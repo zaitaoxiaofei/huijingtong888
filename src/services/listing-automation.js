@@ -10913,14 +10913,20 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(categoryPath, `${categoryPath} / %`);
   }
   if (vehicleBrand) {
-    where.push("LOWER(COALESCE(d.vehicle_brand, '')) LIKE ?");
-    params.push(`%${vehicleBrand}%`);
-    countParams.push(`%${vehicleBrand}%`);
+    where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR EXISTS (
+      SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
+      WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin') AND LOWER(vehicle.brand_name) LIKE ?))`);
+    params.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
+    countParams.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
   }
   if (vehicleModel) {
-    where.push("(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ?)");
-    params.push(...Array(4).fill(`%${vehicleModel}%`));
-    countParams.push(...Array(4).fill(`%${vehicleModel}%`));
+    where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ?
+      OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ? OR EXISTS (
+        SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
+        WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin')
+          AND (LOWER(vehicle.brand_name) LIKE ? OR LOWER(vehicle.model_name) LIKE ?)))`);
+    params.push(...Array(6).fill(`%${vehicleModel}%`));
+    countParams.push(...Array(6).fill(`%${vehicleModel}%`));
   }
   if (minPrice !== null && Number.isFinite(minPrice) && minPrice >= 0) {
     where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) >= ?");
@@ -14416,6 +14422,14 @@ async function initializeListingAutomationSchema() {
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await ensureMysqlColumn("listing_drafts", "tenant_id", "VARCHAR(80) NULL");
+    await mysqlExecute(`CREATE TABLE IF NOT EXISTS listing_draft_vehicle_links (
+      tenant_id VARCHAR(80) NOT NULL,
+      draft_id BIGINT UNSIGNED NOT NULL,
+      vehicle_catalog_id BIGINT UNSIGNED NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (tenant_id, draft_id, vehicle_catalog_id),
+      KEY idx_listing_draft_vehicle_links_vehicle (tenant_id, vehicle_catalog_id, draft_id)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
     await ensureMysqlIndex("listing_drafts", "idx_listing_drafts_tenant_status_updated", "(tenant_id, status, updated_at, id)");
     await ensureMysqlIndex("listing_drafts", "idx_listing_drafts_tenant_template", "(tenant_id, template_id, status, updated_at)");
     await ensureMysqlColumn("listing_drafts", "template_payload_json", "LONGTEXT NULL");
@@ -14953,6 +14967,7 @@ async function ensureListingListReadSchema() {
       mysqlQuery("SELECT 1 FROM listing_drafts LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_category_templates LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_shop_copies LIMIT 0"),
+      mysqlQuery("SELECT 1 FROM listing_draft_vehicle_links LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_publish_records LIMIT 0")
     ])
       .then(() => {

@@ -34,10 +34,11 @@ const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
-const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brand: "", selectedId: null, taskScope: "mine", taskQuery: "", taskStatus: "all", taskCoreName: "", taskBrand: "", taskModel: "", taskOwner: "all", createdRange: [], dueRange: [], saving: false, loading: false });
+const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brands: [], vehicleIds: [], selectedId: null, taskScope: "mine", taskQuery: "", taskStatus: "all", taskCoreName: "", taskBrand: "", taskModel: "", taskOwner: "all", createdRange: [], dueRange: [], saving: false, loading: false });
 const bindingOptions = reactive({ brands: [], categories: [], tasks: [] });
 const catalogEntry = ref(null);
-const selectedBrandModels = computed(() => bindingOptions.brands.find((brand) => brand.name === draftBinding.brand)?.models || []);
+const selectedBrandModels = computed(() => bindingOptions.brands.filter((brand) => draftBinding.brands.includes(brand.name))
+  .flatMap((brand) => (brand.models || []).map((model) => ({ ...model, brand: brand.name }))));
 const filteredBindingTasks = computed(() => {
   const personId = Number(currentPersonId.value || 0);
   const query = draftBinding.taskQuery.trim().toLocaleLowerCase();
@@ -356,6 +357,7 @@ async function loadRecords() {
         for (const row of state.rows) {
           const binding = byDraft.get(Number(row.id));
           row.vehicle_catalog_id = binding?.vehicle_catalog_id || null;
+          row.vehicle_bindings = binding?.vehicle_bindings || [];
           row.team_task_id = binding?.task_id || null;
           row.team_task_title = binding?.task_title || "";
           row.team_task_core_name = binding?.task_core_name || binding?.task_title || "";
@@ -405,14 +407,19 @@ async function openDraftBinding(mode, rows) {
   if (!ids.length) return;
   draftBinding.mode = mode;
   draftBinding.draftIds = ids;
-  draftBinding.brand = mode === "vehicle" && rows.length === 1 ? rows[0].vehicle_brand || "" : "";
-  draftBinding.selectedId = rows.length === 1 ? (mode === "task" ? rows[0].team_task_id : rows[0].vehicle_catalog_id) : null;
+  draftBinding.brands = mode === "vehicle" && rows.length === 1
+    ? [...new Set((rows[0].vehicle_bindings || []).map((item) => item.brand_name).filter(Boolean).concat(rows[0].vehicle_brand || []))]
+    : [];
+  draftBinding.vehicleIds = mode === "vehicle" && rows.length === 1
+    ? (rows[0].vehicle_bindings?.map((item) => Number(item.id)).filter(Boolean) || (rows[0].vehicle_catalog_id ? [Number(rows[0].vehicle_catalog_id)] : []))
+    : [];
+  draftBinding.selectedId = mode === "task" && rows.length === 1 ? rows[0].team_task_id : null;
   draftBinding.taskScope = "mine";
   draftBinding.taskQuery = "";
   draftBinding.taskStatus = "all";
   draftBinding.taskCoreName = "";
-  draftBinding.taskBrand = rows.length === 1 ? rows[0].vehicle_brand || "" : "";
-  draftBinding.taskModel = rows.length === 1 ? rows[0].vehicle_model || "" : "";
+  draftBinding.taskBrand = rows.length === 1 && (rows[0].vehicle_bindings || []).length <= 1 ? rows[0].vehicle_brand || "" : "";
+  draftBinding.taskModel = rows.length === 1 && (rows[0].vehicle_bindings || []).length <= 1 ? rows[0].vehicle_model || "" : "";
   draftBinding.taskOwner = "all";
   draftBinding.createdRange = [];
   draftBinding.dueRange = [];
@@ -430,11 +437,14 @@ async function openDraftBinding(mode, rows) {
       bindingOptions.brands = brands;
       bindingOptions.categories = categories;
       if (!draftBinding.selectedId && rows.length === 1) {
-        const brand = String(rows[0].vehicle_brand || "").toLocaleLowerCase();
-        const model = String(rows[0].vehicle_model || "").toLocaleLowerCase();
+        const vehicles = (rows[0].vehicle_bindings || []).length
+          ? rows[0].vehicle_bindings
+          : [{ brand_name: rows[0].vehicle_brand, model_name: rows[0].vehicle_model }];
         const coreName = String(rows[0].core_name || rows[0].core_product_name || "").toLocaleLowerCase();
         const mine = bindingOptions.tasks.filter((task) => Number(task.owner_person_id) === Number(currentPersonId.value));
-        const exact = brand && model && mine.find((task) => task.models?.some((entry) => entry.brand?.toLocaleLowerCase() === brand && entry.name?.toLocaleLowerCase() === model));
+        const exact = mine.find((task) => task.models?.some((entry) => vehicles.some((vehicle) =>
+          entry.brand?.toLocaleLowerCase() === String(vehicle.brand_name || "").toLocaleLowerCase()
+          && entry.name?.toLocaleLowerCase() === String(vehicle.model_name || "").toLocaleLowerCase())));
         const parent = coreName && mine.find((task) => task.core_name?.toLocaleLowerCase() === coreName);
         draftBinding.selectedId = exact?.id || parent?.id || null;
         if (parent && !exact) {
@@ -455,22 +465,28 @@ async function onCatalogEntrySaved(item) {
   catalogEntry.value = null;
   try {
     bindingOptions.brands = await loadInventoryVehicleCatalog({ force: true });
-    draftBinding.brand = item.brand || "";
-    draftBinding.selectedId = selectedBrandModels.value.find((model) => model.name === item.model)?.id || null;
+    if (item.brand && !draftBinding.brands.includes(item.brand)) draftBinding.brands.push(item.brand);
+    const modelId = selectedBrandModels.value.find((model) => model.brand === item.brand && model.name === item.model)?.id;
+    if (modelId && !draftBinding.vehicleIds.includes(Number(modelId))) draftBinding.vehicleIds.push(Number(modelId));
   } catch (error) {
     ElMessage.error(error.message || "车型目录刷新失败");
   }
 }
 
 async function saveDraftBinding() {
-  if (!draftBinding.selectedId) return ElMessage.warning(draftBinding.mode === "vehicle" ? "请先选择车型" : "请先选择任务");
+  if (draftBinding.mode === "vehicle" && !draftBinding.vehicleIds.length) return ElMessage.warning("请先选择至少一个车型");
+  if (draftBinding.mode === "vehicle" && draftBinding.brands.some((brand) =>
+    !selectedBrandModels.value.some((model) => model.brand === brand && draftBinding.vehicleIds.includes(Number(model.id))))) {
+    return ElMessage.warning("每个已选品牌至少选择一个车型，或移除未选择车型的品牌");
+  }
+  if (draftBinding.mode === "task" && !draftBinding.selectedId) return ElMessage.warning("请先选择任务");
   draftBinding.saving = true;
   try {
     const result = await apiClient.post("/api/listing/drafts/bind", {
       mode: draftBinding.mode,
       draft_ids: draftBinding.draftIds,
       ...(draftBinding.mode === "task" ? { brand: draftBinding.taskBrand, model: draftBinding.taskModel, category: draftBinding.taskCoreName } : {}),
-      [draftBinding.mode === "vehicle" ? "vehicle_id" : "task_id"]: draftBinding.selectedId
+      [draftBinding.mode === "vehicle" ? "vehicle_ids" : "task_id"]: draftBinding.mode === "vehicle" ? draftBinding.vehicleIds : draftBinding.selectedId
     });
     draftBinding.visible = false;
     draftListCache.clear();
@@ -2016,7 +2032,7 @@ watch(() => route.query.taskId, () => {
       </el-table-column>
       <el-table-column v-if="isDraftMode" label="车型" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">
-          {{ vehicleModelText(row) || "-" }}
+          {{ row.vehicle_bindings?.length ? row.vehicle_bindings.map((item) => [item.brand_name, item.model_name].filter(Boolean).join(' · ')).join('、') : (vehicleModelText(row) || '-') }}
           <el-button link type="primary" size="small" @click="openDraftBinding('vehicle', [row])">绑定</el-button>
         </template>
       </el-table-column>
@@ -2571,13 +2587,14 @@ watch(() => route.query.taskId, () => {
       <template v-if="draftBinding.mode === 'vehicle'">
         <div class="draft-vehicle-binding-fields">
           <div class="draft-vehicle-binding-heading"><strong>一级品牌</strong><el-button link type="primary" @click="catalogEntry = { kind: 'brand' }">＋ 新增品牌</el-button></div>
-          <el-select v-model="draftBinding.brand" filterable clearable :loading="draftBinding.loading" placeholder="搜索或下拉选择品牌" style="width: 100%" @change="draftBinding.selectedId = null">
+          <el-select v-model="draftBinding.brands" multiple collapse-tags filterable clearable :loading="draftBinding.loading" placeholder="搜索或多选品牌" style="width: 100%" @change="draftBinding.vehicleIds = draftBinding.vehicleIds.filter((id) => selectedBrandModels.some((model) => Number(model.id) === Number(id)))">
             <el-option v-for="brand in bindingOptions.brands" :key="brand.name" :label="brand.nameZh ? `${brand.name} · ${brand.nameZh}` : brand.name" :value="brand.name" />
           </el-select>
-          <div class="draft-vehicle-binding-heading"><strong>二级车型</strong><el-button link type="primary" @click="catalogEntry = { kind: 'model', brand: draftBinding.brand }">＋ 新增车型</el-button></div>
-          <el-select v-model="draftBinding.selectedId" filterable clearable :disabled="!draftBinding.brand" :loading="draftBinding.loading" placeholder="搜索或下拉选择车型" style="width: 100%">
-            <el-option v-for="model in selectedBrandModels" :key="model.id" :label="model.label || model.name" :value="model.id" />
+          <div class="draft-vehicle-binding-heading"><strong>二级车型</strong><el-button link type="primary" :disabled="draftBinding.brands.length !== 1" @click="catalogEntry = { kind: 'model', brand: draftBinding.brands[0] }">＋ 新增车型</el-button></div>
+          <el-select v-model="draftBinding.vehicleIds" multiple collapse-tags filterable clearable :disabled="!draftBinding.brands.length" :loading="draftBinding.loading" placeholder="搜索或多选车型" style="width: 100%">
+            <el-option v-for="model in selectedBrandModels" :key="model.id" :label="`${model.brand} · ${model.label || model.name}`" :value="Number(model.id)" />
           </el-select>
+          <span class="muted-text">已选择 {{ draftBinding.brands.length }} 个品牌、{{ draftBinding.vehicleIds.length }} 个车型。新增车型时请先只选择一个品牌。</span>
         </div>
       </template>
       <div v-else class="draft-task-binding-picker">
