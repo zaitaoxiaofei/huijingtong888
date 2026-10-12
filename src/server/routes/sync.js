@@ -83,6 +83,7 @@ function snapshotOnlineProductSyncTask() {
 
 function onlineProductSyncScope(body = {}) {
   if (body.pending_listing || body.pendingListing || body.scope === "pending_listing") return "pending_listing";
+  if (Array.isArray(body.offer_ids || body.offerIds) && (body.offer_ids || body.offerIds).length) return "publish_offers";
   return Array.isArray(body.online_product_ids) && body.online_product_ids.length ? "selected" : "all";
 }
 

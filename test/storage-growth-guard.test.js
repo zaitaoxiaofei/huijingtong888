@@ -94,11 +94,15 @@ test("package labels are deleted after the order enters transport", () => {
   assert.match(mysqlCutoverSource, /if \(isOrderInTransportMysql\(posting\)\) \{[\s\S]{0,220}DELETE FROM order_package_label_cache WHERE order_id = \?/);
 });
 
-test("listing publish tasks keep seven days and publish records keep thirty days", () => {
+test("listing publish tasks expire while old publish records keep their binding fields", () => {
   assert.match(listingPublishCleanupSource, /taskRetentionDays[^\n]+\|\| 7/);
   assert.match(listingPublishCleanupSource, /recordRetentionDays[^\n]+\|\| 30/);
   assert.match(listingPublishCleanupSource, /DELETE FROM listing_publish_task_items/);
   assert.match(listingPublishCleanupSource, /NOT EXISTS \([\s\S]*listing_publish_task_items/);
+  assert.match(listingPublishCleanupSource, /UPDATE listing_publish_records[\s\S]*SET request_json = NULL/);
+  assert.doesNotMatch(listingPublishCleanupSource, /DELETE FROM listing_publish_records/);
+  assert.match(listingPublishCleanupSource, /recordsDeleted: 0/);
+  assert.match(listingPublishCleanupSource, /status NOT IN \('pending', 'submitted', 'processing'/);
   assert.match(serverSource, /key: "listing_publish_history_cleanup"[\s\S]*taskRetentionDays: 7, recordRetentionDays: 30/);
 });
 

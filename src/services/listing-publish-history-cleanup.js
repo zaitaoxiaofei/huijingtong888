@@ -40,13 +40,19 @@ export async function cleanupListingPublishHistory(options = {}) {
       ) expired
     )
   `, [taskRetentionDays], batchSize);
-  const recordsDeleted = await deleteInBatches(`
-    DELETE FROM listing_publish_records
+  const recordsCompacted = await deleteInBatches(`
+    UPDATE listing_publish_records
+    SET request_json = NULL, response_json = NULL, template_snapshot_json = NULL,
+        quality_json = NULL
     WHERE id IN (
       SELECT id FROM (
         SELECT r.id
         FROM listing_publish_records r
         WHERE r.created_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
+          AND r.list_summary_json IS NOT NULL AND r.list_summary_json <> ''
+          AND r.status NOT IN ('pending', 'submitted', 'processing', 'resubmitting', 'ozon_status_pending')
+          AND (r.request_json IS NOT NULL OR r.response_json IS NOT NULL
+            OR r.template_snapshot_json IS NOT NULL OR r.quality_json IS NOT NULL)
           AND NOT EXISTS (
             SELECT 1 FROM listing_publish_task_items i WHERE i.record_id = r.id
           )
@@ -82,7 +88,8 @@ export async function cleanupListingPublishHistory(options = {}) {
     orphanTemplateRetentionDays,
     taskItemsDeleted,
     tasksDeleted,
-    recordsDeleted,
+    recordsDeleted: 0,
+    recordsCompacted,
     orphanTemplatesDeleted
   };
 }

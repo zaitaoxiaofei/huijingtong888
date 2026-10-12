@@ -12,7 +12,8 @@ test("draft inbox starts shop options and records in parallel", () => {
 
 test("listing drafts use index-friendly updated_at range filters", () => {
   assert.match(listingDraftsSource, /where\.push\(`\$\{dateFilterColumn\} >= \?`\)/);
-  assert.match(listingDraftsSource, /params\.push\(`\$\{startDate\} 00:00:00`\)/);
+  assert.match(listingDraftsSource, /params\.push\(startBoundary\)/);
+  assert.match(listingDraftsSource, /query\.dateTimeZone === "Asia\/Shanghai"/);
   assert.match(listingDraftsSource, /where\.push\(`\$\{dateFilterColumn\} < DATE_ADD\(\?, INTERVAL 1 DAY\)`\)/);
   assert.doesNotMatch(listingDraftsSource, /DATE\(d\.updated_at\) >= \?/);
   assert.doesNotMatch(listingDraftsSource, /DATE\(d\.updated_at\) <= \?/);
@@ -23,7 +24,7 @@ test("draft inbox can explicitly sort by creation time without changing other ca
   assert.match(listingDraftsSource, /const sortColumn = sortBy === "created_at" \? "d\.created_at" : "d\.updated_at";/);
   assert.match(listingDraftsSource, /ORDER BY \$\{sortColumn\} DESC, d\.id DESC/);
   assert.match(viewSource, /params\.set\("sortBy", "created_at"\);/);
-  assert.match(viewSource, /isDraftMode \? '生成时间' : '更新时间'/);
+  assert.match(viewSource, /isDraftMode \? '创建时间' : '更新时间'/);
 });
 
 test("listing drafts avoid unnecessary joins for paged lightweight queries", () => {
@@ -31,7 +32,7 @@ test("listing drafts avoid unnecessary joins for paged lightweight queries", () 
   assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\(`LEFT JOIN tenant_members creator_members/);
   assert.match(listingDraftsSource, /fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id AND creator_members\.person_id = p\.id"\)/);
   assert.doesNotMatch(listingDraftsSource, /GROUP BY draft_id/);
-  assert.match(listingDraftsSource, /if \(projectOnly && \(!status \|\| status === "all"\)\)/);
+  assert.match(listingDraftsSource, /if \(projectOnly && !includePublished && \(!status \|\| status === "all"\)\)/);
   assert.match(listingDraftsSource, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_any"\)\}/);
   assert.match(listingDraftsSource, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_visible"\)\} AND c_project_visible\.status IN \('prepared', 'blocked'\)\)/);
 });

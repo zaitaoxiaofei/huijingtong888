@@ -36,6 +36,7 @@ test("publish task reads avoid full schema warmup and large record payloads", ()
   const tasks = source.match(/export async function listingPublishTasks[\s\S]*?async function claimListingPublishTaskItemForRetry/)?.[0] || "";
   assert.match(source, /async function ensurePublishTaskReadSchema/);
   assert.match(tasks, /await ensurePublishTaskReadSchema\(\)/);
+  assert.match(tasks, /const fromSql = `\s*FROM listing_publish_tasks t/);
   assert.match(tasks, /\(r\.response_json IS NOT NULL\) AS record_has_response/);
   assert.doesNotMatch(tasks, /r\.response_json AS record_response_json/);
   assert.match(tasks, /COALESCE\(i\.error_json, r\.error_json\) AS effective_error_json/);
@@ -69,17 +70,48 @@ test("development review returns published shop SKUs and order and unit counts",
   assert.match(review, /LOWER\(o\.status\) NOT IN \('cancelled'/);
   assert.match(review, /COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /draft\.published_skus = skusByDraft/);
+  assert.match(review, /COALESCE\(NULLIF\(r\.draft_id, 0\), i\.draft_id\) AS draft_id/);
+  assert.match(review, /draft\.published_shops = stores/);
+  assert.match(review, /draft\.publish_records = stores\.filter/);
+  assert.doesNotMatch(review, /AND r\.status IN \('imported', 'published', 'success'\)\s+AND TRIM\(COALESCE\(r\.ozon_sku/);
+  assert.match(review, /op\.offer_id = r\.offer_id/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
+  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1"/);
   assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
   assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
   assert.match(reviewEndpoint, /sales_by_task/);
   assert.match(routeSource, /POST \/api\/listing\/development-review/);
+  assert.match(viewSource, /reviewDraftIds\) params\.set\("ids", reviewDraftIds\)/);
+});
+
+test("manual online listing sync narrows database writes to the selected offers", () => {
+  const sync = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const syncRoutes = readFileSync(new URL("../src/server/routes/sync.js", import.meta.url), "utf8");
+  assert.match(sync, /requestedOfferIds/);
+  assert.match(sync, /requestedOfferIds\.includes\(String\(item\.offer_id/);
+  assert.match(syncRoutes, /publish_offers/);
 });
 
 test("publish record table reads lightweight list summaries instead of request payloads", () => {
   const records = source.match(/export async function listingPublishRecords[\s\S]*?export async function listingDraftProjects/)?.[0] || "";
   const listSelect = records.match(/const listRecordSelectSql = `[\s\S]*?`;/)?.[0] || "";
+  assert.match(records, /const fromSql = \(includeCategory\) => `/);
+  assert.match(records, /SELECT COUNT\(\*\) AS total \$\{fromSql\(Boolean\(keyword \|\| categoryPath\)\)\}/);
+  assert.match(records, /\$\{fromSql\(true\)\}/);
   assert.match(listSelect, /JSON_EXTRACT\(r\.list_summary_json, '\$\.name'\)/);
   assert.match(listSelect, /JSON_EXTRACT\(r\.list_summary_json, '\$\.primary_image'\)/);
   assert.doesNotMatch(listSelect, /JSON_EXTRACT\(r\.request_json/);
+});
+
+test("publish records filter by Beijing update days and summarize every variant SKU", () => {
+  const records = source.match(/export async function listingPublishRecords[\s\S]*?export async function listingDraftProjects/)?.[0] || "";
+  assert.match(viewSource, /params\.set\("startUpdatedDate", state\.updatedRange\[0\]\)/);
+  assert.match(viewSource, /params\.set\("endUpdatedDate", state\.updatedRange\[1\]\)/);
+  assert.match(records, /r\.updated_at >= \?/);
+  assert.match(records, /r\.updated_at < DATE_ADD\(\?, INTERVAL 1 DAY\)/);
+  assert.match(records, /T00:00:00\+08:00/);
+  assert.match(records, /AS variant_count/);
+  assert.match(records, /AS sku_count/);
+  assert.match(viewSource, /已同步 \$\{row\.sku_count \|\| 0\}\/\$\{row\.variant_count\} 个 SKU/);
+  assert.match(viewSource, /@click="openDrawer\(row\)"/);
 });

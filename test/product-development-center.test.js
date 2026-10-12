@@ -77,6 +77,16 @@ test("product development center shows completed-task review and loads ideas wit
   assert.match(viewSource, /label="出单"/);
   assert.match(viewSource, /reviewTaskMetrics\(row\)\.orders/);
   assert.match(viewSource, /reviewTaskMetrics\(row\)\.units/);
+  assert.match(viewSource, /apiClient\.get\("\/api\/team\/tasks\?type=product_development"/);
+  assert.match(viewSource, /const reviewPageSize = 10/);
+  assert.match(viewSource, /v-model:current-page="reviewPage"/);
+  assert.match(viewSource, /reviewCreatedRange/);
+  assert.match(viewSource, /reviewCompletedRange/);
+  assert.match(viewSource, /reviewOrderSort.value === "orders"/);
+  assert.match(viewSource, /openDevelopmentTask\(row\)/);
+  assert.match(viewSource, /draftIds: ids.join\(","\)/);
+  assert.match(viewSource, /path: "\/listing-records", query: \{ draftIds/);
+  assert.match(viewSource, /获取在线 SKU/);
   assert.match(viewSource, /创建人：/);
   assert.match(viewSource, /reviewTaskCompletionTime/);
   assert.match(viewSource, /include_tasks=0/);

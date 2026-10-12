@@ -12,8 +12,11 @@ import { withImageToken } from "../../api/tools/imageCropper";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
+import DevelopmentCatalogEntryDialog from "../../components/team/DevelopmentCatalogEntryDialog.vue";
+import OzonCategoryFilter from "../../components/listing/OzonCategoryFilter.vue";
 import { ozonBuyerProductLinkFromRow } from "../../utils/product-links";
-import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { shanghaiDateKey, shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options.js";
 import {
   developmentTypeOptions,
   developmentTypeTagType,
@@ -31,6 +34,33 @@ const batchDeleting = ref(false);
 const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
+const draftBinding = reactive({ visible: false, mode: "vehicle", draftIds: [], brand: "", selectedId: null, taskScope: "mine", taskQuery: "", taskStatus: "all", taskCoreName: "", taskBrand: "", taskModel: "", taskOwner: "all", createdRange: [], dueRange: [], saving: false, loading: false });
+const bindingOptions = reactive({ brands: [], categories: [], tasks: [] });
+const catalogEntry = ref(null);
+const selectedBrandModels = computed(() => bindingOptions.brands.find((brand) => brand.name === draftBinding.brand)?.models || []);
+const filteredBindingTasks = computed(() => {
+  const personId = Number(currentPersonId.value || 0);
+  const query = draftBinding.taskQuery.trim().toLocaleLowerCase();
+  const includes = (value, needle) => String(value || "").toLocaleLowerCase().includes(String(needle || "").trim().toLocaleLowerCase());
+  const inRange = (value, range) => !Array.isArray(range) || range.length !== 2 || (shanghaiDateKey(value) >= range[0] && shanghaiDateKey(value) <= range[1]);
+  return bindingOptions.tasks.filter((task) => {
+    if (draftBinding.taskScope === "mine" && (personId <= 0 || (Number(task.owner_person_id) !== personId
+      && Number(task.created_by_person_id) !== personId)) && Number(task.id) !== Number(draftBinding.selectedId)) return false;
+    if (draftBinding.taskStatus !== "all" && task.status !== draftBinding.taskStatus) return false;
+    if (draftBinding.taskOwner !== "all" && Number(task.owner_person_id) !== Number(draftBinding.taskOwner)) return false;
+    if (draftBinding.taskCoreName && !includes(task.core_name, draftBinding.taskCoreName)) return false;
+    if (draftBinding.taskBrand && !includes(task.brand, draftBinding.taskBrand) && !task.models?.some((model) => includes(model.brand, draftBinding.taskBrand))) return false;
+    if (draftBinding.taskModel && !task.models?.some((model) => includes(model.name, draftBinding.taskModel))) return false;
+    if (!inRange(task.created_at, draftBinding.createdRange) || !inRange(task.due_at, draftBinding.dueRange)) return false;
+    return !query || includes(task.title, query) || String(task.id).includes(query);
+  }).sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")) || Number(b.id) - Number(a.id));
+});
+const bindingTaskBrands = computed(() => [...new Set([...bindingOptions.brands.map((brand) => brand.name), ...bindingOptions.tasks.flatMap((task) => [task.brand, ...(task.models || []).map((model) => model.brand)])].filter(Boolean))].sort());
+const bindingTaskModels = computed(() => [...new Set([...bindingOptions.brands.filter((brand) => !draftBinding.taskBrand || brand.name === draftBinding.taskBrand).flatMap((brand) => brand.models.map((model) => model.name)), ...bindingOptions.tasks.flatMap((task) => (task.models || []).filter((model) => !draftBinding.taskBrand || model.brand === draftBinding.taskBrand).map((model) => model.name))].filter(Boolean))].sort());
+const bindingCoreNames = computed(() => [...new Set([...bindingOptions.categories.map((row) => row.value || row.name), ...bindingOptions.tasks.map((task) => task.core_name)].filter(Boolean))].sort());
+const taskStatusLabels = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成", delayed: "已延期" };
+const advancedFiltersVisible = ref(false);
+const publishAdvancedFiltersVisible = ref(false);
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
@@ -84,6 +114,11 @@ const state = reactive({
   category: "",
   vehicleBrand: "",
   vehicleModel: "",
+  publishStatus: "all",
+  minPrice: "",
+  maxPrice: "",
+  createdRange: [],
+  updatedRange: [],
   status: "all",
   quality: "all",
   page: 1,
@@ -106,6 +141,17 @@ const drawer = reactive({
     imagesText: "",
     videoUrlsText: ""
   }
+});
+
+const skuReview = reactive({ visible: false, loading: false, record: null });
+const skuReviewGroups = computed(() => {
+  const groups = new Map();
+  for (const link of skuReview.record?.links || []) {
+    const variantId = String(link.variant_id || "未确认变体");
+    if (!groups.has(variantId)) groups.set(variantId, []);
+    groups.get(variantId).push(link);
+  }
+  return [...groups].map(([variantId, links]) => ({ variantId, links }));
 });
 
 const batchListing = reactive({
@@ -165,6 +211,10 @@ const isTaskMode = computed(() => isPublishMode.value && publishView.value === "
 const filteredRows = computed(() => state.rows);
 const selectedDraftRows = computed(() => isDraftMode.value ? selectedRows.value.filter((row) => row.row_type === "draft") : []);
 const selectedPublishRows = computed(() => selectedRows.value.filter((row) => row?.id && row.row_type !== "draft"));
+const advancedFilterCount = computed(() => [
+  state.minPrice !== "" && state.minPrice !== null,
+  state.maxPrice !== "" && state.maxPrice !== null
+].filter(Boolean).length);
 const batchPublishFailedResults = computed(() => Array.isArray(batchListing.result?.results)
   ? batchListing.result.results.filter((item) => item && item.ok === false)
   : []);
@@ -252,20 +302,40 @@ async function loadRecords() {
   });
   if (isDraftMode.value) {
     params.set("lightweight", "1");
-    params.set("projectOnly", "1");
+    const reviewDraftIds = String(route.query.draftIds || "").trim();
+    if (reviewDraftIds) params.set("ids", reviewDraftIds);
+    else params.set("projectOnly", "1");
+    if (state.nameQuery.trim() || state.category.trim() || state.vehicleBrand.trim() || state.vehicleModel.trim()
+      || state.shopId !== "all" || state.developmentType !== "all" || state.publishStatus !== "all"
+      || state.minPrice !== "" || state.maxPrice !== "" || state.createdRange?.length === 2) {
+      params.set("includePublished", "1");
+    }
     params.set("sortBy", "created_at");
   }
   if (state.query.trim()) params.set("query", state.query.trim());
   if (state.nameQuery.trim()) params.set("nameQuery", state.nameQuery.trim());
   if (state.shopId !== "all") params.set("shopId", String(state.shopId));
-  if (state.creatorId !== "all") {
+  if (state.creatorId !== "all" && !String(route.query.draftIds || "").trim()) {
     const creatorId = String(state.creatorId);
     if (creatorId) params.set("creatorId", creatorId);
   }
   if (isDraftMode.value && state.developmentType !== "all") params.set("developmentType", String(state.developmentType));
-  if (isDraftMode.value && state.category.trim()) params.set("category", state.category.trim());
+  if (state.category.trim()) params.set("categoryPath", state.category.trim());
   if (isDraftMode.value && state.vehicleBrand.trim()) params.set("vehicleBrand", state.vehicleBrand.trim());
   if (isDraftMode.value && state.vehicleModel.trim()) params.set("vehicleModel", state.vehicleModel.trim());
+  if (isDraftMode.value && state.publishStatus !== "all") params.set("publishStatus", state.publishStatus);
+  if (isDraftMode.value && state.minPrice !== "") params.set("minPrice", String(state.minPrice));
+  if (isDraftMode.value && state.maxPrice !== "") params.set("maxPrice", String(state.maxPrice));
+  if (isDraftMode.value && state.createdRange?.length === 2) {
+    params.set("startDate", state.createdRange[0]);
+    params.set("endDate", state.createdRange[1]);
+    params.set("dateTimeZone", "Asia/Shanghai");
+  }
+  if (isPublishMode.value && state.updatedRange?.length === 2) {
+    params.set("startUpdatedDate", state.updatedRange[0]);
+    params.set("endUpdatedDate", state.updatedRange[1]);
+    params.set("dateTimeZone", "Asia/Shanghai");
+  }
   const requestUrl = `${endpoint}?${params.toString()}`;
   const cacheKey = requestUrl;
   const cached = cacheKey ? draftListCache.get(cacheKey) : null;
@@ -277,6 +347,25 @@ async function loadRecords() {
     if (requestSeq !== recordsRequestSeq) return;
     setBoundedListCache(draftListCache, cacheKey, result);
     applyDraftListResult(result);
+    if (isDraftMode.value && state.rows.length) {
+      const ids = state.rows.filter((row) => row.row_type === "draft").map((row) => row.id);
+      if (ids.length) {
+        const bindings = await apiClient.get(`/api/listing/draft-bindings?ids=${ids.join(",")}`, { noCache: true });
+        if (requestSeq !== recordsRequestSeq) return;
+        const byDraft = new Map(bindings.map((item) => [Number(item.draft_id), item]));
+        for (const row of state.rows) {
+          const binding = byDraft.get(Number(row.id));
+          row.vehicle_catalog_id = binding?.vehicle_catalog_id || null;
+          row.team_task_id = binding?.task_id || null;
+          row.team_task_title = binding?.task_title || "";
+          row.team_task_core_name = binding?.task_core_name || binding?.task_title || "";
+          row.team_task_owner_name = binding?.task_owner_name || "";
+          row.team_task_owner_avatar_url = binding?.task_owner_avatar_url || "";
+          row.core_name = binding?.draft_core_name || row.core_name || "";
+          if (binding?.shop_names) row.shop_name = binding.shop_names;
+        }
+      }
+    }
   } finally {
     if (requestSeq === recordsRequestSeq) loading.value = false;
   }
@@ -308,6 +397,89 @@ async function updateDraftDevelopmentType(row, value) {
     ElMessage.error(error.message || "开发类型保存失败");
   } finally {
     developmentSavingDraftId.value = null;
+  }
+}
+
+async function openDraftBinding(mode, rows) {
+  const ids = rows.filter((row) => row?.row_type === "draft" && row.id).map((row) => Number(row.id));
+  if (!ids.length) return;
+  draftBinding.mode = mode;
+  draftBinding.draftIds = ids;
+  draftBinding.brand = mode === "vehicle" && rows.length === 1 ? rows[0].vehicle_brand || "" : "";
+  draftBinding.selectedId = rows.length === 1 ? (mode === "task" ? rows[0].team_task_id : rows[0].vehicle_catalog_id) : null;
+  draftBinding.taskScope = "mine";
+  draftBinding.taskQuery = "";
+  draftBinding.taskStatus = "all";
+  draftBinding.taskCoreName = "";
+  draftBinding.taskBrand = rows.length === 1 ? rows[0].vehicle_brand || "" : "";
+  draftBinding.taskModel = rows.length === 1 ? rows[0].vehicle_model || "" : "";
+  draftBinding.taskOwner = "all";
+  draftBinding.createdRange = [];
+  draftBinding.dueRange = [];
+  draftBinding.visible = true;
+  draftBinding.loading = true;
+  try {
+    if (mode === "vehicle") bindingOptions.brands = await loadInventoryVehicleCatalog();
+    else {
+      const [options, brands, categories] = await Promise.all([
+        apiClient.get("/api/listing/draft-binding-options", { noCache: true }),
+        loadInventoryVehicleCatalog(),
+        loadInventoryNamingOptions({ type: "category" })
+      ]);
+      bindingOptions.tasks = options.tasks || [];
+      bindingOptions.brands = brands;
+      bindingOptions.categories = categories;
+      if (!draftBinding.selectedId && rows.length === 1) {
+        const brand = String(rows[0].vehicle_brand || "").toLocaleLowerCase();
+        const model = String(rows[0].vehicle_model || "").toLocaleLowerCase();
+        const coreName = String(rows[0].core_name || rows[0].core_product_name || "").toLocaleLowerCase();
+        const mine = bindingOptions.tasks.filter((task) => Number(task.owner_person_id) === Number(currentPersonId.value));
+        const exact = brand && model && mine.find((task) => task.models?.some((entry) => entry.brand?.toLocaleLowerCase() === brand && entry.name?.toLocaleLowerCase() === model));
+        const parent = coreName && mine.find((task) => task.core_name?.toLocaleLowerCase() === coreName);
+        draftBinding.selectedId = exact?.id || parent?.id || null;
+        if (parent && !exact) {
+          draftBinding.taskCoreName = parent.core_name;
+          draftBinding.taskBrand = "";
+          draftBinding.taskModel = "";
+        }
+      }
+    }
+  } catch (error) {
+    ElMessage.error(error.message || "绑定选项加载失败");
+  } finally {
+    draftBinding.loading = false;
+  }
+}
+
+async function onCatalogEntrySaved(item) {
+  catalogEntry.value = null;
+  try {
+    bindingOptions.brands = await loadInventoryVehicleCatalog({ force: true });
+    draftBinding.brand = item.brand || "";
+    draftBinding.selectedId = selectedBrandModels.value.find((model) => model.name === item.model)?.id || null;
+  } catch (error) {
+    ElMessage.error(error.message || "车型目录刷新失败");
+  }
+}
+
+async function saveDraftBinding() {
+  if (!draftBinding.selectedId) return ElMessage.warning(draftBinding.mode === "vehicle" ? "请先选择车型" : "请先选择任务");
+  draftBinding.saving = true;
+  try {
+    const result = await apiClient.post("/api/listing/drafts/bind", {
+      mode: draftBinding.mode,
+      draft_ids: draftBinding.draftIds,
+      ...(draftBinding.mode === "task" ? { brand: draftBinding.taskBrand, model: draftBinding.taskModel, category: draftBinding.taskCoreName } : {}),
+      [draftBinding.mode === "vehicle" ? "vehicle_id" : "task_id"]: draftBinding.selectedId
+    });
+    draftBinding.visible = false;
+    draftListCache.clear();
+    await loadRecords();
+    ElMessage.success(`已为 ${result.count} 条草稿绑定${draftBinding.mode === "vehicle" ? "车型" : "任务"}`);
+  } catch (error) {
+    ElMessage.error(error.message || "绑定失败");
+  } finally {
+    draftBinding.saving = false;
   }
 }
 
@@ -491,6 +663,19 @@ function openTaskRecord(recordId) {
   router.push({ name: "listing-publish-records", query: { recordId: String(recordId) } });
 }
 
+async function syncTaskRecord(row) {
+  if (!row?.record_id) return;
+  refreshingId.value = row.record_id;
+  try {
+    const updated = await apiClient.post(`/api/listing/publish-records/${row.record_id}/refresh`, {});
+    await Promise.all([openTaskDrawer({ id: taskDrawer.task.id }), loadPublishTasks()]);
+    const count = updated.variant_links?.filter((link) => link.ozon_sku).length || 0;
+    ElMessage.success(count ? `已同步 ${count} 个线上 SKU` : "状态已刷新，Ozon 暂未返回线上 SKU");
+  } finally {
+    refreshingId.value = null;
+  }
+}
+
 function taskStatusType(status) {
   const value = String(status || "");
   if (value === "completed" || value === "success") return "success";
@@ -571,6 +756,11 @@ function resetFilters() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
+  state.updatedRange = [];
   state.status = "all";
   state.quality = "all";
   state.developmentType = "all";
@@ -586,6 +776,11 @@ function resetModeFilters() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
+  state.updatedRange = [];
   state.page = 1;
   selectedRows.value = [];
   loadRecords();
@@ -599,6 +794,11 @@ function resetModeFiltersFromRoute() {
   state.category = "";
   state.vehicleBrand = "";
   state.vehicleModel = "";
+  state.publishStatus = "all";
+  state.minPrice = "";
+  state.maxPrice = "";
+  state.createdRange = [];
+  state.updatedRange = [];
   state.page = 1;
   selectedRows.value = [];
   applyRouteStatusFilter();
@@ -806,12 +1006,13 @@ function normalizeDraftProjectFallback(row = {}) {
   const normalized = {
     ...row,
     row_type: rowType,
+    created_at: row.created_at || row.createdAt || row.updated_at || row.updatedAt || "",
     row_key: row.row_key || `${rowType === "draft" ? "draft" : "record"}-${row.id}`,
     status: draftStatus,
     source_label: row.source_label || (rowType === "draft" ? "商品上架" : "上架记录"),
     creator_name: creatorText(row),
     shop_name: row.shop_name || (rowType === "draft"
-      ? (Number(row.shop_copy_count || 0) > 0 ? `Shop copies: ${row.shop_copy_count}` : "Draft not assigned")
+      ? ([...new Set((row.shop_copies || []).map((copy) => copy.shop_name).filter(Boolean))].join("、") || "未分配店铺")
       : ""),
     offer_id: row.offer_id || row.internal_code || (rowType === "draft" ? `DRAFT-${row.id}` : ""),
     images: draftImages,
@@ -852,7 +1053,6 @@ function taskDisplayName(row = {}) {
 
 async function loadPublishRecordDetail(row) {
   if (row?.row_type === "draft") return row;
-  if (row?.request?.items) return row;
   detailLoadingId.value = row.id;
   try {
     const detail = await apiClient.get(`/api/listing/publish-records/${row.id}`, { noCache: true });
@@ -862,6 +1062,28 @@ async function loadPublishRecordDetail(row) {
   } finally {
     detailLoadingId.value = null;
   }
+}
+
+async function openSkuReview(row) {
+  if (row?.row_type === "draft") return openDrawer(row);
+  skuReview.visible = true;
+  skuReview.loading = true;
+  skuReview.record = null;
+  try {
+    skuReview.record = await apiClient.get(`/api/listing/publish-records/${row.id}?view=sku`, { noCache: true });
+  } catch (error) {
+    ElMessage.error(error.message || "SKU 对应关系加载失败");
+  } finally {
+    skuReview.loading = false;
+  }
+}
+
+function skuInventoryLabel(link) {
+  if (link.inventory_status === "conflict") return "库存冲突，需人工核对";
+  if (link.inventory_status === "bound") return `已绑定库存 #${link.inventory_id}`;
+  if (link.inventory_id) return `库存 #${link.inventory_id} · 等待在线商品绑定`;
+  if (link.inventory_status === "waiting_online") return "在线商品未同步，暂不能绑定库存";
+  return "未绑定库存";
 }
 
 async function editInListingAutomation(row) {
@@ -1139,10 +1361,10 @@ async function openDrawer(row) {
   drawer.payloadText = "";
   drawer.responseText = "";
   drawer.form = {
-    name: item.name || "",
-    offer_id: item.offer_id || "",
-    price: item.price || "",
-    old_price: item.old_price || "",
+    name: item.name || detail.product_name || "",
+    offer_id: item.offer_id || detail.offer_id || "",
+    price: item.price || detail.price || "",
+    old_price: item.old_price || detail.old_price || "",
     primary_image: item.primary_image || "",
     imagesText: (item.images || []).join("\n"),
     videoUrlsText: extractVideoUrls(item).join("\n")
@@ -1218,7 +1440,8 @@ async function refreshRecord(row) {
     const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
     const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
     if (index >= 0) state.rows[index] = updated;
-    ElMessage.success("状态已刷新");
+    const skuCount = updated.variant_links?.filter((link) => link.ozon_sku).length || 0;
+    ElMessage.success(skuCount > 1 ? `已同步 ${skuCount} 个线上 SKU` : updated.ozon_sku ? `已同步线上 SKU：${updated.ozon_sku}` : "状态已刷新，Ozon 暂未返回线上 SKU");
   } finally {
     refreshingId.value = null;
   }
@@ -1233,16 +1456,39 @@ async function batchRefreshRecords() {
   batchRefreshing.value = true;
   try {
     let success = 0;
+    let failed = 0;
     for (const row of rows) {
-      const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
-      const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
-      if (index >= 0) state.rows[index] = updated;
-      success += 1;
+      try {
+        const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
+        const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
+        if (index >= 0) state.rows[index] = updated;
+        success += 1;
+      } catch {
+        failed += 1;
+      }
     }
-    ElMessage.success(`已刷新 ${success} 条上架记录`);
+    if (failed) ElMessage.warning(`已同步 ${success} 条，失败 ${failed} 条，请稍后重试`);
+    else ElMessage.success(`已同步 ${success} 条上架记录`);
   } finally {
     batchRefreshing.value = false;
   }
+}
+
+function viewOnlineSku(link) {
+  if (!link?.ozon_sku || !(link.shop_id || drawer.row?.shop_id)) return;
+  router.push({ path: "/online-products", query: {
+    shopId: String(link.shop_id || drawer.row.shop_id), offer: String(link.ozon_sku), status: "all"
+  } });
+}
+
+function unlinkedPublishItems(record) {
+  const items = Array.isArray(record?.request?.items) ? record.request.items : [];
+  return items.map((item, index) => ({
+    item_index: index,
+    offer_id: item.offer_id || "",
+    ozon_sku: index === 0 && String(item.offer_id || "") === String(record.offer_id || "")
+      ? record.ozon_sku || "" : ""
+  }));
 }
 
 async function deleteRecord(row) {
@@ -1605,6 +1851,7 @@ function handlePublishViewChange(name) {
 onMounted(async () => {
   window.addEventListener("beforeunload", guardBatchBrowserPublishClose);
   publishView.value = route.query.tab === "tasks" ? "tasks" : "records";
+  if (route.query.draftIds) state.creatorId = "all";
   applyRouteStatusFilter();
   applyRouteShopFilter();
   if (isTaskMode.value) {
@@ -1650,6 +1897,13 @@ watch(() => route.query.recordId, () => {
   openRoutePublishRecord();
 });
 
+watch(() => route.query.draftIds, () => {
+  if (!isDraftMode.value) return;
+  state.page = 1;
+  state.creatorId = route.query.draftIds ? "all" : currentPersonId.value || "all";
+  loadRecords();
+});
+
 watch(() => route.query.taskId, () => {
   if (!isTaskMode.value) return;
   loadPublishTasks();
@@ -1665,43 +1919,63 @@ watch(() => route.query.taskId, () => {
     </el-tabs>
 
     <template v-if="!isTaskMode">
-    <section class="toolbar-panel">
-      <div class="toolbar-filters">
-        <el-input v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="名称 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
+    <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
+      <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
+        <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="标题关键词 / offer_id / 线上 SKU / 店铺 / 类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <OzonCategoryFilter v-model="state.category" @change="searchRecords" />
+        <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
+          <el-option label="全部开发类型" value="all" />
+          <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+        <el-select v-if="isDraftMode" v-model="state.status" placeholder="草稿状态" @change="searchRecords">
+          <el-option v-for="option in statusOptions" :key="option.value" :label="option.label === '全部状态' ? '全部草稿状态' : option.label" :value="option.value" />
+        </el-select>
+        <el-select v-if="isDraftMode" v-model="state.publishStatus" placeholder="上架状态" @change="searchRecords">
+          <el-option label="全部上架状态" value="all" />
+          <el-option label="未上架" value="not_published" />
+          <el-option label="上架成功" value="success" />
+          <el-option label="部分上架" value="partial" />
+          <el-option label="上架失败" value="failed" />
+          <el-option label="处理中" value="processing" />
+        </el-select>
         <el-select v-model="state.shopId" filterable placeholder="店铺" @change="searchRecords">
           <el-option label="全部店铺" value="all" />
           <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="shop.id" />
         </el-select>
-        <el-select v-model="state.creatorId" filterable placeholder="人员" @change="searchRecords">
-          <el-option label="全部人员" value="all" />
-          <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="person.id" />
+        <el-select v-model="state.creatorId" filterable placeholder="人员 / ID" @change="searchRecords">
+          <el-option label="全部人员 / ID" value="all" />
+          <el-option v-for="person in state.people" :key="person.id" :label="`${person.name} (ID ${person.id})`" :value="person.id" />
         </el-select>
-        <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="类型" @change="searchRecords">
-          <el-option label="全部类型" value="all" />
-          <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
-        </el-select>
-        <el-input v-if="isDraftMode" v-model="state.category" clearable placeholder="Ozon 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-if="isDraftMode" v-model="state.vehicleBrand" clearable placeholder="车型品牌" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-if="isDraftMode" v-model="state.vehicleModel" clearable placeholder="车型 / 产品信息" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
+        <el-input v-if="isDraftMode" v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="草稿 ID / 俄语商品名 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-select v-if="isPublishMode" v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
-        <el-select v-if="isPublishMode" v-model="state.quality" placeholder="评分" @change="searchRecords">
+        <div v-if="isDraftMode && advancedFiltersVisible" class="draft-advanced-filters">
+          <el-input-number v-model="state.minPrice" :min="0" :controls="false" placeholder="最低售价" @change="searchRecords" />
+          <el-input-number v-model="state.maxPrice" :min="0" :controls="false" placeholder="最高售价" @change="searchRecords" />
+        </div>
+        <el-select v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.quality" placeholder="评分" @change="searchRecords">
           <el-option label="全部评分" value="all" />
           <el-option label="85分以下" value="lt85" />
           <el-option label="85分以上" value="gte85" />
           <el-option label="90分以上" value="gte90" />
         </el-select>
+        <el-date-picker v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.updatedRange" class="updated-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="更新开始" end-placeholder="更新结束" @change="searchRecords" />
       </div>
-      <div class="toolbar-actions">
+      <div class="toolbar-actions" :class="{ 'draft-toolbar-actions': isDraftMode }">
+        <el-date-picker v-if="isDraftMode" v-model="state.createdRange" class="created-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" @change="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.vehicleModel" class="vehicle-filter" clearable placeholder="品牌 / 车型关键词" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="quickCreateDraft">快速创建草稿</el-button>
+        <el-button v-if="isDraftMode" link type="primary" @click="advancedFiltersVisible = !advancedFiltersVisible">{{ advancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ advancedFilterCount ? ` (${advancedFilterCount})` : "" }}</el-button>
+        <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' || state.updatedRange?.length === 2 ? ' · 已设置' : '' }}</el-button>
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading || batchRefreshing" @click="refreshToolbarRecords">
-          {{ isPublishMode && selectedPublishRows.length ? "同步选中状态" : "刷新列表" }}
+          {{ isPublishMode && selectedPublishRows.length ? "批量同步状态 / SKU" : "刷新列表" }}
         </el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
+        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('vehicle', selectedDraftRows)">批量绑定车型</el-button>
+        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('task', selectedDraftRows)">批量绑定任务</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Edit" :disabled="selectedDraftRows.length < 2" @click="batchOpenDraftsForListing">批量编辑</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="openBatchMaterialOptimization">批量优化</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="batchOpenAiVariantWorkbench">AI裂变</el-button>
@@ -1722,7 +1996,7 @@ watch(() => route.query.taskId, () => {
         @selection-change="handleSelectionChange"
       >
       <el-table-column type="selection" width="44" fixed="left" />
-      <el-table-column label="商品" min-width="420">
+      <el-table-column label="商品" min-width="310">
         <template #default="{ row }">
           <div class="record-product">
             <ProductImagePreview
@@ -1735,10 +2009,25 @@ watch(() => route.query.taskId, () => {
             <div>
               <ProductTitleLink :title="publishRecordProductTitle(row)" :href="publishRecordBuyerLink(row)" :lines="2" />
               <span>{{ row.offer_id }}</span>
-              <span v-if="vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
+              <span v-if="isPublishMode && vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
               <em>{{ row.image_count || 0 }} 图 / {{ row.video_urls?.length || 0 }} 视频</em>
             </div>
           </div>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="isDraftMode" label="车型" min-width="150" show-overflow-tooltip>
+        <template #default="{ row }">
+          {{ vehicleModelText(row) || "-" }}
+          <el-button link type="primary" size="small" @click="openDraftBinding('vehicle', [row])">绑定</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="isDraftMode" label="关联任务" min-width="160" show-overflow-tooltip>
+        <template #default="{ row }">
+          <el-button v-if="!row.team_task_id" link type="primary" size="small" @click="openDraftBinding('task', [row])">绑定</el-button>
+          <el-button v-else link type="primary" size="small" class="draft-task-bound" @click="openDraftBinding('task', [row])">
+            <el-avatar :src="row.team_task_owner_avatar_url" :size="24">{{ (row.team_task_owner_name || '任').slice(0, 1) }}</el-avatar>
+            <span>{{ row.team_task_core_name }}</span>
+          </el-button>
         </template>
       </el-table-column>
       <el-table-column v-if="isDraftMode" label="开发类型" width="116" align="center">
@@ -1761,18 +2050,18 @@ watch(() => route.query.taskId, () => {
           </el-select>
         </template>
       </el-table-column>
-      <el-table-column v-if="isDraftMode" label="Ozon 类目" min-width="156" prop="category_name" show-overflow-tooltip>
+      <el-table-column label="Ozon 类目" min-width="125" prop="category_name" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category_name || "未分类" }}</template>
       </el-table-column>
-      <el-table-column label="人员" min-width="116" prop="creator_name" show-overflow-tooltip />
-      <el-table-column label="店铺" min-width="136" prop="shop_name" show-overflow-tooltip />
-      <el-table-column label="来源" min-width="126" prop="source_label" show-overflow-tooltip />
-      <el-table-column :label="isDraftMode ? '草稿状态' : '状态'" min-width="112">
+      <el-table-column label="人员" min-width="82" prop="creator_name" show-overflow-tooltip />
+      <el-table-column label="店铺" min-width="116" prop="shop_name" show-overflow-tooltip />
+      <el-table-column v-if="isPublishMode" label="来源" min-width="126" prop="source_label" show-overflow-tooltip />
+      <el-table-column v-if="isPublishMode" label="状态" min-width="112">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column v-if="isDraftMode" label="上架状态" min-width="128">
+      <el-table-column v-if="isDraftMode" label="上架状态" min-width="98">
         <template #default="{ row }">
           <el-tooltip :content="row.publish_record_count ? `关联 ${row.publish_record_count} 条上架记录` : '尚未提交到 Ozon'" placement="top">
             <el-tag :type="draftPublishStatusType(row)" effect="plain">{{ draftPublishStatusText(row) }}</el-tag>
@@ -1804,20 +2093,26 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="售价" min-width="132">
+      <el-table-column v-if="isPublishMode" label="线上 SKU" min-width="150">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="openSkuReview(row)">{{ row.variant_count ? `查看变体对应 (${row.sku_count || 0}/${row.variant_count})` : row.ozon_sku ? '查看 SKU · 变体待确认' : '查看变体 / SKU' }}</el-button>
+        </template>
+      </el-table-column>
+      <el-table-column label="售价" min-width="92">
         <template #default="{ row }">
           <span class="price-cell">{{ recordPriceText(row) }}</span>
         </template>
       </el-table-column>
-      <el-table-column :label="isDraftMode ? '生成时间' : '更新时间'" min-width="152">
+      <el-table-column :label="isDraftMode ? '创建时间' : '更新时间'" min-width="142">
         <template #default="{ row }">
           <span class="record-text nowrap">{{ compactDateTime(isDraftMode ? row.created_at : (row.updated_at || row.created_at)) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" min-width="360" class-name="record-actions-column">
+      <el-table-column label="操作" :min-width="isDraftMode ? 250 : 360" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id" @click="editInListingAutomation(row)">编辑</el-button>
+            <el-button v-if="isPublishMode" class="erp-btn-link" link type="primary" :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">同步状态 / SKU</el-button>
+            <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id || (isPublishMode && row.payload_compacted)" @click="editInListingAutomation(row)">编辑</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
             <el-button class="erp-btn-link-danger" link type="danger" :icon="Delete" :disabled="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
@@ -1923,6 +2218,51 @@ watch(() => route.query.taskId, () => {
       />
     </template>
 
+    <el-drawer v-model="skuReview.visible" title="草稿变体与线上 SKU" size="820px" destroy-on-close>
+      <el-skeleton v-if="skuReview.loading" :rows="8" animated />
+      <div v-else-if="skuReview.record" class="sku-review">
+        <section class="sku-review-header">
+          <ProductImagePreview :src="skuReview.record.image || recordImagePlaceholder" size="portrait" fit="cover" proxy-remote />
+          <div>
+            <strong>{{ skuReview.record.title || `上架记录 #${skuReview.record.id}` }}</strong>
+            <span>草稿 #{{ skuReview.record.draft_id || "未关联" }} · 当前记录 #{{ skuReview.record.id }}</span>
+            <span>同一个草稿变体在不同店铺对应不同线上 SKU；下方按变体汇总。</span>
+          </div>
+        </section>
+        <section v-for="group in skuReviewGroups" :key="group.variantId" class="sku-variant-card">
+          <div class="sku-variant-head">
+            <div><span>草稿变体 ID</span><strong>{{ group.variantId }}</strong></div>
+            <el-tag effect="plain">{{ group.links.length }} 条线上 SKU</el-tag>
+          </div>
+          <div class="sku-shop-grid">
+            <el-form v-for="link in group.links" :key="`${link.record_id}-${link.shop_id}-${link.offer_id}`" class="sku-shop-form" label-position="left" label-width="68px" size="small">
+              <div class="sku-shop-head">
+                <strong>{{ link.shop_name || `店铺 #${link.shop_id}` }}</strong>
+                <span>记录 #{{ link.record_id }}</span>
+              </div>
+              <el-form-item label="线上 SKU">
+                <el-button v-if="link.ozon_sku" link type="primary" @click="viewOnlineSku(link)">{{ link.ozon_sku }}</el-button>
+                <span v-else class="muted-text">等待 Ozon 返回</span>
+              </el-form-item>
+              <el-form-item label="Offer ID"><span class="sku-review-value" :title="link.offer_id">{{ link.offer_id || "-" }}</span></el-form-item>
+              <el-form-item label="售价"><span>{{ link.price == null ? "-" : `${link.price} ${link.currency_code || ""}` }}</span></el-form-item>
+              <el-form-item label="库存">
+                <el-tag :type="link.inventory_status === 'bound' ? 'success' : link.inventory_status === 'conflict' ? 'danger' : 'warning'" effect="plain">{{ skuInventoryLabel(link) }}</el-tag>
+              </el-form-item>
+              <div v-if="link.inventory_id && (link.inventory_name || link.inventory_code)" class="sku-inventory-name">{{ link.inventory_name || link.inventory_code }}</div>
+            </el-form>
+          </div>
+        </section>
+        <el-alert v-if="skuReview.record.unlinked_offers?.length" type="warning" :closable="false" show-icon
+          title="当前记录没有可确认的草稿变体关联；请按发布时 Offer ID 核对，不会按顺序自动绑定库存。" />
+        <el-form v-for="item in skuReview.record.unlinked_offers || []" :key="item.offer_id" class="sku-shop-form" label-position="left" label-width="78px" size="small">
+          <el-form-item label="Offer ID">{{ item.offer_id }}</el-form-item>
+          <el-form-item label="线上 SKU">{{ item.ozon_sku || "未返回" }}</el-form-item>
+        </el-form>
+        <el-empty v-if="!skuReviewGroups.length && !skuReview.record.unlinked_offers?.length" description="暂无变体与线上 SKU 的关联" />
+      </div>
+    </el-drawer>
+
     <el-drawer v-model="drawer.visible" :title="drawerTitle" size="760px">
       <div v-if="drawer.row" class="record-drawer">
         <section class="drawer-hero">
@@ -1939,6 +2279,49 @@ watch(() => route.query.taskId, () => {
             <span>{{ drawer.row.shop_name }} / {{ drawer.row.offer_id }}</span>
           </div>
         </section>
+
+        <section class="section-line">
+          <strong>草稿变体 ↔ 各店铺线上 SKU</strong>
+          <span>草稿 ID：{{ drawer.row.draft_id || "未关联" }} · 当前记录：{{ drawer.row.id }}</span>
+        </section>
+        <el-table v-if="(drawer.row.draft_variant_links || drawer.row.variant_links)?.length" :data="drawer.row.draft_variant_links || drawer.row.variant_links" border size="small">
+          <el-table-column label="草稿变体" min-width="190" show-overflow-tooltip>
+            <template #default="{ row }">草稿 {{ drawer.row.draft_id }} / 变体 {{ row.variant_id }}</template>
+          </el-table-column>
+          <el-table-column label="店铺 / 记录" min-width="140">
+            <template #default="{ row }">{{ row.shop_name || drawer.row.shop_name || row.shop_id || "-" }} · #{{ row.record_id || drawer.row.id }}</template>
+          </el-table-column>
+          <el-table-column prop="offer_id" label="Offer ID" min-width="130" show-overflow-tooltip />
+          <el-table-column label="线上 SKU" min-width="130" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-button v-if="row.ozon_sku" link type="primary" @click="viewOnlineSku(row)">{{ row.ozon_sku }}</el-button>
+              <span v-else>{{ row.ozon_sku || "待同步" }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="ozon_status" label="Ozon 状态" min-width="110" show-overflow-tooltip />
+          <el-table-column label="售价" min-width="100">
+            <template #default="{ row }">{{ row.price == null ? "-" : `${row.price} ${row.currency_code || ""}` }}</template>
+          </el-table-column>
+          <el-table-column label="评分" width="76">
+            <template #default="{ row }">{{ row.quality_score == null ? "-" : row.quality_score }}</template>
+          </el-table-column>
+          <el-table-column label="本地库存 ID" min-width="120">
+            <template #default="{ row }">{{ row.inventory_id || row.source_product_id || "未绑定" }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!drawer.row.variant_links?.length && unlinkedPublishItems(drawer.row).length" class="section-line">
+          <strong>当前记录的发布时商品编号（变体关系未确认）</strong>
+        </div>
+        <el-table v-if="!drawer.row.variant_links?.length && unlinkedPublishItems(drawer.row).length" :data="unlinkedPublishItems(drawer.row)" border size="small">
+          <el-table-column label="草稿变体" min-width="160">
+            <template #default>未确认对应变体</template>
+          </el-table-column>
+          <el-table-column prop="offer_id" label="发布时 Offer ID" min-width="200" show-overflow-tooltip />
+          <el-table-column label="已知线上 SKU" min-width="150">
+            <template #default="{ row }">{{ row.ozon_sku || "未确认" }}</template>
+          </el-table-column>
+        </el-table>
+        <el-alert v-if="drawer.row.variant_link_warning" type="warning" :title="drawer.row.variant_link_warning" :closable="false" show-icon />
 
         <el-alert
           v-if="publishFailureReason(drawer.row)"
@@ -2079,6 +2462,7 @@ watch(() => route.query.taskId, () => {
                 <el-button v-if="row.record_id" class="erp-btn-link" link type="primary" @click="openTaskRecord(row.record_id)">
                   记录 #{{ row.record_id }}
                 </el-button>
+                <el-button v-if="row.record_id" class="erp-btn-link" link type="primary" :loading="refreshingId === row.record_id" @click="syncTaskRecord(row)">同步状态 / SKU</el-button>
                 <span v-else class="muted-text">未生成</span>
               </template>
             </el-table-column>
@@ -2198,6 +2582,69 @@ watch(() => route.query.taskId, () => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="draftBinding.visible" :title="`${draftBinding.draftIds.length > 1 ? '批量' : ''}绑定${draftBinding.mode === 'vehicle' ? '车型' : '任务'}`" :width="draftBinding.mode === 'task' ? 'min(1320px, 96vw)' : '480px'" top="3vh">
+      <p>已选择 {{ draftBinding.draftIds.length }} 条草稿</p>
+      <template v-if="draftBinding.mode === 'vehicle'">
+        <div class="draft-vehicle-binding-fields">
+          <div class="draft-vehicle-binding-heading"><strong>一级品牌</strong><el-button link type="primary" @click="catalogEntry = { kind: 'brand' }">＋ 新增品牌</el-button></div>
+          <el-select v-model="draftBinding.brand" filterable clearable :loading="draftBinding.loading" placeholder="搜索或下拉选择品牌" style="width: 100%" @change="draftBinding.selectedId = null">
+            <el-option v-for="brand in bindingOptions.brands" :key="brand.name" :label="brand.nameZh ? `${brand.name} · ${brand.nameZh}` : brand.name" :value="brand.name" />
+          </el-select>
+          <div class="draft-vehicle-binding-heading"><strong>二级车型</strong><el-button link type="primary" @click="catalogEntry = { kind: 'model', brand: draftBinding.brand }">＋ 新增车型</el-button></div>
+          <el-select v-model="draftBinding.selectedId" filterable clearable :disabled="!draftBinding.brand" :loading="draftBinding.loading" placeholder="搜索或下拉选择车型" style="width: 100%">
+            <el-option v-for="model in selectedBrandModels" :key="model.id" :label="model.label || model.name" :value="model.id" />
+          </el-select>
+        </div>
+      </template>
+      <div v-else class="draft-task-binding-picker">
+        <div class="draft-task-binding-filters">
+          <el-segmented v-model="draftBinding.taskScope" :options="[{ label: '我的任务', value: 'mine' }, { label: '全部任务', value: 'all' }]" />
+          <el-select v-model="draftBinding.taskStatus" aria-label="筛选任务状态" placeholder="任务状态">
+            <el-option label="全部状态" value="all" />
+            <el-option v-for="(label, status) in taskStatusLabels" :key="status" :label="label" :value="status" />
+          </el-select>
+          <el-select v-model="draftBinding.taskOwner" filterable clearable placeholder="负责人" aria-label="筛选任务负责人">
+            <el-option label="全部人员" value="all" />
+            <el-option v-for="person in [...new Map(bindingOptions.tasks.filter((task) => task.owner_person_id).map((task) => [task.owner_person_id, { id: task.owner_person_id, name: task.owner_name }])).values()]" :key="person.id" :label="person.name || `人员 ${person.id}`" :value="person.id" />
+          </el-select>
+          <el-input v-model="draftBinding.taskQuery" clearable placeholder="任务名称 / ID" :prefix-icon="Search" />
+        </div>
+        <div class="draft-task-binding-filters draft-task-binding-scope-filters">
+          <el-select v-model="draftBinding.taskCoreName" filterable allow-create clearable default-first-option placeholder="核心品名（可输入）" aria-label="筛选核心品名">
+            <el-option v-for="name in bindingCoreNames" :key="name" :label="name" :value="name" />
+          </el-select>
+          <el-select v-model="draftBinding.taskBrand" filterable allow-create clearable default-first-option placeholder="品牌（可输入）" aria-label="筛选品牌" @change="draftBinding.taskModel = ''">
+            <el-option v-for="brand in bindingTaskBrands" :key="brand" :label="brand" :value="brand" />
+          </el-select>
+          <el-select v-model="draftBinding.taskModel" filterable allow-create clearable default-first-option placeholder="车型（可输入）" aria-label="筛选车型">
+            <el-option v-for="model in bindingTaskModels" :key="model" :label="model" :value="model" />
+          </el-select>
+        </div>
+        <div class="draft-task-binding-filters draft-task-binding-time-filters">
+          <el-date-picker v-model="draftBinding.createdRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" />
+          <el-date-picker v-model="draftBinding.dueRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="结束开始" end-placeholder="结束结束" />
+          <span>按创建时间倒序 · {{ filteredBindingTasks.length }} 项</span>
+        </div>
+        <div v-loading="draftBinding.loading" class="draft-task-binding-list">
+          <el-table :data="filteredBindingTasks" max-height="min(52vh, 540px)" highlight-current-row row-key="id" @row-click="(row) => draftBinding.selectedId = row.id">
+            <el-table-column width="46" align="center"><template #default="{ row }"><el-radio v-model="draftBinding.selectedId" :value="row.id" :aria-label="`选择任务 ${row.title}`" /></template></el-table-column>
+            <el-table-column label="任务 / 核心品名" min-width="260"><template #default="{ row }"><div class="draft-task-binding-name"><strong>{{ row.title }}</strong><small>#{{ row.id }} · {{ row.core_name || '未设置核心品名' }}</small></div></template></el-table-column>
+            <el-table-column label="品牌 / 车型" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ [row.brand, row.models?.map((model) => model.name).join('、')].filter(Boolean).join(' · ') || '未配置车型' }}</template></el-table-column>
+            <el-table-column label="负责人" width="145"><template #default="{ row }"><div class="draft-task-binding-person"><el-avatar :src="row.owner_avatar_url" :size="26">{{ (row.owner_name || '未').slice(0, 1) }}</el-avatar>{{ row.owner_name || '未分配' }}</div></template></el-table-column>
+            <el-table-column label="进度" width="110"><template #default="{ row }">{{ Number(row.done_count || 0) }} / {{ Number(row.target_count || 0) }}</template></el-table-column>
+            <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag size="small" effect="plain">{{ taskStatusLabels[row.status] || row.status }}</el-tag></template></el-table-column>
+            <el-table-column label="创建时间" width="155"><template #default="{ row }">{{ compactDateTime(row.created_at) }}</template></el-table-column>
+            <el-table-column label="结束时间" width="110"><template #default="{ row }">{{ row.due_at ? shanghaiDateKey(row.due_at) : '-' }}</template></el-table-column>
+          </el-table>
+          <el-empty v-if="!draftBinding.loading && !filteredBindingTasks.length" :description="draftBinding.taskScope === 'mine' ? '没有符合条件的我的任务，可切换“全部任务”' : '没有符合条件的任务'" :image-size="72" />
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="draftBinding.visible = false">取消</el-button>
+        <el-button type="primary" :loading="draftBinding.saving" :disabled="draftBinding.loading" @click="saveDraftBinding">确认绑定</el-button>
+      </template>
+    </el-dialog>
+    <DevelopmentCatalogEntryDialog v-if="catalogEntry" :kind="catalogEntry.kind" :brand="catalogEntry.brand || ''" :brands="bindingOptions.brands" @close="catalogEntry = null" @saved="onCatalogEntrySaved" />
     <el-dialog v-model="batchMaterialOptimization.visible" title="批量优化草稿" width="960px">
       <el-form label-width="92px">
         <el-form-item label="草稿数量">
@@ -2237,7 +2684,27 @@ watch(() => route.query.taskId, () => {
 </template>
 
 <style scoped>
-.publish-records-page { gap: 12px; min-height: 0; }
+.draft-vehicle-binding-fields { display: grid; gap: 8px; }
+.draft-vehicle-binding-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.draft-task-binding-picker { display: grid; gap: 10px; }
+.draft-task-binding-filters { display: grid; grid-template-columns: 190px 150px 170px minmax(180px, 1fr); align-items: center; gap: 8px; }
+.draft-task-binding-filters > * { min-width: 0; width: 100%; }
+.draft-task-binding-scope-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.draft-task-binding-time-filters { grid-template-columns: 290px 290px auto; }
+.draft-task-binding-time-filters span { color: #697386; font-size: 12px; }
+.draft-task-binding-list { min-width: 0; overflow: hidden; border: 1px solid #e5eaf3; border-radius: 8px; }
+.draft-task-binding-name { display: grid; gap: 4px; min-width: 0; }
+.draft-task-binding-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.draft-task-binding-name small { color: #7b8797; }
+.draft-task-binding-person, .draft-task-bound { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.draft-task-bound span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.draft-task-binding-radios { display: flex; flex-direction: column; align-items: stretch; width: 100%; }
+.draft-task-binding-option { display: flex; align-items: center; width: 100%; height: auto; margin: 0; padding: 10px 12px; border-bottom: 1px solid #edf1f7; white-space: normal; }
+.draft-task-binding-option:last-child { border-bottom: 0; }
+.draft-task-binding-option :deep(.el-radio__label) { display: grid; min-width: 0; gap: 3px; }
+.draft-task-binding-title { overflow: hidden; color: #243247; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.draft-task-binding-meta { color: #7b8797; font-size: 12px; }
+.publish-records-page { gap: 12px; min-height: 0; width: 100%; max-width: 100%; min-width: 0; overflow: hidden; }
 .batch-material-facts { width: 100%; max-height: 520px; overflow: auto; display: grid; gap: 10px; }
 .batch-material-fact-row { display: grid; grid-template-columns: 100px 1.1fr 1fr 1.3fr 1.3fr; gap: 8px; align-items: start; padding: 10px; border: 1px solid #e5eaf3; border-radius: 8px; }
 .batch-material-fact-row strong { line-height: 32px; }
@@ -2260,12 +2727,18 @@ watch(() => route.query.taskId, () => {
 }
 .toolbar-filters {
   display: grid;
-  grid-template-columns: 190px 140px 140px 120px minmax(180px, 1fr) 120px;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 10px;
   flex: 1;
   min-width: 0;
 }
 .toolbar-filters > * { width: 100%; min-width: 0; }
+.toolbar-filters > .created-date-filter { grid-column: span 2; }
+.publish-record-toolbar-panel { display: block; padding: 8px 10px; }
+.publish-record-toolbar-filters { grid-template-columns: minmax(280px, 2fr) minmax(180px, 1fr) 130px 140px 120px; gap: 8px; }
+.publish-record-toolbar-filters :deep(.category-filter-trigger) { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.publish-record-toolbar-filters > .updated-date-filter { grid-column: span 2; }
+.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 6px; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
   flex: 0 1 620px;
@@ -2278,6 +2751,15 @@ watch(() => route.query.taskId, () => {
   flex-wrap: nowrap;
   white-space: nowrap;
 }
+.draft-toolbar-panel { display: block; padding: 8px 10px; }
+.draft-toolbar-filters { grid-template-columns: minmax(190px, 1.5fr) 125px 125px 125px 140px 155px minmax(220px, 1.6fr); gap: 8px; }
+.draft-advanced-filters { display: grid; grid-column: 1 / -1; grid-template-columns: 120px 120px; gap: 8px; padding-top: 2px; }
+.draft-advanced-filters > * { min-width: 0; width: 100%; }
+.draft-toolbar-actions { justify-content: flex-start; gap: 6px; margin-top: 6px; overflow-x: auto; scrollbar-width: thin; }
+.draft-toolbar-actions > .created-date-filter { flex: 0 0 250px; width: 250px; }
+.draft-toolbar-actions > .vehicle-filter { flex: 0 0 190px; width: 190px; }
+.draft-toolbar-actions :deep(.el-button) { flex: 0 0 auto; margin-left: 0; padding-left: 9px; padding-right: 9px; }
+.draft-toolbar-actions .selection-count { margin-left: 4px; }
 .batch-text-variant-panel { width: 100%; display: flex; flex-direction: column; gap: 10px; }
 .batch-text-variant-main, .batch-text-variant-row, .batch-text-variant-shop {
   display: flex;
@@ -2310,10 +2792,15 @@ watch(() => route.query.taskId, () => {
 }
 .publish-table-wrap {
   flex: 1 1 auto;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
 }
 .publish-table {
   width: 100%;
 }
+.publish-records-page .record-actions-column .row-actions { flex-wrap: wrap; gap: 2px 8px; }
 .publish-task-table,
 .publish-task-item-table { width: 100%; }
 .task-title-cell,
@@ -2406,6 +2893,26 @@ watch(() => route.query.taskId, () => {
 }
 .row-actions :deep(.el-button) { margin-left: 0; }
 .record-drawer { display: flex; flex-direction: column; gap: 16px; }
+.sku-review { display: flex; flex-direction: column; gap: 18px; }
+.sku-review-header { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 14px; align-items: center; padding: 14px; border: 1px solid #e5eaf3; border-radius: 10px; background: #f8fafc; }
+.sku-review-header > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.sku-review-header strong { font-size: 15px; line-height: 1.5; }
+.sku-review-header span, .sku-variant-head span, .sku-shop-head span { color: #697386; font-size: 12px; }
+.sku-variant-card { padding: 16px; border: 1px solid #e5eaf3; border-radius: 10px; background: #fff; }
+.sku-variant-head, .sku-shop-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.sku-variant-head { margin-bottom: 14px; }
+.sku-variant-head > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.sku-variant-head strong { overflow-wrap: anywhere; }
+.sku-shop-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.sku-shop-form { min-width: 0; margin: 0; padding: 12px; border: 1px solid #e9edf4; border-radius: 8px; background: #fbfcff; }
+.sku-shop-head { margin-bottom: 10px; }
+.sku-shop-form .el-form-item { margin-bottom: 5px; }
+.sku-shop-form .el-form-item__content { min-width: 0; }
+.sku-shop-form .el-button { max-width: 100%; height: auto; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.sku-shop-form .el-tag { max-width: 100%; height: auto; white-space: normal; line-height: 1.5; }
+.sku-review-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sku-inventory-name { padding-left: 68px; color: #697386; font-size: 12px; }
+@media (max-width: 760px) { .sku-shop-grid { grid-template-columns: 1fr; } }
 .drawer-hero { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid #e5eaf3; border-radius: 8px; background: #f8fafc; }
 .drawer-hero strong { font-size: 16px; overflow-wrap: anywhere; }
 .repair-panel { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid #f0d28a; border-radius: 8px; background: #fffaf0; }
@@ -2431,18 +2938,26 @@ watch(() => route.query.taskId, () => {
   .toolbar-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .publish-record-toolbar-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .publish-record-search { grid-column: 1 / -1; }
   .toolbar-actions {
     justify-content: flex-start;
     width: 100%;
     flex-wrap: wrap;
   }
   .toolbar-actions :deep(.el-button) { margin-left: 0; }
+  .draft-toolbar-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .draft-advanced-filters { grid-template-columns: 120px 120px; }
+  .draft-toolbar-actions { flex-wrap: nowrap; }
 }
 @media (max-width: 760px) {
   .publish-records-page { padding: 8px; }
   .toolbar-panel { gap: 10px; padding: 10px; }
   .toolbar-filters,
   .task-toolbar-filters { grid-template-columns: 1fr; flex-basis: auto; width: 100%; }
+  .publish-record-toolbar-filters { grid-template-columns: 1fr; }
+  .publish-record-search { grid-column: auto; }
+  .publish-record-toolbar-filters > .updated-date-filter { grid-column: auto; }
   .toolbar-actions {
     justify-content: flex-start;
     width: 100%;
@@ -2452,6 +2967,11 @@ watch(() => route.query.taskId, () => {
   }
   .toolbar-actions :deep(.el-button) { flex: 0 0 auto; margin-left: 0; }
   .selection-count { align-self: center; }
+  .draft-toolbar-filters,
+  .draft-advanced-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .draft-toolbar-actions { flex-wrap: nowrap; }
+  .draft-toolbar-actions .selection-count { margin-left: 0; }
+  .draft-advanced-filters > .created-date-filter { grid-column: 1 / -1; }
   .publish-table,
   .publish-task-table { min-width: 1080px; }
   .publish-table-wrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
