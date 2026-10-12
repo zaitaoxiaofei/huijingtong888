@@ -37,7 +37,11 @@ export async function listingDraftBindingOptions() {
   await ensureSchema();
   const [vehicles, tasks] = await Promise.all([
     mysqlQuery("SELECT id, brand_name, model_name FROM ai_vehicle_catalog WHERE enabled = 1 AND model_name <> '' ORDER BY brand_name, model_name"),
-    mysqlQuery("SELECT id, title, status FROM team_tasks WHERE active = 1 ORDER BY updated_at DESC, id DESC")
+    mysqlQuery(`SELECT task.id, task.title, task.status, task.work_type, task.owner_person_id,
+      task.created_by_person_id, task.due_at, owner.name AS owner_name
+      FROM team_tasks task
+      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      WHERE task.active = 1 ORDER BY task.updated_at DESC, task.id DESC`)
   ]);
   return { vehicles, tasks };
 }
