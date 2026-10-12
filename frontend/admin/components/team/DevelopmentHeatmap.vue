@@ -167,6 +167,14 @@ function toggleCoordinate(row, column) {
 }
 function updatePlan(key, field, value) {
   const next = new Map(planOrders.value); const current = next.get(key) || { sequence: null, marked: false };
+  if (field === "sequence" && Number(value) > 0) {
+    for (const [otherKey, plan] of next) {
+      if (otherKey !== key && Number(plan.sequence) === Number(value)) {
+        next.set(otherKey, { ...plan, sequence: null });
+        pendingPlanKeys.value = new Set(pendingPlanKeys.value).add(otherKey);
+      }
+    }
+  }
   next.set(key, { ...current, [field]: field === "sequence" && !Number(value) ? null : value }); planOrders.value = next;
   pendingPlanKeys.value = new Set(pendingPlanKeys.value).add(key);
 }

@@ -698,7 +698,21 @@ export async function saveDevelopmentHeatmapOrdersMysql(body = {}, sessionPerson
     return [item.coordinateHash, item];
   })).values()];
   await withMysqlTransaction(async (connection) => {
+    const [existing] = await connection.execute(`SELECT dimension,coordinate_hash,sequence_number FROM product_development_heatmap_orders
+      WHERE period_key=? ORDER BY updated_at DESC,dimension ASC,coordinate_hash ASC FOR UPDATE`, [periodKey]);
+    const occupied = new Set();
+    for (const row of existing) {
+      if (row.sequence_number == null) continue;
+      if (occupied.has(Number(row.sequence_number))) {
+        await connection.execute(`UPDATE product_development_heatmap_orders SET sequence_number=NULL
+          WHERE period_key=? AND dimension=? AND coordinate_hash=?`, [periodKey, row.dimension, row.coordinate_hash]);
+      } else occupied.add(Number(row.sequence_number));
+    }
     for (const item of normalized) {
+      if (item.sequence !== null) {
+        await connection.execute(`UPDATE product_development_heatmap_orders SET sequence_number=NULL
+          WHERE period_key=? AND sequence_number=? AND NOT (dimension=? AND coordinate_hash=?)`, [periodKey, item.sequence, dimension, item.coordinateHash]);
+      }
       await connection.execute(`INSERT INTO product_development_heatmap_orders
         (period_key,dimension,coordinate_hash,coordinate_json,sequence_number,is_marked,updated_by_person_id)
         VALUES (?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE coordinate_json=VALUES(coordinate_json),sequence_number=VALUES(sequence_number),
