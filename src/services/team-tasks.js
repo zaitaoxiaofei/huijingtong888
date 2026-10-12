@@ -560,20 +560,18 @@ async function ensureOperationalTeamTasks() {
       total: shippingTarget, printed, transported }) });
 }
 
-async function refreshOperationalTeamTasks() {
-  if (Date.now() - operationalTasksRefreshedAt < OPERATIONAL_TASK_REFRESH_INTERVAL_MS) return;
-  if (!operationalTasksRefreshPromise) {
-    operationalTasksRefreshPromise = ensureOperationalTeamTasks()
-      .then(() => { operationalTasksRefreshedAt = Date.now(); })
-      .finally(() => { operationalTasksRefreshPromise = null; });
-  }
-  await operationalTasksRefreshPromise;
+function scheduleOperationalTeamTaskRefresh() {
+  if (Date.now() - operationalTasksRefreshedAt < OPERATIONAL_TASK_REFRESH_INTERVAL_MS || operationalTasksRefreshPromise) return;
+  operationalTasksRefreshPromise = ensureOperationalTeamTasks()
+    .then(() => { operationalTasksRefreshedAt = Date.now(); })
+    .catch(() => {})
+    .finally(() => { operationalTasksRefreshPromise = null; });
 }
 
 export async function teamTasksMysql(query = {}) {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();
-  await refreshOperationalTeamTasks();
+  scheduleOperationalTeamTaskRefresh();
   const where = ["t.active = 1"];
   const params = [];
   const period = String(query.period || "").trim();

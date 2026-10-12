@@ -6,6 +6,7 @@ import { shanghaiDateKey, shanghaiDateText, shanghaiMonthStart } from "../../uti
 import { buildDevelopmentHeatmap, developmentCoordinateKey, developmentPlanPeriodKey } from "../../utils/development-heatmap.js";
 
 const emit = defineEmits(["open-task", "create"]);
+const props = defineProps({ initialTasks: { type: Array, default: () => [] }, initialTasksLoaded: { type: Boolean, default: false } });
 const tasks = ref([]); const loading = ref(false); const error = ref("");
 const metric = ref("tasks"); const dimension = ref("brand"); const scope = ref("all"); const query = ref(""); const includeCompleted = ref(false); const viewMode = ref("quadrant"); const expandedQuadrantScore = ref(null); const draggedPoint = ref(null); const prioritySaving = ref(false);
 const period = ref("month"); const time = ref("due");
@@ -301,7 +302,7 @@ watch([periodKey, dimension], () => { selectedCoordinateKeys.value = []; selecte
 watch(() => heatmap.value.rows.length, fitCanvas);
 watch([viewMode, expandedQuadrantScore], centerRingCanvas);
 watch(viewport, (element) => { if (element) resizeObserver?.observe(element); }, { flush: "post" });
-onMounted(() => { setPeriod("month"); load(); fitCanvas(); resizeObserver = new ResizeObserver(fitCanvas); if (viewport.value) resizeObserver.observe(viewport.value); });
+onMounted(() => { setPeriod("month"); if (props.initialTasksLoaded) tasks.value = props.initialTasks; else load(); fitCanvas(); resizeObserver = new ResizeObserver(fitCanvas); if (viewport.value) resizeObserver.observe(viewport.value); });
 onBeforeUnmount(() => resizeObserver?.disconnect());
 </script>
 

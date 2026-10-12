@@ -32,6 +32,7 @@ const tabs = [
 const activeTab = ref("tasks");
 const loading = ref(false);
 const developmentDataLoaded = ref(false);
+const tasksLoaded = ref(false);
 let developmentDataPromise = null;
 const createVisible = ref(false);
 const attachVisible = ref(false);
@@ -643,6 +644,7 @@ async function loadData() {
     products.value = Array.isArray(productRows) ? productRows : [];
     tasks.value = Array.isArray(taskRows) ? taskRows : [];
     ideas.value = Array.isArray(ideaRows) ? ideaRows : [];
+    tasksLoaded.value = true;
     developmentDataLoaded.value = true;
   } catch (error) { ElMessage.error(error.message || "产品开发数据加载失败"); }
   finally { loading.value = false; }
@@ -656,6 +658,7 @@ async function loadTaskCenterData() {
     ]);
     people.value = Array.isArray(personRows) ? personRows : personRows?.rows || [];
     tasks.value = Array.isArray(taskRows) ? taskRows : [];
+    tasksLoaded.value = true;
   } catch (error) { ElMessage.error(error.message || "任务中心加载失败"); }
   finally { loading.value = false; }
 }
@@ -1004,8 +1007,8 @@ onMounted(() => {
 });
 onBeforeUnmount(() => { if (taskClockTimer) clearInterval(taskClockTimer); });
 watch(activeTab, (value) => {
-  if (value !== "tasks") loadDevelopmentData();
-  else loadTaskPlanOrders();
+  if (value === "tasks") loadTaskPlanOrders();
+  else if (value !== "dashboard") loadDevelopmentData();
   if (value === "analytics" && bindingStatus.value !== "all") { bindingStatus.value = "all"; bindingsLoaded.value = false; }
   if (value === "projects") loadCategories();
   if (value === "analytics") { loadDrafts(); loadBindings(); }
@@ -1028,7 +1031,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
       </div>
     </header>
 
-    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" @open-task="openHeatmapTask" @create="openTask()" />
+    <DevelopmentHeatmap ref="heatmapView" v-if="activeTab==='dashboard'" :initial-tasks="tasks" :initial-tasks-loaded="tasksLoaded" @open-task="openHeatmapTask" @create="openTask()" />
 
     <section v-else-if="activeTab==='ideas'" class="panel ideas-page">
       <div class="section-title"><div><span>按类目和品牌安排开发，与任务中心同步，可先创建后认领</span><h2>灵感列表</h2></div><div class="idea-header-actions"><el-popover placement="bottom-end" :width="250" trigger="manual" :visible="developmentScopeFiltersVisible"><template #reference><el-button :icon="SlidersHorizontal" @click="developmentScopeFiltersVisible=!developmentScopeFiltersVisible">范围筛选{{ developmentScopeFilterCount ? ` · ${developmentScopeFilterCount}` : '' }}</el-button></template><div class="development-scope-filters"><el-select v-model="developmentBrandFilter" :teleported="false" clearable filterable placeholder="全部品牌 / 非汽车" aria-label="筛选开发品牌"><el-option v-for="brand in developmentBrandOptions" :key="brand" :label="brand" :value="brand" /></el-select><el-select v-model="developmentCategoryFilter" :teleported="false" clearable filterable placeholder="全部开发类目" aria-label="筛选开发类目"><el-option v-for="category in developmentCategoryOptions" :key="category" :label="category" :value="category" /></el-select></div></el-popover><el-button type="primary" @click="openIdea()"><Lightbulb :size="16" /> 快速创建灵感</el-button></div></div>
