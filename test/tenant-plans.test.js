@@ -56,3 +56,43 @@ test("tenant plan catalog persists presets and is wired into enterprise create a
   assert.match(view, /tenantForm\.plan_code/);
   assert.match(view, /savePlan/);
 });
+
+test("tenant operations separate customer-space work from plan-catalog work", () => {
+  const view = read("../frontend/admin/views/settings/TenantSubscriptionView.vue");
+  assert.match(view, /el-tab-pane label="客户空间" name="customers"/);
+  assert.match(view, /el-tab-pane label="套餐目录" name="plans"/);
+  assert.match(view, /filteredRows/);
+  assert.match(view, /el-drawer v-model="detailVisible"/);
+  assert.match(view, /子账号用量/);
+  assert.match(view, /店铺用量/);
+  assert.match(view, /每个新客户空间会自动生成客户激活码/);
+  assert.match(view, /不是客户购买或注册用的激活码/);
+  assert.match(view, /高级接入：浏览器插件令牌/);
+});
+
+test("customer activation codes are separate, hash-only, and platform-admin managed", () => {
+  const tenantService = read("../src/services/tenants.js");
+  const server = read("../src/server.js");
+  assert.match(tenantService, /CREATE TABLE IF NOT EXISTS tenant_activation_codes/);
+  assert.match(tenantService, /createHash\("sha256"\)/);
+  assert.match(tenantService, /randomBytes\(24\)/);
+  assert.match(tenantService, /withMysqlTransaction\(async connection =>/);
+  assert.match(tenantService, /INSERT INTO tenant_activation_codes/);
+  assert.match(tenantService, /SELECT c\.id, c\.tenant_id, c\.code_hint, c\.status, c\.expires_at, c\.created_at, c\.revoked_at/);
+  assert.doesNotMatch(tenantService, /SELECT[^`]*\bcode\b[^`]*FROM tenant_activation_codes/is);
+  assert.match(server, /GET \/api\/tenants\/activation-code/);
+  assert.match(server, /POST \/api\/tenants\/activation-code/);
+  assert.match(server, /DELETE \/api\/tenants\/activation-code/);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"] } }, ["api", "tenants", "activation-code"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 2, role: "owner" } } }, ["api", "tenants", "activation-code"]).allowed, false);
+});
+
+test("tenant creation reveals the activation code once and the view distinguishes it from plugin tokens", () => {
+  const tenantService = read("../src/services/tenants.js");
+  const view = read("../frontend/admin/views/settings/TenantSubscriptionView.vue");
+  assert.match(tenantService, /return \{ ok: true, id: result, activation_code: activationCode \}/);
+  assert.match(view, /完整码只显示这一次/);
+  assert.match(view, /activationCodeStatus\.code_hint/);
+  assert.match(view, /客户自助注册兑换将在下一步接入/);
+  assert.match(view, /copyActivationCode/);
+});

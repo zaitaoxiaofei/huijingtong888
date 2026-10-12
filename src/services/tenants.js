@@ -43,6 +43,19 @@ export async function ensureTenantSchemaMysql() {
       UNIQUE KEY uk_tenant_plugin_token_hash (token_hash),
       KEY idx_tenant_plugin_tokens_tenant_active (tenant_id, revoked_at, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_activation_codes (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id BIGINT UNSIGNED NOT NULL,
+      code_hash CHAR(64) NOT NULL,
+      code_hint VARCHAR(12) NOT NULL,
+      status VARCHAR(16) NOT NULL DEFAULT 'active',
+      expires_at DATETIME NULL,
+      created_by_person_id BIGINT UNSIGNED NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      revoked_at DATETIME NULL,
+      UNIQUE KEY uk_tenant_activation_code_hash (code_hash),
+      KEY idx_tenant_activation_codes_tenant (tenant_id, status, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
     await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_plans (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       code VARCHAR(32) NOT NULL,
@@ -142,11 +155,70 @@ export async function createTenantMysql(body = {}) {
   const plan = plans[0];
   if (!plan) throw new Error("请选择一个有效套餐；套餐可在企业管理的套餐目录中启用或编辑");
   const memberLimit = tenantPlanMemberLimit(plan);
-  const result = await mysqlExecute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, member_limit, shop_limit)
-    VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
   const ownerPersonId = Number(body.owner_person_id || body.ownerPersonId || 0);
-  if (ownerPersonId) await mysqlExecute("INSERT INTO tenant_members (tenant_id, person_id, role) VALUES (?, ?, 'owner')", [result.insertId, ownerPersonId]);
-  return { ok: true, id: Number(result.insertId) };
+  const activationCode = generateTenantActivationCode();
+  const result = await withMysqlTransaction(async connection => {
+    const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, member_limit, shop_limit)
+      VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
+    const tenantId = Number(tenantResult.insertId);
+    if (ownerPersonId) await connection.execute("INSERT INTO tenant_members (tenant_id, person_id, role) VALUES (?, ?, 'owner')", [tenantId, ownerPersonId]);
+    await connection.execute(`INSERT INTO tenant_activation_codes
+      (tenant_id, code_hash, code_hint, status, expires_at, created_by_person_id)
+      VALUES (?, ?, ?, 'active', DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?)`, [tenantId, hashTenantActivationCode(activationCode), activationCode.slice(-6), Number(plan.duration_days), Number(body.created_by_person_id || 0) || null]);
+    return tenantId;
+  });
+  return { ok: true, id: result, activation_code: activationCode };
+}
+
+function generateTenantActivationCode() {
+  return `OZ-${randomBytes(24).toString("hex").toUpperCase()}`;
+}
+
+function hashTenantActivationCode(code) {
+  return createHash("sha256").update(String(code || "").trim().toUpperCase()).digest("hex");
+}
+
+export async function tenantActivationCodeStatusMysql(tenantId) {
+  await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0) throw new Error("请选择有效客户空间");
+  const rows = await mysqlQuery(`SELECT c.id, c.tenant_id, c.code_hint, c.status, c.expires_at, c.created_at, c.revoked_at,
+      t.status AS tenant_status, t.subscription_status
+    FROM tenant_activation_codes c JOIN tenants t ON t.id = c.tenant_id
+    WHERE c.tenant_id = ? ORDER BY c.id DESC LIMIT 1`, [normalizedTenantId]);
+  const row = rows[0];
+  if (!row) return { configured: false };
+  const expired = row.status === "active" && row.expires_at && new Date(row.expires_at).getTime() <= Date.now();
+  const unavailable = row.tenant_status !== "active" || !["active", "trial"].includes(row.subscription_status);
+  return { configured: true, ...row, status: unavailable ? "unavailable" : expired ? "expired" : row.status };
+}
+
+export async function issueTenantActivationCodeMysql(tenantId, personId = null) {
+  await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0) throw new Error("请选择有效客户空间");
+  const code = generateTenantActivationCode();
+  await withMysqlTransaction(async connection => {
+    const [tenants] = await connection.execute("SELECT id, status, subscription_status, subscription_expires_at FROM tenants WHERE id = ? FOR UPDATE", [normalizedTenantId]);
+    const tenant = tenants[0];
+    if (!tenant) throw new Error("客户空间不存在");
+    if (tenant.status !== "active") throw new Error("客户空间已归档，不能生成激活码");
+    if (!["active", "trial"].includes(tenant.subscription_status)) throw new Error("客户空间套餐已暂停，请先恢复授权再生成激活码");
+    if (tenant.subscription_expires_at && new Date(tenant.subscription_expires_at).getTime() <= Date.now()) throw new Error("客户空间套餐已到期，请先续费再生成激活码");
+    await connection.execute("UPDATE tenant_activation_codes SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND status = 'active'", [normalizedTenantId]);
+    await connection.execute(`INSERT INTO tenant_activation_codes
+      (tenant_id, code_hash, code_hint, status, expires_at, created_by_person_id)
+      VALUES (?, ?, ?, 'active', ?, ?)`, [normalizedTenantId, hashTenantActivationCode(code), code.slice(-6), tenant.subscription_expires_at, Number(personId) || null]);
+  });
+  return { ok: true, activation_code: code };
+}
+
+export async function revokeTenantActivationCodeMysql(tenantId) {
+  await ensureTenantSchemaMysql();
+  const normalizedTenantId = Number(tenantId);
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0) throw new Error("请选择有效客户空间");
+  const result = await mysqlExecute("UPDATE tenant_activation_codes SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND status = 'active'", [normalizedTenantId]);
+  return { ok: true, revoked: Number(result.affectedRows || 0) };
 }
 
 export async function setTenantQuotasMysql(tenantId, body = {}) {
@@ -227,6 +299,7 @@ export async function archiveTenantMysql(tenantId) {
   if (rows[0].slug === DEFAULT_TENANT_SLUG) throw new Error("默认企业不能删除");
   await mysqlExecute("UPDATE tenants SET status = 'archived', subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
   await mysqlExecute("UPDATE tenant_members SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ?", [normalizedTenantId]);
+  await mysqlExecute("UPDATE tenant_activation_codes SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND status = 'active'", [normalizedTenantId]);
   return { ok: true };
 }
 
