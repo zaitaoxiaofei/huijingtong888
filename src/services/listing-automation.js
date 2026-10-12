@@ -9970,38 +9970,53 @@ export async function autoSyncListingPublishRecords(options = {}) {
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 100);
   const minAgeMinutes = Math.min(Math.max(Number(options.minAgeMinutes || 5), 1), 120);
   const maxAgeDays = Math.min(Math.max(Number(options.maxAgeDays || 60), 1), 60);
+  const missingSkuSql = `EXISTS (SELECT 1 FROM listing_publish_variant_links l
+    WHERE l.record_id = r.id AND l.tenant_id = COALESCE(r.tenant_id, 'admin') AND l.ozon_sku = '')`;
+  const skuDueSql = `r.status IN ('imported', 'published', 'success')
+    AND COALESCE(r.published_at, r.created_at) <= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+    AND (r.sku_sync_checked_at IS NULL OR r.sku_sync_checked_at <= DATE_SUB(NOW(), INTERVAL 1 HOUR))
+    AND ${missingSkuSql}`;
   const rows = await all(`
-    SELECT id, status, quality_source, quality_checked_at
-    FROM listing_publish_records
-    WHERE status <> 'deleted'
-      AND task_id <> ''
-      AND created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-      AND updated_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+    SELECT r.id, r.tenant_id, r.status, r.quality_source, r.quality_checked_at,
+      (${skuDueSql}) AS sku_due
+    FROM listing_publish_records r
+    WHERE r.status <> 'deleted'
+      AND r.created_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
+      AND r.updated_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
       AND (
-        status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending', 'ozon_status_error', 'failed')
-        OR (
-          status IN ('imported', 'published', 'success')
+        (r.task_id <> '' AND (
+          r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending', 'ozon_status_error', 'failed')
+          OR (r.status IN ('imported', 'published', 'success')
           AND (
-            quality_checked_at IS NULL
-            OR quality_checked_at <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
-            OR COALESCE(quality_source, '') NOT LIKE '%ozon_rating_by_sku%'
-          )
-        )
+            r.quality_checked_at IS NULL
+            OR r.quality_checked_at <= DATE_SUB(NOW(), INTERVAL 10 MINUTE)
+            OR COALESCE(r.quality_source, '') NOT LIKE '%ozon_rating_by_sku%'
+          ))))
+        OR (${skuDueSql})
       )
     ORDER BY
-      CASE WHEN status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending', 'ozon_status_error', 'failed') THEN 0 ELSE 1 END,
-      updated_at ASC
+      CASE WHEN r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending', 'ozon_status_error', 'failed') THEN 0
+        WHEN (${skuDueSql}) THEN 1 ELSE 2 END,
+      r.updated_at ASC
     LIMIT ?
   `, [minAgeMinutes, maxAgeDays, limit]);
-  const stats = { scanned: rows.length, refreshed: 0, quality_refreshed: 0, failed: 0, errors: [] };
+  const stats = { scanned: rows.length, refreshed: 0, sku_refreshed: 0, quality_refreshed: 0, failed: 0, errors: [] };
   for (const item of rows) {
     try {
       const status = String(item.status || "");
+      const tenantId = String(item.tenant_id || "admin");
+      const session = tenantId === "admin" ? null : { tenant: { id: Number(tenantId), slug: "scheduled-job" } };
       if (["submitted", "processing", "resubmitting", "ozon_status_pending", "ozon_status_error", "failed"].includes(status)) {
-        await refreshListingPublishRecord(Number(item.id), null);
+        await refreshListingPublishRecord(Number(item.id), session);
         stats.refreshed += 1;
+      } else if (Number(item.sku_due) > 0) {
+        await run(`UPDATE listing_publish_records SET sku_sync_checked_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?`,
+        [Number(item.id), tenantId]);
+        await refreshListingPublishRecord(Number(item.id), session);
+        stats.sku_refreshed += 1;
       } else {
-        await refreshPublishRecordQuality(Number(item.id));
+        await refreshPublishRecordQuality(Number(item.id), tenantId);
         stats.quality_refreshed += 1;
       }
     } catch (error) {
@@ -14527,6 +14542,7 @@ async function initializeListingAutomationSchema() {
     await ensureMysqlColumn("listing_publish_records", "binding_error", "TEXT NULL");
     await ensureMysqlColumn("listing_publish_records", "binding_checked_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "binding_completed_at", "TIMESTAMP NULL");
+    await ensureMysqlColumn("listing_publish_records", "sku_sync_checked_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "offer_source", "VARCHAR(64) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "source_collector_sku", "VARCHAR(160) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "template_snapshot_json", "LONGTEXT NULL");

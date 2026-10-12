@@ -1292,16 +1292,29 @@ async function batchRefreshRecords() {
   batchRefreshing.value = true;
   try {
     let success = 0;
+    let failed = 0;
     for (const row of rows) {
-      const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
-      const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
-      if (index >= 0) state.rows[index] = updated;
-      success += 1;
+      try {
+        const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
+        const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
+        if (index >= 0) state.rows[index] = updated;
+        success += 1;
+      } catch {
+        failed += 1;
+      }
     }
-    ElMessage.success(`已刷新 ${success} 条上架记录`);
+    if (failed) ElMessage.warning(`已同步 ${success} 条，失败 ${failed} 条，请稍后重试`);
+    else ElMessage.success(`已同步 ${success} 条上架记录`);
   } finally {
     batchRefreshing.value = false;
   }
+}
+
+function viewOnlineSku(link) {
+  if (!link?.ozon_sku || !drawer.row?.shop_id) return;
+  router.push({ path: "/online-products", query: {
+    shopId: String(drawer.row.shop_id), offer: String(link.ozon_sku), status: "all"
+  } });
 }
 
 async function deleteRecord(row) {
@@ -1782,7 +1795,7 @@ watch(() => route.query.taskId, () => {
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading || batchRefreshing" @click="refreshToolbarRecords">
-          {{ isPublishMode && selectedPublishRows.length ? "同步选中状态" : "刷新列表" }}
+          {{ isPublishMode && selectedPublishRows.length ? "批量同步状态 / SKU" : "刷新列表" }}
         </el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Edit" :disabled="selectedDraftRows.length < 2" @click="batchOpenDraftsForListing">批量编辑</el-button>
@@ -2035,7 +2048,12 @@ watch(() => route.query.taskId, () => {
         <el-table v-if="drawer.row.variant_links?.length" :data="drawer.row.variant_links" border size="small">
           <el-table-column prop="variant_id" label="草稿变体 ID" min-width="160" show-overflow-tooltip />
           <el-table-column prop="offer_id" label="Offer ID" min-width="130" show-overflow-tooltip />
-          <el-table-column prop="ozon_sku" label="线上 SKU" min-width="130" show-overflow-tooltip />
+          <el-table-column label="线上 SKU" min-width="130" show-overflow-tooltip>
+            <template #default="{ row }">
+              <el-button v-if="row.ozon_sku" link type="primary" @click="viewOnlineSku(row)">{{ row.ozon_sku }}</el-button>
+              <span v-else>{{ row.ozon_sku || "待同步" }}</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="ozon_status" label="Ozon 状态" min-width="110" show-overflow-tooltip />
           <el-table-column label="售价" min-width="100">
             <template #default="{ row }">{{ row.price == null ? "-" : `${row.price} ${row.currency_code || ""}` }}</template>
