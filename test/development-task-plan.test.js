@@ -19,6 +19,19 @@ test("development targets round trip without losing per-model goals or accepting
   assert.match(developmentPlanDeliverable(normalized), /T4 10 个 SKU；T7 20 个 SKU/);
 });
 
+test("parent task keeps unassigned drafts in a shared pool without crediting a model", () => {
+  const input = { ...plan(), unallocated_draft_ids: [103] };
+  const normalized = normalizeDevelopmentPlan(input, body);
+  const progress = developmentPlanProgress(normalized, [{ id: 103, product_name: "待分配草稿", sku_count: 8 }]);
+  assert.deepEqual(normalized.unallocated_draft_ids, [103]);
+  assert.equal(progress.models[0].done, 0);
+  assert.equal(progress.models[1].done, 0);
+  assert.deepEqual(progress.unallocated_drafts.map(({ id, title, count }) => ({ id, title, count })), [
+    { id: 103, title: "待分配草稿", count: 8 }
+  ]);
+  assert.throws(() => normalizeDevelopmentPlan({ ...input, unallocated_draft_ids: [101] }, body), /无效或重复/);
+});
+
 test("missing fields, invalid dates, fractional targets, repeated models and repeated drafts are blocked", () => {
   for (const patch of [{ owner_person_id: null }, { due_at: "" }, { due_at: "2026-02-30" }, { type: "custom" }]) {
     assert.throws(() => normalizeDevelopmentPlan(plan(), { ...body, ...patch }));
