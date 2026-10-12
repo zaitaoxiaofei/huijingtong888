@@ -1722,8 +1722,9 @@ watch(() => route.query.taskId, () => {
     </el-tabs>
 
     <template v-if="!isTaskMode">
-    <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode }">
-      <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode }">
+    <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
+      <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
+        <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="搜索商品名、offer_id、线上 SKU、Ozon 商品 ID、店铺或类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
           <el-option label="全部开发类型" value="all" />
           <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
@@ -1737,8 +1738,7 @@ watch(() => route.query.taskId, () => {
           <el-option label="全部人员" value="all" />
           <el-option v-for="person in state.people" :key="person.id" :label="`${person.name} (ID ${person.id})`" :value="person.id" />
         </el-select>
-        <el-input v-model="state.nameQuery" :prefix-icon="Search" clearable :placeholder="isDraftMode ? '草稿 ID / 俄语商品名 / offer_id' : '名称 / offer_id'" @keyup.enter="searchRecords" @clear="searchRecords" />
-        <el-input v-if="isPublishMode" v-model="state.query" clearable placeholder="offer / product id / 类目" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-if="isDraftMode" v-model="state.nameQuery" :prefix-icon="Search" clearable placeholder="草稿 ID / 俄语商品名 / offer_id" @keyup.enter="searchRecords" @clear="searchRecords" />
         <el-select v-model="state.status" placeholder="状态" @change="searchRecords">
           <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
         </el-select>
@@ -2360,6 +2360,9 @@ watch(() => route.query.taskId, () => {
 }
 .toolbar-filters > * { width: 100%; min-width: 0; }
 .toolbar-filters > .created-date-filter { grid-column: span 2; }
+.publish-record-toolbar-panel { display: block; }
+.publish-record-toolbar-filters { grid-template-columns: minmax(320px, 2fr) repeat(4, minmax(130px, 1fr)); }
+.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 10px; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
   flex: 0 1 620px;
@@ -2532,6 +2535,8 @@ watch(() => route.query.taskId, () => {
   .toolbar-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .publish-record-toolbar-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .publish-record-search { grid-column: 1 / -1; }
   .toolbar-actions {
     justify-content: flex-start;
     width: 100%;
@@ -2547,6 +2552,8 @@ watch(() => route.query.taskId, () => {
   .toolbar-panel { gap: 10px; padding: 10px; }
   .toolbar-filters,
   .task-toolbar-filters { grid-template-columns: 1fr; flex-basis: auto; width: 100%; }
+  .publish-record-toolbar-filters { grid-template-columns: 1fr; }
+  .publish-record-search { grid-column: auto; }
   .toolbar-actions {
     justify-content: flex-start;
     width: 100%;
