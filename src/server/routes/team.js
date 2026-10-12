@@ -7,7 +7,7 @@ export function createTeamRoutes({ services, readJson }) {
     "PUT /api/team/development-task-priority": async (req) => services.updateDevelopmentTaskPriority(await readJson(req)),
     "GET /api/team/development-projects": () => services.developmentProjects(),
     "GET /api/team/development-candidates": (req, url) => services.developmentCandidates(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/team/development-ideas": () => services.developmentIdeas(),
+    "GET /api/team/development-ideas": (req, url) => services.developmentIdeas(Object.fromEntries(url.searchParams.entries())),
     "GET /api/team/development-categories": () => services.developmentInventoryCategories(),
     "POST /api/team/attachments": (req) => services.uploadTeamAttachment(req),
     "POST /api/team/tasks": async (req) => services.createTeamTask(await readJson(req), req._session?.personId),

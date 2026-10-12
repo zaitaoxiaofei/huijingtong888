@@ -10524,6 +10524,7 @@ export async function listingDrafts(query = {}, session) {
   const creatorId = Number(query.creatorId || query.creator_id || 0);
   const developmentType = String(query.developmentType || query.development_type || "").trim().toLowerCase();
   const category = String(query.category || query.categoryName || query.category_name || "").trim().toLowerCase();
+  const requestedIds = [...new Set(String(query.ids || query.draft_ids || "").split(",").map((value) => Number(value.trim())).filter((value) => Number.isSafeInteger(value) && value > 0))].slice(0, 500);
   const vehicleBrand = String(query.vehicleBrand || query.vehicle_brand || "").trim().toLowerCase();
   const vehicleModel = String(query.vehicleModel || query.vehicle_model || "").trim().toLowerCase();
   const sortBy = String(query.sortBy || query.sort_by || "updated_at").trim().toLowerCase() === "created_at"
@@ -10542,6 +10543,12 @@ export async function listingDrafts(query = {}, session) {
   where.push(tenantScope);
   const params = [tenantId];
   const countParams = [tenantId];
+  if (requestedIds.length) {
+    const placeholders = requestedIds.map(() => "?").join(",");
+    where.push(`d.id IN (${placeholders})`);
+    params.push(...requestedIds);
+    countParams.push(...requestedIds);
+  }
   if (projectOnly && status === "editing") {
     where.push(`NOT EXISTS (SELECT 1 FROM listing_shop_copies c_project WHERE c_project.draft_id = d.id AND ${relatedTenantScope("c_project")})`);
     params.push(tenantId);
@@ -10758,7 +10765,15 @@ export async function listingDrafts(query = {}, session) {
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         NULL AS template_payload_json,
         t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
-        (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count
+        (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count,
+        ${requestedIds.length ? "d.source_product_id" : "NULL"} AS source_product_id,
+        ${requestedIds.length ? `GREATEST(1, COALESCE(
+          CASE WHEN JSON_VALID(d.template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(d.template_payload_json,'$.editable_payload.variants')) END,
+          CASE WHEN JSON_VALID(d.template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(d.template_payload_json,'$.variants')) END,
+          CASE WHEN JSON_VALID(d.manual_facts_json) THEN JSON_LENGTH(JSON_EXTRACT(d.manual_facts_json,'$.variants')) END, 1
+        ))` : "NULL"} AS sku_count,
+        ${requestedIds.length ? `(SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id=d.id AND ${relatedTenantScope("r")} AND r.status<>'deleted')` : "NULL"} AS publish_record_count,
+        ${requestedIds.length ? `(SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id=d.id AND ${relatedTenantScope("r")} AND r.status IN ('imported','published','success'))` : "NULL"} AS publish_success_count
       ${fromSql}
       ORDER BY ${sortColumn} DESC, d.id DESC
       LIMIT ? OFFSET ?
@@ -10788,7 +10803,15 @@ export async function listingDrafts(query = {}, session) {
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         d.template_payload_json,
         t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
-        (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count
+        (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count,
+        ${requestedIds.length ? "d.source_product_id" : "NULL"} AS source_product_id,
+        ${requestedIds.length ? `GREATEST(1, COALESCE(
+          CASE WHEN JSON_VALID(d.template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(d.template_payload_json,'$.editable_payload.variants')) END,
+          CASE WHEN JSON_VALID(d.template_payload_json) THEN JSON_LENGTH(JSON_EXTRACT(d.template_payload_json,'$.variants')) END,
+          CASE WHEN JSON_VALID(d.manual_facts_json) THEN JSON_LENGTH(JSON_EXTRACT(d.manual_facts_json,'$.variants')) END, 1
+        ))` : "NULL"} AS sku_count,
+        ${requestedIds.length ? `(SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id=d.id AND ${relatedTenantScope("r")} AND r.status<>'deleted')` : "NULL"} AS publish_record_count,
+        ${requestedIds.length ? `(SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id=d.id AND ${relatedTenantScope("r")} AND r.status IN ('imported','published','success'))` : "NULL"} AS publish_success_count
       ${fromSql}
       ORDER BY ${sortColumn} DESC, d.id DESC
       LIMIT ? OFFSET ?

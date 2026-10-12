@@ -7,7 +7,9 @@ const viewSource = fs.readFileSync(new URL("../frontend/admin/views/team/Product
 const heatmapSource = fs.readFileSync(new URL("../frontend/admin/components/team/DevelopmentHeatmap.vue", import.meta.url), "utf8");
 
 test("development overview skips unrelated data bootstrap and reuses the task-center payload", () => {
-  assert.match(viewSource, /if \(value === "tasks"\) loadTaskPlanOrders\(\);\s*else if \(value !== "dashboard"\) loadDevelopmentData\(\)/);
+  assert.match(viewSource, /if \(value === "tasks"\) loadTaskPlanOrders\(\);\s*else if \(value !== "dashboard"\) loadDevelopmentData\(value\)/);
+  assert.match(viewSource, /include_tasks=0/);
+  assert.match(viewSource, /async function loadReviewDrafts\(\)/);
   assert.match(viewSource, /:initial-tasks="tasks" :initial-tasks-loaded="tasksLoaded"/);
   assert.match(heatmapSource, /if \(props\.initialTasksLoaded\) tasks\.value = props\.initialTasks; else load\(\)/);
 });
