@@ -33,6 +33,7 @@ const selectedRows = ref([]);
 const activeRepairTarget = ref("");
 const developmentSavingDraftId = ref(null);
 const advancedFiltersVisible = ref(false);
+const publishAdvancedFiltersVisible = ref(false);
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
@@ -278,7 +279,7 @@ async function loadRecords() {
     if (creatorId) params.set("creatorId", creatorId);
   }
   if (isDraftMode.value && state.developmentType !== "all") params.set("developmentType", String(state.developmentType));
-  if (isDraftMode.value && state.category.trim()) params.set("categoryPath", state.category.trim());
+  if (state.category.trim()) params.set("categoryPath", state.category.trim());
   if (isDraftMode.value && state.vehicleBrand.trim()) params.set("vehicleBrand", state.vehicleBrand.trim());
   if (isDraftMode.value && state.vehicleModel.trim()) params.set("vehicleModel", state.vehicleModel.trim());
   if (isDraftMode.value && state.publishStatus !== "all") params.set("publishStatus", state.publishStatus);
@@ -1725,6 +1726,7 @@ watch(() => route.query.taskId, () => {
     <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
       <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
         <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="搜索商品名、offer_id、线上 SKU、Ozon 商品 ID、店铺或类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <OzonCategoryFilter v-if="isPublishMode" v-model="state.category" @change="searchRecords" />
         <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
           <el-option label="全部开发类型" value="all" />
           <el-option v-for="option in developmentTypeOptions" :key="option.value" :label="option.label" :value="option.value" />
@@ -1756,7 +1758,7 @@ watch(() => route.query.taskId, () => {
           <el-input-number v-model="state.maxPrice" :min="0" :controls="false" placeholder="最高售价" @change="searchRecords" />
           <el-date-picker v-model="state.createdRange" class="created-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="创建开始" end-placeholder="创建结束" @change="searchRecords" />
         </div>
-        <el-select v-if="isPublishMode" v-model="state.quality" placeholder="评分" @change="searchRecords">
+        <el-select v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.quality" placeholder="评分" @change="searchRecords">
           <el-option label="全部评分" value="all" />
           <el-option label="85分以下" value="lt85" />
           <el-option label="85分以上" value="gte85" />
@@ -1766,6 +1768,7 @@ watch(() => route.query.taskId, () => {
       <div class="toolbar-actions" :class="{ 'draft-toolbar-actions': isDraftMode }">
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="quickCreateDraft">快速创建草稿</el-button>
         <el-button v-if="isDraftMode" link type="primary" @click="advancedFiltersVisible = !advancedFiltersVisible">{{ advancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ advancedFilterCount ? ` (${advancedFilterCount})` : "" }}</el-button>
+        <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' ? ' · 已设置' : '' }}</el-button>
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading || batchRefreshing" @click="refreshToolbarRecords">
@@ -1834,7 +1837,7 @@ watch(() => route.query.taskId, () => {
           </el-select>
         </template>
       </el-table-column>
-      <el-table-column v-if="isDraftMode" label="Ozon 类目" min-width="156" prop="category_name" show-overflow-tooltip>
+      <el-table-column label="Ozon 类目" min-width="156" prop="category_name" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category_name || "未分类" }}</template>
       </el-table-column>
       <el-table-column label="人员" min-width="116" prop="creator_name" show-overflow-tooltip />
@@ -2360,9 +2363,10 @@ watch(() => route.query.taskId, () => {
 }
 .toolbar-filters > * { width: 100%; min-width: 0; }
 .toolbar-filters > .created-date-filter { grid-column: span 2; }
-.publish-record-toolbar-panel { display: block; }
-.publish-record-toolbar-filters { grid-template-columns: minmax(320px, 2fr) repeat(4, minmax(130px, 1fr)); }
-.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 10px; }
+.publish-record-toolbar-panel { display: block; padding: 8px 10px; }
+.publish-record-toolbar-filters { grid-template-columns: minmax(280px, 2fr) minmax(180px, 1fr) 130px 140px 120px; gap: 8px; }
+.publish-record-toolbar-filters :deep(.category-filter-trigger) { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 6px; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
   flex: 0 1 620px;

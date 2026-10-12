@@ -8157,7 +8157,7 @@ export async function listingPublishTasks(query = {}, session = null) {
     )`);
     params.push(...Array(3).fill(`%${keyword}%`));
   }
-  const fromSql = `
+  const fromSql = (includeCategory) => `
     FROM listing_publish_tasks t
     LEFT JOIN tenant_members creator_members
       ON creator_members.person_id = t.created_by_person_id
@@ -9363,18 +9363,16 @@ export async function listingPublishRecords(query = {}, session = null) {
   const shopQuery = cleanText(query.shopQuery || query.shop || "", 120).toLowerCase();
   const shopId = Number(query.shopId || query.shop_id || 0);
   const keyword = cleanText(query.query || query.keyword || "", 160).toLowerCase();
+  const categoryPath = cleanText(query.categoryPath || query.category_path || "", 500);
   const status = cleanText(query.status || "all", 40);
   const quality = cleanText(query.quality || "all", 40);
   const creatorId = cleanText(query.creatorId || query.creator_id || "", 40);
-  const categoryJoinSql = keyword ? `
+  const categoryJoinSql = `
     LEFT JOIN ozon_category_mappings m
-      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.description_category_id')), ''), ':', 1), '') AS UNSIGNED)
-     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.type_id')), ''), ':', 1), '') AS UNSIGNED)
-     AND m.status = 'active'
-  ` : "";
-  const categoryNameSelect = keyword
-    ? "COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, ''))"
-    : "''";
+      ON m.description_category_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.description_category_id')), JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].description_category_id')), ''), ':', 1), '') AS UNSIGNED)
+     AND m.type_id = CAST(NULLIF(SUBSTRING_INDEX(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.type_id')), JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].type_id')), ''), ':', 1), '') AS UNSIGNED)
+  `;
+  const categoryNameSelect = "COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, ''), '')";
 
   if (status === "success") where.push("r.status IN ('imported', 'published', 'success')");
   else if (status === "processing") where.push("r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')");
@@ -9401,6 +9399,10 @@ export async function listingPublishRecords(query = {}, session = null) {
   if (creatorId !== "all" && Number(creatorId) > 0) {
     where.push("r.created_by_person_id = ?");
     params.push(Number(creatorId));
+  }
+  if (categoryPath) {
+    where.push(`(${categoryNameSelect} = ? OR ${categoryNameSelect} LIKE ?)`);
+    params.push(categoryPath, `${categoryPath} / %`);
   }
   if (keyword) {
     where.push(`(
@@ -9430,7 +9432,7 @@ export async function listingPublishRecords(query = {}, session = null) {
      AND creator_members.active = 1
     LEFT JOIN people creator ON creator.id = r.created_by_person_id
       AND creator_members.person_id = creator.id
-    ${categoryJoinSql}
+    ${includeCategory ? categoryJoinSql : ""}
     WHERE ${where.join(" AND ")}
   `;
   const fullRecordSelectSql = `
@@ -9463,10 +9465,10 @@ export async function listingPublishRecords(query = {}, session = null) {
   `;
   if (paged) {
     const [countRow, rows] = await Promise.all([
-      row(`SELECT COUNT(*) AS total ${fromSql}`, params),
+      row(`SELECT COUNT(*) AS total ${fromSql(Boolean(keyword || categoryPath))}`, params),
       all(`
         ${includePayload ? fullRecordSelectSql : listRecordSelectSql}
-        ${fromSql}
+        ${fromSql(true)}
         ORDER BY r.created_at DESC, r.id DESC
         LIMIT ? OFFSET ?
       `, [...params, pageSize, (page - 1) * pageSize])
@@ -9484,7 +9486,7 @@ export async function listingPublishRecords(query = {}, session = null) {
   }
   const rows = await all(`
     ${includePayload ? fullRecordSelectSql : listRecordSelectSql}
-    ${fromSql}
+    ${fromSql(true)}
     ORDER BY r.created_at DESC, r.id DESC
     LIMIT ?
   `, [...params, limit]);
