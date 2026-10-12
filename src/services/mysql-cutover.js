@@ -5,6 +5,7 @@ import { getRoles } from "../shared/permissions.js";
 import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, searchInventoryRows } from "./inventory-search.js";
 import { ensureInventoryNumberingMysql } from "./inventory-numbering.js";
 import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
+import { propagateListingVariantInventory } from "./listing-variant-inventory.js";
 import { loadOrderFbpStocks, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
 import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
@@ -9399,12 +9400,18 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin") {
   }
 
   const outboundSync = await syncOutboundForOpenOrdersMysql({ shop_id: Number(online.shop_id), ozon_sku: bindSku });
-  if (mappingId) scheduleBindingProfitRecalculationMysql(mappingId);
+  const variantBinding = productId ? await propagateListingVariantInventory({
+    tenantKey: defaultTenant ? "admin" : String(normalizedTenantId),
+    tenantPk: normalizedTenantId,
+    shopId: Number(online.shop_id), ozonSku: bindSku, offerId: online.offer_id, productId
+  }) : null;
+  for (const id of new Set([mappingId, ...(variantBinding?.mapping_ids || [])].filter(Boolean))) scheduleBindingProfitRecalculationMysql(id);
 
   return {
     ok: true,
     mapping_id: mappingId,
     product_id: productId,
+    variant_binding: variantBinding,
     outbound_sync: outboundSync,
     profit_sync: mappingId ? { scheduled: true } : { scheduled: false }
   };
