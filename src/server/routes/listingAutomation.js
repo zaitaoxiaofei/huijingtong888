@@ -150,6 +150,7 @@ export async function handleListingAutomationRestRoute({ req, res, parts, servic
   }
 
   if (req.method === "GET" && parts[2] === "publish-records" && parts[3]) {
+    if (req.query?.view === "sku") return json(res, await services.listingPublishSkuReview(Number(parts[3]), req._session));
     return json(res, await services.listingPublishRecordDetail(Number(parts[3]), req._session));
   }
 

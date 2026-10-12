@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { propagateListingVariantInventory } from "../src/services/listing-variant-inventory.js";
+import { listingVariantInventoryCandidates, propagateListingVariantInventory } from "../src/services/listing-variant-inventory.js";
 
 function fakeDatabase(links) {
   const writes = [];
@@ -12,7 +12,12 @@ function fakeDatabase(links) {
     transaction: async (callback) => callback({
       execute: async (sql, params) => {
         if (sql.includes("SELECT id, shop_id, ozon_sku, offer_id, source_product_id")) return [links.map((link) => ({ ...link }))];
-        if (sql.includes("SELECT l.id FROM listing_publish_variant_links")) return [[]];
+        if (sql.includes("SELECT l.id FROM listing_publish_variant_links")) {
+          if (!sql.includes("l.ozon_sku COLLATE utf8mb4_0900_ai_ci")) {
+            throw Object.assign(new Error("Illegal mix of collations"), { code: "ER_CANT_AGGREGATE_2COLLATIONS" });
+          }
+          return [[]];
+        }
         if (sql.includes("SELECT id FROM shops")) return [[{ id: params[0] }]];
         if (sql.includes("SELECT id, offer_id, name, product_id FROM online_products")) return [[online.get(`${params[0]}:${params[1]}`)].filter(Boolean)];
         if (sql.includes("SELECT id, product_id FROM sku_mappings")) return [[]];
@@ -55,4 +60,17 @@ test("an existing different inventory blocks sibling propagation", async () => {
   }, db);
   assert.deepEqual(result, { linked: 0, bound: 0, conflicts: 1, mapping_ids: [] });
   assert.deepEqual(db.writes, []);
+});
+
+test("reconciliation picks one inventory for unbound sibling shops and skips conflicts", () => {
+  const rows = [
+    { tenant_id: "admin", draft_id: 7, variant_id: "blue", shop_id: 11, ozon_sku: "501", offer_id: "a", source_product_id: null, online_row_id: 101, online_inventory_id: 88, mapped_inventory_id: 88 },
+    { tenant_id: "admin", draft_id: 7, variant_id: "blue", shop_id: 12, ozon_sku: "502", offer_id: "b", source_product_id: null, online_row_id: null, online_inventory_id: null, mapped_inventory_id: null },
+    { tenant_id: "admin", draft_id: 8, variant_id: "red", shop_id: 11, ozon_sku: "601", source_product_id: 88, online_row_id: 102, online_inventory_id: 99, mapped_inventory_id: 99 },
+    { tenant_id: "admin", draft_id: 8, variant_id: "red", shop_id: 12, ozon_sku: "602", source_product_id: null, online_row_id: 103, online_inventory_id: null, mapped_inventory_id: null }
+  ];
+  assert.deepEqual(listingVariantInventoryCandidates(rows), [{
+    tenantKey: "admin", draftId: 7, variantId: "blue", shopId: 11,
+    ozonSku: "501", offerId: "a", productId: 88
+  }]);
 });
