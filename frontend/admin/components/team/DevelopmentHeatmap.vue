@@ -54,6 +54,17 @@ const quadrantCards = computed(() => {
   });
   return cards;
 });
+const quadrantBoardStyle = computed(() => {
+  const counts = Object.fromEntries(quadrantCards.value.map((group) => [group.score, group.points.length]));
+  const share = (first, second) => Math.max(0.18, Math.min(0.82, (first + 1) / (first + second + 2)));
+  const left = share(counts[10] + counts[8], counts[7] + counts[6]);
+  const top = share(counts[10] + counts[7], counts[8] + counts[6]);
+  return {
+    gridTemplateColumns: `${left}fr ${1 - left}fr`,
+    gridTemplateRows: `${top}fr ${1 - top}fr`,
+    transform: `scale(${zoom.value})`
+  };
+});
 const boardWidth = computed(() => viewMode.value === "coordinates" ? Math.max(canvasWidth.value, 190 + heatmap.value.columns.length * 158) : canvasWidth.value);
 const boardHeight = computed(() => viewMode.value === "coordinates" ? 58 + heatmap.value.rows.length * 100 : 696);
 const boardShellStyle = computed(() => viewMode.value === "quadrant"
@@ -315,7 +326,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
       <div class="heatmap-canvas-toolbar" v-if="heatmap.rows.length && heatmap.columns.length && (viewMode === 'coordinates' || viewMode === 'quadrant' || expandedQuadrantScore !== null)"><span>缩放</span><el-button circle size="small" aria-label="缩小热力图" @click="zoomBy(-0.08)">−</el-button><strong>{{ Math.round(zoom * 100) }}%</strong><el-button circle size="small" aria-label="放大热力图" @click="zoomBy(0.08)">＋</el-button><el-button size="small" @click="resetZoom">重置</el-button><small>滚轮缩放 · 左键拖动画布</small></div>
       <div v-if="heatmap.rows.length && heatmap.columns.length" ref="viewport" class="heatmap-viewport" :class="{ 'is-panning': isDragging, 'planning-mode': planningMode, 'square-mode': viewMode === 'quadrant' }" @wheel.prevent="handleZoomWheel" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan">
         <div v-if="viewMode === 'quadrant'" class="heatmap-board-shell square-board-shell" :style="boardShellStyle">
-          <div class="quadrant-board square-quadrant-board" :style="{ transform: `scale(${zoom})` }">
+          <div class="quadrant-board square-quadrant-board" :style="quadrantBoardStyle">
             <section v-for="group in quadrantCards" :key="group.score" class="priority-quadrant" :class="[`quadrant-${group.score}`, { 'drop-target-active': activeDropScore === group.score, dimmed: expandedQuadrantScore != null && expandedQuadrantScore !== group.score }]" @dragover.prevent="handleQuadrantDragOver($event, group.score)" @dragleave="activeDropScore === group.score && (activeDropScore = null)" @drop.prevent.stop="dropOnQuadrant(group.score)">
               <header><div><strong>{{ group.label }}</strong><small>{{ group.points.length }} 个点位</small></div><b>{{ group.points.length }}</b></header>
               <div class="quadrant-points">
@@ -410,5 +421,5 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 
 <style scoped>
 .priority-filter-bar{gap:7px}.priority-filter{display:inline-flex;align-items:center;gap:6px;padding:6px 11px;border:1px solid transparent;border-radius:999px;font:inherit;font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer}.priority-filter small{font-size:10px;opacity:.78}.priority-filter.priority-all{background:#f1f5f9;color:#475569}.priority-filter.priority-10{background:#fee2e2;color:#b91c1c}.priority-filter.priority-7{background:#dbeafe;color:#1e40af}.priority-filter.priority-8{background:#fff1f2;color:#be123c}.priority-filter.priority-6{background:#f1f5f9;color:#475569}.priority-filter.active{box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor}.priority-filter:hover{filter:saturate(1.08)}.priority-filter.drop-target-active{outline:2px dashed currentColor;outline-offset:3px}
-.heatmap-viewport.square-mode{overflow:auto;background:#f5f7fb}.square-board-shell{min-width:900px;min-height:696px}.square-quadrant-board{width:100%;height:696px;grid-template-rows:repeat(2,minmax(0,1fr));gap:12px;padding:8px}.square-quadrant-board .priority-quadrant{overflow:hidden;border:1px solid #dbe4ef;border-radius:16px;background:#fff}.square-quadrant-board .priority-quadrant.drop-target-active{outline:3px solid currentColor;outline-offset:-3px}.square-quadrant-board .priority-quadrant.dimmed{opacity:.62}.square-quadrant-board .quadrant-points{align-content:start;justify-content:start;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));padding:12px;gap:10px}.square-quadrant-board .quadrant-point{cursor:grab}.square-quadrant-board .quadrant-point:active{cursor:grabbing}.square-quadrant-board .quadrant-empty{align-self:center;justify-self:center;color:#94a3b8;font-size:12px}
+.heatmap-viewport.square-mode{height:clamp(520px,68vh,900px);overflow:auto;background:#f5f7fb}.square-board-shell{min-width:900px;min-height:520px;height:100%}.square-quadrant-board{width:100%;height:100%;gap:12px;padding:8px}.square-quadrant-board .priority-quadrant{overflow:hidden;border:1px solid #dbe4ef;border-radius:16px;background:#fff}.square-quadrant-board .priority-quadrant.drop-target-active{outline:3px solid currentColor;outline-offset:-3px}.square-quadrant-board .priority-quadrant.dimmed{opacity:.62}.square-quadrant-board .quadrant-points{align-content:start;justify-content:start;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));padding:12px;gap:10px}.square-quadrant-board .quadrant-point{cursor:grab}.square-quadrant-board .quadrant-point:active{cursor:grabbing}.square-quadrant-board .quadrant-empty{align-self:center;justify-self:center;color:#94a3b8;font-size:12px}
 </style>
