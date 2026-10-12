@@ -443,12 +443,12 @@ async function saveDraftBinding() {
 
 async function refreshToolbarRecords() {
   if (isDraftMode.value) draftListCache.clear();
-  if (isPublishMode.value && selectedPublishRows.value.length) {
-    await batchRefreshRecords();
-    return;
-  }
   await loadRecords();
   ElMessage.success("列表已刷新");
+}
+
+function hasSyncedSku(row) {
+  return Number(row?.sku_count || 0) > 0 || Boolean(row?.ozon_sku);
 }
 
 async function loadPublishTasks() {
@@ -1928,9 +1928,8 @@ watch(() => route.query.taskId, () => {
         <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' || state.updatedRange?.length === 2 ? ' · 已设置' : '' }}</el-button>
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
-        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading || batchRefreshing" @click="refreshToolbarRecords">
-          {{ isPublishMode && selectedPublishRows.length ? "批量同步状态 / SKU" : "刷新列表" }}
-        </el-button>
+        <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="refreshToolbarRecords">刷新列表</el-button>
+        <el-button v-if="isPublishMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedPublishRows.length" @click="batchRefreshRecords">批量同步状态 / SKU</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
         <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('vehicle', selectedDraftRows)">批量绑定车型</el-button>
         <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('task', selectedDraftRows)">批量绑定任务</el-button>
@@ -1954,7 +1953,7 @@ watch(() => route.query.taskId, () => {
         @selection-change="handleSelectionChange"
       >
       <el-table-column type="selection" width="44" fixed="left" />
-      <el-table-column label="商品" min-width="420">
+      <el-table-column label="商品" :min-width="isPublishMode ? 300 : 420">
         <template #default="{ row }">
           <div class="record-product">
             <ProductImagePreview
@@ -2005,13 +2004,12 @@ watch(() => route.query.taskId, () => {
           </el-select>
         </template>
       </el-table-column>
-      <el-table-column label="Ozon 类目" min-width="156" prop="category_name" show-overflow-tooltip>
+      <el-table-column label="Ozon 类目" :min-width="isPublishMode ? 130 : 156" prop="category_name" show-overflow-tooltip>
         <template #default="{ row }">{{ row.category_name || "未分类" }}</template>
       </el-table-column>
-      <el-table-column label="人员" min-width="116" prop="creator_name" show-overflow-tooltip />
-      <el-table-column label="店铺" min-width="136" prop="shop_name" show-overflow-tooltip />
-      <el-table-column label="来源" min-width="126" prop="source_label" show-overflow-tooltip />
-      <el-table-column :label="isDraftMode ? '草稿状态' : '状态'" min-width="112">
+      <el-table-column label="人员" :min-width="isPublishMode ? 90 : 116" prop="creator_name" show-overflow-tooltip />
+      <el-table-column label="店铺" :min-width="isPublishMode ? 110 : 136" prop="shop_name" show-overflow-tooltip />
+      <el-table-column :label="isDraftMode ? '草稿状态' : '状态'" :min-width="isPublishMode ? 100 : 112">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
         </template>
@@ -2023,21 +2021,7 @@ watch(() => route.query.taskId, () => {
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column v-if="isPublishMode" label="失败原因" min-width="220">
-        <template #default="{ row }">
-          <div v-if="publishFailureReason(row)" class="failure-cell">
-            <strong>{{ publishFailureReason(row) }}</strong>
-            <span v-if="publishFailureFixTip(row)">{{ publishFailureFixTip(row) }}</span>
-            <em v-if="publishImportErrorItems(row).length">
-              {{ publishImportErrorItems(row)[0].field || publishImportErrorItems(row)[0].code || "Ozon 明细" }}：
-              {{ publishImportErrorItems(row)[0].raw_message || publishImportErrorItems(row)[0].message }}
-            </em>
-          </div>
-          <span v-else-if="row.row_type === 'draft'" class="muted-text">草稿可继续编辑或选择店铺上架</span>
-          <span v-else class="muted-text">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="isPublishMode" label="内容评分" width="150">
+      <el-table-column v-if="isPublishMode" label="内容评分" width="116">
         <template #default="{ row }">
           <div class="quality-cell">
             <el-tag :type="qualityType(row.quality_score)" effect="plain">{{ row.quality_score ? `${row.quality_score} 分` : "未返回" }}</el-tag>
@@ -2048,12 +2032,13 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-if="isPublishMode" label="线上 SKU" min-width="150">
+      <el-table-column v-if="isPublishMode" label="线上 SKU" width="92" align="center">
         <template #default="{ row }">
-          <el-button link type="primary" @click="openSkuReview(row)">{{ row.variant_count ? `查看变体对应 (${row.sku_count || 0}/${row.variant_count})` : row.ozon_sku ? '查看 SKU · 变体待确认' : '查看变体 / SKU' }}</el-button>
+          <el-button v-if="hasSyncedSku(row)" link type="primary" @click="openSkuReview(row)">查看</el-button>
+          <el-button v-else link type="primary" :loading="refreshingId === row.id" @click="refreshRecord(row)">同步</el-button>
         </template>
       </el-table-column>
-      <el-table-column label="售价" min-width="132">
+      <el-table-column label="售价" :min-width="isPublishMode ? 100 : 132">
         <template #default="{ row }">
           <span class="price-cell">{{ recordPriceText(row) }}</span>
         </template>
@@ -2063,10 +2048,9 @@ watch(() => route.query.taskId, () => {
           <span class="record-text nowrap">{{ compactDateTime(isDraftMode ? row.created_at : (row.updated_at || row.created_at)) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" min-width="360" class-name="record-actions-column">
+      <el-table-column label="操作" :min-width="isPublishMode ? 230 : 360" class-name="record-actions-column">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button v-if="isPublishMode" class="erp-btn-link" link type="primary" :icon="Refresh" :loading="refreshingId === row.id" @click="refreshRecord(row)">同步状态 / SKU</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id || (isPublishMode && row.payload_compacted)" @click="editInListingAutomation(row)">编辑</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
             <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
@@ -2660,7 +2644,7 @@ watch(() => route.query.taskId, () => {
 .publish-record-toolbar-filters { grid-template-columns: minmax(280px, 2fr) minmax(180px, 1fr) 130px 140px 120px; gap: 8px; }
 .publish-record-toolbar-filters :deep(.category-filter-trigger) { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .publish-record-toolbar-filters > .updated-date-filter { grid-column: span 2; }
-.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 6px; }
+.publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 6px; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
   flex: 0 1 620px;
@@ -2714,6 +2698,9 @@ watch(() => route.query.taskId, () => {
 }
 .publish-table-wrap {
   flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .publish-table {
   width: 100%;
