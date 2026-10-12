@@ -9364,6 +9364,8 @@ export async function listingPublishRecords(query = {}, session = null) {
   const shopId = Number(query.shopId || query.shop_id || 0);
   const keyword = cleanText(query.query || query.keyword || "", 160).toLowerCase();
   const categoryPath = cleanText(query.categoryPath || query.category_path || "", 500);
+  const startUpdatedDate = cleanText(query.startUpdatedDate || query.start_updated_date || "", 10);
+  const endUpdatedDate = cleanText(query.endUpdatedDate || query.end_updated_date || "", 10);
   const status = cleanText(query.status || "all", 40);
   const quality = cleanText(query.quality || "all", 40);
   const creatorId = cleanText(query.creatorId || query.creator_id || "", 40);
@@ -9403,6 +9405,18 @@ export async function listingPublishRecords(query = {}, session = null) {
   if (categoryPath) {
     where.push(`(${categoryNameSelect} = ? OR ${categoryNameSelect} LIKE ?)`);
     params.push(categoryPath, `${categoryPath} / %`);
+  }
+  if (startUpdatedDate) {
+    where.push("r.updated_at >= ?");
+    params.push(query.dateTimeZone === "Asia/Shanghai"
+      ? new Date(`${startUpdatedDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ")
+      : `${startUpdatedDate} 00:00:00`);
+  }
+  if (endUpdatedDate) {
+    where.push("r.updated_at < DATE_ADD(?, INTERVAL 1 DAY)");
+    params.push(query.dateTimeZone === "Asia/Shanghai"
+      ? new Date(`${endUpdatedDate}T00:00:00+08:00`).toISOString().slice(0, 19).replace("T", " ")
+      : endUpdatedDate);
   }
   if (keyword) {
     where.push(`(
@@ -9447,6 +9461,10 @@ export async function listingPublishRecords(query = {}, session = null) {
         r.quality_checked_at, r.error_json, r.source_product_id, r.offer_source, r.created_by_person_id,
         r.publish_task_id, r.published_at, r.created_at, r.updated_at, r.list_summary_json,
         (r.request_json IS NULL) AS payload_compacted,
+        (SELECT COUNT(*) FROM listing_publish_variant_links l_count
+          WHERE l_count.record_id = r.id AND l_count.tenant_id = COALESCE(r.tenant_id, 'admin')) AS variant_count,
+        (SELECT COUNT(*) FROM listing_publish_variant_links l_sku
+          WHERE l_sku.record_id = r.id AND l_sku.tenant_id = COALESCE(r.tenant_id, 'admin') AND l_sku.ozon_sku <> '') AS sku_count,
         s.name AS shop_name, creator.name AS created_by_name,
         '' AS online_primary_image,
         ${categoryNameSelect} AS category_name,
@@ -19217,6 +19235,8 @@ function normalizePublishRecordRow(row = {}, options = {}) {
     id: Number(row.id || 0),
     draft_id: Number(row.draft_id || 0),
     shop_id: Number(row.shop_id || 0),
+    variant_count: Number(row.variant_count || 0),
+    sku_count: Number(row.sku_count || 0),
     row_key: `record-${row.id}`,
     row_type: "publish_record",
     payload_compacted: Boolean(row.payload_compacted || row.request_json === null),

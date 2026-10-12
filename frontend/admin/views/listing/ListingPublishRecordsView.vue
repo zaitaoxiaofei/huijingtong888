@@ -91,6 +91,7 @@ const state = reactive({
   minPrice: "",
   maxPrice: "",
   createdRange: [],
+  updatedRange: [],
   status: "all",
   quality: "all",
   page: 1,
@@ -288,6 +289,11 @@ async function loadRecords() {
   if (isDraftMode.value && state.createdRange?.length === 2) {
     params.set("startDate", state.createdRange[0]);
     params.set("endDate", state.createdRange[1]);
+    params.set("dateTimeZone", "Asia/Shanghai");
+  }
+  if (isPublishMode.value && state.updatedRange?.length === 2) {
+    params.set("startUpdatedDate", state.updatedRange[0]);
+    params.set("endUpdatedDate", state.updatedRange[1]);
     params.set("dateTimeZone", "Asia/Shanghai");
   }
   const requestUrl = `${endpoint}?${params.toString()}`;
@@ -612,6 +618,7 @@ function resetFilters() {
   state.minPrice = "";
   state.maxPrice = "";
   state.createdRange = [];
+  state.updatedRange = [];
   state.status = "all";
   state.quality = "all";
   state.developmentType = "all";
@@ -631,6 +638,7 @@ function resetModeFilters() {
   state.minPrice = "";
   state.maxPrice = "";
   state.createdRange = [];
+  state.updatedRange = [];
   state.page = 1;
   selectedRows.value = [];
   loadRecords();
@@ -648,6 +656,7 @@ function resetModeFiltersFromRoute() {
   state.minPrice = "";
   state.maxPrice = "";
   state.createdRange = [];
+  state.updatedRange = [];
   state.page = 1;
   selectedRows.value = [];
   applyRouteStatusFilter();
@@ -1725,7 +1734,7 @@ watch(() => route.query.taskId, () => {
     <template v-if="!isTaskMode">
     <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
       <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
-        <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="搜索商品名、offer_id、线上 SKU、Ozon 商品 ID、店铺或类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
+        <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="标题关键词 / offer_id / 线上 SKU / 店铺 / 类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
         <OzonCategoryFilter v-if="isPublishMode" v-model="state.category" @change="searchRecords" />
         <el-select v-if="isDraftMode" v-model="state.developmentType" placeholder="开发类型" @change="searchRecords">
           <el-option label="全部开发类型" value="all" />
@@ -1764,11 +1773,12 @@ watch(() => route.query.taskId, () => {
           <el-option label="85分以上" value="gte85" />
           <el-option label="90分以上" value="gte90" />
         </el-select>
+        <el-date-picker v-if="isPublishMode && publishAdvancedFiltersVisible" v-model="state.updatedRange" class="updated-date-filter" type="daterange" value-format="YYYY-MM-DD" start-placeholder="更新开始" end-placeholder="更新结束" @change="searchRecords" />
       </div>
       <div class="toolbar-actions" :class="{ 'draft-toolbar-actions': isDraftMode }">
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :icon="Plus" @click="quickCreateDraft">快速创建草稿</el-button>
         <el-button v-if="isDraftMode" link type="primary" @click="advancedFiltersVisible = !advancedFiltersVisible">{{ advancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ advancedFilterCount ? ` (${advancedFilterCount})` : "" }}</el-button>
-        <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' ? ' · 已设置' : '' }}</el-button>
+        <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' || state.updatedRange?.length === 2 ? ' · 已设置' : '' }}</el-button>
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading || batchRefreshing" @click="refreshToolbarRecords">
@@ -1880,7 +1890,11 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-if="isPublishMode" label="首个线上 SKU" min-width="150" prop="ozon_sku" show-overflow-tooltip />
+      <el-table-column v-if="isPublishMode" label="线上 SKU" min-width="150">
+        <template #default="{ row }">
+          <el-button link type="primary" @click="openDrawer(row)">{{ row.variant_count ? `已同步 ${row.sku_count || 0}/${row.variant_count} 个 SKU` : row.ozon_sku ? '查看线上 SKU' : '待同步 SKU' }}</el-button>
+        </template>
+      </el-table-column>
       <el-table-column label="售价" min-width="132">
         <template #default="{ row }">
           <span class="price-cell">{{ recordPriceText(row) }}</span>
@@ -2366,6 +2380,7 @@ watch(() => route.query.taskId, () => {
 .publish-record-toolbar-panel { display: block; padding: 8px 10px; }
 .publish-record-toolbar-filters { grid-template-columns: minmax(280px, 2fr) minmax(180px, 1fr) 130px 140px 120px; gap: 8px; }
 .publish-record-toolbar-filters :deep(.category-filter-trigger) { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.publish-record-toolbar-filters > .updated-date-filter { grid-column: span 2; }
 .publish-record-toolbar-panel .toolbar-actions { justify-content: flex-start; margin-top: 6px; }
 .task-toolbar-filters {
   grid-template-columns: minmax(260px, 420px) 160px 140px;
@@ -2558,6 +2573,7 @@ watch(() => route.query.taskId, () => {
   .task-toolbar-filters { grid-template-columns: 1fr; flex-basis: auto; width: 100%; }
   .publish-record-toolbar-filters { grid-template-columns: 1fr; }
   .publish-record-search { grid-column: auto; }
+  .publish-record-toolbar-filters > .updated-date-filter { grid-column: auto; }
   .toolbar-actions {
     justify-content: flex-start;
     width: 100%;

@@ -102,3 +102,16 @@ test("publish record table reads lightweight list summaries instead of request p
   assert.match(listSelect, /JSON_EXTRACT\(r\.list_summary_json, '\$\.primary_image'\)/);
   assert.doesNotMatch(listSelect, /JSON_EXTRACT\(r\.request_json/);
 });
+
+test("publish records filter by Beijing update days and summarize every variant SKU", () => {
+  const records = source.match(/export async function listingPublishRecords[\s\S]*?export async function listingDraftProjects/)?.[0] || "";
+  assert.match(viewSource, /params\.set\("startUpdatedDate", state\.updatedRange\[0\]\)/);
+  assert.match(viewSource, /params\.set\("endUpdatedDate", state\.updatedRange\[1\]\)/);
+  assert.match(records, /r\.updated_at >= \?/);
+  assert.match(records, /r\.updated_at < DATE_ADD\(\?, INTERVAL 1 DAY\)/);
+  assert.match(records, /T00:00:00\+08:00/);
+  assert.match(records, /AS variant_count/);
+  assert.match(records, /AS sku_count/);
+  assert.match(viewSource, /已同步 \$\{row\.sku_count \|\| 0\}\/\$\{row\.variant_count\} 个 SKU/);
+  assert.match(viewSource, /@click="openDrawer\(row\)"/);
+});
