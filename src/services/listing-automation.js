@@ -8157,7 +8157,7 @@ export async function listingPublishTasks(query = {}, session = null) {
     )`);
     params.push(...Array(3).fill(`%${keyword}%`));
   }
-  const fromSql = (includeCategory) => `
+  const fromSql = `
     FROM listing_publish_tasks t
     LEFT JOIN tenant_members creator_members
       ON creator_members.person_id = t.created_by_person_id
@@ -9423,7 +9423,7 @@ export async function listingPublishRecords(query = {}, session = null) {
     params.push(...Array(12).fill(`%${keyword}%`));
   }
 
-  const fromSql = `
+  const fromSql = (includeCategory) => `
     FROM listing_publish_records r
     LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
     LEFT JOIN tenant_members creator_members

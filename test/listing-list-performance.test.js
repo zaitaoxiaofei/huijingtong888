@@ -36,6 +36,7 @@ test("publish task reads avoid full schema warmup and large record payloads", ()
   const tasks = source.match(/export async function listingPublishTasks[\s\S]*?async function claimListingPublishTaskItemForRetry/)?.[0] || "";
   assert.match(source, /async function ensurePublishTaskReadSchema/);
   assert.match(tasks, /await ensurePublishTaskReadSchema\(\)/);
+  assert.match(tasks, /const fromSql = `\s*FROM listing_publish_tasks t/);
   assert.match(tasks, /\(r\.response_json IS NOT NULL\) AS record_has_response/);
   assert.doesNotMatch(tasks, /r\.response_json AS record_response_json/);
   assert.match(tasks, /COALESCE\(i\.error_json, r\.error_json\) AS effective_error_json/);
@@ -94,6 +95,9 @@ test("manual online listing sync narrows database writes to the selected offers"
 test("publish record table reads lightweight list summaries instead of request payloads", () => {
   const records = source.match(/export async function listingPublishRecords[\s\S]*?export async function listingDraftProjects/)?.[0] || "";
   const listSelect = records.match(/const listRecordSelectSql = `[\s\S]*?`;/)?.[0] || "";
+  assert.match(records, /const fromSql = \(includeCategory\) => `/);
+  assert.match(records, /SELECT COUNT\(\*\) AS total \$\{fromSql\(Boolean\(keyword \|\| categoryPath\)\)\}/);
+  assert.match(records, /\$\{fromSql\(true\)\}/);
   assert.match(listSelect, /JSON_EXTRACT\(r\.list_summary_json, '\$\.name'\)/);
   assert.match(listSelect, /JSON_EXTRACT\(r\.list_summary_json, '\$\.primary_image'\)/);
   assert.doesNotMatch(listSelect, /JSON_EXTRACT\(r\.request_json/);
