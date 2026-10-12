@@ -2138,6 +2138,7 @@ async function prepareRuntimeBeforeListen() {
   try {
     await warmMysqlPool();
     await services.warmCoreInventoryRuntime?.();
+    await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();
     console.log("listing automation schema warmup completed");
     runtimeReadiness.ready = true;

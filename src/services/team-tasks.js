@@ -568,6 +568,12 @@ function scheduleOperationalTeamTaskRefresh() {
     .finally(() => { operationalTasksRefreshPromise = null; });
 }
 
+export async function warmTeamTasksRuntimeMysql() {
+  ensureMysqlEnabled();
+  await ensureTeamTasksSchema();
+  return { ok: true };
+}
+
 export async function teamTasksMysql(query = {}) {
   ensureMysqlEnabled();
   await ensureTeamTasksSchema();
