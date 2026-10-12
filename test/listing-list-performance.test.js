@@ -69,11 +69,26 @@ test("development review returns published shop SKUs and order and unit counts",
   assert.match(review, /LOWER\(o\.status\) NOT IN \('cancelled'/);
   assert.match(review, /COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /draft\.published_skus = skusByDraft/);
+  assert.match(review, /COALESCE\(NULLIF\(r\.draft_id, 0\), i\.draft_id\) AS draft_id/);
+  assert.match(review, /draft\.published_shops = stores/);
+  assert.match(review, /draft\.publish_records = stores\.filter/);
+  assert.doesNotMatch(review, /AND r\.status IN \('imported', 'published', 'success'\)\s+AND TRIM\(COALESCE\(r\.ozon_sku/);
+  assert.match(review, /op\.offer_id = r\.offer_id/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
+  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1"/);
   assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
   assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
   assert.match(reviewEndpoint, /sales_by_task/);
   assert.match(routeSource, /POST \/api\/listing\/development-review/);
+  assert.match(viewSource, /reviewDraftIds\) params\.set\("ids", reviewDraftIds\)/);
+});
+
+test("manual online listing sync narrows database writes to the selected offers", () => {
+  const sync = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  const syncRoutes = readFileSync(new URL("../src/server/routes/sync.js", import.meta.url), "utf8");
+  assert.match(sync, /requestedOfferIds/);
+  assert.match(sync, /requestedOfferIds\.includes\(String\(item\.offer_id/);
+  assert.match(syncRoutes, /publish_offers/);
 });
 
 test("publish record table reads lightweight list summaries instead of request payloads", () => {

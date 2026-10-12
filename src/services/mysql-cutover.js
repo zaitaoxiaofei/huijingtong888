@@ -8336,6 +8336,8 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
   const selectedIds = Array.isArray(body.online_product_ids)
     ? body.online_product_ids.map(Number).filter(Boolean)
     : [];
+  const requestedOfferIds = [...new Set((Array.isArray(body.offer_ids || body.offerIds) ? (body.offer_ids || body.offerIds) : [])
+    .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 200);
 
   const selectedRows = selectedIds.length
     ? await mysqlQuery(
@@ -8408,6 +8410,7 @@ export async function syncOzonOnlineProductsMysql(body = {}) {
       }
       shopResult.fetched = items.length;
       const matchingItems = items.filter((item) => {
+        if (requestedOfferIds.length && !requestedOfferIds.includes(String(item.offer_id || "").trim())) return false;
         if (
           selectedRows.length &&
           !selectedProductIds.has(String(item.ozon_product_id || "")) &&

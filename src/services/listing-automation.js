@@ -10512,6 +10512,7 @@ export async function listingDrafts(query = {}, session) {
   await ensureListingListReadSchema();
   const paged = String(query.paged || "") === "1";
   const lightweight = String(query.lightweight || query.compact || "").trim() === "1";
+  const includeReviewSkus = String(query.includeReviewSkus || query.include_review_skus || "").trim() === "1";
   const includeShopDetails = String(query.includeShopDetails || query.include_shop_details || "").trim() === "1";
   const projectOnly = String(query.projectOnly || query.project_only || "").trim() === "1";
   const page = Math.max(1, Number(query.page || 1));
@@ -10711,6 +10712,7 @@ export async function listingDrafts(query = {}, session) {
       ORDER BY FIELD(d.id, ${placeholders})
     `, [tenantMemberId, ...pageIds, tenantId, ...pageIds]);
     const normalizedPageRows = pageRows.map((item) => normalizeDraftRow(item));
+    if (requestedIds.length && includeReviewSkus) await attachDevelopmentReviewSkus(normalizedPageRows, requestedIds, tenantId);
     return {
       rows: await resolveMappedMediaInValue(normalizedPageRows),
       total,
@@ -10818,7 +10820,7 @@ export async function listingDrafts(query = {}, session) {
     `;
   const rows = await all(rowsSql, [...fromParams, paged ? pageSize : 100, paged ? offset : 0]);
   const normalizedRows = await Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item))));
-  if (requestedIds.length && !lightweight) await attachDevelopmentReviewSkus(normalizedRows, requestedIds, tenantId);
+  if (requestedIds.length && (!lightweight || includeReviewSkus)) await attachDevelopmentReviewSkus(normalizedRows, requestedIds, tenantId);
   if (!paged) return normalizedRows;
   const totalRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams);
   return {
@@ -10843,8 +10845,8 @@ export async function listingDevelopmentReview(body = {}, session = null) {
 
   const drafts = [];
   for (let index = 0; index < draftIds.length; index += 100) {
-    const rows = await listingDrafts({ ids: draftIds.slice(index, index + 100).join(",") }, session);
-    drafts.push(...(Array.isArray(rows) ? rows : []));
+    const rows = await listingDrafts({ ids: draftIds.slice(index, index + 100).join(","), paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1" }, session);
+    drafts.push(...(Array.isArray(rows) ? rows : rows?.rows || []));
   }
   const draftById = new Map(drafts.map((item) => [Number(item.id), item]));
   const skuPairs = [];
@@ -10885,30 +10887,35 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
   if (!drafts.length) return;
   const placeholders = requestedIds.map(() => "?").join(",");
   const records = await all(`
-    SELECT r.id, r.draft_id, r.shop_id, r.offer_id, r.ozon_sku, r.status, r.published_at, r.updated_at,
+    SELECT r.id, COALESCE(NULLIF(r.draft_id, 0), i.draft_id) AS draft_id, r.shop_id, r.offer_id,
+      COALESCE(NULLIF(r.ozon_sku, ''), op.ozon_sku, '') AS ozon_sku, r.status, r.published_at, r.updated_at,
       COALESCE(s.name, CONCAT('店铺 ', r.shop_id)) AS shop_name,
       COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.name')), ''),
         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].name')), ''), '') AS online_product_name,
       op.id AS online_product_id, op.product_id AS inventory_product_id
     FROM listing_publish_records r
-    JOIN listing_drafts d ON d.id = r.draft_id
+    LEFT JOIN listing_publish_task_items i ON i.id = r.publish_task_item_id AND COALESCE(i.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    JOIN listing_drafts d ON d.id = COALESCE(NULLIF(r.draft_id, 0), i.draft_id)
     LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
-    LEFT JOIN online_products op ON op.shop_id = r.shop_id
-      AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci
-    WHERE r.draft_id IN (${placeholders})
+    LEFT JOIN online_products op ON op.shop_id = r.shop_id AND (
+      (TRIM(COALESCE(r.ozon_sku, '')) <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
+      OR (TRIM(COALESCE(r.offer_id, '')) <> '' AND op.offer_id = r.offer_id)
+    )
+    WHERE COALESCE(NULLIF(r.draft_id, 0), i.draft_id) IN (${placeholders})
       AND COALESCE(d.tenant_id, 'admin') = ?
       AND COALESCE(r.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')
       AND r.status IN ('imported', 'published', 'success')
-      AND TRIM(COALESCE(r.ozon_sku, '')) <> ''
-    ORDER BY r.draft_id, r.shop_id, r.ozon_sku, r.updated_at DESC, r.id DESC
+    ORDER BY d.id, r.shop_id, r.ozon_sku, r.updated_at DESC, r.id DESC
   `, [...requestedIds, tenantId]);
 
   const uniqueRecords = new Map();
   for (const record of records) {
+    record.draft_id = Number(record.draft_id || record.task_item_draft_id || 0);
     const key = `${Number(record.draft_id)}|${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`;
     if (!uniqueRecords.has(key)) uniqueRecords.set(key, record);
   }
-  const skuRecords = [...uniqueRecords.values()];
+  const successfulRecords = [...uniqueRecords.values()];
+  const skuRecords = successfulRecords.filter((record) => String(record.ozon_sku || "").trim());
   const skuPairs = [...new Map(skuRecords.map((record) => [
     `${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`,
     { shopId: Number(record.shop_id), sku: String(record.ozon_sku || "").trim() }
@@ -10927,6 +10934,7 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
   }
 
   const skusByDraft = new Map();
+  const storesByDraft = new Map();
   for (const record of skuRecords) {
     const sales = salesBySku.get(`${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`) || {};
     const draftId = Number(record.draft_id);
@@ -10947,7 +10955,31 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
     });
     skusByDraft.set(draftId, rows);
   }
-  for (const draft of drafts) draft.published_skus = skusByDraft.get(Number(draft.id)) || [];
+  for (const record of successfulRecords) {
+    const draftId = Number(record.draft_id);
+    const rows = storesByDraft.get(draftId) || new Map();
+    const key = String(record.shop_id || "");
+    const current = rows.get(key) || {
+      record_id: Number(record.id), shop_id: Number(record.shop_id), shop_name: record.shop_name || "",
+      offer_id: String(record.offer_id || ""), ozon_sku: String(record.ozon_sku || ""), status: String(record.status || ""),
+      published_at: record.published_at || null, online_product_id: Number(record.online_product_id || 0) || null,
+      inventory_product_id: Number(record.inventory_product_id || 0) || null
+    };
+    if (Number(record.id) > Number(current.record_id)) Object.assign(current, {
+      record_id: Number(record.id), offer_id: String(record.offer_id || ""), ozon_sku: String(record.ozon_sku || ""),
+      status: String(record.status || ""), published_at: record.published_at || null,
+      online_product_id: Number(record.online_product_id || 0) || null, inventory_product_id: Number(record.inventory_product_id || 0) || null
+    });
+    rows.set(key, current);
+    storesByDraft.set(draftId, rows);
+  }
+  for (const draft of drafts) {
+    const stores = [...(storesByDraft.get(Number(draft.id))?.values() || [])];
+    draft.published_skus = skusByDraft.get(Number(draft.id)) || [];
+    draft.published_shops = stores;
+    draft.publish_success_count = stores.length;
+    draft.publish_records = stores.filter((item) => !String(item.ozon_sku || "").trim());
+  }
 }
 
 export async function listingDraftDetail(id, session) {

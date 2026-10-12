@@ -252,13 +252,15 @@ async function loadRecords() {
   });
   if (isDraftMode.value) {
     params.set("lightweight", "1");
-    params.set("projectOnly", "1");
+    const reviewDraftIds = String(route.query.draftIds || "").trim();
+    if (reviewDraftIds) params.set("ids", reviewDraftIds);
+    else params.set("projectOnly", "1");
     params.set("sortBy", "created_at");
   }
   if (state.query.trim()) params.set("query", state.query.trim());
   if (state.nameQuery.trim()) params.set("nameQuery", state.nameQuery.trim());
   if (state.shopId !== "all") params.set("shopId", String(state.shopId));
-  if (state.creatorId !== "all") {
+  if (state.creatorId !== "all" && !String(route.query.draftIds || "").trim()) {
     const creatorId = String(state.creatorId);
     if (creatorId) params.set("creatorId", creatorId);
   }
@@ -1605,6 +1607,7 @@ function handlePublishViewChange(name) {
 onMounted(async () => {
   window.addEventListener("beforeunload", guardBatchBrowserPublishClose);
   publishView.value = route.query.tab === "tasks" ? "tasks" : "records";
+  if (route.query.draftIds) state.creatorId = "all";
   applyRouteStatusFilter();
   applyRouteShopFilter();
   if (isTaskMode.value) {
@@ -1648,6 +1651,13 @@ watch(() => route.query.shopId, () => {
 watch(() => route.query.recordId, () => {
   if (isTaskMode.value) return;
   openRoutePublishRecord();
+});
+
+watch(() => route.query.draftIds, () => {
+  if (!isDraftMode.value) return;
+  state.page = 1;
+  state.creatorId = route.query.draftIds ? "all" : currentPersonId.value || "all";
+  loadRecords();
 });
 
 watch(() => route.query.taskId, () => {

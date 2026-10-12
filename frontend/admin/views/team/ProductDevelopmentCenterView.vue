@@ -75,6 +75,18 @@ const reviewDraftsKey = ref("");
 const reviewDetailsVisible = ref(false);
 const reviewDetailsKind = ref("drafts");
 const reviewDetailsTask = ref(null);
+const reviewCategoryFilter = ref("");
+const reviewVehicleFilter = ref("");
+const reviewOwnerFilter = ref("all");
+const reviewCreatorFilter = ref("all");
+const reviewCreatedRange = ref([]);
+const reviewCompletedRange = ref([]);
+const reviewPublishFilter = ref("all");
+const reviewOrderSort = ref("latest");
+const reviewPage = ref(1);
+const reviewPageSize = 10;
+const reviewSyncLoading = ref(false);
+const reviewTasks = ref([]);
 const ideaBrands = ref([]);
 const ideaCategories = ref([]);
 const developmentBrandFilter = ref("");
@@ -292,9 +304,31 @@ const sortedIdeas = computed(() => ideas.value.filter(matchesDevelopmentScope).s
 const developmentIdeas = computed(() => sortedIdeas.value.filter((row) => row.development_started_at
   && row.assignee_person_id && Number(row.target_product_count || 0) > 0 && row.development_due_at));
 const personById = computed(() => new Map(people.value.map((person) => [Number(person.id), person])));
-const completedDevelopmentTasks = computed(() => tasks.value
+const completedDevelopmentTasks = computed(() => reviewTasks.value
   .filter((row) => row.type === "product_development" && row.status === "done")
   .sort((a, b) => new Date(b.completed_at || b.updated_at || 0) - new Date(a.completed_at || a.updated_at || 0)));
+const filteredReviewTasks = computed(() => completedDevelopmentTasks.value.filter((task) => {
+  const category = String(task.development_category || task.development_plan?.category || "").toLowerCase();
+  if (reviewCategoryFilter.value.trim() && !category.includes(reviewCategoryFilter.value.trim().toLowerCase())) return false;
+  const models = (task.development_plan?.models || []).map((item) => item.model || "").join(" ").toLowerCase();
+  if (reviewVehicleFilter.value.trim() && !models.includes(reviewVehicleFilter.value.trim().toLowerCase())) return false;
+  if (reviewOwnerFilter.value !== "all" && Number(task.owner_person_id || 0) !== Number(reviewOwnerFilter.value)) return false;
+  if (reviewCreatorFilter.value !== "all" && Number(task.created_by_person_id || 0) !== Number(reviewCreatorFilter.value)) return false;
+  const created = task.created_at ? shanghaiDateKey(task.created_at) : "";
+  if (reviewCreatedRange.value?.length === 2 && (created < reviewCreatedRange.value[0] || created > reviewCreatedRange.value[1])) return false;
+  const completed = (task.completed_at || task.updated_at) ? shanghaiDateKey(task.completed_at || task.updated_at) : "";
+  if (reviewCompletedRange.value?.length === 2 && (completed < reviewCompletedRange.value[0] || completed > reviewCompletedRange.value[1])) return false;
+  if (reviewPublishFilter.value !== "all") {
+    const state = reviewTaskPublishState(task);
+    const isFullyPublished = state.total > 0 && state.published === state.total;
+    if (reviewPublishFilter.value === "published" && !isFullyPublished) return false;
+    if (reviewPublishFilter.value === "unpublished" && isFullyPublished) return false;
+  }
+  return true;
+}).sort((a, b) => reviewOrderSort.value === "orders"
+  ? reviewTaskMetrics(b).orders - reviewTaskMetrics(a).orders || new Date(b.completed_at || b.updated_at || 0) - new Date(a.completed_at || a.updated_at || 0)
+  : new Date(b.completed_at || b.updated_at || 0) - new Date(a.completed_at || a.updated_at || 0)));
+const pagedReviewTasks = computed(() => filteredReviewTasks.value.slice((reviewPage.value - 1) * reviewPageSize, reviewPage.value * reviewPageSize));
 
 function reviewTaskDraftIds(task) {
   const activeIds = (draftRows, fallbackIds = []) => Array.isArray(draftRows)
@@ -398,6 +432,39 @@ function reviewTaskCompletionTime(task) {
   return value ? shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }) : "暂无记录";
 }
 function openReviewDetails(task, kind) { reviewDetailsTask.value = task; reviewDetailsKind.value = kind; reviewDetailsVisible.value = true; }
+function openTaskDrafts(task) {
+  const ids = reviewTaskDraftIds(task);
+  if (!ids.length) return ElMessage.info("该任务还没有关联草稿箱");
+  router.push({ path: "/listing-records", query: { draftIds: ids.join(","), source: "development-review" } });
+}
+async function syncReviewOnlineSkus() {
+  const offers = reviewTaskDraftRows(reviewDetailsTask.value || {}).flatMap((draft) => draft.published_shops || []);
+  const unique = [...new Map(offers.filter((item) => item.shop_id && item.offer_id).map((item) => [`${item.shop_id}|${item.offer_id}`, item])).values()];
+  if (!unique.length) return ElMessage.info("没有待同步的上架 offer 记录");
+  reviewSyncLoading.value = true;
+  try {
+    for (const shopId of [...new Set(unique.map((item) => Number(item.shop_id)))]) {
+      const offerIds = unique.filter((item) => Number(item.shop_id) === shopId).map((item) => item.offer_id);
+      await apiClient.post("/api/sync/online-products", { shop_id: shopId, offer_ids: offerIds, scope: "publish_offers" });
+      let status = { running: true };
+      for (let attempt = 0; attempt < 180 && status.running; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        status = await apiClient.get("/api/sync/online-products/status", { noCache: true });
+      }
+      if (status.running) throw new Error("在线商品同步仍在进行，请稍后刷新复盘数据");
+      if (status.error) throw new Error(status.error);
+    }
+    const task = reviewDetailsTask.value;
+    if (task) {
+      const result = await apiClient.post("/api/listing/development-review", { tasks: [{ task_id: task.id, draft_ids: reviewTaskDraftIds(task) }] });
+      const next = new Map(reviewDrafts.value);
+      for (const draft of result?.drafts || []) next.set(Number(draft.id), draft);
+      reviewDrafts.value = next;
+    }
+    ElMessage.success("在线商品同步完成，已刷新当前任务数据");
+  } catch (error) { ElMessage.error(error.message || "在线 SKU 同步启动失败"); }
+  finally { reviewSyncLoading.value = false; }
+}
 function reviewDetailsTitle() {
   const task = reviewDetailsTask.value;
   if (reviewDetailsKind.value === "vehicles") return `${taskDisplayName(task)} · 车型明细`;
@@ -405,7 +472,7 @@ function reviewDetailsTitle() {
   if (reviewDetailsKind.value === "orders") return `${taskDisplayName(task)} · 出单明细`;
   return `${taskDisplayName(task)} · 关联草稿箱`;
 }
-async function refreshReviewData() { await loadTaskCenterData(); reviewDraftsKey.value = ""; await loadReviewDrafts(); }
+async function refreshReviewData() { reviewDraftsKey.value = ""; await loadReviewDrafts(true); }
 
 function stageLabel(value) { return stages.find((item) => item.value === value)?.label || value || "待完善"; }
 function stageIndex(value) { return Math.max(0, stages.findIndex((item) => item.value === value)); }
@@ -826,13 +893,18 @@ function mergeIdeaRowsWithTasks(ideaRows) {
     || Number(b.task_id || b.id) - Number(a.task_id || a.id));
 }
 
-async function loadReviewDrafts() {
-  await loadTaskCenterData(false);
-  const ids = [...new Set(completedDevelopmentTasks.value.flatMap(reviewTaskDraftIds))];
-  const key = completedDevelopmentTasks.value.map((task) => `${task.id}:${task.updated_at || ""}`).join(",") + `|${ids.join(",")}`;
-  if (key === reviewDraftsKey.value) return;
+async function loadReviewDrafts(force = false) {
   reviewDraftsLoading.value = true;
   try {
+    const [taskRows, personRows] = await Promise.all([
+      apiClient.get("/api/team/tasks?type=product_development", { noCache: true }),
+      people.value.length ? Promise.resolve(people.value) : apiClient.get("/api/people", { noCache: true }).catch(() => [])
+    ]);
+    reviewTasks.value = Array.isArray(taskRows) ? taskRows : [];
+    people.value = Array.isArray(personRows) ? personRows : personRows?.rows || [];
+    const ids = [...new Set(completedDevelopmentTasks.value.flatMap(reviewTaskDraftIds))];
+    const key = completedDevelopmentTasks.value.map((task) => `${task.id}:${task.updated_at || ""}`).join(",") + `|${ids.join(",")}`;
+    if (!force && key === reviewDraftsKey.value) return;
     const result = await apiClient.post("/api/listing/development-review", {
       tasks: completedDevelopmentTasks.value.map((task) => ({ task_id: task.id, draft_ids: reviewTaskDraftIds(task) }))
     });
@@ -1230,15 +1302,25 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
     </section>
 
     <section v-else-if="activeTab==='products'" v-loading="reviewDraftsLoading" class="panel development-review-page">
-      <div class="section-title"><div><span>按已完成的开发任务汇总关联草稿、车型、SKU 与发布状态</span><h2>开发数据复盘</h2></div><div class="review-header-actions"><el-tag type="success" effect="light">{{ completedDevelopmentTasks.length }} 个已完成任务</el-tag><el-button @click="refreshReviewData"><RefreshCw :size="15" /> 刷新</el-button></div></div>
-      <el-table :data="completedDevelopmentTasks" row-key="id" max-height="calc(100vh - 340px)" empty-text="还没有已完成的开发任务">
+      <div class="section-title"><div><span>按已完成的开发任务汇总关联草稿、车型、SKU 与发布状态</span><h2>开发数据复盘</h2></div><div class="review-header-actions"><el-tag type="success" effect="light">{{ filteredReviewTasks.length }} / {{ completedDevelopmentTasks.length }} 个已完成任务</el-tag><el-button @click="refreshReviewData"><RefreshCw :size="15" /> 刷新</el-button></div></div>
+      <div class="review-filters">
+        <el-input v-model="reviewCategoryFilter" clearable placeholder="核心品名" aria-label="按核心品名筛选" @input="reviewPage=1" />
+        <el-input v-model="reviewVehicleFilter" clearable placeholder="车型" aria-label="按车型筛选" @input="reviewPage=1" />
+        <el-select v-model="reviewOwnerFilter" placeholder="负责人" @change="reviewPage=1"><el-option label="全部负责人" value="all" /><el-option v-for="person in people" :key="`review-owner-${person.id}`" :label="person.name" :value="String(person.id)" /></el-select>
+        <el-select v-model="reviewCreatorFilter" placeholder="创建人" @change="reviewPage=1"><el-option label="全部创建人" value="all" /><el-option v-for="person in people" :key="`review-creator-${person.id}`" :label="person.name" :value="String(person.id)" /></el-select>
+        <el-date-picker v-model="reviewCreatedRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="创建开始" end-placeholder="创建结束" @change="reviewPage=1" />
+        <el-date-picker v-model="reviewCompletedRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="完成开始" end-placeholder="完成结束" @change="reviewPage=1" />
+        <el-select v-model="reviewPublishFilter" placeholder="上架状态" @change="reviewPage=1"><el-option label="全部上架状态" value="all" /><el-option label="已全部上架" value="published" /><el-option label="未全部上架" value="unpublished" /></el-select>
+        <el-select v-model="reviewOrderSort" placeholder="排序" @change="reviewPage=1"><el-option label="按完成时间" value="latest" /><el-option label="出单量从高到低" value="orders" /></el-select>
+      </div>
+      <el-table :data="pagedReviewTasks" row-key="id" max-height="calc(100vh - 425px)" empty-text="没有符合筛选条件的已完成任务">
         <el-table-column label="任务信息" min-width="500">
           <template #default="{row}">
             <div class="review-task-cell">
               <el-image v-if="reviewTaskDraftRows(row)[0]?.effective_images?.[0]" class="review-task-image" :src="reviewTaskDraftRows(row)[0].effective_images[0]" fit="cover" :preview-src-list="[reviewTaskDraftRows(row)[0].effective_images[0]]" preview-teleported />
               <div v-else class="review-task-image-empty">无图</div>
               <div class="review-task-main">
-                <strong>{{ taskDisplayName(row) }}</strong>
+                <el-link type="primary" :underline="false" class="review-task-link" @click="openDevelopmentTask(row)">{{ taskDisplayName(row) }}</el-link>
                 <div class="review-task-people"><span>负责人：{{ row.owner_name || '未分配' }}</span><span>创建人：{{ reviewTaskCreator(row) }}</span></div>
                 <div class="review-task-times"><span>创建 {{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</span><span>完成 {{ reviewTaskCompletionTime(row) }}</span></div>
               </div>
@@ -1249,7 +1331,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
           <template #default="{row}">
             <div class="review-metrics">
               <el-button class="review-metric-button" link @click="openReviewDetails(row,'vehicles')"><b>{{ reviewTaskMetrics(row).vehicles }}</b><span>车型</span></el-button>
-              <el-button class="review-metric-button" link @click="openReviewDetails(row,'drafts')"><b>{{ reviewTaskMetrics(row).draftBoxes }}</b><span>草稿箱</span></el-button>
+              <el-button class="review-metric-button" link @click="openTaskDrafts(row)"><b>{{ reviewTaskMetrics(row).draftBoxes }}</b><span>草稿箱</span></el-button>
               <el-button class="review-metric-button" link @click="openReviewDetails(row,'skus')"><b>{{ reviewTaskMetrics(row).skus }}</b><span>在线 SKU</span></el-button>
             </div>
           </template>
@@ -1259,6 +1341,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
         </el-table-column>
         <el-table-column label="出单" width="160" align="center"><template #default="{row}"><span class="review-sales-summary"><strong>{{ reviewTaskMetrics(row).orders }}</strong> 单 · <strong>{{ reviewTaskMetrics(row).units }}</strong> 件</span></template></el-table-column>
       </el-table>
+      <div class="review-pagination"><el-pagination v-model:current-page="reviewPage" :page-size="reviewPageSize" :total="filteredReviewTasks.length" layout="total, prev, pager, next" /></div>
       <el-dialog v-model="reviewDetailsVisible" :title="reviewDetailsTitle()" width="min(1000px, 94vw)" append-to-body destroy-on-close>
         <el-table v-if="reviewDetailsKind==='vehicles'" :data="reviewTaskVehicleRows(reviewDetailsTask || {})" max-height="60vh" row-key="model">
           <el-table-column prop="brand" label="品牌" min-width="150" />
@@ -1266,21 +1349,23 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
           <el-table-column prop="target" label="目标 SKU" width="120" align="center" />
           <el-table-column prop="draft_count" label="关联草稿" width="120" align="center" />
         </el-table>
-        <el-table v-else-if="reviewDetailsKind==='drafts'" :data="reviewTaskDraftRows(reviewDetailsTask || {})" max-height="60vh" row-key="id" empty-text="没有关联草稿">
-          <el-table-column label="草稿箱" min-width="330"><template #default="{row}"><div class="review-draft-cell"><el-image v-if="row.effective_images?.[0]" :src="row.effective_images[0]" fit="cover" :preview-src-list="[row.effective_images[0]]" preview-teleported /><span v-else class="review-draft-image-empty">无图</span><div><strong>{{ row.product_name || `草稿 #${row.id}` }}</strong><small>{{ row.internal_code || `草稿 #${row.id}` }}</small></div></div></template></el-table-column>
-          <el-table-column prop="model_name" label="车型" min-width="150" />
-          <el-table-column label="在线 SKU" width="110" align="center"><template #default="{row}">{{ row.published_skus?.length || 0 }}</template></el-table-column>
-          <el-table-column label="上架记录" width="170" align="center"><template #default="{row}"><el-tag :type="Number(row.publish_success_count||0)>0 || row.published_skus?.length?'success':'info'">{{ Number(row.publish_success_count||0)>0 ? `成功 ${row.publish_success_count} 条` : Number(row.publish_record_count||0)>0 ? '未成功' : '无记录' }}</el-tag></template></el-table-column>
-          <el-table-column label="操作" width="110" align="center"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftId:row.id}})">打开草稿</el-button></template></el-table-column>
-        </el-table>
-        <el-table v-else :data="reviewTaskSkuRows(reviewDetailsTask || {})" max-height="60vh" row-key="record_id" empty-text="没有成功上架的在线 SKU">
+        <div v-else class="review-sku-details">
+          <div class="review-sync-toolbar"><span>在线商品可能需要等待 Ozon 生成 SKU；可按关联上架记录手动获取。</span><el-button type="primary" plain :loading="reviewSyncLoading" @click="syncReviewOnlineSkus">获取在线 SKU</el-button></div>
+          <el-table :data="reviewTaskSkuRows(reviewDetailsTask || {})" max-height="42vh" row-key="record_id" empty-text="暂无已同步的在线 SKU">
           <el-table-column prop="ozon_sku" label="Ozon SKU" min-width="150" />
           <el-table-column prop="product_name" label="在线商品" min-width="240" show-overflow-tooltip />
           <el-table-column prop="shop_name" label="店铺" min-width="150" show-overflow-tooltip />
-          <el-table-column label="关联草稿" min-width="200"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftId:row.draft_id}})">{{ row.draft_name }}</el-button></template></el-table-column>
+          <el-table-column label="关联草稿" min-width="200"><template #default="{row}"><el-button link type="primary" @click="router.push({path:'/listing-records',query:{draftIds:String(row.draft_id),source:'development-review'}})">{{ row.draft_name }}</el-button></template></el-table-column>
           <el-table-column label="出单" width="150" align="center"><template #default="{row}">{{ row.order_count || 0 }} 单 · {{ row.unit_count || 0 }} 件</template></el-table-column>
           <el-table-column label="库存绑定" width="130" align="center"><template #default="{row}"><el-tag :type="row.inventory_product_id?'success':'info'">{{ row.inventory_product_id ? '已绑定库存' : '未绑定' }}</el-tag></template></el-table-column>
-        </el-table>
+          </el-table>
+          <el-table v-if="reviewTaskDraftRows(reviewDetailsTask || {}).some((draft) => draft.publish_records?.length)" :data="reviewTaskDraftRows(reviewDetailsTask || {}).flatMap((draft) => (draft.publish_records || []).map((record) => ({...record, draft_id:draft.id, draft_name:draft.product_name || `草稿 #${draft.id}`})))" max-height="30vh" class="review-pending-records" row-key="record_id" empty-text="没有待同步记录">
+            <el-table-column prop="shop_name" label="发布店铺" min-width="150" />
+            <el-table-column prop="offer_id" label="Offer ID" min-width="180" />
+            <el-table-column prop="draft_name" label="关联草稿" min-width="180" show-overflow-tooltip />
+            <el-table-column label="同步状态" width="180" align="center"><template #default="{row}">{{ row.ozon_sku ? `已获取 SKU ${row.ozon_sku}` : '发布成功，等待线上 SKU' }}</template></el-table-column>
+          </el-table>
+        </div>
       </el-dialog>
     </section>
     <section v-else-if="activeTab==='projects'" class="panel projects-page"><div class="section-title"><div><span>完全按照库存中心类目归组 · 产品数量从高到低</span><h2>{{ selectedProject ? selectedProject.name : '库存类目项目' }}</h2></div><el-button v-if="selectedProject" @click="selectedProject=null">返回类目总览</el-button></div><template v-if="!selectedProject"><div class="category-summary"><span>共 {{ displayedProjects.length }} 个类目</span><b>{{ displayedProjects.reduce((sum,item)=>sum+Number(item.product_count||0),0) }} 个库存产品</b></div><div class="project-grid"><article v-for="(project,index) in displayedProjects" :key="project.id" class="project-card" @click="openProject(project)"><div class="category-card-head"><b>#{{ index + 1 }}</b><strong>{{ project.name }}</strong><em>{{ project.product_count }}</em></div><p>{{ project.brand_count || 0 }} 个品牌 · {{ project.listed_count || 0 }} 个产品已关联 SKU</p><el-progress :percentage="Math.round(Number(project.product_count||0)/Math.max(1,Number(displayedProjects[0]?.product_count||1))*100)" :show-text="false" :stroke-width="6" /><el-button link type="primary">查看该类目产品 →</el-button></article></div><el-empty v-if="!displayedProjects.length" description="库存中心尚未填写库存类目，请先完善产品主档的类目字段" /></template><template v-else><el-table v-loading="categoryProductsLoading" :data="projectDetailProducts" class="project-product-table" empty-text="该类目还没有产品"><el-table-column label="主图" width="90"><template #default="{row}"><el-image class="idea-image" :src="productImage(row)" fit="cover" preview-teleported /></template></el-table-column><el-table-column prop="brand" label="品牌" width="150"><template #default="{row}"><strong>{{ row.brand || '未填品牌' }}</strong></template></el-table-column><el-table-column prop="title" label="产品" min-width="220" /><el-table-column prop="vehicle_model" label="车型/款式" min-width="160" /><el-table-column label="库存 / SKU" width="130"><template #default="{row}">{{ row.stock }} / {{ row.sku_count }}</template></el-table-column><el-table-column label="操作" width="180"><template #default="{row}"><el-button plain @click="editInventoryProduct(row)">产品表单</el-button><el-button link type="success" @click="createListingDraft(row)">创建草稿</el-button></template></el-table-column></el-table></template></section>
@@ -1425,6 +1510,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
 .review-metrics{display:flex;flex-wrap:wrap;gap:8px}
 .review-metrics .review-metric-button{display:flex;align-items:center;gap:5px;height:auto;margin:0;padding:7px 10px;border:1px solid #e6edf5;border-radius:8px;background:#f8fafc;color:#667085;font-size:12px;white-space:nowrap}
 .review-metrics .review-metric-button:hover{border-color:#9ec5ff;background:#eff6ff}
+.review-filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0;padding:12px;border:1px solid #e7edf5;border-radius:12px;background:#f8fafc}.review-filters>.el-input{width:170px}.review-filters>.el-select{width:150px}.review-filters>.el-date-editor{width:270px}.review-task-link{justify-content:flex-start;font-weight:700}.review-pagination{display:flex;justify-content:flex-end;padding:14px 4px 2px}.review-sync-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 0 12px;color:#718096;font-size:13px}.review-pending-records{margin-top:14px}
 .review-metrics b{color:#243247;font-size:15px}
 .review-sales-summary{color:#667085;font-size:12px}.review-sales-summary strong{color:#243247}
 .review-publish-cell{display:grid;justify-items:center;gap:5px}
