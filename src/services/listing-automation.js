@@ -9975,6 +9975,7 @@ export async function autoSyncListingPublishRecords(options = {}) {
   const skuDueSql = `r.status IN ('imported', 'published', 'success')
     AND COALESCE(r.published_at, r.created_at) <= DATE_SUB(NOW(), INTERVAL 1 HOUR)
     AND (r.sku_sync_checked_at IS NULL OR r.sku_sync_checked_at <= DATE_SUB(NOW(), INTERVAL 1 HOUR))
+    AND r.sku_sync_attempt_count < 2
     AND ${missingSkuSql}`;
   const rows = await all(`
     SELECT r.id, r.tenant_id, r.status, r.quality_source, r.quality_checked_at,
@@ -10010,7 +10011,8 @@ export async function autoSyncListingPublishRecords(options = {}) {
         await refreshListingPublishRecord(Number(item.id), session);
         stats.refreshed += 1;
       } else if (Number(item.sku_due) > 0) {
-        await run(`UPDATE listing_publish_records SET sku_sync_checked_at = CURRENT_TIMESTAMP
+        await run(`UPDATE listing_publish_records SET sku_sync_checked_at = CURRENT_TIMESTAMP,
+          sku_sync_attempt_count = sku_sync_attempt_count + 1
           WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?`,
         [Number(item.id), tenantId]);
         await refreshListingPublishRecord(Number(item.id), session);
@@ -14543,6 +14545,7 @@ async function initializeListingAutomationSchema() {
     await ensureMysqlColumn("listing_publish_records", "binding_checked_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "binding_completed_at", "TIMESTAMP NULL");
     await ensureMysqlColumn("listing_publish_records", "sku_sync_checked_at", "TIMESTAMP NULL");
+    await ensureMysqlColumn("listing_publish_records", "sku_sync_attempt_count", "INT NOT NULL DEFAULT 0");
     await ensureMysqlColumn("listing_publish_records", "offer_source", "VARCHAR(64) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "source_collector_sku", "VARCHAR(160) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "template_snapshot_json", "LONGTEXT NULL");
