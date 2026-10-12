@@ -67,11 +67,16 @@ test("product development center shows completed-task review and loads ideas wit
   assert.match(viewSource, /function reviewTaskDraftIds/);
   assert.match(viewSource, /function reviewTaskMetrics/);
   assert.match(viewSource, /function reviewTaskPublishState/);
+  assert.match(viewSource, /function reviewTaskVehicleRows/);
+  assert.match(viewSource, /function reviewTaskSkuRows/);
   assert.match(viewSource, /effective_images\?\.\[0\]/);
   assert.match(viewSource, /label="开发产出"/);
   assert.match(viewSource, /草稿箱/);
-  assert.match(viewSource, /草稿商品/);
+  assert.match(viewSource, /在线 SKU/);
   assert.match(viewSource, /label="上架情况"/);
+  assert.match(viewSource, /label="出单"/);
+  assert.match(viewSource, /reviewTaskMetrics\(row\)\.orders/);
+  assert.match(viewSource, /reviewTaskMetrics\(row\)\.units/);
   assert.match(viewSource, /创建人：/);
   assert.match(viewSource, /reviewTaskCompletionTime/);
   assert.match(viewSource, /include_tasks=0/);

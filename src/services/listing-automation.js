@@ -10817,15 +10817,137 @@ export async function listingDrafts(query = {}, session) {
       LIMIT ? OFFSET ?
     `;
   const rows = await all(rowsSql, [...fromParams, paged ? pageSize : 100, paged ? offset : 0]);
-  if (!paged) return Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item))));
+  const normalizedRows = await Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item))));
+  if (requestedIds.length && !lightweight) await attachDevelopmentReviewSkus(normalizedRows, requestedIds, tenantId);
+  if (!paged) return normalizedRows;
   const totalRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams);
   return {
-    rows: await Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item)))),
+    rows: normalizedRows,
     total: Number(totalRow?.total || 0),
     page,
     pageSize,
     mode: "paged"
   };
+}
+
+export async function listingDevelopmentReview(body = {}, session = null) {
+  const requestedTasks = Array.isArray(body.tasks) ? body.tasks : [];
+  if (requestedTasks.length > 200) throw new Error("一次最多复盘 200 个已完成开发任务，请缩小范围后重试。");
+  const taskGroups = requestedTasks.map((item) => ({
+    taskId: Number(item?.task_id || item?.taskId || 0),
+    draftIds: [...new Set((Array.isArray(item?.draft_ids || item?.draftIds) ? (item.draft_ids || item.draftIds) : [])
+      .map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 500)
+  })).filter((item) => Number.isSafeInteger(item.taskId) && item.taskId > 0);
+  const draftIds = [...new Set(taskGroups.flatMap((item) => item.draftIds))];
+  if (draftIds.length > 5000) throw new Error("复盘关联草稿数量超出单次读取上限，请刷新任务数据后重试。");
+
+  const drafts = [];
+  for (let index = 0; index < draftIds.length; index += 100) {
+    const rows = await listingDrafts({ ids: draftIds.slice(index, index + 100).join(",") }, session);
+    drafts.push(...(Array.isArray(rows) ? rows : []));
+  }
+  const draftById = new Map(drafts.map((item) => [Number(item.id), item]));
+  const skuPairs = [];
+  for (const group of taskGroups) {
+    const groupPairs = new Map();
+    for (const draftId of group.draftIds) {
+      for (const sku of draftById.get(draftId)?.published_skus || []) {
+        const key = `${Number(sku.shop_id)}|${String(sku.ozon_sku || "").trim().toLowerCase()}`;
+        if (key !== "0|") groupPairs.set(key, { taskId: group.taskId, shopId: Number(sku.shop_id), sku: String(sku.ozon_sku || "").trim() });
+      }
+    }
+    skuPairs.push(...groupPairs.values());
+  }
+  const salesByTask = new Map();
+  if (skuPairs.length) {
+    const valuesSql = skuPairs.map(() => "SELECT ? AS task_id, ? AS shop_id, CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci AS ozon_sku").join(" UNION ALL ");
+    const sales = await all(`
+      SELECT linked.task_id, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      FROM (${valuesSql}) linked
+      JOIN orders o ON o.shop_id = linked.shop_id
+        AND LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
+      JOIN order_items oi ON oi.order_id = o.id
+        AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = linked.ozon_sku
+      GROUP BY linked.task_id
+    `, skuPairs.flatMap((item) => [item.taskId, item.shopId, item.sku]));
+    for (const row of sales) salesByTask.set(Number(row.task_id), {
+      orders: Number(row.order_count || 0),
+      units: Number(row.unit_count || 0)
+    });
+  }
+  return {
+    drafts,
+    sales_by_task: Object.fromEntries(taskGroups.map((item) => [item.taskId, salesByTask.get(item.taskId) || { orders: 0, units: 0 }]))
+  };
+}
+
+async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
+  if (!drafts.length) return;
+  const placeholders = requestedIds.map(() => "?").join(",");
+  const records = await all(`
+    SELECT r.id, r.draft_id, r.shop_id, r.offer_id, r.ozon_sku, r.status, r.published_at, r.updated_at,
+      COALESCE(s.name, CONCAT('店铺 ', r.shop_id)) AS shop_name,
+      COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.name')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].name')), ''), '') AS online_product_name,
+      op.id AS online_product_id, op.product_id AS inventory_product_id
+    FROM listing_publish_records r
+    JOIN listing_drafts d ON d.id = r.draft_id
+    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN online_products op ON op.shop_id = r.shop_id
+      AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    WHERE r.draft_id IN (${placeholders})
+      AND COALESCE(d.tenant_id, 'admin') = ?
+      AND COALESCE(r.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')
+      AND r.status IN ('imported', 'published', 'success')
+      AND TRIM(COALESCE(r.ozon_sku, '')) <> ''
+    ORDER BY r.draft_id, r.shop_id, r.ozon_sku, r.updated_at DESC, r.id DESC
+  `, [...requestedIds, tenantId]);
+
+  const uniqueRecords = new Map();
+  for (const record of records) {
+    const key = `${Number(record.draft_id)}|${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`;
+    if (!uniqueRecords.has(key)) uniqueRecords.set(key, record);
+  }
+  const skuRecords = [...uniqueRecords.values()];
+  const skuPairs = [...new Map(skuRecords.map((record) => [
+    `${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`,
+    { shopId: Number(record.shop_id), sku: String(record.ozon_sku || "").trim() }
+  ])).values()];
+  const salesBySku = new Map();
+  if (skuPairs.length) {
+    const conditions = skuPairs.map(() => `(o.shop_id = ? AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci)`).join(" OR ");
+    const salesRows = await all(`
+      SELECT o.shop_id, oi.ozon_sku, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      FROM orders o JOIN order_items oi ON oi.order_id = o.id
+      WHERE LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
+        AND (${conditions})
+      GROUP BY o.shop_id, oi.ozon_sku
+    `, skuPairs.flatMap((pair) => [pair.shopId, pair.sku]));
+    for (const item of salesRows) salesBySku.set(`${Number(item.shop_id)}|${String(item.ozon_sku || "").trim().toLowerCase()}`, item);
+  }
+
+  const skusByDraft = new Map();
+  for (const record of skuRecords) {
+    const sales = salesBySku.get(`${Number(record.shop_id)}|${String(record.ozon_sku || "").trim().toLowerCase()}`) || {};
+    const draftId = Number(record.draft_id);
+    const rows = skusByDraft.get(draftId) || [];
+    rows.push({
+      record_id: Number(record.id),
+      shop_id: Number(record.shop_id),
+      shop_name: record.shop_name || "",
+      ozon_sku: String(record.ozon_sku || ""),
+      offer_id: String(record.offer_id || ""),
+      product_name: record.online_product_name || "",
+      online_product_id: Number(record.online_product_id || 0) || null,
+      inventory_product_id: Number(record.inventory_product_id || 0) || null,
+      status: record.status,
+      published_at: record.published_at || null,
+      order_count: Number(sales.order_count || 0),
+      unit_count: Number(sales.unit_count || 0)
+    });
+    skusByDraft.set(draftId, rows);
+  }
+  for (const draft of drafts) draft.published_skus = skusByDraft.get(Number(draft.id)) || [];
 }
 
 export async function listingDraftDetail(id, session) {
