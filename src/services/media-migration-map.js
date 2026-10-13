@@ -177,6 +177,7 @@ export async function resolveMappedMediaInValue(value) {
       return isMediaLocator(item) ? (bySource.get(canonicalMediaSource(item)) || item) : item;
     }
     if (Array.isArray(item)) return item.map(replace);
+    if (item instanceof Date) return item;
     if (item && typeof item === "object") {
       return Object.fromEntries(Object.entries(item).map(([key, nested]) => [key, replace(nested)]));
     }
