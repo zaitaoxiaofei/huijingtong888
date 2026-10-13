@@ -322,6 +322,8 @@ function normalizeTeamTaskRow(row = {}) {
     owner_person_id: row.owner_person_id ? Number(row.owner_person_id) : null,
     owner_name: row.owner_name || "",
     owner_avatar_url: row.owner_avatar_url || "",
+    created_by_name: row.created_by_name || "",
+    created_by_avatar_url: row.created_by_avatar_url || "",
     collaborator_person_ids: collaboratorIds,
     period: row.period || "week",
     status: row.status || "todo",
@@ -611,10 +613,12 @@ export async function teamTasksMysql(query = {}) {
   }
   const rows = await mysqlQuery(`
       SELECT t.*, p.name AS owner_name, p.avatar_url AS owner_avatar_url,
+      creator.name AS created_by_name, creator.avatar_url AS created_by_avatar_url,
       link.project_id, project.name AS project_name, link.candidate_id, candidate.title AS candidate_title,
       link.stage AS development_stage, link.deliverable, link.reviewer_person_id
     FROM team_tasks t
     LEFT JOIN people p ON p.id = t.owner_person_id
+    LEFT JOIN people creator ON creator.id = t.created_by_person_id
     LEFT JOIN product_development_task_links link ON link.task_id = t.id
     LEFT JOIN product_development_projects project ON project.id = link.project_id AND project.active = 1
     LEFT JOIN product_development_candidates candidate ON candidate.id = link.candidate_id AND candidate.active = 1

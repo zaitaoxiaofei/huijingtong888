@@ -34,6 +34,7 @@ import {
 import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 import { deriveCollectedAttributesFromFacts } from "./listing-collected-attribute-deriver.js";
 import { listingTenantLookup } from "./listing-tenant-scope.js";
+import { buildOrderOutcomeSql } from "./order-outcome.js";
 import { listingVariantInventoryCandidates, propagateListingVariantInventory } from "./listing-variant-inventory.js";
 import { ensurePersistedDraftVariantIds, publishedItemVariantIds } from "./listing-variant-identity.js";
 import {
@@ -10833,8 +10834,8 @@ export async function listingDrafts(query = {}, session) {
   const status = String(query.status || "").trim().toLowerCase();
   const tenantId = listingTenantId(session);
   const tenantMemberId = Number(session?.tenant?.id || 0);
-  const tenantScope = "COALESCE(d.tenant_id, 'admin') = ?";
-  const relatedTenantScope = (alias) => `COALESCE(${alias}.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')`;
+  const tenantScope = "CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci";
+  const relatedTenantScope = (alias) => `CONVERT(COALESCE(${alias}.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
   const where = ["COALESCE(d.status, '') <> 'deleted'"];
   where.push(tenantScope);
   const params = [tenantId];
@@ -10960,7 +10961,7 @@ export async function listingDrafts(query = {}, session) {
     )`);
   }
   const fromSqlJoins = [
-    "LEFT JOIN listing_category_templates t ON t.id = d.template_id AND COALESCE(t.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')"
+    `LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}`
   ];
   if (!paged || !lightweight) {
     fromSqlJoins.push(`LEFT JOIN tenant_members creator_members
@@ -10997,13 +10998,13 @@ export async function listingDrafts(query = {}, session) {
     }
     const placeholders = pageIds.map(() => "?").join(", ");
     const shopCopiesSelect = includeShopDetails
-      ? `COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('shop_id', c_shop.shop_id, 'shop_name', COALESCE(s_shop.name, CONCAT('店铺 ', c_shop.shop_id)), 'offer_id', c_shop.offer_id, 'status', c_shop.status, 'price', c_shop.price)) FROM listing_shop_copies c_shop LEFT JOIN shops s_shop ON s_shop.id = c_shop.shop_id AND COALESCE(s_shop.tenant_id, 'admin') = COALESCE(c_shop.tenant_id, 'admin') WHERE c_shop.draft_id = d.id AND ${relatedTenantScope("c_shop")}), JSON_ARRAY())`
+      ? `COALESCE((SELECT JSON_ARRAYAGG(JSON_OBJECT('shop_id', c_shop.shop_id, 'shop_name', COALESCE(s_shop.name, CONCAT('店铺 ', c_shop.shop_id)), 'offer_id', c_shop.offer_id, 'status', c_shop.status, 'price', c_shop.price)) FROM listing_shop_copies c_shop LEFT JOIN shops s_shop ON s_shop.id = c_shop.shop_id AND CONVERT(COALESCE(s_shop.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(c_shop.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci WHERE c_shop.draft_id = d.id AND ${relatedTenantScope("c_shop")}), JSON_ARRAY())`
       : "JSON_ARRAY()";
     const pageRows = await all(`
       SELECT
         d.id, d.template_id, d.product_name, d.internal_code,
         '[]' AS source_urls_json,
-        JSON_ARRAY(d.list_image_url) AS source_images_json,
+        COALESCE(d.source_images_json, JSON_ARRAY(d.list_image_url)) AS source_images_json,
         d.cost_price, d.sale_price, d.length_cm, d.width_cm, d.height_cm, d.weight_g,
         d.color, d.spec, d.quantity, d.status, d.development_type, d.vehicle_brand, d.vehicle_model, d.vehicle_model_key,
         d.created_by_person_id, d.created_at, d.updated_at,
@@ -11015,7 +11016,17 @@ export async function listingDrafts(query = {}, session) {
         JSON_ARRAY() AS draft_variant_images_json,
         JSON_ARRAY() AS draft_template_images_json,
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
-        NULL AS template_payload_json,
+        JSON_OBJECT(
+          'editable_payload', JSON_OBJECT(
+            'variants', JSON_ARRAY(JSON_OBJECT(
+              'images', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images'),
+              'images_manually_edited', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images_manually_edited'),
+              'image_edit_intent', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].image_edit_intent')
+            )),
+            'images', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.images')
+          ),
+          'images', JSON_EXTRACT(d.template_payload_json, '$.images')
+        ) AS template_payload_json,
         t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
         (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")} AND c.status = 'prepared') AS shop_copy_count,
         (SELECT r.status FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status <> 'deleted' ORDER BY r.updated_at DESC, r.id DESC LIMIT 1) AS publish_status,
@@ -11023,7 +11034,7 @@ export async function listingDrafts(query = {}, session) {
         (SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status IN ('imported', 'published', 'success')) AS publish_success_count,
         (SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status IN ('failed', 'ozon_status_error')) AS publish_failed_count
       FROM listing_drafts d
-      LEFT JOIN listing_category_templates t ON t.id = d.template_id AND COALESCE(t.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')
+      LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}
       LEFT JOIN tenant_members creator_members
         ON creator_members.person_id = d.created_by_person_id
        AND creator_members.tenant_id = ?
@@ -11163,11 +11174,31 @@ export async function listingDevelopmentReview(body = {}, session = null) {
   })).filter((item) => Number.isSafeInteger(item.taskId) && item.taskId > 0);
   const draftIds = [...new Set(taskGroups.flatMap((item) => item.draftIds))];
   if (draftIds.length > 5000) throw new Error("复盘关联草稿数量超出单次读取上限，请刷新任务数据后重试。");
+  const includeVariants = body.include_variants === true || body.includeVariants === true;
+  if (includeVariants && taskGroups.length !== 1) throw new Error("变体明细一次只能读取一个开发任务，请重新展开任务后重试。");
+  if (includeVariants && draftIds.length > 100) throw new Error("单个任务关联草稿超过 100 个，请使用草稿箱列表查看全部草稿明细。");
 
   const drafts = [];
   for (let index = 0; index < draftIds.length; index += 100) {
-    const rows = await listingDrafts({ ids: draftIds.slice(index, index + 100).join(","), paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1" }, session);
-    drafts.push(...(Array.isArray(rows) ? rows : rows?.rows || []));
+    const rows = await listingDrafts({ ids: draftIds.slice(index, index + 100).join(","), paged: "1", page: "1", pageSize: "100", lightweight: includeVariants ? "0" : "1", includeReviewSkus: "1" }, session);
+    const pageDrafts = Array.isArray(rows) ? rows : rows?.rows || [];
+    if (includeVariants) {
+      for (const draft of pageDrafts) {
+        const payload = objectValue(draft.template_payload || {});
+        const editable = objectValue(payload.editable_payload || payload.editablePayload);
+        draft.variants = normalizeArray(editable.variants || payload.variants).map((variant, index) => ({
+          variant_id: String(variant?.id || variant?.variant_id || variant?.variantId || index + 1),
+          name: String(variant?.name || variant?.title || variant?.color || variant?.sku || `变体 ${index + 1}`),
+          offer_id: String(variant?.offer_id || variant?.offerId || variant?.sku || ""),
+          sku: String(variant?.sku || ""),
+          attributes: normalizeArray(variant?.attributes).map((attribute) => ({ name: String(attribute?.name || ""), value: String(attribute?.value || "") })),
+          effective_images: resolveDraftEffectiveImages({ editable_payload: { variants: [variant] } }, draft.source_images || []).images
+        }));
+        delete draft.template_payload;
+        delete draft.template_payload_json;
+      }
+    }
+    drafts.push(...pageDrafts);
   }
   const draftById = new Map(drafts.map((item) => [Number(item.id), item]));
   const skuPairs = [];
@@ -11183,12 +11214,15 @@ export async function listingDevelopmentReview(body = {}, session = null) {
   }
   const salesByTask = new Map();
   if (skuPairs.length) {
+    const orderOutcome = buildOrderOutcomeSql("o", "mysql");
+    const effectiveBusinessSale = `(${orderOutcome.effectiveSale} AND NOT ${orderOutcome.afterDeliveryReturn})`;
     const valuesSql = skuPairs.map(() => "SELECT ? AS task_id, ? AS shop_id, CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci AS ozon_sku").join(" UNION ALL ");
     const sales = await all(`
-      SELECT linked.task_id, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      SELECT linked.task_id,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS order_count,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS unit_count
       FROM (${valuesSql}) linked
       JOIN orders o ON o.shop_id = linked.shop_id
-        AND LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
       JOIN order_items oi ON oi.order_id = o.id
         AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = linked.ozon_sku
       GROUP BY linked.task_id
@@ -11213,18 +11247,20 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
       COALESCE(s.name, CONCAT('店铺 ', r.shop_id)) AS shop_name,
       COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.list_summary_json, '$.name')), ''),
         NULLIF(JSON_UNQUOTE(JSON_EXTRACT(r.request_json, '$.items[0].name')), ''), '') AS online_product_name,
-      op.id AS online_product_id, op.product_id AS inventory_product_id
+      op.id AS online_product_id, op.product_id AS inventory_product_id,
+      inventory.name AS inventory_product_name, inventory.code AS inventory_product_code
     FROM listing_publish_records r
-    LEFT JOIN listing_publish_task_items i ON i.id = r.publish_task_item_id AND COALESCE(i.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN listing_publish_task_items i ON i.id = r.publish_task_item_id AND CONVERT(COALESCE(i.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
     JOIN listing_drafts d ON d.id = COALESCE(NULLIF(r.draft_id, 0), i.draft_id)
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND CONVERT(COALESCE(s.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
     LEFT JOIN online_products op ON op.shop_id = r.shop_id AND (
       (TRIM(COALESCE(r.ozon_sku, '')) <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
-      OR (TRIM(COALESCE(r.offer_id, '')) <> '' AND op.offer_id = r.offer_id)
+      OR (TRIM(COALESCE(r.offer_id, '')) <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
     )
+    LEFT JOIN products inventory ON inventory.id = op.product_id
     WHERE COALESCE(NULLIF(r.draft_id, 0), i.draft_id) IN (${placeholders})
-      AND COALESCE(d.tenant_id, 'admin') = ?
-      AND COALESCE(r.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')
+      AND CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
+      AND CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
       AND r.status IN ('imported', 'published', 'success')
     ORDER BY d.id, r.shop_id, r.ozon_sku, r.updated_at DESC, r.id DESC
   `, [...requestedIds, tenantId]);
@@ -11243,12 +11279,15 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
   ])).values()];
   const salesBySku = new Map();
   if (skuPairs.length) {
+    const orderOutcome = buildOrderOutcomeSql("o", "mysql");
+    const effectiveBusinessSale = `(${orderOutcome.effectiveSale} AND NOT ${orderOutcome.afterDeliveryReturn})`;
     const conditions = skuPairs.map(() => `(o.shop_id = ? AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci)`).join(" OR ");
     const salesRows = await all(`
-      SELECT o.shop_id, oi.ozon_sku, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      SELECT o.shop_id, oi.ozon_sku,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS order_count,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS unit_count
       FROM orders o JOIN order_items oi ON oi.order_id = o.id
-      WHERE LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
-        AND (${conditions})
+      WHERE (${conditions})
       GROUP BY o.shop_id, oi.ozon_sku
     `, skuPairs.flatMap((pair) => [pair.shopId, pair.sku]));
     for (const item of salesRows) salesBySku.set(`${Number(item.shop_id)}|${String(item.ozon_sku || "").trim().toLowerCase()}`, item);
@@ -11269,6 +11308,8 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
       product_name: record.online_product_name || "",
       online_product_id: Number(record.online_product_id || 0) || null,
       inventory_product_id: Number(record.inventory_product_id || 0) || null,
+      inventory_product_name: record.inventory_product_name || "",
+      inventory_product_code: record.inventory_product_code || "",
       status: record.status,
       published_at: record.published_at || null,
       order_count: Number(sales.order_count || 0),

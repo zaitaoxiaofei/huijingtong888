@@ -5,6 +5,7 @@ import test from "node:test";
 const source = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const routeSource = readFileSync(new URL("../src/server/routes/listingAutomation.js", import.meta.url), "utf8");
 const viewSource = readFileSync(new URL("../frontend/admin/views/listing/ListingPublishRecordsView.vue", import.meta.url), "utf8");
+const developmentReviewViewSource = readFileSync(new URL("../frontend/admin/views/team/ProductDevelopmentCenterView.vue", import.meta.url), "utf8");
 
 test("collector box batches publish statistics for the visible page", () => {
   const section = source.match(/export async function collectorBoxProducts[\s\S]*?export async function collectorBoxProductDetail/)?.[0] || "";
@@ -57,6 +58,8 @@ test("development review can fetch linked drafts with authoritative image and pu
   assert.match(drafts, /AS source_product_id/);
   assert.match(drafts, /AS sku_count/);
   assert.match(drafts, /AS publish_success_count/);
+  assert.match(drafts, /const tenantScope = "CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci"/);
+  assert.match(drafts, /listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(drafts, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
 });
@@ -65,23 +68,50 @@ test("development review returns published shop SKUs and order and unit counts",
   const review = source.match(/async function attachDevelopmentReviewSkus\([\s\S]*?export async function listingDraftDetail/)?.[0] || "";
   assert.match(review, /r\.status IN \('imported', 'published', 'success'\)/);
   assert.match(review, /op\.product_id AS inventory_product_id/);
-  assert.match(review, /COUNT\(DISTINCT o\.id\) AS order_count/);
-  assert.match(review, /SUM\(oi\.quantity\)/);
-  assert.match(review, /LOWER\(o\.status\) NOT IN \('cancelled'/);
+  assert.match(review, /buildOrderOutcomeSql\("o", "mysql"\)/);
+  assert.match(review, /orderOutcome\.effectiveSale/);
+  assert.match(review, /orderOutcome\.afterDeliveryReturn/);
+  assert.match(review, /COUNT\(DISTINCT CASE WHEN \$\{effectiveBusinessSale\} THEN o\.id END\) AS order_count/);
+  assert.match(review, /SUM\(CASE WHEN \$\{effectiveBusinessSale\} THEN oi\.quantity ELSE 0 END\)/);
+  assert.doesNotMatch(review, /LOWER\(o\.status\) NOT IN/);
   assert.match(review, /COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /draft\.published_skus = skusByDraft/);
   assert.match(review, /COALESCE\(NULLIF\(r\.draft_id, 0\), i\.draft_id\) AS draft_id/);
   assert.match(review, /draft\.published_shops = stores/);
   assert.match(review, /draft\.publish_records = stores\.filter/);
   assert.doesNotMatch(review, /AND r\.status IN \('imported', 'published', 'success'\)\s+AND TRIM\(COALESCE\(r\.ozon_sku/);
-  assert.match(review, /op\.offer_id = r\.offer_id/);
+  assert.match(review, /CONVERT\(op\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(r\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /CONVERT\(COALESCE\(r\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /inventory\.name AS inventory_product_name/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
-  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: "1", includeReviewSkus: "1"/);
-  assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
-  assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
+  assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: includeVariants \? "0" : "1", includeReviewSkus: "1"/);
+  assert.match(reviewEndpoint, /buildOrderOutcomeSql\("o", "mysql"\)/);
+  assert.match(reviewEndpoint, /COUNT\(DISTINCT CASE WHEN \$\{effectiveBusinessSale\} THEN o\.id END\)/);
+  assert.match(reviewEndpoint, /SUM\(CASE WHEN \$\{effectiveBusinessSale\} THEN oi\.quantity ELSE 0 END\)/);
   assert.match(reviewEndpoint, /sales_by_task/);
   assert.match(routeSource, /POST \/api\/listing\/development-review/);
   assert.match(viewSource, /reviewDraftIds\) params\.set\("ids", reviewDraftIds\)/);
+});
+
+test("development review loads effective draft images, people, and variant details on demand", () => {
+  const review = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
+  const lightweightDrafts = source.match(/if \(paged && lightweight\)[\s\S]*?const rowsSql = lightweight/)?.[0] || "";
+  assert.match(review, /include_variants/);
+  assert.match(review, /lightweight: includeVariants \? "0" : "1"/);
+  assert.match(review, /draft\.variants = normalizeArray/);
+  assert.match(lightweightDrafts, /JSON_EXTRACT\(d\.template_payload_json, '\$\.editable_payload\.variants\[0\]\.images'\)/);
+  assert.match(lightweightDrafts, /pageRows\.map\(\(item\) => normalizeDraftRow\(item\)\)/);
+  assert.match(source, /effective_images: effectiveMedia\.images/);
+  assert.match(developmentReviewViewSource, /loadReviewCatalogs/);
+  assert.match(developmentReviewViewSource, /<el-table-column type="expand"/);
+  assert.match(developmentReviewViewSource, /reviewTaskDetailRows\(row\)/);
+  assert.match(developmentReviewViewSource, /reviewPersonAvatar\(row,'creator'\)/);
+  assert.match(developmentReviewViewSource, /openTaskModelDraftPicker\(row, model\)/);
+  assert.match(developmentReviewViewSource, /sales\.set\(Number\(task\.id\), result\?\.sales_by_task\?\.\[task\.id\]/);
+  const taskRows = readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
+  assert.match(taskRows, /creator\.name AS created_by_name/);
+  assert.match(taskRows, /created_by_avatar_url: row\.created_by_avatar_url/);
 });
 
 test("manual online listing sync narrows database writes to the selected offers", () => {
