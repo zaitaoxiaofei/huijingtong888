@@ -50,9 +50,11 @@ test("task binding stores the selected task without changing vehicle metadata", 
   const { bindListingDrafts, writes } = service([11]);
   const result = await bindListingDrafts({ mode: "task", draft_ids: [11], task_id: 9 });
   assert.deepEqual(result.task, { id: 9, title: "新品任务" });
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 2);
   assert.match(writes[0].sql, /INSERT INTO listing_draft_bindings/);
   assert.deepEqual(writes[0].params, ["admin", 11, 9]);
+  assert.match(writes[1].sql, /UPDATE listing_variant_lineage/);
+  assert.deepEqual(writes[1].params, [9, "新品任务", "admin", 11]);
 });
 
 test("task choices expose ownership and status for the default personal task list", async () => {
@@ -71,7 +73,7 @@ test("task binding assigns a matching draft to the task model", async () => {
   await bindListingDrafts({ mode: "task", draft_ids: [11], task_id: 9 });
   const update = writes.find(({ sql }) => sql.includes("UPDATE team_tasks"));
   assert.deepEqual(JSON.parse(update.params[0]).models[0].draft_ids, [11]);
-  assert.deepEqual(writes.at(-1).params, ["admin", 11, 9]);
+  assert.deepEqual(writes.find(({ sql }) => sql.includes("INSERT INTO listing_draft_bindings")).params, ["admin", 11, 9]);
 });
 
 test("task binding places a draft without a matching model under the parent task", async () => {

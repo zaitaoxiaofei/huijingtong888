@@ -144,7 +144,10 @@ const drawer = reactive({
   }
 });
 
-const skuReview = reactive({ visible: false, loading: false, record: null });
+const skuReview = reactive({ visible: false, loading: false, record: null, selectedProductByVariant: {}, bindingVariantId: "" });
+const skuInventoryProducts = ref([]);
+const skuInventorySearching = ref(false);
+let skuInventorySearchSequence = 0;
 const skuReviewGroups = computed(() => {
   const groups = new Map();
   for (const link of skuReview.record?.links || []) {
@@ -1088,10 +1091,48 @@ async function openSkuReview(row) {
   skuReview.record = null;
   try {
     skuReview.record = await apiClient.get(`/api/listing/publish-records/${row.id}?view=sku`, { noCache: true });
+    skuReview.selectedProductByVariant = Object.fromEntries(skuReviewGroups.value.map((group) => [
+      group.variantId, Number(group.links.find((link) => link.inventory_id)?.inventory_id || 0) || ""
+    ]));
+    skuInventoryProducts.value = [];
   } catch (error) {
     ElMessage.error(error.message || "SKU 对应关系加载失败");
   } finally {
     skuReview.loading = false;
+  }
+}
+
+async function searchSkuInventoryProducts(query = "") {
+  const search = String(query || "").trim();
+  if (!search) { skuInventoryProducts.value = []; return; }
+  const sequence = ++skuInventorySearchSequence;
+  skuInventorySearching.value = true;
+  try {
+    const result = await apiClient.get(`/api/products?paged=1&page=1&pageSize=30&query=${encodeURIComponent(search)}`, { noCache: true });
+    if (sequence === skuInventorySearchSequence) skuInventoryProducts.value = result?.rows || [];
+  } catch (error) {
+    ElMessage.error(error.message || "库存产品搜索失败");
+  } finally {
+    if (sequence === skuInventorySearchSequence) skuInventorySearching.value = false;
+  }
+}
+
+async function bindSkuVariantInventory(group) {
+  const productId = Number(skuReview.selectedProductByVariant[group.variantId] || 0);
+  const recordId = Number(skuReview.record?.id || 0);
+  if (!productId || !recordId) return ElMessage.warning("请先搜索并选择库存产品");
+  skuReview.bindingVariantId = group.variantId;
+  try {
+    const result = await apiClient.post("/api/listing/inventory-bindings/bind", {
+      record_id: recordId, variant_id: group.variantId, product_id: productId
+    });
+    skuReview.record = await apiClient.get(`/api/listing/publish-records/${recordId}?view=sku`, { noCache: true });
+    const count = Number(result?.variant_binding?.bound || 0);
+    ElMessage.success(`库存 #${productId} 已绑定到此草稿变体，关联 ${count} 个店铺 SKU`);
+  } catch (error) {
+    ElMessage.error(error.message || "变体库存绑定失败");
+  } finally {
+    skuReview.bindingVariantId = "";
   }
 }
 
@@ -2257,6 +2298,24 @@ watch(() => route.query.taskId, () => {
               <div v-if="link.inventory_id && (link.inventory_name || link.inventory_code)" class="sku-inventory-name">{{ link.inventory_name || link.inventory_code }}</div>
             </el-form>
           </div>
+          <div class="sku-variant-binding">
+            <el-select
+              v-model="skuReview.selectedProductByVariant[group.variantId]"
+              filterable remote clearable
+              :remote-method="searchSkuInventoryProducts"
+              :loading="skuInventorySearching"
+              placeholder="搜索库存编号或名称"
+              class="sku-variant-inventory-select"
+            >
+              <el-option v-for="product in skuInventoryProducts" :key="product.id" :value="product.id"
+                :label="`${product.inventory_number || product.code || `#${product.id}`} · ${product.name}`" />
+            </el-select>
+            <el-button type="primary" :loading="skuReview.bindingVariantId === group.variantId"
+              :disabled="Boolean(skuReview.bindingVariantId) || group.variantId === '未确认变体' || !skuReview.record.draft_id" @click="bindSkuVariantInventory(group)">
+              {{ group.links.some((link) => link.inventory_id) ? "确认 / 更新此变体库存" : "绑定此变体库存" }}
+            </el-button>
+            <span class="muted-text">确认后会把同一草稿变体在各店铺的 SKU 关联到该库存。</span>
+          </div>
         </section>
         <el-alert v-if="skuReview.record.unlinked_offers?.length" type="warning" :closable="false" show-icon
           title="当前记录没有可确认的草稿变体关联；请按发布时 Offer ID 核对，不会按顺序自动绑定库存。" />
@@ -2918,6 +2977,8 @@ watch(() => route.query.taskId, () => {
 .sku-shop-form .el-tag { max-width: 100%; height: auto; white-space: normal; line-height: 1.5; }
 .sku-review-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sku-inventory-name { padding-left: 68px; color: #697386; font-size: 12px; }
+.sku-variant-binding { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #edf1f7; }
+.sku-variant-inventory-select { width: min(100%, 360px); }
 @media (max-width: 760px) { .sku-shop-grid { grid-template-columns: 1fr; } }
 .drawer-hero { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid #e5eaf3; border-radius: 8px; background: #f8fafc; }
 .drawer-hero strong { font-size: 16px; overflow-wrap: anywhere; }
