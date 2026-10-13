@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   canonicalMediaSource,
   mediaSourceFingerprint,
@@ -47,6 +48,18 @@ test("deep resolver leaves values unchanged when no media address exists", async
     quantity: 1
   };
   assert.deepEqual(await resolveMappedMediaInValue(value), value);
+});
+
+test("deep resolver preserves database dates while resolving draft images", async () => {
+  const source = fs.readFileSync(path.resolve("src/services/media-migration-map.js"), "utf8")
+    .replace(/^import .*;\n/gm, "")
+    .replace(/^export /gm, "");
+  const resolve = new Function("crypto", "mysqlExecute", "mysqlQuery",
+    `${source}\nreturn resolveMappedMediaInValue;`)(crypto, async () => {}, async () => []);
+  const createdAt = new Date("2026-10-13T08:18:22.000Z");
+  const result = await resolve({ created_at: createdAt, images: ["/uploads/headrest.jpg"] });
+  assert.equal(result.created_at.toISOString(), createdAt.toISOString());
+  assert.equal(result.images[0], "/uploads/headrest.jpg");
 });
 
 test("listing drafts resolve verified OSS mappings after effective image selection", () => {
