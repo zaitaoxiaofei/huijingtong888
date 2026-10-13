@@ -21,6 +21,17 @@ const routeSource = readFileSync(new URL("../frontend/admin/router/index.js", im
 const navigationSource = readFileSync(new URL("../frontend/admin/constants/navigation.js", import.meta.url), "utf8");
 const adminLayoutSource = readFileSync(new URL("../frontend/admin/layouts/AdminLayout.vue", import.meta.url), "utf8");
 
+test("status sync keeps the publish record category shown by the list", () => {
+  const helperSource = publishRecordsSource.match(/function mergeRefreshedPublishRecord\(current, updated\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helperSource);
+  const merge = new Function(`${helperSource}\nreturn mergeRefreshedPublishRecord;`)();
+  assert.deepEqual(merge({ id: 1, category_name: "汽车枕头", status: "processing" },
+    { id: 1, status: "imported" }), { id: 1, category_name: "汽车枕头", status: "imported" });
+  assert.equal(merge({ category_name: "汽车枕头" }, { category_name: "汽车坐垫" }).category_name, "汽车坐垫");
+  const calls = publishRecordsSource.match(/state\.rows\[index\] = mergeRefreshedPublishRecord\(state\.rows\[index\], updated\)/g) || [];
+  assert.equal(calls.length, 3);
+});
+
 test("draft batch media uses the current effective image set", () => {
   const helperSource = publishRecordsSource.match(/function draftListImages\(row = \{\}\) \{[\s\S]*?\n\}\n\nfunction compactDateTime/)?.[0]
     .replace(/\n\nfunction compactDateTime$/, "");
