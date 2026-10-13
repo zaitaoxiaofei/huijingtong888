@@ -1439,7 +1439,7 @@ async function retryRecord() {
     drawerResponseCache = { response: updated.response, error: updated.error };
     if (drawer.technicalJsonLoaded) drawer.responseText = JSON.stringify(drawerResponseCache, null, 2);
     const index = state.rows.findIndex((row) => Number(row.id) === Number(updated.id));
-    if (index >= 0) state.rows[index] = updated;
+    if (index >= 0) state.rows[index] = mergeRefreshedPublishRecord(state.rows[index], updated);
     drawer.visible = false;
     ElMessage.success("已重新提交 Ozon，可稍后刷新状态");
   } finally {
@@ -1456,7 +1456,7 @@ async function refreshRecord(row) {
   try {
     const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
     const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
-    if (index >= 0) state.rows[index] = updated;
+    if (index >= 0) state.rows[index] = mergeRefreshedPublishRecord(state.rows[index], updated);
     const skuCount = updated.variant_links?.filter((link) => link.ozon_sku).length || 0;
     ElMessage.success(skuCount > 1 ? `已同步 ${skuCount} 个线上 SKU` : updated.ozon_sku ? `已同步线上 SKU：${updated.ozon_sku}` : "状态已刷新，Ozon 暂未返回线上 SKU");
   } finally {
@@ -1478,7 +1478,7 @@ async function batchRefreshRecords() {
       try {
         const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/refresh`, {});
         const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
-        if (index >= 0) state.rows[index] = updated;
+        if (index >= 0) state.rows[index] = mergeRefreshedPublishRecord(state.rows[index], updated);
         success += 1;
       } catch {
         failed += 1;
@@ -1489,6 +1489,10 @@ async function batchRefreshRecords() {
   } finally {
     batchRefreshing.value = false;
   }
+}
+
+function mergeRefreshedPublishRecord(current, updated) {
+  return { ...current, ...updated, category_name: updated.category_name || current.category_name || "" };
 }
 
 function viewOnlineSku(link) {
