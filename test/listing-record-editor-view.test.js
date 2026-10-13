@@ -21,6 +21,19 @@ const routeSource = readFileSync(new URL("../frontend/admin/router/index.js", im
 const navigationSource = readFileSync(new URL("../frontend/admin/constants/navigation.js", import.meta.url), "utf8");
 const adminLayoutSource = readFileSync(new URL("../frontend/admin/layouts/AdminLayout.vue", import.meta.url), "utf8");
 
+test("draft batch media uses the current effective image set", () => {
+  const helperSource = publishRecordsSource.match(/function draftListImages\(row = \{\}\) \{[\s\S]*?\n\}\n\nfunction compactDateTime/)?.[0]
+    .replace(/\n\nfunction compactDateTime$/, "");
+  assert.ok(helperSource);
+  const draftListImages = new Function(`${helperSource}\nreturn draftListImages;`)();
+  assert.deepEqual(draftListImages({ effective_images: ["https://example.com/current.jpg"],
+    source_images: ["https://example.com/old.jpg"] }), ["https://example.com/current.jpg"]);
+  assert.deepEqual(draftListImages({ effective_images: [], source_images: ["https://example.com/old.jpg"] }), []);
+  const publishBuilder = listingAutomationServiceSource.match(/async function buildPublishTemplateFromListingDraft[\s\S]*?async function buildCanonicalDraftTemplatePayload/)?.[0] || "";
+  assert.match(publishBuilder, /normalizeImages\(draft\.effective_images \|\| \[\]\)/);
+  assert.doesNotMatch(publishBuilder, /normalizeImages\(draft\.source_images/);
+});
+
 test("listing record editor loads standardized template snapshot before raw request", () => {
   assert.match(source, /function buildTemplateFromDetailRow\(row\)/);
   assert.match(source, /const snapshot = plainClone\(row\.template_snapshot, null\)/);

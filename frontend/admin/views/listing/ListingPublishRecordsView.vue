@@ -1045,6 +1045,7 @@ function normalizeDraftProjectFallback(row = {}) {
 }
 
 function draftListImages(row = {}) {
+  if (Array.isArray(row.effective_images)) return row.effective_images.map((item) => String(item || "").trim()).filter(Boolean);
   const sourceImages = Array.isArray(row.source_images)
     ? row.source_images.map((item) => typeof item === "string" ? item : item?.url || item?.image_url || item?.imageUrl || item?.src || "")
     : [];
