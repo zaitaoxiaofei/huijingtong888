@@ -88,27 +88,27 @@ export async function propagateListingVariantInventory(
         const [onlineRows] = await connection.execute(`SELECT id, offer_id, name, product_id FROM online_products
           WHERE shop_id = ? AND ozon_sku = ? ORDER BY id DESC LIMIT 1`,
         [Number(link.shop_id), String(link.ozon_sku)]);
-        const online = onlineRows[0];
-        if (!online) continue;
+        const online = onlineRows[0] || null;
+        if (!online && !String(link.ozon_sku || "").trim()) continue;
         const [mappingRows] = await connection.execute(`SELECT id, product_id FROM sku_mappings
           WHERE shop_id = ? AND ozon_sku = ? AND (tenant_id = ?${tenantKey === "admin" ? " OR tenant_id IS NULL" : ""})
           LIMIT 1 FOR UPDATE`, [Number(link.shop_id), String(link.ozon_sku), Number(tenantPk)]);
         const mapping = mappingRows[0];
         if ((mapping?.product_id && Number(mapping.product_id) !== inventoryId)
-          || (online.product_id && Number(online.product_id) !== inventoryId)) {
+          || (online?.product_id && Number(online.product_id) !== inventoryId)) {
           throw new Error("同一草稿变体的线上 SKU 已绑定其他库存，自动绑定已停止");
         }
-        await connection.execute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [inventoryId, Number(online.id)]);
+        if (online) await connection.execute("UPDATE online_products SET product_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [inventoryId, Number(online.id)]);
         let mappingId = Number(mapping?.id || 0);
         if (mappingId) {
-          await connection.execute(`UPDATE sku_mappings SET product_id = ?, tenant_id = ?, online_product_id = ?,
+          await connection.execute(`UPDATE sku_mappings SET product_id = ?, tenant_id = ?, online_product_id = COALESCE(?, online_product_id),
             offer_id = ?, display_name = ?, active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-          [inventoryId, Number(tenantPk), Number(online.id), String(online.offer_id || link.offer_id || ""), String(online.name || ""), mappingId]);
+          [inventoryId, Number(tenantPk), online ? Number(online.id) : null, String(online?.offer_id || link.offer_id || ""), String(online?.name || ""), mappingId]);
         } else {
           const [inserted] = await connection.execute(`INSERT INTO sku_mappings
             (shop_id, tenant_id, product_id, online_product_id, ozon_sku, offer_id, display_name, active)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1)`, [Number(link.shop_id), Number(tenantPk), inventoryId,
-            Number(online.id), String(link.ozon_sku), String(online.offer_id || link.offer_id || ""), String(online.name || "")]);
+            online ? Number(online.id) : null, String(link.ozon_sku), String(online?.offer_id || link.offer_id || ""), String(online?.name || "")]);
           mappingId = Number(inserted.insertId);
         }
         await connection.execute(`UPDATE order_items oi JOIN orders o ON o.id = oi.order_id

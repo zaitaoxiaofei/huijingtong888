@@ -9858,7 +9858,8 @@ export async function listingPublishSkuReview(id, session = null) {
       const conflict = new Set(boundIds).size > 1;
       return { ...link,
         inventory_id: conflict ? null : boundIds[0] || null,
-        inventory_status: conflict ? "conflict" : link.online_product_id && link.mapped_product_id
+        inventory_status: conflict ? "conflict" : link.mapped_product_id
+          && (!link.source_product_id || Number(link.mapped_product_id) === Number(link.source_product_id))
           ? "bound" : boundIds.length ? "pending" : link.online_row_id ? "unbound" : "waiting_online"
       };
     }),
@@ -10014,10 +10015,11 @@ async function syncPublishRecordOzonSku(record, tenantId) {
       [tenantPk, Number(record.shop_id), sku]);
       const mappedProductId = Number(bound?.mapping_product_id || 0);
       const onlineProductId = Number(bound?.online_product_id || 0);
+      const sourceProductId = Number(link.source_product_id || 0);
       if ((!mappedProductId || !onlineProductId || mappedProductId === onlineProductId)
-        && (mappedProductId || onlineProductId)) await propagateListingVariantInventory({
+        && (sourceProductId || mappedProductId || onlineProductId)) await propagateListingVariantInventory({
         tenantKey: tenantId, tenantPk, shopId: Number(record.shop_id), ozonSku: sku,
-        offerId: link.offer_id, productId: mappedProductId || onlineProductId
+        offerId: link.offer_id, productId: sourceProductId || mappedProductId || onlineProductId
       });
     }
     if (Number(link.item_index) === 0 && String(link.offer_id || "") === String(record.offer_id || "")) {
@@ -19892,13 +19894,43 @@ export async function bindListingRecordToInventory(body = {}, session = null) {
   const recordId = Number(body.record_id || body.recordId || 0);
   const productId = Number(body.product_id || body.productId || 0);
   const onlineProductId = Number(body.online_product_id || body.onlineProductId || 0);
+  const variantId = String(body.variant_id || body.variantId || "").trim();
   if ((!recordId && !onlineProductId) || !productId) throw new Error("请选择 SKU 和库存产品");
   const product = await row(`SELECT id FROM products WHERE id=? AND active=1 AND (tenant_id=?${defaultTenant ? " OR tenant_id IS NULL" : ""})`, [productId, tenantPk]);
   if (!product) throw new Error("库存产品不存在或已停用");
   if (recordId && !onlineProductId) {
     const recordScope = "COALESCE(NULLIF(tenant_id, ''), 'admin') = ?";
-    const record = await row(`SELECT id FROM listing_publish_records WHERE id=? AND status<>'deleted' AND ${recordScope}`, [recordId, tenantId]);
+    const record = await row(`SELECT id,draft_id FROM listing_publish_records WHERE id=? AND status<>'deleted' AND ${recordScope}`, [recordId, tenantId]);
     if (!record) throw new Error("发布记录不存在或不属于当前企业");
+    if (variantId) {
+      const variantLinks = await all(`SELECT l.id,l.draft_id,l.variant_id,l.shop_id,l.offer_id,l.ozon_sku,l.source_product_id
+        FROM listing_publish_variant_links l
+        JOIN listing_publish_records r ON r.id=l.record_id AND r.status<>'deleted'
+          AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
+        WHERE l.record_id=? AND l.variant_id=? AND l.tenant_id=?
+        ORDER BY l.shop_id,l.record_id,l.id`, [recordId, variantId, tenantId]);
+      if (!variantLinks.length) throw new Error("当前上架记录中找不到该草稿变体，请刷新 SKU 明细后重试");
+      const draftId = Number(record.draft_id || variantLinks[0].draft_id || 0);
+      const siblingLinks = draftId ? await all(`SELECT id,draft_id,variant_id,shop_id,offer_id,ozon_sku,source_product_id
+        FROM listing_publish_variant_links WHERE draft_id=? AND variant_id=? AND tenant_id=?
+        ORDER BY shop_id,record_id,id`, [draftId, variantId, tenantId]) : variantLinks;
+      if (siblingLinks.some((link) => Number(link.source_product_id || 0) && Number(link.source_product_id) !== productId)) {
+        throw new Error("同一草稿变体已绑定到其他库存产品，请先核对现有绑定");
+      }
+      const seed = siblingLinks.find((link) => String(link.ozon_sku || "").trim());
+      let variantBinding = { linked: siblingLinks.length, bound: 0, conflicts: 0, mapping_ids: [] };
+      if (seed) {
+        variantBinding = await propagateListingVariantInventory({
+          tenantKey: tenantId, tenantPk, shopId: Number(seed.shop_id), ozonSku: String(seed.ozon_sku),
+          offerId: String(seed.offer_id || ""), productId
+        });
+        if (variantBinding.conflicts) throw new Error("同一草稿变体的其他店铺 SKU 已绑定不同库存，未覆盖任何关联");
+      } else {
+        await run(`UPDATE listing_publish_variant_links SET source_product_id=?
+          WHERE draft_id=? AND variant_id=? AND tenant_id=?`, [productId, draftId, variantId, tenantId]);
+      }
+      return { ok: true, status: "bound", product_id: productId, variant_id: variantId, variant_binding: variantBinding };
+    }
     const variants = await row("SELECT COUNT(DISTINCT variant_id) AS total FROM listing_publish_variant_links WHERE record_id = ? AND tenant_id = ?", [recordId, tenantId]);
     if (Number(variants?.total || 0) > 1) throw new Error("该上架记录包含多个草稿变体；请在库存绑定页选择具体线上 SKU 后绑定库存");
     await run(`UPDATE listing_publish_records SET source_product_id=?,binding_status='pending',binding_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'deleted' AND ${recordScope}`, [productId, recordId, tenantId]);
