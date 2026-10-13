@@ -9266,7 +9266,7 @@ async function persistListingVariantLineageForRecord(recordId, tenantId) {
     FROM listing_publish_variant_links l
     JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
     LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
-    LEFT JOIN shops shop ON shop.id=l.shop_id
+    JOIN shops shop ON shop.id=l.shop_id AND COALESCE(NULLIF(shop.tenant_id,''),'admin')=l.tenant_id
     LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
       AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
     LEFT JOIN (
@@ -10059,10 +10059,12 @@ async function syncPublishRecordOzonSku(record, tenantId) {
       [sku, productId, ozonStatus.slice(0, 64), Number.isFinite(onlinePrice) && onlinePrice > 0 ? onlinePrice : null, Number(link.id), tenantId]);
     if (link.id && tenantPk) {
       const bound = await row(`SELECT sm.product_id AS mapping_product_id, op.product_id AS online_product_id
-        FROM online_products op LEFT JOIN sku_mappings sm ON sm.shop_id = op.shop_id AND sm.ozon_sku = op.ozon_sku
+        FROM online_products op JOIN shops s ON s.id = op.shop_id
+          AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = ?
+        LEFT JOIN sku_mappings sm ON sm.shop_id = op.shop_id AND sm.ozon_sku = op.ozon_sku
           AND sm.active = 1 AND sm.tenant_id = ?
         WHERE op.shop_id = ? AND op.ozon_sku = ? ORDER BY op.id DESC LIMIT 1`,
-      [tenantPk, Number(record.shop_id), sku]);
+      [tenantId, tenantPk, Number(record.shop_id), sku]);
       const mappedProductId = Number(bound?.mapping_product_id || 0);
       const onlineProductId = Number(bound?.online_product_id || 0);
       const sourceProductId = Number(link.source_product_id || 0);
@@ -10150,9 +10152,12 @@ export async function autoSyncListingPublishRecords(options = {}) {
           l.offer_id, l.inventory_id AS source_product_id, op.id AS online_row_id,
           op.product_id AS online_inventory_id, sm.product_id AS mapped_inventory_id
         FROM listing_variant_lineage l
+        JOIN shops lineage_shop ON lineage_shop.id = l.shop_id
+          AND COALESCE(NULLIF(lineage_shop.tenant_id, ''), 'admin') = l.tenant_id
         LEFT JOIN online_products op ON op.shop_id = l.shop_id
           AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
         LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.active = 1
+          AND COALESCE(NULLIF(sm.tenant_id, ''), 'admin') = l.tenant_id
           AND sm.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
         WHERE l.ozon_sku <> '' AND l.updated_at >= DATE_SUB(NOW(), INTERVAL 60 DAY)
         ORDER BY l.id DESC LIMIT 2000`);
@@ -14794,6 +14799,7 @@ async function initializeListingAutomationSchema() {
         KEY idx_listing_variant_lineage_task (tenant_id, development_task_id, draft_id)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await ensureMysqlIndex("listing_variant_lineage", "idx_listing_variant_lineage_tenant_shop_sku", "(tenant_id, shop_id, ozon_sku)");
     await ensureMysqlColumn("listing_publish_records", "binding_status", "VARCHAR(32) NOT NULL DEFAULT 'pending'");
     await ensureMysqlColumn("listing_publish_records", "binding_source", "VARCHAR(32) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "binding_attempt_count", "INT NOT NULL DEFAULT 0");
@@ -14827,7 +14833,7 @@ async function initializeListingAutomationSchema() {
       FROM listing_publish_variant_links l
       LEFT JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
       LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
-      LEFT JOIN shops shop ON shop.id=l.shop_id
+      JOIN shops shop ON shop.id=l.shop_id AND COALESCE(NULLIF(shop.tenant_id,''),'admin')=l.tenant_id
       LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
         AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
       LEFT JOIN (

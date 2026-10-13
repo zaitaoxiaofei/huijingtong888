@@ -2,16 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { listingVariantInventoryCandidates, propagateListingVariantInventory } from "../src/services/listing-variant-inventory.js";
 
-function fakeDatabase(links) {
+function fakeDatabase(links, { allowedShops = null } = {}) {
   const writes = [];
+  const ownsShop = (shopId) => !allowedShops || allowedShops.includes(Number(shopId));
   const online = new Map([["11:501", { id: 101, offer_id: "a", name: "A", product_id: null }],
     ["12:502", { id: 102, offer_id: "b", name: "B", product_id: null }]]);
   return {
     writes,
-    query: async () => [{ draft_id: 7, variant_id: "variant-blue" }],
+    query: async (sql) => {
+      assert.match(sql, /JOIN shops source_shop/);
+      return ownsShop(11) ? [{ draft_id: 7, variant_id: "variant-blue" }] : [];
+    },
     transaction: async (callback) => callback({
       execute: async (sql, params) => {
-        if (sql.includes("SELECT id, shop_id, ozon_sku, offer_id, inventory_id AS source_product_id")) return [links.map((link) => ({ ...link }))];
+        if (sql.includes("SELECT l.id, l.shop_id, l.ozon_sku, l.offer_id, l.inventory_id AS source_product_id")) {
+          assert.match(sql, /JOIN shops s ON s.id = l.shop_id/);
+          return [links.filter((link) => ownsShop(link.shop_id)).map((link) => ({ ...link }))];
+        }
         if (sql.includes("SELECT l.id FROM listing_variant_lineage")) {
           if (!sql.includes("l.ozon_sku COLLATE utf8mb4_0900_ai_ci")) {
             throw Object.assign(new Error("Illegal mix of collations"), { code: "ER_CANT_AGGREGATE_2COLLATIONS" });
@@ -19,7 +26,10 @@ function fakeDatabase(links) {
           return [[]];
         }
         if (sql.includes("SELECT id FROM shops")) return [[{ id: params[0] }]];
-        if (sql.includes("SELECT id, offer_id, name, product_id FROM online_products")) return [[online.get(`${params[0]}:${params[1]}`)].filter(Boolean)];
+        if (sql.includes("SELECT op.id, op.offer_id, op.name, op.product_id FROM online_products")) {
+          assert.match(sql, /JOIN shops s ON s.id = op.shop_id/);
+          return [[ownsShop(params[1]) ? online.get(`${params[1]}:${params[2]}`) : null].filter(Boolean)];
+        }
         if (sql.includes("SELECT id, product_id FROM sku_mappings")) return [[]];
         if (sql.includes("INSERT INTO sku_mappings")) {
           writes.push({ table: "mapping", shopId: params[0], sku: params[4], productId: params[2] });
@@ -75,4 +85,30 @@ test("reconciliation picks one inventory for unbound sibling shops and skips con
     tenantKey: "admin", draftId: 7, variantId: "blue", shopId: 11,
     ozonSku: "501", offerId: "a", productId: 88
   }]);
+});
+
+test("variant identity stays tenant-scoped even when draft and variant IDs overlap", () => {
+  const rows = [
+    { tenant_id: "10", draft_id: 7, variant_id: "blue", shop_id: 11, ozon_sku: "501", offer_id: "a", source_product_id: null, online_row_id: 101, online_inventory_id: 88, mapped_inventory_id: 88 },
+    { tenant_id: "10", draft_id: 7, variant_id: "blue", shop_id: 12, ozon_sku: "502", offer_id: "a2", source_product_id: null, online_row_id: null, online_inventory_id: null, mapped_inventory_id: null },
+    { tenant_id: "20", draft_id: 7, variant_id: "blue", shop_id: 21, ozon_sku: "601", offer_id: "b", source_product_id: null, online_row_id: 201, online_inventory_id: 99, mapped_inventory_id: 99 },
+    { tenant_id: "20", draft_id: 7, variant_id: "blue", shop_id: 22, ozon_sku: "602", offer_id: "b2", source_product_id: null, online_row_id: null, online_inventory_id: null, mapped_inventory_id: null }
+  ];
+  assert.deepEqual(listingVariantInventoryCandidates(rows), [
+    { tenantKey: "10", draftId: 7, variantId: "blue", shopId: 11, ozonSku: "501", offerId: "a", productId: 88 },
+    { tenantKey: "20", draftId: 7, variantId: "blue", shopId: 21, ozonSku: "601", offerId: "b", productId: 99 }
+  ]);
+});
+
+test("inventory propagation excludes sibling shops owned by another tenant", async () => {
+  const db = fakeDatabase([
+    { id: 1, shop_id: 11, ozon_sku: "501", offer_id: "a", source_product_id: null },
+    { id: 2, shop_id: 12, ozon_sku: "502", offer_id: "b", source_product_id: null }
+  ], { allowedShops: [11] });
+  const result = await propagateListingVariantInventory({
+    tenantKey: "10", tenantPk: 10, shopId: 11, ozonSku: "501", offerId: "a", productId: 88
+  }, db);
+  assert.equal(result.linked, 1);
+  assert.equal(result.bound, 1);
+  assert.deepEqual(db.writes.filter((write) => write.table === "mapping").map((write) => write.shopId), [11]);
 });
