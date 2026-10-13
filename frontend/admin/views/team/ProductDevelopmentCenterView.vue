@@ -517,6 +517,9 @@ async function syncReviewOnlineSkus() {
       const next = new Map(reviewDrafts.value);
       for (const draft of result?.drafts || []) next.set(Number(draft.id), draft);
       reviewDrafts.value = next;
+      const sales = new Map(reviewSalesByTask.value);
+      sales.set(Number(task.id), result?.sales_by_task?.[task.id] || { orders: 0, units: 0 });
+      reviewSalesByTask.value = sales;
     }
     ElMessage.success("在线商品同步完成，已刷新当前任务数据");
   } catch (error) { ElMessage.error(error.message || "在线 SKU 同步启动失败"); }

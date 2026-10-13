@@ -34,6 +34,7 @@ import {
 import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 import { deriveCollectedAttributesFromFacts } from "./listing-collected-attribute-deriver.js";
 import { listingTenantLookup } from "./listing-tenant-scope.js";
+import { buildOrderOutcomeSql } from "./order-outcome.js";
 import {
   isLikelyRemoteImageUrl,
   verifyRemoteImagesReadyForOzon
@@ -10892,12 +10893,15 @@ export async function listingDevelopmentReview(body = {}, session = null) {
   }
   const salesByTask = new Map();
   if (skuPairs.length) {
+    const orderOutcome = buildOrderOutcomeSql("o", "mysql");
+    const effectiveBusinessSale = `(${orderOutcome.effectiveSale} AND NOT ${orderOutcome.afterDeliveryReturn})`;
     const valuesSql = skuPairs.map(() => "SELECT ? AS task_id, ? AS shop_id, CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci AS ozon_sku").join(" UNION ALL ");
     const sales = await all(`
-      SELECT linked.task_id, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      SELECT linked.task_id,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS order_count,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS unit_count
       FROM (${valuesSql}) linked
       JOIN orders o ON o.shop_id = linked.shop_id
-        AND LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
       JOIN order_items oi ON oi.order_id = o.id
         AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = linked.ozon_sku
       GROUP BY linked.task_id
@@ -10954,12 +10958,15 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
   ])).values()];
   const salesBySku = new Map();
   if (skuPairs.length) {
+    const orderOutcome = buildOrderOutcomeSql("o", "mysql");
+    const effectiveBusinessSale = `(${orderOutcome.effectiveSale} AND NOT ${orderOutcome.afterDeliveryReturn})`;
     const conditions = skuPairs.map(() => `(o.shop_id = ? AND CONVERT(oi.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci)`).join(" OR ");
     const salesRows = await all(`
-      SELECT o.shop_id, oi.ozon_sku, COUNT(DISTINCT o.id) AS order_count, COALESCE(SUM(oi.quantity), 0) AS unit_count
+      SELECT o.shop_id, oi.ozon_sku,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS order_count,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS unit_count
       FROM orders o JOIN order_items oi ON oi.order_id = o.id
-      WHERE LOWER(o.status) NOT IN ('cancelled', 'canceled', 'cancel', 'cancelled_by_client', 'canceled_by_client')
-        AND (${conditions})
+      WHERE (${conditions})
       GROUP BY o.shop_id, oi.ozon_sku
     `, skuPairs.flatMap((pair) => [pair.shopId, pair.sku]));
     for (const item of salesRows) salesBySku.set(`${Number(item.shop_id)}|${String(item.ozon_sku || "").trim().toLowerCase()}`, item);

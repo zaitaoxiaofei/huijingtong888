@@ -65,9 +65,12 @@ test("development review returns published shop SKUs and order and unit counts",
   const review = source.match(/async function attachDevelopmentReviewSkus\([\s\S]*?export async function listingDraftDetail/)?.[0] || "";
   assert.match(review, /r\.status IN \('imported', 'published', 'success'\)/);
   assert.match(review, /op\.product_id AS inventory_product_id/);
-  assert.match(review, /COUNT\(DISTINCT o\.id\) AS order_count/);
-  assert.match(review, /SUM\(oi\.quantity\)/);
-  assert.match(review, /LOWER\(o\.status\) NOT IN \('cancelled'/);
+  assert.match(review, /buildOrderOutcomeSql\("o", "mysql"\)/);
+  assert.match(review, /orderOutcome\.effectiveSale/);
+  assert.match(review, /orderOutcome\.afterDeliveryReturn/);
+  assert.match(review, /COUNT\(DISTINCT CASE WHEN \$\{effectiveBusinessSale\} THEN o\.id END\) AS order_count/);
+  assert.match(review, /SUM\(CASE WHEN \$\{effectiveBusinessSale\} THEN oi\.quantity ELSE 0 END\)/);
+  assert.doesNotMatch(review, /LOWER\(o\.status\) NOT IN/);
   assert.match(review, /COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /draft\.published_skus = skusByDraft/);
   assert.match(review, /COALESCE\(NULLIF\(r\.draft_id, 0\), i\.draft_id\) AS draft_id/);
@@ -79,8 +82,9 @@ test("development review returns published shop SKUs and order and unit counts",
   assert.match(review, /inventory\.name AS inventory_product_name/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
   assert.match(reviewEndpoint, /paged: "1", page: "1", pageSize: "100", lightweight: includeVariants \? "0" : "1", includeReviewSkus: "1"/);
-  assert.match(reviewEndpoint, /COUNT\(DISTINCT o\.id\)/);
-  assert.match(reviewEndpoint, /SUM\(oi\.quantity\)/);
+  assert.match(reviewEndpoint, /buildOrderOutcomeSql\("o", "mysql"\)/);
+  assert.match(reviewEndpoint, /COUNT\(DISTINCT CASE WHEN \$\{effectiveBusinessSale\} THEN o\.id END\)/);
+  assert.match(reviewEndpoint, /SUM\(CASE WHEN \$\{effectiveBusinessSale\} THEN oi\.quantity ELSE 0 END\)/);
   assert.match(reviewEndpoint, /sales_by_task/);
   assert.match(routeSource, /POST \/api\/listing\/development-review/);
   assert.match(viewSource, /reviewDraftIds\) params\.set\("ids", reviewDraftIds\)/);
@@ -100,6 +104,7 @@ test("development review loads effective draft images, people, and variant detai
   assert.match(developmentReviewViewSource, /reviewTaskDetailRows\(row\)/);
   assert.match(developmentReviewViewSource, /reviewPersonAvatar\(row,'creator'\)/);
   assert.match(developmentReviewViewSource, /openTaskModelDraftPicker\(row, model\)/);
+  assert.match(developmentReviewViewSource, /sales\.set\(Number\(task\.id\), result\?\.sales_by_task\?\.\[task\.id\]/);
   const taskRows = readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
   assert.match(taskRows, /creator\.name AS created_by_name/);
   assert.match(taskRows, /created_by_avatar_url: row\.created_by_avatar_url/);
