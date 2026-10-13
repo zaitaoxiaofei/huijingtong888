@@ -142,6 +142,7 @@ test("publish records filter by Beijing update days and summarize every variant 
   assert.match(records, /T00:00:00\+08:00/);
   assert.match(records, /AS variant_count/);
   assert.match(records, /AS sku_count/);
-  assert.match(viewSource, /已同步 \$\{row\.sku_count \|\| 0\}\/\$\{row\.variant_count\} 个 SKU/);
-  assert.match(viewSource, /@click="openDrawer\(row\)"/);
+  assert.match(viewSource, /function hasSyncedSku\(row\)/);
+  assert.match(viewSource, /v-if="hasSyncedSku\(row\)" link type="primary" @click="openSkuReview\(row\)"/);
+  assert.match(viewSource, /@click="editInListingAutomation\(row\)"/);
 });

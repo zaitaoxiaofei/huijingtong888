@@ -10914,14 +10914,20 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(categoryPath, `${categoryPath} / %`);
   }
   if (vehicleBrand) {
-    where.push("LOWER(COALESCE(d.vehicle_brand, '')) LIKE ?");
-    params.push(`%${vehicleBrand}%`);
-    countParams.push(`%${vehicleBrand}%`);
+    where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR EXISTS (
+      SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
+      WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin') AND LOWER(vehicle.brand_name) LIKE ?))`);
+    params.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
+    countParams.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
   }
   if (vehicleModel) {
-    where.push("(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ?)");
-    params.push(...Array(4).fill(`%${vehicleModel}%`));
-    countParams.push(...Array(4).fill(`%${vehicleModel}%`));
+    where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ?
+      OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ? OR EXISTS (
+        SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
+        WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin')
+          AND (LOWER(vehicle.brand_name) LIKE ? OR LOWER(vehicle.model_name) LIKE ?)))`);
+    params.push(...Array(6).fill(`%${vehicleModel}%`));
+    countParams.push(...Array(6).fill(`%${vehicleModel}%`));
   }
   if (minPrice !== null && Number.isFinite(minPrice) && minPrice >= 0) {
     where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) >= ?");
@@ -11007,7 +11013,8 @@ export async function listingDrafts(query = {}, session) {
         COALESCE(d.source_images_json, JSON_ARRAY(d.list_image_url)) AS source_images_json,
         d.cost_price, d.sale_price, d.length_cm, d.width_cm, d.height_cm, d.weight_g,
         d.color, d.spec, d.quantity, d.status, d.development_type, d.vehicle_brand, d.vehicle_model, d.vehicle_model_key,
-        d.created_by_person_id, d.created_at, d.updated_at,
+        d.created_by_person_id,
+        CASE WHEN d.created_at IS NULL OR YEAR(d.created_at) < 2000 THEN d.updated_at ELSE d.created_at END AS created_at, d.updated_at,
         d.list_price AS draft_variant_price,
         ${shopCopiesSelect} AS shop_copies_json,
         NULL AS draft_template_price,
@@ -11059,7 +11066,8 @@ export async function listingDrafts(query = {}, session) {
         d.id, d.template_id, d.product_name, d.internal_code, d.source_urls_json, d.source_images_json,
         d.cost_price, d.sale_price, d.length_cm, d.width_cm, d.height_cm, d.weight_g,
         d.color, d.spec, d.quantity, d.status, d.development_type, d.vehicle_brand, d.vehicle_model, d.vehicle_model_key,
-        d.created_by_person_id, d.created_at, d.updated_at,
+        d.created_by_person_id,
+        CASE WHEN d.created_at IS NULL OR YEAR(d.created_at) < 2000 THEN d.updated_at ELSE d.created_at END AS created_at, d.updated_at,
         COALESCE(
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].price.value')), ''),
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].price.price')), ''),
@@ -11117,7 +11125,8 @@ export async function listingDrafts(query = {}, session) {
         d.id, d.template_id, d.product_name, d.internal_code, d.source_urls_json, d.source_images_json,
         d.cost_price, d.sale_price, d.length_cm, d.width_cm, d.height_cm, d.weight_g,
         d.color, d.spec, d.quantity, d.status, d.development_type, d.vehicle_brand, d.vehicle_model, d.vehicle_model_key,
-        d.created_by_person_id, d.created_at, d.updated_at,
+        d.created_by_person_id,
+        CASE WHEN d.created_at IS NULL OR YEAR(d.created_at) < 2000 THEN d.updated_at ELSE d.created_at END AS created_at, d.updated_at,
         COALESCE(
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].primary_image')), ''),
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].cover_image')), ''),
@@ -14454,6 +14463,14 @@ async function initializeListingAutomationSchema() {
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await ensureMysqlColumn("listing_drafts", "tenant_id", "VARCHAR(80) NULL");
+    await mysqlExecute(`CREATE TABLE IF NOT EXISTS listing_draft_vehicle_links (
+      tenant_id VARCHAR(80) NOT NULL,
+      draft_id BIGINT UNSIGNED NOT NULL,
+      vehicle_catalog_id BIGINT UNSIGNED NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (tenant_id, draft_id, vehicle_catalog_id),
+      KEY idx_listing_draft_vehicle_links_vehicle (tenant_id, vehicle_catalog_id, draft_id)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
     await ensureMysqlIndex("listing_drafts", "idx_listing_drafts_tenant_status_updated", "(tenant_id, status, updated_at, id)");
     await ensureMysqlIndex("listing_drafts", "idx_listing_drafts_tenant_template", "(tenant_id, template_id, status, updated_at)");
     await ensureMysqlColumn("listing_drafts", "template_payload_json", "LONGTEXT NULL");
@@ -14991,6 +15008,7 @@ async function ensureListingListReadSchema() {
       mysqlQuery("SELECT 1 FROM listing_drafts LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_category_templates LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_shop_copies LIMIT 0"),
+      mysqlQuery("SELECT 1 FROM listing_draft_vehicle_links LIMIT 0"),
       mysqlQuery("SELECT 1 FROM listing_publish_records LIMIT 0")
     ])
       .then(() => {

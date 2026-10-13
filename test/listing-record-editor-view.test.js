@@ -121,7 +121,8 @@ test("draft inbox keeps primary filters in operator order and exposes creation d
   assert.match(publishRecordsSource, /v-model="state.createdRange"[\s\S]*start-placeholder="创建开始"/);
   assert.match(publishRecordsSource, /v-model="state.vehicleModel"[\s\S]*placeholder="品牌 \/ 车型关键词"/);
   assert.match(publishRecordsSource, /params\.set\("includePublished", "1"\)/);
-  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.product_name, ''\)\) LIKE \?\)"\)/);
+  assert.match(listingAutomationServiceSource, /LOWER\(COALESCE\(d\.product_name, ''\)\) LIKE \? OR EXISTS/);
+  assert.match(listingAutomationServiceSource, /listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle/);
 });
 
 test("quick listing imports a draft as a new draft instead of editing its source", () => {
