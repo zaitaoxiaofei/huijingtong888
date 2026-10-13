@@ -10539,7 +10539,7 @@ export async function listingDrafts(query = {}, session) {
   const status = String(query.status || "").trim().toLowerCase();
   const tenantId = listingTenantId(session);
   const tenantMemberId = Number(session?.tenant?.id || 0);
-  const tenantScope = "COALESCE(d.tenant_id, 'admin') = ?";
+  const tenantScope = "CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci";
   const relatedTenantScope = (alias) => `CONVERT(COALESCE(${alias}.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
   const where = ["COALESCE(d.status, '') <> 'deleted'"];
   where.push(tenantScope);
@@ -10640,7 +10640,7 @@ export async function listingDrafts(query = {}, session) {
     )`);
   }
   const fromSqlJoins = [
-    "LEFT JOIN listing_category_templates t ON t.id = d.template_id AND COALESCE(t.tenant_id, 'admin') = COALESCE(d.tenant_id, 'admin')"
+    `LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}`
   ];
   if (!paged || !lightweight) {
     fromSqlJoins.push(`LEFT JOIN tenant_members creator_members
@@ -10938,7 +10938,7 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
     )
     LEFT JOIN products inventory ON inventory.id = op.product_id
     WHERE COALESCE(NULLIF(r.draft_id, 0), i.draft_id) IN (${placeholders})
-      AND COALESCE(d.tenant_id, 'admin') = ?
+      AND CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
       AND CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
       AND r.status IN ('imported', 'published', 'success')
     ORDER BY d.id, r.shop_id, r.ozon_sku, r.updated_at DESC, r.id DESC

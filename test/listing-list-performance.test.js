@@ -57,6 +57,8 @@ test("development review can fetch linked drafts with authoritative image and pu
   assert.match(drafts, /AS source_product_id/);
   assert.match(drafts, /AS sku_count/);
   assert.match(drafts, /AS publish_success_count/);
+  assert.match(drafts, /const tenantScope = "CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci"/);
+  assert.match(drafts, /listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(drafts, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
 });
@@ -78,6 +80,7 @@ test("development review returns published shop SKUs and order and unit counts",
   assert.match(review, /draft\.publish_records = stores\.filter/);
   assert.doesNotMatch(review, /AND r\.status IN \('imported', 'published', 'success'\)\s+AND TRIM\(COALESCE\(r\.ozon_sku/);
   assert.match(review, /CONVERT\(op\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(r\.offer_id USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
+  assert.match(review, /CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /CONVERT\(COALESCE\(r\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci/);
   assert.match(review, /inventory\.name AS inventory_product_name/);
   const reviewEndpoint = source.match(/export async function listingDevelopmentReview\([\s\S]*?async function attachDevelopmentReviewSkus/)?.[0] || "";
