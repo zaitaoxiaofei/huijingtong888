@@ -8940,10 +8940,7 @@ async function buildPublishTemplateFromListingDraft(draft = {}, session = null) 
     })) {
       if (value > 0 && !numberFromOzonValue(dimensions[key])) dimensions[key] = value;
     }
-    const images = normalizeImages(draft.template_payload.images || editable.images || []);
-    const draftImages = normalizeImages(draft.source_images || []);
-    // A draft's selected images are the operator's latest explicit choice.
-    const finalImages = draftImages.length ? draftImages : images;
+    const finalImages = normalizeImages(draft.effective_images || []);
     return normalizeTemplatePayload({
       ...draft.template_payload,
       title: draft.template_payload.title || editable.title || draft.product_name || "",
@@ -8981,10 +8978,7 @@ async function buildPublishTemplateFromListingDraft(draft = {}, session = null) 
     ...userFacts
   });
   const attributes = normalizeAttributes(userFacts.attributes || manualFacts.attributes || editableFacts.attributes || template.attributes || []);
-  const draftImages = normalizeImages(draft.source_images || []).filter((item) => item.url);
-  const images = normalizeImages(userFacts.images || manualFacts.images || editableFacts.images || template.images || []);
-  // A draft's selected images are the operator's latest explicit choice.
-  const finalImages = draftImages.length ? draftImages : images;
+  const finalImages = normalizeImages(draft.effective_images || []);
   const title = String(draft.product_name || userFacts.title || manualFacts.title || editableFacts.title || template.title || template.template_name || "").trim();
   const description = String(userFacts.description || manualFacts.description || editableFacts.description || template.description || "").trim();
   const price = {
