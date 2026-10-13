@@ -9247,7 +9247,57 @@ async function savePublishVariantLinks({ recordId, draftId, tenantId, shopId, sh
       items.length === 1 ? (Number(sourceProductId || 0) || null) : null
     ]);
   }
+  await persistListingVariantLineageForRecord(recordId, tenantId);
   return true;
+}
+
+async function persistListingVariantLineageForRecord(recordId, tenantId) {
+  await run(`
+    INSERT INTO listing_variant_lineage
+      (tenant_id,draft_id,template_id,variant_id,record_id,publish_task_id,publish_task_item_id,ozon_task_id,
+       inventory_id,development_task_id,development_task_title,shop_id,shop_name,offer_id,ozon_product_id,ozon_sku,
+       ozon_status,price,currency_code,quality_score,quality_checked_at,created_by_person_id,draft_title)
+    SELECT l.tenant_id,l.draft_id,d.template_id,l.variant_id,l.record_id,r.publish_task_id,r.publish_task_item_id,
+      r.task_id,COALESCE(l.source_product_id,r.source_product_id,
+        CASE WHEN op.product_id IS NOT NULL AND sm.product_id IS NOT NULL AND op.product_id<>sm.product_id
+          THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),binding.task_id,COALESCE(task.title,''),
+      l.shop_id,COALESCE(shop.name,''),l.offer_id,l.ozon_product_id,l.ozon_sku,l.ozon_status,l.price,l.currency_code,
+      l.quality_score,l.quality_checked_at,r.created_by_person_id,COALESCE(d.product_name,'')
+    FROM listing_publish_variant_links l
+    JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
+    LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
+    LEFT JOIN shops shop ON shop.id=l.shop_id
+    LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
+      AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
+    LEFT JOIN (
+      SELECT shop_id,COALESCE(NULLIF(tenant_id,''),'admin') AS tenant_key,ozon_sku,MAX(product_id) AS product_id
+      FROM sku_mappings WHERE active=1 AND product_id IS NOT NULL
+      GROUP BY shop_id,COALESCE(NULLIF(tenant_id,''),'admin'),ozon_sku
+      HAVING COUNT(DISTINCT product_id)=1
+    ) sm ON sm.shop_id=l.shop_id AND sm.tenant_key=l.tenant_id AND l.ozon_sku<>''
+      AND CONVERT(sm.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
+    LEFT JOIN listing_draft_bindings binding ON binding.draft_id=l.draft_id AND binding.tenant_id=l.tenant_id
+    LEFT JOIN team_tasks task ON task.id=binding.task_id
+    WHERE l.record_id=? AND l.tenant_id=? AND l.variant_id<>''
+    ON DUPLICATE KEY UPDATE
+      template_id=COALESCE(VALUES(template_id),template_id),record_id=VALUES(record_id),
+      publish_task_id=COALESCE(VALUES(publish_task_id),publish_task_id),
+      publish_task_item_id=COALESCE(VALUES(publish_task_item_id),publish_task_item_id),
+      ozon_task_id=COALESCE(NULLIF(VALUES(ozon_task_id),''),ozon_task_id),
+      inventory_id=CASE WHEN inventory_id IS NULL OR inventory_id=VALUES(inventory_id)
+        THEN VALUES(inventory_id) ELSE inventory_id END,
+      development_task_id=COALESCE(VALUES(development_task_id),development_task_id),
+      development_task_title=COALESCE(NULLIF(VALUES(development_task_title),''),development_task_title),
+      shop_name=COALESCE(NULLIF(shop_name,''),VALUES(shop_name)),
+      ozon_product_id=COALESCE(NULLIF(VALUES(ozon_product_id),''),ozon_product_id),
+      ozon_sku=COALESCE(NULLIF(VALUES(ozon_sku),''),ozon_sku),
+      ozon_status=COALESCE(NULLIF(VALUES(ozon_status),''),ozon_status),
+      price=COALESCE(VALUES(price),price),currency_code=COALESCE(NULLIF(VALUES(currency_code),''),currency_code),
+      quality_score=COALESCE(VALUES(quality_score),quality_score),
+      quality_checked_at=COALESCE(VALUES(quality_checked_at),quality_checked_at),
+      created_by_person_id=COALESCE(VALUES(created_by_person_id),created_by_person_id),
+      draft_title=COALESCE(NULLIF(draft_title,''),VALUES(draft_title))
+  `, [Number(recordId), String(tenantId || 'admin')]);
 }
 
 function buildPublishRecordListSummary(payload = {}) {
@@ -10030,6 +10080,7 @@ async function syncPublishRecordOzonSku(record, tenantId) {
       await autoBindPublishRecordInventory(Number(record.id), tenantId);
     }
   }
+  await persistListingVariantLineageForRecord(record.id, tenantId);
 }
 
 export async function autoSyncListingPublishRecords(options = {}) {
@@ -10096,10 +10147,9 @@ export async function autoSyncListingPublishRecords(options = {}) {
   if (Date.now() - lastVariantInventoryReconciliation >= 60 * 60 * 1000) {
     try {
       const links = await all(`SELECT l.tenant_id, l.draft_id, l.variant_id, l.shop_id, l.ozon_sku,
-          l.offer_id, l.source_product_id, op.id AS online_row_id,
+          l.offer_id, l.inventory_id AS source_product_id, op.id AS online_row_id,
           op.product_id AS online_inventory_id, sm.product_id AS mapped_inventory_id
-        FROM listing_publish_variant_links l
-        JOIN listing_publish_records r ON r.id = l.record_id AND r.status <> 'deleted'
+        FROM listing_variant_lineage l
         LEFT JOIN online_products op ON op.shop_id = l.shop_id
           AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
         LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.active = 1
@@ -14698,6 +14748,52 @@ async function initializeListingAutomationSchema() {
         INDEX idx_listing_variant_online (shop_id, ozon_sku)
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS listing_draft_bindings (
+        tenant_id VARCHAR(80) NOT NULL,
+        draft_id BIGINT UNSIGNED NOT NULL,
+        vehicle_catalog_id BIGINT UNSIGNED NULL,
+        task_id BIGINT UNSIGNED NULL,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (tenant_id,draft_id),
+        KEY idx_listing_draft_bindings_task (task_id),
+        KEY idx_listing_draft_bindings_vehicle (vehicle_catalog_id)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
+    await mysqlExecute(`
+      CREATE TABLE IF NOT EXISTS listing_variant_lineage (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        tenant_id VARCHAR(80) NOT NULL,
+        draft_id BIGINT NOT NULL,
+        template_id BIGINT NULL,
+        variant_id VARCHAR(128) NOT NULL,
+        record_id BIGINT NULL,
+        publish_task_id BIGINT NULL,
+        publish_task_item_id BIGINT NULL,
+        ozon_task_id VARCHAR(128) NOT NULL DEFAULT '',
+        inventory_id BIGINT NULL,
+        development_task_id BIGINT NULL,
+        development_task_title VARCHAR(255) NOT NULL DEFAULT '',
+        shop_id BIGINT NOT NULL,
+        shop_name VARCHAR(255) NOT NULL DEFAULT '',
+        offer_id VARCHAR(128) NOT NULL DEFAULT '',
+        ozon_product_id VARCHAR(128) NOT NULL DEFAULT '',
+        ozon_sku VARCHAR(128) NOT NULL DEFAULT '',
+        ozon_status VARCHAR(64) NOT NULL DEFAULT '',
+        price DECIMAL(18,2) NULL,
+        currency_code VARCHAR(12) NOT NULL DEFAULT '',
+        quality_score DECIMAL(5,2) NULL,
+        quality_checked_at TIMESTAMP NULL,
+        created_by_person_id BIGINT NULL,
+        draft_title VARCHAR(500) NOT NULL DEFAULT '',
+        first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_listing_variant_lineage_sku (tenant_id, draft_id, variant_id, shop_id, offer_id),
+        KEY idx_listing_variant_lineage_inventory (tenant_id, inventory_id, id),
+        KEY idx_listing_variant_lineage_sku (shop_id, ozon_sku),
+        KEY idx_listing_variant_lineage_task (tenant_id, development_task_id, draft_id)
+      ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+    `);
     await ensureMysqlColumn("listing_publish_records", "binding_status", "VARCHAR(32) NOT NULL DEFAULT 'pending'");
     await ensureMysqlColumn("listing_publish_records", "binding_source", "VARCHAR(32) NOT NULL DEFAULT ''");
     await ensureMysqlColumn("listing_publish_records", "binding_attempt_count", "INT NOT NULL DEFAULT 0");
@@ -14717,6 +14813,35 @@ async function initializeListingAutomationSchema() {
     await ensureMysqlIndex("listing_publish_records", "idx_listing_publish_task", "(publish_task_id, id)");
     await ensureMysqlUniqueIndex("listing_publish_records", "uq_listing_publish_record_task_item", "(publish_task_item_id)");
     await ensureMysqlIndex("listing_publish_records", "idx_listing_publish_collector", "(source_collector_sku, status, updated_at)");
+    if (!(await row("SELECT 1 AS found FROM listing_variant_lineage LIMIT 1"))) await mysqlExecute(`
+      INSERT IGNORE INTO listing_variant_lineage
+        (tenant_id,draft_id,template_id,variant_id,record_id,publish_task_id,publish_task_item_id,ozon_task_id,
+         inventory_id,development_task_id,development_task_title,shop_id,shop_name,offer_id,ozon_product_id,ozon_sku,
+         ozon_status,price,currency_code,quality_score,quality_checked_at,created_by_person_id,draft_title)
+      SELECT l.tenant_id,l.draft_id,d.template_id,l.variant_id,l.record_id,r.publish_task_id,r.publish_task_item_id,
+        r.task_id,COALESCE(l.source_product_id,r.source_product_id,
+          CASE WHEN op.product_id IS NOT NULL AND sm.product_id IS NOT NULL AND op.product_id<>sm.product_id
+            THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),binding.task_id,COALESCE(task.title,''),
+        l.shop_id,COALESCE(shop.name,''),l.offer_id,l.ozon_product_id,l.ozon_sku,l.ozon_status,l.price,l.currency_code,
+        l.quality_score,l.quality_checked_at,r.created_by_person_id,COALESCE(d.product_name,'')
+      FROM listing_publish_variant_links l
+      LEFT JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
+      LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
+      LEFT JOIN shops shop ON shop.id=l.shop_id
+      LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
+        AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
+      LEFT JOIN (
+        SELECT shop_id,COALESCE(NULLIF(tenant_id,''),'admin') AS tenant_key,ozon_sku,MAX(product_id) AS product_id
+        FROM sku_mappings WHERE active=1 AND product_id IS NOT NULL
+        GROUP BY shop_id,COALESCE(NULLIF(tenant_id,''),'admin'),ozon_sku
+        HAVING COUNT(DISTINCT product_id)=1
+      ) sm ON sm.shop_id=l.shop_id AND sm.tenant_key=l.tenant_id AND l.ozon_sku<>''
+        AND CONVERT(sm.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
+      LEFT JOIN listing_draft_bindings binding ON binding.draft_id=l.draft_id AND binding.tenant_id=l.tenant_id
+      LEFT JOIN team_tasks task ON task.id=binding.task_id
+      WHERE l.variant_id<>''
+      ORDER BY l.updated_at DESC,l.id DESC
+    `);
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_publish_tasks (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -19303,6 +19428,9 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
         await run(`UPDATE listing_publish_variant_links SET quality_score = ?, quality_checked_at = CURRENT_TIMESTAMP
           WHERE record_id = ? AND tenant_id = ? AND ozon_sku = ?`,
         [rating.score, Number(recordId), tenantId || record.tenant_id || "admin", sku]);
+        await run(`UPDATE listing_variant_lineage SET quality_score = ?, quality_checked_at = CURRENT_TIMESTAMP
+          WHERE tenant_id = ? AND shop_id = ? AND ozon_sku = ?`,
+        [rating.score, tenantId || record.tenant_id || "admin", Number(record.shop_id), sku]);
       }
       if (normalized.length) {
         quality = normalized.sort((a, b) => b.score - a.score)[0];
@@ -19331,6 +19459,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
     Number(recordId),
     ...(tenantId ? [tenantId] : [])
   ]);
+  await persistListingVariantLineageForRecord(recordId, tenantId || record.tenant_id || "admin");
   return quality;
 }
 
@@ -19576,6 +19705,7 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
   ]);
   await run("UPDATE listing_publish_variant_links SET ozon_status = ? WHERE record_id = ?",
     [String(status || "submitted").slice(0, 64), Number(recordId)]);
+  await persistListingVariantLineageForRecord(recordId, tenantId || "admin");
   await autoBindPublishRecordInventory(recordId, tenantId).catch((error) => {
     console.warn("[listing-automation] auto bind inventory failed:", error.message);
   });
@@ -19903,17 +20033,15 @@ export async function bindListingRecordToInventory(body = {}, session = null) {
     const record = await row(`SELECT id,draft_id FROM listing_publish_records WHERE id=? AND status<>'deleted' AND ${recordScope}`, [recordId, tenantId]);
     if (!record) throw new Error("发布记录不存在或不属于当前企业");
     if (variantId) {
-      const variantLinks = await all(`SELECT l.id,l.draft_id,l.variant_id,l.shop_id,l.offer_id,l.ozon_sku,l.source_product_id
-        FROM listing_publish_variant_links l
-        JOIN listing_publish_records r ON r.id=l.record_id AND r.status<>'deleted'
-          AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
-        WHERE l.record_id=? AND l.variant_id=? AND l.tenant_id=?
-        ORDER BY l.shop_id,l.record_id,l.id`, [recordId, variantId, tenantId]);
+      const variantLinks = await all(`SELECT id,draft_id,variant_id,shop_id,offer_id,ozon_sku,inventory_id AS source_product_id
+        FROM listing_variant_lineage
+        WHERE draft_id=? AND variant_id=? AND tenant_id=?
+        ORDER BY shop_id,id`, [Number(record.draft_id), variantId, tenantId]);
       if (!variantLinks.length) throw new Error("当前上架记录中找不到该草稿变体，请刷新 SKU 明细后重试");
       const draftId = Number(record.draft_id || variantLinks[0].draft_id || 0);
-      const siblingLinks = draftId ? await all(`SELECT id,draft_id,variant_id,shop_id,offer_id,ozon_sku,source_product_id
-        FROM listing_publish_variant_links WHERE draft_id=? AND variant_id=? AND tenant_id=?
-        ORDER BY shop_id,record_id,id`, [draftId, variantId, tenantId]) : variantLinks;
+      const siblingLinks = draftId ? await all(`SELECT id,draft_id,variant_id,shop_id,offer_id,ozon_sku,inventory_id AS source_product_id
+        FROM listing_variant_lineage WHERE draft_id=? AND variant_id=? AND tenant_id=?
+        ORDER BY shop_id,id`, [draftId, variantId, tenantId]) : variantLinks;
       if (siblingLinks.some((link) => Number(link.source_product_id || 0) && Number(link.source_product_id) !== productId)) {
         throw new Error("同一草稿变体已绑定到其他库存产品，请先核对现有绑定");
       }
@@ -19926,6 +20054,8 @@ export async function bindListingRecordToInventory(body = {}, session = null) {
         });
         if (variantBinding.conflicts) throw new Error("同一草稿变体的其他店铺 SKU 已绑定不同库存，未覆盖任何关联");
       } else {
+        await run(`UPDATE listing_variant_lineage SET inventory_id=?
+          WHERE draft_id=? AND variant_id=? AND tenant_id=?`, [productId, draftId, variantId, tenantId]);
         await run(`UPDATE listing_publish_variant_links SET source_product_id=?
           WHERE draft_id=? AND variant_id=? AND tenant_id=?`, [productId, draftId, variantId, tenantId]);
       }

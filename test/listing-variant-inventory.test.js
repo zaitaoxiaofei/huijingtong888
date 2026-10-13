@@ -11,8 +11,8 @@ function fakeDatabase(links) {
     query: async () => [{ draft_id: 7, variant_id: "variant-blue" }],
     transaction: async (callback) => callback({
       execute: async (sql, params) => {
-        if (sql.includes("SELECT id, shop_id, ozon_sku, offer_id, source_product_id")) return [links.map((link) => ({ ...link }))];
-        if (sql.includes("SELECT l.id FROM listing_publish_variant_links")) {
+        if (sql.includes("SELECT id, shop_id, ozon_sku, offer_id, inventory_id AS source_product_id")) return [links.map((link) => ({ ...link }))];
+        if (sql.includes("SELECT l.id FROM listing_variant_lineage")) {
           if (!sql.includes("l.ozon_sku COLLATE utf8mb4_0900_ai_ci")) {
             throw Object.assign(new Error("Illegal mix of collations"), { code: "ER_CANT_AGGREGATE_2COLLATIONS" });
           }
@@ -26,6 +26,7 @@ function fakeDatabase(links) {
           return [{ insertId: writes.length }];
         }
         if (sql.includes("UPDATE online_products SET product_id")) writes.push({ table: "online", productId: params[0], onlineId: params[1] });
+        if (sql.includes("SET inventory_id = ?")) writes.push({ table: "lineage", productId: params[0] });
         if (sql.includes("SET source_product_id = ?")) writes.push({ table: "links", productId: params[0] });
         return [{}];
       }
@@ -48,6 +49,7 @@ test("one bound SKU propagates inventory to sibling shops for the same draft var
   assert.deepEqual(db.writes.filter((write) => write.table === "mapping").map((write) => [write.shopId, write.sku, write.productId]),
     [[11, "501", 88], [12, "502", 88]]);
   assert.deepEqual(db.writes.filter((write) => write.table === "links").map((write) => write.productId), [88]);
+  assert.deepEqual(db.writes.filter((write) => write.table === "lineage").map((write) => write.productId), [88]);
 });
 
 test("an existing different inventory blocks sibling propagation", async () => {

@@ -263,6 +263,12 @@ export async function bindListingDrafts(body = {}, session = null) {
       } else {
         await connection.execute(`INSERT INTO listing_draft_bindings (tenant_id, draft_id, task_id) VALUES (?, ?, ?)
           ON DUPLICATE KEY UPDATE task_id = VALUES(task_id), updated_at = CURRENT_TIMESTAMP`, [tenant, id, task.id]);
+        try {
+          await connection.execute(`UPDATE listing_variant_lineage SET development_task_id = ?, development_task_title = ?
+            WHERE tenant_id = ? AND draft_id = ?`, [Number(task.id), String(task.title || ""), tenant, id]);
+        } catch (error) {
+          if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+        }
       }
     }
   });
