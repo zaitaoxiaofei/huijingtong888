@@ -8386,9 +8386,6 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
       validation.ok = true;
       const preparedMedia = preparedMediaByDraftShop[`${draftId}:${Number(shop.id)}`] || [];
       const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia);
-      if (browserPreparedMedia && shop.watermark_path && !preparedPayload.reused) {
-        throw new Error("浏览器未完整准备该草稿与店铺的水印素材，已阻止服务器重复处理");
-      }
       const sourceProductId = await resolveListingSourceProductId(template, validation.payload);
       const textVariantPolicy = normalizeShopTextVariantPolicy(textVariantPolicySource, [shop]);
       const {
@@ -9274,23 +9271,23 @@ async function persistListingVariantLineageForRecord(recordId, tenantId) {
     LEFT JOIN team_tasks task ON task.id=binding.task_id
     WHERE l.record_id=? AND l.tenant_id=? AND l.variant_id<>''
     ON DUPLICATE KEY UPDATE
-      template_id=COALESCE(VALUES(template_id),template_id),record_id=VALUES(record_id),
-      publish_task_id=COALESCE(VALUES(publish_task_id),publish_task_id),
-      publish_task_item_id=COALESCE(VALUES(publish_task_item_id),publish_task_item_id),
-      ozon_task_id=COALESCE(NULLIF(VALUES(ozon_task_id),''),ozon_task_id),
-      inventory_id=CASE WHEN inventory_id IS NULL OR inventory_id=VALUES(inventory_id)
-        THEN VALUES(inventory_id) ELSE inventory_id END,
-      development_task_id=COALESCE(VALUES(development_task_id),development_task_id),
-      development_task_title=COALESCE(NULLIF(VALUES(development_task_title),''),development_task_title),
-      shop_name=COALESCE(NULLIF(shop_name,''),VALUES(shop_name)),
-      ozon_product_id=COALESCE(NULLIF(VALUES(ozon_product_id),''),ozon_product_id),
-      ozon_sku=COALESCE(NULLIF(VALUES(ozon_sku),''),ozon_sku),
-      ozon_status=COALESCE(NULLIF(VALUES(ozon_status),''),ozon_status),
-      price=COALESCE(VALUES(price),price),currency_code=COALESCE(NULLIF(VALUES(currency_code),''),currency_code),
-      quality_score=COALESCE(VALUES(quality_score),quality_score),
-      quality_checked_at=COALESCE(VALUES(quality_checked_at),quality_checked_at),
-      created_by_person_id=COALESCE(VALUES(created_by_person_id),created_by_person_id),
-      draft_title=COALESCE(NULLIF(draft_title,''),VALUES(draft_title))
+      template_id=COALESCE(VALUES(template_id),listing_variant_lineage.template_id),record_id=VALUES(record_id),
+      publish_task_id=COALESCE(VALUES(publish_task_id),listing_variant_lineage.publish_task_id),
+      publish_task_item_id=COALESCE(VALUES(publish_task_item_id),listing_variant_lineage.publish_task_item_id),
+      ozon_task_id=COALESCE(NULLIF(VALUES(ozon_task_id),''),listing_variant_lineage.ozon_task_id),
+      inventory_id=CASE WHEN listing_variant_lineage.inventory_id IS NULL OR listing_variant_lineage.inventory_id=VALUES(inventory_id)
+        THEN VALUES(inventory_id) ELSE listing_variant_lineage.inventory_id END,
+      development_task_id=COALESCE(VALUES(development_task_id),listing_variant_lineage.development_task_id),
+      development_task_title=COALESCE(NULLIF(VALUES(development_task_title),''),listing_variant_lineage.development_task_title),
+      shop_name=COALESCE(NULLIF(listing_variant_lineage.shop_name,''),VALUES(shop_name)),
+      ozon_product_id=COALESCE(NULLIF(VALUES(ozon_product_id),''),listing_variant_lineage.ozon_product_id),
+      ozon_sku=COALESCE(NULLIF(VALUES(ozon_sku),''),listing_variant_lineage.ozon_sku),
+      ozon_status=COALESCE(NULLIF(VALUES(ozon_status),''),listing_variant_lineage.ozon_status),
+      price=COALESCE(VALUES(price),listing_variant_lineage.price),currency_code=COALESCE(NULLIF(VALUES(currency_code),''),listing_variant_lineage.currency_code),
+      quality_score=COALESCE(VALUES(quality_score),listing_variant_lineage.quality_score),
+      quality_checked_at=COALESCE(VALUES(quality_checked_at),listing_variant_lineage.quality_checked_at),
+      created_by_person_id=COALESCE(VALUES(created_by_person_id),listing_variant_lineage.created_by_person_id),
+      draft_title=COALESCE(NULLIF(listing_variant_lineage.draft_title,''),VALUES(draft_title))
   `, [Number(recordId), String(tenantId || 'admin')]);
 }
 

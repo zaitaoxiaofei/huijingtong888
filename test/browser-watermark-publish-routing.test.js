@@ -69,5 +69,16 @@ test("failed and interrupted task retries prepare media in the browser with ten 
   assert.match(publishRecordsSource, /browser_prepared_media: true/);
   assert.match(listingAutomationSource, /LISTING_PUBLISH_RETRY_CONCURRENCY = 10/);
   assert.match(listingAutomationSource, /mapWithConcurrency\(candidates, LISTING_PUBLISH_RETRY_CONCURRENCY/);
-  assert.match(listingAutomationSource, /已阻止服务器重复处理/);
+});
+
+test("task retry falls back to server watermarking when browser media is incomplete", () => {
+  const retrySource = listingAutomationSource.match(/export async function retryListingPublishTask[\s\S]*?async function processListingDraftBatchPublishTask/)?.[0] || "";
+  assert.doesNotMatch(retrySource, /browserPreparedMedia && shop\.watermark_path && !preparedPayload\.reused/);
+  assert.match(retrySource, /skip_publish_watermark: browserPreparedMedia && preparedPayload\.reused/);
+});
+
+test("variant lineage upsert qualifies existing target values against joined draft columns", () => {
+  const lineageSource = listingAutomationSource.match(/async function persistListingVariantLineageForRecord[\s\S]*?function buildPublishRecordListSummary/)?.[0] || "";
+  assert.match(lineageSource, /template_id=COALESCE\(VALUES\(template_id\),listing_variant_lineage\.template_id\)/);
+  assert.match(lineageSource, /inventory_id IS NULL OR listing_variant_lineage\.inventory_id=VALUES\(inventory_id\)/);
 });
