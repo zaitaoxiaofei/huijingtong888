@@ -12488,7 +12488,6 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   const title = String(patch.title || body.product_name || body.productName || editable.title || template.title || template.template_name || "").trim();
   const description = String(patch.description || editable.description || template.description || "").trim();
   assertAiVariantDraftTextReadable({ title, description });
-  assertAiVariantDraftTitleTarget(title, body.manual_facts || body.manualFacts || {}, body.ai_optimization || body.aiOptimization || {});
   const userFacts = sanitizeDraftManualFactsMedia(objectValue(body.manual_facts || body.manualFacts), images, { dropImages: true });
   const inheritedPrice = objectValue(editable.price || template.editable_payload?.price || {});
   const inheritedDimensions = normalizeAiVariantDraftDimensions(editable, template);
@@ -12763,34 +12762,6 @@ export async function createInventoryProductListingDraft(body = {}, session = nu
     productId
   ]);
   return { ...(await listingDraft(draftId, session)), reused: false };
-}
-
-function assertAiVariantDraftTitleTarget(title = "", manualFacts = {}, aiOptimization = {}) {
-  const sourceModel = String(manualFacts.source_variant_value || manualFacts.sourceVariantValue || "").trim();
-  const targetModel = String(manualFacts.target_variant_value || manualFacts.targetVariantValue || aiOptimization.target_variant_value || aiOptimization.targetVariantValue || "").trim();
-  if (!sourceModel || !targetModel || sourceModel.toLowerCase() === targetModel.toLowerCase()) return;
-  const sourceTitle = String(manualFacts.source_product_title || manualFacts.sourceProductTitle || "").trim();
-  const staleModels = [sourceModel, ...listingSourceTitleAliases(sourceTitle, sourceModel)]
-    .filter((model) => model && model.toLowerCase() !== targetModel.toLowerCase());
-  if (!staleModels.some((model) => containsExactListingModel(title, model))) return;
-  const error = new Error(`AI 裂变标题仍包含母车型 ${sourceModel}，目标车型为 ${targetModel}。已停止保存草稿，请重新生成标题。`);
-  error.status = 422;
-  error.code = "ai_variant_title_source_model_leak";
-  throw error;
-}
-
-function listingSourceTitleAliases(sourceTitle = "", sourceModel = "") {
-  const title = String(sourceTitle || "").trim();
-  const source = String(sourceModel || "").trim();
-  if (!title || !source) return [];
-  const escaped = source.split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
-  const match = title.match(new RegExp(`${escaped}((?:\\s*[/|]\\s*[A-Za-z0-9-]+(?:\\s+(?:Pro|Plus|Max))?)*)`, "iu"));
-  return match?.[1] ? [...match[1].matchAll(/[/|]\s*([A-Za-z0-9-]+(?:\s+(?:Pro|Plus|Max))?)/giu)].map((item) => item[1].trim()) : [];
-}
-
-function containsExactListingModel(text = "", model = "") {
-  const escaped = String(model || "").trim().split(/\s+/).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+");
-  return Boolean(escaped && new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "iu").test(String(text || "")));
 }
 
 async function ensureAiVariantDraftVideoMedia(body = {}, patch = {}, session = null) {

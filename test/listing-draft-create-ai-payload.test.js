@@ -67,9 +67,8 @@ test("AI variant lightweight draft rejects missing video and video cover media",
   assert.match(source, /ensureAiVariantDraftVideoMedia\(body, objectValue/);
 });
 
-test("AI variant lightweight draft blocks titles that retain the source vehicle", () => {
-  assert.match(source, /function assertAiVariantDraftTitleTarget/);
-  assert.match(source, /ai_variant_title_source_model_leak/);
-  assert.match(source, /标题仍包含母车型/);
-  assert.match(source, /containsExactListingModel/);
+test("AI variant lightweight draft does not block saving titles that retain the source vehicle", () => {
+  assert.doesNotMatch(source, /assertAiVariantDraftTitleTarget/);
+  assert.doesNotMatch(source, /ai_variant_title_source_model_leak/);
+  assert.doesNotMatch(source, /标题仍包含母车型/);
 });
