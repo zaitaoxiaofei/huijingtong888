@@ -189,11 +189,11 @@ const procurementUrgencyOptions = [
 ];
 const orderProcurementModeOptions = [
   { value: "shortage_purchase", label: "缺货采购", description: "本地没有可用现货，采购后进入在途，到货后登记实收。" },
-  { value: "inventory_update", label: "更新实存", description: "仓库已经盘清实物，填写本地实际剩余数量和当前库存总货值；不生成采购在途。" },
+  { value: "inventory_update", label: "更新仓库实物", description: "仓库已经盘清实物，填写当前在仓实物总数（包含待发订单）和库存总货值；不生成采购在途。" },
   { value: "historical_debt_backfill", label: "历史采购补记", description: "只用于已经真实出库、运输或签收的历史欠账；当前待备货订单不能使用。", disabled: true }
 ];
 function orderProcurementModeDescription(mode) { return orderProcurementModeOptions.find((item) => item.value === mode)?.description || orderProcurementModeOptions[0].description; }
-function orderProcurementQuantityLabel(mode) { return mode === "inventory_update" ? "实存数量" : "采购数量"; }
+function orderProcurementQuantityLabel(mode) { return mode === "inventory_update" ? "仓库实物总数" : "采购数量"; }
 function orderProcurementAmountLabel(mode) { return mode === "inventory_update" ? "库存总货值" : "货款"; }
 
 const statusTabLabelMap = computed(() => new Map((vm.statusTabs || []).map((item) => [item.value, item.label])));
@@ -2152,7 +2152,7 @@ async function validateProcurementPurchaseInputs() {
     && ((Number(product.purchase_quantity) === 0 && Number(product.purchase_amount) !== 0)
       || (Number(product.purchase_quantity) > 0 && !(Number(product.purchase_amount) > 0))));
   if (invalidInventoryUpdate) {
-    ElMessage.warning(`「${invalidInventoryUpdate.product_name || invalidInventoryUpdate.product_code}」请同时填写本地实际剩余数量和当前库存总货值`);
+    ElMessage.warning(`「${invalidInventoryUpdate.product_name || invalidInventoryUpdate.product_code}」请同时填写当前在仓实物总数（包含待发订单）和库存总货值`);
     return false;
   }
   const abnormalProducts = orderProcurementProducts.value.filter((product) => (
@@ -2233,7 +2233,7 @@ async function submitOrderProcurement() {
     const markedCount = Number(result?.marked_count || 0);
     const inventoryUpdatedCount = Number(result?.inventory_updated_count || 0);
     if (inventoryUpdatedCount > 0 && !createdCount) {
-      ElMessage.success(`已更新 ${inventoryUpdatedCount} 个库存商品的实存数量与总货值，请按最新库存重新判断是否采购`);
+      ElMessage.success(`已更新 ${inventoryUpdatedCount} 个库存商品的仓库实物总数与总货值，请按最新可用库存重新判断是否采购`);
     } else if (markedCount > 0) {
       const orderNo = String(result?.purchase_order_no || "").trim();
       ElMessage.success(`采购已提交：${stockCount} 条库存可满足，${createdCount} 条已完成采购${orderNo ? `（${orderNo}）` : ""}`);

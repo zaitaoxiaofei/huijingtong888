@@ -68,6 +68,32 @@ function countedStock(snapshot, value) {
     stocktake_delta: counted - (snapshot.physical_estimate ?? snapshot.local_stock) };
 }
 
+function stocktakeCount(snapshot, body) {
+  const type = body.stocktake_type || 'physical';
+  if (!['physical', 'available'].includes(type)) throw new Error('请选择更新类型（stocktake_type）：仓库实物数或剩余可用数');
+  if (type === 'physical') {
+    return { ...countedStock(snapshot, body.counted_quantity), stocktake_type: type,
+      open_order_demand: Number(snapshot.open_order_demand || 0),
+      order_reserved: Number(snapshot.current_stock_reserved || 0),
+      fbp_reserved: Number(snapshot.fbp_reserved || 0),
+      available_before: Number(snapshot.available_estimate || 0),
+      available_after: Math.max(0, Number(body.counted_quantity) - Number(snapshot.open_order_demand || 0) - Number(snapshot.fbp_reserved || 0)) };
+  }
+  const available = integer(body.available_quantity, '剩余可用数量（available_quantity）', 0);
+  const physicalBefore = Number(snapshot.physical_estimate ?? snapshot.local_stock ?? 0);
+  if (physicalBefore < 0) throw new Error('当前仓库实物推算为负数，请先按实物数盘点核对库存流水');
+  const occupied = Number(snapshot.open_order_demand || 0) + Number(snapshot.fbp_reserved || 0);
+  // Zero availability cannot reveal how many of the outstanding orders have
+  // physical goods. Preserve an existing shortage instead of inventing stock.
+  const counted = available === 0 ? Math.min(physicalBefore, occupied) : occupied + available;
+  return { counted_quantity: counted, physical_before: physicalBefore,
+    stocktake_delta: counted - physicalBefore, stocktake_type: type,
+    open_order_demand: Number(snapshot.open_order_demand || 0),
+    order_reserved: Number(snapshot.current_stock_reserved || 0),
+    fbp_reserved: Number(snapshot.fbp_reserved || 0),
+    available_before: Number(snapshot.available_estimate || 0), available_after: available };
+}
+
 function historicalPurchaseTime(value) {
   const date = String(value || '');
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$/.test(date) || !Number.isFinite(Date.parse(date)) || Date.parse(date) > Date.now()) throw new Error('请填写有效的采购／补录日期（purchased_at，北京时间），不能晚于当前时间');
@@ -78,7 +104,7 @@ function historicalPurchaseTime(value) {
 export function planLedgerAction(snapshot, body) {
   if (body.revision !== snapshot.revision) throw Object.assign(new Error('采购、订单或库存已变化，请刷新对账后重新提交'), { status: 409 });
   const reason = body.action_type === 'stocktake' && body.reason_code
-    ? validateInventoryAdjustment(body.reason_code, body.reason_note, countedStock(snapshot, body.counted_quantity).stocktake_delta)
+    ? validateInventoryAdjustment(body.reason_code, body.reason_note, stocktakeCount(snapshot, body).stocktake_delta)
     : String(body.reason || '').trim();
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
@@ -221,7 +247,7 @@ export function planLedgerAction(snapshot, body) {
     result.extra_sources = conversionSources(body, Number(snapshot.product.id));
   } else if (['damage', 'loss', 'stocktake'].includes(type)) {
     if (type === 'stocktake') {
-      Object.assign(result, countedStock(snapshot, body.counted_quantity));
+      Object.assign(result, stocktakeCount(snapshot, body));
       if (body.counted_amount !== undefined) {
         result.counted_amount = money(body.counted_amount);
         if (!result.counted_quantity && result.counted_amount) throw new Error('本地实存为 0 时，当前库存总货值必须填写 0');
@@ -299,9 +325,11 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
   const openDeducted = sum(orders.filter(row => row.needs_fulfillment), row => row.outbound_quantity);
   const physical = localStock + openDeducted;
   const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
+  const openOrderDemand = sum(orders.filter(row => row.needs_fulfillment), row => row.quantity);
   return {
     product, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
-    current_stock_reserved: reserved, fbp_reserved: fbpReserved, available_estimate: Math.max(0, physical - reserved - fbpReserved),
+    current_stock_reserved: reserved, open_order_demand: openOrderDemand,
+    fbp_reserved: fbpReserved, available_estimate: Math.max(0, physical - openOrderDemand - fbpReserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
     received_quantity: sum(purchases, row => row.received_quantity),
     incoming_quantity: sum(purchases, row => row.pending_quantity),
@@ -318,14 +346,18 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
 // Hooks keep all writes on the same transaction, including existing receipt/cost machinery.
 export function createProcurementLedgerService(hooks) {
   const { query, transaction, coverage, postMovement, receive, recordCost, refreshPurchase, requirePerson, prepare } = hooks;
-  async function snapshot(productId, run = query) {
+  async function snapshot(productId, run = query, tenantId = 'admin') {
+    if (hooks.assertProductAccess) await hooks.assertProductAccess(productId, tenantId, run);
+    const tenantScoped = String(tenantId) !== 'admin';
+    const movementTenantSql = tenantScoped ? ' AND tenant_id = ?' : '';
+    const movementArgs = tenantScoped ? [productId, Number(tenantId)] : [productId];
     const products = await run(`SELECT id, name, code, inventory_number, stock_unit, purchase_cost,
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
-      FROM products WHERE id = ? AND active = 1`, [productId]);
+      FROM products WHERE id = ? AND active = 1${tenantScoped ? ' AND tenant_id = ?' : ''}`, movementArgs);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
     const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
       MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
-      WHERE product_id = ? AND status = 'posted' GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, [productId]);
+      WHERE product_id = ? AND status = 'posted'${movementTenantSql} GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, movementArgs);
     const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at, person.name AS person_name,
       COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity
       FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id
@@ -335,13 +367,13 @@ export function createProcurementLedgerService(hooks) {
         SUM(CASE WHEN status = 'pending_arrival' THEN quantity ELSE 0 END) AS pending_quantity
         FROM inbound_records WHERE product_id = ? GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
       WHERE poi.product_id = ? AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
-    const projection = await coverage(run, productId);
+    const projection = await coverage(run, productId, tenantId);
     const orders = [...projection.values()].filter(order => order.stock_location !== 'FBP').flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
         posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
     const outbound = await run(`SELECT related_order_item_id AS order_item_id, -SUM(quantity_delta) AS quantity
       FROM inventory_movements WHERE product_id = ? AND status = 'posted' AND source_type = 'order_outbound'
-      AND COALESCE(stock_location, 'LOCAL') != 'FBP' GROUP BY related_order_item_id`, [productId]);
+      AND COALESCE(stock_location, 'LOCAL') != 'FBP'${movementTenantSql} GROUP BY related_order_item_id`, movementArgs);
     for (const order of orders) order.outbound_quantity = Number(outbound.find(row => Number(row.order_item_id) === order.order_item_id)?.quantity || 0);
     const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
     const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);
@@ -350,7 +382,7 @@ export function createProcurementLedgerService(hooks) {
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
-      AND COALESCE(stock_location, 'LOCAL') != 'FBP' GROUP BY source_ref`, [productId]);
+      AND COALESCE(stock_location, 'LOCAL') != 'FBP'${movementTenantSql} GROUP BY source_ref`, movementArgs);
     for (const batch of value.batches) batch.local_posted_quantity = Number(posted.find(row => row.source_ref === `inbound_${batch.id}`)?.quantity || 0);
     value.requests = await run(`SELECT * FROM procurement_requests WHERE product_id = ? AND purchase_order_id IS NOT NULL AND status != 'cancelled' ORDER BY id`, [productId]);
     value.allocations = await run(`SELECT * FROM procurement_order_allocations WHERE product_id = ? AND status = 'allocated' ORDER BY id`, [productId]);
@@ -367,10 +399,11 @@ export function createProcurementLedgerService(hooks) {
       ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
-  async function read(body) {
+  async function read(body, tenantId = 'admin') {
     await prepare();
     const id = integer(body.product_id || body.productId, '库存商品 ID');
-    const [value, fbp] = await Promise.all([snapshot(id), hooks.fbpStocks && body.include_fbp !== false ? hooks.fbpStocks(id) : null]);
+    const value = await snapshot(id, query, tenantId);
+    const fbp = hooks.fbpStocks && body.include_fbp !== false ? await hooks.fbpStocks(id) : null;
     if (fbp) value.fbp_inventory = fbp;
     value.source_inference = inferProcurementSources(value);
     return value;
@@ -388,7 +421,7 @@ export function createProcurementLedgerService(hooks) {
       WHERE ${where} ORDER BY t.id ASC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     return { rows, total: Number(count?.total || 0), page, pageSize };
   }
-  async function apply(body, personId, existingConnection = null) {
+  async function apply(body, personId, existingConnection = null, tenantId = 'admin') {
     if (!existingConnection) await prepare();
     const productId = integer(body.product_id, '库存商品 ID');
     const requestKey = String(body.request_key || '');
@@ -399,6 +432,7 @@ export function createProcurementLedgerService(hooks) {
       const actor = await requirePerson(personId, connection);
       const extraSources = conversionSources(body, productId);
       const ids = [...new Set([productId, Number(body.target_product_id || 0), ...extraSources.map(row => row.product_id)].filter(Boolean))].sort((a, b) => a - b);
+      for (const id of ids) if (hooks.assertProductAccess) await hooks.assertProductAccess(id, tenantId, run);
       for (const id of ids) await run('SELECT id FROM products WHERE id = ? FOR UPDATE', [id]);
       const previous = await run('SELECT * FROM procurement_ledger_actions WHERE request_key = ? FOR UPDATE', [requestKey]);
       if (previous[0]) {
@@ -415,15 +449,15 @@ export function createProcurementLedgerService(hooks) {
       await run('SELECT id FROM purchase_order_items WHERE product_id = ? FOR UPDATE', [productId]);
       await run('SELECT id FROM procurement_requests WHERE product_id = ? FOR UPDATE', [productId]);
       await run('SELECT id FROM procurement_order_allocations WHERE product_id = ? FOR UPDATE', [productId]);
-      const before = await snapshot(productId, run);
+      const before = await snapshot(productId, run, tenantId);
       const plan = planLedgerAction(before, body);
       if (plan.allocations?.length) {
         const orderItems = plan.allocations.map(row => row.order_item_id);
         await run(`SELECT oi.id FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE oi.id IN (${orderItems.map(() => '?').join(',')}) FOR UPDATE`, orderItems);
-        planLedgerAction(await snapshot(productId, run), body);
+        planLedgerAction(await snapshot(productId, run, tenantId), body);
       }
       if (plan.target_product_id) {
-        const target = await snapshot(plan.target_product_id, run);
+        const target = await snapshot(plan.target_product_id, run, tenantId);
         if (body.target_revision !== target.revision) throw new Error('另一商品的库存已变化，请重新选择并核对');
         if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('实际替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
         const components = await run(`SELECT product_id FROM product_components WHERE product_id IN (${ids.map(() => '?').join(',')}) LIMIT 1`, ids);
@@ -431,7 +465,7 @@ export function createProcurementLedgerService(hooks) {
       }
       const extraSnapshots = [];
       for (const source of extraSources) {
-        const stock = await snapshot(source.product_id, run);
+        const stock = await snapshot(source.product_id, run, tenantId);
         if (source.revision !== stock.revision) throw new Error(`配件 ${stock.product.name} 库存已变化，请重新选择配件并预览`);
         if (source.quantity > stock.available_estimate) throw new Error(`配件 ${stock.product.name} 未占用现货不足，不能借用订单或 FBP 占用`);
         extraSnapshots.push(stock);
@@ -548,6 +582,9 @@ export function createProcurementLedgerService(hooks) {
         ...(plan.type === 'set_priority' ? { order_item_id: plan.order_item_id, priority: plan.priority } : {}),
         ...(plan.counted_quantity !== undefined ? { counted_quantity: plan.counted_quantity, physical_before: plan.physical_before,
           physical_after: plan.counted_quantity, stocktake_delta: plan.stocktake_delta,
+          ...(plan.stocktake_type ? { stocktake_type: plan.stocktake_type, available_before: plan.available_before,
+            available_after: plan.available_after, open_order_demand: plan.open_order_demand,
+            order_reserved: plan.order_reserved, fbp_reserved: plan.fbp_reserved } : {}),
           ...(plan.counted_amount !== undefined ? { counted_amount: plan.counted_amount, counted_unit_cost: plan.counted_unit_cost } : {}) } : {}),
         local_before: before.local_stock, local_after: before.local_stock + plan.local_delta,
         local_delta: plan.local_delta, target_product_id: plan.target_product_id || null, target_delta: plan.target_delta };
@@ -637,9 +674,9 @@ export function createProcurementLedgerService(hooks) {
       stage: 'purchased_revision', purchase_order_id: Number(item.purchase_order_id), purchase_order_item_id: Number(item.id),
       quantity: plan.quantity, amount: plan.amount, shipping_amount: plan.shipping_amount, person_id: actor, anomaly_reason: note });
   }
-  async function preview(body) {
+  async function preview(body, tenantId = 'admin') {
     await prepare();
-    const before = await snapshot(integer(body.product_id, '库存商品 ID'));
+    const before = await snapshot(integer(body.product_id, '库存商品 ID'), query, tenantId);
     // The editor supplies the values it loaded; preview obtains one fresh revision.
     // Apply still requires that exact revision inside its transaction.
     let submitted = body;
@@ -655,7 +692,7 @@ export function createProcurementLedgerService(hooks) {
     const plan = planLedgerAction(before, submitted);
     const extraChanges = [];
     for (const source of plan.extra_sources || []) {
-      const stock = await snapshot(source.product_id);
+      const stock = await snapshot(source.product_id, query, tenantId);
       if (source.revision !== stock.revision) throw new Error(`配件 ${stock.product.name} 已变化，请重新选择并预览`);
       if (source.quantity > stock.available_estimate) throw new Error(`配件 ${stock.product.name} 未占用现货不足`);
       extraChanges.push({ product_id: source.product_id, product_name: stock.product.name, quantity: source.quantity, unit_cost: Number(stock.product.purchase_cost || 0),
@@ -663,7 +700,7 @@ export function createProcurementLedgerService(hooks) {
     }
     let target = null;
     if (plan.target_product_id) {
-      target = await snapshot(plan.target_product_id);
+      target = await snapshot(plan.target_product_id, query, tenantId);
       if (body.target_revision !== target.revision) throw new Error('另一商品已变化，请重新选择');
       if (plan.target_delta < 0 && -plan.target_delta > target.available_estimate) throw new Error('替代来源商品未占用现货不足，请先核对订单及 FBP 占用');
     }

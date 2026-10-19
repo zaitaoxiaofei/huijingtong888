@@ -9,6 +9,7 @@ import { propagateListingVariantInventory } from "./listing-variant-inventory.js
 import { loadOrderFbpStocks, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
 import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
+import { isOrderInTransport as isOrderInTransportMysql } from "./order-query-facts.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
 import { PDFDocument } from "pdf-lib";
@@ -2745,18 +2746,32 @@ async function orderProcurementCoverageMysql(options = {}) {
   return await loadOrderProcurementCoverage(mysqlQuery, openSql, options);
 }
 
-export async function productInventoryAvailabilityMysql(query = {}) {
+export async function productInventoryAvailabilityMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const values = String(query.productIds ?? query.product_ids ?? query.productId ?? "").split(",").map((value) => value.trim());
   const productIds = [...new Set(values.map(Number))];
   if (!values[0] || productIds.length > 200 || productIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
     throw new Error("请提供 1 至 200 个有效的库存商品 ID（productIds）");
   }
-  const coverage = await orderProcurementCoverageMysql({ productIds });
+  const tenantScoped = String(tenantId) !== "admin";
+  let tenantPk = null;
+  if (tenantScoped) {
+    const requiredTenantColumns = [["products", "tenant_id"], ["shops", "tenant_id"],
+      ["sku_mappings", "tenant_id"], ["product_components", "tenant_id"]];
+    const columnsReady = (await Promise.all(requiredTenantColumns.map(([table, column]) => mysqlSchemaColumnExists(table, column)))).every(Boolean);
+    if (!columnsReady || !await inventoryMovementTenantColumnExistsMysql()) {
+      throw Object.assign(new Error("企业库存数量尚未完成租户字段迁移，请联系管理员"), { statusCode: 503 });
+    }
+    tenantPk = await resolveShopTenantIdMysql(tenantId);
+    const owned = await mysqlQuery(`SELECT id FROM products WHERE tenant_id = ? AND active = 1 AND id IN (${productIds.map(() => "?").join(",")})`, [tenantPk, ...productIds]);
+    if (owned.length !== productIds.length) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+  }
+  const coverage = await orderProcurementCoverageMysql(tenantScoped ? { productIds, tenantId: tenantPk } : { productIds });
   return {
     source: "order_procurement_coverage",
     rows: productIds.map((productId) => coverage.product_availability?.get(productId) || {
       product_id: productId, local_stock: 0, local_available: 0,
+      physical_stock: 0, available_stock: 0, open_order_demand_qty: 0,
       order_reserved_qty: 0, fbp_reserved_qty: 0,
       pending_procurement_qty: 0, pending_procurement_available_qty: 0,
       inventory_needs_review: false
@@ -17695,14 +17710,6 @@ async function saveRawPostingMysql(shop, posting) {
   ]);
 }
 
-function isOrderInTransportMysql(order = {}) {
-  const state = [order.status, order.logistics_status, order.tracking_stage, order.substatus]
-    .map((value) => String(value || "").toLowerCase())
-    .join(" ");
-  if (!state || /(cancel|return|reject|awaiting_packaging|awaiting_deliver)/.test(state)) return false;
-  return /(deliver|transport|transferr|carriage|shipped|sent_by_seller|pickup|posting_transferred)/.test(state);
-}
-
 async function historicalPurchasedUnitCostMysql(productId) {
   const row = await mysqlQueryOne(`
     SELECT SUM(poi.amount) / NULLIF(SUM(COALESCE(NULLIF(poi.actual_quantity, 0), poi.requested_quantity)), 0) AS unit_cost
@@ -32068,7 +32075,16 @@ export async function deleteSkuMappingMysql(id) {
 const procurementLedgerService = createProcurementLedgerService({
   query: mysqlQuery, transaction: withMysqlTransaction,
   fbpStocks: productId => loadProductFbpStocks(mysqlQuery, productId),
-  coverage: (query, productId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId, includeTrace: true }),
+  coverage: (query, productId, tenantId) => loadOrderProcurementCoverage(query, '', { fresh: true, productId, includeTrace: true, tenantId }),
+  assertProductAccess: async (productId, tenantId, query) => {
+    if (String(tenantId) === "admin") return;
+    if (!await mysqlSchemaColumnExists("products", "tenant_id") || !await inventoryMovementTenantColumnExistsMysql()) {
+      throw Object.assign(new Error("企业库存流水尚未完成租户字段迁移，请联系管理员"), { statusCode: 503 });
+    }
+    const tenantPk = await resolveShopTenantIdMysql(tenantId);
+    const rows = await query("SELECT id FROM products WHERE id = ? AND tenant_id = ? AND active = 1", [productId, tenantPk]);
+    if (!rows.length) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+  },
   postMovement: postInventoryMysql, receive: applyInboundRecordUpdateMysql,
   recordCost: recordPurchaseCostVersionMysql, refreshPurchase: refreshPurchaseOrderStatusMysql,
   requirePerson: requireSessionPersonIdMysql, invalidate: invalidateOrderProcurementCoverage,
@@ -32082,8 +32098,8 @@ const procurementLedgerService = createProcurementLedgerService({
     await ensurePurchaseCostVersionSchemaMysql();
   }
 });
-export const procurementLedgerMysql = (query) => procurementLedgerService.read(query);
+export const procurementLedgerMysql = (query, tenantId = "admin") => procurementLedgerService.read(query, tenantId);
 export const procurementStockCostTasksMysql = (query) => procurementLedgerService.costTasks(query);
-export const applyProcurementLedgerMysql = (body, personId) => procurementLedgerService.apply(body, personId);
+export const applyProcurementLedgerMysql = (body, personId, tenantId = "admin") => procurementLedgerService.apply(body, personId, null, tenantId);
 
-export const previewProcurementLedgerMysql = (body) => procurementLedgerService.preview(body);
+export const previewProcurementLedgerMysql = (body, tenantId = "admin") => procurementLedgerService.preview(body, tenantId);

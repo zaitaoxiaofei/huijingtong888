@@ -83,7 +83,15 @@ const purchaseRows = computed(() => [...(data.value?.purchases || [])]
   .map(row => purchaseUsage.value.get(Number(row.id)) || row)
   .filter(row => purchaseFilter.value !== 'incoming' || Number(row.pending_quantity) > 0)
   .sort((a, b) => String(b.purchased_at || '').localeCompare(String(a.purchased_at || '')) || Number(b.id) - Number(a.id)));
-const countDelta = computed(() => form.counted_quantity == null ? null : Number(form.counted_quantity) - Number(data.value?.physical_estimate || 0));
+const stocktakeTargetPhysical = computed(() => {
+  if (form.stocktake_type === 'physical' && form.counted_quantity != null) return Number(form.counted_quantity);
+  if (form.stocktake_type !== 'available' || form.available_quantity == null) return null;
+  const occupied = Number(data.value?.open_order_demand || 0) + Number(data.value?.fbp_reserved || 0);
+  return Number(form.available_quantity) === 0
+    ? Math.min(Number(data.value?.physical_estimate || 0), occupied)
+    : occupied + Number(form.available_quantity);
+});
+const countDelta = computed(() => stocktakeTargetPhysical.value == null ? null : stocktakeTargetPhysical.value - Number(data.value?.physical_estimate || 0));
 const countReasons = computed(() => inventoryAdjustmentReasons.filter(reason => reason.direction === 'any'
   || (reason.direction === 'decrease' && countDelta.value < 0)
   || (reason.direction === 'increase' && countDelta.value >= 0)
@@ -233,7 +241,8 @@ function edit(type, row = null) {
   Object.keys(form).forEach(key => delete form[key]);
   Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
     order_item_id: row?.order_item_id || null, reason: '', reason_code: '', reason_note: '', amount: 0, shipping_amount: 0, purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`,
-    inventory_effect: 'already_accounted', target_product_id: null, target_quantity: 1, counted_quantity: undefined, correct_received: false,
+    inventory_effect: 'already_accounted', target_product_id: null, target_quantity: 1,
+    stocktake_type: '', counted_quantity: undefined, available_quantity: undefined, correct_received: false,
     extra_sources: [], priority: row?.allocation_priority ? 0 : 1 });
   if (type === 'revise_purchase') Object.assign(form, { purchase_item_id: row.id, quantity: Number(row.actual_quantity), amount: Number(row.amount), shipping_amount: Number(row.shipping_amount) });
   preview.value = null; submission.value = null; target.value = null; formVisible.value = true;
@@ -241,7 +250,9 @@ function edit(type, row = null) {
 watch(form, () => { preview.value = null; submission.value = null; });
 async function makePreview() {
   if (form.action_type === 'stocktake') {
-    if (form.counted_quantity == null) return ElMessage.warning('请输入实际清点数量；没有实物请填 0');
+    if (!form.stocktake_type) return ElMessage.warning('请先选择更新实物数还是剩余可用数');
+    if (form.stocktake_type === 'physical' && form.counted_quantity == null) return ElMessage.warning('请输入仓库实物数量；没有实物请填 0');
+    if (form.stocktake_type === 'available' && form.available_quantity == null) return ElMessage.warning('请输入剩余可用数量；没有可用库存请填 0');
     try { validateInventoryAdjustment(form.reason_code, form.reason_note, countDelta.value); }
     catch (error) { return ElMessage.warning(error.message); }
   }
@@ -257,12 +268,9 @@ async function makePreview() {
   finally { saving.value = false; }
 }
 async function confirmStock() {
-  await makePreview();
-  if (!submission.value) return;
+  if (!submission.value || !preview.value) return;
   try {
-    const occupied = Number(data.value.current_stock_reserved || 0) + Number(data.value.fbp_reserved || 0);
-    const warning = Number(form.counted_quantity) < occupied ? ` 当前订单和 FBP 已占用 ${occupied} 件，更新后库存不足，需复核分配和备货。` : '';
-    await ElMessageBox.confirm(`本地库存 ${preview.value.physical_before} → ${preview.value.physical_after}。原因：${validateInventoryAdjustment(form.reason_code, form.reason_note, countDelta.value)}。保存后重新计算订单覆盖；采购在途不变。${warning}`, '确认更新本地库存', { confirmButtonText: '确认更新', cancelButtonText: '继续填写', type: 'warning' });
+    await ElMessageBox.confirm(`仓库实物 ${preview.value.physical_before} → ${preview.value.physical_after}，剩余可用 ${preview.value.available_before} → ${preview.value.available_after}。待发订单需求 ${preview.value.open_order_demand}，FBP 占用 ${preview.value.fbp_reserved}；库存流水将${preview.value.stocktake_delta >= 0 ? '增加' : '减少'} ${Math.abs(preview.value.stocktake_delta)} 件。原因：${preview.value.reason}。保存后重新计算订单覆盖；采购在途不变。`, '再次确认库存更新', { confirmButtonText: '确认更新', cancelButtonText: '继续核对', type: 'warning' });
   } catch { return; }
   await save();
 }
@@ -324,9 +332,9 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <div class="ledger-metric-groups"><section><h3>仓库实物、分配与可用</h3>
         <div class="ledger-metrics">
           <div><span>仓库实物总数</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近核实：${time(data.last_stocktake_at)}` : data.stocktake_id ? '已盘点，时间待核' : '未盘点' }}</small></div>
-          <div><span>已分配给订单</span><strong>{{ data.current_stock_reserved }}</strong><small>全部待履约本地订单</small></div>
+          <div><span>待发订单需求</span><strong>{{ data.open_order_demand }}</strong><small>其中现货已分配 {{ data.current_stock_reserved }}</small></div>
           <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
-          <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>仓库实物扣除订单及 FBP 占用后</small></div>
+          <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>实物扣除全部待发订单需求及 FBP 占用</small></div>
         </div></section><section><h3>采购与缺口</h3><div class="ledger-metrics">
           <div><span>采购在途</span><el-button link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>点击查看待收采购</small></div>
           <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>
@@ -526,13 +534,18 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <template v-if="needsTarget"><el-form-item :label="form.action_type === 'substitute' ? '实际使用来源商品' : '转换目标商品'"><el-select v-model="form.target_product_id" filterable remote :remote-method="value => search(value, true)" @change="selectTarget" style="width:100%"><el-option v-for="p in targetProducts" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || ''}`" /></el-select></el-form-item><el-form-item :label="form.action_type === 'substitute' ? '来源实际消耗数量' : '目标入库数量'"><el-input-number v-model="form.target_quantity" :min="1" :precision="0" /><span v-if="target">该商品本地库存 {{ target.local_stock }}</span></el-form-item></template>
         <template v-if="form.action_type === 'stocktake'">
           <p><strong>{{ data.product.name }}</strong> · 库存 ID：{{ data.product.inventory_number || '—' }}</p>
-          <el-form-item label="系统本地库存">{{ data.physical_estimate }} 件</el-form-item>
-          <el-form-item label="实际清点数量"><el-input-number v-model="form.counted_quantity" placeholder="无实物请填 0" :min="0" :precision="0" /></el-form-item>
+          <el-alert type="info" :closable="false" title="先选择要校准的数量" description="仓库实物包含未出单及待备货、待发货但仍在仓库的货；上网进入运输后才离库。剩余可用＝实物－全部待发本地订单需求－FBP 占用。两种更新都会生成可追溯的盘点流水并重算订单分配，采购在途不计入。" />
+          <el-form-item label="更新类型"><el-radio-group v-model="form.stocktake_type"><el-radio value="physical">更新仓库实物数</el-radio><el-radio value="available">更新剩余可用数</el-radio></el-radio-group></el-form-item>
+          <el-form-item label="当前实物／可用">{{ data.physical_estimate }} 件／{{ data.available_estimate }} 件</el-form-item>
+          <el-form-item label="待发订单／FBP">{{ data.open_order_demand }} 件／{{ data.fbp_reserved }} 件</el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'physical'" label="仓库实物数"><el-input-number v-model="form.counted_quantity" placeholder="实际在仓数量，无实物填 0" :min="0" :precision="0" /></el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'available'" label="剩余可用数"><el-input-number v-model="form.available_quantity" placeholder="扣除待发订单后可用数量" :min="0" :precision="0" /></el-form-item>
+          <p v-if="form.stocktake_type === 'available'">输入正数时会先覆盖全部待发订单及 FBP 占用，再保留你填写的可用数量。输入 0 且已有订单缺口时，不会凭空增加实物；如需核对实际在仓数量，请选择“更新仓库实物数”。</p>
           <el-form-item v-if="countDelta != null" label="本次变动">{{ countDelta === 0 ? '数量一致' : `${countDelta > 0 ? '增加' : '减少'} ${Math.abs(countDelta)} 件` }}</el-form-item>
           <el-form-item label="调整原因"><el-radio-group v-model="form.reason_code"><el-radio v-for="reason in countReasons" :key="reason.code" :value="reason.code">{{ reason.label }}</el-radio></el-radio-group></el-form-item>
           <el-form-item :label="form.reason_code === 'other' ? '说明（必填）' : '补充说明（选填）'"><el-input v-model="form.reason_note" type="textarea" :rows="2" maxlength="900" placeholder="可填写领用人、凭证或补充情况" /></el-form-item>
           <div class="ledger-toolbar"><span>如果是以下情况，请使用对应流程：</span><el-button @click="startConversion">库存转换</el-button><el-button @click="formVisible = false; showPurchases('incoming')">已到货，核对采购记录</el-button></div>
-          <p>清点数量包含已打包但尚未发出的货物，不包含采购在途。转换、实收、退货及已发货漏扣请按关联单据处理，避免重复记账。</p>
+          <p>转换、实收、退货及已发货漏扣请按关联单据处理，避免重复记账。</p>
         </template>
         <template v-if="form.action_type === 'convert'">
           <el-divider>同时消耗的配件（例如车标）</el-divider>
@@ -546,12 +559,15 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         </template>
         <el-form-item v-if="form.action_type !== 'stocktake'" label="原因／凭证"><el-input v-model="form.reason" type="textarea" :rows="3" maxlength="1000" placeholder="说明实际采购、来源商品、使用去向或盘点差异" /></el-form-item>
       </el-form>
+      <el-alert v-if="preview && form.action_type === 'stocktake'" type="warning" :closable="false"
+        :title="`仓库实物 ${preview.physical_before} → ${preview.physical_after}；剩余可用 ${preview.available_before} → ${preview.available_after}`"
+        :description="`待发订单需求 ${preview.open_order_demand} 件（现货已分配 ${preview.order_reserved} 件），FBP 占用 ${preview.fbp_reserved} 件；库存流水差额 ${preview.stocktake_delta > 0 ? '+' : ''}${preview.stocktake_delta} 件。采购在途不变。`" />
       <el-alert v-if="preview && form.action_type !== 'stocktake'" type="warning" :closable="false" :title="`本地账面库存：${preview.local_before} → ${preview.local_after}${needsTarget ? `；另一商品库存：${preview.target_before} → ${preview.target_after}` : ''}`" :description="form.action_type === 'revise_purchase' ? '采购、收货及关联订单覆盖将同步重算；负库存保留为待核差异，不自动补采购。' : '历史补录只解释所选订单来源；不会新增一笔当前待采购任务。'" />
       <el-table v-if="preview?.affected_orders?.length" :data="preview.affected_orders" max-height="180"><el-table-column prop="posting_number" label="覆盖减少的订单" /><el-table-column prop="before" label="原关联数量" /><el-table-column prop="after" label="纠正后关联数量" /></el-table>
       <el-alert v-if="preview?.cost_task_quantity > 0" type="info" :closable="false" :title="`将生成 ${preview.cost_task_quantity} 件现货成本核对任务，交由采购关联已有采购或补录成本；不是要求再采购这些货物。`" />
       <el-alert v-if="preview && form.action_type === 'convert'" :type="preview.conversion_cost_amount == null ? 'warning' : 'info'" :closable="false" :title="preview.conversion_cost_amount == null ? '部分来源库存缺少成本，本次转换成本暂不能确定；不生成虚假的零元采购。请核对来源商品采购成本。' : `转换成本合计 ${preview.conversion_cost_amount} 元，转入目标成品成本记录，不新增采购或在途。`" />
       <el-table v-if="preview?.extra_changes?.length" :data="preview.extra_changes"><el-table-column prop="product_name" label="配件" /><el-table-column prop="quantity" label="消耗" /><el-table-column prop="available_before" label="未占用现货（前）" /><el-table-column prop="available_after" label="未占用现货（后）" /></el-table>
-      <template #footer><el-button :disabled="saving" @click="discardForm">取消</el-button><el-button v-if="form.action_type === 'stocktake'" type="primary" :loading="saving" @click="confirmStock">确认更新</el-button><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template>
+      <template #footer><el-button :disabled="saving" @click="discardForm">取消</el-button><template v-if="form.action_type === 'stocktake'"><el-button :loading="saving" @click="makePreview">预览变动</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="confirmStock">确认更新</el-button></template><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template>
     </el-dialog>
   </el-dialog>
 </template>

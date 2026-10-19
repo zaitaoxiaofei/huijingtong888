@@ -14,11 +14,13 @@ function toggle(id) {
     <section v-for="parent in parents" :key="parent.id" class="inventory-identity">
       <strong class="inventory-parent-name" :title="parent.name">{{ parent.name || '库存名称待核对' }}</strong>
       <small>{{ parent.virtual ? '虚拟库存' : '库存' }} ID：{{ parent.inventoryNumber || '待核对' }} · 本单 {{ parent.quantity ?? '待核' }} {{ parent.virtual ? '套' : '件' }}</small>
+      <div class="inventory-local-counts">
+        <span title="扣除全部待发本地订单需求及 FBP 占用后的可用数量">剩余可用 <b>{{ parent.localAvailable ?? '待核对' }}</b> {{ parent.localAvailable == null ? '' : parent.virtual ? '套' : '件' }}</span>
+        <span title="包含已分拣、已打包但尚未发出的货；以仓库盘点为准">本地实物 <b>{{ parent.localPhysical ?? '待核对' }}</b> {{ parent.localPhysical == null ? '' : parent.virtual ? '套' : '件' }}</span>
+      </div>
       <div v-for="stock in parent.fbpStocks" :key="stock.ozon_sku" class="inventory-stock-comparison" :title="stock.synced_at ? `Ozon 同步：${shanghaiDateTimeText(stock.synced_at, { assumeUtcWhenNaive: true })}；不同 SKU 库存独立` : '尚无此店铺 SKU 的 FBP 同步记录，不等于零库存'">
         <small v-if="parent.fbpStocks.length > 1">SKU {{ stock.ozon_sku }}</small>
         <b>FBP：{{ stock.present ?? '待同步' }}<template v-if="stock.present != null"> 套</template></b>
-        <span>｜</span>
-        <b title="本地实物数量，包含已分拣、已打包但未发出的货物；以盘点为准">本地：{{ parent.localPhysical ?? '待核对' }}<template v-if="parent.localPhysical != null"> {{ parent.virtual ? '套' : '件' }}</template></b>
       </div>
       <div v-if="parent.virtual" class="inventory-children">
         <div v-for="child in (expanded.has(parent.id) ? parent.children : parent.children.slice(0, 2))" :key="child.product_id" class="inventory-child" :title="`本单实际消耗 ${child.quantity ?? '待核'}；${parent.quantity > 0 ? `每套 ${child.quantity / parent.quantity} × 本单 ${parent.quantity} 套` : '套数待核对'}`">
@@ -45,4 +47,6 @@ function toggle(id) {
 .inventory-child .inventory-child-shortage { color:var(--el-color-danger); }
 .inventory-stock-comparison { display:flex;flex-wrap:wrap;gap:3px 6px;font-size:12px;line-height:1.5; }
 .inventory-stock-comparison > small { width:100%; }
+.inventory-local-counts { display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;line-height:1.5; }
+.inventory-local-counts span:first-child { color:#0b6b56; }
 </style>

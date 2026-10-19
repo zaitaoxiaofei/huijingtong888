@@ -32,6 +32,7 @@ test('global product availability subtracts current order reservations and FBP r
   });
   assert.deepEqual(coverage.product_availability.get(605), {
     product_id: 605, local_stock: 10, local_available: 3,
+    physical_stock: 10, available_stock: 3, open_order_demand_qty: 5,
     order_reserved_qty: 5, fbp_reserved_qty: 2,
     pending_procurement_qty: 0, pending_procurement_available_qty: 0,
     inventory_needs_review: false

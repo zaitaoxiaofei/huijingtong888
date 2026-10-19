@@ -128,12 +128,12 @@ const orderHistoryActiveTab = ref("purchase");
 const priceAnomalyReasons = ["供应商涨价", "采购数量较少", "临时加急采购", "更换供应商", "商品规格或质量升级", "包含额外商品或服务", "历史价格不准确", "其他原因"];
 const purchaseModeOptions = [
   { value: "shortage_purchase", label: "缺货采购", description: "本地没有可用现货，采购后进入在途，到货后登记实收。" },
-  { value: "inventory_update", label: "更新实存", description: "仓库已经盘清实物，直接填写本地实际剩余数量和当前库存总货值；不生成采购在途。" },
+  { value: "inventory_update", label: "更新仓库实物", description: "仓库已经盘清实物，直接填写当前在仓实物总数（包含待发订单）和库存总货值；不生成采购在途。" },
   { value: "historical_debt_backfill", label: "历史采购补记", description: "只补已经真实出库、运输或签收订单缺失的采购记录；不增加本地库存，不能用于待备货订单。" }
 ];
 function purchaseModeDescription(mode) { return purchaseModeOptions.find((item) => item.value === mode)?.description || purchaseModeOptions[0].description; }
 function purchaseModeLabel(mode) { return purchaseModeOptions.find((item) => item.value === mode)?.label || (mode === "stock_record_backfill" ? "旧版补采购记录" : "缺货采购"); }
-function purchaseQuantityLabel(mode) { return mode === "inventory_update" ? "实存数量" : mode === "historical_debt_backfill" ? "补记数量" : "采购数量"; }
+function purchaseQuantityLabel(mode) { return mode === "inventory_update" ? "仓库实物总数" : mode === "historical_debt_backfill" ? "补记数量" : "采购数量"; }
 function purchaseAmountLabel(mode) { return mode === "inventory_update" ? "库存总货值" : mode === "historical_debt_backfill" ? "历史货款" : "货款"; }
 let suggestionTimer = null;
 let suggestionRequestVersion = 0;
@@ -1420,7 +1420,7 @@ async function submitCreate() {
   const invalidValueIndex = createForm.items.findIndex((item) => item.purchase_mode === "inventory_update" && ((Number(item.quantity) === 0 && Number(item.amount) !== 0) || (Number(item.quantity) > 0 && !(Number(item.amount) > 0))));
   if (invalidValueIndex >= 0) {
     activeItemIndex.value = invalidValueIndex;
-    return ElMessage.warning(`第 ${invalidValueIndex + 1} 条更新实存需要同时填写真实剩余数量和当前库存总货值`);
+    return ElMessage.warning(`第 ${invalidValueIndex + 1} 条更新仓库实物需要同时填写当前在仓实物总数和库存总货值`);
   }
   const anomalyIndex = createForm.items.findIndex((item) => item.purchase_mode !== "inventory_update" && freePurchasePriceChange(item) > 0.1 && !freePurchaseAnomalyReason(item));
   if (anomalyIndex >= 0) {
@@ -1680,7 +1680,7 @@ onMounted(async () => {
     </el-dialog>
 
     <el-dialog v-model="bulkVisible" title="批量采购确认" width="calc(100vw - 24px)" align-center destroy-on-close class="bulk-purchase-dialog">
-      <el-alert title="每个商品可分别选择缺货采购、更新实存或历史采购补记。鼠标悬浮选项可查看适用场景。" type="info" :closable="false" show-icon />
+      <el-alert title="每个商品可分别选择缺货采购、更新仓库实物或历史采购补记。鼠标悬浮选项可查看适用场景。" type="info" :closable="false" show-icon />
       <div class="bulk-order-toolbar">
         <el-select v-model="bulkMeta.source_type" class="channel-select" placeholder="采购渠道"><el-option label="1688" value="1688" /><el-option label="拼多多" value="pdd" /><el-option label="微信" value="wechat" /><el-option label="其他" value="other" /></el-select>
         <el-select v-model="bulkMeta.supplier_id" filterable clearable placeholder="选择供应商"><el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="supplier.id" /></el-select>
@@ -1791,7 +1791,7 @@ onMounted(async () => {
     </el-dialog>
 
     <el-dialog v-model="createVisible" title="登记已下单采购" width="min(1760px, calc(100vw - 32px))" align-center destroy-on-close class="free-purchase-dialog">
-      <el-alert title="每条商品请选择处理类型：缺货采购、更新实存或历史采购补记。鼠标悬浮选项可查看适用场景。" type="info" :closable="false" show-icon />
+      <el-alert title="每条商品请选择处理类型：缺货采购、更新仓库实物或历史采购补记。鼠标悬浮选项可查看适用场景。" type="info" :closable="false" show-icon />
       <el-form label-width="92px">
         <el-row :gutter="16">
           <el-col :span="8"><el-form-item label="采购负责人"><el-select v-model="createForm.person_id"><el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="person.id" /></el-select></el-form-item></el-col>

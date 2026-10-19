@@ -43,7 +43,8 @@ test('manual priority requires inventory management permission; cost tasks use t
     readJson: async () => ({ action_type: 'set_priority' }) });
   await assert.rejects(routes['POST /api/procurement/ledger']({ _session: { roles: ['packing'], personId: 2 } }), error => error.status === 403);
   assert.equal(called, false);
-  await routes['POST /api/procurement/ledger']({ _session: { roles: ['procurement'], personId: 2 } });
+  await routes['POST /api/procurement/ledger']({ _session: { roles: ['procurement'], personId: 2,
+    tenant: { id: 1, slug: 'default' } } });
   assert.equal(called, true);
   assert.deepEqual(await routes['GET /api/procurement/stock-cost-tasks']({}, new URL('https://example.test/api/procurement/stock-cost-tasks?page=2')), { page: '2' });
 });

@@ -28,7 +28,7 @@ test("three purchase modes use separate inventory semantics", () => {
 test("workspace and order purchase entry expose explained business modes", () => {
   for (const source of [workspace, orders]) {
     assert.match(source, /缺货采购/);
-    assert.match(source, /更新实存/);
+    assert.match(source, /更新仓库实物/);
     assert.match(source, /历史采购补记/);
     assert.match(source, /description/);
   }

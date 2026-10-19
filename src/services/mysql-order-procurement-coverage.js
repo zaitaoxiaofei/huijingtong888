@@ -30,16 +30,21 @@ const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
 export function invalidateOrderProcurementCoverage() { generation += 1; cached = null; pending = null; }
 
-export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false } = {}) {
+export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null } = {}) {
   if (includeTrace) fresh = true;
   if (productId !== null && (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0)) throw new Error('库存商品 ID 无效');
+  const tenantPk = tenantId == null || tenantId === 'admin' ? null : Number(tenantId);
+  if (tenantPk !== null && (!Number.isSafeInteger(tenantPk) || tenantPk <= 0)) throw new Error('企业 ID 无效');
   const scopedIds = [...new Set([
     ...(Array.isArray(productIds) ? productIds : []),
     productId
   ].map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
   if (scopedIds.length) fresh = true; // A scoped snapshot must never reuse or populate the all-product cache.
   const scopedIdSql = scopedIds.join(',');
+  if (tenantPk !== null && !scopedIds.length) throw new Error('企业库存覆盖查询需要指定库存商品 ID');
   const scope = (column = 'product_id') => scopedIds.length ? ` AND ${column} IN (${scopedIdSql})` : '';
+  const movementTenant = tenantPk === null ? '' : ` AND tenant_id = ${tenantPk}`;
+  const scopedMovementTenant = tenantPk === null ? '' : ` AND im.tenant_id = ${tenantPk}`;
   // Small product-scoped saves need only their own history. Full queue loads
   // aggregate once; a correlated lookup here avoids aggregating unrelated orders.
   const transportAt = scopedIds.length
@@ -71,25 +76,26 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
             AND ${hasTransportHistory}) THEN 1 ELSE 0 END AS entered_transport,
         COALESCE(raw.query_stock_location, 'LOCAL') AS stock_location
         FROM orders o JOIN order_items oi ON oi.order_id = o.id
+        ${tenantPk === null ? '' : `JOIN shops tenant_shop ON tenant_shop.id = o.shop_id AND tenant_shop.tenant_id = ${tenantPk}`}
         ${scopedIds.length ? '' : `LEFT JOIN (
           SELECT order_id, 1 AS has_history, MIN(last_status_changed_at) AS transport_at
           FROM order_status_history
           WHERE status IN ${transportStatusesSql}
           GROUP BY order_id
         ) transport ON transport.order_id = o.id`}
-        LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.active = 1
-        LEFT JOIN (SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings WHERE active = 1 GROUP BY shop_id, ozon_sku) fallback_mapping
+        LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.active = 1${tenantPk === null ? '' : ` AND direct_mapping.tenant_id = ${tenantPk}`}
+        LEFT JOIN (SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings WHERE active = 1${tenantPk === null ? '' : ` AND tenant_id = ${tenantPk}`} GROUP BY shop_id, ozon_sku) fallback_mapping
           ON fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
         LEFT JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, fallback_mapping.id)
-        LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1
+        LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1${tenantPk === null ? '' : ` AND p.tenant_id = ${tenantPk}`}
         LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id AND recipe.ozon_sku = oi.ozon_sku AND recipe.active = 1 AND recipe.mode = 'combo'
         LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
-        LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL
-        LEFT JOIN products cp ON cp.id = COALESCE(ri.product_id, pc.component_product_id, p.id)
+        LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL${tenantPk === null ? '' : ` AND pc.tenant_id = ${tenantPk}`}
+        LEFT JOIN products cp ON cp.id = COALESCE(ri.product_id, pc.component_product_id, p.id)${tenantPk === null ? '' : ` AND cp.tenant_id = ${tenantPk}`}
         LEFT JOIN ozon_orders_raw raw FORCE INDEX (idx_order_query_stock_location)
           ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
         ${scopedIds.length ? `WHERE (COALESCE(ri.product_id, pc.component_product_id, p.id, 0) IN (${scopedIdSql})
-          OR oi.id IN (SELECT related_order_item_id FROM inventory_movements WHERE product_id IN (${scopedIdSql})
+          OR oi.id IN (SELECT related_order_item_id FROM inventory_movements WHERE product_id IN (${scopedIdSql})${movementTenant}
             AND status = 'posted' AND source_type = 'order_outbound'))` : ''}
 `, fresh),
       // Match the order/inventory display: legacy UNKNOWN movements belong to the non-FBP ledger.
@@ -100,7 +106,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
           WHEN movement_type = 'CANCEL_RESTORE' THEN -ABS(quantity_delta) ELSE 0 END) AS fbp_reserved
         FROM inventory_movements
         WHERE status = 'posted' AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
-          AND (source_type IS NULL OR source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'))${scope()} GROUP BY product_id`),
+          AND (source_type IS NULL OR source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'))${scope()}${movementTenant} GROUP BY product_id`),
       query(`SELECT a.order_item_id, a.product_id, a.procurement_request_id, a.allocated_quantity
         FROM procurement_order_allocations a WHERE a.status = 'allocated'${scope('a.product_id')}`),
       query(`SELECT ir.id, ir.product_id, ir.procurement_request_id, ir.purchase_order_id, ir.quantity, ir.amount,
@@ -122,14 +128,14 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit
         FROM inventory_movements im LEFT JOIN products p ON p.id = im.product_id WHERE im.status = 'posted' AND im.source_type = 'order_outbound'
           AND COALESCE(NULLIF(im.stock_location, ''), 'LOCAL') != 'FBP'
-          ${scope('im.product_id')}
+          ${scope('im.product_id')}${scopedMovementTenant}
         GROUP BY im.related_order_item_id, im.product_id`),
       query(`SELECT order_item_id, product_id, quantity, inbound_record_id FROM procurement_history_sources WHERE 1 = 1${scope()}`),
       query(`SELECT id, product_id, quantity_delta AS quantity, created_at AS approved_at FROM inventory_movements
         WHERE status = 'posted' AND quantity_delta > 0
           AND source_type IN ('return_in', 'initial_stock', 'opening_stock')
           AND (source_type != 'return_in' OR source_ref IS NULL OR source_ref NOT LIKE 'cancel_%')
-          AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'${scope()}`),
+          AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'${scope()}${movementTenant}`),
       loadFbpReservations(query, scopedIds),
       query(`SELECT product_id, order_item_id, priority FROM inventory_order_priorities WHERE priority > 0${scope()}`)
     ]);

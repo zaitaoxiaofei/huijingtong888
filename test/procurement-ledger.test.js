@@ -83,6 +83,34 @@ test('structured stocktake reasons allow zero and record sample losses without c
   assert.throws(() => planLedgerAction(snapshot(), body('stocktake', { counted_quantity: 3, reason_code: 'invented' })), /调整原因/);
 });
 
+test('available count updates physical ledger after reserving all pending orders and FBP', () => {
+  const state = snapshot({ local_stock: 8, physical_estimate: 10, open_order_demand: 6,
+    current_stock_reserved: 4, fbp_reserved: 1, available_estimate: 3 });
+  const plan = planLedgerAction(state, body('stocktake', { stocktake_type: 'available', available_quantity: 5 }));
+  assert.equal(plan.physical_before, 10);
+  assert.equal(plan.counted_quantity, 12);
+  assert.equal(plan.stocktake_delta, 2);
+  assert.equal(plan.local_delta, 2);
+  assert.equal(plan.available_before, 3);
+  assert.equal(plan.available_after, 5);
+  assert.equal(plan.open_order_demand, 6);
+  assert.equal(plan.order_reserved, 4);
+  assert.throws(() => planLedgerAction(state, body('stocktake', { stocktake_type: 'available', available_quantity: -1 })), /剩余可用数量/);
+});
+
+test('zero available count does not manufacture stock when open orders already exceed physical stock', () => {
+  const state = snapshot({ local_stock: 3, physical_estimate: 5, open_order_demand: 8,
+    current_stock_reserved: 5, fbp_reserved: 0, available_estimate: 0 });
+  const plan = planLedgerAction(state, body('stocktake', { stocktake_type: 'available', available_quantity: 0 }));
+  assert.equal(plan.counted_quantity, 5);
+  assert.equal(plan.local_delta, 0);
+  assert.equal(plan.available_after, 0);
+  const physical = planLedgerAction(state, body('stocktake', { stocktake_type: 'physical', counted_quantity: 3 }));
+  assert.equal(physical.local_delta, -2);
+  assert.equal(physical.available_after, 0);
+  assert.equal(planLedgerAction(state, body('stocktake', { counted_quantity: 3 })).stocktake_type, 'physical');
+});
+
 test('missing purchase count creates only new stock cost tasks and never adds transit', () => {
   const plan = planLedgerAction(snapshot({ physical_estimate: 4, stocktake_id: 9, cost_tasks: [{ quantity: 4, resolved_quantity: 0 }] }),
     body('stocktake', { counted_quantity: 7, reason_code: 'missing_purchase', reason: '' }));
@@ -139,6 +167,18 @@ test('ledger uses physical returns and FBP transfer, not order cancellation coun
     { source_type: 'fbp_in', quantity_delta: 30, stock_location: 'FBP' }
   ], [], []);
   assert.equal(result.local_stock, 60);
+});
+
+test('waiting order outbound remains physical while all pending demand reduces available stock', () => {
+  const value = summarizeLedger({ id: 10 }, [
+    { source_type: 'purchase_inbound', quantity_delta: 15, stock_location: 'LOCAL' },
+    { source_type: 'order_outbound', quantity_delta: -5, stock_location: 'LOCAL' }
+  ], [], [{ needs_fulfillment: true, quantity: 8, stock_quantity: 5, outbound_quantity: 5 }], 1);
+  assert.equal(value.local_stock, 10);
+  assert.equal(value.physical_estimate, 15);
+  assert.equal(value.open_order_demand, 8);
+  assert.equal(value.current_stock_reserved, 5);
+  assert.equal(value.available_estimate, 6);
 });
 
 function fixture(failSecond = false, overrides = {}) {

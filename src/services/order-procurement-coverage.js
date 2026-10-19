@@ -260,20 +260,28 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   }
   result.available_batches = batches.filter(batch => !batch.stock_source).map(({ remaining, ...batch }) => ({ ...batch, unallocated_quantity: remaining }));
   const localReserved = new Map();
+  const openDemand = new Map();
   for (const order of result.values()) if (order.needs_fulfillment && order.stock_location !== 'FBP') {
-    for (const item of order.items) localReserved.set(item.product_id, (localReserved.get(item.product_id) || 0) + Number(item.stock_quantity || 0));
+    for (const item of order.items) {
+      localReserved.set(item.product_id, (localReserved.get(item.product_id) || 0) + Number(item.stock_quantity || 0));
+      openDemand.set(item.product_id, (openDemand.get(item.product_id) || 0) + Number(item.quantity || 0));
+    }
   }
   const productAvailability = new Map();
-  const productIds = new Set([...stockByProduct.keys(), ...pendingIncomingByProduct.keys(), ...localReserved.keys()]);
+  const productIds = new Set([...stockByProduct.keys(), ...pendingIncomingByProduct.keys(), ...localReserved.keys(), ...openDemand.keys()]);
   for (const productId of productIds) {
     const stock = stockByProduct.get(productId) || {};
     const localStock = rounded(Number(stock.ledger || 0) + Number(stock.open_deducted || 0));
     const orderReserved = positive(localReserved.get(productId));
+    const openOrderDemand = positive(openDemand.get(productId));
     const fbpReserved = positive(stock.fbp_reserved);
     productAvailability.set(productId, {
       product_id: productId,
       local_stock: localStock,
-      local_available: positive(localStock - orderReserved - fbpReserved),
+      local_available: positive(localStock - openOrderDemand - fbpReserved),
+      physical_stock: localStock,
+      available_stock: positive(localStock - openOrderDemand - fbpReserved),
+      open_order_demand_qty: openOrderDemand,
       order_reserved_qty: orderReserved,
       fbp_reserved_qty: fbpReserved,
       pending_procurement_qty: positive(pendingIncomingByProduct.get(productId)),

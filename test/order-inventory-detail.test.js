@@ -63,7 +63,7 @@ test('order inventory dialog mounts on demand and history actions are order-spec
   assert.match(dialog, /本单采购结论/);
   assert.match(dialog, /已分配现货/);
   assert.match(dialog, /仓库实物总数/);
-  assert.match(dialog, /仓库实物扣除订单及 FBP 占用后/);
+  assert.match(dialog, /实物扣除全部待发订单需求及 FBP 占用/);
 });
 
 test('order inventory management keeps detail with binding, creation, and inventory edit actions on the order row', () => {

@@ -2,6 +2,21 @@
 // History remains live and is aggregated once, without cross-row write locks.
 export const transportStatusesSql = "('delivering','delivered','posting_delivered','posting_in_transit')";
 
+const waitingDispatchStatuses = new Set(['awaiting_packaging', 'awaiting_approve', 'acceptance_in_progress',
+  'posting_created', 'posting_acceptance_in_progress', 'awaiting_deliver', 'awaiting_registration',
+  'posting_awaiting_registration', 'posting_registration_error', 'posting_registered', 'sent_by_seller',
+  'posting_ready_for_pickup', 'posting_transferred_to_courier_service', 'posting_transferring',
+  'posting_in_carriage', 'posting_transferring_to_delivery']);
+
+export function isOrderInTransport(order = {}) {
+  const primary = String(order.status || order.tracking_stage || '').toLowerCase();
+  if (waitingDispatchStatuses.has(primary)) return false;
+  const state = [order.status, order.logistics_status, order.tracking_stage, order.substatus]
+    .map(value => String(value || '').toLowerCase()).join(' ');
+  if (!state || /(cancel|return|reject)/.test(state)) return false;
+  return /(deliver|transport|transferr|carriage|shipped|pickup|posting_transferred)/.test(state);
+}
+
 export function stockLocationSql(raw = 'NEW.raw_json') {
   const value = path => `JSON_UNQUOTE(JSON_EXTRACT(${raw}, '${path}'))`;
   const pairs = ['delivery_method.name', 'delivery_method.warehouse', 'analytics_data.warehouse', 'analytics_data.tpl_provider'];
