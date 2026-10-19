@@ -59,7 +59,7 @@ test("七日与十五日销量窗口只包含昨天及之前的完整北京时�
   const window = completedBeijingSalesWindow(new Date("2026-10-18T16:30:00.000Z"));
   assert.deepEqual(window, { from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" });
   assert.match(service, /profitOrderedAtUtcRangeMysql\("o", salesWindow\.from15, salesWindow\.through\)/);
-  assert.match(service, /\[salesWindow\.from7, \.+\(tenantPk/);
+  assert.ok(service.includes("[salesWindow.from7, ...Array(7).fill(tenantPk), ...range.params]"));
 });
 
 test("页面默认库存视角并保留 SKU 切换、状态筛选、主图预览与采购预填", () => {
@@ -80,9 +80,11 @@ test("库存预警按企业隔离接口、缓存与持久快照，库存视角�
   const inventoryBranch = service.indexOf('if (mode === "inventory-alerts")', service.indexOf("export async function stockAlertsMysql"));
   const snapshotRead = service.indexOf("const persistedBase = forceRefresh ? null", inventoryBranch);
   assert.ok(inventoryBranch > 0 && inventoryBranch < snapshotRead);
-  assert.match(service.slice(inventoryBranch, snapshotRead), /stockedInventoryAlertProductsMysql\(tenantPk\)/);
-  assert.match(service, /AND im\.tenant_id = \?/);
-  assert.match(service, /AND cp\.tenant_id = \?/);
+  assert.match(service.slice(inventoryBranch, snapshotRead), /stockedInventoryAlertProductsMysql\(inventoryTenantPk, inventoryDefaultTenant\)/);
+  assert.match(service, /const inventoryTenantPk = await resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(service, /stockedInventoryAlertProductsMysql\(inventoryTenantPk, inventoryDefaultTenant\)/);
+  assert.match(service, /tenantShopPredicateMysql\("im", defaultTenant\)/);
+  assert.match(service, /tenantShopPredicateMysql\("cp", defaultTenant\)/);
 });
 
 test("库存销量查询计入组合配件，并将企业与完整日边界参数送入 SQL", async () => {
@@ -97,20 +99,62 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   });
   const start = service.indexOf("async function inventoryAlertProductSalesMysql");
   const end = service.indexOf("export async function stockAlertsMysql", start);
+  const predicateStart = service.indexOf("function tenantShopPredicateMysql");
+  const predicateEnd = service.indexOf("async function activeShopForTenantMysql", predicateStart);
+  vm.runInContext(service.slice(predicateStart, predicateEnd), context);
   vm.runInContext(service.slice(start, end), context);
-  await context.inventoryAlertProductSalesMysql(12);
-  await context.stockedInventoryAlertProductsMysql(12);
-  await context.purchasedInventoryInTransitMysql(12);
+  await context.inventoryAlertProductSalesMysql(12, true);
+  await context.stockedInventoryAlertProductsMysql(12, true);
+  await context.purchasedInventoryInTransitMysql(12, true);
   assert.match(queries[0].sql, /oi\.quantity \* COALESCE\(ri\.quantity, pc\.quantity, 1\)/);
   assert.match(queries[0].sql, /JOIN products cp ON cp\.id = CASE WHEN recipe\.id IS NOT NULL THEN ri\.product_id/);
   assert.equal((queries[0].sql.match(/\?/g) || []).length, queries[0].params.length);
   assert.equal(queries[0].params[0], "2026-10-12");
   assert.equal(queries[0].params.at(-2), "from-utc");
   assert.equal(queries[0].params.at(-1), "to-utc");
+  for (const alias of ["sh", "direct_mapping", "fallback_source", "sm", "p", "pc", "cp"]) {
+    assert.match(queries[0].sql, new RegExp(`${alias}\\.tenant_id = \\? OR ${alias}\\.tenant_id IS NULL`));
+  }
   assert.match(queries[1].sql, /im\.quantity_delta > 0/);
   assert.equal(queries[1].params.length, 2);
+  assert.match(queries[1].sql, /p\.tenant_id = \? OR p\.tenant_id IS NULL/);
+  assert.match(queries[1].sql, /im\.tenant_id = \? OR im\.tenant_id IS NULL/);
   assert.match(queries[2].sql, /ir\.status = 'pending_arrival'/);
   assert.match(queries[2].sql, /po\.purchased_at IS NOT NULL/);
+  assert.match(queries[2].sql, /pr\.tenant_id = \? OR pr\.tenant_id IS NULL/);
+  await context.inventoryAlertProductSalesMysql(44, false);
+  assert.doesNotMatch(queries[3].sql, /tenant_id IS NULL/);
+  assert.deepEqual(Array.from(queries[3].params.slice(1, 8)), Array(7).fill(44));
+});
+
+test("默认企业库存视角解析真实企业 PK，三条读取使用同一作用域", async () => {
+  const calls = [];
+  const context = vm.createContext({
+    ensureMysqlCutoverEnabled() {},
+    ensureProductNamingSchemaMysql: async () => {},
+    ensureOzonStockStorageSchemaMysql: async () => {},
+    ensureStockLocationSchemaMysql: async () => {},
+    ensureProfitAnalyticsSchemaMysql: async () => {},
+    ensureSkuInventoryRecipeSchemaMysql: async () => {},
+    ensureProductCompositionSchemaMysql: async () => {},
+    resolveShopTenantIdMysql: async (tenantId) => { calls.push(["resolve", tenantId]); return 4; },
+    isDefaultShopTenantMysql: async (tenantPk) => { calls.push(["default", tenantPk]); return true; },
+    stockedInventoryAlertProductsMysql: async (tenantPk, legacy) => { calls.push(["products", tenantPk, legacy]); return [{ product_id: 1 }]; },
+    inventoryAlertProductSalesMysql: async (tenantPk, legacy) => { calls.push(["sales", tenantPk, legacy]); return []; },
+    purchasedInventoryInTransitMysql: async (tenantPk, legacy) => { calls.push(["incoming", tenantPk, legacy]); return []; },
+    productInventoryAvailabilityMysql: async (_, tenantId) => { calls.push(["availability", tenantId]); return { rows: [{ product_id: 1, physical_stock: 4, available_stock: 3 }] }; },
+    getCachedMasterData: async (_, loader) => loader(),
+    applyStockAlertQuery: (rows) => rows
+  });
+  const start = service.indexOf("export async function stockAlertsMysql");
+  const end = service.indexOf("async function loadFbpStockAlertBaseMysql", start);
+  vm.runInContext(service.slice(start, end).replace("export ", ""), context);
+  const rows = await context.stockAlertsMysql({ mode: "inventory-alerts" });
+  assert.deepEqual(calls, [
+    ["resolve", "admin"], ["default", 4],
+    ["products", 4, true], ["sales", 4, true], ["incoming", 4, true], ["availability", "admin"]
+  ]);
+  assert.equal(rows[0].available_stock, 3);
 });
 
 test("生产周期只接受固定选项，旧库存保持待设置且创建编辑均写入字段", () => {

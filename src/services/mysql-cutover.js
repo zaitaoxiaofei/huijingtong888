@@ -3999,7 +3999,7 @@ export async function peopleMysql() {
   return getCachedMasterData("people", async () => (await mysqlQuery("SELECT * FROM people ORDER BY active DESC, id")).map(({ password_hash, ...row }) => ({ ...row, roles: getRoles(row) })));
 }
 
-async function inventoryAlertProductSalesMysql(tenantPk = null) {
+async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
   const salesWindow = completedBeijingSalesWindow();
   const range = profitOrderedAtUtcRangeMysql("o", salesWindow.from15, salesWindow.through);
   return mysqlQuery(`
@@ -4010,23 +4010,23 @@ async function inventoryAlertProductSalesMysql(tenantPk = null) {
       SELECT cp.id AS product_id, ${chinaDateSqlMysql("o.ordered_at")} AS date_key,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity
       FROM orders o
-      JOIN shops sh ON sh.id = o.shop_id ${tenantPk ? "AND sh.tenant_id = ?" : ""}
+      JOIN shops sh ON sh.id = o.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
       JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id
-        AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1 ${tenantPk ? "AND direct_mapping.tenant_id = ?" : ""}
+        AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1 AND ${tenantShopPredicateMysql("direct_mapping", defaultTenant)}
       LEFT JOIN (
-        SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings
-        WHERE active = 1 ${tenantPk ? "AND tenant_id = ?" : ""} GROUP BY shop_id, ozon_sku
+        SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings fallback_source
+        WHERE active = 1 AND ${tenantShopPredicateMysql("fallback_source", defaultTenant)} GROUP BY shop_id, ozon_sku
       ) fallback_mapping ON fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
-      JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, fallback_mapping.id) ${tenantPk ? "AND sm.tenant_id = ?" : ""}
-      JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantPk ? "AND p.tenant_id = ?" : ""}
+      JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, fallback_mapping.id) AND ${tenantShopPredicateMysql("sm", defaultTenant)}
+      JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
       LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id AND recipe.ozon_sku = oi.ozon_sku
         AND recipe.active = 1 AND recipe.mode = 'combo'
       LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
-      LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL ${tenantPk ? "AND pc.tenant_id = ?" : ""}
+      LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL AND ${tenantShopPredicateMysql("pc", defaultTenant)}
       JOIN products cp ON cp.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
         WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
-        AND cp.active = 1 ${tenantPk ? "AND cp.tenant_id = ?" : ""}
+        AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
       WHERE LOWER(o.status) NOT LIKE '%cancel%'
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
         AND NOT EXISTS (SELECT 1 FROM ozon_orders_raw raw
@@ -4035,25 +4035,25 @@ async function inventoryAlertProductSalesMysql(tenantPk = null) {
         ${range.whereSql}
     ) consumed
     GROUP BY consumed.product_id
-  `, [salesWindow.from7, ...(tenantPk ? Array(7).fill(tenantPk) : []), ...range.params]);
+  `, [salesWindow.from7, ...Array(7).fill(tenantPk), ...range.params]);
 }
 
-async function stockedInventoryAlertProductsMysql(tenantPk = null) {
+async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
   const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
       p.inventory_number, p.name AS product_name,
       p.image_url, p.production_lead_days, p.created_at
     FROM products p
-    WHERE p.active = 1 ${tenantPk ? "AND p.tenant_id = ?" : ""}
+    WHERE p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
       AND EXISTS (
         SELECT 1 FROM inventory_movements im
         WHERE im.product_id = p.id AND im.status = 'posted' AND im.quantity_delta > 0
           AND ${localStockLocationPredicateMysql("im")}
-          ${tenantPk ? "AND im.tenant_id = ?" : ""}
+          AND ${tenantShopPredicateMysql("im", defaultTenant)}
       )
     ORDER BY p.id DESC
-  `, tenantPk ? [tenantPk, tenantPk] : []);
+  `, [tenantPk, tenantPk]);
   return rows.map((row) => ({
     product_id: Number(row.product_id),
     inventory_id: row.inventory_id,
@@ -4065,19 +4065,19 @@ async function stockedInventoryAlertProductsMysql(tenantPk = null) {
   }));
 }
 
-async function purchasedInventoryInTransitMysql(tenantPk = null) {
+async function purchasedInventoryInTransitMysql(tenantPk, defaultTenant) {
   return mysqlQuery(`
     SELECT ir.product_id, SUM(ir.quantity) AS incoming_stock
     FROM inbound_records ir
-    JOIN products p ON p.id = ir.product_id AND p.active = 1 ${tenantPk ? "AND p.tenant_id = ?" : ""}
+    JOIN products p ON p.id = ir.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
     LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id
     LEFT JOIN procurement_requests pr ON pr.id = ir.procurement_request_id
     WHERE ir.status = 'pending_arrival'
       AND ((po.id IS NOT NULL AND po.status IN ('purchased', 'partial_inbound') AND po.purchased_at IS NOT NULL)
         OR (pr.id IS NOT NULL AND pr.status = 'purchased'))
-      ${tenantPk ? "AND (pr.id IS NULL OR pr.tenant_id = ?)" : ""}
+      AND (pr.id IS NULL OR ${tenantShopPredicateMysql("pr", defaultTenant)})
     GROUP BY ir.product_id
-  `, tenantPk ? [tenantPk, tenantPk] : []);
+  `, [tenantPk, tenantPk]);
 }
 
 export async function stockAlertsMysql(query = {}, tenantId = "admin") {
@@ -4107,12 +4107,14 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
   if (mode === "inventory-alerts") {
     await ensureSkuInventoryRecipeSchemaMysql();
     await ensureProductCompositionSchemaMysql();
-    const salesCacheKey = `stock-alerts:product-sales:v1:${cacheScope}`;
+    const inventoryTenantPk = await resolveShopTenantIdMysql(tenantId);
+    const inventoryDefaultTenant = await isDefaultShopTenantMysql(inventoryTenantPk);
+    const salesCacheKey = `stock-alerts:product-sales:v2:${inventoryTenantPk}`;
     if (forceRefresh) invalidateMasterDataCache(salesCacheKey);
     const [products, salesRows, incomingRows] = await Promise.all([
-      stockedInventoryAlertProductsMysql(tenantPk),
-      getCachedMasterData(salesCacheKey, () => inventoryAlertProductSalesMysql(tenantPk), 60_000),
-      purchasedInventoryInTransitMysql(tenantPk)
+      stockedInventoryAlertProductsMysql(inventoryTenantPk, inventoryDefaultTenant),
+      getCachedMasterData(salesCacheKey, () => inventoryAlertProductSalesMysql(inventoryTenantPk, inventoryDefaultTenant), 60_000),
+      purchasedInventoryInTransitMysql(inventoryTenantPk, inventoryDefaultTenant)
     ]);
     const salesByProduct = new Map(salesRows.map((row) => [Number(row.product_id), row]));
     const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
