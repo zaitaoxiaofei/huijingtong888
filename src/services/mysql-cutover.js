@@ -12,6 +12,7 @@ import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidat
 import { isOrderInTransport as isOrderInTransportMysql } from "./order-query-facts.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
+import { orderStatusHistoryBusinessFingerprint } from "./order-history-fingerprint.js";
 import { PDFDocument } from "pdf-lib";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
@@ -17389,31 +17390,7 @@ export async function procurementProductPurchaseHistoryMysql(query = {}) {
 }
 
 function orderStatusHistoryBusinessFingerprintMysql(payload = {}) {
-  return JSON.stringify([
-    payload.status || "",
-    payload.substatus || "",
-    payload.logistics_status || "",
-    payload.tracking_stage || "",
-    payload.sync_state || "",
-    payload.ordered_at || null,
-    payload.delivered_at || null,
-    payload.customer_id || "",
-    payload.customer_name || "",
-    payload.buyer_city || "",
-    payload.buyer_region || "",
-    payload.buyer_country || "",
-    payload.buyer_district || "",
-    payload.buyer_zip_code || "",
-    payload.buyer_address_tail || "",
-    payload.delivery_type || "",
-    payload.delivery_city || "",
-    payload.delivery_region || "",
-    payload.delivery_date_begin || null,
-    payload.delivery_date_end || null,
-    payload.warehouse_name || "",
-    payload.tpl_provider || "",
-    payload.cluster_to || ""
-  ]);
+  return orderStatusHistoryBusinessFingerprint(payload);
 }
 
 function orderStatusHistoryRowFingerprintMysql(row = {}) {

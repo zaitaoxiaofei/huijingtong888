@@ -8,6 +8,7 @@ const serverSource = fs.readFileSync(new URL("../src/server.js", import.meta.url
 const configSource = fs.readFileSync(new URL("../src/config.js", import.meta.url), "utf8");
 const scheduledJobSource = fs.readFileSync(new URL("../src/services/scheduled-jobs.js", import.meta.url), "utf8");
 const mysqlCutoverSource = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+const orderHistoryFingerprintSource = fs.readFileSync(new URL("../src/services/order-history-fingerprint.js", import.meta.url), "utf8");
 const assetVariantSource = fs.readFileSync(new URL("../src/services/asset-variant-engine.js", import.meta.url), "utf8");
 const aiVariantDraftSaveSource = fs.readFileSync(new URL("../src/services/ai-variant-draft-save-batches.js", import.meta.url), "utf8");
 const remoteReleaseSource = fs.readFileSync(new URL("../deploy/linux/remote-release.sh", import.meta.url), "utf8");
@@ -198,8 +199,9 @@ test("order history exposes an exact business fingerprint before any dedupe is e
   assert.match(mysqlCutoverSource, /import \{ config \} from "\.\.\/config\.js"/);
   assert.match(mysqlCutoverSource, /function orderStatusHistoryBusinessFingerprintMysql/);
   assert.match(mysqlCutoverSource, /function orderStatusHistoryRowFingerprintMysql/);
-  assert.match(mysqlCutoverSource, /payload\.delivery_date_begin \|\| null/);
-  assert.match(mysqlCutoverSource, /payload\.warehouse_name \|\| ""/);
+  assert.match(mysqlCutoverSource, /import \{ orderStatusHistoryBusinessFingerprint \} from "\.\/order-history-fingerprint\.js"/);
+  assert.match(orderHistoryFingerprintSource, /fingerprintDateTime\(payload\.delivery_date_begin\)/);
+  assert.match(orderHistoryFingerprintSource, /fingerprintText\(payload\.warehouse_name\)/);
   assert.match(mysqlCutoverSource, /await recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, historySource, exists\)/);
   assert.match(configSource, /ORDER_HISTORY_DEDUPE_MODE/);
   assert.match(configSource, /\["off", "shadow", "enabled"\], "off"/);
