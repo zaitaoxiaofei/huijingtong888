@@ -88,7 +88,8 @@ test("stock warning SQL scopes tenants and keeps rejected or purchased episodes 
   }
   assert.match(statements[0].sql, /warning_episode_closed_at = CURRENT_TIMESTAMP/);
   assert.match(statements[0].sql, /NOT \(COALESCE\(warning_sales\.recent_30d_qty, 0\) > 0/);
-  assert.match(statements[1].sql, /status = 'cancelled', approval_status = 'cancelled'/);
+  assert.match(statements[1].sql, /SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP/);
+  assert.doesNotMatch(statements[1].sql, /CASE[\s\S]*status/);
   assert.match(statements[3].sql, /existing_request\.request_group_no LIKE 'AUTO-STOCK-%'[\s\S]*existing_request\.warning_episode_closed_at IS NULL/);
   assert.match(statements[3].sql, /existing_request\.demand_type = 'warehouse_request'[\s\S]*existing_request\.approval_status = 'rejected'/);
   assert.deepEqual(Array.from(statements[3].params), [7, 7, 7]);
@@ -107,12 +108,13 @@ const confirmSection = functionSection(
 function confirmationHarness({ failConfirmation = false } = {}) {
   const state = { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null };
   const calls = [];
+  const events = [];
   const context = loadSection(confirmSection, {
     requireDefaultProcurementTenantMysql: async (tenantId) => {
       if (tenantId !== "admin") throw new Error("tenant gate");
       return 7;
     },
-    invalidateOrderProcurementCoverage: () => {},
+    invalidateOrderProcurementCoverage: () => { events.push("invalidate"); },
     normalizeProcurementPurchaseMode: () => "shortage_purchase",
     assertDefaultProcurementProductsMysql: async () => {},
     ensureProcurementPurchaseModeSchemaMysql: async () => {},
@@ -120,8 +122,15 @@ function confirmationHarness({ failConfirmation = false } = {}) {
     ensurePurchaseOrderShipmentSchemaMysql: async () => {},
     withMysqlTransaction: async (callback) => {
       const before = { ...state };
-      try { return await callback({ transaction: true }); }
-      catch (error) { Object.assign(state, before); throw error; }
+      try {
+        const result = await callback({ transaction: true });
+        events.push("commit");
+        return result;
+      } catch (error) {
+        Object.assign(state, before);
+        events.push("rollback");
+        throw error;
+      }
     },
     prepareProcurementRequestPurchaseQuantitiesMysql: async (_body, connection) => {
       assert.equal(connection.transaction, true);
@@ -144,17 +153,19 @@ function confirmationHarness({ failConfirmation = false } = {}) {
       state.status = "purchased";
     }
   });
-  return { confirm: context.confirmProcurementRequestsPurchasedMysql, state, calls };
+  return { confirm: context.confirmProcurementRequestsPurchasedMysql, state, calls, events };
 }
 
 const purchaseBody = { request_ids: [17], items: [{ product_id: 9, actual_quantity: 40 }] };
 
-test("confirmed purchase keeps the warehouse request ID linked to its purchase order", async () => {
-  const { confirm, state, calls } = confirmationHarness();
+test("confirmed purchase keeps the warehouse request ID linked and invalidates cached demand after commit", async () => {
+  const { confirm, state, calls, events } = confirmationHarness();
   const result = await confirm(purchaseBody, 3, "admin");
   assert.deepEqual(calls, ["prepare", "merge", "confirm"]);
   assert.equal(result.purchase_order_id, 55);
   assert.deepEqual(state, { requestId: 17, quantity: 160, status: "purchased", purchaseOrderId: 55 });
+  assert.deepEqual(events, ["invalidate", "commit", "invalidate"]);
+  assert.match(source, /const result = transactionConnection \? await confirm\(transactionConnection\) : await withMysqlTransaction\(confirm\);\s*if \(!transactionConnection\) invalidateOrderProcurementCoverage\(\)/);
 });
 
 test("confirmation failure rolls back the quantity split and request linkage", async () => {

@@ -22895,7 +22895,7 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
     return { ok: true };
   };
   const result = transactionConnection ? await confirm(transactionConnection) : await withMysqlTransaction(confirm);
-  invalidateOrderProcurementCoverage();
+  if (!transactionConnection) invalidateOrderProcurementCoverage();
   return result;
 }
 
@@ -23425,6 +23425,7 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
     await confirmPurchaseOrderMysql(order.id, purchaseBody, sessionPersonId, connection);
     return order;
   });
+  invalidateOrderProcurementCoverage();
   return {
     ok: true,
     purchase_order_id: Number(purchaseOrder.id),
