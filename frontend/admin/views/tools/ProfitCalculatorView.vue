@@ -16,6 +16,7 @@ const result = ref(null);
 const logisticsRules = ref([]);
 const logisticsError = ref("");
 const rateError = ref("");
+const rateLoading = ref(true);
 const rateSourceDate = ref("");
 const selection = ref(null);
 const categoryDetail = computed(() => selection.value?.category || null);
@@ -35,6 +36,8 @@ const quotes = computed(() => quoteLogisticsRules(logisticsRules.value, {
 }));
 const displayQuotes = computed(() => threeChannelQuotes(quotes.value));
 const defaultQuote = computed(() => defaultLogisticsQuote(displayQuotes.value));
+const quoteReady = computed(() => Number(form.saleCny) > 0 && Number(form.exchangeRate) > 0
+  && Number(form.weight) > 0 && [form.length, form.width, form.height].every((value) => Number(value) > 0));
 onMounted(async () => {
   const [rulesResult, rateResult] = await Promise.allSettled([
     apiClient.get("/api/tools/pricing/logistics-rules", { noCache: true }),
@@ -43,9 +46,10 @@ onMounted(async () => {
   if (rulesResult.status === "fulfilled") logisticsRules.value = Array.isArray(rulesResult.value) ? rulesResult.value : [];
   else logisticsError.value = "物流规则加载失败，请刷新后重试";
   if (rateResult.status === "fulfilled" && Number(rateResult.value?.rate) > 0) {
-    form.exchangeRate = Number(rateResult.value.rate);
+    if (!(Number(form.exchangeRate) > 0)) form.exchangeRate = Number(rateResult.value.rate);
     rateSourceDate.value = String(rateResult.value.source_date || "");
-  } else rateError.value = "俄罗斯央行汇率获取失败，暂不能计算，请稍后刷新";
+  } else rateError.value = "俄罗斯央行汇率获取失败，请手动填写人民币兑卢布汇率";
+  rateLoading.value = false;
 });
 function selectQuote(quote) {
   selectedRuleId.value = quote.id;
@@ -54,6 +58,10 @@ function selectQuote(quote) {
 }
 const money = (value) => Number(value || 0).toFixed(2);
 function calculate() {
+  if (!(Number(form.exchangeRate) > 0)) {
+    ElMessage.warning(rateLoading.value ? "汇率仍在获取中，请稍后计算" : "缺少人民币兑卢布汇率，请在参考汇率处填写后计算");
+    return;
+  }
   if (!categoryDetail.value || selectedCommission.value === null) {
     ElMessage.warning("请从 rFBS 佣金表选择商品类目，并等待汇率和售价匹配佣金档位");
     return;
@@ -93,7 +101,7 @@ function calculate() {
             <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
           <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /></el-select></el-form-item>
-          <p class="exchange-note">参考汇率：1 元 ≈ {{ form.exchangeRate || '获取中' }} ₽ · 俄罗斯央行 {{ rateSourceDate }} <span v-if="rateError" class="rate-error">{{ rateError }}</span></p>
+          <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number :controls="false" v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
           <el-form-item label="广告费占比"><el-input-number :controls="false" v-model="form.adRate" :min="0" :max="100" :precision="1" /><span class="unit">%</span></el-form-item>
@@ -112,7 +120,8 @@ function calculate() {
         <el-card shadow="never" class="shipping-panel">
           <template #header><strong>物流费用</strong></template>
           <p v-if="logisticsError" class="rate-error">{{ logisticsError }}</p>
-          <p v-else-if="!quotes.length" class="hint">填写售价、重量和尺寸后显示有效渠道。</p>
+          <p v-else-if="!quoteReady" class="hint">{{ Number(form.exchangeRate) > 0 ? '填写售价、重量和尺寸后显示有效渠道。' : '缺少人民币兑卢布汇率；请等待获取或在参考汇率处手动填写。' }}</p>
+          <p v-else-if="!quotes.length" class="hint">当前售价、重量和尺寸没有匹配的有效物流渠道，请核对参数或切换服务商。</p>
           <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；默认陆空 Standard，点击卡片可切换。</p><div class="shipping-cards"><button v-for="quote in displayQuotes" :key="quote.id" type="button" class="shipping-card" :class="{ active: (selectedRuleId ?? defaultQuote?.id) === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g</small></button></div></template>
         </el-card>
         <el-card v-if="result" shadow="never">

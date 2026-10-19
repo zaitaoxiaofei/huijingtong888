@@ -58,3 +58,14 @@ test("premium big respects the second and third side limits", () => {
   assert.equal(quoteLogisticsRules([premium], payload, at).length, 0);
   assert.equal(quoteLogisticsRules([premium], { ...payload, width: 80 }, at).length, 1);
 });
+
+test("GUOO premium big quotes a 120 by 20 by 30 cm, 5.5 kg package", () => {
+  const premium = { ...rule, name: "GUOO 标准 Premium Big", channel: "standard",
+    min_weight_g: 5001, max_weight_g: 30000, min_price_rub: 7001, max_price_rub: 250000,
+    per_gram_cny: 0.0314, per_ticket_cny: 69.64 };
+  const [quote] = quoteLogisticsRules([premium], {
+    carrier: "GUOO", priceRub: 788 * 11.32, weightG: 5500, length: 120, width: 20, height: 30
+  }, at);
+  assert.equal(quote.chargeableWeightG, 6000);
+  assert.equal(quote.priceCny, 258.04);
+});
