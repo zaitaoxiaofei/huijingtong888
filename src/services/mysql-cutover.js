@@ -20790,7 +20790,7 @@ async function assertDefaultProcurementProductsMysql(productIds, defaultTenantId
   if (rows.length !== ids.length) throw new Error("采购商品不属于当前企业，请刷新后重新选择库存商品");
 }
 
-export async function createProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
+export async function createProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId = "admin", transactionConnection = null) {
   ensureMysqlCutoverEnabled();
   const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
@@ -20803,7 +20803,7 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
   const creatorId = nullableInteger(sessionPersonId) || personId;
   const items = Array.isArray(body.items) && body.items.length ? body.items : [body];
   const groupNo = String(body.request_group_no || procurementRequestGroupNoMysql());
-  return await withMysqlTransaction(async (connection) => {
+  const create = async (connection) => {
     const ids = [];
     for (const item of items) {
       const productId = nullableInteger(item.product_id);
@@ -20839,7 +20839,8 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
       ids.push(Number(result[0].insertId));
     }
     return { id: ids[0], ids, request_group_no: groupNo };
-  });
+  };
+  return transactionConnection ? create(transactionConnection) : withMysqlTransaction(create);
 }
 
 const WAREHOUSE_PROCUREMENT_REASON_CODES = new Set([
@@ -23449,7 +23450,7 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}, trans
       for (const request of productRequests) {
         const requestQuantity = Math.max(0, Number(request.quantity || 0));
         requestedTotal += requestQuantity;
-        if (actualQuantity > 0
+        if (remaining > 0
           && (request.demand_type === 'warehouse_request' || String(request.request_group_no || '').startsWith('AUTO-STOCK-'))) {
           selectedIds.push(Number(request.id));
           remaining = Math.max(0, remaining - requestQuantity);
@@ -23515,12 +23516,12 @@ function beijingLedgerTimestampMysql(value = new Date()) {
   return `${shanghaiDateTimeMysql(value).replace(' ', 'T')}+08:00`;
 }
 
-async function applyDirectProcurementModeMysql(item, sessionPersonId) {
+async function applyDirectProcurementModeMysql(item, sessionPersonId, connection = null) {
   const mode = normalizeProcurementPurchaseMode(item.purchase_mode);
   if (!['inventory_update', 'historical_debt_backfill'].includes(mode)) return null;
   const productId = Number(item.product_id || 0);
   if (!productId) throw new Error('库存商品 ID（product_id）缺失，无法执行采购类型操作；请重新绑定库存商品');
-  const snapshot = await procurementLedgerService.read({ product_id: productId, include_fbp: false });
+  const snapshot = await procurementLedgerService.read({ product_id: productId, include_fbp: false }, "admin", connection);
   if (mode === 'inventory_update') {
     const quantity = Number(item.actual_stock_quantity ?? item.actual_quantity ?? item.quantity);
     const amount = Number(item.actual_stock_value ?? item.amount);
@@ -23531,7 +23532,7 @@ async function applyDirectProcurementModeMysql(item, sessionPersonId) {
     return procurementLedgerService.apply({ product_id: productId, revision: snapshot.revision,
       action_type: 'stocktake', counted_quantity: quantity, counted_amount: amount,
       reason: String(item.note || '采购入口更新实存：以仓库当前实际剩余数量和总货值为准'),
-      request_key: randomUUID() }, sessionPersonId);
+      request_key: randomUUID() }, sessionPersonId, connection);
   }
   const quantity = Number(item.actual_quantity ?? item.quantity);
   const amount = Number(item.amount);
@@ -23543,52 +23544,60 @@ async function applyDirectProcurementModeMysql(item, sessionPersonId) {
     shipping_amount: Number(item.shipping_amount || 0), inventory_effect: 'already_accounted',
     purchased_at: item.purchased_at || beijingLedgerTimestampMysql(),
     reason: String(item.note || '历史采购补记：仅补已真实出库订单的采购欠账，不增加本地库存'),
-    request_key: randomUUID() }, sessionPersonId);
+    request_key: randomUUID() }, sessionPersonId, connection);
 }
 
-export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
+export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null, tenantId = "admin", transactionConnection = null) {
   const defaultTenantId = await requireDefaultProcurementTenantMysql(tenantId);
-  invalidateOrderProcurementCoverage();
   const actor = sessionPersonId || body.person_id || null;
   const submittedItems = Array.isArray(body.items) ? body.items : [];
   const directItems = submittedItems.filter(item => ['inventory_update', 'historical_debt_backfill'].includes(normalizeProcurementPurchaseMode(item.purchase_mode)));
   const shortageItems = submittedItems.filter(item => !directItems.includes(item));
   await assertDefaultProcurementProductsMysql(submittedItems.map(item => item.product_id), defaultTenantId);
-  const directResults = [];
-  for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, actor));
-  let requestIdsInput = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
-  if (directItems.length && requestIdsInput.length) {
-    const directProducts = new Set(directItems.map(item => Number(item.product_id)));
-    const requests = await mysqlQuery(`SELECT request.id, request.product_id FROM procurement_requests request
-      JOIN products product ON product.id = request.product_id AND (product.tenant_id = ? OR product.tenant_id IS NULL)
-      WHERE request.id IN (${requestIdsInput.map(() => '?').join(',')})
-        AND (request.tenant_id = ? OR request.tenant_id IS NULL)`, [defaultTenantId, ...requestIdsInput, defaultTenantId]);
-    const handledIds = requests.filter(row => directProducts.has(Number(row.product_id))).map(row => Number(row.id));
-    if (handledIds.length) await mysqlExecute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
-      note = CONCAT(COALESCE(note, ''), '；已通过更新实存或历史采购补记处理') WHERE id IN (${handledIds.map(() => '?').join(',')})`, handledIds);
-    requestIdsInput = requestIdsInput.filter(id => !handledIds.includes(id));
+  if (directItems.length) await procurementLedgerService.prepare();
+  if (shortageItems.length) {
+    await ensureProcurementPurchaseModeSchemaMysql();
+    await ensurePurchaseCostVersionSchemaMysql();
+    await ensurePurchaseOrderShipmentSchemaMysql();
   }
-  if (!shortageItems.length) return { ok: true, stage: directItems.every(item => normalizeProcurementPurchaseMode(item.purchase_mode) === 'inventory_update') ? 'inventory_update' : 'historical_debt_backfill', direct_results: directResults };
-  const purchaseBody = { ...body, request_ids: requestIdsInput, items: shortageItems };
-  await ensureProcurementPurchaseModeSchemaMysql();
-  await ensurePurchaseCostVersionSchemaMysql();
-  await ensurePurchaseOrderShipmentSchemaMysql();
-  const purchaseOrder = await withMysqlTransaction(async (connection) => {
+  const confirm = async (connection) => {
+    const directResults = [];
+    for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, actor, connection));
+    let requestIdsInput = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
+    if (directItems.length && requestIdsInput.length) {
+      const directProducts = new Set(directItems.map(item => Number(item.product_id)));
+      const [requests] = await connection.query(`SELECT request.id, request.product_id FROM procurement_requests request
+        JOIN products product ON product.id = request.product_id AND (product.tenant_id = ? OR product.tenant_id IS NULL)
+        WHERE request.id IN (${requestIdsInput.map(() => '?').join(',')})
+          AND (request.tenant_id = ? OR request.tenant_id IS NULL) FOR UPDATE`, [defaultTenantId, ...requestIdsInput, defaultTenantId]);
+      const handledIds = requests.filter(row => directProducts.has(Number(row.product_id))).map(row => Number(row.id));
+      if (handledIds.length) await connection.execute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
+        note = CONCAT(COALESCE(note, ''), '；已通过更新实存或历史采购补记处理')
+        WHERE id IN (${handledIds.map(() => '?').join(',')}) AND (tenant_id = ? OR tenant_id IS NULL)`, [...handledIds, defaultTenantId]);
+      requestIdsInput = requestIdsInput.filter(id => !handledIds.includes(id));
+    }
+    if (!shortageItems.length) return {
+      ok: true,
+      stage: directItems.every(item => normalizeProcurementPurchaseMode(item.purchase_mode) === 'inventory_update') ? 'inventory_update' : 'historical_debt_backfill',
+      direct_results: directResults
+    };
+    const purchaseBody = { ...body, request_ids: requestIdsInput, items: shortageItems };
     const requestIds = await prepareProcurementRequestPurchaseQuantitiesMysql(purchaseBody, connection, defaultTenantId);
     if (!requestIds.length) throw new Error("本次实际采购数量没有覆盖任何待采购需求");
     purchaseBody.request_ids = requestIds;
     const order = await mergeProcurementRequestsMysql(purchaseBody, sessionPersonId, connection, tenantId);
     await confirmPurchaseOrderMysql(order.id, purchaseBody, sessionPersonId, connection);
-    return order;
-  });
-  invalidateOrderProcurementCoverage();
-  return {
-    ok: true,
-    purchase_order_id: Number(purchaseOrder.id),
-    purchase_order_no: purchaseOrder.order_no || "",
-    stage: directItems.length ? "mixed" : "in_transit",
-    direct_results: directResults
+    return {
+      ok: true,
+      purchase_order_id: Number(order.id),
+      purchase_order_no: order.order_no || "",
+      stage: directItems.length ? "mixed" : "in_transit",
+      direct_results: directResults
+    };
   };
+  const result = transactionConnection ? await confirm(transactionConnection) : await withMysqlTransaction(confirm);
+  if (!transactionConnection) invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
@@ -23600,33 +23609,30 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
   await assertDefaultProcurementProductsMysql(items.map(item => item.product_id), defaultTenantId);
   const directItems = items.filter(item => ['inventory_update', 'historical_debt_backfill'].includes(normalizeProcurementPurchaseMode(item.purchase_mode)));
   const shortageItems = items.filter(item => !directItems.includes(item));
-  const directResults = [];
-  for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, sessionPersonId || body.person_id || null));
-  if (!shortageItems.length) return { ok: true, stage: 'direct', direct_results: directResults, ids: [] };
-  const shortageBody = { ...body, items: shortageItems };
-  const created = await createProcurementRequestMysql(shortageBody, sessionPersonId, tenantId);
-  try {
-    return {
-      ...created,
-      ...await confirmProcurementRequestsPurchasedMysql({
-        ...shortageBody,
-        request_ids: created.ids,
-        note: body.note || "采购工作台登记采购"
-      }, sessionPersonId, tenantId),
-      direct_results: directResults
-    };
-  } catch (error) {
-    const ids = (created.ids || []).map(Number).filter(Boolean);
-    if (ids.length) {
-      await mysqlExecute(`
-        UPDATE procurement_requests
-        SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
-          note = CONCAT(COALESCE(note, ''), '；采购登记失败，系统已取消本次记录')
-        WHERE id IN (${ids.map(() => "?").join(",")}) AND purchase_order_id IS NULL
-      `, ids);
-    }
-    throw error;
+  if (directItems.length) await procurementLedgerService.prepare();
+  if (shortageItems.length) {
+    await ensureProcurementRequestTimestampSchemaMysql();
+    await ensureProcurementOrderSourceSchemaMysql();
+    await ensureProcurementFlexibleRequestSchemaMysql();
+    await ensureProcurementPurchaseModeSchemaMysql();
+    await ensurePurchaseCostVersionSchemaMysql();
+    await ensurePurchaseOrderShipmentSchemaMysql();
   }
+  const result = await withMysqlTransaction(async (connection) => {
+    const directResults = [];
+    for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, sessionPersonId || body.person_id || null, connection));
+    if (!shortageItems.length) return { ok: true, stage: 'direct', direct_results: directResults, ids: [] };
+    const shortageBody = { ...body, items: shortageItems };
+    const created = await createProcurementRequestMysql(shortageBody, sessionPersonId, tenantId, connection);
+    const purchased = await confirmProcurementRequestsPurchasedMysql({
+      ...shortageBody,
+      request_ids: created.ids,
+      note: body.note || "采购工作台登记采购"
+    }, sessionPersonId, tenantId, connection);
+    return { ...created, ...purchased, direct_results: directResults };
+  });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function previewShippedProcurementReceiptsMysql(body = {}) {

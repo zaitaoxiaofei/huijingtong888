@@ -67,6 +67,19 @@ test("real order shortages retain their existing partial purchase split", async 
   assert.match(writes[1].sql, /source_order_item_id/);
 });
 
+test("a real order consuming all purchased units cannot close a selected warehouse or stock warning request", async () => {
+  for (const suggestion of [
+    { id: 31, product_id: 9, quantity: 200, demand_type: "warehouse_request", request_group_no: "CG-1" },
+    { id: 32, product_id: 9, quantity: 200, demand_type: "advance_stock", request_group_no: "AUTO-STOCK-20261019-9" }
+  ]) {
+    const realOrder = { id: 30, product_id: 9, quantity: 40, demand_type: "real_order", source_order_item_id: 81 };
+    const { prepare, connection, writes } = prepareHarness([realOrder, suggestion]);
+    const ids = await prepare({ request_ids: [30, suggestion.id], items: [{ product_id: 9, actual_quantity: 40 }] }, connection, 7);
+    assert.deepEqual(Array.from(ids), [30]);
+    assert.equal(writes.length, 0);
+  }
+});
+
 const warningSection = functionSection(
   "function procurementInventoryWarningJoinsMysql(",
   "let pendingOrderProcurementReconcilePromise = null;");
@@ -106,7 +119,7 @@ const confirmSection = functionSection(
   "export async function recordProcurementPurchaseMysql(");
 
 function confirmationHarness({ failConfirmation = false } = {}) {
-  const state = { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null };
+  const state = { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null, inventory: 100 };
   const calls = [];
   const events = [];
   const context = loadSection(confirmSection, {
@@ -115,15 +128,22 @@ function confirmationHarness({ failConfirmation = false } = {}) {
       return 7;
     },
     invalidateOrderProcurementCoverage: () => { events.push("invalidate"); },
-    normalizeProcurementPurchaseMode: () => "shortage_purchase",
+    normalizeProcurementPurchaseMode: (value) => value || "shortage_purchase",
     assertDefaultProcurementProductsMysql: async () => {},
+    procurementLedgerService: { prepare: async () => {} },
+    applyDirectProcurementModeMysql: async (_item, _actor, connection) => {
+      assert.equal(connection.transaction, true);
+      calls.push("direct");
+      state.inventory = 80;
+      return { ok: true };
+    },
     ensureProcurementPurchaseModeSchemaMysql: async () => {},
     ensurePurchaseCostVersionSchemaMysql: async () => {},
     ensurePurchaseOrderShipmentSchemaMysql: async () => {},
     withMysqlTransaction: async (callback) => {
       const before = { ...state };
       try {
-        const result = await callback({ transaction: true });
+        const result = await callback({ transaction: true, query: async () => [[]] });
         events.push("commit");
         return result;
       } catch (error) {
@@ -163,8 +183,8 @@ test("confirmed purchase keeps the warehouse request ID linked and invalidates c
   const result = await confirm(purchaseBody, 3, "admin");
   assert.deepEqual(calls, ["prepare", "merge", "confirm"]);
   assert.equal(result.purchase_order_id, 55);
-  assert.deepEqual(state, { requestId: 17, quantity: 160, status: "purchased", purchaseOrderId: 55 });
-  assert.deepEqual(events, ["invalidate", "commit", "invalidate"]);
+  assert.deepEqual(state, { requestId: 17, quantity: 160, status: "purchased", purchaseOrderId: 55, inventory: 100 });
+  assert.deepEqual(events, ["commit", "invalidate"]);
   assert.match(source, /const result = transactionConnection \? await confirm\(transactionConnection\) : await withMysqlTransaction\(confirm\);\s*if \(!transactionConnection\) invalidateOrderProcurementCoverage\(\)/);
 });
 
@@ -172,7 +192,18 @@ test("confirmation failure rolls back the quantity split and request linkage", a
   const { confirm, state, calls } = confirmationHarness({ failConfirmation: true });
   await assert.rejects(confirm(purchaseBody, 3, "admin"), /price validation failed/);
   assert.deepEqual(calls, ["prepare", "merge", "confirm"]);
-  assert.deepEqual(state, { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null });
+  assert.deepEqual(state, { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null, inventory: 100 });
+});
+
+test("mixed direct inventory action rolls back if purchase confirmation fails", async () => {
+  const { confirm, state, calls, events } = confirmationHarness({ failConfirmation: true });
+  await assert.rejects(confirm({ ...purchaseBody, items: [
+    { product_id: 8, purchase_mode: "inventory_update", actual_quantity: 80, amount: 100 },
+    ...purchaseBody.items
+  ] }, 3, "admin"), /price validation failed/);
+  assert.deepEqual(calls, ["direct", "prepare", "merge", "confirm"]);
+  assert.deepEqual(state, { requestId: 17, quantity: 200, status: "submitted", purchaseOrderId: null, inventory: 100 });
+  assert.deepEqual(events, ["rollback"]);
 });
 
 test("nondefault tenants cannot enter the shared procurement purchase flow", async () => {
@@ -180,4 +211,58 @@ test("nondefault tenants cannot enter the shared procurement purchase flow", asy
   await assert.rejects(confirm(purchaseBody, 3, "other"), /tenant gate/);
   assert.deepEqual(calls, []);
   assert.equal(state.status, "submitted");
+});
+
+const recordSection = functionSection(
+  "export async function recordProcurementPurchaseMysql(",
+  "export async function previewShippedProcurementReceiptsMysql(");
+
+test("free purchase rolls back direct inventory and newly created requests together", async () => {
+  const state = { inventory: 100, createdRequest: false };
+  const events = [];
+  const context = loadSection(recordSection, {
+    requireDefaultProcurementTenantMysql: async () => 7,
+    assertDefaultProcurementProductsMysql: async () => {},
+    normalizeProcurementPurchaseMode: (value) => value || "shortage_purchase",
+    procurementLedgerService: { prepare: async () => {} },
+    ensureProcurementRequestTimestampSchemaMysql: async () => {},
+    ensureProcurementOrderSourceSchemaMysql: async () => {},
+    ensureProcurementFlexibleRequestSchemaMysql: async () => {},
+    ensureProcurementPurchaseModeSchemaMysql: async () => {},
+    ensurePurchaseCostVersionSchemaMysql: async () => {},
+    ensurePurchaseOrderShipmentSchemaMysql: async () => {},
+    withMysqlTransaction: async (callback) => {
+      const before = { ...state };
+      try {
+        const result = await callback({ transaction: true });
+        events.push("commit");
+        return result;
+      } catch (error) {
+        Object.assign(state, before);
+        events.push("rollback");
+        throw error;
+      }
+    },
+    applyDirectProcurementModeMysql: async (_item, _actor, connection) => {
+      assert.equal(connection.transaction, true);
+      state.inventory = 80;
+      return { ok: true };
+    },
+    createProcurementRequestMysql: async (_body, _actor, _tenantId, connection) => {
+      assert.equal(connection.transaction, true);
+      state.createdRequest = true;
+      return { ids: [55] };
+    },
+    confirmProcurementRequestsPurchasedMysql: async (_body, _actor, _tenantId, connection) => {
+      assert.equal(connection.transaction, true);
+      throw new Error("purchase validation failed");
+    },
+    invalidateOrderProcurementCoverage: () => { events.push("invalidate"); }
+  });
+  await assert.rejects(context.recordProcurementPurchaseMysql({ items: [
+    { product_id: 8, purchase_mode: "inventory_update", quantity: 80, amount: 100 },
+    { product_id: 9, purchase_mode: "shortage_purchase", quantity: 40, amount: 50 }
+  ] }, 3, "admin"), /purchase validation failed/);
+  assert.deepEqual(state, { inventory: 100, createdRequest: false });
+  assert.deepEqual(events, ["rollback"]);
 });

@@ -399,10 +399,13 @@ export function createProcurementLedgerService(hooks) {
       ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
-  async function read(body, tenantId = 'admin') {
-    await prepare();
+  async function read(body, tenantId = 'admin', existingConnection = null) {
+    if (!existingConnection) await prepare();
     const id = integer(body.product_id || body.productId, '库存商品 ID');
-    const value = await snapshot(id, query, tenantId);
+    const run = existingConnection
+      ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
+      : query;
+    const value = await snapshot(id, run, tenantId);
     const fbp = hooks.fbpStocks && body.include_fbp !== false ? await hooks.fbpStocks(id) : null;
     if (fbp) value.fbp_inventory = fbp;
     value.source_inference = inferProcurementSources(value);
@@ -710,7 +713,7 @@ export function createProcurementLedgerService(hooks) {
       ...(plan.counted_quantity !== undefined ? { physical_after: plan.counted_quantity } : {}),
       target_before: target?.local_stock, target_after: target ? target.local_stock + plan.target_delta : null };
   }
-  return { read, apply, preview, costTasks, receiveAndCount };
+  return { read, apply, preview, costTasks, receiveAndCount, prepare };
 }
 
 export function planReceiptCorrection(batches, received, quantity) {
