@@ -26579,18 +26579,22 @@ async function dashboardMonthShippingCostSummaryMysql(today) {
       SELECT
         o.shop_id,
         COALESCE(s.name, CONCAT('店铺 ', o.shop_id)) AS shop_name,
-        COUNT(DISTINCT o.id) AS order_count,
-        COALESCE(SUM(oi.quantity), 0) AS item_quantity,
-        COALESCE(SUM(COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)), 0) AS revenue,
-        COALESCE(SUM(COALESCE(opi.purchase_cost_cny, oi.frozen_purchase_cost * oi.quantity, 0)), 0) AS purchase_cost,
-        COALESCE(SUM(COALESCE(opi.domestic_shipping_cny, oi.frozen_domestic_shipping * oi.quantity, 0)), 0) AS domestic_shipping_cost,
-        COALESCE(SUM(COALESCE(opi.international_shipping_cny, oi.frozen_international_shipping * oi.quantity, 0)), 0) AS international_shipping_cost
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS order_count,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN oi.quantity ELSE 0 END), 0) AS item_quantity,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.purchase_cost_cny, oi.frozen_purchase_cost * oi.quantity, 0) ELSE 0 END), 0) AS purchase_cost,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.domestic_shipping_cny, oi.frozen_domestic_shipping * oi.quantity, 0) ELSE 0 END), 0) AS domestic_shipping_cost,
+        COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} THEN COALESCE(opi.international_shipping_cny, oi.frozen_international_shipping * oi.quantity, 0) ELSE 0 END), 0) AS international_shipping_cost,
+        COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+        COALESCE(SUM(CASE WHEN ${outcome.cancelledPreFulfillment} THEN oi.quantity ELSE 0 END), 0) AS cancelled_quantity,
+        COUNT(DISTINCT CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN o.id END) AS return_orders,
+        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.quantity ELSE 0 END), 0) AS return_quantity,
+        COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN oi.sale_price * oi.quantity ELSE 0 END), 0) AS return_revenue
       FROM orders o
       JOIN order_items oi ON oi.order_id = o.id
       LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
       LEFT JOIN shops s ON s.id = o.shop_id
       WHERE 1=1 ${dateFilter.whereSql}
-        AND ${effectiveBusinessSale}
       GROUP BY o.shop_id, s.name
       ORDER BY revenue DESC, order_count DESC
     `, dateFilter.params);
@@ -26600,7 +26604,12 @@ async function dashboardMonthShippingCostSummaryMysql(today) {
       revenue: Number(acc.revenue || 0) + Number(row.revenue || 0),
       purchase_cost: Number(acc.purchase_cost || 0) + Number(row.purchase_cost || 0),
       domestic_shipping_cost: Number(acc.domestic_shipping_cost || 0) + Number(row.domestic_shipping_cost || 0),
-      international_shipping_cost: Number(acc.international_shipping_cost || 0) + Number(row.international_shipping_cost || 0)
+      international_shipping_cost: Number(acc.international_shipping_cost || 0) + Number(row.international_shipping_cost || 0),
+      cancelled_orders: Number(acc.cancelled_orders || 0) + Number(row.cancelled_orders || 0),
+      cancelled_quantity: Number(acc.cancelled_quantity || 0) + Number(row.cancelled_quantity || 0),
+      return_orders: Number(acc.return_orders || 0) + Number(row.return_orders || 0),
+      return_quantity: Number(acc.return_quantity || 0) + Number(row.return_quantity || 0),
+      return_revenue: Number(acc.return_revenue || 0) + Number(row.return_revenue || 0)
     }), {});
     const revenue = Number(totals.revenue || 0);
     const purchaseCost = Number(totals.purchase_cost || 0);
@@ -26619,7 +26628,13 @@ async function dashboardMonthShippingCostSummaryMysql(today) {
       international_shipping_cost: roundMoneyMysql(internationalShippingCost),
       shipping_cost: roundMoneyMysql(shippingCost),
       shipping_cost_ratio: revenue ? shippingCost / revenue : null,
-      shops: rows.map((row) => {
+      cancelled_orders: Number(totals.cancelled_orders || 0),
+      cancelled_quantity: Number(totals.cancelled_quantity || 0),
+      return_orders: Number(totals.return_orders || 0),
+      return_quantity: Number(totals.return_quantity || 0),
+      return_revenue: roundMoneyMysql(totals.return_revenue || 0),
+      order_outcomes_available: true,
+      shops: rows.filter((row) => Number(row.order_count || 0) > 0).map((row) => {
         const shopRevenue = Number(row.revenue || 0);
         const shopPurchaseCost = Number(row.purchase_cost || 0);
         const shopDomesticShippingCost = Number(row.domestic_shipping_cost || 0);
@@ -26654,6 +26669,7 @@ async function dashboardMonthShippingCostSummaryMysql(today) {
       international_shipping_cost: null,
       shipping_cost: null,
       shipping_cost_ratio: null,
+      order_outcomes_available: false,
       shops: []
     };
   }
@@ -27029,11 +27045,30 @@ export async function pendingSettlementCostsMysql(query = {}) {
 async function dashboardSnapshotIsStaleMysql(snapshot = {}, dateKey = todayDateKeyMysql()) {
   const snapshotUpdatedAt = new Date(snapshot?.snapshot?.source_updated_at || snapshot?.snapshot?.refreshed_at || "");
   if (Number.isNaN(snapshotUpdatedAt.getTime())) return true;
-  const source = await mysqlQueryOne(`
-    SELECT MAX(refreshed_at) AS refreshed_at
-    FROM analytics_shop_daily
-    WHERE date_key = ?
-  `, [dateKey]);
+  const dateFilter = profitOrderedAtUtcRangeMysql("o", dateKey, dateKey);
+  const outcome = buildOrderOutcomeSql("o", "mysql");
+  const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
+  const [source, orders] = await Promise.all([
+    mysqlQueryOne(`
+      SELECT MAX(refreshed_at) AS refreshed_at
+      FROM analytics_shop_daily
+      WHERE date_key = ?
+    `, [dateKey]),
+    mysqlQueryOne(`
+      SELECT
+        COUNT(DISTINCT o.id) AS order_count,
+        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS effective_orders,
+        COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
+        MAX(o.id) AS order_max_id
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      WHERE 1=1 ${dateFilter.whereSql}
+    `, dateFilter.params)
+  ]);
+  const snapshotOrders = snapshot?.commerce?.today || {};
+  if (["order_count", "effective_orders", "cancelled_orders"].some((key) =>
+    Number(orders?.[key] || 0) !== Number(snapshotOrders[key] || 0))) return true;
+  if (Number(orders?.order_max_id || 0) !== Number(snapshot?.snapshot?.order_max_id || 0)) return true;
   if (!source?.refreshed_at) return false;
   const sourceUpdatedAt = new Date(source.refreshed_at);
   return !Number.isNaN(sourceUpdatedAt.getTime()) && sourceUpdatedAt > snapshotUpdatedAt;
@@ -27062,6 +27097,13 @@ async function saveDashboardSnapshotMysql(dateKey, payload = {}) {
 async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = todayDateKeyMysql() } = {}) {
   if (forceRefresh) invalidateDashboardCachesMysql();
   const selectedDate = String(dateKey || todayDateKeyMysql()).slice(0, 10);
+  const orderDateFilter = profitOrderedAtUtcRangeMysql("o", selectedDate, selectedDate);
+  const orderSource = await mysqlQueryOne(`
+    SELECT MAX(o.id) AS order_max_id
+    FROM orders o
+    JOIN order_items oi ON oi.order_id = o.id
+    WHERE 1=1 ${orderDateFilter.whereSql}
+  `, orderDateFilter.params);
   const previousDate = dateKeyMysql(addDaysMysql(new Date(`${selectedDate}T00:00:00+08:00`), -1));
   const adLatestDate = await latestDashboardAdDateMysql(selectedDate);
   const adCurrentDate = adLatestDate || selectedDate;
@@ -27088,6 +27130,23 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
   const todayProfit = recentCommerce.today;
   const yesterdayProfit = recentCommerce.yesterday;
   const shopBreakdown = recentCommerce.shops;
+  const monthOrderOutcomes = monthShippingCost.order_outcomes_available ? {
+    effective_orders: monthShippingCost.order_count,
+    cancelled_orders: monthShippingCost.cancelled_orders,
+    cancelled_quantity: monthShippingCost.cancelled_quantity,
+    return_orders: monthShippingCost.return_orders,
+    return_quantity: monthShippingCost.return_quantity,
+    return_revenue: monthShippingCost.return_revenue
+  } : null;
+  const currentProfitTrend = monthOrderOutcomes ? {
+    ...profitTrend,
+    month_effective_orders: monthOrderOutcomes.effective_orders,
+    month_cancelled_orders: monthOrderOutcomes.cancelled_orders,
+    month_cancelled_quantity: monthOrderOutcomes.cancelled_quantity,
+    month_return_orders: monthOrderOutcomes.return_orders,
+    month_return_quantity: monthOrderOutcomes.return_quantity,
+    month_return_revenue: monthOrderOutcomes.return_revenue
+  } : profitTrend;
   const stockRows = stock.rows || [];
   const procurementRows = (procurement.rows || []).map((item) => ({
     product_id: Number(item.product_id || 0),
@@ -27104,6 +27163,7 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
   const warningCount = Number(stock.meta?.warning_count || stockRows.filter((item) => item.alert_level !== "ok").length);
   const procurementAmount = procurementRows.reduce((sum, item) => sum + Number(item.total_amount || 0), 0);
   return {
+    snapshot: { order_max_id: Number(orderSource?.order_max_id || 0) },
     summary: {
       urgent_count: urgentCount,
       warning_count: warningCount,
@@ -27115,13 +27175,13 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
       fbp_inventory_quantity: fbpInventoryValue.quantity,
       month_shipping_cost: monthShippingCost,
       month_order_outcomes: {
-        effective_orders: Number(profitTrend?.month_effective_orders || monthShippingCost?.order_count || 0),
-        cancelled_orders: Number(profitTrend?.month_cancelled_orders || 0),
-        cancelled_quantity: Number(profitTrend?.month_cancelled_quantity || 0),
+        effective_orders: Number(currentProfitTrend?.month_effective_orders || 0),
+        cancelled_orders: Number(currentProfitTrend?.month_cancelled_orders || 0),
+        cancelled_quantity: Number(currentProfitTrend?.month_cancelled_quantity || 0),
         cancelled_revenue: roundMoneyMysql(profitTrend?.month_cancelled_revenue || 0),
-        return_orders: Number(profitTrend?.month_return_orders || 0),
-        return_quantity: Number(profitTrend?.month_return_quantity || 0),
-        return_revenue: roundMoneyMysql(profitTrend?.month_return_revenue || 0)
+        return_orders: Number(currentProfitTrend?.month_return_orders || 0),
+        return_quantity: Number(currentProfitTrend?.month_return_quantity || 0),
+        return_revenue: roundMoneyMysql(currentProfitTrend?.month_return_revenue || 0)
       },
       aftersales_loss: aftersalesLoss,
       ai_usage: aiUsage,
@@ -27132,7 +27192,7 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
       previous_date_key: previousDate,
       today: todayProfit,
       yesterday: yesterdayProfit,
-      profit_trend: profitTrend,
+      profit_trend: currentProfitTrend,
       shops: shopBreakdown,
       advertising: {
         date_key: adCurrentDate,
