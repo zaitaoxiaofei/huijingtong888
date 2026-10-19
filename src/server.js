@@ -2275,6 +2275,15 @@ async function runBackgroundCustomerMessageDispatch() {
   }
 }
 
+function throwForPartialOrderSync(result, jobName) {
+  if (!Array.isArray(result?.errors) || result.errors.length === 0) return;
+  const failedShops = [...new Set((result.shops || [])
+    .filter((shop) => shop?.error)
+    .map((shop) => shop.shop_name || (shop.shop_id ? `#${shop.shop_id}` : ""))
+    .filter(Boolean))];
+  throw new Error(`${jobName} incomplete: ${result.errors.length} error(s); failed shop(s): ${failedShops.join(", ") || "unknown"}`);
+}
+
 async function runBackgroundOrderStatusSync() {
   if (backgroundOrderSyncRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 30 };
   const laneBusy = claimBackgroundModuleLane("orders", "order_status_sync");
@@ -2288,6 +2297,7 @@ async function runBackgroundOrderStatusSync() {
       skip_post_processing: true
     });
     const dashboard = await services.refreshDashboardSnapshot({ forceRefresh: true });
+    throwForPartialOrderSync(result, "Order status sync");
     console.log(`background order status sync ok: fetched ${result.fetched || 0}, updated ${result.updated || 0}, requests ${result.requests || 0}`);
     console.log(`dashboard snapshot refreshed after order sync: ${dashboard?.commerce?.date_key || ""} ${dashboard?.snapshot?.refreshed_at || ""}`);
     return {
@@ -2320,6 +2330,7 @@ async function runBackgroundCancelledOrderSync() {
       history_source: "cancelled_reconciliation",
       skip_post_processing: true
     });
+    throwForPartialOrderSync(result, "Cancelled order sync");
     console.log(`background cancelled order sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return { window, ...result };
   } catch (error) {
@@ -2350,6 +2361,7 @@ async function runBackgroundPostingDetailSync() {
       limit: BACKGROUND_POSTING_DETAIL_SYNC_LIMIT,
       concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
     });
+    throwForPartialOrderSync(reconciliation, "Posting detail reconciliation");
     console.log(`background posting detail sync ok: reconciled ${reconciliation.fetched || 0}, candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return { ...result, reconciliation: { window: reconciliationWindow, ...reconciliation } };
   } catch (error) {
