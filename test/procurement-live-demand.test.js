@@ -35,6 +35,22 @@ test('explicit procurement-demand refresh invalidates the cached order/status pr
   assert.match(body, /invalidateOrderProcurementCoverage\(\)/);
 });
 
+test('inventory-warning demand upgrades legacy product components before querying tenant-scoped components', async () => {
+  const source = await fs.readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function ensureInventoryWarningProcurementRequestsMysql()'), source.indexOf('async function ensurePendingOrderProcurementRequestsMysql()'));
+  const calls = [];
+  const synchronize = new Function(
+    'ensureProcurementFlexibleRequestSchemaMysql',
+    'ensureProductCompositionSchemaMysql',
+    `${body}; return ensureInventoryWarningProcurementRequestsMysql;`
+  )(
+    async () => { calls.push('procurement'); },
+    async () => { calls.push('components'); throw new Error('schema upgrade stopped'); }
+  );
+  await assert.rejects(synchronize(), /schema upgrade stopped/);
+  assert.deepEqual(calls, ['procurement', 'components']);
+});
+
 test('existing actionable requests are not duplicated; completed and cancelled records cannot hide new gaps', () => {
   const coverage = new Map([[1, order(1, 10, 2)]]);
   const row = { id: 77, product_id: 10, quantity: 2, status: 'suggested', source_order_id: 1, operational_needs_fulfillment: true, operational_shortage: 2 };

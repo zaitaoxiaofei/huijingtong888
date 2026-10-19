@@ -15356,6 +15356,7 @@ function procurementInventoryWarningConditionMysql() {
 
 async function ensureInventoryWarningProcurementRequestsMysql() {
   await ensureProcurementFlexibleRequestSchemaMysql();
+  await ensureProductCompositionSchemaMysql();
   const defaultTenantId = await requireDefaultProcurementTenantMysql();
   const warningJoins = procurementInventoryWarningJoinsMysql(defaultTenantId);
   const warningCondition = procurementInventoryWarningConditionMysql();
