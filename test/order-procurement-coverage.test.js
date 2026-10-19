@@ -101,6 +101,16 @@ test('received purchase history cannot cover an open order when the physical poo
   assert.equal(result.stock_quantity, 0);
   assert.equal(result.shortage_quantity, 1);
 });
+test('approved receipt covers only the units remaining in the physical pool', () => {
+  const result = calculate([item(1, { quantity: 2 })], {
+    stocks: [{ product_id: 10, ledger: 1 }],
+    requests: [{ id: 3, product_id: 10, quantity: 2, purchase_order_id: 4, status: 'purchased' }],
+    allocations: [{ order_item_id: 1, product_id: 10, procurement_request_id: 3, allocated_quantity: 2 }],
+    inbounds: [{ id: 5, product_id: 10, procurement_request_id: 3, purchase_order_id: 4, quantity: 2, status: 'approved' }]
+  }).get(1);
+  assert.equal(result.stock_quantity, 1);
+  assert.equal(result.shortage_quantity, 1);
+});
 test('purchase suggestions alone are not confirmed supply', () => {
   assert.equal(calculate([item()], { requests: [{ id: 3, product_id: 10, source_order_item_id: 1, quantity: 1, amount: 10, status: 'suggested' }] }).get(1).shortage_quantity, 1);
 });

@@ -7,7 +7,7 @@ const historical = (id, quantity, extra = {}) => ({ order_id: id, order_item_id:
   entered_transport: 1, needs_fulfillment: 0, stock_location: 'LOCAL', ordered_at: '2026-09-01T00:00:00Z', ...extra });
 const demand = (id, quantity) => historical(id, quantity, { entered_transport: 0, needs_fulfillment: 1, ordered_at: '2026-09-16T00:00:00Z' });
 
-test('100 shipped, 2 historic receipts, 2 new purchases: historical 98 survives and new demand is covered', () => {
+test('historical debt keeps received purchase evidence separate until its current order source is explicit', () => {
   const input = { demands: [historical(1, 100), demand(2, 2)], stocks: [{ product_id: 10, ledger: -98 }],
     requests: [{ id: 20, product_id: 10, quantity: 2, source_order_item_id: 2, purchase_order_id: 20, status: 'purchased' }],
     inbounds: [{ id: 1, product_id: 10, quantity: 2, amount: 20, status: 'approved', purchased_at: '2026-08-01T00:00:00Z' },
@@ -19,6 +19,10 @@ test('100 shipped, 2 historic receipts, 2 new purchases: historical 98 survives 
   input.inbounds[1].status = 'approved';
   result = calculateOrderProcurementCoverage(input);
   assert.equal(result.get(1).missing_purchase_quantity, 98);
+  assert.equal(result.get(2).stock_quantity, 0);
+  assert.equal(result.get(2).shortage_quantity, 2);
+  input.sources = [{ order_item_id: 2, product_id: 10, quantity: 2, inbound_record_id: 2 }];
+  result = calculateOrderProcurementCoverage(input);
   assert.equal(result.get(2).stock_quantity, 2);
 });
 

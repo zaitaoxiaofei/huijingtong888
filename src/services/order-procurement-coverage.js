@@ -131,13 +131,15 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       const stock = stockByProduct.get(Number(detail.product_id));
       if (stock?.stocktake_id || positive(stock?.fbp_reserved) || prioritizedProducts.has(Number(detail.product_id))) continue;
       const productId = Number(detail.product_id);
-      const recordedSupply = positive(detail.received_quantity + detail.documented_quantity);
       // An explicit current-order source is earmarked for that order even
       // when older historical shipments leave the aggregate ledger negative.
-      // Consume the shared pool only to the extent it exists, so the same
-      // physical units are not offered to another current order.
+      // An approved receipt proves a source, not extra physical stock. It
+      // covers the order only while the physical pool still has those units.
+      const pool = pools.get(productId) || 0;
+      const recordedSupply = positive(detail.documented_quantity)
+        + Math.min(positive(detail.received_quantity), positive(pool - detail.documented_quantity));
       detail.current_recorded_supply = recordedSupply;
-      pools.set(productId, positive((pools.get(productId) || 0) - recordedSupply));
+      pools.set(productId, positive(pool - recordedSupply));
     }
   }
   // A physical count supersedes old promises of incoming supply. Release live
