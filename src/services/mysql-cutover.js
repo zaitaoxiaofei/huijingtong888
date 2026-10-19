@@ -2766,20 +2766,19 @@ export async function productInventoryAvailabilityMysql(query = {}, tenantId = "
   if (!values[0] || productIds.length > 200 || productIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
     throw new Error("请提供 1 至 200 个有效的库存商品 ID（productIds）");
   }
-  const tenantScoped = String(tenantId) !== "admin";
-  let tenantPk = null;
-  if (tenantScoped) {
-    const requiredTenantColumns = [["products", "tenant_id"], ["shops", "tenant_id"],
-      ["sku_mappings", "tenant_id"], ["product_components", "tenant_id"]];
-    const columnsReady = (await Promise.all(requiredTenantColumns.map(([table, column]) => mysqlSchemaColumnExists(table, column)))).every(Boolean);
-    if (!columnsReady || !await inventoryMovementTenantColumnExistsMysql()) {
-      throw Object.assign(new Error("企业库存数量尚未完成租户字段迁移，请联系管理员"), { statusCode: 503 });
-    }
-    tenantPk = await resolveShopTenantIdMysql(tenantId);
-    const owned = await mysqlQuery(`SELECT id FROM products WHERE tenant_id = ? AND active = 1 AND id IN (${productIds.map(() => "?").join(",")})`, [tenantPk, ...productIds]);
-    if (owned.length !== productIds.length) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+  const defaultTenant = String(tenantId) === "admin";
+  const requiredTenantColumns = [["products", "tenant_id"], ["shops", "tenant_id"],
+    ["sku_mappings", "tenant_id"], ["product_components", "tenant_id"], ["procurement_requests", "tenant_id"]];
+  const columnsReady = (await Promise.all(requiredTenantColumns.map(([table, column]) => mysqlSchemaColumnExists(table, column)))).every(Boolean);
+  if (!columnsReady || !await inventoryMovementTenantColumnExistsMysql()) {
+    throw Object.assign(new Error("企业库存数量尚未完成租户字段迁移，请联系管理员"), { statusCode: 503 });
   }
-  const coverage = await orderProcurementCoverageMysql(tenantScoped ? { productIds, tenantId: tenantPk } : { productIds });
+  const tenantPk = await resolveShopTenantIdMysql(tenantId);
+  const owned = await mysqlQuery(`SELECT id FROM products WHERE active = 1
+    AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
+    AND id IN (${productIds.map(() => "?").join(",")})`, [tenantPk, ...productIds]);
+  if (owned.length !== productIds.length) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+  const coverage = await orderProcurementCoverageMysql({ productIds, tenantId: tenantPk, includeLegacyTenantNull: defaultTenant });
   return {
     source: "order_procurement_coverage",
     rows: productIds.map((productId) => coverage.product_availability?.get(productId) || {

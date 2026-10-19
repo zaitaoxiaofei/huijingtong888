@@ -58,14 +58,21 @@ test('availability API resolves a bounded product batch from the order projectio
   const start = service.indexOf('export async function productInventoryAvailabilityMysql(');
   const end = service.indexOf('export async function orderProcurementBatchesMysql(', start);
   const calls = [];
+  const ownershipSql = [];
   const load = new Function('ensureMysqlCutoverEnabled', 'orderProcurementCoverageMysql',
+    'mysqlSchemaColumnExists', 'inventoryMovementTenantColumnExistsMysql', 'resolveShopTenantIdMysql', 'mysqlQuery',
     `${service.slice(start, end).replace('export ', '')}; return productInventoryAvailabilityMysql;`)(
     () => {}, async (options) => {
       calls.push(options);
       return { product_availability: new Map([[605, { product_id: 605, local_stock: 4, pending_procurement_qty: 0 }]]) };
-    });
+    }, async () => true, async () => true, async tenantId => tenantId === 'admin' ? 1 : Number(tenantId),
+    async (sql, args) => { ownershipSql.push({ sql, args }); return args.slice(1).map(id => ({ id })); });
   const result = await load({ productIds: '605,606' });
-  assert.deepEqual(calls, [{ productIds: [605, 606] }]);
+  assert.deepEqual(calls, [{ productIds: [605, 606], tenantId: 1, includeLegacyTenantNull: true }]);
+  assert.match(ownershipSql[0].sql, /tenant_id = \? OR tenant_id IS NULL/);
+  await load({ productIds: '605' }, '19');
+  assert.deepEqual(calls[1], { productIds: [605], tenantId: 19, includeLegacyTenantNull: false });
+  assert.doesNotMatch(ownershipSql[1].sql, /tenant_id IS NULL/);
   assert.equal(result.source, 'order_procurement_coverage');
   assert.equal(result.rows[0].local_stock, 4);
   assert.equal(result.rows[1].pending_procurement_qty, 0);
