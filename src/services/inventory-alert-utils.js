@@ -9,6 +9,7 @@ const FBP_COVERAGE_DAYS_URGENT = 7;
 
 export function completedBeijingSalesWindow(anchor = new Date()) {
   return {
+    from30: shanghaiDateDaysAgo(30, anchor),
     from15: shanghaiDateDaysAgo(15, anchor),
     from7: shanghaiDateDaysAgo(7, anchor),
     through: shanghaiDateDaysAgo(1, anchor)
@@ -69,7 +70,8 @@ export function applyStockAlertQuery(rows, query = {}) {
 export function withInventoryProductAlertStatus(product = {}) {
   const recent7d = Math.max(0, Number(product.recent_7d_qty || 0));
   const recent15d = Math.max(0, Number(product.recent_15d_qty || 0));
-  const leadDays = Number(product.production_lead_days || 0) || null;
+  const recent30d = Math.max(0, Number(product.recent_30d_qty || 0));
+  const leadDays = Number(product.production_lead_days || 7);
   const physicalStock = Math.max(0, Number(product.physical_stock ?? product.local_stock ?? 0));
   const availableStock = Math.max(0, Number(product.available_stock ?? product.local_available ?? physicalStock));
   const incomingStock = Math.max(0, Number(product.incoming_stock || 0));
@@ -83,6 +85,7 @@ export function withInventoryProductAlertStatus(product = {}) {
     ...product,
     recent_7d_qty: recent7d,
     recent_15d_qty: recent15d,
+    recent_30d_qty: recent30d,
     production_lead_days: leadDays,
     physical_stock: physicalStock,
     available_stock: availableStock,
@@ -112,8 +115,8 @@ export function applyInventoryProductAlertQuery(rows, query = {}) {
     if (alertType !== "all" && row.alert_type !== alertType) return false;
     return true;
   });
-  filtered.sort((left, right) => right.recent_7d_qty - left.recent_7d_qty
-    || right.recent_15d_qty - left.recent_15d_qty
+  filtered.sort((left, right) => right.recent_30d_qty - left.recent_30d_qty
+    || right.recent_7d_qty - left.recent_7d_qty
     || right.product_id - left.product_id);
   return {
     rows: paged ? filtered.slice((page - 1) * pageSize, page * pageSize) : filtered,

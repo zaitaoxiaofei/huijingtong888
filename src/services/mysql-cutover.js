@@ -804,6 +804,7 @@ async function ensureProductCompositionSchemaMysql() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   await ensureMysqlColumns("product_components", [
+    "ALTER TABLE product_components ADD COLUMN tenant_id BIGINT UNSIGNED NULL AFTER id",
     "ALTER TABLE product_components ADD COLUMN component_role VARCHAR(16) NOT NULL DEFAULT 'included' AFTER quantity"
   ]);
   productCompositionSchemaReadyMysql = true;
@@ -4001,13 +4002,19 @@ export async function peopleMysql() {
 
 async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
   const salesWindow = completedBeijingSalesWindow();
-  const range = profitOrderedAtUtcRangeMysql("o", salesWindow.from15, salesWindow.through);
+  const range = profitOrderedAtUtcRangeMysql("o", salesWindow.from30, salesWindow.through);
   return mysqlQuery(`
-    SELECT consumed.product_id,
+    SELECT consumed.product_id, consumed.shop_id, consumed.ozon_sku,
+      MAX(consumed.shop_name) AS shop_name,
+      MAX(consumed.mapping_id) AS mapping_id,
+      MAX(consumed.offer_id) AS offer_id,
       SUM(CASE WHEN consumed.date_key >= ? THEN consumed.quantity ELSE 0 END) AS recent_7d_qty,
-      SUM(consumed.quantity) AS recent_15d_qty
+      SUM(CASE WHEN consumed.date_key >= ? THEN consumed.quantity ELSE 0 END) AS recent_15d_qty,
+      SUM(consumed.quantity) AS recent_30d_qty
     FROM (
-      SELECT cp.id AS product_id, ${chinaDateSqlMysql("o.ordered_at")} AS date_key,
+      SELECT cp.id AS product_id, o.shop_id, sh.name AS shop_name,
+        COALESCE(NULLIF(oi.ozon_sku, ''), sm.ozon_sku) AS ozon_sku,
+        sm.id AS mapping_id, sm.offer_id, ${chinaDateSqlMysql("o.ordered_at")} AS date_key,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity
       FROM orders o
       JOIN shops sh ON sh.id = o.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
@@ -4034,8 +4041,29 @@ async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
             AND raw.query_stock_location = 'FBP')
         ${range.whereSql}
     ) consumed
-    GROUP BY consumed.product_id
-  `, [salesWindow.from7, ...Array(7).fill(tenantPk), ...range.params]);
+    GROUP BY consumed.product_id, consumed.shop_id, consumed.ozon_sku
+  `, [salesWindow.from7, salesWindow.from15, ...Array(7).fill(tenantPk), ...range.params]);
+}
+
+async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenant) {
+  if (!productIds.length) return [];
+  return mysqlQuery(`
+    SELECT DISTINCT cp.id AS product_id, sm.id AS mapping_id, sm.shop_id,
+      sh.name AS shop_name, sm.ozon_sku, sm.offer_id
+    FROM sku_mappings sm
+    JOIN shops sh ON sh.id = sm.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
+    JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
+    LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = sm.shop_id AND recipe.ozon_sku = sm.ozon_sku
+      AND recipe.active = 1 AND recipe.mode = 'combo'
+    LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
+    LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL
+      AND ${tenantShopPredicateMysql("pc", defaultTenant)}
+    JOIN products cp ON cp.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
+      WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
+      AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
+    WHERE sm.active = 1 AND cp.id IN (${productIds.map(() => "?").join(",")})
+    ORDER BY cp.id, sm.shop_id, sm.ozon_sku, sm.id
+  `, [tenantPk, tenantPk, tenantPk, tenantPk, ...productIds]);
 }
 
 async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
@@ -4060,7 +4088,8 @@ async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
     inventory_number: row.inventory_number || "",
     product_name: row.product_name || "",
     image_url: compactProductImageUrlForListMysql({ id: row.product_id, image_url: row.image_url, created_at: row.created_at }),
-    production_lead_days: row.production_lead_days == null ? null : Number(row.production_lead_days),
+    production_lead_days: row.production_lead_days == null ? 7 : Number(row.production_lead_days),
+    lead_time_defaulted: row.production_lead_days == null,
     created_at: row.created_at
   }));
 }
@@ -4109,25 +4138,66 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     await ensureProductCompositionSchemaMysql();
     const inventoryTenantPk = await resolveShopTenantIdMysql(tenantId);
     const inventoryDefaultTenant = await isDefaultShopTenantMysql(inventoryTenantPk);
-    const salesCacheKey = `stock-alerts:product-sales:v2:${inventoryTenantPk}`;
+    const salesCacheKey = `stock-alerts:product-sales:v3:${inventoryTenantPk}`;
     if (forceRefresh) invalidateMasterDataCache(salesCacheKey);
     const [products, salesRows, incomingRows] = await Promise.all([
       stockedInventoryAlertProductsMysql(inventoryTenantPk, inventoryDefaultTenant),
       getCachedMasterData(salesCacheKey, () => inventoryAlertProductSalesMysql(inventoryTenantPk, inventoryDefaultTenant), 60_000),
       purchasedInventoryInTransitMysql(inventoryTenantPk, inventoryDefaultTenant)
     ]);
-    const salesByProduct = new Map(salesRows.map((row) => [Number(row.product_id), row]));
+    const salesByProduct = new Map();
+    for (const row of salesRows) {
+      const productId = Number(row.product_id);
+      const totals = salesByProduct.get(productId) || { recent_7d_qty: 0, recent_15d_qty: 0, recent_30d_qty: 0 };
+      totals.recent_7d_qty += Number(row.recent_7d_qty || 0);
+      totals.recent_15d_qty += Number(row.recent_15d_qty || 0);
+      totals.recent_30d_qty += Number(row.recent_30d_qty || 0);
+      salesByProduct.set(productId, totals);
+    }
     const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
     const availabilityByProduct = new Map();
+    const skuRows = [];
     for (let index = 0; index < products.length; index += 200) {
       const productIds = products.slice(index, index + 200).map((product) => Number(product.product_id));
-      const availability = await productInventoryAvailabilityMysql({ productIds: productIds.join(",") }, tenantId);
+      const [availability, boundSkus] = await Promise.all([
+        productInventoryAvailabilityMysql({ productIds: productIds.join(",") }, tenantId),
+        inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant)
+      ]);
       for (const row of availability.rows || []) availabilityByProduct.set(Number(row.product_id), row);
+      skuRows.push(...boundSkus);
+    }
+    const skusByProduct = new Map();
+    const addSku = (row) => {
+      const productId = Number(row.product_id);
+      const productSkus = skusByProduct.get(productId) || new Map();
+      const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
+      if (!productSkus.has(key)) productSkus.set(key, {
+        mapping_id: Number(row.mapping_id || 0),
+        shop_id: Number(row.shop_id || 0),
+        shop_name: row.shop_name || "",
+        ozon_sku: String(row.ozon_sku || ""),
+        offer_id: row.offer_id || "",
+        recent_7d_qty: 0,
+        recent_15d_qty: 0,
+        recent_30d_qty: 0
+      });
+      skusByProduct.set(productId, productSkus);
+      return productSkus.get(key);
+    };
+    for (const row of skuRows) addSku(row);
+    for (const row of salesRows) {
+      const sku = addSku(row);
+      sku.recent_7d_qty = Number(row.recent_7d_qty || 0);
+      sku.recent_15d_qty = Number(row.recent_15d_qty || 0);
+      sku.recent_30d_qty = Number(row.recent_30d_qty || 0);
     }
     return applyStockAlertQuery(products.map((product) => {
       const productId = Number(product.product_id);
       const sales = salesByProduct.get(productId) || {};
       const availability = availabilityByProduct.get(productId) || {};
+      const skus = [...(skusByProduct.get(productId)?.values() || [])]
+        .sort((left, right) => right.recent_30d_qty - left.recent_30d_qty || left.shop_id - right.shop_id || left.ozon_sku.localeCompare(right.ozon_sku));
+      const shops = [...new Map(skus.map((sku) => [sku.shop_id, { shop_id: sku.shop_id, shop_name: sku.shop_name }])).values()];
       return {
         ...product,
         physical_stock: Number(availability.physical_stock ?? availability.local_stock ?? 0),
@@ -4135,7 +4205,12 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
         open_order_demand_qty: Number(availability.open_order_demand_qty || 0),
         incoming_stock: incomingByProduct.get(productId) || 0,
         recent_7d_qty: Number(sales.recent_7d_qty || 0),
-        recent_15d_qty: Number(sales.recent_15d_qty || 0)
+        recent_15d_qty: Number(sales.recent_15d_qty || 0),
+        recent_30d_qty: Number(sales.recent_30d_qty || 0),
+        shop_count: shops.length,
+        sku_count: skus.length,
+        shops,
+        skus
       };
     }), query);
   }
@@ -13400,7 +13475,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       Number(body.advertising_rate || 0),
       Number(body.return_rate || 0.05),
       normalizeStockUnitMysql(body.stock_unit),
-      normalizeProductionLeadDaysMysql(body.production_lead_days),
+      normalizeProductionLeadDaysMysql(body.production_lead_days ?? (body.product_type === "selection" ? null : 7)),
       Number(body.is_accessory || 0) ? 1 : 0,
       ownerPersonId,
       createdByPersonId,
