@@ -213,6 +213,7 @@ function createDefaultForm() {
 function resetForm() {
   requestKey.value = newRequestKey();
   Object.assign(form, createDefaultForm());
+  form.production_lead_days = isInventoryTarget.value ? 7 : null;
   form.owner_person_id = props.people[0]?.id ? String(props.people[0].id) : "";
   form.product_type = isInventoryTarget.value ? "main" : "selection";
   form.selection_status = isInventoryTarget.value ? "listed" : "draft";
@@ -259,7 +260,7 @@ function fillFormFromValue(value = {}) {
     desired_profit_value: Number(value.desired_profit_value || 20),
     return_rate: roundMoney(resolvedReturnRate(value) * 100),
     stock_unit: value.stock_unit || "个",
-    production_lead_days: value.production_lead_days == null ? null : Number(value.production_lead_days),
+    production_lead_days: value.production_lead_days == null ? (isInventoryTarget.value ? 7 : null) : Number(value.production_lead_days),
     is_accessory: Number(value.is_accessory || 0) ? 1 : 0,
     composition_items: Array.isArray(value.composition_items) ? value.composition_items.map(normalizeComponentItem) : [],
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
@@ -1828,7 +1829,7 @@ function submitAndCreateDraft() {
               </el-col>
               <el-col v-if="isInventoryTarget" :span="8">
                 <el-form-item label="生产周期">
-                  <el-select v-model="form.production_lead_days" clearable placeholder="待设置">
+                  <el-select v-model="form.production_lead_days" placeholder="默认 7 天">
                     <el-option v-for="days in PRODUCTION_LEAD_DAY_OPTIONS" :key="days" :label="`${days} 天`" :value="days" />
                   </el-select>
                 </el-form-item>

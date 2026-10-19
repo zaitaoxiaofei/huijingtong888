@@ -23,6 +23,8 @@ const syncLoading = ref(false);
 const rowActionLoading = ref("");
 const requestDialogVisible = ref(false);
 const requestProducts = ref([]);
+const skuDetailsVisible = ref(false);
+const selectedInventory = ref(null);
 const state = reactive({
   rows: [],
   total: 0,
@@ -58,8 +60,7 @@ const inventoryAlertFilters = [
   { value: "out_of_stock", label: "断货" },
   { value: "low_stock", label: "缺货" },
   { value: "in_transit", label: "采购在途" },
-  { value: "healthy", label: "库存健康" },
-  { value: "lead_time_missing", label: "周期待设置" }
+  { value: "healthy", label: "库存健康" }
 ];
 const syncRouteQuery = createDefaultRouteQuerySync({
   route,
@@ -96,6 +97,7 @@ function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
+    if (state.filters.alertType === "lead_time_missing") state.filters.alertType = "all";
   } finally {
     syncingRoute = false;
   }
@@ -131,15 +133,35 @@ function openMappings() {
 function inventoryAlertLabel(row) {
   if (row.alert_type === "out_of_stock") return "断货";
   if (row.alert_type === "low_stock") return "缺货";
-  if (row.alert_type === "healthy") return "库存健康";
-  return "周期待设置";
+  return "库存健康";
 }
 
 function inventoryAlertTagType(row) {
   if (row.alert_type === "out_of_stock") return "danger";
   if (row.alert_type === "low_stock") return "warning";
   if (row.alert_type === "healthy") return "success";
-  return "info";
+  return "success";
+}
+
+function linkedShops(row) {
+  return Array.isArray(row.shops) ? row.shops : [];
+}
+
+function linkedSkus(row) {
+  return Array.isArray(row.skus) ? row.skus : [];
+}
+
+function linkedShopCount(row) {
+  return Number(row.shop_count ?? linkedShops(row).length);
+}
+
+function linkedSkuCount(row) {
+  return Number(row.sku_count ?? linkedSkus(row).length);
+}
+
+function openSkuDetails(row) {
+  selectedInventory.value = row;
+  skuDetailsVisible.value = true;
 }
 
 function openWarehouseRequest(row) {
@@ -292,7 +314,7 @@ onMounted(async () => {
         <el-button :type="inventoryView ? 'primary' : 'default'" @click="changeView('inventory')">库存视角</el-button>
         <el-button :type="!inventoryView ? 'primary' : 'default'" @click="changeView('sku')">FBP SKU 视角</el-button>
       </div>
-      <span v-if="inventoryView" class="muted-text">按近 7 个完整北京时间日的日均销量 × 生产周期预警</span>
+      <span v-if="inventoryView" class="muted-text">按近 30 个完整北京时间日的总销量排序；预警线按近 7 日日均销量 × 生产周期计算</span>
     </div>
     <InventoryPageToolbar
       :filters="state.filters"
@@ -300,7 +322,7 @@ onMounted(async () => {
       :show-shop="!inventoryView"
       :show-date-range="!inventoryView"
       :query-label="inventoryView ? '库存搜索' : 'FBP预警搜索'"
-      :query-placeholder="inventoryView ? '库存编号 / 名称关键词' : '完整库存编号 / SKU / Offer / 名称关键词'"
+      :query-placeholder="inventoryView ? '库存编号 / 名称 / 店铺 / 线上 SKU' : '完整库存编号 / SKU / Offer / 名称关键词'"
       @search="handleSearch"
       @reset="handleReset"
     />
@@ -330,24 +352,42 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="生产周期" width="120" align="center">
-          <template #default="{ row }"><strong v-if="row.production_lead_days">{{ row.production_lead_days }} 天</strong><el-tag v-else type="info">待设置</el-tag></template>
+        <el-table-column label="关联店铺 / SKU" min-width="280">
+          <template #default="{ row }">
+            <div class="cell-stack alert-relations">
+              <span><strong>{{ linkedShopCount(row) }}</strong> 个店铺 · <strong>{{ linkedSkuCount(row) }}</strong> 个线上 SKU</span>
+              <span v-if="linkedShops(row).length" class="alert-relation-preview muted-text">
+                店铺：{{ linkedShops(row).slice(0, 2).map((shop) => shop.shop_name || shop.shop_id).join('、') }}{{ linkedShops(row).length > 2 ? ` 等 ${linkedShops(row).length} 家` : '' }}
+              </span>
+              <span v-if="linkedSkus(row).length" class="alert-relation-preview muted-text">
+                SKU：{{ linkedSkus(row).slice(0, 2).map((sku) => sku.ozon_sku || sku.offer_id || '-').join('、') }}{{ linkedSkus(row).length > 2 ? ` 等 ${linkedSkus(row).length} 个` : '' }}
+              </span>
+              <span v-if="!linkedSkuCount(row)" class="muted-text">暂无关联线上 SKU</span>
+            </div>
+          </template>
         </el-table-column>
-        <el-table-column label="销量" width="150" align="center">
-          <template #default="{ row }"><div class="cell-stack cell-center"><strong>近 7 天 {{ integer(row.recent_7d_qty) }}</strong><span class="muted-text">近 15 天 {{ integer(row.recent_15d_qty) }}</span></div></template>
+        <el-table-column label="生产周期" width="120" align="center">
+          <template #default="{ row }"><div class="cell-stack cell-center"><strong>{{ row.production_lead_days ?? 7 }} 天</strong><span v-if="row.lead_time_defaulted" class="muted-text">默认值</span></div></template>
+        </el-table-column>
+        <el-table-column label="销量" width="170" align="center">
+          <template #default="{ row }"><div class="cell-stack cell-center"><strong>近 30 天 {{ integer(row.recent_30d_qty) }}</strong><span class="muted-text">近 7 天 {{ integer(row.recent_7d_qty) }} · 15 天 {{ integer(row.recent_15d_qty) }}</span></div></template>
         </el-table-column>
         <el-table-column label="预警" min-width="210">
           <template #default="{ row }">
             <div class="cell-stack">
-              <div class="alert-row-tags"><el-tag :type="inventoryAlertTagType(row)">{{ inventoryAlertLabel(row) }}</el-tag><el-tag v-if="row.lead_time_missing && row.alert_type !== 'lead_time_missing'" type="info">周期待设置</el-tag><el-tag v-if="row.in_transit" type="primary">采购在途</el-tag></div>
-              <span v-if="row.alert_quantity !== null">预警线 {{ integer(row.alert_quantity) }} 件 · 日均 {{ Number(row.daily_sales_7d || 0).toFixed(2) }}</span>
-              <span v-else class="muted-text">设置生产周期后计算预警线</span>
+              <div class="alert-row-tags"><el-tag :type="inventoryAlertTagType(row)">{{ inventoryAlertLabel(row) }}</el-tag><el-tag v-if="row.in_transit" type="primary">采购在途</el-tag></div>
+              <span>预警线 {{ integer(row.alert_quantity) }} 件 · 日均 {{ Number(row.daily_sales_7d || 0).toFixed(2) }}</span>
               <span v-if="row.suggested_purchase_qty > 0" class="muted-text">建议补 {{ integer(row.suggested_purchase_qty) }} 件（已扣在途）</span>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">
-          <template #default="{ row }"><el-button link type="primary" :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button></template>
+          <template #default="{ row }">
+            <div class="cell-stack alert-row-actions">
+              <el-button link type="primary" @click="openSkuDetails(row)">查看明细</el-button>
+              <el-button link type="primary" :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button>
+            </div>
+          </template>
         </el-table-column>
       </el-table>
       <el-table v-else v-loading="loading || syncLoading" :data="pagedRows" stripe border class="erp-data-table">
@@ -456,6 +496,40 @@ onMounted(async () => {
       @update:pageSize="handlePageSizeChange"
     />
     <WarehouseProcurementRequestDialog v-model="requestDialogVisible" :products="requestProducts" @submitted="loadPageData" />
+    <el-drawer v-if="skuDetailsVisible" v-model="skuDetailsVisible" title="库存关联明细" size="min(720px, 100vw)" append-to-body>
+      <template v-if="selectedInventory">
+        <div class="alert-detail-heading">
+          <div class="product-cell">
+            <ProductImagePreview :src="selectedInventory.image_url" :preview-list="selectedInventory.image_url ? [selectedInventory.image_url] : []" size="portrait" fit="cover" />
+            <div class="cell-stack">
+              <strong>{{ selectedInventory.product_name || '-' }}</strong>
+              <span class="inventory-id-display">库存 ID：{{ selectedInventory.inventory_number || selectedInventory.inventory_id || selectedInventory.product_id }}</span>
+              <span class="muted-text">{{ linkedShopCount(selectedInventory) }} 个店铺 · {{ linkedSkuCount(selectedInventory) }} 个线上 SKU · 近 30 天合计 {{ integer(selectedInventory.recent_30d_qty) }} 件</span>
+            </div>
+          </div>
+          <span class="muted-text">销量按库存实际消耗数量统计，多个线上 SKU 汇总到同一个库存。</span>
+        </div>
+        <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存关联 SKU 明细" tabindex="0">
+          <el-table :data="linkedSkus(selectedInventory)" stripe border class="erp-data-table" empty-text="暂无关联线上 SKU">
+            <el-table-column label="店铺" prop="shop_name" min-width="130">
+              <template #default="{ row }">{{ row.shop_name || row.shop_id || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="线上 SKU / Offer" min-width="230">
+              <template #default="{ row }"><div class="cell-stack"><strong class="alert-sku-value">{{ row.ozon_sku || '-' }}</strong><span class="muted-text alert-sku-value">Offer {{ row.offer_id || '-' }}</span></div></template>
+            </el-table-column>
+            <el-table-column label="近 7 天" width="90" align="right">
+              <template #default="{ row }">{{ integer(row.recent_7d_qty) }}</template>
+            </el-table-column>
+            <el-table-column label="近 15 天" width="95" align="right">
+              <template #default="{ row }">{{ integer(row.recent_15d_qty) }}</template>
+            </el-table-column>
+            <el-table-column label="近 30 天" width="95" align="right">
+              <template #default="{ row }"><strong>{{ integer(row.recent_30d_qty) }}</strong></template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
@@ -468,4 +542,10 @@ onMounted(async () => {
 .alert-filter-count { margin-left: 5px; opacity: .8; }
 .alert-row-tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .inventory-alert-table :deep(.el-table__row) { height: 92px; }
+.alert-relations { min-width: 0; }
+.alert-relation-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert-row-actions { align-items: flex-start; }
+.alert-row-actions :deep(.el-button) { margin: 0; }
+.alert-detail-heading { display: grid; gap: 12px; margin-bottom: 18px; }
+.alert-sku-value { overflow-wrap: anywhere; }
 </style>
