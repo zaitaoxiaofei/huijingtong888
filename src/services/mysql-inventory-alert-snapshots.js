@@ -16,6 +16,7 @@ export async function refreshInventoryAlertSkuDailyMysqlService(deps, body = {})
     ON DUPLICATE KEY UPDATE item_quantity = VALUES(item_quantity), refreshed_at = VALUES(refreshed_at)
   `, orderedAtFilter.params);
   deps.invalidateCache("stock-alerts:base:v2");
+  deps.invalidateCachePrefix?.("stock-alerts:base:v3:");
   const count = await deps.queryOne(
     "SELECT COUNT(*) AS count FROM inventory_alert_sku_daily WHERE date_key >= ? AND date_key <= ?",
     [rangeFrom, rangeTo]

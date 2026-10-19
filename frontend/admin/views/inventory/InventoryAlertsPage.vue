@@ -10,6 +10,7 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import WarehouseProcurementRequestDialog from "../../components/procurement/WarehouseProcurementRequestDialog.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
@@ -20,11 +21,16 @@ const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const syncLoading = ref(false);
 const rowActionLoading = ref("");
+const requestDialogVisible = ref(false);
+const requestProducts = ref([]);
 const state = reactive({
   rows: [],
   total: 0,
+  meta: {},
   shops: [],
   filters: {
+    view: "inventory",
+    alertType: "all",
     query: "",
     shopId: "all",
     dateFrom: "",
@@ -35,6 +41,8 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  view: "inventory",
+  alertType: "all",
   query: "",
   shopId: "all",
   dateFrom: "",
@@ -44,6 +52,15 @@ const filterDefaults = {
 };
 
 const pagedRows = computed(() => state.rows);
+const inventoryView = computed(() => state.filters.view !== "sku");
+const inventoryAlertFilters = [
+  { value: "all", label: "全部" },
+  { value: "out_of_stock", label: "断货" },
+  { value: "low_stock", label: "缺货" },
+  { value: "in_transit", label: "采购在途" },
+  { value: "healthy", label: "库存健康" },
+  { value: "lead_time_missing", label: "周期待设置" }
+];
 const syncRouteQuery = createDefaultRouteQuerySync({
   route,
   router,
@@ -109,6 +126,46 @@ function handlePageSizeChange(size) {
 
 function openMappings() {
   router.push("/inventory/mappings");
+}
+
+function inventoryAlertLabel(row) {
+  if (row.alert_type === "out_of_stock") return "断货";
+  if (row.alert_type === "low_stock") return "缺货";
+  if (row.alert_type === "healthy") return "库存健康";
+  return "周期待设置";
+}
+
+function inventoryAlertTagType(row) {
+  if (row.alert_type === "out_of_stock") return "danger";
+  if (row.alert_type === "low_stock") return "warning";
+  if (row.alert_type === "healthy") return "success";
+  return "info";
+}
+
+function openWarehouseRequest(row) {
+  requestProducts.value = [{
+    id: row.product_id,
+    name: row.product_name,
+    inventory_number: row.inventory_number || row.inventory_id,
+    image_url: row.image_url,
+    suggested_purchase_qty: Math.max(1, Number(row.suggested_purchase_qty || 0))
+  }];
+  requestDialogVisible.value = true;
+}
+
+function changeView(view) {
+  state.filters.view = view;
+  state.filters.alertType = "all";
+  state.filters.page = 1;
+  syncRouteQuery("manual");
+  loadPageData();
+}
+
+function changeAlertType(value) {
+  state.filters.alertType = value;
+  state.filters.page = 1;
+  syncRouteQuery("manual");
+  loadPageData();
 }
 
 async function offerOpenReplenishmentPage(message = "FBP 备货单草稿已创建。") {
@@ -191,21 +248,25 @@ async function loadPageData() {
   loading.value = true;
   try {
     const params = new URLSearchParams({
-      mode: "fbp-alerts",
+      mode: inventoryView.value ? "inventory-alerts" : "fbp-alerts",
       paged: "1",
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize),
-      shopId: String(state.filters.shopId || "all"),
-      dateFrom: String(state.filters.dateFrom || ""),
-      dateTo: String(state.filters.dateTo || "")
+      alertType: String(state.filters.alertType || "all")
     });
+    if (!inventoryView.value) {
+      params.set("shopId", String(state.filters.shopId || "all"));
+      params.set("dateFrom", String(state.filters.dateFrom || ""));
+      params.set("dateTo", String(state.filters.dateTo || ""));
+    }
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), loadShopDictionary()];
+    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), inventoryView.value ? Promise.resolve(state.shops) : loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
     state.total = Number(payload?.total || payload?.meta?.total || 0);
+    state.meta = payload?.meta || {};
     state.shops = Array.isArray(shops) ? shops : [];
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
@@ -226,17 +287,70 @@ onMounted(async () => {
 
 <template>
   <div class="inventory-page-shell inventory-card">
+    <div class="alert-view-switch">
+      <div class="alert-view-buttons">
+        <el-button :type="inventoryView ? 'primary' : 'default'" @click="changeView('inventory')">库存视角</el-button>
+        <el-button :type="!inventoryView ? 'primary' : 'default'" @click="changeView('sku')">FBP SKU 视角</el-button>
+      </div>
+      <span v-if="inventoryView" class="muted-text">按近 7 个完整北京时间日的日均销量 × 生产周期预警</span>
+    </div>
     <InventoryPageToolbar
       :filters="state.filters"
       :shops="state.shops"
-      query-label="FBP预警搜索"
-      query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
+      :show-shop="!inventoryView"
+      :show-date-range="!inventoryView"
+      :query-label="inventoryView ? '库存搜索' : 'FBP预警搜索'"
+      :query-placeholder="inventoryView ? '库存编号 / 名称关键词' : '完整库存编号 / SKU / Offer / 名称关键词'"
       @search="handleSearch"
       @reset="handleReset"
     />
 
+    <div v-if="inventoryView" class="alert-status-filters">
+      <el-button
+        v-for="option in inventoryAlertFilters"
+        :key="option.value"
+        size="small"
+        :type="state.filters.alertType === option.value ? 'primary' : 'default'"
+        @click="changeAlertType(option.value)"
+      >{{ option.label }}<span v-if="option.value !== 'all'" class="alert-filter-count">{{ state.meta[option.value] ?? 0 }}</span></el-button>
+    </div>
+
     <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存预警表格" tabindex="0">
-      <el-table v-loading="loading || syncLoading" :data="pagedRows" stripe border class="erp-data-table">
+      <el-table v-if="inventoryView" v-loading="loading" :data="pagedRows" stripe border class="erp-data-table inventory-alert-table">
+        <el-table-column label="主图" width="90" fixed="left">
+          <template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" fit="cover" /></template>
+        </el-table-column>
+        <el-table-column label="库存信息" min-width="350">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
+              <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_id }}</span>
+              <span>剩余可用 <strong :class="{ 'danger-text': row.available_stock <= 0 }">{{ integer(row.available_stock) }}</strong> · 本地实物 <strong>{{ integer(row.physical_stock) }}</strong></span>
+              <span class="muted-text">采购在途 {{ integer(row.incoming_stock) }} · 待履约占用 {{ integer(row.open_order_demand_qty) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="生产周期" width="120" align="center">
+          <template #default="{ row }"><strong v-if="row.production_lead_days">{{ row.production_lead_days }} 天</strong><el-tag v-else type="info">待设置</el-tag></template>
+        </el-table-column>
+        <el-table-column label="销量" width="150" align="center">
+          <template #default="{ row }"><div class="cell-stack cell-center"><strong>近 7 天 {{ integer(row.recent_7d_qty) }}</strong><span class="muted-text">近 15 天 {{ integer(row.recent_15d_qty) }}</span></div></template>
+        </el-table-column>
+        <el-table-column label="预警" min-width="210">
+          <template #default="{ row }">
+            <div class="cell-stack">
+              <div class="alert-row-tags"><el-tag :type="inventoryAlertTagType(row)">{{ inventoryAlertLabel(row) }}</el-tag><el-tag v-if="row.lead_time_missing && row.alert_type !== 'lead_time_missing'" type="info">周期待设置</el-tag><el-tag v-if="row.in_transit" type="primary">采购在途</el-tag></div>
+              <span v-if="row.alert_quantity !== null">预警线 {{ integer(row.alert_quantity) }} 件 · 日均 {{ Number(row.daily_sales_7d || 0).toFixed(2) }}</span>
+              <span v-else class="muted-text">设置生产周期后计算预警线</span>
+              <span v-if="row.suggested_purchase_qty > 0" class="muted-text">建议补 {{ integer(row.suggested_purchase_qty) }} 件（已扣在途）</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" fixed="right">
+          <template #default="{ row }"><el-button link type="primary" :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button></template>
+        </el-table-column>
+      </el-table>
+      <el-table v-else v-loading="loading || syncLoading" :data="pagedRows" stripe border class="erp-data-table">
         <el-table-column label="店铺" width="130" fixed="left">
           <template #default="{ row }"><strong>{{ row.shop_name || "-" }}</strong></template>
         </el-table-column>
@@ -341,6 +455,17 @@ onMounted(async () => {
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
+    <WarehouseProcurementRequestDialog v-model="requestDialogVisible" :products="requestProducts" @submitted="loadPageData" />
   </div>
 </template>
 
+<style scoped>
+.alert-view-switch { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 12px 14px 4px; }
+.alert-view-buttons { display: flex; gap: 8px; }
+.alert-view-buttons .el-button + .el-button { margin-left: 0; }
+.alert-status-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 14px 12px; }
+.alert-status-filters .el-button + .el-button { margin-left: 0; }
+.alert-filter-count { margin-left: 5px; opacity: .8; }
+.alert-row-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.inventory-alert-table :deep(.el-table__row) { height: 92px; }
+</style>

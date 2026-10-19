@@ -23,7 +23,7 @@ function reset() {
     product_id: Number(product.id), product_name: product.name || product.product_name || "-",
     product_code: product.inventory_number || product.inventory_id || product.code || "-",
     image_url: product.image_url || product.product_image_url || "",
-    quantity: 1, reason_code: "", reason_note: ""
+    quantity: Math.max(1, Math.floor(Number(product.suggested_purchase_qty || 1))), reason_code: "", reason_note: ""
   }));
 }
 

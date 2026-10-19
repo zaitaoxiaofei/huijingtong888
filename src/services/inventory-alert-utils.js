@@ -7,6 +7,14 @@ const FBS_VIRTUAL_STOCK_WARNING_THRESHOLD = 10;
 const FBP_COVERAGE_DAYS_SHORTAGE = 15;
 const FBP_COVERAGE_DAYS_URGENT = 7;
 
+export function completedBeijingSalesWindow(anchor = new Date()) {
+  return {
+    from15: shanghaiDateDaysAgo(15, anchor),
+    from7: shanghaiDateDaysAgo(7, anchor),
+    through: shanghaiDateDaysAgo(1, anchor)
+  };
+}
+
 export function applyStockAlertQuery(rows, query = {}) {
   const mode = String(query.mode || "alerts");
   const paged = String(query.paged || "") === "1";
@@ -17,6 +25,8 @@ export function applyStockAlertQuery(rows, query = {}) {
   const dateFrom = String(query.dateFrom || query.date_from || "").slice(0, 10);
   const dateTo = String(query.dateTo || query.date_to || "").slice(0, 10);
   const alertType = String(query.alertType || query.alert_type || "all");
+
+  if (mode === "inventory-alerts") return applyInventoryProductAlertQuery(rows, query);
 
   const fbpAlertMode = mode === "fbp-alerts";
   const sourceRows = mode === "fbp" || fbpAlertMode ? flattenFbpRows(rows) : rows;
@@ -52,6 +62,72 @@ export function applyStockAlertQuery(rows, query = {}) {
       warning_count: fbpAlertMode ? filtered.length : rows.filter((row) => row.alert_level !== "ok").length,
       urgent_count: filtered.filter((row) => row.alert_level === "danger").length,
       last_synced_at: rows.reduce((latest, row) => maxTextDate(latest, row.last_synced_at), "")
+    }
+  };
+}
+
+export function withInventoryProductAlertStatus(product = {}) {
+  const recent7d = Math.max(0, Number(product.recent_7d_qty || 0));
+  const recent15d = Math.max(0, Number(product.recent_15d_qty || 0));
+  const leadDays = Number(product.production_lead_days || 0) || null;
+  const physicalStock = Math.max(0, Number(product.physical_stock ?? product.local_stock ?? 0));
+  const availableStock = Math.max(0, Number(product.available_stock ?? product.local_available ?? physicalStock));
+  const incomingStock = Math.max(0, Number(product.incoming_stock || 0));
+  const alertQuantity = leadDays ? Math.ceil(recent7d / 7 * leadDays) : null;
+  const outOfStock = availableStock <= 0;
+  const lowStock = !outOfStock && alertQuantity !== null && availableStock < alertQuantity;
+  const inTransit = incomingStock > 0;
+  const healthy = !outOfStock && !lowStock && alertQuantity !== null;
+  const alertType = outOfStock ? "out_of_stock" : lowStock ? "low_stock" : healthy ? "healthy" : "lead_time_missing";
+  return {
+    ...product,
+    recent_7d_qty: recent7d,
+    recent_15d_qty: recent15d,
+    production_lead_days: leadDays,
+    physical_stock: physicalStock,
+    available_stock: availableStock,
+    incoming_stock: incomingStock,
+    daily_sales_7d: Number((recent7d / 7).toFixed(2)),
+    alert_quantity: alertQuantity,
+    suggested_purchase_qty: alertQuantity === null ? 0 : Math.max(0, alertQuantity - availableStock - incomingStock),
+    alert_type: alertType,
+    alert_level: outOfStock ? "danger" : lowStock ? "warning" : healthy ? "ok" : "info",
+    lead_time_missing: leadDays === null,
+    in_transit: inTransit
+  };
+}
+
+export function applyInventoryProductAlertQuery(rows, query = {}) {
+  const paged = String(query.paged || "") === "1";
+  const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
+  const page = Math.max(Number(query.page || 1), 1);
+  const shopId = String(query.shopId || query.shop_id || "all");
+  const alertType = String(query.alertType || query.alert_type || "all");
+  const searchText = String(query.query || query.search || "").trim().toLowerCase();
+  const prepared = rows.map(withInventoryProductAlertStatus);
+  const filtered = searchInventoryRows(prepared, searchText).filter((row) => {
+    if (shopId !== "all" && !row.skus?.some((sku) => String(sku.shop_id || "") === shopId)) return false;
+    if (alertType === "in_transit") return row.in_transit;
+    if (alertType === "lead_time_missing") return row.lead_time_missing;
+    if (alertType !== "all" && row.alert_type !== alertType) return false;
+    return true;
+  });
+  filtered.sort((left, right) => right.recent_7d_qty - left.recent_7d_qty
+    || right.recent_15d_qty - left.recent_15d_qty
+    || right.product_id - left.product_id);
+  return {
+    rows: paged ? filtered.slice((page - 1) * pageSize, page * pageSize) : filtered,
+    total: filtered.length,
+    page,
+    pageSize,
+    mode: "inventory-alerts",
+    meta: {
+      total: prepared.length,
+      out_of_stock: prepared.filter((row) => row.alert_type === "out_of_stock").length,
+      low_stock: prepared.filter((row) => row.alert_type === "low_stock").length,
+      in_transit: prepared.filter((row) => row.in_transit).length,
+      healthy: prepared.filter((row) => row.alert_type === "healthy").length,
+      lead_time_missing: prepared.filter((row) => row.lead_time_missing).length
     }
   };
 }

@@ -73,7 +73,7 @@ test("warm alerts read and parse the persisted snapshot only once", async () => 
     ensureOzonStockStorageSchemaMysql: async () => {}, ensureStockLocationSchemaMysql: async () => {},
     ensureProfitAnalyticsSchemaMysql: async () => {},
     getCachedMasterData: async (key, loader) => cached ||= await loader(),
-    mysqlQueryOne: async (sql) => { reads++; assert.match(sql, /alerts-v4/); return { payload_json: JSON.stringify(products) }; },
+    mysqlQueryOne: async (sql, params) => { reads++; assert.match(sql, /cache_key = \?/); assert.equal(params[0], "alerts-v5-admin"); return { payload_json: JSON.stringify(products) }; },
     parseJsonFallback: JSON.parse, STOCK_ALERT_BASE_CACHE_TTL_MS: 30000, applyStockAlertQuery
   });
   const start = source.indexOf("export async function stockAlertsMysql");
@@ -110,6 +110,7 @@ test("sorted inventory starts count and page queries together without unused FBP
   const context = vm.createContext({
     ensureMysqlCutoverEnabled() {}, ensureProductCompositionSchemaMysql: async () => {},
     ensureProductNamingSchemaMysql: async () => {}, ensureStockLocationSchemaMysql: async () => {},
+    normalizeVehicleBrand: () => "",
     inventoryProductPredicateMysql: () => "1=1", inventoryProductSearchTermsMysql: () => [],
     isInventoryIdentifier, localStockLocationPredicateMysql: () => "stock_location = 'LOCAL'",
     mysqlQuery: (sql) => { queries.push(sql); return new Promise((resolve) => { releasePage = resolve; }); },

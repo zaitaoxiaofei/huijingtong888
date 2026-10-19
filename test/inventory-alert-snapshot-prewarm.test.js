@@ -7,7 +7,8 @@ const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), 
 
 test("inventory alert snapshots are refreshed before operators hit a cold page", () => {
   assert.match(serviceSource, /INTERVAL 15 MINUTE/);
-  assert.match(serviceSource, /if \(forceRefresh\) invalidateMasterDataCache\("stock-alerts:base:v2"\)/);
+  assert.match(serviceSource, /if \(forceRefresh\) invalidateMasterDataCache\(cacheKey\)/);
+  assert.match(serviceSource, /const cacheKey = `stock-alerts:base:v3:\$\{cacheScope\}`/);
   assert.match(serviceSource, /const persistedBase = forceRefresh \? null : await mysqlQueryOne/);
   assert.match(serverSource, /key: "inventory_alert_snapshot_refresh"/);
   assert.match(serverSource, /intervalMinutes: 10/);

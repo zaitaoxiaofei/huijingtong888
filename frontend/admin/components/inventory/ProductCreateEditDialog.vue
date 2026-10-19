@@ -71,6 +71,7 @@ const fallbackLogisticsRules = ref([]);
 let similarProductsTimer = null;
 
 const STOCK_UNIT_OPTIONS = ["个", "件", "套", "对", "双", "条", "米", "卷", "包", "片", "张", "盒"];
+const PRODUCTION_LEAD_DAY_OPTIONS = [3, 5, 7, 10, 15, 30];
 
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
@@ -184,6 +185,7 @@ function createDefaultForm() {
     desired_profit_value: 20,
     return_rate: 5,
     stock_unit: "个",
+    production_lead_days: null,
     is_accessory: 0,
     composition_items: [],
     product_type: "selection",
@@ -257,6 +259,7 @@ function fillFormFromValue(value = {}) {
     desired_profit_value: Number(value.desired_profit_value || 20),
     return_rate: roundMoney(resolvedReturnRate(value) * 100),
     stock_unit: value.stock_unit || "个",
+    production_lead_days: value.production_lead_days == null ? null : Number(value.production_lead_days),
     is_accessory: Number(value.is_accessory || 0) ? 1 : 0,
     composition_items: Array.isArray(value.composition_items) ? value.composition_items.map(normalizeComponentItem) : [],
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
@@ -1508,6 +1511,7 @@ async function submitDialog(options = {}) {
       desired_profit_value: Number(form.desired_profit_value || 20),
       return_rate: resolvedReturnRate(form),
       stock_unit: form.structured_naming.stock_unit || form.stock_unit || "个",
+      production_lead_days: form.production_lead_days,
       is_accessory: Number(form.is_accessory || 0) ? 1 : 0,
       composition_items: form.composition_items.map((item) => ({
         component_product_id: Number(item.component_product_id || 0),
@@ -1820,6 +1824,13 @@ function submitAndCreateDraft() {
               <el-col :span="8">
                 <el-form-item label="采购数量" prop="purchase_quantity">
                   <el-input-number v-model="form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" />
+                </el-form-item>
+              </el-col>
+              <el-col v-if="isInventoryTarget" :span="8">
+                <el-form-item label="生产周期">
+                  <el-select v-model="form.production_lead_days" clearable placeholder="待设置">
+                    <el-option v-for="days in PRODUCTION_LEAD_DAY_OPTIONS" :key="days" :label="`${days} 天`" :value="days" />
+                  </el-select>
                 </el-form-item>
               </el-col>
               <el-col :span="8">
