@@ -39,7 +39,7 @@ function snapshotOrderSyncTask() {
 }
 
 function startOrderSyncTask(services, mode, body = {}) {
-  if (orderSyncTask.running) return { started: false, queued: true, ...snapshotOrderSyncTask() };
+  if (orderSyncTask.running) return { started: false, queued: false, running: true, reason: "already_running" };
   const controller = new AbortController();
   orderSyncTask = {
     task_id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,

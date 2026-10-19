@@ -4,6 +4,7 @@ import { apiClient } from "../../admin/utils/api.js";
 import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
+import { summarizeOrderSyncResult } from "../utils/order-sync-result.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -619,7 +620,13 @@ export function useOrdersPage() {
     }, timeoutMs);
     try {
       const started = await apiClient.post(url, body, { signal: controller.signal });
+      if (started?.started === false) {
+        vm.syncStatus = "已有订单同步任务在执行，本次同步未启动，请稍后重试。";
+        ElMessage.warning(vm.syncStatus);
+        return null;
+      }
       const taskId = String(started?.task_id || "");
+      if (!taskId) throw new Error("订单同步未返回任务 ID，请刷新后重试");
       let task = started;
       while (task?.queued && task?.running) {
         if (task.progress?.message) vm.syncStatus = task.progress.message;
@@ -644,11 +651,18 @@ export function useOrdersPage() {
       }
       if (task?.error) throw new Error(task.error);
       const result = task?.result ? { ...task, ...task.result } : task;
+      const summary = summarizeOrderSyncResult(result);
       vm.syncStatus = messages.refreshing;
       await loadOrders({ includeCounts: true, forceRefresh: true });
       await loadLatestOrderSyncStatus();
-      vm.syncStatus = messages.success(result);
-      ElMessage.success(messages.successToast(result));
+      vm.syncStatus = `${messages.success(result, summary)} 当前列表仍按筛选条件展示。`;
+      if (summary.failedShopCount) {
+        const warning = `${summary.failedShopCount} 个店铺同步失败：${summary.failureReason}；其他店铺的订单已保留。`;
+        vm.syncStatus = `${vm.syncStatus} ${warning}`;
+        ElMessage.warning(warning);
+      } else {
+        ElMessage.success(messages.successToast(result, summary));
+      }
       return result;
     } catch (error) {
       if (error?.name === "AbortError") {
@@ -864,8 +878,8 @@ export function useOrdersPage() {
       return runOrderSync("/api/sync/ozon/incremental", body, {
         running: "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
         refreshing: "拉取完成，正在刷新订单列表...",
-        success: (result) => `新订单拉取完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
-        successToast: (result) => `已拉取 ${result?.fetched || 0} 单新订单`,
+        success: (result, summary) => `新订单拉取完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
+        successToast: (result, summary) => `已拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
         failurePrefix: "拉取新订单失败："
       });
     },
@@ -878,8 +892,8 @@ export function useOrdersPage() {
       return runOrderSync("/api/sync/ozon", body, {
         running: `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
         refreshing: "同步完成，正在刷新订单列表...",
-        success: (result) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${result?.inserted || 0} 单，更新 ${result?.updated || 0} 单。`,
-        successToast: (result) => `已同步 ${result?.fetched || 0} 单订单`,
+        success: (result, summary) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
+        successToast: (result, summary) => `已同步 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
         failurePrefix: "同步当前范围失败："
       }, { timeoutMs: 30 * 60 * 1000 });
     },
