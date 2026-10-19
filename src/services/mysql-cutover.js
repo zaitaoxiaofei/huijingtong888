@@ -4061,9 +4061,10 @@ async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenan
     JOIN products cp ON cp.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
       WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
       AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
-    WHERE sm.active = 1 AND cp.id IN (${productIds.map(() => "?").join(",")})
+    WHERE sm.active = 1 AND ${tenantShopPredicateMysql("sm", defaultTenant)}
+      AND cp.id IN (${productIds.map(() => "?").join(",")})
     ORDER BY cp.id, sm.shop_id, sm.ozon_sku, sm.id
-  `, [tenantPk, tenantPk, tenantPk, tenantPk, ...productIds]);
+  `, [tenantPk, tenantPk, tenantPk, tenantPk, tenantPk, ...productIds]);
 }
 
 async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {

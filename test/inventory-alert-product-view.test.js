@@ -127,11 +127,17 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   assert.match(queries[2].sql, /po\.purchased_at IS NOT NULL/);
   assert.match(queries[2].sql, /pr\.tenant_id = \? OR pr\.tenant_id IS NULL/);
   assert.match(queries[3].sql, /JOIN products cp ON cp\.id = CASE WHEN recipe\.id IS NOT NULL THEN ri\.product_id/);
+  assert.match(queries[3].sql, /sm\.tenant_id = \? OR sm\.tenant_id IS NULL/);
   assert.match(queries[3].sql, /cp\.id IN \(\?,\?\)/);
   assert.equal((queries[3].sql.match(/\?/g) || []).length, queries[3].params.length);
   await context.inventoryAlertProductSalesMysql(44, false);
   assert.doesNotMatch(queries[4].sql, /tenant_id IS NULL/);
   assert.deepEqual(Array.from(queries[4].params.slice(2, 9)), Array(7).fill(44));
+  await context.inventoryAlertProductSkusMysql([1, 2], 44, false);
+  assert.match(queries[5].sql, /sm\.tenant_id = \?/);
+  assert.doesNotMatch(queries[5].sql, /tenant_id IS NULL/);
+  assert.deepEqual(Array.from(queries[5].params.slice(0, 5)), Array(5).fill(44));
+  assert.equal((queries[5].sql.match(/\?/g) || []).length, queries[5].params.length);
 });
 
 test("默认企业库存视角解析真实企业 PK，聚合同库存的多店铺 SKU 且避免重复", async () => {
