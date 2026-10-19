@@ -858,6 +858,7 @@ async function ensureProcurementFlexibleRequestSchemaMysql() {
     "ALTER TABLE procurement_requests ADD COLUMN price_exception_confirmed_by_person_id BIGINT UNSIGNED NULL AFTER price_actual_unit_cost",
     "ALTER TABLE procurement_requests ADD COLUMN price_exception_confirmed_at DATETIME NULL AFTER price_exception_confirmed_by_person_id",
     "ALTER TABLE procurement_requests ADD COLUMN auto_completed_at DATETIME NULL AFTER price_exception_confirmed_at",
+    "ALTER TABLE procurement_requests ADD COLUMN warning_episode_closed_at DATETIME NULL AFTER auto_completed_at",
     "ALTER TABLE procurement_requests ADD COLUMN demand_type VARCHAR(32) NOT NULL DEFAULT 'advance_stock' AFTER source_ozon_sku",
     "ALTER TABLE procurement_requests ADD COLUMN request_reason_code VARCHAR(64) NULL AFTER demand_type",
     "ALTER TABLE procurement_requests ADD COLUMN request_reason_note TEXT NULL AFTER request_reason_code",
@@ -15102,7 +15103,7 @@ export async function procurementSummaryMysql() {
   `);
 }
 
-function procurementInventoryWarningJoinsMysql() {
+function procurementInventoryWarningJoinsMysql(defaultTenantId) {
   return `
     LEFT JOIN (
       SELECT product_id, SUM(quantity_delta) AS stock
@@ -15125,7 +15126,9 @@ function procurementInventoryWarningJoinsMysql() {
           - MIN(FLOOR(GREATEST(COALESCE(component_stock.stock, 0), 0) / NULLIF(pc.quantity, 0)))
         ) AS incoming_stock
       FROM product_components pc
-      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1 ${tenantScope ? `AND component_product.tenant_id = ${tenantScope.id} AND pc.tenant_id = ${tenantScope.id}` : ""}
+      JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1
+        AND (component_product.tenant_id = ${defaultTenantId} OR component_product.tenant_id IS NULL)
+        AND (pc.tenant_id = ${defaultTenantId} OR pc.tenant_id IS NULL)
       LEFT JOIN (
         SELECT product_id, SUM(quantity_delta) AS stock
         FROM inventory_movements
@@ -15140,7 +15143,7 @@ function procurementInventoryWarningJoinsMysql() {
       ) component_incoming ON component_incoming.product_id = pc.component_product_id
       GROUP BY pc.product_id
     ) warning_component_supply ON warning_component_supply.product_id = p.id
-    JOIN (
+    LEFT JOIN (
       SELECT warning_mapping.product_id,
         SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 6 DAY) THEN warning_item.quantity ELSE 0 END) AS recent_7d_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("warning_order.ordered_at")} >= DATE_SUB(CURRENT_DATE, INTERVAL 29 DAY) THEN warning_item.quantity ELSE 0 END) AS recent_30d_qty,
@@ -15182,7 +15185,7 @@ function procurementInventoryWarningIncomingMysql() {
 }
 
 function procurementInventoryWarningConditionMysql() {
-  return `warning_sales.recent_30d_qty > 0
+  return `COALESCE(warning_sales.recent_30d_qty, 0) > 0
     AND ((${procurementInventoryWarningStockMysql()}) + (${procurementInventoryWarningIncomingMysql()}))
       < (warning_sales.recent_30d_qty / 30 * 21)
     AND (
@@ -15196,34 +15199,51 @@ function procurementInventoryWarningConditionMysql() {
 }
 
 async function ensureInventoryWarningProcurementRequestsMysql() {
+  await ensureProcurementFlexibleRequestSchemaMysql();
+  const defaultTenantId = await requireDefaultProcurementTenantMysql();
+  const warningJoins = procurementInventoryWarningJoinsMysql(defaultTenantId);
+  const warningCondition = procurementInventoryWarningConditionMysql();
   await mysqlExecute(`
-    UPDATE procurement_requests stale
-    JOIN products p ON p.id = stale.product_id
-    ${procurementInventoryWarningJoinsMysql()}
-    SET stale.status = 'cancelled', stale.approval_status = 'cancelled', stale.cancelled_at = CURRENT_TIMESTAMP,
-      stale.note = CONCAT(COALESCE(stale.note, ''), '；预警规则复核后不再满足持续销量条件')
-    WHERE stale.request_group_no LIKE 'AUTO-STOCK-%'
-      AND stale.status IN ('pending', 'suggested', 'submitted')
-      AND NOT (${procurementInventoryWarningConditionMysql()})
-  `);
+    UPDATE procurement_requests episode
+    JOIN products p ON p.id = episode.product_id
+    ${warningJoins}
+    SET episode.warning_episode_closed_at = CURRENT_TIMESTAMP
+    WHERE (episode.request_group_no LIKE 'AUTO-STOCK-%' OR episode.demand_type = 'warehouse_request')
+      AND episode.warning_episode_closed_at IS NULL
+      AND (episode.tenant_id = ? OR episode.tenant_id IS NULL)
+      AND (p.tenant_id = ? OR p.tenant_id IS NULL)
+      AND (COALESCE(p.active, 0) != 1 OR NOT (${warningCondition}))
+  `, [defaultTenantId, defaultTenantId]);
+  await mysqlExecute(`
+    UPDATE procurement_requests
+    SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP
+    WHERE request_group_no LIKE 'AUTO-STOCK-%'
+      AND warning_episode_closed_at IS NOT NULL
+      AND (tenant_id = ? OR tenant_id IS NULL)
+      AND status IN ('pending', 'suggested', 'submitted')
+  `, [defaultTenantId]);
   await mysqlExecute(`
     UPDATE procurement_requests active_warning
     JOIN products p ON p.id=active_warning.product_id
-    ${procurementInventoryWarningJoinsMysql()}
+    ${warningJoins}
     SET active_warning.quantity=GREATEST(1, CEIL(warning_sales.recent_30d_qty / 30 * 21
       - (${procurementInventoryWarningStockMysql()})
       - (${procurementInventoryWarningIncomingMysql()}))),
       active_warning.updated_at=CURRENT_TIMESTAMP
     WHERE active_warning.request_group_no LIKE 'AUTO-STOCK-%'
+      AND active_warning.warning_episode_closed_at IS NULL
+      AND (active_warning.tenant_id = ? OR active_warning.tenant_id IS NULL)
+      AND (p.tenant_id = ? OR p.tenant_id IS NULL)
       AND active_warning.status IN ('pending','suggested','submitted')
-      AND ${procurementInventoryWarningConditionMysql()}
-  `);
+      AND ${warningCondition}
+  `, [defaultTenantId, defaultTenantId]);
   await mysqlExecute(`
     INSERT INTO procurement_requests
-    (request_group_no, product_id, raw_name, binding_status, person_id, created_by_person_id,
+    (tenant_id, request_group_no, product_id, raw_name, binding_status, person_id, created_by_person_id,
       quantity, amount, shipping_amount, purchase_url, approval_status, status, note, urgency,
       source_type, supplier_id)
     SELECT
+      ?,
       CONCAT('AUTO-STOCK-', DATE_FORMAT(CURRENT_DATE, '%Y%m%d'), '-', p.id),
       p.id,
       p.name,
@@ -15243,20 +15263,30 @@ async function ensureInventoryWarningProcurementRequestsMysql() {
       COALESCE(NULLIF(p.source_platform, ''), '1688'),
       p.supplier_id
     FROM products p
-    ${procurementInventoryWarningJoinsMysql()}
+    ${warningJoins}
     WHERE p.active = 1
-      AND ${procurementInventoryWarningConditionMysql()}
+      AND (p.tenant_id = ? OR p.tenant_id IS NULL)
+      AND ${warningCondition}
       AND COALESCE(p.owner_person_id, (SELECT id FROM people WHERE active = 1 ORDER BY id LIMIT 1)) IS NOT NULL
       AND NOT EXISTS (
         SELECT 1
         FROM procurement_requests existing_request
-        LEFT JOIN purchase_orders existing_order ON existing_order.id = existing_request.purchase_order_id
         WHERE existing_request.product_id = p.id
-          AND existing_request.demand_type = 'advance_stock'
-          AND existing_request.status IN ('pending', 'suggested', 'submitted', 'merged')
-          AND COALESCE(existing_order.status, '') NOT IN ('purchased', 'partial_inbound', 'inbound_done')
+          AND (existing_request.tenant_id = ? OR existing_request.tenant_id IS NULL)
+          AND (
+            (existing_request.request_group_no LIKE 'AUTO-STOCK-%'
+              AND (existing_request.warning_episode_closed_at IS NULL
+                OR existing_request.status IN ('pending', 'suggested', 'submitted', 'merged')))
+            OR (existing_request.demand_type = 'warehouse_request'
+              AND (existing_request.status IN ('pending', 'suggested', 'submitted', 'merged')
+                OR (existing_request.warning_episode_closed_at IS NULL
+                  AND (existing_request.status IN ('purchased', 'partial_inbound', 'inbound_done', 'done')
+                    OR existing_request.approval_status = 'rejected'))))
+            OR (existing_request.demand_type = 'advance_stock'
+              AND existing_request.status IN ('pending', 'suggested', 'submitted', 'merged'))
+          )
       )
-  `);
+  `, [defaultTenantId, defaultTenantId, defaultTenantId]);
 }
 
 let pendingOrderProcurementReconcilePromise = null;
@@ -15337,8 +15367,9 @@ async function ensurePendingOrderProcurementRequestsMysql() {
   }
 }
 
-export async function refreshProcurementDemandMysql() {
+export async function refreshProcurementDemandMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  await requireDefaultProcurementTenantMysql(tenantId);
   const orders = await ensurePendingOrderProcurementRequestsMysql();
   await ensureInventoryWarningProcurementRequestsMysql();
   invalidateOrderProcurementCoverage();
@@ -20589,6 +20620,20 @@ function procurementRequestGroupNoMysql() {
   return `CG-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${pad(now.getMilliseconds(), 3)}`;
 }
 
+async function requireDefaultProcurementTenantMysql(tenantId = "admin") {
+  const id = await resolveShopTenantIdMysql(tenantId);
+  if (await isDefaultShopTenantMysql(id)) return id;
+  throw Object.assign(new Error("当前企业采购工作台尚未开通共享库存采购流程，请在企业申请明细中处理"), { status: 403 });
+}
+
+async function assertDefaultProcurementProductsMysql(productIds, defaultTenantId) {
+  const ids = [...new Set(productIds.map(Number).filter(Boolean))];
+  if (!ids.length) return;
+  const rows = await mysqlQuery(`SELECT id FROM products
+    WHERE id IN (${ids.map(() => "?").join(",")}) AND (tenant_id = ? OR tenant_id IS NULL)`, [...ids, defaultTenantId]);
+  if (rows.length !== ids.length) throw new Error("采购商品不属于当前企业，请刷新后重新选择库存商品");
+}
+
 export async function createProcurementRequestMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
@@ -20610,14 +20655,20 @@ export async function createProcurementRequestMysql(body = {}, sessionPersonId =
       if (!productId && !rawName) throw new Error("采购商品名称和库存商品至少填写一项");
       if (!(Number(item.quantity || 0) > 0)) throw new Error("采购数量（quantity）必须大于 0");
       if (Number(item.amount || 0) < 0) throw new Error("采购金额不能为负数；未知金额可稍后补齐");
+      if (productId) {
+        const product = await mysqlConnectionQueryOne(connection,
+          "SELECT id FROM products WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL) FOR UPDATE",
+          [productId, normalizedTenantId]);
+        if (!product) throw new Error(`库存商品 #${productId} 不属于当前企业，无法创建采购请求`);
+      }
       const result = await connection.execute(`
         INSERT INTO procurement_requests
-        (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
+        (tenant_id, request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
           quantity, amount, shipping_amount, purchase_url, approval_status, status, needed_by, note, urgency,
           source_type, supplier_id, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
-        groupNo, productId, rawName || null, String(item.raw_spec || "").trim() || null,
+        normalizedTenantId, groupNo, productId, rawName || null, String(item.raw_spec || "").trim() || null,
         productId ? "bound" : "unbound", personId, creatorId,
         Math.max(1, Number(item.quantity || 1)), Number(item.amount || 0), Number(item.shipping_amount || 0),
         item.purchase_url || body.purchase_url || "", item.needed_by || body.needed_by || null,
@@ -20640,8 +20691,9 @@ const WAREHOUSE_PROCUREMENT_REASON_CODES = new Set([
   "safety_stock_shortage", "seasonal_replenishment", "fbp_stock_shortage", "other"
 ]);
 
-export async function createWarehouseProcurementRequestsMysql(body = {}, sessionPersonId = null) {
+export async function createWarehouseProcurementRequestsMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  const defaultTenantId = await requireDefaultProcurementTenantMysql(tenantId);
   await ensureProcurementRequestTimestampSchemaMysql();
   await ensureProcurementFlexibleRequestSchemaMysql();
   const personId = await requireSessionPersonIdMysql(sessionPersonId);
@@ -20659,14 +20711,18 @@ export async function createWarehouseProcurementRequestsMysql(body = {}, session
       if (!(quantity > 0) || !Number.isInteger(quantity)) throw new Error("建议采购数量必须是大于 0 的整数");
       if (!WAREHOUSE_PROCUREMENT_REASON_CODES.has(reasonCode)) throw new Error("请选择有效的申请原因");
       if (reasonCode === "other" && !reasonNote) throw new Error("选择其他原因时，请填写具体原因");
+      const product = await mysqlConnectionQueryOne(connection,
+        "SELECT id FROM products WHERE id = ? AND (tenant_id = ? OR tenant_id IS NULL) FOR UPDATE",
+        [productId, defaultTenantId]);
+      if (!product) throw new Error(`库存商品 #${productId} 不属于当前企业，无法提交采购申请`);
       const [result] = await connection.execute(`
         INSERT INTO procurement_requests
-        (request_group_no, product_id, binding_status, person_id, created_by_person_id,
+        (tenant_id, request_group_no, product_id, binding_status, person_id, created_by_person_id,
           quantity, amount, shipping_amount, approval_status, status, note, urgency,
           source_type, demand_type, request_reason_code, request_reason_note)
-        VALUES (?, ?, 'bound', ?, ?, ?, 0, 0, 'submitted', 'submitted', '', 'normal',
+        VALUES (?, ?, ?, 'bound', ?, ?, ?, 0, 0, 'submitted', 'submitted', '', 'normal',
           'warehouse', 'warehouse_request', ?, ?)
-      `, [groupNo, productId, personId, personId, quantity, reasonCode, reasonNote || null]);
+      `, [defaultTenantId, groupNo, productId, personId, personId, quantity, reasonCode, reasonNote || null]);
       ids.push(Number(result.insertId));
     }
     return { ok: true, ids, request_group_no: groupNo };
@@ -22032,7 +22088,11 @@ export async function updateProcurementRequestMysql(id, body = {}, tenantId = "a
   await ensureProcurementFlexibleRequestSchemaMysql();
   const requestId = Number(id);
   const result = await withMysqlTransaction(async (connection) => {
-    const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM procurement_requests WHERE id = ? FOR UPDATE", [requestId]);
+    const existing = await mysqlConnectionQueryOne(connection, `SELECT request.* FROM procurement_requests request
+      LEFT JOIN products product ON product.id = request.product_id
+      WHERE request.id = ? AND (request.tenant_id = ? OR request.tenant_id IS NULL)
+        AND (request.product_id IS NULL OR product.tenant_id = ? OR product.tenant_id IS NULL)
+      FOR UPDATE`, [requestId, normalizedTenantId, normalizedTenantId]);
     if (!existing) throw new Error("Procurement request not found");
     assertFreshRecord(body, existing, "采购请求已被其他用户保存，请刷新后再继续编辑");
     const existingStatus = String(existing.status || "");
@@ -22049,6 +22109,9 @@ export async function updateProcurementRequestMysql(id, body = {}, tenantId = "a
     const nextApprovalStatus = body.approval_status || existing.approval_status || nextStatus || "pending";
     const personId = await resolvePersonIdOrFirstMysql(body.person_id ?? existing.person_id, connection);
     const nextProductId = body.product_id !== undefined ? nullableInteger(body.product_id) : nullableInteger(existing.product_id);
+    if (nextProductId && nextProductId !== Number(existing.product_id || 0)) {
+      await assertDefaultProcurementProductsMysql([nextProductId], normalizedTenantId);
+    }
     const nextRawName = body.raw_name !== undefined ? String(body.raw_name || "").trim() : String(existing.raw_name || "").trim();
     const nextRawSpec = body.raw_spec !== undefined ? String(body.raw_spec || "").trim() : String(existing.raw_spec || "").trim();
     if (!nextProductId && !nextRawName) throw new Error("采购商品名称和库存商品至少保留一项");
@@ -22550,18 +22613,22 @@ export async function procurementPurchaseGroupRecommendationsMysql(query = {}) {
   `, [...productIds, ...productIds]);
 }
 
-export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId = null) {
+export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId = null, transactionConnection = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProcurementPurchaseModeSchemaMysql();
+  const defaultTenantId = await requireDefaultProcurementTenantMysql(tenantId);
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!ids.length) throw new Error("Please select procurement requests to merge");
   const placeholders = ids.map(() => "?").join(",");
-  return await withMysqlTransaction(async (connection) => {
+  const merge = async (connection) => {
     const [requests] = await connection.query(`
-      SELECT * FROM procurement_requests
-      WHERE id IN (${placeholders}) AND status IN ('pending', 'suggested', 'submitted')
+      SELECT request.* FROM procurement_requests request
+      JOIN products product ON product.id = request.product_id
+        AND (product.tenant_id = ? OR product.tenant_id IS NULL)
+      WHERE request.id IN (${placeholders}) AND request.status IN ('pending', 'suggested', 'submitted')
+        AND (request.tenant_id = ? OR request.tenant_id IS NULL)
       FOR UPDATE
-    `, ids);
+    `, [defaultTenantId, ...ids, defaultTenantId]);
     if (requests.length !== ids.length) throw new Error("Some procurement requests were already processed. Please refresh and try again.");
     const orderNo = await nextPurchaseOrderNoMysql(connection);
     const personId = await requireSessionPersonIdMysql(sessionPersonId, connection);
@@ -22663,15 +22730,16 @@ export async function mergeProcurementRequestsMysql(body = {}, sessionPersonId =
       }
     }
     return { id: orderId, order_no: orderNo, purchase_group_id: purchaseGroupId };
-  });
+  };
+  return transactionConnection ? merge(transactionConnection) : withMysqlTransaction(merge);
 }
 
-export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId = null) {
+export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId = null, transactionConnection = null) {
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
   await ensurePurchaseOrderShipmentSchemaMysql();
   const orderId = Number(id);
-  const result = await withMysqlTransaction(async (connection) => {
+  const confirm = async (connection) => {
     const order = await mysqlConnectionQueryOne(connection, "SELECT * FROM purchase_orders WHERE id = ? FOR UPDATE", [orderId]);
     if (!order) throw new Error("Purchase order not found");
     if (!["pending_purchase", "purchased"].includes(order.status)) throw new Error("Current purchase order status cannot be confirmed as purchased");
@@ -22825,20 +22893,21 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
         release_reason = NULL, updated_at = CURRENT_TIMESTAMP
     `, [personId, orderId]);
     return { ok: true };
-  });
+  };
+  const result = transactionConnection ? await confirm(transactionConnection) : await withMysqlTransaction(confirm);
   invalidateOrderProcurementCoverage();
   return result;
 }
 
-export function startConfirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
+export async function startConfirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
+  await requireDefaultProcurementTenantMysql(tenantId);
   const requestIds = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (!requestIds.length) throw new Error("Please select procurement requests to merge");
   const queuedBody = { ...body, request_ids: requestIds };
   setTimeout(async () => {
     try {
-      const result = await mergeProcurementRequestsMysql(queuedBody, sessionPersonId);
-      if (result?.id) await confirmPurchaseOrderMysql(result.id, queuedBody, sessionPersonId);
+      await confirmProcurementRequestsPurchasedMysql(queuedBody, sessionPersonId, tenantId);
     } catch (error) {
       console.error("[procurement] async purchase confirmation failed", error);
     }
@@ -23175,32 +23244,39 @@ export async function updateInboundRecordMysql(id, body = {}, sessionPersonId = 
   return result;
 }
 
-async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
+async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}, transactionConnection = null, defaultTenantId = null) {
+  const scopedTenantId = defaultTenantId || await requireDefaultProcurementTenantMysql();
   const ids = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   const quantityByProduct = new Map((body.items || [])
     .map((item) => [Number(item.product_id || 0), Number(item.actual_quantity ?? item.quantity ?? 0)])
     .filter(([productId, quantity]) => productId && quantity >= 0));
   if (!ids.length || !quantityByProduct.size) return ids;
-  return await withMysqlTransaction(async (connection) => {
+  const prepare = async (connection) => {
     const [requests] = await connection.query(`
-      SELECT * FROM procurement_requests
-      WHERE id IN (${ids.map(() => "?").join(",")})
-        AND status IN ('pending', 'suggested', 'submitted')
-      ORDER BY CASE WHEN source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, created_at ASC, id ASC
+      SELECT request.* FROM procurement_requests request
+      JOIN products product ON product.id = request.product_id
+        AND (product.tenant_id = ? OR product.tenant_id IS NULL)
+      WHERE request.id IN (${ids.map(() => "?").join(",")})
+        AND (request.tenant_id = ? OR request.tenant_id IS NULL)
+        AND request.status IN ('pending', 'suggested', 'submitted')
+      ORDER BY CASE WHEN request.source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, request.created_at ASC, request.id ASC
       FOR UPDATE
-    `, ids);
+    `, [scopedTenantId, ...ids, scopedTenantId]);
     const activeRequestIds = new Set(requests.map((request) => Number(request.id)));
     const staleProductIds = [...quantityByProduct.keys()].filter((productId) => {
       return !requests.some((request) => Number(request.product_id) === productId);
     });
     if (staleProductIds.length) {
       const [replacementRequests] = await connection.query(`
-        SELECT * FROM procurement_requests
-        WHERE product_id IN (${staleProductIds.map(() => "?").join(",")})
-          AND status IN ('pending', 'suggested', 'submitted')
-        ORDER BY CASE WHEN source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, created_at ASC, id ASC
+        SELECT request.* FROM procurement_requests request
+        JOIN products product ON product.id = request.product_id
+          AND (product.tenant_id = ? OR product.tenant_id IS NULL)
+        WHERE request.product_id IN (${staleProductIds.map(() => "?").join(",")})
+          AND (request.tenant_id = ? OR request.tenant_id IS NULL)
+          AND request.status IN ('pending', 'suggested', 'submitted')
+        ORDER BY CASE WHEN request.source_order_item_id IS NOT NULL THEN 0 ELSE 1 END, request.created_at ASC, request.id ASC
         FOR UPDATE
-      `, staleProductIds);
+      `, [scopedTenantId, ...staleProductIds, scopedTenantId]);
       for (const request of replacementRequests) {
         if (activeRequestIds.has(Number(request.id))) continue;
         requests.push(request);
@@ -23217,6 +23293,12 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
       for (const request of productRequests) {
         const requestQuantity = Math.max(0, Number(request.quantity || 0));
         requestedTotal += requestQuantity;
+        if (actualQuantity > 0
+          && (request.demand_type === 'warehouse_request' || String(request.request_group_no || '').startsWith('AUTO-STOCK-'))) {
+          selectedIds.push(Number(request.id));
+          remaining = Math.max(0, remaining - requestQuantity);
+          continue;
+        }
         if (remaining <= 0) continue;
         if (remaining >= requestQuantity) {
           selectedIds.push(Number(request.id));
@@ -23235,11 +23317,11 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
         `, [unmetQuantity, 1 - ratio, 1 - ratio, unmetQuantity, Number(request.id)]);
         const [inserted] = await connection.execute(`
           INSERT INTO procurement_requests
-          (request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
+          (tenant_id, request_group_no, product_id, raw_name, raw_spec, binding_status, person_id, created_by_person_id,
             quantity, amount, shipping_amount, purchase_url, source_type, supplier_id, approval_status, status,
             needed_by, note, urgency, source_order_id, source_order_item_id, source_ozon_sku, demand_type, purchase_mode)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [request.request_group_no, request.product_id, request.raw_name, request.raw_spec, request.binding_status,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [request.tenant_id || scopedTenantId, request.request_group_no, request.product_id, request.raw_name, request.raw_spec, request.binding_status,
           request.person_id, request.created_by_person_id, purchasedQuantity, Number(request.amount || 0) * ratio,
           Number(request.shipping_amount || 0) * ratio, request.purchase_url, request.source_type, request.supplier_id,
           request.needed_by, `${request.note || ""}；本次实际采购 ${purchasedQuantity} 件`, request.urgency,
@@ -23254,10 +23336,10 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
         const ratio = actualQuantity > 0 ? remaining / actualQuantity : 0;
         const [inserted] = await connection.execute(`
           INSERT INTO procurement_requests
-          (request_group_no, product_id, binding_status, person_id, created_by_person_id, quantity, amount,
+          (tenant_id, request_group_no, product_id, binding_status, person_id, created_by_person_id, quantity, amount,
             shipping_amount, purchase_url, source_type, supplier_id, approval_status, status, note, urgency, demand_type, purchase_mode)
-          VALUES (?, ?, 'bound', ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock', ?)
-        `, [source.request_group_no, productId, body.person_id || source.person_id, source.created_by_person_id,
+          VALUES (?, ?, ?, 'bound', ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', 'submitted', ?, ?, 'advance_stock', ?)
+        `, [source.tenant_id || scopedTenantId, source.request_group_no, productId, body.person_id || source.person_id, source.created_by_person_id,
           remaining, Number(input.amount || 0) * ratio, Number(input.shipping_amount || 0) * ratio,
           input.purchase_url || source.purchase_url, body.source_type || source.source_type,
           body.supplier_id || source.supplier_id, `实际采购超出当前订单需求 ${remaining} 件，转为提前采购库存`, source.urgency,
@@ -23269,7 +23351,8 @@ async function prepareProcurementRequestPurchaseQuantitiesMysql(body = {}) {
       .filter((request) => !quantityByProduct.has(Number(request.product_id)))
       .map((request) => Number(request.id));
     return [...new Set([...selectedIds, ...untouchedIds])];
-  });
+  };
+  return transactionConnection ? prepare(transactionConnection) : withMysqlTransaction(prepare);
 }
 
 function beijingLedgerTimestampMysql(value = new Date()) {
@@ -23307,18 +23390,23 @@ async function applyDirectProcurementModeMysql(item, sessionPersonId) {
     request_key: randomUUID() }, sessionPersonId);
 }
 
-export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null) {
+export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
+  const defaultTenantId = await requireDefaultProcurementTenantMysql(tenantId);
   invalidateOrderProcurementCoverage();
   const actor = sessionPersonId || body.person_id || null;
   const submittedItems = Array.isArray(body.items) ? body.items : [];
   const directItems = submittedItems.filter(item => ['inventory_update', 'historical_debt_backfill'].includes(normalizeProcurementPurchaseMode(item.purchase_mode)));
   const shortageItems = submittedItems.filter(item => !directItems.includes(item));
+  await assertDefaultProcurementProductsMysql(submittedItems.map(item => item.product_id), defaultTenantId);
   const directResults = [];
   for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, actor));
   let requestIdsInput = [...new Set((body.request_ids || []).map(Number).filter(Boolean))];
   if (directItems.length && requestIdsInput.length) {
     const directProducts = new Set(directItems.map(item => Number(item.product_id)));
-    const requests = await mysqlQuery(`SELECT id, product_id FROM procurement_requests WHERE id IN (${requestIdsInput.map(() => '?').join(',')})`, requestIdsInput);
+    const requests = await mysqlQuery(`SELECT request.id, request.product_id FROM procurement_requests request
+      JOIN products product ON product.id = request.product_id AND (product.tenant_id = ? OR product.tenant_id IS NULL)
+      WHERE request.id IN (${requestIdsInput.map(() => '?').join(',')})
+        AND (request.tenant_id = ? OR request.tenant_id IS NULL)`, [defaultTenantId, ...requestIdsInput, defaultTenantId]);
     const handledIds = requests.filter(row => directProducts.has(Number(row.product_id))).map(row => Number(row.id));
     if (handledIds.length) await mysqlExecute(`UPDATE procurement_requests SET status = 'cancelled', approval_status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP,
       note = CONCAT(COALESCE(note, ''), '；已通过更新实存或历史采购补记处理') WHERE id IN (${handledIds.map(() => '?').join(',')})`, handledIds);
@@ -23326,16 +23414,17 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
   }
   if (!shortageItems.length) return { ok: true, stage: directItems.every(item => normalizeProcurementPurchaseMode(item.purchase_mode) === 'inventory_update') ? 'inventory_update' : 'historical_debt_backfill', direct_results: directResults };
   const purchaseBody = { ...body, request_ids: requestIdsInput, items: shortageItems };
-  const requestIds = await prepareProcurementRequestPurchaseQuantitiesMysql(purchaseBody);
-  if (!requestIds.length) throw new Error("本次实际采购数量没有覆盖任何待采购需求");
-  purchaseBody.request_ids = requestIds;
-  const purchaseOrder = await mergeProcurementRequestsMysql(purchaseBody, sessionPersonId);
-  try {
-    await confirmPurchaseOrderMysql(purchaseOrder.id, purchaseBody, sessionPersonId);
-  } catch (error) {
-    await cancelPurchaseOrderMysql(purchaseOrder.id);
-    throw error;
-  }
+  await ensureProcurementPurchaseModeSchemaMysql();
+  await ensurePurchaseCostVersionSchemaMysql();
+  await ensurePurchaseOrderShipmentSchemaMysql();
+  const purchaseOrder = await withMysqlTransaction(async (connection) => {
+    const requestIds = await prepareProcurementRequestPurchaseQuantitiesMysql(purchaseBody, connection, defaultTenantId);
+    if (!requestIds.length) throw new Error("本次实际采购数量没有覆盖任何待采购需求");
+    purchaseBody.request_ids = requestIds;
+    const order = await mergeProcurementRequestsMysql(purchaseBody, sessionPersonId, connection, tenantId);
+    await confirmPurchaseOrderMysql(order.id, purchaseBody, sessionPersonId, connection);
+    return order;
+  });
   return {
     ok: true,
     purchase_order_id: Number(purchaseOrder.id),
@@ -23345,18 +23434,20 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
   };
 }
 
-export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null) {
+export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
+  const defaultTenantId = await requireDefaultProcurementTenantMysql(tenantId);
   const items = Array.isArray(body.items) ? body.items : [];
   if (!items.length) throw new Error("请至少填写一条采购商品");
   const unbound = items.find((item) => !Number(item.product_id || 0));
   if (unbound) throw new Error(`「${unbound.raw_name || unbound.name || "采购商品"}」尚未绑定库存商品，无法登记采购记录`);
+  await assertDefaultProcurementProductsMysql(items.map(item => item.product_id), defaultTenantId);
   const directItems = items.filter(item => ['inventory_update', 'historical_debt_backfill'].includes(normalizeProcurementPurchaseMode(item.purchase_mode)));
   const shortageItems = items.filter(item => !directItems.includes(item));
   const directResults = [];
   for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, sessionPersonId || body.person_id || null));
   if (!shortageItems.length) return { ok: true, stage: 'direct', direct_results: directResults, ids: [] };
   const shortageBody = { ...body, items: shortageItems };
-  const created = await createProcurementRequestMysql(shortageBody, sessionPersonId);
+  const created = await createProcurementRequestMysql(shortageBody, sessionPersonId, tenantId);
   try {
     return {
       ...created,
@@ -23364,7 +23455,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
         ...shortageBody,
         request_ids: created.ids,
         note: body.note || "采购工作台登记采购"
-      }, sessionPersonId),
+      }, sessionPersonId, tenantId),
       direct_results: directResults
     };
   } catch (error) {
