@@ -2,13 +2,15 @@
 
 ## List endpoint
 
-- Endpoint: `POST /v3/posting/fbs/list`.
+- Endpoint: `POST /v4/posting/fbs/list`.
 - The `filter.since` and `filter.to` fields use RFC3339 timestamps.
 - Ozon documents a maximum query period of one year for this list operation.
 - The ERP uses 31-day request chunks, which stay well within that limit while keeping historical imports bounded.
-- Pagination must continue until Ozon returns `has_next: false`.
+- The ERP requests up to 100 postings per page and passes the returned `cursor` while `has_next` is true.
+- Status-specific reconciliations filter the complete date range locally after reading all pages.
+- All FBS list requests share one process-wide queue with at least 1.2 seconds between requests. A rate-limit response pauses further list requests for at least 30 seconds, without fast retries.
 
-Official reference: <https://docs.ozon.ru/api/seller/#operation/PostingAPI_GetFbsPostingListV3>
+Official reference: <https://docs.ozon.ru/api/seller/#operation/PostingFbsList>
 
 ## Split packages during FBS shipment
 

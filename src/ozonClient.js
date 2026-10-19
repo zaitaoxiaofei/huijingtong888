@@ -2,6 +2,11 @@ const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const OZON_REQUEST_TIMEOUT_MS = 45000;
 const OZON_REQUEST_RETRIES = 2;
+const FBS_LIST_PATH = "/v4/posting/fbs/list";
+const FBS_LIST_INTERVAL_MS = 1200;
+let fbsListNextRequestAt = 0;
+let fbsListCooldownUntil = 0;
+let fbsListQueue = Promise.resolve();
 
 export async function fetchOzonPostings(shop, options = {}) {
   const legacySince = typeof options === "string" ? options : "";
@@ -13,45 +18,53 @@ export async function fetchOzonPostings(shop, options = {}) {
 
   const since = normalizeIsoStart(params.from || params.since, 30);
   const to = normalizeIsoEnd(params.to, new Date());
-  const limit = Math.min(Math.max(Number(params.limit || 1000), 1), 1000);
+  const limit = Math.min(Math.max(Number(params.limit || 100), 1), 100);
   const chunkDays = Math.min(Math.max(Number(params.chunkDays || 31), 1), 366);
   const statuses = normalizeStatusList(params.statuses || params.status);
   const postingsByNumber = new Map();
   let requests = 0;
   let ranges = 0;
 
-  for (const status of statuses.length ? statuses : [""]) {
-    for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
+  for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
+    throwIfAborted(params.signal);
+    ranges += 1;
+    const filter = { since: rangeSince, to: rangeTo };
+    let cursor = "";
+    const seenCursors = new Set();
+    while (true) {
       throwIfAborted(params.signal);
-      ranges += 1;
-      let offset = 0;
-      while (true) {
-        throwIfAborted(params.signal);
-        const filter = { since: rangeSince, to: rangeTo };
-        if (status) filter.status = status;
-        const data = await ozonRequest(shop, "/v3/posting/fbs/list", {
-          dir: "DESC",
-          filter,
-          limit,
-          offset,
-          with: {
-            analytics_data: true,
-            barcodes: true,
-            financial_data: true,
-            translit: true
-          }
-        }, { signal: params.signal });
-        requests += 1;
-        const result = data.result || {};
-        const items = result.postings || [];
-        for (const item of items) {
-          const normalized = normalizeOzonPosting(item);
-          if (normalized.posting_number) postingsByNumber.set(normalized.posting_number, normalized);
+      const data = await ozonRequest(shop, FBS_LIST_PATH, {
+        filter,
+        limit,
+        cursor,
+        translit: true,
+        with: {
+          analytics_data: true,
+          barcodes: true,
+          financial_data: true
         }
-        if (!result.has_next) break;
-        if (!items.length) break;
-        offset += limit;
+      }, { signal: params.signal });
+      requests += 1;
+      const page = Array.isArray(data.postings) ? data : data.result;
+      if (!Array.isArray(page?.postings) || typeof page.has_next !== "boolean") {
+        throw new Error(`Ozon ${FBS_LIST_PATH} returned an invalid postings list`);
       }
+      for (const item of page.postings) {
+        const normalized = normalizeOzonPosting(item);
+        if (statuses.length && !normalized.status) {
+          throw new Error(`Ozon ${FBS_LIST_PATH} returned a posting without status`);
+        }
+        if (normalized.posting_number && (!statuses.length || statuses.includes(normalized.status))) {
+          postingsByNumber.set(normalized.posting_number, normalized);
+        }
+      }
+      if (!page.has_next) break;
+      const nextCursor = String(page.cursor || "");
+      if (!nextCursor || nextCursor === cursor || seenCursors.has(nextCursor)) {
+        throw new Error(`Ozon ${FBS_LIST_PATH} did not advance its cursor`);
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
     }
   }
 
@@ -1271,15 +1284,53 @@ async function ozonRequest(shop, path, payload, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= OZON_REQUEST_RETRIES; attempt += 1) {
     try {
-      return await ozonRequestOnce(shop, path, payload, options);
+      return path === FBS_LIST_PATH
+        ? await withFbsListRateLimit(options.signal, () => ozonRequestOnce(shop, path, payload, options))
+        : await ozonRequestOnce(shop, path, payload, options);
     } catch (error) {
       if (options.signal?.aborted) throwIfAborted(options.signal);
       lastError = error;
+      if (path === FBS_LIST_PATH && isOzonRateLimitError(error)) break;
       if (!isRetryableOzonError(error) || attempt >= OZON_REQUEST_RETRIES) break;
       await sleep(Math.max(400 * (attempt + 1), Number(error.retryAfterMs || 0)));
     }
   }
   throw lastError;
+}
+
+async function withFbsListRateLimit(signal, request) {
+  const previous = fbsListQueue;
+  let release;
+  fbsListQueue = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    throwIfAborted(signal);
+    const cooldownMs = fbsListCooldownUntil - Date.now();
+    if (cooldownMs > 0) {
+      const error = new Error(`Ozon ${FBS_LIST_PATH} rate limited; retry after ${Math.ceil(cooldownMs / 1000)}s`);
+      error.statusCode = 429;
+      error.retryAfterMs = cooldownMs;
+      throw error;
+    }
+    await sleep(Math.max(0, fbsListNextRequestAt - Date.now()));
+    throwIfAborted(signal);
+    fbsListNextRequestAt = Date.now() + FBS_LIST_INTERVAL_MS;
+    try {
+      return await request();
+    } catch (error) {
+      if (isOzonRateLimitError(error)) {
+        const cooldownMs = Math.min(5 * 60_000, Math.max(30_000, Number(error.retryAfterMs || 0)));
+        fbsListCooldownUntil = Date.now() + cooldownMs;
+      }
+      throw error;
+    }
+  } finally {
+    release();
+  }
+}
+
+function isOzonRateLimitError(error) {
+  return Number(error?.statusCode || 0) === 429 || /rate limit|too many requests/i.test(String(error?.message || ""));
 }
 
 async function ozonRequestOnce(shop, path, payload, options = {}) {
@@ -1735,14 +1786,15 @@ function normalizeOzonPosting(item) {
   const products = Array.isArray(item.products) ? item.products : [];
   const financialProducts = Array.isArray(item.financial_data?.products) ? item.financial_data.products : [];
   const cancellation = item.cancellation || item.cancel_reason || {};
+  const status = item.status || item.status_alias || "";
   return {
     posting_number: String(item.posting_number || ""),
     order_number: String(item.order_number || item.order_id || item.posting_number || ""),
     order_id: String(item.order_id || ""),
-    status: item.status || "",
+    status,
     substatus: item.substatus || "",
-    logistics_status: item.status || "",
-    tracking_stage: item.substatus || item.status || "",
+    logistics_status: status,
+    tracking_stage: item.substatus || status,
     ordered_at: item.in_process_at || item.created_at || item.shipment_date || new Date().toISOString(),
     delivered_at: item.delivered_at || null,
     buyer_region: item.analytics_data?.region || item.analytics_data?.city || "",
@@ -1770,8 +1822,8 @@ function normalizeOzonPosting(item) {
       return {
         ozon_sku: resolvedOzonPostingSku(product),
         ozon_product_id: String(product.product_id || product.id || financialProduct.product_id || financialProduct.id || ""),
-        offer_id: String(product.offer_id || ""),
-        name: product.name || "",
+        offer_id: String(product.offer_id || product.product_offer_id || ""),
+        name: product.name || product.product_name || "",
         quantity: Number(product.quantity || 1),
         sale_price: numberFromOzon(product.price || product.financial_data?.price || 0),
         image_url: primaryImage
@@ -1856,6 +1908,7 @@ function resolvedOzonPostingSku(item = {}) {
       || item.productSku
       || item.fbo_sku
       || item.fbs_sku
+      || item.product_id
       || ""
   );
 }

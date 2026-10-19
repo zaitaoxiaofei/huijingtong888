@@ -46,34 +46,57 @@ test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
   assert.deepEqual(rows.map((item) => item.warehouse_id), ["1001"]);
 });
 
-test("fetchOzonPostings follows has_next when Ozon returns a short page", async (t) => {
+test("fetchOzonPostings uses v4 cursors when Ozon returns a short page", async (t) => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
     globalThis.fetch = originalFetch;
   });
 
-  globalThis.fetch = async (_url, options = {}) => {
+  globalThis.fetch = async (url, options = {}) => {
     const body = JSON.parse(options.body || "{}");
-    calls.push(body);
+    calls.push({ url: String(url), body, at: Date.now() });
     const page = calls.length;
-    return jsonResponse({
-      result: {
-        postings: [{ posting_number: `POST-${page}`, products: [] }],
-        has_next: page === 1
-      }
-    });
+    const result = {
+      postings: [{
+        posting_number: `POST-${page}`,
+        status_alias: page === 1 ? "awaiting_packaging" : "delivered",
+        products: [{ product_id: "123", product_offer_id: "offer-123", product_name: "Product", price: { amount: "1200.5" } }]
+      }, ...(page === 2 ? [{ posting_number: "POST-3", status: "cancelled", products: [] }] : [])],
+      has_next: page === 1,
+      cursor: page === 1 ? "next-page" : ""
+    };
+    return jsonResponse(page === 1 ? result : { result });
   };
 
   const result = await fetchOzonPostings(REAL_SHOP, {
     from: "2026-07-24",
     to: "2026-07-25",
-    limit: 1000
+    limit: 1000,
+    statuses: ["awaiting_packaging", "delivered"]
   });
 
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls.map((body) => body.offset), [0, 1000]);
+  assert.ok(calls.every((call) => call.url.endsWith("/v4/posting/fbs/list")));
+  assert.deepEqual(calls.map((call) => call.body.cursor), ["", "next-page"]);
+  assert.ok(calls.every((call) => !("offset" in call.body) && !("dir" in call.body) && !("sort_dir" in call.body)));
+  assert.ok(calls.every((call) => call.body.limit === 100));
+  assert.equal(calls[0].body.translit, true);
+  assert.ok(!("translit" in calls[0].body.with));
+  assert.ok(!("status" in calls[0].body.filter) && !("statuses" in calls[0].body.filter));
+  assert.ok(calls[1].at - calls[0].at >= 1100);
   assert.deepEqual(result.postings.map((row) => row.posting_number), ["POST-1", "POST-2"]);
+  assert.equal(result.postings[0].status, "awaiting_packaging");
+  assert.equal(result.postings[0].items[0].ozon_sku, "123");
+  assert.equal(result.postings[0].items[0].offer_id, "offer-123");
+  assert.equal(result.postings[0].items[0].sale_price, 1200.5);
+});
+
+test("fetchOzonPostings rejects a v4 response without an advancing cursor", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({ postings: [{ posting_number: "POST-1", products: [] }], has_next: true, cursor: "" });
+  await assert.rejects(fetchOzonPostings(REAL_SHOP, { from: "2026-07-24", to: "2026-07-25" }), /did not advance its cursor/);
 });
 
 test("fetchOzonProductPrices reads product price v5 rows", async (t) => {
