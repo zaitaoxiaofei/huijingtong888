@@ -41,10 +41,10 @@ export function resolveOrderFreightDescriptor(posting = {}) {
   ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
   if (!text) return null;
 
-  const carrier = /\bguoo\b/i.test(text) ? "GUOO" : (/\bcel\b/i.test(text) ? "CEL" : "");
+  const carrier = /\bogl\b/i.test(text) ? "OGL" : (/\bguoo\b/i.test(text) ? "GUOO" : (/\bcel\b/i.test(text) ? "CEL" : ""));
   const channel = /\beconomy\b/i.test(text)
     ? "economy"
-    : (/\bstandard\b/i.test(text) ? "standard" : (/\bexpress\b/i.test(text) ? "express" : ""));
+    : (/\bstandard\b/i.test(text) ? "standard" : (/\bexpress\b/i.test(text) ? "express" : (carrier === "OGL" ? "economy" : "")));
   const serviceClass = SERVICE_CLASSES.find(([, pattern]) => pattern.test(text))?.[0] || "";
   if (!carrier || !channel || !serviceClass) return null;
   return { carrier, channel, serviceClass, sourceText: text };

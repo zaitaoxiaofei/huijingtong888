@@ -32,10 +32,11 @@ const selectedCommission = computed(() => selection.value ? categoryDetail.value
 const bandMismatch = computed(() => selection.value && actualCommission.value !== null && selection.value.band !== (saleRub.value <= 1500 ? 0 : saleRub.value <= 5000 ? 1 : 2));
 const quotes = computed(() => quoteLogisticsRules(logisticsRules.value, {
   carrier: form.carrier, priceRub: saleRub.value,
-  weightG: form.weight, length: form.length, width: form.width, height: form.height
+  weightG: form.weight, length: form.length, width: form.width, height: form.height, exchangeRate: form.exchangeRate
 }));
 const displayQuotes = computed(() => threeChannelQuotes(quotes.value));
 const defaultQuote = computed(() => defaultLogisticsQuote(displayQuotes.value));
+const activeQuote = computed(() => quotes.value.find((quote) => quote.id === selectedRuleId.value) || defaultQuote.value);
 const quoteReady = computed(() => Number(form.saleCny) > 0 && Number(form.exchangeRate) > 0
   && Number(form.weight) > 0 && [form.length, form.width, form.height].every((value) => Number(value) > 0));
 onMounted(async () => {
@@ -107,7 +108,7 @@ function calculate() {
           <el-form-item label="包裹尺寸" required>
             <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
-          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /></el-select></el-form-item>
+          <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /><el-option label="OGL（陆运）" value="OGL" /></el-select></el-form-item>
           <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" @update:model-value="editExchangeRate" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number :controls="false" v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
@@ -129,13 +130,14 @@ function calculate() {
           <p v-if="logisticsError" class="rate-error">{{ logisticsError }}</p>
           <p v-else-if="!quoteReady" class="hint">{{ Number(form.exchangeRate) > 0 ? '填写售价、重量和尺寸后显示有效渠道。' : '缺少人民币兑卢布汇率；请等待获取或在参考汇率处手动填写。' }}</p>
           <p v-else-if="!quotes.length" class="hint">当前售价、重量和尺寸没有匹配的有效物流渠道，请核对参数或切换服务商。</p>
-          <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；默认陆空 Standard，点击卡片可切换。</p><div class="shipping-cards"><button v-for="quote in displayQuotes" :key="quote.id" type="button" class="shipping-card" :class="{ active: (selectedRuleId ?? defaultQuote?.id) === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g</small></button></div></template>
+          <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；{{ form.carrier === 'OGL' ? '仅陆运，运费包含平台电子服务费。' : '默认陆空 Standard，点击卡片可切换。' }}</p><div class="shipping-cards"><button v-for="quote in displayQuotes" :key="quote.id" type="button" class="shipping-card" :class="{ active: (selectedRuleId ?? defaultQuote?.id) === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g<span v-if="quote.serviceFeeRub"> · 含电子服务费 ₽{{ money(quote.serviceFeeRub) }}</span></small></button></div></template>
         </el-card>
         <el-card v-if="result" shadow="never">
           <template #header><strong>费用明细（人民币 / 件）</strong></template>
           <div class="detail-row"><span>采购成本</span><b>¥ {{ money(form.purchaseCost) }}</b></div>
           <div class="detail-row"><span>平台佣金</span><b>¥ {{ money(result.commission) }}</b></div>
-          <div class="detail-row"><span>跨境物流费</span><b>¥ {{ money(form.freight) }}</b></div>
+          <div class="detail-row"><span>跨境物流费</span><b>¥ {{ money(activeQuote?.transportCny ?? form.freight) }}</b></div>
+          <div v-if="activeQuote?.serviceFeeRub" class="detail-row"><span>OGL 平台电子服务费（₽{{ money(activeQuote.serviceFeeRub) }}）</span><b>¥ {{ money(activeQuote.serviceFeeCny) }}</b></div>
           <div class="detail-row"><span>国内运费及贴单</span><b>¥ {{ money(form.domesticCost) }}</b></div>
           <div class="detail-row"><span>尾程费（售价 2.5%）</span><b>¥ {{ money(result.lastMile) }}</b></div>
           <div class="detail-row"><span>提现费（系统现有公式）</span><b>¥ {{ money(result.withdrawalFee) }}</b></div>

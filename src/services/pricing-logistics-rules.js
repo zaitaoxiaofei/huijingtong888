@@ -8,7 +8,7 @@ export async function sharedPricingLogisticsRules() {
       min_price_rub, max_price_rub, base_fee_cny, per_gram_cny, per_ticket_cny,
       enabled, version_group_id, effective_from, effective_to, note
     FROM logistics_fee_rules
-    WHERE tenant_id IS NULL AND carrier IN ('GUOO', 'CEL') AND enabled != 0
+    WHERE tenant_id IS NULL AND carrier IN ('GUOO', 'CEL', 'OGL') AND enabled != 0
     ORDER BY carrier, channel, version_group_id, effective_from DESC, id DESC
   `);
 }

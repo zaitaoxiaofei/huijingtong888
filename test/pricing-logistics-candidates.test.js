@@ -28,3 +28,14 @@ test("pricing automatically uses the valid rFBS tier when the initially selected
 test("pricing still rejects package dimensions outside the current carrier rules", () => {
   assert.deepEqual(pricingLogisticsCandidates([rule], { ...form, length: 70 }, [12, 17, 20.5], at), []);
 });
+
+test("OGL pricing includes the electronic service fee while solving the sale price", () => {
+  const oglRule = { ...rule, id: 80, version_group_id: 80, name: "OGL 陆运 Extra Small",
+    carrier: "OGL", channel: "economy", min_price_rub: 1, max_price_rub: 1500,
+    per_gram_cny: 0.0242, per_ticket_cny: 2.8 };
+  const quotes = pricingLogisticsCandidates([oglRule], { ...form, carrier: "OGL",
+    exchangeRate: 10, targetMargin: 20, discountRate: 0 }, [12, 17, 20.5], at);
+  assert.ok(quotes.length > 0);
+  assert.ok(quotes[0].serviceFeeRub >= 15);
+  assert.equal(quotes[0].priceCny, Math.round((quotes[0].transportCny + quotes[0].serviceFeeCny) * 100) / 100);
+});

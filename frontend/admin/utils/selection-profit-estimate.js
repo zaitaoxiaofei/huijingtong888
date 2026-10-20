@@ -23,6 +23,10 @@ function productWithRule(row = {}, logisticsRule = null) {
     logistics_rule_base_fee_cny: Number(logisticsRule.base_fee_cny || 0),
     logistics_rule_per_gram_cny: Number(logisticsRule.per_gram_cny || 0),
     logistics_rule_per_ticket_cny: Number(logisticsRule.per_ticket_cny || 0),
+    logistics_rule_min_weight_g: Number(logisticsRule.min_weight_g),
+    logistics_rule_max_weight_g: Number(logisticsRule.max_weight_g),
+    logistics_rule_min_price_rub: Number(logisticsRule.min_price_rub),
+    logistics_rule_max_price_rub: Number(logisticsRule.max_price_rub),
     return_rate: normalizedRate(row.return_rate, 0.05),
     advertising_rate: normalizedRate(row.advertising_rate, 0)
   };

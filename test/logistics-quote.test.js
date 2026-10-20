@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../frontend/admin/utils/logistics-quote.js";
+import { OGL_RATES, oglElectronicServiceFeeRub, oglParcelValueRub } from "../src/ogl-rates.js";
 
 test("three local channels appear in Express, Standard, Economy order", () => {
   const quotes = [
@@ -68,4 +69,36 @@ test("GUOO premium big quotes a 120 by 20 by 30 cm, 5.5 kg package", () => {
   }, at);
   assert.equal(quote.chargeableWeightG, 6000);
   assert.equal(quote.priceCny, 258.04);
+});
+
+test("OGL uses the cheaper overlapping land rule and adds its capped electronic service fee", () => {
+  const rules = OGL_RATES.map((rate, index) => ({
+    id: index + 100, version_group_id: index + 100, enabled: 1,
+    effective_from: "2026-10-20T00:00:00+08:00", effective_to: null,
+    name: `OGL 陆运 ${rate.serviceClass}`, carrier: "OGL", channel: "economy", mode: "per_gram",
+    min_weight_g: rate.minWeightG, max_weight_g: rate.maxWeightG,
+    min_price_rub: rate.minPriceRub, max_price_rub: rate.maxPriceRub,
+    base_fee_cny: 0, per_gram_cny: rate.perGramCny, per_ticket_cny: rate.perTicketCny
+  }));
+  const date = "2026-10-20T00:00:00+08:00";
+  const payload = { carrier: "OGL", priceRub: 1000, weightG: 500, length: 20, width: 15, height: 10, exchangeRate: 10 };
+  const quotes = quoteLogisticsRules(rules, payload, date);
+  assert.equal(defaultLogisticsQuote(threeChannelQuotes(quotes)).name, "OGL 陆运 Extra Small");
+  assert.equal(quotes.find((quote) => quote.name.endsWith("Extra Small")).priceCny, 16.9);
+  assert.equal(oglElectronicServiceFeeRub(100), 15);
+  assert.equal(oglElectronicServiceFeeRub(20000), 200);
+  const [big] = quoteLogisticsRules(rules, { ...payload, priceRub: 5000, weightG: 2200,
+    length: 100, width: 60, height: 6 }, date);
+  assert.equal(big.chargeableWeightG, 3000);
+  assert.equal(big.transportCny, 84);
+  assert.equal(big.serviceFeeCny, 10);
+  assert.equal(big.priceCny, 94);
+  assert.equal(quoteLogisticsRules(rules, { ...payload, length: 201 }, date).length, 0);
+});
+
+test("OGL reads the parcel total from Ozon raw product prices", () => {
+  assert.equal(oglParcelValueRub(JSON.stringify({ products: [
+    { price: "200", quantity: 1 }, { price: "100", quantity: 2 }
+  ] })), 400);
+  assert.equal(oglParcelValueRub("invalid"), 0);
 });
