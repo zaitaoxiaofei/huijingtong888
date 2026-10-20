@@ -87,8 +87,10 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     const rowStatus = String(item.status || "");
     const orderStatus = String(item.purchase_order_status || "");
     const realOrderRequest = Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0);
+    const missingRealOrderSource = String(item.demand_type || "") === "real_order" && !realOrderRequest;
     return ["pending", "suggested", "submitted"].includes(rowStatus)
       && !["purchased", "partial_inbound", "inbound_done"].includes(orderStatus)
+      && !missingRealOrderSource
       && (!realOrderRequest || (item.operational_needs_fulfillment == null
         ? procurementOrderActionClassMysql(item) === "p0_purchase"
         : item.operational_needs_fulfillment));
