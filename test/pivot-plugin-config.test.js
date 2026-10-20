@@ -78,6 +78,17 @@ test("pivot analytics plugin saves authorization only after a successful probe",
   assert.ok(bindIndex > probeIndex);
 });
 
+test("pivot analytics plugin permits browser collection only after a fresh successful table response for the observed store", () => {
+  const source = backgroundSource();
+  assert.match(source, /browserAnalyticsTableReady\(tab\?\.id, companyId, prepareStartedAt\)/);
+  assert.match(source, /browserAnalyticsTableReady\(existingTab\.id, existingCompanyId\)/);
+  assert.match(source, /result\.company_id === companyId/);
+  assert.match(source, /\/api\\\/site\\\/seller-analytics\\\/charts\\\/v3\\\/table\\\/\(\?:totals\|by_sku\)/);
+  assert.match(source, /!request\.bind_auth_only && browserAnalyticsTableReady/);
+  assert.match(source, /warning: 'BROWSER_COLLECT_ONLY'/);
+  assert.match(source, /const observedCompanyId = String\(currentSellerCompanyId\(tab\?\.id\) \|\| ''\)\.trim\(\)/);
+});
+
 test("pivot analytics plugin blocks collection while preparing or when task store differs", () => {
   const source = backgroundSource();
 

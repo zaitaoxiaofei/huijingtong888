@@ -35,6 +35,7 @@ const headerCache = new Map();
 const injectedTabs = new Set();
 const latestContextHeadersByTab = new Map();
 const latestAnalyticsApiByTab = new Map();
+const latestAnalyticsTableByTab = new Map();
 const PLUGIN_STATUS_SYNC_MIN_INTERVAL_MS = 30000;
 const AUTH_BINDING_SYNC_MIN_INTERVAL_MS = 300000;
 const panelState = {
@@ -555,12 +556,17 @@ function isSellerAnalyticsApiUrl(url = '') {
   return /\/api\/.+(?:seller-analytics|analytics|charts|funnel|graph)/i.test(value);
 }
 
+function browserAnalyticsTableReady(tabId, companyId, since = Date.now() - 60000) {
+  const result = latestAnalyticsTableByTab.get(tabId);
+  return result?.ok && result.company_id === companyId && result.updated_at >= since ? result : null;
+}
+
 async function waitForSellerAnalyticsDataReady(tabId, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let lastStatus = null;
   while (Date.now() < deadline) {
     const latest = latestAnalyticsApiByTab.get(tabId);
-    if (latest?.ok) {
+    if (browserAnalyticsTableReady(tabId, currentSellerCompanyId(tabId), prepareStartedAt)) {
       logPanel(`销售漏斗数据接口已加载：HTTP ${latest.status}`, 'success');
       return latest;
     }
@@ -601,6 +607,10 @@ async function waitForSellerAuthContext(tab, request = {}, timeoutMs = AUTH_CONT
             };
           }
           lastError = `AUTH_PROBE_HTTP_${probe?.status || 'UNKNOWN'}`;
+          if (!request.bind_auth_only && browserAnalyticsTableReady(tab?.id, companyId, prepareStartedAt)) {
+            logPanel(`服务器授权校验 HTTP ${probe?.status || '-'}；当前店铺浏览器分析接口已成功，改用插件采集`, 'error');
+            return { success: true, companyId, probe, warning: 'BROWSER_COLLECT_ONLY' };
+          }
           return { success: false, companyId, probe, error: lastError };
         } catch (probeError) {
           lastError = probeError?.message || String(probeError);
@@ -651,6 +661,10 @@ async function runPrepareRequest(request) {
             seller_tab: panelState.sellerTab
           };
         }
+        if (!request.bind_auth_only && browserAnalyticsTableReady(existingTab.id, existingCompanyId)) {
+          logPanel(`服务器授权校验 HTTP ${probe?.status || '-'}；当前店铺浏览器分析接口已成功，改用插件采集`, 'error');
+          return { success: true, current_company_id: existingCompanyId, auth_probe: probe, auth_warning: 'BROWSER_COLLECT_ONLY', fast_path: true, seller_tab: panelState.sellerTab };
+        }
       }
     } catch (error) {
       logPanel(`快速授权校验未通过，回退完整刷新：${error?.message || error}`, 'error');
@@ -661,6 +675,7 @@ async function runPrepareRequest(request) {
   prepareSellerTabId = tab.id;
   prepareStartedAt = Date.now();
   latestContextHeadersByTab.delete(tab.id);
+  latestAnalyticsTableByTab.delete(tab.id);
   const warmup = await warmSellerAnalyticsPermission(tab.id);
   tab = await openSellerAnalyticsGraphsAfterWarmup(tab.id, targetUrl);
   if (!tab?.id) return { success: false, error: 'SELLER_GRAPHS_OPEN_FAILED', warmup };
@@ -964,12 +979,17 @@ function takeHeaderSnapshot(url, method) {
 
 function rememberSellerAnalyticsApiResult(details) {
   if (details.tabId < 0 || !isSellerAnalyticsApiUrl(details.url)) return;
-  latestAnalyticsApiByTab.set(details.tabId, {
+  const result = {
     url: details.url,
     status: details.statusCode,
     ok: Number(details.statusCode || 0) >= 200 && Number(details.statusCode || 0) < 300,
+    company_id: currentSellerCompanyId(details.tabId),
     updated_at: Date.now()
-  });
+  };
+  latestAnalyticsApiByTab.set(details.tabId, result);
+  if (/\/api\/site\/seller-analytics\/charts\/v3\/table\/(?:totals|by_sku)(?:[/?]|$)/i.test(details.url)) {
+    latestAnalyticsTableByTab.set(details.tabId, result);
+  }
 }
 
 async function getPanelStatus() {
@@ -1117,6 +1137,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   injectedTabs.delete(tabId);
   latestContextHeadersByTab.delete(tabId);
   latestAnalyticsApiByTab.delete(tabId);
+  latestAnalyticsTableByTab.delete(tabId);
   void findSellerAnalyticsTab();
   void syncPluginStatus(true).catch(() => {});
 });
