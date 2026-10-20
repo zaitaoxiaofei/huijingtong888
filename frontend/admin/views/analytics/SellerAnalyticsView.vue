@@ -26,6 +26,7 @@ import {
 } from "../../api/sellerAnalytics";
 import { apiClient } from "../../utils/api";
 import { getAnalyticsPeriodDateRange } from "../../utils/analytics-date-range";
+import { waitForSellerAnalyticsPreparation } from "../../utils/seller-analytics-recognition";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 
 const route = useRoute();
@@ -469,6 +470,7 @@ const currentErpBaseUrl = computed(() => {
   return String(window.location.origin || "").trim();
 });
 const skipPluginValidation = computed(() => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(currentErpBaseUrl.value));
+const showLocalBrowserProfileControls = computed(() => skipPluginValidation.value);
 const localPluginSetupHint = computed(() => {
   const base = currentErpBaseUrl.value;
   if (!base) return "";
@@ -962,6 +964,11 @@ async function openPersistentBrowserLogin() {
   }
 }
 
+function openOzonAnalyticsPage() {
+  window.open("https://seller.ozon.ru/app/analytics/graphs", "_blank", "noopener");
+  ElMessage.info("请在当前浏览器的 Ozon 分析页切换到 ERP 所选店铺，然后点击“重新识别店铺”");
+}
+
 async function confirmPersistentBrowserLogin() {
   if (!selectedStoreId.value) return;
   browserProfilePreparing.value = true;
@@ -1240,17 +1247,67 @@ async function recognizeCurrentShop() {
   recognizingPlugin.value = true;
   try {
     if (!(await requireAnalyticsPluginInstance())) return;
-    await prepareSellerAnalyticsPlugin({
+    const expectedStoreId = selectedStoreId.value;
+    prepareFlow.tone = "warning";
+    prepareFlow.title = "正在重新识别店铺";
+    prepareFlow.detail = `等待插件识别 ERP 店铺 ${expectedStoreId}，请保持对应的 Ozon 分析页打开。`;
+    const queued = await prepareSellerAnalyticsPlugin({
       shop_id: state.filters.shopId,
-      store_id: selectedStoreId.value,
-      company_id: selectedStoreId.value,
+      store_id: expectedStoreId,
+      company_id: expectedStoreId,
       shop_name: selectedShop.value?.name || "",
       plugin_instance_id: pluginInstanceId.value
     });
-    ElMessage.info("已通知当前浏览器的分析插件重新识别店铺");
-    await wait(1500);
-    await Promise.all([loadPluginStatus(), loadPluginValidation()]);
+    wakeAnalyticsPlugin();
+    const result = await waitForSellerAnalyticsPreparation({
+      requestId: queued?.data?.id || queued?.id,
+      expectedStoreId,
+      readValidation: async () => {
+        const validation = await loadPluginValidation();
+        await loadPluginStatus();
+        return validation;
+      },
+      wait,
+      isCurrent: () => selectedStoreId.value === expectedStoreId,
+      onValidation: (validation) => {
+        prepareFlow.detail = validation?.prepare_request?.status === "running"
+          ? `插件正在识别 Ozon 店铺，目标店铺 ID：${expectedStoreId}。`
+          : `等待插件领取本次识别请求，目标店铺 ID：${expectedStoreId}。`;
+      }
+    });
+    if (result.status === "ready") {
+      prepareFlow.tone = "success";
+      prepareFlow.title = "Ozon 店铺已对齐";
+      prepareFlow.detail = `插件识别的 Ozon 店铺与 ERP 店铺 ${expectedStoreId} 一致，可以开始采集。`;
+      ElMessage.success("当前店铺识别完成");
+      return;
+    }
+    if (result.status === "cancelled") {
+      prepareFlow.tone = "info";
+      prepareFlow.title = "识别已取消";
+      prepareFlow.detail = "ERP 已切换到另一家店铺，请对新店铺重新识别。";
+      return;
+    }
+    const currentStoreId = result.request?.current_company_id || result.validation?.current_company_id || "未识别";
+    if (result.status === "superseded") {
+      prepareFlow.tone = "warning";
+      prepareFlow.title = "识别请求已被覆盖";
+      prepareFlow.detail = "本次识别被另一项店铺识别请求覆盖，请重试。";
+    } else if (result.status === "mismatch" || (result.status === "timeout" && result.validation?.code === "company_mismatch")) {
+      prepareFlow.tone = "danger";
+      prepareFlow.title = "Ozon 店铺未对齐";
+      prepareFlow.detail = `ERP 店铺 ID：${expectedStoreId}；插件识别到的 Ozon 店铺 ID：${currentStoreId}。请在 Ozon 分析页切换到 ERP 店铺后重试。`;
+    } else {
+      prepareFlow.tone = result.status === "failed" ? "danger" : "warning";
+      prepareFlow.title = result.status === "failed" ? "店铺识别失败" : "店铺识别未完成";
+      const reason = result.status === "failed" ? `（错误码：${result.request?.error || "PREPARE_FAILED"}）` : "";
+      prepareFlow.detail = `插件未完成店铺 ${expectedStoreId} 的识别${reason}。请确认店铺分析插件已开启，并在当前浏览器打开对应的 Ozon 分析页后重试。`;
+    }
+    ElMessage.warning(prepareFlow.detail);
   } catch (error) {
+    prepareFlow.tone = "danger";
+    prepareFlow.title = "店铺识别失败";
+    prepareFlow.detail = error?.message || "重新识别店铺失败";
     ElMessage.error(error?.message || "重新识别店铺失败");
   } finally {
     recognizingPlugin.value = false;
@@ -1860,11 +1917,12 @@ onDeactivated(() => {
           <el-progress v-if="runningRun" :percentage="progressPercent" :show-text="false" :stroke-width="6" class="seller-sync-assistant__progress-bar" />
         </div>
         <div class="seller-sync-assistant__actions">
-          <el-tag :type="browserProfileStatus?.configured ? 'success' : 'info'" effect="light">
+          <el-tag v-if="browserProfileStatus?.configured || showLocalBrowserProfileControls" :type="browserProfileStatus?.configured ? 'success' : 'info'" effect="light">
             {{ browserProfileStatus?.configured ? "长期登录已配置" : "长期登录未配置" }}
           </el-tag>
-          <el-button size="large" :loading="browserProfilePreparing" @click="openPersistentBrowserLogin">打开独立登录窗口</el-button>
-          <el-button size="large" type="primary" plain :loading="browserProfilePreparing" @click="confirmPersistentBrowserLogin">确认长期绑定</el-button>
+          <el-button v-if="showLocalBrowserProfileControls" size="large" :loading="browserProfilePreparing" @click="openPersistentBrowserLogin">打开独立登录窗口</el-button>
+          <el-button v-if="showLocalBrowserProfileControls" size="large" type="primary" plain :loading="browserProfilePreparing" @click="confirmPersistentBrowserLogin">确认长期绑定</el-button>
+          <el-button size="large" @click="openOzonAnalyticsPage">打开本机 Ozon 分析页</el-button>
           <el-button size="large" :loading="recognizingPlugin" @click="recognizeCurrentShop">重新识别店铺</el-button>
         </div>
       </section>
