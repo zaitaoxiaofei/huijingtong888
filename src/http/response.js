@@ -58,11 +58,12 @@ export function writeHead(res, status, headers = {}) {
   res.writeHead(status, finalHeaders);
 }
 
-export function json(res, payload, status = 200) {
+export function json(res, payload, status = 200, headers = {}) {
   const body = JSON.stringify(payload);
   writeHead(res, status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(body)
+    "Content-Length": Buffer.byteLength(body),
+    ...headers
   });
   res.end(body);
 }

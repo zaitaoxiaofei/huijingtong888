@@ -2,6 +2,7 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js
 import { createHash, randomBytes } from "node:crypto";
 import { assertTenantQuotaAvailable, normalizeTenantQuotaLimit } from "./tenant-quotas.js";
 import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMemberLimit } from "./tenant-plans.js";
+import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEncryptionConfigured } from "./tenant-plugin-token-crypto.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -36,6 +37,7 @@ export async function ensureTenantSchemaMysql() {
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       tenant_id BIGINT UNSIGNED NOT NULL,
       token_hash CHAR(64) NOT NULL,
+      token_ciphertext VARCHAR(255) NULL,
       label VARCHAR(100) NOT NULL DEFAULT 'Ozon browser plugin',
       created_by_person_id BIGINT UNSIGNED NOT NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -43,6 +45,9 @@ export async function ensureTenantSchemaMysql() {
       UNIQUE KEY uk_tenant_plugin_token_hash (token_hash),
       KEY idx_tenant_plugin_tokens_tenant_active (tenant_id, revoked_at, created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute("ALTER TABLE tenant_plugin_tokens ADD COLUMN token_ciphertext VARCHAR(255) NULL").catch(error => {
+      if (error?.code !== "ER_DUP_FIELDNAME") throw error;
+    });
     await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_activation_codes (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       tenant_id BIGINT UNSIGNED NOT NULL,
@@ -377,20 +382,37 @@ async function requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin
 export async function issueTenantPluginTokenMysql(tenantId, personId, { isPlatformAdmin = false } = {}) {
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin);
   const token = `ozp_${randomBytes(32).toString("base64url")}`;
+  const encryptedToken = encryptTenantPluginToken(token);
   await withMysqlTransaction(async (connection) => {
     await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [tenant.id]);
     await connection.execute("UPDATE tenant_plugin_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND revoked_at IS NULL", [tenant.id]);
-    await connection.execute(`INSERT INTO tenant_plugin_tokens (tenant_id, token_hash, created_by_person_id)
-      VALUES (?, ?, ?)`, [tenant.id, hashTenantPluginToken(token), Number(personId)]);
+    await connection.execute(`INSERT INTO tenant_plugin_tokens (tenant_id, token_hash, token_ciphertext, created_by_person_id)
+      VALUES (?, ?, ?, ?)`, [tenant.id, hashTenantPluginToken(token), encryptedToken, Number(personId)]);
   });
   return { ok: true, tenant_id: tenant.id, token };
 }
 
 export async function tenantPluginTokenStatusMysql(tenantId, personId, options = {}) {
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
-  const rows = await mysqlQuery(`SELECT id, label, created_at FROM tenant_plugin_tokens
+  const rows = await mysqlQuery(`SELECT id, label, created_at, token_ciphertext FROM tenant_plugin_tokens
     WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`, [tenant.id]);
-  return { configured: Boolean(rows[0]), created_at: rows[0]?.created_at || null, label: rows[0]?.label || "" };
+  return {
+    configured: Boolean(rows[0]),
+    created_at: rows[0]?.created_at || null,
+    label: rows[0]?.label || "",
+    recoverable: Boolean(rows[0]?.token_ciphertext),
+    can_reveal: Boolean(rows[0]?.token_ciphertext) && tenantPluginTokenEncryptionConfigured(),
+    encryption_configured: tenantPluginTokenEncryptionConfigured()
+  };
+}
+
+export async function readTenantPluginTokenMysql(tenantId, personId, options = {}) {
+  const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
+  const rows = await mysqlQuery(`SELECT token_ciphertext FROM tenant_plugin_tokens
+    WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`, [tenant.id]);
+  if (!rows[0]) throw new Error("该企业尚未配置插件令牌");
+  if (!rows[0].token_ciphertext) throw new Error("当前令牌为旧版凭证，无法恢复；重置后请重新配置插件");
+  return { ok: true, tenant_id: tenant.id, token: decryptTenantPluginToken(rows[0].token_ciphertext) };
 }
 
 export async function revokeTenantPluginTokenMysql(tenantId, personId, options = {}) {

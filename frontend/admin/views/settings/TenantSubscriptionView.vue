@@ -316,6 +316,9 @@ async function archive() {
 
 async function issuePluginToken() {
   try {
+    if (!pluginTokenStatus.value.encryption_configured) {
+      throw new Error("服务器尚未配置稳定的企业插件令牌加密密钥，请先配置后再生成或重置令牌");
+    }
     if (pluginTokenStatus.value.configured) {
       await ElMessageBox.confirm("生成新令牌会立即撤销旧令牌，已配置旧令牌的插件需要重新粘贴。", "重置插件接入令牌", { type: "warning" });
     }
@@ -326,6 +329,20 @@ async function issuePluginToken() {
   } catch (error) {
     if (error !== "cancel") ElMessage.error(error.message || "生成插件令牌失败");
   }
+}
+
+async function revealPluginToken() {
+  try {
+    const result = await apiClient.post("/api/tenants/plugin-token/reveal", { tenant_id: selected.value.id });
+    pluginTokenValue.value = result.token;
+    pluginTokenDialog.value = true;
+  } catch (error) {
+    ElMessage.error(error.message || "读取插件令牌失败");
+  }
+}
+
+function clearPluginTokenValue() {
+  pluginTokenValue.value = "";
 }
 
 async function revokePluginToken() {
@@ -378,6 +395,7 @@ async function copyActivationCode() {
 }
 
 async function copyPluginToken() {
+  if (!pluginTokenValue.value) return;
   try {
     await navigator.clipboard.writeText(pluginTokenValue.value);
     ElMessage.success("插件接入令牌已复制");
@@ -521,7 +539,20 @@ onMounted(load);
 
         <el-collapse class="advanced-section">
           <el-collapse-item name="plugin"><template #title><span class="advanced-title">高级接入：浏览器插件令牌</span></template>
-            <div class="plugin-box"><div><strong>{{ pluginTokenStatus.configured ? '已配置插件接入令牌' : '尚未配置插件接入令牌' }}</strong><p>此令牌只供 Ozon 浏览器插件连接 ERP，和客户购买/注册用的激活码是两种不同凭证。</p></div><div class="plugin-actions"><el-button type="primary" plain @click="issuePluginToken">{{ pluginTokenStatus.configured ? '重置令牌' : '生成令牌' }}</el-button><el-button type="danger" plain :disabled="!pluginTokenStatus.configured" @click="revokePluginToken">撤销</el-button></div></div>
+            <div class="plugin-box">
+              <div>
+                <strong>{{ pluginTokenStatus.configured ? (pluginTokenStatus.can_reveal ? '已配置插件接入令牌' : pluginTokenStatus.recoverable ? '已配置插件令牌' : '已配置旧版令牌，暂不可查看') : '尚未配置插件接入令牌' }}</strong>
+                <p>此令牌只供 Ozon 浏览器插件连接 ERP，和客户购买/注册用的激活码是两种不同凭证。新令牌会加密保存，授权管理员可随时查看和复制。</p>
+                <p v-if="!pluginTokenStatus.encryption_configured" class="token-warning">服务器尚未配置稳定的令牌加密密钥，因此暂不能生成或查看可恢复的令牌。</p>
+                <p v-else-if="pluginTokenStatus.configured && !pluginTokenStatus.recoverable" class="token-warning">当前令牌是在此功能上线前创建的，系统无法从旧哈希还原。重置一次并更新插件配置后，即可随时查看和复制。</p>
+                <p v-else-if="pluginTokenStatus.configured && !pluginTokenStatus.can_reveal" class="token-warning">令牌已加密保存，但当前服务未能使用对应密钥解密；请恢复原加密密钥后再查看，或确认插件可更新后重置。</p>
+              </div>
+              <div class="plugin-actions">
+                <el-button v-if="pluginTokenStatus.can_reveal" type="primary" plain @click="revealPluginToken">查看/复制</el-button>
+                <el-button type="primary" plain :disabled="!pluginTokenStatus.encryption_configured" @click="issuePluginToken">{{ pluginTokenStatus.configured ? '重置令牌' : '生成令牌' }}</el-button>
+                <el-button type="danger" plain :disabled="!pluginTokenStatus.configured" @click="revokePluginToken">撤销</el-button>
+              </div>
+            </div>
           </el-collapse-item>
         </el-collapse>
 
@@ -560,13 +591,14 @@ onMounted(load);
     </el-dialog>
 
     <el-dialog v-model="activationCodeDialog" title="客户激活码已生成" width="620px"><el-alert type="warning" :closable="false" title="请立即复制并安全发送给客户；完整码只显示这一次。" /><p class="dialog-lead">此码当前尚不能用于自助注册；兑换功能完成后客户才能用它创建主账号并认领此工作空间。</p><el-input v-model="activationCodeValue" readonly /><template #footer><el-button @click="activationCodeDialog = false">关闭</el-button><el-button type="primary" @click="copyActivationCode">复制激活码</el-button></template></el-dialog>
-    <el-dialog v-model="pluginTokenDialog" title="浏览器插件接入令牌" width="620px"><el-alert type="warning" :closable="false" title="这是插件连接令牌，不是客户购买或注册用的激活码。" /><p class="dialog-lead">此令牌仅显示一次，请复制到该客户空间的 Ozon 浏览器插件设置中。</p><el-input v-model="pluginTokenValue" readonly /><template #footer><el-button @click="pluginTokenDialog = false">关闭</el-button><el-button type="primary" @click="copyPluginToken">复制令牌</el-button></template></el-dialog>
+    <el-dialog v-model="pluginTokenDialog" title="浏览器插件接入令牌" width="620px" @closed="clearPluginTokenValue"><el-alert type="info" :closable="false" title="这是插件连接令牌，不是客户购买或注册用的激活码。" /><p class="dialog-lead">请仅复制到需要连接此企业空间的 Ozon 浏览器插件中；关闭窗口后可再次点击“查看/复制”。</p><el-input v-model="pluginTokenValue" readonly /><template #footer><el-button @click="pluginTokenDialog = false">关闭</el-button><el-button type="primary" :disabled="!pluginTokenValue" @click="copyPluginToken">复制令牌</el-button></template></el-dialog>
   </main>
 </template>
 
 <style scoped>
 .tenant-page{max-width:1600px;margin:0 auto;padding:28px 32px 40px;color:#182230}.page-header,.panel-heading,.section-heading,.archive-section,.plan-card-top{display:flex;align-items:center;justify-content:space-between;gap:18px}.page-header{margin-bottom:22px}.eyebrow{margin-bottom:8px;color:#64748b;font-size:12px;font-weight:600;letter-spacing:.04em}.page-header h1{margin:0;font-size:26px;line-height:1.25;font-weight:700}.page-header p,.panel-heading p,.section-heading p,.dialog-lead{margin:7px 0 0;color:#667085;font-size:13px;line-height:1.6}.header-actions{display:flex;gap:10px;flex:none}.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.summary-card{display:grid;gap:7px;padding:17px 19px;border:1px solid #e7ebf0;border-radius:12px;background:#fff}.summary-card span{color:#667085;font-size:13px}.summary-card strong{font-size:27px;line-height:1.1;font-weight:700;color:#182230}.summary-card small{color:#98a2b3;font-size:12px}.summary-card.attention strong{color:#d97706}.tenant-tabs{background:#fff;border:1px solid #e7ebf0;border-radius:12px;padding:0 20px 18px}.tenant-tabs :deep(.el-tabs__header){margin:0 0 4px}.tenant-tabs :deep(.el-tabs__nav-wrap::after){height:1px;background:#edf0f3}.tenant-tabs :deep(.el-tabs__item){height:54px;font-weight:600}.customer-panel,.plan-panel{padding:21px 2px 0}.panel-heading{margin-bottom:19px}.panel-heading h2{margin:0;font-size:18px}.result-count{flex:none;color:#667085;font-size:13px}.filters{display:flex;gap:10px;margin-bottom:14px}.search-input{max-width:410px}.filter-select{width:160px}.customer-table{width:100%}.customer-table :deep(th.el-table__cell){height:45px;background:#f8fafc;color:#667085;font-size:12px;font-weight:600}.customer-table :deep(td.el-table__cell){height:64px;color:#344054}.space-cell{display:grid;gap:4px}.space-cell strong{color:#1d2939;font-size:14px;font-weight:600}.space-cell span,.usage-sub{color:#98a2b3;font-size:12px}.usage-sub{display:block;margin-top:3px}.plan-cell{font-weight:500}.activation-note{margin-top:18px}.activation-note :deep(.el-alert__title){font-size:13px;font-weight:600}.activation-note :deep(.el-alert__description){line-height:1.6}.plan-group+.plan-group{margin-top:28px}.plan-group>h3{display:flex;align-items:center;gap:9px;margin:0 0 14px;font-size:15px}.plan-group>h3 small{color:#98a2b3;font-size:12px;font-weight:400}.group-dot{width:8px;height:8px;border-radius:50%}.trial-dot{background:#7c6ee6}.paid-dot{background:#3370e8}.plan-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.plan-card{display:flex;flex-direction:column;min-height:203px;padding:17px 18px 12px;border:1px solid #e6eaf0;border-radius:12px;background:#fff;transition:border-color .15s,box-shadow .15s}.plan-card:hover{border-color:#bfd3ff;box-shadow:0 5px 18px #1d29390c}.plan-card.inactive{background:#fafbfc;opacity:.76}.plan-card-top{align-items:flex-start}.plan-card-top h4{margin:8px 0 0;font-size:15px}.plan-kind{display:inline-flex;padding:3px 7px;border-radius:5px;font-size:11px;font-weight:600}.trial-kind{background:#f1efff;color:#6554c0}.paid-kind{background:#edf4ff;color:#2362c7}.plan-duration{display:flex;align-items:baseline;gap:5px;margin:17px 0 15px}.plan-duration strong{font-size:28px;line-height:1;font-weight:700}.plan-duration>span{color:#667085;font-size:13px}.plan-duration .el-tag{align-self:center;margin-left:auto}.plan-quotas{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px 0;border-top:1px solid #eff1f4;border-bottom:1px solid #eff1f4}.plan-quotas>span{display:grid;grid-template-columns:17px 1fr;align-items:center;column-gap:5px;color:#344054;font-size:12px}.plan-quotas :deep(.el-icon){color:#667085}.plan-quotas small{grid-column:2;color:#98a2b3;font-size:11px}.plan-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:auto;padding-top:10px}.drawer-intro{display:flex;align-items:center;justify-content:space-between;padding:0 0 20px;border-bottom:1px solid #edf0f3}.drawer-slug{color:#475467;font-size:13px;font-weight:600}.drawer-intro p{margin:6px 0 0;color:#98a2b3;font-size:12px}.drawer-section{padding:21px 0;border-bottom:1px solid #edf0f3}.section-heading{align-items:flex-start;margin-bottom:15px}.section-heading h3{margin:0;font-size:15px}.section-heading p{font-size:12px}.subscription-card{padding-top:17px}.subscription-facts{display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:10px;margin:16px 0;padding:14px;border-radius:9px;background:#f8fafc}.subscription-facts>div{display:grid;gap:7px}.subscription-facts span{color:#667085;font-size:11px}.subscription-facts strong{font-size:13px;font-weight:600;line-height:1.5}.plan-assign{display:flex;gap:9px}.assign-select{min-width:0;flex:1}.inline-hint{margin:9px 0 0;color:#98a2b3;font-size:11px;line-height:1.5}.quota-form{display:flex;align-items:flex-end;gap:8px}.quota-form :deep(.el-form-item){margin:0 4px 0 0}.quota-form :deep(.el-input-number){width:130px}.member-actions{display:flex;gap:8px}.member-table :deep(th.el-table__cell){background:#f8fafc;color:#667085;font-size:12px}.advanced-section{margin-top:4px;border-bottom:1px solid #edf0f3}.advanced-section :deep(.el-collapse-item__header){height:53px;border-bottom:0;font-size:13px}.advanced-section :deep(.el-collapse-item__wrap){border-bottom:0}.advanced-title{color:#475467;font-weight:600}.plugin-box{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:0 0 17px}.plugin-box strong{font-size:13px}.plugin-box p{max-width:480px;margin:6px 0 0;color:#667085;font-size:12px;line-height:1.6}.plugin-actions{display:flex;flex:none;gap:6px}.archive-section{margin-top:20px;padding:15px 16px;border:1px solid #f1d0d0;border-radius:9px;background:#fffafa}.archive-section strong{color:#a63838;font-size:13px}.archive-section p{margin:5px 0 0;color:#8b6e6e;font-size:11px}.dialog-lead{margin:0 0 18px}.dialog-form :deep(.el-form-item){margin-bottom:17px}.dialog-form :deep(.el-form-item__label){padding-bottom:6px;color:#475467;font-weight:600}.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.full-width{width:100%}.quota-input{display:flex;align-items:center;gap:12px}.quota-input :deep(.el-input-number){width:150px}
 .activation-code-status{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid #e7ebf0;border-radius:8px;background:#f8fafc;color:#475467;font-size:13px}.activation-code-status span:first-child{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600;letter-spacing:.04em}
+.token-warning{color:#b54708!important}
 @media(max-width:1000px){.tenant-page{padding:22px 20px}.plan-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.customer-table{min-width:980px}.customer-panel{overflow-x:auto}.tenant-tabs{padding-right:14px;padding-left:14px}}
 @media(max-width:680px){.tenant-page{padding:18px 12px}.page-header{align-items:flex-start;flex-direction:column}.header-actions{width:100%}.header-actions .el-button{flex:1}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.summary-card{padding:13px}.summary-card strong{font-size:23px}.tenant-tabs{padding:0 10px 12px}.filters{flex-wrap:wrap}.search-input{max-width:none;width:100%}.filter-select{flex:1;width:auto;min-width:120px}.plan-grid{grid-template-columns:1fr}.plan-card{min-height:190px}.subscription-facts{grid-template-columns:1fr;gap:12px}.plan-assign{align-items:stretch;flex-direction:column}.quota-form{flex-wrap:wrap}.section-heading{align-items:flex-start;flex-direction:column}.member-actions{width:100%}.member-actions .el-button{flex:1}.plugin-box{align-items:flex-start;flex-direction:column}.form-row{grid-template-columns:1fr;gap:0}}
 </style>
