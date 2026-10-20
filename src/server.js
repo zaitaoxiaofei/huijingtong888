@@ -785,7 +785,7 @@ const scheduledJobDefinitions = [
     key: "inventory_sales_daily_backfill",
     name: "库存销量按日补齐",
     category: "inventory",
-    priority: "low",
+    priority: "high",
     intervalMinutes: 1,
     initialDelaySeconds: 120,
     catchupEnabled: false,
