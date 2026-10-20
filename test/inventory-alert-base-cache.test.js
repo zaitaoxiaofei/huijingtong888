@@ -12,7 +12,7 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
   const tenantA = 17001;
   const tenantB = 17002;
   const stock = new Map([[tenantA, 5], [tenantB, 9]]);
-  const calls = { products: [], coverage: [], summarySkus: [], pageSkus: [], invalidations: 0 };
+  const calls = { products: [], balances: [], coverage: [], summarySkus: [], pageSkus: [], invalidations: 0, balanceInvalidations: 0 };
   const context = vm.createContext({
     ensureMysqlCutoverEnabled() {},
     ensureProductNamingSchemaMysql: async () => {},
@@ -21,6 +21,7 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async (tenantId) => tenantId === 'tenant-a' ? tenantA : tenantB,
     isDefaultShopTenantMysql: async () => false,
@@ -31,6 +32,11 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
     inventoryAlertProductSalesMysql: async (tenantPk) => [{ product_id: tenantPk, shop_id: tenantPk + 100,
       shop_name: `Shop ${tenantPk}`, ozon_sku: `SKU-${tenantPk}`, recent_7d_qty: 1, recent_15d_qty: 1, recent_30d_qty: 1 }],
     purchasedInventoryInTransitMysql: async () => [],
+    inventoryProductBalanceMysql: async (productIds, tenantId) => {
+      calls.balances.push([tenantId, ...productIds]);
+      const quantity = stock.get(tenantId);
+      return new Map([[tenantId, { physical_stock: quantity, available_stock: quantity }]]);
+    },
     orderProcurementCoverageMysql: async ({ productIds, tenantId }) => {
       calls.coverage.push([tenantId, ...productIds]);
       const quantity = stock.get(tenantId);
@@ -45,6 +51,7 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
     invalidateMasterDataCache,
     invalidateMasterDataCachePrefix,
     invalidateProcurementCoverageCache: () => { calls.invalidations += 1; },
+    invalidateInventoryProductBalance: () => { calls.balanceInvalidations += 1; },
     applyStockAlertQuery
   });
   const start = service.indexOf('export async function stockAlertsMysql');
@@ -62,7 +69,8 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
     assert.equal(filtered.total, 1);
     assert.equal(other.rows[0].available_stock, 9);
     assert.deepEqual(calls.products, [tenantA, tenantB]);
-    assert.deepEqual(calls.coverage, [[tenantA, tenantA], [tenantB, tenantB]]);
+    assert.deepEqual(calls.balances, [[tenantA, tenantA], [tenantB, tenantB]]);
+    assert.deepEqual(calls.coverage, []);
     assert.equal(calls.summarySkus.length, 2);
     assert.equal(calls.pageSkus.length, 3);
 
@@ -73,13 +81,14 @@ test('inventory alert base is tenant scoped, reused across filters, and refreshe
     stock.set(tenantA, 2);
     assert.equal((await context.stockAlertsMysql(query, 'tenant-a')).rows[0].available_stock, 5);
     assert.equal((await context.stockAlertsMysql({ ...query, refresh: '1' }, 'tenant-a')).rows[0].available_stock, 2);
-    assert.equal(calls.coverage.length, 3);
+    assert.equal(calls.balances.length, 3);
 
     stock.set(tenantB, 1);
     context.invalidateOrderProcurementCoverage();
     assert.equal(calls.invalidations, 1);
+    assert.equal(calls.balanceInvalidations, 1);
     assert.equal((await context.stockAlertsMysql(query, 'tenant-b')).rows[0].available_stock, 1);
-    assert.equal(calls.coverage.length, 4);
+    assert.equal(calls.balances.length, 4);
   } finally {
     invalidateMasterDataCachePrefix('stock-alerts:inventory-base:v1:');
     invalidateMasterDataCachePrefix('stock-alerts:product-sales:v3:');

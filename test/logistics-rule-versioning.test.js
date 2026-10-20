@@ -10,9 +10,9 @@ test("logistics rules keep effective-dated versions for order-time freight", () 
   assert.match(serviceSource, /version_group_id/);
   assert.match(serviceSource, /effective_from <= \?/);
   assert.match(serviceSource, /candidate\.effective_to IS NULL OR candidate\.effective_to > \?/);
-  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, item\.ordered_at, \{ raw_json: item\.ozon_raw_json \}\)/);
-  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, order\.ordered_at, rawOrder\)/);
-  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, posting\.ordered_at, posting\)/);
+  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, item\.ordered_at, \{ raw_json: item\.ozon_raw_json, order_id: item\.order_id \}\)/);
+  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, order\.ordered_at, \{ \.\.\.rawOrder, order_id: orderId \}\)/);
+  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, posting\.ordered_at, \{ \.\.\.posting, order_id: orderId \}\)/);
 });
 
 test("order item snapshots record the matched logistics rule version", () => {
@@ -39,8 +39,8 @@ test("order freight prioritizes the actual Ozon delivery method", () => {
   assert.match(serviceSource, /resolveOrderFreightDescriptor\(posting\)/);
   assert.match(serviceSource, /logistics_rule_source: source/);
   assert.match(serviceSource, /"ozon_delivery_method"/);
-  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, posting\.ordered_at, posting\)/);
-  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, order\.ordered_at, rawOrder\)/);
+  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, posting\.ordered_at, \{ \.\.\.posting, order_id: orderId \}\)/);
+  assert.match(serviceSource, /productForProfitEstimateMysql\(mapping\.product_id, order\.ordered_at, \{ \.\.\.rawOrder, order_id: orderId \}\)/);
   assert.match(serviceSource, /ozon_raw_json/);
   assert.match(serviceSource, /WHEN candidate\.name LIKE '% Premium Big' THEN 'Premium Big'/);
   assert.match(serviceSource, /WHEN candidate\.name LIKE '% Extra Small' THEN 'Extra Small'/);
