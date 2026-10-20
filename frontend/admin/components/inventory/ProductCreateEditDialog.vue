@@ -72,6 +72,7 @@ let similarProductsTimer = null;
 
 const STOCK_UNIT_OPTIONS = ["个", "件", "套", "对", "双", "条", "米", "卷", "包", "片", "张", "盒"];
 const PRODUCTION_LEAD_DAY_OPTIONS = [3, 5, 7, 10, 15, 30];
+const WAREHOUSE_LOGISTICS_DAY_OPTIONS = [1, 2, 3, 4, 5];
 
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
@@ -186,6 +187,7 @@ function createDefaultForm() {
     return_rate: 5,
     stock_unit: "个",
     production_lead_days: null,
+    warehouse_logistics_days: null,
     is_accessory: 0,
     composition_items: [],
     product_type: "selection",
@@ -214,6 +216,7 @@ function resetForm() {
   requestKey.value = newRequestKey();
   Object.assign(form, createDefaultForm());
   form.production_lead_days = isInventoryTarget.value ? 7 : null;
+  form.warehouse_logistics_days = isInventoryTarget.value ? 2 : null;
   form.owner_person_id = props.people[0]?.id ? String(props.people[0].id) : "";
   form.product_type = isInventoryTarget.value ? "main" : "selection";
   form.selection_status = isInventoryTarget.value ? "listed" : "draft";
@@ -261,6 +264,7 @@ function fillFormFromValue(value = {}) {
     return_rate: roundMoney(resolvedReturnRate(value) * 100),
     stock_unit: value.stock_unit || "个",
     production_lead_days: value.production_lead_days == null ? (isInventoryTarget.value ? 7 : null) : Number(value.production_lead_days),
+    warehouse_logistics_days: value.warehouse_logistics_days == null ? (isInventoryTarget.value ? 2 : null) : Number(value.warehouse_logistics_days),
     is_accessory: Number(value.is_accessory || 0) ? 1 : 0,
     composition_items: Array.isArray(value.composition_items) ? value.composition_items.map(normalizeComponentItem) : [],
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
@@ -1513,6 +1517,7 @@ async function submitDialog(options = {}) {
       return_rate: resolvedReturnRate(form),
       stock_unit: form.structured_naming.stock_unit || form.stock_unit || "个",
       production_lead_days: form.production_lead_days,
+      warehouse_logistics_days: form.warehouse_logistics_days,
       is_accessory: Number(form.is_accessory || 0) ? 1 : 0,
       composition_items: form.composition_items.map((item) => ({
         component_product_id: Number(item.component_product_id || 0),
@@ -1831,6 +1836,13 @@ function submitAndCreateDraft() {
                 <el-form-item label="生产周期">
                   <el-select v-model="form.production_lead_days" placeholder="默认 7 天">
                     <el-option v-for="days in PRODUCTION_LEAD_DAY_OPTIONS" :key="days" :label="`${days} 天`" :value="days" />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col v-if="isInventoryTarget" :span="8">
+                <el-form-item label="物流到仓时长">
+                  <el-select v-model="form.warehouse_logistics_days" placeholder="默认 2 天">
+                    <el-option v-for="days in WAREHOUSE_LOGISTICS_DAY_OPTIONS" :key="days" :label="`${days} 天`" :value="days" />
                   </el-select>
                 </el-form-item>
               </el-col>

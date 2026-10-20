@@ -7,9 +7,10 @@ import InventoryIdentity from '../../../orders/components/InventoryIdentity.vue'
 import LedgerBatchTrace from './LedgerBatchTrace.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
-const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' } });
+const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
+const ledgerBase = computed(() => props.inventoryMode ? '/api/inventory/ledger' : '/api/procurement/ledger');
 const loading = ref(false), saving = ref(false), searching = ref(false);
 const productId = ref(0), products = ref([]), targetProducts = ref([]), data = ref(null), target = ref(null);
 const preview = ref(null), submission = ref(null), formVisible = ref(false);
@@ -42,6 +43,7 @@ watch([historyPageSize, data], () => { historyPage.value = 1; });
 watch(productId, () => { historyLinkVisible.value = false; usagePurchaseId.value = null; });
 function showBatch(id) { traceBatchId.value = id; activeTab.value = 'batch-trace'; }
 async function reconcileBatch({ inbound_id, allocations }) {
+  if (props.inventoryMode) return false;
   if (saving.value) return;
   saving.value = true;
   try {
@@ -193,7 +195,7 @@ async function load(id = productId.value) {
   if (!id) { loading.value = false; return; }
   loading.value = true;
   try {
-    const result = await apiClient.get(`/api/procurement/ledger?product_id=${id}`, { noCache: true });
+    const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}`, { noCache: true });
     if (version === loadVersion) data.value = result;
   } catch (error) { if (version === loadVersion) { data.value = null; loadError.value = error.message; } }
   finally { if (version === loadVersion) loading.value = false; }
@@ -238,6 +240,7 @@ function editCost(type, row) {
   Object.assign(form, { cost_task_id: Number(row.id), quantity: Number(row.quantity) - Number(row.resolved_quantity) });
 }
 function edit(type, row = null) {
+  if (props.inventoryMode && (type !== 'stocktake' || !props.stocktakeEnabled)) return;
   Object.keys(form).forEach(key => delete form[key]);
   Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
     order_item_id: row?.order_item_id || null, reason: '', reason_code: '', reason_note: '', amount: 0, shipping_amount: 0, purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`,
@@ -249,6 +252,7 @@ function edit(type, row = null) {
 }
 watch(form, () => { preview.value = null; submission.value = null; });
 async function makePreview() {
+  if (props.inventoryMode && form.action_type !== 'stocktake') return;
   if (form.action_type === 'stocktake') {
     if (!form.stocktake_type) return ElMessage.warning('请先选择更新实物数还是剩余可用数');
     if (form.stocktake_type === 'physical' && form.counted_quantity == null) return ElMessage.warning('请输入仓库实物数量；没有实物请填 0');
@@ -262,7 +266,7 @@ async function makePreview() {
   try {
     const payload = { ...form, extra_sources: (form.extra_sources || []).map(({ product_id, quantity, revision }) => ({ product_id, quantity, revision })), product_id: productId.value, revision: data.value.revision,
       target_revision: target.value?.revision, request_key: crypto.randomUUID() };
-    preview.value = await apiClient.post('/api/procurement/ledger/preview', payload);
+    preview.value = await apiClient.post(`${ledgerBase.value}/preview`, payload);
     submission.value = payload;
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
@@ -276,9 +280,10 @@ async function confirmStock() {
 }
 async function save() {
   if (!submission.value || saving.value) return;
+  if (props.inventoryMode && submission.value.action_type !== 'stocktake') return;
   saving.value = true;
   try {
-    await apiClient.post('/api/procurement/ledger', submission.value);
+    await apiClient.post(ledgerBase.value, submission.value);
     ElMessage.success('已保存对账记录，库存和历史缺口已重新计算');
     formVisible.value = false;
     await load();
@@ -286,11 +291,11 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) ? props.initialTab : 'current'; products.value = []; load(props.productId); if (!props.orderOverview) search(''); } else ++loadVersion; }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; load(props.productId); if (!props.orderOverview && !props.inventoryMode) search(''); } else ++loadVersion; }, { immediate: true });
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="库存明细与历史核对" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
+  <el-dialog v-model="visible" :title="inventoryMode ? '库存明细' : '库存明细与历史核对'" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
     <section v-if="orderOverview" class="ledger-order-summary">
       <h3>本单采购结论 <small>{{ orderLabel }}</small></h3>
       <InventoryIdentity v-if="orderOverview.parents?.length" :parents="orderOverview.parents" />
@@ -308,15 +313,15 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       <el-alert v-if="orderCoverageConclusion" :type="orderCoverageConclusion.type" :closable="false" show-icon class="ledger-order-conclusion" :title="orderCoverageConclusion.title" />
     </section>
     <div class="ledger-toolbar">
-      <el-select v-if="!orderOverview" :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
+      <el-select v-if="!orderOverview && !inventoryMode" :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
         <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
       </el-select>
       <strong v-else class="ledger-scope">库存汇总</strong>
       <div class="ledger-top-actions">
-        <el-button type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
-        <el-button :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
-        <el-dropdown @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
+        <el-button v-if="!inventoryMode || stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
+        <el-button v-if="!inventoryMode" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
+        <el-dropdown v-if="!inventoryMode" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
           <el-dropdown-item v-if="$slots.management" command="management">绑定管理</el-dropdown-item>
           <el-dropdown-item command="damage" :disabled="!data || loading">货损报废</el-dropdown-item>
           <el-dropdown-item command="loss" :disabled="!data || loading">货物丢失</el-dropdown-item>
@@ -336,11 +341,12 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
           <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>实物扣除全部待发订单需求及 FBP 占用</small></div>
         </div></section><section><h3>采购与缺口</h3><div class="ledger-metrics">
-          <div><span>采购在途</span><el-button link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>点击查看待收采购</small></div>
+          <div><span>采购在途</span><strong v-if="inventoryMode">{{ data.incoming_quantity }}</strong><el-button v-else link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>{{ inventoryMode ? '待收货数量' : '点击查看待收采购' }}</small></div>
           <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>
           <div :class="{ 'ledger-shortage': data.current_shortage > 0 }"><span>全部待履约订单待采购</span><strong>{{ data.current_shortage }}</strong><small>历史缺记录不计入此数</small></div>
         </div></section></div>
-        <div v-if="pendingCosts.length || data.current_shortage > 0" class="ledger-toolbar">
+        <section v-if="inventoryMode && $slots['inventory-relations']" class="ledger-management"><slot name="inventory-relations" /></section>
+        <div v-if="!inventoryMode && (pendingCosts.length || data.current_shortage > 0)" class="ledger-toolbar">
           <el-button v-if="pendingCosts.length" type="warning" plain @click="showPurchases()">补采购记录（{{ pendingCosts.length }} 项待核）</el-button>
           <el-button v-if="data.current_shortage > 0" type="primary" plain @click="visible = false; $router.push('/procurement/workspace')">处理采购缺口（{{ data.current_shortage }} 件）</el-button>
         </div>
@@ -348,7 +354,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <strong>FBP 库存汇总：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} {{ data.product.stock_unit || '库存单位' }}</strong>
           <el-button type="primary" plain @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button>
         </div>
-        <div v-if="data.missing_purchase > 0 || data.missing_receipt > 0" class="ledger-toolbar">
+        <div v-if="!inventoryMode && (data.missing_purchase > 0 || data.missing_receipt > 0)" class="ledger-toolbar">
           <strong>历史缺采购来源：{{ data.missing_purchase }} 件</strong><span>收货记录待补：{{ data.missing_receipt }} 件</span>
           <el-button type="warning" plain size="small" @click="showHistoryTodo">去处理历史记录</el-button>
           <small>先关联已有采购，确实漏记才补录；不计入新采购需求。</small>
@@ -377,7 +383,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               <el-table-column prop="quantity" label="需求" width="90" />
               <el-table-column prop="stock_quantity" label="现货覆盖" width="110" />
               <el-table-column prop="incoming_quantity" label="在途覆盖" width="110" />
-              <el-table-column label="覆盖来源／采购关联" min-width="310"><template #default="{ row }">
+              <el-table-column v-if="!inventoryMode" label="覆盖来源／采购关联" min-width="310"><template #default="{ row }">
                 <div v-if="row.stock_quantity > 0">本地现货 · {{ row.stock_quantity }} 件</div>
                 <div v-for="source in (sourceSuggestions.get(row.order_item_id) || []).filter(item => item.purpose === 'stock_suggestion' && !item.already_allocated)" :key="source.batch_id"><el-button link type="primary" @click="showBatch(source.batch_id)">{{ source.purchase_order_no || `收货批次 #${source.batch_id}（单号待补）` }} · {{ source.quantity }} 件 · 自动分配</el-button></div>
                 <div v-if="unmatchedStock(row) > 0"><small>现货 {{ unmatchedStock(row) }} 件缺来源记录，不影响发货</small> <el-button size="small" plain @click="showPurchases()">补查采购记录</el-button></div>
@@ -386,10 +392,10 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               </template></el-table-column>
               <el-table-column label="待采购" width="110"><template #default="{ row }"><strong class="ledger-shortage">{{ row.quantity_needs_review ? '数量待核' : row.shortage_quantity }}</strong></template></el-table-column>
               <el-table-column label="核对" min-width="200"><template #default="{ row }"><span v-if="row.quantity_needs_review">请核对已有采购数量，避免重复采购</span><span v-else-if="row.shortage_quantity > 0">返回订单或采购工作台采购</span><span v-else>已覆盖，无需重复采购</span></template></el-table-column>
-              <el-table-column label="操作" width="210"><template #default="{ row }"><el-button size="small" :type="row.allocation_priority ? 'warning' : 'primary'" plain @click="edit('set_priority', row)">{{ row.allocation_priority ? '恢复默认顺序' : '优先分配' }}</el-button><el-button v-if="row.shortage_quantity > 0" size="small" plain @click="edit('substitute', row)">库存替代</el-button></template></el-table-column>
+              <el-table-column v-if="!inventoryMode" label="操作" width="210"><template #default="{ row }"><el-button size="small" :type="row.allocation_priority ? 'warning' : 'primary'" plain @click="edit('set_priority', row)">{{ row.allocation_priority ? '恢复默认顺序' : '优先分配' }}</el-button><el-button v-if="row.shortage_quantity > 0" size="small" plain @click="edit('substitute', row)">库存替代</el-button></template></el-table-column>
             </el-table>
           </el-tab-pane>
-          <el-tab-pane label="采购与成本" name="purchases" lazy>
+          <el-tab-pane v-if="!inventoryMode" label="采购与成本" name="purchases" lazy>
             <p>点击使用数量查看对应订单。已发使用包含按采购／发货顺序自动分配，人工关联优先保留；未归属订单不等于仓库剩余现货。</p>
             <h3>盘点现货成本待核（{{ pendingCosts.length }}）</h3>
             <p>盘点不要求库管填写金额。已有采购请关联；确实漏记才补录成本。货物后续发出不影响这些核对任务。</p>
@@ -418,7 +424,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               <el-table-column label="操作"><template #default="{ row }"><el-button link type="primary" @click="edit('revise_purchase', row)">纠正记录</el-button></template></el-table-column>
             </el-table>
           </el-tab-pane>
-          <el-tab-pane label="历史核对" name="history" lazy>
+          <el-tab-pane v-if="!inventoryMode" label="历史核对" name="history" lazy>
             <el-alert v-if="data.source_inference" type="info" :closable="false" :title="`来源建议不改库存或缺口。当前现货尚缺来源 ${data.source_inference.current_unmatched + data.source_inference.physical_unmatched} 件；历史建议匹配后仍待核 ${data.source_inference.historical_unmatched} 件；采购余量未解释 ${data.source_inference.unassigned_purchase_quantity} 件（可能涉及损耗、转换等，不等于现货）。`" />
             <p>本地账面余额 {{ data.local_stock }} 件<span v-if="data.physical_estimate < 0"> · 账面待核差异 {{ -data.physical_estimate }} 件</span>。不等于真实现货，也不计入本次待采购；实物不符请核对现货，不要重复补采购。</p>
             <el-alert type="warning" :closable="false" :title="`历史缺采购来源 ${data.missing_purchase} 件 · 收货待核 ${data.missing_receipt} 件；仅核对已发订单，不增加当前采购需求。`" />
@@ -469,7 +475,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
               </el-table>
             </el-collapse-item></el-collapse>
           </el-tab-pane>
-          <el-tab-pane label="采购批次反查" name="batch-trace" lazy>
+          <el-tab-pane v-if="!inventoryMode" label="采购批次反查" name="batch-trace" lazy>
             <LedgerBatchTrace :key="productId" :orders="data.orders" :batches="data.batches" :batch-id="traceBatchId" :inference="data.source_inference" :saving="saving" @reconcile="reconcileBatch" @purchases="showPurchases()" />
           </el-tab-pane>
           <el-tab-pane label="库存流水" name="movements" lazy>
@@ -486,7 +492,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       </template>
       <el-empty v-else-if="!loading && !loadError" :description="orderOverview ? '没有已绑定的库存商品，请通过更多操作中的绑定管理核对' : '请选择商品；没有当前采购任务的商品也可以对账'" />
     </div>
-    <el-dialog v-if="usagePurchase" :model-value="true" title="采购使用明细" width="1000px" append-to-body @close="usagePurchaseId = null">
+    <el-dialog v-if="!inventoryMode && usagePurchase" :model-value="true" title="采购使用明细" width="1000px" append-to-body @close="usagePurchaseId = null">
       <h3>{{ usagePurchase.order_no }}</h3>
       <p>已收货 {{ usagePurchase.received_quantity }} = 已发订单使用 {{ usagePurchase.shipped_usage }} + 待发订单占用 {{ usagePurchase.current_usage }} + 未归属订单 {{ usagePurchase.unattributed_usage }} 件。</p>
       <el-alert :type="usagePurchase.usage_needs_review ? 'error' : 'info'" :closable="false" :title="usagePurchase.usage_needs_review ? '使用数超过收货数，请核对采购或关联记录' : '未归属订单可能包含现货保留、FBP 调拨、损耗、转换或历史漏关联，不能直接当作现货。无批次凭证的去向不强行归入本采购。'" />
@@ -500,7 +506,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       </el-table>
       <el-pagination v-model:current-page="usagePage" :page-size="20" :total="usagePurchase.usage_orders.length" layout="total, prev, pager, next" />
     </el-dialog>
-    <el-dialog v-if="historyLinkVisible" v-model="historyLinkVisible" title="批量关联已有采购" width="760px" append-to-body :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
+    <el-dialog v-if="!inventoryMode && historyLinkVisible" v-model="historyLinkVisible" title="批量关联已有采购" width="760px" append-to-body :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
       <p>已选 {{ historySelection.length }} 单，共需关联 {{ selectedHistoryQuantity }} 件。只补来源，不增加库存或采购成本。</p>
       <el-select v-model="historyBatchId" filterable style="width:100%" :disabled="saving" placeholder="选择已收货采购批次">
         <el-option v-for="batch in availableHistory" :key="batch.id" :value="Number(batch.id)" :label="`${batch.purchase_order_no || '采购单号待补'} · 批次 #${batch.id} · ${time(batch.purchased_at)} · 可关联 ${batch.available_history_quantity} 件`" />
@@ -544,7 +550,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <el-form-item v-if="countDelta != null" label="本次变动">{{ countDelta === 0 ? '数量一致' : `${countDelta > 0 ? '增加' : '减少'} ${Math.abs(countDelta)} 件` }}</el-form-item>
           <el-form-item label="调整原因"><el-radio-group v-model="form.reason_code"><el-radio v-for="reason in countReasons" :key="reason.code" :value="reason.code">{{ reason.label }}</el-radio></el-radio-group></el-form-item>
           <el-form-item :label="form.reason_code === 'other' ? '说明（必填）' : '补充说明（选填）'"><el-input v-model="form.reason_note" type="textarea" :rows="2" maxlength="900" placeholder="可填写领用人、凭证或补充情况" /></el-form-item>
-          <div class="ledger-toolbar"><span>如果是以下情况，请使用对应流程：</span><el-button @click="startConversion">库存转换</el-button><el-button @click="formVisible = false; showPurchases('incoming')">已到货，核对采购记录</el-button></div>
+          <div v-if="!inventoryMode" class="ledger-toolbar"><span>如果是以下情况，请使用对应流程：</span><el-button @click="startConversion">库存转换</el-button><el-button @click="formVisible = false; showPurchases('incoming')">已到货，核对采购记录</el-button></div>
           <p>转换、实收、退货及已发货漏扣请按关联单据处理，避免重复记账。</p>
         </template>
         <template v-if="form.action_type === 'convert'">
