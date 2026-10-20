@@ -17617,8 +17617,15 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
 async function productWithOglOrderRateMysql(product, orderedAt, posting = null) {
   if (!product || !orderedAt || String(product.logistics_rule_carrier || "").toUpperCase() !== "OGL") return product;
   const rate = await cbrCnyRateForDate(orderedAt);
+  const rawParcelValue = oglParcelValueRub(posting?.raw_json || posting?.raw || null);
+  const postingParcelValue = Array.isArray(posting?.items)
+    ? posting.items.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 1), 0) * rate.rate
+    : 0;
+  const orderParcelValue = !rawParcelValue && !postingParcelValue && Number(posting?.order_id) > 0
+    ? Number((await mysqlQueryOne("SELECT SUM(sale_price * quantity) AS sale_cny FROM order_items WHERE order_id = ?", [Number(posting.order_id)]))?.sale_cny || 0) * rate.rate
+    : 0;
   return { ...product, exchange_rate: rate.rate, ogl_exchange_rate_source_date: rate.source_date,
-    ogl_parcel_value_rub: oglParcelValueRub(posting?.raw_json || posting?.raw || null) };
+    ogl_parcel_value_rub: rawParcelValue || postingParcelValue || orderParcelValue };
 }
 
 export async function recalculateOrderItemsForMappingMysql(mappingId, options = {}) {
@@ -17651,7 +17658,7 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
   let updated = 0;
   const dateKeys = new Set();
   for (const item of rows) {
-    const effectiveProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json }) || product;
+    const effectiveProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json, order_id: item.order_id }) || product;
     const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product: effectiveProduct, mapping });
     const settlement = resolveProfitSettlementStatusMysql(item);
     const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: item, item, product: effectiveProduct, estimated, quantity: item.quantity, salePrice: item.sale_price });
@@ -17897,7 +17904,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync") {
       LEFT JOIN online_products op ON op.id = sm.online_product_id
       WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1
     `, [shop.id, item.ozon_sku]);
-    const product = mapping ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, posting) : null;
+    const product = mapping ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, { ...posting, order_id: orderId }) : null;
     const existingItem = await mysqlQueryOne("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
     if (existingItem) {
       const previousQuantity = Number(existingItem.quantity || 0);
@@ -18690,7 +18697,7 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
       unbound += 1;
       continue;
     }
-    const product = await productForProfitEstimateMysql(mapping.product_id, order.ordered_at, rawOrder);
+    const product = await productForProfitEstimateMysql(mapping.product_id, order.ordered_at, { ...rawOrder, order_id: orderId });
     if (!product) {
       unbound += 1;
       continue;
@@ -19349,7 +19356,7 @@ export async function forceRecalculateOrderProfitsForProductMysql(productId, bod
       });
       continue;
     }
-    const mappedProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json });
+    const mappedProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json, order_id: item.order_id });
     if (!mappedProduct || Number(mappedProduct.id) !== Number(productId)) {
       unbound += 1;
       skippedRows.push({
