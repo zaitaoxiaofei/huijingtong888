@@ -157,6 +157,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async (tenantId) => { calls.push(["resolve", tenantId]); return 4; },
     isDefaultShopTenantMysql: async (tenantPk) => { calls.push(["default", tenantPk]); return true; },
@@ -167,6 +168,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
       { product_id: 1, mapping_id: 40, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-D", recent_7d_qty: 0, recent_15d_qty: 1, recent_30d_qty: 1 }
     ]; },
     purchasedInventoryInTransitMysql: async (tenantPk, legacy) => { calls.push(["incoming", tenantPk, legacy]); return []; },
+    inventoryProductBalanceMysql: async (ids, tenantPk, legacy, refresh) => { calls.push(["balance", ids, tenantPk, legacy, refresh]); return new Map([[1, { product_id: 1, physical_stock: 4, available_stock: 3 }]]); },
     orderProcurementCoverageMysql: async (options) => { calls.push(["availability", options]); return { product_availability: new Map([[1, { product_id: 1, physical_stock: 4, available_stock: 3 }]]) }; },
     inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => { calls.push(["skus", ids, tenantPk, legacy, summaryOnly]); return [
       { product_id: 1, mapping_id: 10, shop_id: 2, shop_name: "甲店", ozon_sku: "SKU-A" },
@@ -184,7 +186,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["resolve", "admin"], ["default", 4],
     ["products", 4, true], ["sales", 4, true], ["incoming", 4, true],
-    ["availability", { productIds: [1], tenantId: 4, includeLegacyTenantNull: true }],
+    ["balance", [1], 4, true, false],
     ["skus", [1], 4, true, true], ["skus", [1], 4, true, null]
   ]);
   assert.equal(rows[0].available_stock, 3);
@@ -205,12 +207,14 @@ test("超过 200 个库存只核算一次企业库存占用，SKU 搜索后只�
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async () => 7,
     isDefaultShopTenantMysql: async () => false,
     stockedInventoryAlertProductsMysql: async () => products,
     inventoryAlertProductSalesMysql: async () => [],
     purchasedInventoryInTransitMysql: async () => [],
+    inventoryProductBalanceMysql: async (ids, tenantPk) => { calls.push(["balance", ids.length, tenantPk]); return new Map(); },
     orderProcurementCoverageMysql: async (options) => { calls.push(["coverage", options.productIds.length, options.tenantId]); return { product_availability: new Map() }; },
     inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => {
       calls.push(["skus", ids.length, tenantPk, legacy, summaryOnly]);
@@ -229,7 +233,7 @@ test("超过 200 个库存只核算一次企业库存占用，SKU 搜索后只�
   assert.equal(result.rows[0].sku_count, 1);
   assert.equal(result.rows[0].skus[0].mapping_id, 401);
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ["coverage", 401, 7], ["skus", 401, 7, false, true], ["skus", 1, 7, false, null]
+    ["balance", 401, 7], ["skus", 401, 7, false, true], ["skus", 1, 7, false, null]
   ]);
 });
 
@@ -242,6 +246,7 @@ test("已解绑但仍有销量的 SKU 在库存预警明细中保留", async () 
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async () => 7,
     isDefaultShopTenantMysql: async () => false,
@@ -249,6 +254,7 @@ test("已解绑但仍有销量的 SKU 在库存预警明细中保留", async () 
     inventoryAlertProductSalesMysql: async () => [{ product_id: 1, mapping_id: 5, shop_id: 11, shop_name: "甲店",
       ozon_sku: "HISTORY-SKU", recent_7d_qty: 2, recent_15d_qty: 3, recent_30d_qty: 4 }],
     purchasedInventoryInTransitMysql: async () => [],
+    inventoryProductBalanceMysql: async () => new Map(),
     orderProcurementCoverageMysql: async () => ({ product_availability: new Map() }),
     inventoryAlertProductSkusMysql: async () => [],
     getCachedMasterData: async (_, loader) => loader(),

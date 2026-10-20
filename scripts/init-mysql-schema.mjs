@@ -890,6 +890,21 @@ CREATE TABLE IF NOT EXISTS inventory_current (
   last_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS inventory_product_balance (
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  product_id BIGINT UNSIGNED NOT NULL,
+  ledger_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  open_deducted_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  open_order_demand_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  fbp_reserved_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  physical_stock DECIMAL(18,4) NOT NULL DEFAULT 0,
+  available_stock DECIMAL(18,4) NOT NULL DEFAULT 0,
+  inventory_needs_review TINYINT(1) NOT NULL DEFAULT 0,
+  refreshed_at DATETIME NOT NULL,
+  PRIMARY KEY (tenant_id, product_id),
+  KEY idx_inventory_product_balance_tenant_fresh (tenant_id, refreshed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   shop_id BIGINT UNSIGNED NOT NULL,
