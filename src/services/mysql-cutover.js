@@ -4072,7 +4072,7 @@ async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenan
       AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
     WHERE sm.active = 1 AND ${tenantShopPredicateMysql("sm", defaultTenant)}
       AND cp.id IN (${productIds.map(() => "?").join(",")})
-    ORDER BY cp.id, sm.shop_id, sm.ozon_sku, sm.id
+    ORDER BY cp.id, sm.shop_id, sm.ozon_sku${summaryOnly ? "" : ", sm.id"}
   `, [tenantPk, tenantPk, tenantPk, tenantPk, tenantPk, ...productIds]);
 }
 

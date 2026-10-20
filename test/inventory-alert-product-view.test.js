@@ -139,6 +139,12 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   assert.doesNotMatch(queries[5].sql, /tenant_id IS NULL/);
   assert.deepEqual(Array.from(queries[5].params.slice(0, 5)), Array(5).fill(44));
   assert.equal((queries[5].sql.match(/\?/g) || []).length, queries[5].params.length);
+  await context.inventoryAlertProductSkusMysql([1, 2], 44, false, true);
+  assert.match(queries[5].sql, /SELECT DISTINCT cp\.id AS product_id, sm\.id AS mapping_id,/);
+  assert.match(queries[5].sql, /ORDER BY cp\.id, sm\.shop_id, sm\.ozon_sku, sm\.id\s*$/);
+  assert.match(queries[6].sql, /SELECT DISTINCT cp\.id AS product_id,\s+sm\.shop_id,/);
+  assert.doesNotMatch(queries[6].sql, /sm\.id AS mapping_id/);
+  assert.match(queries[6].sql, /ORDER BY cp\.id, sm\.shop_id, sm\.ozon_sku\s*$/);
 });
 
 test("默认企业库存视角解析真实企业 PK，聚合同库存的多店铺 SKU 且避免重复", async () => {
