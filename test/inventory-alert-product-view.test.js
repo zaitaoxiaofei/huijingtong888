@@ -36,8 +36,9 @@ test("库存预警以库存为一行，按近三十日销量降序并计算生�
 
   assert.deepEqual(payload.rows.map((row) => row.product_id), [3, 1]);
   assert.equal(payload.total, 4);
-  assert.equal(payload.rows[1].alert_quantity, 70);
-  assert.equal(payload.rows[1].suggested_purchase_qty, 1);
+  assert.equal(payload.rows[1].alert_quantity, 90);
+  assert.equal(payload.rows[1].warehouse_logistics_days, 2);
+  assert.equal(payload.rows[1].suggested_purchase_qty, 21);
   assert.equal(payload.rows[1].alert_type, "low_stock");
   assert.equal(payload.rows[1].physical_stock, 71);
   assert.equal(payload.meta.out_of_stock, 1);
@@ -49,7 +50,7 @@ test("库存预警以库存为一行，按近三十日销量降序并计算生�
 });
 
 test("断货与采购在途状态可重叠，在途足额时不再建议采购", () => {
-  const rows = [product(1, 14, 0, 10, 20), product(2, 14, 1, 10, 0)];
+  const rows = [product(1, 14, 0, 10, 24), product(2, 14, 1, 10, 0)];
   const transit = applyStockAlertQuery(rows, { mode: "inventory-alerts", alertType: "in_transit" });
   assert.deepEqual(transit.rows.map((row) => row.product_id), [1]);
   assert.equal(transit.rows[0].alert_type, "out_of_stock");
@@ -100,7 +101,7 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
     mysqlQuery: async (sql, params) => { queries.push({ sql, params }); return []; }
   });
   const start = service.indexOf("async function inventoryAlertProductSalesMysql");
-  const end = service.indexOf("export async function stockAlertsMysql", start);
+  const end = service.indexOf("export async function updateInventoryProductLeadTimesMysql", start);
   const predicateStart = service.indexOf("function tenantShopPredicateMysql");
   const predicateEnd = service.indexOf("async function activeShopForTenantMysql", predicateStart);
   vm.runInContext(service.slice(predicateStart, predicateEnd), context);
@@ -150,37 +151,109 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async (tenantId) => { calls.push(["resolve", tenantId]); return 4; },
     isDefaultShopTenantMysql: async (tenantPk) => { calls.push(["default", tenantPk]); return true; },
     stockedInventoryAlertProductsMysql: async (tenantPk, legacy) => { calls.push(["products", tenantPk, legacy]); return [{ product_id: 1, production_lead_days: 7 }]; },
     inventoryAlertProductSalesMysql: async (tenantPk, legacy) => { calls.push(["sales", tenantPk, legacy]); return [
       { product_id: 1, mapping_id: 10, shop_id: 2, shop_name: "甲店", ozon_sku: "SKU-A", recent_7d_qty: 2, recent_15d_qty: 3, recent_30d_qty: 5 },
-      { product_id: 1, mapping_id: 20, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-B", recent_7d_qty: 1, recent_15d_qty: 2, recent_30d_qty: 10 }
+      { product_id: 1, mapping_id: 20, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-B", recent_7d_qty: 1, recent_15d_qty: 2, recent_30d_qty: 10 },
+      { product_id: 1, mapping_id: 40, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-D", recent_7d_qty: 0, recent_15d_qty: 1, recent_30d_qty: 1 }
     ]; },
     purchasedInventoryInTransitMysql: async (tenantPk, legacy) => { calls.push(["incoming", tenantPk, legacy]); return []; },
-    productInventoryAvailabilityMysql: async (_, tenantId) => { calls.push(["availability", tenantId]); return { rows: [{ product_id: 1, physical_stock: 4, available_stock: 3 }] }; },
-    inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy) => { calls.push(["skus", ids, tenantPk, legacy]); return [
+    orderProcurementCoverageMysql: async (options) => { calls.push(["availability", options]); return { product_availability: new Map([[1, { product_id: 1, physical_stock: 4, available_stock: 3 }]]) }; },
+    inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => { calls.push(["skus", ids, tenantPk, legacy, summaryOnly]); return [
       { product_id: 1, mapping_id: 10, shop_id: 2, shop_name: "甲店", ozon_sku: "SKU-A" },
       { product_id: 1, mapping_id: 11, shop_id: 2, shop_name: "甲店", ozon_sku: "SKU-A" },
       { product_id: 1, mapping_id: 20, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-B" },
       { product_id: 1, mapping_id: 30, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-C" }
     ]; },
     getCachedMasterData: async (_, loader) => loader(),
-    applyStockAlertQuery: (rows) => rows
+    applyStockAlertQuery: (rows) => ({ rows, total: rows.length })
   });
   const start = service.indexOf("export async function stockAlertsMysql");
   const end = service.indexOf("async function loadFbpStockAlertBaseMysql", start);
   vm.runInContext(service.slice(start, end).replace("export ", ""), context);
-  const rows = await context.stockAlertsMysql({ mode: "inventory-alerts" });
-  assert.deepEqual(calls, [
+  const { rows } = await context.stockAlertsMysql({ mode: "inventory-alerts" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["resolve", "admin"], ["default", 4],
-    ["products", 4, true], ["sales", 4, true], ["incoming", 4, true], ["availability", "admin"], ["skus", [1], 4, true]
+    ["products", 4, true], ["sales", 4, true], ["incoming", 4, true],
+    ["availability", { productIds: [1], tenantId: 4, includeLegacyTenantNull: true }],
+    ["skus", [1], 4, true, true], ["skus", [1], 4, true, null]
   ]);
   assert.equal(rows[0].available_stock, 3);
-  assert.equal(rows[0].recent_30d_qty, 15);
-  assert.equal(rows[0].sku_count, 3);
+  assert.equal(rows[0].recent_30d_qty, 16);
+  assert.equal(rows[0].sku_count, 4);
   assert.equal(rows[0].shop_count, 2);
-  assert.deepEqual(Array.from(rows[0].skus, (sku) => [sku.ozon_sku, sku.recent_30d_qty]), [["SKU-B", 10], ["SKU-A", 5], ["SKU-C", 0]]);
+  assert.deepEqual(Array.from(rows[0].skus, (sku) => [sku.ozon_sku, sku.recent_30d_qty]), [["SKU-B", 10], ["SKU-A", 5], ["SKU-D", 1], ["SKU-C", 0]]);
+});
+
+test("超过 200 个库存只核算一次企业库存占用，SKU 搜索后只展开当前页完整关系", async () => {
+  const calls = [];
+  const products = Array.from({ length: 401 }, (_, index) => ({ product_id: index + 1, product_name: `库存 ${index + 1}`, production_lead_days: 7 }));
+  const context = vm.createContext({
+    ensureMysqlCutoverEnabled() {},
+    ensureProductNamingSchemaMysql: async () => {},
+    ensureOzonStockStorageSchemaMysql: async () => {},
+    ensureStockLocationSchemaMysql: async () => {},
+    ensureProfitAnalyticsSchemaMysql: async () => {},
+    ensureSkuInventoryRecipeSchemaMysql: async () => {},
+    ensureProductCompositionSchemaMysql: async () => {},
+    mysqlSchemaColumnExists: async () => true,
+    resolveShopTenantIdMysql: async () => 7,
+    isDefaultShopTenantMysql: async () => false,
+    stockedInventoryAlertProductsMysql: async () => products,
+    inventoryAlertProductSalesMysql: async () => [],
+    purchasedInventoryInTransitMysql: async () => [],
+    orderProcurementCoverageMysql: async (options) => { calls.push(["coverage", options.productIds.length, options.tenantId]); return { product_availability: new Map() }; },
+    inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => {
+      calls.push(["skus", ids.length, tenantPk, legacy, summaryOnly]);
+      return ids.map((id) => ({ product_id: id, mapping_id: id, shop_id: 11, shop_name: "甲店", ozon_sku: `SKU-${id}`, offer_id: `OFFER-${id}` }));
+    },
+    getCachedMasterData: async (_, loader) => loader(),
+    applyStockAlertQuery
+  });
+  const start = service.indexOf("export async function stockAlertsMysql");
+  const end = service.indexOf("async function loadFbpStockAlertBaseMysql", start);
+  vm.runInContext(service.slice(start, end).replace("export ", ""), context);
+  const result = await context.stockAlertsMysql({ mode: "inventory-alerts", paged: "1", pageSize: 20, query: "SKU-401" }, "tenant-seven");
+  assert.equal(result.total, 1);
+  assert.equal(result.rows[0].product_id, 401);
+  assert.equal(result.rows[0].shop_count, 1);
+  assert.equal(result.rows[0].sku_count, 1);
+  assert.equal(result.rows[0].skus[0].mapping_id, 401);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["coverage", 401, 7], ["skus", 401, 7, false, true], ["skus", 1, 7, false, null]
+  ]);
+});
+
+test("已解绑但仍有销量的 SKU 在库存预警明细中保留", async () => {
+  const context = vm.createContext({
+    ensureMysqlCutoverEnabled() {},
+    ensureProductNamingSchemaMysql: async () => {},
+    ensureOzonStockStorageSchemaMysql: async () => {},
+    ensureStockLocationSchemaMysql: async () => {},
+    ensureProfitAnalyticsSchemaMysql: async () => {},
+    ensureSkuInventoryRecipeSchemaMysql: async () => {},
+    ensureProductCompositionSchemaMysql: async () => {},
+    mysqlSchemaColumnExists: async () => true,
+    resolveShopTenantIdMysql: async () => 7,
+    isDefaultShopTenantMysql: async () => false,
+    stockedInventoryAlertProductsMysql: async () => [{ product_id: 1, product_name: "库存 1", production_lead_days: 7 }],
+    inventoryAlertProductSalesMysql: async () => [{ product_id: 1, mapping_id: 5, shop_id: 11, shop_name: "甲店",
+      ozon_sku: "HISTORY-SKU", recent_7d_qty: 2, recent_15d_qty: 3, recent_30d_qty: 4 }],
+    purchasedInventoryInTransitMysql: async () => [],
+    orderProcurementCoverageMysql: async () => ({ product_availability: new Map() }),
+    inventoryAlertProductSkusMysql: async () => [],
+    getCachedMasterData: async (_, loader) => loader(),
+    applyStockAlertQuery
+  });
+  const start = service.indexOf("export async function stockAlertsMysql");
+  const end = service.indexOf("async function loadFbpStockAlertBaseMysql", start);
+  vm.runInContext(service.slice(start, end).replace("export ", ""), context);
+  const result = await context.stockAlertsMysql({ mode: "inventory-alerts", paged: "1", query: "HISTORY-SKU" }, "tenant-seven");
+  assert.equal(result.total, 1);
+  assert.deepEqual(Array.from(result.rows[0].skus, (sku) => [sku.ozon_sku, sku.recent_30d_qty]), [["HISTORY-SKU", 4]]);
 });
 
 test("生产周期只接受固定选项，新建库存默认七天且旧库存预警按七天计算", () => {

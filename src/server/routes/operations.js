@@ -22,8 +22,15 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries())),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/inventory/ledger/preview": async (req) => services.previewInventoryStocktake(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/inventory/ledger": async (req) => {
+      if (!hasPermission(req._session, 'inventory.write')) throw Object.assign(new Error('更新库存需要库存管理权限（inventory.write），请联系管理员授权后重试'), { statusCode: 403 });
+      return services.applyInventoryStocktake(await readJson(req), req._session?.personId, tenantIdFromRequest(req));
+    },
+    "POST /api/inventory/products/lead-times": async (req) => services.updateInventoryProductLeadTimes(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/procurement/ledger": async (req) => {
       const body = await readJson(req);
       if (['convert', 'substitute', 'damage', 'loss', 'stocktake', 'set_priority'].includes(body.action_type) && !hasPermission(req._session, 'inventory.write')) {

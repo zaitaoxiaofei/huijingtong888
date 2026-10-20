@@ -1,5 +1,6 @@
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 import { ensureProcurementLedgerSchema, createProcurementLedgerService } from "./procurement-ledger.js";
+import { inventoryLedgerView, inventoryStocktakeBody, inventoryStocktakePreviewView, inventoryStocktakeResultView } from "./inventory-ledger-view.js";
 import { ensurePeopleRolesSchemaMysql, personRoleFields } from "./people-roles.js";
 import { getRoles } from "../shared/permissions.js";
 import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, searchInventoryRows } from "./inventory-search.js";
@@ -1062,6 +1063,7 @@ async function ensureProductNamingSchemaMysql() {
     "ALTER TABLE products ADD COLUMN surface_process VARCHAR(255) NOT NULL DEFAULT ''",
     "ALTER TABLE products ADD COLUMN vehicle_models_json JSON NULL",
     "ALTER TABLE products ADD COLUMN production_lead_days INT NULL",
+    "ALTER TABLE products ADD COLUMN warehouse_logistics_days INT NOT NULL DEFAULT 2",
     "CREATE INDEX idx_products_inventory_naming ON products (inventory_category(128), vehicle_brand(128), vehicle_model(128), accessory_name(128))"
   ]);
   await ensureInventoryNumberingMysql();
@@ -1595,6 +1597,7 @@ function compactProductListRowMysql(row) {
     return_rate: Number(row.return_rate || 0),
     stock_unit: row.stock_unit || "个",
     production_lead_days: row.production_lead_days == null ? null : Number(row.production_lead_days),
+    warehouse_logistics_days: row.warehouse_logistics_days == null ? 2 : Number(row.warehouse_logistics_days),
     is_accessory: Number(row.is_accessory || 0) ? 1 : 0,
     component_count: Number(row.component_count || 0),
     component_summary: row.component_summary || "",
@@ -1641,7 +1644,13 @@ function normalizeStockUnitMysql(value) {
 function normalizeProductionLeadDaysMysql(value) {
   if (value === null || value === undefined || value === "") return null;
   const days = Number(value);
-  if (![3, 5, 7, 10, 15, 30].includes(days)) throw new Error("生产周期（production_lead_days）只能选择 3、5、7、10、15 或 30 天，请在库存商品中修改。");
+  if (![3, 5, 7, 10, 15, 30].includes(days)) throw Object.assign(new Error("生产周期（production_lead_days）只能选择 3、5、7、10、15 或 30 天，请在库存商品中修改。"), { statusCode: 400 });
+  return days;
+}
+
+function normalizeWarehouseLogisticsDaysMysql(value) {
+  const days = Number(value);
+  if (!Number.isSafeInteger(days) || days < 1 || days > 5) throw Object.assign(new Error("物流到仓时长（warehouse_logistics_days）只能选择 1 至 5 天，请在库存商品中修改。"), { statusCode: 400 });
   return days;
 }
 
@@ -4045,10 +4054,10 @@ async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
   `, [salesWindow.from7, salesWindow.from15, ...Array(7).fill(tenantPk), ...range.params]);
 }
 
-async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenant) {
+async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenant, summaryOnly = false) {
   if (!productIds.length) return [];
   return mysqlQuery(`
-    SELECT DISTINCT cp.id AS product_id, sm.id AS mapping_id, sm.shop_id,
+    SELECT DISTINCT cp.id AS product_id, ${summaryOnly ? "" : "sm.id AS mapping_id,"} sm.shop_id,
       sh.name AS shop_name, sm.ozon_sku, sm.offer_id
     FROM sku_mappings sm
     JOIN shops sh ON sh.id = sm.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
@@ -4072,7 +4081,7 @@ async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
       p.inventory_number, p.name AS product_name,
-      p.image_url, p.production_lead_days, p.created_at
+      p.image_url, p.production_lead_days, p.warehouse_logistics_days, p.created_at, p.updated_at
     FROM products p
     WHERE p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
       AND EXISTS (
@@ -4091,7 +4100,10 @@ async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
     image_url: compactProductImageUrlForListMysql({ id: row.product_id, image_url: row.image_url, created_at: row.created_at }),
     production_lead_days: row.production_lead_days == null ? 7 : Number(row.production_lead_days),
     lead_time_defaulted: row.production_lead_days == null,
-    created_at: row.created_at
+    warehouse_logistics_days: row.warehouse_logistics_days == null ? 2 : Number(row.warehouse_logistics_days),
+    logistics_time_defaulted: row.warehouse_logistics_days == null,
+    created_at: row.created_at,
+    updated_at: row.updated_at
   }));
 }
 
@@ -4108,6 +4120,37 @@ async function purchasedInventoryInTransitMysql(tenantPk, defaultTenant) {
       AND (pr.id IS NULL OR ${tenantShopPredicateMysql("pr", defaultTenant)})
     GROUP BY ir.product_id
   `, [tenantPk, tenantPk]);
+}
+
+export async function updateInventoryProductLeadTimesMysql(body = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
+  const productId = Number(body.product_id);
+  if (!Number.isSafeInteger(productId) || productId <= 0) throw Object.assign(new Error("请选择有效的库存商品 ID（product_id）"), { statusCode: 400 });
+  const productionDays = normalizeProductionLeadDaysMysql(body.production_lead_days);
+  if (productionDays == null) throw Object.assign(new Error("请选择生产周期（production_lead_days）：3、5、7、10、15 或 30 天"), { statusCode: 400 });
+  const logisticsDays = normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days);
+  const expectedProductionDays = normalizeProductionLeadDaysMysql(body.expected_production_lead_days);
+  const expectedLogisticsDays = normalizeWarehouseLogisticsDaysMysql(body.expected_warehouse_logistics_days);
+  if (expectedProductionDays == null) throw Object.assign(new Error("缺少保存前的生产周期（expected_production_lead_days），请刷新库存预警后重试"), { statusCode: 400 });
+  const tenantPk = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(tenantPk);
+  if (!await mysqlSchemaColumnExists("products", "tenant_id")) throw Object.assign(new Error("企业库存商品尚未完成租户归属迁移，请联系管理员"), { statusCode: 503 });
+  const owner = await mysqlQueryOne(`SELECT id FROM products WHERE id = ? AND active = 1 AND ${tenantShopPredicateMysql("products", defaultTenant)} LIMIT 1`, [productId, tenantPk]);
+  if (!owner) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+  const result = await mysqlExecute(`UPDATE products SET production_lead_days = ?, warehouse_logistics_days = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND active = 1 AND ${tenantShopPredicateMysql("products", defaultTenant)}
+      AND COALESCE(production_lead_days, 7) = ? AND COALESCE(warehouse_logistics_days, 2) = ?`,
+  [productionDays, logisticsDays, productId, tenantPk, expectedProductionDays, expectedLogisticsDays]);
+  if (!result.affectedRows) {
+    const current = await mysqlQueryOne(`SELECT production_lead_days, warehouse_logistics_days FROM products
+      WHERE id = ? AND active = 1 AND ${tenantShopPredicateMysql("products", defaultTenant)} LIMIT 1`, [productId, tenantPk]);
+    if (!current) throw Object.assign(new Error("库存商品不存在或不属于当前企业"), { statusCode: 404 });
+    if (Number(current.production_lead_days ?? 7) !== productionDays || Number(current.warehouse_logistics_days ?? 2) !== logisticsDays) {
+      throw Object.assign(new Error("生产周期或物流到仓时长已被其他人修改，请刷新库存预警后重试"), { statusCode: 409 });
+    }
+  }
+  return { ok: true, product_id: productId, production_lead_days: productionDays, warehouse_logistics_days: logisticsDays };
 }
 
 export async function stockAlertsMysql(query = {}, tenantId = "admin") {
@@ -4137,6 +4180,10 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
   if (mode === "inventory-alerts") {
     await ensureSkuInventoryRecipeSchemaMysql();
     await ensureProductCompositionSchemaMysql();
+    const coverageTables = ["products", "shops", "sku_mappings", "product_components", "procurement_requests", "inventory_movements"];
+    const missingCoverageColumns = (await Promise.all(coverageTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
+      .filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
+    if (missingCoverageColumns.length) throw Object.assign(new Error(`库存数量暂不可用：缺少企业归属字段 ${missingCoverageColumns.join("、")}，请管理员完成数据迁移。`), { statusCode: 503 });
     const inventoryTenantPk = await resolveShopTenantIdMysql(tenantId);
     const inventoryDefaultTenant = await isDefaultShopTenantMysql(inventoryTenantPk);
     const salesCacheKey = `stock-alerts:product-sales:v3:${inventoryTenantPk}`;
@@ -4156,48 +4203,33 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
       salesByProduct.set(productId, totals);
     }
     const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
-    const availabilityByProduct = new Map();
-    const skuRows = [];
-    for (let index = 0; index < products.length; index += 200) {
-      const productIds = products.slice(index, index + 200).map((product) => Number(product.product_id));
-      const [availability, boundSkus] = await Promise.all([
-        productInventoryAvailabilityMysql({ productIds: productIds.join(",") }, tenantId),
-        inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant)
-      ]);
-      for (const row of availability.rows || []) availabilityByProduct.set(Number(row.product_id), row);
-      skuRows.push(...boundSkus);
-    }
+    const productIds = products.map((product) => Number(product.product_id));
+    const [coverage, skuRows] = productIds.length ? await Promise.all([
+      orderProcurementCoverageMysql({ productIds, tenantId: inventoryTenantPk, includeLegacyTenantNull: inventoryDefaultTenant }),
+      inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant, true)
+    ]) : [{ product_availability: new Map() }, []];
+    const availabilityByProduct = coverage.product_availability || new Map();
     const skusByProduct = new Map();
     const addSku = (row) => {
       const productId = Number(row.product_id);
       const productSkus = skusByProduct.get(productId) || new Map();
       const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
       if (!productSkus.has(key)) productSkus.set(key, {
-        mapping_id: Number(row.mapping_id || 0),
         shop_id: Number(row.shop_id || 0),
         shop_name: row.shop_name || "",
         ozon_sku: String(row.ozon_sku || ""),
-        offer_id: row.offer_id || "",
-        recent_7d_qty: 0,
-        recent_15d_qty: 0,
-        recent_30d_qty: 0
+        offer_id: row.offer_id || ""
       });
       skusByProduct.set(productId, productSkus);
       return productSkus.get(key);
     };
     for (const row of skuRows) addSku(row);
-    for (const row of salesRows) {
-      const sku = addSku(row);
-      sku.recent_7d_qty = Number(row.recent_7d_qty || 0);
-      sku.recent_15d_qty = Number(row.recent_15d_qty || 0);
-      sku.recent_30d_qty = Number(row.recent_30d_qty || 0);
-    }
-    return applyStockAlertQuery(products.map((product) => {
+    for (const row of salesRows) addSku(row);
+    const result = applyStockAlertQuery(products.map((product) => {
       const productId = Number(product.product_id);
       const sales = salesByProduct.get(productId) || {};
       const availability = availabilityByProduct.get(productId) || {};
-      const skus = [...(skusByProduct.get(productId)?.values() || [])]
-        .sort((left, right) => right.recent_30d_qty - left.recent_30d_qty || left.shop_id - right.shop_id || left.ozon_sku.localeCompare(right.ozon_sku));
+      const skus = [...(skusByProduct.get(productId)?.values() || [])];
       const shops = [...new Map(skus.map((sku) => [sku.shop_id, { shop_id: sku.shop_id, shop_name: sku.shop_name }])).values()];
       return {
         ...product,
@@ -4214,6 +4246,35 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
         skus
       };
     }), query);
+    const pageIds = result.rows.map((row) => Number(row.product_id));
+    const pageSkus = await inventoryAlertProductSkusMysql(pageIds, inventoryTenantPk, inventoryDefaultTenant);
+    const fullByProduct = new Map();
+    for (const row of pageSkus) {
+      const productId = Number(row.product_id);
+      const byKey = fullByProduct.get(productId) || new Map();
+      const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
+      if (!byKey.has(key)) byKey.set(key, { mapping_id: Number(row.mapping_id || 0), shop_id: Number(row.shop_id || 0),
+        shop_name: row.shop_name || "", ozon_sku: String(row.ozon_sku || ""), offer_id: row.offer_id || "",
+        recent_7d_qty: 0, recent_15d_qty: 0, recent_30d_qty: 0 });
+      fullByProduct.set(productId, byKey);
+    }
+    const pageIdSet = new Set(pageIds);
+    for (const row of salesRows) {
+      const productId = Number(row.product_id);
+      if (!pageIdSet.has(productId)) continue;
+      const byKey = fullByProduct.get(productId) || new Map();
+      const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
+      if (!byKey.has(key)) byKey.set(key, { mapping_id: Number(row.mapping_id || 0), shop_id: Number(row.shop_id || 0),
+        shop_name: row.shop_name || "", ozon_sku: String(row.ozon_sku || ""), offer_id: row.offer_id || "" });
+      const sku = byKey.get(key);
+      sku.recent_7d_qty = Number(row.recent_7d_qty || 0);
+      sku.recent_15d_qty = Number(row.recent_15d_qty || 0);
+      sku.recent_30d_qty = Number(row.recent_30d_qty || 0);
+      fullByProduct.set(productId, byKey);
+    }
+    for (const row of result.rows) row.skus = [...(fullByProduct.get(Number(row.product_id))?.values() || [])]
+      .sort((left, right) => right.recent_30d_qty - left.recent_30d_qty || left.shop_id - right.shop_id || left.ozon_sku.localeCompare(right.ozon_sku));
+    return result;
   }
   const cacheKey = `stock-alerts:base:v3:${cacheScope}`;
   const snapshotKey = `alerts-v5-${cacheScope}`;
@@ -11092,7 +11153,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
     NULL AS supplier_id, p.purchase_url, p.source_platform, p.shipping_method,
     p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
     p.package_weight_g, p.length_cm, p.width_cm, p.height_cm, p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
-    p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.stock_unit, p.production_lead_days, p.is_accessory,
+    p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory,
     p.inventory_category, p.vehicle_brand, p.fitment_type, p.vehicle_model, p.vehicle_models_json,
     p.accessory_name, p.color, p.material, p.surface_process, p.product_quantity, p.package_mode, p.package_contents,
     p.product_type, p.selection_status, p.parent_product_id, p.active, p.created_at, p.updated_at,
@@ -11256,7 +11317,7 @@ export async function productsMysql(query = {}, tenantId = "admin") {
         p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
         p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
         p.desired_profit_mode, p.desired_profit_value, p.return_rate,
-        p.stock_unit, p.production_lead_days, p.is_accessory,
+        p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory,
         p.inventory_category, p.vehicle_brand, p.fitment_type, p.vehicle_model, p.vehicle_models_json,
         p.accessory_name, p.color, p.material, p.surface_process, p.product_quantity, p.package_mode, p.package_contents,
         p.product_type, p.selection_status, p.parent_product_id,
@@ -13425,7 +13486,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       "purchase_url", "supplier_note", "source_platform", "supplier_id", "shipping_method", "logistics_rule_id", "recommended_shipping_method",
       "purchase_cost", "domestic_shipping", "handling_fee", "purchase_quantity", "package_weight_g", "length_cm", "width_cm", "height_cm",
       "listing_price_rub", "air_sale_price_rmb", "exchange_rate", "target_margin", "desired_profit_mode", "desired_profit_value",
-      "advertising_rate", "return_rate", "stock_unit", "production_lead_days", "is_accessory", "owner_person_id", "created_by_person_id", "product_type", "selection_status",
+      "advertising_rate", "return_rate", "stock_unit", "production_lead_days", "warehouse_logistics_days", "is_accessory", "owner_person_id", "created_by_person_id", "product_type", "selection_status",
       "source_selection_id", "variant_task_id", "variant_result_id", "variant_type", "is_variant_generated", "material_asset_status"
     ];
     const productValues = [
@@ -13477,6 +13538,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       Number(body.return_rate || 0.05),
       normalizeStockUnitMysql(body.stock_unit),
       normalizeProductionLeadDaysMysql(body.production_lead_days ?? (body.product_type === "selection" ? null : 7)),
+      normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days ?? 2),
       Number(body.is_accessory || 0) ? 1 : 0,
       ownerPersonId,
       createdByPersonId,
@@ -13725,7 +13787,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   await withMysqlTransaction(async (connection) => {
   const existing = await mysqlConnectionQueryOne(connection, `
     SELECT id, updated_at, image_url, detail_image_urls, material_asset_status, product_type, selection_status,
-      development_type, vehicle_brand, vehicle_model, vehicle_model_key, created_by_person_id, production_lead_days
+      development_type, vehicle_brand, vehicle_model, vehicle_model_key, created_by_person_id, production_lead_days, warehouse_logistics_days
     FROM products
     WHERE id = ? AND active = 1 ${tenantScoped ? "AND tenant_id = ?" : ""}
     FOR UPDATE
@@ -13804,7 +13866,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
       purchase_cost = ?, domestic_shipping = ?, handling_fee = ?, purchase_quantity = ?,
       package_weight_g = ?, length_cm = ?, width_cm = ?, height_cm = ?,
       listing_price_rub = ?, air_sale_price_rmb = ?, exchange_rate = ?, target_margin = ?,
-      desired_profit_mode = ?, desired_profit_value = ?, advertising_rate = ?, return_rate = ?, stock_unit = ?, production_lead_days = ?, is_accessory = ?, owner_person_id = ?, created_by_person_id = ?,
+      desired_profit_mode = ?, desired_profit_value = ?, advertising_rate = ?, return_rate = ?, stock_unit = ?, production_lead_days = ?, warehouse_logistics_days = ?, is_accessory = ?, owner_person_id = ?, created_by_person_id = ?,
       product_type = ?, selection_status = ?, material_asset_status = COALESCE(?, material_asset_status), updated_at = CURRENT_TIMESTAMP
     WHERE id = ? ${tenantScoped ? "AND tenant_id = ?" : ""}
   `, [
@@ -13854,6 +13916,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     Number(body.return_rate || 0.05),
     normalizeStockUnitMysql(body.stock_unit),
     normalizeProductionLeadDaysMysql(body.production_lead_days === undefined ? existing.production_lead_days : body.production_lead_days),
+    normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days === undefined ? existing.warehouse_logistics_days ?? 2 : body.warehouse_logistics_days),
     Number(body.is_accessory || 0) ? 1 : 0,
     tenantScoped ? nullableInteger(body.owner_person_id) : nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
     tenantScoped ? (creator ? Number(existing.created_by_person_id) : nullableInteger(body.owner_person_id)) : nullableInteger(body.created_by_person_id) || nullableInteger(existing.created_by_person_id) || nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
@@ -32473,3 +32536,23 @@ export const procurementStockCostTasksMysql = (query) => procurementLedgerServic
 export const applyProcurementLedgerMysql = (body, personId, tenantId = "admin") => procurementLedgerService.apply(body, personId, null, tenantId);
 
 export const previewProcurementLedgerMysql = (body, tenantId = "admin") => procurementLedgerService.preview(body, tenantId);
+export const inventoryLedgerMysql = async (query, tenantId = "admin") => {
+  let ledger = await procurementLedgerService.read(query, tenantId);
+  if (String(tenantId) !== "admin" && ledger.fbp_inventory) {
+    const tenantPk = await resolveShopTenantIdMysql(tenantId);
+    const ownedShops = await mysqlQuery("SELECT id FROM shops WHERE tenant_id = ?", [tenantPk]);
+    const ownedIds = new Set(ownedShops.map((row) => Number(row.id)));
+    const rows = (ledger.fbp_inventory.rows || []).filter((row) => ownedIds.has(Number(row.shop_id)));
+    ledger = { ...ledger, fbp_inventory: {
+      rows,
+      present: rows.length ? rows.reduce((sum, row) => sum + Number(row.inventory_quantity || 0), 0) : null,
+      available: rows.length ? rows.reduce((sum, row) => sum + Number(row.available_inventory_quantity || 0), 0) : null,
+      incomplete: !rows.length || rows.some((row) => row.present == null)
+    } };
+  }
+  return inventoryLedgerView(ledger);
+};
+export const previewInventoryStocktakeMysql = async (body, tenantId = "admin") => inventoryStocktakePreviewView(
+  await procurementLedgerService.preview(inventoryStocktakeBody(body), tenantId));
+export const applyInventoryStocktakeMysql = async (body, personId, tenantId = "admin") => inventoryStocktakeResultView(
+  await procurementLedgerService.apply(inventoryStocktakeBody(body), personId, null, tenantId));

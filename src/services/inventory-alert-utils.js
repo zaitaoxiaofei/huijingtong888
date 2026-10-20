@@ -72,10 +72,11 @@ export function withInventoryProductAlertStatus(product = {}) {
   const recent15d = Math.max(0, Number(product.recent_15d_qty || 0));
   const recent30d = Math.max(0, Number(product.recent_30d_qty || 0));
   const leadDays = Number(product.production_lead_days || 7);
+  const logisticsDays = Number(product.warehouse_logistics_days || 2);
   const physicalStock = Math.max(0, Number(product.physical_stock ?? product.local_stock ?? 0));
   const availableStock = Math.max(0, Number(product.available_stock ?? product.local_available ?? physicalStock));
   const incomingStock = Math.max(0, Number(product.incoming_stock || 0));
-  const alertQuantity = leadDays ? Math.ceil(recent7d / 7 * leadDays) : null;
+  const alertQuantity = leadDays ? Math.ceil(recent7d / 7 * (leadDays + logisticsDays)) : null;
   const outOfStock = availableStock <= 0;
   const lowStock = !outOfStock && alertQuantity !== null && availableStock < alertQuantity;
   const inTransit = incomingStock > 0;
@@ -87,6 +88,7 @@ export function withInventoryProductAlertStatus(product = {}) {
     recent_15d_qty: recent15d,
     recent_30d_qty: recent30d,
     production_lead_days: leadDays,
+    warehouse_logistics_days: logisticsDays,
     physical_stock: physicalStock,
     available_stock: availableStock,
     incoming_stock: incomingStock,
