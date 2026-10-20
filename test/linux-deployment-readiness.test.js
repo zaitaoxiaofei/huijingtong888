@@ -37,7 +37,9 @@ test("Linux service is memory-bounded and only starts the packaged server", () =
 });
 
 test("Nginx proxies to a loopback-only application port", () => {
-  assert.match(nginx, /proxy_pass http:\/\/127\.0\.0\.1:3000/);
+  assert.match(nginx, /server 127\.0\.0\.1:3000;/);
+  assert.match(nginx, /server 127\.0\.0\.1:3001 backup;/);
+  assert.match(nginx, /proxy_pass http:\/\/ozon_erp_backend;/);
   assert.match(envExample, /HOST=127\.0\.0\.1/);
   assert.match(envExample, /DB_POOL_MAX=10/);
   assert.match(envExample, /SCHEDULED_JOBS_ENABLED=false/);
