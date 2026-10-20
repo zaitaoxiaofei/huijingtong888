@@ -4144,7 +4144,7 @@ async function repairInventoryAlertSalesDatesMysql(salesWindow) {
   if (inventoryAlertSalesReadRepairInflightMysql) return inventoryAlertSalesReadRepairInflightMysql;
   const repair = (async () => {
     const missingDates = await inventoryAlertSalesMissingDatesMysql(salesWindow);
-    if (missingDates.length > 15) return;
+    if (missingDates.length > 30) return;
     for (const dateKey of missingDates) {
       await refreshInventoryAlertSkuDailyMysql({ from: dateKey, to: dateKey });
     }
@@ -4160,7 +4160,7 @@ async function repairInventoryAlertSalesDatesMysql(salesWindow) {
 async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
   const salesWindow = completedBeijingSalesWindow();
   const missingDates = await inventoryAlertSalesMissingDatesMysql(salesWindow);
-  if (missingDates.length > 15) return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+  if (missingDates.length > 30) return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
   if (missingDates.length) {
     try {
       await repairInventoryAlertSalesDatesMysql(salesWindow);
