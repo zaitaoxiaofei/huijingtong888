@@ -788,8 +788,8 @@ const scheduledJobDefinitions = [
     priority: "high",
     intervalMinutes: 1,
     initialDelaySeconds: 120,
-    catchupEnabled: false,
-    maxCatchupRuns: 0
+    catchupEnabled: true,
+    maxCatchupRuns: 1
   },
   {
     key: "ozon_category_sync",
