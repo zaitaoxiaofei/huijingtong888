@@ -223,7 +223,7 @@ test("tenant product creation is limited to tenant-owned selections and rejects 
   assert.match(updateProduct, /当前企业只能编辑本企业选品/);
   assert.match(updateProduct, /shouldSyncOutbound = !tenantScoped/);
   const usageUpdate = service.match(/async function incrementLogisticsRuleUsageMysqlTx\([\s\S]*?(?=export async function prepareInventoryProductCreationMysql)/)?.[0] || "";
-  assert.match(usageUpdate, /logisticsTenantScopeMysql\(tenantId\)/);
+  assert.match(usageUpdate, /readableLogisticsTenantScopeMysql\(tenantId\)/);
   assert.match(usageUpdate, /WHERE l\.id = \? AND \$\{scope\.sql\}/);
   assert.match(usageUpdate, /所选物流规则不存在或不属于当前企业/);
   assert.match(tenantDetail, /p\.tenant_id = \?/);
