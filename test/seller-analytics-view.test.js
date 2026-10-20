@@ -22,9 +22,11 @@ test("seller analytics page has local product pagination controls", () => {
   assert.match(source, /import PageFooterPagination/);
   assert.match(source, /<PageFooterPagination/);
   assert.match(source, /class="seller-global-footer"/);
-  assert.match(source, /:page-size="ANALYTICS_PAGE_SIZE"/);
+  assert.match(source, /:page-size="state\.pageSize"/);
+  assert.match(source, /:page-sizes="ANALYTICS_PAGE_SIZE_OPTIONS"/);
   assert.match(source, /:total="totalProductCount"/);
   assert.match(source, /@update:page="handlePageChange"/);
+  assert.match(source, /@update:pageSize="handlePageSizeChange"/);
   assert.doesNotMatch(source, /<el-pagination/);
   assert.doesNotMatch(source, /seller-table-actions--pagination/);
 });
@@ -66,7 +68,8 @@ test("seller analytics metric details use revenue default and server-side column
   assert.match(source, /function handleSortChange/);
   assert.match(source, /@sort-change="handleSortChange"/);
   assert.match(source, /:default-sort="\{ prop: state\.sortKey/);
-  assert.match(source, /:prop="compactMetricSortProp\(column\)"/);
+  assert.match(source, /v-for="column in visibleTableMetricColumns"/);
+  assert.match(source, /:prop="column\.sortProp"/);
   assert.match(source, /sortable="custom"/);
   assert.match(source, /prop="score" sortable="custom"/);
 });
@@ -76,8 +79,8 @@ test("seller analytics workbench keeps filters tabs and table headers fixed", ()
 
   assert.match(source, /class="seller-sticky-head"/);
   assert.match(source, /\.seller-sticky-head \{[^}]*position: sticky/);
-  assert.match(source, /<section class="seller-toolbar">[\s\S]*class="seller-toolbar__filters"[\s\S]*class="seller-toolbar__query"[\s\S]*class="seller-toolbar__divider"[\s\S]*class="seller-source-tabs seller-source-tabs--inline"[\s\S]*class="seller-toolbar__collect"/);
-  assert.doesNotMatch(source, /<section class="seller-source-tabs">/);
+  assert.match(source, /<ErpFilterBar class="seller-toolbar">[\s\S]*class="seller-toolbar__filters"[\s\S]*class="seller-toolbar__query"[\s\S]*class="seller-filter seller-filter--source"[\s\S]*class="seller-toolbar__divider"[\s\S]*class="seller-toolbar__collect"/);
+  assert.match(source, /<ErpPageHeader compact title="数据分析"/);
   assert.match(source, /\.seller-analytics-page \{[^}]*overflow: hidden/);
   assert.match(source, /\.seller-workspace-scroll \{[^}]*overflow: hidden/);
   assert.match(source, /\.seller-toolbar \{[^}]*display: flex/);
@@ -159,8 +162,7 @@ test("seller analytics next collect page does not depend on the local view page"
   assert.match(source, /const nextCollectPage = computed/);
   assert.match(source, /page:\s*targetPage/);
   assert.doesNotMatch(source, /state\.page\s*=\s*page;\s*\n\s*await handleCollect\(\)/);
-  assert.match(source, /采集第 \{\{ nextCollectPage \}\} 页/);
-  assert.doesNotMatch(source, /采集下一页（第 \{\{ nextCollectPage \}\} 页）/);
+  assert.match(source, /async function collectNextPage\(\) \{\s*await handleCollect\(nextCollectPage\.value\)/);
 });
 
 test("seller analytics has a full-store auto collect action", () => {
@@ -180,8 +182,8 @@ test("seller analytics shows persistent collect completion status for current sh
   assert.match(source, /const collectStatus = computed/);
   assert.match(source, /当前店铺采集完成/);
   assert.match(source, /await loadRunsMeta\(true\)/);
-  assert.match(source, /class="seller-collect-panel"/);
-  assert.match(source, /class="seller-collect-status"/);
+  assert.match(source, /class="seller-sync-assistant__progress"/);
+  assert.match(source, /class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--\$\{collectStatus\.tone\}`"/);
   assert.match(source, /ElMessage\.success\("当前店铺采集完成/);
   assert.doesNotMatch(source, /已采集 \${summary\.value\.collectedPageCount/);
 });
@@ -191,18 +193,18 @@ test("seller analytics can create daily 7d and 28d full-store collect runs", () 
 
   assert.match(source, /const DAILY_SYNC_PERIOD_KEYS = \["7d", "28d"\]/);
   assert.match(source, /function buildCollectPayload/);
-  assert.match(source, /startSellerAnalyticsDirectCollect/);
-  assert.match(source, /async function createCollectRunAndStartDirect/);
+  assert.match(source, /createPluginCollectRun\(buildCollectPayload/);
+  assert.match(source, /async function createPluginCollectRun/);
   assert.match(source, /store_id:\s*selectedStoreId\.value/);
   assert.match(source, /company_id:\s*selectedStoreId\.value/);
   assert.match(source, /async function collectDailyDefaultPeriods/);
   assert.match(source, /for \(const periodKey of DAILY_SYNC_PERIOD_KEYS\)/);
-  assert.match(source, /createCollectRunAndStartDirect\(buildCollectPayload/);
+  assert.match(source, /createPluginCollectRun\(buildCollectPayload/);
   assert.match(source, /period_key:\s*periodKey/);
   assert.match(source, /auto_all_pages:\s*true/);
   assert.match(source, /full_store:\s*true/);
-  assert.match(source, /同步 7天\+28天/);
-  assert.match(source, /@click="collectDailyDefaultPeriods"/);
+  assert.match(source, /已创建近 7 天和近 28 天全店同步批次/);
+  assert.match(source, /@click="collectFullStore"/);
 });
 
 test("seller analytics verifies plugin store alignment before starting collection", () => {
@@ -214,7 +216,7 @@ test("seller analytics verifies plugin store alignment before starting collectio
   assert.match(source, /const skipPluginValidation = computed/);
   assert.match(source, /localhost\|127\\\.0\\\.0\\\.1/);
   assert.match(source, /if \(skipPluginValidation\.value\) return true;/);
-  assert.match(source, /本地环境已跳过校验/);
+  assert.match(source, /本地调试允许继续/);
   assert.match(source, /ElMessageBox\.alert/);
   assert.match(source, /if \(!\(await ensureCollectReady\(\)\)\) return;/);
   assert.match(source, /店铺未对齐/);
@@ -231,25 +233,23 @@ test("seller analytics table uses Ozon ERP metric groups and source tab metric s
   assert.match(source, /label: "流量搜索"/);
   assert.match(source, /label: "商品卡片"/);
   assert.match(source, /label: "成交质量"/);
-  assert.match(source, /v-for="column in compactMetricColumns"/);
+  assert.match(source, /const visibleTableMetricColumns = computed/);
+  assert.match(source, /v-for="column in visibleTableMetricColumns"/);
   assert.doesNotMatch(source, /v-for="group in visibleMetricGroups"/);
   assert.doesNotMatch(source, /v-for="metric in group\.children"/);
 });
 
-test("seller analytics metric table keeps diagnosis explanation in hover and pushes source metadata later", () => {
+test("seller analytics metric table keeps diagnosis explanation after sortable metrics", () => {
   const source = viewSource();
-  const metricsPane = source.slice(source.indexOf('<el-tab-pane label="指标明细" name="metrics">'));
-  const funnelIndex = metricsPane.indexOf('label="行为漏斗"');
-  const salesIndex = metricsPane.indexOf('v-for="column in compactMetricColumns"');
+  const paneStart = source.indexOf('<el-tab-pane label="指标明细" name="metrics"');
+  const metricsPane = source.slice(paneStart, source.indexOf('</el-tab-pane>', paneStart));
+  const salesIndex = metricsPane.indexOf('v-for="column in visibleTableMetricColumns"');
   const diagnosisIndex = metricsPane.indexOf('label="诊断"');
-  const onlineIndex = metricsPane.indexOf('label="在线商品"');
-  const sourceIndex = metricsPane.indexOf('label="来源"');
+  const adviceIndex = metricsPane.indexOf('label="优化建议"');
 
-  assert.ok(funnelIndex > 0);
-  assert.ok(salesIndex > funnelIndex);
+  assert.ok(salesIndex > 0);
   assert.ok(diagnosisIndex > salesIndex);
-  assert.ok(onlineIndex > diagnosisIndex);
-  assert.ok(sourceIndex > onlineIndex);
+  assert.ok(adviceIndex > diagnosisIndex);
   assert.match(metricsPane, /recommendationTooltipText\(row\)/);
   assert.match(metricsPane, /popper-class="seller-rec-tooltip"/);
 });
@@ -292,14 +292,15 @@ test("seller analytics issue modal separates recommendation items with colored t
   assert.match(source, /class="seller-rec-item__evidence"/);
 });
 
-test("seller analytics behavior funnel mirrors Ozon ERP list and modal display", () => {
+test("seller analytics behavior funnel modal retains Ozon ERP rate details", () => {
   const source = viewSource();
 
   assert.match(source, /function getProductFunnelStages/);
   assert.match(source, /function getProductFunnelRates/);
   assert.match(source, /function formatFunnelRate/);
-  assert.match(source, /class="seller-funnel-button"/);
-  assert.match(source, /class="seller-funnel seller-funnel--compact"/);
+  assert.match(source, /v-model="funnelDialog\.visible"/);
+  assert.match(source, /productFunnelData\(funnelDialog\.row\)/);
+  assert.match(source, /class="seller-funnel"/);
   assert.match(source, /曝光点击率/);
   assert.match(source, /点击加购率/);
   assert.match(source, /点击转化率/);
