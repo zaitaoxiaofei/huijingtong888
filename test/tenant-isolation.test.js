@@ -83,6 +83,9 @@ test("plugin tenant identity comes from a hashed, revocable tenant credential", 
   assert.match(tenantService, /token_ciphertext VARCHAR\(255\) NULL/);
   assert.match(tenantService, /createHash\("sha256"\)/);
   assert.match(tenantService, /readTenantPluginTokenMysql/);
+  assert.match(tenantService, /saveTenantPluginTokenMysql/);
+  assert.match(tenantService, /此令牌已关联其他企业/);
+  assert.match(tenantService, /activeRows\[0\]\?\.token_hash === tokenHash/);
   assert.match(tenantService, /WHERE tenant_id = \? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1/);
   assert.match(tenantService, /withMysqlTransaction\(async \(connection\)/);
   assert.match(tenantService, /WHERE pt\.token_hash = \? AND pt\.revoked_at IS NULL AND t\.status = 'active'/);
@@ -92,6 +95,7 @@ test("plugin tenant identity comes from a hashed, revocable tenant credential", 
   assert.doesNotMatch(pluginHandler, /req\.headers\["x-tenant-id"\].*tenantId/);
   assert.match(server, /POST \/api\/tenants\/plugin-token/);
   assert.match(server, /POST \/api\/tenants\/plugin-token\/reveal/);
+  assert.match(server, /POST \/api\/tenants\/plugin-token\/import/);
   assert.match(server, /req\._sensitiveResponse \? \{ "Cache-Control": "no-store" \}/);
   assert.match(server, /DELETE \/api\/tenants\/plugin-token/);
 });
@@ -102,5 +106,8 @@ test("tenant administrators can explicitly reveal and copy recoverable plugin to
   assert.match(view, /pluginTokenStatus\.can_reveal/);
   assert.match(view, />查看\/复制<\/el-button>/);
   assert.match(view, /@closed="clearPluginTokenValue"/);
-  assert.match(view, /重置一次并更新插件配置后/);
+  assert.match(view, /apiClient\.post\("\/api\/tenants\/plugin-token\/import"/);
+  assert.match(view, /录入已有令牌/);
+  assert.match(view, /只会补存加密副本/);
+  assert.match(view, /如果原令牌已丢失，才需要重置并更新插件配置/);
 });

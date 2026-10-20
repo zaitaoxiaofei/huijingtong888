@@ -415,6 +415,39 @@ export async function readTenantPluginTokenMysql(tenantId, personId, options = {
   return { ok: true, tenant_id: tenant.id, token: decryptTenantPluginToken(rows[0].token_ciphertext) };
 }
 
+export async function saveTenantPluginTokenMysql(tenantId, personId, tokenInput, { isPlatformAdmin = false } = {}) {
+  const tenant = await requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin);
+  const token = String(tokenInput || "").trim();
+  if (!/^ozp_[A-Za-z0-9_-]{40,80}$/.test(token)) {
+    throw new Error("令牌格式不正确，请粘贴 Ozon 浏览器插件使用的 ozp_ 令牌");
+  }
+  const tokenHash = hashTenantPluginToken(token);
+  const encryptedToken = encryptTenantPluginToken(token);
+  let unchanged = false;
+  await withMysqlTransaction(async connection => {
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [tenant.id]);
+    const [existingRows] = await connection.execute("SELECT id, tenant_id, revoked_at FROM tenant_plugin_tokens WHERE token_hash = ? LIMIT 1 FOR UPDATE", [tokenHash]);
+    const existing = existingRows[0];
+    if (existing && Number(existing.tenant_id) !== tenant.id) {
+      throw new Error("此令牌已关联其他企业，不能重复使用");
+    }
+    const [activeRows] = await connection.execute("SELECT id, token_hash FROM tenant_plugin_tokens WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE", [tenant.id]);
+    if (activeRows[0]?.token_hash === tokenHash) {
+      await connection.execute("UPDATE tenant_plugin_tokens SET token_ciphertext = ? WHERE id = ?", [encryptedToken, activeRows[0].id]);
+      unchanged = true;
+      return;
+    }
+    await connection.execute("UPDATE tenant_plugin_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND revoked_at IS NULL", [tenant.id]);
+    if (existing) {
+      await connection.execute("UPDATE tenant_plugin_tokens SET token_ciphertext = ?, revoked_at = NULL WHERE id = ?", [encryptedToken, existing.id]);
+      return;
+    }
+    await connection.execute(`INSERT INTO tenant_plugin_tokens (tenant_id, token_hash, token_ciphertext, created_by_person_id)
+      VALUES (?, ?, ?, ?)`, [tenant.id, tokenHash, encryptedToken, Number(personId)]);
+  });
+  return { ok: true, tenant_id: tenant.id, unchanged };
+}
+
 export async function revokeTenantPluginTokenMysql(tenantId, personId, options = {}) {
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
   await mysqlExecute("UPDATE tenant_plugin_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND revoked_at IS NULL", [tenant.id]);

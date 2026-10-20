@@ -87,7 +87,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
-import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
+import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
@@ -287,6 +287,13 @@ const routes = {
     req._sensitiveResponse = true;
     const body = await readJson(req);
     return readTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+      isPlatformAdmin: hasPermission(req._session, "admin")
+    });
+  },
+  "POST /api/tenants/plugin-token/import": async (req) => {
+    req._sensitiveResponse = true;
+    const body = await readJson(req);
+    return saveTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, body.token, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },

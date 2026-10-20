@@ -20,6 +20,8 @@ const accountVisible = ref(false);
 const pluginTokenStatus = ref({ configured: false });
 const pluginTokenDialog = ref(false);
 const pluginTokenValue = ref("");
+const pluginTokenImportDialog = ref(false);
+const pluginTokenImportValue = ref("");
 const activationCodeStatus = ref({ configured: false });
 const activationCodeValue = ref("");
 const activationCodeDialog = ref(false);
@@ -341,6 +343,34 @@ async function revealPluginToken() {
   }
 }
 
+function openPluginTokenImport() {
+  pluginTokenImportValue.value = "";
+  pluginTokenImportDialog.value = true;
+}
+
+function clearPluginTokenImportValue() {
+  pluginTokenImportValue.value = "";
+}
+
+async function saveExistingPluginToken() {
+  const token = pluginTokenImportValue.value.trim();
+  if (!token) {
+    ElMessage.warning("请先粘贴已有的插件令牌");
+    return;
+  }
+  try {
+    await ElMessageBox.confirm("如果粘贴的是当前正在使用的令牌，只会补存加密副本，插件不会掉线；如果是另一枚令牌，当前令牌会立即失效。", "保存已有插件令牌", { type: "warning", confirmButtonText: "确认保存" });
+    await apiClient.post("/api/tenants/plugin-token/import", { tenant_id: selected.value.id, token });
+    pluginTokenValue.value = token;
+    pluginTokenImportDialog.value = false;
+    pluginTokenDialog.value = true;
+    await loadPluginTokenStatus();
+    ElMessage.success("已有令牌已安全保存，可随时查看和复制");
+  } catch (error) {
+    if (error !== "cancel") ElMessage.error(error.message || "保存已有令牌失败");
+  }
+}
+
 function clearPluginTokenValue() {
   pluginTokenValue.value = "";
 }
@@ -544,11 +574,12 @@ onMounted(load);
                 <strong>{{ pluginTokenStatus.configured ? (pluginTokenStatus.can_reveal ? '已配置插件接入令牌' : pluginTokenStatus.recoverable ? '已配置插件令牌' : '已配置旧版令牌，暂不可查看') : '尚未配置插件接入令牌' }}</strong>
                 <p>此令牌只供 Ozon 浏览器插件连接 ERP，和客户购买/注册用的激活码是两种不同凭证。新令牌会加密保存，授权管理员可随时查看和复制。</p>
                 <p v-if="!pluginTokenStatus.encryption_configured" class="token-warning">服务器尚未配置稳定的令牌加密密钥，因此暂不能生成或查看可恢复的令牌。</p>
-                <p v-else-if="pluginTokenStatus.configured && !pluginTokenStatus.recoverable" class="token-warning">当前令牌是在此功能上线前创建的，系统无法从旧哈希还原。重置一次并更新插件配置后，即可随时查看和复制。</p>
+                <p v-else-if="pluginTokenStatus.configured && !pluginTokenStatus.recoverable" class="token-warning">当前令牌是在此功能上线前创建的，系统无法从旧哈希还原。如果你保存了原令牌，可录入以补存加密副本，不会更换令牌；如果原令牌已丢失，才需要重置并更新插件配置。</p>
                 <p v-else-if="pluginTokenStatus.configured && !pluginTokenStatus.can_reveal" class="token-warning">令牌已加密保存，但当前服务未能使用对应密钥解密；请恢复原加密密钥后再查看，或确认插件可更新后重置。</p>
               </div>
               <div class="plugin-actions">
                 <el-button v-if="pluginTokenStatus.can_reveal" type="primary" plain @click="revealPluginToken">查看/复制</el-button>
+                <el-button type="primary" plain :disabled="!pluginTokenStatus.encryption_configured" @click="openPluginTokenImport">录入已有令牌</el-button>
                 <el-button type="primary" plain :disabled="!pluginTokenStatus.encryption_configured" @click="issuePluginToken">{{ pluginTokenStatus.configured ? '重置令牌' : '生成令牌' }}</el-button>
                 <el-button type="danger" plain :disabled="!pluginTokenStatus.configured" @click="revokePluginToken">撤销</el-button>
               </div>
@@ -592,6 +623,7 @@ onMounted(load);
 
     <el-dialog v-model="activationCodeDialog" title="客户激活码已生成" width="620px"><el-alert type="warning" :closable="false" title="请立即复制并安全发送给客户；完整码只显示这一次。" /><p class="dialog-lead">此码当前尚不能用于自助注册；兑换功能完成后客户才能用它创建主账号并认领此工作空间。</p><el-input v-model="activationCodeValue" readonly /><template #footer><el-button @click="activationCodeDialog = false">关闭</el-button><el-button type="primary" @click="copyActivationCode">复制激活码</el-button></template></el-dialog>
     <el-dialog v-model="pluginTokenDialog" title="浏览器插件接入令牌" width="620px" @closed="clearPluginTokenValue"><el-alert type="info" :closable="false" title="这是插件连接令牌，不是客户购买或注册用的激活码。" /><p class="dialog-lead">请仅复制到需要连接此企业空间的 Ozon 浏览器插件中；关闭窗口后可再次点击“查看/复制”。</p><el-input v-model="pluginTokenValue" readonly /><template #footer><el-button @click="pluginTokenDialog = false">关闭</el-button><el-button type="primary" :disabled="!pluginTokenValue" @click="copyPluginToken">复制令牌</el-button></template></el-dialog>
+    <el-dialog v-model="pluginTokenImportDialog" title="录入已有插件令牌" width="620px" @closed="clearPluginTokenImportValue"><el-alert type="info" :closable="false" title="粘贴你此前保存的 Ozon 浏览器插件令牌，不要发送给客服或粘贴到聊天中。" /><p class="dialog-lead">若令牌与当前使用的一致，系统只会补存加密副本，原插件继续工作；若不同，保存后该空间会切换到这枚令牌。</p><el-input v-model="pluginTokenImportValue" type="password" show-password autocomplete="new-password" placeholder="粘贴 ozp_ 开头的完整令牌" /><template #footer><el-button @click="pluginTokenImportDialog = false">取消</el-button><el-button type="primary" :disabled="!pluginTokenImportValue.trim()" @click="saveExistingPluginToken">安全保存</el-button></template></el-dialog>
   </main>
 </template>
 
