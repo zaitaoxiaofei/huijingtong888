@@ -15,7 +15,7 @@ test("seller analytics polling stays low frequency and avoids forced status sync
   assert.match(source, /const PLUGIN_STATUS_SYNC_MIN_INTERVAL_MS = 30000/);
   assert.match(source, /const AUTH_BINDING_SYNC_MIN_INTERVAL_MS = 300000/);
   assert.match(source, /await syncPluginStatus\(\)\.catch/);
-  const nextRequestsSource = source.match(/async function getNextCollectRequests\(\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
+  const nextRequestsSource = source.match(/async function getNextCollectRequests\([^)]*\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
   assert.doesNotMatch(nextRequestsSource, /syncPluginStatus\(true\)/);
 });
 
@@ -51,9 +51,10 @@ test("pivot analytics plugin wakes on an ERP collection event and sleeps after d
 
 test("pivot analytics plugin claims collect tasks for the current Ozon store only", () => {
   const source = backgroundSource();
-  const nextRequestsSource = source.match(/async function getNextCollectRequests\(\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
+  const nextRequestsSource = source.match(/async function getNextCollectRequests\([^)]*\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
 
-  assert.match(nextRequestsSource, /const companyId = currentSellerCompanyId\(sellerTab\?\.id\) \|\| panelState\.currentCompanyId \|\| ''/);
+  assert.match(nextRequestsSource, /const companyId = currentSellerCompanyId\(tab\?\.id\)/);
+  assert.doesNotMatch(nextRequestsSource, /panelState\.currentCompanyId/);
   assert.match(nextRequestsSource, /if \(!companyId\)[\s\S]*?return \[\]/);
   assert.match(nextRequestsSource, /params\.set\('store_id', companyId\)/);
   assert.match(nextRequestsSource, /params\.set\('company_id', companyId\)/);
@@ -97,7 +98,8 @@ test("pivot analytics plugin blocks collection while preparing or when task stor
   const processRequestSource = source.match(/async function processCollectRequest\([\s\S]*?async function runWithConcurrency/)?.[0] || "";
 
   assert.match(source, /if \(polling \|\| preparing\) return/);
-  assert.match(source, /requestStoreId !== currentCompanyId/);
+  assert.match(source, /requestStoreId === currentCompanyId/);
+  assert.equal((processRequestSource.match(/assertCollectStoreContext\(requestStoreId, tab\)/g) || []).length, 3);
   assert.match(source, /STORE_CONTEXT_MISMATCH task=/);
   assert.match(processRequestSource, /error\?\.code === 'STORE_CONTEXT_MISMATCH'[\s\S]*?return;[\s\S]*?await postCollectResult\(request, \{ success: false/);
   assert.match(processRequestSource, /租约过期后会重新排队/);
@@ -107,7 +109,7 @@ test("pivot analytics plugin gives an actionable message for a store authorizati
   const source = backgroundSource();
 
   assert.match(source, /Number\(result\?\.status\) === 403/);
-  assert.match(source, /请确认 Seller 已登录且账号有该店铺权限，再对该店铺重新绑定/);
+  assert.match(source, /ECS 直连探测店铺[\s\S]*?浏览器采集需单独检查/);
 });
 
 test("pivot analytics plugin popup exposes token configuration", () => {
