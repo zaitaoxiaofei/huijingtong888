@@ -122,7 +122,7 @@ test("order schema supports tenant shop pagination and the opt-in migration audi
   assert.match(migration, /GET_LOCK\('tenant_orders_indexes_v1'/);
   assert.doesNotMatch(migration, /UPDATE orders SET tenant_id/);
   assert.match(packageJson, /"db:migrate:tenant-orders": "node scripts\/migrate-tenant-orders\.mjs"/);
-  const sync = service.match(/async function upsertPostingMysql\(shop, posting\) \{([\s\S]*?)\n\}/)?.[1] || "";
+  const sync = service.match(/async function upsertPostingMysql\(shop, posting[^)]*\) \{([\s\S]*?)\n\}/)?.[1] || "";
   assert.match(sync, /SELECT \* FROM orders WHERE shop_id = \? AND posting_number = \?/);
   assert.doesNotMatch(sync, /SELECT \* FROM orders WHERE posting_number = \?/);
 });
