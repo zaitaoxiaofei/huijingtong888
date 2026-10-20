@@ -18,7 +18,7 @@ import { PDFDocument } from "pdf-lib";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { actualItemProfit, estimateItemProfit } from "../profit.js";
-import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
+import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
@@ -2310,6 +2310,9 @@ function isFbpLogisticsTextMysql(value = "") {
 
 function resolveOrderStockLocationMysql(posting = {}) {
   const raw = parseOzonPostingRawMysql(posting);
+  if (String(posting.fulfillment_schema || raw.fulfillment_schema || "").toUpperCase() === "FBP") {
+    return { stockLocation: "FBP", stockLocationSource: "ozon_fbp_posting" };
+  }
   const deliveryMethod = raw.delivery_method || posting.delivery_method || {};
   const analytics = raw.analytics_data || posting.analytics_data || {};
   const warehouseName = textValueMysql(deliveryMethod.warehouse, deliveryMethod.name, raw.warehouse_name, posting.warehouse_name);
@@ -18612,6 +18615,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   const to = normalizeSyncDateMysql(rawToDateTime || rawTo);
   const fetchFrom = normalizeSyncDateTimeMysql(rawFromDateTime) || normalizeShanghaiDateBoundaryMysql(rawFrom, "start") || from;
   const fetchTo = normalizeSyncDateTimeMysql(rawToDateTime) || normalizeShanghaiDateBoundaryMysql(rawTo, "end") || to;
+  const fbpFetchFrom = normalizeSyncDateTimeMysql(body.fbp_from_datetime || body.fbpFromDateTime) || fetchFrom;
   if (from && to && from > to) throw new Error("End date cannot be earlier than start date");
   throwIfAbortedMysql(options.signal);
   let inserted = 0;
@@ -18626,8 +18630,28 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   for (const shop of activeShops) {
     try {
       throwIfAbortedMysql(options.signal);
-      const result = await fetchOzonPostings(shop, { from: fetchFrom, to: fetchTo, statuses, chunkDays: 31, signal: options.signal });
-      const postings = Array.isArray(result) ? result : result.postings || [];
+      const postingsByNumber = new Map();
+      const feedErrors = [];
+      let feedRequests = 0;
+      let feedRanges = 0;
+      let successfulFeeds = 0;
+      for (const [name, fetch, feedFrom] of [
+        ["FBS", fetchOzonPostings, fetchFrom],
+        ["FBP", fetchOzonFbpPostings, fbpFetchFrom]
+      ]) {
+        try {
+          const result = await fetch(shop, { from: feedFrom, to: fetchTo, statuses, chunkDays: 31, signal: options.signal });
+          for (const posting of result.postings || []) postingsByNumber.set(posting.posting_number, posting);
+          feedRequests += Number(result.requests || 0);
+          feedRanges += Number(result.ranges || 0);
+          successfulFeeds += 1;
+        } catch (error) {
+          if (options.signal?.aborted) throwIfAbortedMysql(options.signal);
+          feedErrors.push(`${name}: ${error.message}`);
+        }
+      }
+      if (!successfulFeeds) throw new Error(feedErrors.join(" | "));
+      const postings = [...postingsByNumber.values()];
       const shopStats = {
         shop_id: shop.id,
         shop_name: shop.name,
@@ -18635,11 +18659,11 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
         inserted: 0,
         updated: 0,
         inserted_items: 0,
-        requests: result.requests || 0,
-        ranges: result.ranges || 0
+        requests: feedRequests,
+        ranges: feedRanges
       };
       fetched += postings.length;
-      requests += result.requests || 0;
+      requests += feedRequests;
       options.onProgress?.({ phase: "saving", message: `正在写入 ${shop.name} 的 ${postings.length} 单...`, completed_shops: completedShops, total_shops: activeShops.length, fetched });
       const shopSalesDates = new Set(postings.map((posting) => chinaDateKeyMysql(posting.ordered_at)).filter(Boolean));
       for (const dateKey of shopSalesDates) {
@@ -18655,6 +18679,10 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       }
       inserted += shopStats.inserted_items;
       updated += shopStats.updated;
+      if (feedErrors.length) {
+        shopStats.error = feedErrors.join(" | ");
+        errors.push(`${shop.name}: ${shopStats.error}`);
+      }
       shopResults.push(shopStats);
       invalidateMasterDataCache();
     } catch (error) {
@@ -18784,6 +18812,9 @@ export async function syncOzonIncrementalOrdersMysql(body = {}, options = {}) {
   for (const shop of activeShops) {
     throwIfAbortedMysql(options.signal);
     const start = fromLatest ? await latestOrderSyncStartMysql(shop.id, recentFrom, overlapMinutes) : recentFrom;
+    const fbpStart = fromLatest
+      ? normalizeShanghaiDateBoundaryMysql(dateKeyDaysAgoMysql(2), "start")
+      : recentFrom;
     const ranges = [{ from: start, to, reason: fromLatest ? "latest" : "recent" }];
     const seen = new Set();
     for (const range of ranges) {
@@ -18795,6 +18826,7 @@ export async function syncOzonIncrementalOrdersMysql(body = {}, options = {}) {
         const result = await syncDemoOrdersMysql(fromLatest ? {
           shop_id: shop.id,
           from_datetime: start,
+          fbp_from_datetime: fbpStart,
           to,
           history_source: "incremental",
           skip_post_processing: true

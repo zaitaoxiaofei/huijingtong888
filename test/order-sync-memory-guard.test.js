@@ -9,7 +9,8 @@ test("order synchronization fetches and persists one shop at a time", () => {
   const sync = service.slice(service.indexOf("export async function syncDemoOrdersMysql"), service.indexOf("async function ensurePurchaseCostVersionSchemaMysql"));
   assert.doesNotMatch(sync, /Promise\.all\(activeShops\.map/);
   assert.match(sync, /for \(const shop of activeShops\)/);
-  assert.match(sync, /const result = await fetchOzonPostings/);
+  assert.match(sync, /for \(const \[name, fetch, feedFrom\] of/);
+  assert.match(sync, /const result = await fetch\(shop,/);
 });
 
 test("cancelled order catch-up skips unrelated heavy post processing", () => {

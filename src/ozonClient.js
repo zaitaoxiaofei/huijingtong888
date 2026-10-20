@@ -3,6 +3,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const OZON_REQUEST_TIMEOUT_MS = 45000;
 const OZON_REQUEST_RETRIES = 2;
 const FBS_LIST_PATH = "/v4/posting/fbs/list";
+const FBP_LIST_PATH = "/v1/posting/fbp/list";
 const FBS_LIST_INTERVAL_MS = 1200;
 let fbsListNextRequestAt = 0;
 let fbsListCooldownUntil = 0;
@@ -65,6 +66,53 @@ export async function fetchOzonPostings(shop, options = {}) {
       }
       seenCursors.add(nextCursor);
       cursor = nextCursor;
+    }
+  }
+
+  const postings = [...postingsByNumber.values()];
+  return { postings, fetched: postings.length, requests, ranges };
+}
+
+export async function fetchOzonFbpPostings(shop, options = {}) {
+  if (!hasRealOzonCredentials(shop)) return { postings: [], fetched: 0, requests: 0, ranges: 0 };
+  const since = normalizeIsoStart(options.from || options.since, 30);
+  const to = normalizeIsoEnd(options.to, new Date());
+  const limit = Math.min(Math.max(Number(options.limit || 100), 1), 100);
+  const chunkDays = Math.min(Math.max(Number(options.chunkDays || 31), 1), 366);
+  const statuses = normalizeStatusList(options.statuses || options.status);
+  const postingsByNumber = new Map();
+  let requests = 0;
+  let ranges = 0;
+
+  for (const [rangeSince, rangeTo] of splitDateRange(since, to, chunkDays)) {
+    throwIfAborted(options.signal);
+    ranges += 1;
+    let cursor = "";
+    const seenCursors = new Set();
+    while (true) {
+      throwIfAborted(options.signal);
+      const data = await ozonRequest(shop, FBP_LIST_PATH, {
+        cursor, filter: { since: rangeSince, to: rangeTo }, limit
+      }, { signal: options.signal });
+      requests += 1;
+      if (!Array.isArray(data?.postings) || typeof data.cursor !== "string") {
+        throw new Error(`Ozon ${FBP_LIST_PATH} returned an invalid postings list`);
+      }
+      for (const item of data.postings) {
+        const normalized = normalizeOzonFbpPosting(item);
+        if (statuses.length && !normalized.status) {
+          throw new Error(`Ozon ${FBP_LIST_PATH} returned a posting without status`);
+        }
+        if (normalized.posting_number && (!statuses.length || statuses.includes(normalized.status))) {
+          postingsByNumber.set(normalized.posting_number, normalized);
+        }
+      }
+      if (!data.cursor) break;
+      if (data.cursor === cursor || seenCursors.has(data.cursor)) {
+        throw new Error(`Ozon ${FBP_LIST_PATH} did not advance its cursor`);
+      }
+      seenCursors.add(data.cursor);
+      cursor = data.cursor;
     }
   }
 
@@ -1284,13 +1332,13 @@ async function ozonRequest(shop, path, payload, options = {}) {
   let lastError = null;
   for (let attempt = 0; attempt <= OZON_REQUEST_RETRIES; attempt += 1) {
     try {
-      return path === FBS_LIST_PATH
-        ? await withFbsListRateLimit(options.signal, () => ozonRequestOnce(shop, path, payload, options))
+      return path === FBS_LIST_PATH || path === FBP_LIST_PATH
+        ? await withFbsListRateLimit(options.signal, () => ozonRequestOnce(shop, path, payload, options), path)
         : await ozonRequestOnce(shop, path, payload, options);
     } catch (error) {
       if (options.signal?.aborted) throwIfAborted(options.signal);
       lastError = error;
-      if (path === FBS_LIST_PATH && isOzonRateLimitError(error)) break;
+      if ((path === FBS_LIST_PATH || path === FBP_LIST_PATH) && isOzonRateLimitError(error)) break;
       if (!isRetryableOzonError(error) || attempt >= OZON_REQUEST_RETRIES) break;
       await sleep(Math.max(400 * (attempt + 1), Number(error.retryAfterMs || 0)));
     }
@@ -1298,7 +1346,7 @@ async function ozonRequest(shop, path, payload, options = {}) {
   throw lastError;
 }
 
-async function withFbsListRateLimit(signal, request) {
+async function withFbsListRateLimit(signal, request, path = FBS_LIST_PATH) {
   const previous = fbsListQueue;
   let release;
   fbsListQueue = new Promise((resolve) => { release = resolve; });
@@ -1307,7 +1355,7 @@ async function withFbsListRateLimit(signal, request) {
     throwIfAborted(signal);
     const cooldownMs = fbsListCooldownUntil - Date.now();
     if (cooldownMs > 0) {
-      const error = new Error(`Ozon ${FBS_LIST_PATH} rate limited; retry after ${Math.ceil(cooldownMs / 1000)}s`);
+      const error = new Error(`Ozon ${path} rate limited; retry after ${Math.ceil(cooldownMs / 1000)}s`);
       error.statusCode = 429;
       error.retryAfterMs = cooldownMs;
       throw error;
@@ -1589,6 +1637,10 @@ export function normalizeOzonPostingForTest(item) {
   return normalizeOzonPosting(item);
 }
 
+export function normalizeOzonFbpPostingForTest(item) {
+  return normalizeOzonFbpPosting(item);
+}
+
 function normalizeOzonReview(item = {}) {
   const comments = (item.comments || item.review_comments || []).map(normalizeOzonReviewComment);
   return {
@@ -1830,6 +1882,19 @@ function normalizeOzonPosting(item) {
       };
     })
   };
+}
+
+function normalizeOzonFbpPosting(item = {}) {
+  const deliveryMethod = item.delivery_method && typeof item.delivery_method === "object" ? item.delivery_method : {};
+  const methodName = String(deliveryMethod.name || "").trim();
+  const raw = {
+    ...item,
+    fulfillment_schema: "FBP",
+    // Existing order warehouse triggers classify the persisted raw delivery method.
+    delivery_method: { ...deliveryMethod, name: methodName ? `${methodName} FBP` : "FBP" }
+  };
+  const posting = normalizeOzonPosting(raw);
+  return { ...posting, fulfillment_schema: "FBP", ordered_at: item.in_process_at || item.order_date || posting.ordered_at };
 }
 
 function nullableNumber(value) {
