@@ -9,7 +9,7 @@ import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
 import { propagateListingVariantInventory } from "./listing-variant-inventory.js";
 import { loadOrderFbpStocks, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
-import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
+import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage as invalidateProcurementCoverageCache, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
 import { isOrderInTransport as isOrderInTransportMysql } from "./order-query-facts.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
@@ -301,6 +301,10 @@ async function ensureProfitAnalyticsSchemaMysql() {
 
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
 const FBP_OPPORTUNITY_CACHE_TTL_MS = STOCK_ALERT_BASE_CACHE_TTL_MS;
+function invalidateOrderProcurementCoverage() {
+  invalidateProcurementCoverageCache();
+  invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:");
+}
 function fbpTransferInTransitWhereMysql(alias = "") {
   const prefix = alias ? `${alias}.` : "";
   return `${prefix}status IN ('sent', 'in_transit', 'received')
@@ -4150,6 +4154,7 @@ export async function updateInventoryProductLeadTimesMysql(body = {}, tenantId =
       throw Object.assign(new Error("生产周期或物流到仓时长已被其他人修改，请刷新库存预警后重试"), { statusCode: 409 });
     }
   }
+  invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:");
   return { ok: true, product_id: productId, production_lead_days: productionDays, warehouse_logistics_days: logisticsDays };
 }
 
@@ -4186,66 +4191,72 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     if (missingCoverageColumns.length) throw Object.assign(new Error(`库存数量暂不可用：缺少企业归属字段 ${missingCoverageColumns.join("、")}，请管理员完成数据迁移。`), { statusCode: 503 });
     const inventoryTenantPk = await resolveShopTenantIdMysql(tenantId);
     const inventoryDefaultTenant = await isDefaultShopTenantMysql(inventoryTenantPk);
-    const salesCacheKey = `stock-alerts:product-sales:v3:${inventoryTenantPk}`;
-    if (forceRefresh) invalidateMasterDataCache(salesCacheKey);
-    const [products, salesRows, incomingRows] = await Promise.all([
-      stockedInventoryAlertProductsMysql(inventoryTenantPk, inventoryDefaultTenant),
-      getCachedMasterData(salesCacheKey, () => inventoryAlertProductSalesMysql(inventoryTenantPk, inventoryDefaultTenant), 60_000),
-      purchasedInventoryInTransitMysql(inventoryTenantPk, inventoryDefaultTenant)
-    ]);
-    const salesByProduct = new Map();
-    for (const row of salesRows) {
-      const productId = Number(row.product_id);
-      const totals = salesByProduct.get(productId) || { recent_7d_qty: 0, recent_15d_qty: 0, recent_30d_qty: 0 };
-      totals.recent_7d_qty += Number(row.recent_7d_qty || 0);
-      totals.recent_15d_qty += Number(row.recent_15d_qty || 0);
-      totals.recent_30d_qty += Number(row.recent_30d_qty || 0);
-      salesByProduct.set(productId, totals);
-    }
-    const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
-    const productIds = products.map((product) => Number(product.product_id));
-    const [coverage, skuRows] = productIds.length ? await Promise.all([
-      orderProcurementCoverageMysql({ productIds, tenantId: inventoryTenantPk, includeLegacyTenantNull: inventoryDefaultTenant }),
-      inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant, true)
-    ]) : [{ product_availability: new Map() }, []];
-    const availabilityByProduct = coverage.product_availability || new Map();
-    const skusByProduct = new Map();
-    const addSku = (row) => {
-      const productId = Number(row.product_id);
-      const productSkus = skusByProduct.get(productId) || new Map();
-      const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
-      if (!productSkus.has(key)) productSkus.set(key, {
-        shop_id: Number(row.shop_id || 0),
-        shop_name: row.shop_name || "",
-        ozon_sku: String(row.ozon_sku || ""),
-        offer_id: row.offer_id || ""
-      });
-      skusByProduct.set(productId, productSkus);
-      return productSkus.get(key);
-    };
-    for (const row of skuRows) addSku(row);
-    for (const row of salesRows) addSku(row);
-    const result = applyStockAlertQuery(products.map((product) => {
-      const productId = Number(product.product_id);
-      const sales = salesByProduct.get(productId) || {};
-      const availability = availabilityByProduct.get(productId) || {};
-      const skus = [...(skusByProduct.get(productId)?.values() || [])];
-      const shops = [...new Map(skus.map((sku) => [sku.shop_id, { shop_id: sku.shop_id, shop_name: sku.shop_name }])).values()];
-      return {
-        ...product,
-        physical_stock: Number(availability.physical_stock ?? availability.local_stock ?? 0),
-        available_stock: Number(availability.available_stock ?? availability.local_available ?? 0),
-        open_order_demand_qty: Number(availability.open_order_demand_qty || 0),
-        incoming_stock: incomingByProduct.get(productId) || 0,
-        recent_7d_qty: Number(sales.recent_7d_qty || 0),
-        recent_15d_qty: Number(sales.recent_15d_qty || 0),
-        recent_30d_qty: Number(sales.recent_30d_qty || 0),
-        shop_count: shops.length,
-        sku_count: skus.length,
-        shops,
-        skus
+    const inventoryCacheKey = `stock-alerts:inventory-base:v1:${inventoryTenantPk}`;
+    if (forceRefresh) invalidateMasterDataCache(inventoryCacheKey);
+    const { baseRows, salesRows } = await getCachedMasterData(inventoryCacheKey, async () => {
+      const salesCacheKey = `stock-alerts:product-sales:v3:${inventoryTenantPk}`;
+      if (forceRefresh) invalidateMasterDataCache(salesCacheKey);
+      const [products, salesRows, incomingRows] = await Promise.all([
+        stockedInventoryAlertProductsMysql(inventoryTenantPk, inventoryDefaultTenant),
+        getCachedMasterData(salesCacheKey, () => inventoryAlertProductSalesMysql(inventoryTenantPk, inventoryDefaultTenant), 60_000),
+        purchasedInventoryInTransitMysql(inventoryTenantPk, inventoryDefaultTenant)
+      ]);
+      const salesByProduct = new Map();
+      for (const row of salesRows) {
+        const productId = Number(row.product_id);
+        const totals = salesByProduct.get(productId) || { recent_7d_qty: 0, recent_15d_qty: 0, recent_30d_qty: 0 };
+        totals.recent_7d_qty += Number(row.recent_7d_qty || 0);
+        totals.recent_15d_qty += Number(row.recent_15d_qty || 0);
+        totals.recent_30d_qty += Number(row.recent_30d_qty || 0);
+        salesByProduct.set(productId, totals);
+      }
+      const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
+      const productIds = products.map((product) => Number(product.product_id));
+      const [coverage, skuRows] = productIds.length ? await Promise.all([
+        orderProcurementCoverageMysql({ productIds, tenantId: inventoryTenantPk, includeLegacyTenantNull: inventoryDefaultTenant }),
+        inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant, true)
+      ]) : [{ product_availability: new Map() }, []];
+      const availabilityByProduct = coverage.product_availability || new Map();
+      const skusByProduct = new Map();
+      const addSku = (row) => {
+        const productId = Number(row.product_id);
+        const productSkus = skusByProduct.get(productId) || new Map();
+        const key = JSON.stringify([Number(row.shop_id), String(row.ozon_sku || "")]);
+        if (!productSkus.has(key)) productSkus.set(key, {
+          shop_id: Number(row.shop_id || 0),
+          shop_name: row.shop_name || "",
+          ozon_sku: String(row.ozon_sku || ""),
+          offer_id: row.offer_id || ""
+        });
+        skusByProduct.set(productId, productSkus);
+        return productSkus.get(key);
       };
-    }), query);
+      for (const row of skuRows) addSku(row);
+      for (const row of salesRows) addSku(row);
+      const baseRows = products.map((product) => {
+        const productId = Number(product.product_id);
+        const sales = salesByProduct.get(productId) || {};
+        const availability = availabilityByProduct.get(productId) || {};
+        const skus = [...(skusByProduct.get(productId)?.values() || [])];
+        const shops = [...new Map(skus.map((sku) => [sku.shop_id, { shop_id: sku.shop_id, shop_name: sku.shop_name }])).values()];
+        return {
+          ...product,
+          physical_stock: Number(availability.physical_stock ?? availability.local_stock ?? 0),
+          available_stock: Number(availability.available_stock ?? availability.local_available ?? 0),
+          open_order_demand_qty: Number(availability.open_order_demand_qty || 0),
+          incoming_stock: incomingByProduct.get(productId) || 0,
+          recent_7d_qty: Number(sales.recent_7d_qty || 0),
+          recent_15d_qty: Number(sales.recent_15d_qty || 0),
+          recent_30d_qty: Number(sales.recent_30d_qty || 0),
+          shop_count: shops.length,
+          sku_count: skus.length,
+          shops,
+          skus
+        };
+      });
+      return { baseRows, salesRows };
+    }, 30_000);
+    const result = applyStockAlertQuery(baseRows, query);
     const pageIds = result.rows.map((row) => Number(row.product_id));
     const pageSkus = await inventoryAlertProductSkusMysql(pageIds, inventoryTenantPk, inventoryDefaultTenant);
     const fullByProduct = new Map();

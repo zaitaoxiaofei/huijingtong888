@@ -210,12 +210,12 @@ async function saveLeadTimes(row) {
     });
     editingLeadProductId.value = 0;
     ElMessage.success("时长已更新，预警线已重新计算");
-    await loadPageData();
+    await loadPageData({ refresh: true });
   } catch (error) {
     ElMessage.error(error.status === 409 ? "时长已被其他人更新，请重新选择后保存" : error.message || "更新时长失败");
     if (error.status === 409) {
       cancelLeadEdit();
-      await loadPageData();
+      await loadPageData({ refresh: true });
     }
   } finally {
     leadSavingProductId.value = 0;
@@ -325,7 +325,7 @@ async function syncSingleProduct(row) {
   }
 }
 
-async function loadPageData() {
+async function loadPageData({ refresh = false } = {}) {
   const requestToken = listRequestGate.next();
   loading.value = true;
   try {
@@ -336,6 +336,7 @@ async function loadPageData() {
       pageSize: String(state.filters.pageSize),
       alertType: String(state.filters.alertType || "all")
     });
+    if (refresh) params.set("refresh", "1");
     if (!inventoryView.value) {
       params.set("shopId", String(state.filters.shopId || "all"));
       params.set("dateFrom", String(state.filters.dateFrom || ""));
@@ -564,8 +565,8 @@ onMounted(async () => {
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
-    <WarehouseProcurementRequestDialog v-model="requestDialogVisible" :products="requestProducts" @submitted="loadPageData" />
-    <ProcurementLedgerDialog v-if="ledgerVisible && selectedInventory" v-model="ledgerVisible" :product-id="Number(selectedInventory.product_id)" inventory-mode :stocktake-enabled="canEditInventory" @saved="loadPageData">
+    <WarehouseProcurementRequestDialog v-model="requestDialogVisible" :products="requestProducts" @submitted="loadPageData({ refresh: true })" />
+    <ProcurementLedgerDialog v-if="ledgerVisible && selectedInventory" v-model="ledgerVisible" :product-id="Number(selectedInventory.product_id)" inventory-mode :stocktake-enabled="canEditInventory" @saved="loadPageData({ refresh: true })">
       <template #inventory-relations>
         <div class="alert-detail-heading">
           <div class="product-cell">

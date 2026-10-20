@@ -11,6 +11,7 @@ const operationsRoutes = readFileSync(new URL('../src/server/routes/operations.j
 
 test('物流时长默认两天，行内更新严格校验周期、企业归属和并发原值', async () => {
   const updates = [];
+  const invalidated = [];
   let changed = 1;
   const reads = [];
   const context = vm.createContext({
@@ -21,7 +22,8 @@ test('物流时长默认两天，行内更新严格校验周期、企业归属�
     mysqlSchemaColumnExists: async () => true,
     tenantShopPredicateMysql: (alias) => `${alias}.tenant_id = ?`,
     mysqlQueryOne: async (sql, args) => { reads.push({ sql, args }); return reads.length === 1 ? { id: 22 } : { production_lead_days: 5, warehouse_logistics_days: 2 }; },
-    mysqlExecute: async (sql, args) => { updates.push({ sql, args }); return { affectedRows: changed }; }
+    mysqlExecute: async (sql, args) => { updates.push({ sql, args }); return { affectedRows: changed }; },
+    invalidateMasterDataCachePrefix: (prefix) => invalidated.push(prefix)
   });
   const normalizeStart = service.indexOf('function normalizeProductionLeadDaysMysql');
   const normalizeEnd = service.indexOf('function normalizeProductComponentItemsMysql', normalizeStart);
@@ -39,10 +41,12 @@ test('物流时长默认两天，行内更新严格校验周期、企业归属�
   assert.match(updates[0].sql, /COALESCE\(warehouse_logistics_days, 2\) = \?/);
   assert.match(updates[0].sql, /products\.tenant_id = \?/);
   assert.equal(reads[0].args[1], 7);
+  assert.deepEqual(invalidated, ['stock-alerts:inventory-base:v1:']);
 
   changed = 0;
   reads.length = 0;
   await assert.rejects(context.updateInventoryProductLeadTimesMysql(payload, 'tenant-seven'), (error) => error.statusCode === 409);
+  assert.equal(invalidated.length, 1);
   await assert.rejects(context.updateInventoryProductLeadTimesMysql({ ...payload, warehouse_logistics_days: 6 }, 'tenant-seven'), /物流到仓时长/);
   await assert.rejects(context.updateInventoryProductLeadTimesMysql({ ...payload, production_lead_days: 8 }, 'tenant-seven'), /生产周期/);
   assert.match(schema, /warehouse_logistics_days INT NOT NULL DEFAULT 2/);

@@ -36,6 +36,7 @@ export async function getCachedMasterData(key, loader, ttlMs = DEFAULT_MASTER_DA
   const promise = Promise.resolve()
     .then(loader)
     .then((value) => {
+      if (masterDataInflight.get(key) !== promise) return value;
       const now = Date.now();
       for (const [cacheKey, entry] of masterDataCache) {
         if (entry.expiresAt <= now) masterDataCache.delete(cacheKey);
@@ -52,7 +53,7 @@ export async function getCachedMasterData(key, loader, ttlMs = DEFAULT_MASTER_DA
       return value;
     })
     .finally(() => {
-      masterDataInflight.delete(key);
+      if (masterDataInflight.get(key) === promise) masterDataInflight.delete(key);
     });
   masterDataInflight.set(key, promise);
   return promise;
