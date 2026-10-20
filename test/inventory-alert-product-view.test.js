@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { applyStockAlertQuery, completedBeijingSalesWindow } from "../src/services/inventory-alert-utils.js";
 
 const page = readFileSync(new URL("../frontend/admin/views/inventory/InventoryAlertsPage.vue", import.meta.url), "utf8");
+const inventoryView = readFileSync(new URL("../frontend/admin/views/inventory/InventoryView.vue", import.meta.url), "utf8");
 const requestDialog = readFileSync(new URL("../frontend/admin/components/procurement/WarehouseProcurementRequestDialog.vue", import.meta.url), "utf8");
 const service = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
@@ -128,7 +129,7 @@ test("销量后台回填优先近三十日，历史脏日每轮最多五天", as
 
 test("页面默认库存视角并保留 SKU 切换、状态筛选、主图预览与采购预填", () => {
   assert.match(page, /view: "inventory"/);
-  assert.match(page, /changeView\('sku'\)/);
+  assert.match(inventoryView, /changeAlertView\('sku'\)/);
   assert.match(page, /inventoryAlertFilters/);
   assert.match(page, /<ProductImagePreview :src="row\.image_url" :preview-list="row\.image_url \? \[row\.image_url\] : \[\]" size="portrait"/);
   assert.match(page, /suggested_purchase_qty: Math\.max\(1, Number\(row\.suggested_purchase_qty \|\| 0\)\)/);

@@ -26,7 +26,7 @@ test('inventory alert detail uses scoped ledger routes and only exposes stocktak
       name: 'inventory-ledger-fixture',
       resolveId(id) { if (id === 'virtual:inventory-ledger') return '\0inventory-ledger'; },
       load(id) {
-        if (id === '\0inventory-ledger') return `import { createApp, h } from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Ledger from '/frontend/admin/components/procurement/ProcurementLedgerDialog.vue'; createApp({ render: () => h(Ledger, { modelValue: true, productId: 10, inventoryMode: true, stocktakeEnabled: true }, { 'inventory-relations': () => h('div', '关联店铺 RuVibe Mart · SKU 12345') }) }).use(ElementPlus).mount('#app');`;
+        if (id === '\0inventory-ledger') return `import { createApp, h } from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Ledger from '/frontend/admin/components/procurement/ProcurementLedgerDialog.vue'; const initialAction = new URLSearchParams(location.search).has('stocktake') ? 'stocktake' : ''; createApp({ render: () => h(Ledger, { modelValue: true, productId: 10, inventoryMode: true, stocktakeEnabled: true, initialAction }, { 'inventory-relations': () => h('div', '关联店铺 RuVibe Mart · SKU 12345') }) }).use(ElementPlus).mount('#app');`;
       }
     }], build: { outDir: output, cssCodeSplit: false, rollupOptions: { input: 'virtual:inventory-ledger', output: { entryFileNames: 'entry.js' } } } });
     browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
@@ -91,6 +91,10 @@ test('inventory alert detail uses scoped ledger routes and only exposes stocktak
     ]);
     assert.equal(requests.at(-1).body.stocktake_type, 'available');
     assert.equal(requests.at(-1).body.available_quantity, 5);
+    const ledgerReadsBeforeDirectOpen = requests.filter(row => row.method === 'GET').length;
+    await page.goto('http://localhost:8788/admin.html?stocktake=1');
+    await page.getByRole('dialog', { name: '更新本地库存' }).waitFor();
+    assert.equal(requests.filter(row => row.method === 'GET').length, ledgerReadsBeforeDirectOpen + 1, 'direct stocktake waits for the ledger to load');
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

@@ -1,9 +1,10 @@
 <script setup>
 import { computed, provide, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 
 const route = useRoute();
+const router = useRouter();
 const replenishmentStatus = ref("applying");
 const replenishmentStatusTabs = [
   { label: "待审核", value: "applying" },
@@ -30,6 +31,13 @@ const pageDescriptionMap = {
 const pageTitle = computed(() => String(route.meta?.title || "库存中心"));
 const pageDescription = computed(() => pageDescriptionMap[String(route.name || "")] || "统一管理库存商品、库存风险和备货流程。");
 const isFbpReplenishment = computed(() => route.name === "inventory-fbp-replenishment");
+const isInventoryAlerts = computed(() => route.name === "inventory-alerts");
+const alertView = computed(() => route.query.view === "sku" ? "sku" : "inventory");
+
+function changeAlertView(view) {
+  if (view === alertView.value) return;
+  router.replace({ query: { ...route.query, view: view === "sku" ? "sku" : undefined, alertType: undefined, page: undefined } });
+}
 </script>
 
 <template>
@@ -49,6 +57,12 @@ const isFbpReplenishment = computed(() => route.name === "inventory-fbp-replenis
             >
               {{ tab.label }}
             </button>
+          </div>
+        </template>
+        <template v-else-if="isInventoryAlerts" #actions>
+          <div class="inventory-header-status" role="tablist" aria-label="库存预警视角">
+            <button type="button" role="tab" :class="{ 'is-active': alertView === 'inventory' }" :aria-selected="alertView === 'inventory'" @click="changeAlertView('inventory')">库存视角</button>
+            <button type="button" role="tab" :class="{ 'is-active': alertView === 'sku' }" :aria-selected="alertView === 'sku'" @click="changeAlertView('sku')">FBP SKU 视角</button>
           </div>
         </template>
       </ErpPageHeader>
