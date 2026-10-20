@@ -10,32 +10,43 @@
     <main class="panel">
       <header class="header">
         <div>
-          <h1>ERP 采集</h1>
+          <h1>数据分析采集</h1>
           <p id="statusText">读取状态中</p>
         </div>
-        <button id="refreshBtn" class="icon-btn" type="button" title="刷新">↻</button>
+        <button id="refreshBtn" class="icon-btn" type="button" title="刷新状态" aria-label="刷新状态">↻</button>
       </header>
 
-      <section class="section">
+      <section class="section config-section">
+        <div class="section-heading">
+          <h2>连接设置</h2>
+          <span id="saveFeedback" class="save-feedback" role="status" aria-live="polite"></span>
+        </div>
+        <div class="field-grid">
         <label>
           <span>ERP 地址</span>
           <input id="erpBaseUrl" type="text" autocomplete="off">
         </label>
         <label>
-          <span>租户</span>
+          <span>企业租户</span>
           <input id="tenantId" type="text" autocomplete="off">
         </label>
+        </div>
         <label>
-          <span>ERP Token</span>
+          <span>企业密钥</span>
           <input id="localPluginToken" type="password" autocomplete="off" placeholder="粘贴企业管理中生成的专属令牌">
         </label>
-        <label>
-          <span>本地镜像</span>
-          <input id="localMirrorBaseUrl" type="text" autocomplete="off" placeholder="http://127.0.0.1:8788">
-        </label>
-        <div class="actions">
-          <button id="authProbeBtn" type="button">测试后台直连</button>
-          <button id="saveBtn" type="button">保存</button>
+        <div class="actions config-actions">
+          <button id="saveBtn" type="button" class="primary">保存连接设置</button>
+          <button id="authProbeBtn" type="button">测试连接</button>
+        </div>
+      </section>
+
+      <section class="section control-section">
+        <div class="status-line">
+          <span>采集状态</span>
+          <strong id="pollingStatus">未启动</strong>
+        </div>
+        <div class="actions control-actions">
           <button id="pollBtn" type="button" class="primary">立即采集</button>
           <button id="startPollingBtn" type="button" class="button-start">启动轮询</button>
           <button id="stopPollingBtn" type="button" class="button-stop">暂停轮询</button>
@@ -49,13 +60,16 @@
         <div><span>执行中</span><strong id="activeCount">0</strong></div>
       </section>
 
-      <section class="section status-line">
-        <span>轮询状态</span>
-        <strong id="pollingStatus">未启动</strong>
+      <section class="section compact-section">
+        <div class="section-heading">
+          <div><h2>最近日志</h2><small>最多保留 200 条，导出可查看完整记录</small></div>
+          <button id="exportLogsBtn" type="button" class="text-btn">导出日志</button>
+        </div>
+        <div id="logList" class="list empty">暂无日志</div>
       </section>
 
-      <section class="section runtime">
-        <div class="section-title">运行状态</div>
+      <details class="section runtime">
+        <summary>运行状态与 Ozon 页面</summary>
         <div class="runtime-grid">
           <div class="runtime-card">
             <span>页面状态</span>
@@ -73,22 +87,13 @@
             <em id="serviceStatusHint">https://erp.hjt888.xyz/</em>
           </div>
         </div>
-      </section>
+        <div class="seller-context"><span>Ozon 页面</span><span id="sellerTab" class="muted">未找到</span></div>
+      </details>
 
-      <section class="section">
-        <div class="section-title">seller 页面</div>
-        <div id="sellerTab" class="muted">未找到</div>
-      </section>
-
-      <section class="section">
-        <div class="section-title">当前队列</div>
+      <details class="section compact-section">
+        <summary>当前队列</summary>
         <div id="queueList" class="list empty">暂无任务</div>
-      </section>
-
-      <section class="section">
-        <div class="section-title">最近日志</div>
-        <div id="logList" class="list empty">暂无日志</div>
-      </section>
+      </details>
     </main>
     <script src="popup.js"></script>
   </body>
