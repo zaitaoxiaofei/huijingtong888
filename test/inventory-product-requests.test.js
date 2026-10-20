@@ -8,8 +8,8 @@ import { createCatalogRoutes, handleCatalogRestRoute } from "../src/server/route
 
 const serviceSource = readFileSync(new URL("../src/services/inventory-product-requests.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
 const namingSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8").match(/export function normalizeStructuredNamingMysql\(body = \{\}\) \{[\s\S]*?\n\}/)[0].replace("export ", "");
-const operator = { personId: 7, name: "录入员", role: "operator" };
-const manager = { personId: 8, name: "库存经理", role: "manager" };
+const operator = { personId: 7, name: "录入员", role: "operator", tenant: { id: 1, slug: "default" } };
+const manager = { personId: 8, name: "库存经理", role: "manager", tenant: { id: 1, slug: "default" } };
 const body = () => ({ request_key: "request-a", name: "旧名称", owner_person_id: 7, image_url: "https://example.com/product.png", purchase_url: "https://example.com/buy", composition_items: [{ component_product_id: 22, quantity: 2 }], structured_naming: { category: "门槛贴纸", accessory: "普通款", colors: ["黑色"], materials: ["PVC"], quantity: 2 } });
 
 function fixture() {
