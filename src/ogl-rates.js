@@ -43,12 +43,29 @@ export function oglRuleFreightCny(rule, { weightG, length, width, height, parcel
   return { transportCny, serviceFeeRub, serviceFeeCny, totalCny: round(transportCny + serviceFeeCny), chargeableWeightG };
 }
 
-export function oglParcelValueRub(rawJson) {
+export function oglParcelValueRub(rawJson, exchangeRate = 0) {
   let payload;
   try { payload = typeof rawJson === "string" ? JSON.parse(rawJson) : rawJson; } catch { return 0; }
   const products = payload?.raw?.products || payload?.products || payload?.result?.products;
   if (!Array.isArray(products) || !products.length) return 0;
-  const amounts = products.map((product) => Number(product?.price) * Number(product?.quantity || 1));
+  const amounts = products.map((product) => {
+    const currency = String(product?.currency_code || payload?.raw?.currency_code || payload?.result?.currency_code || payload?.currency_code || "").toUpperCase();
+    const rate = currency === "RUB" ? 1 : (currency === "CNY" ? Number(exchangeRate) : 0);
+    return rate > 0 ? Number(product?.price) * Number(product?.quantity || 1) * rate : 0;
+  });
   return amounts.every((amount) => Number.isFinite(amount) && amount > 0)
     ? amounts.reduce((sum, amount) => sum + amount, 0) : 0;
+}
+
+export function selectOglOrderRule(rules, input) {
+  let selected = null;
+  const seenVersions = new Set();
+  for (const rule of rules) {
+    const versionGroup = Number(rule.version_group_id || rule.id);
+    if (seenVersions.has(versionGroup)) continue;
+    seenVersions.add(versionGroup);
+    const quote = oglRuleFreightCny(rule, input);
+    if (quote && (!selected || quote.totalCny < selected.quote.totalCny)) selected = { rule, quote };
+  }
+  return selected?.rule || null;
 }

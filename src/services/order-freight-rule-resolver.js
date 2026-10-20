@@ -46,6 +46,6 @@ export function resolveOrderFreightDescriptor(posting = {}) {
     ? "economy"
     : (/\bstandard\b/i.test(text) ? "standard" : (/\bexpress\b/i.test(text) ? "express" : (carrier === "OGL" ? "economy" : "")));
   const serviceClass = SERVICE_CLASSES.find(([, pattern]) => pattern.test(text))?.[0] || "";
-  if (!carrier || !channel || !serviceClass) return null;
+  if (!carrier || !channel || (!serviceClass && carrier !== "OGL")) return null;
   return { carrier, channel, serviceClass, sourceText: text };
 }

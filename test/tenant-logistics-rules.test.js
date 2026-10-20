@@ -52,7 +52,7 @@ test("default logistics matching and historical version selection cannot choose 
   const service = read("../src/services/mysql-cutover.js");
   assert.match(service, /const scope = await logisticsTenantScopeMysql\(tenantId, alias\);[\s\S]*?scope\.sql} OR \(\$\{alias}\.tenant_id IS NULL AND \$\{alias}\.carrier = 'OGL'\)/);
   assert.match(service, /const tenantScope = await readableLogisticsTenantScopeMysql\(tenantId, "l"\);[\s\S]*?FROM logistics_fee_rules l\s+WHERE l\.enabled != 0 AND \$\{tenantScope\.sql\}/);
-  assert.match(service, /const defaultScope = hasTenantColumn\s+\? await logisticsTenantScopeMysql\("admin", "candidate"\)\s+: \{ sql: "1 = 1", params: \[\] \};[\s\S]*?WHERE \$\{defaultScope\.sql\}/);
+  assert.match(service, /const defaultScope = hasTenantColumn\s+\? await readableLogisticsTenantScopeMysql\(product\?\.tenant_id \|\| "admin", "candidate"\)\s+: \{ sql: "1 = 1", params: \[\] \};[\s\S]*?WHERE \$\{defaultScope\.sql\}/);
   assert.match(service, /rule\.tenant_id <=> p\.tenant_id/);
   assert.match(service, /WHERE selected\.id = \?[\s\S]*?AND \(selected\.tenant_id <=> \? OR \(selected\.tenant_id IS NULL AND selected\.carrier = 'OGL'\)\)/);
   assert.match(service, /AND candidate\.tenant_id <=> selected\.tenant_id/);

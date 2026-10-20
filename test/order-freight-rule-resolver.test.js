@@ -8,6 +8,16 @@ test("resolves OGL Big to its single land channel", () => {
   });
 });
 
+test("retains OGL warehouse evidence when Ozon omits the service class", () => {
+  assert.deepEqual(resolveOrderFreightDescriptor({ raw: {
+    delivery_method: { name: "Доставка Ozon курьеру, Hefei", warehouse: "OGL 嘉兴快递仓库" },
+    analytics_data: { warehouse: "OGL 嘉兴快递仓库" }
+  } }), {
+    carrier: "OGL", channel: "economy", serviceClass: "",
+    sourceText: "Доставка Ozon курьеру, Hefei OGL 嘉兴快递仓库 OGL 嘉兴快递仓库"
+  });
+});
+
 test("resolves GUOO realFBS delivery method to a local freight rule descriptor", () => {
   assert.deepEqual(resolveOrderFreightDescriptor({
     raw: {
