@@ -384,17 +384,21 @@ async function bindServerSideAuth(companyId, sellerTab = null, force = false) {
 }
 
 async function getNextCollectRequests() {
+  const sellerTab = panelState.sellerTab || await findSellerAnalyticsTab() || await findAnySellerTab();
+  const companyId = currentSellerCompanyId(sellerTab?.id) || panelState.currentCompanyId || '';
+  if (!companyId) {
+    const message = '当前 Ozon 店铺身份尚未识别，暂停领取采集任务；请刷新 Seller 分析页后重试。';
+    if (panelState.lastError !== message) logPanel(message, 'error');
+    panelState.lastError = message;
+    return [];
+  }
   const config = await getErpConfig();
   await syncPluginStatus().catch((error) => {
     logPanel(`同步插件状态失败：${error?.message || error}`, 'error');
   });
   const params = new URLSearchParams({ limit: String(BATCH_SIZE) });
-  const sellerTab = panelState.sellerTab || await findSellerAnalyticsTab() || await findAnySellerTab();
-  const companyId = currentSellerCompanyId(sellerTab?.id) || panelState.currentCompanyId || '';
-  if (companyId) {
-    params.set('store_id', companyId);
-    params.set('company_id', companyId);
-  }
+  params.set('store_id', companyId);
+  params.set('company_id', companyId);
   const response = await fetch(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/collect-runs/next?${params.toString()}`, {
     method: 'GET',
     headers: localPluginHeaders(config)
@@ -457,7 +461,11 @@ async function probeServerSideAuth(companyId = '', sellerTab = null) {
   const json = await response.json().catch(() => null);
   if (!response.ok || json?.success === false) throw new Error(json?.error || `HTTP ${response.status}`);
   const result = json?.data || json;
-  logPanel(`Auth probe ${result?.ok ? 'OK' : 'FAILED'} HTTP ${result?.status || '-'}`, result?.ok ? 'success' : 'error');
+  if (!result?.ok && Number(result?.status) === 403) {
+    logPanel(`Ozon 拒绝店铺 ${resolvedCompanyId || '当前店铺'} 的分析授权（HTTP 403）。请确认 Seller 已登录且账号有该店铺权限，再对该店铺重新绑定。`, 'error');
+  } else {
+    logPanel(`Auth probe ${result?.ok ? 'OK' : 'FAILED'} HTTP ${result?.status || '-'}`, result?.ok ? 'success' : 'error');
+  }
   return result;
 }
 
@@ -772,7 +780,9 @@ async function processCollectRequest(request, tab) {
     const requestStoreId = String(request.store_id || request.storeId || request.company_id || request.companyId || '').trim();
     const currentCompanyId = currentSellerCompanyId(tab?.id);
     if (!requestStoreId || !currentCompanyId || requestStoreId !== currentCompanyId) {
-      throw new Error(`STORE_CONTEXT_MISMATCH task=${requestStoreId || '-'} current=${currentCompanyId || '-'}`);
+      const error = new Error(`STORE_CONTEXT_MISMATCH task=${requestStoreId || '-'} current=${currentCompanyId || '-'}`);
+      error.code = 'STORE_CONTEXT_MISMATCH';
+      throw error;
     }
     const delayMs = currentCollectDelayMs();
     logPanel(`限速等待 ${Math.round(delayMs / 1000)} 秒后采集 ${request.source_label || request.source_key} 第 ${(request.page_index || 0) + 1} 页`);
@@ -791,6 +801,11 @@ async function processCollectRequest(request, tab) {
       logPanel(`${request.source_label || request.source_key} ${request.endpoint_type} 已回传`, 'success');
     }
   } catch (error) {
+    if (error?.code === 'STORE_CONTEXT_MISMATCH') {
+      panelState.lastError = error.message;
+      logPanel(`采集任务暂缓：${panelState.lastError}；租约过期后会重新排队`, 'error');
+      return;
+    }
     if (!rateTuned) {
       tuneCollectRate({ success: false, error: error?.message || String(error) });
     }

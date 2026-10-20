@@ -51,10 +51,14 @@ test("pivot analytics plugin wakes on an ERP collection event and sleeps after d
 
 test("pivot analytics plugin claims collect tasks for the current Ozon store only", () => {
   const source = backgroundSource();
+  const nextRequestsSource = source.match(/async function getNextCollectRequests\(\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
 
-  assert.match(source, /const companyId = currentSellerCompanyId\(sellerTab\?\.id\) \|\| panelState\.currentCompanyId \|\| ''/);
-  assert.match(source, /params\.set\('store_id', companyId\)/);
-  assert.match(source, /params\.set\('company_id', companyId\)/);
+  assert.match(nextRequestsSource, /const companyId = currentSellerCompanyId\(sellerTab\?\.id\) \|\| panelState\.currentCompanyId \|\| ''/);
+  assert.match(nextRequestsSource, /if \(!companyId\)[\s\S]*?return \[\]/);
+  assert.match(nextRequestsSource, /params\.set\('store_id', companyId\)/);
+  assert.match(nextRequestsSource, /params\.set\('company_id', companyId\)/);
+  assert.doesNotMatch(nextRequestsSource, /if \(companyId\)\s*\{/);
+  assert.match(nextRequestsSource, /店铺身份尚未识别，暂停领取采集任务/);
 });
 
 test("pivot analytics plugin locks preparation to one fresh seller tab identity", () => {
@@ -90,10 +94,20 @@ test("pivot analytics plugin permits browser collection only after a fresh succe
 
 test("pivot analytics plugin blocks collection while preparing or when task store differs", () => {
   const source = backgroundSource();
+  const processRequestSource = source.match(/async function processCollectRequest\([\s\S]*?async function runWithConcurrency/)?.[0] || "";
 
   assert.match(source, /if \(polling \|\| preparing\) return/);
   assert.match(source, /requestStoreId !== currentCompanyId/);
   assert.match(source, /STORE_CONTEXT_MISMATCH task=/);
+  assert.match(processRequestSource, /error\?\.code === 'STORE_CONTEXT_MISMATCH'[\s\S]*?return;[\s\S]*?await postCollectResult\(request, \{ success: false/);
+  assert.match(processRequestSource, /租约过期后会重新排队/);
+});
+
+test("pivot analytics plugin gives an actionable message for a store authorization 403", () => {
+  const source = backgroundSource();
+
+  assert.match(source, /Number\(result\?\.status\) === 403/);
+  assert.match(source, /请确认 Seller 已登录且账号有该店铺权限，再对该店铺重新绑定/);
 });
 
 test("pivot analytics plugin popup exposes token configuration", () => {
