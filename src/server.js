@@ -932,7 +932,7 @@ const scheduledJobHandlers = {
     pageSize: 1,
     refresh: "1"
   })),
-  inventory_sales_daily_backfill: withForegroundApiDeferral("inventory_sales_daily_backfill", () => backfillInventoryAlertSalesMysql({ max_days: 5 })),
+  inventory_sales_daily_backfill: withForegroundApiDeferral("inventory_sales_daily_backfill", () => backfillInventoryAlertSalesMysql({ max_days: 30 })),
   ozon_category_sync: withForegroundApiDeferral("ozon_category_sync", runBackgroundOzonCategorySync),
   listing_publish_record_sync: withForegroundApiDeferral("listing_publish_record_sync", (job) => services.autoSyncListingPublishRecords(job?.config || {})),
   listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),
