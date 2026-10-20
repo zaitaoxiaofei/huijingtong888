@@ -1590,6 +1590,8 @@ async function finishPluginPrepareRequest(db, payload = {}, tenantId = 'admin') 
   const pluginInstanceId = normalizePluginInstanceId(payload.plugin_instance_id || payload.pluginInstanceId)
   const request = await getPluginPrepareRequest(db, tenantId, pluginInstanceId)
   if (!request) return null
+  const resultRequestId = safeString(payload.request_id || payload.requestId)
+  if (resultRequestId && resultRequestId !== request.id) return { ...request, ignored: true }
   const success = payload?.success !== false
   const currentCompanyId = safeString(payload.current_company_id || payload.currentCompanyId || payload.company_id || payload.companyId)
   const expectedStoreId = safeString(request.expected_store_id)

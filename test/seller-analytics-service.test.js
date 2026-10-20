@@ -6,6 +6,7 @@ import {
   claimNextCollectRequest,
   claimNextCollectRequests,
   createCollectRun,
+  finishPluginPrepareRequest,
   finishCollectRequest,
   getAnalysis,
   getPluginStatus,
@@ -520,6 +521,31 @@ test("seller analytics isolates prepare requests by browser instance", async () 
   assert.equal(requestB.plugin_instance_id, "browser-b");
 });
 
+test("a superseded store preparation cannot finish a newer request", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const oldRequest = await preparePlugin(db, { plugin_instance_id: "browser-switch", store_id: "3570178" }, "admin");
+  await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "browser-switch" });
+  const newRequest = await preparePlugin(db, { plugin_instance_id: "browser-switch", store_id: "4202503" }, "admin");
+
+  const staleResult = await finishPluginPrepareRequest(db, {
+    plugin_instance_id: "browser-switch",
+    request_id: oldRequest.id,
+    success: true,
+    current_company_id: "3570178"
+  }, "admin");
+  assert.equal(staleResult.ignored, true);
+  assert.equal((await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "browser-switch" })).id, newRequest.id);
+
+  const freshResult = await finishPluginPrepareRequest(db, {
+    plugin_instance_id: "browser-switch",
+    request_id: newRequest.id,
+    success: true,
+    current_company_id: "4202503"
+  }, "admin");
+  assert.equal(freshResult.status, "ready");
+  assert.equal(freshResult.current_company_id, "4202503");
+});
+
 test("auth-only prepare stays auth-only through plugin claim and rejects browser-only fallback", async () => {
   const db = createMemorySellerAnalyticsDb();
   const authOnly = await preparePlugin(db, {
@@ -551,8 +577,7 @@ test("auth-only prepare stays auth-only through plugin claim and rejects browser
     getOzonCookieInfo: async () => ({ header: "cookie" }),
     probeServerSideAuth: async () => ({ ok: false, status: 403 }),
     logPanel: () => {},
-    findSellerAnalyticsTab: async () => ({ id: 7 }),
-    findAnySellerTab: async () => null,
+    findAnySellerTab: async () => ({ id: 7 }),
     ensureSellerAnalyticsGraphsTab: async () => null,
     panelState: { sellerTab: null }
   };

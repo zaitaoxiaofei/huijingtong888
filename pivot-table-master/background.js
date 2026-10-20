@@ -922,19 +922,22 @@ async function pollPrepareOnce() {
     return;
   }
   preparing = true;
+  let request = null;
   try {
-    const request = await getNextPrepareRequest();
+    request = await getNextPrepareRequest();
     if (!request?.id) return;
     logPanel(`Prepare seller analytics page: ${request.expected_store_id || 'store'}`);
     const result = await runPrepareRequest(request);
-    await postPrepareResult(result);
+    await postPrepareResult({ ...result, request_id: request.id });
     await syncPluginStatus(true).catch(() => {});
   } catch (error) {
     panelState.lastError = error?.message || String(error);
     logPanel(panelState.lastError, 'error');
-    try {
-      await postPrepareResult({ success: false, error: panelState.lastError });
-    } catch (postError) {}
+    if (request?.id) {
+      try {
+        await postPrepareResult({ request_id: request.id, success: false, error: panelState.lastError });
+      } catch (postError) {}
+    }
   } finally {
     prepareSellerTabId = 0;
     preparing = false;
