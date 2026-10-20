@@ -4,6 +4,7 @@ set -Eeuo pipefail
 archive_path="${1:-}"
 release_version="${2:-}"
 run_db_init="${3:-1}"
+run_db_maintenance="${4:-1}"
 app_root="/opt/ozon-erp"
 releases_root="$app_root/releases"
 shared_root="$app_root/shared"
@@ -29,6 +30,10 @@ if [[ ! -s "$env_file" ]]; then
 fi
 if [[ ! "$release_version" =~ ^[0-9A-Za-z._-]+$ ]]; then
   echo "Invalid release version: $release_version" >&2
+  exit 2
+fi
+if [[ "$run_db_maintenance" != "0" && "$run_db_maintenance" != "1" ]]; then
+  echo "Invalid database maintenance flag: $run_db_maintenance" >&2
   exit 2
 fi
 
@@ -168,7 +173,7 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
-if [[ "$run_db_init" == "1" ]]; then
+if [[ "$run_db_maintenance" == "1" && "$run_db_init" == "1" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$env_file"
@@ -179,6 +184,8 @@ fi
 # Tenant-aware order sync and inventory binding require these ownership columns.
 # Existing installations need explicit, idempotent migrations because CREATE TABLE
 # IF NOT EXISTS cannot add ownership columns to legacy tables.
+install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
+if [[ "$run_db_maintenance" == "1" ]]; then
 for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
   migrate-tenant-sku-mappings.mjs \
@@ -208,12 +215,14 @@ if [[ -f "$staging_dir/scripts/init-inventory-numbering.mjs" ]]; then
   (cd "$staging_dir" && node scripts/init-inventory-numbering.mjs --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 fi
 
-install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
 if [[ -f "$staging_dir/scripts/init-order-query-facts.mjs" ]]; then
   set -a
   source "$env_file"
   set +a
   (cd "$staging_dir" && node scripts/init-order-query-facts.mjs --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
+else
+  echo "Skipping database maintenance for $release_version"
 fi
 
 rm -rf "$staging_dir/public/uploads" "$staging_dir/uploads"

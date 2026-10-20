@@ -15,6 +15,7 @@ Options:
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
+  --skip-database-maintenance  Do not run schema migrations or database maintenance
   --dry-run                   Validate local inputs only; never build or connect
   -h, --help                  Show this help
 
@@ -70,6 +71,7 @@ identity_file="${OZON_ECS_IDENTITY_FILE:-}"
 version=""
 skip_build=0
 skip_database_init=0
+skip_database_maintenance=0
 dry_run=0
 allow_dirty=0
 
@@ -89,6 +91,7 @@ while (($#)); do
     --skip-build) skip_build=1; shift ;;
     --allow-dirty) allow_dirty=1; shift ;;
     --skip-database-init) skip_database_init=1; shift ;;
+    --skip-database-maintenance) skip_database_maintenance=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
@@ -180,9 +183,11 @@ scp "${scp_options[@]}" "$script_dir/remote-release.sh" "$remote_target:$remote_
 
 db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
+db_maintenance_flag=1
+((skip_database_maintenance)) && db_maintenance_flag=0
 printf 'Activating release on ECS...\n'
 ssh "${ssh_options[@]}" "$remote_target" \
-  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag'"
+  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag'"
 
 if command -v shasum >/dev/null 2>&1; then
   archive_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"

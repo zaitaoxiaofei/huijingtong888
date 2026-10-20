@@ -39,7 +39,15 @@ test("Mac/Linux deployment reuses the shared build and atomic release implementa
 test("Mac/Linux activation passes the archive before the version as required by the remote script", () => {
   assert.match(remote, /archive_path="\$\{1:-\}"/);
   assert.match(remote, /release_version="\$\{2:-\}"/);
-  assert.ok(unixClient.includes("bash '$remote_script' '$remote_archive' '$version' '$db_init_flag'"));
+  assert.ok(unixClient.includes("bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag'"));
+});
+
+test("Mac/Linux release can skip all database maintenance when no schema change is needed", () => {
+  assert.match(unixClient, /--skip-database-maintenance/);
+  assert.match(unixClient, /\(\(skip_database_maintenance\)\) && db_maintenance_flag=0/);
+  assert.match(remote, /run_db_maintenance="\$\{4:-1\}"/);
+  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \]\]; then\s+for tenant_migration/);
+  assert.ok(remote.indexOf("init-order-query-facts.mjs") < remote.indexOf("\nfi\n\nrm -rf \"$staging_dir/public/uploads\""));
 });
 
 test("Mac/Linux DryRun exits before every mutating or remote deployment step", () => {
