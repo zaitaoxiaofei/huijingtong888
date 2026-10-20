@@ -7,7 +7,7 @@ test("purchase cost center is registered under procurement navigation", async ()
   const router = await readFile(new URL("../frontend/admin/router/index.js", import.meta.url), "utf8");
 
   assert.match(navigation, /purchase-cost-center/);
-  assert.match(navigation, /成本与异常/);
+  assert.match(navigation, /成本预警/);
   assert.match(router, /PurchaseCostCenterView/);
 });
 
