@@ -40,6 +40,7 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
   const server = read("../src/server.js");
   assert.match(server, /services\.fbpReplenishmentOrders\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
+  assert.match(server, /services\.createFbpReplenishmentOrders\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.updateFbpReplenishmentOrderItems\(await readJson\(req\), tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.deleteFbpReplenishmentOrder\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.deleteFbpReplenishmentOrderItem\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);

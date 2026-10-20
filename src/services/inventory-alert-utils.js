@@ -30,14 +30,22 @@ export function applyStockAlertQuery(rows, query = {}) {
   if (mode === "inventory-alerts") return applyInventoryProductAlertQuery(rows, query);
 
   const fbpAlertMode = mode === "fbp-alerts";
-  const sourceRows = mode === "fbp" || fbpAlertMode ? flattenFbpRows(rows) : rows;
+  const fbpOperationsMode = mode === "fbp-operations";
+  const requestedFbpFocus = String(query.fbpFocus || query.fbp_focus || "replenishment");
+  const fbpFocus = ["replenishment", "declining", "all"].includes(requestedFbpFocus) ? requestedFbpFocus : "replenishment";
+  const fbpMode = mode === "fbp" || fbpAlertMode || fbpOperationsMode;
+  const sourceRows = fbpMode ? flattenFbpRows(rows) : rows;
   const filtered = searchInventoryRows(sourceRows, searchText).filter((row) => {
     if (fbpAlertMode && row.alert_level === "ok") return false;
+    if (fbpOperationsMode && fbpFocus === "replenishment"
+      && (row.replenishment_ignored || Number(row.suggested_qty || 0) <= 0)) return false;
+    if (fbpOperationsMode && fbpFocus === "declining"
+      && !["continuous_decline", "recent_decline"].includes(row.trend_type)) return false;
     if (mode === "fbp" || fbpAlertMode) {
       if (!matchesFbpAlertType(row, alertType)) return false;
     }
     if (shopId !== "all") {
-      if (mode === "fbp" || fbpAlertMode) {
+      if (fbpMode) {
         if (String(row.shop_id || "") !== shopId) return false;
       } else {
         const matched = Array.isArray(row.skus) && row.skus.some((sku) => String(sku.shop_id || "") === shopId);
@@ -50,7 +58,7 @@ export function applyStockAlertQuery(rows, query = {}) {
     return true;
   });
 
-  if (mode === "fbp" || fbpAlertMode) sortFbpRows(filtered, query, fbpAlertMode);
+  if (fbpMode) sortFbpRows(filtered, query, fbpAlertMode, fbpOperationsMode);
   const pageRows = paged ? filtered.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize) : filtered;
   return {
     rows: pageRows,
@@ -108,6 +116,9 @@ export function applyInventoryProductAlertQuery(rows, query = {}) {
   const page = Math.max(Number(query.page || 1), 1);
   const shopId = String(query.shopId || query.shop_id || "all");
   const alertType = String(query.alertType || query.alert_type || "all");
+  const requestedSort = String(query.sortBy || query.sort_by || "recent_30d_qty");
+  const sortBy = ["recent_7d_qty", "recent_15d_qty", "recent_30d_qty"].includes(requestedSort)
+    ? requestedSort : "recent_30d_qty";
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
   const prepared = rows.map(withInventoryProductAlertStatus);
   const filtered = searchInventoryRows(prepared, searchText).filter((row) => {
@@ -117,7 +128,8 @@ export function applyInventoryProductAlertQuery(rows, query = {}) {
     if (alertType !== "all" && row.alert_type !== alertType) return false;
     return true;
   });
-  filtered.sort((left, right) => right.recent_30d_qty - left.recent_30d_qty
+  filtered.sort((left, right) => right[sortBy] - left[sortBy]
+    || right.recent_30d_qty - left.recent_30d_qty
     || right.recent_7d_qty - left.recent_7d_qty
     || right.product_id - left.product_id);
   return {
@@ -142,11 +154,17 @@ function flattenFbpRows(rows) {
   const result = [];
   for (const product of rows) {
     const skus = Array.isArray(product.skus) ? product.skus : [];
+    const seenSkus = new Set();
     for (const sku of skus) {
-      if (Number(sku.fbp_snapshot_count || 0) <= 0 && Number(sku.fbp_present || 0) <= 0 && Number(sku.fbp_available || 0) <= 0) continue;
+      if (Number(sku.fbp_snapshot_count || 0) <= 0 && Number(sku.fbp_present || 0) <= 0
+        && Number(sku.fbp_available || 0) <= 0 && Number(sku.fbp_transfer_in_transit_qty || 0) <= 0) continue;
+      const key = `${sku.shop_id}:${sku.ozon_sku}`;
+      if (seenSkus.has(key)) continue;
+      seenSkus.add(key);
       result.push(withFbpAlertStatus({
         product_id: product.product_id,
         product_name: product.product_name,
+        product_all_time_qty: product.all_time_qty,
         product_image_url: product.image_url,
         inventory_id: product.inventory_id,
         inventory_number: product.inventory_number || "",
@@ -157,6 +175,7 @@ function flattenFbpRows(rows) {
         recent_7d_qty: sku.recent_7d_qty,
         recent_30d_qty: sku.recent_30d_qty,
         prev_7d_qty: sku.prev_7d_qty,
+        older_7d_qty: sku.older_7d_qty,
         all_time_qty: sku.all_time_qty,
         free_stock_count: sku.free_stock_count,
         paid_stock_count: sku.paid_stock_count,
@@ -184,7 +203,15 @@ function matchesFbpAlertType(row = {}, alertType = "all") {
   return row.alert_type === alertType;
 }
 
-function sortFbpRows(rows, query = {}, alertMode = false) {
+function sortFbpRows(rows, query = {}, alertMode = false, operationsMode = false) {
+  if (operationsMode) {
+    rows.sort((left, right) => Number(right.product_all_time_qty || 0) - Number(left.product_all_time_qty || 0)
+      || Number(right.all_time_qty || 0) - Number(left.all_time_qty || 0)
+      || Number(left.product_id || 0) - Number(right.product_id || 0)
+      || Number(left.shop_id || 0) - Number(right.shop_id || 0)
+      || String(left.ozon_sku || "").localeCompare(String(right.ozon_sku || "")));
+    return;
+  }
   const sortKey = String(query.sortKey || query.sort_key || "fbp_available");
   const factor = String(query.sortDir || query.sort_dir || "asc") === "desc" ? -1 : 1;
   rows.sort((left, right) => {
@@ -248,6 +275,7 @@ export function withStockAlertStatus(product) {
 
 function withFbpAlertStatus(row) {
   const available = Number(row.fbp_available || 0);
+  const transferInTransit = Math.max(0, Number(row.fbp_transfer_in_transit_qty || 0));
   const dailySales = dynamicFbpDailySales(row);
   const coverageDays = dailySales > 0 ? available / dailySales : null;
   const warnings = [];
@@ -270,18 +298,35 @@ function withFbpAlertStatus(row) {
   }
 
   if (alertType) warnings.push({ type: alertType, level: alertLevel, text: alertText });
+  const trend = fbpSalesTrend(row);
   return {
     ...row,
     daily_sales_30d: dailySales,
     daily_sales_14d: dailySales,
     dynamic_daily_sales: dailySales,
     coverage_days: coverageDays,
-    suggested_qty: suggestedFbpReplenishmentQty(available, dailySales),
+    fbp_effective_available: available + transferInTransit,
+    suggested_qty: suggestedFbpReplenishmentQty(available + transferInTransit, dailySales),
     alert_type: alertType || "ok",
     alert_level: alertLevel,
+    trend_type: trend.type,
+    trend_text: trend.text,
     warnings,
     suggestion: fbpAlertSuggestion(alertType, coverageDays)
   };
+}
+
+function fbpSalesTrend(row) {
+  const recent = Math.max(0, Number(row.recent_7d_qty || 0));
+  const previous = Math.max(0, Number(row.prev_7d_qty || 0));
+  const older = Math.max(0, Number(row.older_7d_qty || 0));
+  if (Number(row.fbp_available || 0) <= 0) return { type: "stockout", text: "断货影响，暂不判断" };
+  if (older >= 10 && older > previous && previous > recent && recent <= older * 0.7) {
+    return { type: "continuous_decline", text: "连续下滑，待复核" };
+  }
+  if (previous >= 10 && recent <= previous * 0.6) return { type: "recent_decline", text: "近周明显下降" };
+  if (Math.max(recent, previous, older) < 10) return { type: "low_sample", text: "样本少，暂不判断" };
+  return { type: "stable", text: "销量平稳或波动" };
 }
 
 function suggestedFbpReplenishmentQty(available, dailySales) {
