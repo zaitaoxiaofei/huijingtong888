@@ -13,3 +13,7 @@ test("logistics carrier detects CEL, Hunchun and postal families", () => {
   assert.equal(detectOrderLogisticsCarrier("Hunchun 2"), "cel");
   assert.equal(detectOrderLogisticsCarrier("China Post"), "postal");
 });
+
+test("logistics carrier detects OGL as its own family", () => {
+  assert.equal(detectOrderLogisticsCarrier("OGL Premium Big"), "ogl");
+});

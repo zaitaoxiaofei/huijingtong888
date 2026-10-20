@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveOrderFreightDescriptor } from "../src/services/order-freight-rule-resolver.js";
 
+test("resolves OGL Big to its single land channel", () => {
+  assert.deepEqual(resolveOrderFreightDescriptor({ delivery_method_name: "OGL Big" }), {
+    carrier: "OGL", channel: "economy", serviceClass: "Big", sourceText: "OGL Big"
+  });
+});
+
 test("resolves GUOO realFBS delivery method to a local freight rule descriptor", () => {
   assert.deepEqual(resolveOrderFreightDescriptor({
     raw: {

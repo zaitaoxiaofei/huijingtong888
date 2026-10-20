@@ -1190,7 +1190,7 @@ async function bindCurrentShopAuth() {
     }
     prepareFlow.tone = "warning";
     prepareFlow.title = "授权绑定未完成";
-    prepareFlow.detail = "没有收到当前店铺授权，请确认店铺数据分析插件已更新到 1.0.29，且 Ozon 已登录并切到该店铺。";
+    prepareFlow.detail = "没有收到当前店铺授权，请确认店铺数据分析插件已更新到最新版，且 Ozon 已登录并切到该店铺。";
     await ElMessageBox.alert(prepareFlow.detail, "首次绑定未完成", {
       type: "warning",
       confirmButtonText: "知道了"
@@ -1209,15 +1209,29 @@ async function requireAnalyticsPluginInstance() {
   requestPluginInstance();
   await wait(700);
   if (pluginInstanceId.value) return true;
+  let pluginUpdate;
+  try {
+    const status = await apiClient.get("/api/system/update-status", { routeScoped: false, noCache: true });
+    pluginUpdate = status?.analytics_plugin;
+  } catch (error) {
+    ElMessage.error(`无法读取分析插件下载信息：${error.message || error}`);
+    return false;
+  }
+  const version = String(pluginUpdate?.version || "").trim();
+  const downloadUrl = String(pluginUpdate?.download_url || "").trim();
+  if (!version || !downloadUrl) {
+    ElMessage.error("分析插件更新信息缺少版本或下载地址，请联系管理员检查插件发布状态");
+    return false;
+  }
   await ElMessageBox.alert(
-    "当前浏览器没有检测到“爆单ERP 店铺数据分析插件 1.0.29”。\n\n“商品信息采集插件 1.4.18”是另一个插件，不能执行店铺分析识别。请下载并安装 1.0.29 后刷新本页面。",
+    `当前浏览器没有检测到“爆单ERP 店铺数据分析插件 ${version}”。\n\n“商品信息采集插件”是另一个插件，不能执行店铺分析识别。请下载并安装 ${version} 后刷新本页面。`,
     "未检测到店铺数据分析插件",
     {
       type: "warning",
-      confirmButtonText: "下载 1.0.29"
+      confirmButtonText: `下载 ${version}`
     }
   );
-  window.open("/downloads/ozon-seller-analytics-plugin.rar", "_blank", "noopener");
+  window.open(downloadUrl, "_blank", "noopener");
   return false;
 }
 

@@ -1,5 +1,6 @@
 import { calculateCelFbsPricing } from "./celRates.js";
 import { calculateProfitQuote } from "./pricingFormula.js";
+import { oglElectronicServiceFeeRub, oglRuleFreightCny } from "./ogl-rates.js";
 
 export function commissionRate(price, mapping, exchangeRate = 1) {
   const ozonRate = ozonCommissionRate(mapping);
@@ -14,7 +15,10 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
   const price = Number(salePrice);
   const qty = Number(quantity || 1);
   const exchangeRate = toNumber(product.exchange_rate, 11.32);
-  const explicitLogisticsFreight = logisticsRuleFreight(product);
+  const explicitLogisticsFreight = logisticsRuleFreight(product, price, exchangeRate);
+  if (String(product.logistics_rule_carrier || "").toUpperCase() === "OGL" && explicitLogisticsFreight === null) {
+    throw new Error("商品所选 OGL 物流规则与包裹重量、尺寸或货值不匹配；请在商品物流规则中选择符合当前包裹与售价的 OGL 档位");
+  }
   const resolvedCommissionRate = commissionRate(price, mapping, exchangeRate);
   if (explicitLogisticsFreight !== null) {
     const purchaseCostPerUnit = roundMoney(
@@ -113,13 +117,30 @@ export function estimateItemProfit({ salePrice, quantity, product, mapping }) {
   };
 }
 
-function logisticsRuleFreight(product = {}) {
+function logisticsRuleFreight(product = {}, salePrice = 0, exchangeRate = 1) {
   if (!Number(product?.logistics_rule_id || 0)) return null;
   const base = toNumberOrNull(product?.logistics_rule_base_fee_cny);
   const perGram = toNumberOrNull(product?.logistics_rule_per_gram_cny);
   const perTicket = toNumberOrNull(product?.logistics_rule_per_ticket_cny);
   if (base === null && perGram === null && perTicket === null) return null;
   const weight = Math.max(0, toNumber(product?.package_weight_g, 0));
+  if (String(product.logistics_rule_carrier || "").toUpperCase() === "OGL") {
+    const parcelValueRub = Number(product.ogl_parcel_value_rub || 0);
+    const quote = oglRuleFreightCny({
+      name: product.logistics_rule_name,
+      min_weight_g: product.logistics_rule_min_weight_g,
+      max_weight_g: product.logistics_rule_max_weight_g,
+      min_price_rub: product.logistics_rule_min_price_rub,
+      max_price_rub: product.logistics_rule_max_price_rub,
+      base_fee_cny: base, per_gram_cny: perGram, per_ticket_cny: perTicket
+    }, { weightG: weight, length: product.length_cm, width: product.width_cm,
+      height: product.height_cm, parcelValueRub: parcelValueRub || salePrice * exchangeRate, exchangeRate });
+    if (!quote) return null;
+    const allocatedServiceFeeCny = parcelValueRub > 0
+      ? oglElectronicServiceFeeRub(parcelValueRub) * (salePrice * exchangeRate / parcelValueRub) / exchangeRate
+      : quote.serviceFeeCny;
+    return roundMoney(quote.transportCny + allocatedServiceFeeCny);
+  }
   return roundMoney((base || 0) + weight * (perGram || 0) + (perTicket || 0));
 }
 

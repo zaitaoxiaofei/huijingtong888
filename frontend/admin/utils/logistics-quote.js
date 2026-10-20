@@ -1,4 +1,5 @@
 import { currentEffectiveLogisticsRules } from "./effective-logistics-rules.js";
+import { oglChargeableWeightG, oglDimensionsValid, oglElectronicServiceFeeRub } from "../../../src/ogl-rates.js";
 
 const round = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
 const CHANNEL_ORDER = ["express", "standard", "economy"];
@@ -40,7 +41,7 @@ function permittedDimensions(kind, dimensions) {
   return false;
 }
 
-export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length, width, height }, at = new Date()) {
+export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length, width, height, exchangeRate }, at = new Date()) {
   const price = Number(priceRub);
   const weight = Number(weightG);
   if (![price, weight].every((value) => Number.isFinite(value) && value > 0)) return [];
@@ -49,16 +50,25 @@ export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length,
     .flatMap((rule) => {
       if (String(rule.mode || "") !== "per_gram") return [];
       const kind = serviceClass(rule.name);
-      if (!kind || !permittedDimensions(kind, { length: Number(length), width: Number(width), height: Number(height) })) return [];
+      const ogl = String(rule.carrier || "").toUpperCase() === "OGL";
+      if (ogl && !(Number(exchangeRate) > 0)) return [];
+      if (!kind || !(ogl
+        ? oglDimensionsValid(length, width, height)
+        : permittedDimensions(kind, { length: Number(length), width: Number(width), height: Number(height) }))) return [];
       if (price < Number(rule.min_price_rub) || price > Number(rule.max_price_rub)) return [];
-      const volumeWeightG = ["Big", "Premium Big"].includes(kind)
+      const volumeWeightG = !ogl && ["Big", "Premium Big"].includes(kind)
         ? Number(length) * Number(width) * Number(height) / 12
         : 0;
-      const chargeableWeightG = Math.max(weight, volumeWeightG);
+      const chargeableWeightG = ogl
+        ? oglChargeableWeightG(kind, weight, length, width, height)
+        : Math.max(weight, volumeWeightG);
       if (chargeableWeightG < Number(rule.min_weight_g) || chargeableWeightG > Number(rule.max_weight_g)) return [];
+      const transportCny = round(Number(rule.base_fee_cny) + chargeableWeightG * Number(rule.per_gram_cny) + Number(rule.per_ticket_cny));
+      const serviceFeeRub = ogl ? oglElectronicServiceFeeRub(price) : 0;
+      const serviceFeeCny = serviceFeeRub && Number(exchangeRate) > 0 ? round(serviceFeeRub / Number(exchangeRate)) : 0;
       return [{
         id: rule.id, name: rule.name, carrier: rule.carrier, channel: rule.channel,
-        priceCny: round(Number(rule.base_fee_cny) + chargeableWeightG * Number(rule.per_gram_cny) + Number(rule.per_ticket_cny)),
+        priceCny: round(transportCny + serviceFeeCny), transportCny, serviceFeeRub, serviceFeeCny,
         chargeableWeightG: round(chargeableWeightG),
         effectiveFrom: rule.effective_from, source: rule.note || ""
       }];

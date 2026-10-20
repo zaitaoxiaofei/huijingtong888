@@ -7,6 +7,8 @@ import { apiClient } from "../../utils/api";
 import { invalidateInventoryNamingOptions, invalidateInventoryVehicleCatalog, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
 import { currentEffectiveLogisticsRules, resolveCurrentLogisticsRule } from "../../utils/effective-logistics-rules";
+import { quoteLogisticsRules } from "../../utils/logistics-quote";
+import { oglRuleFreightCny } from "../../../../src/ogl-rates.js";
 import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/inventory-similarity";
 import { useAuthStore } from "../../stores/auth";
 import { useRouter } from "vue-router";
@@ -144,6 +146,8 @@ const logisticsRuleOptions = computed(() => currentEffectiveLogisticsRules(avail
 }));
 
 const selectedLogisticsRule = computed(() => resolveSelectedLogisticsRule(form));
+const oglRuleMismatch = computed(() => String(selectedLogisticsRule.value?.carrier || "").toUpperCase() === "OGL"
+  && !getTransportEstimate(form, selectedLogisticsRule.value).oglQuote);
 const previewNumbers = computed(() => buildSelectionPreview(form, selectedLogisticsRule.value));
 const selectionPreviewCards = computed(() => [
   { label: "当前售价", value: `¥${money(previewNumbers.value.saleRmb)}`, hint: "手动填写优先" },
@@ -1349,9 +1353,17 @@ function getTransportEstimate(row, logisticsRule) {
   const base = Number(rule.base_fee_cny || 0);
   const perGram = Number(rule.per_gram_cny || 0);
   const perTicket = Number(rule.per_ticket_cny || 0);
-  const amount = roundMoney(base + weight * perGram + perTicket);
+  const exchangeRate = Number(row?.exchange_rate || 11.32);
+  const saleRmb = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0);
+  const parcelValueRub = Number(row?.listing_price_rub || 0) || saleRmb * exchangeRate;
+  const oglQuote = String(rule.carrier || "").toUpperCase() === "OGL"
+    ? oglRuleFreightCny(rule, { weightG: weight, length: row?.length_cm, width: row?.width_cm,
+      height: row?.height_cm, parcelValueRub, exchangeRate })
+    : null;
+  const amount = oglQuote ? oglQuote.totalCny : roundMoney(base + weight * perGram + perTicket);
   return {
     rule,
+    oglQuote,
     totalRmb: amount,
     totalCny: amount,
     unitPurchase: roundMoney(purchaseUnit),
@@ -1391,7 +1403,13 @@ function resolveSelectedLogisticsRule(row) {
   }
   const weight = Number(row?.package_weight_g || 0);
   const saleRmb = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0) || (Number(row?.listing_price_rub || 0) / Number(row?.exchange_rate || 11.32));
+  const exchangeRate = Number(row?.exchange_rate || 11.32);
+  const oglQuotes = quoteLogisticsRules(availableLogisticsRules.value, {
+    carrier: "OGL", priceRub: Number(row?.listing_price_rub || 0) || saleRmb * exchangeRate,
+    weightG: weight, length: row?.length_cm, width: row?.width_cm, height: row?.height_cm, exchangeRate
+  });
   const matched = logisticsRuleOptions.value.find((rule) => {
+    if (String(rule.carrier || "").toUpperCase() === "OGL") return oglQuotes.some((quote) => Number(quote.id) === Number(rule.id));
     const minWeight = Number(rule.min_weight_g || 0);
     const maxWeight = Number(rule.max_weight_g || Infinity);
     const minPrice = Number(rule.min_price_rub || 0);
@@ -1492,6 +1510,10 @@ async function submitDialog(options = {}) {
       throw new Error("缺少要编辑的库存产品 ID，已阻止误创建，请关闭后重新打开");
     }
     const effectiveLogisticsRule = resolveSelectedLogisticsRule(form);
+    if (String(effectiveLogisticsRule?.carrier || "").toUpperCase() === "OGL") {
+      const quote = getTransportEstimate(form, effectiveLogisticsRule);
+      if (!quote.oglQuote) throw new Error("OGL 物流规则与商品售价（货值）、包裹克重或长宽高不匹配；请在商品价格和包裹信息中修改后选择适用的 OGL 档位");
+    }
     const payload = {
       ...form,
       name: generatedProductName.value || form.name,
@@ -2052,8 +2074,9 @@ function submitAndCreateDraft() {
               </div>
               <el-tag effect="plain">{{ previewNumbers.targetMode === "margin" ? "按利润率定价" : "按利润额定价" }}</el-tag>
             </div>
+            <el-alert v-if="oglRuleMismatch" type="warning" :closable="false" title="OGL 规则与售价（货值）、包裹克重或长宽高不匹配；请修改参数或选择适用档位后再看利润预估。" />
 
-            <div class="selection-preview-compare">
+            <div v-else class="selection-preview-compare">
               <div class="selection-preview-row">
                 <div v-for="card in selectionPreviewCards" :key="card.label" class="selection-preview-card">
                   <span>{{ card.label }}</span>

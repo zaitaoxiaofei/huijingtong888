@@ -141,6 +141,7 @@ const LOGISTICS_CARRIER_OPTIONS = [
   { value: "all", label: "全部物流大类" },
   { value: "guoo", label: "GUOO" },
   { value: "cel", label: "CEL" },
+  { value: "ogl", label: "OGL" },
   { value: "postal", label: "邮政" },
   { value: "other", label: "其他物流" }
 ];

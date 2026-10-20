@@ -141,8 +141,8 @@ async function resolveDownloadArtifactPath(filename) {
     ? ["ozon-baodan-erp-plugin-*.zip"]
     : normalized === "ozon-erp-collector-plugin.rar" || normalized === "ozon-baodan-erp-plugin.rar"
       ? ["ozon-baodan-erp-plugin-*.rar"]
-      : normalized === "ozon-seller-analytics-plugin.rar"
-        ? ["ozon-seller-analytics-plugin-*.rar"]
+      : normalized === "ozon-seller-analytics-plugin.zip"
+        ? ["ozon-seller-analytics-plugin-*.zip"]
       : [];
   const candidates = Array.from(new Set([
     ...aliasNames.flatMap((name) => [
@@ -1091,15 +1091,21 @@ async function handleRestRoute(req, res, url, parts) {
   if (req.method === "GET" && parts[0] === "downloads" && (
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
     /^ozon-baodan-erp-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
-    /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.rar$/.test(parts[1] || "") ||
+    /^ozon-seller-analytics-plugin-[0-9][0-9A-Za-z.-]*\.(?:rar|zip)$/.test(parts[1] || "") ||
     /^pdd-procurement-logistics-plugin-[0-9][0-9A-Za-z.-]*\.zip$/.test(parts[1] || "") ||
     parts[1] === "ozon-baodan-erp-plugin.zip" ||
     parts[1] === "ozon-erp-collector-plugin.zip" ||
     parts[1] === "ozon-baodan-erp-plugin.rar" ||
     parts[1] === "ozon-erp-collector-plugin.rar" ||
-    parts[1] === "ozon-seller-analytics-plugin.rar"
+    parts[1] === "ozon-seller-analytics-plugin.rar" ||
+    parts[1] === "ozon-seller-analytics-plugin.zip"
   )) {
     const filename = parts[1];
+    if (filename === "ozon-seller-analytics-plugin.rar") {
+      writeHead(res, 302, { "Location": "/downloads/ozon-seller-analytics-plugin.zip", "Cache-Control": "no-store" });
+      res.end();
+      return true;
+    }
     if (/^(?:ozon-baodan-erp-plugin|ozon-erp-collector-plugin)(?:-[0-9][0-9A-Za-z.-]*)?\.rar$/.test(filename)) {
       const pluginVersion = globalUpdateStatus().plugin.version;
       const latestPackage = `ozon-baodan-erp-plugin-${pluginVersion}.zip`;

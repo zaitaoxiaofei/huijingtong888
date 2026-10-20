@@ -29,6 +29,8 @@ import { calculateSelectionPricing } from "../celRates.js";
 import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } from "./order-logistics-filter-rules.js";
 import { detectOrderLogisticsCarrier } from "./order-logistics-carrier.js";
 import { resolveOrderFreightDescriptor } from "./order-freight-rule-resolver.js";
+import { cbrCnyRateForDate } from "./pricing-reference-rate.js";
+import { oglParcelValueRub } from "../ogl-rates.js";
 import {
   applyStockAlertQuery,
   completedBeijingSalesWindow,
@@ -3406,6 +3408,13 @@ async function logisticsTenantScopeMysql(tenantId = "admin", alias = "l") {
   };
 }
 
+async function readableLogisticsTenantScopeMysql(tenantId = "admin", alias = "l") {
+  const scope = await logisticsTenantScopeMysql(tenantId, alias);
+  return scope.hasTenantColumn
+    ? { ...scope, sql: `(${scope.sql} OR (${alias}.tenant_id IS NULL AND ${alias}.carrier = 'OGL'))` }
+    : scope;
+}
+
 function logisticsProductTenantPredicateMysql(alias, scope) {
   if (!scope.hasTenantColumn) return "1 = 1";
   return `(${alias}.tenant_id = ?${scope.defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`;
@@ -3418,7 +3427,7 @@ function logisticsTenantScopeSqlForJoinedRuleMysql(scope, alias) {
 export async function logisticsRulesMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureLogisticsRuleFilterSchemaMysql();
-  const scope = await logisticsTenantScopeMysql(tenantId);
+  const scope = await readableLogisticsTenantScopeMysql(tenantId);
   const productScope = logisticsProductTenantPredicateMysql("p", scope);
   const mappingScope = logisticsProductTenantPredicateMysql("sm", scope);
   return await mysqlQuery(`
@@ -3636,7 +3645,7 @@ async function activeOrderLogisticsFilterMethodsMysql(tenantId = "admin") {
     return cached;
   }
   await ensureLogisticsRuleFilterSchemaMysql();
-  const tenantScope = await logisticsTenantScopeMysql(tenantId, "l");
+  const tenantScope = await readableLogisticsTenantScopeMysql(tenantId, "l");
   const [configuredRow, rows] = await Promise.all([
     mysqlQueryOne(`SELECT COUNT(*) AS count FROM logistics_fee_rules l WHERE ${tenantScope.sql}`, tenantScope.params),
     mysqlQuery(`
@@ -12653,7 +12662,8 @@ async function tenantInventoryProductDetailMysql(id, query = {}, tenantId) {
     LEFT JOIN tenant_members creator_member ON creator_member.tenant_id = p.tenant_id AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1
     LEFT JOIN people creator ON creator.id = creator_member.person_id AND creator.active != 0
     LEFT JOIN suppliers supplier ON supplier.id = p.supplier_id AND supplier.tenant_id = p.tenant_id
-    LEFT JOIN logistics_fee_rules logistics ON logistics.id = p.logistics_rule_id AND logistics.tenant_id = p.tenant_id
+    LEFT JOIN logistics_fee_rules logistics ON logistics.id = p.logistics_rule_id
+      AND (logistics.tenant_id = p.tenant_id OR (logistics.tenant_id IS NULL AND logistics.carrier = 'OGL'))
     WHERE p.id = ? AND p.tenant_id = ? AND p.active = 1
   `, [Number(id), tenantPk]);
   if (!row) return null;
@@ -13412,7 +13422,7 @@ async function maybeCreateProcurementForProductMysql(connection, productId, body
 async function incrementLogisticsRuleUsageMysqlTx(connection, ruleId, tenantId = "admin") {
   const logisticsRuleId = Number(ruleId || 0);
   if (!logisticsRuleId) return;
-  const scope = await logisticsTenantScopeMysql(tenantId);
+  const scope = await readableLogisticsTenantScopeMysql(tenantId);
   const [result] = await connection.execute(`
     UPDATE logistics_fee_rules l
     SET usage_count = COALESCE(usage_count, 0) + 1,
@@ -13830,8 +13840,8 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     }
     const logisticsRuleId = nullableInteger(body.logistics_rule_id);
     if (logisticsRuleId) {
-      const ruleScope = await logisticsTenantScopeMysql(String(tenantPk));
-      const rule = await mysqlConnectionQueryOne(connection, `SELECT id FROM logistics_fee_rules WHERE id = ? AND ${ruleScope.sql} LIMIT 1`, [logisticsRuleId, ...ruleScope.params]);
+      const ruleScope = await readableLogisticsTenantScopeMysql(String(tenantPk), "l");
+      const rule = await mysqlConnectionQueryOne(connection, `SELECT l.id FROM logistics_fee_rules l WHERE l.id = ? AND ${ruleScope.sql} LIMIT 1`, [logisticsRuleId, ...ruleScope.params]);
       if (!rule) throw Object.assign(new Error("所选物流规则不存在或不属于当前企业，请选择本企业物流规则。"), { statusCode: 400 });
     }
     if (body.selection_status !== undefined && String(body.selection_status) !== String(existing.selection_status || "draft")) {
@@ -17833,6 +17843,10 @@ function productWithLogisticsRuleMysql(product, rule, source = "product_default"
     logistics_rule_base_fee_cny: rule.base_fee_cny,
     logistics_rule_per_gram_cny: rule.per_gram_cny,
     logistics_rule_per_ticket_cny: rule.per_ticket_cny,
+    logistics_rule_min_weight_g: rule.min_weight_g,
+    logistics_rule_max_weight_g: rule.max_weight_g,
+    logistics_rule_min_price_rub: rule.min_price_rub,
+    logistics_rule_max_price_rub: rule.max_price_rub,
     logistics_rule_source: source
   };
 }
@@ -17848,6 +17862,10 @@ function productWithoutLogisticsRuleMysql(product) {
     logistics_rule_base_fee_cny: null,
     logistics_rule_per_gram_cny: null,
     logistics_rule_per_ticket_cny: null,
+    logistics_rule_min_weight_g: null,
+    logistics_rule_max_weight_g: null,
+    logistics_rule_min_price_rub: null,
+    logistics_rule_max_price_rub: null,
     logistics_rule_source: "none"
   };
 }
@@ -17891,17 +17909,22 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
       rule.channel AS logistics_rule_channel,
       rule.base_fee_cny AS logistics_rule_base_fee_cny,
       rule.per_gram_cny AS logistics_rule_per_gram_cny,
-      rule.per_ticket_cny AS logistics_rule_per_ticket_cny
+      rule.per_ticket_cny AS logistics_rule_per_ticket_cny,
+      rule.min_weight_g AS logistics_rule_min_weight_g,
+      rule.max_weight_g AS logistics_rule_max_weight_g,
+      rule.min_price_rub AS logistics_rule_min_price_rub,
+      rule.max_price_rub AS logistics_rule_max_price_rub
     FROM products p
-    LEFT JOIN logistics_fee_rules rule ON rule.id = p.logistics_rule_id AND rule.tenant_id <=> p.tenant_id
+    LEFT JOIN logistics_fee_rules rule ON rule.id = p.logistics_rule_id
+      AND (rule.tenant_id <=> p.tenant_id OR (rule.tenant_id IS NULL AND rule.carrier = 'OGL'))
     WHERE p.id = ? AND p.active = 1
   `, [Number(productId)]);
   if (product && orderedAt) product.pricing_effective_at = orderedAt;
   if (product && orderedAt && posting) {
     const actualRule = await actualOrderLogisticsRuleMysql(posting, orderedAt);
-    if (actualRule) return productWithLogisticsRuleMysql(product, actualRule, "ozon_delivery_method");
+    if (actualRule) return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, actualRule, "ozon_delivery_method"), orderedAt, posting);
   }
-  if (!product?.logistics_rule_id || !orderedAt) return product;
+  if (!product?.logistics_rule_id || !orderedAt) return productWithOglOrderRateMysql(product, orderedAt, posting);
   const effectiveAt = normalizeMysqlDateTime(orderedAt);
   const version = await mysqlQueryOne(`
     SELECT candidate.*
@@ -17910,14 +17933,28 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
       ON candidate.version_group_id = COALESCE(selected.version_group_id, selected.id)
       AND candidate.tenant_id <=> selected.tenant_id
     WHERE selected.id = ?
-      AND selected.tenant_id <=> ?
+      AND (selected.tenant_id <=> ? OR (selected.tenant_id IS NULL AND selected.carrier = 'OGL'))
       AND candidate.effective_from <= ?
       AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
     ORDER BY candidate.effective_from DESC, candidate.id DESC
     LIMIT 1
   `, [Number(product.logistics_rule_id), product.tenant_id ?? null, effectiveAt, effectiveAt]);
   if (!version) return productWithoutLogisticsRuleMysql(product);
-  return productWithLogisticsRuleMysql(product, version);
+  return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, version), orderedAt, posting);
+}
+
+async function productWithOglOrderRateMysql(product, orderedAt, posting = null) {
+  if (!product || !orderedAt || String(product.logistics_rule_carrier || "").toUpperCase() !== "OGL") return product;
+  const rate = await cbrCnyRateForDate(orderedAt);
+  const rawParcelValue = oglParcelValueRub(posting?.raw_json || posting?.raw || null);
+  const postingParcelValue = Array.isArray(posting?.items)
+    ? posting.items.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 1), 0) * rate.rate
+    : 0;
+  const orderParcelValue = !rawParcelValue && !postingParcelValue && Number(posting?.order_id) > 0
+    ? Number((await mysqlQueryOne("SELECT SUM(sale_price * quantity) AS sale_cny FROM order_items WHERE order_id = ?", [Number(posting.order_id)]))?.sale_cny || 0) * rate.rate
+    : 0;
+  return { ...product, exchange_rate: rate.rate, ogl_exchange_rate_source_date: rate.source_date,
+    ogl_parcel_value_rub: rawParcelValue || postingParcelValue || orderParcelValue };
 }
 
 export async function recalculateOrderItemsForMappingMysql(mappingId, options = {}) {
@@ -17950,7 +17987,7 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
   let updated = 0;
   const dateKeys = new Set();
   for (const item of rows) {
-    const effectiveProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json }) || product;
+    const effectiveProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json, order_id: item.order_id }) || product;
     const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product: effectiveProduct, mapping });
     const settlement = resolveProfitSettlementStatusMysql(item);
     const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: item, item, product: effectiveProduct, estimated, quantity: item.quantity, salePrice: item.sale_price });
@@ -18188,7 +18225,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync") {
       LEFT JOIN online_products op ON op.id = sm.online_product_id
       WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1
     `, [shop.id, item.ozon_sku]);
-    const product = mapping ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, posting) : null;
+    const product = mapping ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, { ...posting, order_id: orderId }) : null;
     const existingItem = await mysqlQueryOne("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
     if (existingItem) {
       const previousQuantity = Number(existingItem.quantity || 0);
@@ -18982,7 +19019,7 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
       unbound += 1;
       continue;
     }
-    const product = await productForProfitEstimateMysql(mapping.product_id, order.ordered_at, rawOrder);
+    const product = await productForProfitEstimateMysql(mapping.product_id, order.ordered_at, { ...rawOrder, order_id: orderId });
     if (!product) {
       unbound += 1;
       continue;
@@ -19641,7 +19678,7 @@ export async function forceRecalculateOrderProfitsForProductMysql(productId, bod
       });
       continue;
     }
-    const mappedProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json });
+    const mappedProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json, order_id: item.order_id });
     if (!mappedProduct || Number(mappedProduct.id) !== Number(productId)) {
       unbound += 1;
       skippedRows.push({
@@ -29111,7 +29148,7 @@ function orderLogisticsCarrierMysql(row = {}) {
 }
 
 function orderLogisticsCarrierOptionsMysql(rows = []) {
-  const labels = { guoo: "GUOO", cel: "CEL", postal: "邮政", other: "其他物流" };
+  const labels = { guoo: "GUOO", cel: "CEL", ogl: "OGL", postal: "邮政", other: "其他物流" };
   const counts = new Map();
   for (const row of rows) {
     const carrier = orderLogisticsCarrierMysql(row);
@@ -29119,7 +29156,7 @@ function orderLogisticsCarrierOptionsMysql(rows = []) {
   }
   return [
     { value: "all", label: "全部物流大类" },
-    ...["guoo", "cel", "postal", "other"]
+    ...["guoo", "cel", "ogl", "postal", "other"]
       .filter((value) => counts.has(value))
       .map((value) => ({ value, label: `${labels[value]} (${counts.get(value)})`, count: counts.get(value) }))
   ];
@@ -29684,7 +29721,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     LEFT JOIN online_products op ON op.shop_id = ? AND op.ozon_sku = oi.ozon_sku
     ${peopleJoinSql}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    LEFT JOIN logistics_fee_rules frozen_rule ON frozen_rule.id = oi.frozen_logistics_rule_id ${tenantScoped ? "AND frozen_rule.tenant_id = ?" : ""}
+    LEFT JOIN logistics_fee_rules frozen_rule ON frozen_rule.id = oi.frozen_logistics_rule_id ${tenantScoped ? "AND (frozen_rule.tenant_id = ? OR (frozen_rule.tenant_id IS NULL AND frozen_rule.carrier = 'OGL'))" : ""}
     WHERE oi.order_id = ?
   `, [...itemTenantParams, Number(order.shop_id), ...(tenantScoped ? [normalizedTenantId] : []), Number(id)]);
 

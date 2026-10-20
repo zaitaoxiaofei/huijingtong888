@@ -69,8 +69,8 @@ const pluginPackageRules = [
     aliasPattern: /^ozon-erp-collector-plugin\.zip$/
   },
   {
-    aliasPattern: /^ozon-seller-analytics-plugin\.rar$/,
-    versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.rar$/
+    aliasPattern: /^ozon-seller-analytics-plugin\.zip$/,
+    versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/
   }
 ];
 
@@ -180,7 +180,7 @@ async function copyPluginPackages() {
 async function hasReusablePluginPackages() {
   const packageSourceDir = path.resolve(rootDir, "..");
   const entries = await fs.readdir(packageSourceDir, { withFileTypes: true }).catch(() => []);
-  return pluginPackageRules.every((rule) => entries.some((entry) => (
+  return pluginPackageRules.slice(0, 2).every((rule) => entries.some((entry) => (
     entry.isFile() && rule.aliasPattern.test(entry.name)
   )));
 }
@@ -357,6 +357,7 @@ if (await hasReusablePluginPackages()) {
 } else {
   await runNpmScript("package:plugin", "Plugin packaging");
 }
+await runNpmScript("package:analytics-plugin", "Analytics plugin packaging");
 
 await fs.rm(outputDir, { recursive: true, force: true });
 await fs.mkdir(outputDir, { recursive: true });
@@ -373,6 +374,11 @@ const includedPluginPackages = [
   ...(await copyPluginPackages()),
   await copyPddProcurementPluginPackage()
 ];
+const analyticsPluginVersion = JSON.parse(await fs.readFile(path.resolve(rootDir, "pivot-table-master", "manifest.json"), "utf8")).version;
+const analyticsPluginPackageName = `ozon-seller-analytics-plugin-${analyticsPluginVersion}.zip`;
+if (!includedPluginPackages.includes(analyticsPluginPackageName) || !includedPluginPackages.includes("ozon-seller-analytics-plugin.zip")) {
+  throw new Error(`Deployment artifact is missing analytics plugin package: ${analyticsPluginPackageName}`);
+}
 
 await writeDeployPackageJson();
 await rewriteDeployEnv();

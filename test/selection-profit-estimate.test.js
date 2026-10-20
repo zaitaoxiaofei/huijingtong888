@@ -69,3 +69,24 @@ test("suggested selection price reaches the target through the order model", () 
   assert.ok(quote.margin >= 20);
   assert.ok(estimateSelectionProfit(product, logisticsRule, suggested.saleRmb - 0.02).margin < 20);
 });
+
+test("OGL selection and order estimates include volumetric freight and electronic service fee", () => {
+  const oglRule = { id: 90, name: "OGL 陆运 Big", carrier: "OGL", channel: "economy",
+    base_fee_cny: 0, per_gram_cny: 0.0164, per_ticket_cny: 34.8,
+    min_weight_g: 2000, max_weight_g: 35000, min_price_rub: 1501, max_price_rub: 7000 };
+  const oglProduct = { ...product, package_weight_g: 2200, length_cm: 100, width_cm: 60,
+    height_cm: 6, exchange_rate: 10 };
+  const quote = estimateSelectionProfit(oglProduct, oglRule, 500);
+  assert.equal(quote.freight, 94);
+  assert.ok(quote.paymentFee > 0);
+});
+
+test("OGL minimum electronic service fee is allocated once across parcel items", () => {
+  const rule = { id: 91, name: "OGL 陆运 Extra Small", carrier: "OGL", channel: "economy",
+    base_fee_cny: 0, per_gram_cny: 0.0242, per_ticket_cny: 2.8,
+    min_weight_g: 1, max_weight_g: 500, min_price_rub: 1, max_price_rub: 1500 };
+  const quote = estimateSelectionProfit({ ...product, package_weight_g: 120,
+    length_cm: 11, width_cm: 10, height_cm: 10, exchange_rate: 10,
+    ogl_parcel_value_rub: 400 }, rule, 20);
+  assert.equal(quote.freight, 6.45);
+});

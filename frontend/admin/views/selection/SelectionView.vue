@@ -7,6 +7,8 @@ import { Sparkles } from "lucide-vue-next";
 import { apiClient } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { oglRuleFreightCny } from "../../../../src/ogl-rates.js";
+import { quoteLogisticsRules } from "../../utils/logistics-quote.js";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
@@ -412,6 +414,17 @@ const logisticsRuleOptions = computed(() => [...state.logisticsRules].sort((a, b
 }));
 const selectedLogisticsRule = computed(() => resolveSelectedLogisticsRule(dialog.form));
 const previewNumbers = computed(() => buildSelectionPreview(dialog.form, selectedLogisticsRule.value));
+const oglRuleMismatch = computed(() => {
+  const rule = selectedLogisticsRule.value;
+  if (String(rule?.carrier || "").toUpperCase() !== "OGL") return "";
+  const exchangeRate = Number(dialog.form.exchange_rate || 11.32);
+  const saleRmb = getSalePriceRmb(dialog.form) || previewNumbers.value.suggestedSaleRmb;
+  if (!(saleRmb > 0)) return "";
+  const quote = oglRuleFreightCny(rule, { weightG: dialog.form.package_weight_g,
+    length: dialog.form.length_cm, width: dialog.form.width_cm, height: dialog.form.height_cm,
+    parcelValueRub: saleRmb * exchangeRate, exchangeRate });
+  return quote ? "" : "商品所选 OGL 物流规则与当前售价、包裹重量或尺寸不匹配；请在物流规则中选择对应档位。";
+});
 const profitFormulaText = "净利润 = 售价 - 均摊采购成本 - 国际运费 - 佣金 - 尾程+银行 - 提现费 - 广告预算 - 退货损失";
 
 function normalizeText(value) {
@@ -788,7 +801,7 @@ function estimateCurrentSaleRow(row, logisticsRule) {
   };
 }
 
-function getTransportEstimate(row, logisticsRule) {
+function getTransportEstimate(row, logisticsRule, saleRmb = getSalePriceRmb(row)) {
   const rule = logisticsRule || {};
   const weight = Number(row?.package_weight_g || 0);
   const quantity = Math.max(Number(row?.purchase_quantity || 1), 1);
@@ -796,7 +809,12 @@ function getTransportEstimate(row, logisticsRule) {
   const base = Number(rule.base_fee_cny || 0);
   const perGram = Number(rule.per_gram_cny || 0);
   const perTicket = Number(rule.per_ticket_cny || 0);
-  const amount = roundMoney(base + weight * perGram + perTicket);
+  const exchangeRate = Number(row?.exchange_rate || 11.32);
+  const oglQuote = String(rule.carrier || "").toUpperCase() === "OGL"
+    ? oglRuleFreightCny(rule, { weightG: weight, length: row?.length_cm, width: row?.width_cm,
+      height: row?.height_cm, parcelValueRub: saleRmb * exchangeRate, exchangeRate })
+    : null;
+  const amount = oglQuote ? oglQuote.totalCny : roundMoney(base + weight * perGram + perTicket);
   return {
     rule,
     totalRmb: amount,
@@ -820,7 +838,15 @@ function getResolvedCommissionRate(row, listingPriceRub) {
 
 function resolveSelectedLogisticsRule(row) {
   if (manualLogisticsRule.value && row?.logistics_rule_id) {
-    return state.logisticsRules.find((item) => Number(item.id) === Number(row.logistics_rule_id)) || null;
+    const selected = state.logisticsRules.find((item) => Number(item.id) === Number(row.logistics_rule_id)) || null;
+    if (String(selected?.carrier || "").toUpperCase() !== "OGL") return selected;
+    const exchangeRate = Number(row.exchange_rate || 11.32);
+    const saleRmb = getSalePriceRmb(row);
+    const [cheapest] = quoteLogisticsRules(state.logisticsRules, {
+      carrier: "OGL", priceRub: saleRmb * exchangeRate, weightG: row.package_weight_g,
+      length: row.length_cm, width: row.width_cm, height: row.height_cm, exchangeRate
+    });
+    return state.logisticsRules.find((item) => Number(item.id) === Number(cheapest?.id)) || selected;
   }
   const weight = Number(row?.package_weight_g || 0);
   const saleRmb = Number(row?.sale_price_rmb || row?.air_sale_price_rmb || 0) || (Number(row?.listing_price_rub || 0) / Number(row?.exchange_rate || 11.32));
@@ -850,9 +876,9 @@ function buildSelectionPreview(row, logisticsRule) {
   const targetMode = String(row.desired_profit_mode || "margin");
   const adRate = resolvedAdvertisingRate(row);
   const purchaseUnit = getPurchaseCostPerUnit(row);
-  const transport = getTransportEstimate(row, logisticsRule);
   const suggested = estimateCurrentSaleRow(row, logisticsRule);
   const saleResolved = sale > 0 ? sale : suggested.saleRmb;
+  const transport = getTransportEstimate(row, logisticsRule, saleResolved);
   const listingPriceRub = Number(row.listing_price_rub || suggested.listingPriceRub || saleResolved * Number(row.exchange_rate || 11.32));
   const commission = saleResolved * getResolvedCommissionRate(row, listingPriceRub);
   const finalMile = saleResolved * 0.014 + (saleResolved < 50 ? 1 : saleResolved >= 750 ? 15 : saleResolved * 0.02);
@@ -2208,6 +2234,7 @@ async function openEditDialog(row) {
     if (seq !== editDetailRequestSeq) return;
     dialog.currentRow = { ...row, ...detail };
     dialog.form = buildEditDialogForm(detail);
+    manualLogisticsRule.value = String(detail.logistics_rule_carrier || "").toUpperCase() === "OGL" && Boolean(detail.logistics_rule_id);
     imageDirty.value = false;
     detailImagesDirty.value = false;
     dialogVisible.value = true;
@@ -2253,6 +2280,7 @@ function refreshSelectionSummaryFromRows() {
 
 async function submitDialog(options = {}) {
   if (!formRef.value) return;
+  if (oglRuleMismatch.value) { ElMessage.warning(oglRuleMismatch.value); return; }
   if (dialog.mode === "edit" && dialogDetailLoading.value) {
     ElMessage.warning("商品详情仍在加载，请稍后保存");
     return;
@@ -2273,7 +2301,8 @@ async function submitDialog(options = {}) {
       vehicle_model: dialog.form.vehicle_model || "",
       supplier_id: dialog.form.supplier_id || null,
       owner_person_id: Number(dialog.form.owner_person_id || 0) || null,
-      logistics_rule_id: Number(dialog.form.logistics_rule_id || 0) || null,
+      logistics_rule_id: Number(String(selectedLogisticsRule.value?.carrier || "").toUpperCase() === "OGL"
+        ? selectedLogisticsRule.value?.id : dialog.form.logistics_rule_id) || null,
       shipping_method: dialog.form.shipping_method || "air_land",
       purchase_cost: Number(dialog.form.purchase_cost || 0),
       domestic_shipping: Number(dialog.form.domestic_shipping || 0),
@@ -3250,6 +3279,7 @@ onBeforeUnmount(() => {
                 </div>
                 <el-tag effect="plain">{{ previewNumbers.targetMode === "margin" ? "按利润率定价" : "按利润额定价" }}</el-tag>
               </div>
+              <el-alert v-if="oglRuleMismatch" type="warning" :closable="false" :title="oglRuleMismatch" />
 
               <div class="selection-preview-compare">
                 <div class="selection-preview-row">

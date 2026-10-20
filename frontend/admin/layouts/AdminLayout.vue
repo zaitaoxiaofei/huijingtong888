@@ -64,7 +64,7 @@ const contextMenu = ref({
 const pluginUpdates = ref({});
 const pluginDownloadLinks = [
   { command: "collector", label: "商品采集插件", url: "/downloads/ozon-erp-collector-plugin.rar" },
-  { command: "analytics", label: "店铺分析插件", url: "/downloads/ozon-seller-analytics-plugin.rar" }
+  { command: "analytics", label: "店铺分析插件", url: "/downloads/ozon-seller-analytics-plugin.zip" }
 ];
 const routeSwitching = ref(false);
 let routeSwitchTimer = 0;
