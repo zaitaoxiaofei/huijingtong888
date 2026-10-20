@@ -13,12 +13,14 @@ const version = String(manifest.version || "").trim();
 if (!/^\d+(?:\.\d+)+$/.test(version)) throw new Error("Analytics plugin manifest version is invalid");
 await fs.mkdir(outputDir, { recursive: true });
 
-for (const name of [`ozon-seller-analytics-plugin-${version}.zip`, "ozon-seller-analytics-plugin.zip"]) {
-  const target = path.join(outputDir, name);
-  await fs.rm(target, { force: true });
-  await execFileAsync("zip", ["-q", "-r", target, "."], { cwd: pluginDir });
-  const contents = await execFileAsync("unzip", ["-p", target, "manifest.json"]);
-  if (JSON.parse(contents.stdout).version !== version) throw new Error(`Analytics plugin package version mismatch: ${name}`);
-}
+const versionedName = `ozon-seller-analytics-plugin-${version}.zip`;
+const versionedPath = path.join(outputDir, versionedName);
+const aliasPath = path.join(outputDir, "ozon-seller-analytics-plugin.zip");
+await fs.rm(versionedPath, { force: true });
+await fs.rm(aliasPath, { force: true });
+await execFileAsync("zip", ["-q", "-r", versionedPath, "."], { cwd: pluginDir });
+const contents = await execFileAsync("unzip", ["-p", versionedPath, "manifest.json"]);
+if (JSON.parse(contents.stdout).version !== version) throw new Error(`Analytics plugin package version mismatch: ${versionedName}`);
+await fs.copyFile(versionedPath, aliasPath);
 
 console.log(`Packaged analytics plugin ${version}`);
