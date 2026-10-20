@@ -211,12 +211,12 @@ test("库存销量从完整的 SKU 日表关联当前库存，保留组合配件
   assert.match(queries.at(-1).sql, /FROM inventory_alert_sku_daily daily/);
 });
 
-test("库存销量读时最多补 15 个脏日，失败或补后仍脏才回退订单查询", async () => {
+test("库存销量读时补齐 30 天窗口，失败或补后仍脏才回退订单查询", async () => {
   const window = { from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" };
   const start = service.indexOf("let inventoryAlertSalesReadRepairInflightMysql");
   const end = service.indexOf("async function inventoryAlertProductSkusMysql", start);
   const run = async ({ missingCount, failAt = 0, remainsDirty = false, concurrent = false, repeat = false }) => {
-    const dates = Array.from({ length: missingCount }, (_, index) => new Date(Date.parse("2026-10-01T00:00:00Z") + index * 86_400_000)
+    const dates = Array.from({ length: missingCount }, (_, index) => new Date(Date.parse("2026-09-19T00:00:00Z") + index * 86_400_000)
       .toISOString().slice(0, 10));
     const refreshed = [];
     let completedRefreshes = 0;
@@ -258,10 +258,13 @@ test("库存销量读时最多补 15 个脏日，失败或补后仍脏才回退�
   const shared = await run({ missingCount: 2, concurrent: true });
   assert.equal(shared.refreshed.length, 2, "concurrent tenants share one global daily repair");
   assert.equal(shared.dailyCalls, 2);
-  const limit = await run({ missingCount: 15 });
-  assert.equal(limit.refreshed.length, 15);
+  const backlog = await run({ missingCount: 23 });
+  assert.equal(backlog.refreshed.length, 23, "the observed production backlog uses daily repair");
+  assert.equal(backlog.dailyCalls, 1);
+  const limit = await run({ missingCount: 30 });
+  assert.equal(limit.refreshed.length, 30);
   assert.equal(limit.dailyCalls, 1);
-  const large = await run({ missingCount: 16 });
+  const large = await run({ missingCount: 31 });
   assert.equal(large.refreshed.length, 0);
   assert.deepEqual(Array.from(large.result), ["raw"]);
   const failed = await run({ missingCount: 2, failAt: 1 });
