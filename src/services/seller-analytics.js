@@ -2376,8 +2376,15 @@ async function claimNextCollectRequests(db, tenantId = 'admin', limit = 6, optio
 }
 
 async function claimNextCollectRequestRows(tenantId, take, requestedStoreIds = []) {
-  await ensureSellerAnalyticsSchema()
-  await restoreMissingCollectQueueRows(tenantId, requestedStoreIds)
+  return withCollectRunStateLock(tenantId, async () => {
+    await ensureSellerAnalyticsSchema()
+    await pruneCollectQueueOrphans(tenantId, requestedStoreIds)
+    await restoreMissingCollectQueueRows(tenantId, requestedStoreIds)
+    return claimMysqlCollectRequests(tenantId, take, requestedStoreIds)
+  })
+}
+
+async function claimMysqlCollectRequests(tenantId, take, requestedStoreIds) {
   return withMysqlTransaction(async (connection) => {
     const params = [tenantId]
     const storeClause = requestedStoreIds.length
@@ -2448,6 +2455,42 @@ async function restoreMissingCollectQueueRows(tenantId, requestedStoreIds = []) 
   const existingIds = new Set(existing.map((row) => String(row.id)))
   for (const run of activeRuns) {
     if (!existingIds.has(String(run.id))) await saveCollectRunQueueRows(run)
+  }
+}
+
+async function pruneCollectQueueOrphans(tenantId, requestedStoreIds = []) {
+  await ensureSellerAnalyticsSchema()
+  const storeClause = requestedStoreIds.length
+    ? `AND store_id IN (${requestedStoreIds.map(() => '?').join(',')})`
+    : ''
+  const staleBefore = new Date(Date.now() - COLLECT_REQUEST_STALE_MS)
+  const queuedRuns = await mysqlQuery(`
+    SELECT DISTINCT run_id FROM seller_analytics_collect_requests
+    WHERE tenant_id=? ${storeClause}
+      AND (status='pending' OR (status='running' AND claimed_at < ?))
+    ORDER BY run_id
+  `, [tenantId, ...requestedStoreIds, staleBefore])
+  for (const row of queuedRuns) {
+    const runId = safeString(row.run_id)
+    if (!runId) continue
+    const run = await loadCollectRunState(sellerAnalyticsDb, runId, tenantId)
+    const activeRun = run && ['pending', 'running'].includes(run.status)
+    const canonicalStatuses = new Map((activeRun ? run.requests : []).map((request) => [safeString(request.id), request.status || 'pending']))
+    const queueRows = await mysqlQuery(`
+      SELECT id FROM seller_analytics_collect_requests
+      WHERE tenant_id=? AND run_id=? ${storeClause}
+        AND (status='pending' OR (status='running' AND claimed_at < ?))
+    `, [tenantId, runId, ...requestedStoreIds, staleBefore])
+    const orphanIds = queueRows
+      .map((item) => safeString(item.id))
+      .filter((id) => !canonicalStatuses.has(id) || canonicalStatuses.get(id) !== 'pending')
+    if (!orphanIds.length) continue
+    await mysqlExecute(`
+      DELETE FROM seller_analytics_collect_requests
+      WHERE tenant_id=? AND run_id=? ${storeClause}
+        AND id IN (${orphanIds.map(() => '?').join(',')})
+        AND (status='pending' OR (status='running' AND claimed_at < ?))
+    `, [tenantId, runId, ...requestedStoreIds, ...orphanIds, staleBefore])
   }
 }
 
@@ -2571,6 +2614,7 @@ async function retryCollectRun(db, runId, tenantId = 'admin') {
     run.status = resetCount > 0 ? 'pending' : run.status
     run.updated_at = new Date().toISOString()
     await saveCollectRunState(db, run)
+    if (db === sellerAnalyticsDb) await syncCollectRunQueueRows(run)
     return { run, resetCount }
   })
 }
@@ -2595,6 +2639,16 @@ async function deleteCollectRun(db, runId, tenantId = 'admin') {
       throw error
     }
     const repo = db.getRepository('Setting')
+    if (db === sellerAnalyticsDb) {
+      await withMysqlTransaction(async (connection) => {
+        await executeSellerAnalyticsSql(connection, `
+          DELETE FROM seller_analytics_collect_requests WHERE tenant_id=? AND run_id=?
+        `, [tenantId, id])
+        await executeSellerAnalyticsSql(connection, `
+          DELETE FROM seller_analytics_collect_runs WHERE tenant_id=? AND id=?
+        `, [tenantId, id])
+      })
+    }
     const result = await repo.delete({ key: getSettingKeyForCollectRun(id), tenant_id: tenantId })
     return {
       success: true,

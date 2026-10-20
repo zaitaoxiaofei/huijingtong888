@@ -28,6 +28,20 @@ test("collect queue converts ISO timestamps before writing MySQL DATETIME column
   assert.doesNotMatch(source, /stringifyJson\(run\.previous_period \|\| \{\}\), run\.created_at, run\.updated_at/);
 });
 
+test("MySQL collect queue prunes stale orphan tasks and keeps queue projection in sync on retry/delete", () => {
+  const source = fs.readFileSync(new URL("../src/services/seller-analytics.js", import.meta.url), "utf8");
+  const prune = source.match(/async function pruneCollectQueueOrphans\([\s\S]*?\n\}/)?.[0] || "";
+  const retry = source.match(/async function retryCollectRun\([\s\S]*?\n\}/)?.[0] || "";
+  const remove = source.match(/async function deleteCollectRun\([\s\S]*?\n\}/)?.[0] || "";
+
+  assert.match(prune, /loadCollectRunState\(sellerAnalyticsDb, runId, tenantId\)/);
+  assert.match(prune, /DELETE FROM seller_analytics_collect_requests/);
+  assert.match(prune, /claimed_at < \?/);
+  assert.match(retry, /syncCollectRunQueueRows\(run\)/);
+  assert.match(remove, /DELETE FROM seller_analytics_collect_requests WHERE tenant_id=\? AND run_id=\?/);
+  assert.match(remove, /DELETE FROM seller_analytics_collect_runs WHERE tenant_id=\? AND id=\?/);
+});
+
 function createMemorySellerAnalyticsDb() {
   const tables = {
     SellerAnalyticsSnapshot: [],
