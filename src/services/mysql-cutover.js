@@ -4123,12 +4123,13 @@ export async function backfillInventoryAlertSalesMysql(body = {}) {
   for (const dateKey of missing.slice(0, maxDays)) {
     await refreshInventoryAlertSkuDailyMysql({ from: dateKey, to: dateKey });
   }
-  const olderDirty = missing.length < maxDays ? await mysqlQuery(`
+  const olderLimit = Math.min(5, Math.max(0, maxDays - missing.length));
+  const olderDirty = olderLimit > 0 ? await mysqlQuery(`
     SELECT DATE_FORMAT(date_key, '%Y-%m-%d') AS date_key
     FROM inventory_alert_sku_daily_refresh
     WHERE dirty = 1 AND date_key < ?
     ORDER BY date_key DESC LIMIT ?
-  `, [salesWindow.from30, maxDays - missing.length]) : [];
+  `, [salesWindow.from30, olderLimit]) : [];
   for (const row of olderDirty) {
     await refreshInventoryAlertSkuDailyMysql({ from: row.date_key, to: row.date_key });
   }
