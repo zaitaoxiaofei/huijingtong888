@@ -7,7 +7,7 @@ import InventoryIdentity from '../../../orders/components/InventoryIdentity.vue'
 import LedgerBatchTrace from './LedgerBatchTrace.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
-const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
+const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
 const ledgerBase = computed(() => props.inventoryMode ? '/api/inventory/ledger' : '/api/procurement/ledger');
@@ -134,6 +134,7 @@ const orderCoverageConclusion = computed(() => {
 });
 const pendingCosts = computed(() => (data.value?.cost_tasks || []).filter(row => Number(row.quantity) > Number(row.resolved_quantity)));
 let loadVersion = 0;
+let pendingInitialAction = '';
 const labels = {
   link_purchase_bulk: '批量核对采购来源',
   receive_and_count: '历史实收补登记与库存校准',
@@ -196,8 +197,14 @@ async function load(id = productId.value) {
   loading.value = true;
   try {
     const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}`, { noCache: true });
-    if (version === loadVersion) data.value = result;
-  } catch (error) { if (version === loadVersion) { data.value = null; loadError.value = error.message; } }
+    if (version === loadVersion) {
+      data.value = result;
+      if (pendingInitialAction === 'stocktake' && props.modelValue && props.inventoryMode && props.stocktakeEnabled) {
+        pendingInitialAction = '';
+        edit('stocktake');
+      }
+    }
+  } catch (error) { if (version === loadVersion) { data.value = null; loadError.value = error.message; pendingInitialAction = ''; } }
   finally { if (version === loadVersion) loading.value = false; }
 }
 async function discardForm() {
@@ -213,7 +220,7 @@ async function changeProduct(id) {
   managementVisible.value = false;
   await load(id);
 }
-async function closeDetail(done) { if (await discardForm()) { ++loadVersion; done(); } }
+async function closeDetail(done) { if (await discardForm()) { pendingInitialAction = ''; ++loadVersion; done(); } }
 async function closeForm(done) { if (await discardForm()) done(); }
 function moreAction(command) {
   if (command === 'management') managementVisible.value = !managementVisible.value;
@@ -291,7 +298,7 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; load(props.productId); if (!props.orderOverview && !props.inventoryMode) search(''); } else ++loadVersion; }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !props.inventoryMode) search(''); } else { pendingInitialAction = ''; ++loadVersion; } }, { immediate: true });
 </script>
 
 <template>

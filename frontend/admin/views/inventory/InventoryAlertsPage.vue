@@ -30,7 +30,9 @@ const requestDialogVisible = ref(false);
 const requestProducts = ref([]);
 const ledgerVisible = ref(false);
 const selectedInventory = ref(null);
+const ledgerInitialAction = ref("");
 const editingLeadProductId = ref(0);
+const editingLeadRow = ref(null);
 const leadSavingProductId = ref(0);
 const leadForm = reactive({ production_lead_days: 7, warehouse_logistics_days: 2, expected_production_lead_days: 7, expected_warehouse_logistics_days: 2 });
 const productionLeadOptions = [3, 5, 7, 10, 15, 30];
@@ -175,14 +177,16 @@ function linkedSkuCount(row) {
   return Number(row.sku_count ?? linkedSkus(row).length);
 }
 
-function openInventoryDetails(row) {
+function openInventoryDetails(row, initialAction = "") {
   selectedInventory.value = row;
+  ledgerInitialAction.value = initialAction;
   ledgerVisible.value = true;
 }
 
 function startLeadEdit(row) {
   if (!canEditInventory.value || leadSavingProductId.value) return;
   editingLeadProductId.value = Number(row.product_id);
+  editingLeadRow.value = row;
   leadForm.production_lead_days = Number(row.production_lead_days ?? 7);
   leadForm.warehouse_logistics_days = Number(row.warehouse_logistics_days ?? 2);
   leadForm.expected_production_lead_days = leadForm.production_lead_days;
@@ -191,6 +195,7 @@ function startLeadEdit(row) {
 
 function cancelLeadEdit() {
   editingLeadProductId.value = 0;
+  editingLeadRow.value = null;
 }
 
 async function saveLeadTimes(row) {
@@ -208,7 +213,7 @@ async function saveLeadTimes(row) {
       expected_production_lead_days: leadForm.expected_production_lead_days,
       expected_warehouse_logistics_days: leadForm.expected_warehouse_logistics_days
     });
-    editingLeadProductId.value = 0;
+    cancelLeadEdit();
     ElMessage.success("时长已更新，预警线已重新计算");
     await loadPageData({ refresh: true });
   } catch (error) {
@@ -231,15 +236,6 @@ function openWarehouseRequest(row) {
     suggested_purchase_qty: Math.max(1, Number(row.suggested_purchase_qty || 0))
   }];
   requestDialogVisible.value = true;
-}
-
-function changeView(view) {
-  cancelLeadEdit();
-  state.filters.view = view;
-  state.filters.alertType = "all";
-  state.filters.page = 1;
-  syncRouteQuery("manual");
-  loadPageData();
 }
 
 function changeAlertType(value) {
@@ -362,7 +358,14 @@ async function loadPageData({ refresh = false } = {}) {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
+watch(() => route.query, () => {
+  const previousView = state.filters.view;
+  applyRouteState();
+  if (previousView !== state.filters.view) {
+    cancelLeadEdit();
+    loadPageData();
+  }
+}, { deep: true });
 watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
@@ -373,12 +376,6 @@ onMounted(async () => {
 
 <template>
   <div class="inventory-page-shell inventory-card">
-    <div class="alert-view-switch">
-      <div class="alert-view-buttons">
-        <el-button size="small" :type="inventoryView ? 'primary' : 'default'" @click="changeView('inventory')">库存视角</el-button>
-        <el-button size="small" :type="!inventoryView ? 'primary' : 'default'" @click="changeView('sku')">FBP SKU 视角</el-button>
-      </div>
-    </div>
     <InventoryPageToolbar
       class="alert-toolbar"
       :filters="state.filters"
@@ -406,56 +403,54 @@ onMounted(async () => {
         <el-table-column label="主图" width="90" fixed="left">
           <template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" fit="cover" /></template>
         </el-table-column>
-        <el-table-column label="库存信息" min-width="285">
+        <el-table-column label="库存信息" min-width="250">
           <template #default="{ row }">
-            <div class="cell-stack">
+            <div class="cell-stack alert-identity">
               <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_id }}</span>
-              <span>剩余可用 <strong class="alert-available-value" :class="{ 'danger-text': row.available_stock <= 0 }">{{ integer(row.available_stock) }}</strong> · 本地实物 <strong>{{ integer(row.physical_stock) }}</strong></span>
-              <span class="muted-text">采购在途 {{ integer(row.incoming_stock) }} · 待履约占用 {{ integer(row.open_order_demand_qty) }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="预警线" width="120" align="center">
-          <template #default="{ row }"><div class="cell-stack cell-center"><strong class="alert-threshold-value">{{ integer(row.alert_quantity) }} 件</strong><span class="muted-text">日均 {{ Number(row.daily_sales_7d || 0).toFixed(2) }}</span><el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag></div></template>
-        </el-table-column>
-        <el-table-column label="建议补货" width="125" align="center">
+        <el-table-column label="近 30 天消耗" width="158">
           <template #default="{ row }">
-            <div class="cell-stack cell-center">
-              <strong>{{ integer(row.suggested_purchase_qty) }} 件</strong>
-              <span class="muted-text">已扣采购在途</span>
-              <el-tag v-if="row.in_transit" type="primary" size="small">采购在途</el-tag>
+            <div class="cell-stack alert-consumption">
+              <div class="alert-metric-row"><strong class="alert-metric-value">{{ integer(row.recent_30d_qty) }} 件</strong></div>
+              <div class="alert-metric-row"><span>近 7 天</span><strong class="alert-metric-value">{{ integer(row.recent_7d_qty) }}</strong></div>
+              <div class="alert-metric-row"><span>近 15 天</span><strong class="alert-metric-value">{{ integer(row.recent_15d_qty) }}</strong></div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="关联店铺 / SKU" min-width="200">
+        <el-table-column label="库存分析" min-width="265">
           <template #default="{ row }">
-            <div class="cell-stack alert-relations">
-              <span><strong>{{ linkedShopCount(row) }}</strong> 个店铺 · <strong>{{ linkedSkuCount(row) }}</strong> 个线上 SKU</span>
-              <span v-if="linkedShops(row).length" class="alert-relation-preview muted-text">
-                店铺：{{ linkedShops(row).slice(0, 2).map((shop) => shop.shop_name || shop.shop_id).join('、') }}{{ linkedShops(row).length > 2 ? ` 等 ${linkedShops(row).length} 家` : '' }}
-              </span>
-              <span v-if="linkedSkus(row).length" class="alert-relation-preview muted-text">
-                SKU：{{ linkedSkus(row).slice(0, 2).map((sku) => sku.ozon_sku || sku.offer_id || '-').join('、') }}{{ linkedSkus(row).length > 2 ? ` 等 ${linkedSkus(row).length} 个` : '' }}
-              </span>
-              <span v-if="!linkedSkuCount(row)" class="muted-text">暂无关联线上 SKU</span>
+            <div class="cell-stack alert-analysis">
+              <div class="alert-analysis-counts">
+                <div><span>本地实物</span><strong class="alert-metric-value">{{ integer(row.physical_stock) }}</strong></div>
+                <div><span>剩余可用</span><strong class="alert-metric-value">{{ integer(row.available_stock) }}</strong></div>
+              </div>
+              <div class="alert-metric-row"><span>预警线</span><strong class="alert-metric-value">{{ integer(row.alert_quantity) }}</strong><el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag></div>
+              <div class="alert-metric-row"><span>可用 − 预警线</span><strong class="alert-metric-value">{{ integer(Number(row.available_stock || 0) - Number(row.alert_quantity || 0)) }}</strong></div>
+              <div class="alert-metric-row"><span>建议补货</span><strong class="alert-metric-value">{{ integer(row.suggested_purchase_qty) }}</strong><span>已扣在途</span><strong class="alert-metric-value">{{ integer(row.incoming_stock) }}</strong></div>
+              <div class="alert-metric-row"><span>待履约占用</span><strong class="alert-metric-value">{{ integer(row.open_order_demand_qty) }}</strong></div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="生产周期" width="110" align="center">
-          <template #default="{ row }"><div class="cell-stack cell-center"><el-select v-if="editingLeadProductId === Number(row.product_id)" v-model="leadForm.production_lead_days" size="small" aria-label="生产周期"><el-option v-for="days in productionLeadOptions" :key="days" :label="`${days} 天`" :value="days" /></el-select><template v-else><strong>{{ row.production_lead_days ?? 7 }} 天</strong><el-button v-if="canEditInventory" link type="primary" size="small" @click="startLeadEdit(row)">编辑</el-button></template></div></template>
+        <el-table-column label="关联店铺" width="112" align="center">
+          <template #default="{ row }">
+            <span class="alert-relation-count"><strong class="alert-metric-value">{{ linkedShopCount(row) }}</strong> 家</span>
+          </template>
         </el-table-column>
-        <el-table-column label="物流到仓" width="120" align="center">
-          <template #default="{ row }"><div class="cell-stack cell-center"><el-select v-if="editingLeadProductId === Number(row.product_id)" v-model="leadForm.warehouse_logistics_days" size="small" aria-label="物流到仓时长"><el-option v-for="days in logisticsDayOptions" :key="days" :label="`${days} 天`" :value="days" /></el-select><template v-else><strong>{{ row.warehouse_logistics_days ?? 2 }} 天</strong><el-button v-if="canEditInventory" link type="primary" size="small" @click="startLeadEdit(row)">编辑</el-button></template></div></template>
+        <el-table-column label="关联 SKU" width="112" align="center">
+          <template #default="{ row }"><span class="alert-relation-count"><strong class="alert-metric-value">{{ linkedSkuCount(row) }}</strong> 个</span></template>
         </el-table-column>
-        <el-table-column label="销量" width="150" align="center">
-          <template #default="{ row }"><div class="cell-stack cell-center"><strong>近 30 天 {{ integer(row.recent_30d_qty) }}</strong><span class="muted-text">近 7 天 {{ integer(row.recent_7d_qty) }} · 15 天 {{ integer(row.recent_15d_qty) }}</span></div></template>
+        <el-table-column label="库存周转时间" width="165">
+          <template #default="{ row }"><div class="cell-stack alert-lead-time"><div class="alert-metric-row"><span>生产周期</span><strong class="alert-metric-value">{{ row.production_lead_days ?? 7 }} 天</strong></div><div class="alert-metric-row"><span>物流到仓</span><strong class="alert-metric-value">{{ row.warehouse_logistics_days ?? 2 }} 天</strong></div><el-button v-if="canEditInventory" size="small" plain @click="startLeadEdit(row)">修改时长</el-button></div></template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="158" fixed="right">
           <template #default="{ row }">
             <div class="cell-stack alert-row-actions">
-              <template v-if="editingLeadProductId === Number(row.product_id)"><el-button link type="primary" :loading="leadSavingProductId === Number(row.product_id)" @click="saveLeadTimes(row)">保存时长</el-button><el-button link :disabled="!!leadSavingProductId" @click="cancelLeadEdit">取消</el-button></template>
-              <template v-else><el-button link type="primary" @click="openInventoryDetails(row)">查看明细</el-button><el-button v-if="canSubmitRequest" link type="primary" :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button></template>
+              <el-button v-if="canEditInventory" size="small" type="primary" plain @click="openInventoryDetails(row, 'stocktake')">更新本地库存</el-button>
+              <el-button v-if="canSubmitRequest" size="small" type="warning" plain :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button>
+              <el-button size="small" @click="openInventoryDetails(row)">查看明细</el-button>
             </div>
           </template>
         </el-table-column>
@@ -565,8 +560,19 @@ onMounted(async () => {
       @update:page="handlePageChange"
       @update:pageSize="handlePageSizeChange"
     />
+    <el-dialog :model-value="!!editingLeadProductId" title="修改库存周转时间" width="420px" append-to-body :close-on-click-modal="false" @update:model-value="value => { if (!value) cancelLeadEdit(); }">
+      <template v-if="editingLeadRow">
+        <p class="alert-lead-dialog-product">库存 ID：{{ editingLeadRow.inventory_number || editingLeadRow.inventory_id || editingLeadRow.product_id }} · {{ editingLeadRow.product_name }}</p>
+        <el-form label-width="96px">
+          <el-form-item label="生产周期"><el-select v-model="leadForm.production_lead_days" aria-label="生产周期"><el-option v-for="days in productionLeadOptions" :key="days" :label="`${days} 天`" :value="days" /></el-select></el-form-item>
+          <el-form-item label="物流到仓"><el-select v-model="leadForm.warehouse_logistics_days" aria-label="物流到仓时长"><el-option v-for="days in logisticsDayOptions" :key="days" :label="`${days} 天`" :value="days" /></el-select></el-form-item>
+        </el-form>
+        <p class="alert-lead-dialog-note">预警线按近 7 天日均消耗 ×（生产周期 + 物流到仓时长）计算。</p>
+      </template>
+      <template #footer><el-button :disabled="!!leadSavingProductId" @click="cancelLeadEdit">取消</el-button><el-button type="primary" :loading="!!leadSavingProductId" @click="saveLeadTimes(editingLeadRow)">保存时长</el-button></template>
+    </el-dialog>
     <WarehouseProcurementRequestDialog v-model="requestDialogVisible" :products="requestProducts" @submitted="loadPageData({ refresh: true })" />
-    <ProcurementLedgerDialog v-if="ledgerVisible && selectedInventory" v-model="ledgerVisible" :product-id="Number(selectedInventory.product_id)" inventory-mode :stocktake-enabled="canEditInventory" @saved="loadPageData({ refresh: true })">
+    <ProcurementLedgerDialog v-if="ledgerVisible && selectedInventory" v-model="ledgerVisible" :product-id="Number(selectedInventory.product_id)" :initial-action="ledgerInitialAction" inventory-mode :stocktake-enabled="canEditInventory" @saved="loadPageData({ refresh: true })">
       <template #inventory-relations>
         <div class="alert-detail-heading">
           <div class="product-cell">
@@ -574,10 +580,11 @@ onMounted(async () => {
             <div class="cell-stack">
               <strong>{{ selectedInventory.product_name || '-' }}</strong>
               <span class="inventory-id-display">库存 ID：{{ selectedInventory.inventory_number || selectedInventory.inventory_id || selectedInventory.product_id }}</span>
-              <span class="muted-text">{{ linkedShopCount(selectedInventory) }} 个店铺 · {{ linkedSkuCount(selectedInventory) }} 个线上 SKU · 近 30 天合计 {{ integer(selectedInventory.recent_30d_qty) }} 件</span>
+              <span class="muted-text">{{ linkedShopCount(selectedInventory) }} 个店铺 · {{ linkedSkuCount(selectedInventory) }} 个线上 SKU</span>
+              <span class="muted-text">消耗：近 7 天 {{ integer(selectedInventory.recent_7d_qty) }} · 近 15 天 {{ integer(selectedInventory.recent_15d_qty) }} · 近 30 天 {{ integer(selectedInventory.recent_30d_qty) }} 件</span>
             </div>
           </div>
-          <span class="muted-text">多个店铺及线上 SKU 的销量汇总到同一个库存。以下是该库存的完整关联关系。</span>
+          <span class="muted-text">多个店铺及线上 SKU 的订单消耗汇总到同一个库存。以下是该库存的完整关联关系。</span>
         </div>
         <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存关联 SKU 明细" tabindex="0">
           <el-table :data="linkedSkus(selectedInventory)" stripe border class="erp-data-table" max-height="320" empty-text="暂无关联线上 SKU">
@@ -605,32 +612,37 @@ onMounted(async () => {
 
 <style scoped>
 .inventory-page-shell.inventory-card { gap: 8px; }
-.alert-view-switch { display: flex; justify-content: flex-end; align-items: center; padding: 2px 10px 0; }
-.alert-view-buttons { display: flex; gap: 8px; }
-.alert-view-buttons .el-button + .el-button { margin-left: 0; }
-.alert-toolbar { position: static; margin: 0; padding: 9px 12px; border-radius: 10px; }
+.alert-toolbar { position: static; margin: 0; padding: 8px 12px; border-radius: 10px; }
 .alert-toolbar :deep(.erp-filter-bar) { justify-content: space-between; gap: 12px; }
 .alert-toolbar :deep(.inventory-toolbar-form) { flex-wrap: nowrap; gap: 8px; }
 .alert-toolbar :deep(.el-form-item) { margin: 0; }
 .alert-toolbar :deep(.el-form-item__label:empty) { display: none; }
+.alert-toolbar :deep(.inventory-toolbar-form .el-input) { width: 260px !important; }
 .alert-status-filters { display: flex; align-items: center; flex-wrap: nowrap; gap: 5px; }
 .alert-status-filters .el-button + .el-button { margin-left: 0; }
 .alert-filter-count { margin-left: 5px; opacity: .8; }
-.alert-available-value { font-size: 18px; font-weight: 800; color: var(--el-color-primary); }
-.alert-threshold-value { font-size: 17px; }
-.inventory-alert-table :deep(.el-table__row) { height: 92px; }
-.alert-relations { min-width: 0; }
-.alert-relation-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.alert-row-actions { align-items: flex-start; }
+.inventory-alert-table :deep(.el-table__row) { height: 112px; }
+.alert-identity .inventory-id-display { font-size: 17px; font-weight: 700; color: var(--el-text-color-primary); }
+.alert-metric-value { font-size: 15px; font-weight: 650; line-height: 1.3; color: var(--el-text-color-primary); }
+.alert-metric-row { display: flex; align-items: baseline; gap: 5px; line-height: 1.3; white-space: nowrap; }
+.alert-metric-row > span, .alert-analysis-counts span { font-size: 12px; color: var(--el-text-color-secondary); }
+.alert-consumption, .alert-analysis, .alert-lead-time { gap: 5px; }
+.alert-analysis-counts { display: flex; flex-wrap: wrap; gap: 12px; }
+.alert-analysis-counts > div { display: flex; align-items: baseline; gap: 5px; }
+.alert-relation-count { white-space: nowrap; color: var(--el-text-color-secondary); }
+.alert-lead-time :deep(.el-button) { align-self: flex-start; margin: 0; }
+.alert-row-actions { align-items: stretch; gap: 4px; }
 .alert-row-actions :deep(.el-button) { margin: 0; }
+.alert-lead-dialog-product { margin: 0 0 16px; color: var(--el-text-color-regular); }
+.alert-lead-dialog-note { margin: 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .alert-detail-heading { display: grid; gap: 12px; margin-bottom: 18px; }
 .alert-sku-value { overflow-wrap: anywhere; }
 @media (max-width: 1300px) {
   .alert-toolbar :deep(.erp-filter-bar), .alert-toolbar :deep(.inventory-toolbar-form), .alert-status-filters { flex-wrap: wrap; }
 }
 @media (max-width: 760px) {
-  .alert-view-switch { justify-content: flex-start; }
   .alert-toolbar :deep(.inventory-toolbar-form) { display: flex; flex-direction: column; align-items: stretch; }
+  .alert-toolbar :deep(.inventory-toolbar-form .el-input) { width: 100% !important; }
   .alert-status-filters { width: 100%; }
   .alert-status-filters .el-button { flex: 1 1 auto; }
 }
