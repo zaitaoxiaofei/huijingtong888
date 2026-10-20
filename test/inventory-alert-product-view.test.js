@@ -116,7 +116,7 @@ test("库存销量从完整的 SKU 日表关联当前库存，保留组合配件
     compactProductImageUrlForListMysql: (row) => row.image_url,
     mysqlQuery: async (sql, params) => { queries.push({ sql, params }); return []; }
   });
-  const start = service.indexOf("async function inventoryAlertProductSalesMysql");
+  const start = service.indexOf("let inventoryAlertSalesReadRepairInflightMysql");
   const end = service.indexOf("export async function updateInventoryProductLeadTimesMysql", start);
   const predicateStart = service.indexOf("function tenantShopPredicateMysql");
   const predicateEnd = service.indexOf("async function activeShopForTenantMysql", predicateStart);
@@ -197,10 +197,118 @@ test("库存销量从完整的 SKU 日表关联当前库存，保留组合配件
   assert.match(queries[6].sql, /ORDER BY cp\.id, sm\.shop_id, sm\.ozon_sku\s*$/);
 
   let rawFallbackCalls = 0;
-  context.inventoryAlertSalesMissingDatesMysql = async () => ["2026-10-18"];
+  let repairedDays = 0;
+  context.inventoryAlertSalesMissingDatesMysql = async () => repairedDays ? [] : ["2026-10-18"];
+  context.refreshInventoryAlertSkuDailyMysql = async ({ from, to }) => {
+    assert.equal(from, "2026-10-18");
+    assert.equal(to, from);
+    repairedDays += 1;
+  };
   context.inventoryAlertProductSalesRawMysql = async () => { rawFallbackCalls += 1; return []; };
   await context.inventoryAlertProductSalesMysql(44, false);
-  assert.equal(rawFallbackCalls, 1, "incomplete or dirty days use the old source query");
+  assert.equal(repairedDays, 1, "a dirty day is repaired before reading the compact daily table");
+  assert.equal(rawFallbackCalls, 0);
+  assert.match(queries.at(-1).sql, /FROM inventory_alert_sku_daily daily/);
+});
+
+test("库存销量读时最多补 15 个脏日，失败或补后仍脏才回退订单查询", async () => {
+  const window = { from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" };
+  const start = service.indexOf("let inventoryAlertSalesReadRepairInflightMysql");
+  const end = service.indexOf("async function inventoryAlertProductSkusMysql", start);
+  const run = async ({ missingCount, failAt = 0, remainsDirty = false, concurrent = false, repeat = false }) => {
+    const dates = Array.from({ length: missingCount }, (_, index) => new Date(Date.parse("2026-10-01T00:00:00Z") + index * 86_400_000)
+      .toISOString().slice(0, 10));
+    const refreshed = [];
+    let completedRefreshes = 0;
+    let releaseFirstRefresh;
+    const firstRefreshGate = new Promise((resolve) => { releaseFirstRefresh = resolve; });
+    let rawCalls = 0;
+    let dailyCalls = 0;
+    const context = vm.createContext({
+      completedBeijingSalesWindow: () => window,
+      inventoryAlertSalesMissingDatesMysql: async () => completedRefreshes >= missingCount && !remainsDirty ? [] : dates,
+      refreshInventoryAlertSkuDailyMysql: async ({ from, to }) => {
+        assert.equal(from, to);
+        refreshed.push(from);
+        if (refreshed.length === failAt) throw new Error("refresh failed");
+        if (concurrent && refreshed.length === 1) await firstRefreshGate;
+        completedRefreshes += 1;
+      },
+      inventoryAlertProductSalesRawMysql: async () => { rawCalls += 1; return ["raw"]; },
+      tenantShopPredicateMysql: (alias) => `${alias}.tenant_id = ?`,
+      mysqlQuery: async () => { dailyCalls += 1; return ["daily"]; },
+      console: { warn() {} }
+    });
+    vm.runInContext(service.slice(start, end), context);
+    const first = context.inventoryAlertProductSalesMysql(44, false);
+    const second = concurrent ? context.inventoryAlertProductSalesMysql(55, false) : null;
+    if (second) {
+      await new Promise((resolve) => setImmediate(resolve));
+      releaseFirstRefresh();
+    }
+    const result = await first;
+    if (second) await second;
+    if (repeat) await context.inventoryAlertProductSalesMysql(44, false);
+    return { refreshed, rawCalls, dailyCalls, result };
+  };
+  const small = await run({ missingCount: 2, repeat: true });
+  assert.equal(small.refreshed.length, 2);
+  assert.equal(small.dailyCalls, 2, "clean watermarks avoid refresh on the next read");
+  assert.deepEqual(Array.from(small.result), ["daily"]);
+  const shared = await run({ missingCount: 2, concurrent: true });
+  assert.equal(shared.refreshed.length, 2, "concurrent tenants share one global daily repair");
+  assert.equal(shared.dailyCalls, 2);
+  const limit = await run({ missingCount: 15 });
+  assert.equal(limit.refreshed.length, 15);
+  assert.equal(limit.dailyCalls, 1);
+  const large = await run({ missingCount: 16 });
+  assert.equal(large.refreshed.length, 0);
+  assert.deepEqual(Array.from(large.result), ["raw"]);
+  const failed = await run({ missingCount: 2, failAt: 1 });
+  assert.equal(failed.rawCalls, 1);
+  assert.equal(failed.dailyCalls, 0);
+  const concurrentlyDirtied = await run({ missingCount: 1, remainsDirty: true });
+  assert.equal(concurrentlyDirtied.rawCalls, 1);
+  assert.equal(concurrentlyDirtied.dailyCalls, 0);
+});
+
+test("跨北京时间午夜共享旧窗口修复时，新窗口不能漏算昨天", async () => {
+  const oldWindow = { from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" };
+  const newWindow = { from30: "2026-09-20", from15: "2026-10-05", from7: "2026-10-13", through: "2026-10-19" };
+  const dirty = new Set(["2026-10-18", "2026-10-19"]);
+  const refreshed = [];
+  let windowCalls = 0;
+  let resolveStarted;
+  let releaseOldRefresh;
+  const started = new Promise((resolve) => { resolveStarted = resolve; });
+  const oldRefreshGate = new Promise((resolve) => { releaseOldRefresh = resolve; });
+  const context = vm.createContext({
+    completedBeijingSalesWindow: () => windowCalls++ === 0 ? oldWindow : newWindow,
+    inventoryAlertSalesMissingDatesMysql: async (window) => [...dirty].filter((dateKey) => dateKey >= window.from30 && dateKey <= window.through),
+    refreshInventoryAlertSkuDailyMysql: async ({ from }) => {
+      refreshed.push(from);
+      if (from === "2026-10-18") {
+        resolveStarted();
+        await oldRefreshGate;
+      }
+      dirty.delete(from);
+    },
+    inventoryAlertProductSalesRawMysql: async (tenantPk) => [`raw:${tenantPk}`],
+    tenantShopPredicateMysql: (alias) => `${alias}.tenant_id = ?`,
+    mysqlQuery: async (_sql, params) => [`daily:${params[2]}`],
+    console: { warn() {} }
+  });
+  const start = service.indexOf("let inventoryAlertSalesReadRepairInflightMysql");
+  const end = service.indexOf("async function inventoryAlertProductSkusMysql", start);
+  vm.runInContext(service.slice(start, end), context);
+  const oldRead = context.inventoryAlertProductSalesMysql(44, false);
+  await started;
+  const newRead = context.inventoryAlertProductSalesMysql(55, false);
+  releaseOldRefresh();
+  assert.deepEqual(Array.from(await oldRead), ["daily:44"]);
+  assert.deepEqual(Array.from(await newRead), ["raw:55"], "new window must recheck its own yesterday after joining old repair");
+  assert.deepEqual(Array.from(await context.inventoryAlertProductSalesMysql(55, false)), ["daily:55"]);
+  assert.deepEqual(refreshed, ["2026-10-18", "2026-10-19"]);
 });
 
 test("日表未补齐时原始查询仍按当前 SKU 绑定归属并识别空 SKU 的旧映射", async () => {

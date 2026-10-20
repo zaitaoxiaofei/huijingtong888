@@ -4138,10 +4138,39 @@ export async function backfillInventoryAlertSalesMysql(body = {}) {
   };
 }
 
+let inventoryAlertSalesReadRepairInflightMysql = null;
+
+async function repairInventoryAlertSalesDatesMysql(salesWindow) {
+  if (inventoryAlertSalesReadRepairInflightMysql) return inventoryAlertSalesReadRepairInflightMysql;
+  const repair = (async () => {
+    const missingDates = await inventoryAlertSalesMissingDatesMysql(salesWindow);
+    if (missingDates.length > 15) return;
+    for (const dateKey of missingDates) {
+      await refreshInventoryAlertSkuDailyMysql({ from: dateKey, to: dateKey });
+    }
+  })();
+  inventoryAlertSalesReadRepairInflightMysql = repair;
+  try {
+    return await repair;
+  } finally {
+    if (inventoryAlertSalesReadRepairInflightMysql === repair) inventoryAlertSalesReadRepairInflightMysql = null;
+  }
+}
+
 async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
   const salesWindow = completedBeijingSalesWindow();
-  if ((await inventoryAlertSalesMissingDatesMysql(salesWindow)).length) {
-    return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+  const missingDates = await inventoryAlertSalesMissingDatesMysql(salesWindow);
+  if (missingDates.length > 15) return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+  if (missingDates.length) {
+    try {
+      await repairInventoryAlertSalesDatesMysql(salesWindow);
+      if ((await inventoryAlertSalesMissingDatesMysql(salesWindow)).length) {
+        return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+      }
+    } catch (error) {
+      console.warn(`[inventory-sales] daily read repair failed; using raw sales: ${String(error?.code || error?.name || "unknown")}`);
+      return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+    }
   }
   return mysqlQuery(`
     SELECT consumed.product_id, consumed.shop_id, consumed.ozon_sku,
