@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { calculateProfit } from "../../utils/pricing-tool.js";
-import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../../utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote, logisticsRuleMismatchReasons } from "../../utils/logistics-quote.js";
 import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
@@ -37,6 +37,15 @@ const quotes = computed(() => quoteLogisticsRules(logisticsRules.value, {
 const displayQuotes = computed(() => threeChannelQuotes(quotes.value));
 const defaultQuote = computed(() => defaultLogisticsQuote(displayQuotes.value));
 const activeQuote = computed(() => quotes.value.find((quote) => quote.id === selectedRuleId.value) || defaultQuote.value);
+const previousRule = computed(() => logisticsRules.value.find((rule) => rule.id === selectedRuleId.value));
+const outdatedQuoteNote = computed(() => {
+  if (!quoteReady.value || !selectedRuleId.value || quotes.value.some((quote) => quote.id === selectedRuleId.value)) return "";
+  const reasons = logisticsRuleMismatchReasons(previousRule.value, {
+    priceRub: saleRub.value, weightG: form.weight, length: form.length, width: form.width, height: form.height
+  });
+  const explanation = reasons.length ? reasons.join("；") : "该规则已停用或不在当前生效期";
+  return `原选 ${previousRule.value?.name || "物流规则"} 已失效：${explanation}。${defaultQuote.value ? `计算时将自动改用 ${defaultQuote.value.name}。` : "请调整标注的参数或切换服务商。"}`;
+});
 const quoteReady = computed(() => Number(form.saleCny) > 0 && Number(form.exchangeRate) > 0
   && Number(form.weight) > 0 && [form.length, form.width, form.height].every((value) => Number(value) > 0));
 onMounted(async () => {
@@ -76,13 +85,10 @@ function calculate() {
   }
   if (bandMismatch.value) { ElMessage.warning("所选佣金售价档与实际售价不符，请选择高亮的售价档"); return; }
   const selected = quotes.value.find((quote) => quote.id === selectedRuleId.value);
-  if (selectedRuleId.value && !selected) {
-    ElMessage.warning("原选物流渠道已不符合当前重量、尺寸或售价，请重新选择");
-    return;
-  }
+  if (selectedRuleId.value && !selected && defaultQuote.value) ElMessage.info(outdatedQuoteNote.value);
   if (selected) form.freight = selected.priceCny;
   else if (defaultQuote.value) selectQuote(defaultQuote.value);
-  else { ElMessage.warning("当前售价、重量和尺寸没有匹配的有效物流渠道"); return; }
+  else { ElMessage.warning(outdatedQuoteNote.value || "当前售价、重量和尺寸没有匹配的有效物流渠道；请核对货值（卢布）、计费重和包裹尺寸"); return; }
   form.commissionRate = selectedCommission.value;
   try {
     result.value = calculateProfit(form);
@@ -129,7 +135,8 @@ function calculate() {
           <template #header><strong>物流费用</strong></template>
           <p v-if="logisticsError" class="rate-error">{{ logisticsError }}</p>
           <p v-else-if="!quoteReady" class="hint">{{ Number(form.exchangeRate) > 0 ? '填写售价、重量和尺寸后显示有效渠道。' : '缺少人民币兑卢布汇率；请等待获取或在参考汇率处手动填写。' }}</p>
-          <p v-else-if="!quotes.length" class="hint">当前售价、重量和尺寸没有匹配的有效物流渠道，请核对参数或切换服务商。</p>
+          <p v-else-if="!quotes.length" class="hint">{{ outdatedQuoteNote || '当前售价、重量和尺寸没有匹配的有效物流渠道；请核对货值（卢布）、计费重和包裹尺寸，或切换服务商。' }}</p>
+          <p v-if="outdatedQuoteNote && quotes.length" class="rate-error">{{ outdatedQuoteNote }}</p>
           <template v-else><p class="shipping-tip">已匹配 {{ form.carrier }} 当前有效物流方案；{{ form.carrier === 'OGL' ? '仅陆运，运费包含平台电子服务费。' : '默认陆空 Standard，点击卡片可切换。' }}</p><div class="shipping-cards"><button v-for="quote in displayQuotes" :key="quote.id" type="button" class="shipping-card" :class="{ active: (selectedRuleId ?? defaultQuote?.id) === quote.id }" :title="quote.source" @click="selectQuote(quote)"><strong>{{ channelLabel(quote.channel) }} <small>{{ quote.channel }}</small></strong><b>¥ {{ money(quote.priceCny) }}</b><small>{{ quote.name }}</small><small>计费重 {{ quote.chargeableWeightG }}g<span v-if="quote.serviceFeeRub"> · 含电子服务费 ₽{{ money(quote.serviceFeeRub) }}</span></small></button></div></template>
         </el-card>
         <el-card v-if="result" shadow="never">
