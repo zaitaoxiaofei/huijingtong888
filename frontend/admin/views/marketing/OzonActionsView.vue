@@ -96,6 +96,7 @@ const state = reactive({
   sellerStatus: "",
   search: "",
   syncPercent: 50,
+  bulkActionPrice: undefined,
   actions: [],
   selectedActionId: "",
   productsModalOpen: false,
@@ -733,6 +734,27 @@ function fillPercentPrice() {
   ElMessage.success(state.mode === "seller" ? `已批量设置 ${percent}% 折扣` : `已按当前价 ${percent}% 批量填入活动价`);
 }
 
+function fillSelectedActionPrice() {
+  const price = Number(state.bulkActionPrice);
+  if (!Number.isFinite(price) || price <= 0) {
+    ElMessage.warning("请输入有效活动价");
+    return;
+  }
+  const rows = visibleProducts.value.filter((row) => state.selectedRowKeys.includes(getProductKey(row)));
+  if (!rows.length) {
+    ElMessage.warning("请先选择商品");
+    return;
+  }
+  for (const row of rows) {
+    const key = getProductKey(row);
+    updateEditValue(key, {
+      action_price: Number(price.toFixed(2)),
+      stock: state.editValues[key]?.stock ?? row?.stock ?? row?.min_stock ?? 0
+    });
+  }
+  ElMessage.success(`已为 ${rows.length} 个选中商品填入活动价 ${price.toFixed(2)}`);
+}
+
 function buildSubmitProducts(rows) {
   return rows.map((row) => {
     const key = getProductKey(row);
@@ -1197,6 +1219,10 @@ onMounted(async () => {
           <el-button class="erp-btn erp-btn-secondary" :loading="state.productsLoading" @click="loadProducts({ loadBoth: true })">重新拉取</el-button>
           <el-input-number v-model="state.syncPercent" :min="1" :max="99" :precision="0" />
           <el-button class="erp-btn erp-btn-secondary" :disabled="!visibleProducts.length" @click="fillPercentPrice">{{ state.mode === "seller" ? "一键折扣" : "一键填活动价" }}</el-button>
+          <template v-if="state.mode === 'official'">
+            <el-input-number v-model="state.bulkActionPrice" :min="0.01" :precision="2" placeholder="输入活动价" aria-label="批量活动价" />
+            <el-button class="erp-btn erp-btn-secondary" :disabled="!state.selectedRowKeys.length" @click="fillSelectedActionPrice">批量填活动价</el-button>
+          </template>
           <el-button class="erp-btn erp-btn-danger" type="danger" :disabled="!state.selectedRowKeys.length || state.productScope !== 'joined'" :loading="state.submitting" @click="removeSelected">
             移除商品{{ state.selectedRowKeys.length && state.productScope === "joined" ? `(${state.selectedRowKeys.length})` : "" }}
           </el-button>
