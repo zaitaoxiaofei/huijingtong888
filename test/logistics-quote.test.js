@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote, logisticsRuleMismatchReasons } from "../frontend/admin/utils/logistics-quote.js";
-import { OGL_RATES, oglElectronicServiceFeeRub, oglParcelValueRub } from "../src/ogl-rates.js";
+import { OGL_RATES, oglElectronicServiceFeeRub, oglParcelValueRub, selectOglOrderRule } from "../src/ogl-rates.js";
 
 test("three local channels appear in Express, Standard, Economy order", () => {
   const quotes = [
@@ -114,9 +114,25 @@ test("an old OGL tier explains the price mismatch while the current tier still q
   ]);
 });
 
-test("OGL reads the parcel total from Ozon raw product prices", () => {
+test("OGL converts explicitly CNY parcel prices and respects RUB prices", () => {
   assert.equal(oglParcelValueRub(JSON.stringify({ products: [
-    { price: "200", quantity: 1 }, { price: "100", quantity: 2 }
-  ] })), 400);
+    { price: "200", quantity: 1, currency_code: "CNY" },
+    { price: "100", quantity: 2, currency_code: "CNY" }
+  ] }), 12.3869), 400 * 12.3869);
+  assert.equal(oglParcelValueRub({ products: [{ price: "448.14", quantity: 1, currency_code: "RUB" }] }, 12.3869), 448.14);
+  assert.equal(oglParcelValueRub({ products: [{ price: "38", quantity: 1 }] }, 12.3869), 0);
   assert.equal(oglParcelValueRub("invalid"), 0);
+});
+
+test("OGL warehouse without a service class selects the matching lowest priced tier", () => {
+  const rules = OGL_RATES.map((rate, index) => ({
+    id: index + 70, version_group_id: index + 70, name: `OGL 陆运 ${rate.serviceClass}`,
+    min_weight_g: rate.minWeightG, max_weight_g: rate.maxWeightG,
+    min_price_rub: rate.minPriceRub, max_price_rub: rate.maxPriceRub,
+    base_fee_cny: 0, per_gram_cny: rate.perGramCny, per_ticket_cny: rate.perTicketCny
+  }));
+  const input = { weightG: 40, length: 30, width: 20, height: 10,
+    parcelValueRub: 38 * 12.3869, exchangeRate: 12.3869 };
+  assert.equal(selectOglOrderRule(rules, input)?.id, 70);
+  assert.equal(selectOglOrderRule(rules, { ...input, parcelValueRub: 0 }), null);
 });

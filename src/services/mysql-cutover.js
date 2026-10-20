@@ -30,7 +30,7 @@ import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } 
 import { detectOrderLogisticsCarrier } from "./order-logistics-carrier.js";
 import { resolveOrderFreightDescriptor } from "./order-freight-rule-resolver.js";
 import { cbrCnyRateForDate } from "./pricing-reference-rate.js";
-import { oglParcelValueRub } from "../ogl-rates.js";
+import { oglParcelValueRub, selectOglOrderRule } from "../ogl-rates.js";
 import {
   applyStockAlertQuery,
   completedBeijingSalesWindow,
@@ -18049,14 +18049,52 @@ function productWithoutLogisticsRuleMysql(product) {
   };
 }
 
-async function actualOrderLogisticsRuleMysql(posting, orderedAt) {
+async function oglOrderParcelValueRubMysql(posting, exchangeRate) {
+  const rawValue = oglParcelValueRub(posting?.raw_json || posting?.raw || null, exchangeRate);
+  if (rawValue > 0) return rawValue;
+  const postingSale = Array.isArray(posting?.items)
+    ? posting.items.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 1), 0)
+    : 0;
+  if (postingSale > 0) return postingSale * exchangeRate;
+  if (Number(posting?.order_id) > 0) {
+    const orderSale = await mysqlQueryOne("SELECT SUM(sale_price * quantity) AS sale_cny FROM order_items WHERE order_id = ?", [Number(posting.order_id)]);
+    return Number(orderSale?.sale_cny || 0) * exchangeRate;
+  }
+  return 0;
+}
+
+async function actualOrderLogisticsRuleMysql(posting, orderedAt, product) {
   const descriptor = resolveOrderFreightDescriptor(posting);
   const effectiveAt = normalizeMysqlDateTime(orderedAt);
   if (!descriptor || !effectiveAt) return null;
   const hasTenantColumn = await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id");
   const defaultScope = hasTenantColumn
-    ? await logisticsTenantScopeMysql("admin", "candidate")
+    ? await readableLogisticsTenantScopeMysql(product?.tenant_id || "admin", "candidate")
     : { sql: "1 = 1", params: [] };
+  if (descriptor.carrier === "OGL" && !descriptor.serviceClass) {
+    const rate = await cbrCnyRateForDate(orderedAt);
+    const parcelValueRub = await oglOrderParcelValueRubMysql(posting, rate.rate);
+    if (!(parcelValueRub > 0)) return null;
+    const candidates = await mysqlQuery(`
+      SELECT candidate.*
+      FROM logistics_fee_rules candidate
+      WHERE ${defaultScope.sql}
+        AND UPPER(candidate.carrier) = 'OGL'
+        AND candidate.channel = 'economy'
+        AND candidate.enabled != 0
+        AND candidate.effective_from <= ?
+        AND (candidate.effective_to IS NULL OR candidate.effective_to > ?)
+      ORDER BY candidate.effective_from DESC, candidate.id DESC
+    `, [...defaultScope.params, effectiveAt, effectiveAt]);
+    return selectOglOrderRule(candidates, {
+      weightG: product?.package_weight_g,
+      length: product?.length_cm,
+      width: product?.width_cm,
+      height: product?.height_cm,
+      parcelValueRub,
+      exchangeRate: rate.rate
+    });
+  }
   return mysqlQueryOne(`
     SELECT candidate.*
     FROM logistics_fee_rules candidate
@@ -18100,7 +18138,7 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
   `, [Number(productId)]);
   if (product && orderedAt) product.pricing_effective_at = orderedAt;
   if (product && orderedAt && posting) {
-    const actualRule = await actualOrderLogisticsRuleMysql(posting, orderedAt);
+    const actualRule = await actualOrderLogisticsRuleMysql(posting, orderedAt, product);
     if (actualRule) return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, actualRule, "ozon_delivery_method"), orderedAt, posting);
   }
   if (!product?.logistics_rule_id || !orderedAt) return productWithOglOrderRateMysql(product, orderedAt, posting);
@@ -18125,15 +18163,8 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
 async function productWithOglOrderRateMysql(product, orderedAt, posting = null) {
   if (!product || !orderedAt || String(product.logistics_rule_carrier || "").toUpperCase() !== "OGL") return product;
   const rate = await cbrCnyRateForDate(orderedAt);
-  const rawParcelValue = oglParcelValueRub(posting?.raw_json || posting?.raw || null);
-  const postingParcelValue = Array.isArray(posting?.items)
-    ? posting.items.reduce((sum, item) => sum + Number(item.sale_price || 0) * Number(item.quantity || 1), 0) * rate.rate
-    : 0;
-  const orderParcelValue = !rawParcelValue && !postingParcelValue && Number(posting?.order_id) > 0
-    ? Number((await mysqlQueryOne("SELECT SUM(sale_price * quantity) AS sale_cny FROM order_items WHERE order_id = ?", [Number(posting.order_id)]))?.sale_cny || 0) * rate.rate
-    : 0;
   return { ...product, exchange_rate: rate.rate, ogl_exchange_rate_source_date: rate.source_date,
-    ogl_parcel_value_rub: rawParcelValue || postingParcelValue || orderParcelValue };
+    ogl_parcel_value_rub: await oglOrderParcelValueRubMysql(posting, rate.rate) };
 }
 
 export async function recalculateOrderItemsForMappingMysql(mappingId, options = {}) {
