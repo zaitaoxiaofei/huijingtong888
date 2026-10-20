@@ -101,7 +101,8 @@ test("seller analytics shop filter refreshes and is sent to analysis APIs", () =
   assert.match(source, /const FILTER_CACHE_KEY_PREFIX = "ozon-erp:seller-analytics:filters"/);
   assert.match(source, /function filterCacheKey\(\)/);
   assert.match(source, /const userKey = String\(user\.id \|\| user\.person_id \|\| user\.username \|\| user\.name \|\| "anonymous"\)/);
-  assert.match(source, /v-model="state\.filters\.shopId"[^>]*@change="handleSearch"/);
+  assert.match(source, /v-model="state\.filters\.shopId"[^>]*@change="handleShopChange"/);
+  assert.match(source, /async function handleShopChange\([\s\S]*?handleSearch\(\)/);
   assert.match(source, /const selectedStoreId = computed/);
   assert.match(source, /function getShopSellerStoreId/);
   assert.match(source, /const source = shop \|\| \{\};/);

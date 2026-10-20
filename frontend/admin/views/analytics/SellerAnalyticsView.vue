@@ -9,6 +9,7 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import { useAuthStore } from "../../stores/auth";
 import {
+  cancelSellerAnalyticsCollectRun,
   createSellerAnalyticsCollectRun,
   confirmSellerAnalyticsBrowserProfile,
   deleteSellerAnalyticsCollectRun,
@@ -229,6 +230,9 @@ const tableMetricColumns = [
 const loading = ref(false);
 const metaLoading = ref(false);
 const collecting = ref(false);
+const cancellingRun = ref(false);
+const switchingShop = ref(false);
+const activeShopId = ref("");
 const generatingTodos = ref(false);
 const bindingAuth = ref(false);
 const activePane = ref("metrics");
@@ -250,6 +254,7 @@ const browserProfilePreparing = ref(false);
 const selectedSnapshotIds = ref([]);
 const metaLoaded = reactive({ snapshots: false, runs: false });
 const rawDialog = reactive({ visible: false, title: "", content: "" });
+const retryDialog = reactive({ visible: false, loading: false, saving: false, runId: "", runs: [], selectedRequestIds: [] });
 const funnelDialog = reactive({ visible: false, row: null });
 const selectedIssueInsight = reactive({ visible: false, item: null });
 const prepareFlow = reactive({
@@ -292,13 +297,14 @@ function syncRunStatus(run) {
   if (!run) return { label: "从未同步", type: "info" };
   if (run.status === "success" && Number(run.failed_count || 0) === 0) return { label: "完整", type: "success" };
   if (["pending", "running"].includes(run.status)) return { label: "同步中", type: "warning" };
+  if (run.status === "cancelled") return { label: "已取消", type: "info" };
   if (Number(run.completed_count || 0) > 0) return { label: "部分完成", type: "warning" };
   return { label: "失败", type: "danger" };
 }
 
 function runCompleteness(run) {
   if (!run) return "—";
-  return `${Number(run.completed_count || 0)}/${Number(run.request_count || 0)}${Number(run.failed_count || 0) ? `，失败 ${Number(run.failed_count || 0)}` : ""}`;
+  return `${Number(run.completed_count || 0)}/${Number(run.request_count || 0)}${Number(run.failed_count || 0) ? `，失败 ${Number(run.failed_count || 0)}` : ""}${Number(run.cancelled_count || 0) ? `，取消 ${Number(run.cancelled_count || 0)}` : ""}`;
 }
 
 function runPeriodText(run) {
@@ -393,6 +399,10 @@ const visibleTableMetricColumns = computed(() => {
 const focusProducts = computed(() => Array.isArray(analysis.value?.focusProducts) ? analysis.value.focusProducts : []);
 const recommendations = computed(() => Array.isArray(analysis.value?.recommendations) ? analysis.value.recommendations : []);
 const runningRun = computed(() => collectRuns.value.find((run) => ["pending", "running"].includes(run.status)));
+const hasFailedRuns = computed(() => collectRuns.value.some((run) => run.status === "failed" && Number(run.failed_count || 0) > 0));
+const retryFailedRequests = computed(() => (
+  retryDialog.runs.find((run) => run.id === retryDialog.runId)?.requests || []
+).filter((request) => request.status === "failed"));
 const latestCurrentPeriodRun = computed(() => {
   const currentRange = periodParams.value;
   return collectRuns.value.find((run) => {
@@ -438,6 +448,13 @@ const collectStatus = computed(() => {
       tone: "danger",
       title: "采集未完全完成",
       detail: `${period} · 成功 ${Number(run.completed_count || 0)} · 失败 ${Number(run.failed_count || 0)}`
+    };
+  }
+  if (run.status === "cancelled") {
+    return {
+      tone: "warning",
+      title: "采集已取消",
+      detail: `${period} · 已完成 ${Number(run.completed_count || 0)}/${total}，已入库数据保留`
     };
   }
   return {
@@ -879,6 +896,7 @@ async function refreshData(silent = false, options = {}) {
     if (options.refreshMeta !== false) markMetaStale();
     const params = buildAnalysisQueryParams();
     const nextAnalysis = await getSellerAnalyticsAnalysis(params);
+    if (params.store_id !== selectedStoreId.value) return;
     analysis.value = nextAnalysis || analysis.value;
     if (options.refreshMeta !== false) {
       await loadRunsMeta(true);
@@ -909,7 +927,9 @@ async function generateOperationTodos() {
 async function loadSnapshotsMeta(silent = false) {
   if (!silent) metaLoading.value = true;
   try {
-    const nextSnapshots = await getSellerAnalyticsSnapshots({ ...periodParams.value, store_id: selectedStoreId.value, limit: 100 });
+    const storeId = selectedStoreId.value;
+    const nextSnapshots = await getSellerAnalyticsSnapshots({ ...periodParams.value, store_id: storeId, limit: 100 });
+    if (storeId !== selectedStoreId.value) return;
     snapshots.value = Array.isArray(nextSnapshots) ? nextSnapshots : [];
     metaLoaded.snapshots = true;
   } finally {
@@ -920,7 +940,9 @@ async function loadSnapshotsMeta(silent = false) {
 async function loadRunsMeta(silent = false) {
   if (!silent) metaLoading.value = true;
   try {
-    const nextRuns = await getSellerAnalyticsCollectRuns({ store_id: selectedStoreId.value, limit: 30, summary: 1 });
+    const storeId = selectedStoreId.value;
+    const nextRuns = await getSellerAnalyticsCollectRuns({ store_id: storeId, limit: 30, summary: 1 });
+    if (storeId !== selectedStoreId.value) return;
     collectRuns.value = Array.isArray(nextRuns) ? nextRuns : [];
     metaLoaded.runs = true;
   } finally {
@@ -934,19 +956,23 @@ async function loadPluginStatus() {
 }
 
 async function loadAuthBindingStatus() {
-  authBindingStatus.value = await getSellerAnalyticsAuthBindingStatus({
+  const storeId = selectedStoreId.value;
+  const next = await getSellerAnalyticsAuthBindingStatus({
     shop_id: state.filters.shopId,
-    store_id: selectedStoreId.value,
-    company_id: selectedStoreId.value
-  }).catch(() => authBindingStatus.value);
+    store_id: storeId,
+    company_id: storeId
+  }).catch(() => null);
+  if (storeId === selectedStoreId.value && next) authBindingStatus.value = next;
   return authBindingStatus.value;
 }
 
 async function loadBrowserProfileStatus() {
-  browserProfileStatus.value = await getSellerAnalyticsBrowserProfileStatus({
-    store_id: selectedStoreId.value,
-    company_id: selectedStoreId.value
-  }).catch(() => browserProfileStatus.value);
+  const storeId = selectedStoreId.value;
+  const next = await getSellerAnalyticsBrowserProfileStatus({
+    store_id: storeId,
+    company_id: storeId
+  }).catch(() => null);
+  if (storeId === selectedStoreId.value && next) browserProfileStatus.value = next;
   return browserProfileStatus.value;
 }
 
@@ -983,13 +1009,16 @@ async function confirmPersistentBrowserLogin() {
 }
 
 async function loadPluginValidation() {
-  pluginValidation.value = await validateSellerAnalyticsPluginStatus({
-    shop_id: state.filters.shopId,
-    store_id: selectedStoreId.value,
-    company_id: selectedStoreId.value,
+  const shopId = state.filters.shopId;
+  const storeId = selectedStoreId.value;
+  const next = await validateSellerAnalyticsPluginStatus({
+    shop_id: shopId,
+    store_id: storeId,
+    company_id: storeId,
     shop_name: selectedShop.value?.name || "",
     plugin_instance_id: pluginInstanceId.value
-  }).catch(() => pluginValidation.value);
+  }).catch(() => null);
+  if (shopId === state.filters.shopId && storeId === selectedStoreId.value && next) pluginValidation.value = next;
   return pluginValidation.value;
 }
 
@@ -1002,6 +1031,50 @@ async function loadActiveMetaPane(silent = false) {
 function handleSearch() {
   state.page = 1;
   Promise.all([refreshData(), loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus(), loadBrowserProfileStatus()]).catch(() => {});
+}
+
+async function cancelCollectRunAndNotify(runId) {
+  await cancelSellerAnalyticsCollectRun(runId);
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId }, window.location.origin);
+}
+
+async function handleShopChange(nextShopId) {
+  const previousShopId = activeShopId.value;
+  if (String(nextShopId) === previousShopId) return;
+  switchingShop.value = true;
+  try {
+    const previousShop = shops.value.find((shop) => String(shop.id) === previousShopId);
+    const previousStoreId = previousShop ? getShopSellerStoreId(previousShop) || previousShopId : "";
+    if (previousStoreId) {
+      const previousRuns = await getSellerAnalyticsCollectRuns({ store_id: previousStoreId, limit: 100, summary: 1 });
+      const activeRuns = (Array.isArray(previousRuns) ? previousRuns : []).filter((run) => ["pending", "running"].includes(run.status));
+      if (activeRuns.length) {
+        await ElMessageBox.confirm(
+          `原店铺还有 ${activeRuns.length} 个采集批次正在运行。取消后剩余请求不会继续执行，已入库数据会保留。确认取消并切换店铺？`,
+          "切换店铺并取消采集",
+          { type: "warning", confirmButtonText: "取消采集并切换", cancelButtonText: "留在原店铺" }
+        );
+        for (const run of activeRuns) await cancelCollectRunAndNotify(run.id);
+        ElMessage.success(`已取消原店铺 ${activeRuns.length} 个采集批次`);
+      }
+    }
+    activeShopId.value = String(nextShopId);
+    collectRuns.value = [];
+    analysis.value = { summary: {}, products: [], focusProducts: [], recommendations: [], totalsRow: null, totalsBySource: {} };
+    pluginValidation.value = null;
+    authBindingStatus.value = null;
+    browserProfileStatus.value = null;
+    retryDialog.visible = false;
+    handleSearch();
+    wakeAnalyticsPlugin();
+    await loadRunsMeta(true).catch(() => {});
+  } catch (error) {
+    state.filters.shopId = previousShopId;
+    handleSearch();
+    if (error !== "cancel" && error !== "close") ElMessage.error(error?.message || "切换店铺失败，原店铺仍保持选中");
+  } finally {
+    switchingShop.value = false;
+  }
 }
 
 function handlePeriodChange() {
@@ -1068,7 +1141,7 @@ async function createPluginCollectRun(payload = {}) {
 }
 
 function wakeAnalyticsPlugin() {
-  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE" }, window.location.origin);
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId.value }, window.location.origin);
 }
 
 async function ensureCollectReady() {
@@ -1382,11 +1455,66 @@ async function collectDailyDefaultPeriods() {
   }
 }
 
-async function retryRun(row) {
-  const result = await retrySellerAnalyticsCollectRun(row.id);
+async function retryRun(row, requestIds = []) {
+  const result = await retrySellerAnalyticsCollectRun(row.id, requestIds.length ? { request_ids: requestIds } : {});
   wakeAnalyticsPlugin();
   ElMessage.success(`已重置 ${result?.data?.resetCount || 0} 个请求`);
   await Promise.all([refreshData(true), loadRunsMeta(true)]);
+}
+
+async function cancelCurrentRun() {
+  const run = runningRun.value;
+  if (!run || cancellingRun.value) return;
+  try {
+    await ElMessageBox.confirm("取消当前店铺的采集批次？已入库数据会保留，剩余请求将停止。", "取消采集", { type: "warning" });
+  } catch {
+    return;
+  }
+  cancellingRun.value = true;
+  try {
+    await cancelCollectRunAndNotify(run.id);
+    ElMessage.success("采集已取消，已入库数据保留");
+    await loadRunsMeta(true);
+  } catch (error) {
+    ElMessage.error(error?.message || "取消采集失败");
+  } finally {
+    cancellingRun.value = false;
+  }
+}
+
+async function openFailedBatchRetry() {
+  retryDialog.visible = true;
+  retryDialog.loading = true;
+  retryDialog.selectedRequestIds = [];
+  try {
+    const runs = await getSellerAnalyticsCollectRuns({ store_id: selectedStoreId.value, limit: 100 });
+    retryDialog.runs = (Array.isArray(runs) ? runs : []).filter((run) => run.status === "failed" && (run.requests || []).some((request) => request.status === "failed"));
+    retryDialog.runId = retryDialog.runs.find((run) => run.id === latestCurrentPeriodRun.value?.id)?.id || retryDialog.runs[0]?.id || "";
+  } catch (error) {
+    retryDialog.visible = false;
+    ElMessage.error(error?.message || "读取失败批次失败");
+  } finally {
+    retryDialog.loading = false;
+  }
+}
+
+function handleRetryRequestSelection(rows) {
+  retryDialog.selectedRequestIds = rows.map((row) => row.id).filter(Boolean);
+}
+
+async function retrySelectedRequests() {
+  if (!retryDialog.runId || !retryDialog.selectedRequestIds.length || retryDialog.saving) return;
+  const run = retryDialog.runs.find((item) => item.id === retryDialog.runId);
+  if (!run) return;
+  retryDialog.saving = true;
+  try {
+    await retryRun(run, retryDialog.selectedRequestIds);
+    retryDialog.visible = false;
+  } catch (error) {
+    ElMessage.error(error?.message || "失败批次补采失败");
+  } finally {
+    retryDialog.saving = false;
+  }
 }
 
 async function removeRun(row) {
@@ -1768,6 +1896,7 @@ function handlePluginInstanceMessage(event) {
   const nextId = String(event.data?.pluginInstanceId || "").trim();
   if (!nextId || pluginInstanceId.value) return;
   pluginInstanceId.value = nextId;
+  wakeAnalyticsPlugin();
   Promise.all([loadPluginStatus(), loadPluginValidation()]).catch(() => {});
 }
 
@@ -1794,7 +1923,9 @@ onMounted(async () => {
   else if (!state.filters.dateRange?.length) state.filters.dateRange = getAnalyticsPeriodDateRange("7d");
   await loadShops();
   applyRouteFilters();
+  activeShopId.value = state.filters.shopId;
   await refreshData();
+  await loadRunsMeta(true).catch(() => {});
   await Promise.all([loadPluginStatus().catch(() => {}), loadPluginValidation().catch(() => {}), loadAuthBindingStatus().catch(() => {}), loadBrowserProfileStatus().catch(() => {})]);
   startPolling();
   startPluginPolling();
@@ -1823,7 +1954,7 @@ onDeactivated(() => {
         <template #actions>
           <ErpFilterBar class="seller-toolbar">
         <div class="seller-toolbar__filters">
-          <el-select v-model="state.filters.shopId" class="seller-filter seller-filter--shop" placeholder="店铺" @change="handleSearch">
+          <el-select v-model="state.filters.shopId" class="seller-filter seller-filter--shop" placeholder="店铺" :disabled="switchingShop" @change="handleShopChange">
             <el-option v-for="shop in shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
           </el-select>
           <el-select v-model="state.filters.periodKey" class="seller-filter" @change="handlePeriodChange">
@@ -1924,6 +2055,8 @@ onDeactivated(() => {
           <el-button v-if="showLocalBrowserProfileControls" size="large" type="primary" plain :loading="browserProfilePreparing" @click="confirmPersistentBrowserLogin">确认长期绑定</el-button>
           <el-button size="large" @click="openOzonAnalyticsPage">打开本机 Ozon 分析页</el-button>
           <el-button size="large" :loading="recognizingPlugin" @click="recognizeCurrentShop">重新识别店铺</el-button>
+          <el-button v-if="runningRun" size="large" type="danger" plain :loading="cancellingRun" @click="cancelCurrentRun">取消当前采集</el-button>
+          <el-button v-if="hasFailedRuns" size="large" type="warning" plain @click="openFailedBatchRetry">失败页批次补采</el-button>
         </div>
       </section>
 
@@ -2164,6 +2297,27 @@ onDeactivated(() => {
       <pre class="seller-raw">{{ rawDialog.content }}</pre>
     </el-dialog>
 
+    <el-dialog v-model="retryDialog.visible" title="失败页批次补采" width="min(920px, 96vw)" destroy-on-close>
+      <div v-loading="retryDialog.loading" class="seller-retry-dialog">
+        <p>选择失败的来源和页批次补采。商品/SKU 搜索只筛选已入库数据，当前不支持保证单个 SKU 的远端精确重采。</p>
+        <el-select v-model="retryDialog.runId" placeholder="选择采集批次" @change="retryDialog.selectedRequestIds = []">
+          <el-option v-for="run in retryDialog.runs" :key="run.id" :label="`${run.period_key || '当前区间'} · 失败 ${run.failed_count || 0} 页批次`" :value="run.id" />
+        </el-select>
+        <el-empty v-if="!retryDialog.runs.length && !retryDialog.loading" description="当前店铺没有可补采的失败页批次" />
+        <el-table v-else :key="retryDialog.runId" :data="retryFailedRequests" max-height="420" @selection-change="handleRetryRequestSelection">
+          <el-table-column type="selection" width="48" />
+          <el-table-column label="来源" min-width="150"><template #default="{ row }">{{ sourceTabs.find((item) => item.value === row.source_key)?.label || row.source_key || "—" }}</template></el-table-column>
+          <el-table-column label="页批次" width="100"><template #default="{ row }">第 {{ Number(row.page_index || 0) + 1 }} 页</template></el-table-column>
+          <el-table-column prop="error_message" label="失败原因" min-width="300" show-overflow-tooltip />
+          <el-table-column prop="attempts" label="尝试次数" width="100" />
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="retryDialog.visible = false">关闭</el-button>
+        <el-button type="primary" :loading="retryDialog.saving" :disabled="!retryDialog.selectedRequestIds.length" @click="retrySelectedRequests">补采选中页批次</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="syncOverviewVisible" title="全店数据同步状态" width="min(1180px, 96vw)" destroy-on-close>
       <div class="seller-sync-overview" v-loading="syncOverviewLoading">
         <section class="seller-sync-schedules">
@@ -2357,8 +2511,10 @@ onDeactivated(() => {
 .seller-sync-assistant__steps span { color: #64748b; font-size: 12px; }
 .seller-sync-assistant__steps strong { color: #0f172a; font-size: 13px; line-height: 1.25; white-space: normal; }
 .seller-sync-assistant__steps em { color: #64748b; font-size: 12px; font-style: normal; line-height: 1.25; white-space: normal; }
-.seller-sync-assistant__actions { grid-column: 1 / -1; display: flex; flex-direction: row; gap: 6px; align-items: center; justify-content: flex-end; white-space: nowrap; }
+.seller-sync-assistant__actions { grid-column: 1 / -1; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }
 .seller-sync-assistant__actions .el-button { margin-left: 0; }
+.seller-retry-dialog { display: grid; gap: 12px; min-height: 160px; }
+.seller-retry-dialog p { margin: 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .seller-sync-assistant__progress { display: grid; gap: 5px; min-width: 0; padding: 7px 9px; border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 10px; background: rgba(255, 255, 255, 0.66); }
 .seller-sync-assistant__progress-row { display: flex; gap: 6px; align-items: center; min-width: 0; color: #64748b; font-size: 12px; }
 .seller-sync-assistant__progress-row .el-tag { flex: 0 0 auto; }

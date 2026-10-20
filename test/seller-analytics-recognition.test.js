@@ -94,3 +94,26 @@ test("seller analytics wakes the plugin and hides server-side login controls on 
   assert.match(source, /window\.open\("https:\/\/seller\.ozon\.ru\/app\/analytics\/graphs"/);
   assert.doesNotMatch(source, /await wait\(1500\);\s*await Promise\.all\(\[loadPluginStatus\(\), loadPluginValidation\(\)\]\)/);
 });
+
+test("seller analytics cancels active old-shop runs before a confirmed switch", () => {
+  const source = fs.readFileSync("frontend/admin/views/analytics/SellerAnalyticsView.vue", "utf8");
+  const api = fs.readFileSync("frontend/admin/api/sellerAnalytics.js", "utf8");
+  assert.match(api, /export function cancelSellerAnalyticsCollectRun\(id\)/);
+  assert.match(api, /collect-runs\/\$\{encodeURIComponent\(id\)\}\/cancel/);
+  assert.match(source, /@change="handleShopChange"/);
+  assert.match(source, /async function handleShopChange\([\s\S]*?getSellerAnalyticsCollectRuns\(\{ store_id: previousStoreId[\s\S]*?ElMessageBox\.confirm[\s\S]*?cancelCollectRunAndNotify\(run\.id\)/);
+  assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId \}, window\.location\.origin\)/);
+  assert.match(source, /@click="cancelCurrentRun"/);
+  assert.match(source, /BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId\.value/);
+});
+
+test("failed-batch retry targets selected failed requests without promising per-SKU remote collection", () => {
+  const source = fs.readFileSync("frontend/admin/views/analytics/SellerAnalyticsView.vue", "utf8");
+  const api = fs.readFileSync("frontend/admin/api/sellerAnalytics.js", "utf8");
+  assert.match(api, /retrySellerAnalyticsCollectRun\(id, payload = \{\}\)/);
+  assert.match(source, /request_ids: requestIds/);
+  assert.match(source, /retryFailedRequests = computed\([\s\S]*?request\.status === "failed"/);
+  assert.match(source, /@selection-change="handleRetryRequestSelection"/);
+  assert.match(source, /@click="retrySelectedRequests"/);
+  assert.match(source, /商品\/SKU 搜索只筛选已入库数据/);
+});

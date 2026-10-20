@@ -66,8 +66,12 @@ export function refreshSellerAnalyticsOperationTodos(payload = {}) {
   return apiClient.post("/api/db/seller-analytics/operation-todos/refresh", payload);
 }
 
-export function retrySellerAnalyticsCollectRun(id) {
-  return apiClient.post(`/api/db/seller-analytics/collect-runs/${encodeURIComponent(id)}/retry`);
+export function retrySellerAnalyticsCollectRun(id, payload = {}) {
+  return apiClient.post(`/api/db/seller-analytics/collect-runs/${encodeURIComponent(id)}/retry`, payload);
+}
+
+export function cancelSellerAnalyticsCollectRun(id) {
+  return apiClient.post(`/api/db/seller-analytics/collect-runs/${encodeURIComponent(id)}/cancel`);
 }
 
 export function deleteSellerAnalyticsCollectRun(id) {
