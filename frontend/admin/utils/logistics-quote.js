@@ -41,6 +41,35 @@ function permittedDimensions(kind, dimensions) {
   return false;
 }
 
+export function logisticsRuleMismatchReasons(rule, { priceRub, weightG, length, width, height }) {
+  if (!rule) return [];
+  const reasons = [];
+  const price = Number(priceRub);
+  const actualWeight = Number(weightG);
+  const minPrice = Number(rule.min_price_rub);
+  const maxPrice = Number(rule.max_price_rub);
+  const kind = serviceClass(rule.name);
+  const ogl = String(rule.carrier || "").toUpperCase() === "OGL";
+  if (Number.isFinite(price) && (price < minPrice || price > maxPrice)) {
+    reasons.push(`货值 ₽${round(price)} 超出该档 ₽${minPrice}–${maxPrice}`);
+  }
+  const chargeableWeight = ogl
+    ? oglChargeableWeightG(kind, actualWeight, length, width, height)
+    : ["Big", "Premium Big"].includes(kind)
+      ? Math.max(actualWeight, Number(length) * Number(width) * Number(height) / 12)
+      : actualWeight;
+  if (Number.isFinite(chargeableWeight) && (chargeableWeight < Number(rule.min_weight_g) || chargeableWeight > Number(rule.max_weight_g))) {
+    reasons.push(`计费重 ${round(chargeableWeight)}g 超出该档 ${rule.min_weight_g}–${rule.max_weight_g}g`);
+  }
+  const validDimensions = ogl
+    ? oglDimensionsValid(length, width, height)
+    : permittedDimensions(kind, { length: Number(length), width: Number(width), height: Number(height) });
+  if (!validDimensions) reasons.push(ogl
+    ? "包裹长宽高不符合 OGL 限制（最长边≤200cm，其余两边≤80cm）"
+    : "包裹尺寸超出该档限制");
+  return reasons;
+}
+
 export function quoteLogisticsRules(rules, { carrier, priceRub, weightG, length, width, height, exchangeRate }, at = new Date()) {
   const price = Number(priceRub);
   const weight = Number(weightG);

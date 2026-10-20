@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote } from "../frontend/admin/utils/logistics-quote.js";
+import { quoteLogisticsRules, channelLabel, threeChannelQuotes, defaultLogisticsQuote, logisticsRuleMismatchReasons } from "../frontend/admin/utils/logistics-quote.js";
 import { OGL_RATES, oglElectronicServiceFeeRub, oglParcelValueRub } from "../src/ogl-rates.js";
 
 test("three local channels appear in Express, Standard, Economy order", () => {
@@ -94,6 +94,24 @@ test("OGL uses the cheaper overlapping land rule and adds its capped electronic 
   assert.equal(big.serviceFeeCny, 10);
   assert.equal(big.priceCny, 94);
   assert.equal(quoteLogisticsRules(rules, { ...payload, length: 201 }, date).length, 0);
+});
+
+test("an old OGL tier explains the price mismatch while the current tier still quotes", () => {
+  const rates = OGL_RATES.map((rate, index) => ({
+    id: index + 200, version_group_id: index + 200, enabled: 1,
+    effective_from: "2026-10-20T00:00:00+08:00", effective_to: null,
+    name: `OGL 陆运 ${rate.serviceClass}`, carrier: "OGL", channel: "economy", mode: "per_gram",
+    min_weight_g: rate.minWeightG, max_weight_g: rate.maxWeightG,
+    min_price_rub: rate.minPriceRub, max_price_rub: rate.maxPriceRub,
+    base_fee_cny: 0, per_gram_cny: rate.perGramCny, per_ticket_cny: rate.perTicketCny
+  }));
+  const input = { carrier: "OGL", priceRub: 280 * 12.3869, weightG: 300,
+    length: 12, width: 12, height: 12, exchangeRate: 12.3869 };
+  const [current] = quoteLogisticsRules(rates, input, "2026-10-20T00:00:00+08:00");
+  assert.equal(current.name, "OGL 陆运 Small");
+  assert.deepEqual(logisticsRuleMismatchReasons(rates[0], input), [
+    "货值 ₽3468.33 超出该档 ₽1–1500"
+  ]);
 });
 
 test("OGL reads the parcel total from Ozon raw product prices", () => {
