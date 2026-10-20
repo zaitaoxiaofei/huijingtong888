@@ -115,6 +115,8 @@ test("clicking prepare on a stale row reconciles registration without submitting
     mysqlQuery: async (sql) => sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
     mysqlQueryOne: async () => ({ raw_json: "{}" }),
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); },
+    markInventoryAlertSkuDailyDirtyMysql: async () => {},
+    invalidateOrderProcurementCoverage() {},
     sortRowsByInputMysql: (rows) => rows,
     shippingProductItemsFromRawPayloadMysql: () => [],
     resolveShippingProductIdMysql: () => 101,
