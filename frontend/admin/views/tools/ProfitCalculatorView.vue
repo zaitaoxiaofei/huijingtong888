@@ -46,14 +46,21 @@ onMounted(async () => {
   if (rulesResult.status === "fulfilled") logisticsRules.value = Array.isArray(rulesResult.value) ? rulesResult.value : [];
   else logisticsError.value = "物流规则加载失败，请刷新后重试";
   if (rateResult.status === "fulfilled" && Number(rateResult.value?.rate) > 0) {
-    if (!(Number(form.exchangeRate) > 0)) form.exchangeRate = Number(rateResult.value.rate);
-    rateSourceDate.value = String(rateResult.value.source_date || "");
-  } else rateError.value = "俄罗斯央行汇率获取失败，请手动填写人民币兑卢布汇率";
+    if (!(Number(form.exchangeRate) > 0)) {
+      form.exchangeRate = Number(rateResult.value.rate);
+      rateSourceDate.value = String(rateResult.value.source_date || "");
+    }
+  } else if (!(Number(form.exchangeRate) > 0)) rateError.value = "俄罗斯央行汇率获取失败，请手动填写人民币兑卢布汇率";
   rateLoading.value = false;
 });
 function selectQuote(quote) {
   selectedRuleId.value = quote.id;
   form.freight = quote.priceCny;
+  result.value = null;
+}
+function editExchangeRate() {
+  rateSourceDate.value = "";
+  rateError.value = "";
   result.value = null;
 }
 const money = (value) => Number(value || 0).toFixed(2);
@@ -101,7 +108,7 @@ function calculate() {
             <div class="dimensions"><el-input-number :controls="false" v-model="form.length" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.width" :min="0" :precision="1" /><span>×</span><el-input-number :controls="false" v-model="form.height" :min="0" :precision="1" /><span>厘米</span></div>
           </el-form-item>
           <el-form-item label="物流服务商"><el-select v-model="form.carrier" @change="selectedRuleId = null"><el-option label="GUOO" value="GUOO" /><el-option label="CEL" value="CEL" /></el-select></el-form-item>
-          <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
+          <el-form-item label="参考汇率" required><el-input-number :controls="false" v-model="form.exchangeRate" :min="0.0001" :precision="4" @update:model-value="editExchangeRate" /><span class="unit">₽ / 元</span><span v-if="rateLoading" class="unit">获取中</span><span v-else-if="rateSourceDate" class="unit">俄罗斯央行 {{ rateSourceDate }}</span><span v-if="rateError" class="rate-error">{{ rateError }}</span></el-form-item>
           <h3>其他费用</h3>
           <el-form-item label="国内运费及贴单"><el-input-number :controls="false" v-model="form.domesticCost" :min="0" :precision="2" /><span class="unit">元/件</span></el-form-item>
           <el-form-item label="广告费占比"><el-input-number :controls="false" v-model="form.adRate" :min="0" :max="100" :precision="1" /><span class="unit">%</span></el-form-item>
