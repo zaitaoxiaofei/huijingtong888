@@ -10,6 +10,7 @@ import { config } from "./config.js";
 import { resolveUploadSubdirRoots } from "./runtime-uploads.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
+import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
@@ -781,6 +782,16 @@ const scheduledJobDefinitions = [
     maxCatchupRuns: 0
   },
   {
+    key: "inventory_sales_daily_backfill",
+    name: "库存销量按日补齐",
+    category: "inventory",
+    priority: "low",
+    intervalMinutes: 1,
+    initialDelaySeconds: 120,
+    catchupEnabled: false,
+    maxCatchupRuns: 0
+  },
+  {
     key: "ozon_category_sync",
     name: "Ozon 类目属性缓存刷新",
     category: "listing",
@@ -921,6 +932,7 @@ const scheduledJobHandlers = {
     pageSize: 1,
     refresh: "1"
   })),
+  inventory_sales_daily_backfill: withForegroundApiDeferral("inventory_sales_daily_backfill", () => backfillInventoryAlertSalesMysql({ max_days: 5 })),
   ozon_category_sync: withForegroundApiDeferral("ozon_category_sync", runBackgroundOzonCategorySync),
   listing_publish_record_sync: withForegroundApiDeferral("listing_publish_record_sync", (job) => services.autoSyncListingPublishRecords(job?.config || {})),
   listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),

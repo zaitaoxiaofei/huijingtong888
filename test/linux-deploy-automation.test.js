@@ -103,3 +103,9 @@ test("ECS release migrates tenant ownership dependencies before starting order s
   assert.ok(remote.indexOf("migrate-tenant-sku-mappings.mjs") < remote.indexOf("migrate-tenant-logistics-rules.mjs"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("\nstart_candidate\n"));
 });
+
+test("ECS release applies versioned OGL rates before activating the candidate", () => {
+  assert.match(remote, /node scripts\/apply-ogl-rates\.mjs --apply/);
+  assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("node scripts/apply-ogl-rates.mjs --apply"));
+  assert.ok(remote.indexOf("node scripts/apply-ogl-rates.mjs --apply") < remote.indexOf("\nstart_candidate\n"));
+});

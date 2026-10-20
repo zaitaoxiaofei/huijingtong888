@@ -193,6 +193,14 @@ for tenant_migration in \
   (cd "$staging_dir" && node "scripts/$tenant_migration" --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 done
 
+if [[ "$run_db_init" == "1" && -f "$staging_dir/scripts/apply-ogl-rates.mjs" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/apply-ogl-rates.mjs --apply)
+fi
+
 if [[ -f "$staging_dir/scripts/init-inventory-numbering.mjs" ]]; then
   set -a
   source "$env_file"

@@ -72,7 +72,8 @@ import {
   onlineStatusKeyMysql,
   onlineStatusKeySqlMysql
 } from "./mysql-online-product-status.js";
-import { refreshInventoryAlertSkuDailyMysqlService } from "./mysql-inventory-alert-snapshots.js";
+import { markInventoryAlertSkuDailyDirtyMysqlService, refreshInventoryAlertSkuDailyMysqlService } from "./mysql-inventory-alert-snapshots.js";
+import { loadInventoryProductBalances, invalidateInventoryProductBalance } from "./mysql-inventory-product-balance.js";
 import { getAiImageUsageOverview } from "./ai-provider-settings.js";
 import {
   missingOnlineProductSkuMarker,
@@ -279,9 +280,20 @@ async function ensureProfitAnalyticsSchemaMysql() {
       shop_id BIGINT NOT NULL,
       ozon_sku VARCHAR(128) NOT NULL,
       item_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+      fbs_item_quantity DECIMAL(18,4) NULL,
       refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (date_key, shop_id, ozon_sku),
       KEY idx_inventory_alert_sku_daily_shop_sku_date (shop_id, ozon_sku, date_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+  `);
+  await ensureMysqlColumns("inventory_alert_sku_daily", [
+    "ALTER TABLE inventory_alert_sku_daily ADD COLUMN fbs_item_quantity DECIMAL(18,4) NULL AFTER item_quantity"
+  ]);
+  await mysqlExecute(`
+    CREATE TABLE IF NOT EXISTS inventory_alert_sku_daily_refresh (
+      date_key DATE NOT NULL PRIMARY KEY,
+      dirty TINYINT(1) NOT NULL DEFAULT 1,
+      refreshed_at DATETIME NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
   await mysqlExecute(`
@@ -305,7 +317,12 @@ const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
 const FBP_OPPORTUNITY_CACHE_TTL_MS = STOCK_ALERT_BASE_CACHE_TTL_MS;
 function invalidateOrderProcurementCoverage() {
   invalidateProcurementCoverageCache();
+  invalidateInventoryProductBalance();
   invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:");
+}
+function invalidateInventoryAlertSalesBindingMysql() {
+  invalidateMasterDataCachePrefix("stock-alerts:product-sales:");
+  invalidateMasterDataCachePrefix("stock-alerts:inventory-base:");
 }
 function fbpTransferInTransitWhereMysql(alias = "") {
   const prefix = alias ? `${alias}.` : "";
@@ -4022,7 +4039,7 @@ export async function peopleMysql() {
   return getCachedMasterData("people", async () => (await mysqlQuery("SELECT * FROM people ORDER BY active DESC, id")).map(({ password_hash, ...row }) => ({ ...row, roles: getRoles(row) })));
 }
 
-async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
+async function inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant) {
   const salesWindow = completedBeijingSalesWindow();
   const range = profitOrderedAtUtcRangeMysql("o", salesWindow.from30, salesWindow.through);
   return mysqlQuery(`
@@ -4035,36 +4052,131 @@ async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
       SUM(consumed.quantity) AS recent_30d_qty
     FROM (
       SELECT cp.id AS product_id, o.shop_id, sh.name AS shop_name,
-        COALESCE(NULLIF(oi.ozon_sku, ''), sm.ozon_sku) AS ozon_sku,
+        COALESCE(NULLIF(oi.ozon_sku, ''), prior_mapping.ozon_sku) AS ozon_sku,
         sm.id AS mapping_id, sm.offer_id, ${chinaDateSqlMysql("o.ordered_at")} AS date_key,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity
       FROM orders o
       JOIN shops sh ON sh.id = o.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
       JOIN order_items oi ON oi.order_id = o.id
-      LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id
-        AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1 AND ${tenantShopPredicateMysql("direct_mapping", defaultTenant)}
+      LEFT JOIN sku_mappings prior_mapping ON prior_mapping.id = oi.sku_mapping_id
+        AND prior_mapping.shop_id = o.shop_id
       LEFT JOIN (
-        SELECT shop_id, ozon_sku, MIN(id) AS id FROM sku_mappings fallback_source
-        WHERE active = 1 AND ${tenantShopPredicateMysql("fallback_source", defaultTenant)} GROUP BY shop_id, ozon_sku
-      ) fallback_mapping ON fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
-      JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, fallback_mapping.id) AND ${tenantShopPredicateMysql("sm", defaultTenant)}
+        SELECT shop_id, ozon_sku,
+          COALESCE(MIN(CASE WHEN active = 1 THEN id END),
+            CASE WHEN COUNT(DISTINCT product_id) = 1 THEN MIN(id) END) AS id
+        FROM sku_mappings fallback_source
+        WHERE ${tenantShopPredicateMysql("fallback_source", defaultTenant)} GROUP BY shop_id, ozon_sku
+      ) fallback_mapping ON fallback_mapping.shop_id = o.shop_id
+        AND fallback_mapping.ozon_sku = COALESCE(NULLIF(oi.ozon_sku, ''), prior_mapping.ozon_sku)
+      JOIN sku_mappings sm ON sm.id = fallback_mapping.id AND ${tenantShopPredicateMysql("sm", defaultTenant)}
       JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
-      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id AND recipe.ozon_sku = oi.ozon_sku
+      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = o.shop_id
+        AND recipe.ozon_sku = COALESCE(NULLIF(oi.ozon_sku, ''), prior_mapping.ozon_sku)
         AND recipe.active = 1 AND recipe.mode = 'combo'
       LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
       LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL AND ${tenantShopPredicateMysql("pc", defaultTenant)}
       JOIN products cp ON cp.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
         WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
         AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
-      WHERE LOWER(o.status) NOT LIKE '%cancel%'
-        AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
+      WHERE ((LOWER(COALESCE(o.status, '')) NOT LIKE '%cancel%'
+        AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%')
+        OR ${orderTransportEvidenceSql("o")})
+        AND NOT EXISTS (
+          SELECT 1 FROM order_items newer
+          LEFT JOIN sku_mappings newer_mapping ON newer_mapping.id = newer.sku_mapping_id
+            AND newer_mapping.shop_id = o.shop_id
+          WHERE newer.order_id = oi.order_id AND newer.id > oi.id
+            AND COALESCE(NULLIF(newer.ozon_sku, ''), NULLIF(newer_mapping.ozon_sku, ''))
+              = COALESCE(NULLIF(oi.ozon_sku, ''), NULLIF(prior_mapping.ozon_sku, ''))
+        )
         AND NOT EXISTS (SELECT 1 FROM ozon_orders_raw raw
           WHERE raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
             AND raw.query_stock_location = 'FBP')
         ${range.whereSql}
     ) consumed
     GROUP BY consumed.product_id, consumed.shop_id, consumed.ozon_sku
-  `, [salesWindow.from7, salesWindow.from15, ...Array(7).fill(tenantPk), ...range.params]);
+  `, [salesWindow.from7, salesWindow.from15, ...Array(6).fill(tenantPk), ...range.params]);
+}
+
+async function inventoryAlertSalesMissingDatesMysql(salesWindow) {
+  const rows = await mysqlQuery(`
+    SELECT DATE_FORMAT(date_key, '%Y-%m-%d') AS date_key
+    FROM inventory_alert_sku_daily_refresh
+    WHERE date_key >= ? AND date_key <= ? AND dirty = 0 AND refreshed_at IS NOT NULL
+  `, [salesWindow.from30, salesWindow.through]);
+  const completed = new Set(rows.map((row) => String(row.date_key)));
+  const missing = [];
+  for (let day = Date.parse(`${salesWindow.through}T00:00:00.000Z`);
+    day >= Date.parse(`${salesWindow.from30}T00:00:00.000Z`); day -= 86_400_000) {
+    const dateKey = new Date(day).toISOString().slice(0, 10);
+    if (!completed.has(dateKey)) missing.push(dateKey);
+  }
+  return missing;
+}
+
+export async function backfillInventoryAlertSalesMysql(body = {}) {
+  ensureMysqlCutoverEnabled();
+  await ensureProfitAnalyticsSchemaMysql();
+  const salesWindow = completedBeijingSalesWindow();
+  const missing = await inventoryAlertSalesMissingDatesMysql(salesWindow);
+  const maxDays = Math.min(Math.max(Number(body.max_days || 5), 1), 30);
+  for (const dateKey of missing.slice(0, maxDays)) {
+    await refreshInventoryAlertSkuDailyMysql({ from: dateKey, to: dateKey });
+  }
+  const olderDirty = missing.length < maxDays ? await mysqlQuery(`
+    SELECT DATE_FORMAT(date_key, '%Y-%m-%d') AS date_key
+    FROM inventory_alert_sku_daily_refresh
+    WHERE dirty = 1 AND date_key < ?
+    ORDER BY date_key DESC LIMIT ?
+  `, [salesWindow.from30, maxDays - missing.length]) : [];
+  for (const row of olderDirty) {
+    await refreshInventoryAlertSkuDailyMysql({ from: row.date_key, to: row.date_key });
+  }
+  return {
+    refreshed_days: Math.min(missing.length, maxDays) + olderDirty.length,
+    remaining_days: Math.max(0, missing.length - maxDays)
+  };
+}
+
+async function inventoryAlertProductSalesMysql(tenantPk, defaultTenant) {
+  const salesWindow = completedBeijingSalesWindow();
+  if ((await inventoryAlertSalesMissingDatesMysql(salesWindow)).length) {
+    return inventoryAlertProductSalesRawMysql(tenantPk, defaultTenant);
+  }
+  return mysqlQuery(`
+    SELECT consumed.product_id, consumed.shop_id, consumed.ozon_sku,
+      MAX(consumed.shop_name) AS shop_name,
+      MAX(consumed.mapping_id) AS mapping_id,
+      MAX(consumed.offer_id) AS offer_id,
+      SUM(CASE WHEN consumed.date_key >= ? THEN consumed.quantity ELSE 0 END) AS recent_7d_qty,
+      SUM(CASE WHEN consumed.date_key >= ? THEN consumed.quantity ELSE 0 END) AS recent_15d_qty,
+      SUM(consumed.quantity) AS recent_30d_qty
+    FROM (
+      SELECT cp.id AS product_id, daily.shop_id, sh.name AS shop_name,
+        daily.ozon_sku, sm.id AS mapping_id, sm.offer_id, daily.date_key,
+        daily.fbs_item_quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity
+      FROM inventory_alert_sku_daily daily
+      JOIN shops sh ON sh.id = daily.shop_id AND ${tenantShopPredicateMysql("sh", defaultTenant)}
+      JOIN (
+        SELECT shop_id, ozon_sku,
+          COALESCE(MIN(CASE WHEN active = 1 THEN id END),
+            CASE WHEN COUNT(DISTINCT product_id) = 1 THEN MIN(id) END) AS id
+        FROM sku_mappings fallback_source
+        WHERE ${tenantShopPredicateMysql("fallback_source", defaultTenant)} GROUP BY shop_id, ozon_sku
+      ) current_mapping ON current_mapping.shop_id = daily.shop_id AND current_mapping.ozon_sku = daily.ozon_sku
+      JOIN sku_mappings sm ON sm.id = current_mapping.id AND ${tenantShopPredicateMysql("sm", defaultTenant)}
+      JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
+      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = daily.shop_id AND recipe.ozon_sku = daily.ozon_sku
+        AND recipe.active = 1 AND recipe.mode = 'combo'
+      LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
+      LEFT JOIN product_components pc ON pc.product_id = p.id AND recipe.id IS NULL AND ${tenantShopPredicateMysql("pc", defaultTenant)}
+      JOIN products cp ON cp.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
+        WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
+        AND cp.active = 1 AND ${tenantShopPredicateMysql("cp", defaultTenant)}
+      WHERE daily.date_key >= ? AND daily.date_key <= ?
+    ) consumed
+    GROUP BY consumed.product_id, consumed.shop_id, consumed.ozon_sku
+  `, [salesWindow.from7, salesWindow.from15, ...Array(6).fill(tenantPk), salesWindow.from30, salesWindow.through]);
 }
 
 async function inventoryAlertProductSkusMysql(productIds, tenantPk, defaultTenant, summaryOnly = false) {
@@ -4135,6 +4247,13 @@ async function purchasedInventoryInTransitMysql(tenantPk, defaultTenant) {
   `, [tenantPk, tenantPk]);
 }
 
+async function inventoryProductBalanceMysql(productIds, tenantPk, defaultTenant, forceRefresh = false) {
+  return loadInventoryProductBalances(mysqlQuery, withMysqlTransaction, tenantPk, defaultTenant, productIds, {
+    forceRefresh,
+    onRefreshed: () => invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:")
+  });
+}
+
 export async function updateInventoryProductLeadTimesMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureProductNamingSchemaMysql();
@@ -4194,6 +4313,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
   if (mode === "inventory-alerts") {
     await ensureSkuInventoryRecipeSchemaMysql();
     await ensureProductCompositionSchemaMysql();
+    await ensureFbpReplenishmentSchemaMysql();
     const coverageTables = ["products", "shops", "sku_mappings", "product_components", "procurement_requests", "inventory_movements"];
     const missingCoverageColumns = (await Promise.all(coverageTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
       .filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
@@ -4221,11 +4341,14 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
       }
       const incomingByProduct = new Map(incomingRows.map((row) => [Number(row.product_id), Number(row.incoming_stock || 0)]));
       const productIds = products.map((product) => Number(product.product_id));
-      const [coverage, skuRows] = productIds.length ? await Promise.all([
-        orderProcurementCoverageMysql({ productIds, tenantId: inventoryTenantPk, includeLegacyTenantNull: inventoryDefaultTenant }),
+      const [availabilityByProduct, skuRows] = productIds.length ? await Promise.all([
+        inventoryProductBalanceMysql(productIds, inventoryTenantPk, inventoryDefaultTenant, forceRefresh).catch(async (error) => {
+          console.warn(`[inventory-balance] projection unavailable; using coverage: ${String(error?.code || error?.name || "unknown")}`);
+          const coverage = await orderProcurementCoverageMysql({ productIds, tenantId: inventoryTenantPk, includeLegacyTenantNull: inventoryDefaultTenant });
+          return coverage.product_availability || new Map();
+        }),
         inventoryAlertProductSkusMysql(productIds, inventoryTenantPk, inventoryDefaultTenant, true)
-      ]) : [{ product_availability: new Map() }, []];
-      const availabilityByProduct = coverage.product_availability || new Map();
+      ]) : [new Map(), []];
       const skusByProduct = new Map();
       const addSku = (row) => {
         const productId = Number(row.product_id);
@@ -4311,7 +4434,10 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     const summaryCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM inventory_alert_sku_daily");
     if (!Number(summaryCount?.count || 0)) {
       const orderCount = await mysqlQueryOne("SELECT COUNT(*) AS count FROM orders");
-      if (Number(orderCount?.count || 0)) await refreshInventoryAlertSkuDailyMysql({ from: "2000-01-01", to: todayDateKeyMysql() });
+      if (Number(orderCount?.count || 0)) await refreshInventoryAlertSkuDailyMysql({
+        from: completedBeijingSalesWindow().from30,
+        to: todayDateKeyMysql()
+      });
     }
     const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
@@ -7606,6 +7732,7 @@ async function syncOrderShippingStateFromOzonMysql(shop, order) {
     return { ok: false, reason: "status_not_shipped", posting };
   }
   const normalized = normalizeSyncedShippingStateMysql(posting);
+  await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
   await mysqlExecute(`
     UPDATE orders
     SET status = ?,
@@ -7640,6 +7767,8 @@ async function syncOrderShippingStateFromOzonMysql(shop, order) {
     posting.substatus || posting.logistics_status || "",
     compactOnlineProductRawJson(posting)
   ]);
+  await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
+  invalidateOrderProcurementCoverage();
   await mysqlExecute(
     "INSERT INTO sync_logs (job, status, message) VALUES ('ozon_ship_compensation', ?, ?)",
     [
@@ -7655,7 +7784,7 @@ export async function shipOrdersMysql(body = {}, userId = null) {
   const ids = Array.isArray(body.order_ids) ? body.order_ids.map(Number).filter(Boolean) : [];
   if (!ids.length) throw new Error("Select orders to ship");
   const ordersToShip = await mysqlQuery(`
-    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage,
+    SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.ordered_at,
       s.name AS shop_name, s.ozon_client_id,
       COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS ozon_api_key, s.api_key_hint
     FROM orders o
@@ -7781,6 +7910,8 @@ export async function shipOrdersMysql(body = {}, userId = null) {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [order.id]);
+    await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
+    invalidateOrderProcurementCoverage();
     shipped.push(order.id);
     shippedLabelRows.push(order);
     updatedOrders.push({
@@ -9726,13 +9857,16 @@ export async function bindOnlineProductMysql(body = {}, tenantId = "admin") {
     }, { syncOutbound: false });
   }
 
+  invalidateOrderProcurementCoverage();
   const outboundSync = await syncOutboundForOpenOrdersMysql({ shop_id: Number(online.shop_id), ozon_sku: bindSku });
+  invalidateInventoryAlertSalesBindingMysql();
   const variantBinding = productId ? await propagateListingVariantInventory({
     tenantKey: defaultTenant ? "admin" : String(normalizedTenantId),
     tenantPk: normalizedTenantId,
     shopId: Number(online.shop_id), ozonSku: bindSku, offerId: online.offer_id, productId
   }) : null;
   for (const id of new Set([mappingId, ...(variantBinding?.mapping_ids || [])].filter(Boolean))) scheduleBindingProfitRecalculationMysql(id);
+  invalidateOrderProcurementCoverage();
 
   return {
     ok: true,
@@ -9909,9 +10043,11 @@ export async function saveSkuInventoryRecipeMysql(body = {}, options = {}) {
     }
     return { ok: true, mode: "combo", recipe_id: recipeId, items };
   });
+  invalidateOrderProcurementCoverage();
   if (options.syncOutbound !== false) {
     await syncOutboundForOpenOrdersMysql({ shop_id: context.shopId, ozon_sku: context.ozonSku });
   }
+  invalidateInventoryAlertSalesBindingMysql();
   return result;
 }
 
@@ -13954,6 +14090,8 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   if (!tenantScoped && (body.structured_naming || body.structuredNaming)) await saveStructuredNamingMysql(productId, body, connection);
   });
 
+  if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
+
   let outboundSync = null;
   let outboundSyncWarning = "";
   if (shouldSyncOutbound) {
@@ -13985,7 +14123,9 @@ export async function updateProductComponentsMysql(id, body = {}, tenantId = "ad
   await withMysqlTransaction(async (connection) => {
     await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantId) : "admin");
   });
+  invalidateOrderProcurementCoverage();
   const outboundSync = tenantScoped ? null : await syncOutboundForOpenOrdersMysql({ product_id: productId, open_only: true });
+  invalidateInventoryAlertSalesBindingMysql();
   return { ok: true, outbound_sync: outboundSync };
 }
 
@@ -14765,6 +14905,7 @@ export async function undoMergeProductHistoryMysql(id) {
       source_product_ids: sourceProductIds
     };
   });
+  invalidateOrderProcurementCoverage();
   await recalculateOrderProfitsForProductMysql(resultPayload.target_product_id);
   for (const sourceProductId of resultPayload.source_product_ids) {
     await recalculateOrderProfitsForProductMysql(sourceProductId);
@@ -14959,8 +15100,10 @@ export async function mergeProductsMysql(body = {}) {
     `, [targetProductId, ...sourceProductIds]);
     await rebuildInventoryCurrentForProductMysql(connection, targetProductId);
   });
+  invalidateOrderProcurementCoverage();
   await syncOutboundForOpenOrdersMysql({ product_id: targetProductId, open_only: true });
   scheduleMergePostProcessingMysql(targetProductId, sourceProductIds);
+  invalidateInventoryAlertSalesBindingMysql();
   return {
     ok: true,
     merge_history_id: mergeHistoryId,
@@ -14972,6 +15115,7 @@ export async function mergeProductsMysql(body = {}) {
 export async function deleteProductMysql(id) {
   ensureMysqlCutoverEnabled();
   await mysqlExecute("UPDATE products SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(id)]);
+  invalidateOrderProcurementCoverage();
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -15004,6 +15148,7 @@ export async function restoreProductMysql(id, tenantId = "admin") {
     WHERE id = ?${whereTenantSql}
   `, params);
   if (tenantScoped && !Number(result.affectedRows || 0)) throw Object.assign(new Error("该隐藏产品不存在或不属于当前企业。"), { statusCode: 404 });
+  invalidateOrderProcurementCoverage();
   invalidateMasterDataCache();
   return { ok: true };
 }
@@ -17167,6 +17312,7 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     `, [row.shop_id, row.posting_number, row.ozon_sku]);
     deducted += 1;
   }
+  if (cancelledRows.length || outboundRecordsSynced || deducted || componentMigrations) invalidateOrderProcurementCoverage();
   return {
     deducted,
     pending,
@@ -18136,7 +18282,8 @@ async function reconcileTransportedProcurementBacklogMysql() {
   }
 }
 
-async function upsertPostingMysql(shop, posting, historySource = "sync") {
+async function upsertPostingMysql(shop, posting, historySource = "sync", options = {}) {
+  if (!options.salesDatesMarked) await markInventoryAlertSkuDailyDirtyMysql(posting.ordered_at);
   await saveRawPostingMysql(shop, posting);
   const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number]);
   let orderId = exists?.id;
@@ -18366,6 +18513,8 @@ async function upsertPostingMysql(shop, posting, historySource = "sync") {
       console.error(`[procurement] failed to reconcile transported order ${orderId}`, error);
     }
   }
+  if (!options.salesDatesMarked) await markInventoryAlertSkuDailyDirtyMysql(posting.ordered_at);
+  invalidateOrderProcurementCoverage();
   return { inserted, updated, insertedItems };
 }
 
@@ -18441,6 +18590,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   let requests = 0;
   const shopResults = [];
   const errors = [];
+  const changedSalesDateKeys = new Set();
   options.onProgress?.({ phase: "fetching", message: `正在从 Ozon 拉取 ${activeShops.length} 个店铺...`, completed_shops: 0, total_shops: activeShops.length, fetched: 0 });
   let completedShops = 0;
   for (const shop of activeShops) {
@@ -18461,9 +18611,14 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       fetched += postings.length;
       requests += result.requests || 0;
       options.onProgress?.({ phase: "saving", message: `正在写入 ${shop.name} 的 ${postings.length} 单...`, completed_shops: completedShops, total_shops: activeShops.length, fetched });
+      const shopSalesDates = new Set(postings.map((posting) => chinaDateKeyMysql(posting.ordered_at)).filter(Boolean));
+      for (const dateKey of shopSalesDates) {
+        changedSalesDateKeys.add(dateKey);
+        await markInventoryAlertSkuDailyDirtyMysql(`${dateKey}T00:00:00+08:00`);
+      }
       for (const posting of postings) {
         throwIfAbortedMysql(options.signal);
-        const stats = await upsertPostingMysql(shop, posting, historySource);
+        const stats = await upsertPostingMysql(shop, posting, historySource, { salesDatesMarked: true });
         shopStats.inserted += stats.inserted;
         shopStats.updated += stats.updated;
         shopStats.inserted_items += stats.insertedItems;
@@ -18483,6 +18638,9 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   const status = errors.length ? "partial_error" : "ok";
   const message = `Range ${from || "last_30_days"}~${to || "now"}; fetched ${fetched}, inserted item(s) ${inserted}, updated order(s) ${updated}, requests ${requests}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (job, status, message) VALUES ('ozon_orders', ?, ?)", [status, message]);
+  for (const dateKey of changedSalesDateKeys) {
+    await markInventoryAlertSkuDailyDirtyMysql(`${dateKey}T00:00:00+08:00`);
+  }
   if (body.skip_post_processing !== true && body.skipPostProcessing !== true) {
     options.onProgress?.({ phase: "refreshing", message: "订单已写入，正在刷新库存和利润统计...", completed_shops: completedShops, total_shops: activeShops.length, fetched });
     await syncOutboundForOpenOrdersMysql({ ordered_from: from || "", ordered_to: to || "" });
@@ -18819,8 +18977,23 @@ export async function refreshInventoryAlertSkuDailyMysql(body = {}) {
     normalizeDate: normalizeSyncDateMysql,
     orderedAtUtcRange: profitOrderedAtUtcRangeMysql,
     queryOne: mysqlQueryOne,
+    transaction: withMysqlTransaction,
+    transportEvidenceSql: orderTransportEvidenceSql,
     todayDateKey: todayDateKeyMysql
   }, body);
+}
+
+async function markInventoryAlertSkuDailyDirtyMysql(orderedAt) {
+  const dateKey = chinaDateKeyMysql(orderedAt);
+  if (!dateKey) return;
+  const salesWindow = completedBeijingSalesWindow();
+  if (dateKey > salesWindow.through) return;
+  await ensureProfitAnalyticsSchemaMysql();
+  await markInventoryAlertSkuDailyDirtyMysqlService({
+    execute: mysqlExecute,
+    invalidateCachePrefix: dateKey >= salesWindow.from30 ? invalidateMasterDataCachePrefix : undefined,
+    normalizeDate: normalizeSyncDateMysql
+  }, dateKey);
 }
 
 export async function refreshProfitAnalyticsSnapshotsMysql(body = {}) {
@@ -18832,7 +19005,10 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}) {
   const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
   const returnLossTotal = returnLossTotalSqlMysql();
   const orderedAtFilter = profitOrderedAtUtcRangeMysql("o", rangeFrom, rangeTo);
-  await refreshInventoryAlertSkuDailyMysql({ from: rangeFrom, to: rangeTo });
+  await refreshInventoryAlertSkuDailyMysql({
+    from: normalizeSyncDateMysql(body.from) || completedBeijingSalesWindow().from30,
+    to: normalizeSyncDateMysql(body.to) || todayDateKeyMysql()
+  });
   await mysqlExecute("DELETE FROM analytics_shop_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
   await mysqlExecute("DELETE FROM analytics_product_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
   await mysqlExecute("DELETE FROM analytics_sku_profit_daily WHERE date_key >= ? AND date_key <= ?", [rangeFrom, rangeTo]);
@@ -23359,7 +23535,7 @@ export async function deletePurchaseOrderMysql(id) {
 export async function createInboundRecordMysql(body = {}) {
   ensureMysqlCutoverEnabled();
   await ensurePurchaseCostVersionSchemaMysql();
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const quantity = Number(body.quantity || 0);
     const amount = Number(body.amount || 0);
     const shippingAmount = Number(body.shipping_amount || 0);
@@ -23405,6 +23581,8 @@ export async function createInboundRecordMysql(body = {}) {
     }
     return { id: inboundId };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 async function applyInboundRecordUpdateMysql(connection, id, body = {}, options = {}) {
@@ -23555,7 +23733,6 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
 }
 
 export async function updateInboundRecordMysql(id, body = {}, sessionPersonId = null) {
-  invalidateOrderProcurementCoverage();
   ensureMysqlCutoverEnabled();
   await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
@@ -23941,7 +24118,7 @@ export function startBatchUpdateInboundRecordsMysql(body = {}, sessionPersonId =
 export async function deleteInboundRecordMysql(id) {
   ensureMysqlCutoverEnabled();
   const inboundId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
     if (!existing) throw new Error("Inbound record not found");
     if (existing.status === "approved") {
@@ -23959,11 +24136,13 @@ export async function deleteInboundRecordMysql(id) {
     await connection.execute("DELETE FROM inbound_records WHERE id = ?", [inboundId]);
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function createInventoryMovementMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const sourceType = String(body.source_type || body.sourceType || "").trim();
     const isManualOutbound = sourceType === "manual_outbound";
     const quantity = Number(body.quantity ?? body.quantity_delta ?? 0);
@@ -24021,13 +24200,15 @@ export async function createInventoryMovementMysql(body = {}, userId = null, ten
     const id = await postInventoryMysql(connection, payload);
     return { id };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function updateInventoryMovementMysql(id, body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const movementId = Number(id || 0);
   if (!movementId) throw new Error("缺少库存流水 ID");
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const tenantScoped = String(tenantId || "admin") !== "admin";
     const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : 0;
     if (tenantScoped) {
@@ -24089,13 +24270,15 @@ export async function updateInventoryMovementMysql(id, body = {}, userId = null,
     }
     return { ok: true, id: createdRows[0]?.movement_id || movementId, movement_ids: createdRows.map((row) => row.movement_id).filter(Boolean) };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function deleteInventoryMovementMysql(id, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const movementId = Number(id || 0);
   if (!movementId) throw new Error("缺少库存流水 ID");
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const tenantScoped = String(tenantId || "admin") !== "admin";
     const tenantPk = tenantScoped ? await resolveShopTenantIdMysql(tenantId) : 0;
     if (tenantScoped && !await inventoryMovementTenantColumnExistsMysql()) {
@@ -24125,6 +24308,8 @@ export async function deleteInventoryMovementMysql(id, userId = null, tenantId =
     }
     return { ok: true, deleted: true, operator: userId ? String(userId) : "" };
   });
+  if (result.deleted) invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function inventoryManualOutboundRecordsMysql(query = {}, tenantId = "admin") {
@@ -24234,7 +24419,7 @@ export async function adjustInventoryStockDebtMysql(body = {}, userId = null) {
   await ensureStockLocationSchemaMysql();
   const productId = Number(body.product_id || 0);
   if (!productId) throw new Error("product_id is required");
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     const product = await mysqlConnectionQueryOne(connection, "SELECT id, code, name FROM products WHERE id = ? AND active = 1 FOR UPDATE", [productId]);
     if (!product) throw new Error("Product not found");
     const stock = await mysqlConnectionQueryOne(connection, `
@@ -24272,6 +24457,8 @@ export async function adjustInventoryStockDebtMysql(body = {}, userId = null) {
       stock_debt_after: roundMoneyMysql(Math.max(0, -(ledgerStock + quantity)))
     };
   });
+  if (result.adjusted) invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function rawOzonOrdersMysql() {
@@ -32038,6 +32225,7 @@ async function refreshCustomerMessageOrderFromOzonMysql(shop, order, timeoutMs =
     const liveLogisticsStatus = String(livePosting.logistics_status || livePosting.substatus || order.logistics_status || "");
     const liveTrackingStage = String(livePosting.tracking_stage || livePosting.substatus || liveStatus || order.tracking_stage || "");
     const statusChanged = liveStatus !== String(order.status || "") || liveTrackingStage !== String(order.tracking_stage || "");
+    await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
     await mysqlExecute(`UPDATE orders SET
       status=?, logistics_status=?, tracking_stage=?, delivered_at=COALESCE(?,delivered_at),
       last_synced_at=CURRENT_TIMESTAMP,
@@ -32051,6 +32239,9 @@ async function refreshCustomerMessageOrderFromOzonMysql(shop, order, timeoutMs =
       statusChanged ? 1 : 0,
       order.id
     ]);
+    await recordOrderStatusHistoryMysql(shop, livePosting, order.id, orderLifecycleMysql(livePosting), "customer_message_status_recheck", order);
+    await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
+    invalidateOrderProcurementCoverage();
     return await mysqlQueryOne("SELECT * FROM orders WHERE id=? LIMIT 1", [order.id]) || order;
   } finally {
     clearTimeout(timeout);
@@ -32534,6 +32725,8 @@ export async function updateSkuMappingMysql(id, body = {}) {
 
   }
 
+  invalidateOrderProcurementCoverage();
+
   const [outboundSync, profitSync] = await Promise.all([
     syncOutboundForOpenOrdersMysql({
       shop_id: Number(existing.shop_id),
@@ -32543,6 +32736,9 @@ export async function updateSkuMappingMysql(id, body = {}) {
       ? recalculateOrderItemsForMappingMysql(mappingId, { include_final: true, refresh_snapshots: true })
       : Promise.resolve({ updated: 0, date_keys: [] })
   ]);
+
+  invalidateOrderProcurementCoverage();
+  invalidateInventoryAlertSalesBindingMysql();
 
   return { ok: true, id: mappingId, outbound_sync: outboundSync, profit_sync: profitSync };
 }

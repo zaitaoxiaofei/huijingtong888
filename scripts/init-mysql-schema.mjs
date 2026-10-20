@@ -890,6 +890,21 @@ CREATE TABLE IF NOT EXISTS inventory_current (
   last_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS inventory_product_balance (
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  product_id BIGINT UNSIGNED NOT NULL,
+  ledger_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  open_deducted_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  open_order_demand_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  fbp_reserved_qty DECIMAL(18,4) NOT NULL DEFAULT 0,
+  physical_stock DECIMAL(18,4) NOT NULL DEFAULT 0,
+  available_stock DECIMAL(18,4) NOT NULL DEFAULT 0,
+  inventory_needs_review TINYINT(1) NOT NULL DEFAULT 0,
+  refreshed_at DATETIME NOT NULL,
+  PRIMARY KEY (tenant_id, product_id),
+  KEY idx_inventory_product_balance_tenant_fresh (tenant_id, refreshed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   shop_id BIGINT UNSIGNED NOT NULL,
@@ -1047,6 +1062,23 @@ CREATE TABLE IF NOT EXISTS ozon_orders_raw (
   raw_json LONGTEXT NOT NULL,
   fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_ozon_orders_raw_store_posting (store_id, posting_number)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_alert_sku_daily (
+  date_key DATE NOT NULL,
+  shop_id BIGINT NOT NULL,
+  ozon_sku VARCHAR(128) NOT NULL,
+  item_quantity DECIMAL(18,4) NOT NULL DEFAULT 0,
+  fbs_item_quantity DECIMAL(18,4) NULL,
+  refreshed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (date_key, shop_id, ozon_sku),
+  KEY idx_inventory_alert_sku_daily_shop_sku_date (shop_id, ozon_sku, date_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_alert_sku_daily_refresh (
+  date_key DATE NOT NULL PRIMARY KEY,
+  dirty TINYINT(1) NOT NULL DEFAULT 1,
+  refreshed_at DATETIME NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS ozon_finance_items (
@@ -1581,6 +1613,7 @@ try {
     "ALTER TABLE products ADD COLUMN listing_tags_prompt TEXT NULL",
     "ALTER TABLE products ADD COLUMN listing_description_prompt TEXT NULL",
     "ALTER TABLE products ADD COLUMN production_lead_days INT NULL",
+    "ALTER TABLE inventory_alert_sku_daily ADD COLUMN fbs_item_quantity DECIMAL(18,4) NULL AFTER item_quantity",
     "ALTER TABLE products ADD COLUMN warehouse_logistics_days INT NOT NULL DEFAULT 2",
     "ALTER TABLE procurement_requests ADD COLUMN cancelled_at DATETIME NULL",
     "ALTER TABLE procurement_requests ADD COLUMN tenant_id BIGINT UNSIGNED NULL",

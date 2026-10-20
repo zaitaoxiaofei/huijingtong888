@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { DatabaseSync } from "node:sqlite";
 import { applyStockAlertQuery, completedBeijingSalesWindow } from "../src/services/inventory-alert-utils.js";
 
 const page = readFileSync(new URL("../frontend/admin/views/inventory/InventoryAlertsPage.vue", import.meta.url), "utf8");
@@ -62,7 +63,20 @@ test("七日、十五日与三十日销量窗口只包含昨天及之前的完�
   const window = completedBeijingSalesWindow(new Date("2026-10-18T16:30:00.000Z"));
   assert.deepEqual(window, { from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" });
   assert.match(service, /profitOrderedAtUtcRangeMysql\("o", salesWindow\.from30, salesWindow\.through\)/);
-  assert.ok(service.includes("[salesWindow.from7, salesWindow.from15, ...Array(7).fill(tenantPk), ...range.params]"));
+  assert.ok(service.includes("[salesWindow.from7, salesWindow.from15, ...Array(6).fill(tenantPk), salesWindow.from30, salesWindow.through]"));
+});
+
+test("北京时间跨日后昨天缺水位会回退并进入分批补齐", async () => {
+  const window = completedBeijingSalesWindow(new Date("2026-10-18T16:30:00.000Z"));
+  const keys = Array.from({ length: 30 }, (_, index) => new Date(Date.parse(`${window.from30}T00:00:00.000Z`) + index * 86_400_000)
+    .toISOString().slice(0, 10));
+  const context = vm.createContext({ mysqlQuery: async () => keys.slice(0, -1).map((date_key) => ({ date_key })) });
+  const start = service.indexOf("async function inventoryAlertSalesMissingDatesMysql");
+  const end = service.indexOf("export async function backfillInventoryAlertSalesMysql", start);
+  vm.runInContext(service.slice(start, end), context);
+  assert.deepEqual(Array.from(await context.inventoryAlertSalesMissingDatesMysql(window)), [window.through]);
+  assert.match(server, /key: "inventory_sales_daily_backfill"/);
+  assert.match(server, /intervalMinutes: 1/);
 });
 
 test("页面默认库存视角并保留 SKU 切换、状态筛选、主图预览与采购预填", () => {
@@ -90,10 +104,12 @@ test("库存预警按企业隔离接口、缓存与持久快照，库存视角�
   assert.match(service, /tenantShopPredicateMysql\("cp", defaultTenant\)/);
 });
 
-test("库存销量查询计入组合配件，并将企业与完整日边界参数送入 SQL", async () => {
+test("库存销量从完整的 SKU 日表关联当前库存，保留组合配件与企业隔离", async () => {
   const queries = [];
   const context = vm.createContext({
     completedBeijingSalesWindow: () => ({ from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" }),
+    inventoryAlertSalesMissingDatesMysql: async () => [],
+    inventoryAlertProductSalesRawMysql: async () => { throw new Error("complete projection must not scan raw orders"); },
     profitOrderedAtUtcRangeMysql: () => ({ whereSql: "AND o.ordered_at >= ? AND o.ordered_at < ?", params: ["from-utc", "to-utc"] }),
     chinaDateSqlMysql: (field) => `DATE(${field})`,
     localStockLocationPredicateMysql: (alias) => `${alias}.stock_location = 'LOCAL'`,
@@ -110,14 +126,18 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   await context.stockedInventoryAlertProductsMysql(12, true);
   await context.purchasedInventoryInTransitMysql(12, true);
   await context.inventoryAlertProductSkusMysql([1, 2], 12, true);
-  assert.match(queries[0].sql, /oi\.quantity \* COALESCE\(ri\.quantity, pc\.quantity, 1\)/);
+  assert.match(queries[0].sql, /FROM inventory_alert_sku_daily daily/);
+  assert.doesNotMatch(queries[0].sql, /JOIN order_items/);
+  assert.match(queries[0].sql, /daily\.fbs_item_quantity \* COALESCE\(ri\.quantity, pc\.quantity, 1\)/);
+  assert.match(queries[0].sql, /current_mapping\.ozon_sku = daily\.ozon_sku/);
+  assert.match(queries[0].sql, /COUNT\(DISTINCT product_id\) = 1/);
   assert.match(queries[0].sql, /JOIN products cp ON cp\.id = CASE WHEN recipe\.id IS NOT NULL THEN ri\.product_id/);
   assert.equal((queries[0].sql.match(/\?/g) || []).length, queries[0].params.length);
   assert.equal(queries[0].params[0], "2026-10-12");
   assert.equal(queries[0].params[1], "2026-10-04");
-  assert.equal(queries[0].params.at(-2), "from-utc");
-  assert.equal(queries[0].params.at(-1), "to-utc");
-  for (const alias of ["sh", "direct_mapping", "fallback_source", "sm", "p", "pc", "cp"]) {
+  assert.equal(queries[0].params.at(-2), "2026-09-19");
+  assert.equal(queries[0].params.at(-1), "2026-10-18");
+  for (const alias of ["sh", "fallback_source", "sm", "p", "pc", "cp"]) {
     assert.match(queries[0].sql, new RegExp(`${alias}\\.tenant_id = \\? OR ${alias}\\.tenant_id IS NULL`));
   }
   assert.match(queries[1].sql, /im\.quantity_delta > 0/);
@@ -133,7 +153,37 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   assert.equal((queries[3].sql.match(/\?/g) || []).length, queries[3].params.length);
   await context.inventoryAlertProductSalesMysql(44, false);
   assert.doesNotMatch(queries[4].sql, /tenant_id IS NULL/);
-  assert.deepEqual(Array.from(queries[4].params.slice(2, 9)), Array(7).fill(44));
+  assert.deepEqual(Array.from(queries[4].params.slice(2, 8)), Array(6).fill(44));
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`
+      CREATE TABLE inventory_alert_sku_daily (date_key TEXT, shop_id INTEGER, ozon_sku TEXT, fbs_item_quantity INTEGER);
+      CREATE TABLE shops (id INTEGER, tenant_id INTEGER, name TEXT);
+      CREATE TABLE sku_mappings (id INTEGER, shop_id INTEGER, tenant_id INTEGER, ozon_sku TEXT, active INTEGER, product_id INTEGER, offer_id TEXT);
+      CREATE TABLE products (id INTEGER, tenant_id INTEGER, active INTEGER);
+      CREATE TABLE sku_inventory_recipes (id INTEGER, shop_id INTEGER, ozon_sku TEXT, active INTEGER, mode TEXT);
+      CREATE TABLE sku_inventory_recipe_items (recipe_id INTEGER, product_id INTEGER, quantity INTEGER);
+      CREATE TABLE product_components (product_id INTEGER, component_product_id INTEGER, quantity INTEGER, tenant_id INTEGER);
+      INSERT INTO shops VALUES (11, 44, '本企业店铺'), (22, 55, '其他企业店铺');
+      INSERT INTO products VALUES (100, 44, 1), (200, 44, 1), (300, 55, 1);
+      INSERT INTO sku_mappings VALUES
+        (1, 11, 44, 'S1', 0, 100, 'old'),
+        (2, 11, 44, 'S1', 1, 200, 'new'),
+        (3, 22, 55, 'S2', 1, 300, 'other'),
+        (4, 11, 44, 'S3', 0, 100, 'unbound'),
+        (5, 11, 44, 'S4', 0, 100, 'ambiguous-1'),
+        (6, 11, 44, 'S4', 0, 200, 'ambiguous-2');
+      INSERT INTO inventory_alert_sku_daily VALUES
+        ('2026-10-18', 11, 'S1', 5), ('2026-10-18', 22, 'S2', 9),
+        ('2026-10-18', 11, 'S3', 4), ('2026-10-18', 11, 'S4', 8);
+    `);
+    const projected = db.prepare(queries[4].sql).all(...queries[4].params);
+    assert.deepEqual(projected.map((row) => [row.product_id, row.recent_30d_qty]).sort((a, b) => a[0] - b[0]),
+      [[100, 4], [200, 5]],
+      "remapped sales move to the current inventory; unambiguous unbound sales remain, ambiguous and other-tenant sales stay hidden");
+  } finally {
+    db.close();
+  }
   await context.inventoryAlertProductSkusMysql([1, 2], 44, false);
   assert.match(queries[5].sql, /sm\.tenant_id = \?/);
   assert.doesNotMatch(queries[5].sql, /tenant_id IS NULL/);
@@ -145,6 +195,54 @@ test("库存销量查询计入组合配件，并将企业与完整日边界参�
   assert.match(queries[6].sql, /SELECT DISTINCT cp\.id AS product_id,\s+sm\.shop_id,/);
   assert.doesNotMatch(queries[6].sql, /sm\.id AS mapping_id/);
   assert.match(queries[6].sql, /ORDER BY cp\.id, sm\.shop_id, sm\.ozon_sku\s*$/);
+
+  let rawFallbackCalls = 0;
+  context.inventoryAlertSalesMissingDatesMysql = async () => ["2026-10-18"];
+  context.inventoryAlertProductSalesRawMysql = async () => { rawFallbackCalls += 1; return []; };
+  await context.inventoryAlertProductSalesMysql(44, false);
+  assert.equal(rawFallbackCalls, 1, "incomplete or dirty days use the old source query");
+});
+
+test("日表未补齐时原始查询仍按当前 SKU 绑定归属并识别空 SKU 的旧映射", async () => {
+  const window = { from30: "2026-09-19", from15: "2026-10-04", from7: "2026-10-12", through: "2026-10-18" };
+  const context = vm.createContext({
+    completedBeijingSalesWindow: () => window,
+    profitOrderedAtUtcRangeMysql: () => ({ whereSql: "AND o.ordered_at >= ? AND o.ordered_at < ?", params: ["2026-09-19", "2026-10-19"] }),
+    chinaDateSqlMysql: (field) => `DATE(${field})`,
+    tenantShopPredicateMysql: (alias) => `${alias}.tenant_id = ?`,
+    orderTransportEvidenceSql: () => "0",
+    mysqlQuery: async (sql, params) => ({ sql, params })
+  });
+  const start = service.indexOf("async function inventoryAlertProductSalesRawMysql");
+  const end = service.indexOf("async function inventoryAlertSalesMissingDatesMysql", start);
+  vm.runInContext(service.slice(start, end), context);
+  const { sql, params } = await context.inventoryAlertProductSalesRawMysql(44, false);
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`
+      CREATE TABLE orders (id INTEGER, shop_id INTEGER, status TEXT, tracking_stage TEXT, ordered_at TEXT, posting_number TEXT);
+      CREATE TABLE order_items (id INTEGER, order_id INTEGER, sku_mapping_id INTEGER, ozon_sku TEXT, quantity INTEGER);
+      CREATE TABLE shops (id INTEGER, tenant_id INTEGER, name TEXT);
+      CREATE TABLE sku_mappings (id INTEGER, shop_id INTEGER, tenant_id INTEGER, ozon_sku TEXT, active INTEGER, product_id INTEGER, offer_id TEXT);
+      CREATE TABLE products (id INTEGER, tenant_id INTEGER, active INTEGER);
+      CREATE TABLE sku_inventory_recipes (id INTEGER, shop_id INTEGER, ozon_sku TEXT, active INTEGER, mode TEXT);
+      CREATE TABLE sku_inventory_recipe_items (recipe_id INTEGER, product_id INTEGER, quantity INTEGER);
+      CREATE TABLE product_components (product_id INTEGER, component_product_id INTEGER, quantity INTEGER, tenant_id INTEGER);
+      CREATE TABLE ozon_orders_raw (store_id INTEGER, posting_number TEXT, query_stock_location TEXT);
+      INSERT INTO shops VALUES (11, 44, '本企业店铺'), (22, 55, '其他企业店铺');
+      INSERT INTO products VALUES (100, 44, 1), (200, 44, 1), (300, 55, 1);
+      INSERT INTO sku_mappings VALUES (1, 11, 44, 'S1', 0, 100, 'old'), (2, 11, 44, 'S1', 1, 200, 'new'),
+        (3, 11, 44, 'S3', 1, 100, 'blank'), (4, 22, 55, 'S2', 1, 300, 'other');
+      INSERT INTO orders VALUES (1, 11, 'awaiting_packaging', '', '2026-10-18', 'p1'),
+        (2, 11, 'awaiting_packaging', '', '2026-10-18', 'p2'), (3, 22, 'awaiting_packaging', '', '2026-10-18', 'p3');
+      INSERT INTO order_items VALUES (1, 1, 1, 'S1', 5), (2, 2, 3, '', 4), (3, 3, 4, 'S2', 9);
+    `);
+    const rows = db.prepare(sql).all(...params);
+    assert.deepEqual(rows.map((row) => [row.product_id, row.recent_30d_qty]).sort((a, b) => a[0] - b[0]),
+      [[100, 4], [200, 5]]);
+  } finally {
+    db.close();
+  }
 });
 
 test("默认企业库存视角解析真实企业 PK，聚合同库存的多店铺 SKU 且避免重复", async () => {
@@ -157,6 +255,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async (tenantId) => { calls.push(["resolve", tenantId]); return 4; },
     isDefaultShopTenantMysql: async (tenantPk) => { calls.push(["default", tenantPk]); return true; },
@@ -167,6 +266,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
       { product_id: 1, mapping_id: 40, shop_id: 3, shop_name: "乙店", ozon_sku: "SKU-D", recent_7d_qty: 0, recent_15d_qty: 1, recent_30d_qty: 1 }
     ]; },
     purchasedInventoryInTransitMysql: async (tenantPk, legacy) => { calls.push(["incoming", tenantPk, legacy]); return []; },
+    inventoryProductBalanceMysql: async (ids, tenantPk, legacy, refresh) => { calls.push(["balance", ids, tenantPk, legacy, refresh]); return new Map([[1, { product_id: 1, physical_stock: 4, available_stock: 3 }]]); },
     orderProcurementCoverageMysql: async (options) => { calls.push(["availability", options]); return { product_availability: new Map([[1, { product_id: 1, physical_stock: 4, available_stock: 3 }]]) }; },
     inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => { calls.push(["skus", ids, tenantPk, legacy, summaryOnly]); return [
       { product_id: 1, mapping_id: 10, shop_id: 2, shop_name: "甲店", ozon_sku: "SKU-A" },
@@ -184,7 +284,7 @@ test("默认企业库存视角解析真实企业 PK，聚合同库存的多店�
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["resolve", "admin"], ["default", 4],
     ["products", 4, true], ["sales", 4, true], ["incoming", 4, true],
-    ["availability", { productIds: [1], tenantId: 4, includeLegacyTenantNull: true }],
+    ["balance", [1], 4, true, false],
     ["skus", [1], 4, true, true], ["skus", [1], 4, true, null]
   ]);
   assert.equal(rows[0].available_stock, 3);
@@ -205,12 +305,14 @@ test("超过 200 个库存只核算一次企业库存占用，SKU 搜索后只�
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async () => 7,
     isDefaultShopTenantMysql: async () => false,
     stockedInventoryAlertProductsMysql: async () => products,
     inventoryAlertProductSalesMysql: async () => [],
     purchasedInventoryInTransitMysql: async () => [],
+    inventoryProductBalanceMysql: async (ids, tenantPk) => { calls.push(["balance", ids.length, tenantPk]); return new Map(); },
     orderProcurementCoverageMysql: async (options) => { calls.push(["coverage", options.productIds.length, options.tenantId]); return { product_availability: new Map() }; },
     inventoryAlertProductSkusMysql: async (ids, tenantPk, legacy, summaryOnly) => {
       calls.push(["skus", ids.length, tenantPk, legacy, summaryOnly]);
@@ -229,7 +331,7 @@ test("超过 200 个库存只核算一次企业库存占用，SKU 搜索后只�
   assert.equal(result.rows[0].sku_count, 1);
   assert.equal(result.rows[0].skus[0].mapping_id, 401);
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ["coverage", 401, 7], ["skus", 401, 7, false, true], ["skus", 1, 7, false, null]
+    ["balance", 401, 7], ["skus", 401, 7, false, true], ["skus", 1, 7, false, null]
   ]);
 });
 
@@ -242,6 +344,7 @@ test("已解绑但仍有销量的 SKU 在库存预警明细中保留", async () 
     ensureProfitAnalyticsSchemaMysql: async () => {},
     ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {},
+    ensureFbpReplenishmentSchemaMysql: async () => {},
     mysqlSchemaColumnExists: async () => true,
     resolveShopTenantIdMysql: async () => 7,
     isDefaultShopTenantMysql: async () => false,
@@ -249,6 +352,7 @@ test("已解绑但仍有销量的 SKU 在库存预警明细中保留", async () 
     inventoryAlertProductSalesMysql: async () => [{ product_id: 1, mapping_id: 5, shop_id: 11, shop_name: "甲店",
       ozon_sku: "HISTORY-SKU", recent_7d_qty: 2, recent_15d_qty: 3, recent_30d_qty: 4 }],
     purchasedInventoryInTransitMysql: async () => [],
+    inventoryProductBalanceMysql: async () => new Map(),
     orderProcurementCoverageMysql: async () => ({ product_availability: new Map() }),
     inventoryAlertProductSkusMysql: async () => [],
     getCachedMasterData: async (_, loader) => loader(),
