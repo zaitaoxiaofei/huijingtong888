@@ -18,6 +18,7 @@ import {
   saveSnapshot
 } from "../src/services/seller-analytics.js";
 import fs from "node:fs";
+import vm from "node:vm";
 
 test("collect queue converts ISO timestamps before writing MySQL DATETIME columns", () => {
   const source = fs.readFileSync(new URL("../src/services/seller-analytics.js", import.meta.url), "utf8");
@@ -500,6 +501,57 @@ test("seller analytics isolates prepare requests by browser instance", async () 
   assert.equal(requestA.plugin_instance_id, "browser-a");
   assert.equal(requestB.expected_store_id, "222222");
   assert.equal(requestB.plugin_instance_id, "browser-b");
+});
+
+test("auth-only prepare stays auth-only through plugin claim and rejects browser-only fallback", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const authOnly = await preparePlugin(db, {
+    plugin_instance_id: "auth-browser",
+    store_id: "111111",
+    bind_auth_only: true
+  }, "admin");
+  assert.equal(authOnly.bind_auth_only, true);
+
+  const stored = await validatePluginStatus(db, { plugin_instance_id: "auth-browser", store_id: "111111" }, "admin");
+  assert.equal(stored.prepare_request.bind_auth_only, true);
+  const claimedAuthOnly = await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "auth-browser" });
+  assert.equal(claimedAuthOnly.bind_auth_only, true);
+
+  await preparePlugin(db, { plugin_instance_id: "collect-browser", store_id: "111111" }, "admin");
+  const claimedCollect = await claimPluginPrepareRequest(db, "admin", { plugin_instance_id: "collect-browser" });
+  assert.equal(claimedCollect.bind_auth_only, false);
+
+  const source = fs.readFileSync(new URL("../pivot-table-master/background.js", import.meta.url), "utf8");
+  const start = source.indexOf("function expectedStoreIdFromPrepare(");
+  const end = source.indexOf("async function ensureRelayInjected(", start);
+  assert.ok(start >= 0 && end > start);
+  const context = {
+    latestAnalyticsTableByTab: new Map([[7, { ok: true, company_id: "111111", updated_at: Date.now() }]]),
+    prepareStartedAt: Date.now() - 1000,
+    AUTH_CONTEXT_TIMEOUT_MS: 45000,
+    currentSellerCompanyId: () => "111111",
+    syncPluginStatus: async () => {},
+    getOzonCookieInfo: async () => ({ header: "cookie" }),
+    probeServerSideAuth: async () => ({ ok: false, status: 403 }),
+    logPanel: () => {},
+    findSellerAnalyticsTab: async () => ({ id: 7 }),
+    findAnySellerTab: async () => null,
+    ensureSellerAnalyticsGraphsTab: async () => null,
+    panelState: { sellerTab: null }
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+
+  const denied = await context.waitForSellerAuthContext({ id: 7 }, claimedAuthOnly, 100);
+  assert.equal(denied.success, false);
+  assert.equal(denied.error, "AUTH_PROBE_HTTP_403");
+  const collect = await context.waitForSellerAuthContext({ id: 7 }, claimedCollect, 100);
+  assert.equal(collect.success, true);
+  assert.equal(collect.warning, "BROWSER_COLLECT_ONLY");
+
+  const deniedFastPath = await context.runPrepareRequest(claimedAuthOnly);
+  assert.equal(deniedFastPath.success, false);
+  const collectFastPath = await context.runPrepareRequest(claimedCollect);
+  assert.equal(collectFastPath.auth_warning, "BROWSER_COLLECT_ONLY");
 });
 
 test("seller analytics marks plugin status offline when heartbeat is stale", async () => {
