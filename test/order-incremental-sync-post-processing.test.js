@@ -20,4 +20,5 @@ test("skip-post-processing sync marks affected sales days without a per-order fu
   assert.doesNotMatch(sync, /await refreshInventoryAlertSkuDailyMysql/);
   const server = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
   assert.ok(server.includes('key: "inventory_sales_daily_backfill"'));
+  assert.match(server, /inventory_sales_daily_backfill: withForegroundApiDeferral\("inventory_sales_daily_backfill", \(\) => backfillInventoryAlertSalesMysql\(\{ max_days: 30 \}\)\)/);
 });

@@ -79,6 +79,53 @@ test("北京时间跨日后昨天缺水位会回退并进入分批补齐", async
   assert.match(server, /intervalMinutes: 1/);
 });
 
+test("销量后台回填优先近三十日，历史脏日每轮最多五天", async () => {
+  const start = service.indexOf("export async function backfillInventoryAlertSalesMysql");
+  const end = service.indexOf("let inventoryAlertSalesReadRepairInflightMysql", start);
+  const run = async (recentCount) => {
+    const recentDates = Array.from({ length: recentCount }, (_, index) => `2026-10-${String(index + 1).padStart(2, "0")}`);
+    const olderDates = Array.from({ length: 25 }, (_, index) => ({ date_key: `2026-08-${String(index + 1).padStart(2, "0")}` }));
+    const refreshed = [];
+    const olderLimits = [];
+    const context = vm.createContext({
+      ensureMysqlCutoverEnabled: () => {},
+      ensureProfitAnalyticsSchemaMysql: async () => {},
+      completedBeijingSalesWindow: () => ({ from30: "2026-10-01" }),
+      inventoryAlertSalesMissingDatesMysql: async () => recentDates,
+      refreshInventoryAlertSkuDailyMysql: async ({ from, to }) => {
+        assert.equal(from, to);
+        refreshed.push(from);
+      },
+      mysqlQuery: async (sql, params) => {
+        assert.match(sql, /date_key < \?/);
+        assert.equal(params[0], "2026-10-01");
+        olderLimits.push(params[1]);
+        return olderDates.slice(0, params[1]);
+      }
+    });
+    vm.runInContext(service.slice(start, end).replace("export async function", "async function"), context);
+    const result = await context.backfillInventoryAlertSalesMysql({ max_days: 30 });
+    return { recentDates, olderDates, refreshed, olderLimits, result };
+  };
+
+  const busy = await run(23);
+  assert.deepEqual(busy.olderLimits, [5]);
+  assert.deepEqual(busy.refreshed.slice(0, 23), busy.recentDates);
+  assert.deepEqual(busy.refreshed.slice(23), busy.olderDates.slice(0, 5).map((row) => row.date_key));
+  assert.equal(busy.result.refreshed_days, 28);
+  assert.equal(busy.result.remaining_days, 0);
+
+  const clean = await run(0);
+  assert.deepEqual(clean.olderLimits, [5]);
+  assert.deepEqual(clean.refreshed, clean.olderDates.slice(0, 5).map((row) => row.date_key));
+  assert.equal(clean.result.refreshed_days, 5);
+
+  const full = await run(30);
+  assert.deepEqual(full.olderLimits, []);
+  assert.equal(full.refreshed.length, 30);
+  assert.equal(full.result.refreshed_days, 30);
+});
+
 test("页面默认库存视角并保留 SKU 切换、状态筛选、主图预览与采购预填", () => {
   assert.match(page, /view: "inventory"/);
   assert.match(page, /changeView\('sku'\)/);
