@@ -15961,7 +15961,11 @@ async function ensurePendingOrderProcurementRequestsMysql() {
         SET request.status='cancelled', request.approval_status='cancelled', request.cancelled_at=CURRENT_TIMESTAMP,
           request.note=CONCAT(COALESCE(request.note,''),'；系统按最新现货、在途和优先级重新计算')
         WHERE request.demand_type='real_order' AND request.status='suggested'
-          AND NOT (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+          AND (
+            COALESCE(request.source_order_id, 0) <= 0
+            OR COALESCE(request.source_order_item_id, 0) <= 0
+            OR NOT (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+          )
       `);
       await connection.execute(`
         UPDATE order_item_procurement_marks marks

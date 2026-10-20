@@ -61,6 +61,20 @@ test("only pre-shipment real orders remain actionable procurement demand", () =>
   assert.equal(result.rows[0].suggested_purchase_qty, 1);
 });
 
+test("legacy real-order demand without an order source is not actionable", async () => {
+  const result = groupProcurementRequestsMysql([requestRow({
+    source_order_id: null,
+    source_order_item_id: null,
+    source_order_status: "",
+    demand_type: "real_order"
+  })], { page: 1, pageSize: 20, demandType: "real_order" });
+  assert.equal(result.total, 0);
+
+  const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+  assert.match(service, /COALESCE\(request\.source_order_id, 0\) <= 0/);
+  assert.match(service, /COALESCE\(request\.source_order_item_id, 0\) <= 0/);
+});
+
 test("newly available stock can cover an existing real-order request", () => {
   const result = groupProcurementRequestsMysql([requestRow({ stock: 1 })], { page: 1, pageSize: 20, demandType: "real_order" });
   assert.equal(result.total, 0);
