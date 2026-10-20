@@ -1,12 +1,12 @@
 const ERP_BASE_URL_KEY = 'pivot-erp-base-url';
 const ERP_TENANT_ID_KEY = 'pivot-erp-tenant-id';
 const LOCAL_PLUGIN_TOKEN_KEY = 'pivot-erp-local-plugin-token';
-const LOCAL_MIRROR_BASE_URL_KEY = 'pivot-erp-local-mirror-base-url';
 const POLLING_ENABLED_KEY = 'pivot-erp-polling-enabled';
+const PANEL_LOG_HISTORY_KEY = 'pivot-erp-panel-logs-v1';
+const PANEL_LOG_LIMIT = 200;
 const DEFAULT_ERP_BASE_URL = 'https://erp.hjt888.xyz';
 const DEFAULT_TENANT_ID = 'admin';
 const DEFAULT_LOCAL_PLUGIN_TOKEN = '';
-const DEFAULT_LOCAL_MIRROR_BASE_URL = 'http://127.0.0.1:8788';
 const POLL_INTERVAL_MS = 60000;
 const PREPARE_POLL_INTERVAL_MS = 60000;
 const BATCH_SIZE = 10;
@@ -76,6 +76,10 @@ let prepareSellerTabId = 0;
 let prepareStartedAt = 0;
 let lastPluginStatusSyncAt = 0;
 let lastAuthBindingSyncAt = 0;
+let logPersistTimer = null;
+let logPersistPromise = Promise.resolve();
+let restorePanelLogsPromise = null;
+const knownPluginTokens = new Set();
 
 function setActionBadge(text, color, title = 'Ozon ERP 采集') {
   if (!chrome?.action) return;
@@ -114,21 +118,24 @@ function normalizeErpBaseUrl(value) {
 }
 
 async function getErpConfig() {
-  const stored = await chrome.storage.local.get([ERP_BASE_URL_KEY, ERP_TENANT_ID_KEY, LOCAL_PLUGIN_TOKEN_KEY, LOCAL_MIRROR_BASE_URL_KEY]);
-  return {
+  const stored = await chrome.storage.local.get([ERP_BASE_URL_KEY, ERP_TENANT_ID_KEY, LOCAL_PLUGIN_TOKEN_KEY]);
+  const config = {
     erpBaseUrl: normalizeErpBaseUrl(stored[ERP_BASE_URL_KEY]),
     tenantId: String(stored[ERP_TENANT_ID_KEY] || DEFAULT_TENANT_ID).trim() || DEFAULT_TENANT_ID,
-    localPluginToken: String(stored[LOCAL_PLUGIN_TOKEN_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim(),
-    localMirrorBaseUrl: normalizeErpBaseUrl(stored[LOCAL_MIRROR_BASE_URL_KEY] || DEFAULT_LOCAL_MIRROR_BASE_URL)
+    localPluginToken: String(stored[LOCAL_PLUGIN_TOKEN_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim()
   };
+  rememberPluginToken(config.localPluginToken);
+  return config;
 }
 
 async function saveErpConfig(patch = {}) {
   const next = {};
   if (patch.erpBaseUrl !== undefined) next[ERP_BASE_URL_KEY] = normalizeErpBaseUrl(patch.erpBaseUrl);
   if (patch.tenantId !== undefined) next[ERP_TENANT_ID_KEY] = String(patch.tenantId || DEFAULT_TENANT_ID).trim() || DEFAULT_TENANT_ID;
-  if (patch.localPluginToken !== undefined) next[LOCAL_PLUGIN_TOKEN_KEY] = String(patch.localPluginToken || '').trim();
-  if (patch.localMirrorBaseUrl !== undefined) next[LOCAL_MIRROR_BASE_URL_KEY] = normalizeErpBaseUrl(patch.localMirrorBaseUrl);
+  if (patch.localPluginToken !== undefined) {
+    next[LOCAL_PLUGIN_TOKEN_KEY] = String(patch.localPluginToken || '').trim();
+    rememberPluginToken(next[LOCAL_PLUGIN_TOKEN_KEY]);
+  }
   await chrome.storage.local.set(next);
   return getErpConfig();
 }
@@ -171,17 +178,53 @@ async function getOzonCookieInfo() {
   return { header, companyId };
 }
 
-function sameErpBaseUrl(left, right) {
-  return normalizeErpBaseUrl(left) === normalizeErpBaseUrl(right);
+function rememberPluginToken(token) {
+  if (token) knownPluginTokens.add(token);
+}
+
+function redactDiagnosticMessage(value) {
+  let message = String(value || '');
+  for (const token of knownPluginTokens) message = message.split(token).join('[已隐藏]');
+  return message
+    .replace(/\b(?:cookie|set-cookie)\s*[:=]\s*[^\r\n]+/gi, 'Cookie: [已隐藏]')
+    .replace(/(["']?(?:authorization|x-local-plugin-token|access[_-]?token|refresh[_-]?token|erp[_ -]?token|api[_-]?key|secret|token)["']?\s*[:=]\s*["']?)(?:bearer\s+)?[^\s,;}&"']+/gi, '$1[已隐藏]')
+    .replace(/([?&](?:token|access_token|api_key|secret)=)[^&#\s]+/gi, '$1[已隐藏]')
+    .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[已隐藏]');
+}
+
+function safePanelLog(item) {
+  return {
+    level: ['info', 'success', 'error'].includes(item?.level) ? item.level : 'info',
+    message: redactDiagnosticMessage(item?.message),
+    time: Number.isFinite(Date.parse(item?.time)) ? item.time : new Date().toISOString()
+  };
+}
+
+function persistPanelLogsSoon() {
+  if (logPersistTimer) return;
+  logPersistTimer = setTimeout(() => {
+    logPersistTimer = null;
+    logPersistPromise = logPersistPromise.catch(() => {}).then(async () => {
+      await restorePanelLogsPromise;
+      await getErpConfig();
+      panelState.logs = panelState.logs.map(safePanelLog);
+      await chrome.storage.local.set({ [PANEL_LOG_HISTORY_KEY]: panelState.logs.slice(0, PANEL_LOG_LIMIT) });
+    });
+    void logPersistPromise.catch(() => {});
+  }, 1000);
+}
+
+async function restorePanelLogs() {
+  const stored = await chrome.storage.local.get([PANEL_LOG_HISTORY_KEY, LOCAL_PLUGIN_TOKEN_KEY]);
+  rememberPluginToken(String(stored[LOCAL_PLUGIN_TOKEN_KEY] || '').trim());
+  const previous = Array.isArray(stored[PANEL_LOG_HISTORY_KEY]) ? stored[PANEL_LOG_HISTORY_KEY] : [];
+  panelState.logs = [...panelState.logs.map(safePanelLog), ...previous.map(safePanelLog)].slice(0, PANEL_LOG_LIMIT);
 }
 
 function logPanel(message, level = 'info') {
-  panelState.logs.unshift({
-    level,
-    message: String(message || ''),
-    time: new Date().toISOString()
-  });
-  panelState.logs = panelState.logs.slice(0, 30);
+  panelState.logs.unshift(safePanelLog({ level, message, time: new Date().toISOString() }));
+  panelState.logs = panelState.logs.slice(0, PANEL_LOG_LIMIT);
+  persistPanelLogsSoon();
 }
 
 function sleep(ms) {
@@ -433,26 +476,6 @@ async function postCollectResult(request, payload) {
       response_status: headerSnapshot?.response_status || payload.response_status,
       tenant_id: config.tenantId
     })
-  });
-  const text = await response.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch (error) {}
-  if (!response.ok || json?.success === false) throw new Error(json?.error || text || `HTTP ${response.status}`);
-  return json;
-}
-
-async function mirrorSnapshotToLocal(payload) {
-  if (!payload || payload.success === false) return null;
-  const config = await getErpConfig();
-  if (!config.localMirrorBaseUrl || sameErpBaseUrl(config.localMirrorBaseUrl, config.erpBaseUrl)) return null;
-  const response = await fetch(`${config.localMirrorBaseUrl}/api/local-plugin/seller-analytics/snapshots`, {
-    method: 'POST',
-    headers: localPluginHeaders(config, {
-      'Content-Type': 'application/json'
-    }),
-    body: JSON.stringify(payload)
   });
   const text = await response.text();
   let json = null;
@@ -760,9 +783,6 @@ async function processCollectRequest(request, tab) {
     tuneCollectRate({ success: collectSuccess, status: responseStatus, error: result?.error || '' });
     rateTuned = true;
     await postCollectResult(request, result);
-    mirrorSnapshotToLocal(result).catch((error) => {
-      logPanel(`Local mirror write failed: ${error?.message || error}`, 'error');
-    });
     if (result?.success === false) {
       panelState.failed += 1;
       logPanel(`${request.source_label || request.source_key} ${request.endpoint_type} 失败：${result.error || '请求失败'}`, 'error');
@@ -893,7 +913,7 @@ async function startPolling(runNow = true) {
     pollTimer = setInterval(() => {
       void pollCollectOnce();
     }, POLL_INTERVAL_MS);
-    logPanel('已启动轮询，3 秒一次', 'success');
+    logPanel('已启动轮询，约 60 秒检查一次', 'success');
   }
   if (!preparePollTimer) {
     preparePollTimer = setInterval(() => {
@@ -994,15 +1014,20 @@ function rememberSellerAnalyticsApiResult(details) {
 
 async function getPanelStatus() {
   const config = await getErpConfig();
+  await restorePanelLogsPromise;
   const stored = await chrome.storage.local.get(POLLING_ENABLED_KEY);
   panelState.pollingEnabled = stored[POLLING_ENABLED_KEY] === true;
   await findSellerAnalyticsTab();
   panelState.currentCompanyId = panelState.sellerTab?.id ? currentSellerCompanyId(panelState.sellerTab.id) : '';
-  await syncPluginStatus(true).catch(() => {});
+  await syncPluginStatus().catch(() => {});
   updateActionBadge();
   return {
     config,
-    state: panelState
+    state: {
+      ...panelState,
+      lastError: redactDiagnosticMessage(panelState.lastError),
+      logs: panelState.logs.map(safePanelLog)
+    }
   };
 }
 
@@ -1082,8 +1107,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     getPanelStatus().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
     return true;
   }
+  if (message?.type === 'PIVOT_ERP_PANEL_GET_DIAGNOSTICS') {
+    Promise.resolve(restorePanelLogsPromise)
+      .then(() => getErpConfig())
+      .then(() => ({
+        version: chrome.runtime.getManifest().version,
+        exportedAt: new Date().toISOString(),
+        logs: panelState.logs.slice(0, PANEL_LOG_LIMIT).map(safePanelLog)
+      }))
+      .then(sendResponse)
+      .catch((error) => sendResponse({ error: error?.message || String(error) }));
+    return true;
+  }
   if (message?.type === 'PIVOT_ERP_PANEL_SAVE_CONFIG') {
     saveErpConfig(message.config || {})
+      .then(async () => { await syncPluginStatus(true).catch(() => {}); })
       .then(() => getPanelStatus())
       .then(sendResponse)
       .catch((error) => sendResponse({ error: error?.message || String(error) }));
@@ -1148,4 +1186,5 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   void initializePolling();
 });
+restorePanelLogsPromise = restorePanelLogs().catch(() => {});
 void initializePolling();
