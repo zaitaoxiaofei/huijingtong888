@@ -17,8 +17,10 @@ function readPluginManifestVersion(manifestPath) {
 }
 const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || readPluginManifestVersion(collectorPluginManifestPath);
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.zip`;
-const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION || readPluginManifestVersion(analyticsPluginManifestPath);
-const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.rar`;
+const analyticsPluginManifestVersion = readPluginManifestVersion(analyticsPluginManifestPath);
+const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION === analyticsPluginManifestVersion
+  ? process.env.ANALYTICS_PLUGIN_VERSION : analyticsPluginManifestVersion;
+const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.zip`;
 const defaultPddProcurementPluginVersion = process.env.PDD_PROCUREMENT_PLUGIN_VERSION || readPluginManifestVersion(pddProcurementPluginManifestPath);
 const defaultPddProcurementPluginPackageName = `pdd-procurement-logistics-plugin-${defaultPddProcurementPluginVersion}.zip`;
 const updateSubscribers = new Set();
@@ -85,9 +87,9 @@ function normalizeUpdatePayload(input = {}) {
     analytics_plugin: {
       ...defaultStatus.analytics_plugin,
       ...analyticsPlugin,
-      version: String(analyticsPlugin.version || defaultStatus.analytics_plugin.version).trim(),
-      download_url: String(analyticsPlugin.download_url || analyticsPlugin.downloadUrl || defaultStatus.analytics_plugin.download_url).trim(),
-      package_name: String(analyticsPlugin.package_name || analyticsPlugin.packageName || `ozon-seller-analytics-plugin-${analyticsPlugin.version || defaultStatus.analytics_plugin.version}.rar`).trim()
+      version: defaultAnalyticsPluginVersion,
+      download_url: defaultStatus.analytics_plugin.download_url,
+      package_name: defaultAnalyticsPluginPackageName
     },
     pdd_procurement_plugin: {
       ...defaultStatus.pdd_procurement_plugin,
