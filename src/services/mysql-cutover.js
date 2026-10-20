@@ -323,6 +323,7 @@ function invalidateOrderProcurementCoverage() {
 function invalidateInventoryAlertSalesBindingMysql() {
   invalidateMasterDataCachePrefix("stock-alerts:product-sales:");
   invalidateMasterDataCachePrefix("stock-alerts:inventory-base:");
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
 }
 function fbpTransferInTransitWhereMysql(alias = "") {
   const prefix = alias ? `${alias}.` : "";
@@ -1249,6 +1250,7 @@ function invalidateFbpPlanningCachesMysql() {
   invalidateMasterDataCache("stock-alerts:base");
   invalidateMasterDataCache("stock-alerts:base:v2");
   invalidateMasterDataCachePrefix("stock-alerts:fbp-base:v2:");
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
   invalidateMasterDataCachePrefix("stock-alerts:base:v3:");
   invalidateMasterDataCache("fbp-opportunities:base:v2");
   invalidateMasterDataCachePrefix("profit-dashboard:");
@@ -4336,12 +4338,35 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
   const cacheScope = tenantPk || "admin";
   const mode = String(query.mode || "alerts");
   const forceRefresh = ["1", "true", "yes", "force"].includes(String(query.refresh || query.forceRefresh || "").toLowerCase());
-  if (mode === "fbp-alerts") {
+  if (mode === "fbp-alerts" || mode === "fbp-operations") {
     await ensureFbpReplenishmentSchemaMysql();
-    const cacheKey = `stock-alerts:fbp-base:v2:${cacheScope}`;
-    if (forceRefresh) invalidateMasterDataCache(cacheKey);
-    const products = await getCachedMasterData(cacheKey, () => loadFbpStockAlertBaseMysql(tenantPk), STOCK_ALERT_BASE_CACHE_TTL_MS);
-    return applyStockAlertQuery(products, query);
+    const operational = mode === "fbp-operations";
+    if (operational) await ensureFbpTransferRecordsSchemaMysql();
+    const operationTenantPk = operational ? await resolveShopTenantIdMysql(tenantId) : tenantPk;
+    const operationDefaultTenant = operational ? await isDefaultShopTenantMysql(operationTenantPk) : false;
+    const cacheKey = operational ? `stock-alerts:fbp-operations-base:v1:${operationTenantPk}` : `stock-alerts:fbp-base:v2:${cacheScope}`;
+    if (forceRefresh) {
+      invalidateMasterDataCache(cacheKey);
+      if (operational) invalidateMasterDataCache(`stock-alerts:fbp-operations-lifetime:v1:${operationTenantPk}`);
+    }
+    const products = await getCachedMasterData(cacheKey,
+      () => loadFbpStockAlertBaseMysql(operationTenantPk, { operational, defaultTenant: operationDefaultTenant }), STOCK_ALERT_BASE_CACHE_TTL_MS);
+    const result = applyStockAlertQuery(products, query);
+    if (!operational || !result.rows.length) return result;
+    await ensureSkuInventoryRecipeSchemaMysql();
+    await ensureProductCompositionSchemaMysql();
+    const productIds = [...new Set(result.rows.map((row) => Number(row.product_id)))];
+    const balances = await inventoryProductBalanceMysql(productIds, operationTenantPk, operationDefaultTenant, forceRefresh)
+      .catch((error) => {
+        console.warn(`[fbp-alerts] local balance unavailable: ${String(error?.code || error?.name || "unknown")}`);
+        return new Map();
+      });
+    result.rows = result.rows.map((row) => ({
+      ...row,
+      local_physical_stock: balances.has(Number(row.product_id)) ? Number(balances.get(Number(row.product_id)).physical_stock || 0) : null,
+      local_available_stock: balances.has(Number(row.product_id)) ? Number(balances.get(Number(row.product_id)).available_stock || 0) : null
+    }));
+    return result;
   }
   if (mode === "inventory-alerts") {
     await ensureSkuInventoryRecipeSchemaMysql();
@@ -4677,8 +4702,70 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
   return applyStockAlertQuery(products, query);
 }
 
-async function loadFbpStockAlertBaseMysql(tenantPk = null) {
-  const rows = await mysqlQuery(`
+async function loadFbpOperationalHistoryMysql(tenantPk = null, defaultTenant = false) {
+  const dateSql = chinaDateSqlMysql("o.ordered_at");
+  const skuSql = "COALESCE(NULLIF(oi.ozon_sku, ''), NULLIF(prior_mapping.ozon_sku, ''))";
+  const joins = `
+    FROM orders o
+    JOIN shops scope_shop ON scope_shop.id = o.shop_id ${tenantPk ? `AND ${tenantShopPredicateMysql("scope_shop", defaultTenant)}` : ""}
+    JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN sku_mappings prior_mapping ON prior_mapping.id = oi.sku_mapping_id AND prior_mapping.shop_id = o.shop_id`;
+  const eligible = `
+    WHERE ((LOWER(COALESCE(o.status, '')) NOT LIKE '%cancel%'
+      AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%')
+      OR ${orderTransportEvidenceSql("o")})
+      AND ${skuSql} IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM order_items newer
+        LEFT JOIN sku_mappings newer_mapping ON newer_mapping.id = newer.sku_mapping_id AND newer_mapping.shop_id = o.shop_id
+        WHERE newer.order_id = oi.order_id AND newer.id > oi.id
+          AND COALESCE(NULLIF(newer.ozon_sku, ''), NULLIF(newer_mapping.ozon_sku, '')) = ${skuSql}
+      )`;
+  const window = completedBeijingSalesWindow();
+  const range = profitOrderedAtUtcRangeMysql("o", window.from30, window.through);
+  const [totals, recent] = await Promise.all([
+    getCachedMasterData(`stock-alerts:fbp-operations-lifetime:v1:${tenantPk}`,
+      () => mysqlQuery(`
+        SELECT o.shop_id, ${skuSql} AS ozon_sku, SUM(oi.quantity) AS all_time_qty
+        ${joins} ${eligible}
+        GROUP BY o.shop_id, ${skuSql}
+      `, tenantPk ? [tenantPk] : []), 15 * 60_000),
+    mysqlQuery(`
+      SELECT o.shop_id, ${skuSql} AS ozon_sku,
+      SUM(oi.quantity) AS recent_30d_qty,
+      SUM(CASE WHEN ${dateSql} BETWEEN ? AND ? THEN oi.quantity ELSE 0 END) AS recent_7d_qty,
+      SUM(CASE WHEN ${dateSql} BETWEEN ? AND ? THEN oi.quantity ELSE 0 END) AS prev_7d_qty,
+      SUM(CASE WHEN ${dateSql} BETWEEN ? AND ? THEN oi.quantity ELSE 0 END) AS older_7d_qty
+      ${joins} ${eligible} ${range.whereSql}
+      GROUP BY o.shop_id, ${skuSql}
+    `, [window.from7, window.through,
+      dateKeyDaysAgoMysql(14), dateKeyDaysAgoMysql(8),
+      dateKeyDaysAgoMysql(21), dateKeyDaysAgoMysql(15),
+      ...(tenantPk ? [tenantPk] : []), ...range.params])
+  ]);
+  const bySku = new Map(totals.map((row) => [`${row.shop_id}:${row.ozon_sku}`, row]));
+  for (const row of recent) {
+    const key = `${row.shop_id}:${row.ozon_sku}`;
+    bySku.set(key, { ...(bySku.get(key) || {}), ...row });
+  }
+  return [...bySku.values()];
+}
+
+async function loadFbpSkuTransfersMysql(tenantPk, defaultTenant) {
+  return mysqlQuery(`
+    SELECT ftr.shop_id, ftr.ozon_sku,
+      SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS in_transit_qty
+    FROM fbp_transfer_records ftr
+    JOIN shops transfer_shop ON transfer_shop.id = ftr.shop_id
+      AND ${tenantShopPredicateMysql("transfer_shop", defaultTenant)}
+    WHERE ftr.shop_id IS NOT NULL AND ftr.ozon_sku <> ''
+      AND ${fbpTransferInTransitWhereMysql("ftr")}
+    GROUP BY ftr.shop_id, ftr.ozon_sku
+  `, [tenantPk]);
+}
+
+async function loadFbpStockAlertBaseMysql(tenantPk = null, { operational = false, defaultTenant = false } = {}) {
+  const [rows, historyRows, transferRows] = await Promise.all([mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       p.name AS product_name, p.image_url, p.alert_stock, p.created_at,
@@ -4700,23 +4787,24 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
       COALESCE(stock.fbp_snapshot_count, 0) AS fbp_snapshot_count,
       stock.last_synced_at,
       stock.warehouse_breakdown,
-      COALESCE(sales.recent_7d_qty, 0) AS recent_7d_qty,
-      COALESCE(sales.recent_30d_qty, 0) AS recent_30d_qty,
-      COALESCE(sales.prev_7d_qty, 0) AS prev_7d_qty
+      ${operational ? "0" : "COALESCE(sales.recent_7d_qty, 0)"} AS recent_7d_qty,
+      ${operational ? "0" : "COALESCE(sales.recent_30d_qty, 0)"} AS recent_30d_qty,
+      ${operational ? "0" : "COALESCE(sales.prev_7d_qty, 0)"} AS prev_7d_qty,
+      CASE WHEN fri.id IS NULL THEN 0 ELSE 1 END AS replenishment_ignored
     FROM sku_mappings sm
-    JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantPk ? "AND p.tenant_id = ?" : ""}
+    JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantPk ? `AND ${tenantShopPredicateMysql("p", defaultTenant)}` : ""}
     LEFT JOIN (
       SELECT product_id, SUM(quantity_delta) AS local_stock
       FROM inventory_movements
       WHERE status = 'posted'
         AND ${localStockLocationPredicateMysql()}
-        ${tenantPk ? "AND tenant_id = ?" : ""}
+        ${tenantPk ? `AND ${tenantShopPredicateMysql("inventory_movements", defaultTenant)}` : ""}
       GROUP BY product_id
     ) local_stock ON local_stock.product_id = p.id
-    LEFT JOIN shops s ON s.id = sm.shop_id ${tenantPk ? "AND s.tenant_id = ?" : ""}
+    LEFT JOIN shops s ON s.id = sm.shop_id ${tenantPk ? `AND ${tenantShopPredicateMysql("s", defaultTenant)}` : ""}
     LEFT JOIN online_products op_by_id ON op_by_id.id = sm.online_product_id AND op_by_id.shop_id = sm.shop_id
     LEFT JOIN online_products op_by_sku ON op_by_sku.shop_id = sm.shop_id AND op_by_sku.ozon_sku = sm.ozon_sku
-    JOIN (
+    ${operational ? "LEFT JOIN" : "JOIN"} (
       SELECT shop_id, ozon_sku,
         SUM(present) AS fbp_present,
         SUM(available) AS fbp_available,
@@ -4735,7 +4823,7 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
       WHERE stock_type = 'fbp_real'
       GROUP BY shop_id, ozon_sku
     ) stock ON stock.shop_id = sm.shop_id AND stock.ozon_sku = sm.ozon_sku
-    LEFT JOIN (
+    ${operational ? "" : `LEFT JOIN (
       SELECT o.shop_id, oi.ozon_sku,
         SUM(CASE WHEN ${chinaDateSqlMysql("o.ordered_at")} >= ? THEN oi.quantity ELSE 0 END) AS recent_7d_qty,
         SUM(CASE WHEN ${chinaDateSqlMysql("o.ordered_at")} >= ? THEN oi.quantity ELSE 0 END) AS recent_30d_qty,
@@ -4746,23 +4834,29 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
         AND LOWER(COALESCE(o.tracking_stage, '')) NOT LIKE '%cancel%'
         AND ${chinaDateSqlMysql("o.ordered_at")} >= ?
       GROUP BY o.shop_id, oi.ozon_sku
-    ) sales ON sales.shop_id = sm.shop_id AND sales.ozon_sku = sm.ozon_sku
+    ) sales ON sales.shop_id = sm.shop_id AND sales.ozon_sku = sm.ozon_sku`}
     LEFT JOIN fbp_replenishment_ignores fri ON fri.shop_id = sm.shop_id
       AND fri.ozon_sku = sm.ozon_sku
       AND fri.active = 1
     WHERE sm.active = 1
-      AND fri.id IS NULL
-      ${tenantPk ? "AND sm.tenant_id = ? AND s.id IS NOT NULL" : ""}
+      ${operational ? "" : "AND fri.id IS NULL"}
+      ${tenantPk ? `AND ${tenantShopPredicateMysql("sm", defaultTenant)} AND s.id IS NOT NULL` : ""}
     ORDER BY p.id DESC, s.id, sm.ozon_sku
   `, [
     ...(tenantPk ? [tenantPk, tenantPk, tenantPk] : []),
-    dateKeyDaysAgoMysql(7),
-    dateKeyDaysAgoMysql(30),
-    dateKeyDaysAgoMysql(14),
-    dateKeyDaysAgoMysql(7),
-    dateKeyDaysAgoMysql(30),
+    ...(operational ? [] : [
+      dateKeyDaysAgoMysql(7),
+      dateKeyDaysAgoMysql(30),
+      dateKeyDaysAgoMysql(14),
+      dateKeyDaysAgoMysql(7),
+      dateKeyDaysAgoMysql(30)
+    ]),
     ...(tenantPk ? [tenantPk] : [])
-  ]);
+  ]), operational ? loadFbpOperationalHistoryMysql(tenantPk, defaultTenant) : Promise.resolve([]),
+    operational ? loadFbpSkuTransfersMysql(tenantPk, defaultTenant) : Promise.resolve([])]);
+
+  const historyBySku = new Map(historyRows.map((row) => [`${row.shop_id}:${row.ozon_sku}`, row]));
+  const transfersBySku = new Map(transferRows.map((row) => [`${row.shop_id}:${row.ozon_sku}`, row]));
 
   const productsMap = new Map();
   for (const row of rows) {
@@ -4786,6 +4880,8 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
       });
     }
     const product = productsMap.get(productId);
+    const history = historyBySku.get(`${row.shop_id}:${row.ozon_sku}`) || {};
+    const transfer = transfersBySku.get(`${row.shop_id}:${row.ozon_sku}`) || {};
     const sku = {
       mapping_id: row.mapping_id,
       shop_id: row.shop_id,
@@ -4800,6 +4896,7 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
         : (row.online_image || row.online_image_url || ""),
       fbp_present: Number(row.fbp_present || 0),
       fbp_available: Number(row.fbp_available || 0),
+      fbp_transfer_in_transit_qty: Number(transfer.in_transit_qty || 0),
       free_stock_count: Number(row.free_stock_count || 0),
       paid_stock_count: Number(row.paid_stock_count || 0),
       expiring_stock_count: Number(row.expiring_stock_count || 0),
@@ -4810,17 +4907,28 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null) {
       stock_level: row.stock_level || "",
       fbp_snapshot_count: Number(row.fbp_snapshot_count || 0),
       recent_3d_qty: 0,
-      recent_7d_qty: Number(row.recent_7d_qty || 0),
-      recent_30d_qty: Number(row.recent_30d_qty || 0),
-      prev_7d_qty: Number(row.prev_7d_qty || 0),
-      all_time_qty: Number(row.recent_30d_qty || 0),
+      recent_7d_qty: Number((operational ? history.recent_7d_qty : row.recent_7d_qty) || 0),
+      recent_30d_qty: Number((operational ? history.recent_30d_qty : row.recent_30d_qty) || 0),
+      prev_7d_qty: Number((operational ? history.prev_7d_qty : row.prev_7d_qty) || 0),
+      older_7d_qty: Number(history.older_7d_qty || 0),
+      all_time_qty: operational ? Number(history.all_time_qty || 0) : Number(row.recent_30d_qty || 0),
+      replenishment_ignored: Number(row.replenishment_ignored || 0) > 0,
       last_synced_at: row.last_synced_at || "",
       warehouses: parseWarehouseBreakdown(row.warehouse_breakdown)
     };
     product.skus.push(sku);
     product.last_synced_at = maxTextDate(product.last_synced_at, sku.last_synced_at);
   }
-  return [...productsMap.values()];
+  return [...productsMap.values()].map((product) => {
+    const seen = new Set();
+    product.all_time_qty = product.skus.reduce((total, sku) => {
+      const key = `${sku.shop_id}:${sku.ozon_sku}`;
+      if (seen.has(key)) return total;
+      seen.add(key);
+      return total + sku.all_time_qty;
+    }, 0);
+    return product;
+  });
 }
 
 function fbpOpportunityPriority(score) {
@@ -5324,9 +5432,35 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
   };
 }
 
-export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null) {
+async function currentFbpSkuBindingMysql(queryRows, shopId, ozonSku, tenantPk, defaultTenant, lock = false) {
+  const rows = await queryRows(`
+    SELECT sm.id AS mapping_id, sm.product_id, sm.offer_id, p.name AS product_name, p.code AS inventory_id
+    FROM sku_mappings sm
+    JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
+    WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1
+      AND ${tenantShopPredicateMysql("sm", defaultTenant)}
+    ORDER BY sm.id DESC LIMIT 2${lock ? " FOR UPDATE" : ""}
+  `, [tenantPk, shopId, ozonSku, tenantPk]);
+  if (rows.length > 1) throw Object.assign(new Error(`店铺 SKU ${ozonSku} 存在多个有效库存绑定（sku_mappings.active），请先到 SKU 绑定页面清理重复绑定。`), { statusCode: 409 });
+  return rows[0] || null;
+}
+
+function assertFbpSkuBindingMysql(row, binding, ozonSku, requireBound = false) {
+  const submittedMappingId = Number(row.mapping_id || row.mappingId || 0);
+  const submittedProductId = Number(row.product_id || row.productId || 0);
+  if (!binding && !submittedMappingId && !submittedProductId && !requireBound) return;
+  if (!binding || (requireBound && (!submittedMappingId || !submittedProductId))
+    || (submittedMappingId && submittedMappingId !== Number(binding.mapping_id))
+    || (submittedProductId && submittedProductId !== Number(binding.product_id))) {
+    throw Object.assign(new Error(`店铺 SKU ${ozonSku} 的本地库存绑定（sku_mappings.product_id / mapping_id）已变化或失效，请到 SKU 绑定页面核对后重新加入备货单。`), { statusCode: 409 });
+  }
+}
+
+export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
+  const tenantPk = await resolveShopTenantIdMysql(tenantId);
+  const defaultTenant = await isDefaultShopTenantMysql(tenantPk);
   const sourceRows = Array.isArray(body.rows) ? body.rows : (Array.isArray(body.items) ? body.items : []);
   if (!sourceRows.length) throw new Error("请先选择要加入备货单的 FBP SKU。");
   const orderDate = String(body.order_date || body.orderDate || todayDateKeyMysql()).slice(0, 10);
@@ -5339,6 +5473,24 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
     grouped.get(shopId).push(row);
   }
   if (!grouped.size) throw new Error("选择的 SKU 缺少店铺或 SKU ID。");
+
+  for (const [shopId, rows] of grouped) {
+    await activeShopForTenantMysql(shopId, tenantId);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      const ozonSku = String(row.ozon_sku || row.ozonSku || "").trim();
+      const binding = await currentFbpSkuBindingMysql(mysqlQuery, shopId, ozonSku, tenantPk, defaultTenant);
+      assertFbpSkuBindingMysql(row, binding, ozonSku);
+      rows[index] = {
+        ...row,
+        product_id: binding?.product_id || null,
+        mapping_id: binding?.mapping_id || null,
+        offer_id: binding?.offer_id || row.offer_id || row.offerId || "",
+        product_name: binding?.product_name || row.product_name || row.name || "",
+        inventory_id: binding?.inventory_id || row.inventory_id || ""
+      };
+    }
+  }
 
   const created = [];
   for (const [shopId, rows] of grouped.entries()) {
@@ -6233,7 +6385,7 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     }
     await connection.execute(`UPDATE fbp_replenishment_orders SET ${fields.join(", ")} WHERE id = ?`, params);
     if (status === "approved") {
-      approvalResult = await reserveFbpReplenishmentApprovedStockMysql(connection, id, userId);
+      approvalResult = await reserveFbpReplenishmentApprovedStockMysql(connection, id, userId, normalizedTenantId, defaultTenant, order.shop_id);
     }
     if (status === "sent" && ["approved", "ozon_created"].includes(currentStatus)) {
       approvalResult = await createFbpReplenishmentApprovedTransfersMysql(connection, id, userId);
@@ -6344,7 +6496,7 @@ async function postFbpTransferInventoryMovementMysql(connection, record = {}, qu
   });
 }
 
-async function reserveFbpReplenishmentApprovedStockMysql(connection, orderId, userId = null) {
+async function reserveFbpReplenishmentApprovedStockMysql(connection, orderId, userId = null, tenantPk, defaultTenant, orderShopId) {
   const personId = await resolvePersonIdOrFirstMysql(userId, connection);
   const [itemRows] = await connection.execute(`
     SELECT i.*
@@ -6357,6 +6509,16 @@ async function reserveFbpReplenishmentApprovedStockMysql(connection, orderId, us
   if (unboundItems.length) {
     const skus = unboundItems.map((row) => row.ozon_sku).filter(Boolean).join(", ");
     throw new Error(`FBP备货单存在未绑定本地商品的明细，无法预留本地库存：${skus || "未知SKU"}`);
+  }
+  for (const item of itemRows) {
+    if (Number(item.shop_id) !== Number(orderShopId)) {
+      throw Object.assign(new Error(`备货单 SKU ${item.ozon_sku} 的店铺与备货单不一致，请核对备货单明细。`), { statusCode: 409 });
+    }
+    const binding = await currentFbpSkuBindingMysql(async (sql, params) => {
+      const [rows] = await connection.execute(sql, params);
+      return rows;
+    }, Number(item.shop_id), String(item.ozon_sku || ""), tenantPk, defaultTenant, true);
+    assertFbpSkuBindingMysql(item, binding, item.ozon_sku, true);
   }
   let reservedQuantity = 0;
   for (const item of itemRows) {
@@ -6796,6 +6958,7 @@ export async function syncOzonFboSupplyOrdersMysql(body = {}, options = {}) {
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
   invalidateMasterDataCachePrefix("stock-alerts:base:v3:");
   invalidateMasterDataCachePrefix("stock-alerts:fbp-base:v2:");
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
   if (errors.length && fetchedOrders === 0 && fetchedItems === 0 && upserted === 0) {
     throw new Error(`Ozon入仓请求同步失败：${errors.slice(0, 3).join(" | ")}${errors.length > 3 ? ` 等 ${errors.length} 个店铺/接口错误` : ""}`);
   }
@@ -7361,6 +7524,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
   invalidateMasterDataCachePrefix("stock-alerts:base:v3:");
   invalidateMasterDataCachePrefix("stock-alerts:fbp-base:v2:");
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
   invalidateMasterDataCachePrefix("online-products:");
   const status = errors.length ? "partial_error" : "ok";
   const message = `Fetched ${fetched}, upserted ${upserted}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
@@ -19079,6 +19243,7 @@ export async function refreshInventoryAlertSkuDailyMysql(body = {}) {
 async function markInventoryAlertSkuDailyDirtyMysql(orderedAt) {
   const dateKey = chinaDateKeyMysql(orderedAt);
   if (!dateKey) return;
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
   const salesWindow = completedBeijingSalesWindow();
   if (dateKey > salesWindow.through) return;
   await ensureProfitAnalyticsSchemaMysql();
@@ -27219,6 +27384,7 @@ function invalidateDashboardCachesMysql() {
   invalidateMasterDataCache("stock-alerts:fbp-base:v1");
   invalidateMasterDataCachePrefix("stock-alerts:base:v3:");
   invalidateMasterDataCachePrefix("stock-alerts:fbp-base:v2:");
+  invalidateMasterDataCachePrefix("stock-alerts:fbp-operations-base:");
 }
 
 function dashboardSnapshotKeyMysql(dateKey = todayDateKeyMysql()) {

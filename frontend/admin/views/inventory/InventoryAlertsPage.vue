@@ -45,6 +45,8 @@ const state = reactive({
   filters: {
     view: "inventory",
     alertType: "all",
+    sortBy: "recent_30d_qty",
+    fbpFocus: "replenishment",
     query: "",
     shopId: "all",
     dateFrom: "",
@@ -57,6 +59,8 @@ const state = reactive({
 const filterDefaults = {
   view: "inventory",
   alertType: "all",
+  sortBy: "recent_30d_qty",
+  fbpFocus: "replenishment",
   query: "",
   shopId: "all",
   dateFrom: "",
@@ -76,6 +80,16 @@ const inventoryAlertFilters = [
   { value: "in_transit", label: "采购在途" },
   { value: "healthy", label: "库存健康" }
 ];
+const inventorySortOptions = [
+  { value: "recent_30d_qty", label: "近 30 天消耗" },
+  { value: "recent_15d_qty", label: "近 15 天消耗" },
+  { value: "recent_7d_qty", label: "近 7 天消耗" }
+];
+const fbpFocusOptions = [
+  { value: "replenishment", label: "待备货 SKU" },
+  { value: "declining", label: "销量下滑 SKU" },
+  { value: "all", label: "全部 FBP SKU" }
+];
 const syncRouteQuery = createDefaultRouteQuerySync({
   route,
   router,
@@ -90,6 +104,20 @@ function warningTagType(level) {
   if (level === "warning") return "warning";
   if (level === "info") return "";
   return "success";
+}
+
+function fbpTrendTagType(type) {
+  if (type === "continuous_decline" || type === "recent_decline") return "warning";
+  if (type === "stable") return "success";
+  return "info";
+}
+
+function fbpOperationSuggestion(row) {
+  if (!row.replenishment_ignored && suggestedQty(row) > 0) return row.suggestion || "优先为当前 SKU 创建 FBP 备货单。";
+  if (row.trend_type === "stockout") return "先核对供货，再判断需求变化。";
+  if (row.trend_type === "continuous_decline") return "核对流量、售价、竞品和断货记录，再决定价格与备货策略。";
+  if (row.trend_type === "recent_decline") return "留意下一周销量，核对曝光和售价变化。";
+  return row.suggestion || "继续观察销量与库存。";
 }
 
 function coverageText(row) {
@@ -107,11 +135,17 @@ function suggestedQty(row) {
   return Math.max(0, Math.round(Number(row.suggested_qty || 0)));
 }
 
+function sharedStockText(value) {
+  return value == null ? "待核算" : `${integer(value)} 件`;
+}
+
 function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
     if (state.filters.alertType === "lead_time_missing") state.filters.alertType = "all";
+    if (!inventorySortOptions.some((option) => option.value === state.filters.sortBy)) state.filters.sortBy = "recent_30d_qty";
+    if (!fbpFocusOptions.some((option) => option.value === state.filters.fbpFocus)) state.filters.fbpFocus = "replenishment";
   } finally {
     syncingRoute = false;
   }
@@ -149,9 +183,14 @@ function openMappings() {
 }
 
 function inventoryAlertLabel(row) {
-  if (row.alert_type === "out_of_stock") return "断货";
-  if (row.alert_type === "low_stock") return "缺货";
+  const purchased = Number(row.incoming_stock || 0) > 0;
+  if (row.alert_type === "out_of_stock") return purchased ? "断货已采购" : "断货未采购";
+  if (row.alert_type === "low_stock") return purchased ? "缺货已采购" : "缺货未采购";
   return "库存健康";
+}
+
+function inventoryAlertGap(row) {
+  return Math.max(0, Number(row.alert_quantity || 0) - Number(row.available_stock || 0));
 }
 
 function inventoryAlertTagType(row) {
@@ -246,6 +285,18 @@ function changeAlertType(value) {
   loadPageData();
 }
 
+function changeInventorySort() {
+  state.filters.page = 1;
+  syncRouteQuery("manual");
+  loadPageData();
+}
+
+function changeFbpFocus() {
+  state.filters.page = 1;
+  syncRouteQuery("manual");
+  loadPageData();
+}
+
 async function offerOpenReplenishmentPage(message = "FBP 备货单草稿已创建。") {
   try {
     await ElMessageBox.confirm(message, "备货单已创建", {
@@ -326,17 +377,17 @@ async function loadPageData({ refresh = false } = {}) {
   loading.value = true;
   try {
     const params = new URLSearchParams({
-      mode: inventoryView.value ? "inventory-alerts" : "fbp-alerts",
+      mode: inventoryView.value ? "inventory-alerts" : "fbp-operations",
       paged: "1",
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize),
-      alertType: String(state.filters.alertType || "all")
+      alertType: inventoryView.value ? String(state.filters.alertType || "all") : "all"
     });
+    if (inventoryView.value) params.set("sortBy", state.filters.sortBy);
+    else params.set("fbpFocus", state.filters.fbpFocus);
     if (refresh) params.set("refresh", "1");
     if (!inventoryView.value) {
       params.set("shopId", String(state.filters.shopId || "all"));
-      params.set("dateFrom", String(state.filters.dateFrom || ""));
-      params.set("dateTo", String(state.filters.dateTo || ""));
     }
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
@@ -363,6 +414,8 @@ watch(() => route.query, () => {
   applyRouteState();
   if (previousView !== state.filters.view) {
     cancelLeadEdit();
+    state.filters.page = 1;
+    syncRouteQuery("manual");
     loadPageData();
   }
 }, { deep: true });
@@ -381,21 +434,29 @@ onMounted(async () => {
       :filters="state.filters"
       :shops="state.shops"
       :show-shop="!inventoryView"
-      :show-date-range="!inventoryView"
-      :query-label="inventoryView ? '' : 'FBP预警搜索'"
-      :query-placeholder="inventoryView ? '库存编号 / 名称 / 店铺 / 线上 SKU' : '完整库存编号 / SKU / Offer / 名称关键词'"
+      :show-date-range="false"
+      :query-label="inventoryView ? '' : 'FBP SKU 搜索'"
+      :query-placeholder="inventoryView ? '库存编号 / 名称 / 店铺 / 线上 SKU' : '库存编号 / SKU / Offer / 名称关键词'"
       @search="handleSearch"
       @reset="handleReset"
     >
-      <div v-if="inventoryView" class="alert-status-filters">
-        <el-button
-          v-for="option in inventoryAlertFilters"
-          :key="option.value"
-          size="small"
-          :type="state.filters.alertType === option.value ? 'primary' : 'default'"
-          @click="changeAlertType(option.value)"
-        >{{ option.label }}<span v-if="option.value !== 'all'" class="alert-filter-count">{{ state.meta[option.value] ?? 0 }}</span></el-button>
+      <div v-if="inventoryView" class="alert-inventory-filters">
+        <div class="alert-status-filters">
+          <el-button
+            v-for="option in inventoryAlertFilters"
+            :key="option.value"
+            size="small"
+            :type="state.filters.alertType === option.value ? 'primary' : 'default'"
+            @click="changeAlertType(option.value)"
+          >{{ option.label }}<span v-if="option.value !== 'all'" class="alert-filter-count">{{ state.meta[option.value] ?? 0 }}</span></el-button>
+        </div>
+        <el-select v-model="state.filters.sortBy" class="alert-sort-select" aria-label="消耗量排序" size="small" @change="changeInventorySort">
+          <el-option v-for="option in inventorySortOptions" :key="option.value" :label="`${option.label} ↓`" :value="option.value" />
+        </el-select>
       </div>
+      <el-select v-else v-model="state.filters.fbpFocus" class="alert-sort-select" aria-label="FBP SKU 备货筛选" size="small" @change="changeFbpFocus">
+        <el-option v-for="option in fbpFocusOptions" :key="option.value" :label="option.label" :value="option.value" />
+      </el-select>
     </InventoryPageToolbar>
 
     <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存预警表格" tabindex="0">
@@ -403,7 +464,7 @@ onMounted(async () => {
         <el-table-column label="主图" width="90" fixed="left">
           <template #default="{ row }"><ProductImagePreview :src="row.image_url" :preview-list="row.image_url ? [row.image_url] : []" size="portrait" fit="cover" /></template>
         </el-table-column>
-        <el-table-column label="库存信息" min-width="250">
+        <el-table-column label="库存信息" width="265">
           <template #default="{ row }">
             <div class="cell-stack alert-identity">
               <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
@@ -411,26 +472,30 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="近 30 天消耗" width="158">
+        <el-table-column label="消耗量" width="250">
           <template #default="{ row }">
-            <div class="cell-stack alert-consumption">
-              <div class="alert-metric-row"><strong class="alert-metric-value">{{ integer(row.recent_30d_qty) }} 件</strong></div>
-              <div class="alert-metric-row"><span>近 7 天</span><strong class="alert-metric-value">{{ integer(row.recent_7d_qty) }}</strong></div>
-              <div class="alert-metric-row"><span>近 15 天</span><strong class="alert-metric-value">{{ integer(row.recent_15d_qty) }}</strong></div>
+            <div class="alert-consumption">
+              <div><span>近 7 天</span><strong class="alert-metric-value">{{ integer(row.recent_7d_qty) }} 件</strong></div>
+              <div><span>近 15 天</span><strong class="alert-metric-value">{{ integer(row.recent_15d_qty) }} 件</strong></div>
+              <div><span>近 30 天</span><strong class="alert-metric-value">{{ integer(row.recent_30d_qty) }} 件</strong></div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="库存分析" min-width="265">
+        <el-table-column label="库存分析" min-width="460">
           <template #default="{ row }">
-            <div class="cell-stack alert-analysis">
-              <div class="alert-analysis-counts">
-                <div><span>本地实物</span><strong class="alert-metric-value">{{ integer(row.physical_stock) }}</strong></div>
-                <div><span>剩余可用</span><strong class="alert-metric-value">{{ integer(row.available_stock) }}</strong></div>
+            <div class="alert-analysis">
+              <div class="alert-analysis-status">
+                <el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag>
+                <span :class="{ 'danger-text': row.alert_type === 'out_of_stock' && !Number(row.incoming_stock) }">预警缺口 <strong class="alert-metric-value">{{ integer(inventoryAlertGap(row)) }} 件</strong></span>
               </div>
-              <div class="alert-metric-row"><span>预警线</span><strong class="alert-metric-value">{{ integer(row.alert_quantity) }}</strong><el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag></div>
-              <div class="alert-metric-row"><span>可用 − 预警线</span><strong class="alert-metric-value">{{ integer(Number(row.available_stock || 0) - Number(row.alert_quantity || 0)) }}</strong></div>
-              <div class="alert-metric-row"><span>建议补货</span><strong class="alert-metric-value">{{ integer(row.suggested_purchase_qty) }}</strong><span>已扣在途</span><strong class="alert-metric-value">{{ integer(row.incoming_stock) }}</strong></div>
-              <div class="alert-metric-row"><span>待履约占用</span><strong class="alert-metric-value">{{ integer(row.open_order_demand_qty) }}</strong></div>
+              <div class="alert-analysis-grid">
+                <div><span>剩余可用</span><strong class="alert-metric-value">{{ integer(row.available_stock) }} 件</strong></div>
+                <div><span>本地实物</span><strong class="alert-metric-value">{{ integer(row.physical_stock) }} 件</strong></div>
+                <div><span>订单待履约占用</span><strong class="alert-metric-value">{{ integer(row.open_order_demand_qty) }} 件</strong></div>
+                <div><span>预警线</span><strong class="alert-metric-value">{{ integer(row.alert_quantity) }} 件</strong></div>
+                <div><span>采购在途</span><strong class="alert-metric-value">{{ integer(row.incoming_stock) }} 件</strong></div>
+                <div><span>仍需采购</span><strong class="alert-metric-value">{{ integer(row.suggested_purchase_qty) }} 件</strong></div>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -456,10 +521,10 @@ onMounted(async () => {
         </el-table-column>
       </el-table>
       <el-table v-else v-loading="loading || syncLoading" :data="pagedRows" stripe border class="erp-data-table">
-        <el-table-column label="店铺" width="130" fixed="left">
+        <el-table-column label="店铺" width="110" fixed="left">
           <template #default="{ row }"><strong>{{ row.shop_name || "-" }}</strong></template>
         </el-table-column>
-        <el-table-column label="FBP SKU" min-width="300">
+        <el-table-column label="FBP SKU" min-width="260">
           <template #default="{ row }">
             <div class="product-cell">
               <ProductImagePreview :src="row.image_url || row.product_image_url" />
@@ -471,38 +536,52 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="关联库存" min-width="220">
+        <el-table-column label="关联本地库存" width="205">
           <template #default="{ row }">
             <div class="cell-stack">
               <strong>{{ row.product_name || "未绑定库存" }}</strong>
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
+              <el-tooltip content="本地库存由关联的多个店铺 SKU 共享，不是当前 SKU 独占量" placement="top">
+                <span class="muted-text">共享实物 {{ sharedStockText(row.local_physical_stock) }} · 可用 {{ sharedStockText(row.local_available_stock) }}</span>
+              </el-tooltip>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="FBP可售" width="110" align="center">
-          <template #default="{ row }">
-            <strong :class="{ 'danger-text': Number(row.fbp_available || 0) <= 0 }">{{ integer(row.fbp_available) }}</strong>
-          </template>
-        </el-table-column>
-        <el-table-column label="近两周销量" width="150" align="center">
+        <el-table-column label="当前 SKU 库存" width="135" align="center">
           <template #default="{ row }">
             <div class="cell-stack cell-center">
-              <strong>7天 {{ integer(row.recent_7d_qty) }}</strong>
-              <span class="muted-text">前7天 {{ integer(row.prev_7d_qty) }}</span>
+              <strong :class="{ 'danger-text': Number(row.fbp_available || 0) <= 0 }">可售 {{ integer(row.fbp_available) }}</strong>
+              <span class="muted-text">发仓在途 {{ integer(row.fbp_transfer_in_transit_qty) }}</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="动态日销" width="110" align="center">
-          <template #default="{ row }">{{ dailySalesText(row) }}</template>
+        <el-table-column label="SKU 可撑" width="115" align="center">
+          <template #default="{ row }"><strong>{{ coverageText(row) }}</strong></template>
         </el-table-column>
-        <el-table-column label="预计可撑" width="120" align="center">
+        <el-table-column label="本 SKU 建议备货" width="125" align="center">
+          <template #default="{ row }"><strong class="alert-sku-replenishment-qty">{{ integer(suggestedQty(row)) }} 件</strong></template>
+        </el-table-column>
+        <el-table-column label="历史订单件数" width="155" align="center">
           <template #default="{ row }">
-            <strong>{{ coverageText(row) }}</strong>
+            <div class="cell-stack cell-center">
+              <strong>库存合计 {{ integer(row.product_all_time_qty) }}</strong>
+              <span class="muted-text">当前 SKU {{ integer(row.all_time_qty) }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="建议备货" width="110" align="center">
+        <el-table-column label="动态日销" width="105" align="center">
+          <template #default="{ row }">{{ dailySalesText(row) }}</template>
+        </el-table-column>
+        <el-table-column label="销量走势" width="170" align="center">
+          <template #default="{ row }"><el-tag :type="fbpTrendTagType(row.trend_type)" size="small">{{ row.trend_text }}</el-tag></template>
+        </el-table-column>
+        <el-table-column label="近三周订单件数" width="220" align="center">
           <template #default="{ row }">
-            <strong>{{ integer(suggestedQty(row)) }}</strong>
+            <div class="alert-fbp-weeks">
+              <div><span>再前 7 天</span><strong>{{ integer(row.older_7d_qty) }}</strong></div>
+              <div><span>前 7 天</span><strong>{{ integer(row.prev_7d_qty) }}</strong></div>
+              <div><span>近 7 天</span><strong>{{ integer(row.recent_7d_qty) }}</strong></div>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="预警标签" min-width="260">
@@ -519,31 +598,34 @@ onMounted(async () => {
             </el-space>
           </template>
         </el-table-column>
-        <el-table-column label="建议" min-width="240">
+        <el-table-column label="运营建议" min-width="260">
           <template #default="{ row }">
-            <span class="muted-text">{{ row.suggestion || "-" }}</span>
+            <span class="muted-text">{{ fbpOperationSuggestion(row) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="最后同步" width="170">
           <template #default="{ row }">{{ dateText(row.last_synced_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="300" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <el-space wrap>
               <el-button
-                class="erp-btn-link"
-                link
-                type="success"
+                v-if="!row.replenishment_ignored && suggestedQty(row) > 0"
+                size="small"
+                type="warning"
+                plain
                 :loading="rowActionLoading === `order-${row.shop_id}-${row.ozon_sku}`"
                 @click="createReplenishmentOrder(row)"
               >创建备货单</el-button>
               <el-button
+                v-if="!row.replenishment_ignored"
                 class="erp-btn-link"
                 link
                 type="warning"
                 :loading="rowActionLoading === `ignore-${row.shop_id}-${row.ozon_sku}`"
                 @click="ignoreReplenishment(row)"
               >忽略</el-button>
+              <el-tag v-else size="small" type="info">已忽略备货</el-tag>
               <el-button class="erp-btn-link" link type="primary" @click="syncSingleProduct(row)">同步库存</el-button>
               <el-button class="erp-btn-link" link @click="openMappings()">编辑绑定</el-button>
             </el-space>
@@ -618,17 +700,31 @@ onMounted(async () => {
 .alert-toolbar :deep(.el-form-item) { margin: 0; }
 .alert-toolbar :deep(.el-form-item__label:empty) { display: none; }
 .alert-toolbar :deep(.inventory-toolbar-form .el-input) { width: 260px !important; }
+.alert-inventory-filters { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .alert-status-filters { display: flex; align-items: center; flex-wrap: nowrap; gap: 5px; }
 .alert-status-filters .el-button + .el-button { margin-left: 0; }
 .alert-filter-count { margin-left: 5px; opacity: .8; }
+.alert-toolbar :deep(.alert-sort-select), .alert-toolbar :deep(.alert-sort-select .el-input) { width: 170px !important; }
 .inventory-alert-table :deep(.el-table__row) { height: 112px; }
 .alert-identity .inventory-id-display { font-size: 17px; font-weight: 700; color: var(--el-text-color-primary); }
 .alert-metric-value { font-size: 15px; font-weight: 650; line-height: 1.3; color: var(--el-text-color-primary); }
 .alert-metric-row { display: flex; align-items: baseline; gap: 5px; line-height: 1.3; white-space: nowrap; }
-.alert-metric-row > span, .alert-analysis-counts span { font-size: 12px; color: var(--el-text-color-secondary); }
-.alert-consumption, .alert-analysis, .alert-lead-time { gap: 5px; }
-.alert-analysis-counts { display: flex; flex-wrap: wrap; gap: 12px; }
-.alert-analysis-counts > div { display: flex; align-items: baseline; gap: 5px; }
+.alert-metric-row > span { font-size: 12px; color: var(--el-text-color-secondary); }
+.alert-consumption { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: center; min-height: 84px; gap: 6px; }
+.alert-consumption > div, .alert-analysis-grid > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.alert-consumption span, .alert-analysis-grid span { font-size: 12px; line-height: 1.25; color: var(--el-text-color-secondary); white-space: nowrap; }
+.alert-consumption .alert-metric-value, .alert-analysis-grid .alert-metric-value { white-space: nowrap; }
+.alert-analysis { display: grid; gap: 9px; min-width: 0; }
+.alert-analysis-status { display: flex; align-items: center; gap: 12px; min-height: 22px; font-size: 12px; color: var(--el-text-color-secondary); }
+.alert-analysis-status :deep(.el-tag) { font-size: 13px; font-weight: 650; }
+.alert-analysis-status .danger-text, .alert-analysis-status .danger-text .alert-metric-value { color: var(--el-color-danger); }
+.alert-analysis-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 14px; row-gap: 7px; }
+.alert-fbp-weeks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.alert-fbp-weeks > div { display: flex; flex-direction: column; gap: 4px; }
+.alert-fbp-weeks span { font-size: 12px; color: var(--el-text-color-secondary); }
+.alert-fbp-weeks strong { font-size: 15px; font-weight: 650; }
+.alert-sku-replenishment-qty { font-size: 15px; font-weight: 650; color: var(--el-color-warning); }
+.alert-lead-time { gap: 5px; }
 .alert-relation-count { white-space: nowrap; color: var(--el-text-color-secondary); }
 .alert-lead-time :deep(.el-button) { align-self: flex-start; margin: 0; }
 .alert-row-actions { align-items: stretch; gap: 4px; }
@@ -638,11 +734,13 @@ onMounted(async () => {
 .alert-detail-heading { display: grid; gap: 12px; margin-bottom: 18px; }
 .alert-sku-value { overflow-wrap: anywhere; }
 @media (max-width: 1300px) {
-  .alert-toolbar :deep(.erp-filter-bar), .alert-toolbar :deep(.inventory-toolbar-form), .alert-status-filters { flex-wrap: wrap; }
+  .alert-toolbar :deep(.erp-filter-bar), .alert-toolbar :deep(.inventory-toolbar-form), .alert-inventory-filters, .alert-status-filters { flex-wrap: wrap; }
 }
 @media (max-width: 760px) {
   .alert-toolbar :deep(.inventory-toolbar-form) { display: flex; flex-direction: column; align-items: stretch; }
   .alert-toolbar :deep(.inventory-toolbar-form .el-input) { width: 100% !important; }
+  .alert-inventory-filters { width: 100%; }
+  .alert-toolbar :deep(.alert-sort-select), .alert-toolbar :deep(.alert-sort-select .el-input) { width: 100% !important; }
   .alert-status-filters { width: 100%; }
   .alert-status-filters .el-button { flex: 1 1 auto; }
 }

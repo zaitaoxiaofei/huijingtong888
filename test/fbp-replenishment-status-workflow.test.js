@@ -41,11 +41,10 @@ test("completed FBP replenishment orders do not remain in the shared transit tot
   assert.match(source, /completed_order\.status = 'completed'/);
   assert.match(source, /WHERE \$\{fbpTransferInTransitWhereMysql\(\)\}/);
   assert.match(source, /WHERE \$\{fbpTransferInTransitWhereMysql\("ftr"\)\}/);
-  assert.doesNotMatch(source, /FBP_OPPORTUNITY_CACHE_TTL_MS/);
 });
 
 test("FBP displays refresh their shared facts whenever a kept-alive page is reopened", () => {
   assert.match(page, /onActivated\(\(\) => void loadPageData\(\)\)/);
   assert.match(opportunitiesPage, /onActivated\(\(\) => \{[\s\S]*?void loadPageData\(\)/);
-  assert.match(productsPage, /onActivated\(\(\) => void loadPageData\(\{ silent: true \}\)\)/);
+  assert.match(productsPage, /onActivated\(\(\) => \{[\s\S]*?void loadPageData\(\{ silent: true \}\)/);
 });

@@ -21,6 +21,13 @@ test('inventory alert desktop toolbar stays compact and lead time controls save 
     alert_quantity: 18, suggested_purchase_qty: 10, alert_type: 'low_stock',
     shops: [], skus: [], shop_count: 0, sku_count: 0
   };
+  const fbpRow = {
+    ...row, shop_name: '测试店铺', ozon_sku: 'FBP-TEST-1', offer_id: 'OFFER-1',
+    product_all_time_qty: 100, all_time_qty: 50, older_7d_qty: 20, prev_7d_qty: 12,
+    recent_7d_qty: 7, fbp_available: 30, suggested_qty: 25,
+    local_physical_stock: 10, local_available_stock: 8,
+    trend_type: 'continuous_decline', trend_text: '连续下滑，待复核'
+  };
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'inventory-alert-page-fixture',
@@ -35,7 +42,12 @@ test('inventory alert desktop toolbar stays compact and lead time controls save 
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><link rel="stylesheet" href="/style.css"><style>html,body,#app{height:100%;margin:0}.fixture-shell{width:calc(100vw - 220px);height:100%;margin-left:220px;overflow:hidden}</style></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
-      if (url.pathname === '/api/stock-alerts') { stockModes.push(url.searchParams.get('mode')); return route.fulfill({ json: { rows: [row], total: 1, meta: { low_stock: 1, out_of_stock: 0, in_transit: 0, healthy: 0 } } }); }
+      if (url.pathname === '/api/stock-alerts') {
+        const mode = url.searchParams.get('mode');
+        stockModes.push(mode);
+        if (mode === 'fbp-operations') assert.equal(url.searchParams.get('fbpFocus'), 'replenishment');
+        return route.fulfill({ json: { rows: [mode === 'fbp-operations' ? fbpRow : row], total: 1, meta: { low_stock: 1, out_of_stock: 0, in_transit: 0, healthy: 0 } } });
+      }
       if (url.pathname === '/api/shops') return route.fulfill({ json: [] });
       if (url.pathname === '/api/inventory/ledger' && route.request().method() === 'GET') return route.fulfill({ json: { product: { id: 10, name: '测试库存', inventory_number: '1-10' }, revision: 'v1', physical_estimate: 10, available_estimate: 8, open_order_demand: 2, fbp_reserved: 0, current_stock_reserved: 2, incoming_quantity: 0, current_incoming: 0, current_shortage: 0, orders: [], movements: [], actions: [] } });
       if (url.pathname === '/api/inventory/products/lead-times' && route.request().method() === 'POST') {
@@ -104,10 +116,15 @@ test('inventory alert desktop toolbar stays compact and lead time controls save 
     }]);
     await page.getByRole('tab', { name: 'FBP SKU 视角' }).click();
     await page.getByRole('columnheader', { name: 'FBP SKU' }).waitFor();
-    assert.deepEqual(stockModes, ['inventory-alerts', 'inventory-alerts', 'fbp-alerts'], 'switching view makes one SKU request');
+    await page.getByText('库存合计 100').waitFor();
+    await page.getByRole('columnheader', { name: '本 SKU 建议备货' }).waitFor();
+    await page.getByRole('button', { name: '创建备货单' }).waitFor();
+    await page.getByText('连续下滑，待复核').waitFor();
+    await page.screenshot({ path: '/tmp/inventory-alert-fbp-operations.png', animations: 'disabled' });
+    assert.deepEqual(stockModes, ['inventory-alerts', 'inventory-alerts', 'fbp-operations'], 'switching view makes one SKU request');
     await page.getByRole('tab', { name: '库存视角' }).click();
     await page.getByRole('columnheader', { name: '库存分析' }).waitFor();
-    assert.deepEqual(stockModes, ['inventory-alerts', 'inventory-alerts', 'fbp-alerts', 'inventory-alerts'], 'switching back makes one inventory request');
+    assert.deepEqual(stockModes, ['inventory-alerts', 'inventory-alerts', 'fbp-operations', 'inventory-alerts'], 'switching back makes one inventory request');
     await page.locator('.inventory-alert-table').getByRole('button', { name: '更新本地库存' }).click();
     await page.getByRole('dialog', { name: '更新本地库存' }).waitFor();
     assert.deepEqual(errors, []);

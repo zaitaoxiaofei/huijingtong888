@@ -28,7 +28,7 @@ function product(productId, sales7, available, leadDays, incoming = 0, sales30 =
   };
 }
 
-test("库存预警以库存为一行，按近三十日销量降序并计算生产周期阈值", () => {
+test("库存预警以库存为一行，按近三十日消耗降序并计算生产周期阈值", () => {
   const payload = applyStockAlertQuery([
     product(1, 70, 69, 7, 0, 70),
     product(2, 14, 0, 10, 20, 20),
@@ -49,6 +49,107 @@ test("库存预警以库存为一行，按近三十日销量降序并计算生�
   assert.equal(payload.meta.healthy, 1);
   assert.equal(payload.meta.lead_time_missing, 0);
   assert.equal(applyStockAlertQuery([product(4, 28, 8, null)], { mode: "inventory-alerts" }).rows[0].production_lead_days, 7);
+});
+
+test("库存视角可按近七、十五、三十日消耗在分页前排序", () => {
+  const rows = [
+    { ...product(1, 1, 10, 7, 0, 100), recent_15d_qty: 20 },
+    { ...product(2, 10, 10, 7, 0, 80), recent_15d_qty: 11 },
+    { ...product(3, 5, 10, 7, 0, 60), recent_15d_qty: 40 }
+  ];
+  const query = { mode: "inventory-alerts", paged: "1", pageSize: 2 };
+  assert.deepEqual(applyStockAlertQuery(rows, query).rows.map((row) => row.product_id), [1, 2]);
+  assert.deepEqual(applyStockAlertQuery(rows, { ...query, sortBy: "recent_7d_qty" }).rows.map((row) => row.product_id), [2, 3]);
+  assert.deepEqual(applyStockAlertQuery(rows, { ...query, sort_by: "recent_15d_qty" }).rows.map((row) => row.product_id), [3, 1]);
+  assert.deepEqual(applyStockAlertQuery(rows, { ...query, sortBy: "available_stock" }).rows.map((row) => row.product_id), [1, 2]);
+});
+
+test("FBP 运营视角按企业查询真实历史件数，并将非 FBP SKU 计入关联库存合计", async () => {
+  const start = service.indexOf("async function loadFbpOperationalHistoryMysql");
+  const end = service.indexOf("function fbpOpportunityPriority", start);
+  const queries = [];
+  const context = vm.createContext({
+    chinaDateSqlMysql: () => "DATE(o.ordered_at)",
+    dateKeyDaysAgoMysql: (days) => `day-${days}`,
+    completedBeijingSalesWindow: () => ({ from30: "day-30", from7: "day-7", through: "day-1" }),
+    profitOrderedAtUtcRangeMysql: () => ({ whereSql: "AND o.ordered_at >= ? AND o.ordered_at < ?", params: ["utc-start", "utc-end"] }),
+    getCachedMasterData: async (_key, loader) => loader(),
+    orderTransportEvidenceSql: () => "FALSE",
+    fbpTransferInTransitWhereMysql: () => "ftr.status = 'sent'",
+    tenantShopPredicateMysql: (alias, defaultTenant) => `(${alias}.tenant_id = ?${defaultTenant ? ` OR ${alias}.tenant_id IS NULL` : ""})`,
+    localStockLocationPredicateMysql: () => "1=1",
+    compactProductImageUrlForListMysql: () => "",
+    parseWarehouseBreakdown: () => [],
+    maxTextDate: (left, right) => right || left,
+    mysqlQuery: async (sql, params) => {
+      queries.push({ sql, params });
+      if (sql.includes("SUM(oi.quantity) AS all_time_qty")) return [
+        { shop_id: 1, ozon_sku: "FBP-A", all_time_qty: 60 },
+        { shop_id: 1, ozon_sku: "FBS-B", all_time_qty: 40 }
+      ];
+      if (sql.includes("SUM(oi.quantity) AS recent_30d_qty")) return [
+        { shop_id: 1, ozon_sku: "FBP-A", recent_30d_qty: 12, recent_7d_qty: 3, prev_7d_qty: 6, older_7d_qty: 10 },
+        { shop_id: 1, ozon_sku: "FBS-B", recent_30d_qty: 8, recent_7d_qty: 2, prev_7d_qty: 4, older_7d_qty: 6 }
+      ];
+      if (sql.includes("FROM fbp_transfer_records ftr")) return [{ shop_id: 1, ozon_sku: "FBP-A", in_transit_qty: 5 }];
+      return [
+        { product_id: 1, inventory_number: "1-1", mapping_id: 1, shop_id: 1, ozon_sku: "FBP-A", fbp_snapshot_count: 1, fbp_available: 10 },
+        { product_id: 1, inventory_number: "1-1", mapping_id: 2, shop_id: 1, ozon_sku: "FBS-B", fbp_snapshot_count: 0, fbp_available: 0, replenishment_ignored: 1 }
+      ];
+    }
+  });
+  vm.runInContext(service.slice(start, end), context);
+  const products = await context.loadFbpStockAlertBaseMysql(7, { operational: true, defaultTenant: true });
+  assert.equal(products[0].all_time_qty, 100);
+  assert.deepEqual(Array.from(products[0].skus, (sku) => [sku.ozon_sku, sku.all_time_qty]), [["FBP-A", 60], ["FBS-B", 40]]);
+  assert.equal(products[0].skus[0].recent_7d_qty, 3);
+  assert.equal(products[0].skus[0].fbp_transfer_in_transit_qty, 5);
+  assert.equal(products[0].skus[1].replenishment_ignored, true);
+  const historySql = queries.find(({ sql }) => sql.includes("SUM(oi.quantity) AS all_time_qty"));
+  assert.match(historySql.sql, /scope_shop\.tenant_id = \? OR scope_shop\.tenant_id IS NULL/);
+  assert.deepEqual(Array.from(historySql.params), [7]);
+  const recentSql = queries.find(({ sql }) => sql.includes("SUM(oi.quantity) AS recent_30d_qty"));
+  assert.match(recentSql.sql, /o\.ordered_at >= \? AND o\.ordered_at < \?/);
+  assert.deepEqual(Array.from(recentSql.params.slice(-3)), [7, "utc-start", "utc-end"]);
+  const baseSql = queries.find(({ sql }) => sql.includes("FROM sku_mappings sm"));
+  assert.match(baseSql.sql, /LEFT JOIN \([\s\S]*?SUM\(present\) AS fbp_present/);
+  assert.match(baseSql.sql, /sm\.tenant_id = \? OR sm\.tenant_id IS NULL/);
+  assert.doesNotMatch(baseSql.sql, /FROM order_items oi/, "运营视角使用历史聚合，不再重复扫描近 30 天订单");
+  assert.equal(baseSql.params.length, 4);
+  assert.doesNotMatch(baseSql.sql, /AND fri\.id IS NULL/);
+});
+
+test("FBP 历史累计复用租户缓存，近期销量查询只扫描有日期索引的近三十天", async () => {
+  const start = service.indexOf("async function loadFbpOperationalHistoryMysql");
+  const end = service.indexOf("async function loadFbpSkuTransfersMysql", start);
+  const queries = [];
+  const cache = new Map();
+  const context = vm.createContext({
+    chinaDateSqlMysql: () => "DATE(o.ordered_at)",
+    completedBeijingSalesWindow: () => ({ from30: "day-30", from7: "day-7", through: "day-1" }),
+    dateKeyDaysAgoMysql: (days) => `day-${days}`,
+    profitOrderedAtUtcRangeMysql: () => ({ whereSql: "AND o.ordered_at >= ? AND o.ordered_at < ?", params: ["utc-start", "utc-end"] }),
+    orderTransportEvidenceSql: () => "FALSE",
+    tenantShopPredicateMysql: (alias) => `${alias}.tenant_id = ?`,
+    getCachedMasterData: async (key, loader) => {
+      if (!cache.has(key)) cache.set(key, await loader());
+      return cache.get(key);
+    },
+    mysqlQuery: async (sql, params) => {
+      queries.push({ sql, params });
+      return sql.includes("AS all_time_qty")
+        ? [{ shop_id: 1, ozon_sku: "S-1", all_time_qty: 20 }]
+        : [{ shop_id: 1, ozon_sku: "S-1", recent_30d_qty: 4, recent_7d_qty: 2 }];
+    }
+  });
+  vm.runInContext(service.slice(start, end), context);
+  await context.loadFbpOperationalHistoryMysql(7, false);
+  await context.loadFbpOperationalHistoryMysql(7, false);
+  assert.equal(queries.filter(({ sql }) => sql.includes("AS all_time_qty")).length, 1);
+  const recent = queries.filter(({ sql }) => sql.includes("AS recent_30d_qty"));
+  assert.equal(recent.length, 2);
+  assert.ok(recent.every(({ sql }) => /o\.ordered_at >= \? AND o\.ordered_at < \?/.test(sql)));
+  assert.ok(recent.every(({ sql, params }) => (sql.match(/\?/g) || []).length === params.length));
 });
 
 test("断货与采购在途状态可重叠，在途足额时不再建议采购", () => {
