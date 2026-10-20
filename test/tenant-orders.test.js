@@ -70,7 +70,7 @@ test("tenant order paging scopes shop, mapping and product rows without shared p
   assert.match(service, /rule\.tenant_id = \$\{Number\(tenantId\)\}/);
   assert.match(service, /const logisticsRuleFilterCacheMysql = new Map\(\)/);
   assert.match(service, /async function activeOrderLogisticsFilterMethodsMysql\(tenantId = "admin"\)/);
-  assert.match(service, /const tenantScope = await logisticsTenantScopeMysql\(tenantId, "l"\)/);
+  assert.match(service, /const tenantScope = await readableLogisticsTenantScopeMysql\(tenantId, "l"\)/);
   assert.match(service, /if \(logisticsRuleFilterCacheMysql\.size > 128\)/);
   assert.match(service, /logisticsRuleFilterCacheMysql\.delete\(cacheKey\)/);
   assert.match(service, /activeOrderLogisticsFilterMethodsMysql\(tenantScoped \? tenantId : "admin"\)/);
