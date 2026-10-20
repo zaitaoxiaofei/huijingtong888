@@ -63,10 +63,18 @@ export async function handleSellerAnalyticsRestRoute({ req, res, parts, services
   if (parts[0] !== "api" || parts[1] !== "db" || parts[2] !== "seller-analytics") return false;
   const tenantId = tenantIdFromRequest(req);
 
+  if (req.method === "POST" && parts[3] === "collect-runs" && parts[4] && parts[5] === "cancel") {
+    return json(res, {
+      success: true,
+      data: await services.sellerAnalyticsCancelCollectRun(decodeURIComponent(parts[4]), tenantId)
+    });
+  }
+
   if (req.method === "POST" && parts[3] === "collect-runs" && parts[4] && parts[5] === "retry") {
     return json(res, {
       success: true,
-      data: await services.sellerAnalyticsRetryCollectRun(decodeURIComponent(parts[4]), tenantId)
+      data: await services.sellerAnalyticsRetryCollectRun(decodeURIComponent(parts[4]), tenantId,
+        readJson ? await payloadFromRequest(req, readJson) : {})
     });
   }
 

@@ -34,7 +34,7 @@ const TENANT_SELLER_ANALYTICS_ROUTES = new Set([
 function isTenantSellerAnalyticsRoute(path, method) {
   if (TENANT_SELLER_ANALYTICS_ROUTES.has(`${method} ${path}`)
     || (method === "HEAD" && TENANT_SELLER_ANALYTICS_ROUTES.has(`GET ${path}`))) return true;
-  if (method === "POST" && /^db\/seller-analytics\/collect-runs\/[^/]+\/retry$/.test(path)) return true;
+  if (method === "POST" && /^db\/seller-analytics\/collect-runs\/[^/]+\/(?:retry|cancel)$/.test(path)) return true;
   if (method === "DELETE" && /^db\/seller-analytics\/(?:collect-runs|snapshots)\/[^/]+$/.test(path)) return true;
   return false;
 }

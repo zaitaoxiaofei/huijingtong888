@@ -1708,6 +1708,7 @@ function summarizeCollectRun(run = {}) {
     request_count: Number(run.request_count ?? requests.length),
     completed_count: Number(run.completed_count ?? requests.filter((item) => item.status === 'success').length),
     failed_count: Number(run.failed_count ?? requests.filter((item) => item.status === 'failed').length),
+    cancelled_count: Number(run.cancelled_count ?? requests.filter((item) => item.status === 'cancelled').length),
     pending_count: Number(run.pending_count ?? requests.filter((item) => item.status === 'pending').length),
     running_count: Number(run.running_count ?? requests.filter((item) => item.status === 'running').length),
     error: run.error || ''
@@ -2092,6 +2093,8 @@ async function processDirectCollectRun(db, tenantId = 'admin', storeId = '') {
       const workers = Array.from({ length: Math.min(concurrency, requests.length) }, async (_, workerIndex) => {
         for (let index = workerIndex; index < requests.length; index += concurrency) {
           const request = requests[index]
+          const run = await loadCollectRunState(db, request.run_id, tenantId)
+          if (!run || run.status === 'cancelled') continue
           const payload = await fetchDirectCollectRequest(db, request, currentBinding, tenantId).catch((error) => ({
             success: false,
             error: error?.message || String(error)
@@ -2538,6 +2541,9 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
       error.statusCode = 404
       throw error
     }
+    if (run.status === 'cancelled' || request.status === 'cancelled') {
+      return { run, request, snapshot: null, metricCount: 0, ignored: true, reason: 'collect_run_cancelled' }
+    }
     if (request.status === 'success') return { run, request, snapshot: null, metricCount: 0 }
     const success = payload.success !== false
     let snapshotResult = null
@@ -2592,7 +2598,7 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
   })
 }
 
-async function retryCollectRun(db, runId, tenantId = 'admin') {
+async function cancelCollectRun(db, runId, tenantId = 'admin') {
   return withCollectRunStateLock(tenantId, async () => {
     const run = await loadCollectRunState(db, runId, tenantId)
     if (!run) {
@@ -2600,9 +2606,78 @@ async function retryCollectRun(db, runId, tenantId = 'admin') {
       error.statusCode = 404
       throw error
     }
+    if (!['pending', 'running'].includes(run.status)) {
+      return { run, cancelledCount: 0, alreadyFinished: true }
+    }
+    const now = new Date().toISOString()
+    let cancelledCount = 0
+    for (const request of run.requests || []) {
+      if (!['pending', 'running'].includes(request.status)) continue
+      request.status = 'cancelled'
+      request.finished_at = now
+      cancelledCount += 1
+    }
+    run.status = 'cancelled'
+    run.cancelled_count = cancelledCount
+    run.finished_at = now
+    run.updated_at = now
+    if (db === sellerAnalyticsDb) {
+      await ensureSellerAnalyticsSchema()
+      await withMysqlTransaction(async (connection) => {
+        await executeSellerAnalyticsSql(connection, `
+          UPDATE seller_analytics_collect_requests
+          SET status='cancelled', finished_at=NOW(), updated_at=NOW()
+          WHERE tenant_id=? AND run_id=? AND status IN ('pending', 'running')
+        `, [tenantId, run.id])
+        await executeSellerAnalyticsSql(connection, `
+          UPDATE seller_analytics_collect_runs
+          SET status='cancelled', updated_at=NOW()
+          WHERE tenant_id=? AND id=?
+        `, [tenantId, run.id])
+        await executeSellerAnalyticsSql(connection, `
+          UPDATE settings SET value=?, updated_at=NOW()
+          WHERE tenant_id=? AND \`key\`=?
+        `, [stringifyJson(run), tenantId, getSettingKeyForCollectRun(run.id)])
+      })
+    } else {
+      await saveCollectRunState(db, run)
+    }
+    return { run, cancelledCount }
+  })
+}
+
+async function retryCollectRun(db, runId, tenantId = 'admin', options = {}) {
+  return withCollectRunStateLock(tenantId, async () => {
+    const run = await loadCollectRunState(db, runId, tenantId)
+    if (!run) {
+      const error = new Error('Seller analytics collect run not found')
+      error.statusCode = 404
+      throw error
+    }
+    if (run.status !== 'failed') {
+      const error = new Error(run.status === 'cancelled'
+        ? 'Cancelled collect runs cannot be retried; create a new run'
+        : 'Only finished failed collect runs can be retried')
+      error.statusCode = 409
+      throw error
+    }
+    const selectedIds = options.request_ids ?? options.requestIds
+    const selective = selectedIds !== undefined
+    if (selective && (!Array.isArray(selectedIds) || selectedIds.length === 0)) {
+      const error = new Error('request_ids must be a non-empty array')
+      error.statusCode = 400
+      throw error
+    }
+    const requestIds = new Set((selectedIds || []).map(safeString).filter(Boolean))
+    if (selective && (requestIds.size === 0 || [...requestIds].some((id) =>
+      !(run.requests || []).some((request) => request.id === id && request.status === 'failed')))) {
+      const error = new Error('Only failed requests in this collect run can be selected for retry')
+      error.statusCode = 409
+      throw error
+    }
     let resetCount = 0
     for (const request of run.requests || []) {
-      if (request.status === 'success') continue
+      if (selective ? !requestIds.has(request.id) : request.status === 'success') continue
       request.status = 'pending'
       request.error_message = ''
       request.claimed_at = null
@@ -2610,11 +2685,12 @@ async function retryCollectRun(db, runId, tenantId = 'admin') {
       resetCount += 1
     }
     run.completed_count = (run.requests || []).filter((item) => item.status === 'success').length
-    run.failed_count = 0
+    run.failed_count = (run.requests || []).filter((item) => item.status === 'failed').length
     run.status = resetCount > 0 ? 'pending' : run.status
     run.updated_at = new Date().toISOString()
     await saveCollectRunState(db, run)
     if (db === sellerAnalyticsDb) await syncCollectRunQueueRows(run)
+    if (resetCount > 0) collectBatchEmptyAt.delete(safeString(tenantId) || 'admin')
     return { run, resetCount }
   })
 }
@@ -4629,6 +4705,7 @@ export {
   claimPluginPrepareRequest,
   claimNextCollectRequest,
   claimNextCollectRequests,
+  cancelCollectRun,
   createCollectRun,
   deleteCollectRun,
   deleteSnapshot,

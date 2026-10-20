@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  cancelCollectRun,
   claimPluginPrepareRequest,
   claimNextCollectRequest,
   claimNextCollectRequests,
@@ -8,11 +9,13 @@ import {
   finishCollectRequest,
   getAnalysis,
   getPluginStatus,
+  listCollectRuns,
   inferSourceFromRequest,
   listOperationTodos,
   preparePlugin,
   refreshOperationTodos,
   resolveCollectPeriod,
+  retryCollectRun,
   savePluginStatus,
   validatePluginStatus,
   saveSnapshot
@@ -701,4 +704,60 @@ test("seller analytics full-store collect run appends next pages until the page 
   assert.equal(savedRun.status, "success");
   assert.equal(savedRun.request_count, 3);
   assert.equal(savedRun.completed_count, 3);
+});
+
+test("cancelled analytics run rejects late results without deleting completed snapshots", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, {
+    store_id: "4202503",
+    period_key: "7d",
+    source_keys: ["hot"]
+  }, "team-a");
+  const completed = await claimNextCollectRequest(db, "team-a", { store_id: "4202503" });
+  await finishCollectRequest(db, run.id, completed.request_id, {
+    success: true,
+    response_status: 200,
+    response_body: { metrics: { revenue: 10 } }
+  }, "team-a");
+  const inFlight = await claimNextCollectRequest(db, "team-a", { store_id: "4202503" });
+  const result = await cancelCollectRun(db, run.id, "team-a");
+  assert.equal(result.run.status, "cancelled");
+  assert.equal(result.cancelledCount, 1);
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
+  const late = await finishCollectRequest(db, run.id, inFlight.request_id, {
+    success: true,
+    response_status: 200,
+    response_body: { items: [{ sku: "must-not-appear", revenue: 99 }] }
+  }, "team-a");
+  assert.equal(late.ignored, true);
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
+  assert.equal(db.tables.SellerAnalyticsProductMetric.length, 0);
+  assert.equal(await claimNextCollectRequest(db, "team-a", { store_id: "4202503" }), null);
+  const [summary] = await listCollectRuns(db, { summary: 1 }, "team-a");
+  assert.equal(summary.cancelled_count, 1);
+  await assert.rejects(() => retryCollectRun(db, run.id, "team-a"), (error) => error.statusCode === 409);
+  await assert.rejects(() => cancelCollectRun(db, run.id, "team-b"), (error) => error.statusCode === 404);
+  const replacement = await createCollectRun(db, { store_id: "4202503", period_key: "7d", source_keys: ["hot"] }, "team-a");
+  assert.notEqual(replacement.id, run.id);
+});
+
+test("selective retry requeues only chosen failed analytics request", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, { store_id: "4202503", source_keys: ["hot"] }, "team-a");
+  await assert.rejects(() => retryCollectRun(db, run.id, "team-a"), (error) => error.statusCode === 409);
+  const first = await claimNextCollectRequest(db, "team-a", { store_id: "4202503" });
+  await finishCollectRequest(db, run.id, first.request_id, { success: false, error: "HTTP 503" }, "team-a");
+  const second = await claimNextCollectRequest(db, "team-a", { store_id: "4202503" });
+  await finishCollectRequest(db, run.id, second.request_id, { success: false, error: "HTTP 429" }, "team-a");
+  const selected = await retryCollectRun(db, run.id, "team-a", { request_ids: [second.request_id] });
+  assert.equal(selected.resetCount, 1);
+  assert.equal(selected.run.requests.find((item) => item.id === first.request_id).status, "failed");
+  assert.equal(selected.run.requests.find((item) => item.id === second.request_id).status, "pending");
+  assert.equal(selected.run.failed_count, 1);
+  await assert.rejects(() => retryCollectRun(db, run.id, "team-a", { request_ids: [first.request_id, "unknown"] }),
+    (error) => error.statusCode === 409);
+  assert.equal((await claimNextCollectRequest(db, "team-a", { store_id: "4202503" })).request_id, second.request_id);
+  await finishCollectRequest(db, run.id, second.request_id, { success: false, error: "HTTP 503" }, "team-a");
+  const legacy = await retryCollectRun(db, run.id, "team-a");
+  assert.equal(legacy.resetCount, 2);
 });

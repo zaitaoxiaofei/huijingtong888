@@ -83,6 +83,7 @@ test("seller analytics tenant gate allows only registered methods and paths", ()
   assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "analysis", "internal-debug"], "GET").allowed, false);
   assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "plugin-status"], "PUT").allowed, false);
   assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "collect-runs", "run-a", "retry"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "collect-runs", "run-a", "cancel"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(tenantSession, ["api", "db", "seller-analytics", "snapshots", "snapshot-a"], "DELETE").allowed, true);
 });
 
@@ -90,6 +91,7 @@ test("seller analytics REST mutations use the session tenant rather than client 
   const calls = [];
   const services = {
     sellerAnalyticsRetryCollectRun: async (...args) => calls.push(["retry", ...args]),
+    sellerAnalyticsCancelCollectRun: async (...args) => calls.push(["cancel", ...args]),
     sellerAnalyticsDeleteCollectRun: async (...args) => calls.push(["delete-run", ...args]),
     sellerAnalyticsDeleteSnapshot: async (...args) => calls.push(["delete-snapshot", ...args])
   };
@@ -100,14 +102,30 @@ test("seller analytics REST mutations use the session tenant rather than client 
   await handleSellerAnalyticsRestRoute({ req, res, parts: ["api", "db", "seller-analytics", "collect-runs", "run-a"], services, json });
   req.method = "POST";
   await handleSellerAnalyticsRestRoute({ req, res, parts: ["api", "db", "seller-analytics", "collect-runs", "run-a", "retry"], services, json });
+  await handleSellerAnalyticsRestRoute({ req, res, parts: ["api", "db", "seller-analytics", "collect-runs", "run-a", "cancel"], services, json });
   req.method = "DELETE";
   await handleSellerAnalyticsRestRoute({ req, res, parts: ["api", "db", "seller-analytics", "snapshots", "snapshot-a"], services, json });
 
   assert.deepEqual(calls, [
     ["delete-run", "run-a", "42"],
-    ["retry", "run-a", "42"],
+    ["retry", "run-a", "42", {}],
+    ["cancel", "run-a", "42"],
     ["delete-snapshot", "snapshot-a", "42"]
   ]);
+});
+
+test("seller analytics selective retry forwards request ids without accepting tenant override", async () => {
+  const calls = [];
+  const req = { method: "POST", _session: { tenant: { id: 42, slug: "company-a" } } };
+  await handleSellerAnalyticsRestRoute({
+    req,
+    res: {},
+    parts: ["api", "db", "seller-analytics", "collect-runs", "run-a", "retry"],
+    services: { sellerAnalyticsRetryCollectRun: async (...args) => calls.push(args) },
+    readJson: async () => ({ tenant_id: "99", request_ids: ["request-a"] }),
+    json: (_res, payload) => payload
+  });
+  assert.deepEqual(calls, [["run-a", "42", { request_ids: ["request-a"] }]]);
 });
 
 test("tenant analytics skips enrichment from the still-shared online products table", () => {
