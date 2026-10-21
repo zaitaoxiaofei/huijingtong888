@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
@@ -26,6 +26,7 @@ import {
 import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
+import { profitVersionSummary } from "./utils/profit-calculation-versions.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
@@ -36,6 +37,8 @@ const route = useRoute();
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
+const ProfitCalculationVersions = defineAsyncComponent(() => import("./components/ProfitCalculationVersions.vue"));
+const profitVersionsExpanded = ref(false);
 const inventoryDetail = reactive({ visible: false, productId: 0, orderId: 0 });
 const historicalPurchaseProducts = ref([]);
 function openInventoryDetail(row, productId) {
@@ -355,9 +358,9 @@ const detailProfitItemCards = computed(() => detailItems.value.map((item, index)
   offerId: item.offer_id || "-",
   imageUrl: detailItemImageUrl(item),
   saleAmount: detailItemSaleAmount(item),
-  estimatedProfit: Number(item.estimated_profit || item.net_profit_cny || 0),
+  estimatedProfit: Number(item.estimated_profit ?? item.net_profit_cny ?? 0),
   actualProfit: item.settlement_state === "accrued" && item.profit_status === "accrued"
-    ? Number(item.actual_profit || item.net_profit_cny || 0)
+    ? Number(item.net_profit_cny ?? item.actual_profit ?? 0)
     : null,
   statusText: item.settlement_state === "accrued" && item.profit_status === "accrued" ? "已结算" : "预估中"
 })));
@@ -785,16 +788,21 @@ function buildProfitSummary(row) {
   const actual = Number(row.actual_profit || 0);
   const settlementStates = splitCsv(row.settlement_states).map((value) => value.toLowerCase());
   const profitStatuses = splitCsv(row.profit_statuses).map((value) => value.toLowerCase());
-  const fullyAccrued = settlementStates.length > 0
+  const fullyAccrued = row.actual_profit_ready !== undefined && row.actual_profit_ready !== null
+    ? Number(row.actual_profit_ready) === 1
+    : settlementStates.length > 0
     && profitStatuses.length > 0
     && settlementStates.every((value) => value === "accrued")
     && profitStatuses.every((value) => value === "accrued");
   const effective = fullyAccrued ? actual : estimated;
+  const version = profitVersionSummary(row);
   return {
     revenue: Number(row.revenue || 0),
     estimated,
     actual,
     hasActual: fullyAccrued,
+    versionLabel: version.label,
+    versionTooltip: version.tooltip,
     effective,
     effectiveType: fullyAccrued ? "actual" : "estimated",
     alertLevel: effective < 0 ? "loss" : effective < 1 ? "low" : ""
@@ -806,7 +814,6 @@ function buildLogisticsSummary(row) {
   const trackingNumber = String(row.tracking_number || "").trim();
   const trackingTarget = trackingNumber || shipmentNumber;
   const rawOzonMethodName = row.delivery_method_name || row.logistics_channel || "";
-  const standardizedMethodName = row.resolved_logistics_rule_name || row.billing_logistics_rule_name || "";
   return {
     shipmentNumber,
     tracking: trackingNumber,
@@ -814,8 +821,12 @@ function buildLogisticsSummary(row) {
     trackingLink: trackingLinkFor(trackingTarget),
     hasSeparateTrackingNumber: Boolean(trackingNumber && shipmentNumber && trackingNumber !== shipmentNumber),
     deliveryMethod: row.delivery_method_name || row.delivery_method || row.shipping_method || "",
-    deliveryMethodLabel: row.fulfillment_type_label || "FBS",
-    ozonMethodName: standardizedMethodName || rawOzonMethodName || "--",
+    deliveryMethodLabel: `${row.fulfillment_type_label || "FBS"} · ${row.logistics_carrier_label || "未识别"}`,
+    serviceClass: row.logistics_service_class || "未识别",
+    serviceClassSourceLabel: row.logistics_service_class_source === "billing_rule" ? "计费规则补充" : "",
+    transportMode: row.logistics_transport_mode_label || "未识别",
+    transportModeSourceLabel: row.logistics_transport_mode_source === "billing_rule" ? "计费规则补充" : "",
+    ozonMethodName: row.logistics_display_name || rawOzonMethodName || "未识别",
     rawOzonMethodName,
     resolvedRuleName: row.billing_logistics_rule_name || row.resolved_logistics_rule_name || "--",
     ruleSourceLabel: row.billing_logistics_rule_name ? "利润计费" : "物流识别",
@@ -1727,6 +1738,7 @@ function bulkPrepareSelected() {
 }
 
 async function openDrawer(mode, orderId) {
+  profitVersionsExpanded.value = false;
   detailDialog.visible = true;
   detailDialog.loading = true;
   detailDialog.mode = mode;
@@ -2552,7 +2564,7 @@ onMounted(async () => {
   // Render rows immediately. Procurement counts are loaded in the background
   // so a cold full-ledger reconciliation cannot block opening this module.
   await loadOrders();
-  if (vm.filters.logisticsMethod && vm.filters.logisticsMethod !== "all") {
+  if (vm.filters.logisticsServiceClass && vm.filters.logisticsServiceClass !== "all") {
     void loadLogisticsOptions().catch(() => {});
   }
 });
@@ -2574,6 +2586,7 @@ onBeforeUnmount(() => {
       :shops="vm.shops"
       :logistics-carrier-options="vm.logisticsCarrierOptions"
       :logistics-method-options="vm.logisticsMethodOptions"
+      :logistics-service-class-options="vm.logisticsServiceClassOptions"
       :search-type-options="SEARCH_TYPE_OPTIONS"
       :sync-status="vm.syncStatus"
       :sync-running="vm.syncRunning"
@@ -3049,6 +3062,14 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column prop="note" label="说明" min-width="360" />
           </el-table>
+          <details :open="profitVersionsExpanded" class="vue-orders-drawer-block" @toggle="profitVersionsExpanded = $event.target.open">
+            <summary>计算依据与版本记录</summary>
+            <ProfitCalculationVersions
+              v-if="profitVersionsExpanded"
+              :payload="detailDialog.data?.profit_calculation_versions || { available: false, items: [] }"
+              :items="detailItems"
+            />
+          </details>
         </div>
 
         <template v-else>

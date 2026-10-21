@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+import { normalizeLogisticsServiceClass } from '../src/services/order-logistics-classification.js';
 
 const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 function definition(name) {
@@ -24,10 +25,13 @@ test('inventory pagination loads details only for the globally sorted page, incl
       let loadedIds, coverageCalls = 0;
       const context = vm.createContext({
         ensureMysqlCutoverEnabled() {},
+        orderListTenantScopeMysql: async () => null, assertTenantOrderListFiltersMysql() {},
+        normalizeLogisticsServiceClass,
         ensureOrderLabelPrintSchemaMysql: async () => {}, ensureSkuInventoryRecipeSchemaMysql: async () => {},
         ensureProductCompositionSchemaMysql: async () => {}, ensureProductNamingSchemaMysql: async () => {},
         orderBaseSqlMysql: async () => ({ where: '1=1', params: [] }),
         filterOrderIdsByLogisticsMethodMysql: () => null, filterOrderIdsByLogisticsCarrierMysql: () => null,
+        filterOrderIdsByLogisticsServiceClassMysql: () => null,
         withRestrictedOrderIdsMysql: base => base, orderFilteredSqlMysql: async () => ({ joins: '', where: '1=1', params: [] }),
         orderProcurementCoverageMysql: async () => { coverageCalls++; return new Map(); },
         mysqlQueryOne: async () => ({ total: candidates.length }), mysqlQuery: async () => candidates.map(row => ({ id: row.id })),
@@ -49,6 +53,7 @@ test('inventory pagination loads details only for the globally sorted page, incl
 
 test('lightweight inventory rows retain raw/nested logistics fallback and input tie order', async () => {
   const context = vm.createContext({
+    orderListTenantScopeMysql: async () => null,
     mysqlQuery: async () => [
       { id: 1, raw_json: '{"raw":{"delivery_method":{"name":"FBP","warehouse":"Hun Chun"}}}' },
       { id: 2, raw_json: '{"analytics_data":{"warehouse":"LOCAL","tpl_provider":"CEL"}}' },
