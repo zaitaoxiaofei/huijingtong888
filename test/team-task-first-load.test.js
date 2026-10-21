@@ -9,7 +9,7 @@ const heatmapSource = fs.readFileSync(new URL("../frontend/admin/components/team
 test("development overview skips unrelated data bootstrap and reuses the task-center payload", () => {
   assert.match(viewSource, /if \(value === "tasks"\) loadTaskPlanOrders\(\);\s*else if \(value !== "dashboard"\) loadDevelopmentData\(value\)/);
   assert.match(viewSource, /include_tasks=0/);
-  assert.match(viewSource, /async function loadReviewDrafts\(\)/);
+  assert.match(viewSource, /async function loadReviewDrafts\(/);
   assert.match(viewSource, /:initial-tasks="tasks" :initial-tasks-loaded="tasksLoaded"/);
   assert.match(heatmapSource, /if \(props\.initialTasksLoaded\) tasks\.value = props\.initialTasks; else load\(\)/);
 });
