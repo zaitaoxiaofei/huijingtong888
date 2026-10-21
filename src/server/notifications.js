@@ -164,10 +164,12 @@ function sendUpdateEvent(res, eventName, payload) {
   return true;
 }
 
-export function subscribeGlobalUpdateEvents(res, query = {}) {
+export function subscribeGlobalUpdateEvents(res, query = {}, trustedSession = {}) {
   const client = {
     res,
-    personId: Number(query.person_id || query.personId || 0) || 0,
+    personId: Number(trustedSession?.personId || 0) || 0,
+    tenantId: Number(trustedSession?.tenant?.id || 0) || 0,
+    tenantSlug: String(trustedSession?.tenant?.slug || ""),
     appVersion: String(query.app_version || query.appVersion || "").trim(),
     pluginVersion: String(query.plugin_version || query.pluginVersion || "").trim()
   };
@@ -208,8 +210,13 @@ export function broadcastGlobalUpdateStatus(status = readUpdateStatusFile()) {
 // Reuse the authenticated application event stream for short-lived operational events.
 export function broadcastGlobalEvent(eventName, payload = {}, options = {}) {
   const personId = Number(options.personId || 0) || 0;
+  const tenantScoped = Object.hasOwn(options, "tenantId");
+  const tenantId = Number(options.tenantId || 0);
   for (const client of [...updateSubscribers]) {
     if (personId && Number(client.personId || 0) !== personId) continue;
+    if (tenantScoped) {
+      if (!Number.isSafeInteger(tenantId) || tenantId <= 0 || client.tenantId !== tenantId) continue;
+    } else if (client.tenantSlug !== "default") continue;
     if (!sendUpdateEvent(client.res, eventName, payload)) updateSubscribers.delete(client);
   }
 }

@@ -34,7 +34,7 @@ export async function handleAssetVariantEngineRestRoute({ req, res, parts, servi
   }
 
   if (req.method === "GET" && parts[2] === "tail-template-files" && parts[3]) {
-    const file = await services.resolveAssetTailTemplateFile(decodeURIComponent(parts[3]));
+    const file = await services.resolveAssetTailTemplateFile(decodeURIComponent(parts[3]), req._session);
     if (!file) return notFound(res);
     writeHead(res, 200, {
       "Content-Type": file.mime,

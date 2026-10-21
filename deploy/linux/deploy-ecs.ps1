@@ -5,6 +5,7 @@ param(
   [int]$SshPort = $(if ($env:OZON_ECS_PORT) { [int]$env:OZON_ECS_PORT } else { 22 }),
   [string]$IdentityFile = $env:OZON_ECS_IDENTITY_FILE,
   [string]$Version = (Get-Date -Format "yyyy.MM.dd-HHmmss"),
+  [string]$ReviewedIdentityManifest,
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
@@ -28,6 +29,14 @@ $archivePath = Join-Path $artifactRoot "ozon-erp-$Version.zip"
 $remoteArchive = "/tmp/ozon-erp-$Version.zip"
 $remoteScript = "/tmp/ozon-erp-remote-release.sh"
 $remoteTarget = "$SshUser@$EcsHost"
+$remoteIdentityManifest = ""
+$resolvedReviewedManifest = ""
+if ($ReviewedIdentityManifest) {
+  $resolvedReviewedManifest = (Resolve-Path -LiteralPath $ReviewedIdentityManifest).Path
+  if (-not (Test-Path -LiteralPath $resolvedReviewedManifest -PathType Leaf)) { throw "Reviewed identity manifest must be a file." }
+  $null = Get-Content -LiteralPath $resolvedReviewedManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+  $remoteIdentityManifest = "/tmp/ozon-erp-identity-$Version.json"
+}
 
 foreach ($command in @("ssh", "scp", "tar.exe")) {
   if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -53,11 +62,26 @@ if ($DryRun) {
   exit 0
 }
 
+Push-Location $projectRoot
+try {
+  & node scripts/verify-release-worktree.mjs
+  if ($LASTEXITCODE -ne 0) { throw "Release worktree validation failed." }
+  $releaseBranch = (& git branch --show-current).Trim()
+  if ($LASTEXITCODE -ne 0) { throw "Cannot resolve release branch." }
+  $releaseCommit = (& git rev-parse HEAD).Trim()
+  if ($LASTEXITCODE -ne 0) { throw "Cannot resolve release commit." }
+} finally {
+  Pop-Location
+}
+
 New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
 if (-not $SkipBuild) {
   $env:DEPLOY_OUTPUT_DIR = $outputDir
   $env:OZON_DEPLOY_WORK_DIR = Join-Path $env:TEMP "ozon-erp-deploy-$Version"
   $env:OZON_RELEASE_VERSION = $Version
+  $env:OZON_RELEASE_BRANCH = $releaseBranch
+  $env:OZON_RELEASE_COMMIT = $releaseCommit
+  $env:OZON_RELEASE_CHANNEL = "production"
   Push-Location $projectRoot
   try {
     & npm.cmd run package:deploy
@@ -78,10 +102,17 @@ $remoteReleaseScript = Join-Path $projectRoot "deploy\linux\remote-release.sh"
 Write-Host "Uploading release $Version to $remoteTarget..."
 & scp @scpOptions $archivePath $remoteReleaseScript "${remoteTarget}:/tmp/"
 if ($LASTEXITCODE -ne 0) { throw "Upload failed with exit code $LASTEXITCODE." }
+if ($resolvedReviewedManifest) {
+  & scp @scpOptions $resolvedReviewedManifest "${remoteTarget}:$remoteIdentityManifest"
+  if ($LASTEXITCODE -ne 0) { throw "Reviewed identity manifest upload failed with exit code $LASTEXITCODE." }
+}
 
 $dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
 $dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
 $remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag'"
+if ($remoteIdentityManifest) {
+  $remoteCommand = "chmod 600 '$remoteIdentityManifest' && $remoteCommand '$remoteIdentityManifest'"
+}
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 

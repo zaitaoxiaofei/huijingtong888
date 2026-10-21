@@ -1,6 +1,7 @@
-import { computed, reactive, ref } from "vue";
+import { computed, onScopeDispose, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { apiClient } from "../../admin/utils/api.js";
+import { apiClient, currentApiCacheScope } from "../../admin/utils/api.js";
+import { useAuthStore } from "../../admin/stores/auth.js";
 import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
@@ -42,9 +43,26 @@ const ORDERS_META_DELAY_MS = 1200;
 const DEFAULT_ORDER_STATUS = "awaiting_packaging";
 const ORDER_STATUS_TAB_PREFERENCE_KEY = "orders.status_tabs";
 const logisticsOptionsCache = new Map();
-let ordersMetaTimer = 0;
 const ordersMetaCache = new Map();
 const ordersListCache = new Map();
+let ordersCacheSessionScope = "";
+let ordersCacheTenant = "";
+let ordersCacheGeneration = 0;
+
+function currentOrdersCacheScope() {
+  const sessionScope = currentApiCacheScope();
+  const user = useAuthStore().user;
+  const tenant = JSON.stringify([user?.id || "", user?.tenant?.id || "", user?.tenant?.slug || ""]);
+  if (sessionScope !== ordersCacheSessionScope || tenant !== ordersCacheTenant) {
+    ordersCacheSessionScope = sessionScope;
+    ordersCacheTenant = tenant;
+    ordersCacheGeneration += 1;
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+    logisticsOptionsCache.clear();
+  }
+  return ordersCacheGeneration;
+}
 
 function cacheOrdersList(requestUrl, result) {
   if (ordersListCache.size >= ORDERS_LIST_CACHE_MAX_ENTRIES) {
@@ -56,6 +74,7 @@ function cacheOrdersList(requestUrl, result) {
 
 function ordersMetaCacheKey(filters = {}) {
   return JSON.stringify({
+    scope: currentOrdersCacheScope(),
     shopId: String(filters.shopId || "all"),
     dateFrom: String(filters.dateFrom || ""),
     dateTo: String(filters.dateTo || ""),
@@ -204,6 +223,9 @@ function orderTabKey(row = {}) {
 }
 
 export function useOrdersPage() {
+  const authStore = useAuthStore();
+  let viewCacheScope = currentOrdersCacheScope();
+  let ordersMetaTimer = 0;
   const loading = ref(false);
   const selectedOrderIds = ref(new Set());
   const orderSyncAbort = ref(null);
@@ -246,12 +268,15 @@ export function useOrdersPage() {
   }
 
   async function loadStatusTabPreference() {
+    const scope = ensureOrdersViewScope();
     try {
       const result = await apiClient.get(`/api/user-preferences?${new URLSearchParams({ key: ORDER_STATUS_TAB_PREFERENCE_KEY }).toString()}`, { noCache: true });
+      if (scope !== currentOrdersCacheScope()) return;
       const order = Array.isArray(result?.value?.order) ? result.value.order : [];
       applyStatusTabOrder(order);
       return statusTabOrder.value;
     } catch (error) {
+      if (scope !== currentOrdersCacheScope()) return;
       console.warn("load order status tab preference failed", error);
       applyStatusTabOrder(DEFAULT_STATUS_TAB_ORDER);
       return statusTabOrder.value;
@@ -380,7 +405,51 @@ export function useOrdersPage() {
     }
   }
 
+  function abortOrderReads() {
+    window.clearTimeout(ordersMetaTimer);
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    ordersMetaAbort.value?.abort();
+    logisticsOptionsAbort.value?.abort();
+    ordersMetaRequestKey.value = "";
+    logisticsOptionsRequestKey.value = "";
+    logisticsOptionsPromise.value = null;
+  }
+
+  function ensureOrdersViewScope() {
+    const scope = currentOrdersCacheScope();
+    if (viewCacheScope !== scope) {
+      viewCacheScope = scope;
+      abortOrderReads();
+      ordersLoadToken.value += 1;
+      selectedOrderIds.value = new Set();
+      statusTabOrder.value = [...DEFAULT_STATUS_TAB_ORDER];
+      patch({
+        rows: [], shops: [], meta: { total: 0, counts: {} },
+        statusTabs: buildStatusTabs(), logisticsMethodOptions: DEFAULT_LOGISTICS_METHOD_OPTIONS,
+        logisticsServiceClassOptions: DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS,
+        logisticsCarrierOptions: LOGISTICS_CARRIER_OPTIONS,
+        syncStatus: "", syncRunning: false, lastSyncText: ""
+      });
+      loading.value = false;
+    }
+    return scope;
+  }
+
+  watch(() => [authStore.user, authStore.user?.tenant?.id, authStore.user?.tenant?.slug], ensureOrdersViewScope, { flush: "sync" });
+  const handleAuthStorageChange = (event) => {
+    if (["authToken", "baodanAuthUser"].includes(event.key)) ensureOrdersViewScope();
+  };
+  window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
+  window.addEventListener("storage", handleAuthStorageChange);
+  onScopeDispose(() => {
+    abortOrderReads();
+    window.removeEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
+    window.removeEventListener("storage", handleAuthStorageChange);
+  });
+
   async function loadOrdersMeta(filtersSnapshot) {
+    const scope = ensureOrdersViewScope();
     window.clearTimeout(ordersMetaTimer);
     const requestKey = ordersMetaCacheKey(filtersSnapshot);
     const cachedCounts = readOrdersMetaCache(filtersSnapshot);
@@ -403,7 +472,7 @@ export function useOrdersPage() {
         includeLogisticsOptions: "0"
       });
       const result = await apiClient.get(`/api/orders?${metaParams.toString()}`, { signal: controller.signal });
-      if (controller.signal.aborted || ordersMetaCacheKey(vm.filters) !== requestKey) return;
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || ordersMetaCacheKey(vm.filters) !== requestKey) return;
       const counts = result?.counts || {};
       writeOrdersMetaCache(filtersSnapshot, counts);
       patch({
@@ -416,7 +485,7 @@ export function useOrdersPage() {
         }
       });
     } catch (error) {
-      if (error?.name === "AbortError") return;
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || error?.name === "AbortError") return;
       console.warn("loadOrdersMeta failed", error);
     } finally {
       if (ordersMetaAbort.value === controller) {
@@ -426,7 +495,8 @@ export function useOrdersPage() {
     }
   }
 
-  async function loadPageInventory(rows, requestToken, requestUrl, forceRefresh = false) {
+  async function loadPageInventory(rows, requestToken, cacheKey, forceRefresh = false) {
+    const scope = ensureOrdersViewScope();
     const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
     if (!orderIds.length) return;
     const controller = new AbortController();
@@ -438,21 +508,23 @@ export function useOrdersPage() {
       const result = await apiClient.get(`/api/orders/inventory-availability?${params}`, {
         signal: controller.signal, noCache: true
       });
-      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || ordersLoadToken.value !== requestToken) return;
       const facts = new Map((Array.isArray(result?.rows) ? result.rows : []).map((row) => [Number(row.order_id), row.inventory_availability]));
       const mergeFacts = (row) => Array.isArray(facts.get(Number(row.id)))
         ? { ...row, inventory_availability: facts.get(Number(row.id)) } : row;
       vm.rows = vm.rows.map(mergeFacts);
-      const cached = ordersListCache.get(requestUrl);
+      const cached = ordersListCache.get(cacheKey);
       if (cached) cached.result = { ...cached.result, rows: (cached.result.rows || []).map(mergeFacts) };
     } catch (error) {
-      if (error?.name !== "AbortError") console.warn("load order inventory availability failed", error);
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || error?.name === "AbortError") return;
+      console.warn("load order inventory availability failed", error);
     } finally {
       if (ordersInventoryAbort.value === controller) ordersInventoryAbort.value = null;
     }
   }
 
   async function loadOrders(options = {}) {
+    const scope = ensureOrdersViewScope();
     window.clearTimeout(ordersMetaTimer);
     ordersListAbort.value?.abort();
     ordersInventoryAbort.value?.abort();
@@ -471,6 +543,7 @@ export function useOrdersPage() {
         includeLogisticsOptions: "0"
       });
       const requestUrl = `/api/orders?${params.toString()}`;
+      const cacheKey = `${scope}:${requestUrl}`;
       if (options.forceRefresh) {
         ordersListCache.clear();
         logisticsOptionsCache.clear();
@@ -481,7 +554,7 @@ export function useOrdersPage() {
         ordersMetaAbort.value = null;
         ordersMetaRequestKey.value = "";
       }
-      const cached = ordersListCache.get(requestUrl);
+      const cached = ordersListCache.get(cacheKey);
       const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < ORDERS_LIST_CACHE_TTL_MS);
       if (hasFreshCache) {
         const cachedResult = cached.result || {};
@@ -500,8 +573,8 @@ export function useOrdersPage() {
         noCache: options.forceRefresh === true,
         cache: options.forceRefresh === true ? "no-store" : undefined
       });
-      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
-      cacheOrdersList(requestUrl, result);
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || ordersLoadToken.value !== requestToken) return;
+      cacheOrdersList(cacheKey, result);
 
       const total = Number(result.total || 0);
       const counts = vm.meta.counts || {};
@@ -525,18 +598,19 @@ export function useOrdersPage() {
       loading.value = false;
       // Product balances hydrate independently of the expensive global allocation
       // counts. Keep row order and procurement coverage owned by the list response.
-      void loadPageInventory(vm.rows, requestToken, requestUrl, options.forceRefresh === true);
+      void loadPageInventory(vm.rows, requestToken, cacheKey, options.forceRefresh === true);
       void shopsPromise.then((shops) => {
-        if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+        if (controller.signal.aborted || scope !== currentOrdersCacheScope() || ordersLoadToken.value !== requestToken) return;
         if (Array.isArray(shops)) patch({ shops });
       });
       window.clearTimeout(ordersMetaTimer);
       // Counts reconcile every status and must not block the active page.
       ordersMetaTimer = window.setTimeout(() => {
+        if (scope !== currentOrdersCacheScope()) return;
         void loadOrdersMeta(filtersSnapshot);
       }, options.includeCounts ? 0 : ORDERS_META_DELAY_MS);
     } catch (error) {
-      if (error?.name === "AbortError") return;
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || error?.name === "AbortError") return;
       if (error?.status === 401) ElMessage.error("登录已失效，请重新登录");
       else ElMessage.error(error?.message || "加载订单失败");
       throw error;
@@ -549,8 +623,10 @@ export function useOrdersPage() {
   }
 
   async function loadLatestOrderSyncStatus() {
+    const scope = ensureOrdersViewScope();
     try {
       const status = await apiClient.get("/api/sync/ozon/status", { noCache: true, cache: "no-store" });
+      if (scope !== currentOrdersCacheScope()) return;
       patch({
         lastSyncText: status?.last_synced_at
           ? shanghaiDateTimeText(status.last_synced_at, { assumeUtcWhenNaive: true })
@@ -558,6 +634,7 @@ export function useOrdersPage() {
       });
       return status;
     } catch (error) {
+      if (scope !== currentOrdersCacheScope()) return;
       console.warn("load latest order sync status failed", error);
       patch({ lastSyncText: "读取失败" });
       return null;
@@ -786,6 +863,7 @@ export function useOrdersPage() {
   }
 
   async function loadLogisticsOptions({ force = false } = {}) {
+    const scope = ensureOrdersViewScope();
     const filtersSnapshot = { ...vm.filters, page: 1, logisticsMethod: "all", logisticsServiceClass: "all" };
     const params = buildOrdersParams(filtersSnapshot, {
       includeRows: "0",
@@ -793,7 +871,8 @@ export function useOrdersPage() {
       includeLogisticsOptions: "1"
     });
     const requestKey = params.toString();
-    const cached = logisticsOptionsCache.get(requestKey);
+    const cacheKey = `${scope}:${requestKey}`;
+    const cached = logisticsOptionsCache.get(cacheKey);
     if (!force && cached && Date.now() - cached.timestamp < LOGISTICS_OPTIONS_CACHE_TTL_MS) {
       patch({ logisticsServiceClassOptions: cached.rows });
       return cached.rows;
@@ -808,7 +887,8 @@ export function useOrdersPage() {
     logisticsOptionsPromise.value = apiClient
       .get(`/api/orders?${params.toString()}`, { signal: controller.signal })
       .then((result) => {
-        if (controller.signal.aborted || logisticsOptionsRequestKey.value !== requestKey) return vm.logisticsServiceClassOptions;
+        if (controller.signal.aborted || scope !== currentOrdersCacheScope()) return [];
+        if (logisticsOptionsRequestKey.value !== requestKey) return vm.logisticsServiceClassOptions;
         const currentParams = buildOrdersParams({ ...vm.filters, page: 1, logisticsMethod: "all", logisticsServiceClass: "all" }, {
           includeRows: "0", includeCounts: "0", includeLogisticsOptions: "1"
         });
@@ -817,7 +897,7 @@ export function useOrdersPage() {
           ? result.logisticsServiceClassOptions
           : DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS;
         if (logisticsOptionsCache.size >= ORDERS_LIST_CACHE_MAX_ENTRIES) logisticsOptionsCache.delete(logisticsOptionsCache.keys().next().value);
-        logisticsOptionsCache.set(requestKey, {
+        logisticsOptionsCache.set(cacheKey, {
           rows,
           timestamp: Date.now()
         });
@@ -825,6 +905,7 @@ export function useOrdersPage() {
         return rows;
       })
       .catch((error) => {
+        if (controller.signal.aborted || scope !== currentOrdersCacheScope()) return [];
         if (error?.name === "AbortError") return vm.logisticsServiceClassOptions;
         console.warn("loadLogisticsOptions failed", error);
         return vm.logisticsServiceClassOptions;

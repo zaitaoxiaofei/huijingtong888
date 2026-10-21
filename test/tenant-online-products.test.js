@@ -60,7 +60,7 @@ test("online product binding forwards session tenant and remains closed to non-d
 test("tenant online product access is limited to exact scoped routes", () => {
   const owner = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "owner" } };
   const member = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "member" } };
-  const platformAdmin = { roles: ["admin"], tenant: { id: 42, slug: "company-a", role: "member" } };
+  const platformAdmin = { roles: ["admin"], platform_role: "super_admin", tenant: { id: 42, slug: "company-a", role: "member" } };
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products"], "GET").allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: owner }, ["api", "online-products"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: owner }, ["api", "online-products"]).allowed, false);

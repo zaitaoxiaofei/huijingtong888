@@ -60,7 +60,8 @@ test("publish task reads, writes, retries, and record joins are tenant-bound", (
   assert.match(recordList, /COALESCE\(r\.tenant_id, 'admin'\) = \?/);
   assert.match(recordList, /COALESCE\(s\.tenant_id, 'admin'\) = COALESCE\(r\.tenant_id, 'admin'\)/);
   assert.match(recordList, /creator_members\.tenant_id = \?/);
-  assert.match(recordList, /\$\{fromSql\}[\s\S]*LIMIT \?\s*`, \[\.\.\.params, limit\]\)/);
+  assert.match(recordList, /const params = \[tenantMemberId, tenantId\]/);
+  assert.match(recordList, /\$\{fromSql\(true\)\}[\s\S]*LIMIT \?\s*`, \[\.\.\.params, limit\]\)/);
   assert.match(projects, /listingPublishProjectCandidates\(query, candidateLimit, session\)/);
   assert.match(projects, /COALESCE\(r\.tenant_id, 'admin'\) = \?/);
   assert.match(projects, /COALESCE\(s\.tenant_id, 'admin'\) = COALESCE\(r\.tenant_id, 'admin'\)/);

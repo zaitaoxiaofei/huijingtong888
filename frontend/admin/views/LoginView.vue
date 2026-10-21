@@ -5,6 +5,7 @@ import { Key, MoonNight, Sunny, User } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
+import BrandLogo from "../components/BrandLogo.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -16,8 +17,8 @@ const text = {
   light: "\u4eae\u8272",
   dark: "\u6697\u8272",
   mode: "\u6a21\u5f0f",
-  dogzon: "\u72d7ZON",
-  brandAria: "\u72d7ZON \u7206\u5355\u5355\u5355",
+  dogzon: "\u7206\u5355 ERP",
+  brandAria: "\u7206\u5355 ERP",
   bao: "\u7206",
   dan: "\u5355",
   login: "\u767b\u5f55",
@@ -289,13 +290,7 @@ async function pollQrLogin() {
     </button>
 
     <section class="brand-area" :aria-label="text.brandAria">
-      <div class="dogzon-logo">{{ text.dogzon }}</div>
-      <div class="brand-logo-sticker">
-        <span class="brand-bao">{{ text.bao }}</span>
-        <span class="brand-dan brand-dan-1">{{ text.dan }}</span>
-        <span class="brand-dan brand-dan-2">{{ text.dan }}</span>
-        <span class="brand-dan brand-dan-3">{{ text.dan }}</span>
-      </div>
+      <BrandLogo class="login-brand-logo" />
     </section>
 
     <section class="order-stage" aria-hidden="true">
@@ -515,54 +510,31 @@ async function pollQrLogin() {
   animation: brandDrop 0.68s cubic-bezier(0.18, 0.9, 0.24, 1.12) both;
 }
 
-.dogzon-logo {
-  color: #075eea;
-  font-size: clamp(38px, 7vw, 72px);
-  font-weight: 950;
-  line-height: 0.95;
-  letter-spacing: 0;
-  text-shadow: 0 12px 28px rgba(37, 99, 235, 0.18);
+.login-brand-logo {
+  gap: 16px;
 }
 
-.brand-logo-sticker {
-  position: relative;
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 0;
-  transform: rotate(-3deg);
-  filter: drop-shadow(0 10px 0 rgba(15, 23, 42, 0.18)) drop-shadow(0 24px 34px rgba(15, 23, 42, 0.18));
+.login-brand-logo :deep(.brand-logo__mark) {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
 }
 
-.brand-logo-sticker span {
-  display: inline-block;
-  font-size: clamp(35px, 6vw, 68px);
-  font-weight: 950;
-  line-height: 0.95;
-  -webkit-text-stroke: 5px #ffffff;
-  paint-order: stroke fill;
+.login-brand-logo :deep(.brand-logo__mark svg) {
+  width: 40px;
+  height: 40px;
 }
 
-.brand-bao {
-  color: #111827;
+.login-brand-logo :deep(.brand-logo__wordmark) {
+  gap: 10px;
 }
 
-.brand-dan {
-  color: #ef1f1f;
-  animation: danPunch 1.6s ease-in-out infinite;
+.login-brand-logo :deep(.brand-logo__wordmark strong) {
+  font-size: clamp(30px, 5vw, 42px);
 }
 
-.brand-dan-1 {
-  transform: scale(1.02) rotate(2deg);
-}
-
-.brand-dan-2 {
-  transform: scale(1.15) rotate(-1deg);
-  animation-delay: 0.12s;
-}
-
-.brand-dan-3 {
-  transform: scale(1.32) rotate(2deg);
-  animation-delay: 0.24s;
+.login-brand-logo :deep(.brand-logo__erp) {
+  font-size: clamp(12px, 1.4vw, 16px);
 }
 
 .order-stage {
@@ -746,9 +718,9 @@ async function pollQrLogin() {
   margin-top: 190px;
   border: 0;
   border-radius: 999px;
-  color: #ffffff;
-  background: linear-gradient(135deg, #075eea, #2563eb 54%, #38bdf8);
-  box-shadow: 0 16px 40px rgba(37, 99, 235, 0.28);
+  color: var(--erp-primary-contrast);
+  background: var(--erp-primary-fill);
+  box-shadow: 0 16px 40px color-mix(in srgb, var(--erp-primary-fill) 28%, transparent);
   font-size: 22px;
   font-weight: 950;
   cursor: pointer;
@@ -758,7 +730,8 @@ async function pollQrLogin() {
 
 .login-start-button:hover {
   transform: translateY(-3px);
-  filter: brightness(1.04);
+  background: var(--erp-primary-fill-hover);
+  filter: none;
 }
 
 .login-card {
@@ -779,7 +752,7 @@ async function pollQrLogin() {
 }
 
 .login-card-head span {
-  color: #2563eb;
+  color: var(--erp-primary);
   font-size: 13px;
   font-weight: 900;
 }
@@ -893,10 +866,11 @@ async function pollQrLogin() {
   justify-content: center;
 }
 
-.login-form :deep(.el-input__wrapper.is-focus) {
+.login-form :deep(.el-input__wrapper.is-focus),
+:root[data-theme="dark"] .login-form :deep(.el-input__wrapper.is-focus) {
   box-shadow:
-    0 0 0 1px rgba(37, 99, 235, 0.9) inset,
-    0 0 0 4px rgba(37, 99, 235, 0.14);
+    0 0 0 1px var(--erp-primary) inset,
+    0 0 0 4px color-mix(in srgb, var(--erp-primary) 14%, transparent);
 }
 
 .login-submit {
@@ -905,10 +879,22 @@ async function pollQrLogin() {
   margin-top: 4px;
   border: 0;
   border-radius: 16px;
-  background: linear-gradient(135deg, #075eea, #2563eb 58%, #ef4444);
-  box-shadow: 0 16px 34px rgba(37, 99, 235, 0.26);
+  background: var(--erp-primary-fill);
+  color: var(--erp-primary-contrast);
+  box-shadow: 0 16px 34px color-mix(in srgb, var(--erp-primary-fill) 26%, transparent);
   font-size: 15px;
   font-weight: 900;
+}
+
+.login-submit:not(.is-disabled):hover,
+.login-submit:not(.is-disabled):focus-visible {
+  background: var(--erp-primary-fill-hover);
+  color: var(--erp-primary-contrast);
+}
+
+.login-submit.is-disabled {
+  background: var(--el-disabled-bg-color);
+  color: var(--el-disabled-text-color);
 }
 
 .wechat-bind-alert {
@@ -966,16 +952,16 @@ async function pollQrLogin() {
 }
 
 .qr-login-button {
-  border-color: rgba(37, 99, 235, 0.34);
-  color: #1d4ed8;
-  background: rgba(239, 246, 255, 0.9);
+  border-color: var(--erp-primary-border);
+  color: var(--erp-primary);
+  background: var(--erp-primary-soft);
 }
 
 .qr-login-button:hover,
 .qr-login-button:focus {
-  border-color: rgba(37, 99, 235, 0.72);
-  color: #1e40af;
-  background: #dbeafe;
+  border-color: var(--erp-primary-control-border);
+  color: var(--erp-primary-hover);
+  background: var(--erp-primary-soft);
 }
 
 .wechat-login-button {
@@ -1066,6 +1052,23 @@ async function pollQrLogin() {
   box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.28) inset;
 }
 
+:root[data-theme="dark"] .login-form :deep(.el-input__inner) {
+  color: var(--erp-text-main);
+  -webkit-text-fill-color: var(--erp-text-main);
+  caret-color: var(--erp-text-main);
+}
+
+:root[data-theme="dark"] .login-form :deep(.el-input__inner::placeholder),
+:root[data-theme="dark"] .login-form :deep(.el-input__prefix),
+:root[data-theme="dark"] .login-form :deep(.el-input__suffix) {
+  color: var(--erp-text-placeholder);
+  -webkit-text-fill-color: var(--erp-text-placeholder);
+}
+
+:root[data-theme="dark"] .login-form :deep(.el-input__inner:-webkit-autofill) {
+  box-shadow: 0 0 0 1000px var(--erp-surface-alt) inset;
+}
+
 @keyframes gridMove {
   from {
     background-position: 0 0, 0 0;
@@ -1083,16 +1086,6 @@ async function pollQrLogin() {
   to {
     opacity: 1;
     transform: translate(-50%, 0) scale(1);
-  }
-}
-
-@keyframes danPunch {
-  0%,
-  100% {
-    filter: brightness(1);
-  }
-  50% {
-    filter: brightness(1.14);
   }
 }
 
@@ -1135,11 +1128,11 @@ async function pollQrLogin() {
 @keyframes buttonPulse {
   0%,
   100% {
-    box-shadow: 0 16px 40px rgba(37, 99, 235, 0.28);
+    box-shadow: 0 16px 40px color-mix(in srgb, var(--erp-primary-fill) 28%, transparent);
     transform: translateY(0);
   }
   50% {
-    box-shadow: 0 22px 60px rgba(37, 99, 235, 0.42);
+    box-shadow: 0 22px 60px color-mix(in srgb, var(--erp-primary-fill) 42%, transparent);
     transform: translateY(-2px);
   }
 }
@@ -1226,10 +1219,6 @@ async function pollQrLogin() {
   .login-theme-toggle {
     top: 14px;
     right: 14px;
-  }
-
-  .brand-logo-sticker span {
-    -webkit-text-stroke-width: 3px;
   }
 
   .order-card {

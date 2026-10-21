@@ -19,6 +19,7 @@ function listHarness() {
     AbortController, URLSearchParams, console,
     window: { clearTimeout() {}, setTimeout(fn) { timers.push(fn); return timers.length; } },
     ordersMetaTimer: 0, ordersMetaCacheKey: () => 'same-filter',
+    ensureOrdersViewScope: () => 1, currentOrdersCacheScope: () => 1,
     ordersMetaCache: new Map(), ordersListCache: new Map(),
     ordersListAbort: { value: null }, ordersMetaAbort: { value: null },
     ordersMetaRequestKey: { value: '' }, ordersLoadToken: { value: 0 }, loading: { value: false },

@@ -87,8 +87,13 @@ function toPersistedTab(tab) {
   };
 }
 
+function isRetiredRoute(route) {
+  return route?.name === "onboarding" || [route?.path, route?.fullPath].some(value =>
+    String(value || "").split(/[?#]/)[0].replace(/\/+$/, "") === "/onboarding");
+}
+
 function canPersistRoute(route) {
-  return route?.path && !route.meta?.public;
+  return route?.path && !route.meta?.public && !isRetiredRoute(route);
 }
 
 function compactRestoredTabs(tabs, activeKey) {
@@ -132,7 +137,7 @@ export const useWorkspaceTabsStore = defineStore("workspace-tabs", () => {
   }
 
   function openRoute(route) {
-    if (!route?.matched?.length || route.meta?.public) return;
+    if (!route?.matched?.length || !canPersistRoute(route)) return;
     const key = resolveTabKey(route);
     const existingTab = findTab(key);
     const nextTab = {
@@ -166,7 +171,7 @@ export const useWorkspaceTabsStore = defineStore("workspace-tabs", () => {
       for (const tab of parsed?.tabs || []) {
         if (!canPersistRoute(tab?.route)) continue;
         const resolved = router.resolve(tab.route.fullPath || tab.route.path);
-        if (!resolved?.matched?.length || resolved.meta?.public) continue;
+        if (!resolved?.matched?.length || !canPersistRoute(resolved)) continue;
         restoredTabs.push({
           key: resolveTabKey(resolved),
           title: String(tab.title || resolveTabTitle(resolved)).trim(),

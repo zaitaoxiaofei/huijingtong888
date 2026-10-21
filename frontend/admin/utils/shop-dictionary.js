@@ -1,5 +1,5 @@
 import { reactive } from "vue";
-import { apiClient } from "./api";
+import { apiClient, currentApiCacheScope } from "./api";
 
 const SHOP_DICTIONARY_TTL_MS = 5 * 60 * 1000;
 
@@ -12,6 +12,7 @@ const state = reactive({
 const cacheByTenant = new Map();
 const inflightByTenant = new Map();
 let listenerInstalled = false;
+let activeScope = "";
 
 function normalizeShop(row = {}) {
   return {
@@ -23,13 +24,14 @@ function normalizeShop(row = {}) {
 }
 
 function activeTenantCacheKey() {
-  try {
-    const user = JSON.parse(window.localStorage?.getItem("baodanAuthUser") || "null");
-    const tenant = user?.tenant || {};
-    return `${tenant.id || ""}:${tenant.slug || "legacy"}`;
-  } catch {
-    return "unknown";
+  const scope = currentApiCacheScope();
+  if (activeScope !== scope) {
+    activeScope = scope;
+    invalidateShopDictionary();
+    state.rows = [];
+    state.loading = false;
   }
+  return scope;
 }
 
 function installShopChangeListener() {
@@ -41,8 +43,10 @@ function installShopChangeListener() {
     inflightByTenant.clear();
   };
   window.addEventListener("erp:shops-changed", markStale);
+  window.addEventListener("erp:auth-scope-changed", activeTenantCacheKey);
   window.addEventListener("storage", (event) => {
     if (event.key === "erp:shops-changed") markStale();
+    if (["authToken", "baodanAuthUser"].includes(event.key)) activeTenantCacheKey();
   });
 }
 
@@ -59,6 +63,9 @@ export async function loadShopDictionary(options = {}) {
   if (!force && inflightByTenant.has(tenantKey)) return inflightByTenant.get(tenantKey);
   state.loading = true;
   const inflight = apiClient.get("/api/shops", { noCache: true, cache: "no-store" }).then((rows) => {
+    if (tenantKey !== activeTenantCacheKey() || inflightByTenant.get(tenantKey) !== inflight) {
+      throw new DOMException("Authentication context changed", "AbortError");
+    }
     const normalizedRows = Array.isArray(rows) ? rows.map(normalizeShop) : [];
     const loadedAt = Date.now();
     cacheByTenant.set(tenantKey, { rows: normalizedRows, loadedAt });
@@ -66,8 +73,10 @@ export async function loadShopDictionary(options = {}) {
     state.loadedAt = loadedAt;
     return normalizedRows;
   }).finally(() => {
-    state.loading = false;
-    inflightByTenant.delete(tenantKey);
+    if (inflightByTenant.get(tenantKey) === inflight) {
+      inflightByTenant.delete(tenantKey);
+      if (activeScope === tenantKey) state.loading = false;
+    }
   });
   inflightByTenant.set(tenantKey, inflight);
   return inflight;
@@ -81,6 +90,7 @@ export function invalidateShopDictionary() {
 
 export function useShopDictionary() {
   installShopChangeListener();
+  activeTenantCacheKey();
   return {
     state,
     load: loadShopDictionary,

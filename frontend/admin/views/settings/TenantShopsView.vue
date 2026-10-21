@@ -10,7 +10,7 @@ const members = ref([]);
 const dialogVisible = ref(false);
 const editing = ref(false);
 const form = reactive(createForm());
-const activeMembers = computed(() => members.value.filter((member) => Number(member.active) !== 0));
+const activeMembers = computed(() => members.value.filter((member) => Number(member.member_active) !== 0 && Number(member.account_active) !== 0));
 
 function createForm() {
   return {
@@ -39,7 +39,7 @@ async function load() {
   try {
     const [shops, tenantMembers] = await Promise.all([
       apiClient.get("/api/shops", { noCache: true }),
-      apiClient.get("/api/tenants/members", { noCache: true })
+      apiClient.get("/api/enterprise/people", { noCache: true })
     ]);
     rows.value = Array.isArray(shops) ? shops : [];
     members.value = Array.isArray(tenantMembers) ? tenantMembers : [];

@@ -26,7 +26,8 @@ import {
   QR_MOBILE_COOKIE_MAX_AGE_SECONDS,
   QR_MOBILE_COOKIE_NAME,
   renderQrCodePng,
-  renderQrConfirmPage
+  renderQrConfirmPage,
+  validateQrLoginSession
 } from "./internal-qr-login.js";
 import {
   consumeWechatTicket,
@@ -70,7 +71,9 @@ export function extractToken(req) {
 }
 
 function authUser(row, session = null) {
-  return { id: row.id, name: row.name, role: primaryRole(row), roles: getRoles(row), username: row.username, avatar_url: row.avatar_url || "", tenant: session?.tenant || null };
+  const identity = session || row;
+  return { id: row.id, name: row.name, role: primaryRole(identity), roles: getRoles(identity), username: row.username, avatar_url: row.avatar_url || "", tenant: session?.tenant || null,
+    ...(session ? { platform_role: session.platform_role || null } : {}) };
 }
 
 export function createAuthHandler(readJson, overrides = {}) {
@@ -98,6 +101,7 @@ export function createAuthHandler(readJson, overrides = {}) {
     renderQrConfirmPage,
     consumeConfirmedQrSession,
     confirmQrLoginSession,
+    validateQrLoginSession,
     createWechatLoginUrl,
     resolveWechatIdentityFromCallback,
     createWechatLoginTicket,
@@ -131,7 +135,7 @@ export function createAuthHandler(readJson, overrides = {}) {
 
         deps.clearRateLimit(loginKey);
         const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
-        return { ok: true, token, user: authUser(row) };
+        return { ok: true, token, user: authUser(row, await deps.getSession(token)) };
       };
     }
 
@@ -149,7 +153,7 @@ export function createAuthHandler(readJson, overrides = {}) {
           const row = await deps.findPersonByWechatIdentity(identity);
           if (row?.active) {
             const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
-            const ticket = deps.createWechatLoginTicket({ token, redirect, user: authUser(row) });
+            const ticket = deps.createWechatLoginTicket({ token, redirect, user: authUser(row, await deps.getSession(token)) });
             return { __redirect: deps.createWechatRedirectUrl({ wechatTicket: ticket, redirect }) };
           }
           const bindTicket = deps.createWechatBindTicket({ identity, redirect });
@@ -215,26 +219,44 @@ export function createAuthHandler(readJson, overrides = {}) {
     if (key === "POST /api/auth/qr/confirm") {
       return async () => {
         const body = await readJson(req);
+        const validation = deps.validateQrLoginSession({ sid: body.sid, secret: body.secret });
+        if (!validation.ok) return { error: validation.error, __status: validation.status || 400 };
         const mobileSession = deps.getQrMobileSession(req);
+        let loginKey = "";
         let row = null;
         if (mobileSession?.user?.id) {
           row = await deps.findPersonById(mobileSession.user.id);
           if (!row?.active) return { error: "手机登录态已失效，请重新输入密码", __status: 401 };
         } else {
+          loginKey = `auth:${deps.getClientIp(req)}`;
+          const rate = deps.consumeRateLimit(loginKey, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS);
+          if (!rate.allowed) return { error: "登录尝试过多，请稍后再试", __status: 429 };
           row = await deps.findPersonForLogin(body.username);
           if (!row || !row.active || !deps.verifyPassword(body.password || "", row.password_hash)) {
             return { error: "用户名或密码错误", __status: 401 };
           }
         }
+        const pending = deps.validateQrLoginSession({ sid: body.sid, secret: body.secret });
+        if (!pending.ok) return { error: pending.error, __status: pending.status || 400 };
         const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
-        const result = deps.confirmQrLoginSession({
-          sid: body.sid,
-          secret: body.secret,
-          token,
-          user: authUser(row)
-        });
-        if (!result.ok) return { error: result.error, __status: result.status || 400 };
-        const mobileToken = deps.createQrMobileSession(authUser(row));
+        let confirmed = false;
+        let result;
+        let user;
+        try {
+          user = authUser(row, await deps.getSession(token));
+          result = deps.confirmQrLoginSession({
+            sid: body.sid,
+            secret: body.secret,
+            token,
+            user
+          });
+          if (!result.ok) return { error: result.error, __status: result.status || 400 };
+          confirmed = true;
+        } finally {
+          if (!confirmed) await deps.destroySession(token);
+        }
+        if (loginKey) deps.clearRateLimit(loginKey);
+        const mobileToken = deps.createQrMobileSession(user);
         return {
           ...result,
           __cookies: [{
@@ -278,7 +300,7 @@ export function createAuthHandler(readJson, overrides = {}) {
         const session = await deps.getSession(extractToken(req));
         if (!session) return { error: "未登录", __status: 401 };
         const row = await deps.updateOwnProfile(session.personId, await readJson(req));
-        return authUser(row);
+        return authUser(row, session);
       };
     }
 

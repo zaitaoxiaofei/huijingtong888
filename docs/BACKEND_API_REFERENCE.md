@@ -97,8 +97,64 @@ Authenticated ERP user.
 | `id` | `number` | Yes | Internal person identifier. |
 | `name` | `string` | Yes | Display name. |
 | `role` | `string` | Yes | Primary role retained for compatibility. |
-| `roles` | `array<string>` | No | Assigned roles; permissions are combined. |
+| `roles` | `array<string>` | No | Business roles of the active enterprise; platform-only users have no business roles. |
+| `platform_role` | `string|null` | No | Explicit active platform grant: super_admin or null. Legacy admin/technical roles do not grant platform access. |
+| `tenant` | `object|null` | No | Active enterprise membership, including id, slug and owner/admin/member role; null for platform-only accounts. |
+| `avatar_url` | `string` | No | Profile avatar URL. |
+| `tenants` | `array<object>` | No | Available active enterprise memberships, returned by auth/me. |
 | `username` | `string` | Yes | Login username. |
+
+### EnterprisePerson
+
+Current-enterprise membership and safe account identity, without credentials.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | Yes | Person identifier. |
+| `person_id` | `number` | Yes | Same person identifier. |
+| `name` | `string` | Yes | Display name. |
+| `username` | `string` | Yes | Login username. |
+| `avatar_url` | `string` | No | Avatar URL. |
+| `tenant_role` | `string` | Yes | Membership authority. |
+| `business_roles` | `array<string>` | Yes | Enterprise job permissions; never platform grants. |
+| `member_active` | `number` | Yes | Membership enabled flag, 0 or 1. |
+| `account_active` | `number` | Yes | Read-only global account enabled flag. |
+| `can_edit_identity` | `boolean` | Yes | False when the identity belongs to another enterprise or has any platform grant. |
+| `updated_at` | `string` | No | Membership revision timestamp. |
+
+### EnterprisePersonMutation
+
+Enterprise owner/admin member management. Create requires name, username and password; update preserves omitted fields. Platform fields, arbitrary account linking and global account disabling are forbidden.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | No | Display name; shared identities are read-only. |
+| `username` | `string` | No | Login name; shared identities are read-only. |
+| `password` | `string` | No | Initial/new password; subject to password policy. |
+| `avatar_url` | `string` | No | Avatar URL; shared identities are read-only. |
+| `tenant_role` | `string` | No | Membership authority. |
+| `business_roles` | `array<string>` | No | Nonempty supported business roles. |
+| `member_active` | `number` | No | Enable/disable only this enterprise membership, 0 or 1. |
+| `updated_at` | `string` | No | Optional optimistic revision check for updates. |
+
+### PlatformAccount
+
+Explicit platform grant roster; does not imply enterprise membership.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | No | Person identifier. |
+| `person_id` | `number` | No | Person identifier. |
+| `name` | `string` | No | Display name. |
+| `username` | `string` | No | Login username. |
+| `platform_role` | `string` | No | Explicit platform grant, super_admin. |
+| `active` | `number` | No | Grant enabled flag. |
+| `account_active` | `number` | No | Global account enabled flag. |
+| `updated_at` | `string` | No | Grant revision timestamp. |
 
 ### AuthSession
 
@@ -122,6 +178,82 @@ Login payload.
 | --- | --- | --- | --- |
 | `username` | `string` | Yes | Username to authenticate. |
 | `password` | `string` | Yes | Plain-text password. |
+
+### QrConfirmRequest
+
+Confirm a pending QR login. Username and password are required unless a valid remembered mobile cookie is present.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sid` | `string` | Yes | Pending QR login identifier. |
+| `secret` | `string` | Yes | One-time confirmation secret from the QR URL. |
+| `username` | `string` | No | Username for the password flow. |
+| `password` | `string` | No | Password for the password flow. |
+
+### QrConfirmResponse
+
+Successful mobile confirmation; the desktop polls its QR session to receive the bearer token.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether confirmation succeeded. |
+| `redirect` | `string` | Yes | Destination after successful login. |
+
+### TenantPluginTokenTarget
+
+Select a plugin credential enterprise. Ordinary owners/admins use their active session enterprise; only platform admins may select another enterprise.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `number` | No | Target enterprise ID; defaults to the active enterprise. Only platform admins may select another enterprise. |
+
+### TenantPluginTokenImportRequest
+
+Store an encrypted copy of an existing enterprise plugin credential.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `number` | No | Target enterprise; ordinary users must remain in the active session enterprise. |
+| `token` | `string` | Yes | Existing ozp_ plugin credential; never log this value. |
+
+### TenantPluginTokenImportResponse
+
+Existing plugin credential import result; the credential value is not returned.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether the import succeeded. |
+| `tenant_id` | `number` | Yes | Enterprise owning the credential. |
+| `unchanged` | `boolean` | Yes | Whether the supplied credential was already active for this enterprise. |
+
+### TenantPluginTokenResponse
+
+Sensitive plugin credential response; returned with Cache-Control: no-store.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether the operation succeeded. |
+| `tenant_id` | `number` | Yes | Enterprise owning the credential. |
+| `token` | `string` | Yes | Plugin credential, shown only to an authorized enterprise administrator. |
+
+### TenantPluginTokenStatus
+
+Enterprise plugin credential configuration without the credential value.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `configured` | `boolean` | Yes | Whether an active credential exists. |
+| `created_at` | `string|null` | No | Credential creation time. |
+| `label` | `string` | No | Credential label. |
+| `recoverable` | `boolean` | No | Whether an encrypted copy is stored. |
+| `can_reveal` | `boolean` | No | Whether the server can decrypt the credential. |
+| `encryption_configured` | `boolean` | No | Whether the required stable encryption key is configured. |
 
 ### ChangePasswordRequest
 
@@ -1446,6 +1578,21 @@ Authenticate a user and return a bearer token.
   - `200` `application/json` -> `AuthSession`
   - `429` `application/json` -> `ErrorResponse`: Returned when login rate limit is exceeded.
 
+#### `POST /api/auth/qr/confirm`
+
+Confirm a QR login once. Password attempts share the ordinary login IP rate limit; invalid, expired or already confirmed QR sessions cannot create an extra session.
+
+- Auth: `public`
+- Request body: required
+  - Schema: `QrConfirmRequest`
+- Responses:
+  - `200` `application/json` -> `QrConfirmResponse`
+  - `401` `application/json` -> `ErrorResponse`: Invalid credentials or inactive remembered account.
+  - `403` `application/json` -> `ErrorResponse`: Invalid confirmation secret.
+  - `409` `application/json` -> `ErrorResponse`: The QR login has already been confirmed.
+  - `410` `application/json` -> `ErrorResponse`: The QR login expired or was consumed.
+  - `429` `application/json` -> `ErrorResponse`: Shared password login rate limit exceeded.
+
 #### `GET /api/auth/me`
 
 Resolve the current user from the bearer token.
@@ -1453,7 +1600,7 @@ Resolve the current user from the bearer token.
 - Auth: `public`
 - Responses:
   - `200` `application/json` -> `AuthUser`: Returned when the token is valid.
-  - `200` `application/json` -> `null`: Null response when not authenticated.
+  - `401` `application/json` -> `ErrorResponse`: Missing, expired, inactive or unauthorized identity.
 
 #### `POST /api/auth/logout`
 
@@ -1472,6 +1619,196 @@ Change the current user's password.
   - Schema: `ChangePasswordRequest`
 - Responses:
   - `200` `application/json` -> `MutationOk`
+
+### Platform And Enterprise Identity
+
+#### `GET /api/system/events`
+
+Default-enterprise business event stream and platform release updates. Subscriber person and enterprise are derived only from the trusted session; person_id and tenant selectors cannot impersonate another subscriber. Business events match recipient and enterprise; legacy untagged business events remain default-enterprise only. Other enterprise subscriptions remain gated.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `app_version` (`string`, optional): Installed application release.
+  - `app_channel` (`string`, optional): Installed release channel.
+- Responses:
+  - `200` `text/event-stream` -> `string`
+  - `401` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `GET /api/platform/accounts`
+
+List explicit platform grants. Requires an active super_admin grant verified against the database; does not require enterprise membership.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<PlatformAccount>`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `GET /api/enterprise/people`
+
+List all memberships of the current enterprise. Requires its database-verified owner/admin; request selectors cannot change the enterprise.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<EnterprisePerson>`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/enterprise/people`
+
+Create a new login identity and current-enterprise membership transactionally, with quota and last-owner checks. Existing global accounts cannot be linked by ID.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `EnterprisePersonMutation`
+- Responses:
+  - `200` `application/json` -> `EnterprisePerson`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `PUT /api/enterprise/people/:id`
+
+Update only a current-enterprise membership. Protect the last owner and shared login identities; changes revoke affected sessions.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Current-enterprise person ID.
+- Request body: required
+  - Schema: `EnterprisePersonMutation`
+- Responses:
+  - `200` `application/json` -> `EnterprisePerson`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+### Enterprise Matrix Configuration
+
+#### `GET /api/asset-variant-engine/bootstrap`
+
+Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Nondefault enterprises require owner/admin; existing default-enterprise operations consumers retain business read access. No provider credentials or platform prompts are exposed.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/asset-variant-engine/rules`
+
+Save a rule for a current-enterprise shop. Tail-template and watermark references must belong to the same enterprise.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `GET /api/asset-variant-engine/tail-templates`
+
+List only current-enterprise tail templates. Unattributed legacy templates remain default-enterprise only.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/asset-variant-engine/tail-templates`
+
+Create an enterprise-owned tail template; nondefault enterprises must upload image data and cannot use arbitrary local paths.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `GET /api/asset-variant-engine/tail-template-files/:id`
+
+Read a tail image owned by the current enterprise. Other media, generation, jobs, imports and publishing remain gated for nondefault enterprises.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Tail template ID.
+- Responses:
+  - `200` `image/*` -> `binary`
+  - `404` `application/json` -> `ErrorResponse`
+
+### Enterprise Plugin Credentials
+
+#### `GET /api/tenants/plugin-token`
+
+Read credential status for the active enterprise. Requires an enterprise owner/admin or platform administrator.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `tenant_id` (`number`, optional): Target enterprise ID; non-platform users cannot select another enterprise.
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenStatus`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/tenants/plugin-token`
+
+Rotate the active enterprise plugin credential. Requires an enterprise owner/admin or platform administrator.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenTarget`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/tenants/plugin-token/reveal`
+
+Decrypt a recoverable credential for an authorized active-enterprise administrator.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenTarget`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`: No credential configured.
+  - `409` `application/json` -> `ErrorResponse`: Legacy hash-only credential cannot be revealed.
+
+#### `POST /api/tenants/plugin-token/import`
+
+Store an existing plugin credential for the active enterprise; a credential associated with another enterprise is rejected.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenImportRequest`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenImportResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`: Credential already belongs to another enterprise.
+
+#### `DELETE /api/tenants/plugin-token`
+
+Revoke the active enterprise credential. Default-enterprise credentials remain platform-admin only.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `tenant_id` (`number`, optional): Target enterprise ID; non-platform users cannot select another enterprise.
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+### Shared Pricing Reference
+
+#### `GET /api/tools/pricing/logistics-rules`
+
+Read the safe shared tariff projection for enterprise calculators. Includes enabled supported-carrier rules from legacy NULL and canonical default scopes; excludes historical customer-owned rules, notes and usage statistics. Management remains platform-only.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
 
 ### Dashboard And Profit
 
@@ -2692,7 +3029,7 @@ Delete or deactivate a shop.
 
 #### `GET /api/people`
 
-Return person master data.
+Return a safe current-enterprise person selector for enterprise users, ignoring request tenant selectors. Only an explicit platform super_admin receives global account master data.
 
 - Auth: `authenticated`
 - Responses:
@@ -2700,7 +3037,7 @@ Return person master data.
 
 #### `POST /api/people`
 
-Create a person.
+Platform super_admin only: create a global account, without granting platform authority or inferring enterprise membership. Enterprise personnel use /api/enterprise/people.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2710,7 +3047,7 @@ Create a person.
 
 #### `PUT /api/people/:id`
 
-Update a person.
+Platform super_admin only: update a global account. Legacy business roles never confer platform authority.
 
 - Auth: `authenticated`
 - Path parameters:
@@ -2722,7 +3059,7 @@ Update a person.
 
 #### `DELETE /api/people/:id`
 
-Soft-delete a person, or hard-delete when hard=1 is set.
+Platform super_admin only: soft-delete a global account, or hard-delete when hard=1 is set. Enterprise personnel management disables only its membership.
 
 - Auth: `authenticated`
 - Path parameters:
@@ -2774,7 +3111,7 @@ Deactivate a supplier after link validation.
 
 #### `GET /api/logistics-rules`
 
-Return logistics fee rules.
+Enterprise business readers receive only canonical shared tariff fields, all carriers and enabled states, including filter keywords needed by inventory, selection and orders; notes, usage statistics and tenant ownership are excluded. Platform super_admin receives full canonical management configuration independently of active enterprise. Tenant selectors cannot select customer rules; configuration writes remain platform-only.
 
 - Auth: `authenticated`
 - Responses:
@@ -2782,7 +3119,7 @@ Return logistics fee rules.
 
 #### `POST /api/logistics-rules`
 
-Create a logistics fee rule.
+Platform super_admin only: create a canonical shared logistics rule in the default scope. Body/query tenant selectors are forbidden; legacy enterprise rules are preserved.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2792,7 +3129,7 @@ Create a logistics fee rule.
 
 #### `PUT /api/logistics-rules/:id`
 
-Update a logistics fee rule.
+Platform super_admin only: update a canonical shared logistics rule in the default scope. Body/query tenant selectors are forbidden.
 
 - Auth: `authenticated`
 - Path parameters:
@@ -2804,7 +3141,7 @@ Update a logistics fee rule.
 
 #### `DELETE /api/logistics-rules/:id`
 
-Delete an unreferenced logistics fee rule.
+Platform super_admin only: delete an unreferenced canonical shared rule in the default scope. Tenant selectors are forbidden.
 
 - Auth: `authenticated`
 - Path parameters:

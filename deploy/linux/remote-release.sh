@@ -5,6 +5,7 @@ archive_path="${1:-}"
 release_version="${2:-}"
 run_db_init="${3:-1}"
 run_db_maintenance="${4:-1}"
+reviewed_identity_manifest="${5:-}"
 app_root="/opt/ozon-erp"
 releases_root="$app_root/releases"
 shared_root="$app_root/shared"
@@ -17,7 +18,7 @@ candidate_pid_file="/tmp/ozon-erp-candidate.pid"
 release_lock_file="/var/lock/ozon-erp-release.lock"
 
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
-  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0]" >&2
+  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest]" >&2
   exit 2
 fi
 if [[ ! -f "$archive_path" ]]; then
@@ -34,6 +35,10 @@ if [[ ! "$release_version" =~ ^[0-9A-Za-z._-]+$ ]]; then
 fi
 if [[ "$run_db_maintenance" != "0" && "$run_db_maintenance" != "1" ]]; then
   echo "Invalid database maintenance flag: $run_db_maintenance" >&2
+  exit 2
+fi
+if [[ -n "$reviewed_identity_manifest" && (! -f "$reviewed_identity_manifest" || ! -s "$reviewed_identity_manifest") ]]; then
+  echo "Reviewed identity manifest not found or empty: $reviewed_identity_manifest" >&2
   exit 2
 fi
 
@@ -109,19 +114,54 @@ EOF
   fi
 }
 
-start_candidate() {
+stop_existing_candidate() {
   if [[ -f "$candidate_pid_file" ]]; then
     local old_candidate_pid
     old_candidate_pid="$(cat "$candidate_pid_file" 2>/dev/null || true)"
-    if [[ "$old_candidate_pid" =~ ^[0-9]+$ ]]; then
+    if [[ "$old_candidate_pid" =~ ^[0-9]+$ ]] && ((old_candidate_pid > 1)) && kill -0 "$old_candidate_pid" 2>/dev/null; then
+      local old_candidate_cwd
+      old_candidate_cwd="$(readlink -f "/proc/$old_candidate_pid/cwd" || true)"
+      if [[ "$old_candidate_cwd" != "$releases_root/"* ]] || ! grep -zFxq 'DEPLOYMENT_CANDIDATE=1' "/proc/$old_candidate_pid/environ"; then
+        echo "Refusing to stop a PID that is not a recorded ERP candidate." >&2
+        return 1
+      fi
       kill "$old_candidate_pid" 2>/dev/null || true
       for _ in {1..30}; do
         kill -0 "$old_candidate_pid" 2>/dev/null || break
         sleep 1
       done
+      if kill -0 "$old_candidate_pid" 2>/dev/null; then
+        echo "Previous candidate did not stop." >&2
+        return 1
+      fi
     fi
     rm -f "$candidate_pid_file"
   fi
+}
+
+backup_database() {
+  local backup_dir="$shared_root/backups/identity-releases"
+  local backup_path="$backup_dir/pre-release-${release_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$$.sql.gz"
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  : "${DB_NAME:?DB_NAME is required for the pre-release database backup}"
+  install -d -m 700 "$backup_dir"
+  (
+    umask 077
+    mysqldump --protocol=SOCKET --socket=/var/run/mysqld/mysqld.sock --user=root \
+      --single-transaction --routines --triggers --events --hex-blob --set-gtid-purged=OFF \
+      --databases "$DB_NAME" | gzip > "$backup_path.partial"
+  )
+  gzip -t "$backup_path.partial"
+  chmod 600 "$backup_path.partial"
+  mv "$backup_path.partial" "$backup_path"
+  echo "Pre-release database backup verified: $backup_path"
+}
+
+start_candidate() {
+  stop_existing_candidate
   rm -f "$candidate_log"
   set -a
   # shellcheck disable=SC1090
@@ -173,6 +213,10 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" ]]; then
+  backup_database
+fi
+
 if [[ "$run_db_maintenance" == "1" && "$run_db_init" == "1" ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -189,7 +233,8 @@ if [[ "$run_db_maintenance" == "1" ]]; then
 for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
   migrate-tenant-sku-mappings.mjs \
-  migrate-tenant-logistics-rules.mjs; do
+  migrate-tenant-logistics-rules.mjs \
+  migrate-tenant-asset-variant-config.mjs; do
   if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
     continue
   fi
@@ -245,6 +290,17 @@ fi
 mv "$staging_dir" "$release_dir"
 chown -R ozon-erp:ozon-erp "$release_dir"
 configure_nginx_failover
+if [[ -n "$reviewed_identity_manifest" ]]; then
+  chmod 600 "$reviewed_identity_manifest"
+  stop_existing_candidate
+  systemctl stop ozon-erp
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
+  set +a
+  (cd "$release_dir" && node scripts/migrate-platform-enterprise-identities.mjs --manifest="$reviewed_identity_manifest")
+  (cd "$release_dir" && node scripts/migrate-platform-enterprise-identities.mjs --apply --manifest="$reviewed_identity_manifest" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
 start_candidate
 ln -sfn "$release_dir" "$current_link"
 systemctl restart ozon-erp
@@ -290,5 +346,8 @@ fi
 find /tmp -maxdepth 1 -type f -name 'ozon-erp-*.zip' -mmin +60 -delete
 
 rm -f "$archive_path"
+if [[ -n "$reviewed_identity_manifest" ]]; then
+  rm -f -- "$reviewed_identity_manifest"
+fi
 echo "Release active: $release_dir"
 systemctl --no-pager --full status ozon-erp | head -n 12

@@ -3,6 +3,11 @@ import { createHash, randomBytes } from "node:crypto";
 import { assertTenantQuotaAvailable, normalizeTenantQuotaLimit } from "./tenant-quotas.js";
 import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMemberLimit } from "./tenant-plans.js";
 import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEncryptionConfigured } from "./tenant-plugin-token-crypto.js";
+import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
+import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
+import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
+import { getRoles } from "../shared/permissions.js";
+import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -26,6 +31,7 @@ export async function ensureTenantSchemaMysql() {
       tenant_id BIGINT UNSIGNED NOT NULL,
       person_id BIGINT UNSIGNED NOT NULL,
       role VARCHAR(32) NOT NULL DEFAULT 'member',
+      business_roles_json JSON NULL,
       active TINYINT(1) NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -33,6 +39,9 @@ export async function ensureTenantSchemaMysql() {
       KEY idx_tenant_members_person (person_id, active),
       KEY idx_tenant_members_tenant (tenant_id, active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute("ALTER TABLE tenant_members ADD COLUMN business_roles_json JSON NULL").catch(error => {
+      if (error?.code !== "ER_DUP_FIELDNAME") throw error;
+    });
     await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_plugin_tokens (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       tenant_id BIGINT UNSIGNED NOT NULL,
@@ -98,11 +107,9 @@ export async function ensureTenantSchemaMysql() {
       if (error?.code !== "ER_DUP_KEYNAME") throw error;
     });
     await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "默认企业"]);
-    await mysqlExecute(`INSERT IGNORE INTO tenant_members (tenant_id, person_id, role)
-      SELECT t.id, p.id, 'owner' FROM tenants t CROSS JOIN people p
-      WHERE t.slug = ? AND p.active = 1`, [DEFAULT_TENANT_SLUG]);
-    await mysqlExecute(`UPDATE sessions s JOIN tenants t ON t.slug = ?
-      SET s.active_tenant_id = t.id WHERE s.active_tenant_id IS NULL`, [DEFAULT_TENANT_SLUG]);
+    await ensurePeopleRolesSchemaMysql();
+    await ensurePlatformGrantSchemaMysql();
+    await withMysqlTransaction(bootstrapDefaultTenantAccessMysql);
   })().catch(error => {
     schemaReady = null;
     throw error;
@@ -124,11 +131,17 @@ export function tenantHasAccess(tenant = {}) {
 
 export async function tenantMembershipsMysql(personId) {
   await ensureTenantSchemaMysql();
-  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active
-    FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active, tm.business_roles_json,
+      p.role AS legacy_role, p.roles_json
+    FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id JOIN people p ON p.id = tm.person_id
     WHERE tm.person_id = ? AND tm.active = 1 AND t.status = 'active'
     ORDER BY t.id`, [Number(personId)]);
-  return rows.map(subscriptionState);
+  return rows.map(row => {
+    const { legacy_role, roles_json, ...membership } = row;
+    return subscriptionState({ ...membership, role: effectiveTenantMembershipRole({
+      tenant_slug: row.slug, tenant_role: row.role, business_roles_json: row.business_roles_json, legacy_role, roles_json
+    }) });
+  });
 }
 
 export async function resolveActiveTenantMysql(personId, requestedTenantId = null) {
@@ -316,9 +329,17 @@ export async function tenantMembersMysql(tenantId) {
     error.statusCode = 400;
     throw error;
   }
-  return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, p.name, p.username
+  const rows = await mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, tm.business_roles_json, p.name, p.username,
+      (SELECT slug FROM tenants WHERE id = tm.tenant_id) AS tenant_slug,
+      p.avatar_url, p.role AS business_role, p.roles_json, p.active AS account_active
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
     WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [normalizedTenantId]);
+  return rows.map(row => {
+    const { tenant_slug, ...membership } = row;
+    return { ...membership, role: effectiveTenantMembershipRole({
+      tenant_slug, tenant_role: row.role, business_roles_json: row.business_roles_json, legacy_role: row.business_role, roles_json: row.roles_json
+    }) };
+  });
 }
 
 export async function upsertTenantMemberMysql(tenantId, body = {}) {
@@ -329,7 +350,7 @@ export async function upsertTenantMemberMysql(tenantId, body = {}) {
   if (!normalizedTenantId || !personId) throw new Error("请选择企业和成员");
   if (!['owner', 'admin', 'member'].includes(role)) throw new Error("企业成员角色无效");
   const active = Number(body.active ?? 1) ? 1 : 0;
-  const peopleRows = await mysqlQuery("SELECT id FROM people WHERE id = ?", [personId]);
+  const peopleRows = await mysqlQuery("SELECT id, role, roles_json FROM people WHERE id = ?", [personId]);
   if (!peopleRows[0]) throw new Error("成员不存在");
   await withMysqlTransaction(async connection => {
     const [tenantRows] = await connection.execute("SELECT id, member_limit FROM tenants WHERE id = ? AND status = 'active' FOR UPDATE", [normalizedTenantId]);
@@ -345,9 +366,10 @@ export async function upsertTenantMemberMysql(tenantId, body = {}) {
       const [countRows] = await connection.execute("SELECT COUNT(*) AS used FROM tenant_members WHERE tenant_id = ? AND active = 1 AND person_id <> ?", [normalizedTenantId, primaryOwnerId]);
       assertTenantQuotaAvailable({ label: "子账号", current: countRows[0]?.used || 0, limit: tenantRows[0].member_limit });
     }
-    await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, active) VALUES (?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE role = VALUES(role), active = VALUES(active), updated_at = CURRENT_TIMESTAMP`,
-    [normalizedTenantId, personId, role, active]);
+    await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, business_roles_json, active) VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE role = VALUES(role), business_roles_json = COALESCE(business_roles_json, VALUES(business_roles_json)),
+        active = VALUES(active), updated_at = CURRENT_TIMESTAMP`,
+    [normalizedTenantId, personId, role, JSON.stringify(getRoles(peopleRows[0])), active]);
   });
   return { ok: true };
 }
@@ -367,15 +389,17 @@ async function requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin
   await ensureTenantSchemaMysql();
   const normalizedTenantId = Number(tenantId);
   const normalizedPersonId = Number(personId);
-  if (!normalizedTenantId || !normalizedPersonId) throw new Error("请选择企业和当前操作账号");
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0 || !Number.isSafeInteger(normalizedPersonId) || normalizedPersonId <= 0) {
+    throw Object.assign(new Error("请选择企业和当前操作账号"), { statusCode: 400 });
+  }
   const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, tm.role AS member_role
     FROM tenants t
     LEFT JOIN tenant_members tm ON tm.tenant_id = t.id AND tm.person_id = ? AND tm.active = 1
     WHERE t.id = ? LIMIT 1`, [normalizedPersonId, normalizedTenantId]);
   const tenant = rows[0];
-  if (!tenant || tenant.status !== "active") throw new Error("企业不存在或已停用");
-  if (tenant.slug === DEFAULT_TENANT_SLUG && !isPlatformAdmin) throw new Error("默认企业插件令牌仅平台管理员可以管理");
-  if (!isPlatformAdmin && !["owner", "admin"].includes(tenant.member_role)) throw new Error("仅企业负责人或企业管理员可以管理插件令牌");
+  if (!tenant || tenant.status !== "active") throw Object.assign(new Error("企业不存在或已停用"), { statusCode: 403 });
+  if (tenant.slug === DEFAULT_TENANT_SLUG && !isPlatformAdmin) throw Object.assign(new Error("默认企业插件令牌仅平台管理员可以管理"), { statusCode: 403 });
+  if (!isPlatformAdmin && !["owner", "admin"].includes(tenant.member_role)) throw Object.assign(new Error("仅企业负责人或企业管理员可以管理插件令牌"), { statusCode: 403 });
   return { ...tenant, id: normalizedTenantId };
 }
 
@@ -410,8 +434,8 @@ export async function readTenantPluginTokenMysql(tenantId, personId, options = {
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
   const rows = await mysqlQuery(`SELECT token_ciphertext FROM tenant_plugin_tokens
     WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`, [tenant.id]);
-  if (!rows[0]) throw new Error("该企业尚未配置插件令牌");
-  if (!rows[0].token_ciphertext) throw new Error("当前令牌为旧版凭证，无法恢复；重置后请重新配置插件");
+  if (!rows[0]) throw Object.assign(new Error("该企业尚未配置插件令牌"), { statusCode: 404 });
+  if (!rows[0].token_ciphertext) throw Object.assign(new Error("当前令牌为旧版凭证，无法恢复；重置后请重新配置插件"), { statusCode: 409 });
   return { ok: true, tenant_id: tenant.id, token: decryptTenantPluginToken(rows[0].token_ciphertext) };
 }
 
@@ -419,7 +443,7 @@ export async function saveTenantPluginTokenMysql(tenantId, personId, tokenInput,
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin);
   const token = String(tokenInput || "").trim();
   if (!/^ozp_[A-Za-z0-9_-]{40,80}$/.test(token)) {
-    throw new Error("令牌格式不正确，请粘贴 Ozon 浏览器插件使用的 ozp_ 令牌");
+    throw Object.assign(new Error("令牌格式不正确，请粘贴 Ozon 浏览器插件使用的 ozp_ 令牌"), { statusCode: 400 });
   }
   const tokenHash = hashTenantPluginToken(token);
   const encryptedToken = encryptTenantPluginToken(token);
@@ -429,7 +453,7 @@ export async function saveTenantPluginTokenMysql(tenantId, personId, tokenInput,
     const [existingRows] = await connection.execute("SELECT id, tenant_id, revoked_at FROM tenant_plugin_tokens WHERE token_hash = ? LIMIT 1 FOR UPDATE", [tokenHash]);
     const existing = existingRows[0];
     if (existing && Number(existing.tenant_id) !== tenant.id) {
-      throw new Error("此令牌已关联其他企业，不能重复使用");
+      throw Object.assign(new Error("此令牌已关联其他企业，不能重复使用"), { statusCode: 409 });
     }
     const [activeRows] = await connection.execute("SELECT id, token_hash FROM tenant_plugin_tokens WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE", [tenant.id]);
     if (activeRows[0]?.token_hash === tokenHash) {

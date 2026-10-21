@@ -1,4 +1,11 @@
-import { getRoles, hasPermission } from "../shared/permissions.js";
+import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
+
+const PLATFORM_MANAGEMENT_RESOURCES = new Set([
+  "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
+  "order-cancellation-rules", "settings", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events",
+  "system-monitoring", "system", "docs", "ai-provider", "ai-prompt-templates", "ai-strategies",
+  "ai-strategy-bundles", "ai-strategy-category-nodes", "ai-strategy-layer-rules"
+]);
 
 function deny(reason = "当前角色没有此操作权限，请联系管理员在人员设置中分配对应角色") {
   return { allowed: false, status: 403, error: reason };
@@ -8,13 +15,33 @@ export function authorizeApiRequest(req, parts = []) {
   const session = req._session;
   if (!session) return deny("未登录");
   if (parts[0] !== "api") return { allowed: true };
-  if (hasPermission(session, "admin")) return { allowed: true };
-  if (!getRoles(session).length) return deny();
+  if (isPlatformAdmin(session)) return { allowed: true };
+  if (!getRoles(session).length && !isEnterpriseAdmin(session)) return deny();
   const method = String(req.method || "GET").toUpperCase();
   const read = ["GET", "HEAD"].includes(method);
   const resource = parts[1];
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
+
+  if (read && ["system/info", "system/update-status"].includes(path)) return { allowed: true };
+  if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug === "default") return { allowed: true };
+  if (method === "GET" && resource === "logistics-rules" && parts.length === 2 && session.tenant?.id && session.tenant?.slug) return { allowed: true };
+  const businessAiConsumption = ["ai-provider/chat", "ai-provider/stream"].includes(path);
+  if (PLATFORM_MANAGEMENT_RESOURCES.has(resource) && !businessAiConsumption) return deny("仅平台超级管理员可以管理共用规则、自动任务、系统监控、AI 配置及提示词库");
+  if (resource === "enterprise") {
+    const collection = parts.length === 3 && parts[2] === "people" && ["GET", "POST"].includes(method);
+    const record = parts.length === 4 && parts[2] === "people" && /^\d+$/.test(String(parts[3] || "")) && method === "PUT";
+    return (collection || record) && isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以管理企业人员");
+  }
+  if (resource === "people") return read ? { allowed: true } : deny("全局账号维护仅限平台超级管理员；企业人员请在企业店铺中管理");
+  if (resource === "asset-variant-engine") {
+    const configWrite = method === "POST" && parts.length === 3 && ["rules", "tail-templates"].includes(parts[2]);
+    if (configWrite) return isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以修改店铺矩阵配置");
+    const configRead = method === "GET" && ((parts.length === 3 && ["bootstrap", "tail-templates"].includes(parts[2]))
+      || (parts.length === 4 && parts[2] === "tail-template-files" && /^\d+$/.test(String(parts[3] || ""))));
+    if (configRead && isEnterpriseAdmin(session)) return { allowed: true };
+    return session.tenant?.slug === "default" ? require("operations") : deny("当前企业仅开放负责人或管理员的矩阵配置；生成及发布功能尚未开放");
+  }
 
   if (method === "GET" && [
     "tools/pricing/reference-rate",
@@ -29,19 +56,14 @@ export function authorizeApiRequest(req, parts = []) {
       (session.tenant?.id && session.tenant?.slug !== "default")
       || (session.tenant?.slug === "default" && ["owner", "admin"].includes(session.tenant?.role))
     )) return { allowed: true };
-    return deny("仅平台管理员可以管理企业和企业成员");
+    return deny("仅平台超级管理员可以管理平台企业授权");
   }
   if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
     const collection = parts.length === 2 && ["GET", "POST"].includes(method);
     const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
     if (collection || record) return { allowed: true };
   }
-  if (resource === "logistics-rules" && ["owner", "admin"].includes(session.tenant?.role)) {
-    const collection = parts.length === 2 && ["GET", "POST"].includes(method);
-    const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
-    if (collection || record) return { allowed: true };
-  }
-  if (resource === "finance-center" && session.tenant?.slug !== "default" && ["owner", "admin"].includes(session.tenant?.role)) {
+  if (resource === "finance-center" && isEnterpriseAdmin(session)) {
     const route = parts.slice(2);
     const companyRead = route.length === 1 && route[0] === "companies" && read;
     const reportRead = route.length === 1 && ["report", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;

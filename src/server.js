@@ -1,4 +1,4 @@
-import { hasPermission } from "./shared/permissions.js";
+import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -18,7 +18,7 @@ import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } fro
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
 import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
-import { tenantIdFromRequest } from "./server/tenant-context.js";
+import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -49,6 +49,9 @@ import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
 import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
+import { createEnterpriseManagementRoutes, handleEnterpriseManagementRestRoute } from "./server/routes/enterpriseManagement.js";
+import { createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
+import { listPlatformAccountsMysql } from "./services/platform-grants.js";
 import {
   cleanupScheduledJobHistory,
   ScheduledJobScheduler,
@@ -89,7 +92,9 @@ import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-s
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
-const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
+const services = { ...mysqlRuntimeServices, ...systemNotificationServices,
+  enterprisePeople: listEnterprisePeopleMysql, createEnterprisePerson: createEnterprisePersonMysql,
+  updateEnterprisePerson: updateEnterprisePersonMysql, platformAccounts: listPlatformAccountsMysql, tenantMembers: tenantMembersMysql };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
 const runtimeReadiness = {
   ready: false,
@@ -216,7 +221,8 @@ const routeModules = {
   ...createAiVariantLabRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
   ...createOnboardingKnowledgeRoutes({ readJson }),
-  ...createSystemNotificationRoutes({ services })
+  ...createSystemNotificationRoutes({ services }),
+  ...createEnterpriseManagementRoutes({ services, readJson })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -224,7 +230,7 @@ const routeModules = {
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
 function dashboardForSession(payload = {}, session = {}) {
-  if (hasPermission(session, "admin")) return payload;
+  if (hasPermission(session, "finance")) return payload;
   const withoutProfitFields = (source = {}) => Object.fromEntries(
     Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
   );
@@ -280,31 +286,31 @@ const routes = {
     const body = await readJson(req);
     return setTenantQuotasMysql(body.tenant_id || body.tenantId, body);
   },
-  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(pluginTokenTenantIdFromRequest(req, req.query?.tenant_id || req.query?.tenantId), req._session?.personId, {
     isPlatformAdmin: hasPermission(req._session, "admin")
   }),
   "POST /api/tenants/plugin-token/reveal": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return readTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+    return readTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
   "POST /api/tenants/plugin-token/import": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return saveTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, body.token, {
+    return saveTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, body.token, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
   "POST /api/tenants/plugin-token": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return issueTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+    return issueTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
-  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, req.query?.tenant_id || req.query?.tenantId), req._session?.personId, {
     isPlatformAdmin: hasPermission(req._session, "admin")
   }),
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
@@ -1039,6 +1045,8 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const enterpriseHandled = await handleEnterpriseManagementRestRoute({ req, res, parts, services, readJson, json });
+  if (enterpriseHandled !== false) return enterpriseHandled;
   const systemNotificationHandled = await handleSystemNotificationRestRoute({ req, res, parts, services, json });
   if (systemNotificationHandled !== false) return systemNotificationHandled;
   const onboardingHandled = await handleOnboardingKnowledgeRestRoute({ req, res, parts, json, notFound });
@@ -1100,17 +1108,14 @@ async function handleRestRoute(req, res, url, parts) {
     return true;
   }
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events") {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events" && parts.length === 3) {
     writeHead(res, 200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store, no-transform",
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no"
     });
-    const unsubscribe = subscribeGlobalUpdateEvents(res, {
-      ...Object.fromEntries(url.searchParams.entries()),
-      personId: req._session?.personId || req._session?.id || 0
-    });
+    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()), req._session);
     req.on("close", unsubscribe);
     return true;
   }
@@ -2138,7 +2143,7 @@ const server = http.createServer(async (req, res) => {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
         return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
       }
-      if (!hasPermission(session, "admin") && parts[1] !== "auth" && !session.tenant?.access_allowed) {
+      if (!isPlatformAdmin(session) && parts[1] !== "auth" && !session.tenant?.access_allowed) {
         return json(res, { error: "企业套餐已到期或已停用，请联系平台管理员开通或续费", code: "TENANT_SUBSCRIPTION_REQUIRED" }, 402);
       }
     }
@@ -2153,7 +2158,7 @@ const server = http.createServer(async (req, res) => {
       markRequestTiming(req, "before_route");
       const payload = await routes[key](req, url);
       markRequestTiming(req, "after_route");
-      json(res, payload);
+      json(res, payload, 200, req._sensitiveResponse ? { "Cache-Control": "no-store" } : {});
       markRequestTiming(req, "after_json");
       return;
     }
@@ -2163,7 +2168,7 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     if (!isRequestCancelledError(error)) console.error(error);
     if (res.writableEnded || res.destroyed) return;
-    json(res, { error: error.message, validation: error.validation }, error.status || error.statusCode || 500);
+    json(res, { error: error.message, validation: error.validation }, error.status || error.statusCode || 500, req._sensitiveResponse ? { "Cache-Control": "no-store" } : {});
   }
 });
 

@@ -3890,10 +3890,16 @@ async function resolveShopTailImageUrl(shop = {}, session = null) {
   `, [shopId]).catch(() => null);
   const raw = String(rule?.tail_image_url || "").trim();
   if (raw) return materializeShopTailImageForPublish(raw, shop, session);
+  const tenantId = listingTenantId(session);
+  const tailTenantScope = tenantId === "admin"
+    ? "(tenant_id IS NULL OR tenant_id = (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1))"
+    : "tenant_id = ?";
+  const tailTenantParams = tenantId === "admin" ? [] : [Number(tenantId)];
   const template = await row(`
     SELECT image_path
     FROM asset_tail_templates
     WHERE status <> 'deleted'
+      AND ${tailTenantScope}
       AND (shop_id = ? OR shop_id IS NULL OR shop_id = 0)
       ${Number(rule?.tail_template_id || 0) ? "AND id = ?" : ""}
     ORDER BY
@@ -3904,8 +3910,8 @@ async function resolveShopTailImageUrl(shop = {}, session = null) {
       id DESC
     LIMIT 1
   `, Number(rule?.tail_template_id || 0)
-    ? [shopId, Number(rule.tail_template_id), Number(rule.tail_template_id), shopId]
-    : [shopId, 0, shopId]).catch(() => null);
+    ? [...tailTenantParams, shopId, Number(rule.tail_template_id), Number(rule.tail_template_id), shopId]
+    : [...tailTenantParams, shopId, 0, shopId]).catch(() => null);
   return materializeShopTailImageForPublish(template?.image_path || "", shop, session);
 }
 
@@ -10896,12 +10902,8 @@ export async function listingDrafts(query = {}, session) {
   }
   if (projectOnly && status === "editing") {
     where.push(`NOT EXISTS (SELECT 1 FROM listing_shop_copies c_project WHERE c_project.draft_id = d.id AND ${relatedTenantScope("c_project")})`);
-    params.push(tenantId);
-    countParams.push(tenantId);
   } else if (projectOnly && status === "waiting") {
     where.push(`EXISTS (SELECT 1 FROM listing_shop_copies c_project WHERE c_project.draft_id = d.id AND ${relatedTenantScope("c_project")} AND c_project.status = 'prepared')`);
-    params.push(tenantId);
-    countParams.push(tenantId);
   } else if (projectOnly && status && status !== "all") {
     where.push("1 = 0");
   } else if (status && status !== "all") {

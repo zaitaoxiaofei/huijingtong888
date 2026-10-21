@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onDeactivated, onMounted, onUnmounted, ref, watch } from "vue";
 import { apiClient } from "../../utils/api.js";
 import { commissionBandLabel } from "../../utils/rfbs-commission.js";
 
@@ -39,6 +39,11 @@ function positionMenu() {
   };
 }
 function showMenu() { open.value = true; positionMenu(); }
+function closeMenuOnEscape(event) {
+  if (!open.value) return;
+  event.stopPropagation();
+  open.value = false;
+}
 function dismiss(event) {
   if (!root.value?.contains(event.target) && !menu.value?.contains(event.target)) open.value = false;
 }
@@ -55,18 +60,19 @@ onUnmounted(() => {
   window.removeEventListener("resize", positionMenu);
   window.removeEventListener("scroll", positionMenu, true);
 });
+onDeactivated(() => { open.value = false; });
 </script>
 
 <template>
   <div ref="root" class="rfbs-picker">
     <div class="rfbs-trigger" :class="{ opened: open }" @click="showMenu">
-      <input :value="open ? query : selectedLabel" :placeholder="selectedLabel" @focus="showMenu" @input="query = $event.target.value; showMenu()" @keydown.esc="open = false" />
+      <input :value="open ? query : selectedLabel" :placeholder="selectedLabel" @focus="showMenu" @input="query = $event.target.value; showMenu()" @keydown.esc="closeMenuOnEscape" />
       <span class="chevron">⌄</span>
     </div>
     <p v-if="error" class="rfbs-error">{{ error }}</p>
   </div>
   <Teleport to="body">
-    <div v-if="open && catalog" ref="menu" class="rfbs-menu" :style="menuStyle">
+    <div v-if="open && catalog" ref="menu" class="rfbs-menu" :style="menuStyle" @keydown.esc="closeMenuOnEscape">
       <div class="rfbs-toolbar"><span>rFBS 类目 · {{ catalog.version }}</span><button type="button" @click="brandOnly = !brandOnly">{{ brandOnly ? "全部类目" : "品牌特例" }}</button></div>
       <div class="rfbs-columns">
         <div class="rfbs-column">
@@ -86,23 +92,33 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+:global(:root[data-theme="dark"]) {
+  --calculator-theme-border: var(--erp-border);
+  --calculator-theme-border-light: var(--erp-border-light);
+  --calculator-theme-danger-text: var(--erp-danger-text);
+  --calculator-theme-surface: var(--erp-surface);
+  --calculator-theme-text-placeholder: var(--erp-text-placeholder);
+  --calculator-theme-text-regular: var(--erp-text-regular);
+  --calculator-theme-text-secondary: var(--erp-text-secondary);
+}
+
 .rfbs-picker { width: 100%; position: relative; }
-.rfbs-trigger { display: flex; align-items: center; width: 100%; min-height: 36px; border: 1px solid #d9deea; border-radius: 7px; background: #fff; }
-.rfbs-trigger.opened { border-color: #7466ef; box-shadow: 0 0 0 2px #7466ef22; }
-.rfbs-trigger input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 8px 10px; color: #303744; font: inherit; }
-.rfbs-trigger input::placeholder { color: #a7afbd; }
-.chevron { padding: 0 12px; color: #a7afbd; }
-.rfbs-menu { position: fixed; z-index: 3000; max-width: calc(100vw - 24px); background: white; border: 1px solid #e3e6ef; border-radius: 8px; box-shadow: 0 12px 28px #15204722; }
-.rfbs-toolbar, .rfbs-footer { display: flex; justify-content: space-between; padding: 8px 12px; color: #7b8496; font-size: 12px; }
-.rfbs-toolbar button { border: 0; background: transparent; color: #6b5be8; cursor: pointer; }
+.rfbs-trigger { display: flex; align-items: center; width: 100%; min-height: 36px; border: 1px solid var(--calculator-theme-border, #d9deea); border-radius: 7px; background: var(--calculator-theme-surface, #fff); }
+.rfbs-trigger.opened { border-color: var(--erp-primary, #7466ef); box-shadow: 0 0 0 2px var(--erp-primary-soft, #7466ef22); }
+.rfbs-trigger input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; padding: 8px 10px; color: var(--calculator-theme-text-regular, #303744); font: inherit; }
+.rfbs-trigger input::placeholder { color: var(--calculator-theme-text-placeholder, #a7afbd); }
+.chevron { padding: 0 12px; color: var(--calculator-theme-text-placeholder, #a7afbd); }
+.rfbs-menu { position: fixed; z-index: 3000; max-width: calc(100vw - 24px); background: var(--calculator-theme-surface, white); border: 1px solid var(--calculator-theme-border, #e3e6ef); border-radius: 8px; box-shadow: 0 12px 28px #15204722; }
+.rfbs-toolbar, .rfbs-footer { display: flex; justify-content: space-between; padding: 8px 12px; color: var(--calculator-theme-text-secondary, #7b8496); font-size: 12px; }
+.rfbs-toolbar button { border: 0; background: transparent; color: var(--erp-primary, #6b5be8); cursor: pointer; }
 .rfbs-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); height: 292px; }
-.rfbs-column { overflow-y: auto; border-right: 1px solid #edf0f5; padding: 5px; }
+.rfbs-column { overflow-y: auto; border-right: 1px solid var(--calculator-theme-border-light, #edf0f5); padding: 5px; }
 .rfbs-column:last-child { border-right: 0; }
-.rfbs-column button { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 8px 10px; border: 0; border-radius: 5px; background: white; text-align: left; color: #343b49; cursor: pointer; font: inherit; font-size: 13px; }
-.rfbs-column button:hover, .rfbs-column button.active { background: #f0edff; }
-.rfbs-column button.recommended:not(.active) { color: #6b5be8; }
+.rfbs-column button { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 8px 10px; border: 0; border-radius: 5px; background: var(--calculator-theme-surface, white); text-align: left; color: var(--calculator-theme-text-regular, #343b49); cursor: pointer; font: inherit; font-size: 13px; }
+.rfbs-column button:hover, .rfbs-column button.active { background: var(--erp-primary-soft, #f0edff); }
+.rfbs-column button.recommended:not(.active) { color: var(--erp-primary, #6b5be8); }
 .band-column strong { white-space: nowrap; margin-left: 6px; }
-.band-column p { padding: 8px; color: #8d95a4; font-size: 12px; }
-.rfbs-error { margin: 4px 0 0; color: #d85050; font-size: 12px; }
+.band-column p { padding: 8px; color: var(--calculator-theme-text-secondary, #8d95a4); font-size: 12px; }
+.rfbs-error { margin: 4px 0 0; color: var(--calculator-theme-danger-text, #d85050); font-size: 12px; }
 @media (max-width: 700px) { .rfbs-columns { height: 260px; } .rfbs-column button { font-size: 12px; padding: 7px 4px; } }
 </style>

@@ -19,14 +19,14 @@ test("password validation accepts a reasonable password", () => {
 });
 
 test("operator cannot mutate people or system configuration", () => {
-  const session = { role: "operator" };
+  const session = { role: "operator", tenant: { id: 1, slug: "default", role: "member" } };
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "people"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "shops"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "scheduled-jobs", "run"]).allowed, false);
 });
 
 test("manager cannot access finance or system resources", () => {
-  const session = { role: "manager", tenant: { id: 1, slug: "default" } };
+  const session = { role: "manager", tenant: { id: 1, slug: "default", role: "member" } };
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "dashboard"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "profit-ranking"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: session }, ["api", "finance-center", "report"]).allowed, false);
@@ -36,9 +36,16 @@ test("manager cannot access finance or system resources", () => {
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "people"]).allowed, false);
 });
 
-test("admin can mutate protected resources", () => {
-  const session = { role: "admin" };
+test("explicit platform administrator can mutate protected resources", () => {
+  const session = { role: "admin", platform_role: "super_admin" };
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "people"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "PUT", _session: session }, ["api", "shops", "1"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "scheduled-jobs", "state"]).allowed, true);
+});
+
+test("legacy administrator business role cannot mutate platform configuration", () => {
+  const session = { role: "admin", tenant: { id: 1, slug: "default", role: "admin" } };
+  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "people"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "scheduled-jobs", "state"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: session }, ["api", "exchange-rate"]).allowed, false);
 });

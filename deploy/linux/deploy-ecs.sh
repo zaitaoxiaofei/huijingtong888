@@ -12,6 +12,7 @@ Options:
   --port PORT                 SSH port (or OZON_ECS_PORT; default: 22)
   --identity-file PATH        SSH private key (or OZON_ECS_IDENTITY_FILE)
   --version VERSION           Release version (default: local timestamp)
+  --reviewed-identity-manifest PATH  Apply an explicitly reviewed identity manifest
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
@@ -69,6 +70,7 @@ ssh_user="${OZON_ECS_USER:-}"
 ssh_port="${OZON_ECS_PORT:-}"
 identity_file="${OZON_ECS_IDENTITY_FILE:-}"
 version=""
+reviewed_identity_manifest=""
 skip_build=0
 skip_database_init=0
 skip_database_maintenance=0
@@ -77,7 +79,7 @@ allow_dirty=0
 
 while (($#)); do
   case "$1" in
-    --host|--user|--port|--identity-file|--version)
+    --host|--user|--port|--identity-file|--version|--reviewed-identity-manifest)
       (($# >= 2)) || fail "$1 requires a value"
       case "$1" in
         --host) host="$2" ;;
@@ -85,6 +87,7 @@ while (($#)); do
         --port) ssh_port="$2" ;;
         --identity-file) identity_file="$2" ;;
         --version) version="$2" ;;
+        --reviewed-identity-manifest) reviewed_identity_manifest="$2" ;;
       esac
       shift 2
       ;;
@@ -121,6 +124,13 @@ output_dir="$artifact_root/$version-package"
 archive_path="$artifact_root/ozon-erp-$version.zip"
 remote_archive="/tmp/ozon-erp-$version.zip"
 remote_script="/tmp/ozon-erp-remote-release.sh"
+remote_identity_manifest=""
+if [[ -n "$reviewed_identity_manifest" ]]; then
+  [[ -f "$reviewed_identity_manifest" ]] || fail "reviewed identity manifest does not exist"
+  node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$reviewed_identity_manifest"
+  reviewed_identity_manifest="$(CDPATH= cd -- "$(dirname -- "$reviewed_identity_manifest")" && pwd -P)/$(basename -- "$reviewed_identity_manifest")"
+  remote_identity_manifest="/tmp/ozon-erp-identity-$version.json"
+fi
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'
@@ -138,7 +148,7 @@ require_command zip
 require_command split
 
 if (( !allow_dirty )); then
-  node "$project_root/scripts/verify-release-worktree.mjs"
+  (cd "$project_root" && node scripts/verify-release-worktree.mjs)
 fi
 
 [[ -n "$identity_file" ]] || fail "SSH identity file is required; set --identity-file or OZON_ECS_IDENTITY_FILE"
@@ -156,8 +166,9 @@ if ((!skip_build)); then
   DEPLOY_OUTPUT_DIR="$output_dir" \
     OZON_DEPLOY_WORK_DIR="$work_dir" \
     OZON_RELEASE_VERSION="$version" \
-    OZON_RELEASE_BRANCH="${OZON_RELEASE_BRANCH:-$(git branch --show-current)}" \
+    OZON_RELEASE_BRANCH="$(git branch --show-current)" \
     OZON_RELEASE_COMMIT="$(git rev-parse HEAD)" \
+    OZON_RELEASE_CHANNEL="production" \
     npm run package:deploy
 fi
 
@@ -180,14 +191,22 @@ done
 ssh "${ssh_options[@]}" "$remote_target" \
   "set -e; cat '$remote_archive'.part-* > '$remote_archive'; rm -f '$remote_archive'.part-*; unzip -tqq '$remote_archive'"
 scp "${scp_options[@]}" "$script_dir/remote-release.sh" "$remote_target:$remote_script"
+if [[ -n "$reviewed_identity_manifest" ]]; then
+  scp "${scp_options[@]}" "$reviewed_identity_manifest" "$remote_target:$remote_identity_manifest"
+fi
 
 db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
 db_maintenance_flag=1
 ((skip_database_maintenance)) && db_maintenance_flag=0
 printf 'Activating release on ECS...\n'
+identity_argument=""
+if [[ -n "$remote_identity_manifest" ]]; then
+  ssh "${ssh_options[@]}" "$remote_target" "chmod 600 '$remote_identity_manifest'"
+  identity_argument=" '$remote_identity_manifest'"
+fi
 ssh "${ssh_options[@]}" "$remote_target" \
-  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag'"
+  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag'$identity_argument"
 
 if command -v shasum >/dev/null 2>&1; then
   archive_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"

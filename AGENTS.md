@@ -162,6 +162,20 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Windows entry scripts should set UTF-8 where practical, such as `chcp 65001` for `.bat` and `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` for PowerShell.
 - If `npm run check:encoding` fails, fix the encoding issue before reporting the task as done.
 
+## 9. Platform Identity and Enterprise Membership Safety
+
+- Platform authority comes only from an active `platform_grants` record with `role = 'super_admin'`, exposed as `session.platform_role`. Never infer platform authority from names, development-account labels, `people.role`, `people.roles_json`, or enterprise membership roles.
+- Enterprise authority belongs to `tenant_members.role` (`owner`, `admin`, or `member`); business duties belong to that membership's `business_roles_json`. Keep global login identity, platform grants, enterprise authority, and business duties separate.
+- Legacy startup assigned ordinary staff `owner` rows in the default enterprise. When that membership still has NULL business duties, use `effectiveTenantMembershipRole` consistently in sessions, directories, member updates, and owner checks; ordinary staff keep their existing job permissions without acquiring management authority. Existing legacy business administrators retain enterprise authority, never platform grants. An incidental profile edit must not turn a historical automatic owner into a reviewed owner.
+- Startup must never create platform grants or enterprise memberships for any account, including platform administrators. Account creation, `people.active`, legacy roles, and service restart must not automatically join anyone to the default enterprise. Preserve disabled membership records.
+- A platform-only account may log in without enterprise membership. Enterprise business APIs still require a valid current enterprise context; platform authority alone must not synthesize default membership or an enterprise session.
+- Legacy sessions may inherit the default enterprise only through an existing active membership for the same person. Missing membership must fail closed.
+- Use `scripts/migrate-platform-enterprise-identities.mjs` for reviewed identity separation. Default mode must remain read-only; apply requires an explicit person-ID manifest, review reason and local MySQL administrator socket. Keep each person's desired platform grant and complete enterprise membership list explicit, preserve business references, and revoke sessions when authority changes.
+- Historical default/customer membership overlap is a review candidate, not proof of an error. Repair only an explicitly reviewed person-ID list in a transaction; preserve other enterprises' memberships and sessions and revoke the removed default access.
+- Keep enterprise shop management, enterprise personnel, and matrix configuration under the current enterprise. Shared exchange/profit/logistics/cancellation settings, task/monitoring administration, AI provider configuration, and prompt-library management belong to the platform management boundary.
+- A menu move or configuration-only slice must not open unfinished enterprise generation, publishing, order, inventory, or procurement routes. Preserve exact route gates until the complete data and background-task paths have passed A/B enterprise isolation checks.
+- Platform-only configuration management must preserve required safe business reads and existing default-enterprise business execution. Check inventory, selection, listing, orders and procurement consumers before restricting shared endpoints; test the business consumption path separately from configuration writes.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

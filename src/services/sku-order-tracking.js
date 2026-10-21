@@ -87,7 +87,7 @@ async function notifyDecliningTrackers(rows, tenantId) {
       shop_id: row.shop_id,
       ozon_sku: row.ozon_sku,
       route: "/order-tracking"
-    }, { personId: Number(row.owner_person_id) });
+    }, { personId: Number(row.owner_person_id), tenantId });
     await mysqlExecute("UPDATE sku_order_trackers SET last_notified_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?", [row.tracker_id, tenantId]);
   }
 }
@@ -282,6 +282,6 @@ export async function saveSkuOrderTracker(body = {}, currentPersonId = null, ten
   await mysqlExecute(`INSERT INTO sku_order_trackers (tenant_id, shop_id, ozon_sku, owner_person_id, decline_weeks, decline_percent, active, created_by_person_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE owner_person_id=VALUES(owner_person_id), decline_weeks=VALUES(decline_weeks), decline_percent=VALUES(decline_percent), active=VALUES(active), updated_at=CURRENT_TIMESTAMP`,
   [tenant.id, shopId, sku, ownerId, declineWeeks, declinePercent, active, currentPersonId || null]);
-  if (active && ownerId) broadcastGlobalEvent("sku-order-tracking", { title: "SKU 单量追踪已绑定", message: `${sku} 已由你负责，持续下滑时系统将发出预警。`, shop_id: shopId, ozon_sku: sku, route: "/order-tracking" }, { personId: ownerId });
+  if (active && ownerId) broadcastGlobalEvent("sku-order-tracking", { title: "SKU 单量追踪已绑定", message: `${sku} 已由你负责，持续下滑时系统将发出预警。`, shop_id: shopId, ozon_sku: sku, route: "/order-tracking" }, { personId: ownerId, tenantId: tenant.id });
   return { ok: true, shop_id: shopId, ozon_sku: sku, active: Boolean(active) };
 }

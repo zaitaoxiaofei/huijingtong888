@@ -37,8 +37,9 @@ test("package total-account quota converts to additional account capacity", () =
 });
 
 test("tenant plan administration remains platform-admin only", () => {
-  assert.equal(authorizeApiRequest({ method: "GET", _session: { roles: ["admin"] } }, ["api", "tenants", "plans"]).allowed, true);
-  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 2, role: "owner" } } }, ["api", "tenants", "plans"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: { roles: ["admin"], platform_role: "super_admin" } }, ["api", "tenants", "plans"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: { roles: ["admin"], tenant: { id: 2, slug: "company-a", role: "admin" } } }, ["api", "tenants", "plans"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 2, slug: "company-a", role: "owner" } } }, ["api", "tenants", "plans"]).allowed, false);
 });
 
 test("tenant plan catalog persists presets and is wired into enterprise create and subscription flows", () => {
@@ -83,8 +84,8 @@ test("customer activation codes are separate, hash-only, and platform-admin mana
   assert.match(server, /GET \/api\/tenants\/activation-code/);
   assert.match(server, /POST \/api\/tenants\/activation-code/);
   assert.match(server, /DELETE \/api\/tenants\/activation-code/);
-  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"] } }, ["api", "tenants", "activation-code"]).allowed, true);
-  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 2, role: "owner" } } }, ["api", "tenants", "activation-code"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"], platform_role: "super_admin" } }, ["api", "tenants", "activation-code"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 2, slug: "company-a", role: "owner" } } }, ["api", "tenants", "activation-code"]).allowed, false);
 });
 
 test("tenant creation reveals the activation code once and the view distinguishes it from plugin tokens", () => {

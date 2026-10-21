@@ -25,7 +25,8 @@ test("tenant quota guard allows available or unlimited capacity and blocks at th
 });
 
 test("quota administration endpoint remains platform-admin only", () => {
-  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"] } }, ["api", "tenants", "quotas"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"], platform_role: "super_admin" } }, ["api", "tenants", "quotas"]).allowed, true);
+  assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["admin"], tenant: { id: 4, slug: "acme", role: "admin" } } }, ["api", "tenants", "quotas"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: { roles: ["operations"], tenant: { id: 4, slug: "acme", role: "owner" } } }, ["api", "tenants", "quotas"]).allowed, false);
 });
 

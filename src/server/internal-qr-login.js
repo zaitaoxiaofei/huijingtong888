@@ -97,11 +97,23 @@ export function consumeConfirmedQrSession(sid) {
   };
 }
 
-export function confirmQrLoginSession({ sid, secret, token, user }) {
+function pendingQrLoginSession({ sid, secret }) {
   const session = getQrSession(sid);
   if (!session) return { ok: false, error: "二维码已过期，请刷新后重试", status: 410 };
   if (session.secret !== String(secret || "")) return { ok: false, error: "二维码无效", status: 403 };
-  if (session.status === "confirmed") return { ok: true, redirect: session.redirect };
+  if (session.status !== "pending") return { ok: false, error: "二维码已确认，请刷新后重试", status: 409 };
+  return { ok: true, session };
+}
+
+export function validateQrLoginSession(payload) {
+  const result = pendingQrLoginSession(payload);
+  return result.ok ? { ok: true } : result;
+}
+
+export function confirmQrLoginSession({ sid, secret, token, user }) {
+  const result = pendingQrLoginSession({ sid, secret });
+  if (!result.ok) return result;
+  const session = result.session;
   session.status = "confirmed";
   session.token = token;
   session.user = user;

@@ -13,6 +13,6 @@ test("all identical GET requests share one inflight request by default", () => {
 
 test("route and global GET requests use separate dedupe scopes", () => {
   assert.match(source, /const routeScoped = options\.routeScoped !== false/);
-  assert.match(source, /`\$\{routeScoped \? "route" : "global"\}:\$\{String\(url\)\}`/);
+  assert.match(source, /`\$\{currentApiCacheScope\(\)\}:\$\{routeScoped \? "route" : "global"\}:\$\{String\(url\)\}`/);
   assert.match(source, /controller\.signal\.addEventListener\("abort"/);
 });

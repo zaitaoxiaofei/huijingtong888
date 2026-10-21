@@ -3,6 +3,11 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
+import { isPlatformAdmin } from "../../../../src/shared/permissions.js";
+
+const authStore = useAuthStore();
+const canRunGlobalCleanup = computed(() => isPlatformAdmin(authStore.user));
 
 const MODE_ITEMS = [
   { key: "official", label: "Ozon 官方活动" },
@@ -583,6 +588,7 @@ async function runCleanupForStore(shop, config) {
 }
 
 async function runAllCleanupNow() {
+  if (!canRunGlobalCleanup.value) return;
   await ElMessageBox.confirm("确认立即扫描所有已启用店铺并删除 Ozon 自动加入活动的商品吗？手动加入的活动商品不会删除。", "立即执行自动删活动", {
     type: "warning",
     confirmButtonText: "立即扫描并删除",
@@ -1028,7 +1034,7 @@ onMounted(async () => {
         </div>
         <div class="cleanup-actions">
           <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.allCleanupLoading" @click="loadAllCleanupConfigs">刷新全部店铺</el-button>
-          <el-button class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
+          <el-button v-if="canRunGlobalCleanup" class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
         </div>
       </div>
 

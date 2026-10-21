@@ -27,6 +27,7 @@ function createNoSessionOverrides() {
     renderQrConfirmPage: () => "<!doctype html><title>扫码确认登录</title>",
     consumeConfirmedQrSession: () => ({ status: "pending" }),
     confirmQrLoginSession: () => ({ ok: true, redirect: "/dashboard" }),
+    validateQrLoginSession: () => ({ ok: true }),
     createWechatLoginUrl: () => null,
     resolveWechatIdentityFromCallback: async () => ({ identity: {}, redirect: "/dashboard" }),
     createWechatLoginTicket: () => "login-ticket",
@@ -42,6 +43,7 @@ async function loadCreateAuthHandler() {
   process.env.DB_HOST = process.env.DB_HOST || "127.0.0.1";
   process.env.DB_NAME = process.env.DB_NAME || "test_db";
   process.env.DB_USER = process.env.DB_USER || "test_user";
+  process.env.DB_PORT = process.env.DB_PORT || "1";
   const mod = await import("../src/server/session.js");
   return mod.createAuthHandler;
 }
@@ -206,12 +208,14 @@ test("login and auth me expose the complete role combination", async () => {
   const handler = createAuthHandler(async () => ({ username: "worker", password: "valid" }), {
     ...createNoSessionOverrides(), verifyPassword: () => true,
     findPersonForLogin: async () => row, findPersonById: async () => row,
-    getSession: async () => ({ personId: 7 }),
+    getSession: async () => ({ personId: 7, role: "manager", roles: ["packing", "manager"], tenant: { id: 2, slug: "company-a", role: "member" }, platform_role: null }),
     createSession: async (_id, _name, role) => { assert.equal(role, "manager"); return "combined-token"; }
   });
   const login = await handler({ method: "POST", headers: {} }, new URL("http://localhost/api/auth/login"))();
   assert.deepEqual(login.user.roles, ["packing", "manager"]);
   assert.equal(login.user.role, "manager");
+  assert.equal(login.user.tenant.id, 2);
+  assert.equal(login.user.platform_role, null);
   const me = await handler({ method: "GET", headers: {authorization:"Bearer combined-token"} }, new URL("http://localhost/api/auth/me"))();
   assert.deepEqual(me.roles, ["packing", "manager"]);
 });

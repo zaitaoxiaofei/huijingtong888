@@ -2,7 +2,7 @@
 
 > Historical note: this tracker contains SQLite-to-MySQL transition history. The current runtime baseline is MySQL; do not treat old SQLite plan items as the active production architecture.
 
-Last updated: 2026-05-17
+Last updated: 2026-10-21
 
 This document is the single tracking entry for system-level work, cross-page UI rules, and feature backlog. When a feature is started or finished, update the status here first.
 
@@ -15,6 +15,15 @@ Status legend:
 - `Research`: needs API or business verification before implementation.
 
 ## 0. Current Refactor Snapshot
+
+- `Done` (2026-10-21, source/local verification only): added global appearance selection with three palettes per light/dark mode and separate remembered choices; standardized header icons and shared sidebar/login branding. Profit and pricing tools open lazily in reusable dialogs without navigating away, retain inputs within the current session and clear on account, enterprise, permission or API scope changes. Existing formulas, APIs and routed tools remain unchanged. ECS and local services have not been deployed or restarted.
+
+- `Done` (2026-10-21, source/local verification only): removed the onboarding menu/page and retired its saved workspace tabs; old links redirect to an accessible home. Repaired the shared dark palette, header/workspace controls and Element Plus overlays, plus page-owned dashboard, task timeline, finance and order controls. Light colors/layouts are preserved. Browser acceptance uses built frontend assets with synthetic API fixtures; ECS deployment and live production acceptance have not been performed.
+
+- `In progress` (2026-10-21): default-enterprise upgrade compatibility is protected separately from platform permission changes. Historical automatic owner rows must not expand ordinary employees' duties; shared tariff reads and existing default-enterprise listing execution must remain available to their business roles. Real production account/membership reconciliation and end-to-end acceptance remain release prerequisites.
+
+- `In progress` (2026-10-21): paid-pilot preparation is tracked in [saas-launch-readiness.md](saas-launch-readiness.md), based on release `2026.10.21-task-brand` (`eefe63d`). Local changes cover QR login protection, tenant plugin-token routing, draft query bindings, explicit platform grants, enterprise personnel and matrix configuration. Startup creates no memberships, including for platform administrators. Historical identity migration, ECS acceptance and complete tenant business workflows remain required before sale.
+- `In progress` (2026-10-21): platform authority now comes from active `platform_grants` records with `role = 'super_admin'`; enterprise authority and business duties belong to `tenant_members.role` and `business_roles_json`. Enterprise shops/personnel/matrix settings are separated from platform accounts, common rules, operations, AI configuration and prompt administration. Use the [reviewed identity manifest migration](platform-enterprise-identity-migration.md); names and legacy admin roles must never auto-promote accounts or add default memberships. Configuration access does not open pending generation, publishing or other unfinished tenant business gates.
 
 - `In progress`: backend entry layer has been split from the monolithic server entry into dedicated HTTP/session/maintenance modules.
 - `In progress`: order/profit/sync route groups are now being extracted from `src/server.js` into `src/server/routes/*` so the main entry keeps shrinking toward startup/auth/dispatch-only responsibilities.
@@ -53,7 +62,7 @@ Status legend:
 | Visual state rules | Done | Do not paint whole rows/cards with saturated red/orange. Use neutral row background and semantic color only on labels/values/badges. | Added to UI docs and `ozon-ui-standard` skill. |
 | Table controls | In progress | Search, tabs, page-size selector, and pagination must follow one unified table-control layout. | Pagination should sit at table footer/right side unless page design has a documented exception. |
 | Inventory action placement | Done | Inventory actions in order rows belong in the inventory column, not the order operation column. | `去绑定库存`, `创建库存`, `删除绑定`, `创建采购请求` are inventory-column actions. |
-| Naming/branding | Done | Use `OZON ERP`; do not use `Ozone` for the product name. | Left nav brand updated. |
+| Naming/branding | Done | Product branding uses `爆单 ERP`; marketplace references retain `Ozon` / `OZON`. | Sidebar and login share `BrandLogo.vue`; no plugin branding changes in this UI update. |
 | Data safety | Backlog | Add clearer backup/restore UX and safeguards. | Backup/restore buttons exist; still need progress, confirmation copy, and restore risk warning. |
 | Backend modularization | In progress | Continue lowering coupling in `server.js`, `services.js`, and the runtime frontend entry through phased module boundaries. | Route-layer extraction covers order/profit/sync plus catalog/config/procurement CRUD groups under `src/server/routes/*`. Shared dashboard/finance summary, finance sync, order sync, analytics calculation, and order profit recalculation logic now have domain modules. Catalog and procurement use their directly imported entry modules. Unused forwarding barrels and global-runtime entries were removed instead of preserving artificial boundaries. Next step is moving more real MySQL domain implementations out of the giant files. |
 | MySQL domain extraction | In progress | Move only cohesive implementations that reduce coupling while preserving the existing export contract. | Procurement plan/list normalization, split-shipping and package-label utilities, order-profit detail snapshot persistence, online-product status/SKU handling, inventory-alert SKU snapshot refresh, and FBP read-model normalization now live in dedicated MySQL modules. `mysql-cutover.js` keeps compatibility exports and thin runtime wrappers. |

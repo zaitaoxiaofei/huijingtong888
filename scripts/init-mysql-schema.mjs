@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS tenant_members (
   tenant_id BIGINT UNSIGNED NOT NULL,
   person_id BIGINT UNSIGNED NOT NULL,
   role VARCHAR(32) NOT NULL DEFAULT 'member',
+  business_roles_json JSON NULL,
   active TINYINT(1) NOT NULL DEFAULT 1,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -112,6 +113,36 @@ CREATE TABLE IF NOT EXISTS tenant_members (
   KEY idx_tenant_members_person (person_id, active),
   KEY idx_tenant_members_tenant (tenant_id, active)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS platform_grants (
+  person_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  role VARCHAR(32) NOT NULL DEFAULT 'super_admin',
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  granted_by_person_id BIGINT UNSIGNED NULL,
+  reason VARCHAR(500) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS asset_tail_templates (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  tenant_id BIGINT UNSIGNED NULL,
+  shop_id BIGINT NULL,
+  category VARCHAR(128) NOT NULL DEFAULT '',
+  vehicle_model VARCHAR(128) NOT NULL DEFAULT '',
+  name VARCHAR(255) NOT NULL,
+  image_path TEXT NOT NULL,
+  purpose VARCHAR(64) NOT NULL DEFAULT 'anti_hijack',
+  is_default TINYINT(1) NOT NULL DEFAULT 0,
+  sort_order INT NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_by_person_id BIGINT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_asset_tail_templates_tenant_scope (tenant_id, shop_id, category, vehicle_model, status),
+  INDEX idx_asset_tail_templates_scope (shop_id, category, vehicle_model, status),
+  INDEX idx_asset_tail_templates_default (is_default, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS tenant_plugin_tokens (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

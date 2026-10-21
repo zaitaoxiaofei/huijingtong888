@@ -1,4 +1,4 @@
-import { canAccessPage, hasPermission } from "../../../src/shared/permissions.js";
+import { canAccessPage, hasPermission, isPlatformAdmin } from "../../../src/shared/permissions.js";
 import { createRouter, createWebHashHistory } from "vue-router";
 import AdminLayout from "../layouts/AdminLayout.vue";
 import MobileLayout from "../layouts/MobileLayout.vue";
@@ -61,6 +61,8 @@ const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue"
 const SystemMonitoringView = () => import("../views/settings/SystemMonitoringView.vue");
 const TenantSubscriptionView = () => import("../views/settings/TenantSubscriptionView.vue");
 const TenantShopsView = () => import("../views/settings/TenantShopsView.vue");
+const EnterprisePersonnelPanel = () => import("../views/settings/EnterprisePersonnelPanel.vue");
+const PlatformAccountsView = () => import("../views/settings/PlatformAccountsView.vue");
 const ImageCropperView = () => import("../views/tools/ImageCropper.vue");
 const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSplitterV3.vue");
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
@@ -73,7 +75,6 @@ const MobileProcurementView = () => import("../views/mobile/MobileProcurementVie
 const MobileInventoryView = () => import("../views/mobile/MobileInventoryView.vue");
 const MobileStockAlertsView = () => import("../views/mobile/MobileStockAlertsView.vue");
 const MobileOnlineProductsView = () => import("../views/mobile/MobileOnlineProductsView.vue");
-const OnboardingKnowledgeView = () => import("../views/onboarding/OnboardingKnowledgeView.vue");
 
 const MOBILE_MODE_STORAGE_KEY = "baodanMobileMode";
 
@@ -118,7 +119,7 @@ export const router = createRouter({
         { path: "", redirect: "/dashboard" },
         { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
-        { path: "onboarding", name: "onboarding", component: OnboardingKnowledgeView, meta: { title: "入职须知", breadcrumb: ["入职须知"] } },
+        { path: "onboarding", redirect: { path: "/dashboard", query: {}, hash: "" } },
         { path: "exceptions", redirect: "/exceptions/profit", meta: { title: "待处理异常", breadcrumb: ["待处理异常"] } },
         { path: "exceptions/profit", name: "exceptions-profit", component: ProfitExceptionView, meta: { title: "利润异常", breadcrumb: ["待处理异常", "利润异常"] } },
         { path: "exceptions/deadline", name: "exceptions-deadline", component: DeadlineExceptionView, meta: { title: "订单超时", breadcrumb: ["待处理异常", "订单超时"] } },
@@ -143,7 +144,7 @@ export const router = createRouter({
           ]
         },
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
-        { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵裂变配置", breadcrumb: ["系统管理", "店铺矩阵裂变配置"] } },
+        { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵配置", breadcrumb: ["企业管理", "店铺矩阵配置"] } },
         { path: "asset-variant-center/create", name: "asset-variant-center-create", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }) },
         { path: "asset-variant-center/wizard", name: "asset-variant-center-wizard", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }), meta: { title: "AI裂变", breadcrumb: ["AI技能库", "AI裂变"], tabKey: "workbench" } },
         { path: "ai-variant-lab", name: "ai-variant-lab", component: AiVariantLabView, meta: { title: "AI裂变", breadcrumb: ["AI技能库", "AI裂变"], tabKey: "workbench" } },
@@ -204,6 +205,8 @@ export const router = createRouter({
         { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
         { path: "tenant-management", name: "tenant-management", component: TenantSubscriptionView, meta: { title: "企业与授权", breadcrumb: ["企业与授权"] } },
         { path: "tenant-shops", name: "tenant-shops", component: TenantShopsView, meta: { title: "企业店铺", breadcrumb: ["企业管理", "店铺管理"] } },
+        { path: "tenant-people", name: "tenant-people", component: EnterprisePersonnelPanel, meta: { title: "企业人员", breadcrumb: ["企业管理", "企业人员"] } },
+        { path: "platform-accounts", name: "platform-accounts", component: PlatformAccountsView, meta: { title: "平台人员", breadcrumb: ["平台管理", "平台人员"] } },
         { path: "settings/tenants", name: "settings-tenants", redirect: (to) => ({ path: "/tenant-management", query: to.query }) },
         { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },
@@ -239,19 +242,23 @@ router.beforeEach(async (to) => {
   startRoutePerf(to);
   document.title = to.meta?.title ? `${to.meta.title} - 爆单ERP` : "爆单ERP";
   const auth = useAuthStore();
+  const home = () => isPlatformAdmin(auth.user) && !auth.user?.tenant?.id ? "/platform-accounts" : "/dashboard";
   if (to.name === "login") {
     await auth.bootstrap();
-    if (auth.isAuthenticated) return safeRedirectTarget(to.query.redirect || "/dashboard");
+    if (auth.isAuthenticated) {
+      const target = safeRedirectTarget(to.query.redirect || home());
+      return canAccessPage(auth.user, target.split("?")[0]) ? target : home();
+    }
     return true;
   }
   if (!to.meta?.public) {
     await auth.bootstrap();
     if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
     if (!canAccessPage(auth.user, to.path)) {
-      return { path: "/dashboard", query: { denied: "permission" } };
+      return { path: home(), query: { denied: "permission" } };
     }
   }
-  if (!to.meta?.mobile && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
+  if (!to.meta?.mobile && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
     return {
       path: "/mobile/orders",
       query: {

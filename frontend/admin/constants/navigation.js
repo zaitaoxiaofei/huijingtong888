@@ -4,7 +4,6 @@ import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, Mag
 export const navigationMenus = [
   { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
   { key: "team-plan", label: "任务系统", route: "/team-plan", icon: Finished },
-  { key: "onboarding", label: "入职须知", route: "/onboarding", icon: Document },
   {
     key: "finance",
     label: "财务中心",
@@ -122,28 +121,26 @@ export const navigationMenus = [
   {
     key: "tenant-shops",
     label: "企业店铺",
-    route: "/tenant-shops",
-    icon: Setting
-  },
-  {
-    key: "tenant-management",
-    label: "企业与授权",
-    route: "/tenant-management",
     icon: Setting,
-    adminOnly: true
+    children: [
+      { key: "tenant-shops", label: "店铺管理", route: "/tenant-shops" },
+      { key: "tenant-people", label: "企业人员", route: "/tenant-people" },
+      { key: "asset-variant-center", label: "店铺矩阵配置", route: "/asset-variant-center" }
+    ]
   },
   {
     key: "settings",
-    label: "系统",
+    label: "平台管理",
     icon: Setting,
     adminOnly: true,
     children: [
+      { key: "platform-accounts", label: "平台人员", route: "/platform-accounts" },
+      { key: "tenant-management", label: "企业与授权", route: "/tenant-management" },
       { key: "settings", label: "基础资料", route: "/settings" },
       { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
       { key: "settings-system-monitoring", label: "系统监控", route: "/settings/system-monitoring" },
       { key: "settings-ai", label: "AI 设置", route: "/settings/ai" },
       { key: "settings-prompts", label: "AI提示词库", route: "/settings/prompts" },
-      { key: "asset-variant-center", label: "店铺矩阵裂变配置", route: "/asset-variant-center" },
       { key: "settings-materials", label: "素材库", route: "/settings/materials" }
     ]
   }

@@ -7,6 +7,7 @@ import { apiClient } from "../../utils/api.js";
 import { commissionRateForRub } from "../../utils/rfbs-commission.js";
 import RfbsCommissionPicker from "./RfbsCommissionPicker.vue";
 
+const props = defineProps({ embedded: { type: Boolean, default: false } });
 const form = reactive({
   category: "", saleCny: null, purchaseCost: null, commissionRate: null, carrier: "GUOO",
   weight: null, length: null, width: null, height: null, freight: null, exchangeRate: null,
@@ -100,11 +101,11 @@ function calculate() {
 </script>
 
 <template>
-  <div class="profit-page">
+  <div class="profit-page" :class="{ 'is-embedded': props.embedded }">
     <el-alert type="info" :closable="false" show-icon title="佣金按 Ozon 中国 rFBS 费率表匹配；物流按售价、重量和尺寸匹配本地规则，退货损失按退货率分摊。" />
     <div class="profit-grid">
       <el-card shadow="never">
-        <template #header><h2>OZON 跨境利润计算器</h2></template>
+        <template v-if="!props.embedded" #header><h2>OZON 跨境利润计算器</h2></template>
         <el-form :model="form" label-width="150px" label-position="right">
           <h3>基础设置</h3>
           <el-form-item label="实际售价" required><el-input-number :controls="false" v-model="form.saleCny" :min="0" :precision="2" /><span class="unit">元</span></el-form-item>
@@ -159,40 +160,57 @@ function calculate() {
 </template>
 
 <style scoped>
+:global(:root[data-theme="dark"]) {
+  --calculator-theme-border-light: var(--erp-border-light);
+  --calculator-theme-danger-text: var(--erp-danger-text);
+  --calculator-theme-success-text: var(--erp-success-text);
+  --calculator-theme-text-regular: var(--erp-text-regular);
+  --calculator-theme-text-secondary: var(--erp-text-secondary);
+}
+
 .profit-page { max-width: 1180px; margin: 0 auto; padding: 24px; }
+.profit-page.is-embedded { max-width: none; margin: 0; padding: 0; }
+.profit-page.is-embedded h3:first-child { margin-top: 0; }
 .profit-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, 1fr); gap: 20px; margin-top: 14px; }
 .results { display: grid; align-content: start; gap: 18px; }
-.results > :first-child { background: #f4f8ff; border-color: #d7e2ff; }
-h2 { margin: 0; text-align: center; color: #6758e9; font-size: 22px; }
-h3 { border-left: 4px solid #7466ef; padding-left: 10px; margin: 26px 0 18px; font-size: 15px; }
-.profit-page :deep(.el-form-item__label) { color: #545b69; font-size: 13px; }
-.unit { margin-left: 8px; color: #697386; }
+.results > :first-child { background: var(--erp-primary-faint, #f4f8ff); border-color: var(--erp-primary-border, #d7e2ff); }
+h2 { margin: 0; text-align: center; color: var(--erp-primary, #6758e9); font-size: 22px; }
+h3 { border-left: 4px solid var(--erp-primary, #7466ef); padding-left: 10px; margin: 26px 0 18px; font-size: 15px; }
+.profit-page :deep(.el-form-item__label) { color: var(--calculator-theme-text-regular, #545b69); font-size: 13px; }
+.unit { margin-left: 8px; color: var(--calculator-theme-text-secondary, #697386); }
 .profit-page :deep(.el-input-number) { width: 220px; max-width: 100%; }
-.profit-page :deep(.el-input-number .el-input__inner) { text-align: left; color: #303744; font-variant-numeric: tabular-nums; }
+.profit-page :deep(.el-input-number .el-input__inner) { text-align: left; color: var(--calculator-theme-text-regular, #303744); font-variant-numeric: tabular-nums; }
 .category-field { width: 100%; }
-.category-field small { display: block; color: #8b95a7; font-size: 11px; line-height: 1.4; margin-top: 4px; }
-.category-field .rate-error { color: #d85050; }
-.exchange-note { margin: 2px 0 16px 150px; color: #8b95a7; font-size: 12px; }
-.rate-error { display: block; color: #d85050; }
+.category-field small { display: block; color: var(--calculator-theme-text-secondary, #8b95a7); font-size: 11px; line-height: 1.4; margin-top: 4px; }
+.category-field .rate-error { color: var(--calculator-theme-danger-text, #d85050); }
+.exchange-note { margin: 2px 0 16px 150px; color: var(--calculator-theme-text-secondary, #8b95a7); font-size: 12px; }
+.rate-error { display: block; color: var(--calculator-theme-danger-text, #d85050); }
 .dimensions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .dimensions :deep(.el-input-number) { width: 118px; }
-.calculate-button { width: 100%; margin-top: 10px; background: #7060ed; border-color: #7060ed; }
-.calculate-button:hover { background: #5f50d9; border-color: #5f50d9; }
-.shipping-tip { margin: 0 0 12px; padding: 10px 12px; border-radius: 7px; color: #5e558e; background: #f2efff; font-size: 12px; }
+.calculate-button { width: 100%; margin-top: 10px; background: var(--erp-primary-fill, #7060ed); border-color: var(--erp-primary-fill, #7060ed); color: var(--erp-primary-contrast, #ffffff); }
+.calculate-button:hover { background: var(--erp-primary-fill-hover, #5f50d9); border-color: var(--erp-primary-fill-hover, #5f50d9); }
+.shipping-tip { margin: 0 0 12px; padding: 10px 12px; border-radius: 7px; color: var(--erp-primary, #5e558e); background: var(--erp-primary-soft, #f2efff); font-size: 12px; }
 .shipping-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.shipping-card { display: grid; align-content: start; gap: 8px; min-height: 130px; padding: 13px; text-align: left; border: 1px solid #cad9fa; border-radius: 8px; background: #edf5ff; cursor: pointer; }
-.shipping-card:nth-child(3n + 2) { border-color: #dacbff; background: #f8f3ff; }
-.shipping-card:nth-child(3n) { border-color: #ffcce4; background: #fff2f8; }
-.shipping-card.active { box-shadow: inset 0 0 0 2px #7466ef; }
-.shipping-card strong { color: #286adf; font-size: 13px; }
-.shipping-card b { color: #eb4d4d; font-size: 19px; }
-.shipping-card small { color: #788294; font-size: 11px; line-height: 1.4; }
+.shipping-card { display: grid; align-content: start; gap: 8px; min-height: 130px; padding: 13px; text-align: left; border: 1px solid var(--erp-primary-border, #cad9fa); border-radius: 8px; background: var(--erp-primary-faint, #edf5ff); cursor: pointer; }
+.shipping-card:nth-child(3n + 2) { border-color: var(--erp-primary-border, #dacbff); background: var(--erp-primary-soft, #f8f3ff); }
+.shipping-card:nth-child(3n) { border-color: var(--erp-primary-border, #ffcce4); background: var(--erp-primary-soft, #fff2f8); }
+.shipping-card.active { box-shadow: inset 0 0 0 2px var(--erp-primary, #7466ef); }
+.shipping-card strong { color: var(--erp-primary, #286adf); font-size: 13px; }
+.shipping-card b { color: var(--calculator-theme-danger-text, #eb4d4d); font-size: 19px; }
+.shipping-card small { color: var(--calculator-theme-text-secondary, #788294); font-size: 11px; line-height: 1.4; }
 .headline { display: grid; gap: 8px; }
-.headline strong { font-size: 30px; color: #6758e9; }
-.headline strong.negative { color: #d85050; }
-.headline small, .headline span, .hint { color: #788294; }
-.detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid #eef0f4; }
-.detail-row.total { color: #279b60; }
+.headline strong { font-size: 30px; color: var(--erp-primary, #6758e9); }
+.headline strong.negative { color: var(--calculator-theme-danger-text, #d85050); }
+.headline small, .headline span, .hint { color: var(--calculator-theme-text-secondary, #788294); }
+.detail-row { display: flex; justify-content: space-between; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--calculator-theme-border-light, #eef0f4); }
+.detail-row.total { color: var(--calculator-theme-success-text, #279b60); }
 .hint { font-size: 12px; }
 @media (max-width: 850px) { .profit-grid { grid-template-columns: 1fr; } .profit-page { padding: 12px; } .exchange-note { margin-left: 0; } }
+@media (max-width: 640px) {
+  .profit-page.is-embedded :deep(.el-form-item) { display: block; }
+  .profit-page.is-embedded :deep(.el-form-item__label) { width: auto !important; height: auto; padding: 0 0 6px; line-height: 1.5; }
+  .profit-page.is-embedded :deep(.el-form-item__content) { margin-left: 0 !important; }
+  .profit-page.is-embedded .dimensions { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto; }
+  .profit-page.is-embedded .dimensions :deep(.el-input-number) { width: 100%; }
+}
 </style>

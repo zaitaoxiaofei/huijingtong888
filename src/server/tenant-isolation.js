@@ -1,3 +1,12 @@
+import { isPlatformAdmin } from "../shared/permissions.js";
+
+const PLATFORM_API_RESOURCES = new Set([
+  "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
+  "order-cancellation-rules", "settings", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events",
+  "system-monitoring", "system", "docs", "ai-provider", "ai-prompt-templates", "ai-strategies",
+  "ai-strategy-bundles", "ai-strategy-category-nodes", "ai-strategy-layer-rules"
+]);
+
 const TENANT_SCOPED_SAFE_PATHS = new Set([
   "user-preferences",
   "ready",
@@ -9,6 +18,14 @@ const SHARED_PRICING_READ_PATHS = new Set([
   "tools/pricing/reference-rate",
   "tools/pricing/rfbs-marketplace",
   "tools/pricing/logistics-rules"
+]);
+
+const TENANT_PLUGIN_TOKEN_ROUTES = new Set([
+  "GET tenants/plugin-token",
+  "POST tenants/plugin-token",
+  "DELETE tenants/plugin-token",
+  "POST tenants/plugin-token/reveal",
+  "POST tenants/plugin-token/import"
 ]);
 
 const TENANT_SELLER_ANALYTICS_ROUTES = new Set([
@@ -45,6 +62,7 @@ function isTenantSellerAnalyticsRoute(path, method) {
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
+  if (isPlatformAdmin(session) && PLATFORM_API_RESOURCES.has(parts[1])) return { allowed: true };
   if (tenant?.slug === "default") return { allowed: true };
   if (!tenant?.id || !tenant?.slug) {
     return {
@@ -57,7 +75,21 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const path = parts.slice(1).join("/");
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
   const verb = String(method || "GET").toUpperCase();
+  const matrixConfigCollection = parts[1] === "asset-variant-engine" && parts.length === 3 && (
+    (parts[2] === "bootstrap" && verb === "GET")
+    || (parts[2] === "rules" && verb === "POST")
+    || (parts[2] === "tail-templates" && ["GET", "POST"].includes(verb))
+  );
+  const matrixTailFile = parts[1] === "asset-variant-engine" && parts[2] === "tail-template-files"
+    && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "GET";
+  if (matrixConfigCollection || matrixTailFile) return { allowed: true };
+  const enterprisePeopleCollection = parts[1] === "enterprise" && parts[2] === "people" && parts.length === 3 && ["GET", "POST"].includes(verb);
+  const enterprisePeopleRecord = parts[1] === "enterprise" && parts[2] === "people" && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "PUT";
+  if (enterprisePeopleCollection || enterprisePeopleRecord) return { allowed: true };
+  if (parts[1] === "people" && parts.length === 2 && verb === "GET") return { allowed: true };
+  if (parts[1] === "logistics-rules" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (verb === "GET" && SHARED_PRICING_READ_PATHS.has(path)) return { allowed: true };
+  if (TENANT_PLUGIN_TOKEN_ROUTES.has(`${verb} ${path}`)) return { allowed: true };
   if (isTenantSellerAnalyticsRoute(path, verb)) return { allowed: true };
   const tenantOzonAttributeRead = parts[1] === "listing" && parts.length === 3
     && ["ozon-category-attributes", "ozon-attribute-values"].includes(parts[2]) && verb === "GET";
@@ -128,10 +160,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
       code: "TENANT_ISOLATION_PENDING"
     };
   }
-  const tenantLogisticsRuleCollection = parts[1] === "logistics-rules" && parts.length === 2 && ["GET", "POST"].includes(verb);
-  const tenantLogisticsRuleRecord = parts[1] === "logistics-rules" && parts.length === 3
-    && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
-  if (tenantLogisticsRuleCollection || tenantLogisticsRuleRecord) return { allowed: true };
   if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (parts[1] === "fbp-replenishment-orders" && parts.length === 2 && verb === "GET") return { allowed: true };
   const tenantFbpDraftMutation = parts[1] === "fbp-replenishment-orders" && verb === "POST" && (
