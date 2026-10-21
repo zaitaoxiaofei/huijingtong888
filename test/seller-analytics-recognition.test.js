@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import { waitForSellerAnalyticsPreparation } from "../frontend/admin/utils/seller-analytics-recognition.js";
+import { isSellerAnalyticsStoreMismatch, isSellerAnalyticsValidationReady, waitForSellerAnalyticsPreparation } from "../frontend/admin/utils/seller-analytics-recognition.js";
 
 function preparation(status, companyId = "3570178", id = "new-request") {
   return {
     ok: status === "ready" && companyId === "4202503",
+    plugin_online: true,
     current_company_id: companyId,
     prepare_request: { id, status, current_company_id: companyId }
   };
@@ -29,6 +30,36 @@ test("recognition waits for this request to finish and does not accept the old s
   assert.equal(result.status, "ready");
   assert.equal(readCount, 3);
   assert.equal(elapsed, 6000);
+});
+
+test("recognition requires an online plugin and the actual expected store", () => {
+  const validation = preparation("ready", "4202503");
+  assert.equal(isSellerAnalyticsValidationReady(validation, "4202503"), true);
+  assert.equal(isSellerAnalyticsValidationReady({ ...validation, plugin_online: false }, "4202503"), false);
+  assert.equal(isSellerAnalyticsValidationReady(validation, "3570178"), false);
+  assert.equal(isSellerAnalyticsValidationReady({ ok: true, plugin_online: true }, ""), false);
+});
+
+test("unavailable identity is not a confirmed store mismatch", () => {
+  const request = { status: "mismatch", current_company_id: "3570178" };
+  assert.equal(isSellerAnalyticsStoreMismatch({ code: "store_identity_unverified" }, request, "4202503"), false);
+  assert.equal(isSellerAnalyticsStoreMismatch({ code: "missing_plugin_company" }, request, "4202503"), false);
+  assert.equal(isSellerAnalyticsStoreMismatch({}, { status: "mismatch" }, "4202503"), false);
+  assert.equal(isSellerAnalyticsStoreMismatch({ code: "company_mismatch" }, request, "4202503"), true);
+  assert.equal(isSellerAnalyticsStoreMismatch({}, request, "4202503"), true);
+});
+
+test("a ready prepare result cannot bypass offline plugin validation", async () => {
+  let elapsed = 0;
+  const result = await waitForSellerAnalyticsPreparation({
+    requestId: "new-request",
+    expectedStoreId: "4202503",
+    readValidation: async () => ({ ...preparation("ready", "4202503"), plugin_online: false }),
+    wait: async (ms) => { elapsed += ms; },
+    now: () => elapsed,
+    timeoutMs: 6000
+  });
+  assert.equal(result.status, "timeout");
 });
 
 test("recognition does not claim success until the validated store matches", async () => {

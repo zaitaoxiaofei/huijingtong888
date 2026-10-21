@@ -1423,6 +1423,10 @@ async function savePluginStatus(db, payload = {}, tenantId = 'admin') {
     plugin_version: safeString(payload?.plugin_version),
     current_company_id: safeString(payload?.current_company_id || payload?.company_id || payload?.store_id),
     identity_error: safeString(payload?.identity_error),
+    identity_code: safeString(payload?.identity_code),
+    observed_company_id: safeString(payload?.observed_company_id),
+    cookie_company_id: safeString(payload?.cookie_company_id),
+    page_company_id: safeString(payload?.page_company_id),
     seller_tab: sellerTab,
     synced_at: mysqlDateValue(payload?.synced_at) || new Date().toISOString(),
     synced_at_ms: Number(payload?.synced_at_ms || Date.now())
@@ -1497,12 +1501,16 @@ async function validatePluginStatus(db, query = {}, tenantId = 'admin') {
     }
   }
   if (status.identity_error) {
+    const conflict = ['identity_conflict', 'store_mismatch'].includes(status.identity_code)
     return {
       ...status,
       ok: false,
-      code: 'store_identity_unverified',
-      message: '当前 Ozon 店铺身份未核对成功，已暂停采集。',
-      detail: `请在 Ozon 后台切换到 ERP 所选店铺 ${expectedStoreId}，刷新分析页后重试。插件会核对 Ozon 店铺 Cookie（sc_company_id）、页面店铺 ID 与请求店铺头（X-O3-Company-Id）；信息不一致或缺失时不能采集。`
+      code: conflict ? 'company_mismatch' : 'store_identity_unverified',
+      message: conflict ? '当前 Ozon 店铺身份信息存在冲突，已暂停采集。' : '插件尚未完成当前 Ozon 店铺识别，已暂停采集。',
+      detail: conflict
+        ? `ERP 所选店铺 ID：${expectedStoreId}；Cookie 店铺 ID：${status.cookie_company_id || '未识别'}；分析请求店铺 ID：${status.observed_company_id || '未识别'}；页面店铺 ID：${status.page_company_id || '未识别'}。请确认 Ozon 当前店铺，并刷新对应分析页后重试。`
+        : `请保持 ERP 所选店铺 ${expectedStoreId} 对应的 Ozon 分析页打开，刷新该页面并等待插件识别。若仍未完成，请导出插件诊断日志，检查页面打开失败或身份读取失败的原因。`,
+      expected_store_id: expectedStoreId
     }
   }
   if (!status.current_company_id) {
@@ -2564,8 +2572,10 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
       const verifiedStoreId = safeString(payload.verified_company_id || payload.verifiedCompanyId)
       const pageStoreId = safeString(payload.current_company_id || payload.currentCompanyId)
       const sentStoreId = normalizeCompanyId(getHeaderValue(payload.request_headers || payload.requestHeaders, 'x-o3-company-id'))
-      if (runStoreId && !options.trustedDirectWorker && (!verifiedStoreId || !pageStoreId || !sentStoreId)) {
-        const error = new Error('分析插件未提供完整的店铺校验信息，已拒绝保存采集结果。请更新分析插件，重新加载扩展并刷新 ERP 与 Ozon 页面后重试。')
+      // Older plugins report the actual request header without the newer identity fields.
+      // Never substitute the task's expected store for that observed request identity.
+      if (runStoreId && !options.trustedDirectWorker && !sentStoreId) {
+        const error = new Error('采集结果缺少实际分析请求的店铺 ID（X-O3-Company-Id），暂未保存。请刷新对应 Ozon 分析页，等待插件识别后重新采集；若仍失败，请导出诊断日志。')
         error.statusCode = 409
         throw error
       }

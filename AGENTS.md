@@ -79,6 +79,9 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - After bumping a plugin version, state the expected package name in the final response, such as `ozon-baodan-erp-plugin-1.4.5.rar`.
 - A plugin release is complete only after ECS contains the versioned package, update-status metadata names that same version/package, and the production download URL is successfully tested.
 - For every ECS deployment containing plugin changes, inspect the downloaded production archive and verify its `manifest.json` version exactly matches both source manifests. Any mismatch blocks completion.
+- New plugin features and enhancements must remain compatible with supported older versions. Missing optional capabilities or newly added fields must use an existing verified fallback and must not require installing the latest version.
+- Plugin updates are optional by default. Require an update only for a documented system-level bug, with an explicit minimum supported version and a concrete reason; require only affected versions below that minimum, never every version different from the latest.
+- Missing shop identity, a failed browser navigation, and a confirmed shop mismatch are different states. Preserve actual cross-shop checks and explain the specific recovery step instead of treating all failures as a wrong shop or an outdated plugin.
 
 ## 5.1 User-Facing Time Display
 

@@ -164,14 +164,25 @@ async function getOzonCookieHeader() {
     .join('; ');
 }
 
-async function getOzonCookieInfo() {
+async function getOzonCookieInfo(tab = null) {
   if (!chrome?.cookies?.getAll) return { header: '', companyId: '' };
-  const cookies = await chrome.cookies.getAll({ url: 'https://seller.ozon.ru/' });
+  const query = { url: /^https:\/\/seller\.ozon\.ru\//.test(tab?.url || '') ? tab.url : 'https://seller.ozon.ru/' };
+  if (tab?.id && chrome.cookies.getAllCookieStores) {
+    const stores = await chrome.cookies.getAllCookieStores();
+    const store = stores.find((item) => item.tabIds?.includes(tab.id));
+    if (store) query.storeId = store.id;
+  }
+  const cookies = await chrome.cookies.getAll(query);
   const header = cookies
     .filter((item) => item?.name)
     .map((item) => `${item.name}=${item.value || ''}`)
     .join('; ');
-  const byName = new Map(cookies.map((item) => [String(item?.name || ''), String(item?.value || '')]));
+  // Chrome returns matching cookies in request order. Do not replace the first
+  // sc_company_id with a later parent-domain cookie bearing the same name.
+  const byName = new Map();
+  for (const item of cookies) {
+    if (!byName.has(item?.name)) byName.set(item.name, String(item.value || ''));
+  }
   const companyId = String(
     byName.get('sc_company_id') ||
     byName.get('company_id') ||
@@ -319,7 +330,8 @@ async function readSellerPageCompanyId(tab) {
       target: { tabId: tab.id, frameIds: [0] },
       func: () => {
         try {
-          return { companyId: String(window.localStorage.getItem('ozon_company_id') || '').trim() };
+          const match = document.cookie.match(/(?:^|;\s*)sc_company_id=([^;]+)/);
+          return { companyId: match ? decodeURIComponent(match[1]).trim() : '' };
         } catch (error) {
           return { companyId: '', error: 'page_store_unavailable' };
         }
@@ -336,13 +348,16 @@ function resolveSellerStoreIdentity(observedCompanyId, cookieCompanyId, expected
   const cookie = String(cookieCompanyId || '').trim();
   const expected = String(expectedStoreId || '').trim();
   const page = String(pageCompanyId || '').trim();
-  const code = !observed || !cookie ? 'identity_missing' : observed !== cookie || (page && page !== cookie) ? 'identity_conflict' : expected && observed !== expected ? 'store_mismatch' : '';
+  // The worker may have restarted after Seller loaded, losing observed headers.
+  // A live page cookie may recover identity; ERP expectations and old localStorage may not.
+  const companyId = observed || page;
+  const code = !companyId || !cookie ? 'identity_missing' : companyId !== cookie || (page && page !== cookie) ? 'identity_conflict' : expected && companyId !== expected ? 'store_mismatch' : '';
   if (code) return { ok: false, code, companyId: '', observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: `STORE_CONTEXT_MISMATCH task=${expected || '-'} observed=${observed || '-'} cookie=${cookie || '-'} page=${page || '-'}` };
-  return { ok: true, code: 'ready', companyId: observed, observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: '' };
+  return { ok: true, code: 'ready', companyId, observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: '' };
 }
 
 async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
-  const cookieInfo = await getOzonCookieInfo();
+  const cookieInfo = await getOzonCookieInfo(tab);
   const pageIdentity = await readSellerPageCompanyId(tab);
   const identity = resolveSellerStoreIdentity(currentSellerCompanyId(tab?.id), cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
   return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: `STORE_CONTEXT_MISMATCH page=${pageIdentity.error}` } : identity;
@@ -373,7 +388,11 @@ async function syncPluginStatus(force = false, selectedTab = null) {
         url: sellerTab.url || ''
       } : null,
       current_company_id: companyId,
+      identity_code: identity.code,
       identity_error: identity.error,
+      observed_company_id: identity.observedCompanyId,
+      cookie_company_id: identity.cookieCompanyId,
+      page_company_id: identity.pageCompanyId,
       latest_analytics_api: sellerTab?.id ? latestAnalyticsApiByTab.get(sellerTab.id) || null : null,
       polling_enabled: panelState.pollingEnabled,
       synced_at: new Date().toISOString(),
@@ -399,7 +418,7 @@ async function bindServerSideAuth(companyId, sellerTab = null, force = false) {
   if (!force && now - Number(lastAuthBindingSyncAtByCompany.get(resolvedCompanyId) || 0) < AUTH_BINDING_SYNC_MIN_INTERVAL_MS) return null;
   const config = await getErpConfig();
   const tab = sellerTab || await findAnySellerTab();
-  const cookieInfo = await getOzonCookieInfo();
+  const cookieInfo = await getOzonCookieInfo(tab);
   const cookie = cookieInfo.header;
   if (!cookie) throw new Error('No Ozon cookie found. Open and login seller.ozon.ru first.');
   const pageIdentity = await readSellerPageCompanyId(tab);
@@ -440,14 +459,14 @@ async function bindServerSideAuth(companyId, sellerTab = null, force = false) {
 
 async function getNextCollectRequests(sellerTab = null) {
   const tab = sellerTab || await findAnySellerTab();
-  const companyId = currentSellerCompanyId(tab?.id);
-  if (!companyId) {
+  const identity = await verifiedSellerStoreIdentity(tab, preferredSellerStoreId);
+  const companyId = identity.companyId;
+  if (identity.code === 'identity_missing') {
     const message = '当前 Ozon 店铺身份尚未识别，暂停领取采集任务；请刷新 Seller 分析页后重试。';
     if (panelState.lastError !== message) logPanel(message, 'error');
     panelState.lastError = message;
     return [];
   }
-  const identity = await verifiedSellerStoreIdentity(tab, companyId);
   if (!identity.ok) {
     if (panelState.lastError !== identity.error) logPanel(`当前 Ozon 店铺身份未对齐，暂停领取任务：${identity.error}`, 'error');
     panelState.lastError = identity.error;
@@ -502,7 +521,7 @@ async function postPrepareResult(payload = {}) {
 async function probeServerSideAuth(companyId = '', sellerTab = null) {
   const config = await getErpConfig();
   const tab = sellerTab || await findAnySellerTab();
-  const cookieInfo = await getOzonCookieInfo();
+  const cookieInfo = await getOzonCookieInfo(tab);
   const resolvedCompanyId = String(companyId || currentSellerCompanyId(tab?.id) || cookieInfo.companyId || '').trim();
   const cookie = cookieInfo.header;
   const headers = latestContextHeadersByTab.get(tab?.id) || {};
@@ -581,7 +600,19 @@ function setPanelSellerTab(tab) {
 
 async function findAnySellerTab(expectedStoreId = preferredSellerStoreId) {
   const tabs = await chrome.tabs.query({ url: 'https://seller.ozon.ru/*' });
-  const tab = selectSellerTab(tabs, expectedStoreId);
+  let tab = selectSellerTab(tabs, expectedStoreId);
+  if (expectedStoreId && !prepareSellerTabId && tab?.id) {
+    // A restarted worker has no per-tab headers. Check the live identities before
+    // choosing an unrelated, more recently visited Seller tab or cookie store.
+    const candidates = [tab, ...tabs.filter((item) => item.id !== tab.id)];
+    for (const candidate of candidates) {
+      const identity = await verifiedSellerStoreIdentity(candidate, expectedStoreId);
+      if (identity.ok) {
+        tab = candidate;
+        break;
+      }
+    }
+  }
   setPanelSellerTab(tab);
   return tab;
 }
@@ -589,7 +620,7 @@ async function findAnySellerTab(expectedStoreId = preferredSellerStoreId) {
 async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.ru/app/analytics/graphs', preferredTab = null) {
   const tab = preferredTab || await findAnySellerTab();
   if (tab?.id) {
-    await chrome.tabs.update(tab.id, { url: targetUrl, active: true });
+    if (tab.url !== targetUrl) await navigateSellerTab(tab.id, targetUrl, 'open_analytics');
     panelState.sellerTab = { id: tab.id, title: tab.title || '', url: targetUrl };
     panelState.sellerMissing = false;
     updateActionBadge();
@@ -602,14 +633,33 @@ async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.r
   return created;
 }
 
+async function navigateSellerTab(tabId, targetUrl, stage) {
+  try {
+    return await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+  } catch (error) {
+    const detail = `SELLER_NAVIGATION_FAILED stage=${stage} tab=${tabId}: ${error?.message || error}`;
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }
+}
+
 async function warmSellerAnalyticsPermission(tabId) {
   if (!tabId) return null;
-  await chrome.tabs.update(tabId, { url: 'https://seller.ozon.ru/app/analytics', active: true });
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.url !== 'https://seller.ozon.ru/app/analytics') {
+    await navigateSellerTab(tabId, 'https://seller.ozon.ru/app/analytics', 'warm_analytics');
+  }
   await waitForTabComplete(tabId, 15000);
   await sleep(1000);
   latestAnalyticsApiByTab.delete(tabId);
   logPanel('销售漏斗页已打开，开始强制刷新以激活分析权限');
-  await chrome.tabs.reload(tabId, { bypassCache: true });
+  try {
+    await chrome.tabs.reload(tabId, { bypassCache: true });
+  } catch (error) {
+    const detail = `SELLER_NAVIGATION_FAILED stage=reload_analytics tab=${tabId}: ${error?.message || error}`;
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }
   await waitForTabComplete(tabId, 20000);
   await sleep(2500);
   return { ok: true, status: 'script_ready', url: 'https://seller.ozon.ru/app/analytics', updated_at: Date.now() };
@@ -617,7 +667,8 @@ async function warmSellerAnalyticsPermission(tabId) {
 
 async function openSellerAnalyticsGraphsAfterWarmup(tabId, targetUrl) {
   if (!tabId) return null;
-  const updated = await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+  const current = await chrome.tabs.get(tabId);
+  const updated = current.url === targetUrl ? current : await navigateSellerTab(tabId, targetUrl, 'open_graphs');
   await waitForTabComplete(tabId, 15000);
   panelState.sellerTab = { id: tabId, title: updated?.title || '', url: targetUrl };
   panelState.sellerMissing = false;
@@ -681,11 +732,11 @@ async function waitForSellerAuthContext(tab, request = {}, timeoutMs = AUTH_CONT
   let lastError = '';
   while (Date.now() < deadline) {
     await syncPluginStatus(true).catch(() => {});
-    const cookieInfo = await getOzonCookieInfo();
+    const cookieInfo = await getOzonCookieInfo(tab);
     const observedCompanyId = String(currentSellerCompanyId(tab?.id) || '').trim();
-    const companyId = observedCompanyId;
     const pageIdentity = await readSellerPageCompanyId(tab);
     const identity = resolveSellerStoreIdentity(observedCompanyId, cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
+    const companyId = identity.companyId;
     if (pageIdentity.error || !identity.ok) {
       lastError = pageIdentity.error || identity.error;
       await sleep(AUTH_CONTEXT_POLL_MS);
@@ -723,6 +774,7 @@ async function waitForSellerAuthContext(tab, request = {}, timeoutMs = AUTH_CONT
     }
     await sleep(AUTH_CONTEXT_POLL_MS);
   }
+  logPanel(`店铺授权上下文等待结束：${lastError || 'AUTH_CONTEXT_TIMEOUT'}`, 'error');
   return { success: false, error: lastError || 'AUTH_CONTEXT_TIMEOUT' };
 }
 
@@ -744,11 +796,21 @@ async function runPrepareRequest(request) {
   const expectedStoreId = expectedStoreIdFromPrepare(request);
   if (expectedStoreId) preferredSellerStoreId = expectedStoreId;
   const existingTab = await findAnySellerTab(expectedStoreId);
-  const existingCompanyId = String(currentSellerCompanyId(existingTab?.id) || '').trim();
+  const existingIdentity = await verifiedSellerStoreIdentity(existingTab, expectedStoreId);
+  const existingCompanyId = existingIdentity.companyId;
   if (existingTab?.id) prepareSellerTabId = existingTab.id;
+  if (existingIdentity.code === 'identity_conflict' || existingIdentity.code === 'store_mismatch') {
+    logPanel(`当前 Ozon 店铺身份未对齐：${existingIdentity.error}`, 'error');
+    return { success: false, error: existingIdentity.error, identity_code: existingIdentity.code, seller_tab: panelState.sellerTab };
+  }
+  if (existingTab?.id && existingIdentity.ok && !request.bind_auth_only && /^https:\/\/seller\.ozon\.ru\/app\/analytics(?:[/?#]|$)/.test(existingTab.url || '')) {
+    await ensureRelayInjected(existingTab.id);
+    logPanel(`复用已核实店铺的分析页面：${existingCompanyId}，浏览器采集通道已就绪`, 'success');
+    return { success: true, current_company_id: existingCompanyId, auth_warning: 'BROWSER_CONTEXT_READY', fast_path: true, seller_tab: panelState.sellerTab };
+  }
   if (existingTab?.id && existingCompanyId && (!expectedStoreId || existingCompanyId === expectedStoreId)) {
     try {
-      const cookieInfo = await getOzonCookieInfo();
+      const cookieInfo = await getOzonCookieInfo(existingTab);
       if (cookieInfo.header) {
         const probe = await probeServerSideAuth(existingCompanyId, existingTab);
         if (probe?.ok) {
@@ -772,12 +834,15 @@ async function runPrepareRequest(request) {
       logPanel(`快速授权校验未通过，回退完整刷新：${error?.message || error}`, 'error');
     }
   }
+  // Invalidate before navigation: requests may already fire before tabs.update resolves.
+  prepareStartedAt = Date.now();
+  if (existingTab?.id) {
+    latestContextHeadersByTab.delete(existingTab.id);
+    latestAnalyticsTableByTab.delete(existingTab.id);
+  }
   let tab = await ensureSellerAnalyticsGraphsTab('https://seller.ozon.ru/app/analytics', existingTab);
   if (!tab?.id) return { success: false, error: 'SELLER_TAB_OPEN_FAILED' };
   prepareSellerTabId = tab.id;
-  prepareStartedAt = Date.now();
-  latestContextHeadersByTab.delete(tab.id);
-  latestAnalyticsTableByTab.delete(tab.id);
   const warmup = await warmSellerAnalyticsPermission(tab.id);
   tab = await openSellerAnalyticsGraphsAfterWarmup(tab.id, targetUrl);
   if (!tab?.id) return { success: false, error: 'SELLER_GRAPHS_OPEN_FAILED', warmup };

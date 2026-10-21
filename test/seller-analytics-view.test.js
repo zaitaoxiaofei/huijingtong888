@@ -1,10 +1,147 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { isSellerAnalyticsStoreMismatch, isSellerAnalyticsValidationReady, waitForSellerAnalyticsPreparation } from "../frontend/admin/utils/seller-analytics-recognition.js";
 
 const viewSource = () => fs.readFileSync("frontend/admin/views/analytics/SellerAnalyticsView.vue", "utf8");
 const routerSource = () => fs.readFileSync("frontend/admin/router/index.js", "utf8");
 const shellSource = () => fs.readFileSync("scripts/generate-admin-shell.mjs", "utf8");
+
+async function checkCollectionReadiness(storeCheck, validation) {
+  const source = viewSource();
+  const ready = source.slice(source.indexOf("async function ensureCollectReady()"), source.indexOf("async function bindCurrentShopAuth()"));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const alerts = [];
+  const prepareFlow = {};
+  let prepared = 0;
+  let elapsed = 0;
+  const context = {
+    requireAnalyticsPluginInstance: async () => true,
+    selectedStoreId: { value: "4202503" },
+    checkCurrentShopViaPlugin: async () => storeCheck,
+    loadPluginValidation: async () => validation,
+    isSellerAnalyticsValidationReady,
+    isSellerAnalyticsStoreMismatch,
+    prepareFlow,
+    ElMessageBox: { alert: async (message, title) => { alerts.push({ message, title }); } },
+    ElMessage: { info() {}, warning() {} },
+    prepareSellerAnalyticsPlugin: async () => { prepared++; return { id: "new-request" }; },
+    state: { filters: { shopId: "erp-shop" } },
+    selectedShop: { value: { name: "Shop" } },
+    pluginInstanceId: { value: "browser-instance" },
+    wakeAnalyticsPlugin() {},
+    waitForSellerAnalyticsPreparation: (options) => waitForSellerAnalyticsPreparation({ ...options, now: () => elapsed, timeoutMs: 6000 }),
+    wait: async (ms) => { elapsed += ms; },
+    loadPluginStatus: async () => {},
+    loadAuthBindingStatus: async () => {},
+    localPluginSetupHint: { value: "" }
+  };
+  const accepted = await new AsyncFunction(...Object.keys(context), `${ready}\nreturn ensureCollectReady();`)(...Object.values(context));
+  return { accepted, prepared, alerts, prepareFlow };
+}
+
+function preparedValidation(overrides = {}) {
+  return {
+    ok: true,
+    plugin_online: true,
+    current_company_id: "4202503",
+    code: "ready",
+    prepare_request: { id: "new-request", status: "ready", current_company_id: "4202503" },
+    ...overrides
+  };
+}
+
+test("older plugins without live store checks use the existing prepare handshake", async () => {
+  for (const storeCheck of [null, { ok: false, code: "check_failed", error: "REALTIME_TIMEOUT" }]) {
+    const result = await checkCollectionReadiness(storeCheck, preparedValidation());
+    assert.equal(result.accepted, true);
+    assert.equal(result.prepared, 1);
+    assert.deepEqual(result.alerts, []);
+  }
+});
+
+test("legacy readiness still blocks offline, unclaimed, and mismatched store results", async () => {
+  const validations = [
+    preparedValidation({ plugin_online: false }),
+    preparedValidation({ prepare_request: { id: "new-request", status: "pending" } }),
+    preparedValidation({ ok: false, code: "company_mismatch", current_company_id: "3570178", prepare_request: { id: "new-request", status: "mismatch", current_company_id: "3570178" } })
+  ];
+  for (const validation of validations) {
+    const result = await checkCollectionReadiness(null, validation);
+    assert.equal(result.accepted, false);
+    assert.equal(result.prepared, 1);
+    assert.equal(result.alerts.length, 1);
+    assert.doesNotMatch(result.alerts[0].message, /最新版|需要更新/);
+  }
+});
+
+test("missing identity asks for recognition without claiming the user chose a wrong store", async () => {
+  const result = await checkCollectionReadiness(null, preparedValidation({
+    ok: false,
+    code: "store_identity_unverified",
+    current_company_id: "",
+    prepare_request: { id: "new-request", status: "failed", error: "STORE_IDENTITY_UNVERIFIED" }
+  }));
+  assert.equal(result.accepted, false);
+  assert.equal(result.prepareFlow.tone, "warning");
+  assert.equal(result.alerts[0].title, "暂时不能启动采集");
+  assert.match(result.alerts[0].message, /身份信息还未读取完整/);
+  assert.doesNotMatch(result.alerts[0].message, /切换|未对齐/);
+});
+
+test("a confirmed live store conflict blocks before queueing a prepare request", async () => {
+  const result = await checkCollectionReadiness({ ok: false, code: "store_mismatch", cookieCompanyId: "3570178" }, preparedValidation());
+  assert.equal(result.accepted, false);
+  assert.equal(result.prepared, 0);
+  assert.equal(result.alerts[0].title, "店铺未对齐");
+});
+
+async function checkPluginConnection({ download = false, metadataUnavailable = false } = {}) {
+  const source = viewSource();
+  const requireInstance = source.slice(source.indexOf("async function requireAnalyticsPluginInstance()"), source.indexOf("async function recognizeCurrentShop()"));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const prompts = [];
+  const downloads = [];
+  const context = {
+    pluginInstanceId: { value: "" },
+    requestPluginInstance() {},
+    wait: async () => {},
+    apiClient: { get: async () => {
+      if (metadataUnavailable) throw new Error("NETWORK_ERROR");
+      return { analytics_plugin: { version: "1.0.34", download_url: "/plugin.rar" } };
+    } },
+    ElMessageBox: { confirm: async (message, title, options) => {
+      prompts.push({ message, title, options });
+      if (!download) throw new Error("cancel");
+    } },
+    window: { open: (url) => downloads.push(url) }
+  };
+  const connected = await new AsyncFunction(...Object.keys(context), `${requireInstance}\nreturn requireAnalyticsPluginInstance();`)(...Object.values(context));
+  return { connected, prompts, downloads };
+}
+
+test("an unanswered instance message prompts connection troubleshooting without automatic downloads", async () => {
+  const result = await checkPluginConnection();
+  assert.equal(result.connected, false);
+  assert.equal(result.downloads.length, 0);
+  assert.equal(result.prompts[0].title, "分析插件暂未连通");
+  assert.match(result.prompts[0].message, /ERP 地址与登录令牌/);
+  assert.doesNotMatch(result.prompts[0].message, /请下载并安装|未检测到.*1\.0\.34/);
+  assert.equal(result.prompts[0].options.confirmButtonText, "下载插件（可选）");
+});
+
+test("plugin download requires the user's optional download choice", async () => {
+  const result = await checkPluginConnection({ download: true });
+  assert.deepEqual(result.downloads, ["/plugin.rar"]);
+});
+
+test("download metadata failure still allows plugin connection troubleshooting", async () => {
+  const result = await checkPluginConnection({ metadataUnavailable: true });
+  assert.equal(result.connected, false);
+  assert.equal(result.prompts.length, 1);
+  assert.equal(result.prompts[0].options.confirmButtonText, "知道了");
+  assert.deepEqual(result.downloads, []);
+});
 
 test("seller analytics route is lazy-loaded so the admin shell can start quickly", () => {
   const router = routerSource();

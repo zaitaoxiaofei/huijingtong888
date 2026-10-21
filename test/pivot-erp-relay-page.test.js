@@ -116,6 +116,32 @@ test("relay refuses conflicting cookie and cached page store", async () => {
   assert.equal(page.getPostedMessages()[0].payload.success, false);
 });
 
+test("relay can collect the live store after switching shops despite its old plugin cache", async () => {
+  const page = loadRelayPage({ cookie: "sc_company_id=222" });
+  page.setStoredCompanyId("111");
+  await page.dispatchExecute({
+    store_id: "222",
+    request_url: "https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals",
+    request_method: "POST",
+    request_headers: { "X-O3-Company-Id": "222" },
+    request_body: { metrics: ["revenue"] }
+  });
+  assert.equal(page.getFetchCallCount(), 1);
+  assert.equal(page.getPostedMessages()[0].payload.current_company_id, "222");
+});
+
+test("relay never authorizes a task from localStorage after the live cookie disappears", async () => {
+  const page = loadRelayPage();
+  page.setStoredCompanyId("111");
+  await page.dispatchExecute({
+    store_id: "111",
+    request_url: "https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals",
+    request_headers: { "X-O3-Company-Id": "111" }
+  });
+  assert.equal(page.getFetchCallCount(), 0);
+  assert.equal(page.getPostedMessages()[0].payload.success, false);
+});
+
 test("relay discards a result if Ozon switches store during the request", async () => {
   const page = loadRelayPage({
     cookie: "sc_company_id=111",

@@ -479,6 +479,45 @@ test("seller analytics validates plugin status against selected store", async ()
   assert.equal(ready.code, "ready");
 });
 
+test("seller analytics separates missing identity from an actual store conflict", async () => {
+  for (const [identityCode, expectedCode] of [
+    ["identity_missing", "store_identity_unverified"],
+    ["", "store_identity_unverified"],
+    ["identity_conflict", "company_mismatch"],
+    ["store_mismatch", "company_mismatch"]
+  ]) {
+    const db = createMemorySellerAnalyticsDb();
+    await savePluginStatus(db, {
+      seller_tab: { id: 1, url: "https://seller.ozon.ru/app/analytics" },
+      identity_error: "STORE_CONTEXT_MISMATCH task=1111 observed=- cookie=1111 page=1111",
+      identity_code: identityCode,
+      cookie_company_id: "1111",
+      page_company_id: "1111"
+    }, "team-a");
+    const validation = await validatePluginStatus(db, { store_id: "1111" }, "team-a");
+    assert.equal(validation.ok, false);
+    assert.equal(validation.code, expectedCode);
+    assert.equal(validation.cookie_company_id, "1111");
+    assert.equal(validation.page_company_id, "1111");
+    if (expectedCode === "store_identity_unverified") {
+      assert.match(validation.message, /尚未完成/);
+      assert.doesNotMatch(validation.detail, /切换到|更新插件|最新版/);
+    }
+  }
+});
+
+test("seller analytics accepts matching legacy status without optional identity metadata", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  await savePluginStatus(db, {
+    plugin_version: "1.0.33",
+    seller_tab: { id: 1, url: "https://seller.ozon.ru/app/analytics" },
+    current_company_id: "1111"
+  }, "team-a");
+  const validation = await validatePluginStatus(db, { store_id: "1111" }, "team-a");
+  assert.equal(validation.ok, true);
+  assert.equal(validation.code, "ready");
+});
+
 test("seller analytics isolates plugin status by browser instance", async () => {
   const db = createMemorySellerAnalyticsDb();
   const common = {
@@ -569,16 +608,19 @@ test("auth-only prepare stays auth-only through plugin claim and rejects browser
   const end = source.indexOf("async function ensureRelayInjected(", start);
   assert.ok(start >= 0 && end > start);
   const context = {
+    latestContextHeadersByTab: new Map(),
     latestAnalyticsTableByTab: new Map([[7, { ok: true, company_id: "111111", updated_at: Date.now() }]]),
     prepareStartedAt: Date.now() - 1000,
     AUTH_CONTEXT_TIMEOUT_MS: 45000,
     currentSellerCompanyId: () => "111111",
+    verifiedSellerStoreIdentity: async () => ({ ok: true, code: "ready", companyId: "111111" }),
     syncPluginStatus: async () => {},
     getOzonCookieInfo: async () => ({ header: "cookie", companyId: "111111" }),
     readSellerPageCompanyId: async () => ({ companyId: "111111" }),
     probeServerSideAuth: async () => ({ ok: false, status: 403 }),
     logPanel: () => {},
-    findAnySellerTab: async () => ({ id: 7 }),
+    findAnySellerTab: async () => ({ id: 7, url: "https://seller.ozon.ru/app/analytics/graphs" }),
+    ensureRelayInjected: async () => {},
     ensureSellerAnalyticsGraphsTab: async () => null,
     panelState: { sellerTab: null }
   };
@@ -595,7 +637,7 @@ test("auth-only prepare stays auth-only through plugin claim and rejects browser
   const deniedFastPath = await context.runPrepareRequest(claimedAuthOnly);
   assert.equal(deniedFastPath.success, false);
   const collectFastPath = await context.runPrepareRequest(claimedCollect);
-  assert.equal(collectFastPath.auth_warning, "BROWSER_COLLECT_ONLY");
+  assert.equal(collectFastPath.auth_warning, "BROWSER_CONTEXT_READY");
 });
 
 test("seller analytics marks plugin status offline when heartbeat is stale", async () => {
@@ -759,11 +801,10 @@ test("seller analytics rejects a browser result verified for another store", asy
   await assert.rejects(
     finishCollectRequest(db, run.id, request.request_id, {
       success: true,
-      request_headers: { "X-O3-Company-Id": "1111" },
       response_status: 200,
       response_body: { metrics: { revenue: 100 } }
     }, "team-a"),
-    (error) => error.statusCode === 409 && /更新分析插件/.test(error.message)
+    (error) => error.statusCode === 409 && /X-O3-Company-Id/.test(error.message) && !/更新分析插件/.test(error.message)
   );
   assert.equal(db.tables.SellerAnalyticsSnapshot.length, 0);
 
@@ -790,6 +831,42 @@ test("seller analytics rejects a browser result verified for another store", asy
   }, "team-a");
   assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
   assert.equal(db.tables.SellerAnalyticsSnapshot[0].store_id, "1111");
+});
+
+test("seller analytics accepts legacy browser results with matching actual request headers", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, {
+    store_id: "1111",
+    period_key: "7d",
+    source_keys: ["hot"]
+  }, "team-a");
+  const request = await claimNextCollectRequest(db, "team-a", { store_id: "1111" });
+  const result = await finishCollectRequest(db, run.id, request.request_id, {
+    success: true,
+    request_headers: { "x-o3-company-id": "1111" },
+    response_status: 200,
+    response_body: { metrics: { revenue: 100 } }
+  }, "team-a");
+  assert.equal(result.request.status, "success");
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
+  assert.equal(db.tables.SellerAnalyticsSnapshot[0].store_id, "1111");
+});
+
+test("seller analytics rejects mismatched legacy browser request headers", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, {
+    store_id: "1111",
+    period_key: "7d",
+    source_keys: ["hot"]
+  }, "team-a");
+  const request = await claimNextCollectRequest(db, "team-a", { store_id: "1111" });
+  await assert.rejects(finishCollectRequest(db, run.id, request.request_id, {
+    success: true,
+    request_headers: { "X-O3-Company-Id": "2222" },
+    response_status: 200,
+    response_body: { metrics: { revenue: 100 } }
+  }, "team-a"), (error) => error.statusCode === 409 && /不一致/.test(error.message));
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 0);
 });
 
 test("seller analytics direct worker keeps its internal result path without browser identity fields", async () => {

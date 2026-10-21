@@ -1,3 +1,17 @@
+export function isSellerAnalyticsValidationReady(validation, expectedStoreId) {
+  return validation?.ok === true && validation.plugin_online === true
+    && String(validation.current_company_id || "") === String(expectedStoreId || "")
+    && Boolean(expectedStoreId);
+}
+
+export function isSellerAnalyticsStoreMismatch(validation, request, expectedStoreId) {
+  if (["store_identity_unverified", "missing_plugin_company"].includes(validation?.code)) return false;
+  if (validation?.code === "company_mismatch") return true;
+  const currentStoreId = String(request?.current_company_id || validation?.current_company_id || "");
+  return request?.status === "mismatch" && Boolean(currentStoreId)
+    && Boolean(expectedStoreId) && currentStoreId !== String(expectedStoreId);
+}
+
 export async function waitForSellerAnalyticsPreparation({
   requestId,
   expectedStoreId,
@@ -25,7 +39,7 @@ export async function waitForSellerAnalyticsPreparation({
       if (request.status === "mismatch" || request.status === "failed") {
         return { status: request.status, validation, request };
       }
-      if (request.status === "ready" && validation?.ok && String(validation.current_company_id || "") === String(expectedStoreId)) {
+      if (request.status === "ready" && isSellerAnalyticsValidationReady(validation, expectedStoreId)) {
         return { status: "ready", validation, request };
       }
     }

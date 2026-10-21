@@ -50,13 +50,9 @@
 
   function getCompanyId() {
     const match = document.cookie.match(/(?:^|;\s*)sc_company_id=([^;]+)/);
-    const cookieCompanyId = match ? decodeURIComponent(match[1]) : '';
-    let storedCompanyId = '';
-    try {
-      storedCompanyId = window.localStorage?.getItem('ozon_company_id') || '';
-    } catch (error) {}
-    if (cookieCompanyId && storedCompanyId && cookieCompanyId !== storedCompanyId) return '';
-    return cookieCompanyId || storedCompanyId;
+    // ozon_company_id was cached by older plugin versions and can survive shop
+    // switches. It is not live Seller identity and must not authorize a request.
+    return match ? decodeURIComponent(match[1]).trim() : '';
   }
 
   function metricSetFromRequestBody(body) {

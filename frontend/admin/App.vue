@@ -42,13 +42,17 @@ async function syncAnalyticsPluginUpdate(status = {}) {
       noCache: true
     });
     const installedVersion = String(pluginStatus?.plugin_version || "").trim();
-    const payload = {
-      ...target,
-      type: "analytics_plugin",
-      installed_version: installedVersion
-    };
-    if (installedVersion && installedVersion !== String(target.version || "").trim()) {
-      window.dispatchEvent(new CustomEvent("app:plugin-update", { detail: payload }));
+    const versionStatus = installedVersion
+      ? await apiClient.get(`/api/system/update-status?analytics_plugin_version=${encodeURIComponent(installedVersion)}`, {
+        routeScoped: false,
+        noCache: true
+      })
+      : null;
+    const update = versionStatus?.analytics_plugin;
+    if (update?.update_available || update?.update_required) {
+      window.dispatchEvent(new CustomEvent("app:plugin-update", {
+        detail: { ...update, type: "analytics_plugin", installed_version: installedVersion }
+      }));
     } else {
       window.dispatchEvent(new CustomEvent("app:plugin-update-clear", { detail: { type: "analytics_plugin" } }));
     }
@@ -232,7 +236,7 @@ function handleUpdateStatusPayload(status) {
   if (status?.app?.update_required) {
     promptAppUpdate(status.app);
   }
-  if (status?.plugin?.update_required) {
+  if (status?.plugin?.update_available || status?.plugin?.update_required) {
     window.dispatchEvent(new CustomEvent("app:plugin-update", { detail: { ...status.plugin, type: "collector_plugin" } }));
   } else {
     window.dispatchEvent(new CustomEvent("app:plugin-update-clear", { detail: { type: "collector_plugin" } }));

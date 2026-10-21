@@ -36,31 +36,69 @@ const defaultStatus = {
   plugin: {
     version: defaultPluginVersion,
     title: "爆单ERP插件有新版本",
-    message: "爆单ERP插件已经更新，请下载最新版并重新安装。",
+    message: "爆单ERP插件有新增或增强功能，可按需下载更新，兼容的旧版本可继续使用。",
     download_url: process.env.COLLECTOR_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultPluginPackageName}`,
     package_name: defaultPluginPackageName,
-    mandatory: true,
+    mandatory: false,
     published_at: new Date().toISOString()
   },
   analytics_plugin: {
     version: defaultAnalyticsPluginVersion,
     title: "店铺数据分析插件有新版本",
-    message: "店铺数据分析插件已经更新，请下载最新版并重新安装。",
+    message: "店铺数据分析插件有新增或增强功能，可按需下载更新，兼容的旧版本可继续使用。",
     download_url: process.env.ANALYTICS_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultAnalyticsPluginPackageName}`,
     package_name: defaultAnalyticsPluginPackageName,
-    mandatory: true,
+    mandatory: false,
     published_at: new Date().toISOString()
   },
   pdd_procurement_plugin: {
     version: defaultPddProcurementPluginVersion,
     title: "拼多多采购物流插件有新版本",
-    message: "拼多多采购物流插件已经更新，请下载最新版并重新安装。",
+    message: "拼多多采购物流插件有新增或增强功能，可按需下载更新，兼容的旧版本可继续使用。",
     download_url: process.env.PDD_PROCUREMENT_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultPddProcurementPluginPackageName}`,
     package_name: defaultPddProcurementPluginPackageName,
-    mandatory: true,
+    mandatory: false,
     published_at: new Date().toISOString()
   }
 };
+
+function comparePluginVersions(left, right) {
+  if (!/^\d+(?:\.\d+){0,3}$/.test(left) || !/^\d+(?:\.\d+){0,3}$/.test(right)) return null;
+  const leftParts = left.split(".").map(Number);
+  const rightParts = right.split(".").map(Number);
+  for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i++) {
+    const difference = (leftParts[i] || 0) - (rightParts[i] || 0);
+    if (difference) return Math.sign(difference);
+  }
+  return 0;
+}
+
+function normalizePluginUpdatePolicy(input, version) {
+  const minimumVersion = String(input.minimum_supported_version || "").trim();
+  const reasonType = String(input.update_reason_type || "").trim();
+  const reason = String(input.update_reason || "").trim();
+  const minimumComparison = comparePluginVersions(minimumVersion, version);
+  return {
+    minimum_supported_version: minimumVersion,
+    update_reason_type: reasonType,
+    update_reason: reason,
+    mandatory: input.mandatory === true && reasonType === "system_bug" && Boolean(reason)
+      && minimumComparison !== null && minimumComparison <= 0
+  };
+}
+
+function pluginUpdateStatus(status, installedVersion) {
+  const updateAvailable = comparePluginVersions(installedVersion, status.version) === -1;
+  const updateRequired = updateAvailable && status.mandatory === true
+    && comparePluginVersions(installedVersion, status.minimum_supported_version) === -1;
+  return {
+    ...status,
+    installed_version: installedVersion,
+    update_available: updateAvailable,
+    update_required: updateRequired,
+    mandatory: updateRequired
+  };
+}
 
 function normalizeUpdatePayload(input = {}) {
   const app = input.app && typeof input.app === "object" ? input.app : {};
@@ -80,6 +118,7 @@ function normalizeUpdatePayload(input = {}) {
     plugin: {
       ...defaultStatus.plugin,
       ...plugin,
+      ...normalizePluginUpdatePolicy(plugin, String(plugin.version || defaultStatus.plugin.version).trim()),
       version: String(plugin.version || defaultStatus.plugin.version).trim(),
       download_url: String(plugin.download_url || plugin.downloadUrl || defaultStatus.plugin.download_url).trim(),
       package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.zip`).trim()
@@ -87,6 +126,7 @@ function normalizeUpdatePayload(input = {}) {
     analytics_plugin: {
       ...defaultStatus.analytics_plugin,
       ...analyticsPlugin,
+      ...normalizePluginUpdatePolicy(analyticsPlugin, defaultAnalyticsPluginVersion),
       version: defaultAnalyticsPluginVersion,
       download_url: defaultStatus.analytics_plugin.download_url,
       package_name: defaultAnalyticsPluginPackageName
@@ -94,6 +134,7 @@ function normalizeUpdatePayload(input = {}) {
     pdd_procurement_plugin: {
       ...defaultStatus.pdd_procurement_plugin,
       ...pddProcurementPlugin,
+      ...normalizePluginUpdatePolicy(pddProcurementPlugin, String(pddProcurementPlugin.version || defaultStatus.pdd_procurement_plugin.version).trim()),
       version: String(pddProcurementPlugin.version || defaultStatus.pdd_procurement_plugin.version).trim(),
       download_url: String(pddProcurementPlugin.download_url || pddProcurementPlugin.downloadUrl || defaultStatus.pdd_procurement_plugin.download_url).trim(),
       package_name: String(pddProcurementPlugin.package_name || pddProcurementPlugin.packageName || `pdd-procurement-logistics-plugin-${pddProcurementPlugin.version || defaultStatus.pdd_procurement_plugin.version}.zip`).trim()
@@ -178,23 +219,15 @@ export function globalUpdateStatus(query = {}) {
   const appVersion = String(query.app_version || query.appVersion || "").trim();
   const pluginVersion = String(query.plugin_version || query.pluginVersion || "").trim();
   const analyticsPluginVersion = String(query.analytics_plugin_version || query.analyticsPluginVersion || "").trim();
+  const pddProcurementPluginVersion = String(query.pdd_procurement_plugin_version || query.pddProcurementPluginVersion || "").trim();
   return {
     app: {
       ...status.app,
       update_required: Boolean(appVersion && appVersion !== status.app.version)
     },
-    plugin: {
-      ...status.plugin,
-      update_required: Boolean(pluginVersion && pluginVersion !== status.plugin.version)
-    },
-    analytics_plugin: {
-      ...status.analytics_plugin,
-      update_required: Boolean(analyticsPluginVersion && analyticsPluginVersion !== status.analytics_plugin.version)
-    },
-    pdd_procurement_plugin: {
-      ...status.pdd_procurement_plugin,
-      update_required: Boolean(query.pdd_procurement_plugin_version && query.pdd_procurement_plugin_version !== status.pdd_procurement_plugin.version)
-    }
+    plugin: pluginUpdateStatus(status.plugin, pluginVersion),
+    analytics_plugin: pluginUpdateStatus(status.analytics_plugin, analyticsPluginVersion),
+    pdd_procurement_plugin: pluginUpdateStatus(status.pdd_procurement_plugin, pddProcurementPluginVersion)
   };
 }
 

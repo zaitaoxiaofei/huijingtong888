@@ -53,9 +53,10 @@ test("pivot analytics plugin claims collect tasks for the current Ozon store onl
   const source = backgroundSource();
   const nextRequestsSource = source.match(/async function getNextCollectRequests\([^)]*\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
 
-  assert.match(nextRequestsSource, /const companyId = currentSellerCompanyId\(tab\?\.id\)/);
+  assert.match(nextRequestsSource, /const identity = await verifiedSellerStoreIdentity\(tab, preferredSellerStoreId\)/);
+  assert.match(nextRequestsSource, /const companyId = identity\.companyId/);
   assert.doesNotMatch(nextRequestsSource, /panelState\.currentCompanyId/);
-  assert.match(nextRequestsSource, /if \(!companyId\)[\s\S]*?return \[\]/);
+  assert.match(nextRequestsSource, /if \(identity\.code === 'identity_missing'\)[\s\S]*?return \[\]/);
   assert.match(nextRequestsSource, /params\.set\('store_id', companyId\)/);
   assert.match(nextRequestsSource, /params\.set\('company_id', companyId\)/);
   assert.doesNotMatch(nextRequestsSource, /if \(companyId\)\s*\{/);
@@ -66,7 +67,7 @@ test("pivot analytics plugin locks preparation to one fresh seller tab identity"
   const source = backgroundSource();
 
   assert.match(source, /let prepareSellerTabId = 0/);
-  assert.match(source, /latestContextHeadersByTab\.delete\(tab\.id\)/);
+  assert.match(source, /latestContextHeadersByTab\.delete\(existingTab\.id\)/);
   assert.match(source, /Number\(context\?\.updated_at \|\| 0\) < prepareStartedAt/);
   assert.match(source, /const observedCompanyId = String\(currentSellerCompanyId\(tab\?\.id\) \|\| ''\)\.trim\(\)/);
   assert.doesNotMatch(source, /const observedCompanyId = String\(currentSellerCompanyId\(tab\?\.id\) \|\| cookieInfo\.companyId/);
