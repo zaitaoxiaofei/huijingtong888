@@ -15,6 +15,7 @@
 
 - [saas-launch-readiness.md](saas-launch-readiness.md)：企业收费试点进度、安全修复及发布验收。
 - [tenant-saas-development-plan.md](tenant-saas-development-plan.md)：套餐、激活与企业隔离原始计划。
+- [platform-enterprise-identity-migration.md](platform-enterprise-identity-migration.md)：平台授权、企业角色与岗位拆分，以及明确人员清单的迁移流程。
 - [order-sync-strategy.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/order-sync-strategy.md)
 - [procurement-module-maintenance.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/procurement-module-maintenance.md)
 - [local-mysql-start.md](/C:/Users/DIZAI/OneDrive/文档/ozon-erp/ozon-system/docs/local-mysql-start.md)

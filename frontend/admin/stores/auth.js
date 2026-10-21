@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
-import { apiClient, clearAuthToken, getAuthToken, setAuthToken } from "../utils/api";
+import { apiClient, clearAuthToken, currentApiCacheScope, getAuthToken, setAuthToken } from "../utils/api";
 
 const AUTH_USER_CACHE_KEY = "baodanAuthUser";
 const BOOTSTRAP_TIMEOUT_MS = 8000;
@@ -34,9 +34,15 @@ export const useAuthStore = defineStore("auth", () => {
   const user = ref(null);
   const bootstrapped = ref(false);
   const loading = ref(false);
-  let verifyPromise = null;
+  let verification = null;
 
   const isAuthenticated = computed(() => Boolean(user.value));
+
+  function applyUser(currentUser) {
+    user.value = currentUser;
+    writeCachedUser(currentUser);
+    currentApiCacheScope();
+  }
 
   async function bootstrap() {
     if (bootstrapped.value) return;
@@ -44,6 +50,7 @@ export const useAuthStore = defineStore("auth", () => {
       bootstrapped.value = true;
       return;
     }
+    const scope = currentApiCacheScope();
     const cachedUser = readCachedUser();
     if (cachedUser) {
       user.value = cachedUser;
@@ -59,40 +66,46 @@ export const useAuthStore = defineStore("auth", () => {
         noCache: true,
         signal: controller.signal
       });
-      user.value = currentUser;
-      writeCachedUser(currentUser);
+      if (scope !== currentApiCacheScope()) return;
+      applyUser(currentUser);
+      bootstrapped.value = true;
     } catch (error) {
+      if (scope !== currentApiCacheScope()) return;
       if (Number(error?.status || 0) === 401) clearSession();
+      bootstrapped.value = true;
     } finally {
       window.clearTimeout(timeoutId);
-      bootstrapped.value = true;
     }
   }
 
   async function verifySession({ background = false } = {}) {
-    if (verifyPromise) return verifyPromise;
+    const scope = currentApiCacheScope();
+    if (verification?.scope === scope) return verification.promise;
     if (!getAuthToken()) {
       clearSession();
       return;
     }
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), BACKGROUND_VERIFY_TIMEOUT_MS);
-    verifyPromise = apiClient.get("/api/auth/me", {
+    const currentVerification = { scope, promise: null };
+    currentVerification.promise = apiClient.get("/api/auth/me", {
       routeScoped: false,
       noCache: true,
       signal: controller.signal
     }).then((currentUser) => {
-      user.value = currentUser;
-      writeCachedUser(currentUser);
+      if (scope !== currentApiCacheScope()) return null;
+      applyUser(currentUser);
       return currentUser;
     }).catch((error) => {
+      if (scope !== currentApiCacheScope() || error?.name === "AbortError") return null;
       if (Number(error?.status || 0) === 401 || !background) clearSession();
       return null;
     }).finally(() => {
       window.clearTimeout(timeoutId);
-      verifyPromise = null;
+      if (verification === currentVerification) verification = null;
     });
-    return verifyPromise;
+    verification = currentVerification;
+    return currentVerification.promise;
   }
 
   async function login(payload) {
@@ -120,8 +133,7 @@ export const useAuthStore = defineStore("auth", () => {
       throw new Error(result?.error || "Login failed");
     }
     setAuthToken(result.token);
-    user.value = result.user;
-    writeCachedUser(result.user);
+    applyUser(result.user);
     bootstrapped.value = true;
     return result;
   }
@@ -131,18 +143,20 @@ export const useAuthStore = defineStore("auth", () => {
   }
 
   async function logout() {
+    const scope = currentApiCacheScope();
     try {
       await apiClient.post("/api/auth/logout");
     } catch {
       // ignore logout errors and clear local session anyway
     }
-    clearSession();
+    if (scope === currentApiCacheScope()) clearSession();
   }
 
   function clearSession() {
     clearAuthToken();
     clearCachedUser();
     user.value = null;
+    currentApiCacheScope();
   }
 
   return {

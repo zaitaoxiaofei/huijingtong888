@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createOperationsRoutes, handleOperationsRestRoute } from "../src/server/routes/operations.js";
+import { createEnterpriseManagementRoutes } from "../src/server/routes/enterpriseManagement.js";
 import { authorizeApiRequest } from "../src/server/authorization.js";
 import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 import { canAccessPage } from "../src/shared/permissions.js";
@@ -47,10 +48,51 @@ test("shop management is limited to tenant owners/admins and exact scoped routes
   assert.equal(tenantIsolationDecision(owner, ["api", "shops", "12", "credentials"], "DELETE").allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "shops"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "shops"]).allowed, false);
-  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "people"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "people"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "tenants", "members"]).allowed, true);
   assert.equal(canAccessPage(owner, "/tenant-shops"), true);
   assert.equal(canAccessPage(member, "/tenant-shops"), false);
+});
+
+test("legacy people selector reads only current enterprise members and strips identity secrets", async () => {
+  const calls = [];
+  const routes = createEnterpriseManagementRoutes({ services: {
+    tenantMembers: async tenantId => {
+      calls.push(tenantId);
+      return [
+        { person_id: tenantId * 10, name: `Member ${tenantId}`, username: `member-${tenantId}`, avatar_url: "", active: 1, account_active: 1,
+          business_roles_json: '["packing"]', role: "owner", platform_role: "super_admin", password_hash: "private-hash", secret: "private-secret" },
+        { person_id: 999, name: "Disabled account", active: 1, account_active: 0 }
+      ];
+    },
+    people: async () => { throw new Error("A business administrator must not read global identities"); }
+  }, readJson: async () => ({}) });
+  for (const tenant of [{ id: 42, slug: "company-a" }, { id: 1, slug: "default" }]) {
+    const session = { personId: 7, roles: ["admin"], tenant: { ...tenant, role: "member" } };
+    const req = { method: "GET", headers: { "x-tenant-id": "99" }, query: { tenant_id: 99, tenantId: 99 }, _session: session };
+    assert.equal(tenantIsolationDecision(session, ["api", "people"], "GET").allowed, true);
+    assert.equal(authorizeApiRequest(req, ["api", "people"]).allowed, true);
+    assert.deepEqual(await routes["GET /api/people"](req), [
+      { id: tenant.id * 10, name: `Member ${tenant.id}`, username: `member-${tenant.id}`, avatar_url: "", roles: ["packing"], active: 1 }
+    ]);
+  }
+  assert.deepEqual(calls, [42, 1]);
+  const server = read("../src/server.js");
+  assert.ok(server.indexOf("...createEnterpriseManagementRoutes({") > server.indexOf("...createOperationsRoutes({"), "safe selector must override the legacy global route");
+});
+
+test("global identity selector requires an explicit platform grant and no enterprise membership", async () => {
+  let globalCalls = 0;
+  const identities = [{ id: 1, name: "Platform account" }];
+  const routes = createEnterpriseManagementRoutes({ services: {
+    people: async () => { globalCalls++; return identities; },
+    tenantMembers: async () => { throw new Error("Platform selector does not infer a default membership"); }
+  }, readJson: async () => ({}) });
+  const req = { method: "GET", _session: { personId: 1, platform_role: "super_admin", tenant: null } };
+  assert.equal(tenantIsolationDecision(req._session, ["api", "people"], "GET").allowed, true);
+  assert.equal(authorizeApiRequest(req, ["api", "people"]).allowed, true);
+  assert.deepEqual(await routes["GET /api/people"](req), identities);
+  assert.equal(globalCalls, 1);
 });
 
 test("shop storage adds a tenant index without bulk-reassigning legacy rows", () => {

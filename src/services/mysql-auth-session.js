@@ -2,6 +2,7 @@ import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
 import { getRoles, primaryRole } from "../shared/permissions.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { ensureTenantSchemaMysql, resolveActiveTenantMysql, tenantHasAccess } from "./tenants.js";
+import { getPlatformGrantMysql } from "./platform-grants.js";
 
 function ensureMysqlAuthSessionEnabled() {
   if (!isMysqlPrimaryEnabled()) {
@@ -46,12 +47,14 @@ export async function createSessionMysql(session) {
   if (typeof ensureTenantSchemaMysql === "function") await ensureTenantSchemaMysql();
   const expiresAt = normalizeMysqlDateTime(session.expiresAt);
   const tenant = await resolveActiveTenantMysql(session.personId, session.activeTenantId);
-  if (!tenant) throw new Error("账号未加入任何企业，请联系平台管理员");
+  const platformGrant = await getPlatformGrantMysql(session.personId);
+  if (session.activeTenantId && !tenant) throw new Error("无权登录所选企业");
+  if (!tenant && !platformGrant) throw new Error("账号未加入任何企业且没有平台授权，请联系平台超级管理员");
 
   await mysqlExecute(`
     INSERT INTO sessions (token, person_id, name, role, username, active_tenant_id, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `, [session.token, session.personId, session.name, session.role, session.username || null, tenant.id, expiresAt]);
+  `, [session.token, session.personId, session.name, session.role, session.username || null, tenant?.id || null, expiresAt]);
 
   return session.token;
 }
@@ -61,11 +64,17 @@ export async function getSessionMysql(token) {
   await ensurePeopleRolesSchemaMysql();
   if (typeof ensureTenantSchemaMysql === "function") await ensureTenantSchemaMysql();
   const row = await mysqlQueryOne(`SELECT s.*, p.name AS current_name, p.role AS current_role, p.roles_json,
-      t.slug AS tenant_slug, t.name AS tenant_name, t.status AS tenant_status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role AS tenant_role
+      t.slug AS tenant_slug, t.name AS tenant_name, t.status AS tenant_status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role AS tenant_role, tm.business_roles_json,
+      pg.role AS platform_role
     FROM sessions s JOIN people p ON p.id = s.person_id AND p.active = 1
-    JOIN tenant_members tm ON tm.tenant_id = s.active_tenant_id AND tm.person_id = s.person_id AND tm.active = 1
-    JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active' WHERE s.token = ?`, [token]);
+    LEFT JOIN tenant_members tm ON tm.tenant_id = s.active_tenant_id AND tm.person_id = s.person_id AND tm.active = 1
+    LEFT JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
+    LEFT JOIN platform_grants pg ON pg.person_id = p.id AND pg.active = 1 AND pg.role = 'super_admin'
+    WHERE s.token = ?`, [token]);
   if (!row) return null;
+  const platformRole = row.platform_role === "super_admin" ? "super_admin" : null;
+  const hasTenant = Boolean(row.tenant_slug && row.tenant_role);
+  if (!hasTenant && !platformRole) return null;
 
   if (new Date(row.expires_at) < new Date()) {
     await destroySessionMysql(token);
@@ -75,11 +84,13 @@ export async function getSessionMysql(token) {
   return {
     personId: row.person_id,
     name: row.current_name,
-    role: primaryRole({ role: row.current_role, roles_json: row.roles_json }),
-    roles: getRoles({ role: row.current_role, roles_json: row.roles_json }),
+    role: hasTenant ? primaryRole({ role: row.current_role, roles_json: row.business_roles_json ?? row.roles_json }) : "",
+    roles: hasTenant ? getRoles({ role: row.current_role, roles_json: row.business_roles_json ?? row.roles_json }) : [],
+    platform_role: platformRole,
     username: row.username,
-    tenantId: Number(row.active_tenant_id),
+    tenantId: hasTenant ? Number(row.active_tenant_id) : null,
     tenant: (() => {
+      if (!hasTenant) return null;
       const tenant = { id: Number(row.active_tenant_id), slug: row.tenant_slug, name: row.tenant_name, status: row.tenant_status, plan_code: row.plan_code, subscription_status: row.subscription_status, subscription_expires_at: row.subscription_expires_at, role: row.tenant_role };
       return { ...tenant, access_allowed: typeof tenantHasAccess === "function" ? tenantHasAccess(tenant) : true };
     })(),

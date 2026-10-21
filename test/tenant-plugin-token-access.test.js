@@ -21,10 +21,11 @@ test("ordinary plugin token requests stay inside the active session enterprise e
   assert.equal(pluginTokenTenantIdFromRequest(req, "42"), 42);
   assert.throws(() => pluginTokenTenantIdFromRequest(req, 99), { statusCode: 403 });
   assert.throws(() => pluginTokenTenantIdFromRequest({}, 42), { statusCode: 403 });
-  assert.equal(pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"] } }, 99), 99);
-  assert.equal(pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], tenant: { id: 1 } } }), 1);
-  assert.throws(() => pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"] } }), { statusCode: 400 });
-  assert.throws(() => pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"] } }, "invalid"), { statusCode: 400 });
+  assert.equal(pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], platform_role: "super_admin" } }, 99), 99);
+  assert.equal(pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], platform_role: "super_admin", tenant: { id: 1 } } }), 1);
+  assert.throws(() => pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], platform_role: "super_admin" } }), { statusCode: 400 });
+  assert.throws(() => pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], platform_role: "super_admin" } }, "invalid"), { statusCode: 400 });
+  assert.throws(() => pluginTokenTenantIdFromRequest({ _session: { roles: ["admin"], tenant: { id: 42, slug: "company-a", role: "admin" } } }, 99), { statusCode: 403 });
   const server = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
   const routes = server.slice(server.indexOf('"GET /api/tenants/plugin-token"'), server.indexOf('"POST /api/system/update-status"'));
   assert.equal((routes.match(/pluginTokenTenantIdFromRequest\(req,/g) || []).length, tokenRoutes.length);
@@ -63,12 +64,14 @@ test("tenant plugin token routes are available only to enterprise owners and adm
       assert.equal(allowed(session, method, parts), role !== "member", `${role}: ${method} ${parts.join("/")}`);
     }
     const ordinary = { roles: ["operations"], tenant: { id: 42, slug: "company-a" } };
-    const platformAdmin = { roles: ["admin"], tenant: { id: 42, slug: "company-a", role: "member" } };
+    const platformAdmin = { roles: ["admin"], platform_role: "super_admin", tenant: { id: 42, slug: "company-a", role: "member" } };
     const unassigned = { roles: ["operations"] };
-    const invalidRole = { roles: [], tenant: { id: 42, slug: "company-a", role: "owner" } };
+    const ownerWithoutBusinessRole = { roles: [], tenant: { id: 42, slug: "company-a", role: "owner" } };
+    const invalidRole = { roles: [], tenant: { id: 42, slug: "company-a", role: "member" } };
     assert.equal(allowed(ordinary, method, parts), false);
     assert.equal(allowed(platformAdmin, method, parts), true);
     assert.equal(allowed(unassigned, method, parts), false);
+    assert.equal(allowed(ownerWithoutBusinessRole, method, parts), true);
     assert.equal(allowed(invalidRole, method, parts), false);
   }
 });

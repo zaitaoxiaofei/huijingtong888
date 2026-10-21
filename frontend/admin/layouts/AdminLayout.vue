@@ -10,7 +10,7 @@ import { useAppStore } from "../stores/app";
 import { useWorkspaceTabsStore } from "../stores/workspaceTabs";
 import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { uploadListingMedia } from "../api/tools/imageCropper";
-import { apiClient } from "../utils/api";
+import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 
 const route = useRoute();
@@ -181,19 +181,25 @@ async function handleLogout() {
 }
 
 async function loadNotifications({ quiet = false } = {}) {
-  if (!authStore.user) return;
+  const scope = currentApiCacheScope();
+  if (!authStore.user?.tenant?.id) {
+    notifications.value = [];
+    notificationUnread.value = 0;
+    return;
+  }
   if (!quiet) notificationLoading.value = true;
   try {
     const result = await apiClient.get(`/api/system-notifications?status=${notificationStatus.value}&pageSize=50`, {
       routeScoped: false,
       noCache: true
     });
+    if (scope !== currentApiCacheScope()) return;
     notifications.value = result?.rows || [];
     notificationUnread.value = Number(result?.unread || 0);
   } catch (error) {
     if (!quiet) ElMessage.error(error?.message || "通知加载失败");
   } finally {
-    notificationLoading.value = false;
+    if (scope === currentApiCacheScope()) notificationLoading.value = false;
   }
 }
 
@@ -655,6 +661,17 @@ watch(
     tabsStore.openRoute(route);
   },
   { immediate: true }
+);
+
+watch(
+  () => [authStore.user?.id, authStore.user?.tenant?.id],
+  () => {
+    notifications.value = [];
+    notificationUnread.value = 0;
+    notificationLoading.value = false;
+    notificationDrawerVisible.value = false;
+  },
+  { flush: "sync" }
 );
 
 onMounted(() => {

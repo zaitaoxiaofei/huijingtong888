@@ -208,12 +208,14 @@ test("login and auth me expose the complete role combination", async () => {
   const handler = createAuthHandler(async () => ({ username: "worker", password: "valid" }), {
     ...createNoSessionOverrides(), verifyPassword: () => true,
     findPersonForLogin: async () => row, findPersonById: async () => row,
-    getSession: async () => ({ personId: 7 }),
+    getSession: async () => ({ personId: 7, role: "manager", roles: ["packing", "manager"], tenant: { id: 2, slug: "company-a", role: "member" }, platform_role: null }),
     createSession: async (_id, _name, role) => { assert.equal(role, "manager"); return "combined-token"; }
   });
   const login = await handler({ method: "POST", headers: {} }, new URL("http://localhost/api/auth/login"))();
   assert.deepEqual(login.user.roles, ["packing", "manager"]);
   assert.equal(login.user.role, "manager");
+  assert.equal(login.user.tenant.id, 2);
+  assert.equal(login.user.platform_role, null);
   const me = await handler({ method: "GET", headers: {authorization:"Bearer combined-token"} }, new URL("http://localhost/api/auth/me"))();
   assert.deepEqual(me.roles, ["packing", "manager"]);
 });

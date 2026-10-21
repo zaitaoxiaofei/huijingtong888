@@ -1,8 +1,26 @@
-import { hasPermission } from "../../shared/permissions.js";
+import { hasPermission, isPlatformAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
 import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
 import { sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
+
+function platformLogisticsScope(req, body = null, url = null) {
+  if (!isPlatformAdmin(req?._session)) {
+    throw Object.assign(new Error("仅平台超级管理员可以管理共用物流规则"), { statusCode: 403 });
+  }
+  const selectors = ["tenant_id", "tenantId"];
+  const searchParams = url?.searchParams || new URL(req?.url || "/", "http://localhost").searchParams;
+  if (selectors.some(key => searchParams.has(key) || Object.hasOwn(req?.query || {}, key) || Object.hasOwn(body || {}, key))) {
+    throw Object.assign(new Error("共用物流规则使用固定的平台配置范围，请移除企业选择参数（tenant_id / tenantId）"), { statusCode: 400 });
+  }
+  return "admin";
+}
+
+function platformLogisticsRule(row) {
+  const { tenant_id, tenantId, ...rule } = row;
+  return rule;
+}
+
 export function createOperationsRoutes({ services, readJson }) {
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
@@ -12,7 +30,7 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/tools/pricing/logistics-rules": () => sharedPricingLogisticsRules(),
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
     "GET /api/settings/packaging-fee-rule/changes": (req, url) => services.packagingFeeRuleChanges(url?.searchParams?.get("limit") || 20),
-    "GET /api/logistics-rules": (req) => services.logisticsRules(tenantIdFromRequest(req)),
+    "GET /api/logistics-rules": async (req, url) => (await services.logisticsRules(platformLogisticsScope(req, null, url))).map(platformLogisticsRule),
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
     "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),
@@ -103,7 +121,11 @@ export function createOperationsRoutes({ services, readJson }) {
     "POST /api/customer-message-settings/template": async (req) => services.updateCustomerMessageTemplate(await readJson(req)),
     "POST /api/customer-message-settings/template/translate-zh": async (req) => services.translateCustomerMessageTemplateZh(await readJson(req)),
     "POST /api/user-preferences": async (req) => services.updateUserPreference(await readJson(req), req._session?.personId),
-    "POST /api/logistics-rules": async (req) => services.createLogisticsRule(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/logistics-rules": async (req, url) => {
+      platformLogisticsScope(req, null, url);
+      const body = await readJson(req);
+      return services.createLogisticsRule(body, platformLogisticsScope(req, body, url));
+    },
     "POST /api/order-cancellation-rules": async (req) => services.createOrderCancellationRule(await readJson(req)),
     "POST /api/order-cancellation-rules/test": async (req) => services.testOrderCancellationRule(await readJson(req)),
     "POST /api/settings/packaging-fee-rule": async (req) => services.updatePackagingFeeRule(await readJson(req), req._session?.personId),
@@ -259,12 +281,14 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
     return json(res, await services.deleteSupplier(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
-  if (req.method === "PUT" && parts[0] === "api" && parts[1] === "logistics-rules" && parts[2]) {
-    return json(res, await services.updateLogisticsRule(Number(parts[2]), await readJson(req), tenantIdFromRequest(req)));
+  if (req.method === "PUT" && parts[0] === "api" && parts[1] === "logistics-rules" && parts.length === 3 && /^\d+$/.test(parts[2] || "")) {
+    platformLogisticsScope(req, null, url);
+    const body = await readJson(req);
+    return json(res, await services.updateLogisticsRule(Number(parts[2]), body, platformLogisticsScope(req, body, url)));
   }
 
-  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "logistics-rules" && parts[2]) {
-    return json(res, await services.deleteLogisticsRule(Number(parts[2]), tenantIdFromRequest(req)));
+  if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "logistics-rules" && parts.length === 3 && /^\d+$/.test(parts[2] || "")) {
+    return json(res, await services.deleteLogisticsRule(Number(parts[2]), platformLogisticsScope(req, null, url)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "stock-warehouse-rules" && parts[2]) {

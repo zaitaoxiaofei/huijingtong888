@@ -5,6 +5,7 @@ import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMember
 import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEncryptionConfigured } from "./tenant-plugin-token-crypto.js";
 import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
 import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
+import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -28,6 +29,7 @@ export async function ensureTenantSchemaMysql() {
       tenant_id BIGINT UNSIGNED NOT NULL,
       person_id BIGINT UNSIGNED NOT NULL,
       role VARCHAR(32) NOT NULL DEFAULT 'member',
+      business_roles_json JSON NULL,
       active TINYINT(1) NOT NULL DEFAULT 1,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -35,6 +37,9 @@ export async function ensureTenantSchemaMysql() {
       KEY idx_tenant_members_person (person_id, active),
       KEY idx_tenant_members_tenant (tenant_id, active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    await mysqlExecute("ALTER TABLE tenant_members ADD COLUMN business_roles_json JSON NULL").catch(error => {
+      if (error?.code !== "ER_DUP_FIELDNAME") throw error;
+    });
     await mysqlExecute(`CREATE TABLE IF NOT EXISTS tenant_plugin_tokens (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
       tenant_id BIGINT UNSIGNED NOT NULL,
@@ -101,6 +106,7 @@ export async function ensureTenantSchemaMysql() {
     });
     await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "默认企业"]);
     await ensurePeopleRolesSchemaMysql();
+    await ensurePlatformGrantSchemaMysql();
     await withMysqlTransaction(bootstrapDefaultTenantAccessMysql);
   })().catch(error => {
     schemaReady = null;
@@ -123,7 +129,7 @@ export function tenantHasAccess(tenant = {}) {
 
 export async function tenantMembershipsMysql(personId) {
   await ensureTenantSchemaMysql();
-  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active, tm.business_roles_json
     FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id
     WHERE tm.person_id = ? AND tm.active = 1 AND t.status = 'active'
     ORDER BY t.id`, [Number(personId)]);
@@ -315,7 +321,8 @@ export async function tenantMembersMysql(tenantId) {
     error.statusCode = 400;
     throw error;
   }
-  return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, p.name, p.username
+  return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, tm.business_roles_json, p.name, p.username,
+      p.avatar_url, p.role AS business_role, p.roles_json, p.active AS account_active
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
     WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [normalizedTenantId]);
 }

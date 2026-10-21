@@ -47,6 +47,7 @@ const mediaAssetDeleting = ref(false);
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
+const tenantConfigOnly = computed(() => authStore.user?.tenant?.slug !== "default");
 const detailDragIndex = ref(null);
 const detailDragOverIndex = ref(null);
 const detailReplaceIndex = ref(-1);
@@ -321,6 +322,7 @@ async function loadBootstrap() {
 }
 
 async function loadMediaAssets() {
+  if (tenantConfigOnly.value) return;
   mediaAssetLoading.value = true;
   try {
     state.mediaAssets = await apiClient.get("/api/listing/media/assets?limit=500", { noCache: true });
@@ -1058,6 +1060,7 @@ async function loadPublishRecordSourceFromRoute() {
 }
 
 async function loadRouteSource() {
+  if (tenantConfigOnly.value) return;
   await loadSelectionSourceFromRoute();
   await loadCollectorSourceFromRoute();
   await loadPublishRecordSourceFromRoute();
@@ -1164,6 +1167,7 @@ async function pollGenerateJob() {
 }
 
 async function restoreGenerateJob() {
+  if (tenantConfigOnly.value) return;
   const cached = readPersistedGenerateJob();
   generateJob.restoring = true;
   try {
@@ -1203,6 +1207,7 @@ async function restoreGenerateJob() {
 }
 
 async function generateVariants(shopIds = state.selectedShopIds) {
+  if (tenantConfigOnly.value) return;
   if (!material.title || !material.mainImage?.url) {
     ElMessage.warning("请先填写标题并上传主图");
     return;
@@ -1229,6 +1234,7 @@ async function generateVariants(shopIds = state.selectedShopIds) {
 }
 
 async function startGenerateAllShopsJob(shopIds = state.selectedShopIds) {
+  if (tenantConfigOnly.value) return;
   if (!material.title || !material.mainImage?.url) {
     ElMessage.warning("请先填写标题并上传主图");
     return;
@@ -1684,6 +1690,7 @@ async function importToListingAutomation() {
 }
 
 async function goToListingAutomation() {
+  if (tenantConfigOnly.value) return;
   await importToListingAutomation();
   if (state.variants.length) {
     router.push({
@@ -1697,6 +1704,7 @@ async function goToListingAutomation() {
 }
 
 function openMaterialCenter() {
+  if (tenantConfigOnly.value) return;
   router.push({
     name: "settings-materials",
     query: {
@@ -2343,6 +2351,7 @@ watch(
 
 onMounted(async () => {
   await loadBootstrap();
+  if (tenantConfigOnly.value) return;
   await loadRouteSource();
   await restoreGenerateJob();
 });
@@ -2359,16 +2368,16 @@ onBeforeUnmount(() => {
   <div class="asset-variant-page" v-loading="loading">
     <header class="workspace-header">
         <div>
-          <h1>店铺矩阵裂变</h1>
-          <p>上传一套原始商品素材，按店铺规则批量生成标题、标签、描述、水印图、详情图和 listing 素材包。</p>
-          <div v-if="generateJob.id" class="active-job-banner">
+          <h1>{{ tenantConfigOnly ? "店铺矩阵配置" : "店铺矩阵裂变" }}</h1>
+          <p>{{ tenantConfigOnly ? "维护本企业店铺的水印、尾图、价格和文案风格配置。" : "上传一套原始商品素材，按店铺规则批量生成标题、标签、描述、水印图、详情图和 listing 素材包。" }}</p>
+          <div v-if="!tenantConfigOnly && generateJob.id" class="active-job-banner">
             <span>后台批量生成任务{{ generateJob.jobNo ? `：${generateJob.jobNo}` : "" }}</span>
             <strong>{{ generateJobProgressText }}</strong>
             <el-tag :type="isGenerateJobActive ? 'warning' : generateJob.status === 'success' ? 'success' : 'info'" effect="light">
               {{ generateJob.status || (generateJob.restoring ? 'restoring' : 'queued') }}
             </el-tag>
           </div>
-          <div v-if="state.localOutputDir" class="local-output-bar">
+          <div v-if="!tenantConfigOnly && state.localOutputDir" class="local-output-bar">
             <span>本地输出目录</span>
             <strong>{{ state.localOutputDir }}</strong>
             <el-button size="small" type="primary" link @click="copyText(state.localOutputDir, '已复制路径')">复制路径</el-button>
@@ -2376,19 +2385,19 @@ onBeforeUnmount(() => {
         </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="loadBootstrap">刷新</el-button>
-        <el-button :icon="View" @click="openMaterialCenter">查看素材</el-button>
-        <el-button :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
-        <el-button type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
-        <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
-        <el-button type="success" :loading="importing" :disabled="!state.variants.length" @click="goToListingAutomation">编辑上架</el-button>
+        <el-button v-if="!tenantConfigOnly" :icon="View" @click="openMaterialCenter">查看素材</el-button>
+        <el-button v-if="!tenantConfigOnly" :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
+        <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
+        <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
+        <el-button v-if="!tenantConfigOnly" type="success" :loading="importing" :disabled="!state.variants.length" @click="goToListingAutomation">编辑上架</el-button>
       </div>
-      <input ref="folderInputRef" class="hidden-input" type="file" webkitdirectory directory multiple @change="onFolderImport">
-      <input ref="detailReplaceInputRef" class="hidden-input" type="file" accept="image/*" @change="onDetailReplaceInput">
+      <input v-if="!tenantConfigOnly" ref="folderInputRef" class="hidden-input" type="file" webkitdirectory directory multiple @change="onFolderImport">
+      <input v-if="!tenantConfigOnly" ref="detailReplaceInputRef" class="hidden-input" type="file" accept="image/*" @change="onDetailReplaceInput">
     </header>
 
     <div class="flow-shell">
       <main class="flow-main">
-        <section class="step-panel source-step" :class="{ collapsed: !sourcePanelExpanded && state.sourceProduct }">
+        <section v-if="!tenantConfigOnly" class="step-panel source-step" :class="{ collapsed: !sourcePanelExpanded && state.sourceProduct }">
           <div class="step-heading">
             <span class="step-index">1</span>
             <div>
@@ -2554,13 +2563,13 @@ onBeforeUnmount(() => {
 
         <section class="step-panel">
           <div class="step-heading">
-            <span class="step-index">2</span>
+            <span class="step-index">{{ tenantConfigOnly ? 1 : 2 }}</span>
             <div>
               <h2>店铺模板</h2>
               <p>这里主要负责每个店铺的水印、尾图和主图生成方案，价格和文案风格放到下方独立矩阵。</p>
             </div>
             <div class="step-actions">
-              <el-button size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
+              <el-button v-if="!tenantConfigOnly" size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
               <el-button size="small" @click="openTailTemplateDialog()">新增尾图模板</el-button>
             </div>
           </div>
@@ -2608,7 +2617,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="rule-actions" @click.stop>
                 <el-button link type="primary" @click="saveRule(shop)">保存规则</el-button>
-                <el-button link type="primary" @click="previewGeneratedResult">预览</el-button>
+                <el-button v-if="!tenantConfigOnly" link type="primary" @click="previewGeneratedResult">预览</el-button>
                 <el-button link type="primary" @click="openTailTemplateDialog(shop)">加尾图</el-button>
               </div>
             </article>
@@ -2617,7 +2626,7 @@ onBeforeUnmount(() => {
 
         <section class="step-panel matrix-panel">
           <div class="step-heading">
-            <span class="step-index">3</span>
+            <span class="step-index">{{ tenantConfigOnly ? 2 : 3 }}</span>
             <div>
               <h2>价格矩阵</h2>
               <p>{{ priceMatrixSummary() }}。价格角色可以手动选择，会保存为店铺规则并应用到一键上架流程。</p>
@@ -2634,7 +2643,7 @@ onBeforeUnmount(() => {
             >
               <div>
                 <strong>{{ shop.name }}</strong>
-                <span>{{ isShopEnabled(shop) ? '参与本次生成' : '本次不生成' }}</span>
+                <span>{{ tenantConfigOnly ? '本企业店铺配置' : isShopEnabled(shop) ? '参与本次生成' : '本次不生成' }}</span>
                 <el-tag size="small" :type="shopPriceRole(shop).type" effect="light">{{ priceRuleText(shop) }}</el-tag>
                 <p class="price-role-desc">{{ priceRoleDescription(shop) }}</p>
               </div>
@@ -2652,7 +2661,7 @@ onBeforeUnmount(() => {
 
         <section class="step-panel matrix-panel">
           <div class="step-heading">
-            <span class="step-index">4</span>
+            <span class="step-index">{{ tenantConfigOnly ? 3 : 4 }}</span>
             <div>
               <h2>风格矩阵</h2>
               <p>默认按店铺随机轮换文案风格；手动选择后，标题和标签会使用同一个风格，避免两边策略打架。</p>
@@ -2668,7 +2677,7 @@ onBeforeUnmount(() => {
             >
               <header>
                 <strong>{{ shop.name }}</strong>
-                <span>{{ isShopEnabled(shop) ? '参与本次生成' : '本次不生成' }} / {{ shop.legalEntity || '未配置主体' }}</span>
+                <span>{{ tenantConfigOnly ? '本企业店铺配置' : isShopEnabled(shop) ? '参与本次生成' : '本次不生成' }} / {{ shop.legalEntity || '未配置主体' }}</span>
               </header>
               <label>
                 <span>文案风格</span>
@@ -2687,7 +2696,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section class="step-panel step-results">
+        <section v-if="!tenantConfigOnly" class="step-panel step-results">
           <div class="step-heading">
             <span class="step-index">5</span>
             <div>
@@ -2850,7 +2859,7 @@ onBeforeUnmount(() => {
       <img v-else class="dialog-image" :src="previewDialog.url" alt="素材预览">
     </el-dialog>
 
-    <el-dialog v-model="packageDialog.visible" width="1240px" class="package-dialog" destroy-on-close>
+    <el-dialog v-if="!tenantConfigOnly" v-model="packageDialog.visible" width="1240px" class="package-dialog" destroy-on-close>
       <template #header>
         <div class="package-dialog-title">
           <span>素材包预览</span>

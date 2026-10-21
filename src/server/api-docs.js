@@ -49,9 +49,49 @@ const schemas = {
     field("id", scalar("number", "Internal person identifier."), true),
     field("name", scalar("string", "Display name."), true),
     field("role", scalar("string", "Primary role retained for compatibility."), true),
-    field("roles", arrayOf(scalar("string"), "Assigned roles; permissions are combined.")),
+    field("roles", arrayOf(scalar("string"), "Business roles of the active enterprise; platform-only users have no business roles.")),
+    field("platform_role", scalar("string|null", "Explicit active platform grant: super_admin or null. Legacy admin/technical roles do not grant platform access.")),
+    field("tenant", scalar("object|null", "Active enterprise membership, including id, slug and owner/admin/member role; null for platform-only accounts.")),
+    field("avatar_url", scalar("string", "Profile avatar URL.")),
+    field("tenants", arrayOf(scalar("object"), "Available active enterprise memberships, returned by auth/me.")),
     field("username", scalar("string", "Login username."), true)
   ], { additionalProperties: false }),
+
+  EnterprisePerson: objectOf("Current-enterprise membership and safe account identity, without credentials.", [
+    field("id", scalar("number", "Person identifier."), true),
+    field("person_id", scalar("number", "Same person identifier."), true),
+    field("name", scalar("string", "Display name."), true),
+    field("username", scalar("string", "Login username."), true),
+    field("avatar_url", scalar("string", "Avatar URL.")),
+    field("tenant_role", scalar("string", "Membership authority.", { enum: ["owner", "admin", "member"] }), true),
+    field("business_roles", arrayOf(scalar("string"), "Enterprise job permissions; never platform grants."), true),
+    field("member_active", scalar("number", "Membership enabled flag, 0 or 1."), true),
+    field("account_active", scalar("number", "Read-only global account enabled flag."), true),
+    field("can_edit_identity", scalar("boolean", "False when the identity belongs to another enterprise or has any platform grant."), true),
+    field("updated_at", scalar("string", "Membership revision timestamp."))
+  ], { additionalProperties: false }),
+
+  EnterprisePersonMutation: objectOf("Enterprise owner/admin member management. Create requires name, username and password; update preserves omitted fields. Platform fields, arbitrary account linking and global account disabling are forbidden.", [
+    field("name", scalar("string", "Display name; shared identities are read-only.")),
+    field("username", scalar("string", "Login name; shared identities are read-only.")),
+    field("password", scalar("string", "Initial/new password; subject to password policy.")),
+    field("avatar_url", scalar("string", "Avatar URL; shared identities are read-only.")),
+    field("tenant_role", scalar("string", "Membership authority.", { enum: ["owner", "admin", "member"] })),
+    field("business_roles", arrayOf(scalar("string"), "Nonempty supported business roles.")),
+    field("member_active", scalar("number", "Enable/disable only this enterprise membership, 0 or 1.")),
+    field("updated_at", scalar("string", "Optional optimistic revision check for updates."))
+  ], { additionalProperties: false }),
+
+  PlatformAccount: objectOf("Explicit platform grant roster; does not imply enterprise membership.", [
+    field("id", scalar("number", "Person identifier.")),
+    field("person_id", scalar("number", "Person identifier.")),
+    field("name", scalar("string", "Display name.")),
+    field("username", scalar("string", "Login username.")),
+    field("platform_role", scalar("string", "Explicit platform grant, super_admin.")),
+    field("active", scalar("number", "Grant enabled flag.")),
+    field("account_active", scalar("number", "Global account enabled flag.")),
+    field("updated_at", scalar("string", "Grant revision timestamp."))
+  ]),
 
   AuthSession: objectOf("Login response for token-based API access.", [
     field("ok", scalar("boolean", "Whether login succeeded."), true),
@@ -1027,7 +1067,7 @@ const endpoints = [
       auth: "public",
       responses: [
         response(200, "application/json", ref("AuthUser"), "Returned when the token is valid."),
-        response(200, "application/json", scalar("null", "Null when the token is missing, expired, or the user is inactive."), "Null response when not authenticated.")
+        response(401, "application/json", ref("ErrorResponse"), "Missing, expired, inactive or unauthorized identity.")
       ]
     }),
     endpoint("POST", "/api/auth/logout", "Invalidate the current session token.", {
@@ -1038,6 +1078,43 @@ const endpoints = [
       auth: "authenticated",
       requestBody: body(ref("ChangePasswordRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
+    })
+  ]),
+  section("Platform And Enterprise Identity", [
+    endpoint("GET", "/api/platform/accounts", "List explicit platform grants. Requires an active super_admin grant verified against the database; does not require enterprise membership.", {
+      responses: [response(200, "application/json", arrayOf(ref("PlatformAccount"), "Platform account roster.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/enterprise/people", "List all memberships of the current enterprise. Requires its database-verified owner/admin; request selectors cannot change the enterprise.", {
+      responses: [response(200, "application/json", arrayOf(ref("EnterprisePerson"), "Enterprise personnel.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/enterprise/people", "Create a new login identity and current-enterprise membership transactionally, with quota and last-owner checks. Existing global accounts cannot be linked by ID.", {
+      requestBody: body(ref("EnterprisePersonMutation")),
+      responses: [response(200, "application/json", ref("EnterprisePerson")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("PUT", "/api/enterprise/people/:id", "Update only a current-enterprise membership. Protect the last owner and shared login identities; changes revoke affected sessions.", {
+      pathParams: [param("id", scalar("number", "Current-enterprise person ID."))],
+      requestBody: body(ref("EnterprisePersonMutation")),
+      responses: [response(200, "application/json", ref("EnterprisePerson")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
+  section("Enterprise Matrix Configuration", [
+    endpoint("GET", "/api/asset-variant-engine/bootstrap", "Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Requires enterprise owner/admin; no provider credentials or platform prompts are exposed.", {
+      responses: [response(200, "application/json", scalar("object", "Scoped configuration bootstrap.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/asset-variant-engine/rules", "Save a rule for a current-enterprise shop. Tail-template and watermark references must belong to the same enterprise.", {
+      requestBody: body(scalar("object", "Existing structured shop rule fields, including shopId; enterprise is derived from session.")),
+      responses: [response(200, "application/json", scalar("object", "ok, shopId, updated_at.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/asset-variant-engine/tail-templates", "List only current-enterprise tail templates. Unattributed legacy templates remain default-enterprise only.", {
+      responses: [response(200, "application/json", arrayOf(scalar("object"), "Scoped tail templates.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/asset-variant-engine/tail-templates", "Create an enterprise-owned tail template; nondefault enterprises must upload image data and cannot use arbitrary local paths.", {
+      requestBody: body(scalar("object", "Tail template metadata and image data; enterprise is derived from session.")),
+      responses: [response(200, "application/json", scalar("object", "Created tail template.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/asset-variant-engine/tail-template-files/:id", "Read a tail image owned by the current enterprise. Other media, generation, jobs, imports and publishing remain gated for nondefault enterprises.", {
+      pathParams: [param("id", scalar("number", "Tail template ID."))],
+      responses: [response(200, "image/*", scalar("binary", "Authorized tail image.")), response(404, "application/json", ref("ErrorResponse"))]
     })
   ]),
   section("Enterprise Plugin Credentials", [
@@ -1060,6 +1137,11 @@ const endpoints = [
     endpoint("DELETE", "/api/tenants/plugin-token", "Revoke the active enterprise credential. Default-enterprise credentials remain platform-admin only.", {
       query: [param("tenant_id", scalar("number", "Target enterprise ID; non-platform users cannot select another enterprise."), false)],
       responses: [response(200, "application/json", ref("MutationOk")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
+  section("Shared Pricing Reference", [
+    endpoint("GET", "/api/tools/pricing/logistics-rules", "Read the safe shared tariff projection for enterprise calculators. Includes enabled supported-carrier rules from legacy NULL and canonical default scopes; excludes historical customer-owned rules, notes and usage statistics. Management remains platform-only.", {
+      responses: [response(200, "application/json", arrayOf(scalar("object", "Public tariff fields and effective dates; no tenant ownership, notes or usage counts."), "Shared tariff reference rows."))]
     })
   ]),
   section("Dashboard And Profit", [
@@ -1677,22 +1759,22 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Shop identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/people", "Return person master data.", {
+    endpoint("GET", "/api/people", "Return a safe current-enterprise person selector for enterprise users, ignoring request tenant selectors. Only an explicit platform super_admin receives global account master data.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("PersonRecord"), "Person rows."))]
     }),
-    endpoint("POST", "/api/people", "Create a person.", {
+    endpoint("POST", "/api/people", "Platform super_admin only: create a global account, without granting platform authority or inferring enterprise membership. Enterprise personnel use /api/enterprise/people.", {
       auth: "authenticated",
       requestBody: body(ref("PersonMutationRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("PUT", "/api/people/:id", "Update a person.", {
+    endpoint("PUT", "/api/people/:id", "Platform super_admin only: update a global account. Legacy business roles never confer platform authority.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Person identifier."))],
       requestBody: body(ref("PersonMutationRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("DELETE", "/api/people/:id", "Soft-delete a person, or hard-delete when hard=1 is set.", {
+    endpoint("DELETE", "/api/people/:id", "Platform super_admin only: soft-delete a global account, or hard-delete when hard=1 is set. Enterprise personnel management disables only its membership.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Person identifier."))],
       query: [param("hard", scalar("boolean", "When true, attempt hard deletion."), false)],
@@ -1718,22 +1800,22 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Supplier identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/logistics-rules", "Return logistics fee rules.", {
+    endpoint("GET", "/api/logistics-rules", "Platform super_admin only: return canonical shared logistics configuration from the default scope, independently of active enterprise. Tenant selectors are forbidden.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("LogisticsRule"), "Logistics-rule rows."))]
     }),
-    endpoint("POST", "/api/logistics-rules", "Create a logistics fee rule.", {
+    endpoint("POST", "/api/logistics-rules", "Platform super_admin only: create a canonical shared logistics rule in the default scope. Body/query tenant selectors are forbidden; legacy enterprise rules are preserved.", {
       auth: "authenticated",
       requestBody: body(ref("LogisticsRuleMutationRequest")),
       responses: [response(200, "application/json", ref("IdResponse"))]
     }),
-    endpoint("PUT", "/api/logistics-rules/:id", "Update a logistics fee rule.", {
+    endpoint("PUT", "/api/logistics-rules/:id", "Platform super_admin only: update a canonical shared logistics rule in the default scope. Body/query tenant selectors are forbidden.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Logistics-rule identifier."))],
       requestBody: body(ref("LogisticsRuleMutationRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("DELETE", "/api/logistics-rules/:id", "Delete an unreferenced logistics fee rule.", {
+    endpoint("DELETE", "/api/logistics-rules/:id", "Platform super_admin only: delete an unreferenced canonical shared rule in the default scope. Tenant selectors are forbidden.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Logistics-rule identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]

@@ -10,7 +10,7 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../utils/shanghai-date";
 
 const loading = ref(false);
-const activeSection = ref("shops");
+const activeSection = ref("rates");
 
 const shopDialogVisible = ref(false);
 const shopDialogSubmitting = ref(false);
@@ -81,8 +81,6 @@ const state = reactive({
 });
 
 const sectionOptions = [
-  { key: "shops", label: "店铺管理", description: "维护店铺主体、Client ID、API Key 标识和结算比例。" },
-  { key: "people", label: "人员管理", description: "维护账号、角色、启停状态和密码。" },
   { key: "rates", label: "汇率设置", description: "维护汇率历史记录，新增后即时生效。" },
   { key: "profit", label: "利润规则", description: "维护利润测算中的包装费阈值和收费规则。" },
   { key: "logistics", label: "物流设置", description: "维护物流规则，支持新增、编辑、停用。" },
@@ -261,7 +259,7 @@ function createDefaultCancellationForm() {
   };
 }
 
-const currentSectionMeta = computed(() => sectionMetaMap[activeSection.value] || sectionMetaMap.shops);
+const currentSectionMeta = computed(() => sectionMetaMap[activeSection.value] || sectionMetaMap.rates);
 
 const filteredShops = computed(() => {
 
@@ -485,6 +483,7 @@ function resetCancellationFilters() {
 }
 
 function goSection(key) {
+  if (!sectionOptions.some((item) => item.key === key)) return;
   activeSection.value = key;
 }
 

@@ -5,8 +5,12 @@ import vm from "node:vm";
 import { getRoles, primaryRole, validateRoles, hasPermission, canAccessPage, roleLabels } from "../src/shared/permissions.js";
 import { authorizeApiRequest } from "../src/server/authorization.js";
 
+function businessUser(roles) {
+  return { role: "operator", roles, tenant: { id: 1, slug: "default", role: "member" } };
+}
+
 function allowed(roles, method, path) {
-  return authorizeApiRequest({ method, _session: { role: "operator", roles } }, path.split("/").filter(Boolean)).allowed;
+  return authorizeApiRequest({ method, _session: businessUser(roles) }, path.split("/").filter(Boolean)).allowed;
 }
 
 test("legacy roles migrate logically while explicit roles take precedence and unknown roles fail closed", () => {
@@ -19,7 +23,7 @@ test("legacy roles migrate logically while explicit roles take precedence and un
   assert.throws(() => validateRoles(["packing", "superuser"]), /不支持/);
 });
 
-test("roles grant the union, independent of order, with admin granting everything", () => {
+test("business roles grant their union independently of order without granting platform authority", () => {
   assert.equal(primaryRole(["packing", "manager"]), "manager");
   assert.equal(primaryRole(["procurement", "admin"]), "admin");
   for (const roles of [["packing", "procurement"], ["procurement", "packing"]]) {
@@ -28,7 +32,9 @@ test("roles grant the union, independent of order, with admin granting everythin
     assert.equal(hasPermission(roles, "operations"), false);
     assert.equal(hasPermission(roles, "inventory.review"), false);
   }
-  assert.equal(hasPermission(["technical", "admin"], "arbitrary.permission"), true);
+  assert.equal(hasPermission(["technical", "admin"], "arbitrary.permission"), false);
+  assert.equal(hasPermission(["technical", "admin"], "packing"), true);
+  assert.equal(hasPermission({ roles: [], platform_role: "super_admin" }, "arbitrary.permission"), true);
   assert.equal(roleLabels(["packing", "operations"]), "打包、运营");
 });
 
@@ -59,46 +65,58 @@ test("manager anywhere in the role list can approve and maintain names; a matchi
   assert.equal(authorizeApiRequest({method:"PUT",_session:{role:"operator",name:"核动力牛马"}},["api","inventory-product-naming","options","1"]).allowed,false);
 });
 
-test("technical can manage system tools but cannot assign roles, access finance or approve", () => {
-  for (const path of ["/api/system-monitoring", "/api/scheduled-jobs", "/api/ai-provider/config"]) assert.equal(allowed(["technical"], "POST", path), true, path);
+test("legacy technical and admin business roles cannot manage platform tools or global accounts", () => {
+  for (const path of ["/api/system-monitoring", "/api/scheduled-jobs", "/api/ai-provider/config", "/api/ai-prompt-templates"]) {
+    assert.equal(allowed(["technical"], "POST", path), false, path);
+    assert.equal(allowed(["technical", "admin"], "POST", path), false, path);
+    assert.equal(authorizeApiRequest({ method: "POST", _session: { platform_role: "super_admin", roles: [] } }, path.split("/").filter(Boolean)).allowed, true, path);
+  }
   for (const path of ["/api/people", "/api/finance-center", "/api/inventory-product-requests/1", "/api/listing/drafts"]) assert.equal(allowed(["technical"], "PUT", path), false, path);
-  assert.equal(allowed(["technical", "admin"], "PUT", "/api/people/1"), true);
+  assert.equal(allowed(["technical", "admin"], "PUT", "/api/people/1"), false);
+  assert.equal(authorizeApiRequest({ method: "PUT", _session: { platform_role: "super_admin", roles: [] } }, ["api", "people", "1"]).allowed, true);
 });
 
 test("menus and direct route access follow the same combined permissions", () => {
-  assert.equal(canAccessPage(["packing"], "/orders"), true);
+  assert.equal(canAccessPage(businessUser(["packing"]), "/orders"), true);
   for (const path of ["/tools/pricing", "/tools/profit-calculator"]) {
-    assert.equal(canAccessPage(["packing"], path), true);
-    assert.equal(canAccessPage(["technical"], path), true);
+    assert.equal(canAccessPage(businessUser(["packing"]), path), true);
+    assert.equal(canAccessPage(businessUser(["technical"]), path), true);
   }
   for (const path of ["/api/tools/pricing/reference-rate", "/api/tools/pricing/rfbs-marketplace", "/api/tools/pricing/logistics-rules"]) {
     assert.equal(allowed(["packing"], "GET", path), true);
     assert.equal(allowed(["technical"], "GET", path), true);
     assert.equal(allowed(["packing"], "POST", path), false);
   }
-  assert.equal(canAccessPage(["packing"], "/procurement/workspace"), false);
-  assert.equal(canAccessPage(["packing", "procurement"], "/procurement/workspace"), true);
-  assert.equal(canAccessPage(["technical"], "/settings/system-monitoring"), true);
-  assert.equal(canAccessPage(["technical"], "/settings"), false);
-  assert.equal(canAccessPage(["technical"], "/finance/payroll"), false);
-  assert.equal(canAccessPage(["technical", "admin"], "/finance/payroll"), true);
+  assert.equal(canAccessPage(businessUser(["packing"]), "/procurement/workspace"), false);
+  assert.equal(canAccessPage(businessUser(["packing", "procurement"]), "/procurement/workspace"), true);
+  assert.equal(canAccessPage(businessUser(["technical"]), "/settings/system-monitoring"), false);
+  assert.equal(canAccessPage(businessUser(["technical"]), "/settings"), false);
+  assert.equal(canAccessPage(businessUser(["technical"]), "/finance/payroll"), false);
+  assert.equal(canAccessPage(businessUser(["technical", "admin"]), "/finance/payroll"), false);
+  assert.equal(canAccessPage({ ...businessUser(["technical", "admin"]), platform_role: "super_admin" }, "/finance/payroll"), true);
   const source = readFileSync(new URL("../frontend/admin/constants/navigation.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
   const icons = Object.fromEntries("ChatDotRound Coin DataAnalysis Document Finished Goods House MagicStick Setting ShoppingCart Tools WarningFilled".split(" ").map(name => [name, null]));
   const context = vm.createContext({ ...icons, canAccessPage }); vm.runInContext(source, context);
-  const menus = context.navigationMenusForRole({ roles: ["technical"] });
+  const menus = context.navigationMenusForRole(businessUser(["technical"]));
   const paths = menus.flatMap(menu => menu.children ? menu.children.map(child => child.route) : [menu.route]);
-  assert.ok(paths.includes("/settings/system-monitoring")); assert.ok(!paths.includes("/settings")); assert.ok(!paths.includes("/orders"));
+  assert.ok(!paths.includes("/settings/system-monitoring")); assert.ok(!paths.includes("/settings")); assert.ok(!paths.includes("/orders"));
+  assert.ok(context.navigationMenusForRole({ platform_role: "super_admin", roles: [], tenant: null }).some(menu => menu.children?.some(child => child.route === "/settings/system-monitoring")));
 });
 
-test("existing session reads current roles from people instead of stale session role", async () => {
+test("existing session reads current enterprise roles instead of stale session or global person roles", async () => {
   const source = readFileSync(new URL("../src/services/mysql-auth-session.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
-  let row = { person_id: 7, name: "old", role: "admin", current_name: "采购员", current_role: "procurement", roles_json: '["procurement","packing"]', expires_at: new Date(Date.now()+60000), created_at: new Date() };
-  const context = vm.createContext({ getRoles, primaryRole, isMysqlPrimaryEnabled: () => true, ensurePeopleRolesSchemaMysql: async () => {}, mysqlExecute: async () => {}, mysqlQuery: async sql => { assert.match(sql, /JOIN people p.*p.active = 1/); return row ? [row] : []; } });
+  let row = { person_id: 7, name: "old", role: "admin", current_name: "采购员", current_role: "admin", roles_json: '["admin"]',
+    active_tenant_id: 2, tenant_slug: "company-a", tenant_role: "member", tenant_status: "active", business_roles_json: '["procurement","packing"]', platform_role: null,
+    expires_at: new Date(Date.now()+60000), created_at: new Date() };
+  const context = vm.createContext({ getRoles, primaryRole, isMysqlPrimaryEnabled: () => true, ensurePeopleRolesSchemaMysql: async () => {}, ensureTenantSchemaMysql: async () => {}, getPlatformGrantMysql: async () => null,
+    mysqlExecute: async () => {}, mysqlQuery: async sql => { assert.match(sql, /JOIN people p.*p.active = 1/); assert.match(sql, /tm\.business_roles_json/); assert.match(sql, /platform_grants pg/); return row ? [row] : []; } });
   vm.runInContext(source, context);
   const session = await context.getSessionMysql("token");
   assert.equal(hasPermission(session, "admin"), false);
+  assert.equal(session.tenant.id, 2);
+  assert.equal(session.platform_role, null);
   assert.equal(hasPermission(session, "packing"), true);
-  row.roles_json = '["procurement"]';
+  row.business_roles_json = '["procurement"]';
   assert.equal(hasPermission(await context.getSessionMysql("token"), "packing"), false);
   row = null;
   assert.equal(await context.getSessionMysql("token"), null);

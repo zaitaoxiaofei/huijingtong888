@@ -26,6 +26,7 @@ function fixture(body, overrides = {}) {
   const tokens = new Set();
   let nextToken = 0;
   const handler = createAuthHandler(async () => body, {
+    getSession: async () => null,
     getQrMobileSession: () => null,
     findPersonForLogin: async () => { events.push("find-login"); return user; },
     findPersonById: async () => { events.push("find-person"); return user; },

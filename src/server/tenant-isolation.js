@@ -1,3 +1,12 @@
+import { isPlatformAdmin } from "../shared/permissions.js";
+
+const PLATFORM_API_RESOURCES = new Set([
+  "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
+  "order-cancellation-rules", "settings", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events",
+  "system-monitoring", "system", "docs", "ai-provider", "ai-prompt-templates", "ai-strategies",
+  "ai-strategy-bundles", "ai-strategy-category-nodes", "ai-strategy-layer-rules"
+]);
+
 const TENANT_SCOPED_SAFE_PATHS = new Set([
   "user-preferences",
   "ready",
@@ -53,6 +62,7 @@ function isTenantSellerAnalyticsRoute(path, method) {
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
+  if (isPlatformAdmin(session) && PLATFORM_API_RESOURCES.has(parts[1])) return { allowed: true };
   if (tenant?.slug === "default") return { allowed: true };
   if (!tenant?.id || !tenant?.slug) {
     return {
@@ -65,6 +75,18 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const path = parts.slice(1).join("/");
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
   const verb = String(method || "GET").toUpperCase();
+  const matrixConfigCollection = parts[1] === "asset-variant-engine" && parts.length === 3 && (
+    (parts[2] === "bootstrap" && verb === "GET")
+    || (parts[2] === "rules" && verb === "POST")
+    || (parts[2] === "tail-templates" && ["GET", "POST"].includes(verb))
+  );
+  const matrixTailFile = parts[1] === "asset-variant-engine" && parts[2] === "tail-template-files"
+    && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "GET";
+  if (matrixConfigCollection || matrixTailFile) return { allowed: true };
+  const enterprisePeopleCollection = parts[1] === "enterprise" && parts[2] === "people" && parts.length === 3 && ["GET", "POST"].includes(verb);
+  const enterprisePeopleRecord = parts[1] === "enterprise" && parts[2] === "people" && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "PUT";
+  if (enterprisePeopleCollection || enterprisePeopleRecord) return { allowed: true };
+  if (parts[1] === "people" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (verb === "GET" && SHARED_PRICING_READ_PATHS.has(path)) return { allowed: true };
   if (TENANT_PLUGIN_TOKEN_ROUTES.has(`${verb} ${path}`)) return { allowed: true };
   if (isTenantSellerAnalyticsRoute(path, verb)) return { allowed: true };

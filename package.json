@@ -77,6 +77,7 @@
     "db:migrate:tenant-inventory-movements": "node scripts/migrate-tenant-inventory-movements.mjs",
     "db:migrate:tenant-suppliers": "node scripts/migrate-tenant-suppliers.mjs",
     "db:migrate:tenant-logistics-rules": "node scripts/migrate-tenant-logistics-rules.mjs",
+    "db:migrate:tenant-asset-variant-config": "node scripts/migrate-tenant-asset-variant-config.mjs",
     "db:migrate:tenant-orders": "node scripts/migrate-tenant-orders.mjs",
     "db:migrate:tenant-finance-center": "node scripts/migrate-tenant-finance-center.mjs",
     "db:optimize:mysql": "node scripts/optimize-mysql-indexes.mjs",

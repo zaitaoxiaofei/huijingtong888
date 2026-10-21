@@ -1,4 +1,4 @@
-import { hasPermission } from "./shared/permissions.js";
+import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -49,6 +49,9 @@ import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
 import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
+import { createEnterpriseManagementRoutes, handleEnterpriseManagementRestRoute } from "./server/routes/enterpriseManagement.js";
+import { createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
+import { listPlatformAccountsMysql } from "./services/platform-grants.js";
 import {
   cleanupScheduledJobHistory,
   ScheduledJobScheduler,
@@ -89,7 +92,9 @@ import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-s
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
 
-const services = { ...mysqlRuntimeServices, ...systemNotificationServices };
+const services = { ...mysqlRuntimeServices, ...systemNotificationServices,
+  enterprisePeople: listEnterprisePeopleMysql, createEnterprisePerson: createEnterprisePersonMysql,
+  updateEnterprisePerson: updateEnterprisePersonMysql, platformAccounts: listPlatformAccountsMysql, tenantMembers: tenantMembersMysql };
 const IMAGE_SESSION_COOKIE = "erp_image_session";
 const runtimeReadiness = {
   ready: false,
@@ -216,7 +221,8 @@ const routeModules = {
   ...createAiVariantLabRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
   ...createOnboardingKnowledgeRoutes({ readJson }),
-  ...createSystemNotificationRoutes({ services })
+  ...createSystemNotificationRoutes({ services }),
+  ...createEnterpriseManagementRoutes({ services, readJson })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -224,7 +230,7 @@ const routeModules = {
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
 function dashboardForSession(payload = {}, session = {}) {
-  if (hasPermission(session, "admin")) return payload;
+  if (hasPermission(session, "finance")) return payload;
   const withoutProfitFields = (source = {}) => Object.fromEntries(
     Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
   );
@@ -1039,6 +1045,8 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const enterpriseHandled = await handleEnterpriseManagementRestRoute({ req, res, parts, services, readJson, json });
+  if (enterpriseHandled !== false) return enterpriseHandled;
   const systemNotificationHandled = await handleSystemNotificationRestRoute({ req, res, parts, services, json });
   if (systemNotificationHandled !== false) return systemNotificationHandled;
   const onboardingHandled = await handleOnboardingKnowledgeRestRoute({ req, res, parts, json, notFound });
@@ -2138,7 +2146,7 @@ const server = http.createServer(async (req, res) => {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
         return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
       }
-      if (!hasPermission(session, "admin") && parts[1] !== "auth" && !session.tenant?.access_allowed) {
+      if (!isPlatformAdmin(session) && parts[1] !== "auth" && !session.tenant?.access_allowed) {
         return json(res, { error: "企业套餐已到期或已停用，请联系平台管理员开通或续费", code: "TENANT_SUBSCRIPTION_REQUIRED" }, 402);
       }
     }

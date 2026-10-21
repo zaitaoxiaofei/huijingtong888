@@ -10,6 +10,7 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { config } from "../config.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope } from "./asset-variant-tenant-scope.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
 import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
@@ -139,7 +140,8 @@ function vehicleSeed(brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom,
   return { brand, brandRu, model, modelRu, labelZh, labelRu, yearFrom, yearTo, popularityRank: rank, aliases };
 }
 
-export async function assetVariantBootstrap() {
+export async function assetVariantBootstrap(query = {}, session = null) {
+  const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   const shops = await mysqlQuery(`
     SELECT s.id, s.name, s.status, s.legal_entity, s.watermark_path,
@@ -148,16 +150,16 @@ export async function assetVariantBootstrap() {
       r.tail_category, r.vehicle_model, r.tail_template_id, r.updated_at AS rule_updated_at
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
-    WHERE s.status <> 'deleted'
+    WHERE s.status <> 'deleted' AND ${assetVariantTenantPredicate(scope, "s")}
     ORDER BY s.id DESC
-  `);
-  const templates = await mysqlQuery(`
+  `, [scope.id]);
+  const templates = scope.isDefault ? await mysqlQuery(`
     SELECT id, name, logo_url, logo_path, position, opacity, size_percent, margin_px, status
     FROM shop_watermark_templates
     WHERE status <> 'deleted'
     ORDER BY updated_at DESC, id DESC
-  `).catch(() => []);
-  const tailTemplates = await assetTailTemplates();
+  `).catch(() => []) : [];
+  const tailTemplates = await assetTailTemplates({}, session);
   await ensureVehicleSeedData();
   const vehicleModels = await assetVehicleModels();
   const ozonCategories = await assetOzonCategoryMappings();
@@ -258,9 +260,18 @@ export async function selectionPublishShops(query = {}) {
 }
 
 export async function saveShopVariantRule(body = {}, session = null) {
+  const scope = assetVariantTenantScope(session, { write: true });
   await ensureAssetVariantSchema();
   const shopId = Number(body.shopId || body.shop_id || 0);
-  if (!shopId) throw new Error("请选择店铺");
+  await requireAssetVariantShop(shopId, scope);
+  const watermarkTemplateId = String(body.watermarkTemplateId || body.watermark_template_id || "");
+  await requireAssetVariantWatermark(watermarkTemplateId, scope);
+  const tailTemplateId = Number(body.tailTemplateId || body.tail_template_id || 0) || null;
+  const tailTemplate = tailTemplateId ? await requireAssetTailTemplate(tailTemplateId, scope, shopId) : null;
+  const requestedTailImage = String(body.tailImageUrl || body.tail_image_url || "").trim();
+  if (!scope.isDefault && requestedTailImage && requestedTailImage !== String(tailTemplate?.image_path || "")) {
+    throw Object.assign(new Error("企业尾图请先在当前企业上传模板，再选择对应尾图模板保存"), { statusCode: 400 });
+  }
   const existing = await mysqlQuery("SELECT updated_at FROM shop_variant_rules WHERE shop_id = ? LIMIT 1", [shopId]).then((rows) => rows[0]);
   const expectedUpdatedAt = body.updated_at || body.updatedAt || body.ruleUpdatedAt || body.rule_updated_at || "";
   if (expectedUpdatedAt && existing?.updated_at && normalizeSecond(expectedUpdatedAt) !== normalizeSecond(existing.updated_at)) {
@@ -269,7 +280,7 @@ export async function saveShopVariantRule(body = {}, session = null) {
     throw error;
   }
   const tailImageUrl = await publishTailTemplateImageForOzon(
-    body.tailImageUrl || body.tail_image_url || "",
+    requestedTailImage,
     { shopId, name: `shop-${shopId}-tail-rule`, session }
   );
   await mysqlExecute(`
@@ -296,12 +307,12 @@ export async function saveShopVariantRule(body = {}, session = null) {
     normalizeTagStyle(body.tagStyle || body.tag_style || body.titleStyle || body.title_style),
     normalizePriceIndex(body.priceIndex || body.price_index),
     normalizePriceRole(body.priceRole || body.price_role),
-    String(body.watermarkTemplateId || body.watermark_template_id || ""),
+    watermarkTemplateId,
     tailImageUrl,
     String(body.mainImagePlan || body.main_image_plan || "watermarked"),
     cleanText(body.tailCategory || body.tail_category || DEFAULT_TAIL_CATEGORY, 128),
     cleanText(body.vehicleModel || body.vehicle_model || DEFAULT_TAIL_MODEL, 128),
-    Number(body.tailTemplateId || body.tail_template_id || 0) || null,
+    tailTemplateId,
     personId(session)
   ]);
   const updated = await mysqlQuery("SELECT updated_at FROM shop_variant_rules WHERE shop_id = ? LIMIT 1", [shopId]).then((rows) => rows[0]);
@@ -309,6 +320,7 @@ export async function saveShopVariantRule(body = {}, session = null) {
 }
 
 export async function generateAssetVariants(body = {}, session = null, context = {}) {
+  assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   await context.throwIfCancelled?.();
   const material = normalizeMaterialPayload(body.material || body);
@@ -319,7 +331,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
   if (!material.mainImage) throw new Error("Missing main image");
   if (!shopIds.length) throw new Error("Please select shops");
 
-  const bootstrap = await assetVariantBootstrap();
+  const bootstrap = await assetVariantBootstrap({}, session);
   const shops = bootstrap.shops.filter((shop) => shopIds.includes(Number(shop.id)));
   if (!shops.length) throw new Error("No available shops");
 
@@ -583,12 +595,13 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
 }
 
 export async function generateAssetVariantTitlePreview(body = {}, session = null) {
+  assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const material = normalizeMaterialPayload(body.material || body);
   const shopId = Number(body.shopId || body.shop_id || 0);
   if (!material.title) throw new Error("Missing material title");
   if (!shopId) throw new Error("请选择店铺");
-  const bootstrap = await assetVariantBootstrap();
+  const bootstrap = await assetVariantBootstrap({}, session);
   const shop = bootstrap.shops.find((item) => Number(item.id) === shopId);
   if (!shop) throw new Error("Shop not found");
   const rule = normalizeRule({ ...shop.rule, ...(body.rule || {}) });
@@ -1178,6 +1191,7 @@ function objectValue(value) {
 }
 
 export async function publishSelectionProductToOzon(body = {}, session = null, context = {}) {
+  assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
@@ -1193,7 +1207,7 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
   const publisherName = productOwnerName || await personNameForSession(session);
 
   await context.markStage?.("bootstrap", { productId });
-  const bootstrap = await assetVariantBootstrap();
+  const bootstrap = await assetVariantBootstrap({}, session);
   const requestedShopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   if (!requestedShopIds.length) throw new Error("请至少选择一个上架店铺");
   const shopIds = requestedShopIds.map(Number).filter(Boolean);
@@ -1260,12 +1274,13 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
 }
 
 export async function enqueuePublishSelectionProductToOzon(body = {}, session = null) {
+  const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
   if (!productId) throw new Error("Missing productId");
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   if (!shopIds.length) throw new Error("请至少选择一个上架店铺");
-  const requestBody = { ...body, shopIds };
+  const requestBody = { ...body, shopIds, _tenantScope: { id: scope.id, slug: scope.slug } };
   const jobNo = `AVJ-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   const insertResult = await mysqlExecute(`
     INSERT INTO asset_variant_jobs
@@ -1278,7 +1293,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
     personId(session)
   ]);
   const jobId = Number(insertResult.insertId || 0);
-  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session) } });
+  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session), tenant: { id: scope.id, slug: scope.slug } } });
   return {
     ok: true,
     accepted: true,
@@ -1291,6 +1306,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
 }
 
 export async function enqueueGenerateAssetVariants(body = {}, session = null) {
+  const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   if (!shopIds.length) throw new Error("请至少选择一个店铺");
@@ -1301,7 +1317,8 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
     ...body,
     shopIds,
     material,
-    workbenchId: cleanText(body.workbenchId || body.workbench_id || "", 128)
+    workbenchId: cleanText(body.workbenchId || body.workbench_id || "", 128),
+    _tenantScope: { id: scope.id, slug: scope.slug }
   };
   const productId = Number(material.sourceProductId || material.source_product_id || body.productId || body.product_id || 0) || null;
   const jobNo = `AVG-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
@@ -1316,7 +1333,7 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
     personId(session)
   ]);
   const jobId = Number(insertResult.insertId || 0);
-  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session) } });
+  enqueueAssetVariantJob({ id: jobId, session: { personId: personId(session), tenant: { id: scope.id, slug: scope.slug } } });
   return {
     ok: true,
     accepted: true,
@@ -1508,15 +1525,25 @@ async function runAssetVariantJob(job) {
     WHERE id = ?
   `, [JSON.stringify(progress.snapshot("starting")), row.id]);
   try {
+    const defaultTenants = await mysqlQuery("SELECT id, slug FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1");
+    const defaultTenant = defaultTenants[0];
+    if (!defaultTenant) throw new Error("默认企业不可用，无法恢复素材任务");
+    const storedScope = request._tenantScope || job.session?.tenant;
+    if (storedScope && (Number(storedScope.id) !== Number(defaultTenant.id) || storedScope.slug !== "default")) {
+      throw new Error("企业素材执行隔离尚未完成，无法执行该企业任务");
+    }
+    // Jobs created before enterprise support belonged to the legacy default
+    // workspace. This only restores job scope, never account memberships.
+    const session = { personId: Number(row.created_by_person_id || 0) || null, tenant: { id: Number(defaultTenant.id), slug: "default" } };
     let result;
     if (row.job_type === "publish_selection") {
-      result = await publishSelectionProductToOzon(request, job.session || null, {
+      result = await publishSelectionProductToOzon(request, session, {
         jobId: row.id,
         markStage: (stage, detail = {}) => updateAssetVariantJobStage(row.id, progress, stage, detail),
         throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
       });
     } else if (row.job_type === "generate_variants") {
-      result = await generateAssetVariants(request, job.session || null, {
+      result = await generateAssetVariants(request, session, {
         jobId: row.id,
         markStage: (stage, detail = {}) => updateAssetVariantJobStage(row.id, progress, stage, detail),
         throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
@@ -1732,21 +1759,65 @@ function buildAssetVariantJobErrorPayload(error) {
   };
 }
 
-export async function assetTailTemplates(query = {}) {
+async function requireAssetVariantShop(shopId, scope) {
+  if (!Number.isSafeInteger(shopId) || shopId <= 0) throw new Error("请选择有效店铺");
+  const rows = await mysqlQuery(`
+    SELECT s.id, s.watermark_path
+    FROM shops s
+    WHERE s.id = ? AND s.status <> 'deleted' AND ${assetVariantTenantPredicate(scope, "s")}
+    LIMIT 1
+  `, [shopId, scope.id]);
+  if (!rows[0]) throw Object.assign(new Error("店铺不存在或不属于当前企业，请在本企业重新选择店铺"), { statusCode: 404 });
+  return rows[0];
+}
+
+async function requireAssetVariantWatermark(templateId, scope) {
+  if (!templateId) return;
+  const shopMatch = templateId.match(/^shop-(\d+)$/);
+  if (shopMatch) {
+    const shop = await requireAssetVariantShop(Number(shopMatch[1]), scope);
+    if (shop.watermark_path) return;
+  } else if (scope.isDefault && /^\d+$/.test(templateId)) {
+    const templates = await mysqlQuery("SELECT id FROM shop_watermark_templates WHERE id = ? AND status <> 'deleted' LIMIT 1", [Number(templateId)]);
+    if (templates[0]) return;
+  }
+  throw Object.assign(new Error("水印模板不存在或不属于当前企业，请选择本企业店铺的水印"), { statusCode: 404 });
+}
+
+async function requireAssetTailTemplate(templateId, scope, shopId = null) {
+  const rows = await mysqlQuery(`
+    SELECT t.*
+    FROM asset_tail_templates t
+    LEFT JOIN shops s ON s.id = t.shop_id
+    WHERE t.id = ? AND t.status <> 'deleted'
+      AND ${assetVariantTenantPredicate(scope, "t")}
+      AND (COALESCE(t.shop_id, 0) = 0 OR (s.id IS NOT NULL AND ${assetVariantTenantPredicate(scope, "s")}))
+      ${shopId ? "AND (COALESCE(t.shop_id, 0) = 0 OR t.shop_id = ?)" : ""}
+    LIMIT 1
+  `, [templateId, scope.id, scope.id, ...(shopId ? [shopId] : [])]);
+  if (!rows[0]) throw Object.assign(new Error("尾图模板不存在或不属于当前企业店铺，请重新选择尾图模板"), { statusCode: 404 });
+  return rows[0];
+}
+
+export async function assetTailTemplates(query = {}, session = null) {
+  const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
+  const shopId = Number(query.shopId || query.shop_id || 0);
+  if (shopId) await requireAssetVariantShop(shopId, scope);
+  const where = ["t.status <> 'deleted'", assetVariantTenantPredicate(scope, "t"),
+    `(COALESCE(t.shop_id, 0) = 0 OR (s.id IS NOT NULL AND ${assetVariantTenantPredicate(scope, "s")}))`];
+  const params = [scope.id, scope.id];
+  if (shopId) { where.push("(t.shop_id = ? OR COALESCE(t.shop_id, 0) = 0)"); params.push(shopId); }
+  if (query.category) { where.push("t.category = ?"); params.push(String(query.category)); }
+  if (query.vehicleModel) { where.push("t.vehicle_model = ?"); params.push(String(query.vehicleModel)); }
   const rows = await mysqlQuery(`
     SELECT t.*, s.name AS shop_name
     FROM asset_tail_templates t
     LEFT JOIN shops s ON s.id = t.shop_id
-    WHERE t.status <> 'deleted'
+    WHERE ${where.join(" AND ")}
     ORDER BY t.is_default DESC, t.shop_id DESC, t.category ASC, t.vehicle_model ASC, t.sort_order ASC, t.id DESC
-  `);
-  return rows.map(normalizeTailTemplate).filter((item) => {
-    if (query.shopId && Number(item.shopId || 0) !== Number(query.shopId) && Number(item.shopId || 0) !== 0) return false;
-    if (query.category && item.category !== String(query.category)) return false;
-    if (query.vehicleModel && item.vehicleModel !== String(query.vehicleModel)) return false;
-    return true;
-  });
+  `, params);
+  return rows.map(normalizeTailTemplate);
 }
 
 export async function syncAssetOzonCategories(body = {}) {
@@ -1805,47 +1876,64 @@ export async function syncAssetOzonCategories(body = {}) {
 }
 
 export async function createAssetTailTemplate(body = {}, session = null) {
+  const scope = assetVariantTenantScope(session, { write: true });
   await ensureAssetVariantSchema();
   const shopId = Number(body.shopId || body.shop_id || 0) || null;
+  if (shopId) await requireAssetVariantShop(shopId, scope);
   const category = cleanText(body.category || DEFAULT_TAIL_CATEGORY, 128);
   const vehicleModel = cleanText(body.vehicleModel || body.vehicle_model || DEFAULT_TAIL_MODEL, 128);
   const name = cleanText(body.name || `${category}-${vehicleModel}-image`, 255);
   const isDefault = Boolean(body.isDefault ?? body.is_default);
-  const storedImagePath = await storeTailTemplateImage(body.image || body.imageData || body.image_data || body.imagePath || body.image_path, name);
+  const imageSource = body.image || body.imageData || body.image_data || body.imagePath || body.image_path;
+  if (!scope.isDefault && !/^data:image\/[a-zA-Z0-9.+-]+;base64,.+$/s.test(String(imageSource || ""))) {
+    throw Object.assign(new Error("请上传本企业的尾图模板图片，不能引用其他素材路径"), { statusCode: 400 });
+  }
+  const storedImagePath = await storeTailTemplateImage(imageSource, name);
   const imagePath = await publishTailTemplateImageForOzon(storedImagePath, { shopId, name, session });
   if (!imagePath) throw new Error("Missing image path");
 
-  if (isDefault) {
-    await mysqlExecute(`
-      UPDATE asset_tail_templates
+  const result = await withMysqlTransaction(async (connection) => {
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [scope.id]);
+    if (isDefault) await connection.execute(`
+      UPDATE asset_tail_templates t
       SET is_default = 0
       WHERE status <> 'deleted'
+        AND ${assetVariantTenantPredicate(scope, "t")}
         AND COALESCE(shop_id, 0) = COALESCE(?, 0)
         AND category = ?
         AND vehicle_model = ?
-    `, [shopId, category, vehicleModel]);
-  }
+    `, [scope.id, shopId, category, vehicleModel]);
 
-  const result = await mysqlExecute(`
-    INSERT INTO asset_tail_templates
-    (shop_id, category, vehicle_model, name, image_path, purpose, is_default, sort_order, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, 'anti_hijack', ?, ?, ?)
-  `, [
-    shopId,
-    category,
-    vehicleModel,
-    name,
-    imagePath,
-    isDefault ? 1 : 0,
-    Number(body.sortOrder || body.sort_order || 0),
-    personId(session)
-  ]);
-  return (await assetTailTemplates()).find((item) => Number(item.id) === Number(result.insertId));
+    const [inserted] = await connection.execute(`
+      INSERT INTO asset_tail_templates
+      (tenant_id, shop_id, category, vehicle_model, name, image_path, purpose, is_default, sort_order, created_by_person_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'anti_hijack', ?, ?, ?)
+    `, [
+      scope.id,
+      shopId,
+      category,
+      vehicleModel,
+      name,
+      imagePath,
+      isDefault ? 1 : 0,
+      Number(body.sortOrder || body.sort_order || 0),
+      personId(session)
+    ]);
+    return inserted;
+  });
+  return (await assetTailTemplates({}, session)).find((item) => Number(item.id) === Number(result.insertId));
 }
 
-export async function resolveAssetTailTemplateFile(id) {
+export async function resolveAssetTailTemplateFile(id, session = null) {
+  const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
-  const template = (await assetTailTemplates()).find((item) => Number(item.id) === Number(id));
+  let template;
+  try {
+    template = normalizeTailTemplate(await requireAssetTailTemplate(Number(id), scope));
+  } catch (error) {
+    if (error.statusCode === 404) return null;
+    throw error;
+  }
   if (!template?.imagePath) return null;
   const candidates = [
     resolveLocalAssetPath(template.imagePath),
@@ -1908,6 +1996,7 @@ async function ensureAssetVariantSchema() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS asset_tail_templates (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      tenant_id BIGINT UNSIGNED NULL,
       shop_id BIGINT NULL,
       category VARCHAR(128) NOT NULL DEFAULT '',
       vehicle_model VARCHAR(128) NOT NULL DEFAULT '',
@@ -1920,6 +2009,7 @@ async function ensureAssetVariantSchema() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_asset_tail_templates_tenant_scope (tenant_id, shop_id, category, vehicle_model, status),
       INDEX idx_asset_tail_templates_scope (shop_id, category, vehicle_model, status),
       INDEX idx_asset_tail_templates_default (is_default, status)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
