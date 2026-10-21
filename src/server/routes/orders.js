@@ -6,6 +6,7 @@ export function createOrderRoutes({ services, readJson, notFound, writeHead, jso
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
       ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req))
       : services.orders(),
+    "GET /api/orders/inventory-availability": (req, url) => orderInventoryAvailability(services, req, url),
     "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries())),
@@ -21,7 +22,18 @@ export function createOrderRoutes({ services, readJson, notFound, writeHead, jso
   };
 }
 
+function orderInventoryAvailability(services, req, url) {
+  if (typeof services.orderInventoryAvailability !== "function") {
+    throw Object.assign(new Error("当前数据服务不支持订单库存数量查询"), { statusCode: 503 });
+  }
+  return services.orderInventoryAvailability(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req));
+}
+
 export async function handleOrderRestRoute({ req, res, url, parts, services, readJson, json, notFound, writeHead }) {
+  if (req.method === "GET" && parts.length === 3 && parts[0] === "api" && parts[1] === "orders" && parts[2] === "inventory-availability") {
+    return json(res, await orderInventoryAvailability(services, req, url));
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "status-history" && parts[3] === "summary") {
     return json(res, await (services.orderStatusHistorySummary?.() || { total_history_rows: 0, open_orders: 0 }));
   }

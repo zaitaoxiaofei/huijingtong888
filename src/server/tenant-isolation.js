@@ -98,6 +98,9 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantSupplierRecord = parts[1] === "suppliers" && parts.length === 3
     && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
   if (tenantSupplierCollection || tenantSupplierRecord) return { allowed: true };
+  const tenantOrderInventoryRead = parts[1] === "orders" && parts.length === 3
+    && parts[2] === "inventory-availability" && verb === "GET";
+  if (tenantOrderInventoryRead) return { allowed: true };
   const tenantOrderDetailRead = parts[1] === "orders" && parts.length === 3
     && /^\d+$/.test(String(parts[2] || "")) && verb === "GET";
   if (tenantOrderDetailRead) return { allowed: true };

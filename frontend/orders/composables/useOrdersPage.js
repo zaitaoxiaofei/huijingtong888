@@ -82,12 +82,10 @@ const STATUS_TABS = [
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
-  { value: "dispute", label: "有争议" },
   { value: "all", label: "全部订单" },
   { value: "unbound", label: "待绑定库存" },
   { value: "pending_purchase", label: "待采购" },
-  { value: "purchase_in_transit", label: "采购在途" },
-  { value: "purchase_records_missing", label: "待补采购记录" }
+  { value: "purchase_in_transit", label: "采购在途" }
 ];
 const DEFAULT_STATUS_TAB_ORDER = STATUS_TABS.map((item) => item.value);
 
@@ -211,6 +209,7 @@ export function useOrdersPage() {
   const orderSyncAbort = ref(null);
   const orderSyncCancelReason = ref("");
   const ordersListAbort = ref(null);
+  const ordersInventoryAbort = ref(null);
   const ordersMetaAbort = ref(null);
   const ordersMetaRequestKey = ref("");
   const logisticsOptionsAbort = ref(null);
@@ -351,7 +350,7 @@ export function useOrdersPage() {
       vm.filters = {
         page: Number(filters.page || 1),
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
-        status: String(filters.status || DEFAULT_ORDER_STATUS),
+        status: ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
@@ -427,9 +426,36 @@ export function useOrdersPage() {
     }
   }
 
+  async function loadPageInventory(rows, requestToken, requestUrl, forceRefresh = false) {
+    const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
+    if (!orderIds.length) return;
+    const controller = new AbortController();
+    ordersInventoryAbort.value?.abort();
+    ordersInventoryAbort.value = controller;
+    try {
+      const params = new URLSearchParams({ orderIds: orderIds.join(",") });
+      if (forceRefresh) params.set("refresh", "1");
+      const result = await apiClient.get(`/api/orders/inventory-availability?${params}`, {
+        signal: controller.signal, noCache: true
+      });
+      if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
+      const facts = new Map((Array.isArray(result?.rows) ? result.rows : []).map((row) => [Number(row.order_id), row.inventory_availability]));
+      const mergeFacts = (row) => Array.isArray(facts.get(Number(row.id)))
+        ? { ...row, inventory_availability: facts.get(Number(row.id)) } : row;
+      vm.rows = vm.rows.map(mergeFacts);
+      const cached = ordersListCache.get(requestUrl);
+      if (cached) cached.result = { ...cached.result, rows: (cached.result.rows || []).map(mergeFacts) };
+    } catch (error) {
+      if (error?.name !== "AbortError") console.warn("load order inventory availability failed", error);
+    } finally {
+      if (ordersInventoryAbort.value === controller) ordersInventoryAbort.value = null;
+    }
+  }
+
   async function loadOrders(options = {}) {
     window.clearTimeout(ordersMetaTimer);
     ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
     const controller = new AbortController();
     ordersListAbort.value = controller;
     const requestToken = ordersLoadToken.value + 1;
@@ -497,6 +523,9 @@ export function useOrdersPage() {
         meta: { total, counts }
       });
       loading.value = false;
+      // Product balances hydrate independently of the expensive global allocation
+      // counts. Keep row order and procurement coverage owned by the list response.
+      void loadPageInventory(vm.rows, requestToken, requestUrl, options.forceRefresh === true);
       void shopsPromise.then((shops) => {
         if (controller.signal.aborted || ordersLoadToken.value !== requestToken) return;
         if (Array.isArray(shops)) patch({ shops });

@@ -432,9 +432,10 @@
 }
 
 .orders-quick-filter-tags {
-  display: flex;
+  display: inline-flex;
   flex-wrap: wrap;
-  gap: 8px;
+  flex: none;
+  gap: 6px;
   align-items: center;
 }
 
@@ -442,13 +443,13 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 34px;
-  padding: 3px 8px 3px 4px;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  color: #606266;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(203, 213, 225, 0.82);
+  border-radius: 999px;
+  color: #475569;
   background: #fff;
-  font-size: 13px;
+  font-size: 12px;
   transition: border-color .2s, background-color .2s, box-shadow .2s;
 }
 
@@ -459,12 +460,29 @@
   box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
 }
 
-.orders-quick-filter-tag .el-check-tag {
-  border-radius: 6px;
+.orders-quick-filter-editor {
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 .orders-quick-filter-days {
-  width: 92px;
+  width: 136px;
+}
+
+.orders-quick-filter-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.orders-quick-filter-actions .el-button {
+  margin-left: 0;
+}
+
+.orders-quick-filter-actions .el-button.is-link {
+  margin-right: auto;
 }
 
 .orders-procurement-time-cell strong {

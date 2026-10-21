@@ -7,6 +7,7 @@ import {
   classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsEvidence,
   ORDER_LOGISTICS_SERVICE_CLASSES, orderLogisticsServiceClassOptions
 } from "../src/services/order-logistics-classification.js";
+import { orderLogisticsCarrierSummaryRows } from "../src/services/order-logistics-carrier-summary.js";
 
 const source = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const definition = (name) => source.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))?.[0];
@@ -182,6 +183,7 @@ test("logistics summary bypasses old snapshots and uses the same safe classifier
 });
 
 test("paged carrier and official-class filters, counts and dropdowns use one shop/date scoped source", async () => {
+  const summaryCalls = [];
   const fixtures = [
     { id: 1, shop: "1", date: "2026-10-20", warehouse_name: "OGL 嘉兴仓库", billing_logistics_rule_name: "OGL 陆运 Extra Small" },
     { id: 2, shop: "1", date: "2026-10-20", delivery_method_name: "OGL Economy Extra Small" },
@@ -210,7 +212,14 @@ test("paged carrier and official-class filters, counts and dropdowns use one sho
     ensureOrderLabelPrintSchemaMysql: async () => {}, ensureSkuInventoryRecipeSchemaMysql: async () => {},
     ensureProductCompositionSchemaMysql: async () => {}, ensureProductNamingSchemaMysql: async () => {},
     orderBaseSqlMysql: async (query) => ({ where: "o.shop_id = ? AND o.ordered_at >= ?", params: [query.shopId, query.dateFrom] }),
-    loadOrderLogisticsSummaryForBaseMysql: async (base) => fixtures.filter((row) => row.shop === base.params[0] && row.date >= base.params[1]).map((row) => ({ ...row, ...classifyOrderLogistics(row) })),
+    loadOrderLogisticsSummaryForBaseMysql: async (base) => {
+      summaryCalls.push("full");
+      return fixtures.filter((row) => row.shop === base.params[0] && row.date >= base.params[1]).map((row) => ({ ...row, ...classifyOrderLogistics(row) }));
+    },
+    loadOrderLogisticsCarrierSummaryForBaseMysql: async (base, _tenant, carrier) => {
+      summaryCalls.push("carrier");
+      return orderLogisticsCarrierSummaryRows(fixtures.filter((row) => row.shop === base.params[0] && row.date >= base.params[1]), carrier);
+    },
     resolveOrderLogisticsValueFromRowMysql: (row) => row.resolved_logistics_rule_value || "",
     orderFilteredSqlMysql: async (_query, base) => ({ ...base, joins: "" }),
     orderLogisticsMethodOptionsMysql: async () => [],
@@ -241,4 +250,21 @@ test("paged carrier and official-class filters, counts and dropdowns use one sho
   assert.deepEqual(Array.from(differentShop.rows, (row) => row.id), [7]);
   const invalid = await ordersPagedMysql({ ...base, logisticsServiceClass: "invalid" });
   assert.equal(invalid.total, 0);
+  assert.ok(summaryCalls.every((call) => call === "full"), "options and service-class requests retain the full summary");
+  const carrierOnly = await ordersPagedMysql({ ...base, includeLogisticsOptions: "0", logisticsCarrier: "ogl" });
+  assert.equal(summaryCalls.at(-1), "carrier");
+  assert.deepEqual(Array.from(carrierOnly.rows, (row) => row.id), [1, 2]);
+  assert.equal(carrierOnly.total, ogl.total);
+  assert.deepEqual(Array.from(carrierOnly.logisticsCarrierOptions), []);
+  assert.deepEqual(Array.from(carrierOnly.logisticsMethodOptions), []);
+  assert.deepEqual(Array.from(carrierOnly.logisticsServiceClassOptions), []);
+  const combined = await ordersPagedMysql({ ...base, includeLogisticsOptions: "0", logisticsCarrier: "ogl", logisticsServiceClass: "extra_small" });
+  assert.equal(summaryCalls.at(-1), "full", "frozen-rule service-class fallback keeps the original full source");
+  assert.deepEqual(Array.from(combined.rows, (row) => row.id), [1, 2]);
+  assert.deepEqual(Array.from(combined.logisticsCarrierOptions), [], "options suppression applies to full combination paths too");
+  await ordersPagedMysql({ ...base, includeLogisticsOptions: "0", logisticsCarrier: "ogl", logistics_method: "logistics_rule_9" });
+  assert.equal(summaryCalls.at(-1), "full", "legacy method filters still resolve enabled rules");
+  const beforeUnfiltered = summaryCalls.length;
+  await ordersPagedMysql({ ...base, includeLogisticsOptions: "0" });
+  assert.equal(summaryCalls.length, beforeUnfiltered, "unfiltered row requests do not load a logistics summary");
 });

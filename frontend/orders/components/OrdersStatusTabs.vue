@@ -70,6 +70,8 @@ function tabTone(value) {
           </button>
         </div>
 
+        <slot name="quick-filters" />
+
         <el-select
           class="orders-mark-filter-select"
           :model-value="activeMarkFilter"

@@ -109,6 +109,8 @@ test("real orders inventory layout and mark notes preserve selection, scrolling 
       page.on("pageerror", (error) => errors.push(error.message));
       const pageRequests = [];
       let releaseSlow, delayAccessory = false, failAccessory = false, failNextMark = false;
+      let releaseAvailability;
+      const availabilityReady = new Promise((resolve) => { releaseAvailability = resolve; });
       const savedMarks = new Map();
       await page.route("**/*", async (route) => {
         const url = new URL(route.request().url());
@@ -128,6 +130,19 @@ test("real orders inventory layout and mark notes preserve selection, scrolling 
             return route.fulfill({ json: { ok: true, id: 1, ...saved } });
           }
           if (request.method !== "GET") return route.abort("blockedbyclient");
+          if (url.pathname === "/api/orders/inventory-availability") {
+            await availabilityReady;
+            return route.fulfill({ json: { rows: [
+              { order_id: 1, inventory_availability: [
+                { product_id: 11, physical_stock: 12, available_stock: 0, inventory_needs_review: false },
+                { product_id: 12, physical_stock: 27, available_stock: 22, inventory_needs_review: false },
+                { product_id: 13, physical_stock: 9, available_stock: 7, inventory_needs_review: false },
+                { product_id: 14, physical_stock: 8, available_stock: 6, inventory_needs_review: false }
+              ] },
+              { order_id: 2, inventory_availability: [{ product_id: 20, physical_stock: 8, available_stock: 6, inventory_needs_review: false }] },
+              { order_id: 3, inventory_availability: [] }
+            ] } });
+          }
           if (url.pathname === "/api/orders") return route.fulfill({ json: {
             rows: orderFixture().map((row) => savedMarks.has(row.id)
               ? { ...row, mark_type: savedMarks.get(row.id).mark_type, mark_note: savedMarks.get(row.id).note } : row),
@@ -174,6 +189,16 @@ test("real orders inventory layout and mark notes preserve selection, scrolling 
       assert.deepEqual([ellipsis.clipped, ellipsis.overflow, ellipsis.ellipsis, ellipsis.nowrap], [true, "hidden", "ellipsis", "nowrap"]);
       assert.equal(await identity.locator(".inventory-child-quantity").first().innerText(), "× 2 件");
       assert.match(await identity.locator(".inventory-local-counts").innerText(), /可用[：\s]*待核对[\s\S]*实物[：\s]*待核对[\s\S]*FBP[：\s]*5/);
+      const availabilityCalls = pageRequests.filter((request) => request.url.startsWith("/api/orders/inventory-availability?"));
+      assert.equal(availabilityCalls.length, 1, "the visible list starts exactly one batch without waiting for its response");
+      assert.equal(new URL(availabilityCalls[0].url, "http://localhost:8788").searchParams.get("orderIds"), "1,2,3");
+      releaseAvailability();
+      await page.waitForFunction(() => {
+        const text = document.querySelector(".inventory-local-counts")?.textContent.replace(/\s/g, "");
+        return text?.includes("可用：0") && text.includes("实物：8");
+      });
+      assert.match(await identity.locator(".inventory-local-counts").innerText(), /可用[：\s]*0[\s\S]*实物[：\s]*8[\s\S]*FBP[：\s]*5/);
+      assert.equal(await identity.locator(".inventory-child-quantity").first().innerText(), "× 2 件", "product facts cannot replace this-order component quantities");
       const counts = await identity.locator(".inventory-local-counts > span").evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().top));
       assert.ok(Math.max(...counts) - Math.min(...counts) < 2, "local and FBP figures share one line");
       await identity.getByRole("button", { name: "展开其余 2 项", exact: true }).click();

@@ -1,4 +1,4 @@
-// Reuse page coverage: opening the list must not request a ledger for every row.
+// Reuse page coverage and one batched balance response; never fetch a ledger per row.
 export function inventoryOverview(row) {
   const coverage = row.procurement_coverage;
   const products = new Map();
@@ -35,6 +35,14 @@ export function inventoryOverview(row) {
     item.physical_estimate = part.physical_stock_estimate;
     products.set(id, item);
   }
+  for (const fact of row.inventory_availability || []) {
+    const item = products.get(Number(fact.product_id));
+    if (!item) continue;
+    // These are product-wide facts, not this order's allocation or procurement state.
+    item.inventory_needs_review = !!fact.inventory_needs_review;
+    if (fact.available_stock != null && Number.isFinite(Number(fact.available_stock))) item.local_available = Number(fact.available_stock);
+    if (fact.physical_stock != null && Number.isFinite(Number(fact.physical_stock))) item.physical_estimate = Number(fact.physical_stock);
+  }
   const items = [...products.values()].sort((a, b) => Number(b.shortage_quantity || 0) - Number(a.shortage_quantity || 0));
   return {
     shopId: Number(row.shop_id), skus: (row.fbp_inventory || []).map(stock => String(stock.ozon_sku)),
@@ -57,7 +65,7 @@ export function inventoryOverview(row) {
     items, active: !!coverage?.needs_fulfillment && coverage.stock_location !== 'FBP',
     shortageCount: items.filter(item => item.shortage_quantity > 0).length,
     coveredCount: items.filter(item => item.shortage_quantity === 0 && !item.quantity_needs_review).length,
-    review: !!(coverage?.inventory_needs_review || coverage?.quantity_needs_review || coverage?.missing_amount || coverage?.missing_record_quantity > 0)
+    review: !!(items.some(item => item.inventory_needs_review) || coverage?.inventory_needs_review || coverage?.quantity_needs_review || coverage?.missing_amount || coverage?.missing_record_quantity > 0)
   };
 }
 
@@ -66,7 +74,7 @@ function localSets(summary, products, field) {
   const quantities = parts.map(part => {
     const value = products.get(Number(part.product_id))?.[field];
     const ratio = Number(part.per_set_quantity || (summary.quantity > 0 ? Number(part.required_quantity) / summary.quantity : 0));
-    return value == null || !(ratio > 0) ? null : Math.floor(Math.max(0, Number(value)) / ratio);
+    return value == null || Number(value) < 0 || !(ratio > 0) ? null : Math.floor(Number(value) / ratio);
   });
   return quantities.some(value => value === null) ? null : Math.min(...quantities);
 }
