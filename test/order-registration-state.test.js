@@ -123,6 +123,7 @@ test("clicking prepare on a stale row reconciles registration without submitting
     shippingProductItemsFromRawPayloadMysql: () => [],
     resolveShippingProductIdMysql: () => 101,
     fetchOzonPostingByNumber: async () => posting,
+    saveRawPostingMysql: async (_shop, latestPosting) => latestPosting,
     shipOzonPosting: async () => { shippingCalls += 1; throw new Error("HAS_INCORRECT_STATUS"); },
     buildLiveShippingProductsMysql: () => [],
     scheduleOrderPackageLabelPrefetchMysql() {},

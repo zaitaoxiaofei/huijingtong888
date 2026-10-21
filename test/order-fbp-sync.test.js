@@ -4,11 +4,18 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import vm from "node:vm";
 
-import { fetchOzonFbpPostings, fetchOzonPostingByNumber } from "../src/ozonClient.js";
+import { fetchOzonFbpPostings, fetchOzonPostingByNumber, normalizeOzonFbpPostingForTest } from "../src/ozonClient.js";
 import { stockLocationSql } from "../src/services/order-query-facts.js";
+import { mergeOrderPostingLogistics } from "../src/services/order-posting-logistics-merge.js";
 
 const shop = { id: 4, name: "Test Shop", ozon_client_id: "123", ozon_api_key: "test-api-key" };
 const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+
+test("FBP normalization does not append duplicate fulfillment markers to an existing method", () => {
+  for (const name of ["FBP", "CEL FBP Standard Extra Small"]) {
+    assert.equal(normalizeOzonFbpPostingForTest({ posting_number: "MARKER-1", delivery_method: { name } }).raw.delivery_method.name, name);
+  }
+});
 
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
@@ -94,6 +101,7 @@ test("one failed feed cannot suppress orders from the other feed", async () => {
   const written = [];
   let failFbp = true;
   const sync = vm.runInNewContext(`${source.replace("export ", "")}; syncDemoOrdersMysql`, {
+    mergeOrderPostingLogistics,
     ensureMysqlCutoverEnabled() {},
     nullableInteger: (value) => Number(value || 0),
     shopsMysql: async () => [{ ...shop, status: "active" }],

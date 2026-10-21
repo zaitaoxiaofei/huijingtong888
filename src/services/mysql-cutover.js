@@ -53,6 +53,8 @@ import { destroySessionsByPersonIdMysql } from "./mysql-auth-session.js";
 import { stockWarehouseRulesMysql } from "./mysql-stock-warehouse-rules.js";
 import { ensureProductBarcodeLabelCacheReadyMysql } from "./product-barcode-labels.js";
 import { compactOnlineProductRawJson, prepareOnlineProductMediaForStorage } from "./online-product-media-storage.js";
+import { hasMeaningfulPostingMethod, isFbpPosting, mergeOrderPostingLogistics } from "./order-posting-logistics-merge.js";
+import { saveOrderPostingLogistics } from "./mysql-order-posting-logistics.js";
 import { recordInventoryProductNamingUsage } from "./inventory-product-naming.js";
 import { ensureFinanceCenterSchema } from "./finance-center.js";
 import {
@@ -2582,12 +2584,11 @@ function financeRowsForOperationMysql(operation) {
 async function resolveOrderLogisticsRuleMysql(row = {}, tenantId = "admin") {
   const payload = parseJsonOrNull(row.raw_json) || {};
   const raw = payload.raw || payload;
-  const deliveryMethod = raw.delivery_method || {};
   const analytics = raw.analytics_data || {};
-  const warehouseName = deliveryMethod.warehouse || analytics.warehouse || "";
-  const deliveryMethodName = deliveryMethod.name || "";
-  const logisticsChannel = deliveryMethod.tpl_provider || analytics.tpl_provider || row.tracking_number || "";
-  const logisticsText = orderLogisticsEvidence(row).text;
+  const evidence = orderLogisticsEvidence(row);
+  const { warehouseName, deliveryMethodName } = evidence;
+  const logisticsChannel = evidence.provider || row.tracking_number || "";
+  const logisticsText = evidence.text;
   const logisticsRule = normalizeResolvedLogisticsRuleMysql(
     await matchOrderLogisticsRuleMysql(logisticsText, tenantId)
   ) || normalizeResolvedLogisticsRuleMysql(
@@ -7931,14 +7932,15 @@ function resolveShippingProductIdMysql(item, index, rawItems = []) {
 }
 
 async function syncOrderShippingStateFromOzonMysql(shop, order) {
-  const posting = await fetchOzonPostingByNumber(shop, order.posting_number);
+  let posting = await fetchOzonPostingByNumber(shop, order.posting_number);
   if (!posting) return { ok: false, reason: "posting_not_found" };
   const statusText = `${posting.status || ""} ${posting.tracking_stage || ""} ${posting.logistics_status || ""}`;
   if (!isAwaitingDeliverLikeStatusMysql(statusText)) {
     return { ok: false, reason: "status_not_shipped", posting };
   }
-  const normalized = normalizeSyncedShippingStateMysql(posting);
   await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
+  posting = await saveRawPostingMysql(shop, posting);
+  const normalized = normalizeSyncedShippingStateMysql(posting);
   await mysqlExecute(`
     UPDATE orders
     SET status = ?,
@@ -7955,23 +7957,6 @@ async function syncOrderShippingStateFromOzonMysql(shop, order) {
     posting.tracking_number || null,
     posting.external_tracking_url || null,
     order.id
-  ]);
-  await mysqlExecute(`
-    INSERT INTO ozon_orders_raw (store_id, posting_number, order_id, status, substatus, raw_json, fetched_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON DUPLICATE KEY UPDATE
-      order_id = VALUES(order_id),
-      status = VALUES(status),
-      substatus = VALUES(substatus),
-      raw_json = VALUES(raw_json),
-      fetched_at = CURRENT_TIMESTAMP
-  `, [
-    shop.id,
-    posting.posting_number,
-    posting.order_id || posting.order_number || "",
-    posting.status || "",
-    posting.substatus || posting.logistics_status || "",
-    compactOnlineProductRawJson(posting)
   ]);
   await markInventoryAlertSkuDailyDirtyMysql(order.ordered_at);
   invalidateOrderProcurementCoverage();
@@ -18456,24 +18441,14 @@ async function accrueDeliveredItemsMysql(orderId) {
   });
 }
 
-async function saveRawPostingMysql(shop, posting) {
-  await mysqlExecute(`
-    INSERT INTO ozon_orders_raw (store_id, posting_number, order_id, status, substatus, raw_json, fetched_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    ON DUPLICATE KEY UPDATE
-      order_id = VALUES(order_id),
-      status = VALUES(status),
-      substatus = VALUES(substatus),
-      raw_json = VALUES(raw_json),
-      fetched_at = CURRENT_TIMESTAMP
-  `, [
-    shop.id,
-    posting.posting_number,
-    posting.order_id || posting.order_number || "",
-    posting.status || "",
-    posting.substatus || posting.logistics_status || "",
-    compactOnlineProductRawJson(posting)
-  ]);
+async function saveRawPostingMysql(shop, posting, supplement) {
+  return saveOrderPostingLogistics({
+    transaction: withMysqlTransaction,
+    shopId: shop.id,
+    posting,
+    supplement,
+    serialize: compactOnlineProductRawJson
+  });
 }
 
 async function historicalPurchasedUnitCostMysql(productId) {
@@ -18553,7 +18528,23 @@ async function reconcileTransportedProcurementBacklogMysql() {
 
 async function upsertPostingMysql(shop, posting, historySource = "sync", options = {}) {
   if (!options.salesDatesMarked) await markInventoryAlertSkuDailyDirtyMysql(posting.ordered_at);
-  await saveRawPostingMysql(shop, posting);
+  posting = await saveRawPostingMysql(shop, posting);
+  if (Number(options.logisticsDetailBudget?.remaining || 0) > 0
+    && isFbpPosting(posting) && !hasMeaningfulPostingMethod(posting)) {
+    options.logisticsDetailBudget.remaining -= 1;
+    try {
+      const detailSignal = options.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(20000)])
+        : AbortSignal.timeout(20000);
+      const detail = await fetchOzonPostingByNumber(shop, posting.posting_number, { signal: detailSignal });
+      if (detail?.posting_number === posting.posting_number) {
+        posting = await saveRawPostingMysql(shop, posting, detail);
+      }
+    } catch (error) {
+      throwIfAbortedMysql(options.signal);
+      console.warn(`[ozon-orders] FBP logistics detail unavailable: ${posting.posting_number} (${error.code || error.name || "request_failed"})`);
+    }
+  }
   const exists = await mysqlQueryOne("SELECT * FROM orders WHERE shop_id = ? AND posting_number = ?", [shop.id, posting.posting_number]);
   let orderId = exists?.id;
   const lifecycle = orderLifecycleMysql(posting);
@@ -18887,7 +18878,9 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
       ]) {
         try {
           const result = await fetch(shop, { from: feedFrom, to: fetchTo, statuses, chunkDays: 31, signal: options.signal });
-          for (const posting of result.postings || []) postingsByNumber.set(posting.posting_number, posting);
+          for (const posting of result.postings || []) {
+            postingsByNumber.set(posting.posting_number, mergeOrderPostingLogistics(postingsByNumber.get(posting.posting_number), posting));
+          }
           feedRequests += Number(result.requests || 0);
           feedRanges += Number(result.ranges || 0);
           successfulFeeds += 1;
@@ -18916,9 +18909,10 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
         changedSalesDateKeys.add(dateKey);
         await markInventoryAlertSkuDailyDirtyMysql(`${dateKey}T00:00:00+08:00`);
       }
+      const logisticsDetailBudget = { remaining: 20 };
       for (const posting of postings) {
         throwIfAbortedMysql(options.signal);
-        const stats = await upsertPostingMysql(shop, posting, historySource, { salesDatesMarked: true });
+        const stats = await upsertPostingMysql(shop, posting, historySource, { salesDatesMarked: true, logisticsDetailBudget, signal: options.signal });
         shopStats.inserted += stats.inserted;
         shopStats.updated += stats.updated;
         shopStats.inserted_items += stats.insertedItems;
@@ -19202,8 +19196,13 @@ export async function syncKnownOzonPostingDetailsMysql(body = {}, options = {}) 
     SELECT o.id, o.shop_id, o.posting_number, o.status, o.tracking_stage, o.ordered_at, o.last_synced_at
     FROM orders o
     JOIN shops s ON s.id = o.shop_id AND s.status = 'active'
+    LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
     WHERE ${filters.join(" AND ")}
     ORDER BY
+      CASE WHEN raw.query_stock_location = 'FBP' AND LOWER(TRIM(COALESCE(
+        JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json, '$.raw.delivery_method.name')),
+        JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json, '$.delivery_method.name')), ''
+      ))) REGEXP '^(fbp[[:space:]]*)*$' THEN 0 ELSE 1 END ASC,
       CASE
         WHEN LOWER(CONCAT_WS(' ', COALESCE(o.status, ''), COALESCE(o.tracking_stage, ''), COALESCE(o.logistics_status, ''))) LIKE '%cancel%' THEN 2
         WHEN ${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")} THEN 1

@@ -1891,7 +1891,7 @@ function normalizeOzonFbpPosting(item = {}) {
     ...item,
     fulfillment_schema: "FBP",
     // Existing order warehouse triggers classify the persisted raw delivery method.
-    delivery_method: { ...deliveryMethod, name: methodName ? `${methodName} FBP` : "FBP" }
+    delivery_method: { ...deliveryMethod, name: methodName ? (/\bfbp\b/i.test(methodName) ? methodName : `${methodName} FBP`) : "FBP" }
   };
   const posting = normalizeOzonPosting(raw);
   return { ...posting, fulfillment_schema: "FBP", ordered_at: item.in_process_at || item.order_date || posting.ordered_at };
