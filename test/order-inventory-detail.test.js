@@ -60,7 +60,11 @@ test('order inventory dialog mounts on demand and history actions are order-spec
   assert.match(table, /item.missing_receipt_quantity > 0/);
   assert.match(table, /emit\('view-inventory-detail', row, item.product_id\)/);
   const dialog = readFileSync(new URL('../frontend/admin/components/procurement/ProcurementLedgerDialog.vue', import.meta.url), 'utf8');
-  assert.match(dialog, /本单采购结论/);
+  assert.match(dialog, /本单需求分配/);
+  assert.doesNotMatch(dialog, /<InventoryIdentity|本单采购结论/);
+  assert.match(dialog, /<template #header="\{ titleId, titleClass \}">[\s\S]*?class="ledger-top-actions"[\s\S]*?更新本地库存[\s\S]*?库存转换[\s\S]*?更多操作[\s\S]*?刷新对账/);
+  assert.match(dialog, /<div v-if="!orderOverview" class="ledger-product">/);
+  assert.match(dialog, /class="ledger-warehouse-summary"[\s\S]*?仓库汇总[\s\S]*?FBP 库存[\s\S]*?查看各店铺 SKU 库存/);
   assert.match(dialog, /已分配现货/);
   assert.match(dialog, /仓库实物总数/);
   assert.match(dialog, /实物扣除全部待发订单需求及 FBP 占用/);

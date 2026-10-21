@@ -16,7 +16,7 @@ test('compact inventory opens lazy component table and preserves management/rece
     id: 1, shop_id: 1, statusLabel: '等待发货', productDisplayRows: [], logisticsSummary: {}, profitSummary: {},
     fbp_inventory: [{ shop_id: 1, ozon_sku: 'SKU-1', present: 5, available: 4, synced_at: '2026-09-28 01:00:00' }],
     availableActions: { showPurchase: true }, unboundItems: [], cancelCategoryText: '--', cancelReasonText: '--',
-    procurementState: { hasOrderIncoming: true, inboundDetails: { quantity: 1 }, canRegisterOrderReceipt: true },
+    procurementState: { latestPurchaseAt: '2026-10-20T01:00:00Z', hasOrderIncoming: true, inboundDetails: { quantity: 1 }, canRegisterOrderReceipt: true },
     inventorySummaries: [{ productId: 10, sku: 'SKU-1', inventoryMode: 'single', productName: '汽车装饰套装',
       inventoryNumber: '2-10', quantity: 1, componentCount: 4, stock: { local: -5, fbp: 10 }, incoming: 1,
       pickingItems: [
@@ -35,7 +35,7 @@ test('compact inventory opens lazy component table and preserves management/rece
       name: 'inventory-fixture', resolveId(id) { if (id === 'virtual:inventory') return '\0inventory'; },
       load(id) { if (id === '\0inventory') return `import {createApp,h,ref} from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Table from '/frontend/orders/components/OrdersTable.vue'; createApp({setup(){const event=ref('');return ()=>h('div',[h(Table,{rows:[${JSON.stringify(row)}],tableHeight:700,onEditInventoryProduct:id=>event.value='edit:'+id,onInventorySaved:()=>event.value='saved',onViewInventoryDetail:(row,id)=>event.value='detail:'+id,onConfirmProcurementInbound:row=>event.value='receipt:'+row.id}),h('p',{id:'event'},event.value)])}}).use(ElementPlus).mount('#app');`; }
     }], build: { outDir: output, cssCodeSplit: false, rollupOptions: { input: 'virtual:inventory', output: { entryFileNames: 'entry.js' } } } });
-    browser = await chromium.launch({ executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+    browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined), headless: true });
     const page = await browser.newPage({ viewport: { width: 1800, height: 1000 } });
     page.on('pageerror', error => errors.push(error.message));
     await page.route('http://localhost:8788/**', async route => {
@@ -47,7 +47,7 @@ test('compact inventory opens lazy component table and preserves management/rece
           if (id === 12 && failAccessory) return route.fulfill({ status: 503, json: { error: '测试网络暂不可用' } });
           if (id === 12 && delayAccessory) await new Promise(resolve => { releaseSlow = resolve; });
           return route.fulfill({ json: { product: { id, name: id === 11 ? '不锈钢门槛条' : '车标贴片', code: `P-${id}` }, revision: 'v1',
-            physical_estimate: saved ? 1 : 0, available_estimate: 0, current_stock_reserved: saved ? 1 : 0, incoming_quantity: 1, current_incoming: 0, current_shortage: saved ? 0 : 1,
+            physical_estimate: id === 12 ? (saved ? 4 : 3) : saved ? 1 : 0, available_estimate: id === 12 ? 2 : 0, current_stock_reserved: saved ? 1 : 0, incoming_quantity: 1, current_incoming: 0, current_shortage: saved ? 0 : 1,
             local_stock: -5, missing_purchase: 5, missing_receipt: 0, purchase_quantity: 0, received_quantity: 0,
             fbp_inventory: { present: 11, available: 10, incomplete: false, rows: [{ shop_id: 1, shop_name: 'A店', ozon_sku: 'SKU-1', present: 5, available: 4, per_set_quantity: 1, inventory_quantity: 5, warehouse_name: '仓一', synced_at: '2026-09-28 01:00:00' }, { shop_id: 2, shop_name: 'B店', ozon_sku: 'SKU-2', present: 3, available: 3, per_set_quantity: 2, inventory_quantity: 6 }] },
             orders: [{ order_id: 1, order_item_id: id, posting_number: 'ORDER-1', needs_fulfillment: true, quantity: 1, stock_quantity: saved ? 1 : 0, incoming_quantity: 0, shortage_quantity: saved ? 0 : 1 }],
@@ -55,7 +55,8 @@ test('compact inventory opens lazy component table and preserves management/rece
         }
         if (url.pathname.startsWith('/api/procurement/ledger') && route.request().method() === 'POST') {
           if (!url.pathname.endsWith('/preview')) saved = true;
-          return route.fulfill({ json: { local_before: -5, local_after: 1, physical_after: 1 } });
+          return route.fulfill({ json: { local_before: -5, local_after: 1, physical_before: 0, physical_after: 1,
+            available_before: 0, available_after: 0, open_order_demand: 1, order_reserved: 1, fbp_reserved: 0, stocktake_delta: 1, reason: '历史库存记错' } });
         }
         return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="84"><rect width="64" height="84" fill="#4366cc"/></svg>' });
       }
@@ -65,13 +66,14 @@ test('compact inventory opens lazy component table and preserves management/rece
     });
     await page.goto('http://localhost:8788/admin.html');
     await page.locator('.inventory-parent-name').getByText('汽车装饰套装', { exact: true }).waitFor();
-    await page.getByText('虚拟库存 ID：2-10 · 本单 1 套', { exact: true }).waitFor();
-    await page.getByText('FBP：5 套', { exact: true }).waitFor();
+    await page.getByText('虚拟库存 ID：2-10', { exact: true }).waitFor();
+    await page.getByText('本单 1 套', { exact: true }).waitFor();
+    await page.locator('.inventory-stock-comparison').getByText('FBP：5', { exact: true }).waitFor();
     assert.equal(await page.getByText('其中可售：', { exact: false }).count(), 0);
     assert.equal(await page.getByText('本地实物推算：', { exact: false }).count(), 0);
-    assert.equal(await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).count(), 0);
+    assert.equal(await page.getByText('2-13 包装礼盒', { exact: true }).count(), 0);
     await page.getByRole('button', { name: '展开其余 2 项', exact: true }).click();
-    await page.getByText('子库存 2-13 · 包装礼盒', { exact: true }).waitFor();
+    await page.getByText('2-13 包装礼盒', { exact: true }).waitFor();
     await page.getByRole('button', { name: '收起子产品', exact: true }).click();
     assert.equal(await page.getByText('1 种缺货 · 1 种已覆盖').count(), 0);
     assert.equal(await page.getByRole('button', { name: '编辑库存', exact: true }).count(), 0);
@@ -82,7 +84,8 @@ test('compact inventory opens lazy component table and preserves management/rece
     assert.equal(await page.locator('#event').innerText(), 'receipt:1');
     await page.getByRole('button', { name: '库存明细' }).click();
     const drawer = page.getByRole('dialog', { name: '库存明细与历史核对' });
-    await drawer.getByText('库存 ID：2-11', { exact: true }).waitFor();
+    const physicalMetric = drawer.locator('.ledger-warehouse-summary .ledger-metrics > div').filter({ hasText: '仓库实物总数' }).locator('strong');
+    await drawer.locator('.selected-inventory-row').filter({ hasText: '库存 ID：2-11' }).waitFor();
     assert.match(await drawer.innerText(), /不锈钢门槛条/);
     assert.match(await drawer.innerText(), /车标贴片/);
     await drawer.getByRole('tab', { name: '订单分配', exact: true }).waitFor();
@@ -90,7 +93,7 @@ test('compact inventory opens lazy component table and preserves management/rece
     assert.equal(await page.getByRole('dialog').count(), 1, 'viewing stock uses one overlay');
     assert.deepEqual(requests.filter(url => url.startsWith('/api/procurement/ledger')), ['/api/procurement/ledger?product_id=11'], 'only the selected shortage product loads');
     assert.equal(requests.some(url => url.startsWith('/api/products?')), false, 'order context does not search all products');
-    assert.equal(await drawer.getByRole('tab').count(), 6);
+    assert.deepEqual(await drawer.getByRole('tab').allInnerTexts(), ['FBP 库存', '订单分配', '采购与成本', '历史核对', '采购批次反查', '库存流水', '操作记录']);
     await drawer.getByRole('button', { name: '查看各店铺 SKU 库存', exact: true }).click();
     await drawer.getByRole('tab', { name: 'FBP 库存', exact: true }).waitFor();
     assert.match(await drawer.locator('.current-fbp-sku').innerText(), /A店[\s\S]*SKU-1/);
@@ -104,33 +107,38 @@ test('compact inventory opens lazy component table and preserves management/rece
     await drawer.getByRole('button', { name: '车标贴片', exact: true }).click();
     await accessoryRequest;
     await drawer.getByRole('button', { name: '不锈钢门槛条', exact: true }).click();
-    await drawer.getByText('P-11', { exact: true }).waitFor();
+    await drawer.locator('.selected-inventory-row').filter({ hasText: '库存 ID：2-11' }).waitFor();
+    await physicalMetric.filter({ hasText: /^0$/ }).waitFor();
     releaseSlow();
     await drawer.getByRole('tab', { name: '采购与成本', exact: true }).click();
     assert.equal(await drawer.getByRole('tab').nth(2).innerText(), '采购与成本');
     await drawer.getByRole('button', { name: '更新本地库存', exact: true }).click();
     const form = page.getByRole('dialog', { name: '更新本地库存', exact: true });
+    await form.getByText('更新仓库实物数', { exact: true }).click();
     await form.getByRole('spinbutton').fill('1');
     await form.getByText('历史库存记错', { exact: true }).click();
     await form.getByRole('textbox').fill('库管实盘为1件');
     await form.getByRole('button', { name: '确认更新', exact: true }).click();
-    await page.getByRole('dialog', { name: '确认更新本地库存', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
+    await page.getByRole('dialog', { name: '再次确认库存更新', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#event').textContent === 'saved');
     assert.equal(await drawer.getByRole('tab', { name: '采购与成本', exact: true }).getAttribute('aria-selected'), 'true', 'save preserves tab');
-    assert.equal(await drawer.getByText('P-11', { exact: true }).count(), 1, 'late accessory result cannot replace selected product');
     const selected = drawer.locator('.selected-inventory-row');
     assert.match(await selected.innerText(), /不锈钢门槛条/);
+    assert.match(await selected.innerText(), /库存 ID：2-11/);
+    assert.equal(await physicalMetric.innerText(), '1', 'late accessory result cannot replace selected product stock with its different balance');
     assert.equal(await selected.locator('td').last().innerText(), '0', 'save refreshes this order coverage in place');
     delayAccessory = false;
     failAccessory = true;
     await drawer.getByRole('button', { name: '车标贴片', exact: true }).click();
     await drawer.getByText('库存明细加载失败，请点击刷新对账重试', { exact: true }).waitFor();
-    assert.equal(await drawer.getByText('P-11', { exact: true }).count(), 0, 'failure never shows the old product ledger');
+    assert.equal(await drawer.locator('.ledger-warehouse-summary').count(), 0, 'failure never shows the old product ledger balances');
     failAccessory = false;
     await drawer.getByRole('button', { name: '刷新对账', exact: true }).click();
-    await drawer.getByText('P-12', { exact: true }).waitFor();
+    await drawer.locator('.selected-inventory-row').filter({ hasText: '库存 ID：2-12' }).waitFor();
+    await physicalMetric.filter({ hasText: /^4$/ }).waitFor();
     await drawer.getByRole('button', { name: '不锈钢门槛条', exact: true }).click();
-    await drawer.getByText('P-11', { exact: true }).waitFor();
+    await drawer.locator('.selected-inventory-row').filter({ hasText: '库存 ID：2-11' }).waitFor();
+    await physicalMetric.filter({ hasText: /^1$/ }).waitFor();
     await drawer.getByRole('tab', { name: '订单分配', exact: true }).click();
     if (process.env.INVENTORY_UI_SCREENSHOT) await page.screenshot({ path: process.env.INVENTORY_UI_SCREENSHOT });
     assert.deepEqual(errors, []);

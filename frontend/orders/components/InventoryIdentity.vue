@@ -12,20 +12,23 @@ function toggle(id) {
 <template>
   <div class="inventory-identities">
     <section v-for="parent in parents" :key="parent.id" class="inventory-identity">
-      <strong class="inventory-parent-name" :title="parent.name">{{ parent.name || '库存名称待核对' }}</strong>
-      <small>{{ parent.virtual ? '虚拟库存' : '库存' }} ID：{{ parent.inventoryNumber || '待核对' }} · 本单 {{ parent.quantity ?? '待核' }} {{ parent.virtual ? '套' : '件' }}</small>
-      <div class="inventory-local-counts">
-        <span title="扣除全部待发本地订单需求及 FBP 占用后的可用数量">剩余可用 <b>{{ parent.localAvailable ?? '待核对' }}</b> {{ parent.localAvailable == null ? '' : parent.virtual ? '套' : '件' }}</span>
-        <span title="包含已分拣、已打包但尚未发出的货；以仓库盘点为准">本地实物 <b>{{ parent.localPhysical ?? '待核对' }}</b> {{ parent.localPhysical == null ? '' : parent.virtual ? '套' : '件' }}</span>
+      <div class="inventory-identity-header">
+        <strong class="inventory-parent-number" :title="`${parent.virtual ? '虚拟库存' : '库存'} ID：${parent.inventoryNumber || '待核对'}`">{{ parent.virtual ? '虚拟库存' : '库存' }} ID：{{ parent.inventoryNumber || '待核对' }}</strong>
+        <span class="inventory-parent-quantity">本单 {{ parent.quantity ?? '待核' }} {{ parent.virtual ? '套' : '件' }}</span>
       </div>
-      <div v-for="stock in parent.fbpStocks" :key="stock.ozon_sku" class="inventory-stock-comparison" :title="stock.synced_at ? `Ozon 同步：${shanghaiDateTimeText(stock.synced_at, { assumeUtcWhenNaive: true })}；不同 SKU 库存独立` : '尚无此店铺 SKU 的 FBP 同步记录，不等于零库存'">
-        <small v-if="parent.fbpStocks.length > 1">SKU {{ stock.ozon_sku }}</small>
-        <b>FBP：{{ stock.present ?? '待同步' }}<template v-if="stock.present != null"> 套</template></b>
+      <strong class="inventory-parent-name" :title="parent.name">{{ parent.name || '库存名称待核对' }}</strong>
+      <div class="inventory-local-counts" :class="{ 'has-multiple-fbp': parent.fbpStocks.length > 1 }">
+        <span title="扣除全部待发本地订单需求及 FBP 占用后的可用数量">可用：<b>{{ parent.localAvailable ?? '待核对' }}</b></span>
+        <span title="包含已分拣、已打包但尚未发出的货；以仓库盘点为准">实物：<b>{{ parent.localPhysical ?? '待核对' }}</b></span>
+        <span v-for="stock in parent.fbpStocks" :key="stock.ozon_sku" class="inventory-stock-comparison" :title="`SKU ${stock.ozon_sku}；${stock.synced_at ? `Ozon 同步：${shanghaiDateTimeText(stock.synced_at, { assumeUtcWhenNaive: true })}；不同 SKU 库存独立` : '尚无此店铺 SKU 的 FBP 同步记录，不等于零库存'}`">
+          FBP<template v-if="parent.fbpStocks.length > 1">（{{ stock.ozon_sku }}）</template>：<b>{{ stock.present ?? '待同步' }}</b>
+        </span>
+        <span v-if="!parent.fbpStocks.length" title="尚无此店铺 SKU 的 FBP 同步记录，不等于零库存">FBP：<b>待同步</b></span>
       </div>
       <div v-if="parent.virtual" class="inventory-children">
-        <div v-for="child in (expanded.has(parent.id) ? parent.children : parent.children.slice(0, 2))" :key="child.product_id" class="inventory-child" :title="`本单实际消耗 ${child.quantity ?? '待核'}；${parent.quantity > 0 ? `每套 ${child.quantity / parent.quantity} × 本单 ${parent.quantity} 套` : '套数待核对'}`">
-          <span>子库存 {{ child.inventory_number || 'ID 待核对' }} · {{ child.product_name }}</span>
-          <b>× {{ child.quantity ?? '待核' }} {{ child.stock_unit || '件' }}</b>
+        <div v-for="child in (expanded.has(parent.id) ? parent.children : parent.children.slice(0, 2))" :key="child.product_id" class="inventory-child" :title="`${child.inventory_number || 'ID 待核对'} ${child.product_name || '库存名称待核对'}；本单实际消耗 ${child.quantity ?? '待核'}；${parent.quantity > 0 ? `每套 ${child.quantity / parent.quantity} × 本单 ${parent.quantity} 套` : '套数待核对'}`">
+          <span class="inventory-child-label" :title="`${child.inventory_number || 'ID 待核对'} ${child.product_name || '库存名称待核对'}`">{{ child.inventory_number || 'ID 待核对' }} {{ child.product_name || '库存名称待核对' }}</span>
+          <b class="inventory-child-quantity">× {{ child.quantity ?? '待核' }} {{ child.stock_unit || '件' }}</b>
           <small v-if="active && child.review">本单数量待核</small>
           <small v-else-if="active && child.shortage > 0" class="inventory-child-shortage">本单该子库存共缺 {{ child.shortage }} {{ child.stock_unit || '件' }}</small>
         </div>
@@ -36,17 +39,21 @@ function toggle(id) {
   </div>
 </template>
 <style scoped>
-.inventory-identities,.inventory-identity { display:flex;flex-direction:column;gap:6px;width:100%; }
+.inventory-identities,.inventory-identity { display:flex;flex-direction:column;gap:4px;width:100%;min-width:0;font-size:inherit; }
 .inventory-identity + .inventory-identity { border-top:1px solid #ebeef5;padding-top:8px; }
-.inventory-parent-name { display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.5; }
+.inventory-identity-header { display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0;line-height:1.5; }
+.inventory-parent-number,.inventory-parent-name { font-size:inherit;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.5; }
+.inventory-parent-number { min-width:0; }
+.inventory-parent-quantity { flex-shrink:0;font-size:inherit;font-weight:600;white-space:nowrap; }
 .inventory-identity small { color:#606266;line-height:1.5; }
-.inventory-children { border-left:2px solid #dce6f4;padding-left:8px;display:grid;gap:5px; }
-.inventory-child { display:flex;flex-wrap:wrap;gap:3px 6px;font-size:12px;line-height:1.5; }
-.inventory-child > span { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%; }
-.inventory-child small { width:100%; }
+.inventory-children { border-left:2px solid #dce6f4;padding-left:8px;display:grid;gap:5px;min-width:0; }
+.inventory-child { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;font-size:12px;line-height:1.5;min-width:0; }
+.inventory-child-label { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0; }
+.inventory-child-quantity { white-space:nowrap;text-align:right; }
+.inventory-child small { grid-column:1 / -1; }
 .inventory-child .inventory-child-shortage { color:var(--el-color-danger); }
-.inventory-stock-comparison { display:flex;flex-wrap:wrap;gap:3px 6px;font-size:12px;line-height:1.5; }
-.inventory-stock-comparison > small { width:100%; }
-.inventory-local-counts { display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px;line-height:1.5; }
+.inventory-local-counts { display:flex;gap:4px 10px;font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums; }
+.inventory-local-counts > span { white-space:nowrap; }
+.inventory-local-counts.has-multiple-fbp { flex-wrap:wrap; }
 .inventory-local-counts span:first-child { color:#0b6b56; }
 </style>
