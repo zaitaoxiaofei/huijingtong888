@@ -1282,3 +1282,34 @@ body,
   border-color: var(--erp-primary-fill);
   color: var(--erp-primary-contrast);
 }
+
+/* Nested workspace panels and teleported detail dialogs keep their light fallbacks. */
+:root[data-theme="dark"] {
+  --erp-detail-surface: var(--erp-surface);
+  --erp-detail-surface-alt: var(--erp-surface-alt);
+  --erp-detail-border: var(--erp-border);
+  --erp-detail-border-light: var(--erp-border-light);
+  --erp-detail-text-main: var(--erp-text-main);
+  --erp-detail-text-regular: var(--erp-text-regular);
+  --erp-detail-text-secondary: var(--erp-text-secondary);
+  --erp-detail-text-placeholder: var(--erp-text-placeholder);
+  --erp-detail-success-bg: var(--erp-success-bg);
+  --erp-detail-success-text: var(--erp-success-text);
+  --erp-detail-success-border: var(--erp-success-border);
+  --erp-detail-warning-bg: var(--erp-warning-bg);
+  --erp-detail-warning-text: var(--erp-warning-text);
+  --erp-detail-warning-border: var(--erp-warning-border);
+  --erp-detail-danger-bg: var(--erp-danger-bg);
+  --erp-detail-danger-text: var(--erp-danger-text);
+  --erp-detail-danger-border: var(--erp-danger-border);
+  --erp-detail-info-bg: var(--erp-info-bg);
+  --erp-detail-info-text: var(--erp-info-text);
+  --erp-detail-info-border: var(--erp-info-border);
+}
+
+:root[data-theme][data-theme-palette] {
+  --erp-detail-primary: var(--erp-primary);
+  --erp-detail-primary-soft: var(--erp-primary-soft);
+  --erp-detail-primary-faint: var(--erp-primary-faint);
+  --erp-detail-primary-border: var(--erp-primary-border);
+}

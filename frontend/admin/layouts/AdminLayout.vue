@@ -1,7 +1,7 @@
 <script setup>
 import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { Bell, Camera, Close, Coin, Download, Expand, Fold, Lock, Operation, Paperclip, PriceTag, RefreshRight, User } from "@element-plus/icons-vue";
+import { Bell, Camera, Close, Download, Expand, Fold, Lock, Operation, Paperclip, RefreshRight, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
@@ -15,8 +15,10 @@ import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { canAccessPage } from "../../../src/shared/permissions.js";
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
+import HeaderToolIcon from "../components/HeaderToolIcon.vue";
 
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
+const EnterpriseMessenger = defineAsyncComponent(() => import("../components/EnterpriseMessenger.vue"));
 
 const route = useRoute();
 const router = useRouter();
@@ -56,6 +58,7 @@ const quickTool = ref("profit");
 const quickToolAuthScope = ref(currentApiCacheScope());
 const canUseProfitCalculator = computed(() => canAccessPage(authStore.user, "/tools/profit-calculator"));
 const canUsePricingTool = computed(() => canAccessPage(authStore.user, "/tools/pricing"));
+const canUseEnterpriseMessages = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user.tenant.access_allowed !== false));
 const quickToolScope = computed(() => {
   const user = authStore.user;
   return user ? `${user.id || user.person_id || ""}:${user.tenant?.id || ""}:${quickToolAuthScope.value}` : "signed-out";
@@ -66,7 +69,7 @@ function resetQuickToolsForScope() {
   quickToolAuthScope.value = currentApiCacheScope();
 }
 function openQuickTool(tool) {
-  if (tool === "profit" ? !canUseProfitCalculator.value : !canUsePricingTool.value) return;
+  if (tool !== "calculator" && (tool === "profit" ? !canUseProfitCalculator.value : !canUsePricingTool.value)) return;
   quickToolAuthScope.value = currentApiCacheScope();
   quickTool.value = tool;
   quickToolsMounted.value = true;
@@ -792,15 +795,20 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
-          <div v-if="canUseProfitCalculator || canUsePricingTool" class="erp-quick-tools" role="group" aria-label="快捷计算工具">
+          <div class="erp-quick-tools" role="group" aria-label="快捷计算工具">
+            <el-tooltip content="简易计算器" placement="bottom">
+              <el-button circle class="erp-header-icon" aria-label="打开简易计算器" @click="openQuickTool('calculator')">
+                <el-icon><HeaderToolIcon name="calculator" /></el-icon>
+              </el-button>
+            </el-tooltip>
             <el-tooltip v-if="canUseProfitCalculator" content="利润计算器" placement="bottom">
               <el-button circle class="erp-header-icon" aria-label="打开利润计算器" @click="openQuickTool('profit')">
-                <el-icon><Coin /></el-icon>
+                <el-icon><HeaderToolIcon name="profit" /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip v-if="canUsePricingTool" content="定价工具" placement="bottom">
               <el-button circle class="erp-header-icon" aria-label="打开定价工具" @click="openQuickTool('pricing')">
-                <el-icon><PriceTag /></el-icon>
+                <el-icon><HeaderToolIcon name="pricing" /></el-icon>
               </el-button>
             </el-tooltip>
           </div>
@@ -838,6 +846,7 @@ onBeforeUnmount(() => {
               <el-icon><Bell /></el-icon>
             </el-button>
           </el-badge>
+          <EnterpriseMessenger v-if="canUseEnterpriseMessages" :key="quickToolScope" />
           <AppearanceSettings />
           <div class="erp-user-card">
             <el-avatar :src="authStore.user?.avatar_url" :size="30" class="erp-user-avatar" title="查看和编辑个人资料" @click="openProfileDialog">
@@ -904,8 +913,9 @@ onBeforeUnmount(() => {
             </div>
             <div class="erp-workspace-panel">
               <RouterView v-slot="{ Component, route: currentRoute }">
+                <!-- Closing a tab can change activeKey before its route navigation finishes. -->
                 <KeepAlive :max="6">
-                  <component :is="Component" :key="`${activeTabKey || currentRoute.path}:${tabsStore.refreshToken}`" />
+                  <component :is="Component" :key="`${tabsStore.tabKeyForRoute(currentRoute)}:${tabsStore.refreshToken}`" />
                 </KeepAlive>
               </RouterView>
             </div>
@@ -1093,7 +1103,7 @@ onBeforeUnmount(() => {
 .is-active-density { color: var(--erp-primary); font-weight: 600; background: var(--erp-primary-soft); }
 @media (max-width: 1100px) {
   .erp-header-right { gap: 2px; }
-  .erp-header-right > .erp-header-badge { display: inline-flex; }
+  .erp-header-right :deep(.erp-header-badge) { display: inline-flex; }
   .erp-quick-tools { gap: 0; margin-right: 0; padding-right: 3px; }
   .erp-header-right :deep(.erp-header-icon.el-button) { width: 28px; height: 28px; min-height: 28px; }
   .erp-header-right :deep(.erp-user-action) { display: none; }

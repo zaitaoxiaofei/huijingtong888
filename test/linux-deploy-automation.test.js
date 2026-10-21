@@ -397,6 +397,8 @@ test("ECS release migrates tenant ownership dependencies before starting order s
   assert.ok(remote.indexOf("migrate-tenant-sku-mappings.mjs") < remote.indexOf("migrate-tenant-logistics-rules.mjs"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("\nstart_candidate\n"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("migrate-tenant-asset-variant-config.mjs"));
+  assert.ok(remote.indexOf("migrate-tenant-asset-variant-config.mjs") < remote.indexOf("migrate-enterprise-messages.mjs"));
+  assert.ok(remote.indexOf("migrate-enterprise-messages.mjs") < remote.indexOf("\nstart_candidate\n"));
   assert.ok(remote.indexOf("migrate-tenant-asset-variant-config.mjs") < remote.indexOf("\nstart_candidate\n"));
 });
 

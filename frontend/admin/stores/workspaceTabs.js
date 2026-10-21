@@ -282,6 +282,7 @@ export const useWorkspaceTabsStore = defineStore("workspace-tabs", () => {
     activeKey,
     activeTab,
     refreshToken,
+    tabKeyForRoute: resolveTabKey,
     findTab,
     openRoute,
     restoreTabs,

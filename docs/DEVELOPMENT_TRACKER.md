@@ -2,7 +2,7 @@
 
 > Historical note: this tracker contains SQLite-to-MySQL transition history. The current runtime baseline is MySQL; do not treat old SQLite plan items as the active production architecture.
 
-Last updated: 2026-10-21
+Last updated: 2026-10-22
 
 This document is the single tracking entry for system-level work, cross-page UI rules, and feature backlog. When a feature is started or finished, update the status here first.
 
@@ -15,6 +15,12 @@ Status legend:
 - `Research`: needs API or business verification before implementation.
 
 ## 0. Current Refactor Snapshot
+
+- `Done` (2026-10-22, source/local verification): fixed workspace cache identity using the RouterView's confirmed route, preserving tab/form state when closing active or inactive tabs, switching queries, restoring tabs and opening multiple workbenches. Expanded light/dark theme variables through development heatmaps, task creation/matrix/configuration, nested overlays and procurement detail cards. Actual component browser checks cover blue/violet in both modes; production deployment follows the release workflow.
+
+- `Done` (2026-10-22, source/local verification): added the header's scoped quick arithmetic calculator and recognizable tool/appearance icons. Added enterprise one-to-one private messages with unread badges, retry-safe drafts, explicit rendered-message read receipts, history/incremental pagination and server-validated order/procurement-demand references. The feature uses one additive table, explicit administrator migration, current active membership checks and private responses; no platform-wide chat access. See [enterprise-private-messages.md](enterprise-private-messages.md). Real isolated MySQL and actual component browser checks cover enterprise separation, retries and account switches; ECS acceptance remains a deployment step.
+
+- `Done` (2026-10-21, ECS acceptance of `2026.10.21-saas-ui-c3e7fce`): merged the latest order performance/OGL/filter changes, deployed from `release/2026.10.21-task-brand` and migrated only the explicitly reviewed platform grants for person IDs 5, 9 and 10. Production login, enterprise directories, OGL list and inventory hydration passed. All eight active accounts retained their credentials, enterprise memberships and subscription dates; unrelated enterprise business isolation gates remain closed.
 
 - `Done` (2026-10-21, source/local verification only): added global appearance selection with three palettes per light/dark mode and separate remembered choices; standardized header icons and shared sidebar/login branding. Profit and pricing tools open lazily in reusable dialogs without navigating away, retain inputs within the current session and clear on account, enterprise, permission or API scope changes. Existing formulas, APIs and routed tools remain unchanged. ECS and local services have not been deployed or restarted.
 

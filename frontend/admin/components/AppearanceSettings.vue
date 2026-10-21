@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, useId } from "vue";
-import { Brush, Check, MoonNight, Sunny } from "@element-plus/icons-vue";
+import { Check, MoonNight, Sunny } from "@element-plus/icons-vue";
+import HeaderToolIcon from "./HeaderToolIcon.vue";
 import { useAppStore } from "../stores/app";
 import { THEME_PRESETS } from "../utils/theme-presets.js";
 
@@ -38,7 +39,7 @@ function previewStyle(preset) {
   <el-popover v-model:visible="visible" trigger="click" placement="bottom-end" :width="336" popper-class="erp-appearance-popper" @show="focusMode">
     <template #reference>
       <el-button ref="trigger" circle class="erp-theme-toggle erp-header-icon" title="外观设置" aria-label="外观设置" aria-haspopup="dialog" :aria-expanded="visible" :aria-controls="`${id}-appearance`">
-        <el-icon><Brush /></el-icon>
+        <el-icon><HeaderToolIcon name="appearance" /></el-icon>
       </el-button>
     </template>
     <section :id="`${id}-appearance`" ref="panel" class="appearance-settings" role="dialog" :aria-labelledby="`${id}-title`" @keydown.esc.stop.prevent="closeSettings">

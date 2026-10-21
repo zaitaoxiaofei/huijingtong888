@@ -122,9 +122,9 @@ onMounted(load);
 .history-purchase-table { margin-top: 16px; }
 .history-product { display: flex; align-items: center; gap: 12px; min-height: 92px; }
 .history-image { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 4px; }
-.history-no-image { display: flex; align-items: center; justify-content: center; background: #f5f7fa; color: #909399; }
+.history-no-image { display: flex; align-items: center; justify-content: center; background: var(--erp-detail-surface-alt, #f5f7fa); color: var(--erp-detail-text-secondary, #909399); }
 .history-product p { margin: 6px 0; }
-.history-error { color: #c45656; font-size: 12px; line-height: 1.5; margin: 6px 0; }
+.history-error { color: var(--erp-detail-danger-text, #c45656); font-size: 12px; line-height: 1.5; margin: 6px 0; }
 .history-purchase-table :deep(.el-input-number) { width: 125px; }
 .history-purchase-table :deep(.el-date-editor) { width: 270px; }
 </style>
