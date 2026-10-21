@@ -31,6 +31,7 @@ import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-sna
 import { calculateSelectionPricing } from "../celRates.js";
 import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } from "./order-logistics-filter-rules.js";
 import { classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsEvidence, orderLogisticsServiceClassOptions } from "./order-logistics-classification.js";
+import { orderLogisticsCarrierCandidateSql, orderLogisticsCarrierSummaryRows } from "./order-logistics-carrier-summary.js";
 import { resolveOrderFreightDescriptor } from "./order-freight-rule-resolver.js";
 import { cbrCnyRateForDate } from "./pricing-reference-rate.js";
 import { oglParcelValueRub, selectOglOrderRule } from "../ogl-rates.js";
@@ -79,6 +80,7 @@ import {
 } from "./mysql-online-product-status.js";
 import { markInventoryAlertSkuDailyDirtyMysqlService, refreshInventoryAlertSkuDailyMysqlService } from "./mysql-inventory-alert-snapshots.js";
 import { loadInventoryProductBalances, invalidateInventoryProductBalance } from "./mysql-inventory-product-balance.js";
+import { loadOrderInventoryAvailability, orderInventoryAvailabilityIds } from "./mysql-order-inventory-availability.js";
 import { getAiImageUsageOverview } from "./ai-provider-settings.js";
 import {
   missingOnlineProductSkuMarker,
@@ -2834,6 +2836,20 @@ export async function productInventoryAvailabilityMysql(query = {}, tenantId = "
       inventory_needs_review: false
     })
   };
+}
+
+export async function orderInventoryAvailabilityMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  orderInventoryAvailabilityIds(query);
+  const required = ["shops", "products", "sku_mappings", "product_components", "inventory_movements"];
+  if (!(await Promise.all(required.map((table) => mysqlSchemaColumnExists(table, "tenant_id")))).every(Boolean)) {
+    throw Object.assign(new Error("企业库存数量尚未完成租户字段迁移，请联系管理员"), { statusCode: 503 });
+  }
+  const defaultTenantId = await resolveShopTenantIdMysql("admin");
+  const requestTenantId = String(tenantId) === "admin" ? null : await resolveShopTenantIdMysql(tenantId);
+  return loadOrderInventoryAvailability({ query: mysqlQuery, loadBalances: inventoryProductBalanceMysql }, query, {
+    tenantId: requestTenantId, defaultTenantId
+  });
 }
 
 export async function orderProcurementBatchesMysql(orderId) {
@@ -29339,6 +29355,21 @@ async function loadOrderRowsForBaseMysql(base) {
   return await orderRowsByIdsMysql(idRows.map((row) => row.id));
 }
 
+async function loadOrderLogisticsCarrierSummaryForBaseMysql(base, tenantId = "admin", carrier = "all") {
+  const cacheKey = `orders:logistics-carrier-summary:v2:${tenantId}:${carrier}:${base.where}:${JSON.stringify(base.params)}`;
+  return getCachedMasterData(cacheKey, async () => {
+    const candidates = orderLogisticsCarrierCandidateSql(carrier);
+    const rows = await mysqlQuery(`
+      SELECT o.id, raw.raw_json
+      FROM orders o
+      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+      WHERE ${base.where}
+        ${candidates ? `AND (${candidates})` : ""}
+    `, base.params);
+    return orderLogisticsCarrierSummaryRows(rows, carrier);
+  }, ORDER_COUNTS_CACHE_TTL_MS);
+}
+
 async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
   const tenantCacheKey = String(tenantId || "admin");
   const cacheKey = `orders:logistics-summary:v8:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
@@ -29777,7 +29808,10 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const logisticsCarrier = String(query.logisticsCarrier || query.logistics_carrier || "all").trim().toLowerCase();
   const logisticsServiceClass = normalizeLogisticsServiceClass(query.logisticsServiceClass || query.logistics_service_class || "all");
   const reuseLogisticsSummary = includeLogisticsOptions || logisticsMethod !== "all" || logisticsCarrier !== "all" || logisticsServiceClass !== "all";
-  const logisticsSummaryRows = reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase, tenantId) : null;
+  const carrierOnly = !includeLogisticsOptions && logisticsMethod === "all" && logisticsServiceClass === "all" && logisticsCarrier !== "all";
+  const logisticsSummaryRows = carrierOnly
+    ? await loadOrderLogisticsCarrierSummaryForBaseMysql(rawBase, tenantId, logisticsCarrier)
+    : reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase, tenantId) : null;
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
   const serviceClassIds = filterOrderIdsByLogisticsServiceClassMysql(logisticsSummaryRows || [], logisticsServiceClass);
@@ -29855,7 +29889,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
     pageSize,
     counts,
     logisticsMethodOptions,
-    logisticsCarrierOptions: orderLogisticsCarrierOptionsMysql(carrierOptionRows),
+    logisticsCarrierOptions: includeLogisticsOptions ? orderLogisticsCarrierOptionsMysql(carrierOptionRows) : [],
     logisticsServiceClassOptions: includeLogisticsOptions ? orderLogisticsServiceClassOptions(serviceClassOptionRows) : [],
     ...(tenantScope ? { tenant_counts_unavailable: true, tenant_procurement_coverage_unavailable: true } : {}),
     mode: "paged"

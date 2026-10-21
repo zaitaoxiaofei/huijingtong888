@@ -66,3 +66,30 @@ test('unknown, historical and FBP rows do not invent local coverage', () => {
   assert.equal(review.coveredCount, 0);
   assert.equal(review.items[0].stock_quantity, undefined);
 });
+
+test('batched product facts supply kit capacity while preserving unknown order allocation', () => {
+  const row = { inventorySummaries: [{ productId: 10, quantity: 2, pickingItems: [
+    { product_id: 11, required_quantity: 4, per_set_quantity: 2 }, { product_id: 12, required_quantity: 2, per_set_quantity: 1 }
+  ] }], inventory_availability: [
+    { product_id: 11, available_stock: 0, physical_stock: 8 }, { product_id: 12, available_stock: 3, physical_stock: 3 },
+    { product_id: 999, available_stock: 99, physical_stock: 99 }
+  ] };
+  const view = inventoryOverview(row);
+  assert.equal(view.parents[0].localAvailable, 0);
+  assert.equal(view.parents[0].localPhysical, 3);
+  assert.equal(view.items.length, 2, 'ignore facts outside the current binding');
+  assert.equal(view.active, false);
+  assert.equal(view.items[0].stock_quantity, undefined);
+  assert.equal(view.items[0].shortage_quantity, undefined);
+  row.inventory_availability.pop(); row.inventory_availability.pop();
+  assert.equal(inventoryOverview(row).parents[0].localAvailable, null, 'one unknown component means unknown kit capacity');
+});
+
+test('negative physical facts remain pending review instead of claiming zero physical stock', () => {
+  const view = inventoryOverview({ inventorySummaries: [{ productId: 10, quantity: 1 }],
+    inventory_availability: [{ product_id: 10, physical_stock: -2, available_stock: 0, inventory_needs_review: true }] });
+  assert.equal(view.review, true);
+  assert.equal(view.parents[0].localPhysical, null);
+  assert.equal(view.parents[0].localAvailable, 0);
+  assert.equal(view.active, false);
+});
