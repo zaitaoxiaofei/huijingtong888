@@ -4,6 +4,7 @@ import test from "node:test";
 import mysql from "mysql2/promise";
 import { createOrderProfitCalculationTables } from "../src/services/order-profit-calculation-schema.js";
 import { ensureOrderProfitCalculationState, recordOrderProfitCalculation } from "../src/services/order-profit-calculation-versions.js";
+import { profitCalculationBaselineAudit } from "../src/services/order-profit-calculation-baseline.js";
 
 // Opt-in only. Never imports the application's config or reads production .env.
 // The supplied local test account must have CREATE/DROP DATABASE permission.
@@ -59,6 +60,20 @@ test("isolated MySQL transactions serialize retries, isolate tenants and roll ba
     const [baseline] = await connections[0].query("SELECT input_completeness, outputs_json FROM order_profit_calc_revisions WHERE tenant_key = '7' AND order_item_id = 2");
     assert.equal(baseline.length, 2);
     assert.ok(baseline.every((row) => row.input_completeness === "legacy_unknown" && JSON.parse(row.outputs_json).amount === "0.0000"));
+    // Legacy installations use general_ci while new version tables use 0900.
+    // CAST/CASE tenant keys must compare explicitly without changing old tables.
+    await connections[0].query("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");
+    await connections[0].query("CREATE TABLE shops (id INT PRIMARY KEY, tenant_id BIGINT) COLLATE utf8mb4_general_ci");
+    await connections[0].query("CREATE TABLE orders (id INT PRIMARY KEY, shop_id INT) COLLATE utf8mb4_general_ci");
+    await connections[0].query("CREATE TABLE order_items (id INT PRIMARY KEY,order_id INT,estimated_profit DECIMAL(18,4),actual_profit DECIMAL(18,4)) COLLATE utf8mb4_general_ci");
+    await connections[0].query("CREATE TABLE order_profit_items (order_item_id INT PRIMARY KEY,is_locked TINYINT) COLLATE utf8mb4_general_ci");
+    await connections[0].query("INSERT INTO shops VALUES (1,7)");
+    await connections[0].query("INSERT INTO orders VALUES (10,1)");
+    await connections[0].query("INSERT INTO order_items VALUES (1,10,12.34,0),(2,10,0,0)");
+    await connections[0].query("INSERT INTO order_profit_items VALUES (1,1),(2,1)");
+    const audit = await profitCalculationBaselineAudit(connections[0]);
+    assert.equal(Number(audit.state_count), 2);
+    assert.equal(Number(audit.missing_count), 0);
   } finally {
     await Promise.all(connections.map((connection) => connection.end()));
     // Only this freshly generated, checked test database is ever removed.

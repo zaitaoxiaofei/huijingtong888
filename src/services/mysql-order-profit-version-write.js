@@ -74,7 +74,7 @@ export async function orderProfitFormulaLabels(orderIds) {
     JOIN orders o ON o.id = state.order_id
     JOIN shops s ON s.id = o.shop_id
     WHERE state.order_id IN (${ids.map(() => "?").join(",")})
-      AND state.tenant_key = CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END
+      AND state.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
     GROUP BY state.order_id`, ids);
   return new Map(rows.map((row) => [Number(row.order_id), row]));
 }
