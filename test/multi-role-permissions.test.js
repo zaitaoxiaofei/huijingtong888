@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { getRoles, primaryRole, validateRoles, hasPermission, canAccessPage, roleLabels } from "../src/shared/permissions.js";
 import { authorizeApiRequest } from "../src/server/authorization.js";
+import { effectiveTenantMembershipRole } from "../src/services/tenant-membership-authority.js";
 
 function businessUser(roles) {
   return { role: "operator", roles, tenant: { id: 1, slug: "default", role: "member" } };
@@ -108,7 +109,7 @@ test("existing session reads current enterprise roles instead of stale session o
   let row = { person_id: 7, name: "old", role: "admin", current_name: "采购员", current_role: "admin", roles_json: '["admin"]',
     active_tenant_id: 2, tenant_slug: "company-a", tenant_role: "member", tenant_status: "active", business_roles_json: '["procurement","packing"]', platform_role: null,
     expires_at: new Date(Date.now()+60000), created_at: new Date() };
-  const context = vm.createContext({ getRoles, primaryRole, isMysqlPrimaryEnabled: () => true, ensurePeopleRolesSchemaMysql: async () => {}, ensureTenantSchemaMysql: async () => {}, getPlatformGrantMysql: async () => null,
+  const context = vm.createContext({ getRoles, primaryRole, effectiveTenantMembershipRole, isMysqlPrimaryEnabled: () => true, ensurePeopleRolesSchemaMysql: async () => {}, ensureTenantSchemaMysql: async () => {}, getPlatformGrantMysql: async () => null,
     mysqlExecute: async () => {}, mysqlQuery: async sql => { assert.match(sql, /JOIN people p.*p.active = 1/); assert.match(sql, /tm\.business_roles_json/); assert.match(sql, /platform_grants pg/); return row ? [row] : []; } });
   vm.runInContext(source, context);
   const session = await context.getSessionMysql("token");

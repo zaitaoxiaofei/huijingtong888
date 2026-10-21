@@ -2,7 +2,7 @@ import { hasPermission, isPlatformAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
 import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
-import { sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
+import { businessLogisticsRules, sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
 
 function platformLogisticsScope(req, body = null, url = null) {
   if (!isPlatformAdmin(req?._session)) {
@@ -21,7 +21,7 @@ function platformLogisticsRule(row) {
   return rule;
 }
 
-export function createOperationsRoutes({ services, readJson }) {
+export function createOperationsRoutes({ services, readJson, readBusinessLogisticsRules = businessLogisticsRules }) {
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
     "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
@@ -30,7 +30,11 @@ export function createOperationsRoutes({ services, readJson }) {
     "GET /api/tools/pricing/logistics-rules": () => sharedPricingLogisticsRules(),
     "GET /api/settings/packaging-fee-rule": () => services.packagingFeeRule(),
     "GET /api/settings/packaging-fee-rule/changes": (req, url) => services.packagingFeeRuleChanges(url?.searchParams?.get("limit") || 20),
-    "GET /api/logistics-rules": async (req, url) => (await services.logisticsRules(platformLogisticsScope(req, null, url))).map(platformLogisticsRule),
+    "GET /api/logistics-rules": async (req, url) => {
+      if (isPlatformAdmin(req?._session)) return (await services.logisticsRules(platformLogisticsScope(req, null, url))).map(platformLogisticsRule);
+      tenantIdFromRequest(req);
+      return readBusinessLogisticsRules();
+    },
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
     "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries())),
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),

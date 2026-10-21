@@ -7,6 +7,7 @@ import { assetVariantSource, loadAssetVariantConfigService, loadShopTailResolver
 
 const enterprise = (id = 2, role = "admin") => ({ personId: 9, roles: ["operations"], tenant: { id, slug: `enterprise-${id}`, role } });
 const defaultSession = { personId: 1, tenant: { id: 1, slug: "default", role: "admin" } };
+const defaultOperations = { personId: 7, roles: ["operations"], tenant: { id: 1, slug: "default", role: "member" } };
 
 test("matrix config requires a valid session and tenant administrator without treating business admin as platform identity", () => {
   for (const session of [null, {}, { tenant: { id: 2 } }, { tenant: { id: -1, slug: "a" } }]) {
@@ -17,6 +18,28 @@ test("matrix config requires a valid session and tenant administrator without tr
   assert.equal(assetVariantTenantScope({ ...enterprise(2, "member"), platform_role: "super_admin" }, { write: true }).id, 2);
   assert.equal(assetVariantTenantScope(defaultSession).isDefault, true);
   assert.throws(() => assetVariantExecutionScope(enterprise()), { statusCode: 403 });
+});
+
+test("default enterprise operations can consume configuration and execute without receiving configuration authority", async () => {
+  assert.deepEqual(assetVariantTenantScope(defaultOperations), { id: 1, slug: "default", isDefault: true });
+  assert.deepEqual(assetVariantExecutionScope(defaultOperations), { id: 1, slug: "default", isDefault: true });
+  assert.throws(() => assetVariantTenantScope(defaultOperations, { write: true }), { statusCode: 403 });
+  assert.throws(() => assetVariantExecutionScope({ ...enterprise(2, "owner"), platform_role: "super_admin" }), { statusCode: 403 });
+  let writes = 0;
+  const service = loadAssetVariantConfigService({
+    query: async (sql, params) => {
+      if (/shop_watermark_templates/.test(sql)) return [];
+      assert.equal(params[0], 1);
+      assert.match(sql, /tenant_id IS NULL/);
+      return /FROM shops s/.test(sql) ? [{ id: 11, name: "Default shop" }] : [{ id: 100, tenant_id: null, image_path: "default-tail" }];
+    },
+    execute: async () => { writes += 1; }
+  });
+  assert.deepEqual(Array.from((await service.assetVariantBootstrap({}, defaultOperations)).shops, shop => shop.id), [11]);
+  assert.deepEqual(Array.from(await service.assetTailTemplates({}, defaultOperations), tail => tail.id), [100]);
+  await assert.rejects(service.saveShopVariantRule({ shopId: 11 }, defaultOperations), { statusCode: 403 });
+  await assert.rejects(service.createAssetTailTemplate({ image: "data:image/png;base64,AA==" }, defaultOperations), { statusCode: 403 });
+  assert.equal(writes, 0);
 });
 
 test("configuration and private tail routes forward only the authenticated session", async () => {

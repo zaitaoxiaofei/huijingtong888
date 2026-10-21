@@ -87,6 +87,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const enterprisePeopleRecord = parts[1] === "enterprise" && parts[2] === "people" && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "PUT";
   if (enterprisePeopleCollection || enterprisePeopleRecord) return { allowed: true };
   if (parts[1] === "people" && parts.length === 2 && verb === "GET") return { allowed: true };
+  if (parts[1] === "logistics-rules" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (verb === "GET" && SHARED_PRICING_READ_PATHS.has(path)) return { allowed: true };
   if (TENANT_PLUGIN_TOKEN_ROUTES.has(`${verb} ${path}`)) return { allowed: true };
   if (isTenantSellerAnalyticsRoute(path, verb)) return { allowed: true };
@@ -156,10 +157,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
       code: "TENANT_ISOLATION_PENDING"
     };
   }
-  const tenantLogisticsRuleCollection = parts[1] === "logistics-rules" && parts.length === 2 && ["GET", "POST"].includes(verb);
-  const tenantLogisticsRuleRecord = parts[1] === "logistics-rules" && parts.length === 3
-    && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
-  if (tenantLogisticsRuleCollection || tenantLogisticsRuleRecord) return { allowed: true };
   if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (parts[1] === "fbp-replenishment-orders" && parts.length === 2 && verb === "GET") return { allowed: true };
   const tenantFbpDraftMutation = parts[1] === "fbp-replenishment-orders" && verb === "POST" && (

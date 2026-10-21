@@ -3,6 +3,7 @@ import { getRoles, primaryRole } from "../shared/permissions.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { ensureTenantSchemaMysql, resolveActiveTenantMysql, tenantHasAccess } from "./tenants.js";
 import { getPlatformGrantMysql } from "./platform-grants.js";
+import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
 
 function ensureMysqlAuthSessionEnabled() {
   if (!isMysqlPrimaryEnabled()) {
@@ -73,7 +74,8 @@ export async function getSessionMysql(token) {
     WHERE s.token = ?`, [token]);
   if (!row) return null;
   const platformRole = row.platform_role === "super_admin" ? "super_admin" : null;
-  const hasTenant = Boolean(row.tenant_slug && row.tenant_role);
+  const tenantRole = effectiveTenantMembershipRole({ ...row, tenant_role: row.tenant_role, legacy_role: row.current_role });
+  const hasTenant = Boolean(row.tenant_slug && tenantRole);
   if (!hasTenant && !platformRole) return null;
 
   if (new Date(row.expires_at) < new Date()) {
@@ -91,7 +93,7 @@ export async function getSessionMysql(token) {
     tenantId: hasTenant ? Number(row.active_tenant_id) : null,
     tenant: (() => {
       if (!hasTenant) return null;
-      const tenant = { id: Number(row.active_tenant_id), slug: row.tenant_slug, name: row.tenant_name, status: row.tenant_status, plan_code: row.plan_code, subscription_status: row.subscription_status, subscription_expires_at: row.subscription_expires_at, role: row.tenant_role };
+      const tenant = { id: Number(row.active_tenant_id), slug: row.tenant_slug, name: row.tenant_name, status: row.tenant_status, plan_code: row.plan_code, subscription_status: row.subscription_status, subscription_expires_at: row.subscription_expires_at, role: tenantRole };
       return { ...tenant, access_allowed: typeof tenantHasAccess === "function" ? tenantHasAccess(tenant) : true };
     })(),
     createdAt: new Date(row.created_at).getTime()

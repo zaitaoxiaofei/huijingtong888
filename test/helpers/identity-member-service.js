@@ -3,6 +3,7 @@ import vm from "node:vm";
 import { hashPassword, validatePasswordStrength } from "../../src/auth-password.js";
 import { getRoles, primaryRole, validateRoles } from "../../src/shared/permissions.js";
 import { assertTenantQuotaAvailable } from "../../src/services/tenant-quotas.js";
+import { effectiveTenantMembershipRole } from "../../src/services/tenant-membership-authority.js";
 
 function serviceSource(filename) {
   return readFileSync(new URL(`../../src/services/${filename}`, import.meta.url), "utf8")
@@ -42,7 +43,7 @@ export function loadIdentityMemberServices(pool, hooks = {}) {
   const platform = vm.createContext({ Date, Number, String, Object, Array, Map, Set, mysqlExecute: query, mysqlQuery: query });
   vm.runInContext(serviceSource("platform-grants.js"), platform);
   const enterprise = vm.createContext({
-    Date, Number, String, Object, Array, Map, Set, getRoles, validateRoles, hashPassword, validatePasswordStrength,
+    Date, Number, String, Object, Array, Map, Set, getRoles, validateRoles, hashPassword, validatePasswordStrength, effectiveTenantMembershipRole,
     assertTenantQuotaAvailable, withMysqlTransaction: transaction,
     ensureTenantSchemaMysql: async () => {}, ensurePlatformGrantSchemaMysql: platform.ensurePlatformGrantSchemaMysql
   });
@@ -50,15 +51,15 @@ export function loadIdentityMemberServices(pool, hooks = {}) {
   const tenantSource = serviceSource("tenants.js");
   const tenants = vm.createContext({ Date, Number, String, Object, Array, Map, Set,
     text: (value, max = 255) => String(value || "").trim().slice(0, max),
-    mysqlQuery: query, ensureTenantSchemaMysql: async () => {}
+    mysqlQuery: query, ensureTenantSchemaMysql: async () => {}, effectiveTenantMembershipRole
   });
   vm.runInContext(tenantSource.slice(tenantSource.indexOf("function subscriptionState("), tenantSource.indexOf("async function listTenantsMysql(")), tenants);
-  const auth = vm.createContext({ Date, Number, String, Object, Array, Map, Set, getRoles, primaryRole,
+  const auth = vm.createContext({ Date, Number, String, Object, Array, Map, Set, getRoles, primaryRole, effectiveTenantMembershipRole,
     isMysqlPrimaryEnabled: () => true, mysqlExecute: query, mysqlQuery: query,
     ensurePeopleRolesSchemaMysql: async () => {}, ensureTenantSchemaMysql: async () => {},
     resolveActiveTenantMysql: tenants.resolveActiveTenantMysql, tenantHasAccess: tenants.tenantHasAccess,
     getPlatformGrantMysql: platform.getPlatformGrantMysql
   });
   vm.runInContext(serviceSource("mysql-auth-session.js"), auth);
-  return { platform, enterprise, auth, transaction, query, calls };
+  return { platform, enterprise, auth, tenants, transaction, query, calls };
 }

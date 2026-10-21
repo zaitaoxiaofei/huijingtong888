@@ -1622,6 +1622,19 @@ Change the current user's password.
 
 ### Platform And Enterprise Identity
 
+#### `GET /api/system/events`
+
+Default-enterprise business event stream and platform release updates. Subscriber person and enterprise are derived only from the trusted session; person_id and tenant selectors cannot impersonate another subscriber. Business events match recipient and enterprise; legacy untagged business events remain default-enterprise only. Other enterprise subscriptions remain gated.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `app_version` (`string`, optional): Installed application release.
+  - `app_channel` (`string`, optional): Installed release channel.
+- Responses:
+  - `200` `text/event-stream` -> `string`
+  - `401` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
 #### `GET /api/platform/accounts`
 
 List explicit platform grants. Requires an active super_admin grant verified against the database; does not require enterprise membership.
@@ -1673,7 +1686,7 @@ Update only a current-enterprise membership. Protect the last owner and shared l
 
 #### `GET /api/asset-variant-engine/bootstrap`
 
-Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Requires enterprise owner/admin; no provider credentials or platform prompts are exposed.
+Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Nondefault enterprises require owner/admin; existing default-enterprise operations consumers retain business read access. No provider credentials or platform prompts are exposed.
 
 - Auth: `authenticated`
 - Responses:
@@ -3098,7 +3111,7 @@ Deactivate a supplier after link validation.
 
 #### `GET /api/logistics-rules`
 
-Platform super_admin only: return canonical shared logistics configuration from the default scope, independently of active enterprise. Tenant selectors are forbidden.
+Enterprise business readers receive only canonical shared tariff fields, all carriers and enabled states, including filter keywords needed by inventory, selection and orders; notes, usage statistics and tenant ownership are excluded. Platform super_admin receives full canonical management configuration independently of active enterprise. Tenant selectors cannot select customer rules; configuration writes remain platform-only.
 
 - Auth: `authenticated`
 - Responses:

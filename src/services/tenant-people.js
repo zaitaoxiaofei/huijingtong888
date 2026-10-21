@@ -4,6 +4,7 @@ import { getRoles, validateRoles } from "../shared/permissions.js";
 import { ensureTenantSchemaMysql } from "./tenants.js";
 import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
 import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
+import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
 
 function fail(message, statusCode = 400) {
   throw Object.assign(new Error(message), { statusCode });
@@ -45,16 +46,18 @@ async function requireEnterpriseAdmin(connection, session, lock = false) {
   const tenantId = positiveId(session?.tenant?.id, "当前企业");
   const personId = positiveId(session?.personId, "当前操作账号");
   if (!session?.tenant?.slug) fail("当前登录会话没有有效企业上下文", 403);
-  const [tenants] = await connection.execute(`SELECT id, status, member_limit FROM tenants WHERE id = ?${lock ? " FOR UPDATE" : ""}`, [tenantId]);
+  if (!["owner", "admin"].includes(session.tenant.role)) fail("仅当前企业负责人或企业管理员可以管理企业人员", 403);
+  const [tenants] = await connection.execute(`SELECT id, slug, status, member_limit FROM tenants WHERE id = ?${lock ? " FOR UPDATE" : ""}`, [tenantId]);
   if (tenants[0]?.status !== "active") fail("当前企业不存在或已停用", 403);
-  const [members] = await connection.execute(`SELECT tm.role FROM tenant_members tm
+  const [members] = await connection.execute(`SELECT tm.role, tm.business_roles_json, p.role AS legacy_role, p.roles_json FROM tenant_members tm
     JOIN people p ON p.id = tm.person_id AND p.active = 1
     WHERE tm.tenant_id = ? AND tm.person_id = ? AND tm.active = 1`, [tenantId, personId]);
-  if (!["owner", "admin"].includes(members[0]?.role)) fail("仅当前企业负责人或企业管理员可以管理企业人员", 403);
+  const role = members[0] && effectiveTenantMembershipRole({ ...members[0], tenant_role: members[0].role, tenant_slug: tenants[0].slug });
+  if (!["owner", "admin"].includes(role)) fail("仅当前企业负责人或企业管理员可以管理企业人员", 403);
   return tenants[0];
 }
 
-const MEMBER_COLUMNS = `p.id, p.id AS person_id, p.name, p.username, p.avatar_url,
+const MEMBER_COLUMNS = `p.id, p.id AS person_id, p.name, p.username, p.avatar_url, t.slug AS tenant_slug,
   p.role AS legacy_role, p.roles_json, p.active AS account_active,
   tm.role AS tenant_role, tm.business_roles_json, tm.active AS member_active, tm.updated_at,
   NOT EXISTS (SELECT 1 FROM tenant_members other WHERE other.person_id = p.id AND other.tenant_id <> tm.tenant_id)
@@ -63,7 +66,7 @@ const MEMBER_COLUMNS = `p.id, p.id AS person_id, p.name, p.username, p.avatar_ur
 function memberResult(row) {
   return {
     id: Number(row.id), person_id: Number(row.person_id), name: row.name, username: row.username,
-    avatar_url: row.avatar_url || "", tenant_role: row.tenant_role,
+    avatar_url: row.avatar_url || "", tenant_role: effectiveTenantMembershipRole(row),
     business_roles: getRoles({ roles: row.business_roles_json ?? row.roles_json ?? row.legacy_role }),
     member_active: Number(row.member_active), account_active: Number(row.account_active),
     updated_at: row.updated_at, can_edit_identity: Boolean(Number(row.can_edit_identity))
@@ -72,20 +75,25 @@ function memberResult(row) {
 
 async function memberById(connection, tenantId, personId, lock = false) {
   const [rows] = await connection.execute(`SELECT ${MEMBER_COLUMNS}
-    FROM tenant_members tm JOIN people p ON p.id = tm.person_id
+    FROM tenant_members tm JOIN people p ON p.id = tm.person_id JOIN tenants t ON t.id = tm.tenant_id
     WHERE tm.tenant_id = ? AND tm.person_id = ?${lock ? " FOR UPDATE" : ""}`, [tenantId, personId]);
   if (!rows[0]) fail("该人员不属于当前企业", 404);
   return memberResult(rows[0]);
 }
 
 async function checkOwnerAndQuota(connection, tenant, personId, target) {
-  const [members] = await connection.execute("SELECT person_id, role, active FROM tenant_members WHERE tenant_id = ? FOR UPDATE", [Number(tenant.id)]);
+  const [rows] = await connection.execute(`SELECT tm.person_id, tm.role, tm.active, tm.business_roles_json, p.role AS legacy_role, p.roles_json, p.active AS account_active
+    FROM tenant_members tm JOIN people p ON p.id = tm.person_id WHERE tm.tenant_id = ? FOR UPDATE`, [Number(tenant.id)]);
+  const members = rows.map(member => ({ ...member, role: effectiveTenantMembershipRole({ ...member, tenant_role: member.role, tenant_slug: tenant.slug }) }));
   const beforeActive = members.filter(member => Number(member.active) === 1);
-  const afterActive = [...members.filter(member => Number(member.person_id) !== personId), { person_id: personId, role: target.role, active: target.active }]
+  const accountActive = members.find(member => Number(member.person_id) === personId)?.account_active ?? 1;
+  const afterActive = [...members.filter(member => Number(member.person_id) !== personId), { person_id: personId, role: target.role, active: target.active, account_active: accountActive }]
     .filter(member => Number(member.active) === 1);
   const beforeOwners = beforeActive.filter(member => member.role === "owner").length;
   const afterOwners = afterActive.filter(member => member.role === "owner").length;
-  if (beforeOwners && !afterOwners) fail("企业必须保留至少一位启用的负责人，请先指定另一位负责人", 409);
+  const beforeLiveOwner = beforeActive.some(member => member.role === "owner" && Number(member.account_active) === 1);
+  const afterLiveOwner = afterActive.some(member => member.role === "owner" && Number(member.account_active) === 1);
+  if ((beforeOwners && !afterOwners) || (beforeLiveOwner && !afterLiveOwner)) fail("企业必须保留至少一位启用的负责人，请先指定另一位负责人", 409);
   const beforeUsed = beforeActive.length - Number(beforeOwners > 0);
   const afterUsed = afterActive.length - Number(afterOwners > 0);
   if (afterUsed > beforeUsed) assertTenantQuotaAvailable({ label: "子账号", current: afterUsed - 1, limit: tenant.member_limit });
@@ -101,7 +109,7 @@ export async function listEnterprisePeopleMysql(session) {
   return withMysqlTransaction(async connection => {
     const tenant = await requireEnterpriseAdmin(connection, session);
     const [rows] = await connection.execute(`SELECT ${MEMBER_COLUMNS}
-      FROM tenant_members tm JOIN people p ON p.id = tm.person_id
+      FROM tenant_members tm JOIN people p ON p.id = tm.person_id JOIN tenants t ON t.id = tm.tenant_id
       WHERE tm.tenant_id = ? ORDER BY tm.active DESC, p.id`, [Number(tenant.id)]);
     return rows.map(memberResult);
   });

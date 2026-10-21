@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import test from "node:test";
 import mysql from "mysql2/promise";
+import { assetVariantExecutionScope } from "../src/services/asset-variant-tenant-scope.js";
 import { loadAssetVariantConfigService, loadShopTailResolver } from "./helpers/asset-variant-config-service.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
@@ -64,6 +65,20 @@ test("enterprise matrix configuration and tail fallback against a disposable MyS
       assert.deepEqual(Array.from(a.tailTemplates, row => row.id).sort(), [200, 201]);
       assert.deepEqual(Array.from(b.tailTemplates, row => row.id).sort(), [300, 301]);
       assert.deepEqual(Array.from(legacy.tailTemplates, row => row.id).sort(), [100, 101]);
+    });
+
+    await t.test("default operations members read their own publishing configuration without administrator grants", async () => {
+      const operations = { personId: 9, roles: ["operations"], tenant: { id: 1, slug: "default", role: "member" } };
+      assert.equal(assetVariantExecutionScope(operations).id, 1);
+      const bootstrap = await service.assetVariantBootstrap({}, operations);
+      assert.deepEqual(Array.from(bootstrap.shops, row => row.id).sort(), [10, 11]);
+      assert.deepEqual(Array.from(await service.assetTailTemplates({}, operations), row => row.id).sort(), [100, 101]);
+      assert.equal((await service.resolveAssetTailTemplateFile(100, operations)).buffer.toString(), "own-tail-bytes");
+      await assert.rejects(service.saveShopVariantRule({ shopId: 11, priceIndex: 2 }, operations), { statusCode: 403 });
+      await assert.rejects(service.createAssetTailTemplate({ image: "data:image/png;base64,AA==" }, operations), { statusCode: 403 });
+      assert.equal((await query("SELECT COUNT(*) AS total FROM shop_variant_rules WHERE shop_id = 11"))[0].total, 0);
+      assert.equal((await query("SELECT COUNT(*) AS total FROM asset_tail_templates"))[0].total, 7);
+      assert.throws(() => assetVariantExecutionScope(session(2)), { statusCode: 403 });
     });
 
     await t.test("A can edit its own rule while cross-tenant shop, watermark, and template references fail", async () => {

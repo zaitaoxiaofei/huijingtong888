@@ -13,7 +13,7 @@ function reviewedManifest() {
 
 function fixture(change = () => {}) {
   let state = {
-    tenants: [{ id: 1, status: "active", member_limit: 3 }, { id: 2, status: "active", member_limit: 1 }],
+    tenants: [{ id: 1, slug: "company-a", status: "active", member_limit: 3 }, { id: 2, slug: "company-b", status: "active", member_limit: 1 }],
     people: [10, 20, 30, 40, 50].map(id => ({ id, active: 1, role: id <= 20 ? "admin" : "operator", roles_json: null, password_hash: "untouched-credential" })),
     grants: [{ person_id: 40, role: "super_admin", active: 1 }],
     members: [
@@ -28,10 +28,13 @@ function fixture(change = () => {}) {
   const calls = [];
   const connection = { async execute(sql, params = []) {
     calls.push({ sql, params: Array.from(params) });
-    if (sql.startsWith("SELECT id, status, member_limit FROM tenants")) return [state.tenants];
+    if (sql.startsWith("SELECT id, slug, status, member_limit FROM tenants")) return [state.tenants];
     if (sql.startsWith("SELECT id, active, role, roles_json FROM people")) return [state.people.filter(item => params.includes(item.id)).map(({ password_hash, ...item }) => item)];
     if (sql.startsWith("SELECT pg.person_id")) return [state.grants.map(grant => ({ ...grant, account_active: state.people.find(item => item.id === grant.person_id)?.active || 0 }))];
-    if (sql.startsWith("SELECT person_id, tenant_id, role, active, business_roles_json FROM tenant_members")) return [state.members];
+    if (sql.startsWith("SELECT tm.person_id, tm.tenant_id,")) return [state.members.map(member => {
+      const person = state.people.find(item => item.id === member.person_id);
+      return { ...member, legacy_role: person.role, roles_json: person.roles_json, account_active: person.active };
+    })];
     if (sql.startsWith("INSERT INTO platform_grants")) {
       const grant = state.grants.find(item => item.person_id === params[0]);
       const values = { person_id: params[0], role: "super_admin", active: 1, granted_by_person_id: params[1], reason: params[2] };
@@ -110,6 +113,17 @@ test("dry-run reads existing grants/memberships without creating schema, credent
   assert.match(dryRun, /return;/);
 });
 
+test("dry-run distinguishes stored default auto-owner rows from effective staff roles", async () => {
+  const report = await inspectIdentitySeparation(async sql => {
+    if (sql.startsWith("SELECT id, active")) return [{ id: 20, active: 1, role: "packing", roles_json: null }];
+    if (sql.startsWith("SHOW")) return [];
+    if (sql.includes("FROM tenant_members")) return [{ person_id: 20, tenant_id: 1, tenant_slug: "default", role: "owner", active: 1 }];
+    throw new Error(`Unexpected query: ${sql}`);
+  });
+  assert.equal(report.accounts[0].memberships[0].stored_role, "owner");
+  assert.equal(report.accounts[0].memberships[0].role, "member");
+});
+
 test("reviewed migration supports dual, platform-only and enterprise-only without deleting identities or business references", async () => {
   const f = fixture();
   const people = structuredClone(f.state.people);
@@ -160,4 +174,21 @@ test("caller rollback protects all privilege and membership changes when mandato
   const cli = readFileSync(new URL("../scripts/migrate-platform-enterprise-identities.mjs", import.meta.url), "utf8");
   assert.ok(cli.indexOf("await connection.beginTransaction()") < cli.indexOf("await applyIdentitySeparationMysql"));
   assert.match(cli, /await connection\.rollback\(\)/);
+});
+
+test("migration cannot rely on historical default auto-owners when removing the last effective owner", async () => {
+  const f = fixture(state => {
+    state.tenants[0].slug = "default";
+    state.people.find(person => person.id === 20).role = "packing";
+  });
+  const manifest = { ...reviewedManifest(), accounts: [{ person_id: 10, platform_role: "super_admin", memberships: [] }] };
+  await assert.rejects(f.apply(manifest), /last active enterprise owner/);
+  assert.equal(f.calls.some(call => /^(INSERT|UPDATE|DELETE)/.test(call.sql)), false);
+});
+
+test("migration cannot rely on a globally disabled owner to remove the last usable owner", async () => {
+  const f = fixture(state => { state.people.find(person => person.id === 20).active = 0; });
+  const manifest = { ...reviewedManifest(), accounts: [{ person_id: 10, platform_role: "super_admin", memberships: [] }] };
+  await assert.rejects(f.apply(manifest), /last active enterprise owner/);
+  assert.equal(f.calls.some(call => /^(INSERT|UPDATE|DELETE)/.test(call.sql)), false);
 });

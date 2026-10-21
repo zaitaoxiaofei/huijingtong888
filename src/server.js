@@ -1108,17 +1108,14 @@ async function handleRestRoute(req, res, url, parts) {
     return true;
   }
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events") {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "system" && parts[2] === "events" && parts.length === 3) {
     writeHead(res, 200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store, no-transform",
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no"
     });
-    const unsubscribe = subscribeGlobalUpdateEvents(res, {
-      ...Object.fromEntries(url.searchParams.entries()),
-      personId: req._session?.personId || req._session?.id || 0
-    });
+    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()), req._session);
     req.on("close", unsubscribe);
     return true;
   }

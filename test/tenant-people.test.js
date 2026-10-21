@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { getRoles, validateRoles } from "../src/shared/permissions.js";
 import { assertTenantQuotaAvailable } from "../src/services/tenant-quotas.js";
 import { validatePasswordStrength } from "../src/auth-password.js";
+import { effectiveTenantMembershipRole } from "../src/services/tenant-membership-authority.js";
 
 const source = readFileSync(new URL("../src/services/tenant-people.js", import.meta.url), "utf8")
   .replace(/^import[^\n]+\n/gm, "").replaceAll("export ", "");
@@ -13,7 +14,7 @@ const updatedAt = "2026-10-21T02:00:00.000Z";
 
 function fixture(change = () => {}) {
   let state = {
-    tenants: [{ id: 1, status: "active", member_limit: 2 }, { id: 2, status: "active", member_limit: 2 }],
+    tenants: [{ id: 1, slug: "company-a", status: "active", member_limit: 2 }, { id: 2, slug: "company-b", status: "active", member_limit: 2 }],
     people: [10, 20, 30, 40].map(id => ({ id, name: `Person ${id}`, username: `user${id}`, role: "operator", roles_json: '["operator"]', avatar_url: "", active: 1 })),
     members: [
       { tenant_id: 1, person_id: 10, role: "owner", active: 1, business_roles_json: '["operations"]', updated_at: updatedAt },
@@ -26,23 +27,27 @@ function fixture(change = () => {}) {
   const calls = [];
   const connection = { async execute(sql, params = []) {
     calls.push({ sql, params: Array.from(params) });
-    if (sql.startsWith("SELECT id, status, member_limit")) return [state.tenants.filter(item => item.id === params[0])];
-    if (sql.startsWith("SELECT tm.role FROM")) {
+    if (sql.startsWith("SELECT id, slug, status, member_limit")) return [state.tenants.filter(item => item.id === params[0])];
+    if (sql.startsWith("SELECT tm.role,")) {
       const member = state.members.find(item => item.tenant_id === params[0] && item.person_id === params[1] && item.active === 1
         && state.people.some(person => person.id === item.person_id && person.active === 1));
-      return [member ? [{ role: member.role }] : []];
+      const person = member && state.people.find(item => item.id === member.person_id);
+      return [member ? [{ role: member.role, business_roles_json: member.business_roles_json, legacy_role: person.role, roles_json: person.roles_json }] : []];
     }
     if (sql.startsWith("SELECT p.id, p.id AS person_id")) {
       const rows = state.members.filter(item => item.tenant_id === params[0] && (params.length === 1 || item.person_id === params[1])).map(member => {
         const person = state.people.find(item => item.id === member.person_id);
-        return { ...person, person_id: person.id, legacy_role: person.role, account_active: person.active,
+        return { ...person, person_id: person.id, legacy_role: person.role, account_active: person.active, tenant_slug: state.tenants.find(item => item.id === member.tenant_id)?.slug,
           tenant_role: member.role, business_roles_json: member.business_roles_json, member_active: member.active, updated_at: member.updated_at,
           can_edit_identity: Number(!state.members.some(item => item.person_id === person.id && item.tenant_id !== member.tenant_id)
             && !state.grants.some(item => item.person_id === person.id)) };
       });
       return [rows];
     }
-    if (sql.startsWith("SELECT person_id, role, active FROM tenant_members")) return [state.members.filter(item => item.tenant_id === params[0])];
+    if (sql.startsWith("SELECT tm.person_id, tm.role,")) return [state.members.filter(item => item.tenant_id === params[0]).map(member => {
+      const person = state.people.find(item => item.id === member.person_id);
+      return { ...member, legacy_role: person.role, roles_json: person.roles_json, account_active: person.active };
+    })];
     if (sql.startsWith("SELECT tenant_id FROM tenant_members")) return [state.members.filter(item => item.person_id === params[0])];
     if (sql.startsWith("SELECT person_id FROM platform_grants")) return [state.grants.filter(item => item.person_id === params[0])];
     if (sql.startsWith("INSERT INTO people")) {
@@ -73,7 +78,7 @@ function fixture(change = () => {}) {
     throw new Error(`Unexpected SQL: ${sql}`);
   } };
   const context = vm.createContext({
-    getRoles, validateRoles, validatePasswordStrength, assertTenantQuotaAvailable,
+    getRoles, validateRoles, validatePasswordStrength, assertTenantQuotaAvailable, effectiveTenantMembershipRole,
     ensureTenantSchemaMysql: async () => {}, ensurePlatformGrantSchemaMysql: async () => {},
     hashPassword: () => "hashed-with-test-salt",
     withMysqlTransaction: async work => {
@@ -174,5 +179,44 @@ test("cross-company target and stale version fail without changing memberships",
   const f = fixture();
   await assert.rejects(f.services.updateEnterprisePersonMysql(30, { member_active: 0 }, ownerSession), { statusCode: 404 });
   await assert.rejects(f.services.updateEnterprisePersonMysql(20, { updated_at: "2026-10-20T00:00:00.000Z", member_active: 0 }, ownerSession), { statusCode: 409 });
+  assert.equal(f.calls.some(call => call.sql.startsWith("UPDATE")), false);
+});
+
+function legacyDefaultFixture(state) {
+  state.tenants[0].slug = "default";
+  state.members[0].business_roles_json = null;
+  state.people[0].role = "admin";
+  state.people[0].roles_json = null;
+  state.members[1].role = "owner";
+  state.members[1].business_roles_json = null;
+  state.people[1].role = "packing";
+  state.people[1].roles_json = null;
+}
+
+test("default member directory caps historical auto-owners and identity-only editing cannot formalize owner permissions", async () => {
+  const f = fixture(legacyDefaultFixture);
+  const rows = await f.services.listEnterprisePeopleMysql({ ...ownerSession, tenant: { ...ownerSession.tenant, slug: "default" } });
+  assert.equal(rows.find(person => person.person_id === 20).tenant_role, "member");
+  const result = await f.services.updateEnterprisePersonMysql(20, { name: "Renamed ordinary staff" }, { ...ownerSession, tenant: { ...ownerSession.tenant, slug: "default" } });
+  assert.equal(result.tenant_role, "member");
+  assert.equal(f.state.members[1].role, "member");
+  assert.deepEqual(JSON.parse(f.state.members[1].business_roles_json), ["packing"]);
+});
+
+test("default actor recheck does not trust a raw legacy auto-owner or a platform flag", async () => {
+  const f = fixture(legacyDefaultFixture);
+  await assert.rejects(f.services.listEnterprisePeopleMysql({ personId: 20, platform_role: "super_admin", tenant: { id: 1, slug: "default", role: "owner" } }), { statusCode: 403 });
+  await assert.rejects(f.services.listEnterprisePeopleMysql({ personId: 10, tenant: { id: 1, slug: "default", role: "member" } }), { statusCode: 403 });
+});
+
+test("last effective default owner remains protected when historical ordinary auto-owner rows remain", async () => {
+  const f = fixture(legacyDefaultFixture);
+  await assert.rejects(f.services.updateEnterprisePersonMysql(10, { member_active: 0 }, { ...ownerSession, tenant: { ...ownerSession.tenant, slug: "default" } }), { statusCode: 409 });
+  assert.equal(f.calls.some(call => call.sql.startsWith("UPDATE")), false);
+});
+
+test("disabled global owner accounts cannot justify removing the last usable owner", async () => {
+  const f = fixture(state => { state.members[1].role = "owner"; state.people[1].active = 0; });
+  await assert.rejects(f.services.updateEnterprisePersonMysql(10, { member_active: 0 }, ownerSession), { statusCode: 409 });
   assert.equal(f.calls.some(call => call.sql.startsWith("UPDATE")), false);
 });

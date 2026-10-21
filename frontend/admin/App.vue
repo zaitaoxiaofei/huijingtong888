@@ -5,7 +5,7 @@ import { ElNotification } from "element-plus";
 import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { useAuthStore } from "./stores/auth";
 import { useGlobalImagePreviewDismiss } from "./composables/useGlobalImagePreviewDismiss";
-import { apiClient, getAuthToken } from "./utils/api";
+import { apiClient, currentApiCacheScope, getAuthToken } from "./utils/api";
 
 const authStore = useAuthStore();
 const route = useRoute();
@@ -249,14 +249,19 @@ function openUpdateEventStream() {
     app_channel: APP_RELEASE_CHANNEL,
     token
   });
-  updateEventSource = new EventSource(`/api/system/events?${params.toString()}`);
+  const scope = currentApiCacheScope();
+  const eventSource = new EventSource(`/api/system/events?${params.toString()}`);
+  updateEventSource = eventSource;
+  const currentStream = () => eventSource === updateEventSource && scope === currentApiCacheScope();
   updateEventSource.addEventListener("hello", (event) => {
+    if (!currentStream()) return;
     resetUpdateEventBackoff();
     try {
       handleUpdateStatusPayload(JSON.parse(event.data || "{}")?.status);
     } catch {}
   });
   updateEventSource.addEventListener("update", (event) => {
+    if (!currentStream()) return;
     resetUpdateEventBackoff();
     try {
       handleUpdateStatusPayload(JSON.parse(event.data || "{}"));
@@ -265,6 +270,7 @@ function openUpdateEventStream() {
     }
   });
   updateEventSource.addEventListener("ai-task", (event) => {
+    if (!currentStream()) return;
     try {
       window.dispatchEvent(new CustomEvent("erp:ai-task-update", { detail: JSON.parse(event.data || "{}") }));
     } catch (error) {
@@ -272,6 +278,7 @@ function openUpdateEventStream() {
     }
   });
   updateEventSource.addEventListener("sku-order-tracking", (event) => {
+    if (!currentStream()) return;
     try {
       const payload = JSON.parse(event.data || "{}");
       ElNotification({
@@ -286,6 +293,7 @@ function openUpdateEventStream() {
     }
   });
   updateEventSource.onerror = () => {
+    if (!currentStream()) return;
     updateEventFailureCount += 1;
     if (updateEventFailureCount >= UPDATE_EVENT_FAILURE_LIMIT) {
       updateEventPollingFallback = true;
@@ -314,12 +322,23 @@ async function checkUpdateStatus() {
 }
 
 function scheduleInitialUpdateCheck() {
+  window.clearInterval(updateCheckTimer);
   window.clearTimeout(initialUpdateCheckTimer);
   initialUpdateCheckTimer = window.setTimeout(async () => {
     await checkUpdateStatus();
     if (!updateEventPollingFallback) openUpdateEventStream();
     updateCheckTimer = window.setInterval(checkUpdateStatus, UPDATE_CHECK_INTERVAL_MS);
   }, 3500);
+}
+
+function resetUpdateEventStreamForAuthScope() {
+  closeUpdateEventStream();
+  resetUpdateEventBackoff();
+  scheduleInitialUpdateCheck();
+}
+
+function handleUpdateStorageChange(event) {
+  if (!event.key || ["authToken", "baodanAuthUser"].includes(event.key)) currentApiCacheScope();
 }
 
 function consumeLoginWelcome() {
@@ -334,10 +353,18 @@ function consumeLoginWelcome() {
 
 onMounted(async () => {
   window.addEventListener("app:auth-expired", handleAuthExpired);
+  window.addEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
+  window.addEventListener("storage", handleUpdateStorageChange);
   await authStore.bootstrap();
   consumeLoginWelcome();
   scheduleInitialUpdateCheck();
 });
+
+watch(
+  () => [authStore.isAuthenticated, authStore.user?.id, authStore.user?.tenant?.id],
+  resetUpdateEventStreamForAuthScope,
+  { flush: "post" }
+);
 
 watch(
   () => route.fullPath,
@@ -347,6 +374,8 @@ watch(
 
 onBeforeUnmount(() => {
   window.removeEventListener("app:auth-expired", handleAuthExpired);
+  window.removeEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
+  window.removeEventListener("storage", handleUpdateStorageChange);
   closeUpdateEventStream();
   window.clearInterval(updateCheckTimer);
   window.clearTimeout(initialUpdateCheckTimer);

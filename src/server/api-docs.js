@@ -1081,6 +1081,10 @@ const endpoints = [
     })
   ]),
   section("Platform And Enterprise Identity", [
+    endpoint("GET", "/api/system/events", "Default-enterprise business event stream and platform release updates. Subscriber person and enterprise are derived only from the trusted session; person_id and tenant selectors cannot impersonate another subscriber. Business events match recipient and enterprise; legacy untagged business events remain default-enterprise only. Other enterprise subscriptions remain gated.", {
+      query: [param("app_version", scalar("string", "Installed application release."), false), param("app_channel", scalar("string", "Installed release channel."), false)],
+      responses: [response(200, "text/event-stream", scalar("string", "hello, update, ping and authorized business event frames.")), response(401, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("GET", "/api/platform/accounts", "List explicit platform grants. Requires an active super_admin grant verified against the database; does not require enterprise membership.", {
       responses: [response(200, "application/json", arrayOf(ref("PlatformAccount"), "Platform account roster.")), response(403, "application/json", ref("ErrorResponse"))]
     }),
@@ -1098,7 +1102,7 @@ const endpoints = [
     })
   ]),
   section("Enterprise Matrix Configuration", [
-    endpoint("GET", "/api/asset-variant-engine/bootstrap", "Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Requires enterprise owner/admin; no provider credentials or platform prompts are exposed.", {
+    endpoint("GET", "/api/asset-variant-engine/bootstrap", "Read shared style dictionaries and only the active enterprise's shops, rules, watermarks and tail templates. Nondefault enterprises require owner/admin; existing default-enterprise operations consumers retain business read access. No provider credentials or platform prompts are exposed.", {
       responses: [response(200, "application/json", scalar("object", "Scoped configuration bootstrap.")), response(403, "application/json", ref("ErrorResponse"))]
     }),
     endpoint("POST", "/api/asset-variant-engine/rules", "Save a rule for a current-enterprise shop. Tail-template and watermark references must belong to the same enterprise.", {
@@ -1800,7 +1804,7 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Supplier identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/logistics-rules", "Platform super_admin only: return canonical shared logistics configuration from the default scope, independently of active enterprise. Tenant selectors are forbidden.", {
+    endpoint("GET", "/api/logistics-rules", "Enterprise business readers receive only canonical shared tariff fields, all carriers and enabled states, including filter keywords needed by inventory, selection and orders; notes, usage statistics and tenant ownership are excluded. Platform super_admin receives full canonical management configuration independently of active enterprise. Tenant selectors cannot select customer rules; configuration writes remain platform-only.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("LogisticsRule"), "Logistics-rule rows."))]
     }),

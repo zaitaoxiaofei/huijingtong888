@@ -10,6 +10,8 @@ export function assetVariantTenantScope(session, { write = false } = {}) {
   }
   const isDefault = tenant.slug === "default";
   const administrator = session.platform_role === "super_admin" || ["owner", "admin"].includes(tenant.role);
+  // Default-enterprise business consumers read these settings during publishing.
+  // Configuration mutations must explicitly opt into the write check below.
   if ((write || !isDefault) && !administrator) {
     throw denied("仅企业负责人或企业管理员可以管理店铺矩阵配置");
   }

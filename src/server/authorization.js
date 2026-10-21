@@ -24,6 +24,8 @@ export function authorizeApiRequest(req, parts = []) {
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 
   if (read && ["system/info", "system/update-status"].includes(path)) return { allowed: true };
+  if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug === "default") return { allowed: true };
+  if (method === "GET" && resource === "logistics-rules" && parts.length === 2 && session.tenant?.id && session.tenant?.slug) return { allowed: true };
   const businessAiConsumption = ["ai-provider/chat", "ai-provider/stream"].includes(path);
   if (PLATFORM_MANAGEMENT_RESOURCES.has(resource) && !businessAiConsumption) return deny("仅平台超级管理员可以管理共用规则、自动任务、系统监控、AI 配置及提示词库");
   if (resource === "enterprise") {
@@ -32,7 +34,14 @@ export function authorizeApiRequest(req, parts = []) {
     return (collection || record) && isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以管理企业人员");
   }
   if (resource === "people") return read ? { allowed: true } : deny("全局账号维护仅限平台超级管理员；企业人员请在企业店铺中管理");
-  if (resource === "asset-variant-engine") return isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以管理店铺矩阵配置");
+  if (resource === "asset-variant-engine") {
+    const configWrite = method === "POST" && parts.length === 3 && ["rules", "tail-templates"].includes(parts[2]);
+    if (configWrite) return isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以修改店铺矩阵配置");
+    const configRead = method === "GET" && ((parts.length === 3 && ["bootstrap", "tail-templates"].includes(parts[2]))
+      || (parts.length === 4 && parts[2] === "tail-template-files" && /^\d+$/.test(String(parts[3] || ""))));
+    if (configRead && isEnterpriseAdmin(session)) return { allowed: true };
+    return session.tenant?.slug === "default" ? require("operations") : deny("当前企业仅开放负责人或管理员的矩阵配置；生成及发布功能尚未开放");
+  }
 
   if (method === "GET" && [
     "tools/pricing/reference-rate",

@@ -16,6 +16,8 @@ Status legend:
 
 ## 0. Current Refactor Snapshot
 
+- `In progress` (2026-10-21): default-enterprise upgrade compatibility is protected separately from platform permission changes. Historical automatic owner rows must not expand ordinary employees' duties; shared tariff reads and existing default-enterprise listing execution must remain available to their business roles. Real production account/membership reconciliation and end-to-end acceptance remain release prerequisites.
+
 - `In progress` (2026-10-21): paid-pilot preparation is tracked in [saas-launch-readiness.md](saas-launch-readiness.md), based on release `2026.10.21-task-brand` (`eefe63d`). Local changes cover QR login protection, tenant plugin-token routing, draft query bindings, explicit platform grants, enterprise personnel and matrix configuration. Startup creates no memberships, including for platform administrators. Historical identity migration, ECS acceptance and complete tenant business workflows remain required before sale.
 - `In progress` (2026-10-21): platform authority now comes from active `platform_grants` records with `role = 'super_admin'`; enterprise authority and business duties belong to `tenant_members.role` and `business_roles_json`. Enterprise shops/personnel/matrix settings are separated from platform accounts, common rules, operations, AI configuration and prompt administration. Use the [reviewed identity manifest migration](platform-enterprise-identity-migration.md); names and legacy admin roles must never auto-promote accounts or add default memberships. Configuration access does not open pending generation, publishing or other unfinished tenant business gates.
 

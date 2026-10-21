@@ -146,6 +146,59 @@ test("platform grants, enterprise people and reviewed identity migration against
       assert.deepEqual(await query("SELECT token FROM sessions WHERE token = 'worker-a'"), []);
     });
 
+    async function legacyDefaultPeople() {
+      await query("UPDATE tenants SET slug = 'default' WHERE id = 1");
+      await query("UPDATE people SET role = 'packing', roles_json = NULL WHERE id = 20");
+      await query("UPDATE people SET role = 'operations', roles_json = NULL WHERE id = 43");
+      await query("UPDATE tenant_members SET role = 'owner', business_roles_json = NULL WHERE tenant_id = 1 AND person_id IN (10, 20, 43)");
+    }
+
+    await scenario("legacy default staff retain their job permissions without acquiring historical auto-owner authority", async () => {
+      await legacyDefaultPeople();
+      const actor = await auth.getSessionMysql("owner-a");
+      const worker = await auth.getSessionMysql("worker-a");
+      assert.equal(actor.tenant.role, "owner");
+      assert.equal(actor.platform_role, null);
+      assert.equal(worker.tenant.role, "member");
+      assert.deepEqual(worker.roles, ["packing"]);
+      assert.equal(worker.platform_role, null);
+      const memberships = await services.tenants.tenantMembershipsMysql(20);
+      assert.equal(memberships[0].role, "member");
+      const rows = await enterprise.listEnterprisePeopleMysql(actor);
+      assert.equal(rows.find(row => row.person_id === 20).tenant_role, "member");
+      assert.equal(rows.find(row => row.person_id === 43).tenant_role, "member");
+      await assert.rejects(enterprise.listEnterprisePeopleMysql({ ...worker, platform_role: "super_admin", tenant: { ...worker.tenant, role: "owner" } }), { statusCode: 403 });
+      assert.equal((await query("SELECT role FROM tenant_members WHERE tenant_id = 1 AND person_id = 20"))[0].role, "owner");
+    });
+
+    await scenario("ordinary default identity edits do not formalize auto-owner and cannot remove the last effective owner", async () => {
+      await legacyDefaultPeople();
+      const actor = await auth.getSessionMysql("owner-a");
+      await assert.rejects(enterprise.updateEnterprisePersonMysql(10, { member_active: 0 }, actor), { statusCode: 409 });
+      const result = await enterprise.updateEnterprisePersonMysql(20, { name: "Fixture ordinary rename" }, actor);
+      assert.equal(result.tenant_role, "member");
+      const stored = (await query("SELECT role, business_roles_json FROM tenant_members WHERE tenant_id = 1 AND person_id = 20"))[0];
+      assert.equal(stored.role, "member");
+      assert.deepEqual(stored.business_roles_json, ["packing"]);
+      await auth.createSessionMysql({ token: "ordinary-after-profile", personId: 20, name: "Fixture ordinary rename", role: "packing", expiresAt: "2099-01-01T00:00:00.000Z" });
+      assert.equal((await auth.getSessionMysql("ordinary-after-profile")).tenant.role, "member");
+    });
+
+    await scenario("reviewed default ownership, legacy role overrides and independent platform grants remain explicit", async () => {
+      await legacyDefaultPeople();
+      await query("UPDATE people SET role = 'admin', roles_json = JSON_ARRAY('packing') WHERE id = 20");
+      assert.equal((await auth.getSessionMysql("worker-a")).tenant.role, "member");
+      await query("INSERT INTO platform_grants (person_id, role, active, reason) VALUES (20, 'super_admin', 1, 'Fixture independent platform identity')");
+      const platformWorker = await auth.getSessionMysql("worker-a");
+      assert.equal(platformWorker.platform_role, "super_admin");
+      assert.equal(platformWorker.tenant.role, "member");
+      await query("UPDATE tenant_members SET business_roles_json = JSON_ARRAY('packing') WHERE tenant_id = 1 AND person_id = 20");
+      assert.equal((await auth.getSessionMysql("worker-a")).tenant.role, "owner");
+      await query("UPDATE tenants SET slug = 'enterprise-a' WHERE id = 1");
+      await query("UPDATE tenant_members SET business_roles_json = NULL WHERE tenant_id = 1 AND person_id = 20");
+      assert.equal((await auth.getSessionMysql("worker-a")).tenant.role, "owner");
+    });
+
     await scenario("directory and actual FOR UPDATE member edit use the current enterprise and database actor permissions", async () => {
       const rows = await enterprise.listEnterprisePeopleMysql(session(10));
       assert.deepEqual(rows.map(row => row.person_id).sort((a, b) => a - b), [10, 11, 20, 21, 22, 23, 43]);
@@ -206,6 +259,11 @@ test("platform grants, enterprise people and reviewed identity migration against
       const [{ used }] = await query("SELECT COUNT(*) - 1 AS used FROM tenant_members WHERE tenant_id = 1 AND active = 1");
       await query("UPDATE tenants SET member_limit = ? WHERE id = 1", [used]);
       assert.equal((await enterprise.updateEnterprisePersonMysql(10, { tenant_role: "admin" }, session(10))).tenant_role, "admin");
+      await query("UPDATE tenant_members SET role = 'owner' WHERE person_id = 10 AND tenant_id = 1");
+      await query("UPDATE people SET active = 0 WHERE id = 43");
+      await assert.rejects(enterprise.updateEnterprisePersonMysql(10, { member_active: 0 }, session(10)), { statusCode: 409 });
+      const manifest = { version: 1, reviewed_by_person_id: 10, reason: "Fixture globally disabled owner protection", accounts: [{ person_id: 10, platform_role: "super_admin", memberships: [] }] };
+      await assert.rejects(transaction(connection => applyIdentitySeparationMysql(connection, manifest)), /last active enterprise owner/);
     });
 
     await scenario("inactive foreign membership and inactive grant protect identity while local membership edits revoke only local sessions", async () => {
@@ -302,6 +360,18 @@ test("platform grants, enterprise people and reviewed identity migration against
       ] };
       await assert.rejects(transaction(connection => applyIdentitySeparationMysql(connection, manifest)), /at least one active platform/);
       assert.equal((await platform.getPlatformGrantMysql(40)).role, "super_admin");
+      assert.equal((await query("SELECT COUNT(*) AS total FROM platform_identity_migration_log"))[0].total, 0);
+    });
+
+    await scenario("migration audit exposes legacy stored roles and rejects loss of the last effective default owner", async () => {
+      await legacyDefaultPeople();
+      const report = await inspectIdentitySeparation(query);
+      const member = report.accounts.find(account => account.person_id === 20).memberships[0];
+      assert.equal(member.stored_role, "owner");
+      assert.equal(member.role, "member");
+      const manifest = { version: 1, reviewed_by_person_id: 10, reason: "Fixture last effective owner guard", accounts: [{ person_id: 10, platform_role: "super_admin", memberships: [] }] };
+      await assert.rejects(transaction(connection => applyIdentitySeparationMysql(connection, manifest)), /last active enterprise owner/);
+      assert.equal(await platform.getPlatformGrantMysql(10), null);
       assert.equal((await query("SELECT COUNT(*) AS total FROM platform_identity_migration_log"))[0].total, 0);
     });
   } finally {

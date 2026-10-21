@@ -6,6 +6,8 @@ import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEn
 import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
 import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
 import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
+import { getRoles } from "../shared/permissions.js";
+import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -129,11 +131,17 @@ export function tenantHasAccess(tenant = {}) {
 
 export async function tenantMembershipsMysql(personId) {
   await ensureTenantSchemaMysql();
-  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active, tm.business_roles_json
-    FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active, tm.business_roles_json,
+      p.role AS legacy_role, p.roles_json
+    FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id JOIN people p ON p.id = tm.person_id
     WHERE tm.person_id = ? AND tm.active = 1 AND t.status = 'active'
     ORDER BY t.id`, [Number(personId)]);
-  return rows.map(subscriptionState);
+  return rows.map(row => {
+    const { legacy_role, roles_json, ...membership } = row;
+    return subscriptionState({ ...membership, role: effectiveTenantMembershipRole({
+      tenant_slug: row.slug, tenant_role: row.role, business_roles_json: row.business_roles_json, legacy_role, roles_json
+    }) });
+  });
 }
 
 export async function resolveActiveTenantMysql(personId, requestedTenantId = null) {
@@ -321,10 +329,17 @@ export async function tenantMembersMysql(tenantId) {
     error.statusCode = 400;
     throw error;
   }
-  return mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, tm.business_roles_json, p.name, p.username,
+  const rows = await mysqlQuery(`SELECT tm.tenant_id, tm.person_id, tm.role, tm.active, tm.business_roles_json, p.name, p.username,
+      (SELECT slug FROM tenants WHERE id = tm.tenant_id) AS tenant_slug,
       p.avatar_url, p.role AS business_role, p.roles_json, p.active AS account_active
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
     WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [normalizedTenantId]);
+  return rows.map(row => {
+    const { tenant_slug, ...membership } = row;
+    return { ...membership, role: effectiveTenantMembershipRole({
+      tenant_slug, tenant_role: row.role, business_roles_json: row.business_roles_json, legacy_role: row.business_role, roles_json: row.roles_json
+    }) };
+  });
 }
 
 export async function upsertTenantMemberMysql(tenantId, body = {}) {
@@ -335,7 +350,7 @@ export async function upsertTenantMemberMysql(tenantId, body = {}) {
   if (!normalizedTenantId || !personId) throw new Error("请选择企业和成员");
   if (!['owner', 'admin', 'member'].includes(role)) throw new Error("企业成员角色无效");
   const active = Number(body.active ?? 1) ? 1 : 0;
-  const peopleRows = await mysqlQuery("SELECT id FROM people WHERE id = ?", [personId]);
+  const peopleRows = await mysqlQuery("SELECT id, role, roles_json FROM people WHERE id = ?", [personId]);
   if (!peopleRows[0]) throw new Error("成员不存在");
   await withMysqlTransaction(async connection => {
     const [tenantRows] = await connection.execute("SELECT id, member_limit FROM tenants WHERE id = ? AND status = 'active' FOR UPDATE", [normalizedTenantId]);
@@ -351,9 +366,10 @@ export async function upsertTenantMemberMysql(tenantId, body = {}) {
       const [countRows] = await connection.execute("SELECT COUNT(*) AS used FROM tenant_members WHERE tenant_id = ? AND active = 1 AND person_id <> ?", [normalizedTenantId, primaryOwnerId]);
       assertTenantQuotaAvailable({ label: "子账号", current: countRows[0]?.used || 0, limit: tenantRows[0].member_limit });
     }
-    await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, active) VALUES (?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE role = VALUES(role), active = VALUES(active), updated_at = CURRENT_TIMESTAMP`,
-    [normalizedTenantId, personId, role, active]);
+    await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, business_roles_json, active) VALUES (?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE role = VALUES(role), business_roles_json = COALESCE(business_roles_json, VALUES(business_roles_json)),
+        active = VALUES(active), updated_at = CURRENT_TIMESTAMP`,
+    [normalizedTenantId, personId, role, JSON.stringify(getRoles(peopleRows[0])), active]);
   });
   return { ok: true };
 }
