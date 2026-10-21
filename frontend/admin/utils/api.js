@@ -17,6 +17,9 @@ const getCache = new Map();
 const getInflightCache = new Map();
 const getInflightRequests = new Map();
 let getCacheRevision = 0;
+let apiCacheToken = null;
+let apiCacheIdentity = "";
+let apiCacheGeneration = 0;
 const routeScopedControllers = new Set();
 const routeAbortedSignals = new WeakSet();
 const GET_NETWORK_RETRY_DELAY_MS = 350;
@@ -82,15 +85,31 @@ function isCacheableGet(url, options = {}) {
   return cachedGetPrefixes.some((prefix) => path === prefix);
 }
 
-function currentApiCacheScope() {
+export function currentApiCacheScope() {
+  const token = getAuthToken();
+  let identity = "unknown";
   try {
     const user = JSON.parse(window.localStorage?.getItem("baodanAuthUser") || "null");
     const tenant = user?.tenant || {};
     const person = user?.personId || user?.person_id || user?.id || user?.username || "unknown";
-    return `${tenant.id || ""}:${tenant.slug || "legacy"}:${person}`;
+    identity = JSON.stringify([tenant.id || "", tenant.slug || "legacy", person]);
   } catch {
-    return "unknown";
+    // An unreadable identity must not fall back to another session's cache.
   }
+  if (token !== apiCacheToken || identity !== apiCacheIdentity) {
+    apiCacheToken = token;
+    apiCacheIdentity = identity;
+    apiCacheGeneration += 1;
+    getCacheRevision += 1;
+    getCache.clear();
+    getInflightCache.clear();
+    getInflightRequests.clear();
+    for (const controller of routeScopedControllers) controller.abort();
+    routeScopedControllers.clear();
+    clearPersistedGetCacheForPrefix("");
+    window.dispatchEvent(new CustomEvent("erp:auth-scope-changed"));
+  }
+  return String(apiCacheGeneration);
 }
 
 function readPersistedGetCache(key) {
@@ -124,7 +143,7 @@ function clearPersistedGetCacheForPrefix(prefix) {
       if (!key || !key.startsWith(PERSISTED_GET_CACHE_PREFIX)) continue;
       const cachedUrl = key.slice(PERSISTED_GET_CACHE_PREFIX.length);
       const cachedPath = String(cachedUrl || "").split("?")[0];
-      if (cachedPath === prefix || cachedPath.startsWith(`${prefix}/`)) keys.push(key);
+      if (!prefix || cachedPath === prefix || cachedPath.startsWith(`${prefix}/`)) keys.push(key);
     }
     keys.forEach((key) => storage.removeItem(key));
   } catch {
@@ -188,6 +207,7 @@ function recordForbiddenApi(url = "", error = null) {
 }
 
 async function request(url, options = {}) {
+  const scope = currentApiCacheScope();
   const trace = beginApiPerf(url, options);
   let response;
   try {
@@ -209,6 +229,10 @@ async function request(url, options = {}) {
   const data = contentType.includes("application/json")
     ? await response.json()
     : await response.text();
+  if (scope !== currentApiCacheScope()) {
+    endApiPerf(trace, { error: "auth_context_changed" });
+    throw new DOMException("Authentication context changed", "AbortError");
+  }
 
   if (!response.ok) {
     const error = new Error(data?.error || `Request failed with status ${response.status}`);
@@ -225,6 +249,7 @@ async function request(url, options = {}) {
 }
 
 async function blobRequest(url, options = {}) {
+  const scope = currentApiCacheScope();
   const trace = beginApiPerf(url, options);
   let response;
   try {
@@ -238,11 +263,20 @@ async function blobRequest(url, options = {}) {
     throw error;
   }
 
+  if (scope !== currentApiCacheScope()) {
+    endApiPerf(trace, { error: "auth_context_changed" });
+    throw new DOMException("Authentication context changed", "AbortError");
+  }
+
   if (!response.ok) {
     const contentType = String(response.headers.get("content-type") || "");
     const data = contentType.includes("application/json")
       ? await response.json().catch(() => ({}))
       : await response.text().catch(() => "");
+    if (scope !== currentApiCacheScope()) {
+      endApiPerf(trace, { error: "auth_context_changed" });
+      throw new DOMException("Authentication context changed", "AbortError");
+    }
     const error = new Error(data?.error || data || `Request failed with status ${response.status}`);
     error.status = response.status;
     error.payload = data;
@@ -252,15 +286,24 @@ async function blobRequest(url, options = {}) {
     throw error;
   }
 
+  const blob = await response.blob();
+  if (scope !== currentApiCacheScope()) {
+    endApiPerf(trace, { error: "auth_context_changed" });
+    throw new DOMException("Authentication context changed", "AbortError");
+  }
   endApiPerf(trace, { status: response.status });
   return {
-    blob: await response.blob(),
+    blob,
     headers: response.headers,
     status: response.status
   };
 }
 
 export async function streamApiResponse(url, body, options = {}) {
+  const scope = currentApiCacheScope();
+  const ensureCurrentScope = () => {
+    if (scope !== currentApiCacheScope()) throw new DOMException("Authentication context changed", "AbortError");
+  };
   const controller = options.signal ? null : new AbortController();
   const signal = options.signal || controller.signal;
   const response = await fetch(url, {
@@ -269,8 +312,10 @@ export async function streamApiResponse(url, body, options = {}) {
     headers: buildHeaders(options.headers),
     body: JSON.stringify(body == null ? {} : body)
   });
+  ensureCurrentScope();
   if (!response.ok || !response.body) {
     const payload = await response.json().catch(() => ({}));
+    ensureCurrentScope();
     const error = new Error(payload?.error || `Request failed with status ${response.status}`);
     error.status = response.status;
     throw error;
@@ -280,6 +325,7 @@ export async function streamApiResponse(url, body, options = {}) {
   let pending = "";
   let completed = null;
   const handleFrame = (frame) => {
+    ensureCurrentScope();
     const event = frame.match(/^event:\s*(.+)$/m)?.[1]?.trim() || "message";
     const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
     if (!data) return;
@@ -295,6 +341,7 @@ export async function streamApiResponse(url, body, options = {}) {
   };
   while (true) {
     const { value, done } = await reader.read();
+    ensureCurrentScope();
     pending += decoder.decode(value || new Uint8Array(), { stream: !done });
     const frames = pending.split(/\r?\n\r?\n/);
     pending = frames.pop() || "";
@@ -302,6 +349,7 @@ export async function streamApiResponse(url, body, options = {}) {
     if (done) break;
   }
   if (pending.trim()) handleFrame(pending);
+  ensureCurrentScope();
   if (!completed) throw new Error("AI 流式请求未返回完成结果");
   return completed;
 }
@@ -309,15 +357,20 @@ export async function streamApiResponse(url, body, options = {}) {
 export const apiClient = {
   get(url, options = {}) {
     if (!isCacheableGet(url, options)) return routeScopedGet(url, options);
+    const scope = currentApiCacheScope();
+    const scopedResult = (data) => {
+      if (scope !== currentApiCacheScope()) throw new DOMException("Authentication context changed", "AbortError");
+      return data;
+    };
     const normalizedUrl = String(url);
     const cacheDelimiter = normalizedUrl.includes("?") ? "&" : "?";
     const key = `${normalizedUrl}${cacheDelimiter}__erp_scope=${encodeURIComponent(currentApiCacheScope())}`;
     const cached = getCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data).then(scopedResult);
     const persisted = readPersistedGetCache(key);
     if (persisted !== null) {
       getCache.set(key, { data: persisted, expiresAt: Date.now() + GET_CACHE_TTL_MS });
-      return Promise.resolve(persisted);
+      return Promise.resolve(persisted).then(scopedResult);
     }
     const inflight = getInflightCache.get(key);
     if (inflight) return inflight;
@@ -325,13 +378,14 @@ export const apiClient = {
     delete requestOptions.routeScoped;
     const revision = getCacheRevision;
     const requestPromise = request(url, { method: "GET", ...requestOptions }).then((data) => {
+      scopedResult(data);
       if (revision === getCacheRevision) {
         getCache.set(key, { data, expiresAt: Date.now() + GET_CACHE_TTL_MS });
         writePersistedGetCache(key, data);
       }
       return data;
     }).finally(() => {
-      getInflightCache.delete(key);
+      if (getInflightCache.get(key) === requestPromise) getInflightCache.delete(key);
     });
     getInflightCache.set(key, requestPromise);
     return requestPromise;
@@ -382,7 +436,7 @@ function routeScopedGet(url, options = {}) {
     return request(url, { method: "GET", ...requestOptions });
   }
   const routeScoped = options.routeScoped !== false;
-  const key = `${routeScoped ? "route" : "global"}:${String(url)}`;
+  const key = `${currentApiCacheScope()}:${routeScoped ? "route" : "global"}:${String(url)}`;
   const inflight = getInflightRequests.get(key);
   if (inflight) return inflight;
   const controller = routeScoped ? new AbortController() : null;
@@ -421,6 +475,7 @@ export function setAuthToken(token) {
   } catch {
     // Ignore storage failures; the next authenticated request will surface auth state.
   }
+  currentApiCacheScope();
 }
 
 export function clearAuthToken() {
@@ -429,4 +484,5 @@ export function clearAuthToken() {
   } catch {
     // Ignore storage failures; auth state is also enforced by the server.
   }
+  currentApiCacheScope();
 }
