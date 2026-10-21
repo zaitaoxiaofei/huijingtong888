@@ -1422,6 +1422,7 @@ async function savePluginStatus(db, payload = {}, tenantId = 'admin') {
     polling_enabled: payload?.polling_enabled === true,
     plugin_version: safeString(payload?.plugin_version),
     current_company_id: safeString(payload?.current_company_id || payload?.company_id || payload?.store_id),
+    identity_error: safeString(payload?.identity_error),
     seller_tab: sellerTab,
     synced_at: mysqlDateValue(payload?.synced_at) || new Date().toISOString(),
     synced_at_ms: Number(payload?.synced_at_ms || Date.now())
@@ -1493,6 +1494,15 @@ async function validatePluginStatus(db, query = {}, tenantId = 'admin') {
       code: 'missing_expected_store',
       message: '当前还没有选中可验证的店铺。',
       detail: '请先在数据分析页面选择店铺，再启动采集。'
+    }
+  }
+  if (status.identity_error) {
+    return {
+      ...status,
+      ok: false,
+      code: 'store_identity_unverified',
+      message: '当前 Ozon 店铺身份未核对成功，已暂停采集。',
+      detail: `请在 Ozon 后台切换到 ERP 所选店铺 ${expectedStoreId}，刷新分析页后重试。插件会核对 Ozon 店铺 Cookie（sc_company_id）、页面店铺 ID 与请求店铺头（X-O3-Company-Id）；信息不一致或缺失时不能采集。`
     }
   }
   if (!status.current_company_id) {
@@ -2101,7 +2111,7 @@ async function processDirectCollectRun(db, tenantId = 'admin', storeId = '') {
             success: false,
             error: error?.message || String(error)
           }))
-          await finishCollectRequest(db, request.run_id, request.request_id, payload, tenantId)
+          await finishCollectRequest(db, request.run_id, request.request_id, payload, tenantId, { trustedDirectWorker: true })
           if ([401, 403].includes(Number(payload.response_status || 0))) {
             throw new Error(`Direct auth rejected: HTTP ${payload.response_status}`)
           }
@@ -2529,7 +2539,7 @@ function appendAbcAnalysisRequest(run, request, payload) {
   return true
 }
 
-async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId = 'admin') {
+async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId = 'admin', options = {}) {
   return withCollectRunStateLock(tenantId, async () => {
     const run = await loadCollectRunState(db, runId, tenantId)
     if (!run) {
@@ -2550,7 +2560,25 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     const success = payload.success !== false
     let snapshotResult = null
     if (success) {
+      const runStoreId = safeString(run.store_id || run.storeId)
+      const verifiedStoreId = safeString(payload.verified_company_id || payload.verifiedCompanyId)
+      const pageStoreId = safeString(payload.current_company_id || payload.currentCompanyId)
+      const sentStoreId = normalizeCompanyId(getHeaderValue(payload.request_headers || payload.requestHeaders, 'x-o3-company-id'))
+      if (runStoreId && !options.trustedDirectWorker && (!verifiedStoreId || !pageStoreId || !sentStoreId)) {
+        const error = new Error('分析插件未提供完整的店铺校验信息，已拒绝保存采集结果。请更新分析插件，重新加载扩展并刷新 ERP 与 Ozon 页面后重试。')
+        error.statusCode = 409
+        throw error
+      }
+      if ((verifiedStoreId && verifiedStoreId !== runStoreId) ||
+          (pageStoreId && pageStoreId !== runStoreId) ||
+          (sentStoreId && sentStoreId !== runStoreId) ||
+          (verifiedStoreId && pageStoreId && verifiedStoreId !== pageStoreId)) {
+        const error = new Error(`采集结果所属店铺与任务店铺不一致：任务 ${runStoreId || '-'}，插件 ${verifiedStoreId || '-'}，页面 ${pageStoreId || '-'}，请求 ${sentStoreId || '-'}。请在 Ozon 后台切换到正确店铺并刷新分析页。`)
+        error.statusCode = 409
+        throw error
+      }
       snapshotResult = await saveSnapshot(db, {
+        store_id: runStoreId || null,
         source: 'pivot-table-master-controlled',
         source_button_label: request.source_label,
         source_button_key: request.source_key,

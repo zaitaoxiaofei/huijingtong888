@@ -574,13 +574,15 @@ test("auth-only prepare stays auth-only through plugin claim and rejects browser
     AUTH_CONTEXT_TIMEOUT_MS: 45000,
     currentSellerCompanyId: () => "111111",
     syncPluginStatus: async () => {},
-    getOzonCookieInfo: async () => ({ header: "cookie" }),
+    getOzonCookieInfo: async () => ({ header: "cookie", companyId: "111111" }),
+    readSellerPageCompanyId: async () => ({ companyId: "111111" }),
     probeServerSideAuth: async () => ({ ok: false, status: 403 }),
     logPanel: () => {},
     findAnySellerTab: async () => ({ id: 7 }),
     ensureSellerAnalyticsGraphsTab: async () => null,
     panelState: { sellerTab: null }
   };
+  vm.runInNewContext(source.slice(source.indexOf("function resolveSellerStoreIdentity("), source.indexOf("async function verifiedSellerStoreIdentity(")), context);
   vm.runInNewContext(source.slice(start, end), context);
 
   const denied = await context.waitForSellerAuthContext({ id: 7 }, claimedAuthOnly, 100);
@@ -731,6 +733,83 @@ test("seller analytics full-store collect run appends next pages until the page 
   assert.equal(savedRun.completed_count, 3);
 });
 
+test("seller analytics rejects a browser result verified for another store", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, {
+    store_id: "1111",
+    company_id: "1111",
+    period_key: "7d",
+    source_keys: ["hot"]
+  }, "team-a");
+  const request = await claimNextCollectRequest(db, "team-a", { store_id: "1111" });
+
+  await assert.rejects(
+    finishCollectRequest(db, run.id, request.request_id, {
+      success: true,
+      current_company_id: "2222",
+      verified_company_id: "2222",
+      request_headers: { "X-O3-Company-Id": "1111" },
+      response_status: 200,
+      response_body: { metrics: { revenue: 100 } }
+    }, "team-a"),
+    (error) => error.statusCode === 409
+  );
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 0);
+
+  await assert.rejects(
+    finishCollectRequest(db, run.id, request.request_id, {
+      success: true,
+      request_headers: { "X-O3-Company-Id": "1111" },
+      response_status: 200,
+      response_body: { metrics: { revenue: 100 } }
+    }, "team-a"),
+    (error) => error.statusCode === 409 && /更新分析插件/.test(error.message)
+  );
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 0);
+
+  await assert.rejects(
+    finishCollectRequest(db, run.id, request.request_id, {
+      success: true,
+      current_company_id: "1111",
+      verified_company_id: "1111",
+      request_headers: { "X-O3-Company-Id": "2222" },
+      response_status: 200,
+      response_body: { metrics: { revenue: 100 } }
+    }, "team-a"),
+    (error) => error.statusCode === 409
+  );
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 0);
+
+  await finishCollectRequest(db, run.id, request.request_id, {
+    success: true,
+    current_company_id: "1111",
+    verified_company_id: "1111",
+    request_headers: { "X-O3-Company-Id": "1111" },
+    response_status: 200,
+    response_body: { metrics: { revenue: 100 } }
+  }, "team-a");
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
+  assert.equal(db.tables.SellerAnalyticsSnapshot[0].store_id, "1111");
+});
+
+test("seller analytics direct worker keeps its internal result path without browser identity fields", async () => {
+  const db = createMemorySellerAnalyticsDb();
+  const run = await createCollectRun(db, {
+    store_id: "1111",
+    period_key: "7d",
+    source_keys: ["hot"]
+  }, "team-a");
+  const request = await claimNextCollectRequest(db, "team-a", { store_id: "1111" });
+  await finishCollectRequest(db, run.id, request.request_id, {
+    success: true,
+    request_headers: { "X-O3-Company-Id": "1111" },
+    response_status: 200,
+    response_body: { metrics: { revenue: 100 } }
+  }, "team-a", { trustedDirectWorker: true });
+  assert.equal(db.tables.SellerAnalyticsSnapshot.length, 1);
+  assert.equal(db.tables.SellerAnalyticsSnapshot[0].store_id, "1111");
+});
+
 test("cancelled analytics run rejects late results without deleting completed snapshots", async () => {
   const db = createMemorySellerAnalyticsDb();
   const run = await createCollectRun(db, {
@@ -741,6 +820,9 @@ test("cancelled analytics run rejects late results without deleting completed sn
   const completed = await claimNextCollectRequest(db, "team-a", { store_id: "4202503" });
   await finishCollectRequest(db, run.id, completed.request_id, {
     success: true,
+    current_company_id: "4202503",
+    verified_company_id: "4202503",
+    request_headers: { "X-O3-Company-Id": "4202503" },
     response_status: 200,
     response_body: { metrics: { revenue: 10 } }
   }, "team-a");

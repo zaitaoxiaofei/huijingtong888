@@ -26,7 +26,7 @@ test("pivot analytics plugin uses the hosted ERP and no longer writes a local mi
   assert.match(source, /const LOCAL_PLUGIN_TOKEN_KEY = 'pivot-erp-local-plugin-token'/);
   assert.match(source, /const DEFAULT_LOCAL_PLUGIN_TOKEN = ''/);
   assert.match(source, /function localPluginHeaders/);
-  assert.match(source, /await postCollectResult\(request, result\)/);
+  assert.match(source, /await postCollectResult\(request, \{ \.\.\.result, verified_company_id: verifiedCompanyId \}\)/);
   assert.doesNotMatch(source, /mirrorSnapshotToLocal|localMirrorBaseUrl|Local mirror write failed/);
   assert.match(source, /headers\['x-local-plugin-token'\] = config\.localPluginToken/);
 });
@@ -98,7 +98,7 @@ test("pivot analytics plugin blocks collection while preparing or when task stor
   const processRequestSource = source.match(/async function processCollectRequest\([\s\S]*?async function runWithConcurrency/)?.[0] || "";
 
   assert.match(source, /if \(polling \|\| preparing\) return/);
-  assert.match(source, /requestStoreId === currentCompanyId/);
+  assert.match(source, /identity\.ok && requestStoreId === identity\.companyId/);
   assert.equal((processRequestSource.match(/assertCollectStoreContext\(requestStoreId, tab\)/g) || []).length, 3);
   assert.match(source, /STORE_CONTEXT_MISMATCH task=/);
   assert.match(processRequestSource, /error\?\.code === 'STORE_CONTEXT_MISMATCH'[\s\S]*?return;[\s\S]*?await postCollectResult\(request, \{ success: false/);

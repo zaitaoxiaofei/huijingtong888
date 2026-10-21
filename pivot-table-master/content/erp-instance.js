@@ -2,6 +2,8 @@
   const RESPONSE_TYPE = 'BAODAN_ANALYTICS_PLUGIN_INSTANCE';
   const REQUEST_TYPE = 'BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST';
   const WAKE_TYPE = 'BAODAN_ANALYTICS_PLUGIN_WAKE';
+  const CHECK_TYPE = 'BAODAN_ANALYTICS_PLUGIN_CHECK_STORE';
+  const CHECK_RESULT_TYPE = 'BAODAN_ANALYTICS_PLUGIN_CHECK_STORE_RESULT';
   const CANCEL_TYPE = 'BAODAN_ANALYTICS_PLUGIN_CANCEL';
 
   function isTrustedErpPage() {
@@ -36,6 +38,14 @@
     if (event.data?.type === WAKE_TYPE) {
       const expectedStoreId = String(event.data.expectedStoreId || '').trim();
       void chrome.runtime.sendMessage({ type: 'PIVOT_ERP_COLLECT_WAKE', expectedStoreId }).catch(() => null);
+    }
+    if (event.data?.type === CHECK_TYPE && isTrustedErpPage()) {
+      const requestId = String(event.data.requestId || '').trim();
+      const expectedStoreId = String(event.data.expectedStoreId || '').trim();
+      if (!requestId || !expectedStoreId) return;
+      void chrome.runtime.sendMessage({ type: 'PIVOT_ERP_CHECK_STORE', expectedStoreId })
+        .then((result) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, result }, window.location.origin))
+        .catch((error) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, result: { ok: false, code: 'check_failed', error: error?.message || String(error) } }, window.location.origin));
     }
     if (event.data?.type === CANCEL_TYPE && isTrustedErpPage()) {
       const runId = String(event.data.runId || '').trim();

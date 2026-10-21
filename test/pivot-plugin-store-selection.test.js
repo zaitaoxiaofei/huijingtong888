@@ -17,6 +17,14 @@ function selectTab(tabs, identities, expectedStoreId = '', pinnedTabId = 0) {
   return vm.runInNewContext(`${selectionSource}\nselectSellerTab`, context)(tabs, expectedStoreId);
 }
 
+function resolveStoreIdentity(observed, cookie, expected = '', page = '') {
+  const identitySource = source.slice(
+    source.indexOf('function resolveSellerStoreIdentity('),
+    source.indexOf('async function verifiedSellerStoreIdentity(')
+  );
+  return vm.runInNewContext(`${identitySource}\nresolveSellerStoreIdentity`, {})(observed, cookie, expected, page);
+}
+
 const oldMartTab = { id: 1, url: 'https://seller.ozon.ru/app/analytics/graphs', active: true, lastAccessed: 100 };
 const newMartSTab = { id: 2, url: 'https://seller.ozon.ru/app', active: false, lastAccessed: 200 };
 
@@ -34,6 +42,41 @@ test('prepare tries an unidentified seller tab before a positively mismatched sh
 test('normal status follows the most recently visited seller tab across windows', () => {
   const selected = selectTab([oldMartTab, newMartSTab], { 1: '3570178', 2: '4202503' });
   assert.equal(selected.id, 2);
+});
+
+test('same-tab Ozon switch cannot reuse the old request-header identity', () => {
+  assert.equal(resolveStoreIdentity('1111', '1111', '1111').ok, true);
+  assert.equal(resolveStoreIdentity('1111', '2222', '1111').ok, false);
+  assert.equal(resolveStoreIdentity('1111', '', '1111').ok, false);
+  assert.equal(resolveStoreIdentity('2222', '2222', '1111').ok, false);
+  assert.equal(resolveStoreIdentity('1111', '1111', '1111', '2222').ok, false);
+  assert.equal(resolveStoreIdentity('1111', '1111', '1111', '2222').code, 'identity_conflict');
+});
+
+test('store preflight reads the current seller page instead of trusting cached headers alone', () => {
+  const verifiedSource = source.slice(
+    source.indexOf('async function verifiedSellerStoreIdentity('),
+    source.indexOf('async function syncPluginStatus(')
+  );
+  assert.match(verifiedSource, /await readSellerPageCompanyId\(tab\)/);
+  const bindSource = source.slice(source.indexOf('async function bindServerSideAuth('), source.indexOf('async function getNextCollectRequests('));
+  const probeSource = source.slice(source.indexOf('async function probeServerSideAuth('), source.indexOf('async function postCollectResult('));
+  assert.match(bindSource, /await readSellerPageCompanyId\(tab\)/);
+  assert.match(probeSource, /await readSellerPageCompanyId\(tab\)/);
+});
+
+test('page-reported store mismatch defers a leased task without posting a failed result', async () => {
+  const requestSource = source.slice(
+    source.indexOf('async function runCollectRequestInSellerTab('),
+    source.indexOf('async function assertCollectStoreContext(')
+  );
+  const context = {
+    findAnySellerTab: async () => ({ id: 1 }),
+    ensureRelayInjected: async () => {},
+    chrome: { tabs: { sendMessage: async () => ({ success: true, payload: { success: false, error: 'STORE_CONTEXT_MISMATCH task=1111 current=2222' } }) } }
+  };
+  const run = vm.runInNewContext(`${requestSource}\nrunCollectRequestInSellerTab`, context);
+  await assert.rejects(run({ store_id: '1111' }, { id: 1 }), (error) => error.code === 'STORE_CONTEXT_MISMATCH');
 });
 
 test('an in-progress prepare keeps its chosen tab while it reloads', () => {
