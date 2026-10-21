@@ -92,8 +92,11 @@ test("listing draft and shop-copy service paths apply tenant ownership before en
   const remove = service.slice(service.indexOf("export async function deleteListingDraft"), service.indexOf("async function listingDraft(id"));
   const access = service.slice(service.indexOf("async function assertDraftAccess"), service.indexOf("async function repairAiVariantDraftTemplateReference"));
   const sourceProductOwnership = service.slice(service.indexOf("async function assertDraftSourceProductTenant"), service.indexOf("async function insert"));
-  assert.match(drafts, /COALESCE\(d\.tenant_id, 'admin'\) = \?/);
-  assert.match(drafts, /COALESCE\(t\.tenant_id, 'admin'\) = COALESCE\(d\.tenant_id, 'admin'\)/);
+  assert.match(drafts, /const tenantScope = "CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci"/);
+  assert.match(drafts, /const relatedTenantScope = \(alias\) => `CONVERT\(COALESCE\(\$\{alias\}\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci`/);
+  assert.match(drafts, /where\.push\(tenantScope\)/);
+  assert.match(drafts, /const params = \[tenantId\]/);
+  assert.match(drafts, /LEFT JOIN listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(drafts, /relatedTenantScope\("c_shop"\)/);
   assert.match(drafts, /relatedTenantScope\("r"\)/);
   assert.match(drafts, /publish_record_count/);

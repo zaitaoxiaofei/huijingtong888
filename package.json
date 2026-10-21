@@ -47,6 +47,7 @@
     "audit:ozon-finance-order": "node scripts/audit-ozon-finance-order.mjs",
     "audit:profit-variance": "node scripts/audit-profit-model-variance.mjs",
     "audit:code-health": "node scripts/audit-code-health.mjs",
+    "audit:tenant-default-access": "node scripts/audit-default-tenant-memberships.mjs",
     "audit:storage": "node scripts/audit-storage-baseline.mjs",
     "audit:storage:deep": "node scripts/audit-storage-baseline.mjs --deep",
     "cleanup:verified-local-media": "node scripts/cleanup-verified-local-media.mjs",

@@ -3,6 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { assertTenantQuotaAvailable, normalizeTenantQuotaLimit } from "./tenant-quotas.js";
 import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMemberLimit } from "./tenant-plans.js";
 import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEncryptionConfigured } from "./tenant-plugin-token-crypto.js";
+import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
+import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -98,11 +100,8 @@ export async function ensureTenantSchemaMysql() {
       if (error?.code !== "ER_DUP_KEYNAME") throw error;
     });
     await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "默认企业"]);
-    await mysqlExecute(`INSERT IGNORE INTO tenant_members (tenant_id, person_id, role)
-      SELECT t.id, p.id, 'owner' FROM tenants t CROSS JOIN people p
-      WHERE t.slug = ? AND p.active = 1`, [DEFAULT_TENANT_SLUG]);
-    await mysqlExecute(`UPDATE sessions s JOIN tenants t ON t.slug = ?
-      SET s.active_tenant_id = t.id WHERE s.active_tenant_id IS NULL`, [DEFAULT_TENANT_SLUG]);
+    await ensurePeopleRolesSchemaMysql();
+    await withMysqlTransaction(bootstrapDefaultTenantAccessMysql);
   })().catch(error => {
     schemaReady = null;
     throw error;
@@ -367,15 +366,17 @@ async function requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin
   await ensureTenantSchemaMysql();
   const normalizedTenantId = Number(tenantId);
   const normalizedPersonId = Number(personId);
-  if (!normalizedTenantId || !normalizedPersonId) throw new Error("请选择企业和当前操作账号");
+  if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0 || !Number.isSafeInteger(normalizedPersonId) || normalizedPersonId <= 0) {
+    throw Object.assign(new Error("请选择企业和当前操作账号"), { statusCode: 400 });
+  }
   const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, tm.role AS member_role
     FROM tenants t
     LEFT JOIN tenant_members tm ON tm.tenant_id = t.id AND tm.person_id = ? AND tm.active = 1
     WHERE t.id = ? LIMIT 1`, [normalizedPersonId, normalizedTenantId]);
   const tenant = rows[0];
-  if (!tenant || tenant.status !== "active") throw new Error("企业不存在或已停用");
-  if (tenant.slug === DEFAULT_TENANT_SLUG && !isPlatformAdmin) throw new Error("默认企业插件令牌仅平台管理员可以管理");
-  if (!isPlatformAdmin && !["owner", "admin"].includes(tenant.member_role)) throw new Error("仅企业负责人或企业管理员可以管理插件令牌");
+  if (!tenant || tenant.status !== "active") throw Object.assign(new Error("企业不存在或已停用"), { statusCode: 403 });
+  if (tenant.slug === DEFAULT_TENANT_SLUG && !isPlatformAdmin) throw Object.assign(new Error("默认企业插件令牌仅平台管理员可以管理"), { statusCode: 403 });
+  if (!isPlatformAdmin && !["owner", "admin"].includes(tenant.member_role)) throw Object.assign(new Error("仅企业负责人或企业管理员可以管理插件令牌"), { statusCode: 403 });
   return { ...tenant, id: normalizedTenantId };
 }
 
@@ -410,8 +411,8 @@ export async function readTenantPluginTokenMysql(tenantId, personId, options = {
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, options.isPlatformAdmin === true);
   const rows = await mysqlQuery(`SELECT token_ciphertext FROM tenant_plugin_tokens
     WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1`, [tenant.id]);
-  if (!rows[0]) throw new Error("该企业尚未配置插件令牌");
-  if (!rows[0].token_ciphertext) throw new Error("当前令牌为旧版凭证，无法恢复；重置后请重新配置插件");
+  if (!rows[0]) throw Object.assign(new Error("该企业尚未配置插件令牌"), { statusCode: 404 });
+  if (!rows[0].token_ciphertext) throw Object.assign(new Error("当前令牌为旧版凭证，无法恢复；重置后请重新配置插件"), { statusCode: 409 });
   return { ok: true, tenant_id: tenant.id, token: decryptTenantPluginToken(rows[0].token_ciphertext) };
 }
 
@@ -419,7 +420,7 @@ export async function saveTenantPluginTokenMysql(tenantId, personId, tokenInput,
   const tenant = await requireTenantPluginAdminMysql(tenantId, personId, isPlatformAdmin);
   const token = String(tokenInput || "").trim();
   if (!/^ozp_[A-Za-z0-9_-]{40,80}$/.test(token)) {
-    throw new Error("令牌格式不正确，请粘贴 Ozon 浏览器插件使用的 ozp_ 令牌");
+    throw Object.assign(new Error("令牌格式不正确，请粘贴 Ozon 浏览器插件使用的 ozp_ 令牌"), { statusCode: 400 });
   }
   const tokenHash = hashTenantPluginToken(token);
   const encryptedToken = encryptTenantPluginToken(token);
@@ -429,7 +430,7 @@ export async function saveTenantPluginTokenMysql(tenantId, personId, tokenInput,
     const [existingRows] = await connection.execute("SELECT id, tenant_id, revoked_at FROM tenant_plugin_tokens WHERE token_hash = ? LIMIT 1 FOR UPDATE", [tokenHash]);
     const existing = existingRows[0];
     if (existing && Number(existing.tenant_id) !== tenant.id) {
-      throw new Error("此令牌已关联其他企业，不能重复使用");
+      throw Object.assign(new Error("此令牌已关联其他企业，不能重复使用"), { statusCode: 409 });
     }
     const [activeRows] = await connection.execute("SELECT id, token_hash FROM tenant_plugin_tokens WHERE tenant_id = ? AND revoked_at IS NULL ORDER BY id DESC LIMIT 1 FOR UPDATE", [tenant.id]);
     if (activeRows[0]?.token_hash === tokenHash) {

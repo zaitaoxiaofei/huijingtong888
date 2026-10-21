@@ -27,6 +27,7 @@ function createNoSessionOverrides() {
     renderQrConfirmPage: () => "<!doctype html><title>扫码确认登录</title>",
     consumeConfirmedQrSession: () => ({ status: "pending" }),
     confirmQrLoginSession: () => ({ ok: true, redirect: "/dashboard" }),
+    validateQrLoginSession: () => ({ ok: true }),
     createWechatLoginUrl: () => null,
     resolveWechatIdentityFromCallback: async () => ({ identity: {}, redirect: "/dashboard" }),
     createWechatLoginTicket: () => "login-ticket",
@@ -42,6 +43,7 @@ async function loadCreateAuthHandler() {
   process.env.DB_HOST = process.env.DB_HOST || "127.0.0.1";
   process.env.DB_NAME = process.env.DB_NAME || "test_db";
   process.env.DB_USER = process.env.DB_USER || "test_user";
+  process.env.DB_PORT = process.env.DB_PORT || "1";
   const mod = await import("../src/server/session.js");
   return mod.createAuthHandler;
 }

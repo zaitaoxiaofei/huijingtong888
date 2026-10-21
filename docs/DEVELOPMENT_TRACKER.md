@@ -2,7 +2,7 @@
 
 > Historical note: this tracker contains SQLite-to-MySQL transition history. The current runtime baseline is MySQL; do not treat old SQLite plan items as the active production architecture.
 
-Last updated: 2026-05-17
+Last updated: 2026-10-21
 
 This document is the single tracking entry for system-level work, cross-page UI rules, and feature backlog. When a feature is started or finished, update the status here first.
 
@@ -15,6 +15,8 @@ Status legend:
 - `Research`: needs API or business verification before implementation.
 
 ## 0. Current Refactor Snapshot
+
+- `In progress` (2026-10-21): paid-pilot preparation is tracked in `docs/saas-launch-readiness.md`, based on release `2026.10.21-task-brand` (`eefe63d`). Default-enterprise bootstrap, QR login protection, tenant plugin-token routing, and project draft query bindings have local fixes and focused regressions. Historical membership review, ECS acceptance and the tenant business workflow remain required before sale.
 
 - `In progress`: backend entry layer has been split from the monolithic server entry into dedicated HTTP/session/maintenance modules.
 - `In progress`: order/profit/sync route groups are now being extracted from `src/server.js` into `src/server/routes/*` so the main entry keeps shrinking toward startup/auth/dispatch-only responsibilities.

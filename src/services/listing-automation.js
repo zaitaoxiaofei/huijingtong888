@@ -10896,12 +10896,8 @@ export async function listingDrafts(query = {}, session) {
   }
   if (projectOnly && status === "editing") {
     where.push(`NOT EXISTS (SELECT 1 FROM listing_shop_copies c_project WHERE c_project.draft_id = d.id AND ${relatedTenantScope("c_project")})`);
-    params.push(tenantId);
-    countParams.push(tenantId);
   } else if (projectOnly && status === "waiting") {
     where.push(`EXISTS (SELECT 1 FROM listing_shop_copies c_project WHERE c_project.draft_id = d.id AND ${relatedTenantScope("c_project")} AND c_project.status = 'prepared')`);
-    params.push(tenantId);
-    countParams.push(tenantId);
   } else if (projectOnly && status && status !== "all") {
     where.push("1 = 0");
   } else if (status && status !== "all") {

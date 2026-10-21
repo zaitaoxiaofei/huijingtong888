@@ -123,6 +123,82 @@ Login payload.
 | `username` | `string` | Yes | Username to authenticate. |
 | `password` | `string` | Yes | Plain-text password. |
 
+### QrConfirmRequest
+
+Confirm a pending QR login. Username and password are required unless a valid remembered mobile cookie is present.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sid` | `string` | Yes | Pending QR login identifier. |
+| `secret` | `string` | Yes | One-time confirmation secret from the QR URL. |
+| `username` | `string` | No | Username for the password flow. |
+| `password` | `string` | No | Password for the password flow. |
+
+### QrConfirmResponse
+
+Successful mobile confirmation; the desktop polls its QR session to receive the bearer token.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether confirmation succeeded. |
+| `redirect` | `string` | Yes | Destination after successful login. |
+
+### TenantPluginTokenTarget
+
+Select a plugin credential enterprise. Ordinary owners/admins use their active session enterprise; only platform admins may select another enterprise.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `number` | No | Target enterprise ID; defaults to the active enterprise. Only platform admins may select another enterprise. |
+
+### TenantPluginTokenImportRequest
+
+Store an encrypted copy of an existing enterprise plugin credential.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `number` | No | Target enterprise; ordinary users must remain in the active session enterprise. |
+| `token` | `string` | Yes | Existing ozp_ plugin credential; never log this value. |
+
+### TenantPluginTokenImportResponse
+
+Existing plugin credential import result; the credential value is not returned.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether the import succeeded. |
+| `tenant_id` | `number` | Yes | Enterprise owning the credential. |
+| `unchanged` | `boolean` | Yes | Whether the supplied credential was already active for this enterprise. |
+
+### TenantPluginTokenResponse
+
+Sensitive plugin credential response; returned with Cache-Control: no-store.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ok` | `boolean` | Yes | Whether the operation succeeded. |
+| `tenant_id` | `number` | Yes | Enterprise owning the credential. |
+| `token` | `string` | Yes | Plugin credential, shown only to an authorized enterprise administrator. |
+
+### TenantPluginTokenStatus
+
+Enterprise plugin credential configuration without the credential value.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `configured` | `boolean` | Yes | Whether an active credential exists. |
+| `created_at` | `string|null` | No | Credential creation time. |
+| `label` | `string` | No | Credential label. |
+| `recoverable` | `boolean` | No | Whether an encrypted copy is stored. |
+| `can_reveal` | `boolean` | No | Whether the server can decrypt the credential. |
+| `encryption_configured` | `boolean` | No | Whether the required stable encryption key is configured. |
+
 ### ChangePasswordRequest
 
 Password change payload.
@@ -1446,6 +1522,21 @@ Authenticate a user and return a bearer token.
   - `200` `application/json` -> `AuthSession`
   - `429` `application/json` -> `ErrorResponse`: Returned when login rate limit is exceeded.
 
+#### `POST /api/auth/qr/confirm`
+
+Confirm a QR login once. Password attempts share the ordinary login IP rate limit; invalid, expired or already confirmed QR sessions cannot create an extra session.
+
+- Auth: `public`
+- Request body: required
+  - Schema: `QrConfirmRequest`
+- Responses:
+  - `200` `application/json` -> `QrConfirmResponse`
+  - `401` `application/json` -> `ErrorResponse`: Invalid credentials or inactive remembered account.
+  - `403` `application/json` -> `ErrorResponse`: Invalid confirmation secret.
+  - `409` `application/json` -> `ErrorResponse`: The QR login has already been confirmed.
+  - `410` `application/json` -> `ErrorResponse`: The QR login expired or was consumed.
+  - `429` `application/json` -> `ErrorResponse`: Shared password login rate limit exceeded.
+
 #### `GET /api/auth/me`
 
 Resolve the current user from the bearer token.
@@ -1472,6 +1563,71 @@ Change the current user's password.
   - Schema: `ChangePasswordRequest`
 - Responses:
   - `200` `application/json` -> `MutationOk`
+
+### Enterprise Plugin Credentials
+
+#### `GET /api/tenants/plugin-token`
+
+Read credential status for the active enterprise. Requires an enterprise owner/admin or platform administrator.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `tenant_id` (`number`, optional): Target enterprise ID; non-platform users cannot select another enterprise.
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenStatus`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/tenants/plugin-token`
+
+Rotate the active enterprise plugin credential. Requires an enterprise owner/admin or platform administrator.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenTarget`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/tenants/plugin-token/reveal`
+
+Decrypt a recoverable credential for an authorized active-enterprise administrator.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenTarget`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`: No credential configured.
+  - `409` `application/json` -> `ErrorResponse`: Legacy hash-only credential cannot be revealed.
+
+#### `POST /api/tenants/plugin-token/import`
+
+Store an existing plugin credential for the active enterprise; a credential associated with another enterprise is rejected.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `TenantPluginTokenImportRequest`
+- Responses:
+  - `200` `application/json` -> `TenantPluginTokenImportResponse`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`: Credential already belongs to another enterprise.
+
+#### `DELETE /api/tenants/plugin-token`
+
+Revoke the active enterprise credential. Default-enterprise credentials remain platform-admin only.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `tenant_id` (`number`, optional): Target enterprise ID; non-platform users cannot select another enterprise.
+- Responses:
+  - `200` `application/json` -> `MutationOk`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
 
 ### Dashboard And Profit
 

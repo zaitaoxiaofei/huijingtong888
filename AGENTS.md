@@ -150,6 +150,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Windows entry scripts should set UTF-8 where practical, such as `chcp 65001` for `.bat` and `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)` for PowerShell.
 - If `npm run check:encoding` fails, fix the encoding issue before reporting the task as done.
 
+## 9. Default Enterprise Membership Safety
+
+- Never infer ordinary accounts' enterprise membership from `people.active`, account creation, or service startup. Platform administrators must explicitly assign ordinary staff and customer memberships.
+- Startup may bootstrap only actual platform administrators, using the shared role resolver so `roles_json` overrides the legacy `role` field. Preserve disabled membership records.
+- Legacy sessions may inherit the default enterprise only through an existing active membership for the same person. Missing membership must fail closed.
+- Historical default/customer membership overlap is a review candidate, not proof of an error. Repair only an explicitly reviewed person-ID list in a transaction; preserve other enterprises' memberships and sessions and revoke the removed default access.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

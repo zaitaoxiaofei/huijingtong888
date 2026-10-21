@@ -26,7 +26,8 @@ import {
   QR_MOBILE_COOKIE_MAX_AGE_SECONDS,
   QR_MOBILE_COOKIE_NAME,
   renderQrCodePng,
-  renderQrConfirmPage
+  renderQrConfirmPage,
+  validateQrLoginSession
 } from "./internal-qr-login.js";
 import {
   consumeWechatTicket,
@@ -98,6 +99,7 @@ export function createAuthHandler(readJson, overrides = {}) {
     renderQrConfirmPage,
     consumeConfirmedQrSession,
     confirmQrLoginSession,
+    validateQrLoginSession,
     createWechatLoginUrl,
     resolveWechatIdentityFromCallback,
     createWechatLoginTicket,
@@ -215,25 +217,41 @@ export function createAuthHandler(readJson, overrides = {}) {
     if (key === "POST /api/auth/qr/confirm") {
       return async () => {
         const body = await readJson(req);
+        const validation = deps.validateQrLoginSession({ sid: body.sid, secret: body.secret });
+        if (!validation.ok) return { error: validation.error, __status: validation.status || 400 };
         const mobileSession = deps.getQrMobileSession(req);
+        let loginKey = "";
         let row = null;
         if (mobileSession?.user?.id) {
           row = await deps.findPersonById(mobileSession.user.id);
           if (!row?.active) return { error: "手机登录态已失效，请重新输入密码", __status: 401 };
         } else {
+          loginKey = `auth:${deps.getClientIp(req)}`;
+          const rate = deps.consumeRateLimit(loginKey, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS);
+          if (!rate.allowed) return { error: "登录尝试过多，请稍后再试", __status: 429 };
           row = await deps.findPersonForLogin(body.username);
           if (!row || !row.active || !deps.verifyPassword(body.password || "", row.password_hash)) {
             return { error: "用户名或密码错误", __status: 401 };
           }
         }
+        const pending = deps.validateQrLoginSession({ sid: body.sid, secret: body.secret });
+        if (!pending.ok) return { error: pending.error, __status: pending.status || 400 };
         const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
-        const result = deps.confirmQrLoginSession({
-          sid: body.sid,
-          secret: body.secret,
-          token,
-          user: authUser(row)
-        });
-        if (!result.ok) return { error: result.error, __status: result.status || 400 };
+        let confirmed = false;
+        let result;
+        try {
+          result = deps.confirmQrLoginSession({
+            sid: body.sid,
+            secret: body.secret,
+            token,
+            user: authUser(row)
+          });
+          if (!result.ok) return { error: result.error, __status: result.status || 400 };
+          confirmed = true;
+        } finally {
+          if (!confirmed) await deps.destroySession(token);
+        }
+        if (loginKey) deps.clearRateLimit(loginKey);
         const mobileToken = deps.createQrMobileSession(authUser(row));
         return {
           ...result,

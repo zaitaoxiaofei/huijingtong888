@@ -18,7 +18,7 @@ import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } fro
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
 import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
-import { tenantIdFromRequest } from "./server/tenant-context.js";
+import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
@@ -280,31 +280,31 @@ const routes = {
     const body = await readJson(req);
     return setTenantQuotasMysql(body.tenant_id || body.tenantId, body);
   },
-  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+  "GET /api/tenants/plugin-token": (req) => tenantPluginTokenStatusMysql(pluginTokenTenantIdFromRequest(req, req.query?.tenant_id || req.query?.tenantId), req._session?.personId, {
     isPlatformAdmin: hasPermission(req._session, "admin")
   }),
   "POST /api/tenants/plugin-token/reveal": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return readTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+    return readTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
   "POST /api/tenants/plugin-token/import": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return saveTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, body.token, {
+    return saveTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, body.token, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
   "POST /api/tenants/plugin-token": async (req) => {
     req._sensitiveResponse = true;
     const body = await readJson(req);
-    return issueTenantPluginTokenMysql(body.tenant_id || body.tenantId, req._session?.personId, {
+    return issueTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, body.tenant_id || body.tenantId), req._session?.personId, {
       isPlatformAdmin: hasPermission(req._session, "admin")
     });
   },
-  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(req.query?.tenant_id || req.query?.tenantId, req._session?.personId, {
+  "DELETE /api/tenants/plugin-token": (req) => revokeTenantPluginTokenMysql(pluginTokenTenantIdFromRequest(req, req.query?.tenant_id || req.query?.tenantId), req._session?.personId, {
     isPlatformAdmin: hasPermission(req._session, "admin")
   }),
   "POST /api/system/update-status": async (req) => updateGlobalUpdateStatus(await readJson(req)),
@@ -2153,7 +2153,7 @@ const server = http.createServer(async (req, res) => {
       markRequestTiming(req, "before_route");
       const payload = await routes[key](req, url);
       markRequestTiming(req, "after_route");
-      json(res, payload);
+      json(res, payload, 200, req._sensitiveResponse ? { "Cache-Control": "no-store" } : {});
       markRequestTiming(req, "after_json");
       return;
     }
@@ -2163,7 +2163,7 @@ const server = http.createServer(async (req, res) => {
   } catch (error) {
     if (!isRequestCancelledError(error)) console.error(error);
     if (res.writableEnded || res.destroyed) return;
-    json(res, { error: error.message, validation: error.validation }, error.status || error.statusCode || 500);
+    json(res, { error: error.message, validation: error.validation }, error.status || error.statusCode || 500, req._sensitiveResponse ? { "Cache-Control": "no-store" } : {});
   }
 });
 

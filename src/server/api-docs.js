@@ -64,6 +64,48 @@ const schemas = {
     field("password", scalar("string", "Plain-text password."), true)
   ], { additionalProperties: false }),
 
+  QrConfirmRequest: objectOf("Confirm a pending QR login. Username and password are required unless a valid remembered mobile cookie is present.", [
+    field("sid", scalar("string", "Pending QR login identifier."), true),
+    field("secret", scalar("string", "One-time confirmation secret from the QR URL."), true),
+    field("username", scalar("string", "Username for the password flow.")),
+    field("password", scalar("string", "Password for the password flow."))
+  ], { additionalProperties: false }),
+
+  QrConfirmResponse: objectOf("Successful mobile confirmation; the desktop polls its QR session to receive the bearer token.", [
+    field("ok", scalar("boolean", "Whether confirmation succeeded."), true),
+    field("redirect", scalar("string", "Destination after successful login."), true)
+  ], { additionalProperties: false }),
+
+  TenantPluginTokenTarget: objectOf("Select a plugin credential enterprise. Ordinary owners/admins use their active session enterprise; only platform admins may select another enterprise.", [
+    field("tenant_id", scalar("number", "Target enterprise ID; defaults to the active enterprise. Only platform admins may select another enterprise."))
+  ]),
+
+  TenantPluginTokenImportRequest: objectOf("Store an encrypted copy of an existing enterprise plugin credential.", [
+    field("tenant_id", scalar("number", "Target enterprise; ordinary users must remain in the active session enterprise.")),
+    field("token", scalar("string", "Existing ozp_ plugin credential; never log this value."), true)
+  ]),
+
+  TenantPluginTokenImportResponse: objectOf("Existing plugin credential import result; the credential value is not returned.", [
+    field("ok", scalar("boolean", "Whether the import succeeded."), true),
+    field("tenant_id", scalar("number", "Enterprise owning the credential."), true),
+    field("unchanged", scalar("boolean", "Whether the supplied credential was already active for this enterprise."), true)
+  ], { additionalProperties: false }),
+
+  TenantPluginTokenResponse: objectOf("Sensitive plugin credential response; returned with Cache-Control: no-store.", [
+    field("ok", scalar("boolean", "Whether the operation succeeded."), true),
+    field("tenant_id", scalar("number", "Enterprise owning the credential."), true),
+    field("token", scalar("string", "Plugin credential, shown only to an authorized enterprise administrator."), true)
+  ]),
+
+  TenantPluginTokenStatus: objectOf("Enterprise plugin credential configuration without the credential value.", [
+    field("configured", scalar("boolean", "Whether an active credential exists."), true),
+    field("created_at", scalar("string|null", "Credential creation time.")),
+    field("label", scalar("string", "Credential label.")),
+    field("recoverable", scalar("boolean", "Whether an encrypted copy is stored.")),
+    field("can_reveal", scalar("boolean", "Whether the server can decrypt the credential.")),
+    field("encryption_configured", scalar("boolean", "Whether the required stable encryption key is configured."))
+  ]),
+
   ChangePasswordRequest: objectOf("Password change payload.", [
     field("old_password", scalar("string", "Current password."), true),
     field("new_password", scalar("string", "New password."), true)
@@ -969,6 +1011,18 @@ const endpoints = [
       requestBody: body(ref("LoginRequest")),
       responses: [response(200, "application/json", ref("AuthSession")), response(429, "application/json", ref("ErrorResponse"), "Returned when login rate limit is exceeded.")]
     }),
+    endpoint("POST", "/api/auth/qr/confirm", "Confirm a QR login once. Password attempts share the ordinary login IP rate limit; invalid, expired or already confirmed QR sessions cannot create an extra session.", {
+      auth: "public",
+      requestBody: body(ref("QrConfirmRequest")),
+      responses: [
+        response(200, "application/json", ref("QrConfirmResponse")),
+        response(401, "application/json", ref("ErrorResponse"), "Invalid credentials or inactive remembered account."),
+        response(403, "application/json", ref("ErrorResponse"), "Invalid confirmation secret."),
+        response(409, "application/json", ref("ErrorResponse"), "The QR login has already been confirmed."),
+        response(410, "application/json", ref("ErrorResponse"), "The QR login expired or was consumed."),
+        response(429, "application/json", ref("ErrorResponse"), "Shared password login rate limit exceeded.")
+      ]
+    }),
     endpoint("GET", "/api/auth/me", "Resolve the current user from the bearer token.", {
       auth: "public",
       responses: [
@@ -984,6 +1038,28 @@ const endpoints = [
       auth: "authenticated",
       requestBody: body(ref("ChangePasswordRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
+    })
+  ]),
+  section("Enterprise Plugin Credentials", [
+    endpoint("GET", "/api/tenants/plugin-token", "Read credential status for the active enterprise. Requires an enterprise owner/admin or platform administrator.", {
+      query: [param("tenant_id", scalar("number", "Target enterprise ID; non-platform users cannot select another enterprise."), false)],
+      responses: [response(200, "application/json", ref("TenantPluginTokenStatus")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/tenants/plugin-token", "Rotate the active enterprise plugin credential. Requires an enterprise owner/admin or platform administrator.", {
+      requestBody: body(ref("TenantPluginTokenTarget")),
+      responses: [response(200, "application/json", ref("TenantPluginTokenResponse")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/tenants/plugin-token/reveal", "Decrypt a recoverable credential for an authorized active-enterprise administrator.", {
+      requestBody: body(ref("TenantPluginTokenTarget")),
+      responses: [response(200, "application/json", ref("TenantPluginTokenResponse")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"), "No credential configured."), response(409, "application/json", ref("ErrorResponse"), "Legacy hash-only credential cannot be revealed.")]
+    }),
+    endpoint("POST", "/api/tenants/plugin-token/import", "Store an existing plugin credential for the active enterprise; a credential associated with another enterprise is rejected.", {
+      requestBody: body(ref("TenantPluginTokenImportRequest")),
+      responses: [response(200, "application/json", ref("TenantPluginTokenImportResponse")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"), "Credential already belongs to another enterprise.")]
+    }),
+    endpoint("DELETE", "/api/tenants/plugin-token", "Revoke the active enterprise credential. Default-enterprise credentials remain platform-admin only.", {
+      query: [param("tenant_id", scalar("number", "Target enterprise ID; non-platform users cannot select another enterprise."), false)],
+      responses: [response(200, "application/json", ref("MutationOk")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
     })
   ]),
   section("Dashboard And Profit", [
