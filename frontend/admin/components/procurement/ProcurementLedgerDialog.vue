@@ -3,7 +3,6 @@ import { computed, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
-import InventoryIdentity from '../../../orders/components/InventoryIdentity.vue';
 import LedgerBatchTrace from './LedgerBatchTrace.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
@@ -305,10 +304,26 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 
 <template>
   <el-dialog v-model="visible" :title="inventoryMode ? '库存明细' : '库存明细与历史核对'" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
+    <template #header="{ titleId, titleClass }">
+      <div class="ledger-dialog-header">
+        <div class="ledger-dialog-heading">
+          <span :id="titleId" :class="titleClass">{{ inventoryMode ? '库存明细' : '库存明细与历史核对' }}</span>
+          <small v-if="orderOverview && orderLabel" class="ledger-order-context" :title="orderLabel">{{ orderLabel }}</small>
+        </div>
+        <div class="ledger-top-actions">
+          <el-button v-if="!inventoryMode || stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
+          <el-button v-if="!inventoryMode" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
+          <el-dropdown v-if="!inventoryMode" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
+            <el-dropdown-item v-if="$slots.management" command="management">绑定管理</el-dropdown-item>
+            <el-dropdown-item command="damage" :disabled="!data || loading">货损报废</el-dropdown-item>
+            <el-dropdown-item command="loss" :disabled="!data || loading">货物丢失</el-dropdown-item>
+          </el-dropdown-menu></template></el-dropdown>
+          <el-button :disabled="!productId || loading" @click="load()">刷新对账</el-button>
+        </div>
+      </div>
+    </template>
     <section v-if="orderOverview" class="ledger-order-summary">
-      <h3>本单采购结论 <small>{{ orderLabel }}</small></h3>
-      <InventoryIdentity v-if="orderOverview.parents?.length" :parents="orderOverview.parents" />
-      <p>点击库存行，下方直接切换详情；不同子产品的件数不合并相加。</p>
+      <div class="ledger-order-heading"><strong>本单需求分配</strong><span>点击库存产品切换详情；不同子产品的件数不合并相加。</span></div>
       <el-table :data="orderItems" row-key="product_id" max-height="290" :row-class-name="({ row }) => Number(row.product_id) === productId ? 'selected-inventory-row' : ''" @row-click="row => changeProduct(row.product_id)">
         <el-table-column label="库存产品" min-width="320"><template #default="{ row }"><div class="ledger-product ledger-order-product">
           <el-image class="ledger-image" :src="`/api/products/${row.product_id}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${row.product_id}/image`]" :initial-index="0" preview-teleported @click.stop><template #error>无图</template></el-image>
@@ -321,34 +336,24 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       </el-table>
       <el-alert v-if="orderCoverageConclusion" :type="orderCoverageConclusion.type" :closable="false" show-icon class="ledger-order-conclusion" :title="orderCoverageConclusion.title" />
     </section>
-    <div class="ledger-toolbar">
-      <el-select v-if="!orderOverview && !inventoryMode" :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
+    <div v-if="!orderOverview && !inventoryMode" class="ledger-toolbar">
+      <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
         <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
       </el-select>
-      <strong v-else class="ledger-scope">库存汇总</strong>
-      <div class="ledger-top-actions">
-        <el-button v-if="!inventoryMode || stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
-        <el-button v-if="!inventoryMode" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
-        <el-dropdown v-if="!inventoryMode" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
-          <el-dropdown-item v-if="$slots.management" command="management">绑定管理</el-dropdown-item>
-          <el-dropdown-item command="damage" :disabled="!data || loading">货损报废</el-dropdown-item>
-          <el-dropdown-item command="loss" :disabled="!data || loading">货物丢失</el-dropdown-item>
-        </el-dropdown-menu></template></el-dropdown>
-        <el-button :disabled="!productId || loading" @click="load()">刷新对账</el-button>
-      </div>
     </div>
     <section v-if="managementVisible" class="ledger-management"><slot name="management" /></section>
     <el-alert v-if="loadError" type="error" :closable="false" title="库存明细加载失败，请点击刷新对账重试" :description="loadError" />
     <div v-loading="loading">
       <template v-if="data">
-        <div class="ledger-product"><el-image v-if="!orderOverview" class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || orderItems.find(item => Number(item.product_id) === productId)?.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <div class="ledger-metric-groups"><section><h3>仓库实物、分配与可用</h3>
+        <div v-if="!orderOverview" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
+        <div class="ledger-metric-groups"><section class="ledger-warehouse-summary"><h3>仓库汇总</h3>
         <div class="ledger-metrics">
           <div><span>仓库实物总数</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近核实：${time(data.last_stocktake_at)}` : data.stocktake_id ? '已盘点，时间待核' : '未盘点' }}</small></div>
           <div><span>待发订单需求</span><strong>{{ data.open_order_demand }}</strong><small>其中现货已分配 {{ data.current_stock_reserved }}</small></div>
-          <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
           <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>实物扣除全部待发订单需求及 FBP 占用</small></div>
+          <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
+          <div v-if="data.fbp_inventory"><span>FBP 库存</span><strong>{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} <small>{{ data.product.stock_unit || '库存单位' }}</small></strong><el-button link type="primary" size="small" @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button></div>
         </div></section><section><h3>采购与缺口</h3><div class="ledger-metrics">
           <div><span>采购在途</span><strong v-if="inventoryMode">{{ data.incoming_quantity }}</strong><el-button v-else link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>{{ inventoryMode ? '待收货数量' : '点击查看待收采购' }}</small></div>
           <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>
@@ -358,10 +363,6 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <div v-if="!inventoryMode && (pendingCosts.length || data.current_shortage > 0)" class="ledger-toolbar">
           <el-button v-if="pendingCosts.length" type="warning" plain @click="showPurchases()">补采购记录（{{ pendingCosts.length }} 项待核）</el-button>
           <el-button v-if="data.current_shortage > 0" type="primary" plain @click="visible = false; $router.push('/procurement/workspace')">处理采购缺口（{{ data.current_shortage }} 件）</el-button>
-        </div>
-        <div class="ledger-toolbar" v-if="data.fbp_inventory">
-          <strong>FBP 库存汇总：{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} {{ data.product.stock_unit || '库存单位' }}</strong>
-          <el-button type="primary" plain @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button>
         </div>
         <div v-if="!inventoryMode && (data.missing_purchase > 0 || data.missing_receipt > 0)" class="ledger-toolbar">
           <strong>历史缺采购来源：{{ data.missing_purchase }} 件</strong><span>收货记录待补：{{ data.missing_receipt }} 件</span>
@@ -587,34 +588,40 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
   </el-dialog>
 </template>
 <style scoped>
-.ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap; }
+.ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap; }
 .ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:#f5f7fa; }
-.ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;margin:16px 0; }
-.ledger-metrics > div { display:grid;gap:8px;padding:14px;background:#f5f7fa;border-radius:8px; }
-.ledger-metrics span { color:#606266;font-size:12px; }.ledger-metrics strong { font-size:22px; }.ledger-warning strong { color:#b45309; }
+.ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:8px 0; }
+.ledger-metrics > div { display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px;background:var(--el-fill-color-light);border-radius:6px; }
+.ledger-metrics span { color:#606266;font-size:12px; }.ledger-metrics strong { font-size:20px;line-height:1.3; }.ledger-warning strong { color:#b45309; }
 .ledger-shortage { color:var(--el-color-danger); }
-.ledger-order-summary { margin-bottom:20px; }
-.ledger-order-summary h3 { display:flex;align-items:center;gap:16px;flex-wrap:wrap; }
-.ledger-order-summary p,.ledger-hint,.ledger-scope small { color:#606266;font-size:13px; }
-.ledger-order-summary h3 small { font-weight:400;color:#606266; }
+.ledger-dialog-header { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
+.ledger-dialog-heading { display:flex;flex-direction:column;gap:2px;min-width:0; }
+.ledger-order-context { max-width:520px;color:var(--el-text-color-secondary);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.ledger-order-summary { margin-bottom:12px; }
+.ledger-order-heading { display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 10px;background:var(--el-color-primary-light-9);border-radius:6px 6px 0 0; }
+.ledger-order-heading span { color:var(--el-text-color-secondary);font-size:12px; }
+.ledger-order-summary p,.ledger-hint { color:#606266;font-size:13px; }
+.ledger-order-summary p { margin:4px 0 0; }
+.ledger-order-conclusion { margin-top:6px;padding:6px 10px; }
 .ledger-order-product { margin:0;min-height:92px;flex-wrap:nowrap; }
 .ledger-product-select { white-space:normal;text-align:left;height:auto;line-height:1.5; }
 .ledger-order-summary :deep(.el-table__row) { cursor:pointer; }
 .ledger-order-summary :deep(.selected-inventory-row) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
 .ledger-top-actions { display:flex;gap:8px;flex-wrap:wrap;margin-left:auto; }
 .ledger-top-actions .el-button { margin-left:0; }
-.ledger-scope { display:flex;flex-direction:column;gap:6px; }
-.ledger-scope small { font-weight:400; }
-.ledger-metric-groups { display:grid;grid-template-columns:4fr 3fr;gap:20px; }
-.ledger-metric-groups h3 { margin:8px 0; }
-.ledger-metric-groups .ledger-metrics { grid-template-columns:repeat(4,minmax(0,1fr));margin:8px 0 16px; }
+.ledger-metric-groups { display:grid;grid-template-columns:5fr 3fr;gap:16px; }
+.ledger-metric-groups h3 { margin:0 0 8px;font-size:14px; }
+.ledger-metric-groups .ledger-metrics { margin:0 0 12px; }
+.ledger-metric-groups .ledger-warehouse-summary .ledger-metrics { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
 .ledger-metric-groups section:last-child .ledger-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
 .ledger-metrics small { color:#606266;font-size:12px;line-height:1.5; }
 .ledger-management { border:1px solid #dcdfe6;padding:16px;margin-bottom:16px;border-radius:8px; }
 .ledger-history-toolbar { position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 0;background:#fff;border-bottom:1px solid #ebeef5; }
 .ledger-history-toolbar .el-pagination { width:100%; }
 :deep(.current-fbp-sku) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
-:global(.unified-inventory-dialog > .el-dialog__body) { max-height:82vh;overflow:auto; }
-@media(max-width:1000px) { .ledger-metric-groups { grid-template-columns:1fr;gap:0; } }
-@media(max-width:900px) { .ledger-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+:global(.unified-inventory-dialog) { display:flex;flex-direction:column;max-height:92vh;margin-bottom:4vh;overflow:hidden; }
+:global(.unified-inventory-dialog > .el-dialog__header) { flex:none;margin-right:0;padding-right:48px;padding-bottom:12px;border-bottom:1px solid var(--el-border-color-lighter); }
+:global(.unified-inventory-dialog > .el-dialog__body) { min-height:0;max-height:none;overflow:auto;padding-top:12px; }
+@media(max-width:1100px) { .ledger-metric-groups { grid-template-columns:1fr;gap:0; } }
+@media(max-width:900px) { .ledger-dialog-heading { width:100%; }.ledger-order-context { max-width:100%; }.ledger-top-actions { margin-left:0; }.ledger-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>

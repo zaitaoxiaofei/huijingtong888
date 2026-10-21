@@ -1973,15 +1973,22 @@ function closeQualityDialog() {
 
 async function handleSaveMark(orderId, markType) {
   const row = tableRows.value.find((item) => Number(item.id) === Number(orderId));
-  const { value: note } = await ElMessageBox.prompt("可填写标记原因，方便后续跟进", "订单标记备注", { inputValue: row?.mark_note || "", inputPlaceholder: "例如：客户要求延迟发货", confirmButtonText: "保存", cancelButtonText: "取消" }).catch(() => ({ value: null }));
+  const { value: note } = await ElMessageBox.prompt("可填写备注，保存后会显示在订单标记下方", "订单标记备注", {
+    inputValue: row?.mark_note || "", inputType: "textarea", inputPlaceholder: "例如：客户要求延迟发货；等待确认收货地址",
+    confirmButtonText: "保存", cancelButtonText: "取消", closeOnClickModal: false
+  }).catch(() => ({ value: null }));
   if (note === null) return;
-  await saveOrderMark(orderId, markType, note);
-  vm.rows = (vm.rows || []).map((row) => (
-    Number(row.id) === Number(orderId)
-      ? { ...row, mark_type: String(markType || ""), mark_note: note }
-      : row
-  ));
-  ElMessage.success("订单标记已更新");
+  try {
+    const saved = await saveOrderMark(orderId, markType, note);
+    vm.rows = (vm.rows || []).map((row) => (
+      Number(row.id) === Number(orderId)
+        ? { ...row, mark_type: String(saved?.mark_type ?? markType ?? ""), mark_note: String(saved?.note ?? note).trim() }
+        : row
+    ));
+    ElMessage.success("订单标记和备注已保存");
+  } catch (error) {
+    ElMessage.error(error?.message || "标记和备注保存失败，请重试");
+  }
 }
 
 async function handleOpenOrderProcurement(orderId) {

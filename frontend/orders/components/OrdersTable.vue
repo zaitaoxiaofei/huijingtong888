@@ -1,6 +1,6 @@
 ﻿<script setup>
 import { computed, ref } from "vue";
-import { CopyDocument, Document } from "@element-plus/icons-vue";
+import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
@@ -341,13 +341,15 @@ function procurementTimeText(row) {
 
       <el-table-column label="标记" width="78" fixed="left" align="center">
         <template #default="{ row }">
-          <div class="orders-mark-cell">
-            <button type="button" class="orders-mark-pill" :title="markLabel(markValue(row))" @click="openMarkMenu(row.id, $event)">
-              <span v-if="markValue(row)" class="orders-mark-dot" :class="`is-${markTone(markValue(row))}`" />
+          <div class="orders-mark-cell" :class="`is-${markTone(markValue(row))}`">
+            <button type="button" class="orders-mark-pill" :title="row.mark_note ? `${markLabel(markValue(row))}：${row.mark_note}` : markLabel(markValue(row))" @click="openMarkMenu(row.id, $event)">
+              <span v-if="markValue(row)" class="orders-mark-dot" :class="`is-${markTone(markValue(row))}`"><el-icon v-if="row.mark_note" class="orders-mark-note-icon"><Document /></el-icon></span>
+              <el-icon v-else-if="row.mark_note" class="orders-mark-note-icon"><Document /></el-icon>
               <span v-else class="orders-mark-pencil-ring">
                 <span class="orders-mark-pencil-icon" />
               </span>
             </button>
+            <button v-if="row.mark_note" type="button" class="orders-mark-note-summary" :title="row.mark_note" :aria-label="`编辑备注：${row.mark_note}`" @click="emit('save-mark', row.id, markValue(row))">{{ row.mark_note }}</button>
             <div v-if="row.printedState" class="orders-print-state orders-print-state-mark">
               <b>已打印</b>
               <span v-if="row.printed_at" class="orders-print-time">
@@ -567,7 +569,7 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="库存信息" min-width="240">
+      <el-table-column label="库存信息" min-width="360">
         <template #header>
           <span>库存信息</span>
           <el-popover trigger="click" placement="bottom" :width="340">
@@ -585,9 +587,13 @@ function procurementTimeText(row) {
           <div class="inventory-compact">
             <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active" />
             <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
-              <strong>库存 {{ inventoryViews.get(row.id).items[0].inventory_number || '—' }}</strong>
-              <span class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name }}</span>
-              <small v-if="inventoryViews.get(row.id).active">本单需 {{ inventoryViews.get(row.id).items[0].quantity }} · 现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
+              <div class="inventory-compact-heading">
+                <strong>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
+                <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
+              </div>
+              <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
+              <small>可用：{{ inventoryViews.get(row.id).items[0].local_available ?? '待核对' }} · 实物：{{ inventoryViews.get(row.id).items[0].physical_estimate ?? '待核对' }} · FBP：待同步</small>
+              <small v-if="inventoryViews.get(row.id).active">现货覆盖 {{ inventoryViews.get(row.id).items[0].stock_quantity ?? '待核' }} · 在途覆盖 {{ inventoryViews.get(row.id).items[0].incoming_quantity ?? '待核' }}</small>
             </template>
             <template v-else-if="inventoryViews.get(row.id)?.items.length">
               <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
@@ -595,20 +601,24 @@ function procurementTimeText(row) {
             </template>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button link type="primary" size="small" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button link type="primary" size="small" :icon="Tickets" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
               <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
                 <el-button
                   v-if="product.sku"
+                  link
+                  type="primary"
                   size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  :icon="Link"
                   @click="emit('open-bind-product-from-order', row.id, product.sku)"
                 >
                   修改绑定
                 </el-button>
                 <el-button
                   v-if="Number(product.productId || 0) > 0"
+                  link
+                  type="primary"
                   size="small"
-                  class="orders-inline-accent-button orders-inline-accent-button-secondary"
+                  :icon="EditPen"
                   @click="emit('edit-inventory-product', product.productId)"
                 >
                   修改库存
@@ -662,7 +672,7 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="归类 / 具体原因" min-width="250">
+      <el-table-column label="归类 / 具体原因" v-if="false" min-width="250">
         <template #default="{ row }">
           <div class="orders-cancel-cell">
             <strong v-if="row.cancelCategoryText !== '--'">{{ row.cancelCategoryText }}</strong>
@@ -846,8 +856,23 @@ function procurementTimeText(row) {
 </template>
 
 <style scoped>
-.inventory-compact { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
-.inventory-compact-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.orders-mark-cell { --orders-mark-note-color: #64748b; }
+.orders-mark-cell.is-red { --orders-mark-note-color: #b91c1c; }
+.orders-mark-cell.is-orange { --orders-mark-note-color: #b45309; }
+.orders-mark-cell.is-yellow { --orders-mark-note-color: #92400e; }
+.orders-mark-cell.is-green { --orders-mark-note-color: #15803d; }
+.orders-mark-cell.is-cyan { --orders-mark-note-color: #0e7490; }
+.orders-mark-cell.is-purple { --orders-mark-note-color: #6d28d9; }
+.orders-mark-cell.is-gray { --orders-mark-note-color: #64748b; }
+.orders-mark-note-icon { font-size: 15px; color: var(--orders-mark-note-color); }
+.orders-mark-dot .orders-mark-note-icon { font-size: 10px; color: #fff; }
+.orders-mark-note-summary { display: -webkit-box; width: 64px; max-width: 64px; padding: 0; border: 0; background: transparent; color: var(--orders-mark-note-color); font: inherit; font-size: 12px; line-height: 1.35; text-align: center; white-space: normal; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.inventory-compact { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; width: 100%; font-size: 13px; }
+.inventory-compact-heading { display: flex; justify-content: space-between; gap: 8px; width: 100%; font-size: inherit; }
+.inventory-compact-heading strong,.inventory-compact-name { font-size: inherit; font-weight: 600; }
+.inventory-compact-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inventory-compact-heading span { flex-shrink: 0; font-weight: 600; white-space: nowrap; }
+.inventory-compact-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inventory-compact small { color: #606266; line-height: 1.6; }
 .orders-inventory-quick-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .orders-inventory-quick-actions .el-button { margin-left: 0; }

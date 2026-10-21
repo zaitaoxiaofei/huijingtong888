@@ -952,7 +952,12 @@ export function useOrdersPage() {
     createOrderProcurementRequests: (orderId, payload = {}) => createOrderProcurementRequests(orderId, payload),
     printSingleOrder: (orderId) => runPrintOrders([orderId]),
     recalculateOrderProfit: (orderId) => recalculateOrderProfit(orderId),
-    saveOrderMark: (orderId, markType) => saveOrderMark(orderId, markType),
+    saveOrderMark: async (orderId, markType, note = "") => {
+      const result = await saveOrderMark(orderId, markType, note);
+      ordersListCache.clear();
+      ordersMetaCache.clear();
+      return result;
+    },
     openBindProduct: (onlineId) => openBindProduct(onlineId),
     openBindProductFromOrder: (orderId, sku) => openBindProductFromOrder(orderId, sku),
     openCreateProduct: (onlineId, orderId, sku) => openCreateProduct(onlineId, orderId, sku),
