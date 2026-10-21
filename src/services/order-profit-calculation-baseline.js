@@ -15,7 +15,7 @@ export async function profitCalculationBaselineAudit(connection, { tablesAvailab
     COALESCE(SUM(CASE WHEN state.formula_version != 'V1' THEN 1 ELSE 0 END), 0) AS unsupported_count
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_profit_calc_state state ON state.order_item_id = oi.id
-      AND state.tenant_key = CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END`));
+      AND state.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci`));
   const [revision] = rows(await connection.query("SELECT COUNT(*) AS revision_count FROM order_profit_calc_revisions"));
   return { ...projection, ...coverage, ...revision };
 }
