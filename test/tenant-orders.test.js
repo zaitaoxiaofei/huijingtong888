@@ -75,7 +75,7 @@ test("tenant order paging scopes shop, mapping and product rows without shared p
   assert.match(service, /logisticsRuleFilterCacheMysql\.delete\(cacheKey\)/);
   assert.match(service, /activeOrderLogisticsFilterMethodsMysql\(tenantScoped \? tenantId : "admin"\)/);
   assert.match(service, /const tenantCacheKey = String\(tenantId \|\| "admin"\)/);
-  assert.match(service, /orders:logistics-summary:v7:\$\{tenantCacheKey\}:/);
+  assert.match(service, /orders:logistics-summary:v8:\$\{tenantCacheKey\}:/);
   assert.match(picking, /direct_mapping\.tenant_id = \$\{tenantPk\}/);
   assert.match(picking, /pc\.tenant_id = \$\{tenantPk\}/);
   assert.match(picking, /child\.tenant_id = \$\{tenantPk\}/);

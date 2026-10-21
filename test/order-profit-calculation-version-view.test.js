@@ -51,6 +51,8 @@ test("list summary keeps zero actual profit and respects an explicit not-ready f
   assert.equal(summary({ ...row, actual_profit_ready: 0 }).hasActual, false);
   assert.equal(summary({ ...row, actual_profit_ready: 1 }).effective, 0);
   assert.match(table, /<span v-else>待结算<\/span>/);
+  assert.doesNotMatch(table, /profitSummary\.versionLabel|profitSummary\.versionTooltip|<View\s*\/>/);
+  assert.match(table, /<el-button\s+link\s+type="primary"[\s\S]*?:icon="Document"[\s\S]*?>查看明细<\/el-button>/);
 });
 
 test("the original profit detail remains above an optional lazy version appendix", () => {
