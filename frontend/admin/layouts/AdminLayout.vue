@@ -1,7 +1,7 @@
 <script setup>
-import { KeepAlive, computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { Bell, Camera, Close, Download, Expand, Fold, Lock, MoonNight, Paperclip, RefreshRight, Sunny, User } from "@element-plus/icons-vue";
+import { Bell, Camera, Close, Coin, Download, Expand, Fold, Lock, Operation, Paperclip, PriceTag, RefreshRight, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
@@ -12,6 +12,11 @@ import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openA
 import { uploadListingMedia } from "../api/tools/imageCropper";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
+import { canAccessPage } from "../../../src/shared/permissions.js";
+import AppearanceSettings from "../components/AppearanceSettings.vue";
+import BrandLogo from "../components/BrandLogo.vue";
+
+const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
 
 const route = useRoute();
 const router = useRouter();
@@ -45,8 +50,32 @@ const breadcrumbItems = computed(() => {
   return [items[0], items[items.length - 1]];
 });
 const currentPageTitle = computed(() => breadcrumbItems.value[breadcrumbItems.value.length - 1] || "ERP Admin");
-const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
-const themeTitle = computed(() => (appStore.theme === "dark" ? "Switch to light theme" : "Switch to dark theme"));
+const quickToolsVisible = ref(false);
+const quickToolsMounted = ref(false);
+const quickTool = ref("profit");
+const quickToolAuthScope = ref(currentApiCacheScope());
+const canUseProfitCalculator = computed(() => canAccessPage(authStore.user, "/tools/profit-calculator"));
+const canUsePricingTool = computed(() => canAccessPage(authStore.user, "/tools/pricing"));
+const quickToolScope = computed(() => {
+  const user = authStore.user;
+  return user ? `${user.id || user.person_id || ""}:${user.tenant?.id || ""}:${quickToolAuthScope.value}` : "signed-out";
+});
+function resetQuickToolsForScope() {
+  quickToolsVisible.value = false;
+  quickToolsMounted.value = false;
+  quickToolAuthScope.value = currentApiCacheScope();
+}
+function openQuickTool(tool) {
+  if (tool === "profit" ? !canUseProfitCalculator.value : !canUsePricingTool.value) return;
+  quickToolAuthScope.value = currentApiCacheScope();
+  quickTool.value = tool;
+  quickToolsMounted.value = true;
+  quickToolsVisible.value = true;
+}
+watch([quickToolScope, canUseProfitCalculator, canUsePricingTool], () => {
+  quickToolsVisible.value = false;
+  quickToolsMounted.value = false;
+}, { flush: "sync" });
 const densityLabel = computed(() => ({
   auto: "自动密度",
   comfortable: "舒适密度",
@@ -682,6 +711,7 @@ onMounted(() => {
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("app:plugin-update", handlePluginUpdate);
   window.addEventListener("app:plugin-update-clear", clearPluginUpdate);
+  window.addEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
   loadNotifications({ quiet: true });
   notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
 });
@@ -692,6 +722,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("blur", handleWindowBlur);
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
   window.removeEventListener("app:plugin-update-clear", clearPluginUpdate);
+  window.removeEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
   window.clearInterval(notificationRefreshTimer);
   window.clearTimeout(routeSwitchTimer);
 });
@@ -702,14 +733,8 @@ onBeforeUnmount(() => {
     <button v-if="!standaloneMode && isMobileViewport && mobileNavigationOpen" type="button" class="erp-mobile-navigation-mask" aria-label="关闭导航" @click="mobileNavigationOpen = false"></button>
     <el-aside v-if="!standaloneMode" :width="isMobileViewport ? '280px' : (appStore.sidebarCollapsed ? '52px' : '180px')" class="erp-sidebar">
       <div class="erp-sidebar-inner">
-        <button type="button" class="erp-logo" aria-label="爆单单单" @click="openDashboard">
-          <span class="brand-logo-sticker">
-            <span class="brand-ozon">OZON</span>
-            <span class="brand-char brand-bao">爆</span>
-            <span class="brand-char brand-dan brand-dan-1">单</span>
-            <span class="brand-char brand-dan brand-dan-2">单</span>
-            <span class="brand-char brand-dan brand-dan-3">单</span>
-          </span>
+        <button type="button" class="erp-logo" aria-label="爆单 ERP 首页" @click="openDashboard">
+          <BrandLogo :collapsed="appStore.sidebarCollapsed && !isMobileViewport" />
         </button>
 
         <el-scrollbar class="erp-sidebar-scroll">
@@ -767,21 +792,33 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
+          <div v-if="canUseProfitCalculator || canUsePricingTool" class="erp-quick-tools" role="group" aria-label="快捷计算工具">
+            <el-tooltip v-if="canUseProfitCalculator" content="利润计算器" placement="bottom">
+              <el-button circle class="erp-header-icon" aria-label="打开利润计算器" @click="openQuickTool('profit')">
+                <el-icon><Coin /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip v-if="canUsePricingTool" content="定价工具" placement="bottom">
+              <el-button circle class="erp-header-icon" aria-label="打开定价工具" @click="openQuickTool('pricing')">
+                <el-icon><PriceTag /></el-icon>
+              </el-button>
+            </el-tooltip>
+          </div>
           <el-dropdown class="erp-density-control" trigger="click" @command="handleDensityCommand">
-            <el-button text :title="`界面密度：${densityLabel}`">
-              {{ densityLabel }}
+            <el-button circle class="erp-header-icon" aria-label="界面密度" :title="`界面密度：${densityLabel}`">
+              <el-icon><Operation /></el-icon>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="auto">自动（推荐）</el-dropdown-item>
-                <el-dropdown-item command="comfortable">舒适</el-dropdown-item>
-                <el-dropdown-item command="standard">标准</el-dropdown-item>
-                <el-dropdown-item command="compact">紧凑</el-dropdown-item>
+                <el-dropdown-item command="auto" :class="{ 'is-active-density': appStore.densityMode === 'auto' }">自动（推荐）</el-dropdown-item>
+                <el-dropdown-item command="comfortable" :class="{ 'is-active-density': appStore.densityMode === 'comfortable' }">舒适</el-dropdown-item>
+                <el-dropdown-item command="standard" :class="{ 'is-active-density': appStore.densityMode === 'standard' }">标准</el-dropdown-item>
+                <el-dropdown-item command="compact" :class="{ 'is-active-density': appStore.densityMode === 'compact' }">紧凑</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
           <el-dropdown trigger="click" @command="handlePluginDownloadCommand">
-            <el-button circle title="插件下载">
+            <el-button circle class="erp-header-icon" aria-label="插件下载" title="插件下载">
               <el-icon><Download /></el-icon>
             </el-button>
             <template #dropdown>
@@ -797,13 +834,11 @@ onBeforeUnmount(() => {
             </template>
           </el-dropdown>
           <el-badge :value="notificationUnread" :max="99" class="erp-header-badge" :hidden="!notificationUnread">
-            <el-button circle title="消息通知" @click="openNotificationDrawer">
+            <el-button circle class="erp-header-icon" aria-label="消息通知" title="消息通知" @click="openNotificationDrawer">
               <el-icon><Bell /></el-icon>
             </el-button>
           </el-badge>
-          <el-button circle class="erp-theme-toggle" :title="themeTitle" @click="appStore.toggleTheme()">
-            <el-icon><component :is="themeIcon" /></el-icon>
-          </el-button>
+          <AppearanceSettings />
           <div class="erp-user-card">
             <el-avatar :src="authStore.user?.avatar_url" :size="30" class="erp-user-avatar" title="查看和编辑个人资料" @click="openProfileDialog">
               {{ String(authStore.user?.name || authStore.user?.username || "?").slice(0, 1) }}
@@ -960,6 +995,8 @@ onBeforeUnmount(() => {
     </div>
   </el-drawer>
 
+  <QuickToolsDialog v-if="quickToolsMounted" :key="quickToolScope" v-model="quickToolsVisible" :tool="quickTool" />
+
   <teleport to="body">
     <div
       v-if="contextMenu.visible"
@@ -1031,6 +1068,44 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.erp-header-left { flex: 1; overflow: hidden; }
+.erp-header-right { flex-shrink: 0; gap: 5px; }
+.erp-quick-tools { display: flex; align-items: center; gap: 3px; padding-right: 8px; margin-right: 3px; border-right: 1px solid var(--erp-border); }
+.erp-header-right :deep(.erp-header-icon.el-button) {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  margin-left: 0;
+  padding: 0;
+  border-radius: 8px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--erp-text-regular);
+}
+.erp-header-right :deep(.erp-header-icon.el-button:hover) {
+  border-color: transparent;
+  background: var(--erp-primary-soft);
+  color: var(--erp-primary);
+}
+.erp-header-right :deep(.erp-header-icon .el-icon) { font-size: 17px; }
+.erp-header-right :deep(.erp-theme-toggle) { display: inline-flex; }
+.erp-density-control { display: inline-flex; }
+.is-active-density { color: var(--erp-primary); font-weight: 600; background: var(--erp-primary-soft); }
+@media (max-width: 1100px) {
+  .erp-header-right { gap: 2px; }
+  .erp-header-right > .erp-header-badge { display: inline-flex; }
+  .erp-quick-tools { gap: 0; margin-right: 0; padding-right: 3px; }
+  .erp-header-right :deep(.erp-header-icon.el-button) { width: 28px; height: 28px; min-height: 28px; }
+  .erp-header-right :deep(.erp-user-action) { display: none; }
+  .erp-header-right :deep(.erp-user-card) { gap: 4px; }
+  .erp-page-meta strong { max-width: min(22vw, 140px); }
+}
+@media (max-width: 420px) {
+  .erp-header-right { gap: 0; }
+  .erp-header-right :deep(.erp-header-icon.el-button) { width: 26px; height: 28px; }
+  .erp-header-right :deep(.erp-user-avatar) { width: 26px; height: 26px; }
+  .erp-page-meta { display: none; }
+}
 .notification-toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }
 .notification-list { min-height:240px; display:flex; flex-direction:column; gap:10px; }
 .notification-card { display:flex; align-items:flex-end; gap:8px; padding:14px; border:1px solid var(--el-border-color-lighter); border-radius:10px; background:var(--el-fill-color-blank); }

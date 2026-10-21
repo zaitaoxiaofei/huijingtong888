@@ -1619,6 +1619,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+:global(:root[data-theme][data-theme-palette]) {
+  --dashboard-theme-link: var(--erp-link);
+  --dashboard-theme-primary: var(--erp-primary);
+  --dashboard-theme-primary-soft: var(--erp-primary-soft);
+}
+
 /* Keep the existing light palette and share dark tokens with teleported overlays. */
 :global(:root[data-theme="dark"]) {
   --dashboard-theme-bg: var(--erp-bg);
@@ -2114,8 +2120,8 @@ button {
   --el-button-bg-color: var(--dashboard-theme-surface, #ffffff);
   --el-button-border-color: var(--dashboard-border);
   --el-button-text-color: var(--dashboard-theme-text-regular, #4b5563);
-  --el-button-hover-bg-color: var(--dashboard-theme-info-bg, #eef6ff);
-  --el-button-hover-border-color: var(--dashboard-theme-info-border, #93c5fd);
+  --el-button-hover-bg-color: var(--erp-primary-soft);
+  --el-button-hover-border-color: var(--erp-primary-border);
   --el-button-hover-text-color: var(--dashboard-theme-link, #1d4ed8);
   transition: all 0.18s ease;
 }
@@ -3262,8 +3268,8 @@ button {
 
 .command-icon-button:hover,
 .command-action-button:hover {
-  border-color: var(--dashboard-theme-info-border, #bfdbfe);
-  background: var(--dashboard-theme-info-bg, #eff6ff);
+  border-color: var(--erp-primary-border);
+  background: var(--erp-primary-soft);
 }
 
 .command-empty {
@@ -3411,7 +3417,7 @@ button {
   border: 0;
   border-radius: 10px;
   color: var(--dashboard-theme-text-main, #1e293b);
-  background: var(--dashboard-theme-info-bg, #eef4ff);
+  background: var(--erp-primary-soft);
   text-align: left;
   cursor: pointer;
 }

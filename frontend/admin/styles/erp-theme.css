@@ -216,10 +216,6 @@ body,
   border-bottom-color: var(--erp-border-light);
 }
 
-.brand-logo-sticker {
-  height: 44px;
-}
-
 .erp-menu.el-menu {
   --el-menu-active-color: var(--erp-primary);
   --el-menu-hover-bg-color: var(--erp-primary-soft);
@@ -245,9 +241,9 @@ body,
 }
 
 .erp-menu .el-menu-item.is-active {
-  background: var(--erp-info-bg);
+  background: var(--erp-primary-soft);
   color: var(--erp-link);
-  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+  box-shadow: inset 0 0 0 1px var(--erp-primary-border);
 }
 
 .erp-menu .el-menu-item.is-active::before {
@@ -1245,4 +1241,42 @@ body,
   line-height: 24px;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
+}
+
+/* Validated appearance presets supply accent ramps; semantic status colors stay independent. */
+:root[data-theme][data-theme-palette] {
+  --erp-primary: var(--erp-palette-primary);
+  --erp-primary-hover: var(--erp-palette-primary-hover);
+  --erp-primary-soft: var(--erp-palette-primary-soft);
+  --erp-primary-faint: var(--erp-palette-primary-faint);
+  --erp-primary-border: var(--erp-palette-primary-border);
+  --erp-primary-control-border: var(--erp-palette-primary-control-border);
+  --erp-primary-fill: var(--erp-palette-primary-fill);
+  --erp-primary-fill-hover: var(--erp-palette-primary-fill-hover);
+  --erp-primary-contrast: var(--erp-palette-primary-contrast);
+  --erp-link: var(--erp-palette-link);
+  --erp-link-hover: var(--erp-palette-link-hover);
+  --erp-menu-hover: var(--erp-primary-faint);
+  --erp-control-hover-border: var(--erp-primary-control-border);
+  --el-color-primary: var(--erp-primary);
+  --el-color-primary-light-3: var(--erp-palette-primary-light-3);
+  --el-color-primary-light-5: var(--erp-palette-primary-light-5);
+  --el-color-primary-light-7: var(--erp-palette-primary-light-7);
+  --el-color-primary-light-8: var(--erp-palette-primary-light-8);
+  --el-color-primary-light-9: var(--erp-palette-primary-light-9);
+  --el-color-primary-dark-2: var(--erp-primary-hover);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"][data-theme-palette] .erp-workspace-tab.is-active {
+  box-shadow: 0 -2px 0 var(--erp-primary) inset;
+}
+
+:root[data-theme][data-theme-palette] .el-pagination .el-pager li.is-active {
+  background: var(--erp-primary-fill);
+  border-color: var(--erp-primary-fill);
+  color: var(--erp-primary-contrast);
 }

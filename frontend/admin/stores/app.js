@@ -1,8 +1,7 @@
 import { computed, ref } from "vue";
 import { defineStore } from "pinia";
+import { applyAppearancePreferences, getThemePreset, normalizeAppearancePreferences, readAppearancePreferences, saveAppearancePreferences } from "../utils/theme-presets.js";
 
-const THEME_STORAGE_KEY = "ozon-admin-theme";
-const DEFAULT_THEME = "light";
 const DENSITY_STORAGE_KEY = "ozon-admin-density";
 const DENSITY_MODES = new Set(["auto", "comfortable", "standard", "compact"]);
 
@@ -17,6 +16,8 @@ function resolveWindowClass(width) {
 export const useAppStore = defineStore("app", () => {
   const sidebarCollapsed = ref(false);
   const theme = ref("light");
+  const themePalettes = ref({ light: "blue", dark: "blue" });
+  const activePalette = computed(() => themePalettes.value[theme.value]);
   const densityMode = ref("auto");
   const viewportWidth = ref(typeof window === "undefined" ? 1440 : window.innerWidth);
   let viewportListenerInstalled = false;
@@ -32,19 +33,41 @@ export const useAppStore = defineStore("app", () => {
     sidebarCollapsed.value = !sidebarCollapsed.value;
   }
 
-  function applyTheme(nextTheme) {
-    theme.value = nextTheme === "dark" ? "dark" : "light";
-    document.documentElement.dataset.theme = theme.value;
-    document.body.dataset.theme = theme.value;
+  function appearanceStorage() {
+    try {
+      return typeof window === "undefined" ? null : window.localStorage;
+    } catch {
+      return null;
+    }
+  }
+
+  function applyThemePreferences(value) {
+    const preferences = normalizeAppearancePreferences(value);
+    theme.value = preferences.mode;
+    themePalettes.value = preferences.palettes;
+    applyAppearancePreferences(preferences, typeof document === "undefined" ? null : document);
+    saveAppearancePreferences(appearanceStorage(), preferences);
   }
 
   function initTheme() {
-    localStorage.removeItem(THEME_STORAGE_KEY);
-    applyTheme(DEFAULT_THEME);
+    applyThemePreferences(readAppearancePreferences(appearanceStorage()));
+  }
+
+  function setThemeMode(mode) {
+    applyThemePreferences({ version: 1, mode, palettes: themePalettes.value });
+  }
+
+  function setThemePalette(palette, mode = theme.value) {
+    const targetMode = mode === "dark" ? "dark" : "light";
+    applyThemePreferences({
+      version: 1,
+      mode: theme.value,
+      palettes: { ...themePalettes.value, [targetMode]: getThemePreset(targetMode, palette).id }
+    });
   }
 
   function toggleTheme() {
-    applyTheme(theme.value === "dark" ? "light" : "dark");
+    setThemeMode(theme.value === "dark" ? "light" : "dark");
   }
 
   function applyLayoutState() {
@@ -61,12 +84,21 @@ export const useAppStore = defineStore("app", () => {
   function setDensityMode(mode) {
     const nextMode = DENSITY_MODES.has(mode) ? mode : "auto";
     densityMode.value = nextMode;
-    localStorage.setItem(DENSITY_STORAGE_KEY, nextMode);
+    try {
+      localStorage.setItem(DENSITY_STORAGE_KEY, nextMode);
+    } catch {
+      // Keep the current layout usable when browser storage is unavailable.
+    }
     applyLayoutState();
   }
 
   function initLayoutPreferences() {
-    const savedDensity = localStorage.getItem(DENSITY_STORAGE_KEY);
+    let savedDensity;
+    try {
+      savedDensity = localStorage.getItem(DENSITY_STORAGE_KEY);
+    } catch {
+      // Fall back to the existing automatic density.
+    }
     densityMode.value = DENSITY_MODES.has(savedDensity) ? savedDensity : "auto";
     syncViewport();
     if (!viewportListenerInstalled) {
@@ -78,6 +110,8 @@ export const useAppStore = defineStore("app", () => {
   return {
     sidebarCollapsed,
     theme,
+    themePalettes,
+    activePalette,
     densityMode,
     effectiveDensity,
     viewportWidth,
@@ -85,6 +119,8 @@ export const useAppStore = defineStore("app", () => {
     tableSize,
     toggleSidebar,
     initTheme,
+    setThemeMode,
+    setThemePalette,
     toggleTheme,
     setDensityMode,
     initLayoutPreferences

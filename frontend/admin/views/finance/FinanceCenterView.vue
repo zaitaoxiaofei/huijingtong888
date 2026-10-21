@@ -215,6 +215,10 @@ onMounted(async () => { await loadCompanies(); await loadAll(); });
 </template>
 
 <style scoped>
+:global(:root[data-theme][data-theme-palette]) {
+  --finance-theme-link: var(--erp-link);
+}
+
 /* Keep the existing light palette and share dark tokens with teleported overlays. */
 :global(:root[data-theme="dark"]) {
   --finance-theme-border: var(--erp-border);
