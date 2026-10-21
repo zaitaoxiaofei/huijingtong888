@@ -3,10 +3,11 @@ import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-function loadRelayPage({ cookie = "" } = {}) {
+function loadRelayPage({ cookie = "", onFetch = () => {} } = {}) {
   const listeners = {};
   const postedMessages = [];
   let fetchCall = null;
+  let fetchCallCount = 0;
   const storage = new Map();
   const window = {
     location: { href: "https://seller.ozon.ru/app/analytics?test=1" },
@@ -27,7 +28,9 @@ function loadRelayPage({ cookie = "" } = {}) {
     window,
     document: { cookie },
     fetch: async (url, options) => {
+      fetchCallCount += 1;
       fetchCall = { url, options };
+      onFetch(context);
       return {
         ok: true,
         status: 200,
@@ -51,7 +54,10 @@ function loadRelayPage({ cookie = "" } = {}) {
       });
       await new Promise((resolve) => setImmediate(resolve));
     },
+    setCookie: (value) => { context.document.cookie = value; },
+    setStoredCompanyId: (value) => { storage.set("ozon_company_id", value); },
     getFetchCall: () => fetchCall,
+    getFetchCallCount: () => fetchCallCount,
     getPostedMessages: () => postedMessages
   };
 }
@@ -71,4 +77,58 @@ test("relay page adds x-o3-company-id from seller cookie when ERP headers omit i
 
   assert.equal(page.getFetchCall().options.headers["X-O3-Company-Id"], "123456");
   assert.equal(page.getPostedMessages()[0].payload.request_headers["X-O3-Company-Id"], "123456");
+});
+
+test("relay refuses an old store task after a same-tab Ozon shop switch", async () => {
+  const page = loadRelayPage({ cookie: "sc_company_id=111" });
+  const request = {
+    store_id: "111",
+    request_url: "https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals",
+    request_method: "POST",
+    request_headers: { "X-O3-Company-Id": "111" },
+    request_body: { metrics: ["revenue"] }
+  };
+
+  await page.dispatchExecute(request);
+  assert.equal(page.getFetchCallCount(), 1);
+
+  page.setCookie("sc_company_id=222");
+  page.setStoredCompanyId("222");
+  await page.dispatchExecute(request);
+  assert.equal(page.getFetchCallCount(), 1);
+  assert.equal(page.getPostedMessages().at(-1).payload.success, false);
+});
+
+test("relay refuses conflicting cookie and cached page store", async () => {
+  const page = loadRelayPage({ cookie: "sc_company_id=111" });
+  page.setStoredCompanyId("111");
+  page.setCookie("sc_company_id=222");
+
+  await page.dispatchExecute({
+    store_id: "111",
+    request_url: "https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals",
+    request_method: "POST",
+    request_headers: { "X-O3-Company-Id": "111" },
+    request_body: { metrics: ["revenue"] }
+  });
+
+  assert.equal(page.getFetchCallCount(), 0);
+  assert.equal(page.getPostedMessages()[0].payload.success, false);
+});
+
+test("relay discards a result if Ozon switches store during the request", async () => {
+  const page = loadRelayPage({
+    cookie: "sc_company_id=111",
+    onFetch: (context) => { context.document.cookie = "sc_company_id=222"; }
+  });
+  await page.dispatchExecute({
+    store_id: "111",
+    request_url: "https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/totals",
+    request_method: "POST",
+    request_headers: { "X-O3-Company-Id": "111" },
+    request_body: { metrics: ["revenue"] }
+  });
+
+  assert.equal(page.getFetchCallCount(), 1);
+  assert.equal(page.getPostedMessages()[0].payload.success, false);
 });

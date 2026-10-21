@@ -121,6 +121,19 @@ test("seller analytics shop filter refreshes and is sent to analysis APIs", () =
   assert.match(source, /company_id:\s*selectedStoreId\.value/);
 });
 
+test("seller analytics verifies the current plugin store before reusing a binding or creating a collect run", () => {
+  const source = viewSource();
+  const ready = source.slice(source.indexOf("async function ensureCollectReady()"), source.indexOf("async function bindCurrentShopAuth()"));
+
+  assert.match(ready, /await checkCurrentShopViaPlugin\(expectedStoreId\)/);
+  assert.match(ready, /storeCheck\.code === "store_mismatch" \|\| storeCheck\.code === "identity_conflict"/);
+  assert.ok(ready.indexOf("await checkCurrentShopViaPlugin(expectedStoreId)") < ready.indexOf("await loadPluginValidation()"));
+  assert.match(ready, /await waitForSellerAnalyticsPreparation\(\{/);
+  assert.match(ready, /requestId: queued\?\.data\?\.id \|\| queued\?\.id/);
+  assert.match(ready, /if \(result\.status === "ready"\)/);
+  assert.match(ready, /if \(selectedStoreId\.value !== expectedStoreId\) return false;[\s\S]*?return true;/);
+});
+
 test("seller analytics period presets stay synchronized with the visible date range", () => {
   const source = viewSource();
 
@@ -216,10 +229,10 @@ test("seller analytics verifies plugin store alignment before starting collectio
   assert.match(source, /async function ensureCollectReady/);
   assert.match(source, /const skipPluginValidation = computed/);
   assert.match(source, /localhost\|127\\\.0\\\.0\\\.1/);
-  assert.match(source, /if \(skipPluginValidation\.value\) return true;/);
-  assert.match(source, /本地调试允许继续/);
+  assert.match(source, /await checkCurrentShopViaPlugin\(expectedStoreId\)/);
+  assert.doesNotMatch(source, /if \(skipPluginValidation\.value\) return true;/);
   assert.match(source, /ElMessageBox\.alert/);
-  assert.match(source, /if \(!\(await ensureCollectReady\(\)\)\) return;/);
+  assert.match(source, /if \(!\(await ensureCollectReady\(\)\) \|\| selectedStoreId\.value !== expectedStoreId \|\| state\.filters\.shopId !== expectedShopId\) return;/);
   assert.match(source, /店铺未对齐/);
 });
 

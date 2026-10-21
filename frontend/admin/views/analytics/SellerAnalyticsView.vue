@@ -1144,56 +1144,94 @@ function wakeAnalyticsPlugin() {
   window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId.value }, window.location.origin);
 }
 
+function checkCurrentShopViaPlugin(expectedStoreId) {
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      window.removeEventListener("message", onMessage);
+      window.clearTimeout(timer);
+      resolve(result);
+    };
+    const onMessage = (event) => {
+      if (event.source !== window || event.origin !== window.location.origin) return;
+      if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_CHECK_STORE_RESULT" || event.data.requestId !== requestId) return;
+      finish(event.data.result || null);
+    };
+    const timer = window.setTimeout(() => finish(null), 10000);
+    window.addEventListener("message", onMessage);
+    window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CHECK_STORE", requestId, expectedStoreId }, window.location.origin);
+  });
+}
+
 async function ensureCollectReady() {
   try {
     if (!(await requireAnalyticsPluginInstance())) return false;
-    if (skipPluginValidation.value) return true;
-    const currentValidation = await loadPluginValidation();
-    if (currentValidation?.ok) {
+    const expectedStoreId = selectedStoreId.value;
+    const storeCheck = await checkCurrentShopViaPlugin(expectedStoreId);
+    if (selectedStoreId.value !== expectedStoreId) return false;
+    if (!storeCheck) {
+      await ElMessageBox.alert("当前店铺分析插件不支持同步前的实时店铺校验。请更新到最新版插件，在 Chrome 扩展管理页点击“重新加载”，并刷新 ERP 与 Ozon 页面后重试。", "需要更新分析插件", { type: "warning", confirmButtonText: "知道了" });
+      return false;
+    }
+    if (storeCheck.code === "store_mismatch" || storeCheck.code === "identity_conflict") {
+      prepareFlow.tone = "danger";
+      prepareFlow.title = "Ozon 店铺未对齐";
+      prepareFlow.detail = `ERP 所选店铺 ID：${expectedStoreId}；Ozon 店铺 Cookie（sc_company_id）：${storeCheck.cookieCompanyId || "未识别"}；分析请求店铺头（X-O3-Company-Id）：${storeCheck.observedCompanyId || "未识别"}；页面店铺 ID：${storeCheck.pageCompanyId || "未识别"}。店铺身份未对齐，已阻止采集。请在 Ozon 后台切换到目标店铺并刷新分析页。`;
+      await ElMessageBox.alert(prepareFlow.detail, "店铺未对齐", { type: "warning", confirmButtonText: "知道了" });
+      return false;
+    }
+    if (storeCheck.code === "check_failed") throw new Error(storeCheck.error || "插件实时校验失败");
+    const currentValidation = storeCheck.ok ? await loadPluginValidation() : null;
+    if (currentValidation?.ok && String(currentValidation.current_company_id || "") === expectedStoreId) {
+      if (selectedStoreId.value !== expectedStoreId) return false;
       prepareFlow.tone = "success";
       prepareFlow.title = "Ozon 店铺已对齐";
-      prepareFlow.detail = "使用当前浏览器插件创建同步任务。";
+      prepareFlow.detail = "已自动核对当前 Ozon 店铺，无需重复绑定，正在创建同步任务。";
       return true;
     }
     prepareFlow.tone = "warning";
     prepareFlow.title = "正在准备 Ozon 分析页";
     prepareFlow.detail = "插件会自动打开 seller.ozon.ru/app/analytics/graphs，并识别当前 Ozon 店铺。";
-    await prepareSellerAnalyticsPlugin({
+    const queued = await prepareSellerAnalyticsPlugin({
       shop_id: state.filters.shopId,
-      store_id: selectedStoreId.value,
-      company_id: selectedStoreId.value,
+      store_id: expectedStoreId,
+      company_id: expectedStoreId,
       shop_name: selectedShop.value?.name || "",
       plugin_instance_id: pluginInstanceId.value
-    }).catch(() => null);
+    });
+    wakeAnalyticsPlugin();
     ElMessage.info("正在自动打开 Ozon 分析页并校验店铺，请稍候");
-    let validation = null;
-    const deadline = Date.now() + 120000;
-    while (Date.now() < deadline) {
-      validation = await loadPluginValidation();
-      await Promise.all([loadPluginStatus(), loadAuthBindingStatus()]);
-      if (validation?.ok) {
-        prepareFlow.tone = "success";
-        prepareFlow.title = "Ozon 店铺已对齐";
-        prepareFlow.detail = "当前 Ozon 店铺和 ERP 选择店铺一致，正在创建同步任务。";
-        return true;
-      }
-      if (validation?.code === "company_mismatch") {
-        prepareFlow.tone = "danger";
-        prepareFlow.title = "需要切换 Ozon 店铺";
-        prepareFlow.detail = validation?.detail || "当前 Ozon 店铺和 ERP 选择店铺不一致，请在 Ozon 后台切换到目标店铺。";
-        break;
-      }
-      prepareFlow.detail = validation?.detail || "正在等待插件打开 graphs 页面并识别当前店铺。";
-      await wait(3000);
+    const result = await waitForSellerAnalyticsPreparation({
+      requestId: queued?.data?.id || queued?.id,
+      expectedStoreId,
+      readValidation: async () => {
+        const validation = await loadPluginValidation();
+        await Promise.all([loadPluginStatus(), loadAuthBindingStatus()]);
+        return validation;
+      },
+      wait,
+      isCurrent: () => selectedStoreId.value === expectedStoreId,
+      onValidation: (validation) => { prepareFlow.detail = validation?.detail || "正在等待插件打开分析页并识别当前店铺。"; }
+    });
+    if (result.status === "ready") {
+      if (selectedStoreId.value !== expectedStoreId) return false;
+      prepareFlow.tone = "success";
+      prepareFlow.title = "Ozon 店铺已对齐";
+      prepareFlow.detail = "当前 Ozon 店铺与 ERP 所选店铺一致，正在创建同步任务。";
+      return true;
     }
-    if (validation?.ok) return true;
-    if (validation?.code !== "company_mismatch") {
+    const validation = result.validation;
+    if (result.status !== "mismatch" && validation?.code !== "company_mismatch" && validation?.code !== "store_identity_unverified") {
       prepareFlow.tone = "warning";
       prepareFlow.title = "Ozon 页面还没准备好";
       prepareFlow.detail = validation?.detail || "请确认插件已开启；如果 Ozon 没有自动打开，请重新点击一键同步。";
+    } else {
+      prepareFlow.tone = "danger";
+      prepareFlow.title = "需要切换 Ozon 店铺";
+      prepareFlow.detail = validation?.detail || "当前 Ozon 店铺和 ERP 选择店铺不一致，请切换到目标店铺并刷新分析页。";
     }
     ElMessage.warning(validation?.message || "当前插件状态还不能启动采集");
-    const title = validation?.code === "company_mismatch" ? "店铺未对齐" : "暂时不能启动采集";
+    const title = prepareFlow.tone === "danger" ? "店铺未对齐" : "暂时不能启动采集";
     const extraHint = validation?.code === "plugin_offline" ? localPluginSetupHint.value : "";
     const detail = [validation?.message, validation?.detail, extraHint].filter(Boolean).join("\n\n") || "请检查插件和 Ozon 分析页后再试。";
     await ElMessageBox.alert(detail, title, {
@@ -1392,7 +1430,9 @@ async function handleCollect(page = nextCollectPage.value) {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
   }
-  if (!(await ensureCollectReady())) return;
+  const expectedStoreId = selectedStoreId.value;
+  const expectedShopId = state.filters.shopId;
+  if (!(await ensureCollectReady()) || selectedStoreId.value !== expectedStoreId || state.filters.shopId !== expectedShopId) return;
   const targetPage = Math.max(1, Number(page || nextCollectPage.value || 1));
   collecting.value = true;
   try {
@@ -1415,7 +1455,9 @@ async function collectFullStore() {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
   }
-  if (!(await ensureCollectReady())) return;
+  const expectedStoreId = selectedStoreId.value;
+  const expectedShopId = state.filters.shopId;
+  if (!(await ensureCollectReady()) || selectedStoreId.value !== expectedStoreId || state.filters.shopId !== expectedShopId) return;
   collecting.value = true;
   try {
     const { result } = await createPluginCollectRun(buildCollectPayload({
@@ -1434,7 +1476,9 @@ async function collectDailyDefaultPeriods() {
     ElMessage.info("关键词搜索只查询已保存数据，不创建插件采集批次");
     return refreshData();
   }
-  if (!(await ensureCollectReady())) return;
+  const expectedStoreId = selectedStoreId.value;
+  const expectedShopId = state.filters.shopId;
+  if (!(await ensureCollectReady()) || selectedStoreId.value !== expectedStoreId || state.filters.shopId !== expectedShopId) return;
   collecting.value = true;
   try {
     const results = [];

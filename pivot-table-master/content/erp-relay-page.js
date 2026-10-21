@@ -49,19 +49,14 @@
   }
 
   function getCompanyId() {
-    try {
-      const cached = window.localStorage?.getItem('ozon_company_id');
-      if (cached) return cached;
-    } catch (error) {}
-
     const match = document.cookie.match(/(?:^|;\s*)sc_company_id=([^;]+)/);
-    const value = match ? decodeURIComponent(match[1]) : '';
-    if (value) {
-      try {
-        window.localStorage?.setItem('ozon_company_id', value);
-      } catch (error) {}
-    }
-    return value;
+    const cookieCompanyId = match ? decodeURIComponent(match[1]) : '';
+    let storedCompanyId = '';
+    try {
+      storedCompanyId = window.localStorage?.getItem('ozon_company_id') || '';
+    } catch (error) {}
+    if (cookieCompanyId && storedCompanyId && cookieCompanyId !== storedCompanyId) return '';
+    return cookieCompanyId || storedCompanyId;
   }
 
   function metricSetFromRequestBody(body) {
@@ -184,6 +179,12 @@
     const method = String(request?.request_method || 'POST').toUpperCase();
     const requestBody = request?.request_body || null;
     const headers = buildRequestHeaders(request?.request_headers);
+    const expectedCompanyId = String(request?.store_id || request?.company_id || headers['X-O3-Company-Id'] || '').trim();
+    const currentCompanyId = getCompanyId();
+    if (!currentCompanyId || (expectedCompanyId && currentCompanyId !== expectedCompanyId) ||
+      (headers['X-O3-Company-Id'] && headers['X-O3-Company-Id'] !== currentCompanyId)) {
+      throw new Error(`STORE_CONTEXT_MISMATCH task=${expectedCompanyId || '-'} current=${currentCompanyId || '-'}`);
+    }
     const requestFetch = nativeFetch || fetch.bind(window);
     const response = await requestFetch(requestUrl, {
       method,
@@ -192,6 +193,9 @@
       body: method === 'GET' ? undefined : nativeJsonStringify(requestBody || {})
     });
     const text = await response.text();
+    if (getCompanyId() !== currentCompanyId) {
+      throw new Error(`STORE_CONTEXT_MISMATCH task=${expectedCompanyId || '-'} current=${getCompanyId() || '-'}`);
+    }
     let responseBody = text;
     try {
       responseBody = cleanJsonParse(text);
@@ -202,6 +206,7 @@
       request_url: requestUrl,
       request_method: method,
       request_headers: headers,
+      current_company_id: currentCompanyId,
       request_body: requestBody,
       source_button_label: request?.source_label || inferSourceContext(requestBody, request)?.label || null,
       source_button_key: request?.source_key || inferSourceContext(requestBody, request)?.key || null,
