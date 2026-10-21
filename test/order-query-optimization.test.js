@@ -43,13 +43,19 @@ test('order quick filters combine and constrain their selected day thresholds', 
 });
 
 test('large inventory lists warm logistics once and bound enrichment concurrency without reordering', async () => {
-  let active = 0, peak = 0, warmed = 0;
+  let active = 0, peak = 0, warmed = 0, versionLoads = 0;
+  let versionOrderIds;
   const map = vm.runInNewContext(`(${source.match(/async function mapWithConcurrencyMysql\([\s\S]*?\n}/)[0]})`);
   const enrich = vm.runInNewContext(`(${source.match(/async function enrichOrderRowsForListMysql\([\s\S]*?\n}/)[0]})`, {
     orderProcurementCoverageMysql: async () => new Map(),
     orderQualityPrefixesMysql: async () => [],
     orderInventoryPickingMysql: async () => new Map(),
     loadOrderFbpStocks: async () => new Map(),
+    orderProfitFormulaLabels: async orderIds => {
+      versionLoads++;
+      versionOrderIds = Array.from(orderIds);
+      return new Map(orderIds.map(id => [id, { profit_formula_versions: id % 2 ? 'V1' : 'V1,V2', profit_calculation_legacy: 1 }]));
+    },
     mysqlQuery: async () => [],
     activeOrderLogisticsFilterMethodsMysql: async () => { warmed++; },
     mapWithConcurrencyMysql: map,
@@ -67,7 +73,11 @@ test('large inventory lists warm logistics once and bound enrichment concurrency
   const result = await enrich(rows);
   assert.equal(warmed, 1);
   assert.equal(peak, 3);
+  assert.equal(versionLoads, 1);
+  assert.deepEqual(versionOrderIds, rows.map(row => row.id));
   assert.deepEqual(Array.from(result, row => row.id), rows.map(row => row.id));
+  assert.ok(result.every(row => row.profit_formula_versions === (row.id % 2 ? 'V1' : 'V1,V2')));
+  assert.ok(result.every(row => row.profit_calculation_legacy === 1));
 });
 
 test('MySQL optimized predicates preserve mapping alternatives and missing raw records', {

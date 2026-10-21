@@ -1,6 +1,8 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
+import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-calculation-schema.js";
 
 const mysqlSchemaSql = `
+${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
 CREATE TABLE IF NOT EXISTS media_migration_map (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   source_fingerprint CHAR(64) NOT NULL,

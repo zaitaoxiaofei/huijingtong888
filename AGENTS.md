@@ -100,6 +100,14 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - For Ozon publish/category blockers, explicitly say whether the missing field belongs to the product/selection, shop, draft, variant, media, price, package, or attribute layer.
 - Example: if `ozon_description_category_id`, `ozon_type_id`, or `ozon_category_id` is missing, say it is the product's Ozon category/classification field, not a shop field, and that Ozon required attributes cannot be validated until it is filled.
 
+## 5.3 Order Profit Calculation Versions
+
+- Published implementations under `src/services/profit-formulas/v1/` are frozen. Changes to profit arithmetic, finance allocation or aftersale accounting require a separately registered version and explicit dispatch; never change historical V1 behavior in place.
+- Every profit writer, including sync, finance application and historical repair, must honor the item's pinned formula and preserve prior results in the calculation revision tables within the same database transaction.
+- Logistics tariff versions and formula versions are separate. Display/filter corrections must not silently select another billing rule or recalculate historical profits.
+- Legacy baselines preserve saved amounts and locks without recalculation. Missing historical inputs remain explicitly unknown; missing version metadata must not be presented as an established V1 baseline.
+- Keep the existing order profit detail layout and fee comparison table. Additional version evidence belongs in the default-collapsed appendix.
+
 ## 6. Product Image Display
 
 **Images must be inspectable, consistent, and previewable.**

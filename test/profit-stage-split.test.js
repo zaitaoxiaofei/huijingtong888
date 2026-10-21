@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { test } from "node:test";
+import { getProfitFormula } from "../src/services/profit-formulas/registry.js";
 
 const backend = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const inventoryView = readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
@@ -10,6 +12,7 @@ const financeBackfillScript = readFileSync(new URL("../scripts/sync-ozon-finance
 const financeOrderAuditScript = readFileSync(new URL("../scripts/audit-ozon-finance-order.mjs", import.meta.url), "utf8");
 const profitVarianceAuditScript = readFileSync(new URL("../scripts/audit-profit-model-variance.mjs", import.meta.url), "utf8");
 const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+const aggregationSource = readFileSync(new URL("../src/services/profit-formulas/v1/aggregation.js", import.meta.url), "utf8");
 
 test("profit stage split distinguishes finance-accrued from delivered-without-finance", () => {
   assert.match(backend, /function resolveProfitStageMysql/);
@@ -29,9 +32,13 @@ test("profit stage split distinguishes finance-accrued from delivered-without-fi
 });
 
 test("estimated recalculation no longer writes estimated profit into actual profit", () => {
-  assert.match(backend, /const nextActualProfit = actualReady \? Number\(existingStageRow\?\.actual_profit \|\| existingStageRow\?\.net_profit_cny \|\| 0\) : 0;/);
+  assert.match(backend, /const nextActualProfit = actualReady \? Number\(existingStageRow\?\.net_profit_cny \?\? existingStageRow\?\.actual_profit \?\? 0\) : 0;/);
   assert.doesNotMatch(backend, /actual_profit = CASE WHEN \? = 'accrued' THEN \? ELSE 0 END/);
-  assert.match(backend, /await saveProfitItemMysql\(\{ orderItemId: itemId, product, estimated, quantity, salePrice, settlement: actualReady \? "pending" : nextSettlement, order, item \}\);/);
+  assert.match(backend, /await saveProfitItemMysql\(\{ orderItemId: itemId, product, estimated, quantity, salePrice, settlement: actualReady \? "pending" : nextSettlement, order, item, connection \}\);/);
+  assert.match(backend, /await syncOrderItemProfitFromBreakdownMysql\(itemId, actualReady \? "pending" : nextSettlement, connection\);/);
+  assert.match(backend, /return withVersionedOrderProfitWrite\(itemId,[\s\S]*?async \(\{ connection, db \}\) =>/);
+  assert.match(backend, /await lockProfitItemMysql\(item\.id, usesEstimatedCollecting \? "finance_accrued_estimated_collecting" : "finance_accrued", connection\);/);
+  assert.match(backend, /const mysqlExecute = profitCalculationDatabase\(connection\)\.execute/);
 });
 
 test("finance-accrued detail prefers locked net profit over stale item actual profit", () => {
@@ -69,14 +76,18 @@ test("estimated terminal losses are componentized once instead of double-counted
   assert.match(saveProfitItemSource, /const terminalPolicy = terminalNoRevenue/);
   assert.match(saveProfitItemSource, /const returnLoss = terminalNoRevenue\s*\?\s*0/);
   assert.match(saveProfitItemSource, /const otherFee = terminalPolicy\?\.collecting \? rawCollectingFee : 0/);
-  assert.match(saveProfitItemSource, /purchaseCost \+ domesticShipping \+ internationalShipping \+ packagingCost \+ commission \+ ozonServiceFee \+ otherFee \+ returnLoss \+ advertisingCost/);
+  assert.match(saveProfitItemSource, /const formula = getProfitFormula\(estimated\?\.formulaVersion \|\| "V1"\)/);
+  assert.match(saveProfitItemSource, /const \{ classifyOrderOutcome, classifyOrderAccounting, resolveReturnLossCostPolicy \} = formula\.outcome/);
+  assert.match(saveProfitItemSource, /formula\.aggregateEstimatedProfit\(\{[\s\S]*?terminalNoRevenue, saleAmount, purchaseCost, domesticShipping, internationalShipping,[\s\S]*?packagingCost, commission, ozonServiceFee, otherFee, returnLoss, advertisingCost/);
+  assert.match(aggregationSource, /purchaseCost \+ domesticShipping \+ internationalShipping \+ packagingCost \+ commission \+ ozonServiceFee \+ otherFee \+ returnLoss \+ advertisingCost/);
 });
 
 test("actual profit application prefers Ozon sale accrual over local sale amount", () => {
   assert.match(backend, /const ozonSaleAccrual = financeRows\.reduce/);
   assert.match(backend, /const actualTotalSale = ozonSaleAccrual > 0 \? ozonSaleAccrual : localTotalSale;/);
   assert.match(backend, /const itemSale = terminalNoRevenue \? 0 : roundMoneyMysql\(actualTotalSale > 0 \? actualTotalSale \* share : localItemSale\);/);
-  assert.match(backend, /const actualProfit = roundMoneyMysql\(terminalNoRevenue \? -terminalLoss : itemSale - terminalLoss\);/);
+  assert.match(backend, /formula\.aggregateActualProfit\(\{[\s\S]*?terminalNoRevenue, itemSale, purchaseCost, domesticShipping, actualInternationalShipping,[\s\S]*?packagingCost, commissionFeeCny, actualServiceFeeCny, returnLoss, advertisingCost, otherFee/);
+  assert.match(aggregationSource, /const actualProfit = roundMoney\(terminalNoRevenue \? -terminalLoss : itemSale - terminalLoss\);/);
   assert.match(backend, /const actualCommissionFeeTotal = Number\(categoryTotals\.commission \|\| 0\);/);
   assert.match(backend, /let commissionFeeCny = roundMoneyMysql\(actualCommissionFeeTotal \* share\);/);
   assert.doesNotMatch(backend, /commissionFeeCny = roundMoneyMysql\(itemSale \* commissionRate\)/);
@@ -84,6 +95,157 @@ test("actual profit application prefers Ozon sale accrual over local sale amount
   assert.match(backend, /sale_amount_cny = VALUES\(sale_amount_cny\)/);
   assert.match(backend, /const ozonOrderSale = directRows\.reduce/);
   assert.match(backend, /const itemSale = ozonOrderSale > 0 \? ozonOrderSale : localOrderSale;/);
+});
+
+test("registered V1 aggregates preserve normal and no-revenue estimated and actual arithmetic", () => {
+  const formula = getProfitFormula("V1");
+  for (const terminalNoRevenue of [false, true]) {
+    const estimated = formula.aggregateEstimatedProfit({
+      terminalNoRevenue, saleAmount: 100, purchaseCost: 1, domesticShipping: 2, internationalShipping: 3,
+      packagingCost: 4, commission: 5, ozonServiceFee: 6, otherFee: 7, returnLoss: 8, advertisingCost: 9
+    });
+    assert.deepEqual(estimated, { costTotal: 45, netProfit: terminalNoRevenue ? -45 : 55, grossProfit: terminalNoRevenue ? -22 : 78 });
+    const actual = formula.aggregateActualProfit({
+      terminalNoRevenue, itemSale: 100, purchaseCost: 1, domesticShipping: 2, actualInternationalShipping: 3,
+      packagingCost: 4, commissionFeeCny: 5, actualServiceFeeCny: 6, returnLoss: 7, advertisingCost: 8, otherFee: 9
+    });
+    assert.deepEqual(actual, { terminalLoss: 45, actualProfit: terminalNoRevenue ? -45 : 55, grossProfit: terminalNoRevenue ? -37 : 63 });
+  }
+});
+
+function profitSaveFixture({ existing = null, packagingFee = 0.5 } = {}) {
+  const writes = [], requestedVersions = [];
+  const connection = { fixture: "same profit transaction" };
+  let queries = 0;
+  const db = {
+    queryOne: async (sql, params) => {
+      queries++;
+      assert.match(sql, /SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = \?/);
+      assert.equal(params[0], 101);
+      return existing;
+    },
+    execute: async (sql, params) => {
+      assert.equal((sql.match(/\?/g) || []).length, params.length);
+      const fields = sql.match(/INSERT INTO order_profit_items\s*\(([\s\S]*?)\)\s*VALUES/)?.[1].split(",").map((field) => field.trim());
+      assert.ok(fields);
+      writes.push(Object.fromEntries(fields.map((field, index) => [field, params[index]])));
+    }
+  };
+  const saveSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\r?\n}/)?.[0];
+  assert.ok(saveSource);
+  const save = runInNewContext(`(${saveSource})`, {
+    getProfitFormula: (version) => { requestedVersions.push(version); return getProfitFormula(version); },
+    profitCalculationDatabase: (passed) => { assert.equal(passed, connection); return db; },
+    mysqlQueryOne: () => assert.fail("must use the supplied transaction for reads"),
+    mysqlExecute: () => assert.fail("must use the supplied transaction for writes"),
+    isTerminalNoRevenueOutcomeMysql: (outcome) => ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome),
+    packagingFeeForSaleAmountMysql: async () => packagingFee,
+    estimateOrderItemReturnLossMysql: async ({ order }) => {
+      assert.equal(getProfitFormula("V1").outcome.classifyOrderOutcome(order), "active");
+      return 0;
+    }
+  });
+  const input = {
+    orderItemId: 101, product: { purchase_cost: 8, domestic_shipping: 1 },
+    estimated: { formulaVersion: "V1", freight: 3, commission: 12, paymentFee: 2, withdrawalFee: 0.8, advertisingCost: 3 },
+    quantity: 2, salePrice: 30, settlement: "pending", order: { status: "awaiting_packaging" }, connection
+  };
+  return { save: (overrides = {}) => save({ ...input, ...overrides }), writes, requestedVersions, queries: () => queries };
+}
+
+test("the actual MySQL profit-save function uses the pinned V1 formula and supplied transaction", async () => {
+  const fixture = profitSaveFixture();
+  await fixture.save();
+  assert.deepEqual(fixture.requestedVersions, ["V1"]);
+  assert.equal(fixture.queries(), 1);
+  assert.equal(fixture.writes.length, 1);
+  assert.deepEqual(fixture.writes[0], {
+    order_item_id: 101, sale_amount_cny: 60, purchase_cost_cny: 16, domestic_shipping_cny: 2,
+    international_shipping_cny: 6, packaging_cost_cny: 0.5, commission_rate: 0.2, commission_fee_cny: 12,
+    ozon_service_fee_cny: 2.8, return_loss_cny: 0, advertising_cost_cny: 3, other_fee_cny: 0,
+    gross_profit_cny: 23.5, net_profit_cny: 17.7, profit_status: "estimated"
+  });
+});
+
+test("profit-save protects a locked settled zero from estimated overwrite", async () => {
+  const fixture = profitSaveFixture({ existing: { is_locked: 1, profit_status: "accrued", net_profit_cny: 0 } });
+  await fixture.save();
+  assert.equal(fixture.queries(), 1);
+  assert.deepEqual(fixture.writes, []);
+});
+
+test("recalculation retains locked zero net profit even without full finance aggregates", async () => {
+  const connection = { fixture: "versioned estimate transaction" };
+  const writes = [], propagated = [];
+  const db = {
+    queryOne: async () => ({ profit_status: "accrued", settlement_state: "accrued", is_locked: 1, net_profit_cny: 0, actual_profit: 99 }),
+    execute: async (sql, params) => writes.push({ sql, params })
+  };
+  const source = backend.match(/async function persistRecalculatedItemMysql[\s\S]*?\r?\n}/)?.[0];
+  const persist = runInNewContext(`(${source})`, {
+    withVersionedOrderProfitWrite: async (id, options, project) => {
+      assert.equal(id, 101);
+      assert.equal(options.layer, "estimate");
+      return project({ connection, db });
+    },
+    profitEstimateInputs: () => ({}),
+    resolveProfitStageMysql: () => ({ actualReady: false }),
+    persistedPlatformFeeMysql: () => 0,
+    saveProfitItemMysql: async (input) => { assert.equal(input.connection, connection); propagated.push(input.settlement); },
+    syncOrderItemProfitFromBreakdownMysql: async (id, settlement, passed) => {
+      assert.equal(id, 101); assert.equal(passed, connection); propagated.push(settlement);
+    }
+  });
+  await persist({ itemId: 101, mapping: { id: 1 }, product: {}, estimated: {}, quantity: 1, salePrice: 50, estimatedProfit: 8 });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].params.at(-3), 0, "settled zero is authoritative over stale actual_profit=99");
+  assert.equal(writes[0].params.at(-2), "accrued");
+  assert.deepEqual(propagated, ["pending", "pending"], "estimated writes must respect the downstream accrued guard");
+});
+
+test("profit-save components are deducted once for pre-fulfillment cancellation and rejection", async () => {
+  const cancelled = profitSaveFixture();
+  await cancelled.save({ order: { status: "cancelled" } });
+  assert.equal(cancelled.writes[0].sale_amount_cny, 0);
+  assert.equal(cancelled.writes[0].net_profit_cny, 0);
+  assert.equal(cancelled.writes[0].return_loss_cny, 0);
+  const rejected = profitSaveFixture();
+  await rejected.save({ order: { status: "cancelled", cancelled_after_ship: 1, cancel_reason: "unclaimed" } });
+  const row = rejected.writes[0];
+  assert.equal(row.sale_amount_cny, 0);
+  assert.equal(row.purchase_cost_cny, 16);
+  assert.equal(row.domestic_shipping_cny, 0);
+  assert.equal(row.international_shipping_cny, 6);
+  assert.equal(row.other_fee_cny, 2.8);
+  assert.equal(row.return_loss_cny, 0);
+  assert.equal(row.ozon_service_fee_cny, 0);
+  assert.equal(row.net_profit_cny, -24.8);
+});
+
+test("profit-save rejects unsupported formulas before touching the profit projection", async () => {
+  const fixture = profitSaveFixture();
+  await assert.rejects(fixture.save({ estimated: { formulaVersion: "V2" } }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
+  assert.equal(fixture.queries(), 0);
+  assert.deepEqual(fixture.writes, []);
+});
+
+test("finance locking uses the caller transaction and preserves the first lock reason and time", async () => {
+  const connection = { fixture: "finance transaction" };
+  const writes = [];
+  const lockSource = backend.match(/async function lockProfitItemMysql[\s\S]*?\r?\n}/)?.[0];
+  const lock = runInNewContext(`(${lockSource})`, {
+    profitCalculationDatabase: (passed) => {
+      assert.equal(passed, connection);
+      return { execute: async (sql, params) => writes.push({ sql, params }) };
+    },
+    mysqlExecute: () => assert.fail("finance locking must not leave the caller transaction")
+  });
+  await lock(101, "finance_accrued", connection);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(Array.from(writes[0].params), ["finance_accrued", 101]);
+  assert.match(writes[0].sql, /SET is_locked = 1/);
+  assert.match(writes[0].sql, /locked_at = COALESCE\(locked_at, CURRENT_TIMESTAMP\)/);
+  assert.match(writes[0].sql, /lock_reason = COALESCE\(lock_reason, \?\)/);
 });
 
 test("terminal orders are repaired to no-revenue negative profit facts", () => {

@@ -17,7 +17,10 @@ import { orderStatusHistoryBusinessFingerprint } from "./order-history-fingerpri
 import { PDFDocument } from "pdf-lib";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
-import { actualItemProfit, estimateItemProfit } from "../profit.js";
+import { actualItemProfit } from "../profit.js";
+import { estimatePinnedOrderItemProfit, orderProfitFormulaLabels, profitCalculationDatabase, profitEstimateInputs, withVersionedOrderProfitBatchWrite, withVersionedOrderProfitWrite } from "./mysql-order-profit-version-write.js";
+import { readOrderProfitCalculationVersions, retryProfitCalculationTransaction } from "./order-profit-calculation-versions.js";
+import { getProfitFormula } from "./profit-formulas/registry.js";
 import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
@@ -27,7 +30,7 @@ import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
 import { calculateSelectionPricing } from "../celRates.js";
 import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } from "./order-logistics-filter-rules.js";
-import { detectOrderLogisticsCarrier } from "./order-logistics-carrier.js";
+import { classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsEvidence, orderLogisticsServiceClassOptions } from "./order-logistics-classification.js";
 import { resolveOrderFreightDescriptor } from "./order-freight-rule-resolver.js";
 import { cbrCnyRateForDate } from "./pricing-reference-rate.js";
 import { oglParcelValueRub, selectOglOrderRule } from "../ogl-rates.js";
@@ -2552,8 +2555,9 @@ async function orderFinanceRowsWithParentAllocationMysql(order = {}, items = [],
   return [...directRows, ...parentShareRows];
 }
 
-async function lockProfitItemMysql(orderItemId, reason = "finance_accrued") {
-  await mysqlExecute(`
+async function lockProfitItemMysql(orderItemId, reason = "finance_accrued", connection = null) {
+  const execute = connection ? profitCalculationDatabase(connection).execute : mysqlExecute;
+  await execute(`
     UPDATE order_profit_items
     SET is_locked = 1,
       locked_at = COALESCE(locked_at, CURRENT_TIMESTAMP),
@@ -2583,7 +2587,7 @@ async function resolveOrderLogisticsRuleMysql(row = {}, tenantId = "admin") {
   const warehouseName = deliveryMethod.warehouse || analytics.warehouse || "";
   const deliveryMethodName = deliveryMethod.name || "";
   const logisticsChannel = deliveryMethod.tpl_provider || analytics.tpl_provider || row.tracking_number || "";
-  const logisticsText = `${deliveryMethodName} ${logisticsChannel} ${warehouseName} ${row.raw_json || ""}`;
+  const logisticsText = orderLogisticsEvidence(row).text;
   const logisticsRule = normalizeResolvedLogisticsRuleMysql(
     await matchOrderLogisticsRuleMysql(logisticsText, tenantId)
   ) || normalizeResolvedLogisticsRuleMysql(
@@ -2621,6 +2625,7 @@ async function enrichOrderLogisticsMysql(row, tenantId = "admin") {
   });
   return {
     ...row,
+    ...classifyOrderLogistics(row),
     raw_json: undefined,
     raw_status: raw.status || "",
     raw_substatus: raw.substatus || "",
@@ -2906,6 +2911,7 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
   // Procurement coverage reconciles the full order and inventory ledger. Do
   // not let a cold reconciliation block the ordinary order-list first paint.
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
+  const formulaLabelsPromise = orderProfitFormulaLabels(orderIds);
   const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks] = await Promise.all([
     tenantScoped ? new Map() : coveragePromise === null ? (cachedOrderProcurementCoverage() || new Map()) : (coveragePromise || orderProcurementCoverageMysql()),
     orderQualityPrefixesMysql(),
@@ -2917,13 +2923,14 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
       GROUP_CONCAT(DISTINCT rule.id ORDER BY rule.id) AS billing_logistics_rule_ids
     FROM order_items oi
     JOIN logistics_fee_rules rule ON rule.id = oi.frozen_logistics_rule_id
-    WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")}) ${tenantScoped ? `AND rule.tenant_id = ${Number(tenantId)}` : ""}
+    WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")}) ${tenantScoped ? `AND (rule.tenant_id = ${Number(tenantId)} OR (rule.tenant_id IS NULL AND rule.carrier = 'OGL'))` : ""}
     GROUP BY oi.order_id
     `, orderIds) : [],
     rows.length ? activeOrderLogisticsFilterMethodsMysql(tenantScoped ? tenantId : "admin") : undefined,
     loadOrderFbpStocks(mysqlQuery, orderIds)
   ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
+  const formulaLabels = await formulaLabelsPromise;
   return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
     const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null }, tenantScoped ? tenantId : "admin");
@@ -2935,6 +2942,7 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
     }, { code: accounting.loss_profile_code });
     return {
       ...enriched,
+      ...(formulaLabels.get(Number(row.id)) || {}),
       ...cancellation,
       cancel_initiator_label: cancellation.initiator_label,
       cancel_reason_label: cancellation.reason_label,
@@ -3321,6 +3329,7 @@ function resolveProfitStageMysql(row = {}) {
 }
 
 async function estimateOrderItemReturnLossMysql({ order, item, product, estimated, quantity, salePrice }) {
+  const formula = getProfitFormula(estimated?.formulaVersion || "V1");
   const orderContext = {
     ...order,
     ...item,
@@ -3331,10 +3340,10 @@ async function estimateOrderItemReturnLossMysql({ order, item, product, estimate
     accrued_at: order?.accrued_at,
     cancelled_after_ship: order?.cancelled_after_ship
   };
-  const accounting = await classifyOrderAccountingMysql(orderContext);
+  const accounting = formula.outcome.classifyOrderAccounting(orderContext, { qualityPrefixes: await orderQualityPrefixesMysql() });
   const qty = Number(quantity || item?.quantity || 1);
   const saleAmount = Number(salePrice || item?.sale_price || 0) * qty;
-  return estimateOutcomeReturnLoss({
+  return formula.outcome.estimateOutcomeReturnLoss({
     outcome: accounting.outcome_type,
     lossProfileCode: accounting.loss_profile_code,
     quantity: qty,
@@ -3841,7 +3850,7 @@ function orderLogisticsMatchCacheKeyMysql(row = {}, methods = []) {
   const methodSignature = methods
     .map((method) => `${method.value || ""}:${method.label || ""}:${(method.warehousePatterns || []).join("|")}`)
     .join(";");
-  const text = `${row.tracking_number || ""} ${row.raw_json || ""}`;
+  const text = `${row.tracking_number || ""} ${orderLogisticsEvidence(row).text}`;
   return createHash("sha1")
     .update(methodSignature)
     .update("\n")
@@ -3854,7 +3863,7 @@ function cachedOrderLogisticsRuleFromRowMysql(row = {}, methods = []) {
   const cached = orderLogisticsRuleMatchCacheMysql.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
   const value = normalizeResolvedLogisticsRuleMysql(
-    matchOrderLogisticsRuleFromTextMysql(`${row.tracking_number || ""} ${row.raw_json || ""}`, methods)
+    matchOrderLogisticsRuleFromTextMysql(`${row.tracking_number || ""} ${orderLogisticsEvidence(row).text}`, methods)
   );
   orderLogisticsRuleMatchCacheMysql.set(key, {
     value,
@@ -9345,6 +9354,8 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
 }
 
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null } = {}) {
+  const formula = getProfitFormula("V1");
+  const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
   from = normalizeSyncDateMysql(from);
   to = normalizeSyncDateMysql(to);
   const orderIds = Array.isArray(arguments[0]?.orderIds) ? arguments[0].orderIds.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0) : [];
@@ -9419,7 +9430,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
     const commissionRate = Number(row.sale_accrual_cny || 0) > 0
       ? actualCommissionFeeTotal / Number(row.sale_accrual_cny || 0)
       : 0;
-    const orderAccounting = await classifyOrderAccountingMysql({
+    const orderAccounting = formula.outcome.classifyOrderAccounting({
       status: row.order_status,
       tracking_stage: row.tracking_stage,
       logistics_status: row.logistics_status,
@@ -9432,7 +9443,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       cancel_initiator: row.cancel_initiator,
       cancel_type: row.cancel_type,
       cancelled_after_ship: row.cancelled_after_ship
-    });
+    }, { qualityPrefixes: await orderQualityPrefixesMysql() });
     const orderOutcome = orderAccounting.outcome_type;
     const cancellation = describeCancellation({ ...row, outcome_type: orderOutcome });
     const orderLossProfile = { ...cancellation, code: orderAccounting.loss_profile_code };
@@ -9501,9 +9512,25 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       const advertisingCost = cancelOnlyCollectingFee ? 0 : Number(item.advertising_cost_cny || 0);
       const hasCollectingFinance = usesEstimatedCollecting || Object.prototype.hasOwnProperty.call(categoryTotals, "collecting_fee");
       const otherFee = hasCollectingFinance ? actualCollectingFee : (returnedNoRevenue ? 0 : Number(item.other_fee_cny || 0));
-      const terminalLoss = purchaseCost + domesticShipping + actualInternationalShipping + packagingCost + commissionFeeCny + actualServiceFeeCny + returnLoss + advertisingCost + otherFee;
-      const actualProfit = roundMoneyMysql(terminalNoRevenue ? -terminalLoss : itemSale - terminalLoss);
-      const grossProfit = roundMoneyMysql(actualProfit + advertisingCost);
+      const { actualProfit, grossProfit } = formula.aggregateActualProfit({
+        terminalNoRevenue, itemSale, purchaseCost, domesticShipping, actualInternationalShipping,
+        packagingCost, commissionFeeCny, actualServiceFeeCny, returnLoss, advertisingCost, otherFee
+      });
+      await withVersionedOrderProfitWrite(item.id, {
+        layer: "actual", source: "ozon_finance", reason: "Ozon 财务数据更新",
+        inputs: {
+          outcome: orderOutcome, loss_profile: orderLossProfile.code, share,
+          category_totals: categoryTotals, uses_estimated_collecting: usesEstimatedCollecting,
+          estimated_collecting_rate: estimatedCollectingRate,
+          purchase_cost_cny: rawPurchaseCost, domestic_shipping_cny: rawDomesticShipping,
+          packaging_cost_cny: rawPackagingCost, advertising_cost_cny: advertisingCost,
+          finance_rows: financeRows.map((financeRow) => Object.fromEntries(
+            ["id", "operation_id", "operation_date", "service_type", "service_name", "amount", "amount_cny", "fee_amount_cny", "accruals_for_sale_cny", "derived_from_parent_posting"]
+              .filter((key) => financeRow[key] !== undefined).map((key) => [key, financeRow[key]])
+          ))
+        }
+      }, async ({ connection }) => {
+      const mysqlExecute = profitCalculationDatabase(connection).execute;
       await mysqlExecute("UPDATE order_items SET platform_fee_actual = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [totalFinanceFeeCny, actualProfit, item.id]);
       await mysqlExecute(`
         INSERT INTO order_profit_items (
@@ -9528,7 +9555,8 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
           profit_status = 'accrued',
           updated_at = CURRENT_TIMESTAMP
       `, [item.id, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost, commissionFeeCny, commissionRate, actualServiceFeeCny, returnLoss, advertisingCost, otherFee, grossProfit, actualProfit]);
-      await lockProfitItemMysql(item.id, usesEstimatedCollecting ? "finance_accrued_estimated_collecting" : "finance_accrued");
+      await lockProfitItemMysql(item.id, usesEstimatedCollecting ? "finance_accrued_estimated_collecting" : "finance_accrued", connection);
+      });
       updated += 1;
       appliedOrderIds.add(Number(row.order_id));
     }
@@ -17052,8 +17080,11 @@ async function upsertOrderOutboundRecordMysql(row = {}, outboundStockLocation = 
   return "inserted";
 }
 
-async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null }) {
-  const existing = await mysqlQueryOne("SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
+async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null, connection = null }) {
+  const formula = getProfitFormula(estimated?.formulaVersion || "V1");
+  const { classifyOrderOutcome, classifyOrderAccounting, resolveReturnLossCostPolicy } = formula.outcome;
+  const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
+  const existing = await db.queryOne("SELECT is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
   if (existing && (Number(existing.is_locked || 0) === 1 || String(existing.profit_status || "") === "accrued") && settlement !== "accrued") return;
   const qty = Number(quantity || 1);
   const rawSaleAmount = Number(salePrice || 0) * qty;
@@ -17091,12 +17122,13 @@ async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, 
     ? 0
     : await estimateOrderItemReturnLossMysql({ order, item, product, estimated, quantity: qty, salePrice });
   const advertisingCost = terminalNoRevenue ? 0 : Number(estimated.advertisingCost || 0);
-  const costTotal = purchaseCost + domesticShipping + internationalShipping + packagingCost + commission + ozonServiceFee + otherFee + returnLoss + advertisingCost;
-  const netProfit = roundMoneyMysql(terminalNoRevenue ? -costTotal : saleAmount - costTotal);
-  const grossProfit = roundMoneyMysql(netProfit + ozonServiceFee + returnLoss + advertisingCost);
+  const { netProfit, grossProfit } = formula.aggregateEstimatedProfit({
+    terminalNoRevenue, saleAmount, purchaseCost, domesticShipping, internationalShipping,
+    packagingCost, commission, ozonServiceFee, otherFee, returnLoss, advertisingCost
+  });
   const commissionRate = rawSaleAmount ? commission / rawSaleAmount : 0;
 
-  await mysqlExecute(`
+  await db.execute(`
     INSERT INTO order_profit_items
     (order_item_id, sale_amount_cny, purchase_cost_cny, domestic_shipping_cny, international_shipping_cny,
      packaging_cost_cny, commission_rate, commission_fee_cny, ozon_service_fee_cny, return_loss_cny,
@@ -17137,15 +17169,16 @@ async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, 
   ]);
 }
 
-async function syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement) {
-  const row = await mysqlQueryOne("SELECT net_profit_cny, is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
+async function syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement, connection = null) {
+  const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
+  const row = await db.queryOne("SELECT net_profit_cny, is_locked, profit_status FROM order_profit_items WHERE order_item_id = ?", [orderItemId]);
   if (!row) return;
   if ((Number(row.is_locked || 0) === 1 || String(row.profit_status || "") === "accrued") && settlement !== "accrued") return;
   const profit = roundMoneyMysql(row.net_profit_cny || 0);
   if (settlement === "accrued") {
-    await mysqlExecute("UPDATE order_items SET estimated_profit = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [profit, profit, orderItemId]);
+    await db.execute("UPDATE order_items SET estimated_profit = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [profit, profit, orderItemId]);
   } else {
-    await mysqlExecute("UPDATE order_items SET estimated_profit = ?, actual_profit = 0, settlement_state = ? WHERE id = ?", [profit, settlement || "pending", orderItemId]);
+    await db.execute("UPDATE order_items SET estimated_profit = ?, actual_profit = 0, settlement_state = ? WHERE id = ?", [profit, settlement || "pending", orderItemId]);
   }
 }
 
@@ -18093,20 +18126,7 @@ async function orderCancelLossAppliesMysql(posting) {
 }
 
 function estimatedProfitValueMysql({ order = null, item, product, estimated, returnLossEstimate }) {
-  const outcome = classifyOrderOutcome(order || item || {});
-  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
-    return roundMoneyMysql(-Number(returnLossEstimate || 0));
-  }
-  return roundMoneyMysql(
-    Number(item.sale_price || 0) * Number(item.quantity || 1)
-    - (Number(product.purchase_cost || 0) + Number(product.domestic_shipping || 0) + Number(estimated.freight || product.international_shipping || 0)) * Number(item.quantity || 1)
-    - (Number(item.sale_price || 0) * Number(item.quantity || 1) > 0 ? 0 : 0)
-    - Number(estimated.commission || 0)
-    - Number(estimated.paymentFee || 0)
-    - Number(estimated.withdrawalFee || 0)
-    - returnLossEstimate
-    - Number(estimated.advertisingCost || 0)
-  );
+  return getProfitFormula(estimated?.formulaVersion || "V1").estimatedProfitValue({ order, item, product, estimated, returnLossEstimate });
 }
 
 function persistedPlatformFeeMysql(estimated, returnLossEstimate) {
@@ -18114,7 +18134,11 @@ function persistedPlatformFeeMysql(estimated, returnLossEstimate) {
 }
 
 async function persistRecalculatedItemMysql({ itemId, mapping, product, estimated, settlement, returnLossEstimate, estimatedProfit, quantity, salePrice, order = null, item = null }) {
-  const existingStageRow = await mysqlQueryOne(`
+  return withVersionedOrderProfitWrite(itemId, {
+    layer: "estimate", source: "order_recalculation",
+    inputs: profitEstimateInputs({ product, mapping, estimated, quantity, salePrice, order, item })
+  }, async ({ connection, db }) => {
+  const existingStageRow = await db.queryOne(`
     SELECT oi.settlement_state,
       oi.actual_profit,
       opi.net_profit_cny,
@@ -18136,10 +18160,14 @@ async function persistRecalculatedItemMysql({ itemId, mapping, product, estimate
       o.status, o.tracking_stage, o.logistics_status, o.delivered_at, o.accrued_at
   `, [itemId]);
   const existingStage = resolveProfitStageMysql(existingStageRow || { ...order, ...item, settlement_state: settlement });
-  const actualReady = Boolean(existingStage.actualReady);
+  // A normal estimate must never undo an already accrued, protected finance
+  // projection merely because this small query lacks full finance aggregates.
+  const hasProtectedActual = existingStageRow?.profit_status === "accrued"
+    && (existingStageRow?.settlement_state === "accrued" || Number(existingStageRow?.is_locked || 0) === 1);
+  const actualReady = Boolean(existingStage.actualReady || hasProtectedActual);
   const nextSettlement = actualReady ? "accrued" : "pending";
-  const nextActualProfit = actualReady ? Number(existingStageRow?.actual_profit || existingStageRow?.net_profit_cny || 0) : 0;
-  await mysqlExecute(`
+  const nextActualProfit = actualReady ? Number(existingStageRow?.net_profit_cny ?? existingStageRow?.actual_profit ?? 0) : 0;
+  await db.execute(`
     UPDATE order_items SET
       sku_mapping_id = ?,
       frozen_purchase_cost = ?,
@@ -18170,8 +18198,9 @@ async function persistRecalculatedItemMysql({ itemId, mapping, product, estimate
     nextSettlement,
     itemId
   ]);
-  await saveProfitItemMysql({ orderItemId: itemId, product, estimated, quantity, salePrice, settlement: actualReady ? "pending" : nextSettlement, order, item });
-  await syncOrderItemProfitFromBreakdownMysql(itemId, actualReady ? "pending" : nextSettlement);
+  await saveProfitItemMysql({ orderItemId: itemId, product, estimated, quantity, salePrice, settlement: actualReady ? "pending" : nextSettlement, order, item, connection });
+  await syncOrderItemProfitFromBreakdownMysql(itemId, actualReady ? "pending" : nextSettlement, connection);
+  });
 }
 
 function normalizeForceRecalculateOrderItemIdsMysql(body = {}) {
@@ -18366,7 +18395,7 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
   const dateKeys = new Set();
   for (const item of rows) {
     const effectiveProduct = await productForProfitEstimateMysql(mapping.product_id, item.ordered_at, { raw_json: item.ozon_raw_json, order_id: item.order_id }) || product;
-    const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product: effectiveProduct, mapping });
+    const estimated = await estimatePinnedOrderItemProfit(item.id, { salePrice: item.sale_price, quantity: item.quantity, product: effectiveProduct, mapping });
     const settlement = resolveProfitSettlementStatusMysql(item);
     const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: item, item, product: effectiveProduct, estimated, quantity: item.quantity, salePrice: item.sale_price });
     const estimatedProfit = estimatedProfitValueMysql({ order: item, item, product: effectiveProduct, estimated, returnLossEstimate });
@@ -18401,22 +18430,30 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
 async function accrueDeliveredItemsMysql(orderId) {
   const order = await mysqlQueryOne("SELECT * FROM orders WHERE id = ?", [orderId]);
   if (!order || order.status !== "delivered") return;
+  const pendingItems = await mysqlQuery("SELECT id FROM order_items WHERE order_id = ? AND COALESCE(settlement_state, '') != 'accrued' ORDER BY id", [orderId]);
+  const pendingItemIds = pendingItems.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0).join(",") || "NULL";
+  await withVersionedOrderProfitBatchWrite(pendingItems.map((row) => row.id), {
+    source: "delivered_pending_normalization", inputs: { order_id: Number(orderId) }, reason: "已送达但未完成财务结算的状态同步"
+  }, async ({ db }) => {
+  const mysqlExecute = db.execute;
   await mysqlExecute(`
     UPDATE order_items
     SET actual_profit = 0,
       settlement_state = CASE WHEN COALESCE(settlement_state, '') = 'accrued' THEN settlement_state ELSE 'pending' END
     WHERE order_id = ?
       AND COALESCE(settlement_state, '') != 'accrued'
+      AND id IN (${pendingItemIds})
   `, [orderId]);
   await mysqlExecute(`
     UPDATE order_profit_items
     SET profit_status = CASE WHEN COALESCE(profit_status, '') = 'accrued' THEN profit_status ELSE 'estimated' END,
       updated_at = CURRENT_TIMESTAMP
     WHERE order_item_id IN (
-      SELECT id FROM order_items WHERE order_id = ?
+      SELECT id FROM order_items WHERE order_id = ? AND id IN (${pendingItemIds})
     )
       AND COALESCE(profit_status, '') != 'accrued'
   `, [orderId]);
+  });
 }
 
 async function saveRawPostingMysql(shop, posting) {
@@ -18609,6 +18646,8 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     if (existingItem) {
       const previousQuantity = Number(existingItem.quantity || 0);
       const nextQuantity = Number(item.quantity || 1);
+      // Validate the pinned formula before metadata or inventory adjustments.
+      const estimated = product && mapping ? await estimatePinnedOrderItemProfit(existingItem.id, { salePrice: item.sale_price, quantity: nextQuantity, product, mapping }) : null;
       await mysqlExecute(`
         UPDATE order_items
         SET sku_mapping_id = COALESCE(?, sku_mapping_id),
@@ -18644,7 +18683,6 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
         `, [nextQuantity, outboundStockLocation.stockLocation, outboundStockLocation.stockLocationSource, "Updated by Ozon sync", existingItem.id]);
       }
       if (product && mapping) {
-        const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: nextQuantity, product, mapping });
         const settlement = resolveProfitSettlementStatusMysql(posting);
         const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: posting, item, product, estimated, quantity: nextQuantity, salePrice: item.sale_price });
         const estimatedProfit = estimatedProfitValueMysql({ order: posting, item, product, estimated, returnLossEstimate });
@@ -18664,13 +18702,14 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       }
       continue;
     }
-    const estimated = product && mapping ? estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping }) : { commission: 0, profit: 0 };
+    const estimated = product && mapping ? await estimatePinnedOrderItemProfit(null, { salePrice: item.sale_price, quantity: item.quantity, product, mapping }) : { commission: 0, profit: 0 };
     const settlement = resolveProfitSettlementStatusMysql(posting);
     const returnLossEstimate = product && mapping
       ? await estimateOrderItemReturnLossMysql({ order: posting, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price })
       : 0;
     const estimatedProfit = product && mapping ? estimatedProfitValueMysql({ order: posting, item, product, estimated, returnLossEstimate }) : 0;
-    const itemResult = await mysqlExecute(`
+    const orderItemId = await retryProfitCalculationTransaction(withMysqlTransaction, async (connection) => {
+    const itemResult = await profitCalculationDatabase(connection).execute(`
       INSERT INTO order_items
       (order_id, sku_mapping_id, ozon_sku, ozon_name, ozon_image_url, ozon_product_id, quantity, sale_price, frozen_purchase_cost, frozen_domestic_shipping,
        frozen_international_shipping, frozen_logistics_rule_id, frozen_handling_fee, estimated_commission, platform_fee_actual, aftersale_loss,
@@ -18698,6 +18737,16 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       settlement
     ]);
     const orderItemId = Number(itemResult.insertId);
+    await withVersionedOrderProfitWrite(orderItemId, {
+      connection, layer: "estimate", legacy: false, source: "order_created",
+      inputs: profitEstimateInputs({ product, mapping, estimated, quantity: item.quantity, salePrice: item.sale_price, order: posting, item })
+    }, async () => {
+      if (!product || !mapping) return;
+      await saveProfitItemMysql({ orderItemId, product, estimated, quantity: item.quantity, salePrice: item.sale_price, settlement, order: posting, item, connection });
+      await syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement, connection);
+    });
+    return orderItemId;
+    });
     if (!mapping) {
       await recordOrderExceptionMysql({
         store_id: shop.id,
@@ -18709,8 +18758,6 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       });
     }
     if (product && mapping) {
-      await saveProfitItemMysql({ orderItemId, product, estimated, quantity: item.quantity, salePrice: item.sale_price, settlement, order: posting, item });
-      await syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement);
       const qty = -Number(item.quantity);
       await postProductInventoryWithComponentsMysql(mysqlPoolConnectionAdapter, {
         product_id: product.id,
@@ -19462,7 +19509,7 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
       unbound += 1;
       continue;
     }
-    const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product, mapping });
+    const estimated = await estimatePinnedOrderItemProfit(item.id, { salePrice: item.sale_price, quantity: item.quantity, product, mapping });
     const settlement = resolveProfitSettlementStatusMysql({ ...order, ...item });
     const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price });
     const estimatedProfit = estimatedProfitValueMysql({ order, item, product, estimated, returnLossEstimate });
@@ -19633,6 +19680,14 @@ export async function repairTerminalNoRevenueOrderProfitsMysql(body = {}) {
       )
   `, dateParams);
 
+  const repairTargets = await mysqlQuery(`SELECT oi.id FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id WHERE ${terminalCondition} ${dateWhereSql} ORDER BY oi.id`, dateParams);
+  const repairTargetIds = repairTargets.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0);
+  const repairTargetWhere = `AND oi.id IN (${repairTargetIds.join(",") || "NULL"})`;
+  const { insertResult, profitResult, itemResult } = await withVersionedOrderProfitBatchWrite(repairTargets.map((row) => row.id), {
+    source: "terminal_no_revenue_repair", inputs: { from, to }, reason: "取消、拒收及退货订单历史利润修订"
+  }, async ({ db }) => {
+  const mysqlExecute = db.execute;
   const insertResult = await mysqlExecute(`
     INSERT INTO order_profit_items (
       order_item_id, sale_amount_cny, purchase_cost_cny, domestic_shipping_cny, international_shipping_cny,
@@ -19662,6 +19717,7 @@ export async function repairTerminalNoRevenueOrderProfitsMysql(body = {}) {
     WHERE ${terminalCondition}
       ${dateWhereSql}
       AND opi.order_item_id IS NULL
+      ${repairTargetWhere}
   `, dateParams);
 
   const profitResult = await mysqlExecute(`
@@ -19674,6 +19730,7 @@ export async function repairTerminalNoRevenueOrderProfitsMysql(body = {}) {
       opi.updated_at = CURRENT_TIMESTAMP
     WHERE ${terminalCondition}
       ${dateWhereSql}
+      ${repairTargetWhere}
       AND (
         ABS(COALESCE(opi.sale_amount_cny, 0)) > 0.005
         OR ABS(COALESCE(opi.net_profit_cny, 0) + ${existingLossSql}) > 0.005
@@ -19689,12 +19746,15 @@ export async function repairTerminalNoRevenueOrderProfitsMysql(body = {}) {
       oi.actual_profit = -${existingLossSql}
     WHERE ${terminalCondition}
       ${dateWhereSql}
+      ${repairTargetWhere}
       AND (
         ABS(COALESCE(oi.estimated_profit, 0) + ${existingLossSql}) > 0.005
         OR ABS(COALESCE(oi.actual_profit, 0) + ${existingLossSql}) > 0.005
       )
   `, dateParams);
 
+  return { insertResult, profitResult, itemResult };
+  });
   const after = await mysqlQueryOne(`
     SELECT COUNT(*) AS positive_items
     FROM order_items oi
@@ -20128,7 +20188,7 @@ export async function forceRecalculateOrderProfitsForProductMysql(productId, bod
       });
       continue;
     }
-    const estimated = estimateItemProfit({ salePrice: item.sale_price, quantity: item.quantity, product: mappedProduct, mapping });
+    const estimated = await estimatePinnedOrderItemProfit(item.id, { salePrice: item.sale_price, quantity: item.quantity, product: mappedProduct, mapping });
     const settlement = resolveProfitSettlementStatusMysql(item);
     const returnLossEstimate = await estimateOrderItemReturnLossMysql({ order: item, item, product: mappedProduct, estimated, quantity: item.quantity, salePrice: item.sale_price });
     const estimatedProfit = estimatedProfitValueMysql({ order: item, item, product: mappedProduct, estimated, returnLossEstimate });
@@ -20459,7 +20519,13 @@ export async function cleanupHistoricalDeliveredReturnLossMysql(body = {}) {
   let clearedReturnLoss = 0;
   const updatedOrders = new Set();
   const dateKeys = new Set();
-  await withMysqlTransaction(async (connection) => {
+  await withVersionedOrderProfitBatchWrite(rows.map((row) => row.order_item_id), {
+    source: "delivered_return_loss_cleanup", inputs: { from, to, onlyFinal }, reason: "已送达订单历史售后损失修订"
+  }, async ({ connection }) => {
+    updatedItems = 0;
+    clearedReturnLoss = 0;
+    updatedOrders.clear();
+    dateKeys.clear();
     for (const row of rows) {
       const nextProfit = recalculateNetProfitWithoutReturnLossMysql(row);
       await connection.execute(`
@@ -20579,7 +20645,13 @@ export async function cleanupHistoricalUnconfirmedActualProfitMysql(body = {}) {
   const updatedOrders = new Set();
   const dateKeys = new Set();
 
-  await withMysqlTransaction(async (connection) => {
+  await withVersionedOrderProfitBatchWrite(rows.map((row) => row.order_item_id), {
+    source: "unconfirmed_actual_cleanup", inputs: { from, to, onlyFinal }, reason: "未完成财务结算的历史实际利润修订"
+  }, async ({ connection }) => {
+    updatedItems = 0;
+    clearedActualProfit = 0;
+    updatedOrders.clear();
+    dateKeys.clear();
     for (const row of rows) {
       const estimatedProfit = roundMoneyMysql(Number(row.estimated_profit || 0));
       const previousActual = roundMoneyMysql(Number(row.actual_profit || 0));
@@ -20674,7 +20746,11 @@ export async function applyHistoricalProfitReviewActionMysql(body = {}, userId =
   if (action === "clear") {
     let clearedReturnLoss = 0;
     const dateKeys = [];
-    await withMysqlTransaction(async (connection) => {
+    await withVersionedOrderProfitBatchWrite(rows.map((row) => row.order_item_id), {
+      source: "manual_historical_review", inputs: { action }, reason: "人工复核清除历史售后损失", actorId: userId
+    }, async ({ connection }) => {
+      clearedReturnLoss = 0;
+      dateKeys.length = 0;
       for (const row of rows) {
         const nextProfit = recalculateNetProfitWithoutReturnLossMysql(row);
         await connection.execute(`
@@ -29266,7 +29342,7 @@ async function loadOrderRowsForBaseMysql(base) {
 
 async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
   const tenantCacheKey = String(tenantId || "admin");
-  const cacheKey = `orders:logistics-summary:v6:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
+  const cacheKey = `orders:logistics-summary:v7:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     if (!orderLogisticsSnapshotSchemaReady) {
       await mysqlExecute(`
@@ -29287,23 +29363,27 @@ async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
     const persisted = parseJsonFallback(snapshot?.payload_json, null);
     if (Array.isArray(persisted)) return persisted;
     const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
+    const billingScope = String(tenantId || "admin") === "admin"
+      ? { sql: "1 = 1", params: [] }
+      : await readableLogisticsTenantScopeMysql(tenantId, "summary_rule");
     const rows = await mysqlQuery(`
-      SELECT o.id, o.posting_number, o.tracking_number, raw.raw_json
+      SELECT o.id, o.posting_number, o.tracking_number, raw.raw_json,
+        GROUP_CONCAT(DISTINCT summary_rule.name ORDER BY summary_rule.name SEPARATOR ' / ') AS billing_logistics_rule_name
       FROM orders o
       LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+      LEFT JOIN order_items summary_item ON summary_item.order_id = o.id
+      LEFT JOIN logistics_fee_rules summary_rule ON summary_rule.id = summary_item.frozen_logistics_rule_id AND ${billingScope.sql}
       WHERE ${base.where}
       GROUP BY o.id
-    `, base.params);
+    `, [...billingScope.params, ...base.params]);
     const resolvedRows = [];
     for (const row of rows) {
       const rule = cachedOrderLogisticsRuleFromRowMysql(row, methods);
-      const logisticsCarrier = detectOrderLogisticsCarrier(`${row.tracking_number || ""} ${row.raw_json || ""} ${rule?.label || ""} ${rule?.value || ""}`);
-      if ((!rule?.value || !rule?.label) && !logisticsCarrier) continue;
       resolvedRows.push({
         id: Number(row.id),
         resolved_logistics_rule_name: rule?.label || "",
         resolved_logistics_rule_value: rule?.value || "",
-        logistics_carrier: logisticsCarrier
+        ...classifyOrderLogistics(row)
       });
     }
     await mysqlExecute(`
@@ -29328,8 +29408,8 @@ function buildOrderLogisticsCountsMysql(rows = [], labelByValue = new Map()) {
   return counts;
 }
 
-async function orderLogisticsMethodOptionsMysql(base, rows = null, tenantId = "admin") {
-  const cacheKey = `orders:logistics-options:v4:${base.where}:${JSON.stringify(base.params)}`;
+async function orderLogisticsMethodOptionsMysql(base, rows = null, tenantId = "admin", carrier = "all") {
+  const cacheKey = `orders:logistics-options:v5:${tenantId}:${carrier}:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     const options = [{ value: "all", label: "全部物流" }];
     const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
@@ -29353,6 +29433,15 @@ function filterOrderIdsByLogisticsMethodMysql(rows = [], method) {
   if (!normalizedMethod || normalizedMethod === "all") return null;
   return rows
     .filter((row) => resolveOrderLogisticsValueFromRowMysql(row) === normalizedMethod)
+    .map((row) => Number(row.id))
+    .filter(Boolean);
+}
+
+function filterOrderIdsByLogisticsServiceClassMysql(rows = [], serviceClass) {
+  const normalized = normalizeLogisticsServiceClass(serviceClass);
+  if (normalized === "all") return null;
+  return rows
+    .filter((row) => row.logistics_service_class_key === normalized)
     .map((row) => Number(row.id))
     .filter(Boolean);
 }
@@ -29590,11 +29679,8 @@ async function monthlyProcurementInventorySummaryMysql(from = "", to = "") {
 
 function orderLogisticsCarrierMysql(row = {}) {
   const explicitCarrier = String(row.logistics_carrier || "").trim().toLowerCase();
-  if (explicitCarrier) return explicitCarrier;
-  const text = `${row.resolved_logistics_rule_name || ""} ${row.resolved_logistics_rule_value || ""}`;
-  const detected = detectOrderLogisticsCarrier(text);
-  if (detected) return detected;
-  return text.trim() ? "other" : "";
+  if (Object.prototype.hasOwnProperty.call(row, "logistics_carrier")) return explicitCarrier;
+  return classifyOrderLogistics(row).logistics_carrier;
 }
 
 function orderLogisticsCarrierOptionsMysql(rows = []) {
@@ -29689,14 +29775,18 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       : null
   ]);
   const logisticsMethod = String(query.logisticsMethod || query.logistics_method || "all");
-  const logisticsCarrier = String(query.logisticsCarrier || query.logistics_carrier || "all");
-  const reuseLogisticsSummary = includeLogisticsOptions || logisticsMethod !== "all" || logisticsCarrier !== "all";
+  const logisticsCarrier = String(query.logisticsCarrier || query.logistics_carrier || "all").trim().toLowerCase();
+  const logisticsServiceClass = normalizeLogisticsServiceClass(query.logisticsServiceClass || query.logistics_service_class || "all");
+  const reuseLogisticsSummary = includeLogisticsOptions || logisticsMethod !== "all" || logisticsCarrier !== "all" || logisticsServiceClass !== "all";
   const logisticsSummaryRows = reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase, tenantId) : null;
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
-  const base = withRestrictedOrderIdsMysql(withRestrictedOrderIdsMysql(rawBase, logisticsIds), carrierIds);
+  const serviceClassIds = filterOrderIdsByLogisticsServiceClassMysql(logisticsSummaryRows || [], logisticsServiceClass);
+  const base = withRestrictedOrderIdsMysql(withRestrictedOrderIdsMysql(withRestrictedOrderIdsMysql(rawBase, logisticsIds), carrierIds), serviceClassIds);
+  const serviceClassOptionRows = (logisticsSummaryRows || []).filter((row) => logisticsCarrier === "all" || orderLogisticsCarrierMysql(row) === logisticsCarrier.toLowerCase());
+  const carrierOptionRows = (logisticsSummaryRows || []).filter((row) => logisticsServiceClass === "all" || row.logistics_service_class_key === logisticsServiceClass);
   const logisticsMethodOptionsPromise = includeLogisticsOptions && optionsBase
-    ? orderLogisticsMethodOptionsMysql(optionsBase, logisticsSummaryRows, tenantId)
+    ? orderLogisticsMethodOptionsMysql(optionsBase, serviceClassOptionRows, tenantId, logisticsCarrier)
     : Promise.resolve([]);
   const requestedCoverageFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
     .includes(String(query.status || "all"));
@@ -29766,7 +29856,8 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
     pageSize,
     counts,
     logisticsMethodOptions,
-    logisticsCarrierOptions: orderLogisticsCarrierOptionsMysql(logisticsSummaryRows || []),
+    logisticsCarrierOptions: orderLogisticsCarrierOptionsMysql(carrierOptionRows),
+    logisticsServiceClassOptions: includeLogisticsOptions ? orderLogisticsServiceClassOptions(serviceClassOptionRows) : [],
     ...(tenantScope ? { tenant_counts_unavailable: true, tenant_procurement_coverage_unavailable: true } : {}),
     mode: "paged"
   };
@@ -30179,6 +30270,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   const billingRuleChannels = [...new Set(items.map((item) => String(item.billing_logistics_rule_channel || "").trim()).filter(Boolean))];
   order.billing_logistics_rule_name = billingRuleNames.join(" / ");
   order.billing_logistics_rule_channel = billingRuleChannels.join(" / ");
+  Object.assign(order, classifyOrderLogistics(order));
 
   const finance = await orderDetailFinanceMysql(order, items);
   const accounting = await classifyOrderAccountingMysql(order);
@@ -30203,7 +30295,14 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   order.loss_profile_label = cancellation.loss_profile_label;
   order.loss_formula_text = cancellation.loss_formula_text;
   const profitDetailSnapshot = buildOrderProfitDetailSnapshotPayload(order, items, finance);
-  return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot };
+  const [ownership] = await mysqlQuery("SELECT tenant_id FROM shops WHERE id = ?", [Number(order.shop_id)]);
+  const calculationVersions = await readOrderProfitCalculationVersions({ query: mysqlQuery }, {
+    tenantId: ownership?.tenant_id || "admin", orderId: Number(id)
+  });
+  const formulaVersions = [...new Set(calculationVersions.items.map((entry) => entry.formula_version))];
+  order.profit_formula_versions = formulaVersions.join(",");
+  order.profit_calculation_legacy = calculationVersions.items.some((entry) => entry.legacy_baseline) ? 1 : 0;
+  return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot, profit_calculation_versions: calculationVersions };
 }
 
 const CUSTOMER_MESSAGE_TYPES = new Set(["order_created", "passport_reminder", "order_update", "shipment_delay", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"]);

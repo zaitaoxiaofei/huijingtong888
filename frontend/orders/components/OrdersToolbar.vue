@@ -7,6 +7,7 @@ const props = defineProps({
   shops: { type: Array, default: () => [] },
   logisticsCarrierOptions: { type: Array, default: () => [] },
   logisticsMethodOptions: { type: Array, default: () => [] },
+  logisticsServiceClassOptions: { type: Array, default: () => [] },
   searchTypeOptions: { type: Array, default: () => [] },
   syncStatus: { type: String, default: "" },
   syncRunning: { type: Boolean, default: false },
@@ -47,10 +48,11 @@ function patchFilters(patch) {
   });
 }
 
-function changeLogisticsMethod(value) {
+function changeLogisticsServiceClass(value) {
   const nextFilters = {
     ...props.filters,
-    logisticsMethod: value,
+    logisticsMethod: "all",
+    logisticsServiceClass: value,
     page: 1
   };
   emit("update:filters", nextFilters);
@@ -96,13 +98,13 @@ function handleCommand(command) {
           </el-select>
 
           <el-select
-            :model-value="filters.logisticsMethod"
+            :model-value="filters.logisticsServiceClass"
             class="orders-toolbar-select orders-toolbar-logistics-select"
-            @change="changeLogisticsMethod"
+            @change="changeLogisticsServiceClass"
             @visible-change="$event && emit('load-logistics-options')"
           >
             <el-option
-              v-for="option in logisticsMethodOptions"
+              v-for="option in logisticsServiceClassOptions"
               :key="option.value"
               :label="option.label"
               :value="option.value"

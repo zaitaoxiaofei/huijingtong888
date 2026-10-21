@@ -225,6 +225,15 @@ else
   echo "Skipping database maintenance for $release_version"
 fi
 
+# This additive schema is required even when broad maintenance is disabled.
+# Baseline copying is a separate, explicit operation after the new writer is live.
+if [[ -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" ]]; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/migrate-order-profit-calculation-versions.mjs --write --create-schema --schema-only --allow-concurrent-writers)
+fi
+
 rm -rf "$staging_dir/public/uploads" "$staging_dir/uploads"
 ln -s "$shared_root/uploads/public" "$staging_dir/public/uploads"
 ln -s "$shared_root/uploads/runtime" "$staging_dir/uploads"

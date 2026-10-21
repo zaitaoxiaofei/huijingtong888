@@ -482,6 +482,7 @@ function procurementTimeText(row) {
               :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'estimated' && row.profitSummary.alertLevel }"
             >
               预计: CNY {{ formatMoney(row.profitSummary.estimated) }}
+              <el-tooltip :content="row.profitSummary.versionTooltip" placement="top"><el-tag size="small" type="info" effect="plain">{{ row.profitSummary.versionLabel }}</el-tag></el-tooltip>
             </div>
             <div class="orders-cell-meta-line">
               真实:
@@ -489,7 +490,8 @@ function procurementTimeText(row) {
                 v-if="row.profitSummary.hasActual"
                 :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'actual' && row.profitSummary.alertLevel }"
               >CNY {{ formatMoney(row.profitSummary.actual) }}</span>
-              <span v-else>--</span>
+              <span v-else>待结算</span>
+              <el-tooltip :content="row.profitSummary.versionTooltip" placement="top"><el-tag size="small" type="info" effect="plain">{{ row.profitSummary.versionLabel }}</el-tag></el-tooltip>
             </div>
             <el-tag
               v-if="row.profitSummary.alertLevel"
@@ -533,8 +535,8 @@ function procurementTimeText(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack">
             <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">物流: {{ row.logisticsSummary.ozonMethodName || "--" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse">{{ row.logisticsSummary.ruleSourceLabel }}: {{ row.logisticsSummary.resolvedRuleName || "--" }}</div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">渠道: {{ row.logisticsSummary.serviceClass }}<small v-if="row.logisticsSummary.serviceClassSourceLabel">（{{ row.logisticsSummary.serviceClassSourceLabel }}）</small></div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse">运输: {{ row.logisticsSummary.transportMode }}<small v-if="row.logisticsSummary.transportModeSourceLabel">（{{ row.logisticsSummary.transportModeSourceLabel }}）</small></div>
             <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
               <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>
               <el-tooltip content="复制货件号" placement="top">

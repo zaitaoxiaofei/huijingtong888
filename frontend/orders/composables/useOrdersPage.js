@@ -41,10 +41,7 @@ const ORDERS_LIST_CACHE_MAX_ENTRIES = 30;
 const ORDERS_META_DELAY_MS = 1200;
 const DEFAULT_ORDER_STATUS = "awaiting_packaging";
 const ORDER_STATUS_TAB_PREFERENCE_KEY = "orders.status_tabs";
-let logisticsOptionsCache = {
-  rows: [],
-  timestamp: 0
-};
+const logisticsOptionsCache = new Map();
 let ordersMetaTimer = 0;
 const ordersMetaCache = new Map();
 const ordersListCache = new Map();
@@ -63,7 +60,8 @@ function ordersMetaCacheKey(filters = {}) {
     dateFrom: String(filters.dateFrom || ""),
     dateTo: String(filters.dateTo || ""),
     logisticsCarrier: String(filters.logisticsCarrier || "all"),
-    logisticsMethod: String(filters.logisticsMethod || "all")
+    logisticsMethod: String(filters.logisticsMethod || "all"),
+    logisticsServiceClass: String(filters.logisticsServiceClass || "all")
   });
 }
 
@@ -137,8 +135,18 @@ const DEFAULT_LOGISTICS_METHOD_OPTIONS = [
   { value: "guoo_light_land", label: "GUOO 超级轻小件" }
 ];
 
+const DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS = [
+  { value: "all", label: "全部物流渠道" },
+  { value: "extra_small", label: "Extra Small" },
+  { value: "small", label: "Small" },
+  { value: "budget", label: "Budget" },
+  { value: "big", label: "Big" },
+  { value: "premium_small", label: "Premium Small" },
+  { value: "premium_big", label: "Premium Big" }
+];
+
 const LOGISTICS_CARRIER_OPTIONS = [
-  { value: "all", label: "全部物流大类" },
+  { value: "all", label: "全部物流商" },
   { value: "guoo", label: "GUOO" },
   { value: "cel", label: "CEL" },
   { value: "ogl", label: "OGL" },
@@ -159,6 +167,7 @@ function createDefaultFilters(defaultFrom, defaultTo) {
     shopId: "all",
     logisticsCarrier: "all",
     logisticsMethod: "all",
+    logisticsServiceClass: "all",
     dateFrom: defaultFrom,
     dateTo: defaultTo,
     searchType: "order",
@@ -206,6 +215,7 @@ export function useOrdersPage() {
   const ordersMetaRequestKey = ref("");
   const logisticsOptionsAbort = ref(null);
   const logisticsOptionsPromise = ref(null);
+  const logisticsOptionsRequestKey = ref("");
   const ordersLoadToken = ref(0);
   const statusTabOrder = ref([...DEFAULT_STATUS_TAB_ORDER]);
   const defaultTo = shanghaiDateKey();
@@ -268,6 +278,7 @@ export function useOrdersPage() {
       shopId: filters.shopId || "all",
       logisticsCarrier: filters.logisticsCarrier || "all",
       logisticsMethod: filters.logisticsMethod || "all",
+      logisticsServiceClass: filters.logisticsServiceClass || "all",
       dateFrom: filters.dateFrom || "",
       dateTo: filters.dateTo || "",
       searchType: filters.searchType || "order",
@@ -296,6 +307,7 @@ export function useOrdersPage() {
     printViews: PRINT_VIEWS,
     logisticsCarrierOptions: LOGISTICS_CARRIER_OPTIONS,
     logisticsMethodOptions: DEFAULT_LOGISTICS_METHOD_OPTIONS,
+    logisticsServiceClassOptions: DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS,
     moreActions: MORE_ACTIONS,
     syncStatus: "",
     syncRunning: false,
@@ -324,6 +336,7 @@ export function useOrdersPage() {
     if (hasOwn("printViews")) vm.printViews = Array.isArray(payload.printViews) ? payload.printViews : [];
     if (hasOwn("logisticsCarrierOptions")) vm.logisticsCarrierOptions = Array.isArray(payload.logisticsCarrierOptions) ? payload.logisticsCarrierOptions : [];
     if (hasOwn("logisticsMethodOptions")) vm.logisticsMethodOptions = Array.isArray(payload.logisticsMethodOptions) ? payload.logisticsMethodOptions : [];
+    if (hasOwn("logisticsServiceClassOptions")) vm.logisticsServiceClassOptions = Array.isArray(payload.logisticsServiceClassOptions) ? payload.logisticsServiceClassOptions : DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS;
     if (hasOwn("moreActions")) vm.moreActions = Array.isArray(payload.moreActions) ? payload.moreActions : [];
     if (hasOwn("syncStatus")) vm.syncStatus = String(payload.syncStatus || "");
     if (hasOwn("syncRunning")) vm.syncRunning = Boolean(payload.syncRunning);
@@ -342,6 +355,7 @@ export function useOrdersPage() {
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
+        logisticsServiceClass: String(filters.logisticsServiceClass || "all"),
         dateFrom: String(filters.dateFrom || defaultFrom),
         dateTo: String(filters.dateTo || defaultTo),
         searchType: String(filters.searchType || "order"),
@@ -433,6 +447,7 @@ export function useOrdersPage() {
       const requestUrl = `/api/orders?${params.toString()}`;
       if (options.forceRefresh) {
         ordersListCache.clear();
+        logisticsOptionsCache.clear();
       }
       if (options.forceRefresh || options.includeCounts) {
         ordersMetaCache.clear();
@@ -742,46 +757,55 @@ export function useOrdersPage() {
   }
 
   async function loadLogisticsOptions({ force = false } = {}) {
-    if (!force && logisticsOptionsCache.rows.length && Date.now() - logisticsOptionsCache.timestamp < LOGISTICS_OPTIONS_CACHE_TTL_MS) {
-      patch({ logisticsMethodOptions: logisticsOptionsCache.rows });
-      return logisticsOptionsCache.rows;
-    }
-    if (logisticsOptionsPromise.value) return logisticsOptionsPromise.value;
-
-    logisticsOptionsAbort.value?.abort();
-    const controller = new AbortController();
-    logisticsOptionsAbort.value = controller;
-    const filtersSnapshot = { ...vm.filters, logisticsMethod: "all" };
+    const filtersSnapshot = { ...vm.filters, page: 1, logisticsMethod: "all", logisticsServiceClass: "all" };
     const params = buildOrdersParams(filtersSnapshot, {
       includeRows: "0",
       includeCounts: "0",
       includeLogisticsOptions: "1"
     });
+    const requestKey = params.toString();
+    const cached = logisticsOptionsCache.get(requestKey);
+    if (!force && cached && Date.now() - cached.timestamp < LOGISTICS_OPTIONS_CACHE_TTL_MS) {
+      patch({ logisticsServiceClassOptions: cached.rows });
+      return cached.rows;
+    }
+    if (logisticsOptionsPromise.value && logisticsOptionsRequestKey.value === requestKey) return logisticsOptionsPromise.value;
+
+    logisticsOptionsAbort.value?.abort();
+    const controller = new AbortController();
+    logisticsOptionsAbort.value = controller;
+    logisticsOptionsRequestKey.value = requestKey;
 
     logisticsOptionsPromise.value = apiClient
       .get(`/api/orders?${params.toString()}`, { signal: controller.signal })
       .then((result) => {
-        if (controller.signal.aborted) return vm.logisticsMethodOptions;
-        const rows = Array.isArray(result?.logisticsMethodOptions) && result.logisticsMethodOptions.length > 1
-          ? result.logisticsMethodOptions
-          : DEFAULT_LOGISTICS_METHOD_OPTIONS;
-        logisticsOptionsCache = {
+        if (controller.signal.aborted || logisticsOptionsRequestKey.value !== requestKey) return vm.logisticsServiceClassOptions;
+        const currentParams = buildOrdersParams({ ...vm.filters, page: 1, logisticsMethod: "all", logisticsServiceClass: "all" }, {
+          includeRows: "0", includeCounts: "0", includeLogisticsOptions: "1"
+        });
+        if (currentParams.toString() !== requestKey) return vm.logisticsServiceClassOptions;
+        const rows = Array.isArray(result?.logisticsServiceClassOptions) && result.logisticsServiceClassOptions.length
+          ? result.logisticsServiceClassOptions
+          : DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS;
+        if (logisticsOptionsCache.size >= ORDERS_LIST_CACHE_MAX_ENTRIES) logisticsOptionsCache.delete(logisticsOptionsCache.keys().next().value);
+        logisticsOptionsCache.set(requestKey, {
           rows,
           timestamp: Date.now()
-        };
-        patch({ logisticsMethodOptions: rows });
+        });
+        patch({ logisticsServiceClassOptions: rows });
         return rows;
       })
       .catch((error) => {
-        if (error?.name === "AbortError") return vm.logisticsMethodOptions;
+        if (error?.name === "AbortError") return vm.logisticsServiceClassOptions;
         console.warn("loadLogisticsOptions failed", error);
-        return vm.logisticsMethodOptions;
+        return vm.logisticsServiceClassOptions;
       })
       .finally(() => {
         if (logisticsOptionsAbort.value === controller) {
           logisticsOptionsAbort.value = null;
+          logisticsOptionsRequestKey.value = "";
+          logisticsOptionsPromise.value = null;
         }
-        logisticsOptionsPromise.value = null;
       });
 
     return logisticsOptionsPromise.value;

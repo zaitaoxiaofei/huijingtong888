@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import { STATE_META } from "../frontend/orders/constants/orders-ui.js";
+import { classifyOrderLogistics } from "../src/services/order-logistics-classification.js";
 
 const mysqlSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const pageSource = readFileSync(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8");
@@ -61,6 +62,7 @@ test("registration detail preserves Ozon substatus without a list warning", () =
 
 test("order list enrichment exposes label permissions without exposing the raw posting", async () => {
   const { enrichOrderLogisticsMysql } = loadFunctions(mysqlSource, ["enrichOrderLogisticsMysql"], {
+    classifyOrderLogistics,
     resolveOrderLogisticsRuleMysql: async () => ({
       rule: null, warehouseName: "", deliveryMethodName: "", logisticsChannel: "",
       raw: { available_actions: ["label_download"] }, analytics: {}

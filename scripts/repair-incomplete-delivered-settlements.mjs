@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { closeMysqlPool, mysqlExecute, mysqlQuery } from "../src/mysql-pool.js";
+import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
+import { withVersionedOrderProfitBatchWrite } from "../src/services/mysql-order-profit-version-write.js";
 import { refreshOrderProfitDetailSnapshotsMysql } from "../src/services/mysql-cutover.js";
 
 const write = process.argv.includes("--write");
@@ -64,8 +65,12 @@ if (write && rows.length) {
   for (let offset = 0; offset < itemIds.length; offset += 500) {
     const ids = itemIds.slice(offset, offset + 500);
     const placeholders = ids.map(() => "?").join(",");
-    await mysqlExecute(`UPDATE order_items SET actual_profit = 0, platform_fee_actual = 0, settlement_state = 'pending' WHERE id IN (${placeholders})`, ids);
-    await mysqlExecute(`UPDATE order_profit_items SET profit_status = 'estimated', is_locked = 0, lock_reason = 'incomplete_finance_basis', updated_at = CURRENT_TIMESTAMP WHERE order_item_id IN (${placeholders})`, ids);
+    await withVersionedOrderProfitBatchWrite(ids, {
+      source: "incomplete_finance_repair", inputs: { order_item_ids: ids }, reason: "显式修订财务依据不完整的历史结算状态"
+    }, async ({ db }) => {
+      await db.execute(`UPDATE order_items SET actual_profit = 0, platform_fee_actual = 0, settlement_state = 'pending' WHERE id IN (${placeholders})`, ids);
+      await db.execute(`UPDATE order_profit_items SET profit_status = 'estimated', is_locked = 0, lock_reason = 'incomplete_finance_basis', updated_at = CURRENT_TIMESTAMP WHERE order_item_id IN (${placeholders})`, ids);
+    });
   }
   await refreshOrderProfitDetailSnapshotsMysql({ order_ids: orderIds, final_only: 0, limit: orderIds.length });
 }

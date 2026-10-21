@@ -17,3 +17,10 @@ test("logistics carrier detects CEL, Hunchun and postal families", () => {
 test("logistics carrier detects OGL as its own family", () => {
   assert.equal(detectOrderLogisticsCarrier("OGL Premium Big"), "ogl");
 });
+
+test("carrier tokens do not match substrings inside unrelated words", () => {
+  assert.equal(detectOrderLogisticsCarrier("Google accessory"), "");
+  assert.equal(detectOrderLogisticsCarrier("cancelled order"), "");
+  assert.equal(detectOrderLogisticsCarrier("GUOO Standard Extra Small Google accessory"), "guoo");
+  assert.equal(detectOrderLogisticsCarrier("OGL_嘉兴仓库"), "ogl");
+});

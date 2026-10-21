@@ -4,6 +4,11 @@ Last updated: 2026-05-13
 
 This document defines the long-term data model for Ozon order lifecycle, estimated profit, real settled profit, and large-data persistence strategy.
 
+The additive V1 formula registry, calculation revisions and narrow baseline
+migration are documented in [Order profit calculation versions](./ORDER_PROFIT_CALCULATION_VERSIONS.md).
+The older schema suggestions below describe the architecture direction; they do
+not replace that implementation's explicit migration and audit procedure.
+
 ## 1. Goal
 
 The system should stop treating every order as endlessly recalculable.
