@@ -68,9 +68,9 @@ test('inventory alert detail uses scoped ledger routes and only exposes stocktak
     await dialog.getByText('更新仓库实物数', { exact: true }).click();
     await dialog.getByRole('spinbutton').fill('8');
     await dialog.getByText('历史库存记错', { exact: true }).click();
-    await dialog.getByRole('button', { name: '预览变动' }).click();
-    await dialog.getByText('仓库实物 10 → 8；剩余可用 8 → 6').waitFor();
+    assert.equal(await dialog.getByRole('button', { name: '确认更新' }).isEnabled(), true);
     await dialog.getByRole('button', { name: '确认更新' }).click();
+    await dialog.getByText('仓库实物 10 → 8；剩余可用 8 → 6').waitFor();
     await page.getByRole('dialog', { name: '再次确认库存更新' }).getByRole('button', { name: '确认更新' }).click();
     assert.deepEqual(requests.filter(row => row.method === 'POST').map(row => row.path), ['/api/inventory/ledger/preview', '/api/inventory/ledger']);
     assert.equal(requests.at(-2).body.action_type, 'stocktake');
@@ -83,14 +83,16 @@ test('inventory alert detail uses scoped ledger routes and only exposes stocktak
     await availableDialog.getByText('历史库存记错', { exact: true }).click();
     await availableDialog.getByRole('button', { name: '预览变动' }).click();
     await availableDialog.getByText('仓库实物 10 → 7；剩余可用 8 → 5').waitFor();
+    await availableDialog.getByRole('spinbutton').fill('4');
     await availableDialog.getByRole('button', { name: '确认更新' }).click();
     await page.getByRole('dialog', { name: '再次确认库存更新' }).getByRole('button', { name: '确认更新' }).click();
     assert.deepEqual(requests.filter(row => row.method === 'POST').map(row => row.path), [
       '/api/inventory/ledger/preview', '/api/inventory/ledger',
-      '/api/inventory/ledger/preview', '/api/inventory/ledger'
+      '/api/inventory/ledger/preview', '/api/inventory/ledger/preview', '/api/inventory/ledger'
     ]);
     assert.equal(requests.at(-1).body.stocktake_type, 'available');
-    assert.equal(requests.at(-1).body.available_quantity, 5);
+    assert.equal(requests.at(-2).body.available_quantity, 4);
+    assert.equal(requests.at(-1).body.available_quantity, 4);
     const ledgerReadsBeforeDirectOpen = requests.filter(row => row.method === 'GET').length;
     await page.goto('http://localhost:8788/admin.html?stocktake=1');
     await page.getByRole('dialog', { name: '更新本地库存' }).waitFor();

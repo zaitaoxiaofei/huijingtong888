@@ -805,6 +805,8 @@ function buildLogisticsSummary(row) {
   const shipmentNumber = String(row.posting_number || row.order_number || "").trim();
   const trackingNumber = String(row.tracking_number || "").trim();
   const trackingTarget = trackingNumber || shipmentNumber;
+  const rawOzonMethodName = row.delivery_method_name || row.logistics_channel || "";
+  const standardizedMethodName = row.resolved_logistics_rule_name || row.billing_logistics_rule_name || "";
   return {
     shipmentNumber,
     tracking: trackingNumber,
@@ -813,7 +815,8 @@ function buildLogisticsSummary(row) {
     hasSeparateTrackingNumber: Boolean(trackingNumber && shipmentNumber && trackingNumber !== shipmentNumber),
     deliveryMethod: row.delivery_method_name || row.delivery_method || row.shipping_method || "",
     deliveryMethodLabel: row.fulfillment_type_label || "FBS",
-    ozonMethodName: row.delivery_method_name || row.logistics_channel || "--",
+    ozonMethodName: standardizedMethodName || rawOzonMethodName || "--",
+    rawOzonMethodName,
     resolvedRuleName: row.billing_logistics_rule_name || row.resolved_logistics_rule_name || "--",
     ruleSourceLabel: row.billing_logistics_rule_name ? "利润计费" : "物流识别",
     warehouse: row.warehouse_name || "",

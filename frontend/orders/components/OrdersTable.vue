@@ -533,7 +533,7 @@ function procurementTimeText(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack">
             <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse">Ozon: {{ row.logisticsSummary.ozonMethodName || "--" }}</div>
+            <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">物流: {{ row.logisticsSummary.ozonMethodName || "--" }}</div>
             <div class="orders-cell-meta-line orders-logistics-warehouse">{{ row.logisticsSummary.ruleSourceLabel }}: {{ row.logisticsSummary.resolvedRuleName || "--" }}</div>
             <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
               <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>

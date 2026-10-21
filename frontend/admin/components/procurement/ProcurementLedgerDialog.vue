@@ -279,6 +279,8 @@ async function makePreview() {
   finally { saving.value = false; }
 }
 async function confirmStock() {
+  if (saving.value) return;
+  if (!submission.value || !preview.value) await makePreview();
   if (!submission.value || !preview.value) return;
   try {
     await ElMessageBox.confirm(`仓库实物 ${preview.value.physical_before} → ${preview.value.physical_after}，剩余可用 ${preview.value.available_before} → ${preview.value.available_after}。待发订单需求 ${preview.value.open_order_demand}，FBP 占用 ${preview.value.fbp_reserved}；库存流水将${preview.value.stocktake_delta >= 0 ? '增加' : '减少'} ${Math.abs(preview.value.stocktake_delta)} 件。原因：${preview.value.reason}。保存后重新计算订单覆盖；采购在途不变。`, '再次确认库存更新', { confirmButtonText: '确认更新', cancelButtonText: '继续核对', type: 'warning' });
@@ -580,7 +582,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       <el-alert v-if="preview?.cost_task_quantity > 0" type="info" :closable="false" :title="`将生成 ${preview.cost_task_quantity} 件现货成本核对任务，交由采购关联已有采购或补录成本；不是要求再采购这些货物。`" />
       <el-alert v-if="preview && form.action_type === 'convert'" :type="preview.conversion_cost_amount == null ? 'warning' : 'info'" :closable="false" :title="preview.conversion_cost_amount == null ? '部分来源库存缺少成本，本次转换成本暂不能确定；不生成虚假的零元采购。请核对来源商品采购成本。' : `转换成本合计 ${preview.conversion_cost_amount} 元，转入目标成品成本记录，不新增采购或在途。`" />
       <el-table v-if="preview?.extra_changes?.length" :data="preview.extra_changes"><el-table-column prop="product_name" label="配件" /><el-table-column prop="quantity" label="消耗" /><el-table-column prop="available_before" label="未占用现货（前）" /><el-table-column prop="available_after" label="未占用现货（后）" /></el-table>
-      <template #footer><el-button :disabled="saving" @click="discardForm">取消</el-button><template v-if="form.action_type === 'stocktake'"><el-button :loading="saving" @click="makePreview">预览变动</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="confirmStock">确认更新</el-button></template><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template>
+      <template #footer><el-button :disabled="saving" @click="discardForm">取消</el-button><template v-if="form.action_type === 'stocktake'"><el-button :loading="saving" @click="makePreview">预览变动</el-button><el-button type="primary" :loading="saving" @click="confirmStock">确认更新</el-button></template><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template>
     </el-dialog>
   </el-dialog>
 </template>
