@@ -589,10 +589,10 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 </template>
 <style scoped>
 .ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap; }
-.ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:#f5f7fa; }
+.ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--erp-detail-surface-alt, #f5f7fa); }
 .ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:8px 0; }
 .ledger-metrics > div { display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px;background:var(--el-fill-color-light);border-radius:6px; }
-.ledger-metrics span { color:#606266;font-size:12px; }.ledger-metrics strong { font-size:20px;line-height:1.3; }.ledger-warning strong { color:#b45309; }
+.ledger-metrics span { color:var(--erp-detail-text-secondary, #606266);font-size:12px; }.ledger-metrics strong { font-size:20px;line-height:1.3; }.ledger-warning strong { color:var(--erp-detail-warning-text, #b45309); }
 .ledger-shortage { color:var(--el-color-danger); }
 .ledger-dialog-header { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
 .ledger-dialog-heading { display:flex;flex-direction:column;gap:2px;min-width:0; }
@@ -600,7 +600,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 .ledger-order-summary { margin-bottom:12px; }
 .ledger-order-heading { display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 10px;background:var(--el-color-primary-light-9);border-radius:6px 6px 0 0; }
 .ledger-order-heading span { color:var(--el-text-color-secondary);font-size:12px; }
-.ledger-order-summary p,.ledger-hint { color:#606266;font-size:13px; }
+.ledger-order-summary p,.ledger-hint { color:var(--erp-detail-text-secondary, #606266);font-size:13px; }
 .ledger-order-summary p { margin:4px 0 0; }
 .ledger-order-conclusion { margin-top:6px;padding:6px 10px; }
 .ledger-order-product { margin:0;min-height:92px;flex-wrap:nowrap; }
@@ -614,9 +614,9 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 .ledger-metric-groups .ledger-metrics { margin:0 0 12px; }
 .ledger-metric-groups .ledger-warehouse-summary .ledger-metrics { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
 .ledger-metric-groups section:last-child .ledger-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
-.ledger-metrics small { color:#606266;font-size:12px;line-height:1.5; }
-.ledger-management { border:1px solid #dcdfe6;padding:16px;margin-bottom:16px;border-radius:8px; }
-.ledger-history-toolbar { position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 0;background:#fff;border-bottom:1px solid #ebeef5; }
+.ledger-metrics small { color:var(--erp-detail-text-secondary, #606266);font-size:12px;line-height:1.5; }
+.ledger-management { border:1px solid var(--erp-detail-border, #dcdfe6);padding:16px;margin-bottom:16px;border-radius:8px; }
+.ledger-history-toolbar { position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 0;background:var(--erp-detail-surface, #fff);border-bottom:1px solid var(--erp-detail-border-light, #ebeef5); }
 .ledger-history-toolbar .el-pagination { width:100%; }
 :deep(.current-fbp-sku) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
 :global(.unified-inventory-dialog) { display:flex;flex-direction:column;max-height:92vh;margin-bottom:4vh;overflow:hidden; }

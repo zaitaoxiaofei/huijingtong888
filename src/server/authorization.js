@@ -1,4 +1,5 @@
 import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
+import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -15,6 +16,7 @@ export function authorizeApiRequest(req, parts = []) {
   const session = req._session;
   if (!session) return deny("未登录");
   if (parts[0] !== "api") return { allowed: true };
+  if (isEnterpriseMessageRoute(parts, String(req.method || "GET").toUpperCase())) return session.tenant?.id ? { allowed: true } : deny("请先选择有效企业后使用私信");
   if (isPlatformAdmin(session)) return { allowed: true };
   if (!getRoles(session).length && !isEnterpriseAdmin(session)) return deny();
   const method = String(req.method || "GET").toUpperCase();

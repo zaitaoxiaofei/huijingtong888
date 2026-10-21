@@ -28,6 +28,68 @@ Enforcement:
 
 ## Schemas
 
+### EnterpriseMessagePeer
+
+Active person in the authenticated enterprise. No global account roster.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | Yes | Person ID. |
+| `name` | `string` | Yes | Display name. |
+| `username` | `string` | No | Login name. |
+| `avatar_url` | `string` | No | Avatar URL. |
+
+### EnterpriseMessageReference
+
+Server-generated business reference. Current ownership, business permissions and isolation gates are rechecked when read. Unavailable references expose no label or route.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `type` | `string` | Yes | order or procurement; procurement identifies procurement_requests, not purchase_orders. |
+| `id` | `number` | Yes | Record ID. |
+| `label` | `string` | Yes | Server-generated label or neutral unavailable text. |
+| `route` | `string` | Yes | Server-generated local route; empty when unavailable. |
+| `available` | `boolean` | Yes | Current member may access the record. |
+
+### EnterpriseDirectMessage
+
+Plain text one-to-one message, visible only to its two active enterprise members. API timestamps are UTC ISO strings; the UI formats Beijing time.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | Yes | Message ID. |
+| `sender_id` | `number` | Yes | Sender person ID. |
+| `recipient_id` | `number` | Yes | Recipient person ID. |
+| `text` | `string` | Yes | Plain text; never HTML. |
+| `client_message_id` | `string` | Yes | Sender-generated stable retry ID. |
+| `reference` | `EnterpriseMessageReference` | No | Optional reference, otherwise null. |
+| `created_at` | `string` | Yes | UTC creation time. |
+| `read_at` | `string` | No | UTC explicit read time or null. |
+
+### EnterpriseMessageSend
+
+Only current-enterprise peers are accepted. Tenant/sender selectors and client-supplied labels/routes do not grant authority. Failed requests must retain their client_message_id for safe retry.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `peer_id` | `number` | Yes | Other active member in the current enterprise. |
+| `text` | `string` | Yes | 1-4000 characters, trimmed plain text. |
+| `client_message_id` | `string` | Yes | 8-64 ASCII letters/digits/underscore/hyphen; UUID recommended. Reused ID with different content returns 409. |
+| `reference` | `object` | No | Optional record pointer. Only type and id are consumed. |
+
+### EnterpriseMessageThread
+
+Cursor page, always ascending by ID. Initial/before pages select the nearest older messages; after pages select the earliest newer messages. Fetching never marks read.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `rows` | `array<EnterpriseDirectMessage>` | Yes | Messages. |
+| `has_more` | `boolean` | Yes | More messages exist in requested direction. |
+| `next_before_id` | `number` | Yes | Smallest returned ID, or zero. |
+| `next_after_id` | `number` | Yes | Largest returned ID, or zero. |
+
 ### ApiCatalog
 
 Machine-readable API contract catalog.
@@ -1619,6 +1681,88 @@ Change the current user's password.
   - Schema: `ChangePasswordRequest`
 - Responses:
   - `200` `application/json` -> `MutationOk`
+
+### Enterprise Private Messages
+
+#### `GET /api/enterprise/messages/contacts`
+
+List other active members of the current enterprise. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/enterprise/messages/conversations`
+
+List only the current member's own conversations with active peers, newest first. Return rows containing peer, last_message and unread_count. No tenant/person selector can inspect another member's inbox.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/enterprise/messages/unread`
+
+Count unread incoming messages from currently active peers in the current enterprise.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/enterprise/messages/thread`
+
+Read a private thread with an active peer. before_id and after_id are mutually exclusive; no request automatically marks messages read.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `peer_id` (`number`, required): Active peer ID.
+  - `before_id` (`number`, optional): Exclusive older cursor.
+  - `after_id` (`number`, optional): Exclusive newer cursor.
+  - `limit` (`number`, optional): 1-50, default 50.
+- Responses:
+  - `200` `application/json` -> `EnterpriseMessageThread`
+
+#### `POST /api/enterprise/messages/send`
+
+Send plain text with an optional verified business record. Stable client_message_id makes lost-response retries idempotent, including concurrent retries. Sender and recipient memberships/accounts are locked and rechecked before write.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `EnterpriseMessageSend`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/enterprise/messages/read`
+
+Mark only explicitly displayed incoming message IDs as read. Outgoing, other-peer and other-enterprise IDs are ignored. No through-ID watermark is used.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/enterprise/messages/references`
+
+Search current-enterprise order numbers or procurement request IDs under the sender's existing business read permission and isolation gates. Return only server-generated labels/routes.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `type` (`string`, required): order or procurement.
+  - `q` (`string`, required): 1-100 character search term.
+  - `limit` (`number`, optional): 1-20, default 20.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/enterprise/messages/reference`
+
+Read one verified reference. Procurement returns a safe read-only summary even when the request is closed: id, product_name, quantity, status, note, created_at, source_posting_number. Foreign or forbidden records return 403 without details.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `type` (`string`, required): order or procurement.
+  - `id` (`number`, required): Business record ID.
+- Responses:
+  - `200` `application/json` -> `object`
 
 ### Platform And Enterprise Identity
 

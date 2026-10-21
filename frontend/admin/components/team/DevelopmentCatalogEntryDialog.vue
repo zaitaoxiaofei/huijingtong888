@@ -42,4 +42,4 @@ async function save() {
   </el-dialog>
 </template>
 
-<style scoped>.catalog-hint{font-size:13px;color:#64748b;line-height:1.8}</style>
+<style scoped>.catalog-hint{font-size:13px;color:var(--erp-detail-text-secondary, #64748b);line-height:1.8}</style>

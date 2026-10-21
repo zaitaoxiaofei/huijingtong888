@@ -1012,7 +1012,7 @@ onMounted(async () => {
 }
 
 .procurement-list-summary strong {
-  color: var(--erp-text-primary);
+  color: var(--erp-text-main);
   font-size: 14px;
 }
 
@@ -1043,9 +1043,9 @@ onMounted(async () => {
   gap: 12px;
   padding: 12px;
   margin-bottom: 10px;
-  border: 1px solid #e7ebf2;
+  border: 1px solid var(--erp-detail-border-light, #e7ebf2);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .purchase-filter-bar { display: block; }
@@ -1069,7 +1069,7 @@ onMounted(async () => {
 }
 
 .procurement-shipment-cell__trace {
-  color: var(--erp-text-primary);
+  color: var(--erp-text-main);
 }
 
 .procurement-structured-search:deep(.inventory-structured-search.is-compact) {
@@ -1136,7 +1136,7 @@ onMounted(async () => {
   display: grid;
   gap: 10px;
   padding: 12px 16px 14px 72px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .purchase-inline-editor__header {

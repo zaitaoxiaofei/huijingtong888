@@ -6,6 +6,7 @@ import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
 import InventoryIdentity from './InventoryIdentity.vue';
+import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
 const props = defineProps({
   rows: { type: Array, default: () => [] },
@@ -399,6 +400,7 @@ function procurementTimeText(row) {
               <span class="orders-item-quantity" :class="{ 'is-multi': Number(row.quantitySummary || 0) > 1 }">
                 x{{ Number(row.quantitySummary || 0) || 1 }}
               </span>
+              <el-button link type="primary" size="small" :aria-label="`引用订单 ${row.posting_number || row.order_number || row.id} 发私信`" @click.stop="openEnterpriseMessage({ type: 'order', id: Number(row.id), label: `订单 ${row.posting_number || row.order_number || row.id}` })">私信</el-button>
             </div>
           </div>
         </template>

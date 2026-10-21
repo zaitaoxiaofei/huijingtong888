@@ -17,6 +17,30 @@ const param = (name, schema, required = true) => ({ name, required, ...schema })
 const response = (status, mediaType, schema, description = "") => ({ status, mediaType, schema, description });
 
 const schemas = {
+  EnterpriseMessagePeer: objectOf("Active person in the authenticated enterprise. No global account roster.", [
+    field("id", scalar("number", "Person ID."), true), field("name", scalar("string", "Display name."), true),
+    field("username", scalar("string", "Login name.")), field("avatar_url", scalar("string", "Avatar URL."))
+  ]),
+  EnterpriseMessageReference: objectOf("Server-generated business reference. Current ownership, business permissions and isolation gates are rechecked when read. Unavailable references expose no label or route.", [
+    field("type", scalar("string", "order or procurement; procurement identifies procurement_requests, not purchase_orders.", { enum: ["order", "procurement"] }), true),
+    field("id", scalar("number", "Record ID."), true), field("label", scalar("string", "Server-generated label or neutral unavailable text."), true),
+    field("route", scalar("string", "Server-generated local route; empty when unavailable."), true), field("available", scalar("boolean", "Current member may access the record."), true)
+  ]),
+  EnterpriseDirectMessage: objectOf("Plain text one-to-one message, visible only to its two active enterprise members. API timestamps are UTC ISO strings; the UI formats Beijing time.", [
+    field("id", scalar("number", "Message ID."), true), field("sender_id", scalar("number", "Sender person ID."), true),
+    field("recipient_id", scalar("number", "Recipient person ID."), true), field("text", scalar("string", "Plain text; never HTML."), true),
+    field("client_message_id", scalar("string", "Sender-generated stable retry ID."), true), field("reference", ref("EnterpriseMessageReference", "Optional reference, otherwise null.")),
+    field("created_at", scalar("string", "UTC creation time."), true), field("read_at", scalar("string", "UTC explicit read time or null."))
+  ]),
+  EnterpriseMessageSend: objectOf("Only current-enterprise peers are accepted. Tenant/sender selectors and client-supplied labels/routes do not grant authority. Failed requests must retain their client_message_id for safe retry.", [
+    field("peer_id", scalar("number", "Other active member in the current enterprise."), true), field("text", scalar("string", "1-4000 characters, trimmed plain text."), true),
+    field("client_message_id", scalar("string", "8-64 ASCII letters/digits/underscore/hyphen; UUID recommended. Reused ID with different content returns 409."), true),
+    field("reference", objectOf("Optional record pointer. Only type and id are consumed.", [field("type", scalar("string", "order or procurement."), true), field("id", scalar("number", "Business record ID."), true)]))
+  ], { additionalProperties: false }),
+  EnterpriseMessageThread: objectOf("Cursor page, always ascending by ID. Initial/before pages select the nearest older messages; after pages select the earliest newer messages. Fetching never marks read.", [
+    field("rows", arrayOf(ref("EnterpriseDirectMessage"), "Messages."), true), field("has_more", scalar("boolean", "More messages exist in requested direction."), true),
+    field("next_before_id", scalar("number", "Smallest returned ID, or zero."), true), field("next_after_id", scalar("number", "Largest returned ID, or zero."), true)
+  ]),
   ApiCatalog: objectOf("Machine-readable API contract catalog.", [
     field("generatedAt", scalar("string", "Generation timestamp in ISO-8601.", { format: "date-time" }), true),
     field("title", scalar("string", "Catalog title."), true),
@@ -1078,6 +1102,36 @@ const endpoints = [
       auth: "authenticated",
       requestBody: body(ref("ChangePasswordRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
+    })
+  ]),
+  section("Enterprise Private Messages", [
+    endpoint("GET", "/api/enterprise/messages/contacts", "List other active members of the current enterprise. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.", {
+      responses: [response(200, "application/json", objectOf("Contact rows.", [field("rows", arrayOf(ref("EnterpriseMessagePeer"), "Active peers."), true)]))]
+    }),
+    endpoint("GET", "/api/enterprise/messages/conversations", "List only the current member's own conversations with active peers, newest first. Return rows containing peer, last_message and unread_count. No tenant/person selector can inspect another member's inbox.", {
+      responses: [response(200, "application/json", objectOf("Conversation rows.", [field("rows", arrayOf(objectOf("Conversation.", [field("peer", ref("EnterpriseMessagePeer")), field("last_message", ref("EnterpriseDirectMessage")), field("unread_count", scalar("number", "Unread incoming count."))]), "Own conversations."), true)]))]
+    }),
+    endpoint("GET", "/api/enterprise/messages/unread", "Count unread incoming messages from currently active peers in the current enterprise.", {
+      responses: [response(200, "application/json", objectOf("Unread count.", [field("unread_count", scalar("number", "Unread incoming messages."), true)]))]
+    }),
+    endpoint("GET", "/api/enterprise/messages/thread", "Read a private thread with an active peer. before_id and after_id are mutually exclusive; no request automatically marks messages read.", {
+      query: [param("peer_id", scalar("number", "Active peer ID.")), param("before_id", scalar("number", "Exclusive older cursor."), false), param("after_id", scalar("number", "Exclusive newer cursor."), false), param("limit", scalar("number", "1-50, default 50."), false)],
+      responses: [response(200, "application/json", ref("EnterpriseMessageThread"))]
+    }),
+    endpoint("POST", "/api/enterprise/messages/send", "Send plain text with an optional verified business record. Stable client_message_id makes lost-response retries idempotent, including concurrent retries. Sender and recipient memberships/accounts are locked and rechecked before write.", {
+      requestBody: body(ref("EnterpriseMessageSend")), responses: [response(200, "application/json", objectOf("Durable result.", [field("message", ref("EnterpriseDirectMessage"), true), field("duplicate", scalar("boolean", "Existing identical request was reused."), true)]))]
+    }),
+    endpoint("POST", "/api/enterprise/messages/read", "Mark only explicitly displayed incoming message IDs as read. Outgoing, other-peer and other-enterprise IDs are ignored. No through-ID watermark is used.", {
+      requestBody: body(objectOf("Explicit displayed IDs.", [field("peer_id", scalar("number", "Peer sender ID."), true), field("message_ids", arrayOf(scalar("number", "Displayed incoming message ID."), "Up to 100 IDs."), true)], { additionalProperties: false })),
+      responses: [response(200, "application/json", objectOf("Read result.", [field("ok", scalar("boolean", "Success.")), field("updated_count", scalar("number", "Newly read messages.")), field("unread_count", scalar("number", "Remaining unread count."))]))]
+    }),
+    endpoint("GET", "/api/enterprise/messages/references", "Search current-enterprise order numbers or procurement request IDs under the sender's existing business read permission and isolation gates. Return only server-generated labels/routes.", {
+      query: [param("type", scalar("string", "order or procurement.")), param("q", scalar("string", "1-100 character search term.")), param("limit", scalar("number", "1-20, default 20."), false)],
+      responses: [response(200, "application/json", objectOf("Matching references.", [field("rows", arrayOf(ref("EnterpriseMessageReference"), "Verified references."))]))]
+    }),
+    endpoint("GET", "/api/enterprise/messages/reference", "Read one verified reference. Procurement returns a safe read-only summary even when the request is closed: id, product_name, quantity, status, note, created_at, source_posting_number. Foreign or forbidden records return 403 without details.", {
+      query: [param("type", scalar("string", "order or procurement.")), param("id", scalar("number", "Business record ID."))],
+      responses: [response(200, "application/json", objectOf("Verified reference and safe record summary.", [field("reference", ref("EnterpriseMessageReference")), field("record", scalar("object", "Safe procurement summary; null for order references."))]))]
     })
   ]),
   section("Platform And Enterprise Identity", [

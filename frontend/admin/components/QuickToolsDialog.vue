@@ -3,14 +3,15 @@ import { computed, defineAsyncComponent } from "vue";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  tool: { type: String, default: "profit", validator: (value) => ["profit", "pricing"].includes(value) }
+  tool: { type: String, default: "profit", validator: (value) => ["calculator", "profit", "pricing"].includes(value) }
 });
 const emit = defineEmits(["update:modelValue"]);
 const tools = {
+  calculator: defineAsyncComponent(() => import("./QuickCalculator.vue")),
   profit: defineAsyncComponent(() => import("../views/tools/ProfitCalculatorView.vue")),
   pricing: defineAsyncComponent(() => import("../views/tools/PricingToolView.vue"))
 };
-const title = computed(() => props.tool === "pricing" ? "定价工具" : "利润计算器");
+const title = computed(() => ({ calculator: "简易计算器", profit: "利润计算器", pricing: "定价工具" }[props.tool]));
 </script>
 
 <template>
@@ -18,7 +19,8 @@ const title = computed(() => props.tool === "pricing" ? "定价工具" : "利润
     :model-value="modelValue"
     :title="title"
     class="quick-tools-dialog"
-    width="min(1320px, 93vw)"
+    :class="{ 'quick-tools-dialog--calculator': tool === 'calculator' }"
+    :width="tool === 'calculator' ? 'min(420px, 93vw)' : 'min(1320px, 93vw)'"
     top="4vh"
     append-to-body
     :close-on-click-modal="false"
@@ -28,7 +30,7 @@ const title = computed(() => props.tool === "pricing" ? "定价工具" : "利润
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="quick-tools-dialog__content">
-      <KeepAlive :max="2">
+      <KeepAlive :max="3">
         <component v-if="modelValue" :is="tools[tool]" :key="tool" embedded />
       </KeepAlive>
     </div>

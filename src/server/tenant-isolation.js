@@ -1,4 +1,5 @@
 import { isPlatformAdmin } from "../shared/permissions.js";
+import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 
 const PLATFORM_API_RESOURCES = new Set([
   "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -62,6 +63,7 @@ function isTenantSellerAnalyticsRoute(path, method) {
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
+  if (isEnterpriseMessageRoute(parts, String(method).toUpperCase())) return tenant?.id && tenant?.slug ? { allowed: true } : { allowed: false, error: "请先选择有效企业后使用私信" };
   if (isPlatformAdmin(session) && PLATFORM_API_RESOURCES.has(parts[1])) return { allowed: true };
   if (tenant?.slug === "default") return { allowed: true };
   if (!tenant?.id || !tenant?.slug) {

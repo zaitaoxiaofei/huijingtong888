@@ -87,7 +87,9 @@ import { systemInfo } from "./server/maintenance.js";
 import { globalUpdateStatus, subscribeGlobalUpdateEvents, updateGlobalUpdateStatus } from "./server/notifications.js";
 import * as systemNotificationServices from "./services/system-notifications.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
-import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool } from "./mysql-pool.js";
+import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool, withMysqlTransaction } from "./mysql-pool.js";
+import { createEnterpriseMessagesService } from "./services/enterprise-messages.js";
+import { createEnterpriseMessageRoutes } from "./server/routes/enterpriseMessages.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
@@ -222,7 +224,8 @@ const routeModules = {
   ...createImageCropperRoutes({ readJson }),
   ...createOnboardingKnowledgeRoutes({ readJson }),
   ...createSystemNotificationRoutes({ services }),
-  ...createEnterpriseManagementRoutes({ services, readJson })
+  ...createEnterpriseManagementRoutes({ services, readJson }),
+  ...createEnterpriseMessageRoutes({ messages: createEnterpriseMessagesService({ transaction: withMysqlTransaction }), readJson })
 };
 
 // 保持现有 API 不变，但把“简单直连型接口”集中成一个表；
@@ -2008,6 +2011,7 @@ const server = http.createServer(async (req, res) => {
     }
     trackForegroundApiRequest(req, res, parts);
     if (parts[0] === "api") {
+      if (parts[1] === "enterprise" && parts[2] === "messages") req._sensitiveResponse = true;
       req._timingMarks = [];
       res._serverTimingStartedAt = startedAt;
       res._serverTimingMarks = req._timingMarks;

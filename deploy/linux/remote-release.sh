@@ -234,7 +234,8 @@ for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
   migrate-tenant-sku-mappings.mjs \
   migrate-tenant-logistics-rules.mjs \
-  migrate-tenant-asset-variant-config.mjs; do
+  migrate-tenant-asset-variant-config.mjs \
+  migrate-enterprise-messages.mjs; do
   if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
     continue
   fi

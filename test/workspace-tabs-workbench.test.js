@@ -26,8 +26,8 @@ test("left navigation reuses fixed workbench ids instead of opening random dupli
 });
 
 test("workspace tabs keep every open page alive by its stable tab key", () => {
-  assert.match(layoutSource, /<KeepAlive>/);
+  assert.match(layoutSource, /<KeepAlive(?:\s[^>]*)?>/);
   assert.doesNotMatch(layoutSource, /<KeepAlive\s+:include=/);
-  assert.match(layoutSource, /:key="`\$\{activeTabKey \|\| currentRoute\.path\}:\$\{tabsStore\.refreshToken\}`"/);
+  assert.match(layoutSource, /:key="`\$\{tabsStore\.tabKeyForRoute\(currentRoute\)\}:\$\{tabsStore\.refreshToken\}`"/);
   assert.doesNotMatch(layoutSource, /:key="`\$\{currentRoute\.fullPath\}/);
 });

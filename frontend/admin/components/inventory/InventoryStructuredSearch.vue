@@ -223,7 +223,7 @@ watch(
   padding: 12px;
   border: 1px solid #e7ebf2;
   border-radius: 12px;
-  background: #f6f8fb;
+  background: var(--erp-detail-surface-alt, #f6f8fb);
 }
 .search-group {
   display: grid;
