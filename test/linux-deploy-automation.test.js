@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import test from "node:test";
+
+const execFileAsync = promisify(execFile);
 
 const client = fs.readFileSync(new URL("../deploy/linux/deploy-ecs.ps1", import.meta.url), "utf8");
 const unixClient = fs.readFileSync(new URL("../deploy/linux/deploy-ecs.sh", import.meta.url), "utf8");
@@ -48,6 +55,54 @@ test("Mac/Linux release can skip all database maintenance when no schema change 
   assert.match(remote, /run_db_maintenance="\$\{4:-1\}"/);
   assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \]\]; then\s+for tenant_migration/);
   assert.ok(remote.indexOf("init-order-query-facts.mjs") < remote.indexOf("\nfi\n\nrm -rf \"$staging_dir/public/uploads\""));
+});
+
+test("Windows database skip switches preserve defaults and forward all remote release arguments", { skip: process.platform !== "win32" }, async () => {
+  const fixtureDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-deploy-flags-"));
+  try {
+    const scriptDir = path.join(fixtureDir, "deploy", "linux");
+    const scriptPath = path.join(scriptDir, "deploy-ecs.ps1");
+    const outputDir = path.join(fixtureDir, ".deploy-artifacts", "test-release-package");
+    const capturePath = path.join(fixtureDir, "ssh-arguments.json");
+    await fsPromises.mkdir(scriptDir, { recursive: true });
+    await fsPromises.mkdir(outputDir, { recursive: true });
+    await fsPromises.writeFile(scriptPath, client, "utf8");
+    await fsPromises.writeFile(path.join(outputDir, "deploy-manifest.json"), "{}", "utf8");
+    for (const [skipInit, skipMaintenance] of [[false, false], [true, false], [false, true], [true, true]]) {
+      await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+        $ErrorActionPreference = 'Stop'
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        function global:tar.exe {
+          [System.IO.File]::WriteAllText($args[3], 'test archive')
+          $global:LASTEXITCODE = 0
+        }
+        function global:scp { $global:LASTEXITCODE = 0 }
+        function global:ssh {
+          [System.IO.File]::WriteAllText($env:OZON_DEPLOY_TEST_CAPTURE, (ConvertTo-Json -InputObject @($args) -Compress), [System.Text.UTF8Encoding]::new($false))
+          $global:LASTEXITCODE = 0
+        }
+        $options = @{ EcsHost = 'deployment.test.invalid'; SshUser = 'test'; SshPort = 22; IdentityFile = ''; Version = 'test-release'; SkipBuild = $true }
+        if ($env:OZON_DEPLOY_TEST_SKIP_INIT -eq '1') { $options.SkipDatabaseInit = $true }
+        if ($env:OZON_DEPLOY_TEST_SKIP_MAINTENANCE -eq '1') { $options.SkipDatabaseMaintenance = $true }
+        & $env:OZON_DEPLOY_TEST_SCRIPT @options
+      `], {
+        env: {
+          ...process.env,
+          OZON_DEPLOY_TEST_SCRIPT: scriptPath,
+          OZON_DEPLOY_TEST_CAPTURE: capturePath,
+          OZON_DEPLOY_TEST_SKIP_INIT: skipInit ? "1" : "0",
+          OZON_DEPLOY_TEST_SKIP_MAINTENANCE: skipMaintenance ? "1" : "0"
+        }
+      });
+      const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
+      assert.equal(sshArguments.at(-2), "test@deployment.test.invalid");
+      assert.ok(sshArguments.at(-1).endsWith(
+        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}'`
+      ), `incorrect remote flags for SkipDatabaseInit=${skipInit}, SkipDatabaseMaintenance=${skipMaintenance}`);
+    }
+  } finally {
+    await fsPromises.rm(fixtureDir, { recursive: true, force: true });
+  }
 });
 
 test("Mac/Linux DryRun exits before every mutating or remote deployment step", () => {

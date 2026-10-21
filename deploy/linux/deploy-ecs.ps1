@@ -7,6 +7,7 @@ param(
   [string]$Version = (Get-Date -Format "yyyy.MM.dd-HHmmss"),
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
+  [switch]$SkipDatabaseMaintenance,
   [switch]$DryRun
 )
 
@@ -79,7 +80,8 @@ Write-Host "Uploading release $Version to $remoteTarget..."
 if ($LASTEXITCODE -ne 0) { throw "Upload failed with exit code $LASTEXITCODE." }
 
 $dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
-$remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag'"
+$dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
+$remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag'"
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 
