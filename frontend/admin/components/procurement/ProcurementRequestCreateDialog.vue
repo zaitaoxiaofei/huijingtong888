@@ -395,9 +395,9 @@ watch(currentUserPersonId, () => {
 .dialog-locked-head {
   margin-bottom: 12px;
   padding: 12px 14px;
-  border: 1px solid rgba(191, 219, 254, 0.9);
+  border: 1px solid var(--erp-detail-primary-border, rgba(191, 219, 254, 0.9));
   border-radius: 14px;
-  background: rgba(239, 246, 255, 0.8);
+  background: var(--erp-detail-surface-alt, rgba(239, 246, 255, 0.8));
 }
 
 .dialog-search-head strong {
@@ -429,7 +429,7 @@ watch(currentUserPersonId, () => {
   padding: 12px;
   border: 1px solid var(--erp-border);
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(248, 250, 252, 1));
+  background: var(--erp-detail-surface-alt, linear-gradient(180deg, rgba(255, 255, 255, 1), rgba(248, 250, 252, 1)));
   text-align: left;
   cursor: pointer;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
@@ -438,13 +438,13 @@ watch(currentUserPersonId, () => {
 
 .product-picker-item:hover {
   transform: translateY(-2px);
-  border-color: rgba(37, 99, 235, 0.35);
+  border-color: var(--erp-detail-border-light, rgba(37, 99, 235, 0.35));
   box-shadow: 0 16px 30px rgba(37, 99, 235, 0.12);
 }
 
 .product-picker-item.active {
   border-color: var(--el-color-primary);
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(255, 255, 255, 0.96)), #fff;
+  background: var(--erp-detail-primary-faint, linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(255, 255, 255, 0.96)), #fff);
   box-shadow: 0 18px 36px rgba(37, 99, 235, 0.14);
 }
 
@@ -454,8 +454,8 @@ watch(currentUserPersonId, () => {
   height: 72px;
   border-radius: 16px;
   overflow: hidden;
-  border: 1px solid rgba(198, 209, 225, 0.75);
-  background: #fff;
+  border: 1px solid var(--erp-detail-border-light, rgba(198, 209, 225, 0.75));
+  background: var(--erp-detail-surface, #fff);
 }
 
 .picker-thumb-fallback {
@@ -463,7 +463,7 @@ watch(currentUserPersonId, () => {
   place-items: center;
   color: var(--erp-text-secondary);
   font-size: 12px;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(15, 23, 42, 0.04)), #fff;
+  background: var(--erp-detail-surface-alt, linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(15, 23, 42, 0.04)), #fff);
 }
 
 .picker-empty {
@@ -472,16 +472,16 @@ watch(currentUserPersonId, () => {
   border-radius: 16px;
   text-align: center;
   color: var(--erp-text-secondary);
-  background: rgba(248, 250, 252, 0.9);
+  background: var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.9));
 }
 
 .selected-product-card {
   display: grid;
   gap: 14px;
   padding: 16px;
-  border: 1px solid rgba(191, 219, 254, 0.9);
+  border: 1px solid var(--erp-detail-border-light, rgba(191, 219, 254, 0.9));
   border-radius: 20px;
-  background: radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 28%), linear-gradient(180deg, rgba(239, 246, 255, 0.88), rgba(248, 250, 252, 0.98));
+  background: var(--erp-detail-primary-faint, radial-gradient(circle at top right, rgba(37, 99, 235, 0.14), transparent 28%), linear-gradient(180deg, rgba(239, 246, 255, 0.88), rgba(248, 250, 252, 0.98)));
   box-shadow: 0 16px 32px rgba(37, 99, 235, 0.08);
 }
 
@@ -502,8 +502,8 @@ watch(currentUserPersonId, () => {
   gap: 4px;
   padding: 12px 14px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.78);
-  border: 1px solid rgba(191, 219, 254, 0.9);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.78));
+  border: 1px solid var(--erp-detail-border-light, rgba(191, 219, 254, 0.9));
 }
 
 .fact-pill span {

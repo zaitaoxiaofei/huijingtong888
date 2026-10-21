@@ -495,15 +495,18 @@ watch(
   gap: 14px;
 }
 
+.composition-layout :deep(.erp-image-preview) { border-color: var(--erp-detail-border-light, #e5e7eb); background: var(--erp-detail-surface-alt, #f8fafc); }
+.composition-layout :deep(.erp-image-preview__empty) { color: var(--erp-detail-text-secondary, #94a3b8); }
+
 .composition-parent {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
   padding: 12px;
-  border: 1px solid #dbe6f3;
+  border: 1px solid var(--erp-detail-border-light, #dbe6f3);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface-alt, #f8fbff);
 }
 
 .composition-parent > div {
@@ -513,7 +516,7 @@ watch(
 }
 
 .composition-parent strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 14px;
   line-height: 1.35;
 }
@@ -524,7 +527,7 @@ watch(
 .composition-component-qty span,
 .composition-component-stock span,
 .composition-option-info span {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -535,7 +538,7 @@ watch(
 }
 
 .composition-parent-stock strong {
-  color: #1d4ed8;
+  color: var(--erp-detail-primary, #1d4ed8);
   font-size: 20px;
 }
 
@@ -568,7 +571,7 @@ watch(
 .composition-current {
   grid-area: current;
   padding-left: 16px;
-  border-left: 1px solid #e2e8f0;
+  border-left: 1px solid var(--erp-detail-border-light, #e2e8f0);
 }
 
 .composition-picker {
@@ -590,7 +593,7 @@ watch(
 }
 
 .composition-section-head strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 14px;
 }
 
@@ -613,18 +616,18 @@ watch(
 
 .composition-component-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 132px 210px 28px;
+  grid-template-columns: auto minmax(0, 1fr) 28px;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid #dbe6f3;
+  border: 1px solid var(--erp-detail-border-light, #dbe6f3);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--erp-detail-surface, #ffffff);
 }
 
 .composition-component-row.is-bottleneck {
-  border-color: #f59e0b;
-  background: #fffbeb;
+  border-color: var(--erp-detail-warning-border, #f59e0b);
+  background: var(--erp-detail-warning-bg, #fffbeb);
 }
 
 .composition-component-info,
@@ -636,16 +639,21 @@ watch(
   min-width: 0;
 }
 
+.composition-component-qty,
+.composition-component-stock {
+  grid-column: 2 / -1;
+}
+
 .composition-component-info strong,
 .composition-option-info strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 13px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
 .composition-component-stock strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 13px;
 }
 
@@ -661,24 +669,26 @@ watch(
   gap: 6px;
   padding: 4px 6px;
   border-radius: 5px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .composition-component-stock em {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 11px;
   font-style: normal;
 }
 
 .composition-component-stock .composition-component-buildable {
-  background: #eff6ff;
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .composition-component-stock .composition-component-buildable strong {
-  color: #1d4ed8;
+  color: var(--erp-detail-primary, #1d4ed8);
 }
 
 .composition-icon-button.el-button {
+  grid-column: 3;
+  grid-row: 1;
   min-width: 24px;
   height: 24px;
   padding: 0;
@@ -701,9 +711,9 @@ watch(
   gap: 12px;
   min-height: 98px;
   padding: 10px 12px;
-  border: 1px solid #dbe6f3;
+  border: 1px solid var(--erp-detail-border-light, #dbe6f3);
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--erp-detail-surface, #ffffff);
 }
 
 .composition-option-info > div {
@@ -722,13 +732,21 @@ watch(
   display: grid;
   place-items: center;
   min-height: 140px;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed var(--erp-detail-border-light, #cbd5e1);
   border-radius: 8px;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 13px;
 }
 
 @media (max-width: 980px) {
+  .product-composition-dialog :deep(.el-dialog__body) {
+    overflow-y: auto;
+  }
+
+  .composition-section-head {
+    flex-wrap: wrap;
+  }
+
   .composition-parent,
   .composition-main {
     grid-template-columns: 1fr;
@@ -745,13 +763,5 @@ watch(
     border-left: 0;
   }
 
-  .composition-component-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
-
-  .composition-component-qty,
-  .composition-component-stock {
-    grid-column: 2 / -1;
-  }
 }
 </style>

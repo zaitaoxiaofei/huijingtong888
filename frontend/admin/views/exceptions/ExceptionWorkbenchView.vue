@@ -691,37 +691,37 @@ onMounted(() => loadRows());
 .exception-overview { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .exception-overview__main { display: grid; gap: 8px; min-width: 0; }
 .exception-overview h2 { margin: 8px 0 2px; }
-.exception-overview p { margin: 0; color: #64748b; }
+.exception-overview p { margin: 0; color: var(--erp-detail-text-regular, #64748b); }
 .exception-summary-inline { display: flex; flex-wrap: wrap; gap: 8px; }
-.exception-summary-chip { display: grid; gap: 2px; min-width: 110px; padding: 8px 10px; border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 12px; background: #f8fafc; }
-.exception-summary-chip strong { font-size: 16px; color: #0f172a; line-height: 1; }
-.exception-summary-chip small { color: #64748b; font-size: 12px; }
+.exception-summary-chip { display: grid; gap: 2px; min-width: 110px; padding: 8px 10px; border: 1px solid var(--erp-detail-border, rgba(148, 163, 184, 0.22)); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
+.exception-summary-chip strong { font-size: 16px; color: var(--erp-detail-text-main, #0f172a); line-height: 1; }
+.exception-summary-chip small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .exception-overview__aside { display: grid; gap: 8px; min-width: 300px; justify-items: end; }
 .exception-module-tabs { width: 100%; }
-.exception-toolbar__summary { display: flex; flex-wrap: wrap; gap: 8px 16px; color: #64748b; font-size: 13px; justify-content: flex-end; }
+.exception-toolbar__summary { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--erp-detail-text-regular, #64748b); font-size: 13px; justify-content: flex-end; }
 .exception-table-card { min-height: 0; }
 .exception-table-wrap { flex: 1 1 auto; }
 .exception-filter-inline { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .exception-object-cell { display: flex; gap: 12px; align-items: flex-start; }
 .exception-object-copy { min-width: 0; display: grid; gap: 6px; }
 .exception-object-copy__top { display: flex; flex-wrap: wrap; gap: 6px; }
-.exception-object-copy strong { color: #0f172a; line-height: 1.4; }
-.exception-object-copy p { margin: 0; color: #475569; line-height: 1.45; }
-.exception-meta-line { display: flex; flex-wrap: wrap; gap: 6px 10px; color: #64748b; font-size: 12px; }
+.exception-object-copy strong { color: var(--erp-detail-text-main, #0f172a); line-height: 1.4; }
+.exception-object-copy p { margin: 0; color: var(--erp-detail-text-regular, #475569); line-height: 1.45; }
+.exception-meta-line { display: flex; flex-wrap: wrap; gap: 6px 10px; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .exception-context-cell, .exception-time-cell, .exception-status-cell, .exception-profit-cell { display: grid; gap: 6px; align-content: start; }
-.exception-context-cell p, .exception-time-cell p, .exception-status-cell p, .exception-profit-cell p { margin: 0; color: #475569; line-height: 1.5; }
+.exception-context-cell p, .exception-time-cell p, .exception-status-cell p, .exception-profit-cell p { margin: 0; color: var(--erp-detail-text-regular, #475569); line-height: 1.5; }
 .exception-status-cell .el-tag { justify-self: start; }
-.exception-status-cell small { color: #64748b; }
-.exception-status-cell .exception-cancel-reason { color: #9f1239; font-weight: 600; }
-.exception-attribution-category { display: grid; gap: 2px; padding: 8px 10px; border-left: 3px solid #e11d48; border-radius: 6px; background: #fff1f2; }
-.exception-attribution-category span { color: #64748b; font-size: 12px; }
-.exception-attribution-category strong { color: #9f1239; }
+.exception-status-cell small { color: var(--erp-detail-text-regular, #64748b); }
+.exception-status-cell .exception-cancel-reason { color: var(--erp-detail-danger-text, #9f1239); font-weight: 600; }
+.exception-attribution-category { display: grid; gap: 2px; padding: 8px 10px; border-left: 3px solid var(--erp-detail-danger-border, #e11d48); border-radius: 6px; background: var(--erp-detail-danger-bg, #fff1f2); }
+.exception-attribution-category span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.exception-attribution-category strong { color: var(--erp-detail-danger-text, #9f1239); }
 .exception-profit-model { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-.exception-profit-model span { color: #64748b; font-size: 12px; }
+.exception-profit-model span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .exception-profit-summary { display: flex; align-items: baseline; gap: 12px; }
-.exception-profit-summary strong { color: #0f172a; font-size: 18px; }
-.exception-profit-summary strong.is-negative { color: #b42318; }
-.exception-profit-summary span { color: #64748b; font-size: 12px; }
+.exception-profit-summary strong { color: var(--erp-detail-text-main, #0f172a); font-size: 18px; }
+.exception-profit-summary strong.is-negative { color: var(--erp-detail-danger-text, #b42318); }
+.exception-profit-summary span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .exception-profit-cell .el-button { justify-self: start; padding-left: 0; }
 .exception-actions-cell { display: grid; grid-template-columns: repeat(2, minmax(92px, 1fr)); gap: 6px; align-items: center; }
 .exception-action-button { width: 100%; margin-left: 0 !important; justify-content: center; }
@@ -730,33 +730,33 @@ onMounted(() => loadRows());
 .profit-detail-drawer { display: grid; gap: 18px; }
 .profit-detail-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .profit-detail-head > div { display: grid; gap: 4px; min-width: 0; }
-.profit-detail-head > div strong { color: #0f172a; font-size: 16px; }
-.profit-detail-head > div span { color: #64748b; }
+.profit-detail-head > div strong { color: var(--erp-detail-text-main, #0f172a); font-size: 16px; }
+.profit-detail-head > div span { color: var(--erp-detail-text-regular, #64748b); }
 .profit-detail-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.profit-detail-summary > div { display: grid; gap: 5px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
-.profit-detail-summary span { color: #64748b; font-size: 12px; }
-.profit-detail-summary strong { color: #0f172a; font-size: 15px; }
-.profit-detail-summary .is-danger strong { color: #b42318; }
-.profit-detail-note { margin: 0; padding: 10px 12px; color: #475569; background: #f8fafc; border-radius: 8px; line-height: 1.6; }
-.profit-cancellation-note { display: grid; gap: 5px; padding: 12px; color: #475569; border: 1px solid #fecdd3; border-radius: 10px; background: #fff1f2; }
-.profit-cancellation-note strong { color: #9f1239; }
-.profit-cancellation-note small { color: #64748b; line-height: 1.5; }
-.profit-loss-breakdown { display: grid; border: 1px solid #fecdd3; border-radius: 12px; overflow: hidden; }
-.profit-loss-breakdown__title { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; background: #fff1f2; }
-.profit-loss-breakdown__title strong { color: #9f1239; }
-.profit-loss-breakdown__title span { color: #64748b; font-size: 12px; }
-.profit-loss-row, .profit-loss-total { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 10px 14px; border-top: 1px solid #f1f5f9; }
+.profit-detail-summary > div { display: grid; gap: 5px; padding: 12px; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 10px; background: var(--erp-detail-surface-alt, #f8fafc); }
+.profit-detail-summary span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.profit-detail-summary strong { color: var(--erp-detail-text-main, #0f172a); font-size: 15px; }
+.profit-detail-summary .is-danger strong { color: var(--erp-detail-danger-text, #b42318); }
+.profit-detail-note { margin: 0; padding: 10px 12px; color: var(--erp-detail-text-regular, #475569); background: var(--erp-detail-surface-alt, #f8fafc); border-radius: 8px; line-height: 1.6; }
+.profit-cancellation-note { display: grid; gap: 5px; padding: 12px; color: var(--erp-detail-text-regular, #475569); border: 1px solid var(--erp-detail-danger-border, #fecdd3); border-radius: 10px; background: var(--erp-detail-danger-bg, #fff1f2); }
+.profit-cancellation-note strong { color: var(--erp-detail-danger-text, #9f1239); }
+.profit-cancellation-note small { color: var(--erp-detail-text-regular, #64748b); line-height: 1.5; }
+.profit-loss-breakdown { display: grid; border: 1px solid var(--erp-detail-danger-border, #fecdd3); border-radius: 12px; overflow: hidden; }
+.profit-loss-breakdown__title { display: flex; justify-content: space-between; gap: 12px; padding: 12px 14px; background: var(--erp-detail-danger-bg, #fff1f2); }
+.profit-loss-breakdown__title strong { color: var(--erp-detail-danger-text, #9f1239); }
+.profit-loss-breakdown__title span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.profit-loss-row, .profit-loss-total { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 10px 14px; border-top: 1px solid var(--erp-detail-border, #f1f5f9); }
 .profit-loss-row > div { display: grid; gap: 2px; }
-.profit-loss-row small { color: #64748b; }
-.profit-loss-total { background: #f8fafc; }
-.profit-loss-total.is-final { color: #9f1239; background: #fff1f2; }
-.profit-formula-list { display: grid; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
-.profit-formula-row, .profit-formula-result { display: grid; grid-template-columns: 24px minmax(110px, 1fr) minmax(130px, 1.3fr) 100px; gap: 8px; align-items: center; min-height: 44px; padding: 0 14px; border-bottom: 1px solid #eef2f7; }
-.profit-formula-row small { color: #64748b; }
-.profit-formula-row b, .profit-formula-result b { text-align: right; color: #0f172a; }
-.profit-formula-operator { color: #64748b; font-size: 16px; }
-.profit-formula-result { grid-template-columns: 24px 1fr 100px; border-bottom: 0; background: #fef2f2; }
-.profit-formula-result strong, .profit-formula-result b { color: #b42318; font-size: 15px; }
+.profit-loss-row small { color: var(--erp-detail-text-regular, #64748b); }
+.profit-loss-total { background: var(--erp-detail-surface-alt, #f8fafc); }
+.profit-loss-total.is-final { color: var(--erp-detail-danger-text, #9f1239); background: var(--erp-detail-danger-bg, #fff1f2); }
+.profit-formula-list { display: grid; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 12px; overflow: hidden; }
+.profit-formula-row, .profit-formula-result { display: grid; grid-template-columns: 24px minmax(110px, 1fr) minmax(130px, 1.3fr) 100px; gap: 8px; align-items: center; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--erp-detail-border, #eef2f7); }
+.profit-formula-row small { color: var(--erp-detail-text-regular, #64748b); }
+.profit-formula-row b, .profit-formula-result b { text-align: right; color: var(--erp-detail-text-main, #0f172a); }
+.profit-formula-operator { color: var(--erp-detail-text-regular, #64748b); font-size: 16px; }
+.profit-formula-result { grid-template-columns: 24px 1fr 100px; border-bottom: 0; background: var(--erp-detail-danger-bg, #fef2f2); }
+.profit-formula-result strong, .profit-formula-result b { color: var(--erp-detail-danger-text, #b42318); font-size: 15px; }
 .profit-detail-actions { display: flex; justify-content: flex-end; gap: 8px; }
 @media (max-width: 900px) {
   .exception-overview { flex-direction: column; }

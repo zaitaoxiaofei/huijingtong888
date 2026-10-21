@@ -717,13 +717,13 @@ onMounted(async () => {
 .alert-analysis { display: grid; gap: 9px; min-width: 0; }
 .alert-analysis-status { display: flex; align-items: center; gap: 12px; min-height: 22px; font-size: 12px; color: var(--el-text-color-secondary); }
 .alert-analysis-status :deep(.el-tag) { font-size: 13px; font-weight: 650; }
-.alert-analysis-status .danger-text, .alert-analysis-status .danger-text .alert-metric-value { color: var(--el-color-danger); }
+.alert-analysis-status .danger-text, .alert-analysis-status .danger-text .alert-metric-value { color: var(--erp-danger-text); }
 .alert-analysis-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: 14px; row-gap: 7px; }
 .alert-fbp-weeks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .alert-fbp-weeks > div { display: flex; flex-direction: column; gap: 4px; }
 .alert-fbp-weeks span { font-size: 12px; color: var(--el-text-color-secondary); }
 .alert-fbp-weeks strong { font-size: 15px; font-weight: 650; }
-.alert-sku-replenishment-qty { font-size: 15px; font-weight: 650; color: var(--el-color-warning); }
+.alert-sku-replenishment-qty { font-size: 15px; font-weight: 650; color: var(--erp-warning-text); }
 .alert-lead-time { gap: 5px; }
 .alert-relation-count { white-space: nowrap; color: var(--el-text-color-secondary); }
 .alert-lead-time :deep(.el-button) { align-self: flex-start; margin: 0; }

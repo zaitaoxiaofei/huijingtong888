@@ -844,15 +844,15 @@ onMounted(async () => {
 .car-sku-summary div {
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--erp-detail-border, #e5e7eb);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .car-heatmap-summary span,
 .car-sku-summary span {
   display: block;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.2;
 }
@@ -862,7 +862,7 @@ onMounted(async () => {
   display: block;
   margin-top: 5px;
   overflow: hidden;
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 16px;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -882,9 +882,9 @@ onMounted(async () => {
   gap: 4px 8px;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid #dbeafe;
+  border: 1px solid var(--erp-detail-primary-border, #dbeafe);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface, #f8fbff);
   cursor: pointer;
 }
 
@@ -896,13 +896,13 @@ onMounted(async () => {
 }
 
 .opportunity-strip__item strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 13px;
 }
 
 .opportunity-strip__item span {
   grid-column: 1 / -1;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -916,9 +916,9 @@ onMounted(async () => {
 .car-opportunity-main,
 .car-side-panel {
   min-width: 0;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--erp-detail-border, #e5e7eb);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .car-section-header {
@@ -927,7 +927,7 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--erp-detail-border, #e5e7eb);
 }
 
 .car-section-header--compact {
@@ -936,7 +936,7 @@ onMounted(async () => {
 
 .car-section-header h3 {
   margin: 0;
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 15px;
   line-height: 1.3;
 }
@@ -944,7 +944,7 @@ onMounted(async () => {
 .car-section-header span {
   display: block;
   margin-top: 3px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -959,21 +959,21 @@ onMounted(async () => {
   gap: 12px;
   margin: 12px 14px 0;
   padding: 10px 12px;
-  border: 1px solid #fed7aa;
+  border: 1px solid var(--erp-detail-border, #fed7aa);
   border-radius: 8px;
-  background: #fff7ed;
+  background: var(--erp-detail-warning-bg, #fff7ed);
 }
 
 .unresolved-model-callout strong {
   display: block;
-  color: #9a3412;
+  color: var(--erp-detail-danger-text, #9a3412);
   font-size: 13px;
 }
 
 .unresolved-model-callout span {
   display: block;
   margin-top: 3px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -989,7 +989,7 @@ onMounted(async () => {
 }
 
 .car-model-table :deep(.is-active-model td) {
-  background: #eff6ff !important;
+  background: var(--erp-detail-primary-soft, #eff6ff) !important;
 }
 
 .model-cell,
@@ -1011,7 +1011,7 @@ onMounted(async () => {
 .metric-stack strong,
 .score-cell strong {
   overflow: hidden;
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1020,7 +1020,7 @@ onMounted(async () => {
 .model-cell span,
 .metric-stack span {
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1029,7 +1029,7 @@ onMounted(async () => {
 .action-text {
   display: block;
   overflow: hidden;
-  color: #334155;
+  color: var(--erp-detail-text-main, #334155);
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1046,18 +1046,18 @@ onMounted(async () => {
   height: 230px;
   margin: 12px;
   overflow: hidden;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--erp-detail-border, #e5e7eb);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, transparent 49%, #e5e7eb 50%, transparent 51%),
-    linear-gradient(0deg, transparent 49%, #e5e7eb 50%, transparent 51%),
-    #f8fafc;
+    linear-gradient(90deg, transparent 49%, var(--erp-detail-surface-alt, #e5e7eb) 50%, transparent 51%),
+    linear-gradient(0deg, transparent 49%, var(--erp-detail-surface-alt, #e5e7eb) 50%, transparent 51%),
+    var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .matrix-axis {
   position: absolute;
   z-index: 1;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -1078,17 +1078,17 @@ onMounted(async () => {
   width: 28px;
   height: 28px;
   transform: translate(-50%, 50%);
-  border: 1px solid #bfdbfe;
+  border: 1px solid var(--erp-detail-primary-border, #bfdbfe);
   border-radius: 50%;
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--erp-detail-primary-soft, #dbeafe);
+  color: var(--erp-detail-primary, #1d4ed8);
   font-size: 11px;
   font-weight: 700;
   cursor: pointer;
 }
 
 .matrix-dot--active {
-  border-color: #0f172a;
+  border-color: var(--erp-detail-border, #0f172a);
   background: #0f172a;
   color: #fff;
 }
@@ -1108,14 +1108,14 @@ onMounted(async () => {
 }
 
 .unresolved-side-panel strong {
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 14px;
 }
 
 .unresolved-side-panel p,
 .unresolved-side-panel li {
   margin: 0;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -1131,17 +1131,17 @@ onMounted(async () => {
   gap: 3px 10px;
   width: 100%;
   padding: 9px 10px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--erp-detail-border, #e5e7eb);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   text-align: left;
   cursor: pointer;
 }
 
 .product-opportunity-row:hover,
 .product-opportunity-row--active {
-  border-color: #93c5fd;
-  background: #eff6ff;
+  border-color: var(--erp-detail-primary-border, #93c5fd);
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .product-opportunity-row strong,
@@ -1153,12 +1153,12 @@ onMounted(async () => {
 }
 
 .product-opportunity-row strong {
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 13px;
 }
 
 .product-opportunity-row span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -1166,7 +1166,7 @@ onMounted(async () => {
   grid-row: 1 / span 2;
   grid-column: 2;
   align-self: center;
-  color: #0f766e;
+  color: var(--erp-detail-success-text, #0f766e);
   font-style: normal;
   font-size: 12px;
   font-weight: 700;
@@ -1178,21 +1178,21 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid #fed7aa;
+  border: 1px solid var(--erp-detail-border, #fed7aa);
   border-radius: 8px;
-  background: #fff7ed;
+  background: var(--erp-detail-warning-bg, #fff7ed);
 }
 
 .car-ai-assistant strong {
   display: block;
-  color: #9a3412;
+  color: var(--erp-detail-danger-text, #9a3412);
   font-size: 13px;
 }
 
 .car-ai-assistant span {
   display: block;
   margin-top: 3px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -1217,27 +1217,27 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .car-review-toolbar strong {
   display: block;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
 }
 
 .car-review-toolbar span {
   display: block;
   margin-top: 3px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
 .car-unmatched-table {
   flex: 1;
   min-height: 0;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .car-unmatched-title {
@@ -1254,12 +1254,12 @@ onMounted(async () => {
 }
 
 .car-unmatched-title strong {
-  color: #7c2d12;
+  color: var(--erp-detail-danger-text, #7c2d12);
   font-size: 13px;
 }
 
 .car-unmatched-title span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -1271,10 +1271,10 @@ onMounted(async () => {
 .car-confirm-dialog p {
   margin: 0;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #f8fafc;
-  color: #334155;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-main, #334155);
   line-height: 1.45;
 }
 
@@ -1305,15 +1305,15 @@ onMounted(async () => {
   width: 58px;
   height: 76px;
   overflow: hidden;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .car-sku-thumb--empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -1325,7 +1325,7 @@ onMounted(async () => {
 
 .car-sku-title strong {
   overflow: hidden;
-  color: #111827;
+  color: var(--erp-detail-text-main, #111827);
   font-size: 13px;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -1334,7 +1334,7 @@ onMounted(async () => {
 
 .car-sku-title span {
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.3;
   text-overflow: ellipsis;

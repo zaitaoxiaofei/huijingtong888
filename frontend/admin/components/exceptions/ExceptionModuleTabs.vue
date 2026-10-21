@@ -58,11 +58,11 @@ function change(target) {
 }
 
 .exception-module-tabs-card__head strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
 }
 
 .exception-module-tabs-card__head span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 13px;
 }
 

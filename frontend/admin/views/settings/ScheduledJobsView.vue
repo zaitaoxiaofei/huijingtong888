@@ -671,8 +671,8 @@ onMounted(loadJobs);
 }
 
 .scheduled-metrics .is-danger {
-  border-color: rgba(220, 38, 38, 0.22);
-  background: rgba(254, 242, 242, 0.92);
+  border-color: var(--erp-detail-danger-border, rgba(220, 38, 38, 0.22));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.92));
 }
 
 .scheduled-metrics span {
@@ -691,9 +691,9 @@ onMounted(loadJobs);
   gap: 10px;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(220, 38, 38, 0.2);
-  background: rgba(254, 242, 242, 0.92);
-  color: #991b1b;
+  border: 1px solid var(--erp-detail-danger-border, rgba(220, 38, 38, 0.2));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.92));
+  color: var(--erp-danger-text, #991b1b);
 }
 
 .scheduled-table-card {

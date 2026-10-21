@@ -907,9 +907,9 @@ async function pollQrLogin() {
   gap: 9px;
   margin-top: 14px;
   padding: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.32);
+  border: 1px solid var(--erp-border-strong, rgba(148, 163, 184, 0.32));
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--erp-surface-alt, rgba(255, 255, 255, 0.7));
 }
 
 .qr-code-frame {
@@ -930,14 +930,14 @@ async function pollQrLogin() {
 
 .qr-login-panel p {
   margin: 0;
-  color: #64748b;
+  color: var(--erp-text-secondary, #64748b);
   font-size: 12px;
   line-height: 1.45;
   text-align: center;
 }
 
 .qr-login-panel strong {
-  color: #075eea;
+  color: var(--erp-primary, #075eea);
   font-size: 13px;
 }
 

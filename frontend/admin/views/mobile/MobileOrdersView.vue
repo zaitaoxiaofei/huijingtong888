@@ -236,20 +236,20 @@ onMounted(() => loadOrders());
   display: grid;
   gap: 4px;
   padding: 12px 10px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 12px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   text-align: left;
 }
 
 .mobile-summary-card span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   font-weight: 700;
 }
 
 .mobile-summary-card strong {
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 22px;
   line-height: 1;
 }
@@ -278,18 +278,18 @@ onMounted(() => loadOrders());
   flex: none;
   height: 34px;
   padding: 0 13px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 999px;
-  background: #fff;
-  color: #475569;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 13px;
   font-weight: 700;
 }
 
 .mobile-status-strip button.active {
-  border-color: #bfdbfe;
-  background: #eaf1ff;
-  color: #1d4ed8;
+  border-color: var(--erp-detail-primary-border, #bfdbfe);
+  background: var(--erp-detail-primary-soft, #eaf1ff);
+  color: var(--erp-detail-primary, #1d4ed8);
 }
 
 .mobile-order-list {
@@ -301,9 +301,9 @@ onMounted(() => loadOrders());
   display: grid;
   gap: 10px;
   padding: 12px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 14px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
@@ -318,7 +318,7 @@ onMounted(() => loadOrders());
 .mobile-order-card__head span {
   min-width: 0;
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -329,8 +329,8 @@ onMounted(() => loadOrders());
   flex: none;
   padding: 4px 8px;
   border-radius: 999px;
-  background: #eef6ff;
-  color: #1d4ed8;
+  background: var(--erp-detail-primary-soft, #eef6ff);
+  color: var(--erp-detail-primary, #1d4ed8);
   font-size: 12px;
 }
 
@@ -346,13 +346,13 @@ onMounted(() => loadOrders());
   height: 72px;
   border-radius: 12px;
   object-fit: cover;
-  background: #eef2f7;
+  background: var(--erp-detail-surface-alt, #eef2f7);
 }
 
 .mobile-order-card__image-fallback {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
   font-weight: 800;
 }
@@ -367,7 +367,7 @@ onMounted(() => loadOrders());
   margin: 0;
   display: -webkit-box;
   overflow: hidden;
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 14px;
   line-height: 1.35;
   -webkit-line-clamp: 2;
@@ -377,7 +377,7 @@ onMounted(() => loadOrders());
 .mobile-order-card__main p {
   margin: 0;
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -392,8 +392,8 @@ onMounted(() => loadOrders());
 .mobile-order-card__facts span {
   padding: 3px 7px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 11px;
   font-weight: 700;
 }
@@ -403,22 +403,22 @@ onMounted(() => loadOrders());
 }
 
 .mobile-order-card__foot span {
-  color: #16a34a;
+  color: var(--erp-detail-success-text, #16a34a);
   font-size: 12px;
   font-weight: 800;
 }
 
 .mobile-order-card__foot span.is-danger {
-  color: #dc2626;
+  color: var(--erp-detail-danger-text, #dc2626);
 }
 
 .mobile-order-card__foot button {
   height: 32px;
   padding: 0 12px;
-  border: 1px solid #c7d2fe;
+  border: 1px solid var(--erp-detail-primary-border, #c7d2fe);
   border-radius: 10px;
-  background: #eef2ff;
-  color: #3730a3;
+  background: var(--erp-detail-primary-soft, #eef2ff);
+  color: var(--erp-detail-primary, #3730a3);
   font-size: 12px;
   font-weight: 800;
 }
@@ -428,11 +428,11 @@ onMounted(() => loadOrders());
   justify-items: center;
   gap: 6px;
   padding: 36px 12px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
 }
 
 .mobile-empty strong {
-  color: #334155;
+  color: var(--erp-detail-text-main, #334155);
   font-size: 15px;
 }
 

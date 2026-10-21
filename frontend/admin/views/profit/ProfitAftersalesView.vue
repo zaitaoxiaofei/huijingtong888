@@ -913,14 +913,14 @@ onMounted(async () => {
 
 .aftersales-summary__item {
   padding: 12px 14px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .aftersales-summary__item span {
   display: block;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -928,13 +928,13 @@ onMounted(async () => {
   display: block;
   margin-top: 6px;
   font-size: 16px;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
 }
 
 .aftersales-summary__item small {
   display: block;
   margin-top: 5px;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 11px;
   line-height: 1.35;
 }
@@ -946,7 +946,7 @@ onMounted(async () => {
 .aftersales-overview-section {
   margin-top: 20px;
   padding-top: 18px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--erp-detail-border, #e2e8f0);
 }
 
 .aftersales-section-heading {
@@ -957,10 +957,10 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
-.aftersales-section-heading h3 { margin: 0; color: #0f172a; font-size: 16px; }
-.aftersales-section-heading p { margin: 5px 0 0; color: #64748b; font-size: 12px; }
-.rate-danger { color: #dc2626; }
-.rate-warning { color: #d97706; }
+.aftersales-section-heading h3 { margin: 0; color: var(--erp-detail-text-main, #0f172a); font-size: 16px; }
+.aftersales-section-heading p { margin: 5px 0 0; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.rate-danger { color: var(--erp-detail-danger-text, #dc2626); }
+.rate-warning { color: var(--erp-detail-warning-text, #d97706); }
 
 .aftersales-product-cell {
   display: flex;
@@ -972,27 +972,27 @@ onMounted(async () => {
 .aftersales-product-cell > div:last-child { display: grid; gap: 3px; min-width: 0; }
 .aftersales-product-cell strong,
 .aftersales-product-cell span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aftersales-product-cell span { color: #64748b; font-size: 12px; }
+.aftersales-product-cell span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 
 .aftersales-ranking-thumb {
   flex: 0 0 44px;
   width: 44px;
   height: 58px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 6px;
   overflow: hidden;
 }
 
 .aftersales-cell-hint {
   margin-top: 4px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.35;
   white-space: normal;
 }
 
 .warning {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
   font-weight: 700;
 }
 
@@ -1027,7 +1027,7 @@ onMounted(async () => {
 
 .aftersales-detail-header span,
 .aftersales-detail-meta span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -1049,14 +1049,14 @@ onMounted(async () => {
 .aftersales-detail-summary div {
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .aftersales-detail-summary span {
   display: block;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.2;
 }
@@ -1064,19 +1064,19 @@ onMounted(async () => {
 .aftersales-detail-summary strong {
   display: block;
   margin-top: 4px;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 14px;
   line-height: 1.2;
 }
 
 .aftersales-detail-summary__total {
-  background: #fff7ed !important;
-  border-color: #fed7aa !important;
+  background: var(--erp-detail-warning-bg, #fff7ed) !important;
+  border-color: var(--erp-detail-border, #fed7aa) !important;
 }
 
 .aftersales-detail-summary__total strong,
 .aftersales-loss-total {
-  color: #c2410c;
+  color: var(--erp-detail-danger-text, #c2410c);
 }
 
 .aftersales-detail-table-wrap {
@@ -1094,9 +1094,9 @@ onMounted(async () => {
   width: 64px;
   height: 84px;
   display: block;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   overflow: hidden;
   cursor: zoom-in;
 }
@@ -1112,7 +1112,7 @@ onMounted(async () => {
 .aftersales-item-thumb-empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -1123,14 +1123,14 @@ onMounted(async () => {
 }
 
 .aftersales-cell-stack strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 13px;
   line-height: 1.35;
   word-break: break-word;
 }
 
 .aftersales-cell-stack span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.35;
   word-break: break-word;
@@ -1151,44 +1151,44 @@ onMounted(async () => {
 }
 
 :deep(.aftersales-summary-cell-is-cost-missing .cell) {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
   font-weight: 700;
 }
 
 :deep(.aftersales-summary-cell-is-shipping-missing .cell) {
-  color: #b91c1c;
+  color: var(--erp-detail-danger-text, #b91c1c);
   font-weight: 700;
 }
 
 :deep(.aftersales-summary-cell-is-review .cell) {
-  color: #1d4ed8;
+  color: var(--erp-detail-primary, #1d4ed8);
   font-weight: 700;
 }
 
 :deep(.aftersales-row-is-cost-missing td) {
-  background: #fff7ed !important;
+  background: var(--erp-detail-warning-bg, #fff7ed) !important;
 }
 
 :deep(.aftersales-row-is-shipping-missing td) {
-  background: #fef2f2 !important;
+  background: var(--erp-detail-danger-bg, #fef2f2) !important;
 }
 
 :deep(.aftersales-row-is-review td) {
-  background: #eff6ff !important;
+  background: var(--erp-detail-primary-soft, #eff6ff) !important;
 }
 
 :deep(.aftersales-cell-is-cost-missing .cell) {
-  color: #9a3412;
+  color: var(--erp-detail-danger-text, #9a3412);
   font-weight: 700;
 }
 
 :deep(.aftersales-cell-is-shipping-missing .cell) {
-  color: #b91c1c;
+  color: var(--erp-detail-danger-text, #b91c1c);
   font-weight: 700;
 }
 
 :deep(.aftersales-cell-is-review .cell) {
-  color: #1d4ed8;
+  color: var(--erp-detail-primary, #1d4ed8);
   font-weight: 700;
 }
 

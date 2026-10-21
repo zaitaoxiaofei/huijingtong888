@@ -78,9 +78,9 @@ function writeBackText(value) {
 .result-pool {
   margin: 0 16px 16px;
   padding: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.22));
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.82));
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
 }
 
@@ -98,13 +98,13 @@ function writeBackText(value) {
 }
 
 .pool-head span {
-  color: #2563eb;
+  color: var(--erp-detail-primary, #2563eb);
   font-size: 12px;
   font-weight: 800;
 }
 
 .pool-head strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 18px;
 }
 
@@ -126,9 +126,9 @@ function writeBackText(value) {
   grid-template-columns: 112px minmax(0, 1fr);
   gap: 12px;
   padding: 10px;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
   border-radius: 10px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .pool-card img {
@@ -136,7 +136,7 @@ function writeBackText(value) {
   aspect-ratio: 1;
   object-fit: cover;
   border-radius: 8px;
-  background: #f1f5f9;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
 }
 
 .pool-body {
@@ -162,7 +162,7 @@ function writeBackText(value) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 5px 10px;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
 }
 
@@ -170,9 +170,9 @@ function writeBackText(value) {
   min-height: 120px;
   display: grid;
   place-items: center;
-  color: #64748b;
-  border: 1px dashed #cbd5e1;
+  color: var(--erp-detail-text-secondary, #64748b);
+  border: 1px dashed var(--erp-detail-border-light, #cbd5e1);
   border-radius: 10px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface-alt, #f8fbff);
 }
 </style>

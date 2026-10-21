@@ -137,19 +137,19 @@ onMounted(loadOverview);
 </template>
 
 <style scoped>
-.monitor-page { min-height: 100%; padding: 0 18px 24px; background: #f5f7fb; }
+.monitor-page { min-height: 100%; padding: 0 18px 24px; background: var(--erp-detail-surface-alt, #f5f7fb); }
 .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 4px 0 14px; }
-.metric-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; border: 1px solid #e6eaf2; border-radius: 12px; background: #fff; }
-.metric-card--primary { border-color: #cbdcfb; background: linear-gradient(145deg, #f7faff, #fff); }
-.metric-card > span, .metric-head > span { color: #687386; font-size: 13px; }
-.metric-card strong { color: #1f2937; font-size: 26px; line-height: 1.2; }
-.metric-card small, .panel-title small { color: #9099aa; font-size: 12px; }
+.metric-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; border: 1px solid var(--erp-detail-border, #e6eaf2); border-radius: 12px; background: var(--erp-detail-surface, #fff); }
+.metric-card--primary { border-color: var(--erp-detail-primary-border, #cbdcfb); background: linear-gradient(145deg, var(--erp-detail-surface-alt, #f7faff), var(--erp-detail-surface, #fff)); }
+.metric-card > span, .metric-head > span { color: var(--erp-text-regular, #687386); font-size: 13px; }
+.metric-card strong { color: var(--erp-detail-text-main, #1f2937); font-size: 26px; line-height: 1.2; }
+.metric-card small, .panel-title small { color: var(--erp-text-regular, #9099aa); font-size: 12px; }
 .metric-head, .panel-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .monitor-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 14px; }
 .panel { border-radius: 12px; }
-.panel-title > span { color: #273244; font-weight: 650; }
+.panel-title > span { color: var(--erp-text-regular, #273244); font-weight: 650; }
 .history-panel { margin-top: 14px; }
-.danger { color: #dc2626 !important; }
+.danger { color: var(--erp-danger-text, #dc2626) !important; }
 @media (max-width: 1100px) { .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monitor-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .monitor-page { padding: 0 10px 16px; } .summary-grid { grid-template-columns: 1fr; } .metric-card { padding: 14px; } }
 </style>

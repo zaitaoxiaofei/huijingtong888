@@ -631,90 +631,90 @@ onBeforeUnmount(() => abortController?.abort());
 .monthly-billing-page { gap: 16px; }
 .billing-filter-card :deep(.el-card__body) { padding: 0; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
-.section-head span, .formula-heading p, .settlement-card p { margin: 4px 0 0; color: #64748b; font-size: 12px; }
+.section-head span, .formula-heading p, .settlement-card p { margin: 4px 0 0; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .billing-controls { margin-left: auto; }
 .head-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .billing-filters { display: flex; flex-wrap: nowrap; align-items: center; margin: 0; }
 .billing-filters :deep(.el-form-item) { margin-right: 14px; margin-bottom: 0; }
-.billing-filters :deep(.el-form-item__label) { padding-right: 7px; color: #64748b; font-size: 12px; }
+.billing-filters :deep(.el-form-item__label) { padding-right: 7px; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .billing-filters .billing-filter-actions { margin-right: 0; margin-left: 2px; }
-.billing-overview, .ai-usage-section, .capital-section, .shop-section { border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; overflow: hidden; }
+.billing-overview, .ai-usage-section, .capital-section, .shop-section { border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 12px; background: var(--erp-detail-surface, #fff); overflow: hidden; }
 .ai-usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 16px 18px; }
-.ai-usage-summary article { padding: 13px 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
-.ai-usage-summary span { display: block; color: #64748b; font-size: 12px; }
-.ai-usage-summary strong { display: block; margin-top: 7px; color: #0f172a; font-size: 19px; }
-.ai-usage-summary article:first-child { border-color: #ddd6fe; background: #f5f3ff; }
-.ai-usage-summary article:first-child strong, .summary-card.is-ai strong, .ai-money { color: #7c3aed; }
-.ai-usage-table { border-top: 1px solid #e2e8f0; }
+.ai-usage-summary article { padding: 13px 15px; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 10px; background: var(--erp-detail-surface-alt, #f8fafc); }
+.ai-usage-summary span { display: block; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.ai-usage-summary strong { display: block; margin-top: 7px; color: var(--erp-detail-text-main, #0f172a); font-size: 19px; }
+.ai-usage-summary article:first-child { border-color: var(--erp-detail-primary-border, #ddd6fe); background: var(--erp-detail-surface-alt, #f5f3ff); }
+.ai-usage-summary article:first-child strong, .summary-card.is-ai strong, .ai-money { color: var(--erp-detail-primary, #7c3aed); }
+.ai-usage-table { border-top: 1px solid var(--erp-detail-border, #e2e8f0); }
 .ai-usage-alert { margin: 14px 18px 16px; }
 .capital-workspace { display: grid; grid-template-columns: 1.25fr 1fr; gap: 14px; padding: 16px 18px 10px; }
-.capital-panel { min-width: 0; padding: 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
+.capital-panel { min-width: 0; padding: 15px; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 10px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .capital-panel__title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
-.capital-panel__title strong { color: #0f172a; font-size: 15px; }
-.capital-panel__title span, .capital-metric span, .capital-metric small { color: #64748b; font-size: 12px; }
+.capital-panel__title strong { color: var(--erp-detail-text-main, #0f172a); font-size: 15px; }
+.capital-panel__title span, .capital-metric span, .capital-metric small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .capital-metric-grid { display: grid; gap: 10px; }
 .procurement-metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .inventory-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.capital-metric { min-width: 0; padding: 12px; border: 1px solid #e2e8f0; border-radius: 9px; background: #fff; }
+.capital-metric { min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 9px; background: var(--erp-detail-surface, #fff); }
 .capital-metric span, .capital-metric small { display: block; }
-.capital-metric strong { display: block; margin: 7px 0 5px; color: #0f172a; font-size: 18px; }
-.capital-metric.is-total { border-color: #bfdbfe; background: #eff6ff; }
-.capital-metric.is-total strong { color: #1d4ed8; }
+.capital-metric strong { display: block; margin: 7px 0 5px; color: var(--erp-detail-text-main, #0f172a); font-size: 18px; }
+.capital-metric.is-total { border-color: var(--erp-detail-primary-border, #bfdbfe); background: var(--erp-detail-primary-soft, #eff6ff); }
+.capital-metric.is-total strong { color: var(--erp-detail-primary, #1d4ed8); }
 .capital-alert { margin: 0 18px 16px; }
-.section-head { padding: 15px 18px; border-bottom: 1px solid #e2e8f0; }
-.section-head strong { display: block; color: #0f172a; font-size: 15px; }
+.section-head { padding: 15px 18px; border-bottom: 1px solid var(--erp-detail-border, #e2e8f0); }
+.section-head strong { display: block; color: var(--erp-detail-text-main, #0f172a); font-size: 15px; }
 .summary-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px; padding: 16px 18px; }
-.summary-card { min-height: 88px; padding: 13px 15px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; }
-.summary-card span, .summary-card small { display: block; color: #64748b; font-size: 12px; }
-.summary-card strong { display: block; margin: 8px 0 3px; color: #0f172a; font-size: 20px; }
-.summary-card.is-income strong { color: #0f766e; }
-.summary-card.is-profit strong { color: #15803d; }
-.summary-card.is-loss strong, .negative-money { color: #dc2626 !important; }
-.summary-card.is-pending strong, .pending-money { color: #d97706; }
+.summary-card { min-height: 88px; padding: 13px 15px; border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 10px; background: var(--erp-detail-surface-alt, #f8fafc); }
+.summary-card span, .summary-card small { display: block; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.summary-card strong { display: block; margin: 8px 0 3px; color: var(--erp-detail-text-main, #0f172a); font-size: 20px; }
+.summary-card.is-income strong { color: var(--erp-detail-success-text, #0f766e); }
+.summary-card.is-profit strong { color: var(--erp-detail-success-text, #15803d); }
+.summary-card.is-loss strong, .negative-money { color: var(--erp-detail-danger-text, #dc2626) !important; }
+.summary-card.is-pending strong, .pending-money { color: var(--erp-detail-warning-text, #d97706); }
 .profit-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; padding: 0 18px 18px; }
-.formula-card, .settlement-card { border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
-.formula-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; border-bottom: 1px solid #e2e8f0; background: linear-gradient(135deg, #f8fafc, #eff6ff); }
+.formula-card, .settlement-card { border: 1px solid var(--erp-detail-border, #e2e8f0); border-radius: 12px; background: var(--erp-detail-surface, #fff); }
+.formula-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px 18px; border-bottom: 1px solid var(--erp-detail-border, #e2e8f0); background: linear-gradient(135deg, var(--erp-detail-surface-alt, #f8fafc), var(--erp-detail-primary-soft, #eff6ff)); }
 .formula-heading > div:first-child { min-width: 0; }
 .formula-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .net-result { min-width: 180px; text-align: right; }
-.net-result span, .net-result small { display: block; color: #64748b; font-size: 12px; }
-.net-result strong { display: block; margin: 3px 0; color: #15803d; font-size: 24px; }
-.net-result.negative strong { color: #dc2626; }
+.net-result span, .net-result small { display: block; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.net-result strong { display: block; margin: 3px 0; color: var(--erp-detail-success-text, #15803d); font-size: 24px; }
+.net-result.negative strong { color: var(--erp-detail-danger-text, #dc2626); }
 .formula-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.formula-row { display: grid; grid-template-columns: 24px minmax(90px, 1fr) 42px 100px 112px; align-items: center; gap: 6px; padding: 11px 14px; border-bottom: 1px solid #f1f5f9; }
-.formula-row:nth-child(odd) { border-right: 1px solid #f1f5f9; }
-.formula-sign { color: #94a3b8; font-weight: 800; }
-.formula-label { color: #334155; font-weight: 600; }
-.formula-row small { color: #94a3b8; text-align: right; }
-.formula-row > strong { color: #334155; text-align: right; }
-.formula-row.is-income .formula-sign, .formula-row.is-income > strong { color: #0f766e; }
-.formula-row.is-ad > strong { color: #7c3aed; }
-.formula-row.is-risk > strong, .formula-row.is-manual > strong, .formula-row.is-salary > strong { color: #b45309; }
-.detail-link { padding: 0; border: 0; background: none; color: #2563eb; cursor: pointer; font-size: 12px; }
+.formula-row { display: grid; grid-template-columns: 24px minmax(90px, 1fr) 42px 100px 112px; align-items: center; gap: 6px; padding: 11px 14px; border-bottom: 1px solid var(--erp-detail-border, #f1f5f9); }
+.formula-row:nth-child(odd) { border-right: 1px solid var(--erp-detail-border, #f1f5f9); }
+.formula-sign { color: var(--erp-detail-text-secondary, #94a3b8); font-weight: 800; }
+.formula-label { color: var(--erp-detail-text-main, #334155); font-weight: 600; }
+.formula-row small { color: var(--erp-detail-text-secondary, #94a3b8); text-align: right; }
+.formula-row > strong { color: var(--erp-detail-text-main, #334155); text-align: right; }
+.formula-row.is-income .formula-sign, .formula-row.is-income > strong { color: var(--erp-detail-success-text, #0f766e); }
+.formula-row.is-ad > strong { color: var(--erp-detail-primary, #7c3aed); }
+.formula-row.is-risk > strong, .formula-row.is-manual > strong, .formula-row.is-salary > strong { color: var(--erp-detail-warning-text, #b45309); }
+.detail-link { padding: 0; border: 0; background: none; color: var(--erp-detail-primary, #2563eb); cursor: pointer; font-size: 12px; }
 .formula-spacer { display: block; }
-.formula-total { display: grid; grid-template-columns: 24px 1fr 100px 150px; gap: 8px; align-items: center; padding: 15px 18px; background: #f0fdf4; color: #166534; }
+.formula-total { display: grid; grid-template-columns: 24px 1fr 100px 150px; gap: 8px; align-items: center; padding: 15px 18px; background: var(--erp-detail-surface-alt, #f0fdf4); color: var(--erp-detail-success-text, #166534); }
 .formula-total small, .formula-total b { text-align: right; }
 .formula-total b { font-size: 20px; }
 .settlement-card { padding: 18px; }
 .settlement-value { margin: 14px 0 0; padding: 15px; border-radius: 10px; }
-.settlement-value.is-settled { background: #ecfdf5; }
-.settlement-value.is-pending { background: #fff7ed; }
+.settlement-value.is-settled { background: var(--erp-detail-surface-alt, #ecfdf5); }
+.settlement-value.is-pending { background: var(--erp-detail-warning-bg, #fff7ed); }
 .settlement-value span { display: block; font-size: 12px; }
 .settlement-value b { display: block; margin-top: 5px; font-size: 23px; }
-.settlement-value.is-settled span, .settled-money { color: #047857; }
-.settlement-value.is-settled b { color: #059669; }
-.settlement-value.is-pending span { color: #9a3412; }
-.settlement-value.is-pending b { color: #c2410c; }
-.settlement-meta { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f1f5f9; color: #475569; font-size: 13px; }
+.settlement-value.is-settled span, .settled-money { color: var(--erp-detail-success-text, #047857); }
+.settlement-value.is-settled b { color: var(--erp-detail-success-text, #059669); }
+.settlement-value.is-pending span { color: var(--erp-detail-danger-text, #9a3412); }
+.settlement-value.is-pending b { color: var(--erp-detail-danger-text, #c2410c); }
+.settlement-meta { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--erp-detail-border, #f1f5f9); color: var(--erp-detail-text-regular, #475569); font-size: 13px; }
 .settlement-card :deep(.el-alert) { margin-top: 16px; }
 .shop-table { border-top: 0; }
-.drawer-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; color: #64748b; font-size: 13px; }
+.drawer-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; color: var(--erp-detail-text-regular, #64748b); font-size: 13px; }
 .expense-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
 .expense-form-grid .wide-field { grid-column: 1 / -1; }
 .expense-form-grid :deep(.el-input-number), .expense-form-grid :deep(.el-date-editor), .expense-form-grid :deep(.el-select) { width: 100%; }
-:global(:root[data-theme="dark"] .billing-overview), :global(:root[data-theme="dark"] .ai-usage-section), :global(:root[data-theme="dark"] .capital-section), :global(:root[data-theme="dark"] .shop-section), :global(:root[data-theme="dark"] .formula-card), :global(:root[data-theme="dark"] .settlement-card), :global(:root[data-theme="dark"] .summary-card), :global(:root[data-theme="dark"] .ai-usage-summary article), :global(:root[data-theme="dark"] .capital-panel), :global(:root[data-theme="dark"] .capital-metric) { border-color: rgba(148, 163, 184, .24); background: rgba(15, 23, 42, .72); }
+:global(:root[data-theme="dark"] .billing-overview), :global(:root[data-theme="dark"] .ai-usage-section), :global(:root[data-theme="dark"] .capital-section), :global(:root[data-theme="dark"] .shop-section), :global(:root[data-theme="dark"] .formula-card), :global(:root[data-theme="dark"] .settlement-card), :global(:root[data-theme="dark"] .summary-card), :global(:root[data-theme="dark"] .ai-usage-summary article), :global(:root[data-theme="dark"] .capital-panel), :global(:root[data-theme="dark"] .capital-metric) { border-color: var(--erp-detail-border, rgba(148, 163, 184, .24)); background: rgba(15, 23, 42, .72); }
 :global(:root[data-theme="dark"] .formula-heading) { background: rgba(30, 41, 59, .84); }
-:global(:root[data-theme="dark"] .formula-label), :global(:root[data-theme="dark"] .formula-row > strong), :global(:root[data-theme="dark"] .section-head strong), :global(:root[data-theme="dark"] .billing-toolbar-row h2), :global(:root[data-theme="dark"] .summary-card strong), :global(:root[data-theme="dark"] .capital-panel__title strong), :global(:root[data-theme="dark"] .capital-metric strong) { color: #e2e8f0; }
+:global(:root[data-theme="dark"] .formula-label), :global(:root[data-theme="dark"] .formula-row > strong), :global(:root[data-theme="dark"] .section-head strong), :global(:root[data-theme="dark"] .billing-toolbar-row h2), :global(:root[data-theme="dark"] .summary-card strong), :global(:root[data-theme="dark"] .capital-panel__title strong), :global(:root[data-theme="dark"] .capital-metric strong) { color: var(--erp-detail-text-secondary, #e2e8f0); }
 @media (max-width: 1280px), (max-width: 1366px) and (any-pointer: coarse) {
   .summary-grid, .ai-usage-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .capital-workspace { grid-template-columns: 1fr; }

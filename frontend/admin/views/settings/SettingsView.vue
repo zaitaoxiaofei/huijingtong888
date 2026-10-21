@@ -1986,15 +1986,15 @@ onBeforeUnmount(() => {
 .dialog-footer { justify-content: flex-end; }
 .settings-cell-stack { flex-direction: column; gap: 4px; }
 .person-info-cell { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.person-info-cell :deep(.el-avatar), .person-avatar-editor :deep(.el-avatar) { flex: none; background: #e8eef8; color: #52637a; }
+.person-info-cell :deep(.el-avatar), .person-avatar-editor :deep(.el-avatar) { flex: none; background: var(--erp-detail-surface-alt, #e8eef8); color: var(--erp-text-regular, #52637a); }
 .person-avatar-editor { display: flex; align-items: center; gap: 16px; }
 .person-avatar-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .person-avatar-actions .muted-text { flex-basis: 100%; }
 .logistics-rule-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .logistics-rule-title strong { min-width: 0; overflow-wrap: anywhere; }
-.rate-delta { margin-left: 4px; color: #dc2626; font-size: 12px; font-weight: 600; }
+.rate-delta { margin-left: 4px; color: var(--erp-danger-text, #dc2626); font-size: 12px; font-weight: 600; }
 .logistics-effective-time { color: var(--erp-text); font-size: 13px; font-weight: 600; }
-.logistics-expiry-time { color: #b45309; font-size: 13px; font-weight: 600; }
+.logistics-expiry-time { color: var(--erp-warning-text, #b45309); font-size: 13px; font-weight: 600; }
 .table-actions { align-items: center; flex-wrap: wrap; gap: 2px 10px; }
 .shop-watermark-row { min-height: 32px; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .field-suffix { margin-left: 8px; color: var(--erp-text-secondary); }
@@ -2002,7 +2002,7 @@ onBeforeUnmount(() => {
 .shop-watermark-table-cell img { width: 52px; height: 32px; object-fit: contain; border: 1px solid var(--erp-border); border-radius: 6px; background:
   linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
   linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.16) 75%),
-  #fff;
+  var(--erp-detail-surface, #fff);
   background-position: 0 0, 8px 8px;
   background-size: 16px 16px;
 }
@@ -2010,12 +2010,12 @@ onBeforeUnmount(() => {
 .shop-watermark-preview-card, .shop-watermark-controls { min-width: 0; }
 .shop-watermark-preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .shop-watermark-preview-head span { color: var(--erp-text-secondary); font-size: 12px; }
-.shop-watermark-preview-box { height: 360px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--erp-border); border-radius: 10px; background: #eef3fa; }
+.shop-watermark-preview-box { height: 360px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--erp-border); border-radius: 10px; background: var(--erp-detail-surface-alt, #eef3fa); }
 .shop-watermark-preview-stage { position: relative; width: min(270px, 100%); aspect-ratio: 3 / 4; max-height: 100%; }
 .shop-watermark-sample-image { display: block; width: 100%; height: 100%; object-fit: contain; }
 .shop-watermark-overlay-image { position: absolute; display: block; height: auto; max-height: 36%; object-fit: contain; touch-action: none; user-select: none; }
 .shop-watermark-overlay-image:active { cursor: grabbing !important; }
-.shop-watermark-preview-empty { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 10px; border-radius: 999px; color: var(--erp-text-secondary); background: rgba(255, 255, 255, 0.88); font-size: 12px; }
+.shop-watermark-preview-empty { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 6px 10px; border-radius: 999px; color: var(--erp-text-secondary); background: var(--erp-detail-surface, rgba(255, 255, 255, 0.88)); font-size: 12px; }
 .shop-watermark-controls { display: flex; flex-direction: column; justify-content: center; }
 .shop-watermark-position-group { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; }
 .shop-watermark-position-group :deep(.el-radio-button), .shop-watermark-position-group :deep(.el-radio-button__inner) { width: 100%; }

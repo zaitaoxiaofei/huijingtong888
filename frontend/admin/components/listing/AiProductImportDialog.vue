@@ -184,10 +184,10 @@ defineExpose({ open });
 .import-toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
 .import-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) repeat(2, 150px) auto; gap: 8px; }
 .import-thumb { width: 64px; height: 84px; border-radius: 6px; overflow: hidden; }
-.import-empty { display: inline-flex; align-items: center; justify-content: center; background: #f5f7fa; color: #909399; }
+.import-empty { display: inline-flex; align-items: center; justify-content: center; background: var(--erp-surface-alt, #f5f7fa); color: var(--erp-text-regular, #909399); }
 .import-meta { min-width: 0; display: grid; gap: 5px; }
 .import-meta strong, .import-meta span, .import-meta em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.import-meta em { color: #64748b; font-size: 12px; font-style: normal; }
+.import-meta em { color: var(--erp-text-regular, #64748b); font-size: 12px; font-style: normal; }
 @media (max-width: 980px) { .import-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .import-toolbar, .import-filters { grid-template-columns: 1fr; } }
 </style>

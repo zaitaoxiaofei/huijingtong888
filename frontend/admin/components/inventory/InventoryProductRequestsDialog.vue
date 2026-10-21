@@ -138,7 +138,7 @@ onMounted(load);
 <style scoped>
 .request-toolbar { display: flex; gap: 12px; margin: 16px 0; }
 .request-image { display: inline-flex; width: 64px; height: 84px; border-radius: 6px; vertical-align: middle; }
-.request-image--empty { align-items: center; justify-content: center; background: #f5f7fa; color: #909399; }
-.request-meta { color: #606266; font-size: 12px; margin-top: 4px; }
+.request-image--empty { align-items: center; justify-content: center; background: var(--erp-detail-surface-alt, #f5f7fa); color: var(--erp-detail-text-secondary, #909399); }
+.request-meta { color: var(--erp-detail-text-regular, #606266); font-size: 12px; margin-top: 4px; }
 .el-pagination { margin-top: 16px; justify-content: flex-end; }
 </style>

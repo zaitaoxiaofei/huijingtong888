@@ -7,7 +7,7 @@
 .vue-config-logistics-grid .ds-card {
   border: 1px solid var(--ds-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--erp-surface, #fff);
   box-shadow: none;
 }
 
@@ -26,16 +26,16 @@
   padding: 6px 12px;
   border: 1px solid var(--ds-border);
   border-radius: 8px;
-  background: #fff;
-  color: var(--ds-text);
+  background: var(--erp-surface, #fff);
+  color: var(--erp-text-regular, var(--ds-text));
   font: inherit;
   font-weight: 600;
 }
 
 .vue-config-tab.active {
-  border-color: #3c6dd8;
-  background: #eef4ff;
-  color: #1f4fbf;
+  border-color: var(--erp-primary-border, #3c6dd8);
+  background: var(--erp-primary-soft, #eef4ff);
+  color: var(--erp-primary, #1f4fbf);
 }
 
 .vue-config-panel {
@@ -71,7 +71,7 @@
 
 .vue-config-cell-meta {
   margin-top: 4px;
-  color: var(--ds-text-subtle);
+  color: var(--erp-text-secondary, var(--ds-text-subtle));
   font-size: 12px;
 }
 
@@ -116,7 +116,7 @@
   padding: 12px 14px;
   border: 1px solid var(--ds-border);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-surface-alt, #f8fafc);
   line-height: 1.7;
 }
 

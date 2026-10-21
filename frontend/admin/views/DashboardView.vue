@@ -1625,8 +1625,8 @@ onBeforeUnmount(() => {
   --dashboard-theme-primary-soft: var(--erp-primary-soft);
 }
 
-/* Keep the existing light palette and share dark tokens with teleported overlays. */
-:global(:root[data-theme="dark"]) {
+/* Share semantic theme tokens with page content and teleported overlays in both modes. */
+:global(:root[data-theme]) {
   --dashboard-theme-bg: var(--erp-bg);
   --dashboard-theme-border: var(--erp-border);
   --dashboard-theme-border-light: var(--erp-border-light);
@@ -1647,7 +1647,7 @@ onBeforeUnmount(() => {
   --dashboard-theme-surface: var(--erp-surface);
   --dashboard-theme-surface-alt: var(--erp-surface-alt);
   --dashboard-theme-text-main: var(--erp-text-main);
-  --dashboard-theme-text-placeholder: var(--erp-text-placeholder);
+  --dashboard-theme-text-placeholder: var(--erp-text-secondary);
   --dashboard-theme-text-regular: var(--erp-text-regular);
   --dashboard-theme-text-secondary: var(--erp-text-secondary);
   --dashboard-theme-warning-bg: var(--erp-warning-bg);
@@ -1681,7 +1681,7 @@ onBeforeUnmount(() => {
   height: 100%;
   padding: 24px;
   background:
-    radial-gradient(circle at 10% 0%, rgba(37, 99, 235, 0.08) 0, rgba(37, 99, 235, 0) 30%),
+    radial-gradient(circle at 10% 0%, var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.08)) 0, var(--erp-detail-primary-soft, rgba(37, 99, 235, 0)) 30%),
     linear-gradient(180deg, var(--dashboard-theme-surface-alt, #f8fafd) 0%, var(--dashboard-bg) 100%) !important;
   color: var(--dashboard-text);
   box-sizing: border-box;
@@ -1813,7 +1813,7 @@ button {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #2563eb, #60a5fa);
+  background: linear-gradient(90deg, var(--erp-primary-fill, #2563eb), var(--erp-primary-fill, #60a5fa));
   box-shadow: 0 2px 8px rgba(37, 99, 235, 0.24);
 }
 
@@ -2581,7 +2581,7 @@ button {
   height: 5px;
   overflow: hidden;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.2);
+  background: var(--erp-detail-surface-alt, rgba(148, 163, 184, 0.2));
 }
 
 .signal-row em {
@@ -2603,7 +2603,7 @@ button {
 }
 
 .signal-row em.is-blue {
-  background: #60a5fa;
+  background: var(--erp-primary-fill, #60a5fa);
 }
 
 .secondary-metric-grid {

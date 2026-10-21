@@ -59,9 +59,9 @@ const reasonText = (revision) => revision.reason === "Preserved existing values 
 </template>
 
 <style scoped>
-.profit-calculation-versions { padding: 12px 0; color: #475467; font-size: 13px; }
+.profit-calculation-versions { padding: 12px 0; color: var(--erp-text-regular, #475467); font-size: 13px; }
 .profit-calculation-item + .profit-calculation-item { margin-top: 16px; }
-.profit-calculation-revision { margin-top: 8px; padding: 10px; border: 1px solid #e4e7ec; border-radius: 6px; }
+.profit-calculation-revision { margin-top: 8px; padding: 10px; border: 1px solid var(--erp-border, #e4e7ec); border-radius: 6px; }
 summary { cursor: pointer; line-height: 1.6; }
 h4 { margin: 14px 0 8px; }
 </style>

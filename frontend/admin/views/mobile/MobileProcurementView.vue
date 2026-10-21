@@ -326,25 +326,25 @@ onMounted(() => loadPage());
   display: grid;
   gap: 4px;
   padding: 13px 12px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 14px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   text-align: left;
 }
 
 .mobile-procurement-summary button.active {
-  border-color: #bfdbfe;
-  background: #eff6ff;
+  border-color: var(--erp-detail-primary-border, #bfdbfe);
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .mobile-procurement-summary span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   font-weight: 800;
 }
 
 .mobile-procurement-summary strong {
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 24px;
   line-height: 1;
 }
@@ -370,9 +370,9 @@ onMounted(() => loadPage());
   display: grid;
   gap: 10px;
   padding: 12px;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 14px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
 
@@ -387,8 +387,8 @@ onMounted(() => loadPage());
 .mobile-procurement-card__head span {
   padding: 4px 8px;
   border-radius: 999px;
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--erp-detail-warning-bg, #fef3c7);
+  color: var(--erp-detail-warning-text, #92400e);
   font-size: 12px;
   font-weight: 800;
 }
@@ -396,7 +396,7 @@ onMounted(() => loadPage());
 .mobile-procurement-card__head strong {
   min-width: 0;
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -414,13 +414,13 @@ onMounted(() => loadPage());
   height: 76px;
   border-radius: 12px;
   object-fit: cover;
-  background: #eef2f7;
+  background: var(--erp-detail-surface-alt, #eef2f7);
 }
 
 .mobile-procurement-card__fallback {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
   font-weight: 800;
 }
@@ -435,7 +435,7 @@ onMounted(() => loadPage());
   margin: 0;
   display: -webkit-box;
   overflow: hidden;
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 14px;
   line-height: 1.35;
   -webkit-box-orient: vertical;
@@ -446,7 +446,7 @@ onMounted(() => loadPage());
 .mobile-procurement-card__meta span {
   margin: 0;
   overflow: hidden;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -461,8 +461,8 @@ onMounted(() => loadPage());
 .mobile-procurement-card__chips span {
   padding: 3px 7px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 11px;
   font-weight: 800;
 }
@@ -472,18 +472,18 @@ onMounted(() => loadPage());
   gap: 4px;
   padding: 9px 10px;
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .mobile-procurement-card__requests details {
   padding: 9px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 12px;
-  background: #fbfdff;
+  background: var(--erp-detail-surface, #fbfdff);
 }
 
 .mobile-procurement-card__requests summary {
-  color: #334155;
+  color: var(--erp-detail-text-main, #334155);
   font-size: 12px;
   font-weight: 800;
 }
@@ -495,14 +495,14 @@ onMounted(() => loadPage());
 }
 
 .mobile-request-line span {
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 12px;
   font-weight: 700;
 }
 
 .mobile-request-line small {
   overflow-wrap: anywhere;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -514,17 +514,17 @@ onMounted(() => loadPage());
   justify-content: center;
   gap: 5px;
   padding: 0 12px;
-  border: 1px solid #c7d2fe;
+  border: 1px solid var(--erp-detail-primary-border, #c7d2fe);
   border-radius: 10px;
-  background: #4f46e5;
-  color: #fff;
+  background: var(--erp-primary-fill, #4f46e5);
+  color: var(--erp-primary-contrast, #fff);
   font-size: 12px;
   font-weight: 900;
 }
 
 .mobile-procurement-card__actions button.secondary {
-  background: #eef2ff;
-  color: #3730a3;
+  background: var(--erp-detail-primary-soft, #eef2ff);
+  color: var(--erp-detail-primary, #3730a3);
 }
 
 .mobile-procurement-card__actions button:disabled {
@@ -536,11 +536,11 @@ onMounted(() => loadPage());
   justify-items: center;
   gap: 6px;
   padding: 36px 12px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
 }
 
 .mobile-empty strong {
-  color: #334155;
+  color: var(--erp-detail-text-main, #334155);
   font-size: 15px;
 }
 

@@ -88,9 +88,9 @@ function updateField(key, value) {
   display: grid;
   gap: 12px;
   padding: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.28);
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.28));
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.86));
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
 }
 
@@ -103,13 +103,13 @@ function updateField(key, value) {
 
 .panel-head h3 {
   margin: 0;
-  color: #101828;
+  color: var(--erp-detail-text-main, #101828);
   font-size: 15px;
 }
 
 .panel-head p {
   margin: 4px 0 0;
-  color: #667085;
+  color: var(--erp-detail-text-secondary, #667085);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -134,7 +134,7 @@ function updateField(key, value) {
 }
 
 .template-option span {
-  color: #98a2b3;
+  color: var(--erp-detail-text-secondary, #98a2b3);
   font-size: 12px;
 }
 </style>

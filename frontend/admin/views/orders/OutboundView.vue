@@ -494,7 +494,7 @@ onMounted(loadPageData);
 
 .outbound-summary-card {
   height: 100%;
-  border: 1px solid rgba(203, 213, 225, 0.8);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.8));
   border-radius: 12px;
   box-shadow: none;
 }
@@ -516,7 +516,7 @@ onMounted(loadPageData);
   padding: 12px 14px;
   border: 1px solid var(--erp-border);
   border-radius: 14px;
-  background: linear-gradient(180deg, #fbfdff 0%, #f6f9fd 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface, #fbfdff) 0%, var(--erp-detail-surface-alt, #f6f9fd) 100%);
 }
 
 .outbound-summary-item .metric-value {
@@ -534,7 +534,7 @@ onMounted(loadPageData);
 }
 
 .outbound-footer :deep(.erp-footer-pagination__meta) {
-  color: #46556c;
+  color: var(--erp-detail-text-regular, #46556c);
   font-size: 11px;
   line-height: 24px;
 }
@@ -545,8 +545,8 @@ onMounted(loadPageData);
 
 .outbound-footer :deep(.el-pagination) {
   --el-pagination-bg-color: transparent;
-  --el-pagination-button-bg-color: #f8fafc;
-  --el-pagination-button-disabled-bg-color: #f1f5f9;
+  --el-pagination-button-bg-color: var(--erp-detail-surface-alt, #f8fafc);
+  --el-pagination-button-disabled-bg-color: var(--erp-detail-surface-alt, #f1f5f9);
   --el-pagination-hover-color: #2563eb;
   --el-pagination-button-color: #334155;
   --el-pagination-button-width: 26px;
@@ -559,16 +559,16 @@ onMounted(loadPageData);
 .outbound-footer :deep(.el-pagination .el-pager li) {
   min-width: 26px;
   height: 26px;
-  border: 1px solid rgba(203, 213, 225, 0.85);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.85));
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   box-shadow: none;
 }
 
 .outbound-footer :deep(.el-pagination .el-pager li.is-active) {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-primary-fill, #2563eb);
+  color: var(--erp-primary-contrast, #fff);
   box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
 }
 
@@ -589,7 +589,7 @@ onMounted(loadPageData);
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  border-bottom: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
 }
 
 .list-wrap :deep(.el-table),

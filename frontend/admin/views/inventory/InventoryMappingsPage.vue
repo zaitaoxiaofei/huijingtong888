@@ -374,9 +374,9 @@ onMounted(async () => {
   align-items: center;
   padding: 16px 18px;
   margin-bottom: 16px;
-  border: 1px solid #d9e6f7;
+  border: 1px solid var(--erp-detail-primary-border, #d9e6f7);
   border-radius: 14px;
-  background: linear-gradient(135deg, #f7fbff 0%, #eef5ff 100%);
+  background: var(--erp-detail-primary-faint, linear-gradient(135deg, #f7fbff 0%, #eef5ff 100%));
 }
 
 .mapping-focus-copy {
@@ -403,8 +403,8 @@ onMounted(async () => {
 .product-thumb-fallback {
   display: grid;
   place-items: center;
-  background: #f3f6fb;
-  color: #8c98aa;
+  background: var(--erp-detail-surface-alt, #f3f6fb);
+  color: var(--erp-detail-text-secondary, #8c98aa);
   font-size: 12px;
 }
 

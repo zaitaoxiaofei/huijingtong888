@@ -20,8 +20,8 @@
   --erp-text-main: #1f2937;
   --erp-text: #1f2937;
   --erp-text-regular: #4b5563;
-  --erp-text-secondary: #7b8497;
-  --erp-text-placeholder: #a8b0c2;
+  --erp-text-secondary: #5f6b7e;
+  --erp-text-placeholder: #657186;
   --erp-link: #2563eb;
   --erp-link-hover: #1d4ed8;
   --erp-menu-hover: #f6f8fc;
@@ -37,7 +37,7 @@
   --erp-warning-border: #fed7aa;
   --erp-danger: #ef4444;
   --erp-danger-bg: #fff1f1;
-  --erp-danger-text: #dc2626;
+  --erp-danger-text: #b91c1c;
   --erp-danger-border: #fecaca;
   --erp-info: #3b82f6;
   --erp-info-bg: #eff6ff;
@@ -1267,6 +1267,10 @@ body,
   --el-color-primary-light-8: var(--erp-palette-primary-light-8);
   --el-color-primary-light-9: var(--erp-palette-primary-light-9);
   --el-color-primary-dark-2: var(--erp-primary-hover);
+  --el-text-color-primary: var(--erp-text-main);
+  --el-text-color-regular: var(--erp-text-regular);
+  --el-text-color-secondary: var(--erp-text-secondary);
+  --el-text-color-placeholder: var(--erp-text-placeholder);
 }
 
 :root[data-theme="light"] {
@@ -1283,8 +1287,180 @@ body,
   color: var(--erp-primary-contrast);
 }
 
-/* Nested workspace panels and teleported detail dialogs keep their light fallbacks. */
-:root[data-theme="dark"] {
+:root[data-theme][data-theme-palette] .el-radio-button {
+  --el-radio-button-checked-bg-color: var(--erp-primary-fill);
+  --el-radio-button-checked-border-color: var(--erp-primary-fill);
+  --el-radio-button-checked-text-color: var(--erp-primary-contrast);
+}
+
+:root[data-theme][data-theme-palette] .el-segmented {
+  --el-segmented-item-selected-bg-color: var(--erp-primary-fill);
+  --el-segmented-item-selected-color: var(--erp-primary-contrast);
+}
+
+:root[data-theme][data-theme-palette] .el-checkbox {
+  --el-checkbox-checked-icon-color: var(--erp-primary-contrast);
+}
+
+:root[data-theme][data-theme-palette] .el-radio__input.is-checked .el-radio__inner::after {
+  background-color: var(--erp-primary-contrast);
+}
+
+:root[data-theme] :is(.el-button--primary, .erp-btn-primary.el-button) {
+  --erp-button-contrast: var(--erp-primary-contrast);
+}
+
+:root[data-theme] .el-alert--success {
+  --erp-alert-text: var(--erp-success-text);
+  --erp-alert-bg: var(--erp-success-bg);
+  --erp-alert-filled: #15803d;
+}
+
+:root[data-theme] .el-alert--warning {
+  --erp-alert-text: var(--erp-warning-text);
+  --erp-alert-bg: var(--erp-warning-bg);
+  --erp-alert-filled: #b45309;
+}
+
+:root[data-theme] .el-alert--error {
+  --erp-alert-text: var(--erp-danger-text);
+  --erp-alert-bg: var(--erp-danger-bg);
+  --erp-alert-filled: #b91c1c;
+}
+
+:root[data-theme] .el-alert--info {
+  --erp-alert-text: var(--erp-info-text);
+  --erp-alert-bg: var(--erp-info-bg);
+  --erp-alert-filled: #315faa;
+}
+
+:root[data-theme] .el-alert {
+  --el-alert-bg-color: var(--erp-alert-bg, var(--erp-surface-alt));
+  --el-alert-text-color: var(--erp-alert-text, var(--erp-text-regular));
+}
+
+:root[data-theme] .el-alert.is-light {
+  background-color: var(--erp-alert-bg, var(--erp-primary-soft));
+  color: var(--erp-alert-text, var(--erp-primary));
+}
+
+:root[data-theme] .el-alert.is-light :is(.el-alert__title, .el-alert__description, .el-alert__icon) {
+  color: inherit;
+}
+
+:root[data-theme] .el-alert.is-dark {
+  --el-alert-bg-color: var(--erp-alert-filled);
+  --el-alert-text-color: #ffffff;
+  background: var(--erp-alert-filled);
+  color: #ffffff;
+}
+
+:root[data-theme] .el-alert.is-dark :is(.el-alert__title, .el-alert__description, .el-alert__icon) {
+  color: inherit;
+}
+
+:root[data-theme] .el-tag--primary.el-tag--dark {
+  background: var(--erp-primary-fill);
+  border-color: var(--erp-primary-fill);
+  color: var(--erp-primary-contrast);
+}
+
+:root[data-theme] :is(.el-step__head.is-error, .el-step__title.is-error, .el-step__description.is-error) {
+  color: var(--erp-danger-text);
+  border-color: var(--erp-danger-text);
+}
+
+:root[data-theme="light"] .el-button--primary:is(.is-link, .is-text):not(.is-disabled) {
+  --el-button-text-color: var(--erp-primary);
+  --el-button-hover-text-color: var(--erp-primary-hover);
+  --el-button-active-text-color: var(--erp-primary-hover);
+  color: var(--erp-primary);
+}
+
+:root[data-theme="light"] .el-button--primary:is(.is-link, .is-text):not(.is-disabled):hover {
+  color: var(--erp-primary-hover);
+}
+
+:root[data-theme] :is(.el-empty__description p, .el-table__empty-text, .el-step__title.is-wait, .el-step__description.is-wait) {
+  color: var(--erp-text-secondary);
+}
+
+:root[data-theme] .el-step__head.is-wait {
+  color: var(--erp-text-secondary);
+  border-color: var(--erp-text-secondary);
+}
+
+:root[data-theme="light"] .el-select__placeholder.is-transparent,
+:root[data-theme="light"] .el-input__inner::placeholder,
+:root[data-theme="light"] .el-range-input::placeholder,
+:root[data-theme="light"] .el-textarea__inner::placeholder {
+  color: var(--erp-text-placeholder);
+}
+
+:root[data-theme="light"] .el-button--success {
+  --erp-button-tone: var(--erp-success-text);
+  --erp-button-tone-bg: var(--erp-success-bg);
+}
+
+:root[data-theme="light"] .el-button--warning {
+  --erp-button-tone: var(--erp-warning-text);
+  --erp-button-tone-bg: var(--erp-warning-bg);
+}
+
+:root[data-theme="light"] :is(.el-button--danger, .erp-btn-danger.el-button, .erp-btn-link-danger.el-button) {
+  --erp-button-tone: var(--erp-danger-text);
+  --erp-button-tone-bg: var(--erp-danger-bg);
+}
+
+:root[data-theme="light"] .el-button--info {
+  --erp-button-tone: var(--erp-info-text);
+  --erp-button-tone-bg: var(--erp-info-bg);
+}
+
+:root[data-theme="light"] .el-button:is(.el-button--success, .el-button--warning, .el-button--danger, .el-button--info, .erp-btn-danger):not(.is-plain):not(.is-link):not(.is-text):not(.is-disabled) {
+  --erp-button-contrast: #ffffff;
+  --el-button-bg-color: var(--erp-button-tone);
+  --el-button-border-color: var(--erp-button-tone);
+  --el-button-text-color: #ffffff;
+  --el-button-hover-bg-color: var(--erp-button-tone);
+  --el-button-hover-border-color: var(--erp-button-tone);
+  --el-button-hover-text-color: #ffffff;
+  --el-button-active-bg-color: var(--erp-button-tone);
+  --el-button-active-border-color: var(--erp-button-tone);
+  --el-button-active-text-color: #ffffff;
+}
+
+:root[data-theme="light"] .el-button:is(.el-button--success, .el-button--warning, .el-button--danger, .el-button--info, .erp-btn-link-danger):is(.is-link, .is-text, .is-plain):not(.is-disabled) {
+  --el-button-text-color: var(--erp-button-tone);
+  --el-button-hover-text-color: var(--erp-button-tone);
+  --el-button-hover-bg-color: var(--erp-button-tone-bg);
+  --el-button-active-text-color: var(--erp-button-tone);
+  color: var(--erp-button-tone);
+}
+
+:root[data-theme] .el-button:is(.el-button--primary, .el-button--success, .el-button--warning, .el-button--danger, .el-button--info, .erp-btn-primary, .erp-btn-danger):not(.is-plain):not(.is-link):not(.is-text):not(.is-disabled) {
+  color: var(--erp-button-contrast);
+}
+
+:root[data-theme] .erp-tab-context-menu__item.is-danger {
+  background: transparent !important;
+}
+
+:root[data-theme] .erp-tab-context-menu__item.is-danger:hover {
+  background: var(--erp-danger-bg) !important;
+}
+
+:root[data-theme] .orders-table .el-table__body tr.is-low-profit-order > td {
+  background: var(--erp-danger-bg) !important;
+}
+
+:root[data-theme] .orders-table .el-table__body tr.is-low-profit-order:hover > td,
+:root[data-theme] .orders-table .el-table__body tr.is-low-profit-order.hover-row > td {
+  background: color-mix(in srgb, var(--erp-danger-bg) 88%, var(--erp-danger-text)) !important;
+}
+
+/* Nested panels and teleported dialogs share the same semantic colors in both modes. */
+:root[data-theme] {
   --erp-detail-surface: var(--erp-surface);
   --erp-detail-surface-alt: var(--erp-surface-alt);
   --erp-detail-border: var(--erp-border);

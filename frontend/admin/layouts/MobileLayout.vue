@@ -98,8 +98,8 @@ onBeforeUnmount(() => setMobileViewportState(false));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  background: #f4f7fb;
-  color: #172033;
+  background: var(--erp-detail-surface-alt, #f4f7fb);
+  color: var(--erp-detail-text-main, #172033);
   touch-action: manipulation;
 }
 
@@ -112,8 +112,8 @@ onBeforeUnmount(() => setMobileViewportState(false));
   gap: 8px;
   align-items: center;
   padding: max(10px, env(safe-area-inset-top)) 12px 10px;
-  border-bottom: 1px solid #dbe3ef;
-  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid var(--erp-detail-primary-border, #dbe3ef);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.96));
   backdrop-filter: blur(12px);
 }
 
@@ -122,10 +122,10 @@ onBeforeUnmount(() => setMobileViewportState(false));
   height: 38px;
   display: grid;
   place-items: center;
-  border: 1px solid #dbe3ef;
+  border: 1px solid var(--erp-detail-primary-border, #dbe3ef);
   border-radius: 10px;
-  background: #fff;
-  color: #334155;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-main, #334155);
   text-decoration: none;
 }
 
@@ -148,7 +148,7 @@ onBeforeUnmount(() => setMobileViewportState(false));
 }
 
 .mobile-topbar__title span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -173,8 +173,8 @@ onBeforeUnmount(() => setMobileViewportState(false));
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
-  border-top: 1px solid #dbe3ef;
-  background: rgba(255, 255, 255, 0.96);
+  border-top: 1px solid var(--erp-detail-primary-border, #dbe3ef);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.96));
   backdrop-filter: blur(12px);
 }
 
@@ -186,15 +186,15 @@ onBeforeUnmount(() => setMobileViewportState(false));
   justify-content: center;
   gap: 6px;
   border-radius: 12px;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
   font-weight: 700;
   text-decoration: none;
 }
 
 .mobile-tabbar__item.router-link-active {
-  background: #eaf1ff;
-  color: #1d4ed8;
+  background: var(--erp-detail-primary-soft, #eaf1ff);
+  color: var(--erp-detail-primary, #1d4ed8);
 }
 
 .mobile-tabbar__dot {

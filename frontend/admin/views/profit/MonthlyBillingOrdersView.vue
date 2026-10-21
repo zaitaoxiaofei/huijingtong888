@@ -476,13 +476,13 @@ onBeforeUnmount(() => {
 
 .monthly-orders-head h2 {
   margin: 0;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 20px;
 }
 
 .monthly-orders-head p {
   margin: 6px 0 0;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 13px;
 }
 
@@ -496,7 +496,7 @@ onBeforeUnmount(() => {
 .monthly-orders-table-wrap {
   flex: 1;
   min-height: 0;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 8px;
   overflow: hidden;
 }
@@ -528,12 +528,12 @@ onBeforeUnmount(() => {
 }
 
 .order-cell strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 12px;
 }
 
 .order-cell span {
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 11px;
 }
 
@@ -549,26 +549,26 @@ onBeforeUnmount(() => {
   width: 64px;
   height: 84px;
   flex: 0 0 64px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   overflow: hidden;
 }
 
 .order-product-image-empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 11px;
 }
 
 .inventory-name {
-  color: #334155;
+  color: var(--erp-detail-text-main, #334155);
   line-height: 1.5;
 }
 
 .inventory-name.is-missing {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 .outcome-cell {
@@ -578,7 +578,7 @@ onBeforeUnmount(() => {
 }
 
 .outcome-cell strong {
-  color: #9f1239;
+  color: var(--erp-detail-danger-text, #9f1239);
   font-size: 11px;
   line-height: 1.45;
   white-space: normal;
@@ -589,9 +589,9 @@ onBeforeUnmount(() => {
   gap: 16px;
   align-items: center;
   padding: 16px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .detail-product-image {
@@ -603,7 +603,7 @@ onBeforeUnmount(() => {
 }
 
 .detail-product-summary strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 15px;
   line-height: 1.5;
 }
@@ -611,7 +611,7 @@ onBeforeUnmount(() => {
 .detail-product-summary p,
 .outcome-explanation p {
   margin: 6px 0 0;
-  color: #64748b;
+  color: var(--erp-detail-text-regular, #64748b);
   font-size: 12px;
 }
 
@@ -619,33 +619,33 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 5px;
   padding: 14px 16px;
-  border: 1px solid #fecdd3;
+  border: 1px solid var(--erp-detail-danger-border, #fecdd3);
   border-radius: 12px;
-  background: #fff1f2;
+  background: var(--erp-detail-danger-bg, #fff1f2);
 }
 
 .outcome-explanation > span {
-  color: #9f1239;
+  color: var(--erp-detail-danger-text, #9f1239);
   font-size: 12px;
 }
 
 .outcome-explanation > strong {
-  color: #881337;
+  color: var(--erp-detail-danger-text, #881337);
   font-size: 16px;
 }
 
 .is-profit-positive {
-  color: #0f766e;
+  color: var(--erp-detail-success-text, #0f766e);
 }
 
 .is-profit-negative {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 :global(:root[data-theme="dark"] .monthly-orders-head h2),
 :global(:root[data-theme="dark"] .order-cell strong),
 :global(:root[data-theme="dark"] .detail-product-summary strong) {
-  color: #e5e7eb;
+  color: var(--erp-detail-text-secondary, #e5e7eb);
 }
 
 @media (max-width: 900px) {

@@ -160,7 +160,7 @@ function calculate() {
 </template>
 
 <style scoped>
-:global(:root[data-theme="dark"]) {
+:global(:root[data-theme]) {
   --calculator-theme-border-light: var(--erp-border-light);
   --calculator-theme-danger-text: var(--erp-danger-text);
   --calculator-theme-success-text: var(--erp-success-text);
