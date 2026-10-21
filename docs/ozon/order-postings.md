@@ -23,3 +23,14 @@ Official reference: <https://docs.ozon.ru/api/seller/#operation/PostingFbsList>
 Official reference: <https://docs.ozon.ru/api/seller/#operation/PostingAPI_ShipFbsPostingV4>
 
 Verified: 2026-07-25.
+
+## FBP logistics snapshots
+
+Verified against live posting responses and ERP sync history: 2026-10-21.
+
+- The ERP reads both `/v4/posting/fbs/list` and `/v1/posting/fbp/list`. The same FBP posting can occur in both feeds. An observed FBP list response contained `provider_id` but omitted the delivery method, warehouse, tracking number and substatus that were present in the FBS detail response.
+- `/v3/posting/fbs/get` returned the actual delivery method and warehouse for the affected active and cancelled FBP postings. A cancelled status does not by itself mean that these logistics fields are unavailable.
+- Merge duplicate postings within a shop before saving. A sparse FBP response must preserve previously verified logistics for that same shop/posting, while its current status, products, financial data and cancellation remain authoritative. Explicitly changed provider, method or warehouse identities prohibit inheriting incompatible old logistics.
+- Persist the merge under a row lock. All raw-posting writers, including shipping reconciliation, must use the same persistence boundary and use its returned tracking fields. An asynchronous detail response only supplements the row read under that lock; it must not restore business fields from the snapshot captured before the request.
+- List sync attempts at most 20 missing-method detail lookups per shop, each bounded to 20 seconds. Scheduled detail reconciliation prioritizes FBP postings with missing methods, including cancelled postings. No carrier, official service class or transport mode is inferred from a provider ID, another order, dimensions or a billing rule.
+- `scripts/repair-fbp-order-logistics.mjs` provides a shop/date-scoped dry run and an explicit metadata-only write with a new private backup. It must not call order upsert, inventory posting or profit recalculation.

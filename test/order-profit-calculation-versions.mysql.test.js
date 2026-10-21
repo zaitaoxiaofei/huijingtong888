@@ -5,6 +5,7 @@ import mysql from "mysql2/promise";
 import { createOrderProfitCalculationTables } from "../src/services/order-profit-calculation-schema.js";
 import { ensureOrderProfitCalculationState, recordOrderProfitCalculation } from "../src/services/order-profit-calculation-versions.js";
 import { profitCalculationBaselineAudit } from "../src/services/order-profit-calculation-baseline.js";
+import { saveOrderPostingLogistics } from "../src/services/mysql-order-posting-logistics.js";
 
 // Opt-in only. Never imports the application's config or reads production .env.
 // The supplied local test account must have CREATE/DROP DATABASE permission.
@@ -74,6 +75,45 @@ test("isolated MySQL transactions serialize retries, isolate tenants and roll ba
     const audit = await profitCalculationBaselineAudit(connections[0]);
     assert.equal(Number(audit.state_count), 2);
     assert.equal(Number(audit.missing_count), 0);
+    // The same isolated database also verifies raw logistics read/merge/write
+    // against real concurrent connections, with no production table selected.
+    await connections[0].query(`CREATE TABLE ozon_orders_raw (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, store_id BIGINT UNSIGNED NOT NULL,
+      posting_number VARCHAR(128) NOT NULL, order_id VARCHAR(128), status VARCHAR(64), substatus VARCHAR(128),
+      raw_json LONGTEXT NOT NULL, fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_test_raw_shop_posting (store_id, posting_number)
+    ) COLLATE utf8mb4_general_ci`);
+    const rich = { posting_number: "RAW1", fulfillment_schema: "FBP", status: "delivered", tracking_number: "TRACK1",
+      raw: { fulfillment_schema: "FBP", delivery_method: { name: "CEL FBP Hunchun 2", tpl_provider: "CEL" } } };
+    const sparse = { posting_number: "RAW1", fulfillment_schema: "FBP", status: "delivered", tracking_number: "", raw: { fulfillment_schema: "FBP" } };
+    const persist = (connection, posting, shopId = 7, serialize = JSON.stringify, supplement = null) => saveOrderPostingLogistics({
+      transaction: (callback) => transaction(connection, callback), shopId, posting, serialize, supplement
+    });
+    await persist(connections[0], rich);
+    await Promise.all(connections.map((connection) => persist(connection, sparse)));
+    const [[rawRow]] = await connections[0].query("SELECT status, raw_json FROM ozon_orders_raw WHERE store_id = 7 AND posting_number = 'RAW1'");
+    assert.equal(rawRow.status, "delivered");
+    assert.equal(JSON.parse(rawRow.raw_json).tracking_number, "TRACK1");
+    assert.equal(JSON.parse(rawRow.raw_json).raw.delivery_method.tpl_provider, "CEL");
+    await persist(connections[0], sparse, 8);
+    const [[otherShop]] = await connections[0].query("SELECT raw_json FROM ozon_orders_raw WHERE store_id = 8 AND posting_number = 'RAW1'");
+    assert.equal(JSON.parse(otherShop.raw_json).tracking_number || "", "");
+    await Promise.all(connections.map((connection, index) => persist(connection, { ...(index === 0 ? rich : sparse), posting_number: "RAW2" })));
+    const [[firstCreation]] = await connections[0].query("SELECT raw_json FROM ozon_orders_raw WHERE store_id = 7 AND posting_number = 'RAW2'");
+    assert.equal(JSON.parse(firstCreation.raw_json).tracking_number, "TRACK1");
+    const beforeGet = { ...sparse, posting_number: "LATE-DETAIL", status: "delivering" };
+    await persist(connections[0], beforeGet);
+    await persist(connections[1], { ...rich, posting_number: "LATE-DETAIL", status: "cancelled", tracking_number: "TRACK-NEW",
+      raw: { fulfillment_schema: "FBP", delivery_method: { name: "GUOO FBP", tpl_provider: "GUOO", provider_id: 99 }, tracking_number: "TRACK-NEW" } });
+    const late = await persist(connections[0], beforeGet, 7, JSON.stringify, { ...rich, posting_number: "LATE-DETAIL" });
+    assert.equal(late.status, "cancelled");
+    assert.equal(late.tracking_number, "TRACK-NEW");
+    assert.equal(late.raw.delivery_method.tpl_provider, "GUOO");
+    assert.equal(late.raw.delivery_method.provider_id, 99);
+    let serializations = 0;
+    await assert.rejects(persist(connections[0], { ...sparse, status: "cancelled" }, 7, (posting) => ++serializations === 1 ? JSON.stringify(posting) : ""), /serializer returned no JSON/);
+    const [[afterFailure]] = await connections[0].query("SELECT status, raw_json FROM ozon_orders_raw WHERE store_id = 7 AND posting_number = 'RAW1'");
+    assert.deepEqual(afterFailure, rawRow);
   } finally {
     await Promise.all(connections.map((connection) => connection.end()));
     // Only this freshly generated, checked test database is ever removed.
