@@ -483,10 +483,10 @@ onMounted(loadPageData);
 }
 
 .procurement-history-card {
-  border: 1px solid rgba(198, 209, 225, 0.85);
+  border: 1px solid var(--erp-detail-border-light, rgba(198, 209, 225, 0.85));
   background:
-    radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 24%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+    var(--erp-detail-surface-alt, radial-gradient(circle at top right, rgba(37, 99, 235, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98)));
 }
 
 .procurement-toolbar {
@@ -501,14 +501,14 @@ onMounted(loadPageData);
   position: sticky;
   top: 0;
   z-index: 3;
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.9));
   backdrop-filter: blur(14px);
 }
 
 .procurement-filter-panel {
   margin-bottom: 0;
   padding: 14px 16px;
-  border: 1px solid rgba(219, 227, 239, 0.9);
+  border: 1px solid var(--erp-detail-border-light, rgba(219, 227, 239, 0.9));
   border-radius: 18px;
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.05);
 }

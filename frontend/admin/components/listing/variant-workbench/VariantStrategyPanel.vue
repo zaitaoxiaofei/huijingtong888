@@ -70,9 +70,9 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
 
 <style scoped>
 .work-card {
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.22));
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.78));
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
   padding: 14px;
 }
@@ -90,8 +90,8 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
   width: 26px;
   height: 26px;
   border-radius: 6px;
-  background: #0f172a;
-  color: #fff;
+  background: var(--erp-detail-surface-alt, #0f172a);
+  color: var(--erp-detail-text-main, #fff);
   font-size: 12px;
   font-weight: 700;
 }
@@ -100,9 +100,9 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
   display: grid;
   gap: 10px;
   padding: 12px;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface-alt, #f8fbff);
 }
 
 .strategy-block + .strategy-block {
@@ -111,7 +111,7 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
 
 .strategy-block h3 {
   margin: 0;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 14px;
 }
 
@@ -123,18 +123,18 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
 
 .strategy-choice {
   min-height: 48px;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
   border-radius: 7px;
-  background: #fff;
-  color: #334155;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #334155);
   cursor: pointer;
   font-weight: 600;
 }
 
 .strategy-choice.active {
-  color: #fff;
-  background: #2563eb;
-  border-color: #2563eb;
+  color: var(--erp-primary-contrast, #fff);
+  background: var(--erp-primary-fill, #2563eb);
+  border-color: var(--erp-primary-fill, #2563eb);
 }
 
 .switch-list {
@@ -150,12 +150,12 @@ const imageStyles = ["高级原厂风", "白底清晰风", "安装场景风", "O
   gap: 10px;
   padding: 9px 10px;
   border-radius: 7px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
+  background: var(--erp-detail-surface, #fff);
+  border: 1px solid var(--erp-detail-border-light, #e2e8f0);
 }
 
 .switch-list span {
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
   font-size: 13px;
 }
 

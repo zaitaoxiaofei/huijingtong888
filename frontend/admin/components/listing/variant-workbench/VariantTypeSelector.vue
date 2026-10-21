@@ -37,9 +37,9 @@ defineEmits(["update:model-value"]);
 
 <style scoped>
 .work-card {
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.22));
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.78));
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
   padding: 14px;
 }
@@ -57,14 +57,14 @@ defineEmits(["update:model-value"]);
   width: 26px;
   height: 26px;
   border-radius: 6px;
-  background: #0f172a;
-  color: #fff;
+  background: var(--erp-detail-surface-alt, #0f172a);
+  color: var(--erp-detail-text-main, #fff);
   font-size: 12px;
   font-weight: 700;
 }
 
 .section-head strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
 }
 
 .type-grid {
@@ -79,17 +79,17 @@ defineEmits(["update:model-value"]);
   gap: 8px;
   align-content: start;
   padding: 12px;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface-alt, #f8fbff);
   text-align: left;
   cursor: pointer;
 }
 
 .type-card.active {
-  border-color: #2563eb;
-  background: #eef6ff;
-  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.18);
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-detail-primary-soft, #eef6ff);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.18));
 }
 
 .type-card > span {
@@ -100,19 +100,19 @@ defineEmits(["update:model-value"]);
 }
 
 .type-card strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 15px;
 }
 
 .type-card em {
-  color: #2563eb;
+  color: var(--erp-detail-primary, #2563eb);
   font-size: 12px;
   font-style: normal;
 }
 
 .type-card p {
   margin: 0;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   line-height: 1.5;
 }

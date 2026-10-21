@@ -610,15 +610,15 @@ onMounted(loadTemplates);
   gap: 12px;
   min-height: 100%;
   padding: 16px;
-  background: #f5f7fb;
+  background: var(--erp-detail-surface-alt, #f5f7fb);
 }
 
 .page-head,
 .asset-context,
 .library-workbench {
-  border: 1px solid #e4eaf2;
+  border: 1px solid var(--erp-detail-border, #e4eaf2);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .page-head {
@@ -634,20 +634,20 @@ onMounted(loadTemplates);
 .editor-toolbar span,
 .template-list button span,
 .prompt-block span {
-  color: #667085;
+  color: var(--erp-text-regular, #667085);
   font-size: 12px;
 }
 
 .page-head h1 {
   margin: 3px 0;
-  color: #101828;
+  color: var(--erp-detail-text-main, #101828);
   font-size: 24px;
 }
 
 .page-head p,
 .asset-context strong {
   margin: 0;
-  color: #475467;
+  color: var(--erp-text-regular, #475467);
   line-height: 1.5;
 }
 
@@ -670,29 +670,29 @@ onMounted(loadTemplates);
   gap: 4px;
   min-height: 82px;
   padding: 12px;
-  border: 1px solid #e4eaf2;
+  border: 1px solid var(--erp-detail-border, #e4eaf2);
   border-radius: 8px;
-  background: #fff;
-  color: #344054;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-text-regular, #344054);
   text-align: left;
   cursor: pointer;
 }
 
 .asset-tabs button.active {
-  border-color: #409eff;
-  background: #eef6ff;
-  color: #175cd3;
+  border-color: var(--erp-detail-primary-border, #409eff);
+  background: var(--erp-detail-primary-soft, #eef6ff);
+  color: var(--erp-detail-primary, #175cd3);
 }
 
 .asset-tabs span,
 .asset-tabs em {
-  color: #667085;
+  color: var(--erp-text-regular, #667085);
   font-size: 12px;
   font-style: normal;
 }
 
 .asset-tabs strong {
-  color: #101828;
+  color: var(--erp-detail-text-main, #101828);
   font-size: 20px;
 }
 
@@ -722,8 +722,8 @@ onMounted(loadTemplates);
 .asset-context li {
   padding: 5px 9px;
   border-radius: 999px;
-  background: #f2f4f7;
-  color: #344054;
+  background: var(--erp-detail-surface-alt, #f2f4f7);
+  color: var(--erp-text-regular, #344054);
   font-size: 12px;
 }
 
@@ -738,14 +738,14 @@ onMounted(loadTemplates);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
-  border-right: 1px solid #edf1f7;
+  border-right: 1px solid var(--erp-detail-border, #edf1f7);
 }
 
 .column-tools {
   display: grid;
   gap: 10px;
   padding: 12px;
-  border-bottom: 1px solid #edf1f7;
+  border-bottom: 1px solid var(--erp-detail-border, #edf1f7);
 }
 
 .template-list {
@@ -762,22 +762,22 @@ onMounted(loadTemplates);
   gap: 5px;
   width: 100%;
   padding: 12px;
-  border: 1px solid #e4eaf2;
+  border: 1px solid var(--erp-detail-border, #e4eaf2);
   border-radius: 8px;
-  background: #fbfdff;
-  color: #344054;
+  background: var(--erp-detail-surface-alt, #fbfdff);
+  color: var(--erp-text-regular, #344054);
   text-align: left;
   cursor: pointer;
 }
 
 .template-list button.active {
-  border-color: #409eff;
-  background: #eef6ff;
+  border-color: var(--erp-detail-primary-border, #409eff);
+  background: var(--erp-detail-primary-soft, #eef6ff);
 }
 
 .template-list strong {
   overflow: hidden;
-  color: #101828;
+  color: var(--erp-detail-text-main, #101828);
   font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -786,7 +786,7 @@ onMounted(loadTemplates);
 .template-list em {
   display: -webkit-box;
   overflow: hidden;
-  color: #667085;
+  color: var(--erp-text-regular, #667085);
   font-size: 12px;
   font-style: normal;
   line-height: 1.45;
@@ -813,7 +813,7 @@ onMounted(loadTemplates);
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border-bottom: 1px solid #edf1f7;
+  border-bottom: 1px solid var(--erp-detail-border, #edf1f7);
 }
 
 .editor-toolbar > div:first-child {
@@ -824,7 +824,7 @@ onMounted(loadTemplates);
 
 .editor-toolbar strong {
   overflow: hidden;
-  color: #101828;
+  color: var(--erp-detail-text-main, #101828);
   font-size: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -844,9 +844,9 @@ onMounted(loadTemplates);
   gap: 10px;
   align-items: stretch;
   padding: 12px;
-  border: 1px solid #edf1f7;
+  border: 1px solid var(--erp-detail-border, #edf1f7);
   border-radius: 8px;
-  background: #fbfdff;
+  background: var(--erp-detail-surface-alt, #fbfdff);
 }
 
 .business-form :deep(.el-form-item) {
@@ -896,9 +896,9 @@ onMounted(loadTemplates);
   align-items: stretch;
   min-width: 0;
   padding: 12px;
-  border: 1px solid #edf1f7;
+  border: 1px solid var(--erp-detail-border, #edf1f7);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .prompt-block > div {
@@ -909,7 +909,7 @@ onMounted(loadTemplates);
 }
 
 .prompt-block strong {
-  color: #344054;
+  color: var(--erp-text-regular, #344054);
   font-size: 14px;
 }
 
@@ -933,7 +933,7 @@ onMounted(loadTemplates);
 }
 
 .preview-dialog strong {
-  color: #344054;
+  color: var(--erp-text-regular, #344054);
 }
 
 pre {
@@ -942,8 +942,8 @@ pre {
   margin: 0;
   padding: 12px;
   border-radius: 8px;
-  background: #f6f8fb;
-  color: #344054;
+  background: var(--erp-detail-surface-alt, #f6f8fb);
+  color: var(--erp-text-regular, #344054);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -1005,7 +1005,7 @@ pre {
 
   .template-column {
     border-right: 0;
-    border-bottom: 1px solid #edf1f7;
+    border-bottom: 1px solid var(--erp-detail-border, #edf1f7);
   }
 }
 </style>

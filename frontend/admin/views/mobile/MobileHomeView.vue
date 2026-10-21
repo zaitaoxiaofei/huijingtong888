@@ -121,34 +121,34 @@ function openDesktopTarget() {
 
 <style scoped>
 .mobile-home-page { display: grid; gap: 14px; }
-.mobile-home-hero { min-height: 132px; display: flex; align-items: center; gap: 14px; padding: 20px; border-radius: 18px; color: #fff; background: linear-gradient(135deg, #1d4ed8, #2563eb 55%, #38bdf8); box-shadow: 0 14px 30px rgba(37, 99, 235, 0.2); }
-.mobile-home-hero__icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 16px; background: rgba(255, 255, 255, 0.18); font-size: 26px; }
+.mobile-home-hero { min-height: 132px; display: flex; align-items: center; gap: 14px; padding: 20px; border-radius: 18px; color: var(--erp-primary-contrast, #fff); background: linear-gradient(135deg, var(--erp-primary-fill, #1d4ed8), var(--erp-primary-fill, #2563eb) 55%, var(--erp-primary-fill, #38bdf8)); box-shadow: 0 14px 30px rgba(37, 99, 235, 0.2); }
+.mobile-home-hero__icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 16px; background: var(--erp-primary-soft, rgba(255, 255, 255, 0.18)); font-size: 26px; color: var(--erp-primary, #1d4ed8); }
 .mobile-home-hero p, .mobile-home-hero h1, .mobile-home-hero span { margin: 0; }
-.mobile-home-hero p { color: #dbeafe; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.mobile-home-hero p { color: inherit; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
 .mobile-home-hero h1 { margin-top: 4px; font-size: 24px; line-height: 1.25; }
-.mobile-home-hero div > span { display: block; margin-top: 7px; color: #e0f2fe; font-size: 13px; line-height: 1.5; }
-.mobile-continue-card, .mobile-desktop-entry { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 12px; border: 1px solid #c7d7f2; border-radius: 14px; background: #fff; color: #1e3a5f; text-align: left; }
+.mobile-home-hero div > span { display: block; margin-top: 7px; color: inherit; font-size: 13px; line-height: 1.5; }
+.mobile-continue-card, .mobile-desktop-entry { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--erp-detail-border, #c7d7f2); border-radius: 14px; background: var(--erp-detail-surface, #fff); color: var(--erp-detail-text-main, #1e3a5f); text-align: left; }
 .mobile-continue-card { padding: 12px 14px; }
-.mobile-continue-card > .el-icon { font-size: 22px; color: #2563eb; }
+.mobile-continue-card > .el-icon { font-size: 22px; color: var(--erp-detail-primary, #2563eb); }
 .mobile-continue-card span { min-width: 0; display: grid; flex: 1; gap: 3px; }
-.mobile-continue-card small { overflow: hidden; color: #64748b; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-continue-card b { color: #2563eb; font-size: 13px; }
+.mobile-continue-card small { overflow: hidden; color: var(--erp-detail-text-regular, #64748b); text-overflow: ellipsis; white-space: nowrap; }
+.mobile-continue-card b { color: var(--erp-detail-primary, #2563eb); font-size: 13px; }
 .mobile-home-section { display: grid; gap: 10px; }
 .mobile-home-section__heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px; }
-.mobile-home-section__heading strong { color: #172033; font-size: 16px; }
-.mobile-home-section__heading span { color: #64748b; font-size: 12px; }
+.mobile-home-section__heading strong { color: var(--erp-detail-text-main, #172033); font-size: 16px; }
+.mobile-home-section__heading span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
 .mobile-home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.mobile-home-card { min-width: 0; min-height: 148px; display: flex; align-items: flex-start; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid #dbe3ef; border-radius: 16px; background: #fff; color: #172033; text-align: left; }
+.mobile-home-card { min-width: 0; min-height: 148px; display: flex; align-items: flex-start; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 16px; background: var(--erp-detail-surface, #fff); color: var(--erp-detail-text-main, #172033); text-align: left; }
 .mobile-home-card__icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px; font-size: 20px; }
-.mobile-home-card.is-blue .mobile-home-card__icon { color: #1d4ed8; background: #dbeafe; }
-.mobile-home-card.is-green .mobile-home-card__icon { color: #047857; background: #d1fae5; }
-.mobile-home-card.is-orange .mobile-home-card__icon { color: #c2410c; background: #ffedd5; }
-.mobile-home-card.is-purple .mobile-home-card__icon { color: #6d28d9; background: #ede9fe; }
-.mobile-home-card.is-red .mobile-home-card__icon { color: #b91c1c; background: #fee2e2; }
-.mobile-home-card.is-cyan .mobile-home-card__icon { color: #0e7490; background: #cffafe; }
+.mobile-home-card.is-blue .mobile-home-card__icon { color: var(--erp-detail-primary, #1d4ed8); background: var(--erp-detail-primary-soft, #dbeafe); }
+.mobile-home-card.is-green .mobile-home-card__icon { color: var(--erp-detail-success-text, #047857); background: var(--erp-detail-success-bg, #d1fae5); }
+.mobile-home-card.is-orange .mobile-home-card__icon { color: var(--erp-detail-danger-text, #c2410c); background: var(--erp-detail-warning-bg, #ffedd5); }
+.mobile-home-card.is-purple .mobile-home-card__icon { color: var(--erp-detail-primary, #6d28d9); background: var(--erp-detail-primary-soft, #ede9fe); }
+.mobile-home-card.is-red .mobile-home-card__icon { color: var(--erp-detail-danger-text, #b91c1c); background: var(--erp-detail-danger-bg, #fee2e2); }
+.mobile-home-card.is-cyan .mobile-home-card__icon { color: var(--erp-detail-primary, #0e7490); background: var(--erp-detail-surface-alt, #cffafe); }
 .mobile-home-card strong { font-size: 14px; line-height: 1.35; }
-.mobile-home-card small { color: #64748b; font-size: 12px; line-height: 1.5; }
-.mobile-desktop-entry { justify-content: center; padding: 0 16px; color: #475569; font-size: 14px; font-weight: 700; }
+.mobile-home-card small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; line-height: 1.5; }
+.mobile-desktop-entry { justify-content: center; padding: 0 16px; color: var(--erp-detail-text-regular, #475569); font-size: 14px; font-weight: 700; }
 @media (max-width: 360px) {
   .mobile-home-grid { grid-template-columns: 1fr; }
   .mobile-home-card { min-height: 116px; }

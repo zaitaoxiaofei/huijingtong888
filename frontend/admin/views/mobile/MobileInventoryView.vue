@@ -145,26 +145,26 @@ onMounted(() => loadProducts());
 <style scoped>
 .mobile-inventory-page { display: grid; gap: 12px; }
 .mobile-inventory-search { display: grid; grid-template-columns: minmax(0, 1fr) 68px; gap: 8px; }
-.mobile-inventory-summary { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 12px; padding: 13px 14px; border: 1px solid #dbe3ef; border-radius: 14px; background: #fff; }
-.mobile-inventory-summary span, .mobile-inventory-summary small { color: #64748b; font-size: 12px; }
-.mobile-inventory-summary strong { grid-row: 1 / 3; grid-column: 2; color: #1d4ed8; font-size: 24px; }
+.mobile-inventory-summary { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 12px; padding: 13px 14px; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 14px; background: var(--erp-detail-surface, #fff); }
+.mobile-inventory-summary span, .mobile-inventory-summary small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.mobile-inventory-summary strong { grid-row: 1 / 3; grid-column: 2; color: var(--erp-detail-primary, #1d4ed8); font-size: 24px; }
 .mobile-inventory-list { display: grid; gap: 10px; }
-.mobile-inventory-card { overflow: hidden; border: 1px solid #dbe3ef; border-radius: 16px; background: #fff; }
+.mobile-inventory-card { overflow: hidden; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 16px; background: var(--erp-detail-surface, #fff); }
 .mobile-inventory-card__main { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; padding: 13px; }
 .mobile-inventory-card__main img, .mobile-inventory-card__placeholder { width: 64px; height: 84px; border-radius: 9px; }
-.mobile-inventory-card__main img { display: block; object-fit: cover; background: #eef2f7; }
-.mobile-inventory-card__placeholder { display: grid; place-items: center; color: #94a3b8; background: #eef2f7; font-size: 12px; }
+.mobile-inventory-card__main img { display: block; object-fit: cover; background: var(--erp-detail-surface-alt, #eef2f7); }
+.mobile-inventory-card__placeholder { display: grid; place-items: center; color: var(--erp-detail-text-secondary, #94a3b8); background: var(--erp-detail-surface-alt, #eef2f7); font-size: 12px; }
 .mobile-inventory-card__copy { min-width: 0; display: grid; align-content: start; gap: 5px; }
-.mobile-inventory-card__copy h2 { display: -webkit-box; margin: 0; overflow: hidden; color: #172033; font-size: 14px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.mobile-inventory-card__copy p, .mobile-inventory-card__copy span { margin: 0; overflow: hidden; color: #64748b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-inventory-card__stocks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid #edf1f6; border-bottom: 1px solid #edf1f6; background: #f8fafc; }
+.mobile-inventory-card__copy h2 { display: -webkit-box; margin: 0; overflow: hidden; color: var(--erp-detail-text-main, #172033); font-size: 14px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.mobile-inventory-card__copy p, .mobile-inventory-card__copy span { margin: 0; overflow: hidden; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-inventory-card__stocks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--erp-detail-border, #edf1f6); border-bottom: 1px solid var(--erp-detail-border, #edf1f6); background: var(--erp-detail-surface-alt, #f8fafc); }
 .mobile-inventory-card__stocks span { min-width: 0; display: grid; gap: 3px; padding: 9px 5px; text-align: center; }
-.mobile-inventory-card__stocks small { overflow: hidden; color: #64748b; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-inventory-card__stocks strong { color: #172033; font-size: 14px; }
-.mobile-inventory-card__foot { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 13px; color: #64748b; font-size: 12px; }
-.mobile-inventory-card__foot button { min-height: 32px; padding: 0 10px; border: 1px solid #bfdbfe; border-radius: 9px; background: #eff6ff; color: #1d4ed8; font-weight: 700; }
-.mobile-inventory-empty { display: grid; gap: 5px; padding: 28px 18px; border: 1px dashed #cbd5e1; border-radius: 14px; color: #64748b; text-align: center; }
-.mobile-inventory-empty strong { color: #334155; }
+.mobile-inventory-card__stocks small { overflow: hidden; color: var(--erp-detail-text-regular, #64748b); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-inventory-card__stocks strong { color: var(--erp-detail-text-main, #172033); font-size: 14px; }
+.mobile-inventory-card__foot { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 13px; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
+.mobile-inventory-card__foot button { min-height: 32px; padding: 0 10px; border: 1px solid var(--erp-detail-primary-border, #bfdbfe); border-radius: 9px; background: var(--erp-detail-primary-soft, #eff6ff); color: var(--erp-detail-primary, #1d4ed8); font-weight: 700; }
+.mobile-inventory-empty { display: grid; gap: 5px; padding: 28px 18px; border: 1px dashed var(--erp-detail-border, #cbd5e1); border-radius: 14px; color: var(--erp-detail-text-regular, #64748b); text-align: center; }
+.mobile-inventory-empty strong { color: var(--erp-detail-text-main, #334155); }
 .mobile-inventory-more { width: 100%; min-height: 44px; }
 @media (max-width: 360px) {
   .mobile-inventory-card__stocks { grid-template-columns: repeat(2, minmax(0, 1fr)); }

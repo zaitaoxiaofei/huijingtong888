@@ -339,17 +339,17 @@ function splitParagraphs(value) {
 .ozon-rich-dialog :deep(.el-dialog__header) {
   margin: 0;
   padding: 20px 24px 16px;
-  border-bottom: 1px solid #e6eaf2;
+  border-bottom: 1px solid var(--erp-detail-border-light, #e6eaf2);
 }
 
 .ozon-rich-dialog :deep(.el-dialog__body) {
   padding: 0;
-  background: #f6f8fb;
+  background: var(--erp-detail-surface-alt, #f6f8fb);
 }
 
 .ozon-rich-dialog :deep(.el-dialog__footer) {
   padding: 0;
-  border-top: 1px solid #e6eaf2;
+  border-top: 1px solid var(--erp-detail-border-light, #e6eaf2);
 }
 
 .rich-dialog-header {
@@ -367,7 +367,7 @@ function splitParagraphs(value) {
 }
 
 .rich-dialog-header strong {
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 18px;
   line-height: 1.2;
 }
@@ -376,7 +376,7 @@ function splitParagraphs(value) {
 .toolbar-hint,
 .preview-head span,
 .rich-dialog-footer span {
-  color: #6b7280;
+  color: var(--erp-detail-text-secondary, #6b7280);
   font-size: 12px;
 }
 
@@ -388,11 +388,11 @@ function splitParagraphs(value) {
 }
 
 .rich-stats span {
-  border: 1px solid #dbe4f0;
+  border: 1px solid var(--erp-detail-border-light, #dbe4f0);
   border-radius: 999px;
   padding: 5px 9px;
-  background: #f8fafc;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-regular, #475569);
 }
 
 .rich-editor-shell {
@@ -407,8 +407,8 @@ function splitParagraphs(value) {
   justify-content: space-between;
   gap: 14px;
   padding: 14px 24px;
-  background: #fff;
-  border-bottom: 1px solid #e6eaf2;
+  background: var(--erp-detail-surface, #fff);
+  border-bottom: 1px solid var(--erp-detail-border-light, #e6eaf2);
 }
 
 .toolbar-left {
@@ -443,10 +443,10 @@ function splitParagraphs(value) {
   display: grid;
   grid-template-columns: 62px 148px minmax(0, 1fr);
   gap: 12px;
-  border: 1px solid #dde6f2;
+  border: 1px solid var(--erp-detail-border-light, #dde6f2);
   border-radius: 8px;
   padding: 12px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
@@ -457,7 +457,7 @@ function splitParagraphs(value) {
   justify-content: space-between;
   gap: 8px;
   min-height: 170px;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
 }
 
 .block-tools strong {
@@ -466,9 +466,9 @@ function splitParagraphs(value) {
   width: 34px;
   height: 34px;
   border-radius: 999px;
-  background: #eef4ff;
+  background: var(--erp-detail-surface-alt, #eef4ff);
   font-weight: 700;
-  color: #1d4ed8;
+  color: var(--erp-detail-primary, #1d4ed8);
 }
 
 .block-tools > div {
@@ -485,9 +485,9 @@ function splitParagraphs(value) {
 .block-image-empty {
   width: 100%;
   height: 170px;
-  border: 1px solid #e5eaf3;
+  border: 1px solid var(--erp-detail-border-light, #e5eaf3);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .block-image img {
@@ -501,7 +501,7 @@ function splitParagraphs(value) {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
 }
 
 .block-image-empty svg {
@@ -516,9 +516,9 @@ function splitParagraphs(value) {
 }
 
 .rich-live-preview {
-  border: 1px solid #e5eaf3;
+  border: 1px solid var(--erp-detail-border-light, #e5eaf3);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   overflow: hidden;
   min-height: 0;
   display: flex;
@@ -531,14 +531,14 @@ function splitParagraphs(value) {
   justify-content: space-between;
   gap: 10px;
   padding: 14px;
-  border-bottom: 1px solid #edf1f7;
-  background: #fbfcff;
+  border-bottom: 1px solid var(--erp-detail-border-light, #edf1f7);
+  background: var(--erp-detail-surface-alt, #fbfcff);
 }
 
 .preview-head h3 {
   margin: 0 0 4px;
   font-size: 15px;
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
 }
 
 .preview-thumbs {
@@ -552,9 +552,9 @@ function splitParagraphs(value) {
 .preview-thumbs :deep(.el-image) {
   width: 28px;
   height: 28px;
-  border: 1px solid #edf1f7;
+  border: 1px solid var(--erp-detail-border-light, #edf1f7);
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .preview-scroll {
@@ -564,11 +564,11 @@ function splitParagraphs(value) {
 }
 
 .preview-block {
-  border: 1px solid #edf1f7;
+  border: 1px solid var(--erp-detail-border-light, #edf1f7);
   border-radius: 8px;
   overflow: hidden;
   margin-bottom: 14px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .preview-block:last-child {
@@ -580,19 +580,19 @@ function splitParagraphs(value) {
   width: 100%;
   max-height: 520px;
   object-fit: contain;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .preview-block h4 {
   margin: 12px 14px 6px;
-  color: #1f2937;
+  color: var(--erp-detail-text-main, #1f2937);
   font-size: 15px;
   line-height: 1.45;
 }
 
 .preview-block p {
   margin: 0 14px 14px;
-  color: #4b5563;
+  color: var(--erp-detail-text-regular, #4b5563);
   line-height: 1.65;
   white-space: pre-wrap;
 }
@@ -603,7 +603,7 @@ function splitParagraphs(value) {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 24px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .rich-dialog-footer > div {

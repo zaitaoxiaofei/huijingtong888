@@ -2027,7 +2027,7 @@ onBeforeUnmount(() => {
 .ai-variant-workbench {
   min-height: 100%;
   padding: 0 0 24px;
-  background: linear-gradient(180deg, #f5f8fc 0%, #eef3f8 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface-alt, #f5f8fc) 0%, var(--erp-detail-surface-alt, #eef3f8) 100%);
 }
 
 .source-toolbar {
@@ -2037,9 +2037,9 @@ onBeforeUnmount(() => {
   align-items: center;
   margin: 16px 16px 0;
   padding: 12px 14px;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
   border-radius: 10px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .source-toolbar > div:first-child {
@@ -2049,21 +2049,21 @@ onBeforeUnmount(() => {
 }
 
 .source-toolbar span {
-  color: #2563eb;
+  color: var(--erp-detail-primary, #2563eb);
   font-size: 12px;
   font-weight: 800;
 }
 
 .source-toolbar strong {
   overflow: hidden;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .source-toolbar em {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-style: normal;
 }
@@ -2130,15 +2130,15 @@ onBeforeUnmount(() => {
   width: 100%;
   padding: 9px;
   text-align: left;
-  border: 1px solid #dce5ef;
+  border: 1px solid var(--erp-detail-border-light, #dce5ef);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   cursor: pointer;
 }
 
 .import-row.active {
-  border-color: #2563eb;
-  background: #eff6ff;
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .check-dot {
@@ -2146,9 +2146,9 @@ onBeforeUnmount(() => {
   place-items: center;
   width: 18px;
   height: 18px;
-  border: 1px solid #93b7ee;
+  border: 1px solid var(--erp-detail-primary-border, #93b7ee);
   border-radius: 50%;
-  color: #2563eb;
+  color: var(--erp-detail-primary, #2563eb);
   font-weight: 800;
 }
 
@@ -2168,8 +2168,8 @@ onBeforeUnmount(() => {
   width: 74px;
   height: 82px;
   font-size: 11px;
-  color: #1e3a8a;
-  background: linear-gradient(135deg, #dbeafe, #f8fafc);
+  color: var(--erp-detail-primary, #1e3a8a);
+  background: linear-gradient(135deg, var(--erp-detail-primary-soft, #dbeafe), var(--erp-detail-surface-alt, #f8fafc));
 }
 
 .import-meta {
@@ -2180,7 +2180,7 @@ onBeforeUnmount(() => {
 
 .import-meta strong {
   overflow: hidden;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2188,7 +2188,7 @@ onBeforeUnmount(() => {
 .import-meta em,
 .import-meta small,
 .import-footer-text {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-style: normal;
 }

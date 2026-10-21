@@ -115,19 +115,19 @@ onUnmounted(stopRefreshTimer);
 </template>
 
 <style scoped>
-.material-records-page { display: grid; gap: 12px; min-height: 0; }
-.page-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border: 1px solid #e5eaf3; border-radius: 8px; background: #fff; }
+.material-records-page { color: var(--erp-text-main, #172033); display: grid; gap: 12px; min-height: 0; }
+.page-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; border: 1px solid var(--erp-border, #e5eaf3); border-radius: 8px; background: var(--erp-surface, #fff); }
 .page-toolbar h2, .detail-heading h3 { margin: 0; font-size: 18px; }
-.page-toolbar span, .detail-heading span, .batch-list span, .batch-list em, .muted { color: #697386; font-size: 12px; font-style: normal; }
+.page-toolbar span, .detail-heading span, .batch-list span, .batch-list em, .muted { color: var(--erp-text-regular, #697386); font-size: 12px; font-style: normal; }
 .records-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; min-height: 560px; }
-.batch-list, .batch-detail { min-width: 0; border: 1px solid #e5eaf3; border-radius: 8px; background: #fff; overflow: hidden; }
+.batch-list, .batch-detail { min-width: 0; border: 1px solid var(--erp-border, #e5eaf3); border-radius: 8px; background: var(--erp-surface, #fff); overflow: hidden; }
 .batch-list { display: flex; flex-direction: column; padding: 8px; gap: 6px; }
-.batch-list button { display: grid; gap: 5px; width: 100%; padding: 10px; border: 1px solid #e5eaf3; border-radius: 6px; background: #fff; text-align: left; cursor: pointer; }
-.batch-list button.active { border-color: #409eff; background: #f5f9ff; }
+.batch-list button { display: grid; gap: 5px; width: 100%; padding: 10px; border: 1px solid var(--erp-border, #e5eaf3); border-radius: 6px; background: var(--erp-surface, #fff); color: var(--erp-text-main, #172033); text-align: left; cursor: pointer; }
+.batch-list button.active { border-color: var(--erp-primary, #409eff); background: var(--erp-primary-soft, #f5f9ff); }
 .batch-list button > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .batch-detail { padding: 12px; }
 .detail-heading { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(240px, 420px); align-items: center; gap: 20px; margin-bottom: 12px; }
 .detail-heading > div { display: grid; gap: 4px; }
-.error-text { color: #f56c6c; font-size: 12px; line-height: 1.45; }
+.error-text { color: var(--erp-detail-danger-text, #b91c1c); font-size: 12px; line-height: 1.45; }
 @media (max-width: 900px) { .records-layout { grid-template-columns: 1fr; } .detail-heading { grid-template-columns: 1fr; } }
 </style>

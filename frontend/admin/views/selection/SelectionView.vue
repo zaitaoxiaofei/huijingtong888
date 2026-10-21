@@ -3658,9 +3658,9 @@ onBeforeUnmount(() => {
 
 .listing-content-check-tag {
   cursor: help;
-  border-color: #cbd5e1;
-  color: #475569;
-  background: #f8fafc;
+  border-color: var(--erp-detail-border-light, #cbd5e1);
+  color: var(--erp-detail-text-regular, #475569);
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .listing-job-meta,
@@ -3695,7 +3695,7 @@ onBeforeUnmount(() => {
   height: 84px;
   border-radius: 8px;
   border: 1px solid var(--erp-border);
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   flex-shrink: 0;
 }
 
@@ -3719,12 +3719,12 @@ onBeforeUnmount(() => {
   padding: 10px;
   border: 1px solid var(--erp-border);
   border-radius: 12px;
-  background: #f9fbfd;
+  background: var(--erp-detail-surface-alt, #f9fbfd);
   font-size: 12px;
 }
 
 .quote-card.is-missing {
-  background: #fcfcfc;
+  background: var(--erp-detail-surface-alt, #fcfcfc);
   border-style: dashed;
 }
 
@@ -3942,8 +3942,8 @@ onBeforeUnmount(() => {
   gap: 4px;
   padding: 10px 12px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.72));
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.14));
 }
 
 .selection-preview-fact span {
@@ -4033,9 +4033,9 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: center;
   padding: 14px;
-  border: 1px solid #dce8f6;
+  border: 1px solid var(--erp-detail-primary-border, #dce8f6);
   border-radius: 8px;
-  background: #f8fbff;
+  background: var(--erp-detail-surface-alt, #f8fbff);
 }
 
 .listing-shop-hero-icon {
@@ -4044,9 +4044,9 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  color: #1677ff;
-  background: #eef6ff;
-  border: 1px solid #cfe1ff;
+  color: var(--erp-detail-primary, #1677ff);
+  background: var(--erp-detail-primary-faint, #eef6ff);
+  border: 1px solid var(--erp-detail-primary-border, #cfe1ff);
 }
 
 .listing-shop-hero-main {
@@ -4058,12 +4058,12 @@ onBeforeUnmount(() => {
 .listing-shop-hero-main span,
 .listing-shop-hero-main p,
 .listing-shop-hero-count span {
-  color: #697386;
+  color: var(--erp-detail-text-secondary, #697386);
   font-size: 12px;
 }
 
 .listing-shop-hero-main strong {
-  color: #172033;
+  color: var(--erp-detail-text-main, #172033);
   font-size: 16px;
   line-height: 1.35;
   overflow: hidden;
@@ -4079,14 +4079,14 @@ onBeforeUnmount(() => {
   min-width: 84px;
   padding: 8px 10px;
   border-radius: 8px;
-  background: #fff;
-  border: 1px solid #edf1f7;
+  background: var(--erp-detail-surface, #fff);
+  border: 1px solid var(--erp-detail-primary-border, #edf1f7);
   text-align: center;
 }
 
 .listing-shop-hero-count strong {
   display: block;
-  color: #1677ff;
+  color: var(--erp-detail-primary, #1677ff);
   font-size: 22px;
   line-height: 1.1;
 }
@@ -4117,23 +4117,23 @@ onBeforeUnmount(() => {
   width: 100%;
   min-height: 86px;
   text-align: left;
-  border: 1px solid #e5eaf3;
+  border: 1px solid var(--erp-detail-primary-border, #e5eaf3);
   border-radius: 8px;
   padding: 12px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   cursor: pointer;
   transition: border-color .16s ease, box-shadow .16s ease, background .16s ease, transform .16s ease;
 }
 
 .listing-shop-option:hover {
-  border-color: #8bbcff;
+  border-color: var(--erp-detail-primary-border, #8bbcff);
   box-shadow: 0 8px 22px rgba(22, 119, 255, .08);
   transform: translateY(-1px);
 }
 
 .listing-shop-option.is-selected {
-  border-color: #1677ff;
-  background: #f7fbff;
+  border-color: var(--erp-detail-primary-border, #1677ff);
+  background: var(--erp-detail-primary-faint, #f7fbff);
   box-shadow: 0 0 0 2px rgba(22, 119, 255, .10);
 }
 
@@ -4146,8 +4146,8 @@ onBeforeUnmount(() => {
   border-radius: 5px;
   display: grid;
   place-items: center;
-  color: #fff;
-  background: #1677ff;
+  color: var(--erp-primary-contrast, #fff);
+  background: var(--erp-primary-fill, #1677ff);
   font-size: 12px;
   line-height: 1;
   opacity: 0;
@@ -4163,9 +4163,9 @@ onBeforeUnmount(() => {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  color: #24518f;
-  background: #eef6ff;
-  border: 1px solid #d7e8ff;
+  color: var(--erp-detail-primary, #24518f);
+  background: var(--erp-detail-primary-faint, #eef6ff);
+  border: 1px solid var(--erp-detail-primary-border, #d7e8ff);
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -4198,8 +4198,8 @@ onBeforeUnmount(() => {
 .listing-shop-option-meta span {
   padding: 3px 7px;
   border-radius: 5px;
-  background: #f4f7fb;
-  color: #5d6b82;
+  background: var(--erp-detail-surface-alt, #f4f7fb);
+  color: var(--erp-detail-text-regular, #5d6b82);
 }
 
 .profit-dialog-title {
@@ -4223,7 +4223,7 @@ onBeforeUnmount(() => {
   padding: 14px 16px;
   border: 1px solid var(--erp-border);
   border-radius: 14px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .profit-summary-card strong {
@@ -4232,15 +4232,15 @@ onBeforeUnmount(() => {
 }
 
 .profit-total-text {
-  color: #0f766e;
+  color: var(--erp-detail-success-text, #0f766e);
 }
 
 .profit-detail-table :deep(.el-table__row:last-child td) {
-  background: rgba(15, 118, 110, 0.08);
+  background: var(--erp-detail-success-bg, rgba(15, 118, 110, 0.08));
 }
 
 .listing-job-error {
-  color: #dc2626;
+  color: var(--erp-detail-danger-text, #dc2626);
   max-width: 220px;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -4249,7 +4249,7 @@ onBeforeUnmount(() => {
 }
 
 .listing-job-fix-tip {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
   max-width: 240px;
   display: -webkit-box;
   -webkit-line-clamp: 2;

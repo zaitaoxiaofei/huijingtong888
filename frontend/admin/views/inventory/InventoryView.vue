@@ -79,7 +79,7 @@ function changeAlertView(view) {
   gap: 4px;
   padding: 4px;
   border-radius: 8px;
-  background: #f1f5f9;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
 }
 
 .inventory-header-status button {
@@ -88,7 +88,7 @@ function changeAlertView(view) {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   cursor: pointer;
   font: inherit;
   font-weight: 600;
@@ -96,19 +96,19 @@ function changeAlertView(view) {
 }
 
 .inventory-header-status button:hover {
-  border-color: #bfdbfe;
-  color: #2563eb;
+  border-color: var(--erp-detail-border-light, #bfdbfe);
+  color: var(--erp-detail-primary, #2563eb);
 }
 
 .inventory-header-status button:focus-visible {
-  outline: 3px solid rgba(37, 99, 235, 0.2);
+  outline: 3px solid var(--erp-detail-primary-border, rgba(37, 99, 235, 0.2));
   outline-offset: 2px;
 }
 
 .inventory-header-status button.is-active {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-primary-fill, #2563eb);
+  color: var(--erp-primary-contrast, #fff);
   box-shadow: none;
 }
 

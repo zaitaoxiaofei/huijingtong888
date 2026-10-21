@@ -587,7 +587,7 @@ onBeforeUnmount(() => {
 :global(.erp-update-toast__body) {
   display: grid;
   gap: 10px;
-  color: #475467;
+  color: var(--erp-text-regular, #475467);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -609,14 +609,14 @@ onBeforeUnmount(() => {
 }
 
 :global(.erp-update-toast__link) {
-  border: 1px solid #d0d5dd;
-  background: #ffffff;
-  color: #475467;
+  border: 1px solid var(--erp-border-strong, #d0d5dd);
+  background: var(--erp-surface, #ffffff);
+  color: var(--erp-text-regular, #475467);
 }
 
 :global(.erp-update-toast__primary) {
-  border: 1px solid #1677ff;
-  background: #1677ff;
-  color: #ffffff;
+  border: 1px solid var(--erp-primary-fill, #1677ff);
+  background: var(--erp-primary-fill, #1677ff);
+  color: var(--erp-primary-contrast, #ffffff);
 }
 </style>

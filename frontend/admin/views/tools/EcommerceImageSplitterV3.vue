@@ -716,7 +716,7 @@ watch(watermarkShopId, () => {
 }
 
 .watermark-preview-panel strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 15px;
 }
 
@@ -725,9 +725,9 @@ watch(watermarkShopId, () => {
   overflow: hidden;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(148, 163, 184, 0.28);
+  border: 1px solid var(--erp-detail-primary-border, rgba(148, 163, 184, 0.28));
   border-radius: 8px;
-  background: #eef3fa;
+  background: var(--erp-detail-surface-alt, #eef3fa);
 }
 
 .watermark-crop-stage {
@@ -769,13 +769,13 @@ watch(watermarkShopId, () => {
   align-items: center;
   gap: 12px;
   padding: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--erp-detail-primary-border, rgba(148, 163, 184, 0.22));
   border-radius: 8px;
-  color: #64748b;
+  color: var(--erp-text-regular, #64748b);
   background:
     linear-gradient(45deg, rgba(148, 163, 184, 0.14) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.14) 75%),
     linear-gradient(45deg, rgba(148, 163, 184, 0.14) 25%, transparent 25%, transparent 75%, rgba(148, 163, 184, 0.14) 75%),
-    #fff;
+    var(--erp-detail-surface, #fff);
   background-position: 0 0, 10px 10px;
   background-size: 20px 20px;
 }
@@ -806,7 +806,7 @@ watch(watermarkShopId, () => {
 
 .watermark-drag-tip {
   margin: -8px 0 16px;
-  color: #64748b;
+  color: var(--erp-text-regular, #64748b);
   font-size: 12px;
   line-height: 1.6;
 }

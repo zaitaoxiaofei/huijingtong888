@@ -108,8 +108,8 @@ const restoredText = computed(() => {
   gap: 16px;
   align-items: center;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(247, 250, 253, 0.94);
+  border-bottom: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.22));
+  background: var(--erp-detail-surface-alt, rgba(247, 250, 253, 0.94));
   backdrop-filter: blur(14px);
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
 }
@@ -127,7 +127,7 @@ const restoredText = computed(() => {
   height: 84px;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid #dbe5ef;
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
 }
 
 .base-copy {
@@ -137,7 +137,7 @@ const restoredText = computed(() => {
 }
 
 .base-copy > span {
-  color: #2563eb;
+  color: var(--erp-detail-primary, #2563eb);
   font-size: 12px;
   font-weight: 700;
 }
@@ -146,7 +146,7 @@ const restoredText = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 18px;
 }
 
@@ -160,8 +160,8 @@ const restoredText = computed(() => {
 .base-facts em {
   padding: 3px 7px;
   border-radius: 5px;
-  background: #eaf2ff;
-  color: #334155;
+  background: var(--erp-detail-primary-soft, #eaf2ff);
+  color: var(--erp-detail-text-regular, #334155);
   font-size: 12px;
   font-style: normal;
 }
@@ -179,17 +179,17 @@ const restoredText = computed(() => {
   align-content: center;
   padding: 8px 10px;
   border-radius: 8px;
-  background: #ffffff;
-  border: 1px solid #dbe5ef;
+  background: var(--erp-detail-surface, #ffffff);
+  border: 1px solid var(--erp-detail-border-light, #dbe5ef);
 }
 
 .task-metrics span {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
 }
 
 .task-metrics strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-size: 16px;
 }
 

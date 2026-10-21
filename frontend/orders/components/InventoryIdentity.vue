@@ -40,20 +40,20 @@ function toggle(id) {
 </template>
 <style scoped>
 .inventory-identities,.inventory-identity { display:flex;flex-direction:column;gap:4px;width:100%;min-width:0;font-size:inherit; }
-.inventory-identity + .inventory-identity { border-top:1px solid #ebeef5;padding-top:8px; }
+.inventory-identity + .inventory-identity { border-top:1px solid var(--erp-border-light, #ebeef5);padding-top:8px; }
 .inventory-identity-header { display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0;line-height:1.5; }
 .inventory-parent-number,.inventory-parent-name { font-size:inherit;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.5; }
 .inventory-parent-number { min-width:0; }
 .inventory-parent-quantity { flex-shrink:0;font-size:inherit;font-weight:600;white-space:nowrap; }
-.inventory-identity small { color:#606266;line-height:1.5; }
-.inventory-children { border-left:2px solid #dce6f4;padding-left:8px;display:grid;gap:5px;min-width:0; }
+.inventory-identity small { color:var(--erp-text-secondary, #606266);line-height:1.5; }
+.inventory-children { border-left:2px solid var(--erp-border, #dce6f4);padding-left:8px;display:grid;gap:5px;min-width:0; }
 .inventory-child { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 8px;font-size:12px;line-height:1.5;min-width:0; }
 .inventory-child-label { overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0; }
 .inventory-child-quantity { white-space:nowrap;text-align:right; }
 .inventory-child small { grid-column:1 / -1; }
-.inventory-child .inventory-child-shortage { color:var(--el-color-danger); }
+.inventory-child .inventory-child-shortage { color:var(--erp-danger-text); }
 .inventory-local-counts { display:flex;gap:4px 10px;font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums; }
 .inventory-local-counts > span { white-space:nowrap; }
 .inventory-local-counts.has-multiple-fbp { flex-wrap:wrap; }
-.inventory-local-counts span:first-child { color:#0b6b56; }
+.inventory-local-counts span:first-child { color:var(--erp-success-text, #0b6b56); }
 </style>

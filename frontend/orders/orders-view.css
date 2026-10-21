@@ -1,4 +1,4 @@
-﻿.vue-orders-shell {
+.vue-orders-shell {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -11,9 +11,9 @@
 .orders-toolbar-card,
 .orders-table-card,
 .orders-pagination-card {
-  border: 1px solid rgba(203, 213, 225, 0.8);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.8));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   box-shadow: none;
 }
 
@@ -92,7 +92,7 @@
 
 .orders-toolbar-last-sync {
   flex: 0 0 auto;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   line-height: 20px;
   white-space: nowrap;
@@ -122,7 +122,7 @@
   gap: 6px;
   padding-left: 10px;
   margin-left: 4px;
-  border-left: 1px solid rgba(203, 213, 225, 0.8);
+  border-left: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.8));
 }
 
 .orders-toolbar-actions-side {
@@ -130,7 +130,7 @@
   align-items: center;
   padding-left: 10px;
   margin-left: 0;
-  border-left: 1px solid rgba(203, 213, 225, 0.8);
+  border-left: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.8));
 }
 
 /* Orders page visual refresh: keep logic unchanged, relax density and unify theme. */
@@ -141,9 +141,9 @@
 .orders-toolbar-card,
 .orders-table-card,
 .orders-pagination-card {
-  border: 1px solid rgba(206, 216, 229, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(206, 216, 229, 0.82));
   border-radius: 14px;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+  box-shadow: 0 8px 22px var(--erp-detail-primary-soft, rgba(15, 23, 42, 0.04));
 }
 
 .orders-toolbar-card .el-card__body {
@@ -313,21 +313,21 @@
 .orders-chip-button-subtle {
   min-height: 30px;
   padding: 0 11px;
-  border: 1px solid rgba(203, 213, 225, 0.72);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.72));
   border-radius: 999px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   gap: 5px;
   font-size: 12px;
 }
 
 .orders-chip-button-subtle:hover {
-  border-color: rgba(148, 163, 184, 0.96);
-  background: #f8fafc;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.96));
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-chip-button-subtle.active,
 .orders-chip-button-subtle.orders-chip-button-mark.active {
-  background: #eef2f7;
+  background: var(--erp-detail-surface-alt, #eef2f7);
 }
 
 .orders-table .el-table__cell,
@@ -340,7 +340,7 @@
 }
 
 .orders-table .el-table__header-wrapper th {
-  background: #f6f8fb;
+  background: var(--erp-detail-surface-alt, #f6f8fb);
   font-size: 13px;
 }
 
@@ -445,10 +445,10 @@
   gap: 6px;
   min-height: 26px;
   padding: 0 9px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 999px;
-  color: #475569;
-  background: #fff;
+  color: var(--erp-detail-text-regular, #475569);
+  background: var(--erp-detail-surface, #fff);
   font-size: 12px;
   transition: border-color .2s, background-color .2s, box-shadow .2s;
 }
@@ -456,7 +456,7 @@
 .orders-quick-filter-tag.is-active {
   border-color: var(--el-color-primary);
   background: var(--el-color-primary-light-9);
-  color: var(--el-color-primary);
+  color: var(--erp-primary);
   box-shadow: 0 0 0 1px var(--el-color-primary-light-7);
 }
 
@@ -486,7 +486,7 @@
 }
 
 .orders-procurement-time-cell strong {
-  color: #303133;
+  color: var(--erp-detail-text-main, #303133);
   font-variant-numeric: tabular-nums;
 }
 
@@ -520,7 +520,7 @@
 
 /* Orders page polish pass: refine controls, row rhythm, and visual hierarchy. */
 .orders-toolbar-card {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(249, 251, 254, 0.96) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface, rgba(255, 255, 255, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(249, 251, 254, 0.96)) 100%);
 }
 
 .orders-toolbar-card .el-input__wrapper,
@@ -530,31 +530,31 @@
 .orders-toolbar-card .el-range-editor.el-input__wrapper {
   min-height: 32px;
   border-radius: 8px;
-  box-shadow: inset 0 0 0 1px rgba(206, 216, 229, 0.92);
-  background: #fff;
+  box-shadow: inset 0 0 0 1px var(--erp-detail-border, rgba(206, 216, 229, 0.92));
+  background: var(--erp-detail-surface, #fff);
 }
 
 .orders-toolbar-card .el-input__wrapper:hover,
 .orders-toolbar-card .el-select__wrapper:hover,
 .orders-toolbar-card .el-range-editor.el-input__wrapper:hover {
-  box-shadow: inset 0 0 0 1px rgba(160, 176, 197, 0.95);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-border, rgba(160, 176, 197, 0.95));
 }
 
 .orders-toolbar-card .el-input__wrapper.is-focus,
 .orders-toolbar-card .el-select__wrapper.is-focused,
 .orders-toolbar-card .el-range-editor.is-active {
-  box-shadow: inset 0 0 0 1px rgba(79, 107, 149, 0.55);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-primary-border, rgba(79, 107, 149, 0.55));
 }
 
 .orders-toolbar-card .el-input__inner,
 .orders-toolbar-card .el-select__placeholder,
 .orders-toolbar-card .el-range-input {
   font-size: 13px;
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
 }
 
 .orders-status-card {
-  border-top-color: rgba(221, 228, 238, 0.9);
+  border-top-color: var(--erp-detail-border, rgba(221, 228, 238, 0.9));
 }
 
 .orders-status-item,
@@ -568,11 +568,11 @@
 }
 
 .orders-table-card {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(252, 253, 255, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface, rgba(255, 255, 255, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(252, 253, 255, 0.98)) 100%);
 }
 
 .orders-table .el-table__header-wrapper th {
-  color: #6a7890;
+  color: var(--erp-detail-text-secondary, #6a7890);
   letter-spacing: 0.01em;
 }
 
@@ -581,7 +581,7 @@
 }
 
 .orders-table .el-table__body-wrapper .el-table__row:hover td {
-  background: linear-gradient(180deg, rgba(248, 251, 255, 0.9) 0%, rgba(244, 248, 253, 0.9) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface-alt, rgba(248, 251, 255, 0.9)) 0%, var(--erp-detail-surface-alt, rgba(244, 248, 253, 0.9)) 100%);
 }
 
 .orders-posting-link,
@@ -593,95 +593,95 @@
 .orders-posting-link:hover,
 .orders-product-link:hover,
 .orders-tracking-link:hover {
-  color: #1849a9;
+  color: var(--erp-link, #1849a9);
 }
 
 .orders-copy-chip {
   min-height: 23px;
   padding: 0 9px;
-  background: #f3f8ff;
-  border-color: rgba(173, 205, 255, 0.95);
+  background: var(--erp-detail-primary-soft, #f3f8ff);
+  border-color: var(--erp-detail-primary-border, rgba(173, 205, 255, 0.95));
 }
 
 .orders-copy-chip:hover {
-  background: #e8f1ff;
+  background: var(--erp-detail-primary-soft, #e8f1ff);
 }
 
 .orders-inventory-item.bound {
-  background: linear-gradient(180deg, rgba(241, 253, 245, 0.96) 0%, rgba(237, 250, 243, 0.92) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-success-bg, rgba(241, 253, 245, 0.96)) 0%, var(--erp-detail-success-bg, rgba(237, 250, 243, 0.92)) 100%);
 }
 
 .orders-inventory-item.pending {
-  background: linear-gradient(180deg, rgba(255, 251, 239, 0.96) 0%, rgba(255, 248, 231, 0.92) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-warning-bg, rgba(255, 251, 239, 0.96)) 0%, var(--erp-detail-warning-bg, rgba(255, 248, 231, 0.92)) 100%);
 }
 
 .orders-inline-accent-button-secondary.el-button,
 .orders-profit-detail-button.el-button {
-  background: #fbfdff;
+  background: var(--erp-detail-surface-alt, #fbfdff);
 }
 
 .orders-inline-accent-button-secondary.el-button:hover,
 .orders-profit-detail-button.el-button:hover {
-  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.08);
+  box-shadow: 0 6px 14px var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.08));
 }
 
 .orders-inline-accent-button-primary.el-button {
-  box-shadow: 0 8px 18px rgba(79, 107, 149, 0.16);
+  box-shadow: 0 8px 18px var(--erp-detail-primary-soft, rgba(79, 107, 149, 0.16));
 }
 
 .orders-inline-accent-button-primary.el-button:hover {
-  box-shadow: 0 10px 20px rgba(79, 107, 149, 0.2);
+  box-shadow: 0 10px 20px var(--erp-detail-primary-soft, rgba(79, 107, 149, 0.2));
 }
 
 /* Orders page business-tone pass: lower blue saturation to steel-blue gray. */
 .orders-toolbar-btn-secondary.el-button {
-  --el-button-hover-bg-color: #f7f9fc;
-  --el-button-hover-border-color: rgba(79, 107, 149, 0.26);
-  --el-button-active-bg-color: #edf2f8;
-  --el-button-active-border-color: rgba(79, 107, 149, 0.34);
+  --el-button-hover-bg-color: var(--erp-detail-surface-alt, #f7f9fc);
+  --el-button-hover-border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.26));
+  --el-button-active-bg-color: var(--erp-detail-surface-alt, #edf2f8);
+  --el-button-active-border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.34));
 }
 
 .orders-selected-count.active {
-  border-color: rgba(79, 107, 149, 0.24);
-  background: #edf2f8;
-  color: #3f5f89;
+  border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.24));
+  background: var(--erp-detail-surface-alt, #edf2f8);
+  color: var(--erp-link, #3f5f89);
 }
 
 .orders-status-action-button {
-  border-color: rgba(79, 107, 149, 0.14);
+  border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.14));
 }
 
 .orders-status-action-button:hover {
-  border-color: rgba(79, 107, 149, 0.28);
-  background: #f7f9fc;
-  color: #3f5f89;
+  border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.28));
+  background: var(--erp-detail-surface-alt, #f7f9fc);
+  color: var(--erp-link, #3f5f89);
 }
 
 .orders-copy-chip {
-  border-color: rgba(190, 203, 222, 0.95);
-  background: #f2f6fb;
-  color: #4a658c;
+  border-color: var(--erp-detail-border, rgba(190, 203, 222, 0.95));
+  background: var(--erp-detail-surface-alt, #f2f6fb);
+  color: var(--erp-link, #4a658c);
 }
 
 .orders-copy-chip:hover {
-  background: #e8eef6;
-  border-color: rgba(129, 151, 182, 0.95);
+  background: var(--erp-detail-surface-alt, #e8eef6);
+  border-color: var(--erp-detail-primary-border, rgba(129, 151, 182, 0.95));
 }
 
 .orders-posting-link,
 .orders-product-link,
 .orders-tracking-link {
-  color: #566f93;
+  color: var(--erp-link, #566f93);
 }
 
 .orders-posting-link:hover,
 .orders-product-link:hover,
 .orders-tracking-link:hover {
-  color: #435a7b;
+  color: var(--erp-link, #435a7b);
 }
 
 .orders-order-title .is-strong {
-  color: #36506f;
+  color: var(--erp-detail-text-main, #36506f);
 }
 
 .orders-table .el-table__body-wrapper a {
@@ -690,22 +690,22 @@
 
 .orders-inline-accent-button-secondary.el-button,
 .orders-profit-detail-button.el-button {
-  background: #fcfdff;
+  background: var(--erp-detail-surface-alt, #fcfdff);
 }
 
 .orders-inline-accent-button-secondary.el-button:hover,
 .orders-profit-detail-button.el-button:hover {
-  border-color: rgba(79, 107, 149, 0.28);
-  background: #f7f9fc;
-  color: #3f5f89;
-  box-shadow: 0 6px 14px rgba(79, 107, 149, 0.07);
+  border-color: var(--erp-detail-primary-border, rgba(79, 107, 149, 0.28));
+  background: var(--erp-detail-surface-alt, #f7f9fc);
+  color: var(--erp-link, #3f5f89);
+  box-shadow: 0 6px 14px var(--erp-detail-primary-soft, rgba(79, 107, 149, 0.07));
 }
 
 .orders-page-footer .erp-footer-pagination .el-pagination .el-pager li.is-active,
 .orders-pagination .el-pagination .el-pager li.is-active {
-  border-color: #4f6b95;
-  background: #4f6b95;
-  box-shadow: 0 8px 18px rgba(79, 107, 149, 0.18);
+  border-color: var(--erp-primary-fill, #4f6b95);
+  background: var(--erp-primary-fill, #4f6b95);
+  box-shadow: 0 8px 18px var(--erp-detail-primary-soft, rgba(79, 107, 149, 0.18));
 }
 
 .orders-toolbar-btn.el-button {
@@ -718,64 +718,64 @@
 }
 
 .orders-toolbar-btn-primary.el-button {
-  --el-button-bg-color: #4f6b95;
-  --el-button-border-color: #4f6b95;
-  --el-button-hover-bg-color: #445d82;
-  --el-button-hover-border-color: #445d82;
-  --el-button-active-bg-color: #3b5375;
-  --el-button-active-border-color: #3b5375;
-  --el-button-text-color: #fff;
+  --el-button-bg-color: var(--erp-primary-fill, #4f6b95);
+  --el-button-border-color: var(--erp-primary-fill, #4f6b95);
+  --el-button-hover-bg-color: var(--erp-primary-fill-hover, #445d82);
+  --el-button-hover-border-color: var(--erp-primary-fill-hover, #445d82);
+  --el-button-active-bg-color: var(--erp-primary-fill-hover, #3b5375);
+  --el-button-active-border-color: var(--erp-primary-fill-hover, #3b5375);
+  --el-button-text-color: var(--erp-primary-contrast, #fff);
 }
 
 .orders-toolbar-btn-secondary.el-button {
-  --el-button-bg-color: #fff;
-  --el-button-border-color: rgba(203, 213, 225, 0.95);
-  --el-button-hover-bg-color: #f8fbff;
-  --el-button-hover-border-color: rgba(37, 99, 235, 0.26);
-  --el-button-active-bg-color: #eff6ff;
-  --el-button-active-border-color: rgba(37, 99, 235, 0.34);
-  --el-button-text-color: #334155;
+  --el-button-bg-color: var(--erp-detail-surface, #fff);
+  --el-button-border-color: var(--erp-detail-border, rgba(203, 213, 225, 0.95));
+  --el-button-hover-bg-color: var(--erp-detail-primary-soft, #f8fbff);
+  --el-button-hover-border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.26));
+  --el-button-active-bg-color: var(--erp-detail-primary-soft, #eff6ff);
+  --el-button-active-border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.34));
+  --el-button-text-color: var(--erp-detail-text-regular, #334155);
 }
 
 .orders-toolbar-btn-danger.el-button {
-  --el-button-bg-color: #fff;
-  --el-button-border-color: rgba(239, 68, 68, 0.28);
-  --el-button-hover-bg-color: #fff5f5;
-  --el-button-hover-border-color: rgba(220, 38, 38, 0.42);
-  --el-button-active-bg-color: #fee2e2;
-  --el-button-active-border-color: rgba(220, 38, 38, 0.48);
-  --el-button-text-color: #b42318;
+  --el-button-bg-color: var(--erp-detail-surface, #fff);
+  --el-button-border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.28));
+  --el-button-hover-bg-color: var(--erp-detail-danger-bg, #fff5f5);
+  --el-button-hover-border-color: var(--erp-detail-danger-border, rgba(220, 38, 38, 0.42));
+  --el-button-active-bg-color: var(--erp-detail-danger-bg, #fee2e2);
+  --el-button-active-border-color: var(--erp-detail-danger-border, rgba(220, 38, 38, 0.48));
+  --el-button-text-color: var(--erp-detail-danger-text, #b42318);
 }
 
 .orders-toolbar-action-accent {
-  --el-button-bg-color: #4f6b95;
-  --el-button-border-color: #4f6b95;
-  --el-button-hover-bg-color: #445d82;
-  --el-button-hover-border-color: #445d82;
-  --el-button-active-bg-color: #3b5375;
-  --el-button-active-border-color: #3b5375;
-  --el-button-text-color: #fff;
+  --el-button-bg-color: var(--erp-primary-fill, #4f6b95);
+  --el-button-border-color: var(--erp-primary-fill, #4f6b95);
+  --el-button-hover-bg-color: var(--erp-primary-fill-hover, #445d82);
+  --el-button-hover-border-color: var(--erp-primary-fill-hover, #445d82);
+  --el-button-active-bg-color: var(--erp-primary-fill-hover, #3b5375);
+  --el-button-active-border-color: var(--erp-primary-fill-hover, #3b5375);
+  --el-button-text-color: var(--erp-primary-contrast, #fff);
 }
 
 .orders-toolbar-background-tag {
   height: 32px;
   padding: 0 11px;
-  color: #4b5f7a;
-  border-color: rgba(148, 163, 184, 0.65);
-  background: #f8fafc;
+  color: var(--erp-detail-text-secondary, #4b5f7a);
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.65));
+  background: var(--erp-detail-surface-alt, #f8fafc);
   line-height: 30px;
 }
 
 .orders-toolbar-status {
   margin-top: 6px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .orders-status-card {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid rgba(226, 232, 240, 0.9);
+  border-top: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
 }
 
 .orders-status-head {
@@ -819,16 +819,16 @@
   justify-content: center;
   width: 28px;
   height: 26px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 999px;
-  background: #fff;
-  color: #64748b;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-secondary, #64748b);
   cursor: pointer;
 }
 
 .orders-status-sort-button:hover {
-  border-color: rgba(148, 163, 184, 0.96);
-  color: #1f2937;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.96));
+  color: var(--erp-detail-text-main, #1f2937);
 }
 
 .orders-status-preference-list {
@@ -842,9 +842,9 @@
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .orders-status-preference-index {
@@ -854,8 +854,8 @@
   width: 26px;
   height: 26px;
   border-radius: 999px;
-  background: #f1f5f9;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f1f5f9);
+  color: var(--erp-detail-text-regular, #475569);
   font-weight: 700;
   font-size: 12px;
 }
@@ -873,19 +873,19 @@
   justify-content: center;
   min-height: 24px;
   padding: 0 8px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 999px;
-  background: #f8fafc;
-  color: #64748b;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
 }
 
 .orders-selected-count.active {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.28));
+  background: var(--erp-detail-primary-soft, #eff6ff);
+  color: var(--erp-link, #1d4ed8);
 }
 
 .orders-print-actions-group {
@@ -921,15 +921,15 @@
   gap: 12px;
   min-height: 36px;
   padding: 0 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--erp-detail-border, #e2e8f0);
   border-radius: 6px;
-  background: #f8fafc;
-  color: #64748b;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 13px;
 }
 
 .orders-print-target-line strong {
-  color: #0f172a;
+  color: var(--erp-detail-text-main, #0f172a);
   font-weight: 600;
 }
 
@@ -941,7 +941,7 @@
 }
 
 .orders-print-dialog-footer > span {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 13px;
 }
 
@@ -973,19 +973,19 @@
   gap: 5px;
   min-height: 26px;
   padding: 0 8px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 999px;
-  background: #f8fafc;
-  color: #334155;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-regular, #334155);
   font-size: 11px;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-border, rgba(255, 255, 255, 0.4));
   transition: all 0.18s ease;
   cursor: pointer;
   white-space: nowrap;
 }
 
 .orders-status-item strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1004,16 +1004,16 @@
 }
 
 .orders-status-item.active {
-  border-color: rgba(148, 163, 184, 0.95);
-  background: #fff;
-  color: #1f2937;
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.14);
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.95));
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-main, #1f2937);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-border, rgba(148, 163, 184, 0.14));
 }
 
 .orders-status-item:hover {
-  border-color: rgba(148, 163, 184, 0.96);
-  background: #fff;
-  color: #1f2937;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.96));
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-main, #1f2937);
 }
 
 .orders-status-subgrid {
@@ -1057,10 +1057,10 @@
   gap: 5px;
   min-height: 24px;
   padding: 0 9px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 999px;
-  background: #fff;
-  color: #475569;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #475569);
   font: inherit;
   font-size: 11px;
   white-space: nowrap;
@@ -1077,22 +1077,22 @@
 }
 
 .orders-chip-button.active {
-  border-color: rgba(148, 163, 184, 0.95);
-  background: #fff;
-  color: #1f2937;
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.14);
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.95));
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-main, #1f2937);
+  box-shadow: inset 0 0 0 1px var(--erp-detail-border, rgba(148, 163, 184, 0.14));
 }
 
 .orders-chip-button-mark.active {
-  border-color: rgba(148, 163, 184, 0.9);
-  background: #eef2f7;
-  color: #1f2937;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.9));
+  background: var(--erp-detail-surface-alt, #eef2f7);
+  color: var(--erp-detail-text-main, #1f2937);
 }
 
 .orders-chip-button:hover {
-  border-color: rgba(148, 163, 184, 0.96);
-  background: #f8fafc;
-  color: #1f2937;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.96));
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-main, #1f2937);
 }
 
 .orders-chip-button-subtle {
@@ -1101,7 +1101,7 @@
   border: none;
   border-radius: 0;
   background: transparent;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   box-shadow: none;
   gap: 3px;
   font-size: 11px;
@@ -1110,14 +1110,14 @@
 .orders-chip-button-subtle:hover {
   border: none;
   background: transparent;
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
 }
 
 .orders-chip-button-subtle.active,
 .orders-chip-button-subtle.orders-chip-button-mark.active {
-  border: 1px solid rgba(148, 163, 184, 0.95);
-  background: #fff;
-  color: #111827;
+  border: 1px solid var(--erp-detail-border, rgba(148, 163, 184, 0.95));
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-main, #111827);
   box-shadow: none;
 }
 
@@ -1125,7 +1125,7 @@
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #94a3b8;
+  background: var(--erp-detail-surface-alt, #94a3b8);
 }
 
 .orders-mark-filter-dot.is-red {
@@ -1157,7 +1157,7 @@
 .orders-status-item.tone-red,
 .orders-status-item.tone-gray,
 .orders-status-item.tone-orange {
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
 }
 
 .orders-status-item.active strong {
@@ -1222,7 +1222,7 @@
 }
 
 .orders-page-footer .erp-footer-pagination__meta {
-  color: #46556c;
+  color: var(--erp-detail-text-regular, #46556c);
   font-size: 11px;
   line-height: 24px;
 }
@@ -1233,10 +1233,10 @@
 
 .orders-page-footer .erp-footer-pagination .el-pagination {
   --el-pagination-bg-color: transparent;
-  --el-pagination-button-bg-color: #f8fafc;
-  --el-pagination-button-disabled-bg-color: #f1f5f9;
-  --el-pagination-hover-color: #2563eb;
-  --el-pagination-button-color: #334155;
+  --el-pagination-button-bg-color: var(--erp-detail-surface-alt, #f8fafc);
+  --el-pagination-button-disabled-bg-color: var(--erp-detail-surface-alt, #f1f5f9);
+  --el-pagination-hover-color: var(--erp-link, #2563eb);
+  --el-pagination-button-color: var(--erp-detail-text-regular, #334155);
   --el-pagination-button-width: 26px;
   --el-pagination-button-height: 26px;
   font-weight: 500;
@@ -1247,17 +1247,17 @@
 .orders-page-footer .erp-footer-pagination .el-pagination .el-pager li {
   min-width: 26px;
   height: 26px;
-  border: 1px solid rgba(203, 213, 225, 0.85);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.85));
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   box-shadow: none;
 }
 
 .orders-page-footer .erp-footer-pagination .el-pagination .el-pager li.is-active {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-primary-fill, #2563eb);
+  color: var(--erp-primary-contrast, #fff);
+  box-shadow: 0 8px 18px var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.22));
 }
 
 .orders-page-footer .erp-page-size {
@@ -1305,9 +1305,9 @@
   gap: 14px;
   align-items: stretch;
   padding: 12px;
-  border: 1px solid rgba(203, 213, 225, 0.86);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.86));
   border-radius: 8px;
-  background: rgba(248, 250, 252, 0.88);
+  background: var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.88));
 }
 
 .order-procurement-product-main,
@@ -1326,9 +1326,9 @@
   width: 64px;
   height: 84px;
   overflow: hidden;
-  border: 1px solid rgba(203, 213, 225, 0.86);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.86));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   color: var(--erp-text-secondary);
   font-size: 12px;
 }
@@ -1363,9 +1363,9 @@
   gap: 4px;
   min-height: 58px;
   padding: 10px;
-  border: 1px solid rgba(226, 232, 240, 0.92);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.92));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .order-procurement-stock-grid span {
@@ -1385,7 +1385,7 @@
 }
 
 .order-procurement-stock-grid .is-shortage strong {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 .order-procurement-sales-panel {
@@ -1393,9 +1393,9 @@
   grid-column: 1 / -1;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid rgba(59, 130, 246, 0.2);
+  border: 1px solid var(--erp-detail-primary-border, rgba(59, 130, 246, 0.2));
   border-radius: 8px;
-  background: rgba(239, 246, 255, 0.72);
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.72));
 }
 
 .order-procurement-sales-heading,
@@ -1419,7 +1419,7 @@
 }
 
 .order-procurement-sales-heading strong {
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
   font-size: 18px;
 }
 
@@ -1439,7 +1439,7 @@
 .order-procurement-decision-row p {
   flex: 1;
   margin: 0;
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -1453,16 +1453,16 @@
 
 .order-procurement-signal-list span {
   padding: 4px 7px;
-  border: 1px solid rgba(191, 219, 254, 0.8);
+  border: 1px solid var(--erp-detail-primary-border, rgba(191, 219, 254, 0.8));
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.82));
   color: var(--erp-text-secondary);
   font-size: 11px;
   white-space: nowrap;
 }
 
 .order-procurement-signal-list strong {
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
   font-size: 12px;
 }
 
@@ -1481,7 +1481,7 @@
   gap: 12px;
   align-items: start;
   padding-top: 12px;
-  border-top: 1px solid rgba(226, 232, 240, 0.92);
+  border-top: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.92));
 }
 
 .order-procurement-cost-panel {
@@ -1489,9 +1489,9 @@
   grid-column: 1 / -1;
   gap: 6px;
   padding: 9px 12px;
-  border: 1px solid rgba(245, 158, 11, 0.28);
+  border: 1px solid var(--erp-detail-warning-border, rgba(245, 158, 11, 0.28));
   border-radius: 8px;
-  background: rgba(255, 251, 235, 0.7);
+  background: var(--erp-detail-warning-bg, rgba(255, 251, 235, 0.7));
 }
 
 .order-procurement-cost-heading {
@@ -1522,13 +1522,13 @@
 
 .order-procurement-cost-summary > span {
   padding-left: 8px;
-  border-left: 1px solid rgba(203, 213, 225, 0.9);
+  border-left: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
 }
 
 .order-procurement-cost-warning,
 .order-procurement-cost-empty {
   margin: 0;
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
   font-size: 12px;
 }
 
@@ -1547,7 +1547,7 @@
   gap: 8px;
   align-items: center;
   padding: 7px 0;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  border-bottom: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
 }
 
 .order-procurement-purchase-form .el-form-item {
@@ -1637,9 +1637,9 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid rgba(245, 158, 11, 0.28);
+  border: 1px solid var(--erp-detail-warning-border, rgba(245, 158, 11, 0.28));
   border-radius: 8px;
-  background: rgba(255, 251, 235, 0.88);
+  background: var(--erp-detail-warning-bg, rgba(255, 251, 235, 0.88));
 }
 
 .order-procurement-missing span {
@@ -1679,11 +1679,11 @@
 .orders-procurement-transparency.is-overdue {
   border-color: color-mix(in srgb, var(--el-color-danger) 30%, transparent);
   background: color-mix(in srgb, var(--el-color-danger-light-9) 58%, transparent);
-  color: var(--el-color-danger);
+  color: var(--erp-danger-text);
 }
 
 .orders-procurement-transparency strong {
-  color: var(--erp-text-primary);
+  color: var(--erp-text-main);
   font-size: 12px;
 }
 
@@ -1712,7 +1712,7 @@
 }
 
 .orders-detail-head-title {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 18px;
   font-weight: 700;
   line-height: 1.2;
@@ -1722,7 +1722,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -1743,29 +1743,29 @@
   display: grid;
   gap: 6px;
   padding: 12px 14px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-profit-summary-card span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .orders-profit-summary-card strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 16px;
   line-height: 1.2;
 }
 
 .orders-profit-summary-card.accent {
-  border-color: rgba(37, 99, 235, 0.22);
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.96) 0%, rgba(248, 250, 252, 0.98) 100%);
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.22));
+  background: linear-gradient(180deg, var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.96)) 0%, var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.98)) 100%);
 }
 
 .orders-profit-summary-card.accent strong {
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
 }
 
 .orders-detail-meta-grid {
@@ -1779,18 +1779,18 @@
   display: grid;
   gap: 6px;
   padding: 12px 14px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 12px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .orders-detail-meta-card span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .orders-detail-meta-card strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   line-height: 1.35;
   word-break: break-word;
@@ -1810,8 +1810,8 @@
 }
 
 .orders-table {
-  --el-table-border-color: #e8eef5;
-  --el-table-row-hover-bg-color: #f8fbff;
+  --el-table-border-color: var(--erp-detail-border, #e8eef5);
+  --el-table-row-hover-bg-color: var(--erp-detail-primary-soft, #f8fbff);
   border: none;
 }
 
@@ -1834,16 +1834,17 @@
 }
 
 .orders-table .el-table__header-wrapper th {
-  background: #f8fafc;
-  color: #64748b;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-weight: 700;
-  border-bottom: 1px solid #e8eef5;
+  border-bottom: 1px solid var(--erp-detail-border, #e8eef5);
 }
 
 .orders-table .el-table__body-wrapper td {
   font-size: 12px;
-  border-bottom: 1px solid #eef3f8;
+  border-bottom: 1px solid var(--erp-detail-border, #eef3f8);
+  background: var(--erp-detail-surface, #fff);
 }
 
 .orders-table .el-table__body-wrapper .el-table__row td {
@@ -1854,15 +1855,15 @@
 .orders-table .el-table__body-wrapper .el-table__row.is-low-profit-order > td.el-table__cell,
 .orders-table .el-table__body-wrapper .el-table__row.is-low-profit-order > td.el-table-fixed-column--left,
 .orders-table .el-table__body-wrapper .el-table__row.is-low-profit-order > td.el-table-fixed-column--right {
-  background: #fff1f1;
+  background: var(--erp-detail-danger-bg, #fff1f1);
 }
 
 .orders-table .el-table__body-wrapper .el-table__row.is-low-profit-order:hover > td.el-table__cell {
-  background: #ffe7e7;
+  background: var(--erp-detail-danger-bg, #ffe7e7);
 }
 
 .orders-low-profit-value {
-  color: #c62828;
+  color: var(--erp-detail-danger-text, #c62828);
   font-weight: 700;
 }
 
@@ -1888,7 +1889,7 @@
 }
 
 .orders-cell-title {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -1897,7 +1898,7 @@
 
 .orders-cell-meta {
   margin-top: 6px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1927,7 +1928,7 @@
 }
 
 .orders-cell-meta-line {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -1939,7 +1940,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -1956,8 +1957,8 @@
   justify-content: center;
   flex: 0 0 64px;
   border-radius: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: #f8fafc;
+  border: 1px solid var(--erp-detail-border, rgba(148, 163, 184, 0.18));
+  background: var(--erp-detail-surface-alt, #f8fafc);
   overflow: hidden;
 }
 
@@ -1982,7 +1983,7 @@
   justify-content: center;
   width: 100%;
   height: 100%;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 11px;
 }
 
@@ -2003,7 +2004,7 @@
 
 .orders-product-link {
   display: inline-block;
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
   font-size: 13px;
   font-weight: 600;
   line-height: 1.45;
@@ -2032,14 +2033,14 @@
   display: inline-flex;
   align-items: center;
   min-height: 20px;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
 }
 
 .orders-item-quantity.is-multi {
-  color: #b42318;
+  color: var(--erp-detail-danger-text, #b42318);
   font-size: 14px;
   font-weight: 900;
 }
@@ -2050,18 +2051,18 @@
   justify-content: center;
   min-height: 22px;
   padding: 0 8px;
-  border: 1px solid rgba(191, 219, 254, 0.95);
+  border: 1px solid var(--erp-detail-primary-border, rgba(191, 219, 254, 0.95));
   border-radius: 999px;
-  background: #eff6ff;
-  color: #2563eb;
+  background: var(--erp-detail-primary-soft, #eff6ff);
+  color: var(--erp-link, #2563eb);
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
 }
 
 .orders-copy-chip:hover {
-  background: #dbeafe;
-  border-color: rgba(96, 165, 250, 0.95);
+  background: var(--erp-detail-primary-soft, #dbeafe);
+  border-color: var(--erp-detail-primary-border, rgba(96, 165, 250, 0.95));
 }
 
 .orders-goods-list,
@@ -2084,7 +2085,7 @@
 }
 
 .orders-row-index {
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
   line-height: 1;
 }
@@ -2099,7 +2100,7 @@
   border: none;
   border-radius: 999px;
   background: transparent;
-  color: #334155;
+  color: var(--erp-detail-text-regular, #334155);
   cursor: pointer;
   appearance: none;
   outline: none;
@@ -2109,7 +2110,7 @@
 
 .orders-mark-pill:hover {
   transform: translateY(-1px);
-  background: rgba(241, 245, 249, 0.9);
+  background: var(--erp-detail-surface-alt, rgba(241, 245, 249, 0.9));
 }
 
 .orders-mark-dot,
@@ -2126,8 +2127,8 @@
 
 .orders-mark-pencil-ring,
 .orders-mark-dot-ring {
-  border: 1.5px dashed rgba(203, 213, 225, 0.95);
-  background: #fff;
+  border: 1.5px dashed var(--erp-detail-border, rgba(203, 213, 225, 0.95));
+  background: var(--erp-detail-surface, #fff);
 }
 
 .orders-mark-pencil-icon {
@@ -2137,9 +2138,9 @@
   border-radius: 2px 2px 2px 0;
   transform: rotate(-45deg);
   background:
-    linear-gradient(135deg, transparent 0 42%, #fff 42% 100%),
-    linear-gradient(135deg, #94a3b8 0 72%, #e2e8f0 72% 100%);
-  box-shadow: inset -1px -1px 0 rgba(255, 255, 255, 0.6);
+    linear-gradient(135deg, transparent 0 42%, var(--erp-detail-surface, #fff) 42% 100%),
+    linear-gradient(135deg, var(--erp-detail-surface-alt, #94a3b8) 0 72%, var(--erp-detail-surface-alt, #e2e8f0) 72% 100%);
+  box-shadow: inset -1px -1px 0 var(--erp-detail-border, rgba(255, 255, 255, 0.6));
 }
 
 .orders-mark-pencil-icon.is-small {
@@ -2148,7 +2149,7 @@
 }
 
 .orders-mark-dot {
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 2px 8px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 0 0 1px var(--erp-detail-border, rgba(255, 255, 255, 0.95)), 0 2px 8px var(--erp-detail-primary-soft, rgba(15, 23, 42, 0.08));
 }
 
 .orders-mark-dot.is-red {
@@ -2185,9 +2186,9 @@
   width: 190px;
   padding: 10px 0;
   border-radius: 14px;
-  background: #fff;
-  border: 1px solid rgba(226, 232, 240, 0.95);
-  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.12);
+  background: var(--erp-detail-surface, #fff);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
+  box-shadow: 0 16px 34px var(--erp-detail-primary-soft, rgba(15, 23, 42, 0.12));
 }
 
 .orders-mark-overlay {
@@ -2206,7 +2207,7 @@
 
 .orders-mark-menu-title {
   padding: 2px 16px 8px;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   font-weight: 700;
 }
@@ -2219,7 +2220,7 @@
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -2227,7 +2228,7 @@
 }
 
 .orders-mark-menu-item:hover {
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-mark-menu-item span:last-child {
@@ -2294,7 +2295,7 @@
 
 .orders-posting-link,
 .orders-tracking-link {
-  color: #2563eb;
+  color: var(--erp-link, #2563eb);
   text-decoration: none;
   font-weight: 600;
   line-height: 1.35;
@@ -2316,7 +2317,7 @@
 }
 
 .orders-order-title .is-strong {
-  color: #000;
+  color: var(--erp-detail-text-main, #000);
   font-size: 16px;
   font-weight: 900;
 }
@@ -2337,7 +2338,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -2349,28 +2350,28 @@
 }
 
 .orders-status-deadline {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
   font-size: 12px;
   line-height: 1.2;
   text-align: center;
 }
 
 .orders-status-deadline.is-danger {
-  color: #b42318;
+  color: var(--erp-detail-danger-text, #b42318);
   font-weight: 700;
 }
 
 .orders-print-state {
   display: grid;
   gap: 2px;
-  color: #15803d;
+  color: var(--erp-detail-success-text, #15803d);
   font-size: 12px;
   line-height: 1.15;
 }
 
 .orders-print-time {
   display: block;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 10px;
   line-height: 1.15;
 }
@@ -2385,7 +2386,7 @@
 }
 
 .orders-print-time {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 10px;
   line-height: 1.15;
   white-space: nowrap;
@@ -2401,17 +2402,17 @@
   gap: 4px;
   padding: 6px 8px;
   border-radius: 8px;
-  border: 1px solid rgba(239, 68, 68, 0.18);
-  background: rgba(254, 242, 242, 0.95);
+  border: 1px solid var(--erp-detail-danger-border, rgba(239, 68, 68, 0.18));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.95));
 }
 
 .orders-quality-box strong {
-  color: #b91c1c;
+  color: var(--erp-detail-danger-text, #b91c1c);
   font-size: 12px;
 }
 
 .orders-quality-box span {
-  color: #7f1d1d;
+  color: var(--erp-detail-danger-text, #7f1d1d);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -2420,21 +2421,21 @@
   display: grid;
   gap: 4px;
   padding: 6px 8px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   position: relative;
 }
 
 .orders-inventory-item.bound {
-  border-color: rgba(34, 197, 94, 0.22);
-  background: rgba(240, 253, 244, 0.9);
+  border-color: var(--erp-detail-success-border, rgba(34, 197, 94, 0.22));
+  background: var(--erp-detail-success-bg, rgba(240, 253, 244, 0.9));
 }
 
 .orders-inventory-item.pending {
   border-style: dashed;
-  border-color: rgba(245, 158, 11, 0.3);
-  background: rgba(255, 251, 235, 0.92);
+  border-color: var(--erp-detail-warning-border, rgba(245, 158, 11, 0.3));
+  background: var(--erp-detail-warning-bg, rgba(255, 251, 235, 0.92));
 }
 
 .orders-stock-binding-state {
@@ -2443,11 +2444,11 @@
 }
 
 .orders-stock-binding-state.is-bound {
-  color: #15803d;
+  color: var(--erp-detail-success-text, #15803d);
 }
 
 .orders-stock-binding-state.is-unbound {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 .orders-stock-badge {
@@ -2465,18 +2466,18 @@
 }
 
 .orders-stock-badge.is-bound {
-  color: #15803d;
-  background: rgba(220, 252, 231, 0.95);
+  color: var(--erp-detail-success-text, #15803d);
+  background: var(--erp-detail-success-bg, rgba(220, 252, 231, 0.95));
 }
 
 .orders-stock-badge.is-unbound {
-  color: #b45309;
-  background: rgba(255, 247, 205, 0.95);
+  color: var(--erp-detail-warning-text, #b45309);
+  background: var(--erp-detail-warning-bg, rgba(255, 247, 205, 0.95));
 }
 
 .orders-inventory-item.danger {
-  border-color: rgba(239, 68, 68, 0.24);
-  background: rgba(254, 242, 242, 0.95);
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.24));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.95));
 }
 
 .orders-inventory-item b,
@@ -2531,7 +2532,7 @@
 }
 
 .orders-money-main {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   line-height: 1.2;
 }
@@ -2560,70 +2561,70 @@
 }
 
 .orders-inline-accent-button.el-button {
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   box-shadow: none;
-  background: #fff;
-  color: #334155;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #334155);
 }
 
 .orders-inline-accent-button-secondary.el-button,
 .orders-profit-detail-button.el-button {
-  border-color: rgba(148, 163, 184, 0.42);
-  background: #fff;
-  color: #334155;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.42));
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #334155);
 }
 
 .orders-inline-accent-button-primary.el-button {
-  border-color: #4f6b95;
-  background: #4f6b95;
-  color: #fff;
+  border-color: var(--erp-primary-fill, #4f6b95);
+  background: var(--erp-primary-fill, #4f6b95);
+  color: var(--erp-primary-contrast, #fff);
 }
 
 .orders-inline-accent-button-success.el-button {
-  border-color: rgba(34, 197, 94, 0.32);
-  background: #ecfdf3;
-  color: #15803d;
+  border-color: var(--erp-detail-success-border, rgba(34, 197, 94, 0.32));
+  background: var(--erp-detail-success-bg, #ecfdf3);
+  color: var(--erp-detail-success-text, #15803d);
 }
 
 .orders-inline-accent-button-danger-soft.el-button {
-  border-color: rgba(248, 113, 113, 0.34);
-  background: #fff1f2;
-  color: #b42318;
+  border-color: var(--erp-detail-danger-border, rgba(248, 113, 113, 0.34));
+  background: var(--erp-detail-danger-bg, #fff1f2);
+  color: var(--erp-detail-danger-text, #b42318);
 }
 
 .orders-text-danger {
-  color: #b42318;
+  color: var(--erp-detail-danger-text, #b42318);
 }
 
 .orders-inline-accent-button-secondary.el-button:hover,
 .orders-profit-detail-button.el-button:hover {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #f8fbff;
-  color: #1e40af;
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.28));
+  background: var(--erp-detail-primary-soft, #f8fbff);
+  color: var(--erp-link, #1e40af);
 }
 
 .orders-inline-accent-button-primary.el-button:hover {
-  border-color: #445d82;
-  background: #445d82;
-  color: #fff;
+  border-color: var(--erp-primary-fill-hover, #445d82);
+  background: var(--erp-primary-fill-hover, #445d82);
+  color: var(--erp-primary-contrast, #fff);
 }
 
 .orders-inline-accent-button-success.el-button:hover {
-  border-color: rgba(22, 163, 74, 0.42);
-  background: #dcfce7;
-  color: #166534;
+  border-color: var(--erp-detail-success-border, rgba(22, 163, 74, 0.42));
+  background: var(--erp-detail-success-bg, #dcfce7);
+  color: var(--erp-detail-success-text, #166534);
 }
 
 .orders-inline-accent-button-danger-soft.el-button:hover {
-  border-color: rgba(239, 68, 68, 0.44);
-  background: #ffe4e6;
-  color: #991b1b;
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.44));
+  background: var(--erp-detail-danger-bg, #ffe4e6);
+  color: var(--erp-detail-danger-text, #991b1b);
 }
 
 .orders-cancel-cell {
   display: grid;
   gap: 4px;
-  color: #7a4a4a;
+  color: var(--erp-detail-danger-text, #7a4a4a);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -2640,7 +2641,7 @@
 }
 
 .orders-delivery-main {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -2665,10 +2666,10 @@
   width: fit-content;
   min-height: 28px;
   padding: 0 10px;
-  border: 1px solid rgba(206, 216, 229, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(206, 216, 229, 0.9));
   border-radius: 999px;
-  background: #f7f9fc;
-  color: #52627a;
+  background: var(--erp-detail-surface-alt, #f7f9fc);
+  color: var(--erp-detail-text-regular, #52627a);
   font-size: 12px;
   font-weight: 600;
 }
@@ -2678,7 +2679,7 @@
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -2690,7 +2691,7 @@
 .orders-stock-inline-facts span + span::before {
   content: "·";
   margin-right: 10px;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
 }
 
 .orders-inventory-item-plain {
@@ -2703,26 +2704,26 @@
 
 .orders-inventory-item-plain.is-warning {
   padding: 8px 10px;
-  border: 1px solid rgba(193, 154, 107, 0.24);
+  border: 1px solid var(--erp-detail-warning-border, rgba(193, 154, 107, 0.24));
   border-radius: 10px;
-  background: rgba(194, 164, 120, 0.08);
+  background: var(--erp-detail-warning-bg, rgba(194, 164, 120, 0.08));
 }
 
 .orders-inventory-item-plain.is-warning .orders-product-name {
-  color: #7a613f;
+  color: var(--erp-detail-warning-text, #7a613f);
 }
 
 .orders-inventory-item-plain.is-warning .orders-stock-inline-facts {
-  color: #8a6c45;
+  color: var(--erp-detail-warning-text, #8a6c45);
 }
 
 .orders-inventory-item-plain.is-warning .orders-stock-inline-facts span + span::before {
-  color: rgba(138, 108, 69, 0.55);
+  color: var(--erp-detail-warning-text, rgba(138, 108, 69, 0.55));
 }
 
 .orders-inventory-item-plain + .orders-inventory-item-plain {
   padding-top: 8px;
-  border-top: 1px solid rgba(226, 232, 240, 0.88);
+  border-top: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.88));
 }
 
 .orders-inventory-item-plain .orders-inline-actions {
@@ -2743,18 +2744,18 @@
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid rgba(206, 216, 229, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(206, 216, 229, 0.9));
   border-radius: 999px;
-  background: #fbfdff;
-  color: #62748d;
+  background: var(--erp-detail-surface-alt, #fbfdff);
+  color: var(--erp-detail-text-secondary, #62748d);
   cursor: pointer;
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
 }
 
 .orders-icon-button:hover {
-  background: #f3f7fb;
-  border-color: rgba(148, 163, 184, 0.95);
-  color: #435a7b;
+  background: var(--erp-detail-surface-alt, #f3f7fb);
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.95));
+  color: var(--erp-link, #435a7b);
   transform: translateY(-1px);
 }
 
@@ -2772,23 +2773,23 @@
 }
 
 .orders-icon-button-el.is-view.el-button {
-  border: 1px solid rgba(197, 210, 224, 0.72);
-  background: rgba(255, 255, 255, 0.6);
-  color: #6b7c90;
+  border: 1px solid var(--erp-detail-border, rgba(197, 210, 224, 0.72));
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.6));
+  color: var(--erp-detail-text-secondary, #6b7c90);
   box-shadow: none;
   transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
 .orders-icon-button-el.is-view.el-button:hover,
 .orders-icon-button-el.is-view.el-button:focus-visible {
-  border-color: rgba(168, 183, 198, 0.88);
-  background: rgba(237, 242, 247, 0.88);
-  color: #516377;
+  border-color: var(--erp-detail-border, rgba(168, 183, 198, 0.88));
+  background: var(--erp-detail-surface-alt, rgba(237, 242, 247, 0.88));
+  color: var(--erp-detail-text-regular, #516377);
 }
 
 .orders-icon-button-el.is-view.el-button:active {
-  background: rgba(229, 236, 243, 0.96);
-  color: #435467;
+  background: var(--erp-detail-surface-alt, rgba(229, 236, 243, 0.96));
+  color: var(--erp-detail-text-regular, #435467);
 }
 
 .orders-icon-button-el.el-button .el-icon {
@@ -2797,14 +2798,14 @@
 
 .orders-stock-item {
   padding: 8px 10px;
-  border: 1px solid rgba(226, 232, 240, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
   border-radius: 10px;
-  background: rgba(248, 250, 252, 0.95);
+  background: var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.95));
 }
 
 .orders-stock-item.danger {
-  border-color: rgba(239, 68, 68, 0.25);
-  background: rgba(254, 242, 242, 0.95);
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.25));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.95));
 }
 
 .orders-stock-item.pending {
@@ -2815,7 +2816,7 @@
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   font-weight: 700;
 }
@@ -2829,7 +2830,7 @@
 
 .orders-pagination-summary {
   margin-right: auto;
-  color: #46556c;
+  color: var(--erp-detail-text-regular, #46556c);
   font-size: 13px;
 }
 
@@ -2848,7 +2849,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 13px;
   white-space: nowrap;
 }
@@ -2859,10 +2860,10 @@
 
 .orders-pagination .el-pagination {
   --el-pagination-bg-color: transparent;
-  --el-pagination-button-bg-color: #f8fafc;
-  --el-pagination-button-disabled-bg-color: #f1f5f9;
-  --el-pagination-hover-color: #2563eb;
-  --el-pagination-button-color: #334155;
+  --el-pagination-button-bg-color: var(--erp-detail-surface-alt, #f8fafc);
+  --el-pagination-button-disabled-bg-color: var(--erp-detail-surface-alt, #f1f5f9);
+  --el-pagination-hover-color: var(--erp-link, #2563eb);
+  --el-pagination-button-color: var(--erp-detail-text-regular, #334155);
   --el-pagination-button-width: 32px;
   --el-pagination-button-height: 32px;
   font-weight: 500;
@@ -2872,17 +2873,17 @@
 .orders-pagination .el-pagination .el-pager li {
   min-width: 32px;
   height: 32px;
-  border: 1px solid rgba(203, 213, 225, 0.85);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.85));
   border-radius: 9px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   box-shadow: none;
 }
 
 .orders-pagination .el-pagination .el-pager li.is-active {
-  border-color: #2563eb;
-  background: #2563eb;
-  color: #fff;
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-primary-fill, #2563eb);
+  color: var(--erp-primary-contrast, #fff);
+  box-shadow: 0 8px 18px var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.22));
 }
 
 .orders-status-cell .el-tag {
@@ -2893,9 +2894,9 @@
   display: grid;
   gap: 12px;
   padding: 14px 16px;
-  border: 1px solid rgba(203, 213, 225, 0.72);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.72));
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(247, 250, 255, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface, rgba(255, 255, 255, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(247, 250, 255, 0.98)) 100%);
 }
 
 .vue-orders-status-panel-head {
@@ -2907,12 +2908,12 @@
 
 .vue-orders-status-panel-head strong {
   display: block;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 15px;
 }
 
 .vue-orders-status-panel-head span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -2928,20 +2929,20 @@
   justify-content: space-between;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid rgba(203, 213, 225, 0.7);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.7));
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.96);
-  color: #46556c;
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.96));
+  color: var(--erp-detail-text-regular, #46556c);
 }
 
 .vue-orders-status-card strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 18px;
 }
 
 .vue-orders-status-card.active {
-  border-color: rgba(59, 130, 246, 0.28);
-  background: rgba(239, 246, 255, 0.98);
+  border-color: var(--erp-detail-primary-border, rgba(59, 130, 246, 0.28));
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.98));
 }
 
 .order-sticky-controls {
@@ -2950,7 +2951,7 @@
   z-index: 8;
   border-radius: 10px;
   overflow: hidden;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .vue-orders-selection-bar {
@@ -2959,21 +2960,21 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 16px;
-  border: 1px solid rgba(59, 130, 246, 0.16);
+  border: 1px solid var(--erp-detail-primary-border, rgba(59, 130, 246, 0.16));
   border-radius: 16px;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.94) 0%, rgba(255, 255, 255, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.94)) 0%, var(--erp-detail-surface, rgba(255, 255, 255, 0.98)) 100%);
 }
 
 .vue-orders-selection-info {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #4b5c73;
+  color: var(--erp-detail-text-regular, #4b5c73);
   font-size: 13px;
 }
 
 .vue-orders-selection-info strong {
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
   font-size: 18px;
 }
 
@@ -3049,8 +3050,8 @@
 }
 
 .order-sticky-controls .danger-link {
-  background: #fff3f2;
-  border-color: rgba(180, 35, 24, 0.2);
+  background: var(--erp-detail-danger-bg, #fff3f2);
+  border-color: var(--erp-detail-border, rgba(180, 35, 24, 0.2));
   color: var(--ds-danger);
 }
 
@@ -3085,10 +3086,10 @@
 .vue-orders-table-wrap {
   max-height: calc(100vh - 290px);
   overflow: auto;
-  border: 1px solid rgba(53, 92, 164, 0.1);
+  border: 1px solid var(--erp-detail-primary-border, rgba(53, 92, 164, 0.1));
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(247, 250, 255, 0.98) 100%);
-  box-shadow: 0 10px 28px rgba(22, 34, 61, 0.04);
+  background: linear-gradient(180deg, var(--erp-detail-surface, rgba(255, 255, 255, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(247, 250, 255, 0.98)) 100%);
+  box-shadow: 0 10px 28px var(--erp-detail-primary-soft, rgba(22, 34, 61, 0.04));
 }
 
 .vue-orders-table {
@@ -3101,7 +3102,7 @@
 .vue-orders-table th,
 .vue-orders-table td {
   vertical-align: top;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.86);
+  border-bottom: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.86));
 }
 
 .vue-orders-table thead th {
@@ -3109,8 +3110,8 @@
   top: 0;
   z-index: 2;
   padding: 14px 12px;
-  background: linear-gradient(180deg, rgba(242, 246, 252, 0.98) 0%, rgba(233, 240, 250, 0.98) 100%);
-  color: #324968;
+  background: linear-gradient(180deg, var(--erp-detail-surface-alt, rgba(242, 246, 252, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(233, 240, 250, 0.98)) 100%);
+  color: var(--erp-detail-text-main, #324968);
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.04em;
@@ -3119,15 +3120,15 @@
 
 .vue-orders-table tbody td {
   padding: 14px 12px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.92));
 }
 
 .vue-orders-table tbody tr:hover td {
-  background: rgba(244, 248, 255, 0.94);
+  background: var(--erp-detail-surface-alt, rgba(244, 248, 255, 0.94));
 }
 
 .vue-orders-table tbody tr.is-overdue td {
-  background: linear-gradient(180deg, rgba(255, 248, 246, 0.96) 0%, rgba(255, 253, 252, 0.96) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-danger-bg, rgba(255, 248, 246, 0.96)) 0%, var(--erp-detail-danger-bg, rgba(255, 253, 252, 0.96)) 100%);
 }
 
 .vue-orders-check {
@@ -3175,7 +3176,7 @@
 }
 
 .vue-orders-cell-main {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.45;
@@ -3188,7 +3189,7 @@
 }
 
 .vue-orders-order-link:hover {
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
   text-decoration: underline;
 }
 
@@ -3197,7 +3198,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px 10px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -3218,41 +3219,41 @@
   min-height: 28px;
   padding: 0 11px;
   border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  background: rgba(241, 245, 249, 0.92);
-  color: #475569;
+  border: 1px solid var(--erp-detail-border, rgba(148, 163, 184, 0.22));
+  background: var(--erp-detail-surface-alt, rgba(241, 245, 249, 0.92));
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   font-weight: 700;
 }
 
 .vue-orders-inline-badge.is-blue {
-  border-color: rgba(59, 130, 246, 0.18);
-  background: rgba(239, 246, 255, 0.96);
-  color: #1d4ed8;
+  border-color: var(--erp-detail-primary-border, rgba(59, 130, 246, 0.18));
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.96));
+  color: var(--erp-link, #1d4ed8);
 }
 
 .vue-orders-inline-badge.is-green {
-  border-color: rgba(34, 197, 94, 0.16);
-  background: rgba(240, 253, 244, 0.98);
-  color: #15803d;
+  border-color: var(--erp-detail-success-border, rgba(34, 197, 94, 0.16));
+  background: var(--erp-detail-success-bg, rgba(240, 253, 244, 0.98));
+  color: var(--erp-detail-success-text, #15803d);
 }
 
 .vue-orders-inline-badge.is-amber {
-  border-color: rgba(245, 158, 11, 0.2);
-  background: rgba(255, 251, 235, 0.98);
-  color: #b45309;
+  border-color: var(--erp-detail-warning-border, rgba(245, 158, 11, 0.2));
+  background: var(--erp-detail-warning-bg, rgba(255, 251, 235, 0.98));
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 .vue-orders-inline-badge.is-red {
-  border-color: rgba(239, 68, 68, 0.2);
-  background: rgba(254, 242, 242, 0.98);
-  color: #b91c1c;
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.2));
+  background: var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.98));
+  color: var(--erp-detail-danger-text, #b91c1c);
 }
 
 .vue-orders-inline-badge.is-slate {
-  border-color: rgba(148, 163, 184, 0.18);
-  background: rgba(248, 250, 252, 0.98);
-  color: #475569;
+  border-color: var(--erp-detail-border, rgba(148, 163, 184, 0.18));
+  background: var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.98));
+  color: var(--erp-detail-text-regular, #475569);
 }
 
 .vue-orders-inline-badge.is-logistics-mode {
@@ -3272,19 +3273,19 @@
 
 .vue-orders-stock-item {
   padding: 10px 11px;
-  border: 1px solid rgba(203, 213, 225, 0.75);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.75));
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(250, 252, 255, 0.98) 0%, rgba(245, 248, 252, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface-alt, rgba(250, 252, 255, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(245, 248, 252, 0.98)) 100%);
 }
 
 .vue-orders-stock-item.pending {
-  border-color: rgba(245, 158, 11, 0.26);
-  background: linear-gradient(180deg, rgba(255, 251, 235, 0.98) 0%, rgba(255, 247, 237, 0.98) 100%);
+  border-color: var(--erp-detail-warning-border, rgba(245, 158, 11, 0.26));
+  background: linear-gradient(180deg, var(--erp-detail-warning-bg, rgba(255, 251, 235, 0.98)) 0%, var(--erp-detail-surface-alt, rgba(255, 247, 237, 0.98)) 100%);
 }
 
 .vue-orders-stock-item.danger {
-  border-color: rgba(239, 68, 68, 0.22);
-  background: linear-gradient(180deg, rgba(254, 242, 242, 0.98) 0%, rgba(255, 247, 247, 0.98) 100%);
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.22));
+  background: linear-gradient(180deg, var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.98)) 0%, var(--erp-detail-danger-bg, rgba(255, 247, 247, 0.98)) 100%);
 }
 
 .vue-orders-stock-head {
@@ -3295,13 +3296,13 @@
 }
 
 .vue-orders-stock-head strong {
-  color: #1f2f47;
+  color: var(--erp-detail-text-main, #1f2f47);
   font-size: 12px;
   font-weight: 800;
 }
 
 .vue-orders-stock-status {
-  color: #5b6b80;
+  color: var(--erp-detail-text-secondary, #5b6b80);
   font-size: 12px;
   font-weight: 700;
   text-align: right;
@@ -3334,19 +3335,19 @@
   display: grid;
   gap: 4px;
   padding: 10px 11px;
-  border: 1px solid rgba(239, 68, 68, 0.18);
+  border: 1px solid var(--erp-detail-danger-border, rgba(239, 68, 68, 0.18));
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(254, 242, 242, 0.98) 0%, rgba(255, 248, 248, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-danger-bg, rgba(254, 242, 242, 0.98)) 0%, var(--erp-detail-danger-bg, rgba(255, 248, 248, 0.98)) 100%);
 }
 
 .vue-orders-cancel-box strong {
-  color: #b42318;
+  color: var(--erp-detail-danger-text, #b42318);
   font-size: 12px;
   font-weight: 800;
 }
 
 .vue-orders-cancel-box span {
-  color: #7a4a4a;
+  color: var(--erp-detail-danger-text, #7a4a4a);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -3367,7 +3368,7 @@
   margin-right: 0;
   margin-bottom: 0;
   padding: 20px 24px 16px;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  border-bottom: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
 }
 
 .erp-centered-dialog .el-dialog__body {
@@ -3409,9 +3410,9 @@
 
 .vue-orders-detail-primary,
 .vue-orders-detail-profit-panel {
-  border: 1px solid rgba(203, 213, 225, 0.78);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.78));
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(247, 250, 255, 0.98) 100%);
+  background: linear-gradient(180deg, var(--erp-detail-surface, rgba(255, 255, 255, 0.99)) 0%, var(--erp-detail-surface-alt, rgba(247, 250, 255, 0.98)) 100%);
 }
 
 .vue-orders-detail-primary {
@@ -3425,15 +3426,15 @@
   width: 116px;
   height: 116px;
   border-radius: 16px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
-  background: #f8fafc;
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
+  background: var(--erp-detail-surface-alt, #f8fafc);
   overflow: hidden;
 }
 
 .vue-orders-detail-primary-image-empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -3448,13 +3449,13 @@
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
 }
 
 .vue-orders-detail-primary-content h3 {
   margin: 0;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 22px;
   line-height: 1.3;
   word-break: break-word;
@@ -3464,7 +3465,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -3481,12 +3482,12 @@
 }
 
 .vue-orders-detail-profit-head strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 16px;
 }
 
 .vue-orders-detail-profit-head span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -3502,31 +3503,31 @@
   display: grid;
   gap: 6px;
   padding: 14px 16px;
-  border: 1px solid rgba(203, 213, 225, 0.72);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.72));
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.92));
 }
 
 .vue-orders-detail-profit-card span,
 .vue-orders-cost-card span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .vue-orders-detail-profit-card strong,
 .vue-orders-cost-card strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 20px;
 }
 
 .vue-orders-detail-profit-card.is-muted strong {
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 16px;
 }
 
 .vue-orders-cost-card.is-total {
-  border-color: rgba(37, 99, 235, 0.2);
-  background: rgba(239, 246, 255, 0.9);
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.2));
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.9));
 }
 
 .vue-orders-detail-dialog-hero {
@@ -3538,13 +3539,13 @@
 
 .vue-orders-detail-dialog-title h3 {
   margin: 0 0 6px;
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 22px;
 }
 
 .vue-orders-detail-dialog-title p {
   margin: 0;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 13px;
 }
 
@@ -3566,21 +3567,21 @@
 }
 
 .vue-orders-drawer-section-head strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 15px;
 }
 
 .vue-orders-drawer-section-head span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .vue-orders-detail-item-thumb {
   width: 64px;
   height: 84px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
   overflow: hidden;
 }
 
@@ -3593,7 +3594,7 @@
 .vue-orders-detail-item-thumb-empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -3607,9 +3608,9 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   padding: 12px;
-  border: 1px solid #fecdd3;
+  border: 1px solid var(--erp-detail-danger-border, #fecdd3);
   border-radius: 10px;
-  background: #fff1f2;
+  background: var(--erp-detail-danger-bg, #fff1f2);
 }
 
 .orders-profit-attribution > div {
@@ -3620,19 +3621,19 @@
 
 .orders-profit-attribution span,
 .orders-profit-attribution small {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .orders-profit-attribution strong {
-  color: #9f1239;
+  color: var(--erp-detail-danger-text, #9f1239);
   overflow-wrap: anywhere;
 }
 
 .orders-profit-loss-breakdown {
   display: grid;
-  border: 1px solid #fecdd3;
+  border: 1px solid var(--erp-detail-danger-border, #fecdd3);
   border-radius: 10px;
   overflow: hidden;
 }
@@ -3648,23 +3649,23 @@
 }
 
 .orders-profit-loss-breakdown__title {
-  background: #fff1f2;
+  background: var(--erp-detail-danger-bg, #fff1f2);
 }
 
 .orders-profit-loss-breakdown__title strong,
 .orders-profit-loss-total.is-final strong {
-  color: #9f1239;
+  color: var(--erp-detail-danger-text, #9f1239);
 }
 
 .orders-profit-loss-breakdown__title span,
 .orders-profit-loss-row small {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
 }
 
 .orders-profit-loss-row,
 .orders-profit-loss-total {
-  border-top: 1px solid #f1f5f9;
+  border-top: 1px solid var(--erp-detail-border, #f1f5f9);
 }
 
 .orders-profit-loss-row > div {
@@ -3673,11 +3674,11 @@
 }
 
 .orders-profit-loss-total {
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-profit-loss-total.is-final {
-  background: #fff1f2;
+  background: var(--erp-detail-danger-bg, #fff1f2);
 }
 
 .orders-profit-item-grid {
@@ -3691,9 +3692,9 @@
   gap: 12px;
   align-items: center;
   padding: 12px;
-  border: 1px solid rgba(203, 213, 225, 0.86);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.86));
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--erp-detail-surface, #ffffff);
 }
 
 .orders-profit-item-thumb {
@@ -3701,8 +3702,8 @@
   height: 84px;
   display: block;
   border-radius: 8px;
-  border: 1px solid rgba(203, 213, 225, 0.8);
-  background: #f8fafc;
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.8));
+  background: var(--erp-detail-surface-alt, #f8fafc);
   overflow: hidden;
   cursor: zoom-in;
 }
@@ -3718,7 +3719,7 @@
 .orders-profit-item-thumb-empty {
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: var(--erp-detail-text-secondary, #94a3b8);
   font-size: 12px;
 }
 
@@ -3729,14 +3730,14 @@
 }
 
 .orders-profit-item-copy strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   line-height: 1.4;
   word-break: break-word;
 }
 
 .orders-profit-item-copy span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.45;
   word-break: break-word;
@@ -3753,23 +3754,23 @@
   gap: 4px;
   padding: 10px;
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-profit-item-metrics span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
 .orders-profit-item-metrics strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   line-height: 1.3;
   word-break: break-word;
 }
 
 .orders-profit-merge-hint {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -3780,16 +3781,16 @@
   justify-content: space-between;
   gap: 10px;
   padding-top: 2px;
-  border-top: 1px dashed rgba(203, 213, 225, 0.92);
+  border-top: 1px dashed var(--erp-detail-border, rgba(203, 213, 225, 0.92));
 }
 
 .orders-profit-aggregate-head strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 15px;
 }
 
 .orders-profit-aggregate-head span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.45;
   text-align: right;
@@ -3806,15 +3807,15 @@
   gap: 5px;
   min-width: 0;
   padding: 10px;
-  border: 1px solid rgba(203, 213, 225, 0.82);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.82));
   border-radius: 8px;
-  background: #ffffff;
+  background: var(--erp-detail-surface, #ffffff);
 }
 
 .orders-profit-summary-card span,
 .orders-profit-summary-card small {
   min-width: 0;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -3827,7 +3828,7 @@
 }
 
 .orders-profit-summary-card strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 17px;
   line-height: 1.25;
   word-break: break-word;
@@ -3847,7 +3848,7 @@
 }
 
 .orders-profit-card-lines span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -3858,39 +3859,39 @@
 }
 
 .orders-profit-summary-card.is-success {
-  border-color: rgba(16, 185, 129, 0.22);
-  background: #ecfdf5;
+  border-color: var(--erp-detail-success-border, rgba(16, 185, 129, 0.22));
+  background: var(--erp-detail-success-bg, #ecfdf5);
 }
 
 .orders-profit-summary-card.is-warning {
-  border-color: rgba(245, 158, 11, 0.24);
-  background: #fffbeb;
+  border-color: var(--erp-detail-warning-border, rgba(245, 158, 11, 0.24));
+  background: var(--erp-detail-warning-bg, #fffbeb);
 }
 
 .orders-profit-summary-card.is-danger {
-  border-color: rgba(239, 68, 68, 0.24);
-  background: #fef2f2;
+  border-color: var(--erp-detail-danger-border, rgba(239, 68, 68, 0.24));
+  background: var(--erp-detail-danger-bg, #fef2f2);
 }
 
 .orders-profit-summary-card.is-strong {
-  border-color: rgba(37, 99, 235, 0.2);
-  background: #eff6ff;
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.2));
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .orders-profit-summary-card.is-success strong {
-  color: #047857;
+  color: var(--erp-detail-success-text, #047857);
 }
 
 .orders-profit-summary-card.is-warning strong {
-  color: #b45309;
+  color: var(--erp-detail-warning-text, #b45309);
 }
 
 .orders-profit-summary-card.is-danger strong {
-  color: #dc2626;
+  color: var(--erp-detail-danger-text, #dc2626);
 }
 
 .orders-profit-summary-card.is-strong strong {
-  color: #1d4ed8;
+  color: var(--erp-link, #1d4ed8);
 }
 
 .orders-profit-rule-row {
@@ -3898,9 +3899,9 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid rgba(203, 213, 225, 0.75);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.75));
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .orders-profit-rule-row > div {
@@ -3910,12 +3911,12 @@
 }
 
 .orders-profit-rule-row strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 13px;
 }
 
 .orders-profit-rule-row span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -3934,33 +3935,33 @@
 }
 
 .orders-profit-detail-table .el-table__header-wrapper th {
-  background: #f8fafc;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   font-weight: 700;
 }
 
 .orders-profit-actual-column {
-  background: rgba(239, 246, 255, 0.42) !important;
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.42)) !important;
 }
 
 .orders-profit-cell-link {
   margin-top: 3px;
-  color: #2563eb;
+  color: var(--erp-link, #2563eb);
   font-size: 12px;
   font-weight: 700;
 }
 
 .orders-profit-total-text {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
 }
 
 .orders-profit-detail-table .is-negative {
-  color: #dc2626;
+  color: var(--erp-detail-danger-text, #dc2626);
 }
 
 .orders-profit-detail-table .is-positive {
-  color: #047857;
+  color: var(--erp-detail-success-text, #047857);
 }
 
 .orders-quality-dialog {
@@ -3978,7 +3979,7 @@
 }
 
 .vue-orders-inventory-cell-meta {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -4041,14 +4042,14 @@
 }
 
 .order-inventory-dialog .dialog-search-head strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 15px;
 }
 
 .order-inventory-dialog .dialog-search-head span,
 .order-inventory-dialog .picker-item-meta span,
 .order-inventory-dialog .selected-product-meta span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -4058,7 +4059,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -4078,9 +4079,9 @@
   min-height: 0;
   overflow: hidden;
   padding: 14px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .inventory-picker-head {
@@ -4128,8 +4129,8 @@
 }
 
 .order-inventory-dialog .inventory-picker-table .el-table__header-wrapper th {
-  background: #f8fafc;
-  color: #475569;
+  background: var(--erp-detail-surface-alt, #f8fafc);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   font-weight: 700;
 }
@@ -4139,7 +4140,7 @@
 }
 
 .order-inventory-dialog .inventory-picker-table .is-selected-inventory-row > td {
-  background: #eff6ff !important;
+  background: var(--erp-detail-primary-soft, #eff6ff) !important;
 }
 
 .inventory-picker-product-cell {
@@ -4151,7 +4152,7 @@
 
 .inventory-picker-table-text {
   display: block;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -4198,15 +4199,15 @@
 .inventory-sku-preview-thumb {
   width: 44px;
   height: 54px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 6px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .inventory-sku-preview-empty {
   display: grid;
   place-items: center;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 10px;
   font-weight: 700;
 }
@@ -4225,20 +4226,20 @@
 }
 
 .inventory-sku-preview-meta strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
 }
 
 .inventory-sku-preview-meta span,
 .inventory-sku-preview-more {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 11px;
 }
 
 .inventory-picker-basic-cell {
   display: grid;
   gap: 4px;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -4263,18 +4264,18 @@
   max-height: 220px;
   overflow: auto;
   padding: 10px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .inventory-recipe-empty {
   padding: 10px 12px;
-  border: 1px dashed rgba(148, 163, 184, 0.7);
+  border: 1px dashed var(--erp-detail-border, rgba(148, 163, 184, 0.7));
   border-radius: 8px;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .inventory-recipe-row {
@@ -4284,9 +4285,9 @@
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .inventory-recipe-product {
@@ -4300,16 +4301,16 @@
   width: 38px;
   height: 50px;
   min-width: 38px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 6px;
   overflow: hidden;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .inventory-recipe-thumb-empty {
   display: grid;
   place-items: center;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 11px;
   font-weight: 700;
 }
@@ -4321,7 +4322,7 @@
 }
 
 .inventory-recipe-meta strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   line-height: 1.35;
   overflow: hidden;
@@ -4332,7 +4333,7 @@
 .inventory-recipe-meta span,
 .inventory-recipe-number span,
 .inventory-recipe-quantity span {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 11px;
   line-height: 1.2;
 }
@@ -4345,7 +4346,7 @@
 }
 
 .inventory-recipe-number strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 13px;
 }
 
@@ -4358,13 +4359,13 @@
   justify-content: flex-end;
   align-items: center;
   gap: 8px;
-  color: #475569;
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
 }
 
 .inventory-recipe-summary strong {
   min-width: 40px;
-  color: #166534;
+  color: var(--erp-detail-success-text, #166534);
   font-size: 14px;
   text-align: right;
 }
@@ -4411,10 +4412,10 @@
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 8px;
-  background: #fff;
-  color: #475569;
+  background: var(--erp-detail-surface, #fff);
+  color: var(--erp-detail-text-regular, #475569);
   font-size: 12px;
 }
 
@@ -4435,9 +4436,9 @@
   align-items: start;
   gap: 12px;
   padding: 12px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--erp-detail-border, #cbd5e1);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   text-align: left;
   cursor: pointer;
   box-shadow: none;
@@ -4445,14 +4446,14 @@
 }
 
 .order-inventory-dialog .product-picker-item:hover {
-  border-color: rgba(37, 99, 235, 0.35);
-  background: #f8fbff;
+  border-color: var(--erp-detail-primary-border, rgba(37, 99, 235, 0.35));
+  background: var(--erp-detail-primary-soft, #f8fbff);
 }
 
 .order-inventory-dialog .product-picker-item.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-  box-shadow: inset 3px 0 0 #2563eb;
+  border-color: var(--erp-detail-primary-border, #2563eb);
+  background: var(--erp-detail-primary-soft, #eff6ff);
+  box-shadow: inset 3px 0 0 var(--erp-detail-primary-border, #2563eb);
 }
 
 .order-inventory-dialog .picker-thumb,
@@ -4465,8 +4466,8 @@
   max-height: 80px;
   border-radius: 8px;
   overflow: hidden;
-  border: 1px solid rgba(198, 209, 225, 0.75);
-  background: #fff;
+  border: 1px solid var(--erp-detail-border, rgba(198, 209, 225, 0.75));
+  background: var(--erp-detail-surface, #fff);
   flex: 0 0 auto;
   display: block;
 }
@@ -4500,7 +4501,7 @@
   min-height: 88px;
   max-height: 88px;
   border-radius: 14px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .order-inventory-dialog .el-image.picker-thumb-product {
@@ -4526,7 +4527,7 @@
   object-fit: contain;
   object-position: center;
   display: block;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .order-inventory-dialog .product-picker-item > .el-image {
@@ -4536,10 +4537,10 @@
 .order-inventory-dialog .picker-thumb-fallback {
   display: grid;
   place-items: center;
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-weight: 700;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.08), rgba(15, 23, 42, 0.04)), #fff;
+  background: linear-gradient(135deg, var(--erp-detail-primary-soft, rgba(37, 99, 235, 0.08)), var(--erp-detail-surface-alt, rgba(15, 23, 42, 0.04))), var(--erp-detail-surface, #fff);
 }
 
 .order-inventory-dialog .picker-item-meta,
@@ -4555,7 +4556,7 @@
 
 .order-inventory-dialog .picker-item-meta strong,
 .order-inventory-dialog .selected-product-meta strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
@@ -4567,11 +4568,11 @@
 
 .order-inventory-dialog .picker-empty {
   padding: 28px 16px;
-  border: 1px dashed rgba(148, 163, 184, 0.8);
+  border: 1px dashed var(--erp-detail-border, rgba(148, 163, 184, 0.8));
   border-radius: 16px;
   text-align: center;
-  color: #66758c;
-  background: rgba(248, 250, 252, 0.9);
+  color: var(--erp-detail-text-secondary, #66758c);
+  background: var(--erp-detail-surface-alt, rgba(248, 250, 252, 0.9));
 }
 
 .order-inventory-dialog .selected-product-card {
@@ -4583,9 +4584,9 @@
   max-height: 100%;
   min-height: 0;
   padding: 12px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
   box-shadow: none;
 }
 
@@ -4665,7 +4666,7 @@
   border-radius: 0;
   background: transparent;
   border: 0;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  border-bottom: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.9));
 }
 
 .order-inventory-current-binding {
@@ -4689,13 +4690,13 @@
 }
 
 .order-inventory-info-row span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 11px;
   line-height: 1.45;
 }
 
 .order-inventory-info-row strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 12px;
   line-height: 1.45;
   word-break: break-word;
@@ -4704,26 +4705,26 @@
 .order-inventory-dialog .dialog-locked-head {
   margin-bottom: 2px;
   padding: 12px 14px;
-  border: 1px solid rgba(191, 219, 254, 0.9);
+  border: 1px solid var(--erp-detail-primary-border, rgba(191, 219, 254, 0.9));
   border-radius: 14px;
-  background: rgba(239, 246, 255, 0.8);
+  background: var(--erp-detail-primary-soft, rgba(239, 246, 255, 0.8));
   display: grid;
   gap: 4px;
 }
 
 .order-inventory-dialog .dialog-locked-head strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
 }
 
 .order-inventory-dialog .dialog-locked-head span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .inventory-source-link {
-  color: #2563eb;
+  color: var(--erp-link, #2563eb);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
@@ -4741,9 +4742,9 @@
 .create-workbench-head {
   margin-bottom: 12px;
   padding: 10px 12px;
-  border: 1px solid rgba(191, 219, 254, 0.9);
+  border: 1px solid var(--erp-detail-primary-border, rgba(191, 219, 254, 0.9));
   border-radius: 8px;
-  background: #eff6ff;
+  background: var(--erp-detail-primary-soft, #eff6ff);
 }
 
 .create-inventory-form {
@@ -4754,9 +4755,9 @@
   display: grid;
   gap: 12px;
   padding: 14px 14px 12px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
+  border: 1px solid var(--erp-detail-border, rgba(203, 213, 225, 0.9));
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .create-form-section .el-select,
@@ -4773,12 +4774,12 @@
 }
 
 .create-section-title strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 14px;
 }
 
 .create-section-title span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -4793,8 +4794,8 @@
 }
 
 .create-similar-panel {
-  border: 1px solid #f0c36d;
-  background: #fffaf0;
+  border: 1px solid var(--erp-detail-warning-border, #f0c36d);
+  background: var(--erp-detail-warning-bg, #fffaf0);
   border-radius: 12px;
   padding: 12px;
 }
@@ -4812,9 +4813,9 @@
   gap: 10px;
   min-width: 0;
   padding: 9px;
-  border: 1px solid #ead7ad;
+  border: 1px solid var(--erp-detail-warning-border, #ead7ad);
   border-radius: 10px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .create-similar-card__body {
@@ -4881,7 +4882,7 @@
 }
 
 .create-composition-dialog-footer span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 12px;
 }
 
@@ -4922,7 +4923,7 @@
 
 .create-dimension-combo span,
 .create-dimension-combo em {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-style: normal;
   white-space: nowrap;
@@ -4939,18 +4940,18 @@
   gap: 4px;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid rgba(226, 232, 240, 0.95);
+  border: 1px solid var(--erp-detail-border, rgba(226, 232, 240, 0.95));
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .create-summary-item span {
-  color: #66758c;
+  color: var(--erp-detail-text-secondary, #66758c);
   font-size: 11px;
 }
 
 .create-summary-item strong {
-  color: #162742;
+  color: var(--erp-detail-text-main, #162742);
   font-size: 13px;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -5284,31 +5285,31 @@
 
 .orders-procurement-table-wrap { overflow-x: auto; }
 .orders-procurement-table { width: 100%; min-width: 1290px; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-.orders-procurement-table th { position: sticky; top: 0; z-index: 1; padding: 10px 8px; color: #606266; background: #f5f7fa; text-align: left; white-space: nowrap; border-bottom: 1px solid #dcdfe6; }
-.orders-procurement-table td { padding: 10px 8px; vertical-align: middle; color: var(--erp-text-primary, #303133); border-bottom: 1px solid #ebeef5; white-space: nowrap; }
-.orders-procurement-table tbody tr.is-received td { background: #f5fff7; }
-.orders-procurement-table tbody tr.is-pending td { background: #fffdf8; }
-.orders-procurement-table .is-quantity { color: #2563eb; font-weight: 700; }
+.orders-procurement-table th { position: sticky; top: 0; z-index: 1; padding: 10px 8px; color: var(--erp-detail-text-regular, #606266); background: var(--erp-detail-surface-alt, #f5f7fa); text-align: left; white-space: nowrap; border-bottom: 1px solid var(--erp-detail-border, #dcdfe6); }
+.orders-procurement-table td { padding: 10px 8px; vertical-align: middle; color: var(--erp-text-main, #303133); border-bottom: 1px solid var(--erp-detail-border, #ebeef5); white-space: nowrap; }
+.orders-procurement-table tbody tr.is-received td { background: var(--erp-detail-success-bg, #f5fff7); }
+.orders-procurement-table tbody tr.is-pending td { background: var(--erp-detail-warning-bg, #fffdf8); }
+.orders-procurement-table .is-quantity { color: var(--erp-link, #2563eb); font-weight: 700; }
 .orders-procurement-product { min-width: 190px; white-space: normal !important; }
 .orders-procurement-product strong, .orders-procurement-product small { display: block; }
 .orders-procurement-product small { margin-top: 4px; color: var(--erp-text-secondary, #606266); }
-.orders-procurement-reference-input { width: 144px; box-sizing: border-box; padding: 6px 8px; color: #303133; border: 1px solid #dcdfe6; border-radius: 4px; outline: none; background: #fff; }
-.orders-procurement-reference-input:focus { border-color: #409eff; box-shadow: 0 0 0 2px rgba(64, 158, 255, .12); }
+.orders-procurement-reference-input { width: 144px; box-sizing: border-box; padding: 6px 8px; color: var(--erp-detail-text-main, #303133); border: 1px solid var(--erp-detail-border, #dcdfe6); border-radius: 4px; outline: none; background: var(--erp-detail-surface, #fff); }
+.orders-procurement-reference-input:focus { border-color: var(--erp-primary-fill, #409eff); box-shadow: 0 0 0 2px var(--erp-detail-primary-border, rgba(64, 158, 255, .12)); }
 .orders-procurement-status { margin-left: auto; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.orders-procurement-status.is-received { color: #237a3b; background: #dff5e5; }
-.orders-procurement-status.is-pending { color: #a35d00; background: #fff0d7; }
-.orders-procurement-save-button { padding: 6px 10px; color: #fff; border: 0; border-radius: 4px; background: #409eff; cursor: pointer; }
-.orders-procurement-save-button:hover { background: #66b1ff; }
+.orders-procurement-status.is-received { color: var(--erp-detail-success-text, #237a3b); background: var(--erp-detail-success-bg, #dff5e5); }
+.orders-procurement-status.is-pending { color: var(--erp-detail-warning-text, #a35d00); background: var(--erp-detail-warning-bg, #fff0d7); }
+.orders-procurement-save-button { padding: 6px 10px; color: var(--erp-primary-contrast, #fff); border: 0; border-radius: 4px; background: var(--erp-primary-fill, #409eff); cursor: pointer; }
+.orders-procurement-save-button:hover { background: var(--erp-primary-fill-hover, #66b1ff); }
 .orders-procurement-actions { display: flex; gap: 6px; }
-.orders-procurement-receipt-button { padding: 6px 10px; color: #237a3b; border: 1px solid #9ed7ac; border-radius: 4px; background: #f2fff4; cursor: pointer; }
-.orders-procurement-receipt-button:hover { color: #fff; border-color: #55af6a; background: #55af6a; }
+.orders-procurement-receipt-button { padding: 6px 10px; color: var(--erp-detail-success-text, #237a3b); border: 1px solid var(--erp-detail-success-border, #9ed7ac); border-radius: 4px; background: var(--erp-detail-success-bg, #f2fff4); cursor: pointer; }
+.orders-procurement-receipt-button:hover { color: var(--erp-primary-contrast, #fff); border-color: var(--erp-primary-fill, #55af6a); background: var(--erp-primary-fill, #55af6a); }
 .orders-procurement-empty { padding: 28px 0; text-align: center; color: var(--erp-text-secondary, #606266); }
 
 .orders-inbound-confirm-dialog .el-message-box__btns {
   padding: 0 20px 18px;
 }
 
-.orders-coverage-summary { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: #66758c; line-height: 1.45; }
+.orders-coverage-summary { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; color: var(--erp-detail-text-secondary, #66758c); line-height: 1.45; }
 .orders-coverage-summary small { font-size: 11px; }
 
 .order-procurement-receipt-hint {

@@ -858,14 +858,14 @@ function procurementTimeText(row) {
 </template>
 
 <style scoped>
-.orders-mark-cell { --orders-mark-note-color: #64748b; }
-.orders-mark-cell.is-red { --orders-mark-note-color: #b91c1c; }
-.orders-mark-cell.is-orange { --orders-mark-note-color: #b45309; }
-.orders-mark-cell.is-yellow { --orders-mark-note-color: #92400e; }
-.orders-mark-cell.is-green { --orders-mark-note-color: #15803d; }
-.orders-mark-cell.is-cyan { --orders-mark-note-color: #0e7490; }
-.orders-mark-cell.is-purple { --orders-mark-note-color: #6d28d9; }
-.orders-mark-cell.is-gray { --orders-mark-note-color: #64748b; }
+.orders-mark-cell { --orders-mark-note-color: var(--erp-text-secondary, #64748b); }
+.orders-mark-cell.is-red { --orders-mark-note-color: var(--erp-danger-text, #b91c1c); }
+.orders-mark-cell.is-orange { --orders-mark-note-color: var(--erp-warning-text, #b45309); }
+.orders-mark-cell.is-yellow { --orders-mark-note-color: var(--erp-warning-text, #92400e); }
+.orders-mark-cell.is-green { --orders-mark-note-color: var(--erp-success-text, #15803d); }
+.orders-mark-cell.is-cyan { --orders-mark-note-color: var(--erp-info-text, #0e7490); }
+.orders-mark-cell.is-purple { --orders-mark-note-color: var(--erp-primary, #6d28d9); }
+.orders-mark-cell.is-gray { --orders-mark-note-color: var(--erp-text-secondary, #64748b); }
 .orders-mark-note-icon { font-size: 15px; color: var(--orders-mark-note-color); }
 .orders-mark-dot .orders-mark-note-icon { font-size: 10px; color: #fff; }
 .orders-mark-note-summary { display: -webkit-box; width: 64px; max-width: 64px; padding: 0; border: 0; background: transparent; color: var(--orders-mark-note-color); font: inherit; font-size: 12px; line-height: 1.35; text-align: center; white-space: normal; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }

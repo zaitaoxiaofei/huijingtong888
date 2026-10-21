@@ -1430,6 +1430,11 @@ onMounted(async () => {
   padding: 10px 16px;
 }
 
+.ozon-actions-tabs :deep(.el-segmented) {
+  --el-segmented-item-selected-bg-color: var(--erp-primary-fill);
+  --el-segmented-item-selected-color: var(--erp-primary-contrast);
+}
+
 .ozon-actions-table,
 .ozon-cleanup-page {
   padding: 16px;
@@ -1511,7 +1516,7 @@ onMounted(async () => {
 }
 
 .danger-text {
-  color: #d03050;
+  color: var(--erp-detail-danger-text, #d03050);
 }
 
 .section-head {
@@ -1531,11 +1536,11 @@ onMounted(async () => {
 }
 
 .ozon-action-filter :deep(.el-segmented) {
-  --el-segmented-item-selected-bg-color: #f8fbff;
-  --el-segmented-item-selected-color: #005bff;
-  border: 1px solid #d6e0ee;
+  --el-segmented-item-selected-bg-color: var(--erp-detail-primary-faint, #f8fbff);
+  --el-segmented-item-selected-color: var(--erp-detail-primary, #005bff);
+  border: 1px solid var(--erp-detail-border-light, #d6e0ee);
   border-radius: 8px;
-  background: #fff;
+  background: var(--erp-detail-surface, #fff);
 }
 
 .ozon-action-list {
@@ -1558,7 +1563,7 @@ onMounted(async () => {
   padding: 26px 28px;
   border: 1px solid transparent;
   border-radius: 24px;
-  background: #f5f7fb;
+  background: var(--erp-detail-surface-alt, #f5f7fb);
   color: var(--erp-text);
   text-align: left;
   cursor: pointer;
@@ -1567,8 +1572,8 @@ onMounted(async () => {
 
 .ozon-action-card:hover,
 .ozon-action-card.is-selected {
-  border-color: #0b68ff;
-  background: #f7faff;
+  border-color: var(--erp-detail-primary-border, #0b68ff);
+  background: var(--erp-detail-primary-faint, #f7faff);
   box-shadow: 0 8px 22px rgba(15, 61, 122, 0.08);
 }
 
@@ -1581,7 +1586,7 @@ onMounted(async () => {
 }
 
 .action-card-main strong {
-  color: #07142b;
+  color: var(--erp-detail-text-main, #07142b);
   font-size: 18px;
   line-height: 1.3;
   font-weight: 800;
@@ -1589,18 +1594,18 @@ onMounted(async () => {
 
 .action-card-main small,
 .action-card-date {
-  color: #60748f;
+  color: var(--erp-detail-text-secondary, #60748f);
   font-size: 14px;
 }
 
 .action-join {
-  color: #005bff;
+  color: var(--erp-detail-primary, #005bff);
   font-size: 14px;
   font-weight: 700;
 }
 
 .action-join.is-active {
-  color: #d95f00;
+  color: var(--erp-detail-warning-text, #d95f00);
 }
 
 .action-card-side {
@@ -1616,7 +1621,7 @@ onMounted(async () => {
 
 .action-card-count {
   align-self: end;
-  color: #07142b;
+  color: var(--erp-detail-text-main, #07142b);
   font-size: 15px;
 }
 

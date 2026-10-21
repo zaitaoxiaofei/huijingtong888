@@ -186,9 +186,9 @@ function onDrop(targetId) {
 
 <style scoped>
 .work-card {
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--erp-detail-border-light, rgba(148, 163, 184, 0.22));
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--erp-detail-surface, rgba(255, 255, 255, 0.78));
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
   padding: 14px;
 }
@@ -206,8 +206,8 @@ function onDrop(targetId) {
   width: 26px;
   height: 26px;
   border-radius: 6px;
-  background: #0f172a;
-  color: #fff;
+  background: var(--erp-detail-surface-alt, #0f172a);
+  color: var(--erp-detail-text-main, #fff);
   font-size: 12px;
   font-weight: 700;
 }
@@ -233,8 +233,8 @@ function onDrop(targetId) {
   min-height: 58px;
   padding: 10px;
   border-radius: 8px;
-  background: #f3f7fb;
-  border: 1px dashed #cbd5e1;
+  background: var(--erp-detail-surface-alt, #f3f7fb);
+  border: 1px dashed var(--erp-detail-border-light, #cbd5e1);
 }
 
 .target-chip {
@@ -245,8 +245,8 @@ function onDrop(targetId) {
   height: 34px;
   padding: 0 8px;
   border-radius: 7px;
-  background: #0f172a;
-  color: #fff;
+  background: var(--erp-detail-surface-alt, #0f172a);
+  color: var(--erp-detail-text-main, #fff);
   cursor: grab;
 }
 
@@ -259,13 +259,13 @@ function onDrop(targetId) {
 .target-chip button {
   border: 0;
   background: transparent;
-  color: #cbd5e1;
+  color: var(--erp-detail-text-main, #cbd5e1);
   cursor: pointer;
   font-size: 17px;
 }
 
 .empty-inline {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 13px;
 }
 
@@ -307,7 +307,7 @@ function onDrop(targetId) {
 }
 
 .product-line em {
-  color: #64748b;
+  color: var(--erp-detail-text-secondary, #64748b);
   font-size: 12px;
   font-style: normal;
 }

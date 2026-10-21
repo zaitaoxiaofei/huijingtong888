@@ -92,7 +92,7 @@ onDeactivated(() => { open.value = false; });
 </template>
 
 <style scoped>
-:global(:root[data-theme="dark"]) {
+:global(:root[data-theme]) {
   --calculator-theme-border: var(--erp-border);
   --calculator-theme-border-light: var(--erp-border-light);
   --calculator-theme-danger-text: var(--erp-danger-text);

@@ -1100,7 +1100,7 @@ onDeactivated(stopOnlineProductSyncPolling);
   gap: 8px;
   flex-shrink: 0;
 }
-.shop-limit-trigger strong { color: var(--el-color-success); font-size: 12px; }
+.shop-limit-trigger strong { color: var(--erp-success-text); font-size: 12px; }
 .shop-limit-trigger small { color: var(--erp-text-secondary); font-size: 12px; }
 .shop-limit-popover { display: grid; gap: 10px; }
 .shop-limit-panel-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -1115,10 +1115,10 @@ onDeactivated(stopOnlineProductSyncPolling);
 .cell-stack { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .muted-text { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.5; }
 .product-cell { display: flex; align-items: flex-start; gap: 12px; }
-.product-thumb { width: 64px; height: 84px; border-radius: 8px; border: 1px solid var(--erp-border); background: #fff; flex-shrink: 0; overflow: hidden; }
+.product-thumb { width: 64px; height: 84px; border-radius: 8px; border: 1px solid var(--erp-border); background: var(--erp-detail-surface, #fff); flex-shrink: 0; overflow: hidden; }
 .stock-cell { display: grid; gap: 2px; justify-items: center; line-height: 1.35; }
 .stock-cell strong { color: var(--erp-text-primary); font-size: 16px; }
-.stock-cell strong.is-zero-stock { color: var(--el-color-danger); }
+.stock-cell strong.is-zero-stock { color: var(--erp-danger-text); }
 .stock-cell span,
 .stock-cell small { color: var(--erp-text-secondary); font-size: 12px; }
 .stock-dialog :deep(.el-dialog__body) { padding: 0 24px 8px; }

@@ -82,7 +82,7 @@ onBeforeUnmount(() => clearTimeout(timer));
 <style scoped>
 .category-filter-trigger { width: 100%; justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category-filter-actions { display: flex; gap: 6px; margin: 8px 0; }
-.category-filter-list { display: flex; max-height: 300px; overflow: auto; border: 1px solid #e5eaf3; }
-.category-filter-column { min-width: 180px; display: flex; flex-direction: column; align-items: stretch; border-right: 1px solid #e5eaf3; }
+.category-filter-list { display: flex; max-height: 300px; overflow: auto; border: 1px solid var(--erp-detail-border-light, #e5eaf3); }
+.category-filter-column { min-width: 180px; display: flex; flex-direction: column; align-items: stretch; border-right: 1px solid var(--erp-detail-border-light, #e5eaf3); }
 .category-filter-item { justify-content: flex-start; margin: 0 !important; padding: 6px 10px; white-space: normal; text-align: left; height: auto; }
 </style>

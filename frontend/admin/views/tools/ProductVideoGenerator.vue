@@ -701,7 +701,7 @@ function revokeUrl(url) {
   position: relative;
   width: 100%;
   aspect-ratio: 3 / 4;
-  background: #f8fafc;
+  background: var(--erp-detail-surface-alt, #f8fafc);
 }
 
 .upload-placeholder {

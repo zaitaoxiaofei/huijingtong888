@@ -46,5 +46,5 @@ onBeforeUnmount(() => window.removeEventListener("erp:auth-scope-changed", clear
 </template>
 
 <style scoped>
-.platform-accounts-page{padding:24px}.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}.page-head h1{margin:0 0 8px}.page-head p{margin:0;color:#64748b}@media(max-width:720px){.platform-accounts-page{padding:14px}.page-head{flex-direction:column}}
+.platform-accounts-page{padding:24px}.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}.page-head h1{margin:0 0 8px}.page-head p{margin:0;color:var(--erp-text-regular, #64748b)}@media(max-width:720px){.platform-accounts-page{padding:14px}.page-head{flex-direction:column}}
 </style>
