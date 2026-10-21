@@ -16,6 +16,8 @@ Status legend:
 
 ## 0. Current Refactor Snapshot
 
+- `Done` (2026-10-21, source/local verification only): removed the onboarding menu/page and retired its saved workspace tabs; old links redirect to an accessible home. Repaired the shared dark palette, header/workspace controls and Element Plus overlays, plus page-owned dashboard, task timeline, finance and order controls. Light colors/layouts are preserved. Browser acceptance uses built frontend assets with synthetic API fixtures; ECS deployment and live production acceptance have not been performed.
+
 - `In progress` (2026-10-21): default-enterprise upgrade compatibility is protected separately from platform permission changes. Historical automatic owner rows must not expand ordinary employees' duties; shared tariff reads and existing default-enterprise listing execution must remain available to their business roles. Real production account/membership reconciliation and end-to-end acceptance remain release prerequisites.
 
 - `In progress` (2026-10-21): paid-pilot preparation is tracked in [saas-launch-readiness.md](saas-launch-readiness.md), based on release `2026.10.21-task-brand` (`eefe63d`). Local changes cover QR login protection, tenant plugin-token routing, draft query bindings, explicit platform grants, enterprise personnel and matrix configuration. Startup creates no memberships, including for platform administrators. Historical identity migration, ECS acceptance and complete tenant business workflows remain required before sale.

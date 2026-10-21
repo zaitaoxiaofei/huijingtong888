@@ -4,7 +4,6 @@ import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, Mag
 export const navigationMenus = [
   { key: "dashboard", label: "首页", route: "/dashboard", icon: House },
   { key: "team-plan", label: "任务系统", route: "/team-plan", icon: Finished },
-  { key: "onboarding", label: "入职须知", route: "/onboarding", icon: Document },
   {
     key: "finance",
     label: "财务中心",

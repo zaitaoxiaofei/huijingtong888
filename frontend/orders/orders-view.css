@@ -5317,3 +5317,192 @@
   margin-top: 6px;
   color: var(--el-text-color-secondary);
 }
+
+/* Page-owned controls also follow the shared palette when their overlays are teleported. */
+:root[data-theme="dark"] :is(.orders-quick-filter-tag, .orders-status-sort-button,
+  .orders-status-preference-item, .orders-selected-count, .orders-toolbar-background-tag) {
+  background: var(--erp-surface-alt);
+  border-color: var(--erp-border-strong);
+  color: var(--erp-text-regular);
+}
+
+:root[data-theme="dark"] :is(.orders-quick-filter-tag.is-active, .orders-selected-count.active) {
+  background: var(--erp-primary-soft);
+  border-color: var(--erp-primary-border);
+  color: var(--erp-primary);
+}
+
+:root[data-theme="dark"] .orders-quick-filter-tag .el-check-tag:not(.is-checked) {
+  color: var(--erp-text-regular);
+  background: var(--erp-surface-alt);
+}
+
+:root[data-theme="dark"] :is(.orders-status-preference-index, .orders-status-item-count) {
+  background: var(--erp-muted-bg);
+  color: var(--erp-text-regular);
+}
+
+:root[data-theme="dark"] :is(.orders-procurement-time-cell strong, .orders-order-title .is-strong) {
+  color: var(--erp-text-main);
+}
+
+:root[data-theme="dark"] :is(.orders-product-link, .orders-tracking-link) {
+  color: var(--erp-link);
+}
+
+:root[data-theme="dark"] :is(.orders-product-link:hover, .orders-tracking-link:hover) {
+  color: var(--erp-primary-hover);
+}
+
+:root[data-theme="dark"] :is(.orders-inline-accent-button-secondary.el-button,
+  .orders-profit-detail-button.el-button, .orders-status-action-button) {
+  background: var(--erp-surface-alt);
+  border-color: var(--erp-border-strong);
+  color: var(--erp-text-regular);
+}
+
+:root[data-theme="dark"] :is(.orders-inline-accent-button-secondary.el-button:hover,
+  .orders-profit-detail-button.el-button:hover, .orders-status-action-button:hover,
+  .orders-status-sort-button:hover) {
+  background: var(--erp-primary-soft);
+  border-color: var(--erp-primary-border);
+  color: var(--erp-primary);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .orders-toolbar-btn-secondary.el-button {
+  --el-button-bg-color: var(--erp-surface-alt);
+  --el-button-border-color: var(--erp-border-strong);
+  --el-button-text-color: var(--erp-text-regular);
+  --el-button-hover-bg-color: var(--erp-primary-soft);
+  --el-button-hover-border-color: var(--erp-primary-border);
+  --el-button-hover-text-color: var(--erp-primary);
+  --el-button-active-bg-color: var(--erp-primary-soft);
+  --el-button-active-border-color: var(--erp-primary);
+}
+
+:root[data-theme="dark"] .orders-toolbar-btn-danger.el-button {
+  --el-button-bg-color: var(--erp-danger-bg);
+  --el-button-border-color: var(--erp-danger-border);
+  --el-button-text-color: var(--erp-danger-text);
+  --el-button-hover-bg-color: var(--erp-danger-bg);
+  --el-button-hover-border-color: var(--erp-danger);
+  --el-button-hover-text-color: var(--erp-danger-text);
+}
+
+:root[data-theme="dark"] .orders-procurement-table th {
+  color: var(--erp-text-regular);
+  background: var(--erp-surface-alt);
+  border-color: var(--erp-border);
+}
+
+:root[data-theme="dark"] .orders-procurement-table td {
+  color: var(--erp-text-main);
+  border-color: var(--erp-border);
+}
+
+:root[data-theme="dark"] .orders-procurement-table tbody tr.is-received td {
+  background: var(--erp-success-bg);
+}
+
+:root[data-theme="dark"] .orders-procurement-table tbody tr.is-pending td {
+  background: var(--erp-warning-bg);
+}
+
+:root[data-theme="dark"] .orders-procurement-reference-input {
+  color: var(--erp-text-main);
+  background: var(--erp-surface-alt);
+  border-color: var(--erp-border-strong);
+}
+
+:root[data-theme="dark"] .orders-procurement-reference-input:focus {
+  border-color: var(--erp-primary);
+  box-shadow: 0 0 0 2px var(--erp-primary-soft);
+}
+
+:root[data-theme="dark"] :is(.orders-procurement-table .is-quantity, .orders-inventory-link) {
+  color: var(--erp-link);
+}
+
+:root[data-theme="dark"] :is(.orders-procurement-status.is-received, .orders-procurement-receipt-button) {
+  color: var(--erp-success-text);
+  background: var(--erp-success-bg);
+  border-color: var(--erp-success-border);
+}
+
+:root[data-theme="dark"] .orders-procurement-status.is-pending {
+  color: var(--erp-warning-text);
+  background: var(--erp-warning-bg);
+}
+
+:root[data-theme="dark"] :is(.orders-procurement-save-button, .orders-procurement-receipt-button:hover) {
+  color: var(--erp-primary-contrast);
+  background: var(--erp-primary-fill);
+  border-color: var(--erp-primary-fill);
+}
+
+:root[data-theme="dark"] .orders-coverage-summary {
+  color: var(--erp-text-secondary);
+}
+
+:root[data-theme="dark"] :is(.orders-icon-button, .orders-copy-chip) {
+  color: var(--erp-text-regular);
+  background: var(--erp-surface-alt);
+  border-color: var(--erp-border-strong);
+}
+
+:root[data-theme="dark"] :is(.orders-icon-button:hover, .orders-copy-chip:hover) {
+  color: var(--erp-primary);
+  background: var(--erp-primary-soft);
+  border-color: var(--erp-primary-border);
+}
+
+:root[data-theme="dark"] .orders-item-quantity {
+  color: var(--erp-text-secondary);
+}
+
+:root[data-theme="dark"] :is(.orders-item-quantity.is-multi, .orders-table .inventory-shortage) {
+  color: var(--erp-danger-text);
+}
+
+:root[data-theme="dark"] .orders-table .inventory-compact small {
+  color: var(--erp-text-secondary);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-primary.el-button {
+  color: var(--erp-primary-contrast);
+  background: var(--erp-primary-fill);
+  border-color: var(--erp-primary-fill);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-primary.el-button:hover {
+  background: var(--erp-primary-fill-hover);
+  border-color: var(--erp-primary-fill-hover);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-danger-soft.el-button {
+  color: var(--erp-danger-text);
+  background: var(--erp-danger-bg);
+  border-color: var(--erp-danger-border);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-danger-soft.el-button:hover {
+  border-color: var(--erp-danger);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-success.el-button {
+  color: var(--erp-success-text);
+  background: var(--erp-success-bg);
+  border-color: var(--erp-success-border);
+}
+
+:root[data-theme="dark"] .orders-inline-accent-button-success.el-button:hover {
+  border-color: var(--erp-success);
+}
+
+:root[data-theme="dark"] :is(.orders-inline-accent-button, .orders-profit-detail-button).el-button.is-disabled,
+:root[data-theme="dark"] :is(.orders-inline-accent-button, .orders-profit-detail-button).el-button.is-disabled:hover {
+  color: var(--el-disabled-text-color);
+  background: var(--el-disabled-bg-color);
+  border-color: var(--el-disabled-border-color);
+}

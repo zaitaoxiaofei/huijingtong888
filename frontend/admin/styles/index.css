@@ -3088,17 +3088,8 @@ body[data-theme="dark"] {
 }
 
 :root[data-theme="dark"] .el-tag--light {
-  background: #162235;
-  color: var(--erp-text);
-}
-
-:root[data-theme="dark"] .el-tag--light.el-tag--primary,
-:root[data-theme="dark"] .el-tag--light.el-tag--success,
-:root[data-theme="dark"] .el-tag--light.el-tag--warning,
-:root[data-theme="dark"] .el-tag--light.el-tag--danger,
-:root[data-theme="dark"] .el-tag--light.el-tag--info {
-  background: #162235;
-  color: var(--erp-text);
+  background: var(--el-tag-bg-color);
+  color: var(--el-tag-text-color);
 }
 
 :root[data-theme="dark"] .el-button--primary.is-plain,
@@ -3106,8 +3097,8 @@ body[data-theme="dark"] {
 :root[data-theme="dark"] .el-button--warning.is-plain,
 :root[data-theme="dark"] .el-button--danger.is-plain,
 :root[data-theme="dark"] .el-button--info.is-plain {
-  background: var(--erp-surface-alt);
-  border-color: var(--erp-border);
+  background: var(--el-button-bg-color);
+  border-color: var(--el-button-border-color);
 }
 
 :root[data-theme="dark"] .el-button--primary.is-plain:hover,
@@ -3115,7 +3106,7 @@ body[data-theme="dark"] {
 :root[data-theme="dark"] .el-button--warning.is-plain:hover,
 :root[data-theme="dark"] .el-button--danger.is-plain:hover,
 :root[data-theme="dark"] .el-button--info.is-plain:hover {
-  background: #142033;
+  background: var(--el-button-hover-bg-color);
 }
 
 :root[data-theme="dark"] .el-button.is-link {
@@ -3469,23 +3460,10 @@ body[data-theme="dark"] {
 :root[data-theme="dark"] .orders-toolbar-card .el-input__wrapper,
 :root[data-theme="dark"] .orders-toolbar-card .el-select__wrapper,
 :root[data-theme="dark"] .orders-toolbar-card .el-range-editor,
-:root[data-theme="dark"] .orders-toolbar-card .el-range-input,
-:root[data-theme="dark"] .orders-toolbar-card .el-button:not(.is-link) {
+:root[data-theme="dark"] .orders-toolbar-card .el-range-input {
   background: var(--erp-surface-alt);
   border-color: var(--erp-border);
   color: var(--erp-text);
-}
-
-:root[data-theme="dark"] .orders-toolbar-card .el-button--primary {
-  background: var(--erp-primary);
-  border-color: var(--erp-primary);
-  color: #08111f;
-}
-
-:root[data-theme="dark"] .orders-toolbar-card .el-button--primary.is-plain {
-  background: #142033;
-  color: var(--erp-primary);
-  border-color: rgba(110, 168, 255, 0.35);
 }
 
 :root[data-theme="dark"] .orders-toolbar-status,
@@ -3614,9 +3592,9 @@ body[data-theme="dark"] {
 
 :root[data-theme="dark"] .el-alert,
 :root[data-theme="dark"] .el-alert--info.is-light {
-  background: var(--erp-surface-alt) !important;
+  background: var(--el-alert-bg-color, var(--erp-surface-alt)) !important;
   border-color: var(--erp-border) !important;
-  color: var(--erp-text) !important;
+  color: var(--el-alert-text-color, var(--erp-text)) !important;
 }
 
 :root[data-theme="dark"] .selection-table-card,

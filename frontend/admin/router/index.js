@@ -75,7 +75,6 @@ const MobileProcurementView = () => import("../views/mobile/MobileProcurementVie
 const MobileInventoryView = () => import("../views/mobile/MobileInventoryView.vue");
 const MobileStockAlertsView = () => import("../views/mobile/MobileStockAlertsView.vue");
 const MobileOnlineProductsView = () => import("../views/mobile/MobileOnlineProductsView.vue");
-const OnboardingKnowledgeView = () => import("../views/onboarding/OnboardingKnowledgeView.vue");
 
 const MOBILE_MODE_STORAGE_KEY = "baodanMobileMode";
 
@@ -120,7 +119,7 @@ export const router = createRouter({
         { path: "", redirect: "/dashboard" },
         { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
-        { path: "onboarding", name: "onboarding", component: OnboardingKnowledgeView, meta: { title: "入职须知", breadcrumb: ["入职须知"] } },
+        { path: "onboarding", redirect: { path: "/dashboard", query: {}, hash: "" } },
         { path: "exceptions", redirect: "/exceptions/profit", meta: { title: "待处理异常", breadcrumb: ["待处理异常"] } },
         { path: "exceptions/profit", name: "exceptions-profit", component: ProfitExceptionView, meta: { title: "利润异常", breadcrumb: ["待处理异常", "利润异常"] } },
         { path: "exceptions/deadline", name: "exceptions-deadline", component: DeadlineExceptionView, meta: { title: "订单超时", breadcrumb: ["待处理异常", "订单超时"] } },
