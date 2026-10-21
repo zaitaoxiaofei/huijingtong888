@@ -603,9 +603,16 @@ function taskPriorityType(row) { return ({ urgent_important: "danger", urgent_un
 function taskListRowClass({ row }) { return row.type === "product_development" ? "" : "task-row-no-expand"; }
 function taskDisplayName(row) {
   if (row?.type !== "product_development") return row?.title || row?.name || "未命名任务";
-  const categories = [...new Set(developmentModels(row).map((model) => model.category || row.development_category).filter(Boolean))];
-  if (categories.length === 1) return `${categories[0]}开发任务`;
-  if (categories.length > 1) return `${categories.slice(0, 2).join("、")}等 ${categories.length} 个核心品名开发任务`;
+  const models = developmentModels(row);
+  const scopes = models.length
+    ? models.map((model) => ({ category: model.category || row.development_plan?.category, brand: model.brand || row.development_plan?.brand }))
+    : developmentScopes(row);
+  const names = [...new Set(scopes.map((scope) => {
+    const category = String(scope.category || "").trim();
+    const brand = String(scope.brand || "").trim();
+    return category ? [category, brand === "非汽车" ? "" : brand].filter(Boolean).join(" · ") : "";
+  }).filter(Boolean))];
+  if (names.length) return `${names.join("、")}开发任务`;
   return row.development_category ? `${row.development_category}开发任务` : row.title || "未配置核心品名";
 }
 function taskModelRows(row) { return developmentModels(row).map((model, index) => ({ ...model, index, label: [model.brand || row.development_brand, model.model || "未命名车型"].filter(Boolean).join(" · ") })); }
@@ -1467,7 +1474,7 @@ watch(taskPlanningPeriodKey, () => { loadTaskPlanOrders(); });
             </div>
           </template></el-table-column>
           <el-table-column label="类型" width="64" align="center"><template #default="{row}"><el-tooltip :content="taskTypeMeta(row).label" placement="top"><span class="task-type-icon" :class="taskTypeMeta(row).value"><component :is="taskTypeMeta(row).icon" :size="17" /></span></el-tooltip></template></el-table-column>
-          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong>{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small></div></template></el-table-column>
+          <el-table-column label="任务名称" min-width="300"><template #default="{row}"><div class="task-name-cell"><strong :title="taskDisplayName(row)">{{ taskDisplayName(row) }}</strong><small v-if="row.type==='product_development'">{{ taskModelSummary(row) }}</small></div></template></el-table-column>
           <el-table-column label="负责人" width="150"><template #default="{row}"><div class="person-inline task-list-owner"><el-avatar :src="row.owner_avatar_url || personAvatar(row.owner_person_id || row.assignee_person_id)" :size="28">{{ personInitial(row.owner_name || row.assignee_name || '未分配') }}</el-avatar><span>{{ row.owner_name || row.assignee_name || '未分配' }}</span></div></template></el-table-column>
           <el-table-column label="优先级" width="152"><template #default="{row}"><el-tag :type="taskPriorityType(row)" effect="light">{{ taskPriorityLabel(row) }}</el-tag></template></el-table-column>
           <el-table-column label="当前进度" width="128"><template #default="{row}"><div class="task-progress-cell"><strong>{{ taskProgress(row) }}%</strong><el-progress :percentage="taskProgress(row)" :show-text="false" :stroke-width="7" :status="taskTone(row)==='overdue'?'exception':taskTone(row)==='done'?'success':undefined" /><small>{{ Number(row.done || 0) }} / {{ Number(row.target || 0) }} {{ row.unit || 'SKU' }}</small></div></template></el-table-column>
