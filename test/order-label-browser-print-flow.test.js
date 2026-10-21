@@ -12,6 +12,7 @@ test("order labels use the browser print confirmation flow without a bound print
   assert.match(pageSource, /const result = await previewOrderLabels\(ids\)/);
   assert.match(serviceSource, /id="printNow" class="primary"/);
   assert.match(serviceSource, /package-label-printed/);
+  assert.match(serviceSource, /record\?\.ok !== true \|\| !record\?\.print_batch_id/);
   assert.match(serviceSource, /contentWindow\?\.print\(\)/);
   assert.match(serviceSource, /id="printCompleted"/);
   assert.match(serviceSource, /id="printFailed"/);

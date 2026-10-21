@@ -85,11 +85,11 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label-printed") {
-    return json(res, services.markOrderLabelsPrinted(await readJson(req), req._session?.personId));
+    return json(res, await services.markOrderLabelsPrinted(await readJson(req), req._session?.personId));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label-print-failed") {
-    return json(res, services.removeFailedOrderLabelPrintBatch(await readJson(req), req._session?.personId));
+    return json(res, await services.removeFailedOrderLabelPrintBatch(await readJson(req), req._session?.personId));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "ship") {

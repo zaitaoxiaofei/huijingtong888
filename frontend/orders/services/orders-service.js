@@ -386,6 +386,7 @@ function waitForPrintConfirmation(printWindow, { url, count, orderIds }) {
       const frame = printWindow.document.getElementById("labelFrame");
       try {
         const record = await apiClient.post("/api/orders/package-label-printed", { order_ids: orderIds });
+        if (record?.ok !== true || !record?.print_batch_id) throw new Error("打印记录未保存，请重试");
         printBatchId = String(record?.print_batch_id || "");
         printTriggered = true;
         frame?.contentWindow?.focus();
