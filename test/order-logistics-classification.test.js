@@ -92,12 +92,67 @@ test("mixed frozen classes do not arbitrarily choose one channel for an order", 
   assert.equal(classifyOrderLogistics({ ...base, billing_logistics_rule_name: "OGL 陆运 Extra Small / OGL Economy Extra Small" }).logistics_service_class, "Extra Small");
 });
 
+test("FBP postings with only their fulfillment identity retain a useful method without inventing a carrier", () => {
+  const actual = classifyOrderLogistics({
+    raw_json: JSON.stringify({ fulfillment_schema: "FBP", raw: { fulfillment_schema: "FBP", delivery_method: { name: "FBP" } } }),
+    resolved_logistics_rule_name: "CEL FBP Standard Extra Small",
+    billing_logistics_rule_name: "CEL FBP Standard Extra Small"
+  });
+  assert.equal(actual.logistics_fulfillment_type, "fbp");
+  assert.equal(actual.logistics_method_label, "FBP 仓配");
+  assert.equal(actual.logistics_method_source, "fulfillment");
+  assert.equal(actual.logistics_display_name, "FBP 仓配");
+  assert.equal(actual.logistics_carrier, "");
+  assert.equal(actual.logistics_service_class, "");
+  assert.equal(actual.logistics_service_class_source, "");
+  assert.equal(actual.logistics_transport_mode, "");
+  assert.equal(actual.logistics_transport_mode_source, "");
+});
+
+test("FBP retains a known raw method or warehouse while billing cannot supply a cross-border channel", () => {
+  for (const deliveryMethod of [{ name: "CEL FBP" }, { name: "FBP", warehouse: "CEL FBP 珲春仓" }]) {
+    const actual = classifyOrderLogistics({
+      raw: { fulfillment_schema: "FBP", delivery_method: deliveryMethod },
+      billing_logistics_rule_name: "CEL Standard Extra Small"
+    });
+    assert.equal(actual.logistics_method_label, deliveryMethod.warehouse || deliveryMethod.name);
+    assert.equal(actual.logistics_method_source, "ozon_raw");
+    assert.equal(actual.logistics_carrier, "cel");
+    assert.equal(actual.logistics_service_class, "");
+    assert.equal(actual.logistics_transport_mode, "");
+  }
+  const explicit = classifyOrderLogistics({ raw: { fulfillment_schema: "FBP", delivery_method: { name: "CEL FBP Standard Extra Small Hch-pd2" } } });
+  assert.equal(explicit.logistics_service_class, "Extra Small");
+  assert.equal(explicit.logistics_service_class_source, "ozon_raw");
+  assert.equal(explicit.logistics_transport_mode, "air_land");
+  assert.equal(explicit.logistics_transport_mode_source, "ozon_raw");
+});
+
+test("row enrichment passes the existing FBP identity through classification and detail reclassification", async () => {
+  const { enrichOrderLogisticsMysql } = functions(["enrichOrderLogisticsMysql"], {
+    classifyOrderLogistics,
+    resolveOrderLogisticsRuleMysql: async () => ({
+      rule: { value: "legacy_fbp", label: "CEL FBP" }, warehouseName: "", deliveryMethodName: "", logisticsChannel: "",
+      raw: {}, analytics: {}
+    }),
+    fallbackShipDeadlineMysql: () => "", describeCancellation: () => ({}), detectShippingMethodKeyMysql: () => ""
+  });
+  const enriched = await enrichOrderLogisticsMysql({ raw_json: "{}", billing_logistics_rule_name: "CEL Standard Extra Small" });
+  assert.equal(enriched.fulfillment_type_key, "fbp");
+  assert.equal(enriched.logistics_fulfillment_type, "fbp");
+  assert.equal(enriched.logistics_method_label, "FBP 仓配");
+  assert.equal(enriched.logistics_carrier, "");
+  assert.equal(classifyOrderLogistics(enriched).logistics_method_label, "FBP 仓配");
+  assert.equal(classifyOrderLogistics(enriched).logistics_service_class, "");
+});
+
 test("logistics summary bypasses old snapshots and uses the same safe classifier as row enrichment", async () => {
   const queries = [];
   const writes = [];
   const rawRows = [
     { ...guoo, id: 3 },
-    { id: 1, raw_json: '{"raw":{"delivery_method":{"warehouse":"OGL 嘉兴仓库"}}}', billing_logistics_rule_name: "OGL 陆运 Extra Small" }
+    { id: 1, raw_json: '{"raw":{"delivery_method":{"warehouse":"OGL 嘉兴仓库"}}}', billing_logistics_rule_name: "OGL 陆运 Extra Small" },
+    { id: 4, raw_json: '{"raw":{"fulfillment_schema":"FBP","delivery_method":{"name":"FBP"}}}', billing_logistics_rule_name: "CEL Standard Extra Small" }
   ];
   const context = {
     createHash, classifyOrderLogistics,
@@ -114,9 +169,12 @@ test("logistics summary bypasses old snapshots and uses the same safe classifier
   };
   const { loadOrderLogisticsSummaryForBaseMysql } = functions(["loadOrderLogisticsSummaryForBaseMysql"], context);
   const rows = await loadOrderLogisticsSummaryForBaseMysql({ where: "o.shop_id = ?", params: [2] }, "tenant-a");
-  assert.match(queries[0], /^orders:logistics-summary:v7:tenant-a:/);
-  assert.deepEqual(Array.from(rows, (row) => [row.id, row.logistics_carrier]), [[3, "guoo"], [1, "ogl"]]);
+  assert.match(queries[0], /^orders:logistics-summary:v8:tenant-a:/);
+  assert.deepEqual(Array.from(rows, (row) => [row.id, row.logistics_carrier]), [[3, "guoo"], [1, "ogl"], [4, ""]]);
   assert.equal(rows[1].logistics_service_class_source, "billing_rule");
+  assert.equal(rows[2].logistics_method_label, "FBP 仓配");
+  assert.equal(rows[2].logistics_service_class_key, "");
+  assert.equal(orderLogisticsServiceClassOptions(rows).find((item) => item.value === "extra_small").count, 2);
   assert.deepEqual(Array.from(queries[1].params), [9, 2]);
   assert.match(queries[1].sql, /summary_item\.frozen_logistics_rule_id/);
   assert.equal(writes.length, 1);

@@ -30,8 +30,8 @@ test("batch repairs can defer expensive per-order snapshot refreshes", () => {
 test("order logistics filters keep carriers separate even when weight bands overlap", () => {
   assert.match(serviceSource, /SELECT l\.id, l\.version_group_id, l\.name, l\.filter_keywords, l\.carrier, l\.channel/);
   assert.match(serviceSource, /const value = `logistics_rule_\$\{Number\(row\.version_group_id \|\| row\.id\)\}`/);
-  assert.match(serviceSource, /orders:logistics-summary:v7:/);
-  assert.match(serviceSource, /orders:logistics-options:v5:/);
+  assert.match(serviceSource, /orders:logistics-summary:v8:/);
+  assert.match(serviceSource, /orders:logistics-options:v6:/);
   assert.match(serviceSource, /explicitValue\.startsWith\("logistics_rule_"\)/);
 });
 

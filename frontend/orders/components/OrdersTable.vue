@@ -1,6 +1,6 @@
 ﻿<script setup>
 import { computed, ref } from "vue";
-import { CopyDocument, View } from "@element-plus/icons-vue";
+import { CopyDocument, Document } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
@@ -482,7 +482,6 @@ function procurementTimeText(row) {
               :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'estimated' && row.profitSummary.alertLevel }"
             >
               预计: CNY {{ formatMoney(row.profitSummary.estimated) }}
-              <el-tooltip :content="row.profitSummary.versionTooltip" placement="top"><el-tag size="small" type="info" effect="plain">{{ row.profitSummary.versionLabel }}</el-tag></el-tooltip>
             </div>
             <div class="orders-cell-meta-line">
               真实:
@@ -491,7 +490,6 @@ function procurementTimeText(row) {
                 :class="{ 'orders-low-profit-value': row.profitSummary.effectiveType === 'actual' && row.profitSummary.alertLevel }"
               >CNY {{ formatMoney(row.profitSummary.actual) }}</span>
               <span v-else>待结算</span>
-              <el-tooltip :content="row.profitSummary.versionTooltip" placement="top"><el-tag size="small" type="info" effect="plain">{{ row.profitSummary.versionLabel }}</el-tag></el-tooltip>
             </div>
             <el-tag
               v-if="row.profitSummary.alertLevel"
@@ -505,16 +503,13 @@ function procurementTimeText(row) {
             <div v-if="Number(row.productDisplayRows?.length || 0) > 1" class="orders-profit-merge-hint">
               已按 {{ Number(row.productDisplayRows?.length || 0) }} 个商品分别计算后汇总
             </div>
-            <el-tooltip content="查看利润详情" placement="top">
-              <el-button
-                class="orders-inline-accent-button orders-inline-accent-button-secondary orders-profit-detail-button orders-icon-button-el is-view"
-                size="small"
-                aria-label="查看利润详情"
-                @click="emit('open-profit', row.id)"
-              >
-                <el-icon><View /></el-icon>
-              </el-button>
-            </el-tooltip>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :icon="Document"
+              @click="emit('open-profit', row.id)"
+            >查看明细</el-button>
           </div>
         </template>
       </el-table-column>
@@ -535,8 +530,14 @@ function procurementTimeText(row) {
         <template #default="{ row }">
           <div class="orders-cell-stack">
             <div class="orders-delivery-main orders-delivery-main-compact">{{ row.logisticsSummary.deliveryMethodLabel || "FBS" }}</div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">渠道: {{ row.logisticsSummary.serviceClass }}<small v-if="row.logisticsSummary.serviceClassSourceLabel">（{{ row.logisticsSummary.serviceClassSourceLabel }}）</small></div>
-            <div class="orders-cell-meta-line orders-logistics-warehouse">运输: {{ row.logisticsSummary.transportMode }}<small v-if="row.logisticsSummary.transportModeSourceLabel">（{{ row.logisticsSummary.transportModeSourceLabel }}）</small></div>
+            <template v-if="row.logisticsSummary.isFbp">
+              <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.methodLabel">物流方式: {{ row.logisticsSummary.methodLabel }}</div>
+              <div v-if="row.logisticsSummary.warehouse && row.logisticsSummary.warehouse !== row.logisticsSummary.methodLabel" class="orders-cell-meta-line orders-logistics-warehouse">仓库: {{ row.logisticsSummary.warehouse }}</div>
+            </template>
+            <template v-else>
+              <div class="orders-cell-meta-line orders-logistics-warehouse" :title="row.logisticsSummary.rawOzonMethodName ? `Ozon 原始物流名称：${row.logisticsSummary.rawOzonMethodName}` : ''">渠道: {{ row.logisticsSummary.serviceClass }}<small v-if="row.logisticsSummary.serviceClassSourceLabel">（{{ row.logisticsSummary.serviceClassSourceLabel }}）</small></div>
+              <div class="orders-cell-meta-line orders-logistics-warehouse">运输: {{ row.logisticsSummary.transportMode }}<small v-if="row.logisticsSummary.transportModeSourceLabel">（{{ row.logisticsSummary.transportModeSourceLabel }}）</small></div>
+            </template>
             <div v-if="row.logisticsSummary.shipmentNumber" class="orders-logistics-id-row">
               <span>货件: {{ row.logisticsSummary.shipmentNumber }}</span>
               <el-tooltip content="复制货件号" placement="top">

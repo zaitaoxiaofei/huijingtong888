@@ -2625,7 +2625,7 @@ async function enrichOrderLogisticsMysql(row, tenantId = "admin") {
   });
   return {
     ...row,
-    ...classifyOrderLogistics(row),
+    ...classifyOrderLogistics({ ...row, fulfillment_type_key: fulfillmentTypeKey }),
     raw_json: undefined,
     raw_status: raw.status || "",
     raw_substatus: raw.substatus || "",
@@ -29342,7 +29342,7 @@ async function loadOrderRowsForBaseMysql(base) {
 
 async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
   const tenantCacheKey = String(tenantId || "admin");
-  const cacheKey = `orders:logistics-summary:v7:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
+  const cacheKey = `orders:logistics-summary:v8:${tenantCacheKey}:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     if (!orderLogisticsSnapshotSchemaReady) {
       await mysqlExecute(`
@@ -29409,7 +29409,7 @@ function buildOrderLogisticsCountsMysql(rows = [], labelByValue = new Map()) {
 }
 
 async function orderLogisticsMethodOptionsMysql(base, rows = null, tenantId = "admin", carrier = "all") {
-  const cacheKey = `orders:logistics-options:v5:${tenantId}:${carrier}:${base.where}:${JSON.stringify(base.params)}`;
+  const cacheKey = `orders:logistics-options:v6:${tenantId}:${carrier}:${base.where}:${JSON.stringify(base.params)}`;
   return getCachedMasterData(cacheKey, async () => {
     const options = [{ value: "all", label: "全部物流" }];
     const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);

@@ -26,7 +26,6 @@ import {
 import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
-import { profitVersionSummary } from "./utils/profit-calculation-versions.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
@@ -795,14 +794,11 @@ function buildProfitSummary(row) {
     && settlementStates.every((value) => value === "accrued")
     && profitStatuses.every((value) => value === "accrued");
   const effective = fullyAccrued ? actual : estimated;
-  const version = profitVersionSummary(row);
   return {
     revenue: Number(row.revenue || 0),
     estimated,
     actual,
     hasActual: fullyAccrued,
-    versionLabel: version.label,
-    versionTooltip: version.tooltip,
     effective,
     effectiveType: fullyAccrued ? "actual" : "estimated",
     alertLevel: effective < 0 ? "loss" : effective < 1 ? "low" : ""
@@ -814,6 +810,12 @@ function buildLogisticsSummary(row) {
   const trackingNumber = String(row.tracking_number || "").trim();
   const trackingTarget = trackingNumber || shipmentNumber;
   const rawOzonMethodName = row.delivery_method_name || row.logistics_channel || "";
+  const fulfillmentType = String(row.logistics_fulfillment_type || row.fulfillment_type_key || row.fulfillment_schema || row.fulfillment_type_label || row.procurement_coverage?.stock_location || "fbs").trim().toLowerCase();
+  const isFbp = fulfillmentType === "fbp";
+  const carrierLabel = String(row.logistics_carrier_label || "").trim();
+  const methodLabel = [row.logistics_method_label, row.delivery_method_name, row.logistics_channel]
+    .map((value) => String(value || "").trim()).find((value) => value && !/^(?:fbp|fbs)$/i.test(value))
+    || (isFbp ? "FBP 仓配" : "未识别");
   return {
     shipmentNumber,
     tracking: trackingNumber,
@@ -821,7 +823,9 @@ function buildLogisticsSummary(row) {
     trackingLink: trackingLinkFor(trackingTarget),
     hasSeparateTrackingNumber: Boolean(trackingNumber && shipmentNumber && trackingNumber !== shipmentNumber),
     deliveryMethod: row.delivery_method_name || row.delivery_method || row.shipping_method || "",
-    deliveryMethodLabel: `${row.fulfillment_type_label || "FBS"} · ${row.logistics_carrier_label || "未识别"}`,
+    isFbp,
+    methodLabel,
+    deliveryMethodLabel: isFbp ? `FBP${carrierLabel ? ` · ${carrierLabel}` : ""}` : `${row.fulfillment_type_label || "FBS"} · ${carrierLabel || "未识别"}`,
     serviceClass: row.logistics_service_class || "未识别",
     serviceClassSourceLabel: row.logistics_service_class_source === "billing_rule" ? "计费规则补充" : "",
     transportMode: row.logistics_transport_mode_label || "未识别",

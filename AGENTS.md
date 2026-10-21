@@ -106,7 +106,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Every profit writer, including sync, finance application and historical repair, must honor the item's pinned formula and preserve prior results in the calculation revision tables within the same database transaction.
 - Logistics tariff versions and formula versions are separate. Display/filter corrections must not silently select another billing rule or recalculate historical profits.
 - Legacy baselines preserve saved amounts and locks without recalculation. Missing historical inputs remain explicitly unknown; missing version metadata must not be presented as an established V1 baseline.
-- Keep the existing order profit detail layout and fee comparison table. Additional version evidence belongs in the default-collapsed appendix.
+- Keep the existing order profit detail layout and fee comparison table. Formula versions belong only in the default-collapsed detail appendix, not as badges in the order list. Use a document icon with the text `查看明细` for its list entry.
+- FBP orders must preserve their known fulfillment method and warehouse display. Missing cross-border service classes or transport modes must not turn a valid FBP order into an identification error or be inferred from its billing rule.
 
 ## 6. Product Image Display
 

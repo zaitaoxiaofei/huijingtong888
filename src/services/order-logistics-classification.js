@@ -61,16 +61,25 @@ function uniqueBillingValue(names, resolve, carrier) {
 }
 
 export function classifyOrderLogistics(posting = {}) {
-  const { text } = orderLogisticsEvidence(posting);
+  const { raw, text, deliveryMethodName, warehouseName } = orderLogisticsEvidence(posting);
+  const isFbp = [posting.logistics_fulfillment_type, posting.fulfillment_type_key, posting.fulfillment_schema, raw.fulfillment_schema]
+    .some((value) => String(value || "").toUpperCase() === "FBP")
+    || /\bfbp\b|hunchun|hun chun|珲春|混春|混川|风船|風船/i.test(text);
   const carrier = detectOrderLogisticsCarrier(text);
   const rawServiceClass = serviceClassKey(text);
   const rawTransport = transportMode(text);
-  const serviceClass = rawServiceClass || uniqueBillingValue(posting.billing_logistics_rule_name, serviceClassKey, carrier);
-  const transport = rawTransport || uniqueBillingValue(posting.billing_logistics_rule_name, transportMode, carrier);
+  const serviceClass = rawServiceClass || (!isFbp ? uniqueBillingValue(posting.billing_logistics_rule_name, serviceClassKey, carrier) : "");
+  const transport = rawTransport || (!isFbp ? uniqueBillingValue(posting.billing_logistics_rule_name, transportMode, carrier) : "");
   const carrierLabel = CARRIER_LABELS[carrier] || "";
   const serviceClassLabel = ORDER_LOGISTICS_SERVICE_CLASSES.find((item) => item.value === serviceClass)?.label || "";
   const transportLabel = TRANSPORT_LABELS[transport] || "";
+  const rawMethodLabel = typeof deliveryMethodName === "string" ? deliveryMethodName.trim() : "";
+  const rawWarehouseLabel = typeof warehouseName === "string" ? warehouseName.trim() : "";
+  const methodLabel = (rawMethodLabel && !/^fbp$/i.test(rawMethodLabel) ? rawMethodLabel : "") || rawWarehouseLabel;
   return {
+    logistics_fulfillment_type: isFbp ? "fbp" : "fbs",
+    logistics_method_label: methodLabel || (isFbp ? "FBP 仓配" : ""),
+    logistics_method_source: methodLabel ? "ozon_raw" : isFbp ? "fulfillment" : "",
     logistics_carrier: carrier,
     logistics_carrier_label: carrierLabel,
     logistics_service_class: serviceClassLabel,
@@ -79,7 +88,7 @@ export function classifyOrderLogistics(posting = {}) {
     logistics_transport_mode: transport,
     logistics_transport_mode_label: transportLabel,
     logistics_transport_mode_source: rawTransport ? "ozon_raw" : transport ? "billing_rule" : "",
-    logistics_display_name: [carrierLabel, serviceClassLabel, transportLabel].filter(Boolean).join(" ")
+    logistics_display_name: isFbp ? methodLabel || "FBP 仓配" : [carrierLabel, serviceClassLabel, transportLabel].filter(Boolean).join(" ")
   };
 }
 

@@ -45,3 +45,21 @@ test("order logistics uses independent classification and keeps billing provenan
   assert.equal(buildLogisticsSummary({ resolved_logistics_rule_name: "CEL Small" }).transportMode, "未识别");
   assert.equal(buildLogisticsSummary({ delivery_method_name: row.delivery_method_name }).ozonMethodName, "Доставка Ozon курьеру");
 });
+
+test("FBP keeps its original method and warehouse without requiring cross-border service classes", () => {
+  const source = pageSource.match(/function buildLogisticsSummary\(row\) \{[\s\S]*?\n\}\n\nfunction buildStatusDeadlineHint/)?.[0];
+  const buildLogisticsSummary = runInNewContext(`${source.replace(/\n\nfunction buildStatusDeadlineHint$/, "")}\n;buildLogisticsSummary`, { trackingLinkFor: () => "" });
+  const generic = buildLogisticsSummary({ fulfillment_type_key: "fbp", fulfillment_type_label: "FBP", delivery_method_name: "FBP", billing_logistics_rule_name: "CEL Small" });
+  assert.equal(generic.isFbp, true);
+  assert.equal(generic.deliveryMethodLabel, "FBP");
+  assert.equal(generic.methodLabel, "FBP 仓配");
+  assert.equal(generic.warehouse, "");
+  const meaningful = buildLogisticsSummary({ logistics_fulfillment_type: "fbp", logistics_method_label: "Ozon warehouse delivery", logistics_carrier_label: "CEL", warehouse_name: "Hunchun warehouse" });
+  assert.equal(meaningful.deliveryMethodLabel, "FBP · CEL");
+  assert.equal(meaningful.methodLabel, "Ozon warehouse delivery");
+  assert.equal(meaningful.warehouse, "Hunchun warehouse");
+  assert.equal(buildLogisticsSummary({ fulfillment_type_label: "FBP", delivery_method_name: "FBP", logistics_channel: "Original warehouse delivery" }).methodLabel, "Original warehouse delivery");
+  assert.equal(buildLogisticsSummary({ procurement_coverage: { stock_location: "FBP" }, delivery_method_name: "Original FBP delivery" }).methodLabel, "Original FBP delivery");
+  assert.match(tableSource, /<template v-if="row\.logisticsSummary\.isFbp">[\s\S]*?物流方式: \{\{ row\.logisticsSummary\.methodLabel \}\}/);
+  assert.match(tableSource, /v-if="row\.logisticsSummary\.warehouse &&/);
+});
