@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { runInNewContext } from "node:vm";
 
 const serviceSource = fs.readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
 const routeSource = fs.readFileSync(new URL("../src/server/routes/team.js", import.meta.url), "utf8");
@@ -10,6 +11,27 @@ const taskCreationDialogSource = fs.readFileSync(new URL("../frontend/admin/comp
 const taskViewSource = fs.readFileSync(new URL("../frontend/admin/views/team/TeamPlanView.vue", import.meta.url), "utf8");
 const schemaSource = fs.readFileSync(new URL("../scripts/init-mysql-schema.mjs", import.meta.url), "utf8");
 const procurementListSource = fs.readFileSync(new URL("../src/services/mysql-procurement-list.js", import.meta.url), "utf8");
+
+test("task list distinguishes development tasks by core product and brand", () => {
+  const source = viewSource.match(/function taskDisplayName\(row\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(source);
+  const taskDisplayName = runInNewContext(`${source}\n;taskDisplayName`, {
+    developmentModels: (row) => row?.development_plan?.models || [],
+    developmentScopes: (row) => row.development_scopes?.length ? row.development_scopes : [{ brand: row.development_brand, category: row.development_category }]
+  });
+  const task = (brand) => ({ type: "product_development", development_plan: { models: [{ brand, category: "门槛条", model: "车型" }] } });
+  assert.equal(taskDisplayName(task("捷兰德")), "门槛条 · 捷兰德开发任务");
+  assert.equal(taskDisplayName(task("接口")), "门槛条 · 接口开发任务");
+  assert.equal(taskDisplayName(task("TENET")), "门槛条 · TENET开发任务");
+  assert.equal(taskDisplayName({ type: "product_development", development_plan: { models: [
+    { brand: "捷兰德", category: "门槛条", model: "A" },
+    { brand: "捷兰德", category: "门槛条", model: "B" },
+    { brand: "TENET", category: "门槛条", model: "C" }
+  ] } }), "门槛条 · 捷兰德、门槛条 · TENET开发任务");
+  assert.equal(taskDisplayName({ type: "product_development", development_brand: "非汽车", development_category: "门槛条" }), "门槛条开发任务");
+  assert.equal(taskDisplayName({ type: "product_development", title: "旧任务" }), "旧任务");
+  assert.match(viewSource, /:title="taskDisplayName\(row\)"/);
+});
 
 test("product development uses structured project, candidate, and task link tables", () => {
   assert.match(serviceSource, /CREATE TABLE IF NOT EXISTS product_development_projects/);
