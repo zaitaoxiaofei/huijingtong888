@@ -32,7 +32,7 @@ test("OGL official requests and cached files retain real MySQL enterprise and fr
     if (route === "/v2/carriage/delivery/list") return json({ methods: [{ delivery_method_id: 77, departure_date: "2026-10-22T16:00:00Z", has_entrusted_acceptance: true,
       carriages: [{ id: 0, available_actions: ["create"] }, { id: 901, status: "formed", available_actions: ["get_label_containers"] }] }], has_next: state.paginate && !body.cursor, cursor: body.cursor ? "" : "page-2" });
     if (route === "/v1/carriage/create") return json({ carriage_id: 901 });
-    if (route === "/v1/carriage/get") return json({ carriage_id: 901, status: state.remoteStatus, delivery_method_id: 77, containers_count: 1, first_mile_type: "pickup", integration_type: "ozon_outsourced", secret_customer: "do-not-expose" });
+    if (route === "/v1/carriage/get") return json({ carriage_id: 901, status: state.remoteStatus, delivery_method_id: 77, containers_count: 1, first_mile_type: "pickup", integration_type: "ozon_outsourced", available_actions:["get_label_containers"], secret_customer: "do-not-expose" });
     if (route === "/v2/posting/fbs/act/get-postings") return json({ result: ["SAME-OGL", ...state.extraNumbers].map(posting_number => ({ posting_number })) });
     if (route === "/v1/carriage/set-postings") return json({ result: body.posting_numbers.map(posting_number => ({ posting_number, result: true })) });
     if (route === "/v1/carriage/courier-contact/set") return json({});
@@ -77,7 +77,7 @@ test("OGL official requests and cached files retain real MySQL enterprise and fr
       ["subscription", () => query("UPDATE tenants SET subscription_expires_at=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 1 DAY) WHERE id=2")]
     ];
     const denied = error => Number(error.statusCode || error.status) === 403;
-    const officialQuery = { id: 901, date: "2026-10-23", tenant_id: 3, shop_id: 30 };
+    const officialQuery = { id: 901, date: "2026-10-23", tenant_id: 3, shop_id: 20 };
     const foreignSnapshot = async () => {
       const rows = {};
       for (const table of ["ogl_dispatch_settings", "ogl_dispatch_batches", "ogl_dispatch_members", "ogl_dispatch_events", "ogl_dispatch_official_locks"]) {
@@ -90,17 +90,17 @@ test("OGL official requests and cached files retain real MySQL enterprise and fr
     await t.test("default legacy shop and A/B share carriage IDs without sharing order matches or label caches", async () => {
       await reset();
       for (const tenant of [1, 2, 3]) {
-        const detail = await service.officialDetail(session(tenant), officialQuery);
+        const detail = await service.officialDetail(session(tenant), {...officialQuery,shop_id:tenant*10});
         assert.equal(detail.dispatch_shop.id, tenant * 10);
         assert.deepEqual(detail.members.map(row => row.order_id), [tenant * 10]);
         assert.ok(!JSON.stringify(detail).includes("do-not-expose"));
         const file = await service.file(session(tenant), tenant, "container-labels");
         assert.equal(file.buffer.toString(), `%PDF-1.7\nSHOP-${tenant * 10}`);
-        const tracking = await service.officialTracking(session(tenant), officialQuery);
+        const tracking = await service.officialTracking(session(tenant), {...officialQuery,shop_id:tenant*10});
         assert.equal(tracking.tracking.master_tracking_number, `YT${tenant * 10}00000000000`);
       }
       const before = calls.filter(row => row.path.endsWith("get-container-labels")).length;
-      for (const tenant of [1, 2, 3]) assert.equal((await service.officialTracking(session(tenant), officialQuery)).tracking.master_tracking_number, `YT${tenant * 10}00000000000`);
+      for (const tenant of [1, 2, 3]) assert.equal((await service.officialTracking(session(tenant), {...officialQuery,shop_id:tenant*10})).tracking.master_tracking_number, `YT${tenant * 10}00000000000`);
       assert.equal(calls.filter(row => row.path.endsWith("get-container-labels")).length, before);
       await assert.rejects(service.file(session(2), 3, "container-labels"), error => error.statusCode === 404);
     });

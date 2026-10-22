@@ -1,3 +1,5 @@
+import { oglTransportDeadlineAt, oglTransportDeadlineRule } from './ogl-transport-deadline.js';
+
 const ONLINE = /(^|\s)(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^\s]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer)(\s|$)/;
 const TERMINAL = /cancel|return|reject|not_accepted|arbitration|dispute/;
 
@@ -40,6 +42,7 @@ export function withOglDispatch(order, member) {
     &&['observed','created','approved','sync_required','confirm_unknown','mismatch'].includes(member.official_status));
   const dispatch = {
     batch_id: Number(member.batch_id), batch_number: member.batch_number || '',
+    official_carriage_id: /^[1-9]\d*$/.test(String(member.official_carriage_id || '')) ? String(member.official_carriage_id) : null,
     container_no: member.container_no == null ? null : Number(member.container_no),
     dispatched_at: member.dispatched_at || null, withdrawn_at: member.withdrawn_at || null,
     dispatched: Boolean(member.dispatched_at && active), applied,
@@ -49,7 +52,9 @@ export function withOglDispatch(order, member) {
   };
   const status = oglPlatformDisplayStatus(order, dispatch) || (dispatch.tracking?oglOrderDisplayStatus(order, dispatch):'');
   dispatch.stage=status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':applied?'applied':'preparing';
-  dispatch.stage_label={delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请·待交接',preparing:'准备中'}[dispatch.stage];
+  dispatch.stage_label={delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',preparing:'准备中'}[dispatch.stage];
+  dispatch.transport_deadline_rule = oglTransportDeadlineRule();
+  dispatch.transport_deadline_at = status === 'ogl_dispatched' ? oglTransportDeadlineAt(order.ordered_at, dispatch.transport_deadline_rule) : null;
   return { ...order, ogl_dispatch: dispatch, ...(status ? { display_status: status } : {}) };
 }
 

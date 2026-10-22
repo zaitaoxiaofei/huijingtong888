@@ -34,9 +34,10 @@ export function createOglDispatchService(client = apiClient) {
     list: (page = 1, range = {}) => client.get(`/api/ogl-dispatch/batches?${new URLSearchParams({ page: String(page), page_size: "20", ...range })}`),
     detail: (id) => client.get(`/api/ogl-dispatch/batch?id=${encodeURIComponent(id)}`),
     officialList: (date) => client.get(`/api/ogl-dispatch/official-carriages?${new URLSearchParams(typeof date === "string" ? { date } : date)}`),
+    officialSnapshot: (range) => client.get(`/api/ogl-dispatch/official-carriages?${new URLSearchParams({ ...range, source: "snapshot" })}`),
     discoverOfficial: (range) => client.post("/api/ogl-dispatch/discover", range),
-    officialDetail: (id, date) => client.get(`/api/ogl-dispatch/official-carriage?${new URLSearchParams({ id: String(id), date })}`),
-    officialTracking: (id, date) => client.get(`/api/ogl-dispatch/official-carriage-tracking?${new URLSearchParams({ id: String(id), date })}`),
+    officialDetail: (id, date, { source, shop_id } = {}) => client.get(`/api/ogl-dispatch/official-carriage?${new URLSearchParams({ id: String(id), date, ...(source ? { source } : {}), ...(shop_id ? { shop_id: String(shop_id) } : {}) })}`),
+    officialTracking: (id, date, shopId) => client.get(`/api/ogl-dispatch/official-carriage-tracking?${new URLSearchParams({ id: String(id), date, ...(shopId ? { shop_id: String(shopId) } : {}) })}`),
     action: (batchId, action, payload = {}) => client.post("/api/ogl-dispatch/action", { ...payload, batch_id: batchId, action }),
     file: (batchId, type) => {
       if (!["container-labels", "barcode"].includes(type)) throw new Error("未知发运文件类型");

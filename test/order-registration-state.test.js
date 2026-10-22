@@ -43,7 +43,7 @@ test("FBS acceptance is awaiting dispatch, cannot prepare again, and keeps Ozon 
   for (const row of acceptanceRows) {
     const actions = page.rowAvailableActions({ ...row, ozon_available_actions: ["click_track_number", "label_download", "label_download_small"] });
     assert.equal(page.rowDisplayStateKey(row), "awaiting_deliver");
-    assert.equal(page.rowStateLabel(row), "等待发货");
+    assert.equal(page.rowStateLabel(row), "等待发运");
     assert.equal(actions.prepare, false);
     assert.equal(actions.splitPrepare, false);
     assert.equal(actions.showPrint, true);
@@ -55,7 +55,7 @@ test("acceptance in progress is assembled and awaits handover, with Ozon-control
   for (const row of acceptanceRows) {
     const printable = { ...row, total_quantity: 2, ozon_available_actions: ["click_track_number", "label_download", "label_download_small"], availableActions: { prepare: true, print: true } };
     assert.equal(page.rowDisplayStateKey(printable), "awaiting_deliver");
-    assert.equal(page.rowStateLabel(printable), "等待发货");
+    assert.equal(page.rowStateLabel(printable), "等待发运");
     assert.match(page.rowRegistrationHint(printable), /已备货.*交接/);
     const actions = page.rowAvailableActions(printable);
     assert.equal(actions.prepare, false);
@@ -121,7 +121,7 @@ test("assembled orders being registered appear under awaiting delivery, with lab
   for (const row of registrationRows) {
     const printable = { ...row, ozon_available_actions: ["label_download", "label_download_small"] };
     assert.equal(page.rowDisplayStateKey(printable), "awaiting_deliver");
-    assert.equal(page.rowStateLabel(printable), "等待发货");
+    assert.equal(page.rowStateLabel(printable), "等待发运");
     const actions = page.rowAvailableActions(printable);
     assert.equal(actions.prepare, false);
     assert.equal(actions.splitPrepare, false);

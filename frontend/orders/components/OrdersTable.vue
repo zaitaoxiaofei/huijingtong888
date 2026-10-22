@@ -415,12 +415,10 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="状态" width="124" align="center">
+      <el-table-column label="状态" width="180" align="center">
         <template #default="{ row }">
           <div class="orders-cell-stack orders-cell-center orders-status-cell">
             <el-tag effect="light" :type="statusTagType(row.statusColor)" :title="row.statusHint || ''">{{ row.statusLabel }}</el-tag>
-            <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" :title="row.ogl_dispatch.batch_number || 'OGL 批次'" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">{{ row.ogl_dispatch.batch_number || 'OGL 批次' }} · {{ row.ogl_dispatch.container_no ? `货位 ${row.ogl_dispatch.container_no}` : '货位未记录' }}</el-button>
-            <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
             <div
               v-if="row.statusDeadlineHint"
               class="orders-status-deadline"
@@ -428,6 +426,8 @@ function procurementTimeText(row) {
             >
               {{ row.statusDeadlineHint }}
             </div>
+            <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" title="查看此运货单的已保存详情" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">运货单 {{ row.ogl_dispatch.official_carriage_id || row.ogl_dispatch.batch_number || '待获取' }}</el-button>
+            <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
           </div>
         </template>
       </el-table-column>

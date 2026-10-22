@@ -11,8 +11,8 @@ const panelSource = readFileSync(new URL("../frontend/orders/components/OglDispa
   .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, "");
 
 const detail = (changes = {}) => ({ batch: { id: 71, batch_number: "OGL-TEST", containers_count: 3, official_status: "not_created", ...changes }, members: [], events: [], summary: {} });
-function fixture({ preview, action, bootstrap, props = {}, officialList, officialDetail, officialTracking, discoverOfficial, prompt } = {}) {
-  const calls = [], emitted = [], mounts = [];
+function fixture({ preview, action, bootstrap, props = {}, officialList, officialSnapshot, officialDetail, officialTracking, discoverOfficial, file, prompt } = {}) {
+  const calls = [], emitted = [], mounts = [], notices = [];
   let session = "A";
   const service = {
     bootstrap: async () => bootstrap ? bootstrap() : ({ settings: { dispatch_shop_id: 8 }, shops: [{ id: 8, name: "Creation Shop" }], can_manage_settings: true }),
@@ -22,27 +22,29 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     detail: async (id) => { calls.push(["detail", id]); return detail({ official_status: "create_unknown" }); },
     settings: async (id) => { calls.push(["settings", id]); return {}; },
     list: async (page, range) => { calls.push(["history", page, range]); return { rows: [], total: 0 }; },
+    officialSnapshot: async (range) => { calls.push(["official-snapshot", range]); return officialSnapshot ? officialSnapshot(range) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: range.date_to, created_at: "2026-10-21T20:40:00Z", snapshot_at: "2026-10-22T08:00:00Z", local_batch_id: 71, dispatch_stage: "applied", dispatch_shop: { id: 8, name: "Creation Shop" } }], total: 1, source: "snapshot", notice: "已保存快照", dispatch_shop: null }; },
     discoverOfficial: async (range) => { calls.push(["official-discover", range]); return discoverOfficial ? discoverOfficial(range) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: range.date_to, created_at: "2026-10-21T20:40:00Z", local_batch_id: 71, dispatch_stage: "applied" }], total: 1, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
     officialList: async (date) => { calls.push(["official-list", date]); return officialList ? officialList(date) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: `${date}T02:00:00Z` }], total: 1, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
-    officialDetail: async (id, date) => { calls.push(["official-detail", id, date]); return officialDetail ? officialDetail(id, date) : { carriage: { carriage_id: id, status: "formed", containers_count: 4 }, members: [{ posting_number: "fixture-only", matched_local: false }], summary: { official_members: 1, matched_local: 0, unmatched_local: 1, online: 0 }, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
-    officialTracking: async (id, date) => { calls.push(["official-tracking", id, date]); return officialTracking ? officialTracking(id, date) : { tracking: { status: "found", source: "official_container_label", carrier_name: "圆通", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], page_count: 1, containers_count: 4, labels: [{ label_page: 1, tracking_numbers: ["YT000000000001"] }], container_mapping_confirmed: false } }; }
+    file: async (...args) => { calls.push(["file", ...args]); return file ? file(...args) : {}; },
+    officialDetail: async (id, date, options) => { calls.push(["official-detail", id, date, options]); return officialDetail ? officialDetail(id, date, options) : { source: options?.source, carriage: { carriage_id: id, status: "formed", containers_count: 4 }, members: [{ posting_number: "fixture-only", matched_local: false }], summary: { official_members: 1, matched_local: 0, unmatched_local: 1, online: 0 }, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
+    officialTracking: async (id, date, shopId) => { calls.push(["official-tracking", id, date, shopId]); return officialTracking ? officialTracking(id, date, shopId) : { tracking: { status: "found", source: "official_container_label", carrier_name: "圆通", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], page_count: 1, containers_count: 4, labels: [{ label_page: 1, tracking_numbers: ["YT000000000001"] }], container_mapping_confirmed: false } }; }
   };
   const context = vm.createContext({
-    URLSearchParams, console, apiClient: {}, service,
+    URLSearchParams, console, apiClient: {}, service, nextTick: async () => {},
     defineProps: () => ({ mode: "create", orderIds: [11, "22", 33, 11], batchId: 0, ...props }),
     defineEmits: () => (...args) => emitted.push(args),
     useAuthStore: () => ({ user: { id: 1, tenant: { id: 10 } } }), currentApiCacheScope: () => session,
     ref: (value) => ({ value }), reactive: (value) => value,
     computed: (getter) => ({ get value() { return getter(); } }),
     onMounted: (callback) => mounts.push(callback), onBeforeUnmount() {}, watch() {},
-    ElMessage: { success() {}, info() {} },
+    ElMessage: { success() {}, info() {}, error: message => notices.push(message) },
     ElMessageBox: { prompt: async () => ({ value: prompt ?? "核实缺货未交出" }), confirm: async () => true },
     shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, orderStateKey, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
   });
   vm.runInContext(serviceSource, context);
   // The component deliberately consumes the injected transport, never a real API.
   vm.runInContext(panelSource, context);
-  return { context, calls, emitted, mount: () => mounts[0](), get: (code) => vm.runInContext(code, context), rotate: () => { session = "B"; } };
+  return { context, calls, emitted, notices, mount: () => mounts[0](), get: (code) => vm.runInContext(code, context), rotate: () => { session = "B"; } };
 }
 
 test("OGL preview sends the actual deduplicated cross-page selection and requires explicit rejection exclusion", async () => {
@@ -179,7 +181,7 @@ test("authoritative OGL platform state overrides stale awaiting-deliver fields i
   const ordinary = { status: "awaiting_deliver", display_status: "delivering" };
   assert.equal(f.context.orderTabKey(ordinary), "awaiting_deliver");
   assert.equal(f.context.rowDisplayStateKey(ordinary), "awaiting_deliver");
-  assert.equal(f.context.rowStateLabel(ordinary), "等待发货");
+  assert.equal(f.context.rowStateLabel(ordinary), "等待发运");
   for (const [status, expected] of [["delivering", "delivering"], ["delivered", "delivered"], ["cancelled", "cancelled"], ["posting_in_transit", "delivering"], ["posting_in_customs", "delivering"], ["posting_sorting", "delivering"], ["posting_in_courier_service", "delivering"]]) {
     const row = { status, tracking_stage: "posting_acceptance_in_progress", display_status: "ogl_dispatched", ogl_dispatch: { dispatched: true } };
     assert.equal(f.context.orderTabKey(row), expected);
@@ -197,20 +199,20 @@ test("duplicate method IDs display all Beijing departure days and preserve an av
   assert.equal(f.get("form.departure_date"), "2026-10-23");
 });
 
-test("existing Ozon applications are discovered for seven Beijing days without creating or dispatching official orders", async () => {
+test("existing applications open seven Beijing days of snapshots without official requests or parent reloads", async () => {
   const f = fixture({ props: { mode: "official", orderIds: [] } });
   await f.mount();
   assert.equal(f.get("tab.value"), "official");
-  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])), ["official-discover", { date_from: shanghaiDateDaysAgo(6), date_to: shanghaiDateKey() }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])), ["official-snapshot", { date_from: shanghaiDateDaysAgo(6), date_to: shanghaiDateKey() }]);
   assert.equal(f.get("officialRows.value.length"), 1);
   await f.get("showOfficialCarriages('2026-10-21')");
   await f.get("openOfficialCarriage('88001')");
   assert.equal(f.get("tab.value"), "official-detail");
   assert.equal(f.get("officialCarriage.value.containers_count"), 4, "use the actual detail count rather than assuming the list/member count");
   assert.equal(f.get("officialMembers.value[0].matched_local"), false);
-  assert.deepEqual(f.calls.find(([name]) => name === "official-detail"), ["official-detail", "88001", "2026-10-21"]);
-  assert.ok(f.calls.every(([name]) => ["official-discover", "official-detail", "official-tracking"].includes(name)), "discovery may associate applications but must never create, approve or physically dispatch an official order");
-  assert.ok(f.emitted.every(([name]) => name === "changed"));
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(([name]) => name === "official-detail"))), ["official-detail", "88001", "2026-10-21", { source: "snapshot", shop_id: 8 }]);
+  assert.ok(f.calls.every(([name]) => ["official-snapshot", "official-detail"].includes(name)), "opening and date queries must not discover, download labels or read live Ozon data");
+  assert.equal(f.emitted.length, 0, "snapshot navigation must not reload orders or their selection");
   assert.equal(f.get("carriageStatus({status:'formed'})"), "已生成");
   assert.equal(f.get("carriageStatus({status:'received'})"), "验收中");
   assert.equal(f.get("carriageStatus({status:'received',status_label:'验收中'})"), "验收中");
@@ -221,16 +223,18 @@ test("existing Ozon applications are discovered for seven Beijing days without c
   assert.equal(f.get("officialMemberStatus({platform_status:'cancelled',tracking_stage:'posting_acceptance_in_progress'})"), "已取消");
 });
 
-test("application discovery requires a bound enterprise shop and rejects invalid or excessive date ranges", async () => {
+test("snapshot reads need no default shop while explicit synchronization requires a selected enterprise shop", async () => {
   const unbound = fixture({ props: { mode: "official", orderIds: [] }, bootstrap: async () => ({ settings: {}, shops: [], can_manage_settings: false }) });
   await unbound.mount();
-  assert.equal(unbound.calls.length, 0, "first use must bind a shop before querying or associating applications");
+  assert.equal(unbound.calls.length, 1, "snapshot browsing never requires a default dispatch shop");
+  await unbound.get("refreshOfficialCarriages()");
+  assert.equal(unbound.calls.length, 1, "sync needs a shop chosen by the operator");
   const f = fixture({ props: { mode: "official", orderIds: [] } });
   await f.mount();
   f.get("officialRange.value = ['2026-01-01','2026-02-01']");
   await f.get("showOfficialCarriages()");
   assert.match(f.get("error.value"), /最多查询 31 天/);
-  assert.equal(f.calls.filter(([name]) => name === "official-discover").length, 1);
+  assert.equal(f.calls.filter(([name]) => name === "official-snapshot").length, 1);
   f.get("chooseMonth('2026-02')");
   assert.deepEqual(Array.from(f.get("officialRange.value")), ["2026-02-01", "2026-02-28"]);
   assert.deepEqual(JSON.parse(JSON.stringify(f.get("dateRangeQuery()"))), { date_from: "2026-02-01", date_to: "2026-02-28" });
@@ -242,7 +246,7 @@ test("application detail uses its own departure day and links an exact local ord
   const f = fixture({ props: { mode: "official", orderIds: [] } });
   await f.mount();
   await f.get("openOfficialCarriage({carriage_id:'88003', departure_date:'2026-10-18'})");
-  assert.deepEqual(f.calls.find(([name]) => name === "official-detail"), ["official-detail", "88003", "2026-10-18"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(([name]) => name === "official-detail"))), ["official-detail", "88003", "2026-10-18", { source: "snapshot" }]);
   assert.equal(f.get("orderPath({order_id:42,shop_id:8,posting_number:'exact'})"), "/orders?orderId=42&shopId=8");
   assert.equal(f.get("orderPath({posting_number:'unmatched'})"), "");
   f.get("useDetail({batch:{id:71,source:'official_discovery',official_status:'observed',official_carriage_id:'88003'},members:[]}); selectedMembers.value=[{order_id:42}]");
@@ -331,9 +335,13 @@ test("official carriage details render without waiting for the separate label tr
   await f.get("openOfficialCarriage('88001')");
   assert.equal(f.get("officialCarriage.value.carriage_id"), "88001");
   assert.equal(f.get("busy.value"), false);
+  assert.equal(f.get("trackingLoading.value"), false);
+  assert.equal(f.calls.some(([name]) => name === "official-tracking"), false, "detail opens without reading a PDF");
+  const tracking = f.get("loadOfficialTracking()");
   assert.equal(f.get("trackingLoading.value"), true);
   assert.equal(f.get("masterTrackingLabel.value"), "待获取");
   finish({ tracking: { status: "found", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], containers_count: 4 } });
+  await tracking;
   for (let i = 0; i < 4; i++) await Promise.resolve();
   assert.equal(f.get("masterTrackingLabel.value"), "YT000000000001");
   assert.equal(f.get("trackingLoading.value"), false);
@@ -344,13 +352,17 @@ test("late tracking reads cannot leak another carriage, Beijing date or tenant i
   const f = fixture({ props: { mode: "official", orderIds: [] }, officialTracking: () => new Promise((resolve) => pending.push(resolve)) });
   await f.mount();
   await f.get("openOfficialCarriage('88001')");
+  const firstRead = f.get("loadOfficialTracking()");
   await f.get("showOfficialCarriages('2026-10-21');");
   await f.get("openOfficialCarriage('88002')");
+  const secondRead = f.get("loadOfficialTracking()");
   pending[0]({ tracking: { status: "found", master_tracking_number: "YT000000000001" } });
+  await firstRead;
   for (let i = 0; i < 4; i++) await Promise.resolve();
   assert.equal(f.get("officialTracking.value"), null);
   assert.equal(f.get("masterTrackingLabel.value"), "待获取");
   pending[1]({ tracking: { status: "found", master_tracking_number: "YT000000000002" } });
+  await secondRead;
   for (let i = 0; i < 4; i++) await Promise.resolve();
   assert.equal(f.get("masterTrackingLabel.value"), "YT000000000002");
   const read = f.get("loadOfficialTracking()");
@@ -370,6 +382,7 @@ test("tracking failures and multiple label numbers do not guess a master number 
   } });
   await f.mount();
   await f.get("openOfficialCarriage('88001')");
+  await f.get("loadOfficialTracking()");
   assert.match(f.get("trackingError.value"), /标签读取暂不可用/);
   assert.equal(f.get("error.value"), "");
   assert.equal(f.get("officialCarriage.value.carriage_id"), "88001");
@@ -382,4 +395,116 @@ test("tracking failures and multiple label numbers do not guess a master number 
   assert.equal(f.get("officialTracking.value.labels.length"), 3);
   assert.equal(f.get("officialTracking.value.containers_count"), 2);
   assert.equal(f.get("officialTracking.value.container_mapping_confirmed"), false);
+});
+
+test("official refresh keeps saved rows visible and never reloads parent orders", async () => {
+  let reject;
+  const f = fixture({ props: { mode: "official", orderIds: [] }, discoverOfficial: () => new Promise((_, fail) => { reject = fail; }) });
+  await f.mount();
+  f.get("syncShopId.value = 8");
+  const refresh = f.get("refreshOfficialCarriages()");
+  assert.equal(f.get("refreshingOfficial.value"), true);
+  assert.equal(f.get("busy.value"), false);
+  assert.equal(f.get("officialRows.value[0].carriage_id"), "88001");
+  reject(new Error("官方暂不可用"));
+  await refresh;
+  assert.equal(f.get("officialRows.value.length"), 1);
+  assert.equal(f.get("error.value"), "");
+  assert.match(f.notices[0], /已保留列表/);
+  assert.equal(f.emitted.length, 0);
+  const calls = f.calls.length;
+  await f.get("returnOfficialList()");
+  assert.equal(f.calls.length, calls, "returning to the list must not start network work");
+});
+
+test("late refresh cannot replace newer snapshots or closed/rotated dialogs", async () => {
+  for (const invalidate of ["visible.value = false", "readSequence += 1"]) {
+    let finish;
+    const f = fixture({ props: { mode: "official", orderIds: [] }, discoverOfficial: () => new Promise(resolve => { finish = resolve; }) });
+    await f.mount();
+    f.get("syncShopId.value = 8");
+    const refresh = f.get("refreshOfficialCarriages()");
+    f.get(invalidate);
+    finish({ rows: [{ carriage_id: "stale" }], total: 1 });
+    await refresh;
+    assert.equal(f.get("officialRows.value[0].carriage_id"), "88001");
+  }
+});
+
+test("snapshot detail is the default even for table double-click arguments; live reads are explicit", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] } });
+  await f.mount();
+  await f.get("openOfficialCarriage({carriage_id:'88001',departure_date:'2026-10-22'}, {column:'table event'})");
+  assert.equal(f.calls.at(-1)[3].source, "snapshot");
+  assert.equal(f.calls.some(([name]) => name === "official-tracking"), false);
+  await f.get("openOfficialCarriage({carriage_id:'88001',departure_date:'2026-10-22'}, true)");
+  assert.equal(f.calls.at(-1)[3].source, undefined);
+  assert.equal(f.calls.at(-1)[3].shop_id, 8);
+});
+
+test("file capabilities remain independent and file errors leave the drawer interactive", async () => {
+  const rejections = [];
+  const f = fixture({ props: { mode: "official", orderIds: [] }, file: () => new Promise((_, reject) => rejections.push(reject)) });
+  await f.mount();
+  assert.equal(f.get("fileCapability({file_capabilities:{container_labels:{available:true},barcode:{available:false,reason:'此申请未提供交接条码'}}}, 'barcode').available"), false);
+  assert.equal(f.get("fileCapability({}, 'container-labels').available"), null);
+  const labels = f.get("downloadFile('container-labels', false, 71, {carriage_id:'88001'})");
+  const barcode = f.get("downloadFile('barcode', false, 72, {carriage_id:'88002'})");
+  assert.equal(f.get("isFileLoading(71, 'container-labels')"), true);
+  assert.equal(f.get("isFileLoading(71, 'barcode')"), false);
+  assert.equal(f.get("isFileLoading(72, 'barcode')"), true);
+  assert.equal(f.get("busy.value"), false);
+  rejections[0](new Error("官方文件能力已变化"));
+  await labels;
+  assert.equal(f.get("isFileLoading(71, 'container-labels')"), false);
+  assert.equal(f.get("isFileLoading(72, 'barcode')"), true);
+  assert.equal(f.get("error.value"), "");
+  assert.equal(f.get("officialRows.value.length"), 1);
+  assert.match(f.notices[0], /货位标签暂不可用/);
+  f.get("visible.value = false");
+  rejections[1](new Error("late file failure"));
+  await barcode;
+  assert.equal(f.notices.length, 1, "a closed dialog must not show stale file errors");
+});
+
+test("snapshot transport uses explicit read-only sources without mutation or file requests", async () => {
+  const f = fixture(), calls = [];
+  const transport = f.context.createOglDispatchService({ get: async url => { calls.push(url); return {}; } });
+  await transport.officialSnapshot({ date_from: "2026-10-16", date_to: "2026-10-22" });
+  await transport.officialDetail("88001", "2026-10-22", { source: "snapshot" });
+  assert.deepEqual(calls, ["/api/ogl-dispatch/official-carriages?date_from=2026-10-16&date_to=2026-10-22&source=snapshot", "/api/ogl-dispatch/official-carriage?id=88001&date=2026-10-22&source=snapshot"]);
+});
+
+test("explicit synchronization selects an owned shop without a default, then reloads all saved shops", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] }, bootstrap: async () => ({ settings: {}, shops: [{ id: 8, name: "A" }, { id: 9, name: "B" }], can_manage_settings: false }) });
+  await f.mount();
+  assert.equal(f.get("syncShopId.value"), null, "opening records must not implicitly choose or bind a shop");
+  f.get("syncShopId.value = 9");
+  await f.get("refreshOfficialCarriages()");
+  const sync = f.calls.find(([name]) => name === "official-discover");
+  assert.equal(sync[1].shop_id, 9);
+  assert.equal(f.calls.at(-1)[0], "official-snapshot");
+  assert.equal(f.calls.at(-1)[1].shop_id, undefined, "the refreshed view includes all saved enterprise shops");
+  assert.equal(f.calls.some(([name]) => name === "settings"), false);
+  assert.equal(f.emitted.length, 0);
+});
+
+test("identical official IDs across owned shops retain original-shop detail, tracking and row identity", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialDetail: async (id, date, options) => ({ carriage: { carriage_id: id, departure_date: date, dispatch_shop: { id: options.shop_id } }, dispatch_shop: { id: options.shop_id }, members: [] }) });
+  await f.mount();
+  const a = { carriage_id: "901", departure_date: "2026-10-22", dispatch_shop: { id: 8 } };
+  const b = { ...a, dispatch_shop: { id: 9 } };
+  f.context.ownedA = a; f.context.ownedB = b;
+  assert.notEqual(f.get("officialCarriageKey(ownedA)"), f.get("officialCarriageKey(ownedB)"));
+  await f.get("openOfficialCarriage(ownedA)");
+  assert.equal(f.calls.at(-1)[3].shop_id, 8);
+  await f.get("openOfficialCarriage(ownedB)");
+  assert.equal(f.calls.at(-1)[3].shop_id, 9);
+  await f.get("loadOfficialTracking()");
+  assert.deepEqual(f.calls.at(-1), ["official-tracking", "901", "2026-10-22", 9]);
+  const paths = [];
+  const transport = f.context.createOglDispatchService({ get: async url => { paths.push(url); return {}; } });
+  await transport.officialDetail("901", "2026-10-22", { source: "snapshot", shop_id: 9 });
+  await transport.officialTracking("901", "2026-10-22", 9);
+  assert.ok(paths.every(url => url.endsWith("shop_id=9")));
 });

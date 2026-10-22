@@ -97,13 +97,13 @@ function writeOrdersMetaCache(filters = {}, counts = {}) {
 }
 
 const STATUS_TABS = [
+  { value: "all", label: "全部订单" },
   { value: "awaiting_packaging", label: "等待备货" },
-  { value: "awaiting_deliver", label: "等待发货" },
-  { value: "ogl_dispatched", label: "发运跟踪", title: "已申请、待交接与实际交运分开跟踪" },
+  { value: "awaiting_deliver", label: "等待发运" },
+  { value: "ogl_dispatched", label: "已发运", title: "已申请·待交接与已实际交运分别展示，实际交运以逐行状态为准" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
-  { value: "all", label: "全部订单" },
   { value: "unbound", label: "待绑定库存" },
   { value: "pending_purchase", label: "待采购" },
   { value: "purchase_in_transit", label: "采购在途" }
@@ -136,10 +136,11 @@ const FULFILLMENT_TYPE_OPTIONS = [
 ];
 
 const MORE_ACTIONS = [
-  { value: "quality-rules", label: "质检规则" },
+  { value: "print-selected", label: "批量打印", requiresSelection: true },
+  { value: "prepare-selected", label: "批量备货", requiresSelection: true },
+  { value: "shipped-receipts", label: "批量登记实收", requiresSelection: true },
   { value: "recalculate-profit", label: "重算利润" },
-  { value: "print-selected", label: "打印所选" },
-  { value: "prepare-selected", label: "备货所选" }
+  { value: "quality-rules", label: "质检规则" }
 ];
 
 const DEFAULT_LOGISTICS_METHOD_OPTIONS = [
@@ -167,11 +168,11 @@ const DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS = [
 
 const LOGISTICS_CARRIER_OPTIONS = [
   { value: "all", label: "全部物流商" },
-  { value: "guoo", label: "GUOO" },
-  { value: "cel", label: "CEL" },
   { value: "ogl", label: "OGL" },
+  { value: "cel", label: "CEL" },
+  { value: "guoo", label: "GUOO" },
   { value: "postal", label: "邮政" },
-  { value: "other", label: "其他物流" }
+  { value: "other", label: "其他" }
 ];
 
 const DEFAULT_PAGE_SIZE = 20;
@@ -243,6 +244,8 @@ export function useOrdersPage() {
     const selected = Array.isArray(order)
       ? order.map((item) => String(item || "")).filter((item) => validValues.has(item))
       : [];
+    const legacyDefault = ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "all", "unbound", "pending_purchase", "purchase_in_transit"];
+    if ([legacyDefault, legacyDefault.filter(value => value !== "ogl_dispatched")].some(previous => previous.length === selected.length && previous.every((value, index) => value === selected[index]))) return [...DEFAULT_STATUS_TAB_ORDER];
     return [...new Set([...selected, ...DEFAULT_STATUS_TAB_ORDER])];
   }
 

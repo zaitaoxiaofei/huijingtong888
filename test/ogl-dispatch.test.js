@@ -119,7 +119,7 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
         const carriage_id=++nextId;official.set(carriage_id,{status:'new',numbers:['A1','EXTRA'],method:body.delivery_method_id});return {carriage_id};
       }
       const carriageId=Number(body.carriage_id??body.id);const item=official.get(carriageId);
-      if(path.endsWith('/get')) {if(pauseGet){const pause=pauseGet;pauseGet=null;pause.enter();await pause.wait;}if(!item)throw new Error('Unknown official carriage');return {status:item.status,containers_count:item.containers,delivery_method_id:item.method,first_mile_type:'pickup',integration_type:'ozon_outsourced'};}
+      if(path.endsWith('/get')) {if(pauseGet){const pause=pauseGet;pauseGet=null;pause.enter();await pause.wait;}if(!item)throw new Error('Unknown official carriage');return {status:item.status,containers_count:item.containers,delivery_method_id:item.method,first_mile_type:'pickup',integration_type:'ozon_outsourced',available_actions:['get_label_containers','get_barcode']};}
       if(path.endsWith('/get-postings')) return {result:item.numbers.map(posting_number=>({posting_number}))};
       if(path.endsWith('/set-postings')) {item.numbers=body.posting_numbers;return {result:body.posting_numbers.map(posting_number=>({posting_number,result:true,error:''}))};}
       if(path.endsWith('/approve')) {item.status='sended';item.containers=body.containers_count;return {};}
@@ -160,15 +160,16 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       for(const [carriageId,status] of [[901,'received'],[902,'formed']])official.set(carriageId,{status,method:77,containers:1,numbers:['A1','A2','B1','NOT-SYNCED']});
       const snapshot=await query('SELECT (SELECT COUNT(*) FROM ogl_dispatch_batches) AS batches,(SELECT COUNT(*) FROM ogl_dispatch_members) AS members,(SELECT COUNT(*) FROM ogl_dispatch_events) AS events,(SELECT COUNT(*) FROM ogl_dispatch_official_locks) AS locks');
       const offset=calls.length;
-      const yesterday=await service.listOfficial(session(2),{date:'2026-10-21',tenant_id:3,shop_id:30});
+      await assert.rejects(service.listOfficial(session(2),{date:'2026-10-21',shop_id:30}),{statusCode:409});
+      const yesterday=await service.listOfficial(session(2),{date:'2026-10-21',tenant_id:3,shop_id:20});
       assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status,'received');assert.equal(yesterday.rows[0].official_only,true);assert.equal(yesterday.rows[0].local_batch_id,null);
       const today=await service.listOfficial(session(2),{date:'2026-10-22'});assert.equal(today.rows[0].status_label,'已生成');assert.equal(today.rows[0].containers_count,1);
-      const current=await service.officialDetail(session(2),{id:902,date:'2026-10-22',tenant_id:3,shop_id:30});
+      const current=await service.officialDetail(session(2),{id:902,date:'2026-10-22',tenant_id:3,shop_id:20});
       assert.deepEqual(current.summary,{official_members:4,matched_local:1,unmatched_local:3,online:0});assert.equal(current.members[0].order_id,1);
       assert.equal(current.members.find(row=>row.posting_number==='A2').matched_local,false,'Same-enterprise other shop is not the official source shop');
       assert.equal(current.members.find(row=>row.posting_number==='B1').order_id,null,'Foreign-enterprise order details are not exposed');
       assert.equal(current.carriage.status,'formed');assert.equal(current.members[0].platform_status,'awaiting_deliver');assert.equal(current.members[0].online,false);
-      await assert.rejects(service.officialDetail(session(3),{id:902,date:'2026-10-22',tenant_id:2,shop_id:20}),/不在默认店铺/);
+      await assert.rejects(service.officialDetail(session(3),{id:902,date:'2026-10-22',tenant_id:2,shop_id:20}),/不属于当前企业/);
       const pdf=await PDFDocument.create();const font=await pdf.embedFont(StandardFonts.Helvetica);pdf.addPage().drawText('YT3000000000001',{font,size:18,x:30,y:300});labelPdfBuffer=Buffer.from(await pdf.save());
       const [tracking,concurrent]=await Promise.all([service.officialTracking(session(2),{id:902,date:'2026-10-22'}),service.officialTracking(session(2),{id:902,date:'2026-10-22'})]);
       assert.equal(tracking.tracking.master_tracking_number,'YT3000000000001');assert.equal(concurrent.tracking.master_tracking_number,tracking.tracking.master_tracking_number);

@@ -181,7 +181,7 @@ function handleCommand(command) {
               <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value">
+                  <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value" :disabled="action.requiresSelection && !selectedCount">
                     {{ action.label }}
                   </el-dropdown-item>
                 </el-dropdown-menu>

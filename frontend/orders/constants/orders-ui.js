@@ -13,8 +13,8 @@ export const INVENTORY_LIST_PAGE_SIZE = 20;
 export const STATE_META = {
   all: { label: "全部订单", color: "slate" },
   awaiting_packaging: { label: "等待备货", color: "amber" },
-  awaiting_deliver: { label: "等待发货", color: "blue" },
-  ogl_dispatched: { label: "发运跟踪", color: "blue" },
+  awaiting_deliver: { label: "等待发运", color: "blue" },
+  ogl_dispatched: { label: "已发运", color: "blue" },
   delivering: { label: "运输中", color: "green" },
   dispute: { label: "有争议", color: "red" },
   delivered: { label: "已签收", color: "green" },

@@ -55,7 +55,8 @@ test('official discovery and scheduler retain tenant/original-shop authority wit
     }
     for(const [tenantId,shopId] of [[1,10],[2,20],[3,30]])await query('INSERT INTO ogl_dispatch_settings(tenant_id,default_shop_id,updated_by) VALUES(?,?,?)',[tenantId,shopId,tenantId]);
     await t.test('same official ID imports only exact original-shop orders, real dates and reliable label identifiers',async()=>{
-      const start=calls.length;const result=await service.discover(session(2),{date:'2026-10-22',tenant_id:3,shop_id:30,actor_id:3});
+      const start=calls.length;await assert.rejects(service.discover(session(2),{date:'2026-10-22',shop_id:30}),{statusCode:409});assert.equal(calls.length,start);
+      const result=await service.discover(session(2),{date:'2026-10-22',tenant_id:3,shop_id:20,actor_id:3},{readTracking:true});
       batchId=result.rows[0].batch_id;assert.ok(batchId);assert.equal(result.rows[0].created_at,'2026-10-22T07:21:15.322672Z');
       assert.equal(result.rows[0].master_tracking_number,'YT3000000000001');assert.ok(calls.slice(start).every(row=>row.shop===20));
       const detail=await service.detail(session(2),batchId);
@@ -70,6 +71,86 @@ test('official discovery and scheduler retain tenant/original-shop authority wit
       await assert.rejects(service.detail(session(3),batchId),{statusCode:404});
       const other=await service.discover(session(3),{date:'2026-10-22'});assert.notEqual(other.rows[0].batch_id,batchId);
       const legacy=await service.discover(session(1),{date:'2026-10-22'});assert.equal((await service.detail(session(1),legacy.rows[0].batch_id)).members[0].order_id,4);
+    });
+    await t.test('snapshot SQL isolates A/B/default NULL, original shops, dates and poisoned references with no external request',async()=>{
+      const offset=calls.length;
+      for(const [tenantId,orderId] of [[1,4],[2,1],[3,3]]) {
+        const list=await service.listOfficial(session(tenantId),{source:'snapshot',date:'2026-10-22',tenant_id:3});
+        assert.equal(list.total,1);assert.equal(list.rows[0].carriage_id,'901');assert.equal(list.source,'snapshot');
+        const detail=await service.officialDetail(session(tenantId),{source:'snapshot',date:'2026-10-22',id:901,tenant_id:3});
+        assert.equal(detail.members.find(row=>row.matched_local).order_id,orderId);assert.equal(detail.members_complete,true);
+        assert.equal(detail.members.filter(row=>row.matched_local).length,1);
+      }
+      await query("INSERT INTO ogl_dispatch_members(tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number,dispatched_at) VALUES(2,?,3,3,30,'FOREIGN',UTC_TIMESTAMP())",[batchId]);
+      let list=await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'});assert.equal(list.rows[0].dispatch_stage,'applied','A poisoned foreign member cannot supply physical stage');
+      let detail=await service.officialDetail(session(2),{source:'snapshot',date:'2026-10-22',id:901});assert.equal(detail.members.find(row=>row.posting_number==='FOREIGN').order_id,null);
+      await query('DELETE FROM ogl_dispatch_members WHERE tenant_id=2 AND order_id=3');
+      await query("INSERT INTO ogl_dispatch_members(tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number,dispatched_at) VALUES(2,?,2,2,21,'OTHER-SHOP',UTC_TIMESTAMP())",[batchId]);
+      list=await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'});detail=await service.officialDetail(session(2),{source:'snapshot',date:'2026-10-22',id:901});
+      assert.equal(list.rows[0].dispatch_stage,'dispatched');assert.equal(detail.carriage.dispatch_stage,'dispatched','A real same-enterprise mixed-shop handover has one consistent stage');
+      await query('DELETE FROM ogl_dispatch_members WHERE tenant_id=2 AND order_id=2');
+      const saved=(await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[batchId]))[0].official_result_json;
+      const ownOther={...saved,carriage:{...saved.carriage,carriage_id:'901'},official_posting_numbers:[]};
+      const [extra]=await fixture.connection.execute("INSERT INTO ogl_dispatch_batches(tenant_id,batch_number,client_request_id,default_shop_id,containers_count,official_carriage_id,official_status,delivery_method_id,departure_date,official_result_json,created_by) VALUES(2,'Snapshot-other-shop','snapshot-other-shop',21,1,'901','observed','77','2026-10-22',?,2)",[JSON.stringify(ownOther)]);
+      await query('UPDATE ogl_dispatch_settings SET default_shop_id=21 WHERE tenant_id=2');
+      list=await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22',shop_id:21});assert.equal(list.rows[0].batch_id,extra.insertId);assert.notEqual(list.rows[0].batch_id,batchId);
+      detail=await service.officialDetail(session(2),{source:'snapshot',date:'2026-10-22',id:901});assert.equal(detail.members.length,0);assert.equal(detail.dispatch_shop.id,21);
+      await query('UPDATE ogl_dispatch_settings SET default_shop_id=20 WHERE tenant_id=2');await query('DELETE FROM ogl_dispatch_batches WHERE id=?',[extra.insertId]);
+      for(const [number,departure] of [['902','2026-12-31T16:00:00Z'],['903','2026-12-30T16:00:00Z']]) {
+        const metadata={...saved,carriage:{...saved.carriage,carriage_id:number,id:number,departure_date:undefined},official_posting_numbers:[]};
+        await query("INSERT INTO ogl_dispatch_batches(tenant_id,batch_number,client_request_id,default_shop_id,containers_count,official_carriage_id,official_status,delivery_method_id,departure_date,official_result_json,created_by) VALUES(2,?,?,20,1,?,'observed','77',?,?,2)",[`Snapshot-${number}`,`snapshot-${number}`,number,departure,JSON.stringify(metadata)]);
+      }
+      list=await service.listOfficial(session(2),{source:'snapshot',date_from:'2026-12-31',date_to:'2027-01-01'});assert.deepEqual(list.rows.map(row=>row.carriage_id),['902','903']);
+      assert.equal((await service.listOfficial(session(2),{source:'snapshot',date:'2027-01-01'})).total,1);
+      await query("DELETE FROM ogl_dispatch_batches WHERE tenant_id=2 AND official_carriage_id IN ('902','903')");
+      assert.equal(calls.length,offset,'All snapshot list/detail/tenant/date checks use zero Ozon reads');
+    });
+    await t.test('every saved snapshot hit rechecks role, membership and subscription, and interactive refresh cannot request PDF via body',async()=>{
+      for(const [revoke,restore] of [["UPDATE tenant_members SET business_roles_json=JSON_ARRAY('technical') WHERE tenant_id=2","UPDATE tenant_members SET business_roles_json=JSON_ARRAY('operations') WHERE tenant_id=2"],["UPDATE tenant_members SET active=0 WHERE tenant_id=2","UPDATE tenant_members SET active=1 WHERE tenant_id=2"],["UPDATE tenants SET subscription_status='expired' WHERE id=2","UPDATE tenants SET subscription_status='active' WHERE id=2"]]) {
+        await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'});await query(revoke);const offset=calls.length;
+        await assert.rejects(service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'}),{statusCode:403});
+        await assert.rejects(service.officialDetail(session(2),{source:'snapshot',id:901,date:'2026-10-22'}),{statusCode:403});assert.equal(calls.length,offset);await query(restore);
+      }
+      const offset=calls.length;await service.discover(session(2),{date:'2026-10-22',source:'snapshot',readTracking:true,options:{readTracking:true}});
+      assert.ok(!calls.slice(offset).some(row=>row.path.endsWith('get-container-labels')),'Client body cannot opt into internal PDF work');
+      const list=await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'});assert.equal(list.rows[0].master_tracking_number,'YT3000000000001','Interactive refresh preserves previously verified label identifiers');
+    });
+    await t.test('explicit shop sync works without default settings, all-shop snapshots retain exact identities and fresh authority',async()=>{
+      const settings=await query('SELECT * FROM ogl_dispatch_settings ORDER BY tenant_id');
+      const savedSettings=settings.find(row=>row.tenant_id===2);let extraBatchId;
+      manifests.set(21,['OTHER-SHOP']);await query('DELETE FROM ogl_dispatch_settings WHERE tenant_id=2');
+      try {
+        assert.equal((await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'})).total,1,'Saved enterprise records do not require a default-shop setting');
+        const before=calls.length;const imported=await service.discover(session(2),{date:'2026-10-22',shop_id:21,tenant_id:3,actor_id:3});extraBatchId=imported.rows[0].batch_id;
+        assert.ok(calls.slice(before).every(row=>row.shop===21));assert.equal(imported.rows[0].dispatch_shop.id,21);
+        assert.deepEqual(await query('SELECT * FROM ogl_dispatch_settings ORDER BY tenant_id'),settings.filter(row=>row.tenant_id!==2),'Selecting sync shop never creates or changes default settings');
+        const all=await service.listOfficial(session(2),{source:'snapshot',date:'2026-10-22'});
+        assert.equal(all.total,2);assert.deepEqual(all.rows.map(row=>row.dispatch_shop.id).sort(),[20,21]);
+        for(const [shopId,orderId] of [[20,1],[21,2]]) {
+          const exact=await service.officialDetail(session(2),{source:'snapshot',date:'2026-10-22',id:901,shop_id:shopId});
+          assert.equal(exact.dispatch_shop.id,shopId);assert.equal(exact.members.find(row=>row.matched_local).order_id,orderId);
+        }
+        for(const method of ['listOfficial','officialDetail','officialTracking','discover']) {
+          const offset=calls.length;await assert.rejects(service[method](session(2),{source:method==='discover'?undefined:'snapshot',id:901,date:'2026-10-22',shop_id:30}),{statusCode:409});assert.equal(calls.length,offset);
+        }
+        await query('INSERT INTO ogl_dispatch_settings(tenant_id,default_shop_id,updated_by,updated_at) VALUES(?,?,?,?)',[2,20,2,savedSettings.updated_at]);
+        hook=async(path,selected)=>{if(path==='/v1/carriage/get'&&selected.id===21){hook=null;await query('UPDATE ogl_dispatch_settings SET default_shop_id=21 WHERE tenant_id=2');}};
+        const selected=await service.discover(session(2),{date:'2026-10-22',shop_id:21});assert.equal(selected.rows[0].batch_id,extraBatchId,'Changing the default does not invalidate the explicit selected original shop');
+        const snapshot=(await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[extraBatchId]))[0].official_result_json;
+        for(const [revoke,restore,code] of [["UPDATE shops SET status='inactive' WHERE id=21","UPDATE shops SET status='active' WHERE id=21",409],["UPDATE tenant_members SET active=0 WHERE tenant_id=2","UPDATE tenant_members SET active=1 WHERE tenant_id=2",403],["UPDATE tenants SET subscription_status='expired' WHERE id=2","UPDATE tenants SET subscription_status='active' WHERE id=2",403]]) {
+          hook=async(path,shop)=>{if(path==='/v1/carriage/get'&&shop.id===21){hook=null;await query(revoke);}};
+          const offset=calls.length;await assert.rejects(service.discover(session(2),{date:'2026-10-22',shop_id:21}),{statusCode:code});
+          assert.ok(!calls.slice(offset).some(row=>row.path.endsWith('get-postings')));await query(restore);
+          assert.deepEqual((await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[extraBatchId]))[0].official_result_json,snapshot);
+        }
+        hook=async(path,shop)=>{if(path.endsWith('get-postings')&&shop.id===21){hook=null;await query('UPDATE tenant_members SET active=0 WHERE tenant_id=2');}};
+        await assert.rejects(service.discover(session(2),{date:'2026-10-22',shop_id:21}),{statusCode:403});await query('UPDATE tenant_members SET active=1 WHERE tenant_id=2');
+        assert.deepEqual((await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[extraBatchId]))[0].official_result_json,snapshot,'Selected shop persistence is also blocked after manifest response revocation');
+      } finally {
+        hook=null;manifests.delete(21);await query('UPDATE tenant_members SET active=1 WHERE tenant_id=2');await query("UPDATE tenants SET subscription_status='active' WHERE id=2");await query("UPDATE shops SET status='active' WHERE id=21");
+        if(extraBatchId){await query('DELETE FROM ogl_dispatch_members WHERE tenant_id=2 AND batch_id=?',[extraBatchId]);await query('DELETE FROM ogl_dispatch_events WHERE tenant_id=2 AND batch_id=?',[extraBatchId]);await query('DELETE FROM ogl_dispatch_batches WHERE tenant_id=2 AND id=?',[extraBatchId]);}
+        await query('DELETE FROM ogl_dispatch_settings WHERE tenant_id=2');await query('INSERT INTO ogl_dispatch_settings(tenant_id,default_shop_id,updated_by,updated_at) VALUES(?,?,?,?)',[2,savedSettings.default_shop_id,savedSettings.updated_by,savedSettings.updated_at]);
+      }
     });
     await t.test('concurrent rediscovery/restart is SQL-idempotent and file reads cannot approve or dispatch',async()=>{
       await Promise.all([service.discover(session(2),{date:'2026-10-22'}),make().discover(session(2),{date:'2026-10-22'})]);
@@ -101,7 +182,7 @@ test('official discovery and scheduler retain tenant/original-shop authority wit
         await query(revoke);const offset=calls.length;await assert.rejects(service.discover(session(2),{date:'2026-10-22'}),{statusCode:403});assert.equal(calls.length,offset);await query(restore);
       }
       const before=(await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[batchId]))[0].official_result_json;
-      hook=async(path,shop)=>{if(path.endsWith('get-container-labels')&&shop.id===20){hook=null;await query('UPDATE tenant_members SET active=0 WHERE tenant_id=2');}};
+      hook=async(path,shop)=>{if(path.endsWith('get-postings')&&shop.id===20){hook=null;await query('UPDATE tenant_members SET active=0 WHERE tenant_id=2');}};
       await assert.rejects(service.discover(session(2),{date:'2026-10-22'}),{statusCode:403});
       assert.deepEqual((await query('SELECT official_result_json FROM ogl_dispatch_batches WHERE id=?',[batchId]))[0].official_result_json,before);await query('UPDATE tenant_members SET active=1 WHERE tenant_id=2');
     });

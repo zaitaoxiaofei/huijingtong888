@@ -29,6 +29,7 @@ import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, s
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
+import { oglTransportDeadlineHint } from "./utils/ogl-transport-deadline.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
@@ -61,6 +62,7 @@ function openInventoryDetail(row, productId) {
 }
 
 const orderDetailCache = new Map();
+const orderClock = ref(Date.now());
 let latestOrderSyncTimer = 0;
 
 const {
@@ -639,7 +641,7 @@ async function saveStatusPreference() {
 
 function rowStateLabel(row) {
   const key = rowDisplayStateKey(row);
-  if (key === "ogl_dispatched") return row?.ogl_dispatch?.stage_label || (row?.ogl_dispatch?.dispatched === true ? "已实际交运" : "已申请·待交接");
+  if (key === "ogl_dispatched") return row?.ogl_dispatch?.dispatched === true ? "已实际交运" : "已申请";
   if (key === "returned") return "已退货";
   if (key === "rejected") return "拒收/未领取";
   if (key === "all") return row?.tracking_stage || row?.status || "-";
@@ -1275,7 +1277,7 @@ function buildTableRow(row) {
     statusLabel: rowStateLabel(row),
     statusHint: displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
-    statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
+    statusDeadlineHint: displayStateKey === "ogl_dispatched" ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     qualityCheckOrder: isQualityCheckOrderRow(row),
     passportMissingOrder: isPassportMissingOrderRow(row),
     procurementState: buildProcurementState(row),
@@ -1711,6 +1713,7 @@ function bulkPrintSelected() {
 }
 
 function handleToolbarMoreAction(action) {
+  if (action === "shipped-receipts") return previewShippedReceipts();
   if (action === "quality-rules") return showQualityRules();
   if (action === "ogl-official-carriages") return openOglDispatch("official");
   if (action === "ogl-create-batch") return openOglDispatch("create");
@@ -2556,6 +2559,7 @@ watch(() => route.query.orderId, async () => {
 onMounted(async () => {
   await Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()]);
   latestOrderSyncTimer = window.setInterval(() => {
+    orderClock.value = Date.now();
     void loadLatestOrderSyncStatus();
   }, 60 * 1000);
   if (route.query.orderId) {
@@ -2626,10 +2630,6 @@ onBeforeUnmount(() => {
 
     <OglDispatchPanel v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" />
 
-    <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">
-      <el-button type="primary" plain :disabled="!selectedCount" :loading="shippedReceiptDialog.loading" @click="previewShippedReceipts()">批量补登记实收（已选 {{ selectedCount }} 单）</el-button>
-      <span>仅预览明确关联的已运输订单，确认后才入库。</span>
-    </div>
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
     <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
