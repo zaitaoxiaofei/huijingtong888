@@ -128,6 +128,18 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
+  async function register(payload) {
+    const scope = currentApiCacheScope();
+    loading.value = true;
+    try {
+      const result = await apiClient.post("/api/auth/register", payload);
+      if (scope !== currentApiCacheScope()) throw new DOMException("注册期间登录状态已改变，请使用新账号重新登录", "AbortError");
+      return applyLoginResult(result).user;
+    } finally {
+      loading.value = false;
+    }
+  }
+
   function applyLoginResult(result) {
     if (result?.error || !result?.token || !result?.user) {
       throw new Error(result?.error || "Login failed");
@@ -166,6 +178,7 @@ export const useAuthStore = defineStore("auth", () => {
     isAuthenticated,
     bootstrap,
     login,
+    register,
     completeWechatLogin,
     applyLoginResult,
     verifySession,

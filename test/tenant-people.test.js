@@ -15,7 +15,7 @@ const updatedAt = "2026-10-21T02:00:00.000Z";
 function fixture(change = () => {}) {
   let state = {
     tenants: [{ id: 1, slug: "company-a", status: "active", member_limit: 2 }, { id: 2, slug: "company-b", status: "active", member_limit: 2 }],
-    people: [10, 20, 30, 40].map(id => ({ id, name: `Person ${id}`, username: `user${id}`, role: "operator", roles_json: '["operator"]', avatar_url: "", active: 1 })),
+    people: [10, 20, 30, 40].map(id => ({ id, name: `Person ${id}`, username: `user${id}`, account_kind: "person", role: "operator", roles_json: '["operator"]', avatar_url: "", active: 1 })),
     members: [
       { tenant_id: 1, person_id: 10, role: "owner", active: 1, business_roles_json: '["operations"]', updated_at: updatedAt },
       { tenant_id: 1, person_id: 20, role: "member", active: 1, business_roles_json: '["packing"]', updated_at: updatedAt },
@@ -27,6 +27,7 @@ function fixture(change = () => {}) {
   const calls = [];
   const connection = { async execute(sql, params = []) {
     calls.push({ sql, params: Array.from(params) });
+    if (state.accountKindQueryError && sql.includes("p.account_kind")) throw state.accountKindQueryError;
     if (sql.startsWith("SELECT id, slug, status, member_limit")) return [state.tenants.filter(item => item.id === params[0])];
     if (sql.startsWith("SELECT tm.role,")) {
       const member = state.members.find(item => item.tenant_id === params[0] && item.person_id === params[1] && item.active === 1
@@ -42,7 +43,7 @@ function fixture(change = () => {}) {
           can_edit_identity: Number(!state.members.some(item => item.person_id === person.id && item.tenant_id !== member.tenant_id)
             && !state.grants.some(item => item.person_id === person.id)) };
       });
-      return [rows];
+      return [sql.includes("p.account_kind = 'person'") ? rows.filter(row => row.account_kind === "person") : rows];
     }
     if (sql.startsWith("SELECT tm.person_id, tm.role,")) return [state.members.filter(item => item.tenant_id === params[0]).map(member => {
       const person = state.people.find(item => item.id === member.person_id);
@@ -53,7 +54,7 @@ function fixture(change = () => {}) {
     if (sql.startsWith("INSERT INTO people")) {
       if (state.people.some(item => item.name === params[0] || item.username === params[1])) throw Object.assign(new Error("Private database duplicate detail"), { code: "ER_DUP_ENTRY" });
       const id = Math.max(...state.people.map(item => item.id)) + 1;
-      state.people.push({ id, name: params[0], username: params[1], role: "operator", roles_json: '["operator"]', avatar_url: params[2], active: 1, password_hash: params[3] });
+      state.people.push({ id, name: params[0], username: params[1], account_kind: "person", role: "operator", roles_json: '["operator"]', avatar_url: params[2], active: 1, password_hash: params[3] });
       return [{ insertId: id }];
     }
     if (sql.startsWith("INSERT INTO tenant_members")) {
@@ -108,6 +109,25 @@ test("legacy business admin and stale/platform session flags never replace actua
   const session = { personId: 20, roles: ["admin"], platform_role: "super_admin", tenant: { id: 1, slug: "company-a", role: "owner" } };
   await assert.rejects(f.services.listEnterprisePeopleMysql(session), { statusCode: 403 });
   await assert.rejects(f.services.listEnterprisePeopleMysql({ personId: 10, platform_role: "super_admin" }), { statusCode: 403 });
+});
+
+test("enterprise personnel hide explicit system accounts and reject direct identity edits without matching names", async () => {
+  const f = fixture(state => {
+    state.people[1].account_kind = "system";
+    state.people[0].username = "health-check";
+  });
+  assert.deepEqual(Array.from(await f.services.listEnterprisePeopleMysql(ownerSession), person => person.id), [10]);
+  await assert.rejects(f.services.updateEnterprisePersonMysql(20, { name: "Changed system name" }, ownerSession), { statusCode: 404 });
+  assert.equal(f.calls.some(call => call.sql.startsWith("UPDATE")), false);
+});
+
+test("enterprise personnel provide migration guidance only for the missing account kind column", async () => {
+  for (const request of [services => services.listEnterprisePeopleMysql(ownerSession), services => services.updateEnterprisePersonMysql(20, { name: "Changed name" }, ownerSession)]) {
+    const f = fixture(state => { state.accountKindQueryError = Object.assign(new Error("Unknown column 'p.account_kind' in 'where clause'"), { code: "ER_BAD_FIELD_ERROR" }); });
+    await assert.rejects(request(f.services), error => error.statusCode === 503 && /账号类型字段尚未迁移/.test(error.message));
+  }
+  const other = fixture(state => { state.accountKindQueryError = Object.assign(new Error("Unknown column 'p.other_field'"), { code: "ER_BAD_FIELD_ERROR" }); });
+  await assert.rejects(other.services.listEnterprisePeopleMysql(ownerSession), error => error.code === "ER_BAD_FIELD_ERROR" && error.statusCode === undefined);
 });
 
 test("new enterprise account and member are created atomically with member-local business roles", async () => {

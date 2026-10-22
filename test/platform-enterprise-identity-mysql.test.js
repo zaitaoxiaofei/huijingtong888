@@ -44,6 +44,7 @@ test("platform grants, enterprise people and reviewed identity migration against
       `CREATE TABLE tenants (id BIGINT UNSIGNED PRIMARY KEY, slug VARCHAR(80) UNIQUE, status VARCHAR(32) DEFAULT 'active', member_limit INT UNSIGNED NULL,
         name VARCHAR(255) DEFAULT 'Fixture enterprise', plan_code VARCHAR(32) DEFAULT 'yearly', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL) ENGINE=InnoDB`,
       `CREATE TABLE people (id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, name VARCHAR(255) UNIQUE, username VARCHAR(255) UNIQUE,
+        account_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'person',
         role VARCHAR(64) DEFAULT 'operator', roles_json JSON NULL, avatar_url TEXT, active TINYINT DEFAULT 1, password_hash TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB`,
       `CREATE TABLE tenant_members (tenant_id BIGINT UNSIGNED, person_id BIGINT UNSIGNED, role VARCHAR(32), business_roles_json JSON NULL,
@@ -213,6 +214,17 @@ test("platform grants, enterprise people and reviewed identity migration against
       const edited = await enterprise.updateEnterprisePersonMysql(20, { business_roles: ["procurement"] }, session(10));
       assert.deepEqual(edited.business_roles, ["procurement"]);
       assert.equal((await query("SELECT role FROM people WHERE id = 20"))[0].role, "operator");
+    });
+
+    await scenario("enterprise directory excludes only explicit system identities without deleting historical members", async () => {
+      await query("UPDATE people SET account_kind='system' WHERE id=43");
+      const rows = await enterprise.listEnterprisePeopleMysql(session(10));
+      assert.ok(!rows.some(person => person.person_id === 43));
+      await assert.rejects(enterprise.updateEnterprisePersonMysql(43, { name: "Cannot edit system identity" }, session(10)), { statusCode: 404 });
+      assert.equal((await query("SELECT COUNT(*) AS n FROM tenant_members WHERE person_id=43"))[0].n, 1);
+      assert.equal((await query("SELECT person_id FROM fixture_business_refs WHERE id=1"))[0].person_id, 43);
+      await query("UPDATE people SET username='e2e', name='health check colleague' WHERE id=20");
+      assert.ok((await enterprise.listEnterprisePeopleMysql(session(10))).some(person => person.person_id === 20));
     });
 
     await scenario("creation hashes passwords and rolls back a global account if member insertion fails", async () => {

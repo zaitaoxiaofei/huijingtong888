@@ -58,7 +58,7 @@ export function createEnterpriseMessagesService({ transaction }) {
         const [member] = await query(`SELECT p.id, p.name, p.username, p.avatar_url, p.role AS legacy_role, p.roles_json,
           tm.role AS tenant_role, tm.business_roles_json
         FROM people p JOIN tenant_members tm ON tm.person_id = p.id AND tm.tenant_id = ? AND tm.active = 1
-        WHERE p.active = 1 AND p.id = ? ${write ? "FOR UPDATE" : "FOR SHARE"}`, [tenantId, personId]);
+        WHERE p.active = 1 AND p.account_kind = 'person' AND p.id = ? ${write ? "FOR UPDATE" : "FOR SHARE"}`, [tenantId, personId]);
         if (!member) fail("仅当前企业启用的成员可以互发和查看私信", 403);
         members.push(member);
       }
@@ -67,6 +67,7 @@ export function createEnterpriseMessagesService({ transaction }) {
         tenant: { ...tenant, role: effectiveTenantMembershipRole({ ...current, tenant_slug: tenant.slug }) } };
       return action({ query, tenantId, actorId, peerId, actor });
     }).catch(error => {
+      if (error.code === "ER_BAD_FIELD_ERROR" && String(error.sqlMessage || error.message).includes("account_kind")) fail("企业私信的账号类型字段尚未迁移，请联系平台维护人员执行私信数据库迁移", 503);
       if (error.code === "ER_NO_SUCH_TABLE" && String(error.sql || "").includes("enterprise_direct_messages")) fail("企业私信尚未完成数据库迁移，请联系平台维护人员", 503);
       throw error;
     });
@@ -115,12 +116,12 @@ export function createEnterpriseMessagesService({ transaction }) {
   async function unreadCount({ query, tenantId, actorId }) {
     const [row] = await query(`SELECT COUNT(*) AS unread_count FROM enterprise_direct_messages m
       JOIN tenant_members tm ON tm.tenant_id = m.tenant_id AND tm.person_id = m.sender_id AND tm.active = 1
-      JOIN people p ON p.id = m.sender_id AND p.active = 1 WHERE m.tenant_id = ? AND m.recipient_id = ? AND m.read_at IS NULL`, [tenantId, actorId]);
+      JOIN people p ON p.id = m.sender_id AND p.active = 1 AND p.account_kind = 'person' WHERE m.tenant_id = ? AND m.recipient_id = ? AND m.read_at IS NULL`, [tenantId, actorId]);
     return Number(row.unread_count);
   }
   return {
     contacts: session => within(session, null, async c => ({ rows: (await c.query(`SELECT p.id, p.name, p.username, p.avatar_url
-      FROM tenant_members tm JOIN people p ON p.id = tm.person_id AND p.active = 1
+      FROM tenant_members tm JOIN people p ON p.id = tm.person_id AND p.active = 1 AND p.account_kind = 'person'
       WHERE tm.tenant_id = ? AND tm.active = 1 AND p.id <> ? ORDER BY p.name, p.id`, [c.tenantId, c.actorId])).map(person) })),
     unread: session => within(session, null, async c => ({ unread_count: await unreadCount(c) })),
     conversations: session => within(session, null, async c => {
@@ -130,7 +131,7 @@ export function createEnterpriseMessagesService({ transaction }) {
           WHERE tenant_id = ? AND (sender_id = ? OR recipient_id = ?) GROUP BY peer_id) grouped
         JOIN enterprise_direct_messages m ON m.id = grouped.last_id AND m.tenant_id = ?
         JOIN tenant_members tm ON tm.person_id = grouped.peer_id AND tm.tenant_id = ? AND tm.active = 1
-        JOIN people p ON p.id = grouped.peer_id AND p.active = 1 ORDER BY m.id DESC`, [c.actorId, c.actorId, c.tenantId, c.actorId, c.actorId, c.tenantId, c.tenantId]);
+        JOIN people p ON p.id = grouped.peer_id AND p.active = 1 AND p.account_kind = 'person' ORDER BY m.id DESC`, [c.actorId, c.actorId, c.tenantId, c.actorId, c.actorId, c.tenantId, c.tenantId]);
       const formatted = await messages(c, rows);
       return { rows: rows.map((row, index) => ({ peer: person({ ...row, id: row.peer_id }), last_message: formatted[index], unread_count: Number(row.unread_count) })) };
     }),

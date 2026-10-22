@@ -330,7 +330,7 @@ export async function archiveTenantMysql(tenantId) {
   return { ok: true };
 }
 
-export async function tenantMembersMysql(tenantId) {
+export async function tenantMembersMysql(tenantId, options = {}) {
   await ensureTenantSchemaMysql();
   const normalizedTenantId = Number(tenantId);
   if (!Number.isSafeInteger(normalizedTenantId) || normalizedTenantId <= 0) {
@@ -342,7 +342,12 @@ export async function tenantMembersMysql(tenantId) {
       (SELECT slug FROM tenants WHERE id = tm.tenant_id) AS tenant_slug,
       p.avatar_url, p.role AS business_role, p.roles_json, p.active AS account_active
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id
-    WHERE tm.tenant_id = ? AND tm.active = 1 ORDER BY p.id`, [normalizedTenantId]);
+    WHERE tm.tenant_id = ? AND tm.active = 1${options.peopleOnly ? " AND p.account_kind = 'person'" : ""} ORDER BY p.id`, [normalizedTenantId]).catch(error => {
+      if (options.peopleOnly && error.code === "ER_BAD_FIELD_ERROR" && String(error.sqlMessage || error.message).includes("account_kind")) {
+        throw Object.assign(new Error("企业人员的账号类型字段尚未迁移，请联系平台维护人员执行私信数据库迁移"), { statusCode: 503 });
+      }
+      throw error;
+    });
   return rows.map(row => {
     const { tenant_slug, ...membership } = row;
     return { ...membership, role: effectiveTenantMembershipRole({

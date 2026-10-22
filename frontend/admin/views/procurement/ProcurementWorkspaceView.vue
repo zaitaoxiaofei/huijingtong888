@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, UploadFilled } from "@element-plus/icons-vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
-import { apiClient } from "../../utils/api.js";
+const router = useRouter();
+import { apiClient, currentApiCacheScope } from "../../utils/api.js";
 import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { useAuthStore } from "../../stores/auth.js";
@@ -24,7 +25,36 @@ const loading = ref(false);
 const demandRefreshing = ref(false);
 let rowsController;
 let disposed = false;
-onBeforeUnmount(() => { disposed = true; rowsController?.abort(); });
+onBeforeUnmount(() => { disposed = true; rowsController?.abort(); messageRequestController?.abort(); window.removeEventListener("erp:auth-scope-changed", resetMessageRequest); });
+const messageRequestVisible = ref(false), messageRequestLoading = ref(false), messageRequestRecord = ref(null), messageRequestError = ref("");
+let messageRequestController, messageRequestVersion = 0;
+function resetMessageRequest() {
+  messageRequestVersion++; messageRequestController?.abort(); messageRequestVisible.value = false;
+  messageRequestRecord.value = null; messageRequestError.value = ""; messageRequestLoading.value = false;
+}
+function closeMessageRequest() {
+  resetMessageRequest();
+  if (route.query.message_request_id) {
+    const query = { ...route.query }; delete query.message_request_id;
+    router.replace({ query }).catch(() => {});
+  }
+}
+async function openMessageRequest(value) {
+  resetMessageRequest();
+  const requestId = Number(value);
+  if (!Number.isSafeInteger(requestId) || requestId <= 0) return;
+  const version = messageRequestVersion, scope = currentApiCacheScope();
+  messageRequestController = new AbortController();
+  messageRequestVisible.value = true; messageRequestLoading.value = true;
+  try {
+    const result = await apiClient.get(`/api/enterprise/messages/reference?type=procurement&id=${requestId}`, { noCache: true, signal: messageRequestController.signal });
+    if (!disposed && version === messageRequestVersion && scope === currentApiCacheScope()) messageRequestRecord.value = result.record;
+  } catch (error) {
+    if (!disposed && version === messageRequestVersion && scope === currentApiCacheScope() && error.name !== "AbortError") messageRequestError.value = error.message || "当前采购需求暂不可访问";
+  } finally { if (!disposed && version === messageRequestVersion && scope === currentApiCacheScope()) messageRequestLoading.value = false; }
+}
+function messageRequestStatus(value) { return ({ pending: "待采购", ordered: "已下单", purchased: "已采购", completed: "已完成", closed: "已关闭", cancelled: "已取消", rejected: "已拒绝", partially_received: "部分收货", received: "已收货" })[value] || value || "—"; }
+watch(() => route.query.message_request_id, openMessageRequest, { immediate: true });
 const submitting = ref(false);
 const createVisible = ref(false);
 const bindVisible = ref(false);
@@ -1507,6 +1537,7 @@ async function saveBinding() {
 }
 
 onMounted(async () => {
+  window.addEventListener("erp:auth-scope-changed", resetMessageRequest);
   await Promise.all([
     loadRows(),
     loadOptions().then(resetCreateForm).catch((error) => ElMessage.error(error.message || "采购基础资料加载失败"))
@@ -1521,6 +1552,21 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
+    <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
+      <div v-loading="messageRequestLoading" style="min-height: 100px">
+        <el-alert v-if="messageRequestError" :title="messageRequestError" type="error" :closable="false" show-icon />
+        <el-descriptions v-if="messageRequestRecord" :column="1" border>
+          <el-descriptions-item label="需求编号">#{{ messageRequestRecord.id }}</el-descriptions-item>
+          <el-descriptions-item label="库存商品">{{ messageRequestRecord.product_name || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="需求数量">{{ messageRequestRecord.quantity }} 件</el-descriptions-item>
+          <el-descriptions-item label="处理状态">{{ messageRequestStatus(messageRequestRecord.status) }}</el-descriptions-item>
+          <el-descriptions-item label="来源订单">{{ messageRequestRecord.source_posting_number || '—' }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ shanghaiDateTimeText(messageRequestRecord.created_at, { assumeUtcWhenNaive: true }) }}</el-descriptions-item>
+          <el-descriptions-item label="备注">{{ messageRequestRecord.note || '—' }}</el-descriptions-item>
+        </el-descriptions>
+      </div>
+      <template #footer><el-button @click="messageRequestVisible = false">关闭</el-button></template>
+    </el-dialog>
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
       <template #actions>

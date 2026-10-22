@@ -5,11 +5,13 @@ defineProps({
 </script>
 
 <template>
-  <span class="brand-logo" :class="{ 'is-collapsed': collapsed }" aria-hidden="true">
+  <span class="brand-logo" :class="{ 'is-collapsed': collapsed }" role="img" aria-label="爆单 ERP">
     <span class="brand-logo__mark">
-      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-        <path d="M12 2.75 21 7.75v8.5l-9 5-9-5v-8.5l9-5Z" />
-        <path d="m3.5 8 8.5 4.75L20.5 8M12 12.75v8M7.5 5.25l9 5v4" />
+      <svg viewBox="0 0 100 100" fill="none" aria-hidden="true" focusable="false">
+        <rect width="100" height="100" rx="26" fill="#6258f6" />
+        <path d="M25 22h30.5C67.5 22 74 27.6 74 37.5c0 5.1-2.1 9-5.9 11.6C76.5 51.2 81 56.2 81 63.5 81 73.6 73.1 79 60.5 79H25V22Z" fill="white" />
+        <path d="M39 32h13.4C58 32 61 33.8 61 37.5S58 43 52.4 43H39V32Zm0 26h18.2C63.6 58 67 59.8 67 63.5S63.6 69 57.2 69H39V58Z" fill="#6258f6" />
+        <path d="m56.8 51.2 26.5-11.8 2.9 6.4-26.5 11.8-2.9-6.4Z" fill="#6258f6" />
       </svg>
     </span>
     <span v-if="!collapsed" class="brand-logo__wordmark">
@@ -36,21 +38,16 @@ defineProps({
   display: grid;
   flex: none;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: var(--erp-primary-soft, #f0efff);
-  color: var(--erp-primary, #6258f6);
+  width: var(--brand-mark-size, 32px);
+  height: var(--brand-mark-size, 32px);
+  border-radius: 26%;
+  background: #6258f6;
 }
 
 .brand-logo__mark svg {
   display: block;
-  width: 22px;
-  height: 22px;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-logo__wordmark {
@@ -61,14 +58,14 @@ defineProps({
 
 .brand-logo__wordmark strong {
   font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
 }
 
 .brand-logo__erp {
-  color: var(--erp-text-regular, #4b5563);
+  color: var(--erp-text-secondary, #64748b);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.08em;
 }
 

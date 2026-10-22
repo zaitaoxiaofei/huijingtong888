@@ -2,6 +2,7 @@ import mysql from "mysql2/promise";
 import { config } from "../src/config.js";
 import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
 import { ENTERPRISE_MESSAGES_SCHEMA_SQL } from "../src/services/enterprise-messages.js";
+import { inspectPeopleAccountKind, preparePeopleAccountKind } from "../src/services/people-account-kind.js";
 
 const apply = process.argv.includes("--apply");
 const socketPath = process.argv.find(arg => arg.startsWith("--mysql-admin-socket="))?.split("=").slice(1).join("=");
@@ -33,7 +34,10 @@ async function inspect(query) {
   return { exists, ready: problems.length === 0, problems };
 }
 async function run() {
-  if (!apply) return console.log(JSON.stringify({ mode: "dry-run", changes_database: false, ...(await inspect(mysqlQuery)) }));
+  if (!apply) {
+    const messages = await inspect(mysqlQuery), accountKind = await inspectPeopleAccountKind(mysqlQuery);
+    return console.log(JSON.stringify({ mode: "dry-run", changes_database: false, ...messages, ready: messages.ready && accountKind.ready, account_kind: accountKind }));
+  }
   if (!socketPath) throw new Error("Apply requires an explicit local --mysql-admin-socket");
   const connection = await mysql.createConnection({ socketPath, user: "root", database: config.dbName });
   const query = async (sql, params = []) => (await connection.query(sql, params))[0];
@@ -42,10 +46,11 @@ async function run() {
     if (Number(lock.acquired) !== 1) throw new Error("Private messages schema migration lock unavailable");
     const before = await inspect(query);
     if (before.exists && !before.ready) throw new Error("Existing private messages schema is incompatible; manual review required");
+    await preparePeopleAccountKind(query);
     for (const sql of ENTERPRISE_MESSAGES_SCHEMA_SQL) await query(sql);
     const after = await inspect(query);
     if (!after.ready) throw new Error("Private messages schema verification failed");
-    console.log(JSON.stringify({ mode: "apply", ...after }));
+    console.log(JSON.stringify({ mode: "apply", ...after, account_kind: await inspectPeopleAccountKind(query) }));
   } finally {
     try { await query("SELECT RELEASE_LOCK('enterprise_messages_schema_v1')"); } finally { await connection.end(); }
   }

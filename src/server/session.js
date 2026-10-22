@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { hashPassword, verifyPassword, isLegacyHash, validatePasswordStrength } from "../auth-password.js";
 import { switchSessionTenantMysql, tenantMembershipsMysql } from "../services/tenants.js";
+import { selfServiceMembership } from "../services/self-service-membership.js";
 import {
   cleanExpiredSessionsMysql,
   createSessionMysql,
@@ -89,6 +90,9 @@ export function createAuthHandler(readJson, overrides = {}) {
     updatePersonWechatIdentity: updatePersonWechatIdentityMysql,
     switchSessionTenant: switchSessionTenantMysql,
     tenantMemberships: tenantMembershipsMysql,
+    registerAccount: selfServiceMembership.register,
+    membership: selfServiceMembership.membership,
+    activateMembership: selfServiceMembership.activate,
     hashPassword,
     verifyPassword,
     isLegacyHash,
@@ -117,6 +121,29 @@ export function createAuthHandler(readJson, overrides = {}) {
 
   return function handleAuth(req, url) {
     const key = `${req.method} ${url.pathname}`;
+
+    if (key === "POST /api/auth/register") {
+      return async () => {
+        req._sensitiveResponse = true;
+        const rate = deps.consumeRateLimit(`register:${deps.getClientIp(req)}`, 5, AUTH_RATE_LIMIT_WINDOW_MS);
+        if (!rate.allowed) return { error: "注册尝试过多，请稍后再试", __status: 429 };
+        const row = await deps.registerAccount(await readJson(req));
+        const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
+        return { ok: true, token, user: authUser(row, await deps.getSession(token)) };
+      };
+    }
+
+    if (key === "GET /api/auth/membership" || key === "POST /api/auth/activate") {
+      return async () => {
+        req._sensitiveResponse = true;
+        const session = await deps.getSession(extractToken(req));
+        if (!session) return { error: "未登录", __status: 401 };
+        if (req.method === "GET") return deps.membership(session);
+        const rate = deps.consumeRateLimit(`activate:${session.personId}:${deps.getClientIp(req)}`, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS);
+        if (!rate.allowed) return { error: "激活尝试过多，请稍后再试", __status: 429 };
+        return deps.activateMembership(await readJson(req), session);
+      };
+    }
 
     if (key === "POST /api/auth/login") {
       return async () => {

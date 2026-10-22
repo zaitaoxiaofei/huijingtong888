@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { authorizeApiRequest } from "../src/server/authorization.js";
+import { subscriptionAccessDecision } from "../src/server/subscription-access.js";
 
 test("tenant management remains limited to platform administrators", () => {
   const operator = { roles: ["operations"] };
@@ -34,5 +35,6 @@ test("tenant subscriptions support trials, paid plans, and suspended access", ()
   assert.match(tenantService, /默认企业不能删除/);
   assert.match(tenantService, /status = 'archived'/);
   assert.match(serverSource, /POST \/api\/tenants\/archive/);
-  assert.match(serverSource, /TENANT_SUBSCRIPTION_REQUIRED/);
+  assert.match(serverSource, /subscriptionAccessDecision\(session, parts, req\.method\)/);
+  assert.equal(subscriptionAccessDecision({ tenant: { id: 2, access_allowed: false } }, ["api", "orders"]).code, "TENANT_SUBSCRIPTION_REQUIRED");
 });

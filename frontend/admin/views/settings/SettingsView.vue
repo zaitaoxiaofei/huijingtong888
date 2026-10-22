@@ -494,7 +494,7 @@ async function loadSettingsData(force = false) {
     return;
     const [shops, people, rates, packagingFeeRule, packagingFeeRuleChanges, logisticsRules, cancellationRules] = await Promise.all([
       loadShopDictionary({ force }),
-      apiClient.get("/api/people"),
+      apiClient.get("/api/people?scope=platform"),
       apiClient.get("/api/exchange-rates"),
       apiClient.get("/api/settings/packaging-fee-rule"),
       apiClient.get("/api/settings/packaging-fee-rule/changes?limit=10"),
@@ -523,12 +523,12 @@ async function loadSectionData(section, force = false) {
   if (section === "shops") {
     const [shops, people] = await Promise.all([
       loadShopDictionary({ force }),
-      apiClient.get("/api/people")
+      apiClient.get("/api/people?scope=platform")
     ]);
     state.shops = Array.isArray(shops) ? shops : [];
     state.people = Array.isArray(people) ? people : [];
   } else if (section === "people") {
-    const people = await apiClient.get("/api/people");
+    const people = await apiClient.get("/api/people?scope=platform");
     state.people = Array.isArray(people) ? people : [];
   } else if (section === "rates") {
     const rates = await apiClient.get("/api/exchange-rates");

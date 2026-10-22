@@ -13,7 +13,7 @@ test("private messages preserve failed drafts, retry safely, paginate concurrent
   const output = await fs.mkdtemp(path.join(os.tmpdir(), "enterprise-messenger-browser-"));
   let browser, lateThread;
   const errors = [], sends = [], reads = [], threadRequests = [];
-  const peers = [{ id: 2, name: "同事乙" }, { id: 3, name: "同事丙" }];
+  const peers = [{ id: 2, name: "同事乙", avatar_url: "http://localhost:8788/avatar.svg" }, { id: 3, name: "同事丙", avatar_url: "http://localhost:8788/broken-avatar.png" }];
   const rows = [{ id: 4, sender_id: 1, recipient_id: 2, text: "旧的已发消息", created_at: "2026-10-21T00:00:00Z" },
     { id: 5, sender_id: 2, recipient_id: 1, text: "历史 <script>window.chatInjected=true</script>", created_at: "2026-10-21T01:00:00Z" }];
   const entry = `import {createApp,h,ref} from 'vue';import {createPinia} from 'pinia';
@@ -22,7 +22,7 @@ test("private messages preserve failed drafts, retry safely, paginate concurrent
     import Messenger from '/frontend/admin/components/EnterpriseMessenger.vue';import Tools from '/frontend/admin/components/QuickToolsDialog.vue';
     import {useAuthStore} from '/frontend/admin/stores/auth.js';import {applyAppearancePreferences} from '/frontend/admin/utils/theme-presets.js';
     const pinia=createPinia();const auth=useAuthStore(pinia);const scope=ref(0);
-    auth.applyLoginResult({token:'fixture-a',user:{id:1,name:'我',roles:['operations'],tenant:{id:1,name:'企业甲',slug:'default'}}});
+    auth.applyLoginResult({token:'fixture-a',user:{id:1,name:'我',avatar_url:'http://localhost:8788/avatar.svg',roles:['operations'],tenant:{id:1,name:'企业甲',slug:'default'}}});
     window.switchChatScope=()=>{auth.applyLoginResult({token:'fixture-b',user:{id:7,name:'另一用户',roles:['operations'],tenant:{id:2,name:'企业乙',slug:'b'}}});scope.value++};
     window.chatTheme=(mode,palette)=>applyAppearancePreferences({version:1,mode,palettes:{[mode]:palette}},document);
     const router=createRouter({history:createWebHashHistory(),routes:[{path:'/:pathMatch(.*)*',component:{render:()=>null}}]});
@@ -65,13 +65,15 @@ test("private messages preserve failed drafts, retry safely, paginate concurrent
           sends.push(b);
           if (failFirstSend) { failFirstSend = false; return route.fulfill({ status: 503, json: { error: "模拟发送失败，请重试" } }); }
           rows.push({ id: 6, sender_id: 2, recipient_id: 1, text: "发送期间收到的消息", created_at: "2026-10-21T02:00:00Z" });
-          const message = { id: 7, sender_id: 1, recipient_id: b.peer_id, text: b.text, reference: { type: "procurement", id: 81, label: "采购需求 #81", route: "/procurement/workspace?message_request_id=81", available: true }, created_at: "2026-10-21T02:01:00Z" };
+          const message = { id: sends.length + 5, sender_id: 1, recipient_id: b.peer_id, text: b.text, reference: { type: "procurement", id: 81, label: "采购需求 #81", route: "/procurement/workspace?message_request_id=81", available: true }, created_at: "2026-10-21T02:01:00Z" };
           rows.push(message); return route.fulfill({ json: { message, duplicate: false } });
         }
         if (endpoint === "reference") return route.fulfill({ json: { reference: { type: "procurement", id: 81, available: true }, record: { id: 81, product_name: "已取消的采购需求商品", quantity: 20, status: "cancelled", note: "保留历史以便追踪", created_at: "2026-10-21T00:00:00Z" } } });
         if (endpoint === "references") return route.fulfill({ json: { rows: [] } });
         throw new Error(`Unexpected message API ${endpoint}`);
       }
+      if (url.pathname === "/avatar.svg") return route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#2563eb"/></svg>' });
+      if (url.pathname === "/broken-avatar.png") return route.fulfill({ status: 404, body: "" });
       if (url.pathname === "/admin.html") return route.fulfill({ contentType: "text/html", body: `<link rel="stylesheet" href="/assets/${css}"><div id="app"></div><script type="module" src="/entry.js"></script>` });
       const file = path.resolve(output, `.${url.pathname}`); assert.ok(file.startsWith(path.resolve(output) + path.sep));
       return route.fulfill({ body: await fs.readFile(file), contentType: file.endsWith(".css") ? "text/css" : "text/javascript" });
@@ -82,7 +84,11 @@ test("private messages preserve failed drafts, retry safely, paginate concurrent
     await page.getByRole("button", { name: /同事乙/ }).click();
     await page.getByText("历史 <script>window.chatInjected=true</script>", { exact: true }).waitFor();
     assert.equal(await page.evaluate(() => window.chatInjected), undefined);
-    assert.match(await page.locator(".messenger-message > small").last().innerText(), /09:00:00/);
+    assert.match(await page.locator(".messenger-message__content > small").last().innerText(), /09:00:00/);
+    assert.equal(await page.locator(".messenger-message > .el-avatar img").count(), 2);
+    assert.equal(await page.locator(".messenger-peer .el-avatar img").count(), 1);
+    assert.equal(await page.locator(".messenger-conversation .el-avatar").count(), 2);
+    await page.waitForFunction(() => document.querySelectorAll('.messenger-conversation .el-avatar')[1]?.textContent === '同');
     await page.waitForFunction(() => !document.querySelector('.messenger-message .el-loading-mask'));
     assert.deepEqual(reads[0], { peer_id: 2, message_ids: [5] });
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
@@ -104,12 +110,43 @@ test("private messages preserve failed drafts, retry safely, paginate concurrent
     assert.ok(threadRequests.some(q => q.includes("after_id=5")), "outgoing acknowledgement must not skip a concurrent incoming message");
     assert.ok(reads.some(read => read.message_ids.includes(6)));
     assert.ok(reads.every(read => !read.message_ids.includes(4) && !read.message_ids.includes(7)), "only received, rendered IDs are marked read");
+    if (process.env.ENTERPRISE_MESSAGES_SCREENSHOT_DIR) {
+      const target = process.env.ENTERPRISE_MESSAGES_SCREENSHOT_DIR;
+      await fs.mkdir(target, { recursive: true });
+      await page.screenshot({ path: path.join(target, "chat-desktop-light.png") });
+      await page.evaluate(() => window.chatTheme("dark", "violet"));
+      await page.screenshot({ path: path.join(target, "chat-desktop-dark.png") });
+      await page.setViewportSize({ width: 420, height: 900 });
+      await page.locator(".messenger-transcript").evaluate(el => { el.scrollTop = el.scrollHeight; });
+      await page.screenshot({ path: path.join(target, "chat-mobile-dark.png") });
+      await page.setViewportSize({ width: 1440, height: 960 });
+      await page.evaluate(() => window.chatTheme("light", "blue"));
+    }
     await page.getByRole("button", { name: "采购需求 #81", exact: false }).click();
     const detail = page.getByRole("dialog", { name: "引用的采购需求", exact: true });
     await detail.getByText("已取消的采购需求商品", { exact: true }).waitFor();
     await detail.getByText("已取消", { exact: true }).waitFor();
     await page.keyboard.press("Escape"); await detail.waitFor({ state: "hidden" });
     assert.ok(await page.getByRole("dialog", { name: "企业私信", exact: true }).isVisible());
+    await input.fill("中文输入确认");
+    await input.evaluate(el => {
+      el.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "zhongwen" }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true }));
+      el.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "中文" }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    assert.equal(sends.length, 2, "IME confirmation, including compositionend-before-keydown, must not send");
+    await page.waitForTimeout(70);
+    await input.evaluate(el => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true, cancelable: true }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true }));
+    });
+    await input.press("Shift+Enter");
+    assert.ok((await input.inputValue()).includes("\n"));
+    assert.equal(sends.length, 2, "Shift+Enter and held Enter must not send");
+    await input.fill("Enter 发送的消息"); await input.press("Enter");
+    await page.waitForFunction(() => document.querySelector('.messenger-composer textarea')?.value === '');
+    assert.equal(sends.length, 3); assert.equal(sends[2].text, "Enter 发送的消息");
     holdPeerThree = true;
     await page.getByRole("button", { name: /同事丙/ }).click();
     await page.getByRole("button", { name: /同事乙/ }).click();

@@ -1,4 +1,4 @@
-import { canAccessPage, hasPermission, isPlatformAdmin } from "../../../src/shared/permissions.js";
+import { canAccessPage, hasPermission, isPlatformAdmin, needsMembershipActivation } from "../../../src/shared/permissions.js";
 import { createRouter, createWebHashHistory } from "vue-router";
 import AdminLayout from "../layouts/AdminLayout.vue";
 import MobileLayout from "../layouts/MobileLayout.vue";
@@ -7,6 +7,7 @@ import { useAuthStore } from "../stores/auth";
 import { markRouteReadyPerf, startRoutePerf } from "../utils/performance-monitor";
 
 const DashboardView = () => import("../views/DashboardView.vue");
+const MembershipView = () => import("../views/MembershipView.vue");
 const TeamPlanView = () => import("../views/team/ProductDevelopmentCenterView.vue");
 const ProfitExceptionView = () => import("../views/exceptions/ProfitExceptionView.vue");
 const DeadlineExceptionView = () => import("../views/exceptions/DeadlineExceptionView.vue");
@@ -119,6 +120,7 @@ export const router = createRouter({
         { path: "", redirect: "/dashboard" },
         { path: "team-plan", name: "team-plan", component: TeamPlanView, meta: { title: "任务系统", breadcrumb: ["任务系统"] } },
         { path: "dashboard", name: "dashboard", component: DashboardView, meta: { title: "经营首页", breadcrumb: ["经营首页"] } },
+        { path: "membership", name: "membership", component: MembershipView, meta: { title: "会员中心", breadcrumb: ["会员中心"] } },
         { path: "onboarding", redirect: { path: "/dashboard", query: {}, hash: "" } },
         { path: "exceptions", redirect: "/exceptions/profit", meta: { title: "待处理异常", breadcrumb: ["待处理异常"] } },
         { path: "exceptions/profit", name: "exceptions-profit", component: ProfitExceptionView, meta: { title: "利润异常", breadcrumb: ["待处理异常", "利润异常"] } },
@@ -242,7 +244,8 @@ router.beforeEach(async (to) => {
   startRoutePerf(to);
   document.title = to.meta?.title ? `${to.meta.title} - 爆单ERP` : "爆单ERP";
   const auth = useAuthStore();
-  const home = () => isPlatformAdmin(auth.user) && !auth.user?.tenant?.id ? "/platform-accounts" : "/dashboard";
+  const home = () => isPlatformAdmin(auth.user) && !auth.user?.tenant?.id ? "/platform-accounts"
+    : needsMembershipActivation(auth.user) ? "/membership" : "/dashboard";
   if (to.name === "login") {
     await auth.bootstrap();
     if (auth.isAuthenticated) {
@@ -255,10 +258,10 @@ router.beforeEach(async (to) => {
     await auth.bootstrap();
     if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
     if (!canAccessPage(auth.user, to.path)) {
-      return { path: home(), query: { denied: "permission" } };
+      return { path: home(), query: { denied: needsMembershipActivation(auth.user) ? "activation" : "permission" } };
     }
   }
-  if (!to.meta?.mobile && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
+  if (!to.meta?.mobile && to.path !== "/membership" && !needsMembershipActivation(auth.user) && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
     return {
       path: "/mobile/orders",
       query: {

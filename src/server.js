@@ -60,6 +60,8 @@ import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } fro
 import { createEnterpriseManagementRoutes, handleEnterpriseManagementRestRoute } from "./server/routes/enterpriseManagement.js";
 import { createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
 import { listPlatformAccountsMysql } from "./services/platform-grants.js";
+import { selfServiceMembership } from "./services/self-service-membership.js";
+import { subscriptionAccessDecision } from "./server/subscription-access.js";
 import {
   cleanupScheduledJobHistory,
   ScheduledJobScheduler,
@@ -283,6 +285,19 @@ const routes = {
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
   "GET /api/tenants": () => listTenantsMysql(),
+  "GET /api/tenants/subscription-vouchers": (req) => {
+    req._sensitiveResponse = true;
+    return selfServiceMembership.listVouchers(req._session);
+  },
+  "POST /api/tenants/subscription-vouchers": async (req) => {
+    req._sensitiveResponse = true;
+    return selfServiceMembership.issueVoucher(await readJson(req), req._session);
+  },
+  "DELETE /api/tenants/subscription-vouchers": async (req) => {
+    req._sensitiveResponse = true;
+    const body = await readJson(req);
+    return selfServiceMembership.revokeVoucher(body.id, req._session);
+  },
   "GET /api/tenants/plans": () => listTenantPlansMysql(),
   "POST /api/tenants/plans": async (req) => createTenantPlanMysql(await readJson(req)),
   "PUT /api/tenants/plans": async (req) => {
@@ -2230,9 +2245,8 @@ const server = http.createServer(async (req, res) => {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=authorization detail=${authorization.error || "权限不足"}`);
         return json(res, { error: authorization.error || "权限不足" }, authorization.status || 403);
       }
-      if (!isPlatformAdmin(session) && parts[1] !== "auth" && !session.tenant?.access_allowed) {
-        return json(res, { error: "企业套餐已到期或已停用，请联系平台管理员开通或续费", code: "TENANT_SUBSCRIPTION_REQUIRED" }, 402);
-      }
+      const subscription = subscriptionAccessDecision(session, parts, req.method);
+      if (!subscription.allowed) return json(res, { error: subscription.error, code: subscription.code }, subscription.status);
     }
 
     markRequestTiming(req, "before_rest");

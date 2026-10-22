@@ -128,6 +128,38 @@ const schemas = {
     field("password", scalar("string", "Plain-text password."), true)
   ], { additionalProperties: false }),
 
+  SelfRegistrationRequest: objectOf("Create an ordinary login identity and a new isolated, unactivated enterprise. No existing enterprise, role, trial, platform grant or verified email is inferred.", [
+    field("username", scalar("string", "3-64 ASCII letters/digits or . _ @ + -; first character must be alphanumeric."), true),
+    field("name", scalar("string", "Display name, 1-100 characters; existing unique-name constraint applies."), true),
+    field("password", scalar("string", "8-128 characters, subject to the shared password policy."), true),
+    field("enterprise_name", scalar("string", "Optional new enterprise display name, at most 100 characters."))
+  ], { additionalProperties: false }),
+  MembershipStatus: objectOf("Current enterprise subscription. Null remaining_days means an existing active perpetual entitlement; zero means no current paid/trial access.", [
+    field("tenant_id", scalar("number", "Current enterprise ID."), true),
+    field("tenant_name", scalar("string", "Current enterprise display name."), true),
+    field("plan_code", scalar("string", "Current plan code or unactivated."), true),
+    field("status", scalar("string", "unactivated, active, trial, expired or suspended."), true),
+    field("expires_at", scalar("string|null", "UTC ISO timestamp; display with the shared Beijing formatter."), true),
+    field("remaining_days", scalar("number|null", "Remaining duration rounded upward to whole days; null means perpetual."), true),
+    field("access_allowed", scalar("boolean", "Whether subscription permits business features; role/isolation checks still apply."), true),
+    field("can_activate", scalar("boolean", "Only the current active owner can redeem; suspended or already perpetual enterprises cannot redeem."), true),
+    field("server_time", scalar("string", "UTC ISO server time for display calculations."), true)
+  ], { additionalProperties: false }),
+  SubscriptionVoucher: objectOf("Platform-issued entitlement snapshot, separate from legacy enterprise-bound activation codes and browser plugin credentials. Full secrets and hashes are never returned here.", [
+    field("id", scalar("number", "Voucher ID."), true), field("code_hint", scalar("string", "Last six characters only."), true),
+    field("status", scalar("string", "active, expired, revoked or used."), true),
+    field("plan_code", scalar("string", "Immutable issued plan code."), true), field("plan_name", scalar("string", "Immutable issued plan name."), true),
+    field("duration_days", scalar("number", "Entitlement duration beginning on redemption."), true),
+    field("subscription_status", scalar("string", "Issued entitlement type: active or trial."), true),
+    field("account_limit", scalar("number|null", "Total accounts including owner; null means unlimited."), true),
+    field("member_limit", scalar("number|null", "Additional-account limit; null means unlimited."), true),
+    field("shop_limit", scalar("number|null", "Shop quota; null means unlimited."), true),
+    field("redeemable_until", scalar("string", "UTC ISO redemption deadline, distinct from membership expiry."), true),
+    field("created_at", scalar("string", "UTC ISO creation timestamp."), true),
+    field("used_at", scalar("string|null", "UTC ISO redemption timestamp."), true),
+    field("used_by_tenant_id", scalar("number|null", "Redeeming enterprise ID; no membership transfer occurs."), true)
+  ], { additionalProperties: false }),
+
   QrConfirmRequest: objectOf("Confirm a pending QR login. Username and password are required unless a valid remembered mobile cookie is present.", [
     field("sid", scalar("string", "Pending QR login identifier."), true),
     field("secret", scalar("string", "One-time confirmation secret from the QR URL."), true),
@@ -1069,6 +1101,36 @@ const endpoints = [
       responses: [response(200, "application/json", ref("ScheduledJob"))]
     })
   ]),
+  section("Membership", [
+    endpoint("POST", "/api/auth/register", "Register with a password and create one isolated enterprise/owner membership in unactivated state; never joins the default enterprise or grants platform authority. Five attempts per IP per authentication window. Existing site access protection remains in force.", {
+      auth: "public", requestBody: body(ref("SelfRegistrationRequest")),
+      responses: [response(200, "application/json", ref("AuthSession")), response(400, "application/json", ref("ErrorResponse")),
+        response(409, "application/json", ref("ErrorResponse"), "Display/login name already in use; all inserts roll back."), response(429, "application/json", ref("ErrorResponse")),
+        response(503, "application/json", ref("ErrorResponse"), "Administrator voucher schema migration is missing or incompatible; no registration rows are inserted.")]
+    }),
+    endpoint("GET", "/api/auth/membership", "Read the current active enterprise membership and subscription, including remaining time. Available before activation; fresh person/membership checks apply.", {
+      auth: "authenticated", responses: [response(200, "application/json", ref("MembershipStatus")), response(401, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")),
+        response(503, "application/json", ref("ErrorResponse"), "Run the explicit subscription-voucher schema migration.")]
+    }),
+    endpoint("POST", "/api/auth/activate", "Current enterprise owner redeems a plan-backed sale voucher exactly once. Renewal extends from max(now, current valid expiry), applies the issued quota snapshot, and never joins, moves or reads another enterprise. Suspended enterprises and existing perpetual entitlements cannot redeem. Legacy OZ enterprise-bound codes are not sale vouchers.", {
+      auth: "authenticated", requestBody: body(objectOf("Voucher redemption.", [field("activation_code", scalar("string", "BD- sale voucher secret, shown only at issuance; never log."), true)], { additionalProperties: false })),
+      responses: [response(200, "application/json", objectOf("Activated current enterprise.", [field("ok", scalar("boolean"), true), field("membership", ref("MembershipStatus"), true)])),
+        response(400, "application/json", ref("ErrorResponse"), "Invalid, expired, revoked, consumed or malformed voucher."), response(401, "application/json", ref("ErrorResponse")),
+        response(403, "application/json", ref("ErrorResponse"), "Not the current active enterprise owner, or enterprise suspended."), response(409, "application/json", ref("ErrorResponse")), response(429, "application/json", ref("ErrorResponse")),
+        response(503, "application/json", ref("ErrorResponse"), "Run the explicit subscription-voucher schema migration.")]
+    }),
+    endpoint("GET", "/api/tenants/subscription-vouchers", "Platform super admins list the 100 latest sale vouchers, without full codes or hashes. Active platform grant is rechecked. Responses are not cacheable.", {
+      auth: "authenticated", responses: [response(200, "application/json", objectOf("Recent vouchers.", [field("rows", arrayOf(ref("SubscriptionVoucher"), "Latest first."), true)])), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/tenants/subscription-vouchers", "Platform super admin issues an independent, one-use subscription voucher with immutable plan duration/type/account/shop quota snapshot. Issuance does not activate an enterprise. Only the SHA-256 hash and six-character hint are stored; plaintext is revealed once in this private response.", {
+      auth: "authenticated", requestBody: body(objectOf("Voucher issuance.", [field("plan_code", scalar("string", "Enabled plan code."), true), field("redeemable_until", scalar("string", "Optional timezone-qualified ISO deadline within the next year; default 30 days."))], { additionalProperties: false })),
+      responses: [response(200, "application/json", objectOf("One-time voucher secret.", [field("ok", scalar("boolean"), true), field("id", scalar("number"), true), field("activation_code", scalar("string", "Copy now; never available from list."), true), field("voucher", ref("SubscriptionVoucher"), true)])), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("DELETE", "/api/tenants/subscription-vouchers", "Platform super admin revokes an unused voucher. Used vouchers are unchanged; revocation does not modify an enterprise subscription.", {
+      auth: "authenticated", requestBody: body(objectOf("Voucher revocation.", [field("id", scalar("number", "Voucher ID."), true)], { additionalProperties: false })),
+      responses: [response(200, "application/json", objectOf("Revocation result.", [field("ok", scalar("boolean"), true), field("revoked", scalar("number", "0 or 1."), true)])), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
   section("Auth", [
     endpoint("POST", "/api/auth/login", "Authenticate a user and return a bearer token.", {
       auth: "public",
@@ -1105,7 +1167,7 @@ const endpoints = [
     })
   ]),
   section("Enterprise Private Messages", [
-    endpoint("GET", "/api/enterprise/messages/contacts", "List other active members of the current enterprise. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.", {
+    endpoint("GET", "/api/enterprise/messages/contacts", "List other active person identities in the current enterprise. Explicit account_kind=system identities cannot use contacts, conversations, unread, thread, send or read APIs, and cannot be contacted. Missing account_kind migration returns 503. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.", {
       responses: [response(200, "application/json", objectOf("Contact rows.", [field("rows", arrayOf(ref("EnterpriseMessagePeer"), "Active peers."), true)]))]
     }),
     endpoint("GET", "/api/enterprise/messages/conversations", "List only the current member's own conversations with active peers, newest first. Return rows containing peer, last_message and unread_count. No tenant/person selector can inspect another member's inbox.", {
@@ -1142,14 +1204,14 @@ const endpoints = [
     endpoint("GET", "/api/platform/accounts", "List explicit platform grants. Requires an active super_admin grant verified against the database; does not require enterprise membership.", {
       responses: [response(200, "application/json", arrayOf(ref("PlatformAccount"), "Platform account roster.")), response(403, "application/json", ref("ErrorResponse"))]
     }),
-    endpoint("GET", "/api/enterprise/people", "List all memberships of the current enterprise. Requires its database-verified owner/admin; request selectors cannot change the enterprise.", {
+    endpoint("GET", "/api/enterprise/people", "List person memberships of the current enterprise, including disabled people for management. Explicit system identities remain absent. Requires its database-verified owner/admin; request selectors cannot change the enterprise. Missing account_kind migration returns 503.", {
       responses: [response(200, "application/json", arrayOf(ref("EnterprisePerson"), "Enterprise personnel.")), response(403, "application/json", ref("ErrorResponse"))]
     }),
     endpoint("POST", "/api/enterprise/people", "Create a new login identity and current-enterprise membership transactionally, with quota and last-owner checks. Existing global accounts cannot be linked by ID.", {
       requestBody: body(ref("EnterprisePersonMutation")),
       responses: [response(200, "application/json", ref("EnterprisePerson")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
     }),
-    endpoint("PUT", "/api/enterprise/people/:id", "Update only a current-enterprise membership. Protect the last owner and shared login identities; changes revoke affected sessions.", {
+    endpoint("PUT", "/api/enterprise/people/:id", "Update only a current-enterprise person membership; system identities cannot be edited through enterprise personnel. Protect the last owner and shared login identities; changes revoke affected sessions.", {
       pathParams: [param("id", scalar("number", "Current-enterprise person ID."))],
       requestBody: body(ref("EnterprisePersonMutation")),
       responses: [response(200, "application/json", ref("EnterprisePerson")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
@@ -1817,8 +1879,9 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Shop identifier."))],
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/people", "Return a safe current-enterprise person selector for enterprise users, ignoring request tenant selectors. Only an explicit platform super_admin receives global account master data.", {
+    endpoint("GET", "/api/people", "Return enabled person identities from the current enterprise, including for dual platform/enterprise accounts; ignore request tenant selectors and exclude system identities. Explicit scope=platform requires super_admin and preserves the legacy platform selector projection (currently default-enterprise members). Platform-only accounts retain that projection. Missing person-kind schema returns 503 for enterprise selectors.", {
       auth: "authenticated",
+      query: [param("scope", scalar("string", "Optional platform selects the legacy platform-management roster; requires super_admin."), false)],
       responses: [response(200, "application/json", arrayOf(ref("PersonRecord"), "Person rows."))]
     }),
     endpoint("POST", "/api/people", "Platform super_admin only: create a global account, without granting platform authority or inferring enterprise membership. Enterprise personnel use /api/enterprise/people.", {

@@ -72,7 +72,8 @@ test("ordinary default and customer staff receive only scoped shop dictionary fi
 test("legacy people selector reads only current enterprise members and strips identity secrets", async () => {
   const calls = [];
   const routes = createEnterpriseManagementRoutes({ services: {
-    tenantMembers: async tenantId => {
+    tenantMembers: async (tenantId, options) => {
+      assert.deepEqual(options, { peopleOnly: true });
       calls.push(tenantId);
       return [
         { person_id: tenantId * 10, name: `Member ${tenantId}`, username: `member-${tenantId}`, avatar_url: "", active: 1, account_active: 1,
@@ -110,6 +111,30 @@ test("global identity selector requires an explicit platform grant and no enterp
   assert.equal(globalCalls, 1);
 });
 
+test("dual platform and enterprise identities use the current enterprise people selector", async () => {
+  const calls = [];
+  const routes = createEnterpriseManagementRoutes({ services: {
+    people: async () => { throw new Error("Enterprise context must not load the platform roster"); },
+    tenantMembers: async (id, options) => { calls.push({ id, options }); return []; }
+  }, readJson: async () => ({}) });
+  assert.deepEqual(await routes["GET /api/people"]({ _session: { personId: 1, platform_role: "super_admin", tenant: { id: 2, slug: "b", role: "owner" } } }), []);
+  assert.deepEqual(calls, [{ id: 2, options: { peopleOnly: true } }]);
+});
+
+test("explicit platform people scope requires a platform grant even with an enterprise admin role", async () => {
+  let calls = 0;
+  const routes = createEnterpriseManagementRoutes({ services: {
+    people: async () => { calls++; return [{ id: 99, name: "System identity" }]; },
+    tenantMembers: async () => { throw new Error("Explicit platform scope must not use enterprise members"); }
+  }, readJson: async () => ({}) });
+  const url = new URL("http://localhost:8788/api/people?scope=platform");
+  const enterprise = { personId: 1, tenant: { id: 1, slug: "default", role: "owner" } };
+  await assert.rejects(routes["GET /api/people"]({ _session: enterprise }, url), { statusCode: 403 });
+  assert.equal(calls, 0);
+  assert.deepEqual(await routes["GET /api/people"]({ _session: { ...enterprise, platform_role: "super_admin" } }, url), [{ id: 99, name: "System identity" }]);
+  assert.equal(calls, 1);
+});
+
 test("shop storage adds a tenant index without bulk-reassigning legacy rows", () => {
   const schema = read("../scripts/init-mysql-schema.mjs");
   const service = read("../src/services/mysql-cutover.js");
@@ -128,7 +153,7 @@ test("tenant member lookup ignores another tenant selector for non-platform acco
   const router = read("../frontend/admin/router/index.js");
   const navigation = read("../frontend/admin/constants/navigation.js");
   assert.match(source, /hasPermission\(req\._session, "admin"\)[\s\S]*\? \(req\.query\?\.tenant_id \|\| req\.query\?\.tenantId \|\| req\._session\?\.tenant\?\.id\)[\s\S]*: req\._session\?\.tenant\?\.id/);
-  assert.match(tenantService, /const normalizedTenantId = Number\(tenantId\);[\s\S]*?Number\.isSafeInteger\(normalizedTenantId\)[\s\S]*?WHERE tm\.tenant_id = \? AND tm\.active = 1 ORDER BY p\.id`, \[normalizedTenantId\]\)/);
+  assert.match(tenantService, /const normalizedTenantId = Number\(tenantId\);[\s\S]*?Number\.isSafeInteger\(normalizedTenantId\)[\s\S]*?WHERE tm\.tenant_id = \? AND tm\.active = 1\$\{options\.peopleOnly \? " AND p\.account_kind = 'person'" : ""\} ORDER BY p\.id`, \[normalizedTenantId\]\)/);
   assert.match(router, /path: "tenant-shops"[\s\S]*component: TenantShopsView/);
   assert.match(navigation, /route: "\/tenant-shops"/);
 });

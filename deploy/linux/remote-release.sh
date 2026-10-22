@@ -249,7 +249,8 @@ for tenant_migration in \
   migrate-tenant-asset-variant-config.mjs \
   migrate-tenant-finance-center.mjs \
   migrate-tenant-inventory-procurement.mjs \
-  migrate-enterprise-messages.mjs; do
+  migrate-enterprise-messages.mjs \
+  migrate-subscription-vouchers.mjs; do
   if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
     continue
   fi

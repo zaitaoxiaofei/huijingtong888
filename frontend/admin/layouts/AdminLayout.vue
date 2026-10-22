@@ -1,7 +1,7 @@
 <script setup>
 import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { Bell, Camera, Close, Download, Expand, Fold, Lock, Operation, Paperclip, RefreshRight, User } from "@element-plus/icons-vue";
+import { ArrowDown, Bell, Camera, Close, Download, Expand, Fold, Key, Lock, Operation, Paperclip, RefreshRight, SwitchButton, Ticket, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
@@ -12,10 +12,12 @@ import { openAiEcommerceSuiteWindow, openAiProductMaterialOptimizerWindow, openA
 import { uploadListingMedia } from "../api/tools/imageCropper";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
-import { canAccessPage } from "../../../src/shared/permissions.js";
+import { membershipDisplay } from "../utils/account-membership.js";
+import { canAccessPage, needsMembershipActivation } from "../../../src/shared/permissions.js";
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
+import MembershipActivationForm from "../components/MembershipActivationForm.vue";
 
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
 const EnterpriseMessenger = defineAsyncComponent(() => import("../components/EnterpriseMessenger.vue"));
@@ -41,6 +43,16 @@ const notificationLoading = ref(false);
 const notifications = ref([]);
 const notificationUnread = ref(0);
 const notificationStatus = ref("all");
+const activationDialogVisible = ref(false);
+const accountName = computed(() => String(authStore.user?.name || authStore.user?.username || "我的账户"));
+const avatarLetter = computed(() => Array.from(accountName.value)[0] || "我");
+const canUploadProfileAvatar = computed(() => !needsMembershipActivation(authStore.user));
+const membership = computed(() => membershipDisplay(authStore.user?.tenant));
+const canActivateMembership = computed(() => authStore.user?.tenant?.role === "owner" && !["suspended", "permanent", "no-tenant"].includes(membership.value.kind));
+const membershipExpiryText = computed(() => membership.value.expiresAt
+  ? `${shanghaiDateTimeText(membership.value.expiresAt)} 到期（北京时间）`
+  : membership.value.active ? "当前会员未设置到期时间" : "激活后即可使用已开放的企业功能");
+const membershipActionLabel = computed(() => !canActivateMembership.value ? "查看会员" : membership.value.active ? "激活 / 续期" : "激活会员");
 
 const activeMenu = computed(() => route.path);
 const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
@@ -56,6 +68,7 @@ const quickToolsVisible = ref(false);
 const quickToolsMounted = ref(false);
 const quickTool = ref("profit");
 const quickToolAuthScope = ref(currentApiCacheScope());
+const canUseQuickTools = computed(() => authStore.user?.platform_role === "super_admin" || Boolean(authStore.user?.tenant?.id && authStore.user.tenant.access_allowed !== false));
 const canUseProfitCalculator = computed(() => canAccessPage(authStore.user, "/tools/profit-calculator"));
 const canUsePricingTool = computed(() => canAccessPage(authStore.user, "/tools/pricing"));
 const canUseEnterpriseMessages = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user.tenant.access_allowed !== false));
@@ -69,13 +82,14 @@ function resetQuickToolsForScope() {
   quickToolAuthScope.value = currentApiCacheScope();
 }
 function openQuickTool(tool) {
+  if (!canUseQuickTools.value) return;
   if (tool !== "calculator" && (tool === "profit" ? !canUseProfitCalculator.value : !canUsePricingTool.value)) return;
   quickToolAuthScope.value = currentApiCacheScope();
   quickTool.value = tool;
   quickToolsMounted.value = true;
   quickToolsVisible.value = true;
 }
-watch([quickToolScope, canUseProfitCalculator, canUsePricingTool], () => {
+watch([quickToolScope, canUseProfitCalculator, canUsePricingTool, canUseQuickTools], () => {
   quickToolsVisible.value = false;
   quickToolsMounted.value = false;
 }, { flush: "sync" });
@@ -202,19 +216,37 @@ function prefetchMenuRoute(target) {
 }
 
 async function handleLogout() {
-  await ElMessageBox.confirm("Confirm logout from the current account?", "Logout", {
-    type: "warning",
-    confirmButtonText: "Logout",
-    cancelButtonText: "Cancel"
-  });
+  try {
+    await ElMessageBox.confirm("确定要退出当前账户吗？", "退出登录", {
+      type: "warning",
+      confirmButtonText: "退出登录",
+      cancelButtonText: "取消"
+    });
+  } catch {
+    return;
+  }
   await authStore.logout();
-  ElMessage.success("Logged out");
+  ElMessage.success("已退出登录");
   router.push("/login");
+}
+
+function openActivationDialog() {
+  if (!canActivateMembership.value) {
+    router.push("/membership");
+    return;
+  }
+  activationDialogVisible.value = true;
+}
+
+function handleAccountCommand(command) {
+  if (command === "activate") openActivationDialog();
+  if (command === "membership") router.push("/membership");
+  if (command === "logout") handleLogout();
 }
 
 async function loadNotifications({ quiet = false } = {}) {
   const scope = currentApiCacheScope();
-  if (!authStore.user?.tenant?.id) {
+  if (!authStore.user?.tenant?.id || authStore.user.tenant.access_allowed === false) {
     notifications.value = [];
     notificationUnread.value = 0;
     return;
@@ -321,6 +353,12 @@ async function cropProfileAvatar(file) {
 }
 
 async function uploadProfileAvatar(options) {
+  if (!canUploadProfileAvatar.value) {
+    const error = new Error("激活会员后可上传头像");
+    options.onError?.(error);
+    ElMessage.info(error.message);
+    return;
+  }
   profileAvatarUploading.value = true;
   try {
     const file = await cropProfileAvatar(options.file);
@@ -696,7 +734,7 @@ watch(
 );
 
 watch(
-  () => [authStore.user?.id, authStore.user?.tenant?.id],
+  () => [authStore.user?.id, authStore.user?.tenant?.id, authStore.user?.tenant?.access_allowed],
   () => {
     notifications.value = [];
     notificationUnread.value = 0;
@@ -705,6 +743,10 @@ watch(
   },
   { flush: "sync" }
 );
+
+watch([() => authStore.user?.id, () => authStore.user?.tenant?.id], () => {
+  activationDialogVisible.value = false;
+}, { flush: "sync" });
 
 onMounted(() => {
   mobileViewportQuery = window.matchMedia("(max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse)");
@@ -795,7 +837,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="erp-header-right">
-          <div class="erp-quick-tools" role="group" aria-label="快捷计算工具">
+          <div v-if="canUseQuickTools" class="erp-quick-tools" role="group" aria-label="快捷计算工具">
             <el-tooltip content="简易计算器" placement="bottom">
               <el-button circle class="erp-header-icon" aria-label="打开简易计算器" @click="openQuickTool('calculator')">
                 <el-icon><HeaderToolIcon name="calculator" /></el-icon>
@@ -841,21 +883,43 @@ onBeforeUnmount(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-badge :value="notificationUnread" :max="99" class="erp-header-badge" :hidden="!notificationUnread">
+          <el-badge v-if="canUseEnterpriseMessages" :value="notificationUnread" :max="99" class="erp-header-badge" :hidden="!notificationUnread">
             <el-button circle class="erp-header-icon" aria-label="消息通知" title="消息通知" @click="openNotificationDrawer">
               <el-icon><Bell /></el-icon>
             </el-button>
           </el-badge>
           <EnterpriseMessenger v-if="canUseEnterpriseMessages" :key="quickToolScope" />
           <AppearanceSettings />
-          <div class="erp-user-card">
-            <el-avatar :src="authStore.user?.avatar_url" :size="30" class="erp-user-avatar" title="查看和编辑个人资料" @click="openProfileDialog">
-              {{ String(authStore.user?.name || authStore.user?.username || "?").slice(0, 1) }}
-            </el-avatar>
-            <div class="erp-user-meta">
-              <strong>{{ authStore.user?.name || authStore.user?.username || "Unknown" }}</strong>
-            </div>
-            <el-button link type="primary" class="erp-user-action" @click="handleLogout">Logout</el-button>
+          <div class="erp-account-area">
+            <el-tooltip v-if="authStore.user?.tenant?.id" :content="membershipExpiryText" placement="bottom">
+              <button type="button" class="erp-membership-chip" :class="{ 'is-active': membership.active, 'is-expired': membership.kind === 'expired' }" :aria-label="`${membership.label}，${membershipActionLabel}`" @click="openActivationDialog">
+                <el-icon><Ticket /></el-icon>
+                <span>{{ membership.label }}</span>
+              </button>
+            </el-tooltip>
+            <el-dropdown trigger="click" placement="bottom-end" popper-class="erp-account-dropdown" @command="handleAccountCommand">
+              <button type="button" class="erp-account-trigger" :aria-label="`${accountName}，打开账户菜单`">
+                <el-avatar :src="authStore.user?.avatar_url" :size="32" class="erp-account-avatar">{{ avatarLetter }}</el-avatar>
+                <span class="erp-account-name">{{ accountName }}</span>
+                <el-icon class="erp-account-chevron"><ArrowDown /></el-icon>
+              </button>
+              <template #dropdown>
+                <el-dropdown-menu class="erp-account-menu">
+                  <li class="erp-account-summary" role="presentation">
+                    <el-avatar :src="authStore.user?.avatar_url" :size="40" class="erp-account-avatar">{{ avatarLetter }}</el-avatar>
+                    <div><strong>{{ accountName }}</strong><small>@{{ authStore.user?.username || '我的账户' }}</small></div>
+                  </li>
+                  <li class="erp-account-membership" role="presentation">
+                    <strong>{{ authStore.user?.tenant?.id ? membership.label : authStore.user?.platform_role === 'super_admin' ? '平台管理账户' : '未加入企业' }}</strong>
+                    <small v-if="authStore.user?.tenant?.id">{{ membershipExpiryText }}</small>
+                  </li>
+                  <el-dropdown-item :icon="User" @click="openProfileDialog">个人资料</el-dropdown-item>
+                  <el-dropdown-item v-if="canActivateMembership" command="activate" :icon="Key">{{ membershipActionLabel }}</el-dropdown-item>
+                  <el-dropdown-item command="membership" :icon="Ticket">会员中心</el-dropdown-item>
+                  <el-dropdown-item command="logout" :icon="SwitchButton" divided class="erp-account-logout">退出登录</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
       </el-header>
@@ -925,9 +989,17 @@ onBeforeUnmount(() => {
     </el-container>
   </el-container>
 
+  <el-dialog v-model="activationDialogVisible" title="激活 / 续期会员" width="440px" align-center destroy-on-close class="erp-activation-dialog">
+    <div class="erp-activation-summary">
+      <span class="erp-activation-icon"><el-icon><Ticket /></el-icon></span>
+      <div><strong>{{ membership.label }}</strong><small>{{ membershipExpiryText }}</small></div>
+    </div>
+    <MembershipActivationForm v-if="activationDialogVisible" :active="membership.active" @activated="activationDialogVisible = false" />
+  </el-dialog>
+
   <el-dialog v-model="profileDialogVisible" width="620px" align-center destroy-on-close class="erp-profile-dialog">
-    <template #header>
-      <div class="erp-profile-dialog-title">
+    <template #header="{ titleId }">
+      <div :id="titleId" class="erp-profile-dialog-title">
         <span><el-icon><User /></el-icon></span>
         <div><strong>个人资料</strong><small>管理头像、显示名称和账户密码</small></div>
       </div>
@@ -937,14 +1009,15 @@ onBeforeUnmount(() => {
       <div class="erp-profile-avatar-shell">
         <el-image v-if="profileForm.avatar_url" :src="profileForm.avatar_url" :preview-src-list="[profileForm.avatar_url]" preview-teleported fit="cover" class="erp-profile-avatar-preview" />
         <el-avatar v-else :size="104">{{ String(profileForm.name || "?").slice(0, 1) }}</el-avatar>
-        <el-upload action="#" :show-file-list="false" :http-request="uploadProfileAvatar" accept=".jpg,.jpeg,.png,.webp" class="erp-profile-avatar-upload">
-          <button type="button" :disabled="profileAvatarUploading" title="更换头像"><el-icon><Camera /></el-icon></button>
+        <el-upload action="#" :show-file-list="false" :http-request="uploadProfileAvatar" :disabled="!canUploadProfileAvatar || profileAvatarUploading" accept=".jpg,.jpeg,.png,.webp" class="erp-profile-avatar-upload">
+          <button type="button" :disabled="!canUploadProfileAvatar || profileAvatarUploading" title="更换头像"><el-icon><Camera /></el-icon></button>
         </el-upload>
       </div>
       <div class="erp-profile-summary-text">
         <strong>{{ profileForm.name || "未填写姓名" }}</strong>
         <span>@{{ authStore.user?.username || "-" }}</span>
-        <small>点击头像可查看大图；点击相机按钮可重新上传，图片会自动裁成 1:1</small>
+        <small v-if="canUploadProfileAvatar">点击头像可查看大图；点击相机按钮可重新上传，图片会自动裁成 1:1</small>
+        <small v-else>激活会员后可上传头像</small>
       </div>
     </section>
 
@@ -1101,19 +1174,53 @@ onBeforeUnmount(() => {
 .erp-header-right :deep(.erp-theme-toggle) { display: inline-flex; }
 .erp-density-control { display: inline-flex; }
 .is-active-density { color: var(--erp-primary); font-weight: 600; background: var(--erp-primary-soft); }
+.erp-account-area { display: flex; align-items: center; gap: 10px; margin-left: 6px; padding-left: 12px; border-left: 1px solid var(--erp-border); }
+.erp-account-trigger { display: inline-flex; align-items: center; gap: 8px; max-width: 190px; padding: 4px 6px; border: 0; border-radius: 10px; background: transparent; color: var(--erp-text-main); cursor: pointer; }
+.erp-account-trigger:hover { background: var(--erp-surface-alt); }
+.erp-account-trigger:focus-visible, .erp-membership-chip:focus-visible { outline: 2px solid var(--erp-primary); outline-offset: 3px; }
+.erp-account-avatar { flex: none; background: var(--erp-primary-soft); color: var(--erp-primary); font-size: 13px; font-weight: 750; }
+.erp-account-name { overflow: hidden; max-width: 105px; color: var(--erp-text-main); font-size: 13px; font-weight: 650; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; }
+.erp-account-chevron { flex: none; color: var(--erp-text-secondary); font-size: 11px; }
+.erp-membership-chip { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid var(--erp-border); border-radius: 7px; background: var(--erp-surface-alt); color: var(--erp-text-regular); font-size: 11px; font-weight: 600; line-height: 1.4; white-space: nowrap; cursor: pointer; }
+.erp-membership-chip.is-active { border-color: var(--erp-primary-border, var(--erp-border)); background: var(--erp-primary-soft); color: var(--erp-primary); }
+.erp-membership-chip.is-expired { background: var(--erp-warning-bg); color: var(--erp-warning-text); border-color: var(--erp-warning-border); }
+.erp-account-menu { min-width: 252px; max-width: min(320px, calc(100vw - 28px)); padding: 8px; }
+.erp-account-summary { display: flex; align-items: center; gap: 10px; padding: 10px 8px 12px; }
+.erp-account-summary > div { display: grid; gap: 4px; min-width: 0; }
+.erp-account-summary strong { overflow: hidden; color: var(--erp-text-main); font-size: 14px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.erp-account-summary small { color: var(--erp-text-secondary); font-size: 11px; overflow-wrap: anywhere; }
+.erp-account-membership { display: grid; gap: 5px; margin: 0 4px 8px; padding: 11px 12px; border: 1px solid var(--erp-border); border-radius: 8px; background: var(--erp-surface-alt); }
+.erp-account-membership strong { color: var(--erp-text-main); font-size: 12px; }
+.erp-account-membership small { color: var(--erp-text-secondary); font-size: 11px; line-height: 1.6; }
+.erp-account-menu :deep(.el-dropdown-menu__item) { min-height: 36px; border-radius: 6px; gap: 6px; font-size: 13px; }
+.erp-account-menu :deep(.erp-account-logout) { color: var(--erp-danger-text); }
+.erp-activation-summary { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding: 16px; border: 1px solid var(--erp-border); border-radius: 10px; background: var(--erp-surface-alt); }
+.erp-activation-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 10px; background: var(--erp-primary-soft); color: var(--erp-primary); font-size: 20px; }
+.erp-activation-summary > div { display: grid; gap: 5px; }
+.erp-activation-summary strong { color: var(--erp-text-main); font-size: 14px; }
+.erp-activation-summary small { color: var(--erp-text-secondary); font-size: 11px; line-height: 1.6; }
+.erp-profile-avatar-upload button:disabled { cursor: not-allowed; opacity: .5; box-shadow: none; }
+.erp-profile-avatar-upload button:disabled:hover { transform: none; }
+@media (max-width: 1366px) {
+  .erp-account-name { display: none; }
+  .erp-account-area { gap: 6px; padding-left: 8px; }
+}
 @media (max-width: 1100px) {
   .erp-header-right { gap: 2px; }
   .erp-header-right :deep(.erp-header-badge) { display: inline-flex; }
   .erp-quick-tools { gap: 0; margin-right: 0; padding-right: 3px; }
   .erp-header-right :deep(.erp-header-icon.el-button) { width: 28px; height: 28px; min-height: 28px; }
-  .erp-header-right :deep(.erp-user-action) { display: none; }
-  .erp-header-right :deep(.erp-user-card) { gap: 4px; }
+  .erp-account-area { gap: 4px; margin-left: 2px; padding-left: 4px; border-left: 0; }
+  .erp-account-trigger { gap: 4px; padding: 2px; }
+  .erp-account-chevron { display: none; }
+  .erp-membership-chip { padding: 4px 6px; font-size: 10px; }
   .erp-page-meta strong { max-width: min(22vw, 140px); }
 }
 @media (max-width: 420px) {
   .erp-header-right { gap: 0; }
   .erp-header-right :deep(.erp-header-icon.el-button) { width: 26px; height: 28px; }
-  .erp-header-right :deep(.erp-user-avatar) { width: 26px; height: 26px; }
+  .erp-header-right :deep(.erp-account-avatar) { width: 28px; height: 28px; }
+  .erp-membership-chip .el-icon { display: none; }
   .erp-page-meta { display: none; }
 }
 .notification-toolbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; }

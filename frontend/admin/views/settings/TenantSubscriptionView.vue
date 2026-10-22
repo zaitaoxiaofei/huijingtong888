@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import SubscriptionVouchersPanel from "../../components/SubscriptionVouchersPanel.vue";
 
 const loading = ref(false);
 const rows = ref([]);
@@ -35,7 +36,7 @@ const memberForm = reactive({ person_id: null, role: "member" });
 const accountForm = reactive({ name: "", username: "", password: "", roles: ["operator"] });
 const planForm = reactive({ name: "", duration_days: 30, subscription_status: "active", account_limit: 1, shop_limit: 2, unlimited_accounts: false, unlimited_shops: false });
 
-const statusLabels = { active: "已开通", trial: "体验中", expired: "已到期", suspended: "已暂停" };
+const statusLabels = { active: "已开通", trial: "体验中", expired: "已到期", suspended: "已暂停", unactivated: "未激活" };
 const title = computed(() => selected.value?.name || "客户空间");
 const activePlans = computed(() => plans.value.filter(plan => Number(plan.active)));
 const trialPlans = computed(() => plans.value.filter(plan => plan.subscription_status === "trial"));
@@ -52,6 +53,7 @@ const filteredRows = computed(() => {
     const matchesKeyword = !keyword || [row.name, row.slug, row.plan_code].some(value => String(value || "").toLowerCase().includes(keyword));
     const matchesStatus = filters.status === "all"
       || (filters.status === "available" && row.access_allowed)
+      || (filters.status === "unactivated" && row.subscription_status === "unactivated")
       || (filters.status === "expired" && row.subscription_status === "expired")
       || (filters.status === "suspended" && row.subscription_status === "suspended");
     const matchesPlan = filters.plan === "all" || row.plan_code === filters.plan;
@@ -61,6 +63,7 @@ const filteredRows = computed(() => {
 
 function planName(code, tenant = null) {
   if (tenant?.slug === "default") return "默认企业（内部空间）";
+  if (code === "unactivated") return "尚未开通";
   return plans.value.find(item => item.code === code)?.name || code || "未设置";
 }
 
@@ -80,6 +83,7 @@ function statusType(row) {
 }
 
 function statusText(row) {
+  if (row.subscription_status === "unactivated") return "未激活";
   if (!row.access_allowed && row.subscription_status !== "suspended") return "已到期";
   return statusLabels[row.subscription_status] || row.subscription_status || "未知";
 }
@@ -89,7 +93,7 @@ async function load() {
   try {
     const [tenants, users, tenantPlans] = await Promise.all([
       apiClient.get("/api/tenants"),
-      apiClient.get("/api/people"),
+      apiClient.get("/api/people?scope=platform"),
       apiClient.get("/api/tenants/plans")
     ]);
     rows.value = tenants;
@@ -443,12 +447,12 @@ onMounted(load);
       <div>
         <div class="eyebrow">订阅运营 / 客户管理</div>
         <h1>客户与套餐</h1>
-        <p>管理客户空间、订阅套餐与客户激活码；客户自助注册兑换正在分步接入。</p>
+        <p>管理独立客户空间、订阅套餐与会员激活码。</p>
       </div>
       <div class="header-actions">
         <el-button @click="load">刷新</el-button>
         <el-button v-if="activeSection === 'customers'" type="primary" @click="openCreateTenant">新增客户空间</el-button>
-        <el-button v-else type="primary" @click="openPlanEditor()">新增套餐</el-button>
+        <el-button v-else-if="activeSection === 'plans'" type="primary" @click="openPlanEditor()">新增套餐</el-button>
       </div>
     </header>
 
@@ -473,6 +477,7 @@ onMounted(load);
             <el-select v-model="filters.status" aria-label="按服务状态筛选" class="filter-select">
               <el-option label="全部状态" value="all" />
               <el-option label="可使用" value="available" />
+              <el-option label="未激活" value="unactivated" />
               <el-option label="已到期" value="expired" />
               <el-option label="已暂停" value="suspended" />
             </el-select>
@@ -487,14 +492,14 @@ onMounted(load);
             </el-table-column>
             <el-table-column label="当前套餐" min-width="160"><template #default="{ row }"><span class="plan-cell">{{ planName(row.plan_code, row) }}</span></template></el-table-column>
             <el-table-column label="服务状态" width="120"><template #default="{ row }"><el-tag :type="statusType(row)" effect="light" round>{{ statusText(row) }}</el-tag></template></el-table-column>
-            <el-table-column label="到期时间（北京时间）" min-width="210"><template #default="{ row }">{{ formatDateTime(row.subscription_expires_at) }}</template></el-table-column>
+            <el-table-column label="到期时间（北京时间）" min-width="210"><template #default="{ row }">{{ row.subscription_status === 'unactivated' ? '尚未开通' : formatDateTime(row.subscription_expires_at) }}</template></el-table-column>
             <el-table-column label="账号用量" min-width="145"><template #default="{ row }"><span>{{ row.member_count }} 个总账号</span><small class="usage-sub">子账号用量：{{ row.sub_account_count }} / {{ quotaText(row.member_limit, '名额') }}</small></template></el-table-column>
             <el-table-column label="店铺用量" width="120"><template #default="{ row }">{{ row.shop_count }} / {{ quotaText(row.shop_limit) }}</template></el-table-column>
             <el-table-column label="操作" width="110" fixed="right"><template #default="{ row }"><el-button type="primary" link @click="openTenant(row)">管理<el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button></template></el-table-column>
           </el-table>
           <el-alert class="activation-note" type="info" :closable="false" show-icon>
-            <template #title>每个新客户空间会自动生成客户激活码</template>
-            激活码由套餐期限约束，完整码仅在创建或重发时展示；客户自助注册和兑换流程将在下一步接入。浏览器插件令牌与客户激活码用途不同。
+            <template #title>客户自助开通请使用“会员激活码”页签</template>
+            客户注册后进入独立空间，兑换会员激活码开通或续期。空间详情中的授权码绑定指定空间；客户自助开通请使用本页签生成的会员激活码。浏览器插件令牌单独管理。
           </el-alert>
         </section>
       </el-tab-pane>
@@ -529,6 +534,7 @@ onMounted(load);
           </div>
         </section>
       </el-tab-pane>
+      <el-tab-pane label="会员激活码" name="vouchers" lazy><SubscriptionVouchersPanel :plans="plans" /></el-tab-pane>
     </el-tabs>
 
     <el-drawer v-model="detailVisible" :title="title" size="760px" class="tenant-drawer" destroy-on-close>

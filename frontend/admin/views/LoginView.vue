@@ -6,12 +6,16 @@ import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
 import BrandLogo from "../components/BrandLogo.vue";
+import { currentApiCacheScope } from "../utils/api";
 
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const appStore = useAppStore();
 const loginStage = ref("welcome");
+const registerVisible = ref(false);
+const registerError = ref("");
+const registerForm = reactive({ username: "", name: "", enterprise_name: "", password: "", confirm_password: "" });
 
 const text = {
   light: "\u4eae\u8272",
@@ -75,6 +79,8 @@ const qrLogin = reactive({
   pollTimer: 0
 });
 let wechatStatusTimer = 0;
+let qrGeneration = 0;
+let loginDisposed = false;
 
 const themeIcon = computed(() => (appStore.theme === "dark" ? Sunny : MoonNight));
 const themeLabel = computed(() => (appStore.theme === "dark" ? text.light : text.dark));
@@ -99,6 +105,43 @@ function openLoginForm() {
   loginStage.value = "form";
 }
 
+function openRegistration() {
+  stopQrPolling();
+  qrLogin.visible = false;
+  registerError.value = "";
+  registerForm.password = "";
+  registerForm.confirm_password = "";
+  registerVisible.value = true;
+}
+
+async function handleRegister() {
+  if (authStore.loading) return;
+  registerError.value = "";
+  if (!registerForm.username.trim() || !registerForm.name.trim()) {
+    registerError.value = "请填写登录名和昵称";
+    return;
+  }
+  if (registerForm.password.length < 8 || /^\d+$/.test(registerForm.password)) {
+    registerError.value = "密码至少 8 位，且不能只包含数字";
+    return;
+  }
+  if (registerForm.password !== registerForm.confirm_password) {
+    registerError.value = "两次输入的密码不一致";
+    return;
+  }
+  try {
+    await authStore.register({ username: registerForm.username.trim(), name: registerForm.name.trim(),
+      enterprise_name: registerForm.enterprise_name.trim(), password: registerForm.password });
+    registerVisible.value = false;
+    registerForm.password = "";
+    registerForm.confirm_password = "";
+    ElMessage.success("注册成功，你的独立工作空间已准备好");
+    await router.replace("/membership");
+  } catch (error) {
+    registerError.value = error.message || "注册失败，请稍后重试";
+  }
+}
+
 function waitForSuccessMoment() {
   return new Promise((resolve) => window.setTimeout(resolve, 120));
 }
@@ -117,6 +160,7 @@ function shouldUseFastRedirect(target) {
 }
 
 async function finishLoginRedirect(target) {
+  const scope = currentApiCacheScope();
   const safeTarget = normalizeRedirectTarget(target);
   if (shouldUseFastRedirect(safeTarget)) {
     sessionStorage.removeItem("baodanLoginWelcome");
@@ -126,6 +170,7 @@ async function finishLoginRedirect(target) {
   sessionStorage.setItem("baodanLoginWelcome", "1");
   loginStage.value = "success";
   await waitForSuccessMoment();
+  if (scope !== currentApiCacheScope() || loginDisposed) return;
   await router.replace(safeTarget);
 }
 
@@ -136,6 +181,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  loginDisposed = true;
   setLoginViewportState(false);
   window.clearTimeout(wechatStatusTimer);
   stopQrPolling();
@@ -222,17 +268,21 @@ async function startWechatLogin() {
 }
 
 async function startQrLogin() {
+  stopQrPolling();
+  const generation = qrGeneration;
+  const scope = currentApiCacheScope();
+  const isCurrent = () => !loginDisposed && generation === qrGeneration && scope === currentApiCacheScope();
   loginStage.value = "form";
   qrLogin.visible = true;
   qrLogin.loading = true;
   qrLogin.status = text.qrWaiting;
-  stopQrPolling();
   try {
     const target = redirectTarget();
     const response = await fetch(`/api/auth/qr/start?redirect=${encodeURIComponent(target)}`, {
       headers: { "Content-Type": "application/json" }
     });
     const data = await response.json();
+    if (!isCurrent()) return;
     if (!response.ok || data.error || !data.sid) throw new Error(data.error || "二维码生成失败");
     qrLogin.sid = data.sid;
     qrLogin.imageUrl = `${data.qrImageUrl}&t=${Date.now()}`;
@@ -240,13 +290,16 @@ async function startQrLogin() {
     pollQrLogin();
     qrLogin.pollTimer = window.setInterval(pollQrLogin, 1800);
   } catch (error) {
-    qrLogin.status = error.message || "二维码生成失败";
+    if (isCurrent()) qrLogin.status = error.message || "二维码生成失败";
   } finally {
-    qrLogin.loading = false;
+    if (isCurrent()) qrLogin.loading = false;
   }
 }
 
 function stopQrPolling() {
+  qrGeneration += 1;
+  qrLogin.sid = "";
+  qrLogin.loading = false;
   if (qrLogin.pollTimer) {
     window.clearInterval(qrLogin.pollTimer);
     qrLogin.pollTimer = 0;
@@ -255,11 +308,15 @@ function stopQrPolling() {
 
 async function pollQrLogin() {
   if (!qrLogin.sid) return;
+  const sid = qrLogin.sid;
+  const generation = qrGeneration;
+  const scope = currentApiCacheScope();
   try {
-    const response = await fetch(`/api/auth/qr/status?sid=${encodeURIComponent(qrLogin.sid)}`, {
+    const response = await fetch(`/api/auth/qr/status?sid=${encodeURIComponent(sid)}`, {
       headers: { "Content-Type": "application/json" }
     });
     const data = await response.json();
+    if (loginDisposed || generation !== qrGeneration || qrLogin.sid !== sid || scope !== currentApiCacheScope()) return;
     if (data.status === "confirmed" && data.token && data.user) {
       stopQrPolling();
       authStore.applyLoginResult(data);
@@ -322,6 +379,8 @@ async function pollQrLogin() {
     >
       {{ text.login }}
     </button>
+
+    <button v-if="loginStage === 'welcome'" class="login-register-start" type="button" @click="openRegistration">还没有账号？免费注册</button>
 
     <section v-if="loginStage === 'form'" class="login-card" :aria-label="text.systemLoginAria">
       <div class="login-card-head">
@@ -401,8 +460,22 @@ async function pollQrLogin() {
         >
           {{ wechat.bindTicket ? text.wechatRetry : text.wechatLogin }}
         </el-button>
+        <el-button link type="primary" class="login-register-link" @click="openRegistration">注册新账号</el-button>
       </el-form>
     </section>
+
+    <el-dialog v-model="registerVisible" title="注册爆单 ERP" width="460px" append-to-body class="registration-dialog" :close-on-click-modal="false" :close-on-press-escape="!authStore.loading" @closed="registerForm.password = ''; registerForm.confirm_password = ''">
+      <p class="registration-intro">创建独立工作空间，先体验基础工具，再用激活码开通业务功能。</p>
+      <el-alert v-if="registerError" :title="registerError" type="error" :closable="false" show-icon />
+      <el-form :model="registerForm" label-position="top" @submit.prevent="handleRegister">
+        <el-form-item label="登录名" required><el-input v-model="registerForm.username" autocomplete="username" maxlength="64" placeholder="字母、数字、下划线或连字符" /></el-form-item>
+        <el-form-item label="昵称" required><el-input v-model="registerForm.name" autocomplete="nickname" maxlength="80" placeholder="同事们怎么称呼你" /></el-form-item>
+        <el-form-item label="企业 / 团队名称"><el-input v-model="registerForm.enterprise_name" maxlength="100" placeholder="选填，稍后也可以设置" /></el-form-item>
+        <el-form-item label="密码" required><el-input v-model="registerForm.password" type="password" show-password autocomplete="new-password" maxlength="128" placeholder="至少 8 位，不能只包含数字" /></el-form-item>
+        <el-form-item label="确认密码" required><el-input v-model="registerForm.confirm_password" type="password" show-password autocomplete="new-password" maxlength="128" placeholder="再次输入密码" /></el-form-item>
+        <el-button type="primary" native-type="submit" :loading="authStore.loading" class="registration-submit">注册并进入</el-button>
+      </el-form>
+    </el-dialog>
 
     <section v-if="loginStage === 'success'" class="success-welcome" aria-live="polite">
       <div class="success-glow"></div>
@@ -413,6 +486,11 @@ async function pollQrLogin() {
 </template>
 
 <style scoped>
+.login-register-start { position: relative; z-index: 6; margin-top: 16px; padding: 6px 12px; border: 0; background: transparent; color: var(--erp-primary); font-size: 14px; cursor: pointer; }
+.login-register-link { display: flex; margin: 16px auto 0; }
+.registration-intro { margin: 0 0 20px; color: var(--erp-text-regular); line-height: 1.7; }
+.registration-submit { width: 100%; }
+.registration-dialog .el-alert { margin-bottom: 18px; }
 .login-page {
   position: relative;
   min-height: 100vh;
@@ -521,8 +599,8 @@ async function pollQrLogin() {
 }
 
 .login-brand-logo :deep(.brand-logo__mark svg) {
-  width: 40px;
-  height: 40px;
+  width: 100%;
+  height: 100%;
 }
 
 .login-brand-logo :deep(.brand-logo__wordmark) {
