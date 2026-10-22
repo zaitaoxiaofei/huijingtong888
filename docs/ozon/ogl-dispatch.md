@@ -66,6 +66,14 @@
 
 官方来源：[配送列表](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageDeliveryListV2)、[创建](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageCreate)、[确认](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageApprove)、[详情](https://docs.ozon.ru/api/seller/#operation/CarriageGet)、[取件联系人](https://docs.ozon.ru/api/seller/#operation/CarriageCourierContactSet)、[货位标签](https://docs.ozon.ru/api/seller/#operation/PostingAPI_PostingFBSActGetContainerLabels)、[发运条码](https://docs.ozon.ru/api/seller/#operation/PostingAPI_PostingFBSGetBarcode)。
 
+### 后台已建单的真实只读核验
+
+同日通过默认企业所属店铺授权，只读查询了后台已创建的 OGL 发运。`delivery/list` 能返回 `carriages.id > 0` 的真实已有单，`get` 与 `get-postings` 均可取得其详情及组成，货件可与 ERP 原店铺订单匹配。
+
+该 OGL 样本的 `get.status` 和列表状态均为 `formed`；`get.available_actions` 返回 `cancel`、`get_label_containers`、`get_label_containers_small`。这与通用文档列出的状态及文件操作枚举不同。只读观察不能证明所有 OGL 状态映射，不能直接将其当作运输证据，也不应未经核验就对它调用 approve。
+
+当前实现会将 `formed` 保留为待核实，尚需适配真实 OGL 能力返回。当前 ERP 批次历史仅查询本地表，配送方式查询虽返回官方已有单，前端未展示这些已有单；按编号恢复入口仅覆盖创建结果未知场景，尚无普通后台单导入闭环。后续应增加独立的只读「查询后台已有发运单」和带清单／货位核验的「关联已有发运单」流程，避免为了跟踪已建单而重新创建官方单。
+
 ## 自动验证与后续验收
 
 服务启动会在库存预热之前创建新表；初始化脚本也包含同一 schema。部署时应先完成数据库备份、构建及新表检查，再接流量。单独运行依赖新运输证据的维护脚本前，也必须先确保新表已创建。
