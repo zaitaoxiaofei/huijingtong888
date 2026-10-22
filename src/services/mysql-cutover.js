@@ -405,7 +405,9 @@ const DEFAULT_ORDER_LOGISTICS_OPTIONS_MYSQL = FALLBACK_ORDER_LOGISTICS_METHODS_M
 
 function isAwaitingDeliverLikeStatusMysql(statusText = "") {
   const text = String(statusText || "").toLowerCase();
+  if (/cancel|return|reject|not_accepted|arbitration|dispute/.test(text)) return false;
   return [
+    "acceptance_in_progress",
     "awaiting_registration",
     "posting_registration_error",
     "awaiting_deliver",
@@ -415,12 +417,16 @@ function isAwaitingDeliverLikeStatusMysql(statusText = "") {
     "posting_transferred_to_courier_service",
     "posting_transferring",
     "posting_in_carriage",
-    "posting_transferring_to_delivery"
+    "posting_transferring_to_delivery",
+    "delivering",
+    "delivered"
   ].some((value) => text.includes(value));
 }
 
 function normalizeSyncedShippingStateMysql(posting = {}) {
   const text = `${posting.status || ""} ${posting.tracking_stage || ""} ${posting.logistics_status || ""}`.toLowerCase();
+  const delivered = text.includes("delivered");
+  const accepting = text.includes("acceptance_in_progress");
   const registering = text.includes("awaiting_registration") || text.includes("posting_registration_error");
   const inTransit = [
     "posting_in_carriage",
@@ -429,7 +435,7 @@ function normalizeSyncedShippingStateMysql(posting = {}) {
     "delivering"
   ].some((value) => text.includes(value));
   return {
-    status: inTransit ? "delivering" : registering ? "awaiting_registration" : "awaiting_deliver",
+    status: delivered ? "delivered" : inTransit ? "delivering" : accepting ? "acceptance_in_progress" : registering ? "awaiting_registration" : "awaiting_deliver",
     trackingStage: posting.tracking_stage || posting.status || (inTransit ? "delivering" : "awaiting_deliver"),
     logisticsStatus: posting.logistics_status || posting.tracking_stage || posting.status || (inTransit ? "delivering" : "awaiting_deliver")
   };
@@ -8184,13 +8190,16 @@ function resolveShippingProductIdMysql(item, index, rawItems = []) {
   return onlineProductId > 0 ? onlineProductId : 0;
 }
 
-async function syncOrderShippingStateFromOzonMysql(shop, order, options = {}) {
+async function syncOrderShippingStateFromOzonMysql(shop, order, options = {}, postingSnapshot = null) {
   const scope = await orderOwnershipTenantScopeMysql(options.tenantId || shop.tenant_id || "admin");
   await assertOrderTaskAccessMysql(scope, options, ["packing"]);
   shop = await activeShopForTenantMysql(shop.id, scope.id);
-  let posting = await fetchOzonPostingByNumber(shop, order.posting_number);
+  let posting = postingSnapshot || await fetchOzonPostingByNumber(shop, order.posting_number);
   await assertOrderTaskAccessMysql(scope, options, ["packing"]);
   if (!posting) return { ok: false, reason: "posting_not_found" };
+  if (String(posting.posting_number || "") !== String(order.posting_number || "")) {
+    throw Object.assign(new Error("Ozon 货件状态不属于当前订单，已停止更新"), { statusCode: 409 });
+  }
   const statusText = `${posting.status || ""} ${posting.tracking_stage || ""} ${posting.logistics_status || ""}`;
   if (!isAwaitingDeliverLikeStatusMysql(statusText)) {
     return { ok: false, reason: "status_not_shipped", posting };
@@ -8225,7 +8234,11 @@ async function syncOrderShippingStateFromOzonMysql(shop, order, options = {}) {
       `Compensated external ship state for order ${order.id}, posting ${order.posting_number}, shop ${shop.name || shop.id}; local ${order.status || ""}/${order.tracking_stage || ""} -> ozon ${posting.status || ""}/${posting.tracking_stage || ""}`
     ]
   );
-  return { ok: true, posting };
+  return { ok: true, posting, state: {
+    status: normalized.status,
+    tracking_stage: normalized.trackingStage,
+    logistics_status: normalized.logisticsStatus
+  } };
 }
 
 export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
@@ -8251,7 +8264,7 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
   for (const order of sortRowsByInputMysql(ordersToShip, ids, "id")) {
     await assertOrderTaskAccessMysql(scope, options, ["packing"]);
     const statusText = `${order.status || ""} ${order.tracking_stage || ""}`.toLowerCase();
-    if (statusText.includes("awaiting_deliver") || statusText.includes("delivering") || statusText.includes("delivered")) {
+    if (isAwaitingDeliverLikeStatusMysql(statusText)) {
       shipped.push(order.id);
       alreadyShipped.push(order.id);
       shippedLabelRows.push(order);
@@ -8296,16 +8309,14 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
     const livePosting = await fetchOzonPostingByNumber(shop, order.posting_number).catch(() => null);
     await assertOrderTaskAccessMysql(scope, options, ["packing"]);
     if (livePosting && isAwaitingDeliverLikeStatusMysql(`${livePosting.status || ""} ${livePosting.tracking_stage || ""} ${livePosting.logistics_status || ""}`)) {
-      const syncResult = await syncOrderShippingStateFromOzonMysql(shop, order, { ...options, tenantId: scope.id });
+      const syncResult = await syncOrderShippingStateFromOzonMysql(shop, order, { ...options, tenantId: scope.id }, livePosting);
       if (syncResult.ok) {
         shipped.push(order.id);
         alreadyShipped.push(order.id);
         shippedLabelRows.push(order);
         updatedOrders.push({
           id: order.id,
-          status: syncResult.posting?.status || "awaiting_deliver",
-          tracking_stage: syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
-          logistics_status: syncResult.posting?.logistics_status || syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
+          ...syncResult.state,
           ozon_available_actions: syncResult.posting?.raw?.available_actions || [],
           tracking_number: syncResult.posting?.tracking_number || order.posting_number || ""
         });
@@ -8334,9 +8345,7 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
           shippedLabelRows.push(order);
           updatedOrders.push({
             id: order.id,
-            status: syncResult.posting?.status || "awaiting_deliver",
-            tracking_stage: syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
-            logistics_status: syncResult.posting?.logistics_status || syncResult.posting?.tracking_stage || syncResult.posting?.status || "awaiting_deliver",
+            ...syncResult.state,
             ozon_available_actions: syncResult.posting?.raw?.available_actions || [],
             tracking_number: syncResult.posting?.tracking_number || order.posting_number || ""
           });
@@ -8737,6 +8746,9 @@ function exceptionOrderBusinessStatusMysql(row = {}) {
   }
   if (text.includes("delivered") || text.includes("signed")) {
     return { key: "delivered", label: "已签收", description: "买家已签收，利润仍以财务结算状态为准。" };
+  }
+  if (text.includes("acceptance_in_progress")) {
+    return { key: "awaiting_deliver", label: "交接处理中", description: "订单已备货，正在由仓库或物流商验收交接，无需重复备货。" };
   }
   if (text.includes("pickup") || text.includes("awaiting_customer")) {
     return { key: "pickup_ready", label: "待买家领取", description: "订单已到达自提点或末端站点。" };
@@ -30714,8 +30726,8 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
   const stage = "LOWER(COALESCE(o.tracking_stage, ''))";
   const value = `LOWER(CONCAT(COALESCE(o.status, ''), ' ', COALESCE(o.tracking_stage, ''), ' ', COALESCE(o.logistics_status, ''), ' ', COALESCE(o.tracking_number, '')))`;
   if (status === "awaiting_packaging") {
-    return `((${state} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress')
-      OR ${stage} IN ('acceptance_in_progress','awaiting_approve','awaiting_packaging','posting_created','posting_acceptance_in_progress'))
+    return `((${state} IN ('awaiting_approve','awaiting_packaging','posting_created')
+      OR ${stage} IN ('awaiting_approve','awaiting_packaging','posting_created'))
       AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
@@ -30723,8 +30735,12 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
   }
   if (status === "awaiting_deliver") {
-    return `(${state} IN ('awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
-      OR ${stage} IN ('awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'))`;
+    return `((${state} IN ('acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
+      OR ${stage} IN ('acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'))
+      AND ${value} NOT LIKE '%delivering%'
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
   }
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
@@ -31006,6 +31022,8 @@ function orderCustomerStatusLabel(row = {}) {
   const value = raw.toLowerCase();
   const map = {
     awaiting_packaging: "等待打包",
+    acceptance_in_progress: "交接处理中",
+    posting_acceptance_in_progress: "交接处理中",
     awaiting_deliver: "等待发货",
     posting_registered: "已登记物流",
     sent_by_seller: "商家已发货",
@@ -31025,6 +31043,8 @@ function orderCustomerStatusLabelRu(row = {}) {
   const value = raw.toLowerCase();
   const map = {
     awaiting_packaging: "ожидает упаковки",
+    acceptance_in_progress: "идёт приёмка",
+    posting_acceptance_in_progress: "идёт приёмка",
     awaiting_deliver: "ожидает передачи в доставку",
     posting_registered: "отправление зарегистрировано",
     sent_by_seller: "передан продавцом",

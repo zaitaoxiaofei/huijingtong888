@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { DatabaseSync } from "node:sqlite";
-import { STATE_META } from "../frontend/orders/constants/orders-ui.js";
+import { orderStateKey, STATE_META } from "../frontend/orders/constants/orders-ui.js";
 import { classifyOrderLogistics } from "../src/services/order-logistics-classification.js";
 
 const mysqlSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
@@ -17,7 +17,7 @@ function functionSource(source, name) {
 }
 
 function loadFunctions(source, names, context = {}) {
-  return vm.runInNewContext(`${names.map((name) => functionSource(source, name)).join("\n")}\n({${names.join(",")}})`, context);
+  return vm.runInNewContext(`${names.map((name) => functionSource(source, name)).join("\n")}\n({${names.join(",")}})`, { STATE_META, orderStateKey, ...context });
 }
 
 const registrationRows = [
@@ -25,6 +25,55 @@ const registrationRows = [
   { status: "awaiting_registration", tracking_stage: "posting_awaiting_registration" },
   { status: "posting_awaiting_registration", tracking_stage: "" }
 ];
+const acceptanceRows = [
+  { status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress" },
+  { status: "posting_acceptance_in_progress", tracking_stage: "" },
+  { status: "", tracking_stage: "posting_acceptance_in_progress" },
+  { status: "awaiting_packaging", tracking_stage: "posting_acceptance_in_progress" }
+];
+
+test("FBS acceptance is awaiting dispatch, cannot prepare again, and keeps Ozon label actions", () => {
+  const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
+  for (const row of acceptanceRows) {
+    const actions = page.rowAvailableActions({ ...row, ozon_available_actions: ["click_track_number", "label_download", "label_download_small"] });
+    assert.equal(page.rowDisplayStateKey(row), "awaiting_deliver");
+    assert.equal(page.rowStateLabel(row), "等待发货");
+    assert.equal(actions.prepare, false);
+    assert.equal(actions.splitPrepare, false);
+    assert.equal(actions.showPrint, true);
+    assert.equal(actions.print, true);
+  }
+});
+test("acceptance in progress is assembled and awaits handover, with Ozon-controlled label actions", () => {
+  const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowRegistrationHint", "rowAvailableActions"], { STATE_META });
+  for (const row of acceptanceRows) {
+    const printable = { ...row, total_quantity: 2, ozon_available_actions: ["click_track_number", "label_download", "label_download_small"], availableActions: { prepare: true, print: true } };
+    assert.equal(page.rowDisplayStateKey(printable), "awaiting_deliver");
+    assert.equal(page.rowStateLabel(printable), "等待发货");
+    assert.match(page.rowRegistrationHint(printable), /已备货.*交接/);
+    const actions = page.rowAvailableActions(printable);
+    assert.equal(actions.prepare, false);
+    assert.equal(actions.showPrepare, false);
+    assert.equal(actions.splitPrepare, false);
+    assert.equal(actions.showPrint, true);
+    assert.equal(actions.print, true);
+    assert.equal(page.rowAvailableActions({ ...printable, ozon_available_actions: ["click_track_number"] }).print, false);
+  }
+});
+
+test("acceptance display and optimistic counts cannot regress transit or terminal statuses", () => {
+  const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
+  const { orderTabKey } = loadFunctions(composableSource, ["orderTabKey"]);
+  for (const row of acceptanceRows) assert.equal(orderTabKey(row), "awaiting_deliver");
+  for (const status of ["delivering", "delivered", "cancelled"]) {
+    const row = { status, tracking_stage: "posting_acceptance_in_progress", ozon_available_actions: ["label_download"] };
+    assert.equal(page.rowDisplayStateKey(row), status);
+    assert.equal(page.rowStateLabel(row), STATE_META[status].label);
+    assert.equal(orderTabKey(row), status);
+    assert.equal(page.rowAvailableActions(row).prepare, false);
+    assert.equal(page.rowAvailableActions(row).print, false);
+  }
+});
 
 test("assembled orders being registered appear under awaiting delivery, with label permissions from Ozon", () => {
   const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
@@ -45,9 +94,8 @@ test("assembled orders being registered appear under awaiting delivery, with lab
 });
 
 test("optimistic tab counts classify registration as awaiting delivery", () => {
-  const constants = composableSource.match(/const AWAITING_PACKAGING_STATES[^]*?const DELIVERING_KEYWORDS[^]*?;/)[0];
-  const orderTabKey = vm.runInNewContext(`${constants}\n${functionSource(composableSource, "orderTabKey")}\norderTabKey`);
-  for (const row of registrationRows) assert.equal(orderTabKey(row), "awaiting_deliver");
+  const { orderTabKey } = loadFunctions(composableSource, ["orderTabKey"]);
+  for (const row of [...registrationRows, ...acceptanceRows]) assert.equal(orderTabKey(row), "awaiting_deliver");
 });
 
 test("registration detail preserves Ozon substatus without a list warning", () => {
@@ -84,9 +132,10 @@ test("SQL filters put registration in the same tab as the frontend without rewri
     db.exec("CREATE TABLE orders (status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
     const insert = db.prepare("INSERT INTO orders VALUES (?, ?, '', '')");
     for (const row of registrationRows) insert.run(row.status, row.tracking_stage);
+    for (const row of acceptanceRows) insert.run(row.status, row.tracking_stage);
     insert.run("awaiting_packaging", "posting_created");
     insert.run("cancelled", "cancelled");
-    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM orders o WHERE ${orderStatusSqlMysql("awaiting_deliver")}`).get().n, 3);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM orders o WHERE ${orderStatusSqlMysql("awaiting_deliver")}`).get().n, registrationRows.length + acceptanceRows.length);
     assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM orders o WHERE ${orderStatusSqlMysql("awaiting_packaging")}`).get().n, 1);
   } finally {
     db.close();
@@ -104,6 +153,21 @@ test("shipping reconciliation recognizes registration but preserves the actual O
   assert.equal(service.isAwaitingDeliverLikeStatusMysql("awaiting_packaging posting_created"), false);
 });
 
+test("shipping compensation retains acceptance and terminal status instead of demoting them", () => {
+  const service = loadFunctions(mysqlSource, ["isAwaitingDeliverLikeStatusMysql", "normalizeSyncedShippingStateMysql"]);
+  for (const row of acceptanceRows) {
+    assert.equal(service.isAwaitingDeliverLikeStatusMysql(`${row.status} ${row.tracking_stage}`), true);
+    assert.equal(service.normalizeSyncedShippingStateMysql(row).status, "acceptance_in_progress");
+  }
+  for (const status of ["delivering", "delivered"]) {
+    assert.equal(service.isAwaitingDeliverLikeStatusMysql(status), true);
+    assert.equal(service.normalizeSyncedShippingStateMysql({ status, tracking_stage: "awaiting_deliver" }).status, status);
+  }
+  for (const status of ["cancelled", "cancelled posting_registered", "returned", "rejected", "dispute", "unknown"]) {
+    assert.equal(service.isAwaitingDeliverLikeStatusMysql(status), false);
+  }
+});
+
 test("clicking prepare on a stale row reconciles registration without submitting shipping again", async () => {
   const order = { id: 1, shop_id: 1, posting_number: "test-posting", status: "awaiting_packaging", tracking_stage: "posting_created" };
   const posting = { ...registrationRows[0], posting_number: order.posting_number, raw: { available_actions: ["label_download"] } };
@@ -114,6 +178,12 @@ test("clicking prepare on a stale row reconciles registration without submitting
     "syncOrderShippingStateFromOzonMysql", "shipOrdersMysql"
   ], {
     ensureMysqlCutoverEnabled() {},
+    orderListTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
+    orderOwnershipTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
+    assertOrderTaskAccessMysql: async () => {},
+    orderTenantPredicateMysql: () => "1 = 1",
+    assertOrderBatchOwnershipMysql: (rows, ids) => assert.equal(rows.length, ids.length),
+    activeShopForTenantMysql: async id => ({ id, tenant_id: 1, name: "Fixture shop" }),
     mysqlQuery: async (sql) => sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
     mysqlQueryOne: async () => ({ raw_json: "{}" }),
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); },

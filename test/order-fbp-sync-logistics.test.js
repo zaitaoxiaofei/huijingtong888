@@ -16,7 +16,15 @@ function functions(names, context) {
     assert.ok(definition, `Missing function ${name}`);
     return definition;
   });
-  return vm.runInNewContext(`${definitions.join("\n")}\n({${names.join(",")}})`, context);
+  // This fixture isolates logistics merging; tenant authorization and actual SQL
+  // ownership are exercised by the dedicated tenant and shipping MySQL suites.
+  return vm.runInNewContext(`${definitions.join("\n")}\n({${names.join(",")}})`, {
+    orderListTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
+    orderOwnershipTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
+    assertOrderTaskAccessMysql: async () => {},
+    activeShopForTenantMysql: async id => ({ ...shop, id, tenant_id: 1 }),
+    ...context
+  });
 }
 
 function richPosting(status = "delivering") {

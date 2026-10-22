@@ -6,6 +6,7 @@ import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
 import { summarizeOrderSyncResult } from "../utils/order-sync-result.js";
+import { orderStateKey } from "../constants/orders-ui.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -172,9 +173,6 @@ const LOGISTICS_CARRIER_OPTIONS = [
 ];
 
 const DEFAULT_PAGE_SIZE = 20;
-const AWAITING_PACKAGING_STATES = ["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"];
-const AWAITING_DELIVER_STATES = ["awaiting_registration", "posting_awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"];
-const DELIVERING_KEYWORDS = ["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "posting_in_carriage", "posting_transferring", "发往", "已上网", "发走"];
 
 function createDefaultFilters(defaultFrom, defaultTo) {
   return {
@@ -214,12 +212,8 @@ function friendlyPrepareError(error) {
 }
 
 function orderTabKey(row = {}) {
-  const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
-  if (values.some((value) => AWAITING_PACKAGING_STATES.includes(value))) return "awaiting_packaging";
-  if (values.some((value) => AWAITING_DELIVER_STATES.includes(value))) return "awaiting_deliver";
-  const text = [row.status, row.tracking_stage, row.logistics_status].map((value) => String(value || "").toLowerCase()).join(" ");
-  if (DELIVERING_KEYWORDS.some((keyword) => text.includes(keyword))) return "delivering";
-  return "all";
+  const key = orderStateKey(row);
+  return ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled"].includes(key) ? key : "all";
 }
 
 export function useOrdersPage() {

@@ -24,6 +24,15 @@ Official reference: <https://docs.ozon.ru/api/seller/#operation/PostingAPI_ShipF
 
 Verified: 2026-07-25.
 
+## OGL acceptance after preparation
+
+Verified against live FBS detail responses and matching ERP status history: 2026-10-22.
+
+- Affected OGL postings had already progressed from `awaiting_deliver` to `acceptance_in_progress` / `posting_acceptance_in_progress`. Their available actions were tracking and label downloads; the ERP database and the live Ozon response agreed. The previous waiting-for-preparation display was a classification error, not proof that preparation was missing.
+- Treat these acceptance states as the waiting-for-delivery category and keep their actual platform status/substatus in storage and detail. Preparation and split preparation must be disabled; label availability remains governed by the platform actions.
+- A stale preparation request may reconcile a verified advanced posting, but must not submit `/v4/posting/fbs/ship` again. Reuse the verified detail snapshot and return the same state that was stored. Delivered, transported, cancelled and disputed states take precedence over an older waiting-stage value.
+- Platform acceptance, printing, and a locally recorded physical OGL handover are separate evidence. Correcting this category must not create a handover batch, repeat an inventory deduction, recalculate profit, or alter a print record.
+
 ## FBP logistics snapshots
 
 Verified against live posting responses and ERP sync history: 2026-10-21.

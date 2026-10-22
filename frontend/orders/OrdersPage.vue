@@ -22,7 +22,8 @@ import {
   INVENTORY_LIST_PAGE_SIZE,
   ORDER_DETAIL_CACHE_TTL_MS,
   SEARCH_TYPE_OPTIONS,
-  STATE_META
+  STATE_META,
+  orderStateKey
 } from "./constants/orders-ui.js";
 import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
@@ -625,50 +626,15 @@ async function saveStatusPreference() {
 }
 
 function rowStateLabel(row) {
-  const status = String(row?.status || "").toLowerCase();
-  const stage = String(row?.tracking_stage || "").toLowerCase();
-  const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
-  const text = `${status} ${stage} ${logisticsStatus}`.trim();
-
-  if (text.includes("return")) return "已退货";
-  if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "拒收/未领取";
-  if (["awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
-    return "等待发货";
-  }
-  if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "发往", "已上网", "发走"].some((value) => text.includes(value))) {
-    return "运输中";
-  }
-  if (["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
-    return "等待备货";
-  }
-  if (text.includes("delivered")) return "已签收";
-  if (text.includes("cancel")) return "已取消";
-  if (text.includes("dispute") || text.includes("arbitration")) return "有争议";
-
-  return STATE_META[status]?.label || row?.tracking_stage || row?.status || "-";
+  const key = rowDisplayStateKey(row);
+  if (key === "returned") return "已退货";
+  if (key === "rejected") return "拒收/未领取";
+  if (key === "all") return row?.tracking_stage || row?.status || "-";
+  return STATE_META[key]?.label || row?.tracking_stage || row?.status || "-";
 }
 
 function rowDisplayStateKey(row) {
-  const status = String(row?.status || "").toLowerCase();
-  const stage = String(row?.tracking_stage || "").toLowerCase();
-  const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
-  const text = `${status} ${stage} ${logisticsStatus}`.trim();
-
-  if (text.includes("return")) return "returned";
-  if (text.includes("reject") || text.includes("not_accepted") || text.includes("unclaimed")) return "rejected";
-  if (["awaiting_registration", "posting_registration_error", "awaiting_deliver", "posting_registered", "sent_by_seller", "posting_ready_for_pickup", "posting_transferred_to_courier_service", "posting_transferring", "posting_in_carriage", "posting_transferring_to_delivery"].some((value) => text.includes(value))) {
-    return "awaiting_deliver";
-  }
-  if (["delivering", "transferring", "carriage", "pickup", "sorting", "customs", "shipped", "sent", "on_way", "发往", "已上网", "发走"].some((value) => text.includes(value))) {
-    return "delivering";
-  }
-  if (["acceptance_in_progress", "awaiting_approve", "awaiting_packaging", "posting_created", "posting_acceptance_in_progress"].some((value) => text.includes(value))) {
-    return "awaiting_packaging";
-  }
-  if (text.includes("delivered")) return "delivered";
-  if (text.includes("cancel")) return "cancelled";
-  if (text.includes("dispute") || text.includes("arbitration")) return "dispute";
-  return status || "all";
+  return orderStateKey(row);
 }
 
 function rowStateColor(row) {
@@ -678,6 +644,7 @@ function rowStateColor(row) {
 
 function rowRegistrationHint(row) {
   const text = [row?.status, row?.tracking_stage, row?.logistics_status].join(" ").toLowerCase();
+  if (text.includes("acceptance_in_progress") && orderStateKey(row) === "awaiting_deliver") return "已备货，正在处理物流交接";
   if (text.includes("posting_registration_error")) return "Ozon 配送注册子状态：注册异常。此状态本身不代表面单下载或发货失败。";
   if (text.includes("awaiting_registration")) return "已备货，正在安排配送";
   return "";
@@ -719,7 +686,7 @@ function rowAvailableActions(row) {
   const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
   const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
   const showPrint = beforeTransit && isAwaitingDeliver && apiActions.print !== false;
-  const isRegistering = statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
+  const isRegistering = statusText.includes("acceptance_in_progress") || statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
   const ozonActions = Array.isArray(row?.ozon_available_actions) ? row.ozon_available_actions : [];
   const labelReady = ozonActions.some((action) => ["label_download", "label_download_small"].includes(action));
   const canPrint = showPrint && !isFbp && (!isRegistering || labelReady) && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
