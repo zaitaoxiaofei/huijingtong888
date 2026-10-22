@@ -21,7 +21,7 @@ test("procurement images use the product-aware image endpoint", () => {
 });
 
 test("product image endpoint refreshes failed remote Ozon URLs without media archival", () => {
-  assert.match(server, /services\.refreshProductImageUrl\(productId\)/);
+  assert.match(server, /services\.refreshProductImageUrl\(productId, options\.tenantId\)/);
   assert.match(mysqlServices, /fetchOzonProductsByIds\(binding, \[ozonProductId\]\)/);
   assert.match(mysqlServices, /UPDATE products SET image_url = \?/);
   assert.doesNotMatch(mysqlServices.match(/async function refreshProductImageUrlUnsafeMysql[\s\S]*?\n}\n/)?.[0] || "", /prepareOnlineProductMediaForStorage|archiveRemoteMediaObjectUrl/);
