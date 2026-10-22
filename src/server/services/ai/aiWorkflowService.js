@@ -7,12 +7,13 @@ import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { config } from "../../../config.js";
 import { mysqlQuery } from "../../../mysql-pool.js";
+import { aiTenantId, currentAiTenantSession } from "../../../services/ai-tenant-context.js";
+import { assertAiImageTaskOwner, registerAiImageTaskOwner } from "../../../services/ai-image-task-ownership.js";
 import { buildZip, runPythonCropper } from "../tools/imageCropperService.js";
 import { aiProviderConfig, chatWithAiProvider } from "../../../services/ai-provider-settings.js";
 import { buildFallbackPrompt, clampImageCount, optimizeImagePrompt } from "../openai/promptService.js";
 import { buildCopyBundlePrompt, buildCopyFactsContract } from "./copyFactsContract.js";
 import { parseCopyBundleResponse, validateCopyBundle } from "./copyQualityValidator.js";
-import { putContentAddressedFile } from "../../../services/object-storage.js";
 import {
   GENERATED_ROOT,
   ROOT_DIR,
@@ -57,6 +58,7 @@ export async function optimizePrompt(payload = {}) {
 
 export async function generateImages(payload = {}) {
   const taskId = crypto.randomUUID();
+  await registerAiImageTaskOwner(taskId);
   const ratio = normalizeRatio(payload.ratio);
   const imageCount = clampImageCount(payload.imageCount ?? payload.count);
   const imageRuntimeConfig = payload.imageRuntimeConfig || payload.runtimeConfig || null;
@@ -78,8 +80,10 @@ export async function generateImages(payload = {}) {
     const crop = payload.autoCrop === false
       ? { croppedImages: [], cropStatus: "skipped" }
       : await cropGeneratedImages({ taskId, generatedImages, cropMode: payload.cropMode || "auto" });
-    const storedGeneratedImages = await storeUnusedAiImages(generatedImages);
-    const storedCroppedImages = await storeUnusedAiImages(crop.croppedImages);
+    // Working images retain authenticated task URLs. Draft/save/publish flows
+    // explicitly materialize an owned image into the public Ozon media store.
+    const storedGeneratedImages = generatedImages;
+    const storedCroppedImages = crop.croppedImages;
     return {
       taskId,
       generationMode: sourceImage ? "image_to_image" : "text_to_image",
@@ -108,26 +112,6 @@ export async function generateImages(payload = {}) {
     publicError.code = error.code || "";
     throw publicError;
   }
-}
-
-async function storeUnusedAiImages(images = []) {
-  return Promise.all((Array.isArray(images) ? images : []).map(async (item) => {
-    const relativePath = String(item?.path || "").trim();
-    if (!relativePath) return item;
-    const filePath = path.resolve(ROOT_DIR, relativePath);
-    const extension = path.extname(filePath).toLowerCase() || ".png";
-    const contentType = extension === ".jpg" || extension === ".jpeg"
-      ? "image/jpeg"
-      : extension === ".webp"
-        ? "image/webp"
-        : "image/png";
-    const stored = await putContentAddressedFile(filePath, {
-      prefix: "ai-unused",
-      extension,
-      contentType
-    });
-    return stored ? { ...item, url: stored.url, oss_object_key: stored.objectKey } : item;
-  }));
 }
 
 async function resolveSourceImageWithFallback(payload = {}) {
@@ -269,21 +253,22 @@ async function resolveSourceImage(payload = {}) {
 }
 
 async function cachedSourceImage(source) {
+  const tenantCacheKey = `${aiTenantId()}:${source}`;
   const now = Date.now();
   for (const [key, entry] of sourceImageCache) {
     if (entry.expiresAt > now) continue;
     sourceImageCache.delete(key);
   }
-  const cached = sourceImageCache.get(source);
+  const cached = sourceImageCache.get(tenantCacheKey);
   if (cached) return cached.promise;
   const promise = fetchSourceImage(source).catch((error) => {
-    sourceImageCache.delete(source);
+    sourceImageCache.delete(tenantCacheKey);
     throw error;
   });
-  sourceImageCache.set(source, { promise, expiresAt: now + AI_SOURCE_IMAGE_CACHE_TTL_MS });
+  sourceImageCache.set(tenantCacheKey, { promise, expiresAt: now + AI_SOURCE_IMAGE_CACHE_TTL_MS });
   while (sourceImageCache.size > AI_SOURCE_IMAGE_CACHE_MAX_ENTRIES) {
     const oldestKey = sourceImageCache.keys().next().value;
-    if (!oldestKey || oldestKey === source) break;
+    if (!oldestKey || oldestKey === tenantCacheKey) break;
     sourceImageCache.delete(oldestKey);
   }
   return promise;
@@ -338,7 +323,7 @@ async function fetchSourceImage(source) {
   const contentType = normalizeImageContentType(response.headers.get("content-type") || "image/png");
   if (!response.body) throw Object.assign(new Error("参考图响应没有可读取的内容"), { status: 502 });
   await fs.mkdir(AI_SOURCE_IMAGE_CACHE_ROOT, { recursive: true });
-  const cacheKey = crypto.createHash("sha256").update(String(source)).digest("hex");
+  const cacheKey = crypto.createHash("sha256").update(`${aiTenantId()}:${source}`).digest("hex");
   const filePath = path.join(AI_SOURCE_IMAGE_CACHE_ROOT, `${cacheKey}.${extensionForContentType(contentType)}`);
   const temporaryPath = `${filePath}.${crypto.randomUUID()}.part`;
   try {
@@ -378,7 +363,7 @@ async function readLocalAiTaskSourceImage(source = "") {
   const taskId = decodeURIComponent((match || legacyMatch)[1]);
   const scope = match ? decodeURIComponent(match[2]) : "generated";
   const filename = (match ? match[3] : legacyMatch[2]).split("/").map(decodeURIComponent).join("/");
-  const file = await getAiTaskFile(taskId, scope, filename).catch(() => null);
+  const file = await getAiTaskFile(taskId, scope, filename);
   if (!file) return null;
   return {
     filePath: file.filePath,
@@ -697,6 +682,7 @@ async function loadListingDraftForCopyTest(draftId = 0) {
 
 export async function cropGeneratedImages({ taskId, generatedImages = [], cropMode = "auto" }) {
   const safeTaskId = validateTaskId(taskId);
+  await assertAiImageTaskOwner(safeTaskId);
   const croppedTaskDir = resolveCroppedTaskDir(safeTaskId);
   await fs.mkdir(croppedTaskDir, { recursive: true });
 
@@ -737,11 +723,12 @@ export async function cropGeneratedImages({ taskId, generatedImages = [], cropMo
   }
 }
 
-export async function getAiTaskFile(taskId, scope, filename) {
+export async function getAiTaskFile(taskId, scope, filename, session = currentAiTenantSession()) {
   const safeTaskId = validateTaskId(taskId);
+  await assertAiImageTaskOwner(safeTaskId, session);
   const root = scope === "cropped" ? resolveCroppedTaskDir(safeTaskId) : resolveGeneratedTaskDir(safeTaskId);
   const filePath = path.resolve(root, String(filename || "").replace(/\\/g, "/"));
-  if (!filePath.startsWith(root)) {
+  if (!filePath.startsWith(`${root}${path.sep}`)) {
     const error = new Error("Illegal file path");
     error.status = 400;
     throw error;
@@ -755,8 +742,9 @@ export async function getAiTaskFile(taskId, scope, filename) {
   return { filePath, size: stat.size, contentType: contentTypeFor(filePath) };
 }
 
-export async function createAiTaskZip(taskId) {
+export async function createAiTaskZip(taskId, session = currentAiTenantSession()) {
   const safeTaskId = validateTaskId(taskId);
+  await assertAiImageTaskOwner(safeTaskId, session);
   const generatedFiles = await collectImageFiles(path.resolve(GENERATED_ROOT, safeTaskId), "generated");
   const croppedFiles = await collectImageFiles(resolveCroppedTaskDir(safeTaskId), "cropped");
   const files = [...generatedFiles, ...croppedFiles];

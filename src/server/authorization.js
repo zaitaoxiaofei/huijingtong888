@@ -26,7 +26,8 @@ export function authorizeApiRequest(req, parts = []) {
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 
   if (read && ["system/info", "system/update-status"].includes(path)) return { allowed: true };
-  if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug === "default") return { allowed: true };
+  if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug) return { allowed: true };
+  if (method === "GET" && ['settings/packaging-fee-rule', 'exchange-rate/current', 'exchange-rates', 'stock-warehouse-rules', 'order-cancellation-rules'].includes(path)) return require('inventory.read');
   if (method === "GET" && resource === "logistics-rules" && parts.length === 2 && session.tenant?.id && session.tenant?.slug) return { allowed: true };
   const businessAiConsumption = ["ai-provider/chat", "ai-provider/stream"].includes(path);
   if (PLATFORM_MANAGEMENT_RESOURCES.has(resource) && !businessAiConsumption) return deny("仅平台超级管理员可以管理共用规则、自动任务、系统监控、AI 配置及提示词库");
@@ -42,6 +43,9 @@ export function authorizeApiRequest(req, parts = []) {
     const configRead = method === "GET" && ((parts.length === 3 && ["bootstrap", "tail-templates"].includes(parts[2]))
       || (parts.length === 4 && parts[2] === "tail-template-files" && /^\d+$/.test(String(parts[3] || ""))));
     if (configRead && isEnterpriseAdmin(session)) return { allowed: true };
+    const verifiedJob = (method === 'GET' && ((parts[2] === 'jobs' && [3, 4].includes(parts.length)) || (parts[2] === 'files' && parts.length === 5)))
+      || (method === 'POST' && ((parts[2] === 'jobs' && parts.length === 5 && ['cancel', 'retry-failures'].includes(parts[4])) || (parts[2] === 'delete-media-group' && parts.length === 3)));
+    if (verifiedJob) return require('operations');
     return session.tenant?.slug === "default" ? require("operations") : deny("当前企业仅开放负责人或管理员的矩阵配置；生成及发布功能尚未开放");
   }
 
@@ -70,17 +74,30 @@ export function authorizeApiRequest(req, parts = []) {
     const companyRead = route.length === 1 && route[0] === "companies" && read;
     const reportRead = route.length === 1 && ["report", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
     const exportRead = route.length === 1 && route[0] === "export" && read;
-    const collectionWrite = route.length === 1 && ["companies", "shop-assignments", "expenses", "vouchers", "close"].includes(route[0]) && method === "POST";
+    const collectionWrite = route.length === 1 && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(route[0]) && method === "POST";
     const expenseDelete = route.length === 2 && route[0] === "expenses" && /^\d+$/.test(String(route[1] || "")) && method === "DELETE";
     if (companyRead || reportRead || exportRead || collectionWrite || expenseDelete) return { allowed: true };
   }
   if (resource === "shops" && session.tenant?.slug !== "default") return deny("仅企业负责人或企业管理员可以管理店铺与店铺密钥");
   if (resource === "people" && session.tenant?.slug !== "default") return deny("企业人员管理尚未完成隔离，请使用企业与授权中的成员管理");
-  if (resource === "online-products" && parts.length === 2 && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
-  if (resource === "online-products" && parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && read && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
-  if (resource === "online-products" && parts.length === 3 && parts[2] === "batch-stock" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
-  if (resource === "online-products" && parts.length === 3 && parts[2] === "action" && method === "POST" && ["owner", "admin"].includes(session.tenant?.role)) return { allowed: true };
-  if (resource === "online-products" && session.tenant?.slug !== "default") return deny("当前账号无权操作企业在线商品；仅企业负责人或管理员可调整库存，归档、绑定、上架编辑、建品和同步功能仍未开放");
+  if (resource === "online-products") {
+    const collectionRead = parts.length === 2 && read;
+    const scopedLookup = parts.length === 3 && ["limits", "warehouses"].includes(parts[2]) && read;
+    const editDraft = parts.length === 4 && /^\d+$/.test(String(parts[2] || "")) && parts[3] === "edit-draft" && read;
+    const inventoryWrite = parts.length === 3 && ["bind", "create-product"].includes(parts[2]) && method === "POST";
+    const operationWrite = parts.length === 3 && ["batch-stock", "action"].includes(parts[2]) && method === "POST";
+    if (collectionRead || scopedLookup) return require("orders.read", "operations");
+    if (editDraft) return require("orders.read", "operations", "inventory.write");
+    if (inventoryWrite) return require("inventory.write");
+    if (operationWrite) return require("operations");
+    return deny("该在线商品操作尚未完成企业隔离或验收");
+  }
+  if (path === "listing/drafts/from-inventory-product" && method === "POST") return require("inventory.write");
+  if (path === "ai-variant-lab/vehicle-catalog") {
+    if (read) return require("inventory.read", "operations", "team");
+    if (method === "POST") return require("inventory.write", "operations");
+    return deny();
+  }
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");

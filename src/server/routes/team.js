@@ -1,5 +1,7 @@
+import { withTeamTenantSession } from "../../services/team-task-tenant.js";
+
 export function createTeamRoutes({ services, readJson }) {
-  return {
+  const routes = {
     "GET /api/team/operational-owners": () => services.teamOperationalOwners(),
     "PUT /api/team/operational-owners": async (req) => services.setTeamOperationalOwner(await readJson(req)),
     "GET /api/team/tasks": (req, url) => services.teamTasks(Object.fromEntries(url.searchParams.entries())),
@@ -16,9 +18,16 @@ export function createTeamRoutes({ services, readJson }) {
     "POST /api/team/development-candidates": async (req) => services.createDevelopmentCandidate(await readJson(req), req._session?.personId),
     "POST /api/team/development-ideas": async (req) => services.createDevelopmentIdea(await readJson(req), req._session?.personId)
   };
+  return Object.fromEntries(Object.entries(routes).map(([route, handler]) => [route,
+    (req, ...args) => withTeamTenantSession(req._session, () => handler(req, ...args))]));
 }
 
 export async function handleTeamRestRoute({ req, res, parts, services, readJson, json }) {
+  if (parts[0] !== "api" || parts[1] !== "team") return false;
+  return withTeamTenantSession(req._session, () => handleAuthorizedTeamRestRoute({ req, res, parts, services, readJson, json }));
+}
+
+async function handleAuthorizedTeamRestRoute({ req, res, parts, services, readJson, json }) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "team" && parts[2] === "tasks" && parts[3] && parts[4] === "operational-details") {
     return json(res, await services.teamTaskOperationalDetails(Number(parts[3])));
   }

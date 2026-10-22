@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
 import { inferProcurementSources } from './procurement-source-inference.js';
+import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryReferences, assertInventoryMember } from './inventory-tenant-scope.js';
 
 export const procurementLedgerSchema = [
   `CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
@@ -48,7 +49,10 @@ export async function ensureProcurementLedgerSchema(execute) {
 }
 
 export function ledgerRevision(value) {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  // MySQL JSON normalizes object key order. A persisted retry must retain the
+  // same identity even when storage reorders submitted object properties.
+  return createHash('sha256').update(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 }
 function integer(value, label, minimum = 1) {
   const number = Number(value);
@@ -346,28 +350,29 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
 // Hooks keep all writes on the same transaction, including existing receipt/cost machinery.
 export function createProcurementLedgerService(hooks) {
   const { query, transaction, coverage, postMovement, receive, recordCost, refreshPurchase, requirePerson, prepare } = hooks;
+  const resolveScope = hooks.resolveScope || resolveInventoryTenantScope;
   async function snapshot(productId, run = query, tenantId = 'admin') {
     if (hooks.assertProductAccess) await hooks.assertProductAccess(productId, tenantId, run);
-    const tenantScoped = String(tenantId) !== 'admin';
-    const movementTenantSql = tenantScoped ? ' AND tenant_id = ?' : '';
-    const movementArgs = tenantScoped ? [productId, Number(tenantId)] : [productId];
+    const scope = await resolveScope(tenantId, run);
+    const movementTenantSql = ` AND ${inventoryTenantSql(scope)}`;
+    const movementArgs = [productId];
     const products = await run(`SELECT id, name, code, inventory_number, stock_unit, purchase_cost,
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
-      FROM products WHERE id = ? AND active = 1${tenantScoped ? ' AND tenant_id = ?' : ''}`, movementArgs);
+      FROM products WHERE id = ? AND active = 1${movementTenantSql}`, movementArgs);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');
     const movements = await run(`SELECT source_type, stock_location, SUM(quantity_delta) AS quantity_delta,
       MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
       WHERE product_id = ? AND status = 'posted'${movementTenantSql} GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, movementArgs);
     const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at, person.name AS person_name,
       COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity
-      FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id
-      LEFT JOIN people person ON person.id = po.created_by_person_id
+      FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
+      LEFT JOIN people person ON person.id = po.created_by_person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = person.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
       LEFT JOIN (SELECT purchase_order_item_id,
         SUM(CASE WHEN status = 'approved' THEN quantity ELSE 0 END) AS received_quantity,
         SUM(CASE WHEN status = 'pending_arrival' THEN quantity ELSE 0 END) AS pending_quantity
-        FROM inbound_records WHERE product_id = ? GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
-      WHERE poi.product_id = ? AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
-    const projection = await coverage(run, productId, tenantId);
+        FROM inbound_records WHERE product_id = ? AND ${inventoryTenantSql(scope)} GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
+      WHERE poi.product_id = ? AND ${inventoryTenantSql(scope, 'poi')} AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
+    const projection = await coverage(run, productId, scope.id);
     const orders = [...projection.values()].filter(order => order.stock_location !== 'FBP').flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
         posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
@@ -384,18 +389,21 @@ export function createProcurementLedgerService(hooks) {
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
       AND COALESCE(stock_location, 'LOCAL') != 'FBP'${movementTenantSql} GROUP BY source_ref`, movementArgs);
     for (const batch of value.batches) batch.local_posted_quantity = Number(posted.find(row => row.source_ref === `inbound_${batch.id}`)?.quantity || 0);
-    value.requests = await run(`SELECT * FROM procurement_requests WHERE product_id = ? AND purchase_order_id IS NOT NULL AND status != 'cancelled' ORDER BY id`, [productId]);
-    value.allocations = await run(`SELECT * FROM procurement_order_allocations WHERE product_id = ? AND status = 'allocated' ORDER BY id`, [productId]);
-    value.sources = await run('SELECT * FROM procurement_history_sources WHERE product_id = ? ORDER BY id', [productId]);
+    value.requests = await run(`SELECT pr.* FROM procurement_requests pr JOIN purchase_orders po ON po.id = pr.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
+      WHERE pr.product_id = ? AND ${inventoryTenantSql(scope, 'pr')} AND pr.status != 'cancelled' ORDER BY pr.id`, [productId]);
+    const orderOwner = `EXISTS (SELECT 1 FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id WHERE oi.id = order_item_id AND ${inventoryTenantSql(scope, 's')})`;
+    value.allocations = await run(`SELECT * FROM procurement_order_allocations WHERE product_id = ? AND status = 'allocated' AND ${orderOwner} ORDER BY id`, [productId]);
+    value.sources = await run(`SELECT * FROM procurement_history_sources WHERE product_id = ? AND ${orderOwner} ORDER BY id`, [productId]);
     value.cost_tasks = await run('SELECT * FROM procurement_stock_cost_tasks WHERE product_id = ? ORDER BY id', [productId]);
     value.cost_links = await run(`SELECT l.* FROM procurement_stock_cost_links l JOIN procurement_stock_cost_tasks t ON t.id = l.task_id
       WHERE t.product_id = ? ORDER BY l.id`, [productId]);
-    value.priorities = await run('SELECT * FROM inventory_order_priorities WHERE product_id = ? ORDER BY order_item_id', [productId]);
+    value.priorities = await run(`SELECT * FROM inventory_order_priorities WHERE product_id = ? AND ${orderOwner} ORDER BY order_item_id`, [productId]);
     value.revision = ledgerRevision(value);
     value.actions = await run(`SELECT a.id, a.action_type, a.person_id, p.name AS person_name, a.reason, a.result_json, a.created_at FROM procurement_ledger_actions a
-      LEFT JOIN people p ON p.id = a.person_id
-      WHERE a.product_id = ? OR JSON_EXTRACT(a.result_json, '$.target_product_id') = ?
-        OR JSON_CONTAINS(a.result_json, JSON_OBJECT('product_id', ?), '$.extra_sources') = 1
+      JOIN products owner_product ON owner_product.id = a.product_id AND ${inventoryTenantSql(scope, 'owner_product')}
+      LEFT JOIN people p ON p.id = a.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = p.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
+      WHERE (a.product_id = ? OR JSON_EXTRACT(a.result_json, '$.target_product_id') = ?
+        OR JSON_CONTAINS(a.result_json, JSON_OBJECT('product_id', ?), '$.extra_sources') = 1)
       ORDER BY a.id DESC LIMIT 50`, [productId, productId, productId]);
     return value;
   }
@@ -406,21 +414,22 @@ export function createProcurementLedgerService(hooks) {
       ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
       : query;
     const value = await snapshot(id, run, tenantId);
-    const fbp = hooks.fbpStocks && body.include_fbp !== false ? await hooks.fbpStocks(id) : null;
+    const fbp = hooks.fbpStocks && body.include_fbp !== false ? await hooks.fbpStocks(id, tenantId) : null;
     if (fbp) value.fbp_inventory = fbp;
     value.source_inference = inferProcurementSources(value);
     return value;
   }
-  async function costTasks(body = {}) {
+  async function costTasks(body = {}, tenantId = 'admin') {
     await prepare();
+    const scope = await resolveScope(tenantId, query);
     const page = Math.min(100000, Math.max(1, Math.floor(Number(body.page) || 1)));
     const pageSize = 30;
     const search = String(body.query || '').trim().slice(0, 200);
-    const where = `t.resolved_quantity < t.quantity${search ? ' AND (p.name LIKE ? OR p.inventory_number LIKE ? OR p.code LIKE ?)' : ''}`;
+    const where = `t.resolved_quantity < t.quantity AND ${inventoryTenantSql(scope, 'p')}${search ? ' AND (p.name LIKE ? OR p.inventory_number LIKE ? OR p.code LIKE ?)' : ''}`;
     const params = search ? Array(3).fill(`%${search}%`) : [];
     const [count] = await query(`SELECT COUNT(*) AS total FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id WHERE ${where}`, params);
     const rows = await query(`SELECT t.*, p.name AS product_name, p.inventory_number, p.code, pe.name AS person_name
-      FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id LEFT JOIN people pe ON pe.id = t.person_id
+      FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id LEFT JOIN people pe ON pe.id = t.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
       WHERE ${where} ORDER BY t.id ASC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     return { rows, total: Number(count?.total || 0), page, pageSize };
   }
@@ -432,12 +441,16 @@ export function createProcurementLedgerService(hooks) {
     const transact = existingConnection ? callback => callback(existingConnection) : transaction;
     const result = await transact(async connection => {
       const run = (sql, args = []) => connection.query(sql, args).then(([rows]) => rows);
+      const scope = await resolveScope(tenantId, run);
       const actor = await requirePerson(personId, connection);
+      await (hooks.assertActor || assertInventoryMember)(scope, actor, run);
+      await (hooks.assertReferences || assertInventoryReferences)(scope, body, run);
+      const scopedRequestKey = createHash('sha256').update(`tenant:${scope.id}:${requestKey}`).digest('hex');
       const extraSources = conversionSources(body, productId);
       const ids = [...new Set([productId, Number(body.target_product_id || 0), ...extraSources.map(row => row.product_id)].filter(Boolean))].sort((a, b) => a - b);
       for (const id of ids) if (hooks.assertProductAccess) await hooks.assertProductAccess(id, tenantId, run);
       for (const id of ids) await run('SELECT id FROM products WHERE id = ? FOR UPDATE', [id]);
-      const previous = await run('SELECT * FROM procurement_ledger_actions WHERE request_key = ? FOR UPDATE', [requestKey]);
+      const previous = await run('SELECT * FROM procurement_ledger_actions WHERE request_key = ? FOR UPDATE', [scopedRequestKey]);
       if (previous[0]) {
         if (Number(previous[0].product_id) !== productId || Number(previous[0].person_id) !== actor) throw new Error('操作标识重复，请刷新重试');
         const saved = typeof previous[0].before_json === 'string' ? JSON.parse(previous[0].before_json) : previous[0].before_json;
@@ -475,7 +488,7 @@ export function createProcurementLedgerService(hooks) {
       }
       const [action] = await connection.execute(`INSERT INTO procurement_ledger_actions
         (request_key, product_id, action_type, person_id, reason, before_json) VALUES (?, ?, ?, ?, ?, ?)`,
-      [requestKey, productId, plan.type, actor, plan.reason, JSON.stringify({ ...before, extra_sources: extraSnapshots, submitted: body })]);
+      [scopedRequestKey, productId, plan.type, actor, plan.reason, JSON.stringify({ ...before, extra_sources: extraSnapshots, submitted: body })]);
       const actionId = Number(action.insertId);
       const note = `对账 #${actionId}：${plan.reason}`;
       const conversionCosts = plan.type === 'convert' ? [before, ...extraSnapshots] : [];
@@ -501,19 +514,19 @@ export function createProcurementLedgerService(hooks) {
         const inTransit = plan.inventory_effect === 'in_transit';
         const status = inTransit ? 'purchased' : 'inbound_done';
         const [purchase] = await connection.execute(`INSERT INTO purchase_orders
-          (order_no, created_by_person_id, status, total_quantity, total_amount, note, purchased_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`, [`HISTORY-${actionId}`, actor, status, plan.quantity,
+          (tenant_id, order_no, created_by_person_id, status, total_quantity, total_amount, note, purchased_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [scope.id, `HISTORY-${actionId}`, actor, status, plan.quantity,
           plan.amount + plan.shipping_amount, `${note}；历史补录，不新增待采购`, plan.purchased_at]);
         purchaseOrderId = Number(purchase.insertId);
         const [item] = await connection.execute(`INSERT INTO purchase_order_items
-          (purchase_order_id, product_id, requested_quantity, actual_quantity, inbound_quantity, amount, shipping_amount, unit_cost, status, note)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [purchaseOrderId, productId, plan.quantity, plan.quantity,
+          (tenant_id, purchase_order_id, product_id, requested_quantity, actual_quantity, inbound_quantity, amount, shipping_amount, unit_cost, status, note)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [scope.id, purchaseOrderId, productId, plan.quantity, plan.quantity,
           inTransit ? 0 : plan.quantity, plan.amount, plan.shipping_amount, cost, status, note]);
         purchaseItemId = Number(item.insertId);
         const [inbound] = await connection.execute(`INSERT INTO inbound_records
-          (product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note,
+          (tenant_id, product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note,
             purchase_order_id, purchase_order_item_id, approved_at, approved_by_person_id)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [productId, actor, plan.quantity, plan.amount,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [scope.id, productId, actor, plan.quantity, plan.amount,
           plan.shipping_amount, cost, inTransit ? 'pending_arrival' : 'approved', `${note}；${inTransit ? '采购仍在途' : plan.stocktake_delta !== undefined ? '仅补历史来源与成本；库存另按实盘核对' : plan.local_delta ? '补漏记本地入库' : '仅补来源，库存已记账或直发'}`,
           purchaseOrderId, Number(item.insertId), inTransit ? null : (plan.counted_at || plan.purchased_at), inTransit ? null : actor]);
         if (plan.stocktake_delta !== undefined) await movement(productId, plan.stocktake_delta, 'reconciliation_stocktake');
@@ -532,7 +545,7 @@ export function createProcurementLedgerService(hooks) {
       } else if (plan.type === 'receive_and_count') {
         for (const receipt of plan.receipts) await receive(connection, receipt.id, {
           ...receipt, status: 'approved', qc_status: 'approved', receipt_context: `${note}；历史到货补登记并按当前实物校准${receipt.receipt_difference_reason ? `；收货差异：${receipt.receipt_difference_reason}${receipt.receipt_difference_note ? `（${receipt.receipt_difference_note}）` : ''}` : ''}`
-        }, { sessionPersonId: actor });
+        }, { sessionPersonId: actor, tenantId: scope.id });
         await movement(productId, plan.receipt_count_adjustment, 'reconciliation_stocktake');
       } else if (plan.type === 'set_priority') {
         await connection.execute(`INSERT INTO inventory_order_priorities (product_id, order_item_id, priority, action_id) VALUES (?, ?, ?, ?)
@@ -540,7 +553,7 @@ export function createProcurementLedgerService(hooks) {
       } else if (plan.type === 'receive' || plan.type === 'link_purchase') {
         if (plan.type === 'receive') await receive(connection, plan.inbound.id, {
           receive_quantity: plan.quantity, expected_remaining_quantity: plan.inbound.quantity, receipt_context: note
-        }, { sessionPersonId: actor });
+        }, { sessionPersonId: actor, tenantId: scope.id });
         // The receipt hook posts inbound stock. Undo that inventory effect when
         // the operator confirms these historical goods were already counted.
         if (plan.type === 'receive' && !plan.local_delta) await movement(productId, -plan.quantity, 'historical_receipt_offset', `inbound_${plan.inbound.id}`);
@@ -550,7 +563,7 @@ export function createProcurementLedgerService(hooks) {
         await movement(productId, plan.local_delta, 'substitution_restore');
         if (plan.target_product_id) await movement(plan.target_product_id, plan.target_delta, 'substitution_out');
       } else if (plan.type === 'revise_purchase') {
-        await revisePurchase(connection, run, before, plan, actor, note, actionId);
+        await revisePurchase(connection, run, before, plan, actor, note, actionId, scope.id);
         purchaseOrderId = Number(plan.item.purchase_order_id);
       } else {
         await movement(productId, plan.local_delta, `reconciliation_${plan.type}`);
@@ -597,25 +610,28 @@ export function createProcurementLedgerService(hooks) {
     if (!existingConnection) hooks.invalidate();
     return result;
   }
-  async function receiveAndCount(body, personId) {
+  async function receiveAndCount(body, personId, tenantId = 'admin') {
     await prepare();
     if (!Array.isArray(body.groups) || !body.groups.length || body.groups.length > 100) throw new Error('请选择 1 至 100 个库存商品并填写当前实物数量');
     const groups = [...body.groups].sort((a, b) => Number(a.product_id) - Number(b.product_id));
     if (new Set(groups.map(row => Number(row.product_id))).size !== groups.length) throw new Error('同一库存只填写一次当前实物总数');
     if (!/^[a-zA-Z0-9-]{16,50}$/.test(String(body.request_key || ''))) throw new Error('补登记操作标识缺失，请重新打开弹窗');
     const results = await transaction(async connection => {
-      for (const group of groups) await connection.query('SELECT id FROM products WHERE id = ? FOR UPDATE', [integer(group.product_id, '库存商品 ID')]);
+      for (const group of groups) {
+        if (hooks.assertProductAccess) await hooks.assertProductAccess(integer(group.product_id, '库存商品 ID'), tenantId, (sql, params = []) => connection.query(sql, params).then(([rows]) => rows));
+        await connection.query('SELECT id FROM products WHERE id = ? FOR UPDATE', [integer(group.product_id, '库存商品 ID')]);
+      }
       const results = [];
       for (const group of groups) results.push(await apply({ product_id: group.product_id, revision: group.revision,
         counted_quantity: group.counted_quantity, receipts: group.receipts, action_type: 'receive_and_count',
         reason: '历史到货漏登记；按当前仓库实物校准，保留原出库记录，历史来源待核对',
-        request_key: `${body.request_key}-${group.product_id}` }, personId, connection));
+        request_key: `${body.request_key}-${group.product_id}` }, personId, connection, tenantId));
       return results;
     });
     hooks.invalidate();
     return { ok: true, results };
   }
-  async function revisePurchase(connection, run, before, plan, actor, note, actionId) {
+  async function revisePurchase(connection, run, before, plan, actor, note, actionId, tenantId) {
     const item = plan.item;
     const productId = Number(before.product.id);
     let pendingLeft = plan.pending_quantity;
@@ -630,8 +646,8 @@ export function createProcurementLedgerService(hooks) {
         unitCost, quantity ? 'pending_arrival' : 'cancelled', note, batch.id]);
     }
     if (pendingLeft > 0) await connection.execute(`INSERT INTO inbound_records
-      (product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note, purchase_order_id, purchase_order_item_id)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?)`, [productId, actor, pendingLeft,
+      (tenant_id, product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note, purchase_order_id, purchase_order_item_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?)`, [tenantId, productId, actor, pendingLeft,
       plan.amount * pendingLeft / plan.quantity, plan.shipping_amount * pendingLeft / plan.quantity, unitCost, note, item.purchase_order_id, item.id]);
     for (const change of plan.receipt_adjustments) {
       await connection.execute(`UPDATE inbound_records SET quantity = ?, amount = ?, shipping_amount = ?, unit_cost = ?, status = ?,

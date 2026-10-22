@@ -4,6 +4,8 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { degrees, PDFDocument } from "pdf-lib";
 import sharp from "sharp";
+import { authorizeBusinessTaskSession } from "./business-task-tenant.js";
+import { hasPermission } from "../shared/permissions.js";
 
 const PRINT_JOB_RETENTION = 100;
 const DEFAULT_LABEL_PRINTER = process.env.OZON_LABEL_PRINTER || "Gprinter GP-1324D";
@@ -17,8 +19,18 @@ const LABEL_PAPER_SIZES = [
   { value: "barcode_70x30", widthMm: 70, heightMm: 30, paperName: "70mm*30mm", rasterFit: "fill", aliases: ["70mm x 30mm", "70mm*30mm", "70x30", "70*30", "30x70", "30*70"] }
 ];
 
-const jobs = [];
+const jobsByTenant = new Map();
 let queue = Promise.resolve();
+
+async function authorizePrintContext(tenantId, options = {}) {
+  if (!options.session) throw Object.assign(new Error("打印操作需要有效企业成员会话"), { statusCode: 403 });
+  if (options.signal?.aborted) throw Object.assign(new Error("打印任务已取消"), { statusCode: 409 });
+  const session = await authorizeBusinessTaskSession(options.session);
+  const expected = String(tenantId || "");
+  const matches = expected === "admin" ? session.tenant.slug === "default" : Number(expected) === Number(session.tenant.id);
+  if (!matches || !hasPermission(session, "packing")) throw Object.assign(new Error("当前企业成员无权执行此打印操作"), { statusCode: 403 });
+  return { session, tenantId: Number(session.tenant.id), serviceTenantId: session.tenant.slug === "default" ? "admin" : String(session.tenant.id) };
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -100,8 +112,11 @@ function safeFilename(value = "print-job.pdf") {
 }
 
 function rememberJob(job) {
+  if (!Number.isSafeInteger(job.tenant_id) || job.tenant_id <= 0) throw new Error("Print job requires an enterprise");
+  const jobs = jobsByTenant.get(job.tenant_id) || [];
   jobs.unshift(job);
   if (jobs.length > PRINT_JOB_RETENTION) jobs.length = PRINT_JOB_RETENTION;
+  jobsByTenant.set(job.tenant_id, jobs);
   return job;
 }
 
@@ -208,12 +223,13 @@ function normalizeCopies(value = 1) {
   return Math.min(999, Math.max(1, Number.isFinite(copies) ? copies : 1));
 }
 
-function createJob({ source = "manual", printer = "label", printSettings = "fit", copies = 1, filename = "print-job.pdf", userId = null, meta = {}, paperSize = "", autoPaper = false }) {
+function createJob({ source = "manual", printer = "label", printSettings = "fit", copies = 1, filename = "print-job.pdf", userId = null, tenantId, meta = {}, paperSize = "", autoPaper = false }) {
   const normalizedSettings = normalizePaperSetting(printSettings);
   const paperSpec = resolveJobPaperSpec({ paperSize, printSettings: normalizedSettings, meta });
   return rememberJob({
     id: `pj-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     source,
+    tenant_id: tenantId,
     printer: printerForRole(printer),
     printer_role: printer,
     print_settings: normalizeLabelPrintSettings(normalizedSettings, paperSpec),
@@ -640,7 +656,8 @@ function coverCropBox(sourceWidth, sourceHeight, targetAspect) {
   return { left: 0, bottom: inset, right: sourceWidth, top: sourceHeight - inset };
 }
 
-async function executePdfJob(job, pdfBuffer) {
+async function executePdfJob(job, pdfBuffer, { beforePrint = async () => {} } = {}) {
+  await beforePrint();
   assertPrintablePdf(pdfBuffer, job.printer);
   const requestedPaperSpec = paperSpecByValue(job.meta?.paper_size);
   const paperSpec = await effectivePaperSpecForPdf(pdfBuffer, requestedPaperSpec, job.meta?.auto_paper);
@@ -651,6 +668,7 @@ async function executePdfJob(job, pdfBuffer) {
       const rawPath = path.join(dir, `${path.basename(job.filename, path.extname(job.filename)) || "label"}.tspl`);
       fs.writeFileSync(rawPath, rawBuffer);
       for (let index = 0; index < job.copies; index += 1) {
+        await beforePrint();
         await printRawFileWindows(rawPath, job.printer, `${job.source}-${job.id}`);
       }
       return;
@@ -679,6 +697,7 @@ async function executePdfJob(job, pdfBuffer) {
     }
     fs.writeFileSync(pdfPath, printableBuffer);
     for (let index = 0; index < job.copies; index += 1) {
+      await beforePrint();
       await printPdfFileWindows(pdfPath, job.printer, printSettings);
     }
   } finally {
@@ -745,7 +764,8 @@ function enqueue(job, task) {
   return next;
 }
 
-export async function serverPrintPdf(body = {}, userId = null) {
+export async function serverPrintPdf(body = {}, userId = null, tenantId = "admin", options = {}) {
+  const context = await authorizePrintContext(tenantId, options);
   const pdfBase64 = String(body.pdf_base64 || "");
   const job = createJob({
     source: body.source || "manual",
@@ -753,7 +773,8 @@ export async function serverPrintPdf(body = {}, userId = null) {
     printSettings: body.print_settings || body.printSettings || "fit",
     copies: body.copies || 1,
     filename: body.filename || "print-job.pdf",
-    userId,
+    userId: context.session.personId,
+    tenantId: context.tenantId,
     meta: {
       ...(body.meta || {}),
       paper_size: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || body.meta?.paper_size || "",
@@ -763,24 +784,31 @@ export async function serverPrintPdf(body = {}, userId = null) {
     autoPaper: body.auto_paper === true || body.autoPaper === true
   });
   const pdfBuffer = Buffer.from(pdfBase64, "base64");
-  return enqueue(job, (activeJob) => executePdfJob(activeJob, pdfBuffer));
+  return enqueue(job, async (activeJob) => {
+    const beforePrint = () => authorizePrintContext(context.serviceTenantId, { ...options, session: context.session });
+    await beforePrint();
+    return executePdfJob(activeJob, pdfBuffer, { beforePrint });
+  });
 }
 
-export async function serverPrintOrderLabels(body = {}, userId = null, services) {
+export async function serverPrintOrderLabels(body = {}, userId = null, services, tenantId = "admin", options = {}) {
+  const context = await authorizePrintContext(tenantId, options);
+  const taskOptions = { ...options, session: context.session };
   const label = await services.orderPackageLabel({
     order_ids: body.order_ids,
     posting_numbers: body.posting_numbers,
     require_all: body.require_all,
     allow_partial: body.allow_partial,
     refresh_cache: body.refresh_cache
-  }, userId);
+  }, context.session.personId, context.serviceTenantId, taskOptions);
   const job = createJob({
     source: "order-label",
     printer: body.printer || "label",
     printSettings: body.print_settings || body.printSettings || "fit",
     copies: body.copies || 1,
     filename: label.filename || "ozon-labels.pdf",
-    userId,
+    userId: context.session.personId,
+    tenantId: context.tenantId,
     meta: {
       order_ids: label.printed_ids || [],
       requested: label.requested,
@@ -791,9 +819,13 @@ export async function serverPrintOrderLabels(body = {}, userId = null, services)
     paperSize: body.paper_size || body.paperSize || body.label_size || body.labelSize || body.preset || "",
     autoPaper: body.auto_paper === true || body.autoPaper === true
   });
-  const printedJob = await enqueue(job, (activeJob) => executePdfJob(activeJob, label.buffer));
+  const printedJob = await enqueue(job, async (activeJob) => {
+    const beforePrint = () => authorizePrintContext(context.serviceTenantId, taskOptions);
+    await beforePrint();
+    return executePdfJob(activeJob, label.buffer, { beforePrint });
+  });
   if (label.printed_ids?.length) {
-    await services.markOrderLabelsPrinted({ order_ids: label.printed_ids }, userId);
+    await services.markOrderLabelsPrinted({ order_ids: label.printed_ids }, context.session.personId, context.serviceTenantId, taskOptions);
   }
   return {
     ok: true,
@@ -806,6 +838,7 @@ export async function serverPrintOrderLabels(body = {}, userId = null, services)
   };
 }
 
-export function serverPrintJobs() {
-  return { ok: true, jobs };
+export async function serverPrintJobs(tenantId = "admin", options = {}) {
+  const context = await authorizePrintContext(tenantId, options);
+  return { ok: true, jobs: jobsByTenant.get(context.tenantId) || [] };
 }

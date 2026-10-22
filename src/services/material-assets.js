@@ -1,12 +1,21 @@
+import { MATERIAL_ASSETS_SCHEMA } from './material-assets-schema.js';
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
+import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord } from './inventory-tenant-scope.js';
+async function materialAssetScope(session) {
+  const fresh = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(fresh, 'operations');
+  return { session: fresh, scope: await resolveInventoryTenantScope(fresh.tenant.id) };
+}
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { materializeListingMediaAssetUrl } from "./listing-automation.js";
 
-export async function materialAssets(query = {}) {
+export async function materialAssets(query = {}, session) {
+  const { scope } = await materialAssetScope(session);
   await ensureMaterialAssetsTable();
   const paged = String(query.paged || "") === "1" || String(query.paged || "").toLowerCase() === "true";
   const page = Math.max(Number(query.page || 1), 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || query.limit || 20), 1), 100);
-  const clauses = [];
+  const clauses = [inventoryTenantSql(scope, "ma")];
   const params = [];
   const status = String(query.status || "").trim();
   if (status && status !== "deleted") {
@@ -47,11 +56,11 @@ export async function materialAssets(query = {}) {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const limit = Math.min(Math.max(Number(query.limit || 200), 1), 1000);
   if (paged) {
-    const countRow = await mysqlQuery(`SELECT COUNT(*) AS total FROM material_assets ${where}`, params).then((rows) => rows[0]);
+    const countRow = await mysqlQuery(`SELECT COUNT(*) AS total FROM material_assets ma ${where}`, params).then((rows) => rows[0]);
     const total = Number(countRow?.total || 0);
     const rows = await mysqlQuery(`
       SELECT *
-      FROM material_assets
+      FROM material_assets ma
       ${where}
       ORDER BY updated_at DESC, id DESC
       LIMIT ? OFFSET ?
@@ -67,7 +76,7 @@ export async function materialAssets(query = {}) {
   }
   const rows = await mysqlQuery(`
     SELECT *
-    FROM material_assets
+    FROM material_assets ma
     ${where}
     ORDER BY updated_at DESC, id DESC
     LIMIT ${limit}
@@ -75,17 +84,24 @@ export async function materialAssets(query = {}) {
   return rows.map(normalizeMaterialAssetRow);
 }
 
-export async function createMaterialAsset(body = {}, personId = null) {
+export async function createMaterialAsset(body = {}, personId = null, session) {
+  const authorized = await materialAssetScope(session);
+  const { scope } = authorized;
+  session = authorized.session;
+  personId = session.personId;
+  if (body.source_selection_id || body.sourceSelectionId) await assertInventoryRecord(scope, "product", body.source_selection_id || body.sourceSelectionId);
   await ensureMaterialAssetsTable();
-  const payload = await normalizeMaterialAssetPayload(body, personId);
+  const payload = await normalizeMaterialAssetPayload(body, personId, session);
+  await materialAssetScope(session);
   const result = await mysqlExecute(`
     INSERT INTO material_assets (
-      asset_type, role, title, url, thumbnail_url, local_url, publish_url, content_text, source_type, source_id,
+      tenant_id, asset_type, role, title, url, thumbnail_url, local_url, publish_url, content_text, source_type, source_id,
       source_selection_id, source_package_id, variant_task_id, variant_result_id,
       target_brand, target_model, product_name, style, ratio, prompt_template_id,
       final_prompt, negative_prompt, provider, model, status, metadata_json, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
+    scope.id,
     payload.asset_type,
     payload.role,
     payload.title,
@@ -114,29 +130,32 @@ export async function createMaterialAsset(body = {}, personId = null) {
     payload.metadata_json,
     personId ? Number(personId) : null
   ]);
-  return materialAssetDetail(result.insertId);
+  return materialAssetDetail(result.insertId, session);
 }
 
-export async function materialAssetDetail(id) {
+export async function materialAssetDetail(id, session) {
+  const { scope } = await materialAssetScope(session);
   await ensureMaterialAssetsTable();
-  const row = await mysqlQuery("SELECT * FROM material_assets WHERE id = ? LIMIT 1", [Number(id)]).then((rows) => rows[0]);
+  const row = await mysqlQuery(`SELECT * FROM material_assets ma WHERE id = ? AND ${inventoryTenantSql(scope, "ma")} LIMIT 1`, [Number(id)]).then((rows) => rows[0]);
   if (!row) throw statusError("素材资产不存在", 404);
   return normalizeMaterialAssetRow(row);
 }
 
-export async function updateMaterialAsset(id, body = {}) {
+export async function updateMaterialAsset(id, body = {}, session) {
+  const { scope } = await materialAssetScope(session);
   await ensureMaterialAssetsTable();
-  const current = await materialAssetDetail(id);
-  const payload = await normalizeMaterialAssetPayload({ ...current, ...body });
+  const current = await materialAssetDetail(id, session);
+  const payload = await normalizeMaterialAssetPayload({ ...current, ...body }, null, session);
+  await materialAssetScope(session);
   await mysqlExecute(`
-    UPDATE material_assets
+    UPDATE material_assets ma
     SET role = ?,
         title = ?,
         status = ?,
         usage_count = ?,
         metadata_json = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+    WHERE id = ? AND ${inventoryTenantSql(scope, "ma")}
   `, [
     payload.role,
     payload.title,
@@ -145,63 +164,27 @@ export async function updateMaterialAsset(id, body = {}) {
     payload.metadata_json,
     Number(id)
   ]);
-  return materialAssetDetail(id);
+  return materialAssetDetail(id, session);
 }
 
-export async function archiveMaterialAsset(id) {
+export async function archiveMaterialAsset(id, session) {
+  const { scope } = await materialAssetScope(session);
+  await materialAssetDetail(id, session);
   await ensureMaterialAssetsTable();
-  await mysqlExecute("UPDATE material_assets SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(id)]);
-  return materialAssetDetail(id);
+  await mysqlExecute(`UPDATE material_assets ma SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND ${inventoryTenantSql(scope, "ma")}`, [Number(id)]);
+  return materialAssetDetail(id, session);
 }
 
-export async function deleteMaterialAsset(id) {
+export async function deleteMaterialAsset(id, session) {
+  const { scope } = await materialAssetScope(session);
   await ensureMaterialAssetsTable();
-  const current = await materialAssetDetail(id);
-  await mysqlExecute("UPDATE material_assets SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(id)]);
+  const current = await materialAssetDetail(id, session);
+  await mysqlExecute(`UPDATE material_assets ma SET status = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND ${inventoryTenantSql(scope, "ma")}`, [Number(id)]);
   return { ok: true, id: Number(id), previousStatus: current.status || "" };
 }
 
 async function ensureMaterialAssetsTable() {
-  await mysqlExecute(`
-    CREATE TABLE IF NOT EXISTS material_assets (
-      id BIGINT PRIMARY KEY AUTO_INCREMENT,
-      asset_type VARCHAR(32) NOT NULL DEFAULT 'image',
-      role VARCHAR(64) NOT NULL DEFAULT 'main_image',
-      title VARCHAR(191) NOT NULL DEFAULT '',
-      url LONGTEXT NULL,
-      thumbnail_url LONGTEXT NULL,
-      content_text LONGTEXT NULL,
-      local_url LONGTEXT NULL,
-      publish_url LONGTEXT NULL,
-      source_type VARCHAR(64) NOT NULL DEFAULT '',
-      source_id VARCHAR(128) NOT NULL DEFAULT '',
-      source_selection_id BIGINT NULL,
-      source_package_id VARCHAR(128) NOT NULL DEFAULT '',
-      variant_task_id VARCHAR(128) NOT NULL DEFAULT '',
-      variant_result_id VARCHAR(128) NOT NULL DEFAULT '',
-      target_brand VARCHAR(128) NOT NULL DEFAULT '',
-      target_model VARCHAR(128) NOT NULL DEFAULT '',
-      product_name VARCHAR(255) NOT NULL DEFAULT '',
-      style VARCHAR(128) NOT NULL DEFAULT '',
-      ratio VARCHAR(16) NOT NULL DEFAULT '3:4',
-      prompt_template_id BIGINT NULL,
-      final_prompt LONGTEXT NULL,
-      negative_prompt LONGTEXT NULL,
-      provider VARCHAR(64) NOT NULL DEFAULT '',
-      model VARCHAR(128) NOT NULL DEFAULT '',
-      status VARCHAR(64) NOT NULL DEFAULT 'pending_review',
-      usage_count INT NOT NULL DEFAULT 0,
-      metadata_json LONGTEXT NULL,
-      created_by BIGINT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      INDEX idx_material_assets_role (asset_type, role, status),
-      INDEX idx_material_assets_source (source_type, source_id),
-      INDEX idx_material_assets_selection (source_selection_id),
-      INDEX idx_material_assets_variant (variant_task_id, variant_result_id),
-      INDEX idx_material_assets_updated (updated_at)
-    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
-  `);
+  await mysqlExecute(MATERIAL_ASSETS_SCHEMA);
   await ensureMaterialAssetColumn("local_url", "LONGTEXT NULL");
   await ensureMaterialAssetColumn("publish_url", "LONGTEXT NULL");
 }
@@ -218,7 +201,7 @@ async function ensureMaterialAssetColumn(name, definition) {
   await mysqlExecute(`ALTER TABLE material_assets ADD COLUMN ${name} ${definition}`);
 }
 
-async function normalizeMaterialAssetPayload(body = {}, personId = null) {
+async function normalizeMaterialAssetPayload(body = {}, personId = null, session) {
   const base = {
     asset_type: cleanText(body.asset_type || body.assetType || "image", 32),
     role: cleanText(body.role || "main_image", 64),
@@ -248,10 +231,10 @@ async function normalizeMaterialAssetPayload(body = {}, personId = null) {
     metadata_json: normalizeJson(body.metadata_json || body.metadataJson || body.metadata || {})
   };
   if (base.asset_type !== "image") return base;
-  return materializeMaterialAssetImage(base, body, personId);
+  return materializeMaterialAssetImage(base, body, personId, session);
 }
 
-async function materializeMaterialAssetImage(payload, body = {}, personId = null) {
+async function materializeMaterialAssetImage(payload, body = {}, personId = null, session) {
   const sourceUrl = payload.thumbnail_url || payload.url || payload.local_url || payload.publish_url;
   if (!sourceUrl || isDataUrl(sourceUrl)) return payload;
   const metadata = parseJson(payload.metadata_json, {});
@@ -261,7 +244,7 @@ async function materializeMaterialAssetImage(payload, body = {}, personId = null
     batch_id: payload.source_package_id || payload.variant_task_id || "",
     role: payload.role || "material_asset",
     created_by_person_id: personId || null
-  });
+  }, session);
   if (!result?.finalUrl) return payload;
   const nextMetadata = {
     ...metadata,

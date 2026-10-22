@@ -33,9 +33,11 @@ test("mysql profit detail snapshot reader parses persisted JSON fields", async (
 test("mysql profit detail snapshot refresh keeps MySQL upsert and result contract", async () => {
   const writes = [];
   const result = await refreshOrderProfitDetailSnapshotsMysqlService({
+    tenantOrderSql: "o.shop_id = 2",
     normalizeDate: (value) => String(value || "").trim(),
     chinaDateSql: (column) => `DATE(${column})`,
     query: async (sql, params) => {
+      assert.match(sql, /o\.shop_id = 2/);
       assert.match(sql, /DATE\(o\.ordered_at\) >= \?/);
       assert.deepEqual(params, ["2026-07-01", "2026-07-29", 50]);
       return [{ id: 9 }];

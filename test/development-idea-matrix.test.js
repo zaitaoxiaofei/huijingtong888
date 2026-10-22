@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 import { readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable } from '../src/services/development-task-plan.js';
 import { buildDevelopmentHeatmap } from '../frontend/admin/utils/development-heatmap.js';
 
@@ -24,27 +25,29 @@ function harness() {
     }
     if (sql.startsWith('UPDATE team_tasks SET active=0')) { state.tasks.find(row => row.id === params[0]).active = 0; return [{}]; }
     if (sql.startsWith('INSERT INTO team_tasks') || sql.startsWith('UPDATE team_tasks SET title=')) {
-      const row = sql.startsWith('INSERT') ? { id: state.nextTask++ } : state.tasks.find(task => task.id === params[9]);
-      Object.assign(row, { title: params[0], owner_person_id: params[1], target_count: params[2], done_count: params[3], status: params[4], due_at: params[5], related_object: params[6], automation_key: params[8], active: 1 });
+      const row = sql.startsWith('INSERT') ? { id: state.nextTask++ } : state.tasks.find(task => task.id === params.at(-1));
+      const values = sql.startsWith('INSERT') ? params : [...params.slice(0, 5), ...params.slice(6)];
+      Object.assign(row, { title: values[0], owner_person_id: values[1], target_count: values[2], done_count: values[3], status: values[4], due_at: values[5], related_object: values[6], automation_key: values[8], active: 1 });
       if (sql.startsWith('INSERT')) state.tasks.push(row);
       if (failAfterTaskWrite) throw new Error('模拟数据库写入失败');
       return [{ insertId: row.id }];
     }
     throw new Error(`Unexpected SQL: ${sql}`);
   };
-  const context = vm.createContext({ Buffer, Date, Map, Set, console,
+  const context = vm.createContext({ ...teamTenantVmContext(), Buffer, Date, Map, Set, console,
     isMysqlPrimaryEnabled: () => true, readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable,
     aiVehicleCatalog: async () => ({ brands: [{ name: 'BYD', models: [{ id: 1, name: '豹3' }] }, { name: 'HAVAL', models: [{ id: 2, name: 'H6' }] }] }),
     inventoryProductNamingOptions: async () => ({ rows: [{ value: '钥匙壳' }, { value: '脚垫' }] }),
     mysqlQuery: async (sql, params) => {
-      if (sql.includes('FROM people')) return [{ id: 7 }];
+      if (sql.startsWith('SELECT owned.id FROM product_development_ideas')) return state.ideas.filter(row => row.id === params[0]);
+      if (sql.startsWith('SELECT id FROM') && sql.includes('FROM people')) return [{ id: 7 }];
       if (sql.includes('FROM listing_drafts')) return drafts.filter(row => params.includes(row.id));
       throw new Error(sql);
     },
     withMysqlTransaction: async callback => { const before = structuredClone(state); try { return await callback({ execute }); } catch (error) { state = before; throw error; } }
   });
   const source = fs.readFileSync(new URL('../src/services/team-tasks.js', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '').replaceAll('export async function', 'async function');
-  vm.runInContext(`${source}\nteamTasksSchemaReady = true;`, context);
+  vm.runInContext(`${source}\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null });`, context);
   return { context, get state() { return state; }, writes, fail: () => { failAfterTaskWrite = true; } };
 }
 

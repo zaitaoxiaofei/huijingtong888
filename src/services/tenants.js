@@ -8,6 +8,7 @@ import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
 import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
 import { getRoles } from "../shared/permissions.js";
 import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
+import { TENANT_AI_LIMITS_SCHEMA } from "./ai-tenant-schema.js";
 
 const DEFAULT_TENANT_SLUG = "default";
 let schemaReady;
@@ -247,12 +248,20 @@ export async function setTenantQuotasMysql(tenantId, body = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const memberLimit = normalizeTenantQuotaLimit(body.member_limit, null, "子账号额度");
-  const shopLimit = normalizeTenantQuotaLimit(body.shop_limit, null, "店铺额度");
-  const tenants = await mysqlQuery("SELECT id FROM tenants WHERE id = ?", [normalizedTenantId]);
-  if (!tenants[0]) throw new Error("企业不存在");
-  await mysqlExecute("UPDATE tenants SET member_limit = ?, shop_limit = ? WHERE id = ?", [memberLimit, shopLimit, normalizedTenantId]);
-  return { ok: true, member_limit: memberLimit, shop_limit: shopLimit };
+  const updatesAi = Object.hasOwn(body, "monthly_ai_request_limit");
+  const aiLimit = updatesAi ? normalizeTenantQuotaLimit(body.monthly_ai_request_limit, null, "每月 AI 请求额度") : undefined;
+  if (aiLimit != null && aiLimit > 4294967295) throw Object.assign(new Error("每月 AI 请求额度超出支持范围"), { statusCode: 400 });
+  if (updatesAi) await mysqlExecute(TENANT_AI_LIMITS_SCHEMA);
+  return withMysqlTransaction(async connection => {
+    const [tenants] = await connection.execute("SELECT id, member_limit, shop_limit FROM tenants WHERE id = ? FOR UPDATE", [normalizedTenantId]);
+    if (!tenants[0]) throw new Error("企业不存在");
+    const memberLimit = body.member_limit === undefined ? tenants[0].member_limit : normalizeTenantQuotaLimit(body.member_limit, null, "子账号额度");
+    const shopLimit = body.shop_limit === undefined ? tenants[0].shop_limit : normalizeTenantQuotaLimit(body.shop_limit, null, "店铺额度");
+    await connection.execute("UPDATE tenants SET member_limit = ?, shop_limit = ? WHERE id = ?", [memberLimit, shopLimit, normalizedTenantId]);
+    if (updatesAi) await connection.execute(`INSERT INTO tenant_ai_limits (tenant_id, monthly_request_limit) VALUES (?, ?)
+      ON DUPLICATE KEY UPDATE monthly_request_limit=VALUES(monthly_request_limit)`, [normalizedTenantId, aiLimit]);
+    return { ok: true, member_limit: memberLimit, shop_limit: shopLimit, ...(updatesAi ? { monthly_ai_request_limit: aiLimit } : {}) };
+  });
 }
 
 export async function setTenantSubscriptionMysql(tenantId, body = {}) {
@@ -482,7 +491,8 @@ export async function resolveTenantPluginTokenMysql(token) {
   const normalizedToken = String(token || "").trim();
   if (!/^ozp_[A-Za-z0-9_-]{40,80}$/.test(normalizedToken)) return null;
   await ensureTenantSchemaMysql();
-  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at,
+      pt.id AS token_id, pt.created_by_person_id
     FROM tenant_plugin_tokens pt JOIN tenants t ON t.id = pt.tenant_id
     WHERE pt.token_hash = ? AND pt.revoked_at IS NULL AND t.status = 'active' LIMIT 1`, [hashTenantPluginToken(normalizedToken)]);
   const tenant = rows[0];
@@ -490,6 +500,8 @@ export async function resolveTenantPluginTokenMysql(token) {
   return {
     tenantId: Number(tenant.id),
     tenantKey: tenant.slug === DEFAULT_TENANT_SLUG ? "admin" : String(tenant.id),
-    tenantSlug: tenant.slug
+    tenantSlug: tenant.slug,
+    tokenId: Number(tenant.token_id),
+    personId: Number(tenant.created_by_person_id)
   };
 }

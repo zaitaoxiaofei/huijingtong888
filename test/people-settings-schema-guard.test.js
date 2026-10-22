@@ -8,7 +8,7 @@ const initMysqlSchemaSource = readFileSync(new URL("../scripts/init-mysql-schema
 test("people management ensures timestamp columns before reading or mutating people", () => {
   assert.match(mysqlCutoverSource, /async function ensurePeopleTimestampSchemaMysql\(\)/);
   assert.match(mysqlCutoverSource, /ALTER TABLE people ADD COLUMN updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP/);
-  assert.match(mysqlCutoverSource, /export async function peopleMysql\(\) \{[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
+  assert.match(mysqlCutoverSource, /export async function peopleMysql\(tenantId = "admin"\) \{[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
   assert.match(mysqlCutoverSource, /export async function createPersonMysql[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
   assert.match(mysqlCutoverSource, /export async function updatePersonMysql[\s\S]*?await ensurePeopleTimestampSchemaMysql\(\);/);
   assert.match(mysqlCutoverSource, /UPDATE people SET name = \?, username = \?, role = \?, roles_json = \?, avatar_url = \?, active = \?, updated_at = CURRENT_TIMESTAMP WHERE id = \?/);

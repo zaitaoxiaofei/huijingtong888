@@ -1,4 +1,5 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { assertFinanceAttachment } from "./tenant-private-files.js";
 
 let schemaReady = false;
 
@@ -24,6 +25,13 @@ function normalizedFinanceTenantId(tenantId = "admin") {
   const id = Number(tenantId);
   if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("企业财务数据暂不可用：当前企业标识无效。"), { statusCode: 503 });
   return id;
+}
+
+async function financeShopScope(tenantId, alias = "s") {
+  const legacy = String(tenantId) === "admin";
+  const rows = await mysqlQuery(`SELECT id FROM tenants WHERE ${legacy ? "slug = 'default'" : "id = ?"} AND status = 'active' LIMIT 1`, legacy ? [] : [normalizedFinanceTenantId(tenantId)]);
+  if (!rows.length) throw Object.assign(new Error("当前企业不存在或已停用"), { statusCode: 403 });
+  return { id: Number(rows[0].id), sql: `(${alias}.tenant_id = ?${legacy ? ` OR ${alias}.tenant_id IS NULL` : ""})`, params: [Number(rows[0].id)] };
 }
 
 async function requireFinanceCompany(companyId, tenantId = "admin") {
@@ -167,6 +175,8 @@ export async function ensureFinanceCenterSchema() {
     SELECT s.id, c.id, '2000-01-01'
     FROM shops s CROSS JOIN finance_companies c
     WHERE c.name = '上海汇境通国际贸易有限公司'
+      AND c.tenant_id IS NULL
+      AND (s.tenant_id IS NULL OR s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active'))
       AND s.status != 'deleted'
       AND (UPPER(TRIM(s.name)) IN ('RUVIBE MART', 'RUVIBE MART M', 'RUVIBE MART X', 'RUVIBE MART S')
         OR UPPER(TRIM(s.name)) REGEXP '^(M|X|S)(店|店铺|SHOP)?$')
@@ -176,6 +186,8 @@ export async function ensureFinanceCenterSchema() {
     SELECT s.id, c.id, '2000-01-01'
     FROM shops s CROSS JOIN finance_companies c
     WHERE c.name = '合肥鑫瀚电子科技有限公司'
+      AND c.tenant_id IS NULL
+      AND (s.tenant_id IS NULL OR s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active'))
       AND s.status != 'deleted'
       AND (UPPER(TRIM(s.name)) IN ('VELOAUTO', 'RUVIBE MART Z')
         OR UPPER(TRIM(s.name)) REGEXP '^(V|Z)(店|店铺|SHOP)?$')
@@ -187,17 +199,18 @@ export async function financeCompanies(tenantId = "admin") {
   await ensureFinanceCenterSchema();
   const normalizedTenantId = normalizedFinanceTenantId(tenantId);
   const tenantScoped = normalizedTenantId != null;
+  const shopScope = await financeShopScope(tenantId);
   const companyFilter = tenantScoped ? "AND tenant_id = ?" : "AND (tenant_id IS NULL OR tenant_id = 0)";
   const companies = await mysqlQuery(`SELECT * FROM finance_companies WHERE status != 'deleted' ${companyFilter} ORDER BY id`, tenantScoped ? [normalizedTenantId] : []);
   const assignments = await mysqlQuery(`
     SELECT a.*, s.name AS shop_name, c.name AS company_name
     FROM finance_shop_company_assignments a
-    JOIN shops s ON s.id = a.shop_id AND s.status != 'deleted' ${tenantScoped ? "AND s.tenant_id = ?" : ""}
-    JOIN finance_companies c ON c.id = a.company_id ${tenantScoped ? "AND c.tenant_id = ?" : ""}
+    JOIN shops s ON s.id = a.shop_id AND s.status != 'deleted' AND ${shopScope.sql}
+    JOIN finance_companies c ON c.id = a.company_id ${tenantScoped ? "AND c.tenant_id = ?" : "AND (c.tenant_id IS NULL OR c.tenant_id = 0)"}
     WHERE ${tenantScoped ? "a.tenant_id = ?" : "(a.tenant_id IS NULL OR a.tenant_id = 0)"}
     ORDER BY s.name, a.effective_from DESC
-  `, tenantScoped ? [normalizedTenantId, normalizedTenantId, normalizedTenantId] : []);
-  const shops = await mysqlQuery(`SELECT id, name FROM shops WHERE status != 'deleted' ${tenantScoped ? "AND tenant_id = ?" : ""} ORDER BY id`, tenantScoped ? [normalizedTenantId] : []);
+  `, [...shopScope.params, ...(tenantScoped ? [normalizedTenantId, normalizedTenantId] : [])]);
+  const shops = await mysqlQuery(`SELECT s.id, s.name FROM shops s WHERE s.status != 'deleted' AND ${shopScope.sql} ORDER BY s.id`, shopScope.params);
   return { companies, assignments, shops };
 }
 
@@ -225,10 +238,11 @@ export async function saveShopCompanyAssignment(body = {}, tenantId = "admin") {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) throw new Error("生效日期不能为空");
   const normalizedTenantId = normalizedFinanceTenantId(tenantId);
   const tenantScoped = normalizedTenantId != null;
-  if (tenantScoped) {
+  {
+    const shopScope = await financeShopScope(tenantId);
     const [shopRows, companyRows] = await Promise.all([
-      mysqlQuery("SELECT id FROM shops WHERE id = ? AND tenant_id = ? AND status != 'deleted' LIMIT 1", [shopId, normalizedTenantId]),
-      mysqlQuery("SELECT id FROM finance_companies WHERE id = ? AND tenant_id = ? AND status != 'deleted' LIMIT 1", [companyId, normalizedTenantId])
+      mysqlQuery(`SELECT s.id FROM shops s WHERE s.id = ? AND ${shopScope.sql} AND s.status != 'deleted' LIMIT 1`, [shopId, ...shopScope.params]),
+      mysqlQuery(`SELECT id FROM finance_companies WHERE id = ? ${tenantScoped ? "AND tenant_id = ?" : "AND (tenant_id IS NULL OR tenant_id = 0)"} AND status != 'deleted' LIMIT 1`, [companyId, ...(tenantScoped ? [normalizedTenantId] : [])])
     ]);
     if (!shopRows.length || !companyRows.length) throw Object.assign(new Error("店铺或公司档案不存在，或不属于当前企业。"), { statusCode: 404 });
   }
@@ -242,22 +256,24 @@ export async function financeExpenses(query = {}, tenantId = "admin") {
   const { from, toExclusive } = monthRange(query.month);
   const companyId = requiredId(query.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
+  const shopScope = await financeShopScope(tenantId);
   const tenantFilter = normalizedTenantId == null ? "AND (e.tenant_id IS NULL OR e.tenant_id = 0)" : "AND e.tenant_id = ? AND c.tenant_id = ?";
-  return mysqlQuery(`SELECT e.*, s.name AS shop_name, c.name AS company_name FROM finance_expenses e JOIN finance_companies c ON c.id=e.company_id LEFT JOIN shops s ON s.id=e.shop_id ${normalizedTenantId == null ? "" : "AND s.tenant_id = ?"} WHERE e.company_id=? ${tenantFilter} AND e.expense_date>=? AND e.expense_date<? ORDER BY e.expense_date DESC, e.id DESC`, [...(normalizedTenantId == null ? [] : [normalizedTenantId]), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
+  return mysqlQuery(`SELECT e.*, s.name AS shop_name, c.name AS company_name FROM finance_expenses e JOIN finance_companies c ON c.id=e.company_id LEFT JOIN shops s ON s.id=e.shop_id AND ${shopScope.sql} WHERE e.company_id=? ${tenantFilter} AND e.expense_date>=? AND e.expense_date<? ORDER BY e.expense_date DESC, e.id DESC`, [...shopScope.params, companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
 }
 
 export async function saveFinanceExpense(body = {}, personId = null, tenantId = "admin") {
   await ensureFinanceCenterSchema();
   const companyId = requiredId(body.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
-  if (normalizedTenantId != null) {
+  {
+    const shopScope = await financeShopScope(tenantId);
     const shopId = body.shop_id ? Number(body.shop_id) : null;
     if (shopId) {
-      const shops = await mysqlQuery(`SELECT s.id FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? AND a.tenant_id=? AND a.effective_from<=? AND (a.effective_to IS NULL OR a.effective_to>=?) WHERE s.id=? AND s.tenant_id=? AND s.status!='deleted' LIMIT 1`, [companyId, normalizedTenantId, String(body.expense_date || "").slice(0, 10), String(body.expense_date || "").slice(0, 10), shopId, normalizedTenantId]);
+      const shops = await mysqlQuery(`SELECT s.id FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? ${normalizedTenantId == null ? "AND (a.tenant_id IS NULL OR a.tenant_id=0)" : "AND a.tenant_id=?"} AND a.effective_from<=? AND (a.effective_to IS NULL OR a.effective_to>=?) WHERE s.id=? AND ${shopScope.sql} AND s.status!='deleted' LIMIT 1`, [companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId]), String(body.expense_date || "").slice(0, 10), String(body.expense_date || "").slice(0, 10), shopId, ...shopScope.params]);
       if (!shops.length) throw Object.assign(new Error("费用关联店铺不存在或未归属于当前企业的该公司。"), { statusCode: 404 });
     }
     if (body.id) {
-      const existing = await mysqlQuery("SELECT id FROM finance_expenses WHERE id=? AND company_id=? AND tenant_id=? LIMIT 1", [Number(body.id), companyId, normalizedTenantId]);
+      const existing = await mysqlQuery(`SELECT id FROM finance_expenses WHERE id=? AND company_id=? ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"} LIMIT 1`, [Number(body.id), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
       if (!existing.length) throw Object.assign(new Error("费用记录不存在或不属于当前企业。"), { statusCode: 404 });
     }
   }
@@ -283,16 +299,28 @@ export async function financeVouchers(query = {}, tenantId = "admin") {
   await ensureFinanceCenterSchema();
   const companyId = requiredId(query.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
+  const shopScope = await financeShopScope(tenantId);
   const { from, toExclusive } = monthRange(query.month);
   const tenantFilter = normalizedTenantId == null ? "AND (v.tenant_id IS NULL OR v.tenant_id=0)" : "AND v.tenant_id=? AND c.tenant_id=?";
-  const rows = await mysqlQuery(`SELECT v.*, e.description AS expense_description, e.category AS expense_category, ofi.operation_id, ofi.posting_number, COALESCE(NULLIF(ofi.service_name,''), ofi.service_type) AS finance_item_name FROM finance_vouchers v JOIN finance_companies c ON c.id=v.company_id LEFT JOIN finance_expenses e ON e.id=v.expense_id AND e.company_id=v.company_id ${normalizedTenantId == null ? "" : "AND e.tenant_id=?"} LEFT JOIN ozon_finance_items ofi ON ofi.id=v.finance_item_id ${normalizedTenantId == null ? "" : "AND EXISTS (SELECT 1 FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=v.company_id AND a.tenant_id=? AND a.effective_from<=ofi.operation_date AND (a.effective_to IS NULL OR a.effective_to>=ofi.operation_date) WHERE s.id=ofi.shop_id AND s.tenant_id=?)"} WHERE v.company_id=? ${tenantFilter} AND COALESCE(v.issue_date, DATE(v.created_at))>=? AND COALESCE(v.issue_date, DATE(v.created_at))<? ORDER BY v.created_at DESC`, [...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId, normalizedTenantId]), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
-  return normalizedTenantId == null ? rows : rows.map((voucher) => ({ ...voucher, attachment_url: null }));
+  return mysqlQuery(`SELECT v.*, CASE WHEN pf.id IS NOT NULL THEN v.attachment_url ELSE NULL END AS attachment_url,
+    e.description AS expense_description, e.category AS expense_category, ofi.operation_id, ofi.posting_number, COALESCE(NULLIF(ofi.service_name,''), ofi.service_type) AS finance_item_name
+    FROM finance_vouchers v JOIN finance_companies c ON c.id=v.company_id
+    LEFT JOIN tenant_private_files pf ON pf.storage_name=SUBSTRING_INDEX(v.attachment_url,'/',-1) AND pf.tenant_id=? AND pf.purpose='finance'
+    LEFT JOIN finance_expenses e ON e.id=v.expense_id AND e.company_id=v.company_id ${normalizedTenantId == null ? "AND (e.tenant_id IS NULL OR e.tenant_id=0)" : "AND e.tenant_id=?"}
+    LEFT JOIN ozon_finance_items ofi ON ofi.id=v.finance_item_id AND EXISTS (
+      SELECT 1 FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=v.company_id
+        ${normalizedTenantId == null ? "AND (a.tenant_id IS NULL OR a.tenant_id=0)" : "AND a.tenant_id=?"}
+        AND a.effective_from<=ofi.operation_date AND (a.effective_to IS NULL OR a.effective_to>=ofi.operation_date)
+      WHERE s.id=ofi.shop_id AND ${shopScope.sql})
+    WHERE v.company_id=? ${tenantFilter} AND COALESCE(v.issue_date, DATE(v.created_at))>=? AND COALESCE(v.issue_date, DATE(v.created_at))<? ORDER BY v.created_at DESC`,
+    [shopScope.id, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), ...shopScope.params, companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
 }
 
 export async function financePlatformItems(query = {}, tenantId = "admin") {
   await ensureFinanceCenterSchema();
   const companyId = requiredId(query.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
+  const shopScope = await financeShopScope(tenantId);
   const { from, toExclusive } = monthRange(query.month);
   return mysqlQuery(`
     SELECT ofi.id, ofi.shop_id, s.name AS shop_name, ofi.operation_id, ofi.posting_number, ofi.operation_date,
@@ -301,12 +329,12 @@ export async function financePlatformItems(query = {}, tenantId = "admin") {
       CASE WHEN v.id IS NULL THEN 'unmatched' ELSE v.review_status END AS voucher_status,
       v.id AS voucher_id
     FROM ozon_finance_items ofi
-    JOIN shops s ON s.id=ofi.shop_id ${normalizedTenantId == null ? "" : "AND s.tenant_id=?"}
+    JOIN shops s ON s.id=ofi.shop_id AND ${shopScope.sql}
     JOIN finance_shop_company_assignments a ON a.shop_id=ofi.shop_id AND a.company_id=? AND a.effective_from<? AND (a.effective_to IS NULL OR a.effective_to>=?) ${normalizedTenantId == null ? "AND (a.tenant_id IS NULL OR a.tenant_id=0)" : "AND a.tenant_id=?"}
     LEFT JOIN finance_vouchers v ON v.finance_item_id=ofi.id AND v.company_id=a.company_id ${normalizedTenantId == null ? "AND (v.tenant_id IS NULL OR v.tenant_id=0)" : "AND v.tenant_id=?"}
     WHERE ofi.operation_date>=? AND ofi.operation_date<?
     ORDER BY ofi.operation_date DESC, ofi.id DESC LIMIT 1000
-  `, [...(normalizedTenantId == null ? [] : [normalizedTenantId]), companyId, toExclusive, from, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
+  `, [...shopScope.params, companyId, toExclusive, from, ...(normalizedTenantId == null ? [] : [normalizedTenantId, normalizedTenantId]), from, toExclusive]);
 }
 
 async function refreshExpenseVoucherStatus(expenseId, tenantId = "admin") {
@@ -324,18 +352,19 @@ export async function saveFinanceVoucher(body = {}, personId = null, tenantId = 
   const companyId = requiredId(body.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
   const tenantFilter = normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?";
-  if (normalizedTenantId != null) {
-    if (String(body.attachment_url || "").trim()) throw Object.assign(new Error("企业凭证附件隔离尚未完成，暂不支持关联附件或外部归档地址。"), { statusCode: 403 });
+  await assertFinanceAttachment(body.attachment_url, tenantId);
+  {
+    const shopScope = await financeShopScope(tenantId);
     if (body.expense_id) {
-      const expense = await mysqlQuery("SELECT id FROM finance_expenses WHERE id=? AND company_id=? AND tenant_id=? LIMIT 1", [Number(body.expense_id), companyId, normalizedTenantId]);
+      const expense = await mysqlQuery(`SELECT id FROM finance_expenses WHERE id=? AND company_id=? ${tenantFilter} LIMIT 1`, [Number(body.expense_id), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
       if (!expense.length) throw Object.assign(new Error("关联费用不存在或不属于当前企业及公司。"), { statusCode: 404 });
     }
     if (body.finance_item_id) {
-      const platformItem = await mysqlQuery(`SELECT ofi.id FROM ozon_finance_items ofi JOIN shops s ON s.id=ofi.shop_id AND s.tenant_id=? JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? AND a.tenant_id=? AND a.effective_from<=ofi.operation_date AND (a.effective_to IS NULL OR a.effective_to>=ofi.operation_date) WHERE ofi.id=? LIMIT 1`, [normalizedTenantId, companyId, normalizedTenantId, Number(body.finance_item_id)]);
+      const platformItem = await mysqlQuery(`SELECT ofi.id FROM ozon_finance_items ofi JOIN shops s ON s.id=ofi.shop_id AND ${shopScope.sql} JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? ${normalizedTenantId == null ? "AND (a.tenant_id IS NULL OR a.tenant_id=0)" : "AND a.tenant_id=?"} AND a.effective_from<=ofi.operation_date AND (a.effective_to IS NULL OR a.effective_to>=ofi.operation_date) WHERE ofi.id=? LIMIT 1`, [...shopScope.params, companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId]), Number(body.finance_item_id)]);
       if (!platformItem.length) throw Object.assign(new Error("关联平台流水不存在或不属于当前企业及公司。"), { statusCode: 404 });
     }
     if (body.id) {
-      const existing = await mysqlQuery("SELECT id, expense_id FROM finance_vouchers WHERE id=? AND company_id=? AND tenant_id=? LIMIT 1", [Number(body.id), companyId, normalizedTenantId]);
+      const existing = await mysqlQuery(`SELECT id, expense_id FROM finance_vouchers WHERE id=? AND company_id=? ${tenantFilter} LIMIT 1`, [Number(body.id), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
       if (!existing.length) throw Object.assign(new Error("凭证记录不存在或不属于当前企业。"), { statusCode: 404 });
     }
   }
@@ -391,14 +420,16 @@ export async function financeMonthlyReport(query = {}, tenantId = "admin") {
   const companyId = requiredId(query.company_id, "公司");
   const normalizedTenantId = await requireFinanceCompany(companyId, tenantId);
   const tenantScoped = normalizedTenantId != null;
+  const shopScope = await financeShopScope(tenantId, "finance_tenant_shop");
+  const directShopScope = await financeShopScope(tenantId);
   const { month, from, toExclusive } = monthRange(query.month);
-  const assignmentJoin = `JOIN finance_shop_company_assignments a ON a.shop_id = source.shop_id AND a.company_id = ? AND a.effective_from < ? AND (a.effective_to IS NULL OR a.effective_to >= ?) ${tenantScoped ? "AND a.tenant_id = ?" : "AND (a.tenant_id IS NULL OR a.tenant_id = 0)"} ${tenantScoped ? "JOIN shops finance_tenant_shop ON finance_tenant_shop.id = source.shop_id AND finance_tenant_shop.tenant_id = ?" : ""}`;
-  const assignmentParams = [companyId, toExclusive, from, ...(tenantScoped ? [normalizedTenantId, normalizedTenantId] : [])];
+  const assignmentJoin = `JOIN finance_shop_company_assignments a ON a.shop_id = source.shop_id AND a.company_id = ? AND a.effective_from < ? AND (a.effective_to IS NULL OR a.effective_to >= ?) ${tenantScoped ? "AND a.tenant_id = ?" : "AND (a.tenant_id IS NULL OR a.tenant_id = 0)"} JOIN shops finance_tenant_shop ON finance_tenant_shop.id = source.shop_id AND ${shopScope.sql}`;
+  const assignmentParams = [companyId, toExclusive, from, ...(tenantScoped ? [normalizedTenantId] : []), ...shopScope.params];
   const companyFilter = tenantScoped ? "AND tenant_id = ?" : "AND (tenant_id IS NULL OR tenant_id = 0)";
   const companyParams = tenantScoped ? [companyId, normalizedTenantId] : [companyId];
   const [companyRows, shops, commerceRows, financeRows, adRows, profitRows, expenseRows, voucherRows, periodRows] = await Promise.all([
     mysqlQuery(`SELECT * FROM finance_companies WHERE id=? ${companyFilter}`, companyParams),
-    mysqlQuery(`SELECT DISTINCT s.id, s.name FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? AND a.effective_from<? AND (a.effective_to IS NULL OR a.effective_to>=?) ${tenantScoped ? "AND a.tenant_id=? AND s.tenant_id=?" : "AND (a.tenant_id IS NULL OR a.tenant_id=0)"} ORDER BY s.name`, [companyId, toExclusive, from, ...(tenantScoped ? [normalizedTenantId, normalizedTenantId] : [])]),
+    mysqlQuery(`SELECT DISTINCT s.id, s.name FROM shops s JOIN finance_shop_company_assignments a ON a.shop_id=s.id AND a.company_id=? AND a.effective_from<? AND (a.effective_to IS NULL OR a.effective_to>=?) ${tenantScoped ? "AND a.tenant_id=?" : "AND (a.tenant_id IS NULL OR a.tenant_id=0)"} WHERE ${directShopScope.sql} ORDER BY s.name`, [companyId, toExclusive, from, ...(tenantScoped ? [normalizedTenantId] : []), ...directShopScope.params]),
     mysqlQuery(`SELECT COALESCE(SUM(source.revenue),0) revenue, COALESCE(SUM(source.cancelled_revenue),0) cancelled_revenue, COALESCE(SUM(source.return_revenue),0) return_revenue, COALESCE(SUM(source.return_loss),0) return_loss, COALESCE(SUM(source.effective_orders),0) effective_orders, COALESCE(SUM(source.cancelled_orders),0) cancelled_orders, COALESCE(SUM(source.return_orders),0) return_orders FROM analytics_shop_daily source ${assignmentJoin} WHERE source.date_key>=? AND source.date_key<?`, [...assignmentParams, from, toExclusive]),
     mysqlQuery(`SELECT COALESCE(SUM(CASE WHEN source.accruals_for_sale_cny>0 THEN source.accruals_for_sale_cny ELSE 0 END),0) settlement_revenue, COALESCE(SUM(source.amount_cny),0) net_settlement_cashflow, COALESCE(SUM(ABS(source.sale_commission_cny)),0) commission, COALESCE(SUM(ABS(source.delivery_charge_cny)),0) delivery, COALESCE(SUM(ABS(source.return_delivery_charge_cny)),0) return_delivery, COALESCE(SUM(CASE WHEN source.amount_cny<0 THEN -source.amount_cny ELSE 0 END),0) total_platform_fees, COUNT(*) finance_rows, MAX(source.synced_at) last_synced_at FROM ozon_finance_items source ${assignmentJoin} WHERE source.operation_date>=? AND source.operation_date<?`, [...assignmentParams, from, toExclusive]),
     mysqlQuery(`SELECT COALESCE(SUM(source.spend_cny),0) advertising FROM ozon_ad_sku_daily source ${assignmentJoin} WHERE source.date_key>=? AND source.date_key<?`, [...assignmentParams, from, toExclusive]),

@@ -19,12 +19,12 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export async function uploadImage(req) {
   const file = await readMultipartImage(req);
-  return saveUploadedImage(file);
+  return saveUploadedImage(file, req._session);
 }
 
 export async function uploadShopWatermark(req, shopId) {
   const file = await readMultipartImage(req);
-  return saveShopWatermark({ shopId, ...file });
+  return saveShopWatermark({ shopId, ...file }, req._session);
 }
 
 export async function detectImage(req, readJson) {
@@ -43,7 +43,7 @@ export async function detectImage(req, readJson) {
     padding: body.padding,
     roundCornerTolerance: body.roundCornerTolerance,
     manualBoxes: body.manualBoxes
-  });
+  }, req._session);
 }
 
 export async function enhanceImage(req, readJson) {
@@ -51,7 +51,7 @@ export async function enhanceImage(req, readJson) {
   return enhanceTaskCrops({
     taskId: body.taskId,
     filenames: body.filenames
-  });
+  }, req._session);
 }
 
 export async function convertRatioImage(req, readJson) {
@@ -59,7 +59,7 @@ export async function convertRatioImage(req, readJson) {
   return convertTaskCropsToRatio({
     taskId: body.taskId,
     filenames: body.filenames
-  });
+  }, req._session);
 }
 
 export async function watermarkImage(req, readJson) {
@@ -69,11 +69,11 @@ export async function watermarkImage(req, readJson) {
     shopId: body.shopId,
     filenames: body.filenames,
     options: body.options
-  });
+  }, req._session);
 }
 
-export async function sendTaskImage({ res, writeHead, taskId, filename }) {
-  const file = await getTaskFile(taskId, filename);
+export async function sendTaskImage({ res, writeHead, taskId, filename, session }) {
+  const file = await getTaskFile(taskId, filename, session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -82,8 +82,8 @@ export async function sendTaskImage({ res, writeHead, taskId, filename }) {
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function downloadCrop({ res, writeHead, taskId, filename }) {
-  const file = await getTaskFile(taskId, path.join("crops", filename));
+export async function downloadCrop({ res, writeHead, taskId, filename, session }) {
+  const file = await getTaskFile(taskId, path.join("crops", filename), session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -93,8 +93,8 @@ export async function downloadCrop({ res, writeHead, taskId, filename }) {
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function downloadEnhancedCrop({ res, writeHead, taskId, filename }) {
-  const file = await getTaskFile(taskId, path.join("enhanced", filename));
+export async function downloadEnhancedCrop({ res, writeHead, taskId, filename, session }) {
+  const file = await getTaskFile(taskId, path.join("enhanced", filename), session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -104,8 +104,8 @@ export async function downloadEnhancedCrop({ res, writeHead, taskId, filename })
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function downloadRatioCrop({ res, writeHead, taskId, filename }) {
-  const file = await getTaskFile(taskId, path.join("ratio-3x4", filename));
+export async function downloadRatioCrop({ res, writeHead, taskId, filename, session }) {
+  const file = await getTaskFile(taskId, path.join("ratio-3x4", filename), session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -115,8 +115,8 @@ export async function downloadRatioCrop({ res, writeHead, taskId, filename }) {
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function downloadWatermarkedCrop({ res, writeHead, taskId, filename }) {
-  const file = await getTaskFile(taskId, path.join("watermarked", filename));
+export async function downloadWatermarkedCrop({ res, writeHead, taskId, filename, session }) {
+  const file = await getTaskFile(taskId, path.join("watermarked", filename), session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -126,8 +126,8 @@ export async function downloadWatermarkedCrop({ res, writeHead, taskId, filename
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function sendShopWatermark({ res, writeHead, shopId }) {
-  const file = await getShopWatermarkFile(shopId);
+export async function sendShopWatermark({ res, writeHead, shopId, session }) {
+  const file = await getShopWatermarkFile(shopId, session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -136,8 +136,8 @@ export async function sendShopWatermark({ res, writeHead, shopId }) {
   return streamFile(file.filePath).pipe(res);
 }
 
-export async function downloadZip({ res, writeHead, taskId, batch = "" }) {
-  const zip = await createTaskZip(taskId, batch);
+export async function downloadZip({ res, writeHead, taskId, batch = "", session }) {
+  const zip = await createTaskZip(taskId, batch, session);
   writeHead(res, 200, {
     "Content-Type": "application/zip",
     "Content-Length": zip.buffer.length,
@@ -147,8 +147,8 @@ export async function downloadZip({ res, writeHead, taskId, batch = "" }) {
   return res.end(zip.buffer);
 }
 
-export async function downloadEnhancedZip({ res, writeHead, taskId, batch = "" }) {
-  const zip = await createEnhancedTaskZip(taskId, batch);
+export async function downloadEnhancedZip({ res, writeHead, taskId, batch = "", session }) {
+  const zip = await createEnhancedTaskZip(taskId, batch, session);
   writeHead(res, 200, {
     "Content-Type": "application/zip",
     "Content-Length": zip.buffer.length,
@@ -158,8 +158,8 @@ export async function downloadEnhancedZip({ res, writeHead, taskId, batch = "" }
   return res.end(zip.buffer);
 }
 
-export async function downloadRatioZip({ res, writeHead, taskId, batch = "" }) {
-  const zip = await createRatioTaskZip(taskId, batch);
+export async function downloadRatioZip({ res, writeHead, taskId, batch = "", session }) {
+  const zip = await createRatioTaskZip(taskId, batch, session);
   writeHead(res, 200, {
     "Content-Type": "application/zip",
     "Content-Length": zip.buffer.length,
@@ -169,8 +169,8 @@ export async function downloadRatioZip({ res, writeHead, taskId, batch = "" }) {
   return res.end(zip.buffer);
 }
 
-export async function downloadWatermarkedZip({ res, writeHead, taskId, batch = "" }) {
-  const zip = await createWatermarkedTaskZip(taskId, batch);
+export async function downloadWatermarkedZip({ res, writeHead, taskId, batch = "", session }) {
+  const zip = await createWatermarkedTaskZip(taskId, batch, session);
   writeHead(res, 200, {
     "Content-Type": "application/zip",
     "Content-Length": zip.buffer.length,

@@ -2,17 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 import { createHash } from 'node:crypto';
 
 test('saving an occupied development sequence replaces the previous coordinate', async () => {
   const rows = new Map();
   const source = fs.readFileSync(new URL('../src/services/team-tasks.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '').replaceAll('export async function', 'async function');
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     createHash,
     isMysqlPrimaryEnabled: () => true,
     withMysqlTransaction: async work => work({ execute: async (sql, params) => {
-      if (sql.includes('SELECT dimension,coordinate_hash,sequence_number FROM product_development_heatmap_orders')) {
+      if (sql.startsWith('SELECT dimension,coordinate_hash,sequence_number FROM')) {
         return [[...rows.values()].filter(row => row.period === params[0]).map(row => ({ dimension: row.dimension, coordinate_hash: row.hash, sequence_number: row.sequence }))];
       }
       if (sql.includes('UPDATE product_development_heatmap_orders SET sequence_number=NULL')) {
@@ -31,7 +32,7 @@ test('saving an occupied development sequence replaces the previous coordinate',
       throw new Error(sql);
     } })
   });
-  vm.runInContext(`${source}\nteamTasksSchemaReady=true;`, context);
+  vm.runInContext(`${source}\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null });`, context);
   const period_key = 'month:2026-10';
   const dimension = 'brand';
   const first = JSON.stringify(['automotive', 'TENET', '挡风板', '']);

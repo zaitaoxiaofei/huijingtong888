@@ -2,15 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 
 function harness() {
   const tasks = [{ id: 1, type: 'product_development', active: true, priority: 'medium' }, { id: 2, type: 'product_development', active: true, priority: 'low' }];
   const writes = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     isMysqlPrimaryEnabled: () => true,
     withMysqlTransaction: async callback => callback({ execute: async (sql, params) => {
       writes.push({ sql, params });
-      if (sql.startsWith('SELECT id FROM team_tasks')) {
+      if (sql.startsWith('SELECT id FROM') && sql.includes('FROM team_tasks')) {
         return [tasks.filter(task => params.includes(task.id) && task.active && task.type === 'product_development').map(task => ({ id: task.id }))];
       }
       if (sql.startsWith('UPDATE team_tasks SET priority=')) {
@@ -22,7 +23,7 @@ function harness() {
   });
   const source = fs.readFileSync(new URL('../src/services/team-tasks.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '').replaceAll('export async function', 'async function');
-  vm.runInContext(`${source}\nteamTasksSchemaReady=true;`, context);
+  vm.runInContext(`${source}\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null });`, context);
   return { context, tasks, writes };
 }
 

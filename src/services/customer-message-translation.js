@@ -1,12 +1,15 @@
 import { chatWithAiProvider } from "./ai-provider-settings.js";
+import { assertCustomerMessageAccess } from "./customer-message-tenant-scope.js";
+import { withAiTenantSession } from "./ai-tenant-context.js";
 
 export async function translateCustomerMessageTemplateZh(body = {}) {
+  const { session } = await assertCustomerMessageAccess({ outbound: true });
   const scenario = String(body.scenario || "").trim();
   const label = String(body.label || body.name || scenario || "customer message template").trim();
   const text = String(body.template_text || body.text || "").trim();
   if (!text) return { ok: true, translated_text: "", template_translation: "" };
 
-  const result = await chatWithAiProvider({
+  const result = await withAiTenantSession(session, () => chatWithAiProvider({
     temperature: 0.1,
     maxTokens: 700,
     messages: [
@@ -26,7 +29,8 @@ export async function translateCustomerMessageTemplateZh(body = {}) {
         content: `Scenario: ${label}\n\nTranslate this Russian template into Chinese and preserve all {{variables}}:\n${text}`
       }
     ]
-  });
+  }));
+  await assertCustomerMessageAccess();
   const translated = String(result.content || "")
     .replace(/^```[a-zA-Z]*\s*/g, "")
     .replace(/```$/g, "")

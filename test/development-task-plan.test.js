@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 import { readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable } from "../src/services/development-task-plan.js";
 
 const body = { title: "TENET 钥匙壳开发", type: "product_development", owner_person_id: 7, due_at: "2026-09-30" };
@@ -100,25 +101,25 @@ test("group progress supports direct completion and brand-category SKU entry", (
 function serviceHarness() {
   const writes = [];
   const state = { stored: [], ideaLinks: [], drafts: [{ id: 101, product_name: "T4", sku_count: 12, created_by_person_id: 7 }, { id: 102, product_name: "T7", sku_count: 5, created_by_person_id: 7 }] };
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     Buffer, Date, Set, Map, console,
     isMysqlPrimaryEnabled: () => true,
     readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable,
     aiVehicleCatalog: async () => ({ brands: [{ name: "TENET", models: [{ id: 1, name: "T4" }, { id: 2, name: "T7" }] }] }),
     inventoryProductNamingOptions: async () => ({ rows: [{ value: "钥匙壳" }] }),
     mysqlQuery: async (sql, params = []) => {
-      if (sql.includes("FROM product_development_ideas idea LEFT JOIN product_development_idea_drafts")) return state.ideaLinks;
-      if (sql.includes("FROM people")) return [{ id: 7 }];
+      if (sql.startsWith("SELECT link.idea_id")) return state.ideaLinks;
+      if (sql.startsWith("SELECT id FROM") && sql.includes("FROM people")) return [{ id: 7 }];
       if (sql.includes("FROM listing_drafts")) return state.drafts.filter((row) => params.includes(row.id));
-      if (sql.includes("SELECT id, automation_key FROM team_tasks")) return state.stored;
-      if (sql.includes("SELECT related_object FROM team_tasks")) return state.stored;
+      if (sql.startsWith("SELECT id, automation_key FROM")) return state.stored;
+      if (sql.startsWith("SELECT related_object FROM")) return state.stored;
       if (sql.includes("SELECT t.*")) return state.stored;
       throw new Error(`Unexpected query: ${sql}`);
     },
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); return { insertId: 55 }; }
   });
   const source = fs.readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export async function", "async function");
-  vm.runInContext(`${source}\nteamTasksSchemaReady = true; operationalTasksRefreshedAt = Date.now(); syncDevelopmentIdeaTasks = async () => {};`, context);
+  vm.runInContext(`${source}\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null }); operationalTasksRefreshedAt = Date.now(); syncDevelopmentIdeaTasks = async () => {};`, context);
   return { context, state, writes };
 }
 

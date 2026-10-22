@@ -31,6 +31,7 @@ export function getMysqlPool() {
   if (!mysqlPool) {
     const connectionLimit = effectiveMysqlConnectionLimit();
     mysqlPool = mysql.createPool({
+      ...(process.env.DB_SOCKET_PATH ? { socketPath: process.env.DB_SOCKET_PATH } : {}),
       host: config.dbHost,
       port: config.dbPort,
       user: config.dbUser,

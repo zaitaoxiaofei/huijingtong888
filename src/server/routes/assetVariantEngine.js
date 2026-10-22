@@ -23,7 +23,7 @@ export async function handleAssetVariantEngineRestRoute({ req, res, parts, servi
   if (parts[0] !== "api" || parts[1] !== "asset-variant-engine") return false;
 
   if (req.method === "GET" && parts[2] === "files" && parts[3] && parts[4]) {
-    const file = await services.resolveAssetVariantFile(decodeURIComponent(parts[3]), parts.slice(4).map(decodeURIComponent).join("/"));
+    const file = await services.resolveAssetVariantFile(decodeURIComponent(parts[3]), parts.slice(4).map(decodeURIComponent).join("/"), req._session);
     if (!file) return notFound(res);
     writeHead(res, 200, {
       "Content-Type": file.mime,

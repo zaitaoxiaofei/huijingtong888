@@ -1,5 +1,6 @@
 import { isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
+import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 
 const PLATFORM_API_RESOURCES = new Set([
   "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -18,7 +19,8 @@ const TENANT_SCOPED_SAFE_PATHS = new Set([
 const SHARED_PRICING_READ_PATHS = new Set([
   "tools/pricing/reference-rate",
   "tools/pricing/rfbs-marketplace",
-  "tools/pricing/logistics-rules"
+  "tools/pricing/logistics-rules",
+  "settings/packaging-fee-rule", "exchange-rate/current", "exchange-rates", "stock-warehouse-rules", "order-cancellation-rules"
 ]);
 
 const TENANT_PLUGIN_TOKEN_ROUTES = new Set([
@@ -59,13 +61,14 @@ function isTenantSellerAnalyticsRoute(path, method) {
 
 /**
  * Business APIs are migrated incrementally. Until a route is tenant-aware,
- * non-default tenants must not access the legacy shared business dataset.
+ * Ordinary members, including the default enterprise, use reviewed routes.
+ * Platform administrators retain the legacy platform maintenance surface.
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
   if (isEnterpriseMessageRoute(parts, String(method).toUpperCase())) return tenant?.id && tenant?.slug ? { allowed: true } : { allowed: false, error: "请先选择有效企业后使用私信" };
   if (isPlatformAdmin(session) && PLATFORM_API_RESOURCES.has(parts[1])) return { allowed: true };
-  if (tenant?.slug === "default") return { allowed: true };
+  if (tenant?.slug === "default" && isPlatformAdmin(session)) return { allowed: true };
   if (!tenant?.id || !tenant?.slug) {
     return {
       allowed: false,
@@ -75,6 +78,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   }
 
   const path = parts.slice(1).join("/");
+  if (isTenantPilotRoute(path, method)) return { allowed: true };
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
   const verb = String(method || "GET").toUpperCase();
   const matrixConfigCollection = parts[1] === "asset-variant-engine" && parts.length === 3 && (
@@ -152,16 +156,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantManualOutboundRecord = parts[1] === "inventory" && parts[2] === "manual-outbound-records"
     && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && ["PUT", "DELETE"].includes(verb);
   if (tenantManualOutboundCollection || tenantManualOutboundRecord) return { allowed: true };
-  // The paged order list still uses global procurement coverage and several
-  // unscoped enrichment queries. Keep it closed until that full read path is
-  // tenant-aware; the numeric detail route above has its own scoped handler.
-  if (parts[1] === "orders" && parts.length === 2 && verb === "GET") {
-    return {
-      allowed: false,
-      error: "企业订单列表隔离改造尚未完成，请联系管理员",
-      code: "TENANT_ISOLATION_PENDING"
-    };
-  }
   if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
   if (parts[1] === "fbp-replenishment-orders" && parts.length === 2 && verb === "GET") return { allowed: true };
   const tenantFbpDraftMutation = parts[1] === "fbp-replenishment-orders" && verb === "POST" && (
@@ -193,7 +187,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantFinanceRead = parts[1] === "finance-center" && parts.length === 3
     && ["companies", "report", "expenses", "vouchers", "platform-items", "export"].includes(parts[2]) && verb === "GET";
   const tenantFinanceWrite = parts[1] === "finance-center" && parts.length === 3
-    && ["companies", "shop-assignments", "expenses", "vouchers", "close"].includes(parts[2]) && verb === "POST";
+    && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(parts[2]) && verb === "POST";
   const tenantFinanceExpenseDelete = parts[1] === "finance-center" && parts[2] === "expenses"
     && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "DELETE";
   if (tenantFinanceRead || tenantFinanceWrite || tenantFinanceExpenseDelete) return { allowed: true };

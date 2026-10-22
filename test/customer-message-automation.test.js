@@ -4,6 +4,8 @@ import test from "node:test";
 
 const clientSource = readFileSync(new URL("../src/ozonClient.js", import.meta.url), "utf8");
 const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
+const templateSchemaSource = readFileSync(new URL("../src/services/customer-message-template-schema.js", import.meta.url), "utf8");
+const coreSchemaSource = readFileSync(new URL("../src/services/customer-message-core-schema.js", import.meta.url), "utf8");
 const runtimeSource = readFileSync(new URL("../src/services/mysql-runtime-services.js", import.meta.url), "utf8");
 const serverSource = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
 const routeSource = readFileSync(new URL("../src/server/routes/operations.js", import.meta.url), "utf8");
@@ -18,8 +20,8 @@ test("customer chat client starts an order chat and sends through documented Ozo
 });
 
 test("automatic customer messages are opt-in and gated by verified chat capability", () => {
-  assert.match(serviceSource, /chat_enabled TINYINT\(1\) NOT NULL DEFAULT 0/);
-  assert.match(serviceSource, /chat_capability VARCHAR\(32\) NOT NULL DEFAULT 'unchecked'/);
+  assert.match(coreSchemaSource, /chat_enabled TINYINT\(1\) NOT NULL DEFAULT 0/);
+  assert.match(coreSchemaSource, /chat_capability VARCHAR\(32\) NOT NULL DEFAULT 'unchecked'/);
   assert.match(serviceSource, /cms\.chat_enabled = 1 AND cms\.send_mode = 'auto' AND cms\.chat_capability = 'available'/);
   assert.match(serviceSource, /OZON_CUSTOMER_MESSAGE_SEND_ENABLED !== "1"/);
   assert.match(routeSource, /customer-message-settings\/shop\/check-capability/);
@@ -27,15 +29,15 @@ test("automatic customer messages are opt-in and gated by verified chat capabili
 });
 
 test("three priority messages use durable idempotent delayed tasks", () => {
-  assert.match(serviceSource, /reminder_step INT NOT NULL DEFAULT 1/);
-  assert.match(serviceSource, /UNIQUE KEY uniq_customer_message_task \(shop_id, order_id, scenario, reminder_step\)/);
-  assert.match(serviceSource, /trigger_condition VARCHAR\(64\) NOT NULL DEFAULT ''/);
-  assert.match(serviceSource, /delay_hours INT NOT NULL DEFAULT 1/);
+  assert.match(coreSchemaSource, /reminder_step INT NOT NULL DEFAULT 1/);
+  assert.match(coreSchemaSource, /UNIQUE KEY uniq_customer_message_task \(shop_id, order_id, scenario, reminder_step\)/);
+  assert.match(templateSchemaSource, /trigger_condition VARCHAR\(64\) NOT NULL DEFAULT ''/);
+  assert.match(templateSchemaSource, /delay_hours INT NOT NULL DEFAULT 1/);
   assert.match(serviceSource, /SELECT 1 AS reminder_step UNION ALL SELECT 2 UNION ALL SELECT 3/);
   assert.match(serviceSource, /CASE schedule\.reminder_step WHEN 1 THEN cmt\.delay_hours WHEN 2 THEN 24 ELSE 72 END\) HOUR/);
-  assert.match(serviceSource, /pickup_automation_enabled_at DATETIME NULL/);
-  assert.match(serviceSource, /review_automation_enabled_at DATETIME NULL/);
-  assert.match(serviceSource, /passport_automation_enabled_at DATETIME NULL/);
+  assert.match(coreSchemaSource, /pickup_automation_enabled_at DATETIME NULL/);
+  assert.match(coreSchemaSource, /review_automation_enabled_at DATETIME NULL/);
+  assert.match(coreSchemaSource, /passport_automation_enabled_at DATETIME NULL/);
   assert.match(serviceSource, /COALESCE\(o\.last_status_changed_at, o\.ordered_at\) >= cms\.pickup_automation_enabled_at/);
   assert.match(serviceSource, /review_automation_enabled_at IS NOT NULL/);
   assert.match(serviceSource, /passport_automation_enabled_at IS NOT NULL/);
@@ -77,7 +79,7 @@ test("customer message dispatcher scans every ten minutes and UI exposes status"
   assert.match(serverSource, /key: "customer_message_dispatch"[\s\S]*intervalMinutes: 10/);
   assert.match(serverSource, /FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set\(\[[\s\S]*"customer_message_dispatch"/);
   assert.match(serverSource, /services\.processCustomerMessageTasks\(\{ limit: 30 \}\)/);
-  assert.match(serverSource, /const result = await services\.processCustomerMessageTasks[\s\S]*const webhookResult = await services\.processOzonWebhookEvents\(\{ limit: 10 \}\)/);
+  assert.match(serverSource, /runTenantScheduledWork\(tenantId => runCustomerMessageTenantScheduledOperation\(tenantId, async \(\) => \{\s*const tasks = await services\.processCustomerMessageTasks\(\{ limit: 30 \}\);\s*const webhooks = await services\.processOzonWebhookEvents\(\{ limit: 10 \}\)/);
   assert.match(viewSource, /消息模板/);
   assert.match(viewSource, /发送记录/);
   assert.doesNotMatch(viewSource, /店铺权限/);
@@ -123,8 +125,8 @@ test("one public Ozon webhook identifies shops and stores idempotent events", ()
   assert.match(serviceSource, /ozon_seller_id=\?/);
   assert.match(serviceSource, /syncOzonPostingsByNumberMysql/);
   assert.match(serviceSource, /TYPE_POSTING_CANCELLED/);
-  assert.match(serviceSource, /function scheduleOzonWebhookDrainMysql\(delayMs = 0\)/);
-  assert.match(serviceSource, /processOzonWebhookEventsMysql\(\{ limit: 10 \}\)/);
+  // Tenant-scoped queued dispatch and no implicit global drain are verified with
+  // actual SQL and service calls in tenant-customer-messages-mysql.test.js.
   assert.match(serviceSource, /reason: "already_processing"/);
   assert.doesNotMatch(serviceSource, /processOzonWebhookEventsMysql\(\{ limit: 1, event_key: eventKey \}\)/);
   assert.doesNotMatch(settingsViewSource, /https:\/\/erp\.hjt888\.xyz\/api\/webhooks\/ozon/);
@@ -157,8 +159,8 @@ test("template editor inserts variables and assigns each template to selected sh
   assert.match(serviceSource, /deleteCustomerMessageTemplateMysql/);
   assert.match(serviceSource, /label: "护照资料提醒"/);
   assert.match(serviceSource, /label: "超时发货提醒"/);
-  assert.match(serviceSource, /customer_message_templates \(scenario, name, label, enabled/);
-  assert.match(serviceSource, /enabled TINYINT\(1\) NOT NULL DEFAULT 0/);
+  assert.match(serviceSource, /customer_message_templates \(tenant_id, scenario, name, label, enabled/);
+  assert.match(templateSchemaSource, /enabled TINYINT\(1\) NOT NULL DEFAULT 0/);
   assert.match(routeSource, /req\.method === "DELETE".*parts\[1\] === "customer-message-settings".*parts\[2\] === "template"/s);
 });
 

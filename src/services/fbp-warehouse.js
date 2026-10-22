@@ -1,13 +1,16 @@
-export async function loadWarehouseFacts(query, productIds, localPredicate) {
+import { inventoryTenantSql } from "./inventory-tenant-scope.js";
+
+export async function loadWarehouseFacts(query, productIds, localPredicate, scope = null) {
   const ids = [...new Set(productIds.map(Number).filter(Boolean))];
   if (!ids.length) return new Map();
   const marks = ids.map(() => '?').join(',');
   const [stock, incoming, transfers, reserved] = await Promise.all([
     query(`SELECT product_id, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id IN (${marks}) AND status = 'posted' AND ${localPredicate}
+        ${scope ? `AND ${inventoryTenantSql(scope)}` : ""}
         AND source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release') GROUP BY product_id`, ids),
     query(`SELECT product_id, SUM(quantity) AS quantity FROM inbound_records
-      WHERE product_id IN (${marks}) AND status = 'pending_arrival' GROUP BY product_id`, ids),
+      WHERE product_id IN (${marks}) AND status = 'pending_arrival' ${scope ? `AND ${inventoryTenantSql(scope)}` : ""} GROUP BY product_id`, ids),
     query(`SELECT * FROM (
       SELECT ftr.product_id, ftr.shop_id, ftr.ozon_sku, ftr.quantity, ftr.listed_quantity, ftr.status, ftr.shipped_at,
         IF(completed_order.status = 'completed', 1, 0) AS completed_replenishment,
@@ -17,10 +20,13 @@ export async function loadWarehouseFacts(query, productIds, localPredicate) {
       LEFT JOIN fbp_replenishment_orders completed_order
         ON ftr.source_type = 'fbp_replenishment'
         AND ftr.source_ref LIKE CONCAT('fbp_replenishment:', completed_order.id, ':%')
+        AND completed_order.shop_id = ftr.shop_id
       WHERE ftr.product_id IN (${marks})
+        ${scope ? `AND EXISTS (SELECT 1 FROM products warehouse_product WHERE warehouse_product.id = ftr.product_id AND ${inventoryTenantSql(scope, "warehouse_product")})
+          AND (ftr.shop_id IS NULL OR EXISTS (SELECT 1 FROM shops warehouse_shop WHERE warehouse_shop.id = ftr.shop_id AND ${inventoryTenantSql(scope, "warehouse_shop")}))` : ""}
         AND ftr.status NOT IN ('draft', 'cancelled') AND ftr.shipped_at IS NOT NULL
       ) shipments WHERE latest_product = 1 OR latest_sku = 1 OR status IN ('sent', 'in_transit', 'received')`, ids),
-    loadFbpReservations(query, ids)
+    loadFbpReservations(query, ids, scope)
   ]);
   const result = new Map(ids.map(id => [id, { ledger_stock: 0, procurement_incoming: 0, fbp_pending: 0, reserved_fbp: 0, last_shipped_qty: 0, last_shipped_at: null, sku_shipments: {} }]));
   for (const row of stock) result.get(Number(row.product_id)).ledger_stock = Number(row.quantity);
@@ -74,11 +80,13 @@ export async function appendPrintRecord(connection, body, userId, expectedShopId
   await connection.execute('UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [orderId]);
   return { ok: true, barcode_printed_qty: Number(rows[0].barcode_printed_qty || 0) + quantity };
 }
-export async function loadFbpReservations(query, productIds = []) {
+export async function loadFbpReservations(query, productIds = [], scope = null) {
   const ids = [...new Set(productIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
   return query(`SELECT i.product_id, SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)) AS quantity
-    FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
+    FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id AND o.shop_id = i.shop_id
     LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
     WHERE o.status IN ('approved', 'ozon_created')${ids.length ? ` AND i.product_id IN (${ids.map(() => '?').join(',')})` : ''}
+      ${scope ? `AND EXISTS (SELECT 1 FROM shops reservation_shop WHERE reservation_shop.id = o.shop_id AND ${inventoryTenantSql(scope, "reservation_shop")})
+        AND EXISTS (SELECT 1 FROM products reservation_product WHERE reservation_product.id = i.product_id AND ${inventoryTenantSql(scope, "reservation_product")})` : ""}
     GROUP BY i.product_id`, ids);
 }

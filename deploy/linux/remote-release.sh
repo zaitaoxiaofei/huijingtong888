@@ -232,9 +232,12 @@ install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
 if [[ "$run_db_maintenance" == "1" ]]; then
 for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
+  migrate-tenant-product-relations.mjs \
   migrate-tenant-sku-mappings.mjs \
   migrate-tenant-logistics-rules.mjs \
   migrate-tenant-asset-variant-config.mjs \
+  migrate-tenant-finance-center.mjs \
+  migrate-tenant-inventory-procurement.mjs \
   migrate-enterprise-messages.mjs; do
   if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
     continue
@@ -243,8 +246,33 @@ for tenant_migration in \
   # shellcheck disable=SC1090
   source "$env_file"
   set +a
-  (cd "$staging_dir" && node "scripts/$tenant_migration" --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  migration_args=(--apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  if [[ "$tenant_migration" == "migrate-tenant-inventory-procurement.mjs" ]]; then
+    migration_args+=(--assign-legacy-platform-default)
+  fi
+  (cd "$staging_dir" && node "scripts/$tenant_migration" "${migration_args[@]}")
 done
+
+# Explicit database selection and a read-only plan precede the task ownership DDL.
+for tenant_task_migration in migrate-tenant-team-tasks.mjs migrate-tenant-order-heatmap.mjs migrate-tenant-material-assets.mjs migrate-tenant-system-notifications.mjs migrate-tenant-customer-messages.mjs migrate-tenant-vehicle-catalog.mjs; do
+  if [[ -f "$staging_dir/scripts/$tenant_task_migration" ]]; then
+    task_migration_args=()
+    if [[ "$tenant_task_migration" == "migrate-tenant-customer-messages.mjs" ]]; then
+      task_migration_args+=(--assign-legacy-customer-default)
+    fi
+    (cd "$staging_dir" && node "scripts/$tenant_task_migration" --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+    (cd "$staging_dir" && node "scripts/$tenant_task_migration" --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock "${task_migration_args[@]}")
+  fi
+done
+
+# Pilot business boundaries are verified before changing the active release.
+# The private-file migration never creates memberships or guesses customer ownership.
+(cd "$staging_dir" && node scripts/migrate-tenant-ai-background.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+(cd "$staging_dir" && node scripts/migrate-tenant-ai-background.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+(cd "$staging_dir" && node scripts/migrate-tenant-private-files.mjs --mysql-admin-socket=/var/run/mysqld/mysqld.sock \
+  --legacy-root="$shared_root/uploads/runtime/team-attachments" --legacy-root="$shared_root/uploads/public/team-attachments")
+(cd "$staging_dir" && node scripts/migrate-tenant-private-files.mjs --apply --backfill-legacy-default --mysql-admin-socket=/var/run/mysqld/mysqld.sock \
+  --legacy-root="$shared_root/uploads/runtime/team-attachments" --legacy-root="$shared_root/uploads/public/team-attachments")
 
 if [[ "$run_db_init" == "1" && -f "$staging_dir/scripts/apply-ogl-rates.mjs" ]]; then
   set -a
@@ -319,6 +347,12 @@ done
 if [[ "$health_ok" != "1" ]]; then
   journalctl -u ozon-erp -n 80 --no-pager >&2 || true
   false
+fi
+
+# Capture files uploaded by the old default-only writer during candidate warmup.
+if [[ "$run_db_maintenance" == "1" ]]; then
+  (cd "$release_dir" && node scripts/migrate-tenant-private-files.mjs --apply --backfill-legacy-default --mysql-admin-socket=/var/run/mysqld/mysqld.sock \
+    --legacy-root="$shared_root/uploads/runtime/team-attachments" --legacy-root="$shared_root/uploads/public/team-attachments")
 fi
 
 # Keep the validated candidate alive as Nginx's hot backup. The next release

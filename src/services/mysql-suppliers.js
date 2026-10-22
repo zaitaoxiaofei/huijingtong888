@@ -1,5 +1,6 @@
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { getCachedMasterData, invalidateMasterDataCachePrefix } from "./mysql-master-data-cache.js";
+import { resolveInventoryTenantScope } from "./inventory-tenant-scope.js";
 
 function ensureMysqlSuppliersEnabled() {
   if (!isMysqlPrimaryEnabled()) {
@@ -18,18 +19,6 @@ async function mysqlQueryOne(sql, params = []) {
   return rows[0] || null;
 }
 
-function supplierTenantScope(tenantId, hasTenantColumn, alias = "s") {
-  const normalized = String(tenantId ?? "").trim();
-  if (normalized === "admin") return { sql: hasTenantColumn ? `${alias}.tenant_id IS NULL` : "1 = 1", params: [] };
-  const tenantPk = Number(normalized);
-  if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
-    const error = new Error("当前企业上下文无效，无法访问供应商");
-    error.statusCode = 403;
-    throw error;
-  }
-  return { sql: `${alias}.tenant_id = ?`, params: [tenantPk] };
-}
-
 let supplierTenantSchemaPromise = null;
 async function hasSupplierTenantSchema() {
   if (!supplierTenantSchemaPromise) {
@@ -45,12 +34,13 @@ async function hasSupplierTenantSchema() {
 
 async function resolveSupplierTenantScope(tenantId, alias = "s") {
   const hasTenantColumn = await hasSupplierTenantSchema();
-  if (!hasTenantColumn && String(tenantId) !== "admin") {
+  if (!hasTenantColumn) {
     const error = new Error("供应商企业隔离暂不可用：suppliers.tenant_id 尚未迁移，请管理员先完成供应商租户迁移。");
     error.statusCode = 503;
     throw error;
   }
-  return { hasTenantColumn, scope: supplierTenantScope(tenantId, hasTenantColumn, alias) };
+  const tenant = await resolveInventoryTenantScope(tenantId);
+  return { hasTenantColumn, tenant, scope: tenant.predicate(alias) };
 }
 
 export async function suppliersMysql(query = {}, tenantId = "admin") {
@@ -126,12 +116,13 @@ async function attachProductCounts(rows, tenantId, hasTenantColumn) {
   }
 
   const placeholders = supplierIds.map(() => "?").join(", ");
-  const productScope = !hasTenantColumn ? "1 = 1" : String(tenantId) === "admin" ? "tenant_id IS NULL" : "tenant_id = ?";
-  const countParams = !hasTenantColumn || String(tenantId) === "admin" ? supplierIds : [Number(tenantId), ...supplierIds];
+  const tenant = await resolveInventoryTenantScope(tenantId);
+  const productScope = tenant.predicate();
+  const countParams = [...productScope.params, ...supplierIds];
   const counts = await mysqlQuery(`
     SELECT supplier_id, COUNT(*) AS product_count
     FROM products
-    WHERE active = 1 AND ${productScope} AND supplier_id IN (${placeholders})
+    WHERE active = 1 AND ${productScope.sql} AND supplier_id IN (${placeholders})
     GROUP BY supplier_id
   `, countParams);
   const countMap = new Map(
@@ -146,7 +137,7 @@ async function attachProductCounts(rows, tenantId, hasTenantColumn) {
 
 export async function createSupplierMysql(body = {}, tenantId = "admin") {
   ensureMysqlSuppliersEnabled();
-  const { hasTenantColumn } = await resolveSupplierTenantScope(tenantId);
+  const { hasTenantColumn, tenant } = await resolveSupplierTenantScope(tenantId);
   const name = requiredText(body.name, "Supplier name is required");
   const contactPerson = String(body.contact_person || "");
   const contactPhone = String(body.contact_phone || "");
@@ -157,7 +148,7 @@ export async function createSupplierMysql(body = {}, tenantId = "admin") {
     ? await mysqlExecute(`
         INSERT INTO suppliers (tenant_id, name, contact_person, contact_phone, wechat_id, business_note, status)
         VALUES (?, ?, ?, ?, ?, ?, 'active')
-      `, [String(tenantId) === "admin" ? null : Number(tenantId), name, contactPerson, contactPhone, wechatId, businessNote])
+      `, [tenant.id, name, contactPerson, contactPhone, wechatId, businessNote])
     : await mysqlExecute(`
         INSERT INTO suppliers (name, contact_person, contact_phone, wechat_id, business_note, status)
         VALUES (?, ?, ?, ?, ?, 'active')
@@ -171,7 +162,7 @@ export async function updateSupplierMysql(id, body = {}, tenantId = "admin") {
   ensureMysqlSuppliersEnabled();
   const { scope } = await resolveSupplierTenantScope(tenantId);
   const supplierId = Number(id);
-  const existing = await mysqlQueryOne(`SELECT * FROM suppliers WHERE id = ? AND ${scope.sql}`, [supplierId, ...scope.params]);
+  const existing = await mysqlQueryOne(`SELECT s.* FROM suppliers s WHERE s.id = ? AND ${scope.sql}`, [supplierId, ...scope.params]);
   if (!existing) throw new Error("Supplier not found");
 
   const payload = [
@@ -185,10 +176,10 @@ export async function updateSupplierMysql(id, body = {}, tenantId = "admin") {
   ];
 
   await mysqlExecute(`
-    UPDATE suppliers SET
+    UPDATE suppliers s SET
       name = ?, contact_person = ?, contact_phone = ?,
       wechat_id = ?, business_note = ?
-    WHERE id = ? AND ${scope.sql}
+    WHERE s.id = ? AND ${scope.sql}
   `, payload);
 
   invalidateSupplierCache();
@@ -197,18 +188,19 @@ export async function updateSupplierMysql(id, body = {}, tenantId = "admin") {
 
 export async function deleteSupplierMysql(id, tenantId = "admin") {
   ensureMysqlSuppliersEnabled();
-  const { hasTenantColumn, scope } = await resolveSupplierTenantScope(tenantId);
+  const { tenant, scope } = await resolveSupplierTenantScope(tenantId);
   const supplierId = Number(id);
+  const productScope = tenant.predicate();
   const linkedProducts = await mysqlQueryOne(
-    `SELECT COUNT(*) AS count FROM products WHERE supplier_id = ? AND active = 1 AND ${!hasTenantColumn ? "1 = 1" : String(tenantId) === "admin" ? "tenant_id IS NULL" : "tenant_id = ?"}`,
-    !hasTenantColumn || String(tenantId) === "admin" ? [supplierId] : [supplierId, Number(tenantId)]
+    `SELECT COUNT(*) AS count FROM products WHERE supplier_id = ? AND active = 1 AND ${productScope.sql}`,
+    [supplierId, ...productScope.params]
   );
 
   if (Number(linkedProducts?.count || 0) > 0) {
     throw new Error(`Supplier still has ${linkedProducts.count} active products`);
   }
 
-  const result = await mysqlExecute(`UPDATE suppliers SET status = 'inactive' WHERE id = ? AND ${scope.sql}`, [supplierId, ...scope.params]);
+  const result = await mysqlExecute(`UPDATE suppliers s SET status = 'inactive' WHERE s.id = ? AND ${scope.sql}`, [supplierId, ...scope.params]);
   if (!Number(result.affectedRows || 0)) throw new Error("Supplier not found");
   invalidateSupplierCache();
   return { ok: true };

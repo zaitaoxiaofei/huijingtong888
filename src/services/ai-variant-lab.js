@@ -10,6 +10,9 @@ import { aiImageRuntimePoolConfig } from "./ai-provider-settings.js";
 import { materializeListingMediaAssetUrl } from "./listing-automation.js";
 import { putContentAddressedObject } from "./object-storage.js";
 import { adaptiveAiImageConcurrency, aiImageRuntimeMetrics } from "./ai-image-runtime-limiter.js";
+import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { assertBusinessTaskPermission, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
 
 const DEFAULT_TEMPLATE_KEY = "generic_vehicle_accessory_variant";
 const SILL_PLATE_TEMPLATE_KEY = "sill_plate_vehicle_variant";
@@ -67,7 +70,14 @@ const IMAGE_TEMPLATE_PROFILES = {
   }
 };
 
+function aiTenantParams(params, index = 0) {
+  return [...params.slice(0, index), aiTenantId(), ...params.slice(index)];
+}
+
+function batchImageRuntimeKey(jobNo) { return `${aiTenantId()}:${jobNo}`; }
+
 export async function aiVariantLabAnalyzeImage(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabAnalyzeImage(body, session));
   await ensureAiVariantLabSchema();
   const businessMode = cleanText(body.businessMode || body.business_mode || "vehicle_model_variant");
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.imagePath || "");
@@ -113,8 +123,8 @@ export async function aiVariantLabAnalyzeImage(body = {}, session = {}) {
   const analysisNo = body.analysisNo || body.analysis_no || makeNo("AVL-A");
   await mysqlExecute(`
     INSERT INTO ai_variant_lab_analyses
-    (analysis_no, source_image_url, source_product_id, business_mode, model, usage_json, analysis_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, analysis_no, source_image_url, source_product_id, business_mode, model, usage_json, analysis_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       source_image_url = VALUES(source_image_url),
       source_product_id = VALUES(source_product_id),
@@ -123,7 +133,7 @@ export async function aiVariantLabAnalyzeImage(body = {}, session = {}) {
       usage_json = VALUES(usage_json),
       analysis_json = VALUES(analysis_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     analysisNo,
     sourceImageUrl,
     sourceProductId,
@@ -132,7 +142,7 @@ export async function aiVariantLabAnalyzeImage(body = {}, session = {}) {
     JSON.stringify(result.usage || {}),
     JSON.stringify(enrichedAnalysis),
     personId(session)
-  ]);
+  ], 0));
   return {
     ok: true,
     analysis_no: analysisNo,
@@ -143,7 +153,8 @@ export async function aiVariantLabAnalyzeImage(body = {}, session = {}) {
   };
 }
 
-export async function aiVariantLabAnalysisLookup(body = {}) {
+export async function aiVariantLabAnalysisLookup(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabAnalysisLookup(body, session));
   await ensureAiVariantLabSchema();
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.imagePath || "");
   const sourceProductId = cleanText(body.sourceProductId || body.source_product_id || "");
@@ -152,6 +163,7 @@ export async function aiVariantLabAnalysisLookup(body = {}) {
 }
 
 export async function aiVariantLabPlanVariant(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabPlanVariant(body, session));
   await ensureAiVariantLabSchema();
   const analysis = await resolveAnalysis(body);
   const targetVariantValue = cleanText(body.targetVariantValue || body.target_variant_value || body.targetModel || body.target_model);
@@ -189,8 +201,8 @@ export async function aiVariantLabPlanVariant(body = {}, session = {}) {
   const planNo = body.planNo || body.plan_no || makeNo("AVL-P");
   await mysqlExecute(`
     INSERT INTO ai_variant_lab_plans
-    (plan_no, analysis_no, source_variant_value, target_variant_value, template_key, model, usage_json, plan_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, plan_no, analysis_no, source_variant_value, target_variant_value, template_key, model, usage_json, plan_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       analysis_no = VALUES(analysis_no),
       source_variant_value = VALUES(source_variant_value),
@@ -200,7 +212,7 @@ export async function aiVariantLabPlanVariant(body = {}, session = {}) {
       usage_json = VALUES(usage_json),
       plan_json = VALUES(plan_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     planNo,
     cleanText(body.analysisNo || body.analysis_no || ""),
     enrichedPlan.source_variant_value,
@@ -210,7 +222,7 @@ export async function aiVariantLabPlanVariant(body = {}, session = {}) {
     JSON.stringify(result.usage || {}),
     JSON.stringify(enrichedPlan),
     personId(session)
-  ]);
+  ], 0));
   return {
     ok: true,
     plan_no: planNo,
@@ -222,6 +234,7 @@ export async function aiVariantLabPlanVariant(body = {}, session = {}) {
 }
 
 export async function aiVariantLabGenerateCopyContract(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabGenerateCopyContract(body, session));
   const plan = body.plan || await resolvePlan(body);
   const analysis = body.analysis || await resolveAnalysis(body).catch(() => ({}));
   const contract = buildCopyContract(plan || {}, analysis || {}, body);
@@ -233,6 +246,7 @@ export async function aiVariantLabGenerateCopyContract(body = {}, session = {}) 
 }
 
 export async function aiVariantLabBatchPlan(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabBatchPlan(body, session));
   await ensureAiVariantLabSchema();
   const targets = normalizeTargetValues(body.targetModels || body.target_models || body.targets);
   if (!targets.length) throw statusError("targetModels is required", 400);
@@ -314,8 +328,8 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
   };
   await mysqlExecute(`
     INSERT INTO ai_variant_lab_batch_jobs
-    (job_no, job_type, analysis_no, source_product_id, source_variant_value, target_count, status, budget_cny, image_concurrency, request_json, result_json, usage_json, cost_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, job_no, job_type, analysis_no, source_product_id, source_variant_value, target_count, status, budget_cny, image_concurrency, request_json, result_json, usage_json, cost_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       analysis_no = VALUES(analysis_no),
       source_product_id = VALUES(source_product_id),
@@ -329,7 +343,7 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
       usage_json = VALUES(usage_json),
       cost_json = VALUES(cost_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     jobNo,
     "variant_batch",
     jobPayload.analysis_no,
@@ -348,7 +362,7 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
     JSON.stringify(result.usage || {}),
     JSON.stringify({ estimated_text_cny: estimateTextCostCny(result.usage), image_spend_cny: 0 }),
     personId(session)
-  ]);
+  ], 0));
   await replaceBatchItems(jobNo, items);
   return {
     ok: true,
@@ -364,6 +378,7 @@ export async function aiVariantLabBatchPlan(body = {}, session = {}) {
 }
 
 export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabBatchRunImages(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
@@ -380,16 +395,16 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
     ? await mysqlQuery(`
     SELECT item_no, target_variant_value, status, item_json
     FROM ai_variant_lab_batch_items
-    WHERE job_no = ? AND ${runnableStatusSql}
+    WHERE tenant_id = ? AND job_no = ? AND ${runnableStatusSql}
     ORDER BY sort_order ASC, id ASC
-  `, [jobNo])
+  `, aiTenantParams([jobNo], 0))
     : await mysqlQuery(`
     SELECT item_no, target_variant_value, status, item_json
     FROM ai_variant_lab_batch_items
-    WHERE job_no = ? AND ${runnableStatusSql}
+    WHERE tenant_id = ? AND job_no = ? AND ${runnableStatusSql}
     ORDER BY sort_order ASC, id ASC
     LIMIT ?
-  `, [jobNo, limit]);
+  `, aiTenantParams([jobNo, limit], 0));
   const runnableRows = selectedKeys.size
     ? rows.filter((row) => selectedKeys.has(row.item_no) || selectedKeys.has(row.target_variant_value))
     : rows;
@@ -399,7 +414,7 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
     const persistedItem = applyItemOverride(parseStoredJson(row.item_json, {}), overrideByKey.get(row.item_no) || overrideByKey.get(row.target_variant_value));
     const item = await finalizeBatchImageItemForRun(persistedItem);
     if (overrideByKey.has(row.item_no) || overrideByKey.has(row.target_variant_value)) {
-      await mysqlExecute("UPDATE ai_variant_lab_batch_items SET target_variant_value = ?, item_json = ?, updated_at = CURRENT_TIMESTAMP WHERE item_no = ?", [cleanText(persistedItem.target_variant_value || row.target_variant_value), JSON.stringify(persistedItem), row.item_no]);
+      await mysqlExecute("UPDATE ai_variant_lab_batch_items SET target_variant_value = ?, item_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND item_no = ?", aiTenantParams([cleanText(persistedItem.target_variant_value || row.target_variant_value), JSON.stringify(persistedItem), row.item_no], 2));
       row.target_variant_value = cleanText(persistedItem.target_variant_value || row.target_variant_value);
     }
     queuedRows.push({ ...row, item_json: JSON.stringify(item) });
@@ -425,21 +440,21 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
           image_result_json = NULL,
           error_message = '',
           updated_at = CURRENT_TIMESTAMP
-      WHERE item_no = ?
-    `, [row.target_variant_value, JSON.stringify(item), row.item_no]);
+      WHERE tenant_id = ? AND item_no = ?
+    `, aiTenantParams([row.target_variant_value, JSON.stringify(item), row.item_no], 2));
   }
   if (!execute) {
-    await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [
+    await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([
       "image_dry_run",
       JSON.stringify({ last_results: results }),
       jobNo
-    ]);
+    ], 2));
     return { ok: true, job_no: jobNo, execute, summary: await summarizeBatchJob(jobNo), results, session_person_id: personId(session) };
   }
   const queueConfig = await resolveImageRuntimeQueueConfig({
     imageConcurrency: positiveInteger(body.imageConcurrency || body.image_concurrency, 20)
   });
-  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [
+  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([
     "generating_images",
     JSON.stringify({
       mode: "background",
@@ -454,7 +469,7 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
       image_channel_capacity: queueConfig.channelCapacity
     }),
     jobNo
-  ]);
+  ], 2));
   const started = startBatchImageBackgroundJob(jobNo, {
     rows: queuedRows,
     sourceImageUrl,
@@ -481,15 +496,16 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
 }
 
 export async function aiVariantLabBatchResumeImages(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabBatchResumeImages(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
   const jobs = await mysqlQuery(`
     SELECT job_no, result_json, image_concurrency, created_by_person_id
     FROM ai_variant_lab_batch_jobs
-    WHERE job_no = ?
+    WHERE tenant_id = ? AND job_no = ?
     LIMIT 1
-  `, [jobNo]);
+  `, aiTenantParams([jobNo], 0));
   if (!jobs.length) throw statusError(`batch job not found: ${jobNo}`, 404);
   const job = jobs[0];
   const previousResult = parseStoredJson(job.result_json, {});
@@ -498,11 +514,11 @@ export async function aiVariantLabBatchResumeImages(body = {}, session = {}) {
     SET status = 'queued_image',
         error_message = '已继续等待，将使用原服务商任务号拉回图片，不重复提交生图',
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ? AND status = 'provider_pending'
-  `, [jobNo]);
+    WHERE tenant_id = ? AND job_no = ? AND status = 'provider_pending'
+  `, aiTenantParams([jobNo], 0));
   const summary = await summarizeBatchJob(jobNo);
   if (!summary.pending) return { ok: true, job_no: jobNo, resumed_count: 0, summary };
-  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [jobNo]);
+  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([jobNo], 0));
   const started = startBatchImageBackgroundJob(jobNo, {
     sourceImageUrl: cleanText(previousResult.source_image_url || ""),
     ratio: previousResult.ratio || "3:4",
@@ -520,17 +536,17 @@ export async function aiVariantLabBatchResumeImages(body = {}, session = {}) {
 }
 
 function startBatchImageBackgroundJob(jobNo, options = {}) {
-  if (runningBatchImageJobs.has(jobNo)) {
-    pendingBatchImageJobWakeups.add(jobNo);
+  if (runningBatchImageJobs.has(batchImageRuntimeKey(jobNo))) {
+    pendingBatchImageJobWakeups.add(batchImageRuntimeKey(jobNo));
     return false;
   }
-  runningBatchImageJobs.add(jobNo);
+  runningBatchImageJobs.add(batchImageRuntimeKey(jobNo));
   Promise.resolve()
     .then(() => runBatchImageBackgroundJob(jobNo, options))
     .catch(async (error) => {
       console.error("[ai-variant-lab] background image batch failed", { jobNo, error: error?.message || error });
       const summary = await summarizeBatchJob(jobNo).catch(() => ({}));
-      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [
+      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([
         "failed",
         JSON.stringify({
           source_image_url: cleanText(options.sourceImageUrl || ""),
@@ -541,25 +557,29 @@ function startBatchImageBackgroundJob(jobNo, options = {}) {
           failed_at: new Date().toISOString()
         }),
         jobNo
-      ]).catch(() => {});
+      ], 2)).catch(() => {});
     })
     .finally(() => {
-      const shouldWake = pendingBatchImageJobWakeups.has(jobNo);
-      pendingBatchImageJobWakeups.delete(jobNo);
-      runningBatchImageJobs.delete(jobNo);
+      const shouldWake = pendingBatchImageJobWakeups.has(batchImageRuntimeKey(jobNo));
+      pendingBatchImageJobWakeups.delete(batchImageRuntimeKey(jobNo));
+      runningBatchImageJobs.delete(batchImageRuntimeKey(jobNo));
       if (shouldWake) startBatchImageBackgroundJob(jobNo, options);
     });
   return true;
 }
 
 async function runBatchImageBackgroundJob(jobNo, options = {}) {
+  const jobs = await mysqlQuery("SELECT tenant_id, created_by_person_id FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", [aiTenantId(), jobNo]);
+  if (!jobs[0]) throw statusError("图片任务不存在或不属于当前企业", 404);
+  const session = await restoreBusinessTaskSession(jobs[0].tenant_id, jobs[0].created_by_person_id);
+  assertBusinessTaskPermission(session, "operations");
   const resultSummary = [];
   const queueConfig = await resolveImageRuntimeQueueConfig(options);
   const { runtimeChannels, hasChannelPool, channelCapacity, poolMaxConcurrency, effectiveConcurrency } = queueConfig;
   let concurrency = 1;
   let workerChannels = [];
   while (true) {
-    pendingBatchImageJobWakeups.delete(jobNo);
+    pendingBatchImageJobWakeups.delete(batchImageRuntimeKey(jobNo));
     const initialStats = await batchImageQueueStats(jobNo, queueConfig);
     if (!initialStats.queued_count) break;
     concurrency = Math.min(adaptiveAiImageConcurrency(effectiveConcurrency), Math.max(1, initialStats.queued_count || 1));
@@ -575,13 +595,13 @@ async function runBatchImageBackgroundJob(jobNo, options = {}) {
     }
     await Promise.all(Array.from({ length: concurrency }, (_, workerIndex) => worker(workerIndex)));
     const nextSummary = await summarizeBatchJob(jobNo);
-    if (!pendingBatchImageJobWakeups.has(jobNo) && !nextSummary.queued) break;
+    if (!pendingBatchImageJobWakeups.has(batchImageRuntimeKey(jobNo)) && !nextSummary.queued) break;
   }
   const summary = await summarizeBatchJob(jobNo);
   const finalStatus = summary.failed > 0
     ? (summary.done > 0 ? "partially_failed" : "failed")
     : (summary.pending > 0 ? "partially_generated" : "image_done");
-  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [
+  await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([
     finalStatus,
     JSON.stringify({
       source_image_url: cleanText(options.sourceImageUrl || ""),
@@ -598,7 +618,7 @@ async function runBatchImageBackgroundJob(jobNo, options = {}) {
       completed_at: new Date().toISOString()
     }),
     jobNo
-  ]);
+  ], 2));
 }
 
 async function fetchNextQueuedBatchImageRow(jobNo) {
@@ -608,17 +628,17 @@ async function fetchNextQueuedBatchImageRow(jobNo) {
     SET status = 'generating_image',
         error_message = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ? AND status = 'queued_image'
+    WHERE tenant_id = ? AND job_no = ? AND status = 'queued_image'
     ORDER BY updated_at ASC, sort_order ASC, id ASC
     LIMIT 1
-  `, [claimToken, jobNo]);
+  `, aiTenantParams([claimToken, jobNo], 1));
   if (!result.affectedRows) return null;
   const rows = await mysqlQuery(`
     SELECT item_no, target_variant_value, status, item_json, provider_job_json
     FROM ai_variant_lab_batch_items
-    WHERE job_no = ? AND status = 'generating_image' AND error_message = ?
+    WHERE tenant_id = ? AND job_no = ? AND status = 'generating_image' AND error_message = ?
     LIMIT 1
-  `, [jobNo, claimToken]);
+  `, aiTenantParams([jobNo, claimToken], 0));
   return rows[0] || null;
 }
 
@@ -650,7 +670,7 @@ async function batchImageQueueStats(jobNo, config = null) {
     ...summary,
     queued_count: summary.queued,
     active_generating_count: summary.generating,
-    running_in_process: runningBatchImageJobs.has(jobNo),
+    running_in_process: runningBatchImageJobs.has(batchImageRuntimeKey(jobNo)),
     effective_image_concurrency: queueConfig.effectiveConcurrency,
     image_pool_max_concurrency: queueConfig.poolMaxConcurrency,
     image_channel_capacity: queueConfig.channelCapacity,
@@ -671,8 +691,8 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
     let providerJobState = parseStoredJson(row.provider_job_json, null);
     try {
       await mysqlExecute(
-        "UPDATE ai_variant_lab_batch_items SET status = ?, image_result_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP WHERE item_no = ?",
-        ["generating_image", row.item_no]
+        "UPDATE ai_variant_lab_batch_items SET status = ?, image_result_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND item_no = ?",
+        aiTenantParams(["generating_image", row.item_no], 1)
       );
       const imageResult = await generateImagesWithChannelRetry({
         finalPrompt: [prompt, negative ? `Negative constraints: ${negative}` : ""].filter(Boolean).join("\n\n"),
@@ -687,10 +707,10 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
           const jobs = Array.isArray(providerJobState?.jobs) ? [...providerJobState.jobs] : [];
           jobs[index] = providerJob;
           providerJobState = { jobs };
-          await mysqlExecute("UPDATE ai_variant_lab_batch_items SET provider_job_json = ?, updated_at = CURRENT_TIMESTAMP WHERE item_no = ?", [
+          await mysqlExecute("UPDATE ai_variant_lab_batch_items SET provider_job_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND item_no = ?", aiTenantParams([
             JSON.stringify(providerJobState),
             row.item_no
-          ]);
+          ], 1));
         },
         usageContext: {
           requestKey: `${jobNo}:${row.item_no}:${started}`,
@@ -710,8 +730,8 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
       await mysqlExecute(`
         UPDATE ai_variant_lab_batch_items
         SET status = ?, image_result_json = ?, provider_job_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP
-        WHERE item_no = ?
-      `, ["image_done", JSON.stringify({ ...completedResult, elapsedMs, attempts }), row.item_no]);
+        WHERE tenant_id = ? AND item_no = ?
+      `, aiTenantParams(["image_done", JSON.stringify({ ...completedResult, elapsedMs, attempts }), row.item_no], 2));
       return { item_no: row.item_no, target_variant_value: row.target_variant_value, elapsedMs, image_result: completedResult };
     } catch (error) {
       const publicError = formatImageGenerationError(error);
@@ -720,40 +740,40 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
       await mysqlExecute(`
         UPDATE ai_variant_lab_batch_items
         SET status = ?, image_result_json = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE item_no = ?
-      `, [
+        WHERE tenant_id = ? AND item_no = ?
+      `, aiTenantParams([
         providerPending ? "provider_pending" : "failed",
         JSON.stringify({ attempts, elapsedMs, failedAt: new Date().toISOString() }),
         publicError.slice(0, 1000),
         row.item_no
-      ]);
+      ], 3));
       if (providerPending) scheduleProviderPendingBatchResume(jobNo, options);
       return { item_no: row.item_no, target_variant_value: row.target_variant_value, elapsedMs, error: publicError, attempts };
     }
 }
 
 function scheduleProviderPendingBatchResume(jobNo, options = {}) {
-  if (pendingBatchImageResumeTimers.has(jobNo)) return;
+  if (pendingBatchImageResumeTimers.has(batchImageRuntimeKey(jobNo))) return;
   const delayMs = Math.max(5000, Number(process.env.AI_VARIANT_PROVIDER_REPOLL_DELAY_MS || 30000));
   const timer = setTimeout(async () => {
-    pendingBatchImageResumeTimers.delete(jobNo);
+    pendingBatchImageResumeTimers.delete(batchImageRuntimeKey(jobNo));
     try {
       const result = await mysqlExecute(`
         UPDATE ai_variant_lab_batch_items
         SET status = 'queued_image',
             error_message = '服务商仍在生成，已自动继续拉回原任务',
             updated_at = CURRENT_TIMESTAMP
-        WHERE job_no = ? AND status = 'provider_pending'
-      `, [jobNo]);
+        WHERE tenant_id = ? AND job_no = ? AND status = 'provider_pending'
+      `, aiTenantParams([jobNo], 0));
       if (!result.affectedRows) return;
-      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE job_no = ?", [jobNo]);
+      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([jobNo], 0));
       startBatchImageBackgroundJob(jobNo, options);
     } catch (error) {
       console.warn("[ai-variant-lab] provider image repoll scheduling failed", { jobNo, error: error?.message || error });
     }
   }, delayMs);
   timer.unref?.();
-  pendingBatchImageResumeTimers.set(jobNo, timer);
+  pendingBatchImageResumeTimers.set(batchImageRuntimeKey(jobNo), timer);
 }
 
 async function persistAiVariantImageResult(imageResult = {}, context = {}) {
@@ -767,7 +787,7 @@ async function persistAiVariantImageResult(imageResult = {}, context = {}) {
       batch_id: cleanText(context.jobNo || ""),
       role: `${scope}_${index + 1}`,
       variant_target: cleanText(context.targetVariantValue || "")
-    }, { personId: Number(context.sessionPersonId || 0) || null });
+    }, currentAiTenantSession());
     if (!persisted?.finalUrl || (!persisted?.publishUrl && !persisted?.localUrl)) {
       throw statusError("AI 裂变图片已生成，但未能持久化到本地素材库，请重试该行。", 503);
     }
@@ -873,9 +893,9 @@ async function startAiImageUsageAttempt(context = {}, channel = {}, operation = 
   try {
     const result = await mysqlExecute(`
     INSERT INTO ai_image_usage_events
-    (request_key, job_no, item_no, person_id, channel_id, channel_name, provider, model, operation, status, requested_count, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', 1, UTC_TIMESTAMP())
-  `, [
+    (tenant_id, request_key, job_no, item_no, person_id, channel_id, channel_name, provider, model, operation, status, requested_count, started_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', 1, UTC_TIMESTAMP())
+  `, aiTenantParams([
     `${context.requestKey}:${channel.channelId || channel.provider || "default"}:${operation}`,
     context.jobNo || "",
     context.itemNo || "",
@@ -885,7 +905,7 @@ async function startAiImageUsageAttempt(context = {}, channel = {}, operation = 
     channel.provider || "",
     channel.imageModel || "",
     operation
-  ]);
+  ], 0));
     return Number(result.insertId || 0) || null;
   } catch (error) {
     console.warn("[ai-image-usage] failed to record request", error?.message || error);
@@ -898,8 +918,8 @@ async function finishAiImageUsageAttempt(id, status, error = null) {
   await mysqlExecute(`
     UPDATE ai_image_usage_events
     SET status = ?, error_message = ?, completed_at = UTC_TIMESTAMP()
-    WHERE id = ?
-  `, [status, cleanText(error?.message || "").slice(0, 1000), id]).catch((updateError) => {
+    WHERE tenant_id = ? AND id = ?
+  `, aiTenantParams([status, cleanText(error?.message || "").slice(0, 1000), id], 2)).catch((updateError) => {
     console.warn("[ai-image-usage] failed to finish request", updateError?.message || updateError);
   });
 }
@@ -1100,7 +1120,8 @@ function stripBrandAssetReferences(contract = {}) {
   };
 }
 
-export async function aiVariantLabBatchJobs(query = {}) {
+export async function aiVariantLabBatchJobs(query = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabBatchJobs(query, session));
   await ensureAiVariantLabSchema();
   await recoverStaleBatchImageJobs();
   const rows = await mysqlQuery(`
@@ -1111,9 +1132,10 @@ export async function aiVariantLabBatchJobs(query = {}) {
            j.created_by_person_id, p.name AS created_by_name, j.created_at, j.updated_at
     FROM ai_variant_lab_batch_jobs j
     LEFT JOIN people p ON p.id = j.created_by_person_id
+    WHERE j.tenant_id = ?
     ORDER BY j.updated_at DESC
     LIMIT ?
-  `, [clampInteger(query.limit, 1, 100, 30)]);
+  `, aiTenantParams([clampInteger(query.limit, 1, 100, 30)], 0));
   return {
     ok: true,
     jobs: rows.map((row) => ({
@@ -1129,6 +1151,7 @@ export async function aiVariantLabBatchJobs(query = {}) {
 }
 
 export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabBatchJobDetail(jobNo, session, query));
   await ensureAiVariantLabSchema();
   const key = cleanText(jobNo || "");
   if (!key) throw statusError("jobNo is required", 400);
@@ -1142,8 +1165,8 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
              j.created_by_person_id, p.name AS created_by_name, j.created_at, j.updated_at
       FROM ai_variant_lab_batch_jobs j
       LEFT JOIN people p ON p.id = j.created_by_person_id
-      WHERE j.job_no = ? LIMIT 1
-    `, [key]);
+      WHERE j.tenant_id = ? AND j.job_no = ? LIMIT 1
+    `, aiTenantParams([key], 0));
     if (!jobs.length) throw statusError(`batch job not found: ${key}`, 404);
     const items = await mysqlQuery(`
       SELECT item_no, status, error_message, updated_at,
@@ -1154,9 +1177,9 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
                JSON_UNQUOTE(JSON_EXTRACT(image_result_json, '$.croppedImages[0].url'))
              ) AS result_image_url
       FROM ai_variant_lab_batch_items
-      WHERE job_no = ?
+      WHERE tenant_id = ? AND job_no = ?
       ORDER BY sort_order ASC, id ASC
-    `, [key]);
+    `, aiTenantParams([key], 0));
     const queue = await batchImageQueueStats(key, await resolveImageRuntimeQueueConfig({ imageConcurrency: positiveInteger(jobs[0].image_concurrency || 4, 4) }));
     return {
       ok: true,
@@ -1180,16 +1203,16 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
     SELECT j.*, p.name AS created_by_name
     FROM ai_variant_lab_batch_jobs j
     LEFT JOIN people p ON p.id = j.created_by_person_id
-    WHERE j.job_no = ?
+    WHERE j.tenant_id = ? AND j.job_no = ?
     LIMIT 1
-  `, [key]);
+  `, aiTenantParams([key], 0));
   if (!jobs.length) throw statusError(`batch job not found: ${key}`, 404);
   const items = await mysqlQuery(`
     SELECT item_no, target_variant_value, status, plan_no, item_json, image_result_json, error_message, sort_order, created_at, updated_at
     FROM ai_variant_lab_batch_items
-    WHERE job_no = ?
+    WHERE tenant_id = ? AND job_no = ?
     ORDER BY sort_order ASC, id ASC
-  `, [key]);
+  `, aiTenantParams([key], 0));
   for (const item of items) {
     if (item.status !== "image_done") continue;
     const imageResult = parseStoredJson(item.image_result_json, {});
@@ -1203,10 +1226,10 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
         sessionPersonId: personId(session) || jobs[0].created_by_person_id
       });
       item.image_result_json = JSON.stringify(durableResult);
-      await mysqlExecute("UPDATE ai_variant_lab_batch_items SET image_result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE item_no = ?", [
+      await mysqlExecute("UPDATE ai_variant_lab_batch_items SET image_result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND item_no = ?", aiTenantParams([
         item.image_result_json,
         item.item_no
-      ]);
+      ], 1));
     } catch (error) {
       item.persistence_error = cleanText(error?.message || error);
     }
@@ -1233,6 +1256,7 @@ export async function aiVariantLabBatchJobDetail(jobNo, session = {}, query = {}
 }
 
 export async function aiVariantLabManualImageResult(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabManualImageResult(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   const itemNo = cleanText(body.itemNo || body.item_no || "");
@@ -1258,8 +1282,8 @@ export async function aiVariantLabManualImageResult(body = {}, session = {}) {
         image_result_json = ?,
         error_message = '',
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ? AND item_no = ?
-  `, [JSON.stringify(imageResult), jobNo, itemNo]);
+    WHERE tenant_id = ? AND job_no = ? AND item_no = ?
+  `, aiTenantParams([JSON.stringify(imageResult), jobNo, itemNo], 1));
   if (!result.affectedRows) throw statusError(`batch item not found: ${itemNo}`, 404);
   const summary = await summarizeBatchJob(jobNo);
   const finalStatus = summary.queued > 0 || summary.generating > 0
@@ -1274,8 +1298,8 @@ export async function aiVariantLabManualImageResult(body = {}, session = {}) {
     SET status = ?,
         result_json = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ?
-  `, [
+    WHERE tenant_id = ? AND job_no = ?
+  `, aiTenantParams([
     finalStatus,
     JSON.stringify({
       summary,
@@ -1283,7 +1307,7 @@ export async function aiVariantLabManualImageResult(body = {}, session = {}) {
       manual_image_uploaded_at: new Date().toISOString()
     }),
     jobNo
-  ]);
+  ], 2));
   return {
     ok: true,
     job_no: jobNo,
@@ -1357,8 +1381,8 @@ async function latestAnalysisRow({ table, idColumn, sourceProductId = "", source
     matchWhere.push("source_image_url = ?");
     matchParams.push(imageUrl);
   }
-  const where = [...(whereExtra ? [whereExtra] : []), `(${matchWhere.join(" OR ")})`];
-  const params = [...extraParams, ...matchParams];
+  const where = ["tenant_id = ?", ...(whereExtra ? [whereExtra] : []), `(${matchWhere.join(" OR ")})`];
+  const params = [aiTenantId(), ...extraParams, ...matchParams];
   const rows = await mysqlQuery(`
     SELECT ${idColumn} AS record_no, source_product_id, source_image_url${includeStatus ? ", status" : ""}, analysis_json, created_at, updated_at
     FROM ${table}
@@ -1378,6 +1402,7 @@ async function latestAnalysisRow({ table, idColumn, sourceProductId = "", source
 }
 
 export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerAnalyze(body, session));
   await ensureAiVariantLabSchema();
   const sourceProductId = cleanText(body.sourceProductId || body.source_product_id || "");
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || "");
@@ -1410,8 +1435,8 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
   const jobNo = body.jobNo || body.job_no || makeNo("OPTJOB");
   await mysqlExecute(`
     INSERT INTO ai_image_optimizer_jobs
-    (job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       source_image_url = VALUES(source_image_url),
       source_product_id = VALUES(source_product_id),
@@ -1420,7 +1445,7 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
       usage_json = VALUES(usage_json),
       analysis_json = VALUES(analysis_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     jobNo,
     imageUrl,
     cleanText(body.sourceProductId || body.source_product_id || ""),
@@ -1429,7 +1454,7 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
     JSON.stringify(result.usage || {}),
     JSON.stringify(analysis),
     personId(session)
-  ]);
+  ], 0));
   return {
     ok: true,
     job_no: jobNo,
@@ -1441,7 +1466,8 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
   };
 }
 
-export async function aiImageOptimizerAnalysisLookup(body = {}) {
+export async function aiImageOptimizerAnalysisLookup(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerAnalysisLookup(body, session));
   await ensureAiVariantLabSchema();
   const sourceProductId = cleanText(body.sourceProductId || body.source_product_id || "");
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || "");
@@ -1449,6 +1475,7 @@ export async function aiImageOptimizerAnalysisLookup(body = {}) {
 }
 
 export async function aiImageOptimizerConfirmAnalysis(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerConfirmAnalysis(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   const analysis = normalizeOptimizerAnalysis(body.analysis || {});
@@ -1457,13 +1484,14 @@ export async function aiImageOptimizerConfirmAnalysis(body = {}, session = {}) {
     UPDATE ai_image_optimizer_jobs
     SET analysis_json = ?, plan_json = NULL, result_json = NULL, status = 'analysis_confirmed',
         created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ?
-  `, [JSON.stringify(analysis), personId(session), jobNo]);
+    WHERE tenant_id = ? AND job_no = ?
+  `, aiTenantParams([JSON.stringify(analysis), personId(session), jobNo], 2));
   if (!Number(result?.affectedRows || 0)) throw statusError(`optimizer job not found: ${jobNo}`, 404);
   return { ok: true, job_no: jobNo, status: "analysis_confirmed", analysis };
 }
 
 export async function aiImageOptimizerConfirmPlan(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerConfirmPlan(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
@@ -1477,13 +1505,14 @@ export async function aiImageOptimizerConfirmPlan(body = {}, session = {}) {
     UPDATE ai_image_optimizer_jobs
     SET plan_json = ?, result_json = NULL, status = 'plan_confirmed',
         created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ? AND status IN ('analysis_confirmed', 'planned', 'plan_confirmed', 'generated', 'partial')
-  `, [JSON.stringify(plan), personId(session), jobNo]);
+    WHERE tenant_id = ? AND job_no = ? AND status IN ('analysis_confirmed', 'planned', 'plan_confirmed', 'generated', 'partial')
+  `, aiTenantParams([JSON.stringify(plan), personId(session), jobNo], 2));
   if (!Number(result?.affectedRows || 0)) throw statusError("请先确认并保存识别结果", 409);
   return { ok: true, job_no: jobNo, status: "plan_confirmed", plan };
 }
 
 export async function aiImageOptimizerSaveResult(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerSaveResult(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
@@ -1492,20 +1521,21 @@ export async function aiImageOptimizerSaveResult(body = {}, session = {}) {
   const result = await mysqlExecute(`
     UPDATE ai_image_optimizer_jobs
     SET result_json = ?, status = ?, created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ? AND status IN ('plan_confirmed', 'generated', 'partial')
-  `, [JSON.stringify(resultJson), status, personId(session), jobNo]);
+    WHERE tenant_id = ? AND job_no = ? AND status IN ('plan_confirmed', 'generated', 'partial')
+  `, aiTenantParams([JSON.stringify(resultJson), status, personId(session), jobNo], 3));
   if (!Number(result?.affectedRows || 0)) throw statusError("请先确认并保存生成计划", 409);
   return { ok: true, job_no: jobNo, status, result: resultJson };
 }
 
-export async function aiImageOptimizerJobDetail(jobNo = "") {
+export async function aiImageOptimizerJobDetail(jobNo = "", session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerJobDetail(jobNo, session));
   await ensureAiVariantLabSchema();
   const key = cleanText(jobNo);
   const rows = await mysqlQuery(`
     SELECT job_no, source_image_url, source_product_id, status, model, usage_json,
            analysis_json, plan_json, result_json, created_at, updated_at
-    FROM ai_image_optimizer_jobs WHERE job_no = ? LIMIT 1
-  `, [key]);
+    FROM ai_image_optimizer_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1
+  `, aiTenantParams([key], 0));
   if (!rows.length) throw statusError(`optimizer job not found: ${key}`, 404);
   const row = rows[0];
   return {
@@ -1525,6 +1555,7 @@ export async function aiImageOptimizerJobDetail(jobNo = "") {
 }
 
 export async function aiImageOptimizerPlan(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerPlan(body, session));
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   const analysis = body.analysis || await resolveOptimizerAnalysis(jobNo);
@@ -1551,8 +1582,8 @@ export async function aiImageOptimizerPlan(body = {}, session = {}) {
   const nextJobNo = jobNo || body.jobNo || body.job_no || makeNo("OPTJOB");
   await mysqlExecute(`
     INSERT INTO ai_image_optimizer_jobs
-    (job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, plan_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, plan_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       status = VALUES(status),
       model = VALUES(model),
@@ -1560,7 +1591,7 @@ export async function aiImageOptimizerPlan(body = {}, session = {}) {
       analysis_json = COALESCE(analysis_json, VALUES(analysis_json)),
       plan_json = VALUES(plan_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     nextJobNo,
     cleanText(body.sourceImageUrl || body.imageUrl || body.imagePath || ""),
     cleanText(body.sourceProductId || body.source_product_id || ""),
@@ -1570,7 +1601,7 @@ export async function aiImageOptimizerPlan(body = {}, session = {}) {
     JSON.stringify(analysis || {}),
     JSON.stringify(plan),
     personId(session)
-  ]);
+  ], 0));
   return {
     ok: true,
     job_no: nextJobNo,
@@ -1596,7 +1627,8 @@ async function callOptimizerPlanWithRetry(payload = {}) {
   }
 }
 
-export async function aiImageOptimizerReviewImage(body = {}) {
+export async function aiImageOptimizerReviewImage(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerReviewImage(body, session));
   const generatedImageUrl = cleanText(body.generatedImageUrl || body.generated_image_url || "");
   if (!generatedImageUrl) throw statusError("generatedImageUrl is required", 400);
   const referenceImageUrl = cleanText(body.referenceImageUrl || body.reference_image_url || "");
@@ -1645,7 +1677,8 @@ export async function aiImageOptimizerReviewImage(body = {}) {
   };
 }
 
-export async function aiImageOptimizerComposeText(body = {}) {
+export async function aiImageOptimizerComposeText(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerComposeText(body, session));
   const imageUrl = cleanText(body.imageUrl || body.image_url || "");
   if (!imageUrl) throw statusError("imageUrl is required", 400);
   const title = optimizerOverlayText(body.title || body.text || body.overlayText || body.overlay_text || "");
@@ -1685,7 +1718,8 @@ export async function aiImageOptimizerComposeText(body = {}) {
   return { ok: true, composed: true, url: `/uploads/listing-media/${filename}`, text: title, subtitle, bullets };
 }
 
-export async function aiImageOptimizerTestImage(body = {}) {
+export async function aiImageOptimizerTestImage(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerTestImage(body, session));
   const plan = body.plan || await resolveOptimizerPlan(cleanText(body.jobNo || body.job_no || "")).catch(() => null);
   const prompt = cleanText(body.imagePrompt || body.image_prompt || plan?.image_optimization_prompt_en || "");
   if (!prompt) throw statusError("image optimization prompt is required", 400);
@@ -1708,10 +1742,13 @@ export async function aiProductMaterialOptimizerPrepareTemplate(body = {}, sessi
   let finalImageSlots = normalizeFinalImageSlots(body.finalImageSlots || body.final_image_slots || [], candidates);
   if (!finalImageSlots.length) throw statusError("请先选择最终图片位", 400);
   if (!finalImageSlots[0]?.url) throw statusError("主图位不能为空", 400);
+  if (finalImageSlots.some(slot => optimizerSlotRequiresMaterialization(slot.url)) && needsAiTenantSession(session)) {
+    return withAiTenantSession(session, () => aiProductMaterialOptimizerPrepareTemplate(body, session));
+  }
   const materializedUrls = new Map();
   finalImageSlots = await Promise.all(finalImageSlots.map(async (slot, index) => {
     const sourceUrl = cleanText(slot.url);
-    if (/^https:\/\//i.test(sourceUrl)) {
+    if (!optimizerSlotRequiresMaterialization(sourceUrl)) {
       materializedUrls.set(sourceUrl, sourceUrl);
       return slot;
     }
@@ -1763,7 +1800,14 @@ export async function aiProductMaterialOptimizerPrepareTemplate(body = {}, sessi
   };
 }
 
-export async function aiVariantLabTestImageEdit(body = {}) {
+function optimizerSlotRequiresMaterialization(value) {
+  if (!/^https:\/\//i.test(String(value || ""))) return true;
+  const pathname = new URL(value).pathname;
+  return /^\/api\/(?:ai\/(?:file|preview-file)|tools\/image-cropper\/file|asset-variant-engine\/files)\//i.test(pathname);
+}
+
+export async function aiVariantLabTestImageEdit(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabTestImageEdit(body, session));
   const plan = body.plan || await resolvePlan(body).catch(() => null);
   const analysis = body.analysis || await resolveAnalysis(body).catch(() => null);
   const imagePrompt = cleanText(body.imageEditPrompt || body.image_edit_prompt || plan?.image_edit_prompt_en || plan?.image_prompt || "");
@@ -1784,6 +1828,7 @@ export async function aiVariantLabTestImageEdit(body = {}) {
 }
 
 export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabSaveTemplate(body, session));
   await ensureAiVariantLabSchema();
   const templateKey = cleanKey(body.templateKey || body.template_key || DEFAULT_TEMPLATE_KEY);
   const templateName = cleanText(body.templateName || body.template_name || "AI variant template");
@@ -1791,8 +1836,8 @@ export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
   const templateJson = body.template || body.template_json || buildTemplateFromBody(body);
   await mysqlExecute(`
     INSERT INTO ai_variant_templates
-    (template_key, template_name, category_key, user_note, template_json, status, auto_apply, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, template_key, template_name, category_key, user_note, template_json, status, auto_apply, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       template_name = VALUES(template_name),
       category_key = VALUES(category_key),
@@ -1801,7 +1846,7 @@ export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
       status = VALUES(status),
       auto_apply = VALUES(auto_apply),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     templateKey,
     templateName,
     categoryKey,
@@ -1810,15 +1855,15 @@ export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
     cleanText(body.status || "active"),
     body.autoApply || body.auto_apply ? 1 : 0,
     personId(session)
-  ]);
+  ], 0));
 
   const casePayload = body.case || body.case_json;
   if (casePayload) {
     const caseKey = cleanKey(casePayload.caseKey || casePayload.case_key || makeNo("AVL-C"));
     await mysqlExecute(`
       INSERT INTO ai_variant_template_cases
-      (case_key, template_key, case_name, source_model, fingerprint_json, prompt_set_json, quality_checks_json, result_score)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (tenant_id, case_key, template_key, case_name, source_model, fingerprint_json, prompt_set_json, quality_checks_json, result_score)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         case_name = VALUES(case_name),
         source_model = VALUES(source_model),
@@ -1827,7 +1872,7 @@ export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
         quality_checks_json = VALUES(quality_checks_json),
         result_score = VALUES(result_score),
         updated_at = CURRENT_TIMESTAMP
-    `, [
+    `, aiTenantParams([
       caseKey,
       templateKey,
       cleanText(casePayload.caseName || casePayload.case_name || templateName),
@@ -1836,16 +1881,17 @@ export async function aiVariantLabSaveTemplate(body = {}, session = {}) {
       JSON.stringify(casePayload.promptSet || casePayload.prompt_set || {}),
       JSON.stringify(casePayload.qualityChecks || casePayload.quality_checks || []),
       finiteNumber(casePayload.resultScore || casePayload.result_score, null)
-    ]);
+    ], 0));
   }
 
   return { ok: true, template_key: templateKey };
 }
 
-export async function aiVariantLabTemplates(query = {}) {
+export async function aiVariantLabTemplates(query = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabTemplates(query, session));
   await ensureAiVariantLabSchema();
-  const where = [];
-  const params = [];
+  const where = ["tenant_id = ?"];
+  const params = [aiTenantId()];
   if (query.templateKey || query.template_key) {
     where.push("template_key = ?");
     params.push(cleanKey(query.templateKey || query.template_key));
@@ -1876,6 +1922,7 @@ export async function aiVariantLabTemplates(query = {}) {
 }
 
 export async function aiVariantLabSaveCase(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabSaveCase(body, session));
   await ensureAiVariantLabSchema();
   const caseJson = buildVariantCaseFromBody(body);
   const caseNo = cleanText(body.caseNo || body.case_no || caseJson.case_no || makeNo("AVC"));
@@ -1892,8 +1939,8 @@ export async function aiVariantLabSaveCase(body = {}, session = {}) {
   );
   await mysqlExecute(`
     INSERT INTO ai_variant_case_templates
-    (case_no, case_name, product_subject_key, product_subject_name, variant_type, variable_slot, source_value, success_target_value, status, success_score, case_json, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (tenant_id, case_no, case_name, product_subject_key, product_subject_name, variant_type, variable_slot, source_value, success_target_value, status, success_score, case_json, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       case_name = VALUES(case_name),
       product_subject_key = VALUES(product_subject_key),
@@ -1906,7 +1953,7 @@ export async function aiVariantLabSaveCase(body = {}, session = {}) {
       success_score = VALUES(success_score),
       case_json = VALUES(case_json),
       updated_at = CURRENT_TIMESTAMP
-  `, [
+  `, aiTenantParams([
     caseNo,
     caseName,
     cleanKey(body.productSubjectKey || body.product_subject_key || caseJson.product_subject_key || productSubject.product_subject_key || productSubject.product_type || ""),
@@ -1919,14 +1966,15 @@ export async function aiVariantLabSaveCase(body = {}, session = {}) {
     finiteNumber(body.successScore || body.success_score || caseJson.success_score, null),
     JSON.stringify({ ...caseJson, case_no: caseNo, case_name: caseName, status, success_target_value: successTargetValue }),
     personId(session)
-  ]);
+  ], 0));
   return { ok: true, case_no: caseNo };
 }
 
-export async function aiVariantLabCases(query = {}) {
+export async function aiVariantLabCases(query = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabCases(query, session));
   await ensureAiVariantLabSchema();
-  const where = [];
-  const params = [];
+  const where = ["tenant_id = ?"];
+  const params = [aiTenantId()];
   const page = clampInteger(query.page, 1, 100000, 1);
   const pageSize = clampInteger(query.pageSize || query.page_size, 10, 100, 20);
   const offset = (page - 1) * pageSize;
@@ -1989,7 +2037,8 @@ export async function aiVariantLabCases(query = {}) {
   };
 }
 
-export async function aiVariantLabCaseDetail(caseNo) {
+export async function aiVariantLabCaseDetail(caseNo, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabCaseDetail(caseNo, session));
   await ensureAiVariantLabSchema();
   const key = cleanText(caseNo || "");
   if (!key) throw statusError("caseNo is required", 400);
@@ -1997,9 +2046,9 @@ export async function aiVariantLabCaseDetail(caseNo) {
     SELECT case_no, case_name, product_subject_key, product_subject_name, variant_type, variable_slot, source_value,
       success_target_value, status, usage_count, success_score, case_json, created_at, updated_at
     FROM ai_variant_case_templates
-    WHERE case_no = ?
+    WHERE tenant_id = ? AND case_no = ?
     LIMIT 1
-  `, [key]);
+  `, aiTenantParams([key], 0));
   if (!rows.length) throw statusError(`case not found: ${key}`, 404);
   const row = rows[0];
   return {
@@ -2013,20 +2062,22 @@ export async function aiVariantLabCaseDetail(caseNo) {
   };
 }
 
-export async function aiVariantLabDeleteCase(caseNo) {
+export async function aiVariantLabDeleteCase(caseNo, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabDeleteCase(caseNo, session));
   await ensureAiVariantLabSchema();
   const key = cleanText(caseNo || "");
   if (!key) throw statusError("caseNo is required", 400);
   const result = await mysqlExecute(`
     UPDATE ai_variant_case_templates
     SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
-    WHERE case_no = ? AND status <> 'deleted'
-  `, [key]);
+    WHERE tenant_id = ? AND case_no = ? AND status <> 'deleted'
+  `, aiTenantParams([key], 0));
   if (!Number(result.affectedRows || 0)) throw statusError(`case not found: ${key}`, 404);
   return { ok: true, deleted: 1, case_no: key };
 }
 
-export async function aiVariantLabDeleteCases(body = {}) {
+export async function aiVariantLabDeleteCases(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiVariantLabDeleteCases(body, session));
   await ensureAiVariantLabSchema();
   const caseNos = [...new Set(arrayValue(body.caseNos || body.case_nos)
     .map((value) => cleanText(value))
@@ -2035,8 +2086,8 @@ export async function aiVariantLabDeleteCases(body = {}) {
   const result = await mysqlExecute(`
     UPDATE ai_variant_case_templates
     SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
-    WHERE case_no IN (${caseNos.map(() => "?").join(", ")}) AND status <> 'deleted'
-  `, caseNos);
+    WHERE tenant_id = ? AND case_no IN (${caseNos.map(() => "?").join(", ")}) AND status <> 'deleted'
+  `, aiTenantParams(caseNos, 0));
   return { ok: true, deleted: Number(result.affectedRows || 0), case_nos: caseNos };
 }
 
@@ -2054,6 +2105,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_lab_analyses (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       analysis_no VARCHAR(64) NOT NULL,
       source_image_url TEXT NULL,
       source_product_id VARCHAR(128) NOT NULL DEFAULT '',
@@ -2064,12 +2116,13 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_lab_analyses_no (analysis_no)
+      UNIQUE KEY uniq_ai_variant_lab_analyses_no (tenant_id, analysis_no)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_lab_plans (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       plan_no VARCHAR(64) NOT NULL,
       analysis_no VARCHAR(64) NOT NULL DEFAULT '',
       source_variant_value VARCHAR(128) NOT NULL DEFAULT '',
@@ -2081,7 +2134,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_lab_plans_no (plan_no),
+      UNIQUE KEY uniq_ai_variant_lab_plans_no (tenant_id, plan_no),
       KEY idx_ai_variant_lab_plans_analysis (analysis_no),
       KEY idx_ai_variant_lab_plans_template (template_key)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2089,6 +2142,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_templates (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       template_key VARCHAR(128) NOT NULL,
       template_name VARCHAR(255) NOT NULL DEFAULT '',
       category_key VARCHAR(128) NOT NULL DEFAULT '',
@@ -2099,7 +2153,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_templates_key (template_key),
+      UNIQUE KEY uniq_ai_variant_templates_key (tenant_id, template_key),
       KEY idx_ai_variant_templates_category (category_key),
       KEY idx_ai_variant_templates_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2107,6 +2161,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_template_cases (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       case_key VARCHAR(128) NOT NULL,
       template_key VARCHAR(128) NOT NULL,
       case_name VARCHAR(255) NOT NULL DEFAULT '',
@@ -2119,13 +2174,14 @@ async function ensureAiVariantLabSchemaNow() {
       failure_count INT NOT NULL DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_template_cases_key (case_key),
+      UNIQUE KEY uniq_ai_variant_template_cases_key (tenant_id, case_key),
       KEY idx_ai_variant_template_cases_template (template_key)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_case_templates (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       case_no VARCHAR(64) NOT NULL,
       case_name VARCHAR(255) NOT NULL DEFAULT '',
       product_subject_key VARCHAR(128) NOT NULL DEFAULT '',
@@ -2141,7 +2197,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_case_templates_no (case_no),
+      UNIQUE KEY uniq_ai_variant_case_templates_no (tenant_id, case_no),
       KEY idx_ai_variant_case_templates_status (status),
       KEY idx_ai_variant_case_templates_variant (variant_type),
       KEY idx_ai_variant_case_templates_subject (product_subject_key)
@@ -2150,6 +2206,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_case_runs (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       run_no VARCHAR(64) NOT NULL,
       case_no VARCHAR(64) NOT NULL,
       target_values_json LONGTEXT NULL,
@@ -2160,7 +2217,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_case_runs_no (run_no),
+      UNIQUE KEY uniq_ai_variant_case_runs_no (tenant_id, run_no),
       KEY idx_ai_variant_case_runs_case (case_no),
       KEY idx_ai_variant_case_runs_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2168,6 +2225,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_lab_batch_jobs (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       job_no VARCHAR(64) NOT NULL,
       job_type VARCHAR(64) NOT NULL DEFAULT '',
       analysis_no VARCHAR(64) NOT NULL DEFAULT '',
@@ -2184,7 +2242,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_lab_batch_jobs_no (job_no),
+      UNIQUE KEY uniq_ai_variant_lab_batch_jobs_no (tenant_id, job_no),
       KEY idx_ai_variant_lab_batch_jobs_status (status),
       KEY idx_ai_variant_lab_batch_jobs_analysis (analysis_no)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2192,6 +2250,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_variant_lab_batch_items (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       item_no VARCHAR(64) NOT NULL,
       job_no VARCHAR(64) NOT NULL,
       target_variant_value VARCHAR(128) NOT NULL DEFAULT '',
@@ -2204,7 +2263,7 @@ async function ensureAiVariantLabSchemaNow() {
       sort_order INT NOT NULL DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_variant_lab_batch_items_no (item_no),
+      UNIQUE KEY uniq_ai_variant_lab_batch_items_no (tenant_id, item_no),
       KEY idx_ai_variant_lab_batch_items_job (job_no),
       KEY idx_ai_variant_lab_batch_items_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -2212,6 +2271,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_image_usage_events (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       request_key VARCHAR(255) NOT NULL,
       job_no VARCHAR(64) NOT NULL DEFAULT '',
       item_no VARCHAR(64) NOT NULL DEFAULT '',
@@ -2228,7 +2288,7 @@ async function ensureAiVariantLabSchemaNow() {
       error_message TEXT NULL,
       started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       completed_at TIMESTAMP NULL,
-      UNIQUE KEY uniq_ai_image_usage_request (request_key),
+      UNIQUE KEY uniq_ai_image_usage_request (tenant_id, request_key),
       KEY idx_ai_image_usage_started (started_at),
       KEY idx_ai_image_usage_person (person_id, started_at),
       KEY idx_ai_image_usage_job (job_no, item_no)
@@ -2239,6 +2299,7 @@ async function ensureAiVariantLabSchemaNow() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_image_optimizer_jobs (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       job_no VARCHAR(64) NOT NULL,
       source_image_url TEXT NULL,
       source_product_id VARCHAR(128) NOT NULL DEFAULT '',
@@ -2251,7 +2312,7 @@ async function ensureAiVariantLabSchemaNow() {
       created_by_person_id BIGINT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_image_optimizer_jobs_no (job_no),
+      UNIQUE KEY uniq_ai_image_optimizer_jobs_no (tenant_id, job_no),
       KEY idx_ai_image_optimizer_jobs_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
@@ -2272,7 +2333,7 @@ async function resolveAnalysis(body = {}) {
   const analysisNo = cleanText(body.analysisNo || body.analysis_no || "");
   if (!analysisNo) throw statusError("analysis or analysisNo is required", 400);
   await ensureAiVariantLabSchema();
-  const rows = await mysqlQuery("SELECT analysis_json FROM ai_variant_lab_analyses WHERE analysis_no = ? LIMIT 1", [analysisNo]);
+  const rows = await mysqlQuery("SELECT analysis_json FROM ai_variant_lab_analyses WHERE tenant_id = ? AND analysis_no = ? LIMIT 1", aiTenantParams([analysisNo], 0));
   if (!rows.length) throw statusError(`analysis not found: ${analysisNo}`, 404);
   return applyProductFactGate(parseStoredJson(rows[0].analysis_json, {}));
 }
@@ -2282,7 +2343,7 @@ async function resolvePlan(body = {}) {
   const planNo = cleanText(body.planNo || body.plan_no || "");
   if (!planNo) throw statusError("plan or planNo is required", 400);
   await ensureAiVariantLabSchema();
-  const rows = await mysqlQuery("SELECT plan_json FROM ai_variant_lab_plans WHERE plan_no = ? LIMIT 1", [planNo]);
+  const rows = await mysqlQuery("SELECT plan_json FROM ai_variant_lab_plans WHERE tenant_id = ? AND plan_no = ? LIMIT 1", aiTenantParams([planNo], 0));
   if (!rows.length) throw statusError(`plan not found: ${planNo}`, 404);
   return parseStoredJson(rows[0].plan_json, {});
 }
@@ -2291,7 +2352,7 @@ async function findTemplate(templateKey) {
   const key = cleanKey(templateKey || "");
   if (!key) return null;
   await ensureAiVariantLabSchema();
-  const rows = await mysqlQuery("SELECT template_key, template_json FROM ai_variant_templates WHERE template_key = ? AND status <> 'disabled' LIMIT 1", [key]);
+  const rows = await mysqlQuery("SELECT template_key, template_json FROM ai_variant_templates WHERE tenant_id = ? AND template_key = ? AND status <> 'disabled' LIMIT 1", aiTenantParams([key], 0));
   if (!rows.length) return null;
   return {
     template_key: rows[0].template_key,
@@ -2315,7 +2376,15 @@ async function resolveImageUrl(body = {}) {
   const imagePath = String(body.imagePath || body.image_path || imageUrl || "").trim();
   if (!imagePath) throw statusError("imageUrl, imageDataUrl, or imagePath is required", 400);
   const resolved = path.isAbsolute(imagePath) ? imagePath : path.resolve(imagePath);
-  if (fs.existsSync(resolved)) return localImageToDataUrl(resolved);
+  if (fs.existsSync(resolved)) {
+    const relative = path.relative(process.cwd(), resolved).replace(/\\/g, "/");
+    const key = aiTenantId();
+    const assets = await mysqlQuery(`SELECT id FROM listing_media_assets
+      WHERE ${key === "admin" ? "(tenant_id = ? OR tenant_id IS NULL OR tenant_id = '')" : "tenant_id = ?"}
+        AND (local_path = ? OR source_path = ?) AND status <> 'deleted' LIMIT 1`, [key, relative, relative]);
+    if (!assets.length) throw statusError("本地图片不存在或不属于当前企业，请在本企业素材库重新上传", 404);
+    return localImageToDataUrl(resolved);
+  }
   if (imagePath.startsWith("/")) return await fetchImageAsDataUrl(new URL(imagePath, config.appBaseUrl).toString());
   throw statusError(`image not found: ${imagePath}`, 404);
 }
@@ -4402,15 +4471,16 @@ async function resolveOrCreateAnalysis(body = {}, session = {}) {
 }
 
 async function replaceBatchItems(jobNo, items) {
-  await mysqlExecute("DELETE FROM ai_variant_lab_batch_items WHERE job_no = ?", [jobNo]);
+  await mysqlExecute("DELETE FROM ai_variant_lab_batch_items WHERE tenant_id = ? AND job_no = ?", [aiTenantId(), jobNo]);
   for (let offset = 0; offset < items.length; offset += 50) {
     const chunk = items.slice(offset, offset + 50);
-    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(", ");
+    const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
     await mysqlExecute(`
       INSERT INTO ai_variant_lab_batch_items
-      (item_no, job_no, target_variant_value, status, plan_no, item_json, sort_order)
+      (tenant_id, item_no, job_no, target_variant_value, status, plan_no, item_json, sort_order)
       VALUES ${placeholders}
     `, chunk.flatMap((item) => [
+        aiTenantId(),
         item.item_no,
         jobNo,
         item.target_variant_value,
@@ -4426,9 +4496,9 @@ async function summarizeBatchJob(jobNo) {
   const rows = await mysqlQuery(`
     SELECT status, COUNT(*) AS count
     FROM ai_variant_lab_batch_items
-    WHERE job_no = ?
+    WHERE tenant_id = ? AND job_no = ?
     GROUP BY status
-  `, [jobNo]);
+  `, aiTenantParams([jobNo], 0));
   const summary = { total: 0, planned: 0, queued: 0, generating: 0, providerPending: 0, done: 0, failed: 0, pending: 0 };
   for (const row of rows) {
     const count = Number(row.count || 0);
@@ -4448,11 +4518,11 @@ async function recoverStaleBatchImageJobs() {
   const rows = await mysqlQuery(`
     SELECT job_no
     FROM ai_variant_lab_batch_jobs
-    WHERE status IN ('generating_images', 'partially_generated')
+    WHERE tenant_id = ? AND status IN ('generating_images', 'partially_generated')
       AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)
     ORDER BY updated_at ASC
     LIMIT 20
-  `, [staleImageJobSeconds()]);
+  `, aiTenantParams([staleImageJobSeconds()], 0));
   for (const row of rows) {
     await recoverStaleBatchImageJob(row.job_no);
   }
@@ -4467,22 +4537,22 @@ async function recoverStaleBatchImageJob(jobNo) {
     SET status = 'queued_image',
         error_message = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ?
+    WHERE tenant_id = ? AND job_no = ?
       AND status IN ('generating_image', 'provider_pending')
       AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND)
-  `, [staleMessage, key, staleImageJobSeconds()]);
+  `, aiTenantParams([staleMessage, key, staleImageJobSeconds()], 1));
   if (!result.affectedRows) {
     const summary = await summarizeBatchJob(key);
     if (summary.generating > 0) {
-      const existingRows = await mysqlQuery("SELECT result_json FROM ai_variant_lab_batch_jobs WHERE job_no = ? LIMIT 1", [key]);
+      const existingRows = await mysqlQuery("SELECT result_json FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", aiTenantParams([key], 0));
       const existingResult = parseStoredJson(existingRows[0]?.result_json, {});
       await mysqlExecute(`
         UPDATE ai_variant_lab_batch_jobs
         SET status = ?,
             result_json = ?,
             updated_at = CURRENT_TIMESTAMP
-        WHERE job_no = ? AND status <> ?
-      `, [
+        WHERE tenant_id = ? AND job_no = ? AND status <> ?
+      `, aiTenantParams([
         "generating_images",
         JSON.stringify({
           ...existingResult,
@@ -4491,12 +4561,12 @@ async function recoverStaleBatchImageJob(jobNo) {
         }),
         key,
         "generating_images"
-      ]);
+      ], 2));
     }
     return;
   }
   const summary = await summarizeBatchJob(key);
-  const existingRows = await mysqlQuery("SELECT result_json FROM ai_variant_lab_batch_jobs WHERE job_no = ? LIMIT 1", [key]);
+  const existingRows = await mysqlQuery("SELECT result_json FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", aiTenantParams([key], 0));
   const existingResult = parseStoredJson(existingRows[0]?.result_json, {});
   const finalStatus = summary.pending > 0
     ? "generating_images"
@@ -4508,8 +4578,8 @@ async function recoverStaleBatchImageJob(jobNo) {
     SET status = ?,
         result_json = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE job_no = ?
-  `, [
+    WHERE tenant_id = ? AND job_no = ?
+  `, aiTenantParams([
     finalStatus,
     JSON.stringify({
       ...existingResult,
@@ -4519,7 +4589,7 @@ async function recoverStaleBatchImageJob(jobNo) {
       recovered_at: new Date().toISOString()
     }),
     key
-  ]);
+  ], 2));
 }
 
 function staleImageJobSeconds() {
@@ -4528,15 +4598,8 @@ function staleImageJobSeconds() {
 
 export async function recoverAiVariantLabImageBatchesOnStartup() {
   await ensureAiVariantLabSchema();
-  await mysqlExecute(`
-    UPDATE ai_variant_lab_batch_items
-    SET status = 'queued_image',
-        error_message = '服务重启后已恢复排队，将优先使用已保存的服务商任务号继续拉回图片',
-        updated_at = CURRENT_TIMESTAMP
-    WHERE status IN ('generating_image', 'provider_pending')
-  `);
   const rows = await mysqlQuery(`
-    SELECT job_no, result_json, image_concurrency, created_by_person_id
+    SELECT tenant_id, job_no, result_json, image_concurrency, created_by_person_id
     FROM ai_variant_lab_batch_jobs
     WHERE status = 'generating_images'
     ORDER BY updated_at ASC
@@ -4544,9 +4607,15 @@ export async function recoverAiVariantLabImageBatchesOnStartup() {
   `);
   let resumed = 0;
   for (const row of rows) {
+    try {
+      const session = await restoreBusinessTaskSession(row.tenant_id, row.created_by_person_id);
+      await withAiTenantSession(session, async () => {
+        await mysqlExecute(`UPDATE ai_variant_lab_batch_items SET status = 'queued_image',
+          error_message = '服务重启后已恢复排队，将优先使用已保存的服务商任务号继续拉回图片', updated_at = CURRENT_TIMESTAMP
+          WHERE tenant_id = ? AND job_no = ? AND status IN ('generating_image', 'provider_pending')`, [aiTenantId(), row.job_no]);
     const result = parseStoredJson(row.result_json, {});
     const sourceImageUrl = cleanText(result.source_image_url || "");
-    if (!sourceImageUrl) continue;
+    if (!sourceImageUrl) return;
     if (startBatchImageBackgroundJob(row.job_no, {
       sourceImageUrl,
       ratio: result.ratio || "3:4",
@@ -4554,6 +4623,10 @@ export async function recoverAiVariantLabImageBatchesOnStartup() {
       imageConcurrency: positiveInteger(row.image_concurrency || result.effective_image_concurrency || 4, 4),
       sessionPersonId: Number(row.created_by_person_id || 0) || null
     })) resumed += 1;
+      });
+    } catch (error) {
+      console.warn("[ai-variant-lab] enterprise task recovery denied", { jobNo: row.job_no, error: error?.message || error });
+    }
   }
   return { ok: true, resumed };
 }
@@ -4561,7 +4634,7 @@ export async function recoverAiVariantLabImageBatchesOnStartup() {
 async function resolveOptimizerAnalysis(jobNo) {
   if (!jobNo) throw statusError("jobNo or analysis is required", 400);
   await ensureAiVariantLabSchema();
-  const rows = await mysqlQuery("SELECT analysis_json FROM ai_image_optimizer_jobs WHERE job_no = ? LIMIT 1", [jobNo]);
+  const rows = await mysqlQuery("SELECT analysis_json FROM ai_image_optimizer_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", aiTenantParams([jobNo], 0));
   if (!rows.length) throw statusError(`optimizer job not found: ${jobNo}`, 404);
   return parseStoredJson(rows[0].analysis_json, {});
 }
@@ -4569,7 +4642,7 @@ async function resolveOptimizerAnalysis(jobNo) {
 async function resolveOptimizerPlan(jobNo) {
   if (!jobNo) throw statusError("jobNo or plan is required", 400);
   await ensureAiVariantLabSchema();
-  const rows = await mysqlQuery("SELECT plan_json FROM ai_image_optimizer_jobs WHERE job_no = ? LIMIT 1", [jobNo]);
+  const rows = await mysqlQuery("SELECT plan_json FROM ai_image_optimizer_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", aiTenantParams([jobNo], 0));
   if (!rows.length) throw statusError(`optimizer job not found: ${jobNo}`, 404);
   return parseStoredJson(rows[0].plan_json, {});
 }
@@ -4598,13 +4671,15 @@ function normalizeTargetValues(value) {
 async function vehicleReferenceImagesByTarget(targets = []) {
   const identities = targets.map(vehicleIdentityParts).filter((item) => item.brand && item.model);
   if (!identities.length) return new Map();
+  const catalog = vehicleCatalogTenantPredicate(aiTenantId());
   const clauses = identities.map(() => "(brand_name = ? AND model_name = ?)").join(" OR ");
   try {
     const rows = await mysqlQuery(`
       SELECT brand_name, model_name, vehicle_reference_image_url
       FROM ai_vehicle_catalog
-      WHERE enabled = 1 AND vehicle_reference_image_url <> '' AND (${clauses})
-    `, identities.flatMap((item) => [item.brand, item.model]));
+      WHERE enabled = 1 AND ${catalog.sql} AND vehicle_reference_image_url <> '' AND (${clauses})
+      ORDER BY source <> 'builtin', id
+    `, [...catalog.params, ...identities.flatMap((item) => [item.brand, item.model])]);
     return new Map(rows.map((row) => [`${row.brand_name} ${row.model_name}`.trim().toLowerCase(), cleanText(row.vehicle_reference_image_url)]));
   } catch (error) {
     console.warn("[ai-variant-lab] target vehicle reference lookup skipped", error?.message || error);

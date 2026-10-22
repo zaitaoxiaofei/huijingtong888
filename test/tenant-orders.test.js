@@ -5,96 +5,72 @@ import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-test("tenant order routes allow only order-owned detail, history, mark, and guarded procurement preview", () => {
+test("verified tenant order list and operations open without permitting unknown routes", () => {
   const tenant = { tenant: { id: 42, slug: "company-a" } };
   assert.equal(tenantIsolationDecision(tenant, ["api", "orders", "123"], "GET").allowed, true);
-  assert.equal(tenantIsolationDecision(tenant, ["api", "orders"], "GET").code, "TENANT_ISOLATION_PENDING");
+  assert.equal(tenantIsolationDecision(tenant, ["api", "orders"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(tenant, ["api", "orders", "123", "status-history"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(tenant, ["api", "orders", "123", "mark"], "PUT").allowed, true);
   assert.equal(tenantIsolationDecision(tenant, ["api", "orders", "123", "procurement-preview"], "GET").allowed, true);
   for (const [method, parts] of [
     ["GET", ["api", "orders"]],
-    ["GET", ["api", "orders", "abc"]],
     ["POST", ["api", "orders", "123", "recalculate-profit"]],
-    ["GET", ["api", "orders", "123", "procurement-batches"]],
-    ["POST", ["api", "orders", "123", "procurement-requests"]],
     ["POST", ["api", "orders", "package-label"]],
     ["POST", ["api", "orders", "package-label-printed"]],
     ["POST", ["api", "orders", "package-label-print-failed"]],
     ["POST", ["api", "orders", "ship"]],
     ["POST", ["api", "orders", "recalculate-profits"]],
     ["GET", ["api", "order-car-heatmap", "models"]]
+  ]) assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, true);
+  for (const [method, parts] of [
+    ["GET", ["api", "orders", "abc"]],
+    ["DELETE", ["api", "orders", "123"]],
+    ["POST", ["api", "orders", "123", "unverified"]],
+    ["POST", ["api", "orders", "ship", "unverified"]]
   ]) assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, false);
 });
 
-test("tenant order REST route propagates tenant ownership and guards shared procurement preview", () => {
+test("tenant order REST routes propagate enterprise ownership into procurement and batch writes", () => {
   const routes = read("../src/server/routes/orders.js");
-  assert.match(routes, /services\.orderStatusHistory\(Number\(parts\[2\]\), Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
-  assert.match(routes, /services\.updateOrderMark\(Number\(parts\[2\]\), await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
-  assert.match(routes, /if \(tenantId !== "admin"\)\s*\{\s*throw Object\.assign\(new Error\("企业订单采购预览暂不可用/);
+  assert.match(routes, /services\.previewOrderProcurement\(Number\(parts\[2\]\), tenantId\)/);
+  assert.match(routes, /services\.orderProcurementBatches\(Number\(parts\[2\]\), tenantIdFromRequest\(req\)\)/);
+  assert.match(routes, /services\.createOrderProcurementRequests\(Number\(parts\[2\]\), await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(routes, /services\.shipOrders\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\), \{ session: req\._session \}\)/);
 });
 
-test("tenant order detail scopes shop and all product-derived fields, and fails closed without ownership schema", () => {
-  const routes = read("../src/server/routes/orders.js");
+test("default enterprise uses the same fail-closed order ownership and safe enrichment as other enterprises", () => {
   const service = read("../src/services/mysql-cutover.js");
-  const isolation = read("../src/server/tenant-isolation.js");
-  assert.match(routes, /services\.orderDetail\(Number\(parts\[2\]\), tenantIdFromRequest\(req\)\)/);
-  assert.match(routes, /services\.orderStatusHistory\(Number\(parts\[2\]\), Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
-  assert.match(routes, /services\.updateOrderMark\(Number\(parts\[2\]\), await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
-  const detail = service.match(/export async function orderDetailMysql\(id, tenantId = "admin"\) \{([\s\S]*?)\n\}\n\nconst CUSTOMER_MESSAGE_TYPES/)?.[1] || "";
-  assert.match(detail, /mysqlSchemaColumnExists\(table, "tenant_id"\)/);
-  assert.match(detail, /企业订单详情暂不可用/);
-  assert.match(detail, /\["shops", "sku_mappings", "products", "logistics_fee_rules"\]/);
-  assert.match(detail, /tenantShopPredicateMysql\("s", false\)/);
-  assert.match(detail, /sm\.shop_id = \? AND sm\.tenant_id = \?/);
-  assert.match(detail, /p\.tenant_id = \?/);
-  assert.match(detail, /LEFT JOIN people pe ON 1 = 0/);
-  assert.match(detail, /frozen_rule\.tenant_id = \?/);
+  const fn = name => service.match(new RegExp('^(?:export )?(?:async )?function '+name+'\\([^]*?^}', 'm'))?.[0] || '';
+  const scope = fn('orderListTenantScopeMysql');
+  assert.match(scope, /const id = await resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(scope, /mysqlSchemaColumnExists\(table, "tenant_id"\)/);
+  assert.match(scope, /inbound_records.*purchase_orders.*purchase_order_items/);
+  assert.doesNotMatch(scope, /tenantId === "admin"\) return null/);
+  const detail = fn('orderDetailMysql');
+  assert.match(detail, /const scope = await orderListTenantScopeMysql\(tenantId\)/);
+  assert.match(detail, /tenantShopPredicateMysql\("s", scope\.defaultTenant\)/);
+  assert.match(detail, /sm\.shop_id = \?/);
+  assert.match(detail, /tenantShopPredicateMysql\("p", scope\.defaultTenant\)/);
+  assert.match(detail, /member\.tenant_id = \$\{scope\.id\}.*member\.active = 1/);
+  assert.match(detail, /readableLogisticsTenantScopeMysql\(tenantId, "frozen_rule"\)/);
+  assert.match(detail, /oi\.\*, sm\.id AS sku_mapping_id, frozen_rule\.id AS frozen_logistics_rule_id/);
 });
 
-test("tenant order paging scopes shop, mapping and product rows without shared procurement coverage", () => {
-  const routes = read("../src/server/routes/orders.js");
+test("paging, counts, derived coverage, logistics cache and picking all keep an explicit enterprise", () => {
   const service = read("../src/services/mysql-cutover.js");
   const picking = read("../src/services/order-inventory-picking.js");
-  const isolation = read("../src/server/tenant-isolation.js");
-  assert.match(routes, /services\.ordersPaged\(Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
-  assert.match(service, /async function orderBaseSqlMysql\(query = \{\}, tenantId = "admin"\)/);
-  assert.match(service, /tenant_shop\.tenant_id = \$\{tenantScope\.id\} AND tenant_shop\.status = 'active'/);
-  assert.match(service, /AND sm\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /p\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /tenantScope \? `AND inventory_movements\.tenant_id = \$\{tenantScope\.id\}`/);
-  assert.match(service, /component_product\.tenant_id = \$\{tenantScope\.id\} AND pc\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /AND request\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /member\.tenant_id = \$\{tenantScope\.id\} AND member\.person_id = request_person\.id AND member\.active = 1/);
-  assert.match(service, /orderInventoryPickingMysql\(orderIds, tenantScoped \? tenantId : "admin"\)/);
-  assert.match(service, /rule\.tenant_id = \$\{Number\(tenantId\)\}/);
-  assert.match(service, /const logisticsRuleFilterCacheMysql = new Map\(\)/);
-  assert.match(service, /async function activeOrderLogisticsFilterMethodsMysql\(tenantId = "admin"\)/);
-  assert.match(service, /const tenantScope = await readableLogisticsTenantScopeMysql\(tenantId, "l"\)/);
-  assert.match(service, /if \(logisticsRuleFilterCacheMysql\.size > 128\)/);
-  assert.match(service, /logisticsRuleFilterCacheMysql\.delete\(cacheKey\)/);
-  assert.match(service, /activeOrderLogisticsFilterMethodsMysql\(tenantScoped \? tenantId : "admin"\)/);
-  assert.match(service, /const tenantCacheKey = String\(tenantId \|\| "admin"\)/);
-  assert.match(service, /orders:logistics-summary:v8:\$\{tenantCacheKey\}:/);
-  assert.match(picking, /direct_mapping\.tenant_id = \$\{tenantPk\}/);
-  assert.match(picking, /pc\.tenant_id = \$\{tenantPk\}/);
-  assert.match(picking, /child\.tenant_id = \$\{tenantPk\}/);
-  assert.match(service, /tenantScoped \? new Map\(\) : coveragePromise === null \? \(cachedOrderProcurementCoverage\(\) \|\| new Map\(\)\)/);
-  assert.match(service, /if \(tenantScope && requestedCoverageFilter\)/);
-  assert.match(service, /function assertTenantOrderListFiltersMysql\(query = \{\}, tenantScope = null\)/);
-  assert.match(service, /const tenantSafeStatuses = new Set\(\["all", "awaiting_packaging", "awaiting_deliver", "delivering", "dispute", "cancelled", "delivered", "unbound"\]\)/);
-  assert.match(service, /function addOrderSearchSqlMysql\(where, params, query, tenantScope = null\)/);
-  assert.match(service, /direct_sm\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /fallback_p\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /sm_by_id\.tenant_id = \$\{tenantScope\.id\} AND p_by_id\.tenant_id = \$\{tenantScope\.id\}/);
-  assert.match(service, /相关映射或采购数据租户隔离尚未完成/);
-  assert.match(service, /const includeCounts = !tenantScope/);
-  assert.match(isolation, /tenantOrderDetailRead/);
-  assert.match(isolation, /企业订单列表隔离改造尚未完成/);
-  assert.match(service, /export async function updateOrderMarkMysql\(orderId, body = \{\}, userId = null, tenantId = "admin"\)/);
-  assert.match(service, /export async function orderStatusHistoryMysql\(orderId, query = \{\}, tenantId = "admin"\)/);
-  assert.match(service, /export async function previewOrderProcurementMysql\(orderId, tenantId = "admin"\)/);
-  assert.match(service, /企业订单采购预览暂不可用：采购、入库与库存关联数据尚未完成租户隔离/);
+  const fn = name => service.match(new RegExp('^(?:export )?(?:async )?function '+name+'\\([^]*?^}', 'm'))?.[0] || '';
+  assert.match(fn('orderBaseSqlMysql'), /orderTenantPredicateMysql\("tenant_shop", tenantScope\)/);
+  assert.match(fn('ordersPagedMysql'), /await orderTenantCoverageMysql\(tenantScope\)/);
+  assert.doesNotMatch(fn('ordersPagedMysql'), /const includeCounts = !tenantScope/);
+  assert.match(fn('orderTenantCoverageMysql'), /tenantId: scope\.id/);
+  assert.match(fn('orderTenantCoverageMysql'), /includeLegacyTenantNull: scope\.defaultTenant, fresh: true/);
+  assert.doesNotMatch(fn('enrichOrderRowsForListMysql'), /cachedOrderProcurementCoverage\(/);
+  assert.match(fn('enrichOrderRowsForListMysql'), /orderInventoryPickingMysql\(orderIds, tenantScope\.id\)/);
+  assert.match(fn('loadOrderLogisticsSummaryForBaseMysql'), /orders:logistics-summary:v9:/);
+  assert.match(picking, /direct_mapping\.shop_id = o\.shop_id/);
+  assert.match(picking, /legacy \? .*tenant_id IS NULL/);
+  assert.match(picking, /scope\("child"\)/);
 });
 
 test("order schema supports tenant shop pagination and the opt-in migration audits linked records", () => {

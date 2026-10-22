@@ -13,18 +13,18 @@ test("matrix config requires a valid session and tenant administrator without tr
   for (const session of [null, {}, { tenant: { id: 2 } }, { tenant: { id: -1, slug: "a" } }]) {
     assert.throws(() => assetVariantTenantScope(session), { statusCode: 403 });
   }
-  assert.throws(() => assetVariantTenantScope(enterprise(2, "member")), { statusCode: 403 });
+  assert.equal(assetVariantTenantScope(enterprise(2, "member")).id, 2);
   assert.throws(() => assetVariantTenantScope({ ...enterprise(2, "member"), roles: ["admin"] }, { write: true }), { statusCode: 403 });
   assert.equal(assetVariantTenantScope({ ...enterprise(2, "member"), platform_role: "super_admin" }, { write: true }).id, 2);
   assert.equal(assetVariantTenantScope(defaultSession).isDefault, true);
-  assert.throws(() => assetVariantExecutionScope(enterprise()), { statusCode: 403 });
+  assert.equal(assetVariantExecutionScope(enterprise()).id, 2);
 });
 
 test("default enterprise operations can consume configuration and execute without receiving configuration authority", async () => {
   assert.deepEqual(assetVariantTenantScope(defaultOperations), { id: 1, slug: "default", isDefault: true });
   assert.deepEqual(assetVariantExecutionScope(defaultOperations), { id: 1, slug: "default", isDefault: true });
   assert.throws(() => assetVariantTenantScope(defaultOperations, { write: true }), { statusCode: 403 });
-  assert.throws(() => assetVariantExecutionScope({ ...enterprise(2, "owner"), platform_role: "super_admin" }), { statusCode: 403 });
+  assert.equal(assetVariantExecutionScope({ ...enterprise(2, "owner"), platform_role: "super_admin" }).isDefault, false);
   let writes = 0;
   const service = loadAssetVariantConfigService({
     query: async (sql, params) => {
@@ -135,13 +135,14 @@ test("listing fallback binds template tenant before shop and template parameters
   assert.deepEqual(Array.from(calls[1].params), [2, 20, 200, 200, 20]);
 });
 
-test("legacy jobs explicitly retain their default workspace and new requests overwrite client tenant scope", () => {
+test("jobs persist enterprise ownership and workers restore current membership instead of client tenant scope", () => {
   const enqueues = assetVariantSource.slice(assetVariantSource.indexOf("export async function enqueuePublishSelectionProductToOzon"), assetVariantSource.indexOf("export async function assetVariantJobs"));
   assert.equal((enqueues.match(/_tenantScope: \{ id: scope\.id, slug: scope\.slug \}/g) || []).length, 2);
   assert.equal((enqueues.match(/assetVariantExecutionScope\(session\)/g) || []).length, 2);
   const worker = assetVariantSource.slice(assetVariantSource.indexOf("async function runAssetVariantJob"), assetVariantSource.indexOf("function createAssetVariantJobProgress"));
-  assert.match(worker, /SELECT id, slug FROM tenants WHERE slug = 'default' AND status = 'active'/);
-  assert.match(worker, /storedScope\.slug !== "default"/);
+  assert.match(worker, /restoreBusinessTaskSession\(row\.tenant_id, row\.created_by_person_id\)/);
+  assert.match(worker, /assertBusinessTaskPermission\(session, "operations"\)/);
+  assert.doesNotMatch(worker, /storedScope|slug: "default"/);
   assert.doesNotMatch(worker, /INSERT.*tenant_members|UPDATE.*tenant_members/);
 });
 

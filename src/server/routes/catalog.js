@@ -15,8 +15,8 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory-product-naming/options": (req, url) => services.inventoryProductNamingOptions(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/inventory-product-naming/options": async (req) => services.createInventoryProductNamingOption(await readJson(req), req._session),
     "POST /api/products": async (req) => {
@@ -24,16 +24,13 @@ export function createCatalogRoutes({ services, readJson }) {
       const tenantId = tenantIdFromRequest(req);
       const sessionPersonId = req._session?.personId || null;
       const isInventoryCreation = Boolean((body.structured_naming || body.structuredNaming) && body.product_type !== "selection");
-      if (tenantId !== "admin" && isInventoryCreation) {
-        throw Object.assign(new Error("企业库存建品审批流程尚未完成租户隔离，目前仅支持直接创建选品产品。"), { statusCode: 403 });
-      }
       const create = isInventoryCreation
         ? (payload) => services.submitInventoryProductRequest(payload, req._session)
         : (payload) => services.createProduct(payload, null, tenantId);
       const created = await create({
         ...body,
         owner_person_id: body.owner_person_id || sessionPersonId,
-        created_by_person_id: body.created_by_person_id || sessionPersonId
+        created_by_person_id: sessionPersonId
       });
       if (created.request_id) return created;
       if (isInventoryCreation) {
@@ -49,22 +46,22 @@ export function createCatalogRoutes({ services, readJson }) {
       }
       return { ...created, product: await services.selectionProduct(created.id, { includeDetails: 0 }, tenantId) };
     },
-    "POST /api/products/merge-preview": async (req) => services.previewMergeProducts(await readJson(req)),
-    "POST /api/products/merge": async (req) => services.mergeProducts(await readJson(req)),
-    "POST /api/selection/selling-points/generate": async (req) => services.generateSelectionSellingPoints(await readJson(req)),
-    "GET /api/products/merge-history": (req, url) => services.productMergeHistory(Object.fromEntries(url.searchParams.entries())),
-    "POST /api/products/import-preview": async (req) => services.previewProductCsvImport(await readJson(req)),
-    "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req)),
-    "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req)) || { ok: true },
-    "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
-    "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req)) || { ok: true },
+    "POST /api/products/merge-preview": async (req) => services.previewMergeProducts(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/products/merge": async (req) => services.mergeProducts(await readJson(req), tenantIdFromRequest(req), { session: req._session }),
+    "POST /api/selection/selling-points/generate": async (req) => services.generateSelectionSellingPoints(await readJson(req), req._session),
+    "GET /api/products/merge-history": (req, url) => services.productMergeHistory(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "POST /api/products/import-preview": async (req) => services.previewProductCsvImport(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/products/import-commit": async (req) => services.commitProductCsvImport(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
+    "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }) || { ok: true },
+    "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req), { tenantId: tenantIdFromRequest(req) }) || { ok: true },
     "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/online-products/create-product": async (req) => {
       const body = await readProductSaveJson(readJson, req);
       return (body.structured_naming || body.structuredNaming)
         ? services.submitInventoryProductRequest(body, req._session)
-        : services.createProductFromOnlineProduct(body);
+        : services.createProductFromOnlineProduct({ ...body, created_by_person_id: req._session?.personId }, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal });
     }
   };
 }
@@ -84,11 +81,11 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "order-profit-details") {
-    return json(res, await services.productOrderProfitDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries())));
+    return json(res, await services.productOrderProfitDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "cancel-details") {
-    return json(res, await services.productCancelDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries())));
+    return json(res, await services.productCancelDetails(Number(parts[2]), Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && /^\d+$/.test(parts[2] || "") && !parts[3]) {
@@ -98,6 +95,8 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "detail-images" && /^\d+$/.test(parts[4] || "")) {
     return sendProductImage(res, Number(parts[2]), () => services.productDetailImage(Number(parts[2]), Number(parts[4]), tenantIdFromRequest(req)), {
+      session: req._session,
+      tenantId: tenantIdFromRequest(req),
       thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
       width: Number(url.searchParams.get("w") || 0),
       version: url.searchParams.get("v") || "",
@@ -107,6 +106,8 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "image") {
     return sendProductImage(res, Number(parts[2]), services.productImage ? (id) => services.productImage(id, tenantIdFromRequest(req)) : null, {
+      session: req._session,
+      tenantId: tenantIdFromRequest(req),
       thumbnail: ["1", "true", "yes"].includes(String(url.searchParams.get("thumb") || "").toLowerCase()),
       width: Number(url.searchParams.get("w") || 0),
       version: url.searchParams.get("v") || "",
@@ -117,7 +118,7 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "products" && parts[2]) {
     const productId = Number(parts[2]);
     if (parts[3] === "development-meta") {
-      return json(res, await services.updateProductDevelopmentMeta(productId, await readJson(req)));
+      return json(res, await services.updateProductDevelopmentMeta(productId, await readJson(req), tenantIdFromRequest(req)));
     }
     if (parts[3] === "components") {
       await services.updateProductComponents(productId, await readJson(req), tenantIdFromRequest(req));
@@ -128,36 +129,36 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "recalculate-profits") {
-    return json(res, await services.recalculateOrderProfitsForProduct(Number(parts[2]), await readJson(req)));
+    return json(res, await services.recalculateOrderProfitsForProduct(Number(parts[2]), { ...await readJson(req), tenantId: tenantIdFromRequest(req), session: req._session, signal: req._abortSignal }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "force-recalculate-profits") {
-    return json(res, await services.forceRecalculateOrderProfitsForProduct(Number(parts[2]), await readJson(req)));
+    return json(res, await services.forceRecalculateOrderProfitsForProduct(Number(parts[2]), await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "add-to-inventory") {
-    return json(res, await services.addSelectionToInventory(Number(parts[2])));
+    return json(res, await services.addSelectionToInventory(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "mappings" && parts[2]) {
-    return json(res, await services.updateSkuMapping(Number(parts[2]), await readJson(req)));
+    return json(res, await services.updateSkuMapping(Number(parts[2]), await readJson(req), tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "mappings" && parts[2]) {
-    return json(res, await services.deleteSkuMapping(Number(parts[2])));
+    return json(res, await services.deleteSkuMapping(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "products" && parts[2]) {
-    await services.deleteProduct(Number(parts[2]));
+    await services.deleteProduct(Number(parts[2]), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "remove-from-inventory") {
-    return json(res, await services.removeProductFromInventory(Number(parts[2])));
+    return json(res, await services.removeProductFromInventory(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "undo-merge") {
-    return json(res, await services.undoMergeProductHistory(Number(parts[2])));
+    return json(res, await services.undoMergeProductHistory(Number(parts[2]), tenantIdFromRequest(req), { session: req._session }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] && parts[3] === "restore") {
@@ -166,11 +167,11 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "online-products" && parts[2]) {
-    return json(res, await services.updateOnlineProduct(Number(parts[2]), await readJson(req)));
+    return json(res, await services.updateOnlineProduct(Number(parts[2]), await readJson(req), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "online-products" && parts[2] && parts[3] === "edit-draft") {
-    return json(res, await services.onlineProductEditDraft(Number(parts[2])));
+    return json(res, await services.onlineProductEditDraft(Number(parts[2]), {}, req._session));
   }
 
   return false;

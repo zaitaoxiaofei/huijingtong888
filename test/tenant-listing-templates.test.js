@@ -19,7 +19,6 @@ test("listing templates and core draft operations expose only tenant-scoped rout
     ["GET", ["api", "listing", "templates", "not-numeric"]],
     ["PUT", ["api", "listing", "templates", "not-numeric"]],
     ["POST", ["api", "listing", "drafts", "batch-publish"]],
-    ["POST", ["api", "listing", "drafts", "from-inventory-product"]],
     ["POST", ["api", "listing", "drafts", "12", "shop-copies", "extra"]],
     ["GET", ["api", "listing", "drafts", "not-numeric"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
@@ -27,6 +26,7 @@ test("listing templates and core draft operations expose only tenant-scoped rout
   for (const [method, parts] of [
     ["GET", ["api", "listing", "drafts"]],
     ["POST", ["api", "listing", "drafts"]],
+    ["POST", ["api", "listing", "drafts", "from-inventory-product"]],
     ["GET", ["api", "listing", "drafts", "12"]],
     ["PUT", ["api", "listing", "drafts", "12"]],
     ["DELETE", ["api", "listing", "drafts", "12"]],
@@ -78,7 +78,9 @@ test("offer identifier availability checks cannot reveal or reserve another tena
   const check = service.slice(service.indexOf("async function listingOfferIdExistsInTenant"), service.indexOf("export async function listingOzonCategories"));
   assert.match(check, /const tenantId = listingTenantId\(session\)/);
   assert.match(check, /const tenantScope = \(alias\) => tenantId === "admin"/);
-  assert.match(check, /JOIN shops s ON s\.id = op\.shop_id AND \$\{tenantScope\("s"\)\}/);
+  assert.match(check, /JOIN shops s ON s\.id = op\.shop_id AND \$\{tenantId === "admin"/);
+  assert.match(check, /s\.tenant_id IS NULL OR s\.tenant_id = \(SELECT id FROM tenants WHERE slug = 'default'/);
+  assert.match(check, /\[\.\.\.\(tenantId === "admin" \? \[\] : \[Number\(tenantId\)\]\), offer\]/);
   assert.match(check, /listing_publish_records r[\s\S]*?\$\{tenantScope\("r"\)\}/);
   assert.match(check, /listing_shop_copies c[\s\S]*?\$\{tenantScope\("c"\)\}/);
   assert.match(check, /listing_drafts d[\s\S]*?\$\{tenantScope\("d"\)\}/);

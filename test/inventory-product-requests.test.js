@@ -5,8 +5,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { createCatalogRoutes, handleCatalogRestRoute } from "../src/server/routes/catalog.js";
+import { inventoryTenantSql } from "../src/services/inventory-tenant-scope.js";
 
 const serviceSource = readFileSync(new URL("../src/services/inventory-product-requests.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
+const predicateSource = readFileSync(new URL("../src/services/ai-vehicle-catalog.js", import.meta.url), "utf8").match(/^export function vehicleCatalogTenantPredicate\([^]*?^}/m)[0].replace("export ", "");
+const vehicleCatalogTenantPredicate = new Function(`${predicateSource}; return vehicleCatalogTenantPredicate;`)();
 const namingSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8").match(/export function normalizeStructuredNamingMysql\(body = \{\}\) \{[\s\S]*?\n\}/)[0].replace("export ", "");
 const operator = { personId: 7, name: "录入员", role: "operator", tenant: { id: 1, slug: "default" } };
 const manager = { personId: 8, name: "库存经理", role: "manager", tenant: { id: 1, slug: "default" } };
@@ -38,14 +41,14 @@ function fixture() {
   async function execute(sql, args = []) {
     if (sql.includes("CREATE TABLE")) return {};
     if (sql.includes("INSERT INTO inventory_product_requests")) {
-      const [key, applicant, name, payload, options] = args;
+      const [, key, applicant, name, payload, options] = args;
       if (!state.requests.some(row => row.request_key === key && row.applicant_id === applicant)) state.requests.push({ id: state.requests.length + 1, request_key: key, applicant_id: applicant, applicant_name: name, payload_json: payload, new_options_json: options, status: "pending", revision: 1, binding_status: "none" });
       return {};
     }
     if (sql.includes("INSERT INTO inventory_product_naming_options")) {
-      const existing = state.options.find(row => row.type === args[0] && row.value === args[1]);
+      const existing = state.options.find(row => row.type === args[1] && row.value === args[2]);
       if (existing) existing.status = "active";
-      else state.options.push({ type: args[0], value: args[1], status: "active" });
+      else state.options.push({ type: args[1], value: args[2], status: "active" });
       return {};
     }
     if (sql.includes("UPDATE inventory_product_requests")) {
@@ -71,7 +74,9 @@ function fixture() {
   }
   const context = vm.createContext({ normalizeVehicleBrand, vehicleBrandAliases, VEHICLE_BRAND_CHINESE,
     hasPermission, randomUUID: () => "generated-key", mysqlQuery: query, mysqlExecute: execute,
-    inventoryProductNamingOptions: async () => ({}), aiVehicleCatalog: async () => ({}), prepareInventoryProductCreationMysql: async () => {},
+    inventoryTenantSql, vehicleCatalogTenantPredicate, resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
+    assertInventoryMember: async () => {}, assertInventoryReferences: async () => {}, assertInventoryRecord: async () => {},
+    ensureInventoryProductNamingSchema: async () => {}, ensureVehicleCatalogSchema: async () => {}, prepareInventoryProductCreationMysql: async () => {},
     validateVehicleBrand: value => { if (!/[A-Z]/i.test(value)) throw new Error("汽车品牌请填写英文名称"); return value.toUpperCase(); },
     createProductMysql: create, createProductFromOnlineProductMysql: create,
     bindOnlineProductMysql: async () => { bindingCalls++; if (failBind) throw new Error("模拟订单绑定失败"); },

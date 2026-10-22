@@ -7,7 +7,7 @@ import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const moduleBody = source => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
-const session = (personId, tenantId = 1, slug = "default") => ({ personId, roles: ["operations"], tenant: { id: tenantId, slug, role: "member" } });
+const session = (personId, tenantId = 1, slug = "default") => ({ personId, roles: ["operations"], tenant: { id: tenantId, slug, role: "member", access_allowed: true } });
 
 function notifications() {
   const timers = new Map();
@@ -26,7 +26,7 @@ function notifications() {
     subscribe(trustedSession, query = {}) {
       const chunks = [];
       const res = { destroyed: false, writableEnded: false, write(chunk) { chunks.push(chunk); } };
-      const unsubscribe = context.subscribeGlobalUpdateEvents(res, query, trustedSession);
+      const unsubscribe = context.subscribeGlobalUpdateEvents(res, query, trustedSession, { authorize: async () => trustedSession });
       const client = { res, unsubscribe, clear() { chunks.length = 0; },
         events() { return chunks.join("").split("\n\n").filter(Boolean).map(frame => ({
           type: frame.match(/^event: (.+)$/m)?.[1], payload: JSON.parse(frame.match(/^data: (.+)$/m)?.[1] || "null")
@@ -38,7 +38,7 @@ function notifications() {
   };
 }
 
-test("only the exact default-enterprise business GET subscribes to system events", () => {
+test("only the exact authenticated business GET subscribes to system events", () => {
   const defaults = [session(7), { ...session(8), roles: ["packing"] }];
   const path = ["api", "system", "events"];
   for (const user of defaults) {
@@ -49,8 +49,8 @@ test("only the exact default-enterprise business GET subscribes to system events
     }
   }
   const customer = session(7, 42, "company-a");
-  assert.equal(tenantIsolationDecision(customer, path, "GET").allowed, false);
-  assert.equal(authorizeApiRequest({ method: "GET", _session: customer }, path).allowed, false);
+  assert.equal(tenantIsolationDecision(customer, path, "GET").allowed, true);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: customer }, path).allowed, true);
   const platform = { personId: 1, platform_role: "super_admin", tenant: null, roles: [] };
   assert.equal(tenantIsolationDecision(platform, path, "GET").allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: platform }, path).allowed, true);
@@ -65,7 +65,8 @@ test("the SSE route passes trusted session separately from untrusted query field
   const unsubscribe = () => {};
   const context = vm.createContext({
     writeHead(_res, status, headers) { assert.equal(status, 200); assert.equal(headers["Content-Type"], "text/event-stream; charset=utf-8"); },
-    subscribeGlobalUpdateEvents(...args) { calls.push(args); return unsubscribe; }
+    subscribeGlobalUpdateEvents(...args) { calls.push(args); return unsubscribe; },
+    extractToken: () => 'original-fixture-token', getSession: async () => session(7)
   });
   vm.runInContext(`async function route(req, res, url, parts) { ${source.slice(start, end)} return false; }`, context);
   const req = { method: "GET", _session: session(7), on(name, callback) { assert.equal(name, "close"); assert.equal(callback, unsubscribe); } };
@@ -75,11 +76,12 @@ test("the SSE route passes trusted session separately from untrusted query field
   assert.equal(calls[0][0], res);
   assert.equal(calls[0][1].person_id, "99");
   assert.equal(calls[0][2], req._session);
+  assert.equal((await calls[0][3].authorize()).personId, 7);
   assert.equal(await context.route(req, res, url, ["api", "system", "events", "other"]), false);
   assert.equal(calls.length, 1);
 });
 
-test("SSE target person and tenant come only from the trusted session and must both match", () => {
+test("SSE target person and tenant come only from the trusted session and must both match", async () => {
   const h = notifications();
   try {
     const target = h.subscribe(session(7, 42, "company-a"), { person_id: 99, personId: 99, tenant_id: 99, tenantId: 99, tenant_slug: "default" });
@@ -88,19 +90,19 @@ test("SSE target person and tenant come only from the trusted session and must b
     const defaultUser = h.subscribe(session(7));
     const clients = [target, otherPerson, otherTenant, defaultUser];
     clients.forEach(client => client.clear());
-    h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "person-seven-company-a" }, { personId: 7, tenantId: 42 });
+    await h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "person-seven-company-a" }, { personId: 7, tenantId: 42 });
     assert.deepEqual(target.events().map(event => event.payload.marker), ["person-seven-company-a"]);
     for (const client of clients.slice(1)) assert.deepEqual(client.events(), []);
-    h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "forged-query-person" }, { personId: 99, tenantId: 42 });
+    await h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "forged-query-person" }, { personId: 99, tenantId: 42 });
     assert.equal(target.events().length, 1);
     for (const tenantId of [0, -1, "invalid", undefined]) {
-      h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "invalid-scope" }, { personId: 7, tenantId });
+      await h.service.broadcastGlobalEvent("sku-order-tracking", { marker: "invalid-scope" }, { personId: 7, tenantId });
     }
     assert.equal(target.events().length, 1);
   } finally { h.close(); }
 });
 
-test("legacy untagged business events reach default subscribers only and still enforce recipient ownership", () => {
+test("legacy untagged business events reach default subscribers only and still enforce recipient ownership", async () => {
   const h = notifications();
   try {
     const target = h.subscribe(session(7));
@@ -109,8 +111,8 @@ test("legacy untagged business events reach default subscribers only and still e
     const platform = h.subscribe({ personId: 7, platform_role: "super_admin", tenant: null });
     const untrusted = h.subscribe(undefined, { person_id: 7, tenant_id: 1, tenant_slug: "default" });
     [target, otherPerson, customer, platform, untrusted].forEach(client => client.clear());
-    h.service.broadcastGlobalEvent("ai-task", { marker: "legacy-owner" }, { personId: 7 });
-    h.service.broadcastGlobalEvent("system-notification", { refresh: true });
+    await h.service.broadcastGlobalEvent("ai-task", { marker: "legacy-owner" }, { personId: 7 });
+    await h.service.broadcastGlobalEvent("system-notification", { refresh: true });
     assert.deepEqual(target.events().map(event => event.type), ["ai-task", "system-notification"]);
     assert.deepEqual(otherPerson.events().map(event => event.type), ["system-notification"]);
     for (const client of [customer, platform, untrusted]) assert.deepEqual(client.events(), []);
@@ -143,6 +145,7 @@ test("both SKU producers deliver only to the matching person in their resolved e
     const clients = [target, h.subscribe(session(7)), h.subscribe(session(8, 42, "company-a")), h.subscribe(session(7, 99, "company-b"))];
     clients.forEach(client => client.clear());
     const broadcasts = [];
+    const deliveries = [];
     const context = vm.createContext({
       mysqlExecute: async () => ({}),
       mysqlQuery: async sql => {
@@ -153,11 +156,12 @@ test("both SKU producers deliver only to the matching person in their resolved e
         if (sql.startsWith("SELECT person_id FROM tenant_members")) return [{ person_id: 7 }];
         throw new Error(`Unexpected fixture SQL: ${sql}`);
       },
-      broadcastGlobalEvent(name, payload, options) { broadcasts.push(options); h.service.broadcastGlobalEvent(name, payload, options); }
+      broadcastGlobalEvent(name, payload, options) { broadcasts.push(options); const delivery = h.service.broadcastGlobalEvent(name, payload, options); deliveries.push(delivery); return delivery; }
     });
     vm.runInContext(moduleBody(read("../src/services/sku-order-tracking.js")), context);
     await context.notifyDecliningTrackers([{ tracker_id: 3, tracked: 1, owner_person_id: 7, shop_id: 12, shop_name: "Fixture shop", ozon_sku: "fixture-sku", week_1_sales: 1, week_2_sales: 4, week_3_sales: 9 }], 42);
     await context.saveSkuOrderTracker({ shop_id: 12, ozon_sku: "fixture-sku", owner_person_id: 7 }, 7, "42");
+    await Promise.all(deliveries);
     assert.deepEqual(broadcasts.map(options => ({ ...options })), [{ personId: 7, tenantId: 42 }, { personId: 7, tenantId: 42 }]);
     assert.deepEqual(target.events().map(event => event.type), ["sku-order-tracking", "sku-order-tracking"]);
     for (const client of clients.slice(1)) assert.deepEqual(client.events(), []);

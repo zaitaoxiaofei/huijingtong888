@@ -7,16 +7,17 @@ const serviceSource = await readFile(new URL("../src/services/mysql-cutover.js",
 test("product merge chooses one complete bundle relationship without adding quantities", () => {
   const compositionMergeSource = serviceSource.split("async function remapProductCompositionReferencesAfterMergeMysql")[1]
     .split("const [recipeRows]")[0];
-  assert.match(compositionMergeSource, /WHERE product_id IN \(\$\{placeholders\}\) OR component_product_id IN \(\$\{placeholders\}\)/);
+  assert.match(compositionMergeSource, /WHERE \(product_id IN \(\$\{placeholders\}\) OR component_product_id IN \(\$\{placeholders\}\)\)/);
+  assert.match(compositionMergeSource, /inventoryTenantSql\(scope, "pc"\)/);
   assert.match(compositionMergeSource, /selectedCompositionSourceId/);
   assert.match(compositionMergeSource, /Number\(row\.product_id\) !== selectedCompositionSourceId/);
   assert.match(compositionMergeSource, /const key = `\$\{parentId\}:\$\{componentId\}`/);
   assert.doesNotMatch(compositionMergeSource, /current\.quantity \+= Number\(row\.quantity \|\| 0\)/);
-  assert.match(compositionMergeSource, /INSERT INTO product_components \(product_id, component_product_id, quantity, component_role\)/);
+  assert.match(compositionMergeSource, /INSERT INTO product_components \(tenant_id, product_id, component_product_id, quantity, component_role\)/);
 });
 
 test("product merge remaps SKU recipes and aggregates duplicate quantities", () => {
-  assert.match(serviceSource, /FROM sku_inventory_recipe_items[\s\S]*WHERE product_id IN \(\$\{placeholders\}\)[\s\S]*FOR UPDATE/);
+  assert.match(serviceSource, /FROM sku_inventory_recipe_items item[\s\S]*WHERE item\.product_id IN \(\$\{placeholders\}\)[\s\S]*FOR UPDATE/);
   assert.match(serviceSource, /const key = `\$\{Number\(row\.recipe_id\)\}:\$\{productId\}`/);
   assert.match(serviceSource, /INSERT INTO sku_inventory_recipe_items \(recipe_id, product_id, quantity\)/);
 });
@@ -24,15 +25,15 @@ test("product merge remaps SKU recipes and aggregates duplicate quantities", () 
 test("product merge blocks self-referencing bundles and resyncs unfinished order deductions", () => {
   assert.match(serviceSource, /if \(parentId === componentId\)/);
   assert.match(serviceSource, /库存合并后会导致套餐引用自身/);
-  assert.match(serviceSource, /await remapProductCompositionReferencesAfterMergeMysql\(connection, targetProductId, sourceProductIds, compositionSourceProductId\)/);
-  assert.match(serviceSource, /await syncOutboundForOpenOrdersMysql\(\{ product_id: targetProductId, open_only: true \}\)/);
+  assert.match(serviceSource, /await remapProductCompositionReferencesAfterMergeMysql\(connection, targetProductId, sourceProductIds, compositionSourceProductId, scope\)/);
+  assert.match(serviceSource, /await syncOutboundForOpenOrdersMysql\(\{ \.\.\.options, tenantId: scope.id, product_id: targetProductId, open_only: true \}\)/);
 });
 
 test("product merge remaps FBP replenishment and transfer references", () => {
   assert.match(serviceSource, /key: "fbp_replenishment_order_items"[\s\S]*table: "fbp_replenishment_order_items"/);
   assert.match(serviceSource, /key: "fbp_transfer_records"[\s\S]*table: "fbp_transfer_records"/);
-  assert.match(serviceSource, /UPDATE fbp_replenishment_order_items SET product_id = \?, updated_at = CURRENT_TIMESTAMP WHERE product_id IN/);
-  assert.match(serviceSource, /UPDATE fbp_transfer_records SET product_id = \? WHERE product_id IN/);
+  assert.match(serviceSource, /await remapOwnedMergeReferencesMysql\(connection, referenceRows, targetProductId, scope\)/);
+  assert.match(serviceSource, /UPDATE \$\{def.table\} merge_ref SET \$\{def.column\} = \?[\s\S]*productMergeReferenceTenantSql\(scope, def.key\)/);
 });
 
 test("product merge preview never returns or renders full base64 image fields", () => {

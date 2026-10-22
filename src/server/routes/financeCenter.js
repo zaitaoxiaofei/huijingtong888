@@ -24,7 +24,7 @@ export function createFinanceCenterRoutes({ readJson, services }) {
     "POST /api/finance-center/expenses": async (req) => saveFinanceExpense(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "GET /api/finance-center/vouchers": (req, url) => financeVouchers(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/finance-center/platform-items": (req, url) => financePlatformItems(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "POST /api/finance-center/voucher-attachments": (req) => services.uploadTeamAttachment(req),
+    "POST /api/finance-center/voucher-attachments": (req) => services.uploadTeamAttachment(req, { purpose: "finance" }),
     "POST /api/finance-center/vouchers": async (req) => saveFinanceVoucher(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/finance-center/close": async (req) => closeFinancePeriod(await readJson(req), req._session?.personId, tenantIdFromRequest(req))
   };

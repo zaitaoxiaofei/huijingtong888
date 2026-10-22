@@ -4,13 +4,16 @@ import test from "node:test";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 import { isTenantScopedPluginRoute, tenantPluginApiError } from "../src/server/local-plugin-tenant.js";
 
-test("default tenant retains access while unsupported tenant business routes fail closed", () => {
+test("default and customer members use reviewed routes while unsupported business routes fail closed", () => {
   const defaultSession = { tenant: { id: 1, slug: "default" } };
   const otherSession = { tenant: { id: 42, slug: "test-company" } };
 
   assert.equal(tenantIsolationDecision(defaultSession, ["api", "orders"]).allowed, true);
-  assert.equal(tenantIsolationDecision(otherSession, ["api", "orders"]).code, "TENANT_ISOLATION_PENDING");
-  assert.equal(tenantIsolationDecision(otherSession, ["api", "dashboard"]).allowed, false);
+  assert.equal(tenantIsolationDecision(defaultSession, ["api", "orders", "unverified-operation"], "POST").code, "TENANT_ISOLATION_PENDING");
+  assert.equal(tenantIsolationDecision({ ...defaultSession, platform_role: 'super_admin' }, ["api", "orders", "unverified-operation"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "orders"]).allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "dashboard"]).allowed, true);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "orders", "unverified-operation"], "POST").code, "TENANT_ISOLATION_PENDING");
   assert.equal(tenantIsolationDecision(otherSession, ["api", "user-preferences"]).allowed, true);
   for (const route of ["reference-rate", "rfbs-marketplace", "logistics-rules"]) {
     assert.equal(tenantIsolationDecision(otherSession, ["api", "tools", "pricing", route], "GET").allowed, true);
@@ -28,7 +31,7 @@ test("default tenant retains access while unsupported tenant business routes fai
   assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(otherSession, ["api", "products", "123"], "PUT").allowed, true);
-  assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products", "123", "edit-draft"], "GET").allowed, false);
+  assert.equal(tenantIsolationDecision(otherSession, ["api", "online-products", "123", "edit-draft"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision({}, ["api", "orders"]).code, "TENANT_CONTEXT_REQUIRED");
 });
 

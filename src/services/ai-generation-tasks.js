@@ -6,6 +6,8 @@ import { generateCommerceCopy, generateImages } from "../server/services/ai/aiWo
 import { broadcastGlobalEvent } from "../server/notifications.js";
 import { aiImageRuntimePoolConfig } from "./ai-provider-settings.js";
 import { adaptiveAiImageConcurrency } from "./ai-image-runtime-limiter.js";
+import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { restoreBusinessTaskSession } from "./business-task-tenant.js";
 
 const SUPPORTED_FIELDS = new Set(["mainImage", "detailImages", "title", "tags", "description", "richText", "video", "commerceCopy"]);
 const MAX_TASK_INPUT_JSON_BYTES = 220_000;
@@ -46,6 +48,7 @@ export async function ensureAiGenerationTaskSchema() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS ai_generation_tasks (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       task_no VARCHAR(64) NOT NULL,
       source_module VARCHAR(64) NOT NULL DEFAULT '',
       workflow_id VARCHAR(128) NOT NULL DEFAULT '',
@@ -67,7 +70,7 @@ export async function ensureAiGenerationTaskSchema() {
       finished_at TIMESTAMP NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uq_ai_generation_task_no (task_no),
+      UNIQUE KEY uq_ai_generation_task_no (tenant_id, task_no),
       INDEX idx_ai_generation_tasks_workflow (workflow_id, result_id),
       INDEX idx_ai_generation_tasks_status (status, priority, created_at)
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
@@ -78,6 +81,7 @@ export async function ensureAiGenerationTaskSchema() {
 }
 
 export async function createAiGenerationTasks(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => createAiGenerationTasks(body, session));
   await ensureAiGenerationTaskSchema();
   startAiGenerationTaskWorker();
   const tasks = normalizeTaskPayloads(body);
@@ -104,9 +108,10 @@ export async function createAiGenerationTasks(body = {}, session = null) {
     const taskNo = buildTaskNo(fieldKey, task, compactInput);
     await mysqlExecute(`
       INSERT INTO ai_generation_tasks
-        (task_no, source_module, workflow_id, result_id, source_batch_id, source_product_id, field_key, status, priority, input_json, depends_on_task_ids, max_attempts, created_by_person_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+        (tenant_id, task_no, source_module, workflow_id, result_id, source_batch_id, source_product_id, field_key, status, priority, input_json, depends_on_task_ids, max_attempts, created_by_person_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
     `, [
+      aiTenantId(),
       taskNo,
       cleanText(task.sourceModule || task.source_module || body.sourceModule || body.source_module || "ai_generation"),
       cleanText(task.workflowId || task.workflow_id || body.workflowId || body.workflow_id || ""),
@@ -120,7 +125,7 @@ export async function createAiGenerationTasks(body = {}, session = null) {
       Math.max(1, Math.min(5, Number(task.maxAttempts || task.max_attempts || body.maxAttempts || body.max_attempts || 2) || 2)),
       Number(session?.personId || session?.id || 0) || null
     ]);
-    const rows = await mysqlQuery("SELECT * FROM ai_generation_tasks WHERE task_no = ? LIMIT 1", [taskNo]);
+    const rows = await mysqlQuery("SELECT * FROM ai_generation_tasks WHERE task_no = ? AND tenant_id = ? LIMIT 1", [taskNo, aiTenantId()]);
     created.push(mapTaskRow(rows[0]));
   }
   scheduleWorkerTick(10);
@@ -128,10 +133,11 @@ export async function createAiGenerationTasks(body = {}, session = null) {
 }
 
 export async function aiGenerationTasks(query = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiGenerationTasks(query, session));
   await ensureAiGenerationTaskSchema();
   startAiGenerationTaskWorker();
-  const filters = [];
-  const params = [];
+  const filters = ["tenant_id = ?"];
+  const params = [aiTenantId()];
   const currentPersonId = Number(session?.personId || session?.id || 0) || 0;
   if (currentPersonId) {
     filters.push("created_by_person_id = ?");
@@ -192,9 +198,9 @@ export async function cleanupAiGenerationTaskHistory(options = {}) {
   while (true) {
     const result = await mysqlExecute(`
       DELETE FROM ai_variant_lab_batch_items
-      WHERE job_no IN (
-        SELECT job_no FROM (
-          SELECT job_no FROM ai_variant_lab_batch_jobs
+      WHERE (tenant_id, job_no) IN (
+        SELECT tenant_id, job_no FROM (
+          SELECT tenant_id, job_no FROM ai_variant_lab_batch_jobs
           WHERE status IN ('image_done', 'image_dry_run', 'partially_failed', 'partially_generated', 'failed')
             AND updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
           LIMIT ${batchSize}
@@ -233,6 +239,7 @@ export async function cleanupAiGenerationTaskHistory(options = {}) {
 }
 
 export async function retryAiGenerationTask(taskId, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => retryAiGenerationTask(taskId, session));
   await ensureAiGenerationTaskSchema();
   const taskNo = cleanText(taskId);
   if (!taskNo) {
@@ -241,8 +248,8 @@ export async function retryAiGenerationTask(taskId, session = null) {
     throw error;
   }
   const currentPersonId = Number(session?.personId || session?.id || 0) || 0;
-  const ownershipSql = currentPersonId ? " AND created_by_person_id = ?" : "";
-  const ownershipParams = currentPersonId ? [currentPersonId] : [];
+  const ownershipSql = " AND tenant_id = ? AND created_by_person_id = ?";
+  const ownershipParams = [aiTenantId(), currentPersonId];
   await mysqlExecute(`
     UPDATE ai_generation_tasks
     SET status = 'queued', error_json = NULL, output_json = NULL, started_at = NULL, finished_at = NULL
@@ -352,6 +359,16 @@ async function claimAndRunTask(row) {
 }
 
 async function executeClaimedTask(row) {
+  try {
+    const session = await restoreBusinessTaskSession(row.tenant_id, row.created_by_person_id);
+    return await withAiTenantSession(session, () => executeAuthorizedAiGenerationTask(row));
+  } catch (error) {
+    await mysqlExecute("UPDATE ai_generation_tasks SET status = 'failed', error_json = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ?",
+      [JSON.stringify(normalizeTaskError(error)), row.id, row.tenant_id]);
+  }
+}
+
+async function executeAuthorizedAiGenerationTask(row) {
   const startedAt = Date.now();
   broadcastTaskStatus(row, "running", { queuedMs: elapsedSince(row.created_at) });
   try {
@@ -391,6 +408,10 @@ async function executeClaimedTask(row) {
 }
 
 function broadcastTaskStatus(row, status, timing = {}) {
+  const tenantId = Number(currentAiTenantSession()?.tenant?.id);
+  if (!Number.isSafeInteger(tenantId) || tenantId <= 0 || aiTenantId() !== String(row.tenant_id || "admin")) {
+    throw new Error("AI task event requires its authorized enterprise context");
+  }
   broadcastGlobalEvent("ai-task", {
     taskId: row.task_no || "",
     fieldKey: row.field_key || "",
@@ -398,7 +419,7 @@ function broadcastTaskStatus(row, status, timing = {}) {
     queuedMs: Number(timing.queuedMs || 0),
     runMs: Number(timing.runMs || 0),
     updatedAt: new Date().toISOString()
-  }, { personId: row.created_by_person_id });
+  }, { personId: row.created_by_person_id, tenantId });
 }
 
 function elapsedSince(value, fallback = Date.now()) {
@@ -424,8 +445,8 @@ async function runTaskHandler(fieldKey, input) {
       categoryName: input.categoryName || input.category_name || input.row?.product?.category,
       sourceId: input.sourceId || input.source_id || input.row?.sourceProductId || input.row?.product?.sourceId || input.row?.id
     };
-    if (input.listingVariantMedia) return generateListingVariantMediaFromImage(videoPayload);
-    const videoResult = await generateAssetVariantVideoFromImage(videoPayload);
+    if (input.listingVariantMedia) return generateListingVariantMediaFromImage(videoPayload, currentAiTenantSession());
+    const videoResult = await generateAssetVariantVideoFromImage(videoPayload, currentAiTenantSession());
     return { video: videoResult?.video || videoResult };
   }
   const error = new Error(`字段 ${fieldKey} 的异步生成处理器尚未接入`);
@@ -469,7 +490,7 @@ async function generateTextFieldOutput(fieldKey, input = {}) {
   const result = await generateDeepSeekListingContent({
     type: fieldKey,
     context
-  });
+  }, currentAiTenantSession());
   const fields = result?.data?.fields || {};
   const content = cleanText(result?.data?.content);
   if (fieldKey === "title") {

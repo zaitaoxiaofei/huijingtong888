@@ -33,7 +33,8 @@ test("report range defaults to today in Beijing and accepts an inclusive date ra
 });
 
 test("daily report is unpaginated and includes only purchased facts without multiplying allocations", async () => {
-  const result = await procurementDailyReport({ date: "2026-09-16" }, async (sql, params) => {
+  const result = await procurementDailyReport({ date: "2026-09-16" }, 'admin', async (sql, params) => {
+    if (sql.includes('FROM tenants')) return [{ id: 1, slug: 'default' }];
     assert.deepEqual(params, procurementDayRange("2026-09-16"));
     assert.match(sql, /po.status IN \('purchased', 'partial_inbound', 'inbound_done'\)/);
     assert.match(sql, /p.inventory_number, p.inventory_category/);
@@ -44,7 +45,7 @@ test("daily report is unpaginated and includes only purchased facts without mult
   });
   assert.deepEqual(result, { date: "2026-09-16", dateFrom: "2026-09-16", dateTo: "2026-09-16", rows });
   const routes = createOperationsRoutes({ services: { procurementDailyReport: (query) => query } });
-  assert.deepEqual(routes["GET /api/procurement/daily-report"]({}, new URL("http://localhost/api/procurement/daily-report?date=2026-09-16")), { date: "2026-09-16" });
+  assert.deepEqual(routes["GET /api/procurement/daily-report"]({ _session: { tenant: { id: 1, slug: 'default' } } }, new URL("http://localhost/api/procurement/daily-report?date=2026-09-16")), { date: "2026-09-16" });
 });
 
 test("range export applies combined workspace filters with EXISTS and remains unpaginated", async () => {
@@ -54,7 +55,8 @@ test("range export applies combined workspace filters with EXISTS and remains un
     inventoryCategory: "钥匙壳", productName: "定制钥匙壳", vehicleBrand: "TENET", vehicleModel: "T4,T7",
     accessoryName: "普通款", color: "黑色", material: "ABS,TPU", process: "碳纤纹"
   };
-  const result = await procurementDailyReport(filters, async (sql, params) => {
+  const result = await procurementDailyReport(filters, 2, async (sql, params) => {
+    if (sql.includes('FROM tenants')) return [{ id: 2, slug: 'a' }];
     assert.deepEqual(params.slice(0, 2), ["2026-08-31 16:00:00", "2026-09-30 16:00:00"]);
     assert.match(sql, /p\.inventory_category = \?/);
     assert.match(sql, /p\.name LIKE \?/);

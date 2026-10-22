@@ -26,6 +26,7 @@ export async function handleAiImageRestRoute({ req, res, parts, json, notFound, 
   try {
     if (req.method === "GET" && parts[2] === "file" && parts[3] && parts[4] && parts[5]) {
       return sendAiTaskImage({
+        session: req._session,
         res,
         writeHead,
         taskId: decodeURIComponent(parts[3]),
@@ -36,6 +37,7 @@ export async function handleAiImageRestRoute({ req, res, parts, json, notFound, 
 
     if (req.method === "GET" && parts[2] === "file" && parts[3] && parts[4]) {
       return sendAiTaskImage({
+        session: req._session,
         res,
         writeHead,
         taskId: decodeURIComponent(parts[3]),
@@ -46,6 +48,7 @@ export async function handleAiImageRestRoute({ req, res, parts, json, notFound, 
 
     if (req.method === "GET" && parts[2] === "download-zip" && parts[3]) {
       return downloadAiZip({
+        session: req._session,
         res,
         writeHead,
         taskId: decodeURIComponent(parts[3])

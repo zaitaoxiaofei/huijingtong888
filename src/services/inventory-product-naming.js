@@ -1,6 +1,7 @@
 import { normalizeVehicleBrand, vehicleBrandAliases } from "../shared/vehicle-brand.js";
 import { hasPermission } from "../shared/permissions.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
 
 let schemaReady = false;
 let productCoreNameSchemaReady = false;
@@ -36,9 +37,10 @@ export function validateVehicleBrand(value) {
   return text;
 }
 
-export async function inventoryProductNamingOptions(query = {}, session = {}) {
+export async function inventoryProductNamingOptions(query = {}, session = {}, internalTenantId) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
+  const tenant = await resolveInventoryTenantScope(internalTenantId ?? session?.tenant?.id);
   const type = String(query.type || "").trim();
   const status = String(query.status || "").trim();
   const search = String(query.q || query.query || "").trim().toLowerCase();
@@ -50,7 +52,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
   if (status === "pending") {
     if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以查看待审核核心品名和汽车品牌");
     const params = [];
-    const where = ["o.option_type IN ('category', 'brand')", "o.status = 'pending'"];
+    const where = [inventoryTenantSql(tenant, 'o'), "o.option_type IN ('category', 'brand')", "o.status = 'pending'"];
     if (search) {
       where.push("LOWER(CONCAT(o.value, ' ', o.label)) LIKE ?");
       params.push(`%${search}%`);
@@ -81,7 +83,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
     if (type === "accessory" && !category) {
       return { rows: [] };
     }
-    const where = ["products.active = 1", bindableInventoryProductPredicate("products"), `${productField} IS NOT NULL`, `TRIM(CAST(${productField} AS CHAR)) <> ''`];
+    const where = [inventoryTenantSql(tenant, 'products'), "products.active = 1", bindableInventoryProductPredicate("products"), `${productField} IS NOT NULL`, `TRIM(CAST(${productField} AS CHAR)) <> ''`];
     const params = [];
     if (category && type !== "category") {
       where.push("inventory_category = ?");
@@ -143,7 +145,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
       SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
         0 AS linked_product_count, o.updated_at AS last_used_at
       FROM inventory_product_naming_options o
-      WHERE o.option_type = ? AND o.status = 'active'
+      WHERE o.option_type = ? AND o.status = 'active' AND (${inventoryTenantSql(tenant, 'o')} OR o.tenant_id = 0)
         AND (? <> 'accessory' OR NOT EXISTS (
           SELECT 1 FROM inventory_product_naming_option_scopes scope_any WHERE scope_any.option_id = o.id
         ) OR EXISTS (
@@ -193,10 +195,11 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
       CASE WHEN o.option_type = 'category'
-        THEN (SELECT COUNT(*) FROM products p WHERE p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category = o.value)
+        THEN (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category = o.value)
         ELSE o.usage_count END AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE (? = '' OR o.option_type = ?)
+      AND (${inventoryTenantSql(tenant, 'o')} OR o.tenant_id = 0)
       AND (? = '' OR LOWER(CONCAT(o.value, ' ', o.label)) LIKE ?)
       AND o.status <> 'archived'
     ORDER BY linked_product_count DESC, o.status = 'active' DESC, o.label ASC
@@ -207,6 +210,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}) {
 
 export async function createInventoryProductNamingOption(body = {}, session = {}) {
   await ensureSchema();
+  const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   const optionType = String(body.option_type || "").trim();
   const value = optionType === "category" ? validateCoreProductName(body.value)
     : optionType === "brand"
@@ -220,11 +224,11 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
   const status = isNamingMaintainer(session) ? 'active' : 'pending';
   await mysqlExecute(`
     INSERT INTO inventory_product_naming_options
-      (option_type, value, label, status, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?)
+      (tenant_id, option_type, value, label, status, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
-  `, [optionType, value, label, status, Number(session?.personId || 0) || null]);
-  const [saved] = await mysqlQuery("SELECT id,option_type,value,label,status FROM inventory_product_naming_options WHERE option_type=? AND value=?", [optionType, value]);
+  `, [tenant.id, optionType, value, label, status, Number(session?.personId || 0) || null]);
+  const [saved] = await mysqlQuery("SELECT id,option_type,value,label,status FROM inventory_product_naming_options WHERE tenant_id=? AND option_type=? AND value=?", [tenant.id, optionType, value]);
   if (!saved || saved.status === "archived") throw new Error("该标准选项已归档（status），请联系经理或管理员在标准选项中审核恢复，不能通过重复新增覆盖原记录。");
   return { ok: true, ...saved };
 }
@@ -232,6 +236,7 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
 export async function updateInventoryProductNamingOption(id, body = {}, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
+  const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以审核或修改标准选项");
   const optionId = Number(id);
   if (!optionId) throw new Error("标准选项不存在");
@@ -240,7 +245,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
     const [options] = await connection.query(`
       SELECT id, option_type, value, label
       FROM inventory_product_naming_options
-      WHERE id = ? AND status <> 'archived'
+      WHERE id = ? AND status <> 'archived' AND ${inventoryTenantSql(tenant)}
       FOR UPDATE
     `, [optionId]);
     const option = options[0];
@@ -253,7 +258,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
     const [duplicates] = await connection.query(`
       SELECT id
       FROM inventory_product_naming_options
-      WHERE option_type = ? AND value = ? AND id <> ? AND status <> 'archived'
+      WHERE option_type = ? AND value = ? AND id <> ? AND status <> 'archived' AND ${inventoryTenantSql(tenant)}
       LIMIT 1
     `, [option.option_type, nextValue, optionId]);
     if (duplicates.length) throw new Error(`标准选项“${nextValue}”已存在`);
@@ -272,7 +277,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
       SELECT id, vehicle_brand, vehicle_model, fitment_type, accessory_name, color,
         product_quantity, stock_unit, package_mode, package_contents, included_accessories, gift_contents
       FROM products
-      WHERE active = 1 AND inventory_category = ?
+      WHERE active = 1 AND inventory_category = ? AND ${inventoryTenantSql(tenant)}
       FOR UPDATE
     `, [option.value]);
 
@@ -298,14 +303,15 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
 export async function deleteInventoryProductNamingOption(id, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
+  const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以停用标准选项");
   const optionId = Number(id);
   if (!optionId) throw new Error("标准选项不存在");
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value,
-      (SELECT COUNT(*) FROM products p WHERE p.active = 1 AND p.inventory_category = o.value) AS linked_product_count
+      (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND p.inventory_category = o.value) AS linked_product_count
     FROM inventory_product_naming_options o
-    WHERE o.id = ? AND o.status <> 'archived'
+    WHERE o.id = ? AND o.status <> 'archived' AND ${inventoryTenantSql(tenant, 'o')}
     LIMIT 1
   `, [optionId]);
   const option = rows[0];
@@ -326,18 +332,19 @@ export async function deleteInventoryProductNamingOption(id, session = {}) {
   return { ok: true, id: optionId, value: option.value };
 }
 
-export async function recordInventoryProductNamingUsage(entries = []) {
+export async function recordInventoryProductNamingUsage(entries = [], tenantId = 'admin') {
   await ensureSchema();
+  const tenant = await resolveInventoryTenantScope(tenantId);
   for (const entry of entries) {
     const optionType = clean(entry?.option_type, 32);
     const value = optionType === "brand" ? normalizeVehicleBrand(entry?.value) : clean(entry?.value, 255);
     const label = optionType === "brand" ? value : clean(entry?.label || value, 255);
     if (!optionType || !value) continue;
     await mysqlExecute(`
-      INSERT INTO inventory_product_naming_options (option_type, value, label, status, usage_count)
-      VALUES (?, ?, ?, 'active', 1)
+      INSERT INTO inventory_product_naming_options (tenant_id, option_type, value, label, status, usage_count)
+      VALUES (?, ?, ?, ?, 'active', 1)
       ON DUPLICATE KEY UPDATE usage_count = usage_count + 1, updated_at = CURRENT_TIMESTAMP
-    `, [optionType, value, label]);
+    `, [tenant.id, optionType, value, label]);
   }
 }
 
@@ -345,6 +352,7 @@ async function initializeSchema() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS inventory_product_naming_options (
       id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      tenant_id BIGINT UNSIGNED NULL,
       option_type VARCHAR(32) NOT NULL,
       value VARCHAR(255) NOT NULL,
       label VARCHAR(255) NOT NULL,
@@ -353,7 +361,8 @@ async function initializeSchema() {
       created_by_person_id BIGINT UNSIGNED NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_inventory_product_naming_option (option_type, value),
+      UNIQUE KEY uk_inventory_product_naming_option (tenant_id, option_type, value),
+      KEY idx_inventory_product_naming_options_tenant_id (tenant_id, id),
       KEY idx_inventory_product_naming_option_search (option_type, status, label)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
   `);
@@ -406,8 +415,8 @@ async function initializeSchema() {
     const canonical = optionType === "brand" ? normalizeVehicleBrand(value) : value;
     if (!canonical) continue;
     await mysqlExecute(`
-      INSERT INTO inventory_product_naming_options (option_type, value, label, status)
-      VALUES (?, ?, ?, 'active') ON DUPLICATE KEY UPDATE label = VALUES(label)
+      INSERT INTO inventory_product_naming_options (tenant_id, option_type, value, label, status)
+      VALUES (0, ?, ?, ?, 'active') ON DUPLICATE KEY UPDATE label = VALUES(label)
     `, [optionType, canonical, optionType === "brand" ? canonical : label]);
   }
   schemaReady = true;
@@ -423,6 +432,8 @@ async function ensureSchema() {
   }
   await schemaReadyPromise;
 }
+
+export const ensureInventoryProductNamingSchema = ensureSchema;
 
 async function initializeProductCoreNameSchema() {
   for (const sql of [

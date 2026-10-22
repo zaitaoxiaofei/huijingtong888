@@ -17,7 +17,9 @@ test("remote image proxy reports a failed upstream as an image load error", () =
 test("remote image proxy limits upstream pressure and briefly caches failures", () => {
   assert.match(serverSource, /IMAGE_PROXY_FETCH_CONCURRENCY/);
   assert.match(serverSource, /acquireImageProxyFetchSlot\(\)/);
-  assert.match(serverSource, /receivedBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES/);
+  assert.match(serverSource, /maxBytes: IMAGE_PROXY_MAX_RESPONSE_BYTES/);
+  const imageRequestSource = fs.readFileSync(new URL("../src/http/public-image-request.js", import.meta.url), "utf8");
+  assert.match(imageRequestSource, /received > maxBytes/);
   assert.match(serverSource, /imageProxyFailureCache\.set\(target, Date\.now\(\) \+ IMAGE_PROXY_FAILURE_TTL_MS\)/);
   assert.match(serverSource, /isManagedOssObjectUrl\(target\)/);
   assert.match(serverSource, /readManagedOssObject\(target/);

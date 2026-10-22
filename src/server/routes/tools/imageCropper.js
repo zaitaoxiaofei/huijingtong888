@@ -38,6 +38,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
     if (req.method === "GET") {
       if (parts[3] === "shop-watermark" && parts[4] && parts[5] === "file") {
         return sendShopWatermark({
+          session: req._session,
           res,
           writeHead,
           shopId: decodeURIComponent(parts[4])
@@ -46,6 +47,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "file" && parts[4] && parts[5]) {
         return sendTaskImage({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -55,6 +57,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download" && parts[4] && parts[5]) {
         return downloadCrop({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -64,6 +67,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-enhanced" && parts[4] && parts[5]) {
         return downloadEnhancedCrop({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -73,6 +77,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-ratio-3x4" && parts[4] && parts[5]) {
         return downloadRatioCrop({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -82,6 +87,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-watermarked" && parts[4] && parts[5]) {
         return downloadWatermarkedCrop({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -91,6 +97,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-zip" && parts[4]) {
         return downloadZip({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -100,6 +107,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-enhanced-zip" && parts[4]) {
         return downloadEnhancedZip({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -109,6 +117,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-ratio-3x4-zip" && parts[4]) {
         return downloadRatioZip({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),
@@ -118,6 +127,7 @@ export async function handleImageCropperRestRoute({ req, res, parts, json, notFo
 
       if (parts[3] === "download-watermarked-zip" && parts[4]) {
         return downloadWatermarkedZip({
+          session: req._session,
           res,
           writeHead,
           taskId: decodeURIComponent(parts[4]),

@@ -2,11 +2,19 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { createHash, randomUUID } from "node:crypto";
+import { mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
+import { assertInventoryRecord, inventoryTenantSql, resolveInventoryTenantScope } from "./inventory-tenant-scope.js";
 
 const MAX_PDF_BYTES = 8 * 1024 * 1024;
-const ACTIVE_TRANSFER_STATUSES = new Set(["draft", "sent", "in_transit", "received"]);
+const ACTIVE_TRANSFER_STATUSES = new Set(["draft", "sent", "in_transit", "received", "listed", "closed"]);
+
+async function fbpPdfScope(session) {
+  const authorized = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(authorized, "procurement");
+  return { ...await resolveInventoryTenantScope(authorized.tenant.id), session: authorized };
+}
 
 function cleanText(value = "") {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -218,31 +226,34 @@ async function parseFbpSupplyPdf(buffer) {
   });
 }
 
-async function resolvePdfShop(header = {}, body = {}) {
+async function resolvePdfShop(header = {}, body = {}, scope) {
   const shopId = Number(body.shop_id || body.shopId || 0);
   if (shopId) {
-    const rows = await mysqlQuery("SELECT id, name FROM shops WHERE id = ? AND status = 'active' LIMIT 1", [shopId]);
+    const rows = await mysqlQuery(`SELECT id, name, ozon_client_id FROM shops WHERE id = ? AND status = 'active' AND ${inventoryTenantSql(scope, "shops")} LIMIT 1`, [shopId]);
     if (!rows[0]) throw new Error("选择的店铺不存在或未启用");
+    if (header.seller_id && String(rows[0].ozon_client_id) !== String(header.seller_id)) throw new Error("PDF 卖家与选择的店铺不一致");
     return rows[0];
   }
   const sellerId = String(header.seller_id || "").trim();
   if (sellerId) {
-    const rows = await mysqlQuery("SELECT id, name FROM shops WHERE ozon_client_id = ? AND status = 'active' LIMIT 1", [sellerId]);
+    const rows = await mysqlQuery(`SELECT id, name FROM shops WHERE ozon_client_id = ? AND status = 'active' AND ${inventoryTenantSql(scope, "shops")} LIMIT 1`, [sellerId]);
     if (rows[0]) return rows[0];
+    throw Object.assign(new Error("PDF 卖家没有对应的本企业店铺"), { statusCode: 404 });
   }
-  const rows = await mysqlQuery("SELECT id, name FROM shops WHERE status = 'active' ORDER BY id LIMIT 1");
+  const rows = await mysqlQuery(`SELECT id, name FROM shops WHERE status = 'active' AND ${inventoryTenantSql(scope, "shops")} ORDER BY id LIMIT 1`);
   if (!rows[0]) throw new Error("系统没有可用店铺，请先配置店铺");
   return rows[0];
 }
 
-async function resolvePdfMappings(shopId, items = []) {
+async function resolvePdfMappings(shopId, items = [], scope) {
   const resolved = [];
   for (const item of items) {
     const rows = await mysqlQuery(`
       SELECT sm.id AS mapping_id, sm.product_id, sm.shop_id, sm.ozon_sku, sm.offer_id, p.name AS product_name
       FROM sku_mappings sm
-      LEFT JOIN products p ON p.id = sm.product_id
+      JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${inventoryTenantSql(scope, "p")}
       WHERE sm.active = 1
+        AND ${inventoryTenantSql(scope, "sm")}
         AND sm.shop_id = ?
         AND (sm.ozon_sku = ? OR sm.ozon_sku = ? OR sm.offer_id = ?)
       ORDER BY CASE WHEN sm.ozon_sku = ? THEN 0 ELSE 1 END, sm.id DESC
@@ -260,11 +271,13 @@ async function resolvePdfMappings(shopId, items = []) {
   return resolved;
 }
 
-export async function previewFbpSupplyPdfMysql(body = {}) {
+export async function previewFbpSupplyPdfMysql(body = {}, session = null) {
+  const scope = await fbpPdfScope(session);
+  if (body.shop_id || body.shopId) await resolvePdfShop({}, body, scope);
   const buffer = decodePdfBase64(body.pdf_base64 || body.pdfBase64);
   const parsed = await parseFbpSupplyPdf(buffer);
-  const shop = await resolvePdfShop(parsed.header, body);
-  const items = await resolvePdfMappings(shop.id, parsed.items);
+  const shop = await resolvePdfShop(parsed.header, body, scope);
+  const items = await resolvePdfMappings(shop.id, parsed.items, scope);
   return {
     ok: true,
     shop,
@@ -278,8 +291,10 @@ export async function previewFbpSupplyPdfMysql(body = {}) {
   };
 }
 
-export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
-  const preview = await previewFbpSupplyPdfMysql(body);
+export async function importFbpSupplyPdfMysql(body = {}, userId = null, session = null) {
+  const scope = await fbpPdfScope(session);
+  userId = scope.session.personId;
+  const preview = await previewFbpSupplyPdfMysql(body, scope.session);
   const unmatched = preview.items.filter((item) => !item.matched);
   if (unmatched.length && body.allow_unmatched !== true) {
     throw new Error(`有 ${unmatched.length} 个 SKU 未匹配商品，请先绑定后再导入`);
@@ -287,6 +302,13 @@ export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
   if (!preview.checks.total_quantity_matched) {
     throw new Error("PDF 明细数量合计与汇总总数量不一致，请检查文件");
   }
+  await fbpPdfScope(scope.session);
+  return withMysqlTransaction(async connection => {
+  const execute = async (sql, params) => (await connection.execute(sql, params))[0];
+  const lockKey = `fbp_pdf_${createHash("sha256").update(JSON.stringify([scope.id, preview.shop.id, preview.header.supply_order_id])).digest("hex").slice(0,32)}`;
+  const [[lock]] = await connection.execute("SELECT GET_LOCK(?, 10) AS acquired", [lockKey]);
+  if (Number(lock.acquired) !== 1) throw new Error("该入库单正在导入，请稍后重试");
+  try {
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
@@ -295,15 +317,19 @@ export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
       skipped += 1;
       continue;
     }
+    const mapping = await assertInventoryRecord(scope, "mapping", item.mapping_id, execute, { lock: true });
+    if (Number(mapping.product_id) !== Number(item.product_id) || Number(mapping.shop_id) !== Number(preview.shop.id)) throw new Error("PDF SKU 绑定已变化，请重新预览后导入");
     const sourceRef = `pdf:${preview.header.supply_order_id}:${item.ozon_sku}`;
     const legacySourceRef = `seller:${preview.header.supply_order_id}:${item.ozon_sku}`;
-    const existingRows = await mysqlQuery(`
-      SELECT id, status
+    const existingRows = await execute(`
+      SELECT id, status, listed_quantity
       FROM fbp_transfer_records
-      WHERE (source_type = 'seller_fbp_supply_pdf' AND source_ref = ?)
-         OR (source_type = 'seller_fbp_supply' AND source_ref = ?)
-      LIMIT 1
-    `, [sourceRef, legacySourceRef]);
+      WHERE ((source_type = 'seller_fbp_supply_pdf' AND source_ref = ?)
+         OR (source_type = 'seller_fbp_supply' AND source_ref = ?))
+        AND shop_id = ? AND product_id = ? AND mapping_id = ?
+      LIMIT 1 FOR UPDATE
+    `, [sourceRef, legacySourceRef, Number(preview.shop.id), Number(item.product_id), Number(item.mapping_id)]);
+    if (Number(existingRows[0]?.listed_quantity || 0) > Number(item.quantity || 0)) throw new Error("PDF 数量小于已入仓数量，不能覆盖现有入仓记录");
     const status = ACTIVE_TRANSFER_STATUSES.has(String(existingRows[0]?.status || "")) ? existingRows[0].status : "in_transit";
     const values = [
       Number(item.product_id),
@@ -311,7 +337,7 @@ export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
       Number(preview.shop.id),
       item.mapped_ozon_sku || item.sku_number || item.ozon_sku,
       Number(item.quantity || 0),
-      0,
+      Number(existingRows[0]?.listed_quantity || 0),
       status,
       "seller_fbp_supply_pdf",
       sourceRef,
@@ -321,16 +347,16 @@ export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
       preview.header.slot_time || null
     ];
     if (existingRows[0]?.id) {
-      await mysqlExecute(`
+      await execute(`
         UPDATE fbp_transfer_records
         SET product_id = ?, mapping_id = ?, shop_id = ?, ozon_sku = ?, quantity = ?, listed_quantity = ?,
             status = ?, source_type = ?, source_ref = ?, warehouse_name = ?, note = ?, person_id = ?, shipped_at = ?,
             updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [...values, Number(existingRows[0].id)]);
+        WHERE id = ? AND shop_id = ? AND product_id = ? AND mapping_id = ?
+      `, [...values, Number(existingRows[0].id), Number(preview.shop.id), Number(item.product_id), Number(item.mapping_id)]);
       updated += 1;
     } else {
-      await mysqlExecute(`
+      await execute(`
         INSERT INTO fbp_transfer_records
           (product_id, mapping_id, shop_id, ozon_sku, quantity, listed_quantity, status, source_type, source_ref, warehouse_name, note, person_id, shipped_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -346,4 +372,6 @@ export async function importFbpSupplyPdfMysql(body = {}, userId = null) {
     message: `PDF入库单 ${preview.header.supply_order_id} 已导入：新增 ${inserted} 条，更新 ${updated} 条${skipped ? `，跳过 ${skipped} 条` : ""}`,
     preview
   };
+  } finally { await connection.execute("SELECT RELEASE_LOCK(?)", [lockKey]); }
+  });
 }

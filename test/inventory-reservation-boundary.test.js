@@ -11,11 +11,11 @@ const order = (id, quantity = 10) => ({ order_id: id, order_item_id: id, product
 test('FBP approval and adjustments reserve once; shipment and receipt do not retain reservation', async () => {
   const db = new DatabaseSync(':memory:');
   db.function('GREATEST', (left, right) => Math.max(left, right));
-  db.exec(`CREATE TABLE fbp_replenishment_orders (id INTEGER, status TEXT);
-    CREATE TABLE fbp_replenishment_order_items (id INTEGER, order_id INTEGER, product_id INTEGER, approved_qty INTEGER);
+  db.exec(`CREATE TABLE fbp_replenishment_orders (id INTEGER, shop_id INTEGER, status TEXT);
+    CREATE TABLE fbp_replenishment_order_items (id INTEGER, order_id INTEGER, shop_id INTEGER, product_id INTEGER, approved_qty INTEGER);
     CREATE TABLE fbp_replenishment_item_adjustments (item_id INTEGER, adjustment_qty INTEGER);
-    INSERT INTO fbp_replenishment_orders VALUES (1, 'approved');
-    INSERT INTO fbp_replenishment_order_items VALUES (1, 1, 10, 100);
+    INSERT INTO fbp_replenishment_orders VALUES (1, 1, 'approved');
+    INSERT INTO fbp_replenishment_order_items VALUES (1, 1, 1, 10, 100);
     INSERT INTO fbp_replenishment_item_adjustments VALUES (1, -10);`);
   const query = async (sql, args) => db.prepare(sql).all(...args);
   try {

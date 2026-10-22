@@ -3,6 +3,7 @@ import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
 import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
 import { businessLogisticsRules, sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
+import { runCustomerMessageTenantOperation } from "../../services/customer-message-tenant-scope.js";
 
 function platformLogisticsScope(req, body = null, url = null) {
   if (!isPlatformAdmin(req?._session)) {
@@ -22,6 +23,7 @@ function platformLogisticsRule(row) {
 }
 
 export function createOperationsRoutes({ services, readJson, readBusinessLogisticsRules = businessLogisticsRules }) {
+  const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
     "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
@@ -36,16 +38,16 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       return readBusinessLogisticsRules();
     },
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
-    "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/manual-outbound-records": (req, url) => services.inventoryManualOutboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/procurement/summary": () => services.procurementSummary(),
-    "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/summary": (req) => services.procurementSummary({}, tenantIdFromRequest(req)),
+    "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "POST /api/procurement/ledger/preview": async (req) => services.previewProcurementLedger(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/inventory/ledger/preview": async (req) => services.previewInventoryStocktake(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/inventory/ledger": async (req) => {
@@ -60,47 +62,47 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       }
       return services.applyProcurementLedger(body, req._session?.personId, tenantIdFromRequest(req));
     },
-    "GET /api/procurement/order-history": (req, url) => services.procurementProductOrderHistory(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/purchase-history": (req, url) => services.procurementProductPurchaseHistory(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/binding-suggestions": (req, url) => services.procurementBindingSuggestions(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/platform-orders": (req, url) => services.procurementPlatformOrders(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/reconciliation": (req, url) => services.procurementReconciliation(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/purchase-orders": (req, url) => services.purchaseOrders(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/purchase-group-recommendations": (req, url) => services.procurementPurchaseGroupRecommendations(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/cost-versions": (req, url) => services.purchaseCostVersions(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/procurement/cost-versions/backfill-preview": () => services.previewPurchaseCostBackfill(),
-    "GET /api/procurement/pending-inbound": () => services.pendingInboundItems(),
-    "GET /api/customer-messages": (req, url) => services.customerMessages(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/customer-chats": (req, url) => services.customerChatThreads(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/customer-chats/messages": (req, url) => services.customerChatThreadMessages(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/customer-message-customer-orders": (req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/customer-message-settings": () => services.customerMessageSettings(),
+    "GET /api/procurement/order-history": (req, url) => services.procurementProductOrderHistory(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/purchase-history": (req, url) => services.procurementProductPurchaseHistory(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/binding-suggestions": (req, url) => services.procurementBindingSuggestions(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/platform-orders": (req, url) => services.procurementPlatformOrders(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/reconciliation": (req, url) => services.procurementReconciliation(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/purchase-orders": (req, url) => services.purchaseOrders(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/purchase-group-recommendations": (req, url) => services.procurementPurchaseGroupRecommendations(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/cost-versions": (req, url) => services.purchaseCostVersions(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/procurement/cost-versions/backfill-preview": (req) => services.previewPurchaseCostBackfill(tenantIdFromRequest(req)),
+    "GET /api/procurement/pending-inbound": (req) => services.pendingInboundItems({}, tenantIdFromRequest(req)),
+    "GET /api/customer-messages": customer((req, url) => services.customerMessages(Object.fromEntries(url.searchParams.entries()))),
+    "GET /api/customer-chats": customer((req, url) => services.customerChatThreads(Object.fromEntries(url.searchParams.entries()))),
+    "GET /api/customer-chats/messages": customer((req, url) => services.customerChatThreadMessages(Object.fromEntries(url.searchParams.entries()))),
+    "GET /api/customer-message-customer-orders": customer((req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries()))),
+    "GET /api/customer-message-settings": customer(() => services.customerMessageSettings()),
     "GET /api/user-preferences": (req, url) => services.userPreference(Object.fromEntries(url.searchParams.entries()), req._session?.personId),
     "GET /api/shops": (req) => services.shops(tenantIdFromRequest(req)),
-    "GET /api/people": () => services.people(),
+    "GET /api/people": (req) => services.people(tenantIdFromRequest(req)),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req)),
-    "POST /api/procurement/pdd-logistics/sync-batch": async (req) => services.syncPddProcurementLogisticsBatch(await readJson(req)),
-    "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId),
-    "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId),
-    "POST /api/procurement/reconciliation/auto-match": async () => services.autoMatchProcurementPayments(),
-    "POST /api/procurement/reconciliation/apply-costs": async (req) => services.applyProcurementActualCosts(await readJson(req)),
-    "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/procurement/pdd-logistics/sync-batch": async (req) => services.syncPddProcurementLogisticsBatch(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/procurement/platform-orders/import": async (req) => services.importProcurementPlatformOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/procurement/payments/import": async (req) => services.importProcurementPayments(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/procurement/reconciliation/auto-match": async (req) => services.autoMatchProcurementPayments(tenantIdFromRequest(req)),
+    "POST /api/procurement/reconciliation/apply-costs": async (req) => services.applyProcurementActualCosts(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req), req._session),
     "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "POST /api/procurement/refresh-demand": (req) => services.refreshProcurementDemand(tenantIdFromRequest(req)),
+    "POST /api/procurement/refresh-demand": (req) => services.refreshProcurementDemand(tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req), req._session?.personId, null, tenantIdFromRequest(req)),
-    "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId),
-    "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req)) || { ok: true },
-    "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId) || { ok: true },
-    "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId),
-    "POST /api/inbound-records/shipped-receipts/preview": async (req) => services.previewShippedProcurementReceipts(await readJson(req)),
-    "POST /api/inbound-records/shipped-receipts/confirm": async (req) => services.confirmShippedProcurementReceipts(await readJson(req), req._session?.personId),
-    "POST /api/inbound-records/receipt-impact-preview": async (req) => services.previewInboundReceiptImpact(await readJson(req)),
-    "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req), req._session?.personId),
+    "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/inbound-records": async (req) => services.createInboundRecord(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/inbound-records/batch-update-async": async (req) => services.startBatchUpdateInboundRecords(await readJson(req), req._session?.personId, tenantIdFromRequest(req), req._session),
+    "POST /api/inbound-records/shipped-receipts/preview": async (req) => services.previewShippedProcurementReceipts(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/inbound-records/shipped-receipts/confirm": async (req) => services.confirmShippedProcurementReceipts(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/inbound-records/receipt-impact-preview": async (req) => services.previewInboundReceiptImpact(await readJson(req), tenantIdFromRequest(req)),
+    "POST /api/inbound-records/batch-update": async (req) => services.batchUpdateInboundRecords(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/inventory/movements": async (req) => {
       const body = await readJson(req);
       if (!hasPermission(req._session, "inventory.write") && !(hasPermission(req._session, "packing") && String(body.source_type || body.sourceType || "").trim() === "manual_outbound")) {
@@ -110,20 +112,20 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       }
       return services.createInventoryMovement(body, req._session?.personId, tenantIdFromRequest(req)) || { ok: true };
     },
-    "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries())),
-    "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId),
-    "POST /api/customer-messages/preview": async (req) => services.previewCustomerMessage(await readJson(req)),
-    "POST /api/customer-message-settings/template/test": async (req) => services.testCustomerMessageTemplate(await readJson(req)),
-    "POST /api/customer-messages/record": async (req) => services.recordCustomerMessage(await readJson(req)),
-    "POST /api/customer-messages/send": async (req) => services.sendCustomerMessage(await readJson(req)),
-    "POST /api/customer-messages/manual-test-send": async (req) => services.sendCustomerMessageManualTest(await readJson(req)),
-    "POST /api/customer-messages/retry": async (req) => services.retryCustomerMessageTask(await readJson(req)),
-    "POST /api/customer-messages/translate-ru": async (req) => services.translateCustomerMessageRu(await readJson(req)),
-    "POST /api/customer-chats/sync": async (req) => services.syncCustomerChats(await readJson(req)),
-    "POST /api/customer-message-settings/shop/check-capability": async (req) => services.checkCustomerMessageShopCapability(await readJson(req)),
-    "POST /api/customer-message-settings/shop": async (req) => services.updateCustomerMessageShopSetting(await readJson(req)),
-    "POST /api/customer-message-settings/template": async (req) => services.updateCustomerMessageTemplate(await readJson(req)),
-    "POST /api/customer-message-settings/template/translate-zh": async (req) => services.translateCustomerMessageTemplateZh(await readJson(req)),
+    "GET /api/inventory/stock-debts": (req, url) => services.inventoryStockDebts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "POST /api/inventory/stock-debts/adjust": async (req) => services.adjustInventoryStockDebt(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/customer-messages/preview": customer(async (req) => services.previewCustomerMessage(await readJson(req))),
+    "POST /api/customer-message-settings/template/test": customer(async (req) => services.testCustomerMessageTemplate(await readJson(req))),
+    "POST /api/customer-messages/record": customer(async (req) => services.recordCustomerMessage(await readJson(req))),
+    "POST /api/customer-messages/send": customer(async (req) => services.sendCustomerMessage(await readJson(req))),
+    "POST /api/customer-messages/manual-test-send": customer(async (req) => services.sendCustomerMessageManualTest(await readJson(req))),
+    "POST /api/customer-messages/retry": customer(async (req) => services.retryCustomerMessageTask(await readJson(req))),
+    "POST /api/customer-messages/translate-ru": customer(async (req) => services.translateCustomerMessageRu(await readJson(req))),
+    "POST /api/customer-chats/sync": customer(async (req) => services.syncCustomerChats(await readJson(req))),
+    "POST /api/customer-message-settings/shop/check-capability": customer(async (req) => services.checkCustomerMessageShopCapability(await readJson(req))),
+    "POST /api/customer-message-settings/shop": customer(async (req) => services.updateCustomerMessageShopSetting(await readJson(req))),
+    "POST /api/customer-message-settings/template": customer(async (req) => services.updateCustomerMessageTemplate(await readJson(req))),
+    "POST /api/customer-message-settings/template/translate-zh": customer(async (req) => services.translateCustomerMessageTemplateZh(await readJson(req))),
     "POST /api/user-preferences": async (req) => services.updateUserPreference(await readJson(req), req._session?.personId),
     "POST /api/logistics-rules": async (req, url) => {
       platformLogisticsScope(req, null, url);
@@ -147,26 +149,26 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "confirm") {
-    return json(res, await services.confirmProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.confirmProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "payment-candidates") {
-    return json(res, await services.procurementPaymentCandidates(Number(parts[3])));
+    return json(res, await services.procurementPaymentCandidates(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "reconciliation" && parts[3] && parts[4] === "payment-match") {
-    return json(res, await services.setProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.setProcurementPaymentMatch(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "platform-orders" && parts[3] && parts[4] === "candidates") {
-    return json(res, await services.procurementPlatformOrderCandidates(Number(parts[3])));
+    return json(res, await services.procurementPlatformOrderCandidates(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "platform-orders" && parts[3] && parts[4] === "link") {
-    return json(res, await services.linkProcurementPlatformOrder(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.linkProcurementPlatformOrder(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "customer-message-settings" && parts[2] === "template" && parts[3]) {
-    return json(res, await services.deleteCustomerMessageTemplate(decodeURIComponent(parts[3])));
+    return json(res, await runCustomerMessageTenantOperation(req._session, () => services.deleteCustomerMessageTemplate(decodeURIComponent(parts[3]))));
   }
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "order-quality-rules") {
     return json(res, await services.saveOrderQualityRules(await readJson(req)));
@@ -186,11 +188,11 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "movements" && parts[3]) {
-    return json(res, await services.updateInventoryMovement(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.updateInventoryMovement(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inventory" && parts[2] === "movements" && parts[3]) {
-    return json(res, await services.deleteInventoryMovement(Number(parts[3]), req._session?.personId));
+    return json(res, await services.deleteInventoryMovement(Number(parts[3]), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "people" && parts[2]) {
@@ -215,11 +217,11 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3] === "submit") {
-    return json(res, await services.submitProcurementRequests(await readJson(req)));
+    return json(res, await services.submitProcurementRequests(await readJson(req), tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3] === "direct-inbound") {
-    return json(res, await services.directInboundProcurementRequests(await readJson(req)));
+    return json(res, await services.directInboundProcurementRequests(await readJson(req), tenantIdFromRequest(req), req._session?.personId));
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "requests" && parts[3]) {
@@ -227,42 +229,42 @@ export async function handleOperationsRestRoute({ req, res, url, parts, services
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3]) {
-    const detail = await services.purchaseOrderDetail(Number(parts[3]));
+    const detail = await services.purchaseOrderDetail(Number(parts[3]), tenantIdFromRequest(req));
     return detail ? json(res, detail) : notFound(res);
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3] && parts[4] === "confirm-purchased") {
-    return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.confirmPurchaseOrder(Number(parts[3]), await readJson(req), req._session?.personId, null, tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "shipments" && parts[3] && parts[4] === "refresh") {
-    return json(res, await services.refreshPurchaseOrderShipment(Number(parts[3])));
+    return json(res, await services.refreshPurchaseOrderShipment(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "cost-versions" && parts[3] && parts[4] === "review") {
-    return json(res, await services.reviewPurchaseCostVersion(Number(parts[3]), await readJson(req), req._session?.personId));
+    return json(res, await services.reviewPurchaseCostVersion(Number(parts[3]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3] && parts[4] === "cancel") {
-    return json(res, await services.cancelPurchaseOrder(Number(parts[3])));
+    return json(res, await services.cancelPurchaseOrder(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3]) {
-    await services.updatePurchaseOrder(Number(parts[3]), await readJson(req));
+    await services.updatePurchaseOrder(Number(parts[3]), await readJson(req), tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "procurement" && parts[2] === "purchase-orders" && parts[3]) {
-    return json(res, await services.deletePurchaseOrder(Number(parts[3])));
+    return json(res, await services.deletePurchaseOrder(Number(parts[3]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "inbound-records" && parts[2]) {
-    await services.updateInboundRecord(Number(parts[2]), await readJson(req), req._session?.personId);
+    await services.updateInboundRecord(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req));
     return json(res, { ok: true });
   }
 
   if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "inbound-records" && parts[2]) {
-    return json(res, await services.deleteInboundRecord(Number(parts[2])));
+    return json(res, await services.deleteInboundRecord(Number(parts[2]), tenantIdFromRequest(req)));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "suppliers" && !parts[2]) {

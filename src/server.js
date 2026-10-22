@@ -14,6 +14,7 @@ import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
+import { requestPublicImage, resolvePublicImageTarget } from "./http/public-image-request.js";
 import { cleanExpiredSessions, createAuthHandler, extractToken, getSession } from "./server/session.js";
 import { authorizeApiRequest } from "./server/authorization.js";
 import { isPrivateImageRead, readCookie, tenantIsolationDecision } from "./server/tenant-isolation.js";
@@ -27,6 +28,8 @@ import { createOperationsRoutes, handleOperationsRestRoute } from "./server/rout
 import { createTeamRoutes, handleTeamRestRoute } from "./server/routes/team.js";
 import { createProfitRoutes } from "./server/routes/profit.js";
 import { createAdvertisingRoutes } from "./server/routes/advertising.js";
+import { withAdvertisingTenant } from "./services/advertising-tenant-context.js";
+import { runCustomerMessageTenantScheduledOperation } from "./services/customer-message-tenant-scope.js";
 import { createFinanceCenterRoutes, handleFinanceCenterRestRoute } from "./server/routes/financeCenter.js";
 import { createPayrollRoutes } from "./server/routes/payroll.js";
 import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "./server/routes/sellerAnalytics.js";
@@ -90,6 +93,11 @@ import { shanghaiDateDaysAgo, shanghaiDateKey } from "./shanghai-time.js";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, warmMysqlPool, withMysqlTransaction } from "./mysql-pool.js";
 import { createEnterpriseMessagesService } from "./services/enterprise-messages.js";
 import { createEnterpriseMessageRoutes } from "./server/routes/enterpriseMessages.js";
+import { isPrivateAttachmentPath, tenantPrivateFiles } from "./services/tenant-private-files.js";
+import { authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./services/business-task-tenant.js";
+import { runTenantScheduledWork } from "./services/tenant-scheduled-work.js";
+import { withAiTenantSession } from "./services/ai-tenant-context.js";
+import { assertTenantPilotSchemaReady } from "./services/tenant-pilot-schema.js";
 import { isManagedOssObjectUrl, readManagedOssObject } from "./services/object-storage.js";
 import { captureSystemMonitorSnapshot, systemMonitoringOverview } from "./services/system-monitoring.js";
 import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTenantActivationCodeMysql, issueTenantPluginTokenMysql, listTenantPlansMysql, listTenantsMysql, readTenantPluginTokenMysql, resolveTenantPluginTokenMysql, revokeTenantActivationCodeMysql, revokeTenantPluginTokenMysql, saveTenantPluginTokenMysql, setTenantQuotasMysql, setTenantSubscriptionMysql, tenantActivationCodeStatusMysql, tenantMembersMysql, tenantMembershipsMysql, tenantPluginTokenStatusMysql, updateTenantPlanMysql, upsertTenantMemberMysql } from "./services/tenants.js";
@@ -233,6 +241,14 @@ const routeModules = {
 // Keep straightforward routes in a single lookup table so server.js stays
 // focused on request dispatch, authentication, and transport concerns.
 function dashboardForSession(payload = {}, session = {}) {
+  if (!isPlatformAdmin(session)) {
+    const safeAiUsage = source => {
+      if (!source) return source;
+      const keys = new Set(['cost', 'request_count', 'generated_count', 'cost_pending', 'unit_cost', 'cost_source', 'count_basis', 'task_count', 'allocation_method', 'people', 'unit']);
+      return { ...Object.fromEntries(Object.entries(source).filter(([key]) => keys.has(key))), available: false, balance: null };
+    };
+    payload = { ...payload, summary: { ...(payload.summary || {}), ai_usage: safeAiUsage(payload.summary?.ai_usage) } };
+  }
   if (hasPermission(session, "finance")) return payload;
   const withoutProfitFields = (source = {}) => Object.fromEntries(
     Object.entries(source || {}).filter(([key]) => !String(key).toLowerCase().includes("profit"))
@@ -325,8 +341,11 @@ const routes = {
   "POST /api/ai-provider/test-capability": async (req) => services.testAiProviderCapability(await readJson(req)),
   "POST /api/ai-provider/test-image-channel": async (req) => services.testAiImageProviderChannel(await readJson(req)),
   "POST /api/ai-provider/image-channel-usage": async (req) => services.getAiImageProviderUsage(await readJson(req)),
-  "POST /api/ai-provider/chat": async (req) => services.chatWithAiProvider(await readJson(req)),
-  "GET /api/dashboard": async (req) => dashboardForSession(await services.dashboard(req.query || {}), req._session),
+  "POST /api/ai-provider/chat": async (req) => {
+    const body = await readJson(req);
+    return withAiTenantSession(req._session, () => services.chatWithAiProvider(body));
+  },
+  "GET /api/dashboard": async (req) => dashboardForSession(await services.dashboard(req.query || {}, tenantIdFromRequest(req)), req._session),
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
   "GET /api/scheduled-job-runs": (req) => scheduledJobRuns(req.query || {}),
   "GET /api/scheduled-job-run-events": (req) => scheduledJobRunEvents(req.query || {}),
@@ -338,42 +357,42 @@ const routes = {
   "POST /api/scheduled-jobs/config": async (req) => updateScheduledJobConfig(await readJson(req)),
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
-  "GET /api/inventory": (req) => services.inventory(req.query || {}),
+  "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),
-  "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}),
+  "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}, tenantIdFromRequest(req)),
-  "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}),
+  "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
-  "GET /api/erp/inventory-current": () => services.inventoryCurrent(),
-  "GET /api/erp/raw-orders": () => services.rawOzonOrders(),
-  "GET /api/erp/profit-items": () => services.profitItems(),
-  "GET /api/erp/order-exceptions": () => services.orderExceptions(),
+  "GET /api/erp/inventory-current": (req) => services.inventoryCurrent(tenantIdFromRequest(req)),
+  "GET /api/erp/raw-orders": (req) => services.rawOzonOrders(tenantIdFromRequest(req)),
+  "GET /api/erp/profit-items": (req) => services.profitItems(tenantIdFromRequest(req)),
+  "GET /api/erp/order-exceptions": (req) => services.orderExceptions(tenantIdFromRequest(req)),
   "POST /api/exchange-rate": async (req) => services.updateExchangeRate(await readJson(req)),
-  "POST /api/fbp-replenishment-ignore": async (req) => services.ignoreFbpReplenishment(await readJson(req), req._session?.personId),
-  "POST /api/fbp-replenishment-restore": async (req) => services.restoreFbpReplenishment(await readJson(req)),
+  "POST /api/fbp-replenishment-ignore": async (req) => services.ignoreFbpReplenishment(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-restore": async (req) => services.restoreFbpReplenishment(await readJson(req), tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders": async (req) => services.createFbpReplenishmentOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-  "POST /api/fbp-replenishment-orders/merge": async (req) => services.mergeFbpReplenishmentOrders(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/merge": async (req) => services.mergeFbpReplenishmentOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/link": async (req) => services.linkFbpReplenishmentOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/unlink": async (req) => services.unlinkFbpReplenishmentOrder(await readJson(req), tenantIdFromRequest(req)),
   "GET /api/fbp-replenishment-batches/fill-preview": (req) => services.fbpReplenishmentBatchFillPreview(req.query || {}, tenantIdFromRequest(req)),
-  "POST /api/fbp-replenishment-batches/fill-results": async (req) => services.recordFbpReplenishmentBatchFill(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-batches/fill-results": async (req) => services.recordFbpReplenishmentBatchFill(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/adjustments": async (req) => services.addFbpReplenishmentItemAdjustment(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "GET /api/fbp-replenishment-orders/items/adjustments": (req) => services.fbpReplenishmentItemAdjustments(req.query || {}, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/adjustments/reason": async (req) => services.updateFbpReplenishmentItemAdjustmentReason(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-  "GET /api/fbp-replenishment-orders/procurement-drafts": () => services.fbpShortageProcurementDrafts(),
-  "POST /api/fbp-replenishment-orders/procurement-drafts/submit": async (req) => services.submitFbpShortageProcurementDrafts(await readJson(req), req._session?.personId),
+  "GET /api/fbp-replenishment-orders/procurement-drafts": (req) => services.fbpShortageProcurementDrafts(tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/procurement-drafts/submit": async (req) => services.submitFbpShortageProcurementDrafts(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/delete": async (req) => services.deleteFbpReplenishmentOrder(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items": async (req) => services.updateFbpReplenishmentOrderItems(await readJson(req), tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/inventory-procurement": async (req) => services.createWarehouseProcurementRequests({ items: [await readJson(req)] }, req._session?.personId, tenantIdFromRequest(req)),
-  "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId),
+  "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-  "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId),
-  "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId),
-  "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req)),
-  "POST /api/fbp-transfer-records/pdf-import": async (req) => services.importFbpSupplyPdf(await readJson(req), req._session?.personId),
+  "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req), req._session),
+  "POST /api/fbp-transfer-records/pdf-import": async (req) => services.importFbpSupplyPdf(await readJson(req), req._session?.personId, req._session),
   "POST /api/pricing/cel-fbs": async (req) => calculateCelFbsPricing(await readJson(req)),
 };
 
@@ -934,7 +953,7 @@ const scheduledJobDefinitions = [
 ];
 
 const scheduledJobHandlers = {
-  operational_notifications: withForegroundApiDeferral("operational_notifications", () => services.generateOperationalNotifications()),
+  operational_notifications: withForegroundApiDeferral("operational_notifications", () => runTenantScheduledWork(tenantId => services.generateOperationalNotifications(tenantId))),
   order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
   customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),
   cancelled_order_sync: withForegroundApiDeferral("cancelled_order_sync", runBackgroundCancelledOrderSync),
@@ -956,7 +975,7 @@ const scheduledJobHandlers = {
     pageSize: 1,
     refresh: "1"
   })),
-  inventory_sales_daily_backfill: withForegroundApiDeferral("inventory_sales_daily_backfill", () => backfillInventoryAlertSalesMysql({ max_days: 30 })),
+  inventory_sales_daily_backfill: withForegroundApiDeferral("inventory_sales_daily_backfill", () => runTenantScheduledWork(tenantId => backfillInventoryAlertSalesMysql({ max_days: 30 }, tenantId))),
   ozon_category_sync: withForegroundApiDeferral("ozon_category_sync", runBackgroundOzonCategorySync),
   listing_publish_record_sync: withForegroundApiDeferral("listing_publish_record_sync", (job) => services.autoSyncListingPublishRecords(job?.config || {})),
   listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),
@@ -1086,10 +1105,10 @@ async function handleRestRoute(req, res, url, parts) {
       res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
     };
     try {
-      const result = await services.streamAiProviderResponse(body, {
+      const result = await withAiTenantSession(req._session, () => services.streamAiProviderResponse(body, {
         signal: controller.signal,
         onDelta: (delta) => send("delta", { delta })
-      });
+      }));
       send("done", result);
       console.info("[ai-provider-stream] done", {
         requestId: streamRequestId,
@@ -1118,7 +1137,10 @@ async function handleRestRoute(req, res, url, parts) {
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no"
     });
-    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()), req._session);
+    const originalEventToken = extractToken(req) || url.searchParams.get('token');
+    const unsubscribe = subscribeGlobalUpdateEvents(res, Object.fromEntries(url.searchParams.entries()), req._session, {
+      authorize: () => getSession(originalEventToken)
+    });
     req.on("close", unsubscribe);
     return true;
   }
@@ -1467,8 +1489,14 @@ function pluginBearerToken(req) {
 async function resolveLocalPluginPrincipal(req) {
   const host = String(req.headers.host || "").replace(/^\[|\]$/g, "").split(":")[0].toLowerCase();
   const localHost = ["localhost", "127.0.0.1", "::1"].includes(host);
-  if (isDirectLocalRequest(req) && localHost) return { tenantId: 0, tenantKey: "admin", tenantSlug: "default" };
-  return resolveTenantPluginTokenMysql(pluginBearerToken(req));
+  const tokenPrincipal = await resolveTenantPluginTokenMysql(pluginBearerToken(req));
+  if (tokenPrincipal) return tokenPrincipal;
+  if (isDirectLocalRequest(req) && localHost) {
+    const session = await getSession(extractToken(req));
+    if (session?.tenant?.id && session.tenant.slug === "default") return { tenantId: Number(session.tenant.id), tenantKey: "admin", tenantSlug: "default", personId: session.personId };
+    return { tenantId: 0, tenantKey: "admin", tenantSlug: "default" };
+  }
+  return null;
 }
 
 async function handleLocalPluginRoute(req, res, parts) {
@@ -1587,20 +1615,22 @@ async function handleLocalPluginRoute(req, res, parts) {
   if (parts[2] === "collector-box" && parts[3] && req.method === "POST" && parts[4] === "create-selection") {
     const sku = decodeURIComponent(parts[3]);
     const body = await readJson(req);
+    const session = await restoreBusinessTaskSession(principal.tenantKey, principal.personId);
     const result = await services.createSelectionFromCollectorBox(sku, {
       ...body,
       tenant_id: tenantId
-    }, null);
+    }, session);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
   if (parts[2] === "collector-box" && parts[3] && req.method === "POST" && parts[4] === "create-listing-template") {
     const sku = decodeURIComponent(parts[3]);
     const body = await readJson(req);
+    const session = await restoreBusinessTaskSession(principal.tenantKey, principal.personId);
     const result = await services.createListingTemplateFromCollectorBox(sku, {
       ...body,
       tenant_id: tenantId
-    }, null);
+    }, session);
     return localPluginJson(req, res, { success: true, data: result, ...result });
   }
 
@@ -1615,7 +1645,7 @@ async function handleLocalPluginRoute(req, res, parts) {
     const result = await services.syncOzonPostingsByNumber({
       ...body,
       posting_numbers: postingNumbers
-    }, { signal: req._abortSignal });
+    }, { signal: req._abortSignal, tenantId });
     return localPluginJson(req, res, { success: result.ok !== false, data: result, ...result });
   }
 
@@ -1684,16 +1714,18 @@ async function handleLocalPluginRoute(req, res, parts) {
 
 
 async function sendProductImage(res, productId, imageLoader = null, options = {}) {
+  res.setHeader('Content-Security-Policy', "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   try {
     const loadImage = () => imageLoader ? imageLoader(productId) : services.productImage(productId);
     let image = await loadImage();
     if (!image && options.allowRefresh !== false && services.refreshProductImageUrl) {
-      image = await services.refreshProductImageUrl(productId).catch(() => "");
+      image = await services.refreshProductImageUrl(productId, options.tenantId).catch(() => "");
     }
     if (!image) return notFound(res);
     const thumbnail = Boolean(options.thumbnail);
     const thumbnailWidth = Math.min(Math.max(Number(options.width || 180), 80), 360);
-    const aiFile = await resolveAiImageFile(String(image));
+    const aiFile = await resolveAiImageFile(String(image), options.session);
     if (aiFile) {
       const originalBuffer = await fs.readFile(aiFile.filePath);
       const imageBody = thumbnail
@@ -1724,7 +1756,7 @@ async function sendProductImage(res, productId, imageLoader = null, options = {}
       }
       let payload = await fetchRemoteImagePayload(String(image)).catch(() => null);
       if (!payload && services.refreshProductImageUrl) {
-        const refreshedImage = await services.refreshProductImageUrl(productId).catch(() => "");
+        const refreshedImage = await services.refreshProductImageUrl(productId, options.tenantId).catch(() => "");
         if (refreshedImage) {
           image = refreshedImage;
           payload = await fetchRemoteImagePayload(String(refreshedImage)).catch(() => null);
@@ -1801,13 +1833,14 @@ async function productThumbnailBuffer(buffer, cacheSeed, width) {
   };
 }
 
-async function resolveAiImageFile(imageUrl) {
+async function resolveAiImageFile(imageUrl, session) {
   const match = String(imageUrl || "").match(/^\/api\/ai\/file\/([^/]+)\/([^/]+)\/(.+)$/);
   if (!match) return null;
   return getAiTaskFile(
     decodeURIComponent(match[1]),
     decodeURIComponent(match[2]),
-    match[3].split("/").map(decodeURIComponent).join("/")
+    match[3].split("/").map(decodeURIComponent).join("/"),
+    session
   );
 }
 
@@ -1870,6 +1903,8 @@ async function writeCachedRemoteImage(target, payload) {
 
 function sendRemoteImageBuffer(res, payload, cacheState) {
   writeHead(res, 200, {
+    'Content-Security-Policy': "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+    'X-Content-Type-Options': 'nosniff',
     "Content-Type": payload.contentType,
     "Content-Length": payload.buffer.length,
     "Cache-Control": `public, max-age=${IMAGE_PROXY_BROWSER_CACHE_SECONDS}`,
@@ -1891,8 +1926,9 @@ async function fetchRemoteImagePayload(target) {
       if (!managed?.contentType?.startsWith("image/")) return null;
       return { buffer: managed.buffer, contentType: managed.contentType };
     }
-    const upstream = await fetch(target, {
+    return await requestPublicImage(target, {
       signal: controller.signal,
+      maxBytes: IMAGE_PROXY_MAX_RESPONSE_BYTES,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
@@ -1900,23 +1936,6 @@ async function fetchRemoteImagePayload(target) {
         "Origin": "https://www.ozon.ru"
       }
     });
-    if (!upstream.ok) return null;
-    const contentType = String(upstream.headers.get("content-type") || "").toLowerCase();
-    if (!contentType.startsWith("image/")) return null;
-    const declaredBytes = Number(upstream.headers.get("content-length") || 0);
-    if (declaredBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES) return null;
-    const chunks = [];
-    let receivedBytes = 0;
-    for await (const chunk of upstream.body) {
-      receivedBytes += chunk.length;
-      if (receivedBytes > IMAGE_PROXY_MAX_RESPONSE_BYTES) {
-        await upstream.body.cancel().catch(() => null);
-        return null;
-      }
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks, receivedBytes);
-    return { buffer, contentType };
   } finally {
     clearTimeout(timeout);
     releaseImageProxyFetchSlot();
@@ -1940,6 +1959,8 @@ function releaseImageProxyFetchSlot() {
 async function sendRemoteImage(req, res, url) {
   const target = String(url.searchParams.get("url") || "").trim();
   if (!/^https?:\/\//i.test(target)) return json(res, { error: "Invalid image url" }, 400);
+  try { await resolvePublicImageTarget(target); }
+  catch { return json(res, { error: "图片代理仅支持公网图片地址" }, 400); }
 
   const cached = await readCachedRemoteImage(target);
   if (cached) return sendRemoteImageBuffer(res, cached, "HIT");
@@ -2126,6 +2147,18 @@ const server = http.createServer(async (req, res) => {
       return sendRemoteImage(req, res, url);
     }
 
+    if (isPrivateAttachmentPath(url.pathname)) {
+      req._sensitiveResponse = true;
+      if (!["GET", "HEAD"].includes(req.method)) return json(res, { error: "附件仅支持读取" }, 405, { "Cache-Control": "no-store" });
+      const session = await getSession(extractToken(req) || readCookie(req, IMAGE_SESSION_COOKIE));
+      if (!session) return json(res, { error: "请登录后访问企业附件" }, 401, { "Cache-Control": "no-store" });
+      const { row, buffer } = await tenantPrivateFiles.read(url.pathname, session);
+      writeHead(res, 200, { "Content-Type": row.content_type, "Content-Length": buffer.length,
+        "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(row.original_name)}`,
+        "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox", "Cache-Control": "private, no-store", "CDN-Cache-Control": "no-store", "Vary": "Cookie, Authorization" });
+      return res.end(req.method === "HEAD" ? undefined : buffer);
+    }
+
     if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
       return serveStatic("/admin.html", req, res);
     }
@@ -2182,6 +2215,7 @@ async function prepareRuntimeBeforeListen() {
     await services.warmCoreInventoryRuntime?.();
     await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();
+    await assertTenantPilotSchemaReady();
     console.log("listing automation schema warmup completed");
     runtimeReadiness.ready = true;
     runtimeReadiness.readyAt = new Date().toISOString();
@@ -2307,10 +2341,14 @@ async function runBackgroundCustomerMessageDispatch() {
   if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundCustomerMessageRunning = true;
   try {
-    const result = await services.processCustomerMessageTasks({ limit: 30 });
-    const webhookResult = await services.processOzonWebhookEvents({ limit: 10 });
-    console.log(`background customer message dispatch ok: webhooks ${webhookResult.processed || 0}, recovered ${webhookResult.recovered || 0}, tasks ${result.processed || 0}, sending_disabled=${Boolean(result.sending_disabled)}`);
-    return { ...result, webhooks_processed: webhookResult.processed || 0, webhooks_recovered: webhookResult.recovered || 0 };
+    const result = await runTenantScheduledWork(tenantId => runCustomerMessageTenantScheduledOperation(tenantId, async () => {
+      const tasks = await services.processCustomerMessageTasks({ limit: 30 });
+      const webhooks = await services.processOzonWebhookEvents({ limit: 10 });
+      return { ...tasks, webhooks_processed: webhooks.processed || 0, webhooks_recovered: webhooks.recovered || 0 };
+    }));
+    result.sending_disabled = process.env.OZON_CUSTOMER_MESSAGE_SEND_ENABLED !== '1';
+    console.log(`background customer message dispatch ok: webhooks ${result.webhooks_processed || 0}, recovered ${result.webhooks_recovered || 0}, tasks ${result.processed || 0}, sending_disabled=${result.sending_disabled}`);
+    return result;
   } finally {
     backgroundCustomerMessageRunning = false;
     releaseBackgroundModuleLane("customer_messages", "customer_message_dispatch");
@@ -2332,13 +2370,14 @@ async function runBackgroundOrderStatusSync() {
   if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 30 };
   backgroundOrderSyncRunning = true;
   try {
-    const result = await services.syncOzonIncrementalOrders({
+    const result = await runTenantScheduledWork(tenantId => services.syncOzonIncrementalOrders({
       mode: "new",
       fallback_days: BACKGROUND_ORDER_SYNC_DAYS,
       overlap_minutes: 60,
       skip_post_processing: true
-    });
-    const dashboard = await services.refreshDashboardSnapshot({ forceRefresh: true });
+    }, { tenantId }));
+    const dashboards = await runTenantScheduledWork(tenantId => services.refreshDashboardSnapshot({ forceRefresh: true }, tenantId));
+    const dashboard = dashboards.tenants.find(item => item.result?.commerce)?.result;
     throwForPartialOrderSync(result, "Order status sync");
     console.log(`background order status sync ok: fetched ${result.fetched || 0}, updated ${result.updated || 0}, requests ${result.requests || 0}`);
     console.log(`dashboard snapshot refreshed after order sync: ${dashboard?.commerce?.date_key || ""} ${dashboard?.snapshot?.refreshed_at || ""}`);
@@ -2365,13 +2404,13 @@ async function runBackgroundCancelledOrderSync() {
   backgroundCancelledOrderSyncRunning = true;
   try {
     const window = rollingOrderSyncWindow(BACKGROUND_CANCELLED_ORDER_SYNC_DAYS);
-    const result = await services.syncDemoOrders({
+    const result = await runTenantScheduledWork(tenantId => services.syncDemoOrders({
       from: window.from,
       to: window.to,
       statuses: ["cancelled"],
       history_source: "cancelled_reconciliation",
       skip_post_processing: true
-    });
+    }, { tenantId }));
     throwForPartialOrderSync(result, "Cancelled order sync");
     console.log(`background cancelled order sync ok: ${window.from}~${window.to}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return { window, ...result };
@@ -2391,18 +2430,18 @@ async function runBackgroundPostingDetailSync() {
   backgroundPostingDetailSyncRunning = true;
   try {
     const reconciliationWindow = rollingOrderSyncWindow(BACKGROUND_POSTING_DETAIL_RECONCILIATION_DAYS);
-    const reconciliation = await services.syncDemoOrders({
+    const reconciliation = await runTenantScheduledWork(tenantId => services.syncDemoOrders({
       from: reconciliationWindow.from,
       to: reconciliationWindow.to,
       history_source: "posting_detail_reconciliation",
       skip_post_processing: true
-    });
-    const result = await services.syncKnownOzonPostingDetails({
+    }, { tenantId }));
+    const result = await runTenantScheduledWork(tenantId => services.syncKnownOzonPostingDetails({
       mode: "scheduled_hourly",
       days: BACKGROUND_POSTING_DETAIL_SYNC_DAYS,
       limit: BACKGROUND_POSTING_DETAIL_SYNC_LIMIT,
       concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
-    });
+    }, { tenantId }));
     throwForPartialOrderSync(reconciliation, "Posting detail reconciliation");
     console.log(`background posting detail sync ok: reconciled ${reconciliation.fetched || 0}, candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return { ...result, reconciliation: { window: reconciliationWindow, ...reconciliation } };
@@ -2422,12 +2461,12 @@ async function runBackgroundPostingDetailDeepSync() {
 
   backgroundPostingDetailSyncRunning = true;
   try {
-    const result = await services.syncKnownOzonPostingDetails({
+    const result = await runTenantScheduledWork(tenantId => services.syncKnownOzonPostingDetails({
       mode: "scheduled_nightly",
       days: BACKGROUND_POSTING_DETAIL_DEEP_SYNC_DAYS,
       limit: BACKGROUND_POSTING_DETAIL_DEEP_SYNC_LIMIT,
       concurrency: BACKGROUND_POSTING_DETAIL_SYNC_CONCURRENCY
-    });
+    }, { tenantId }));
     console.log(`background posting detail deep sync ok: candidates ${result.candidate_orders || 0}, fetched ${result.fetched || 0}, updated ${result.updated || 0}`);
     return result;
   } catch (error) {
@@ -2445,7 +2484,7 @@ async function runBackgroundAnalyticsRefresh() {
   if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundAnalyticsRefreshRunning = true;
   try {
-    const result = await services.refreshProfitAnalyticsSnapshots({});
+    const result = await runTenantScheduledWork(tenantId => services.refreshProfitAnalyticsSnapshots({}, tenantId));
     console.log(`background analytics refresh ok: product rows ${result.product_rows || 0}, sku rows ${result.sku_rows || 0}`);
     return result;
   } catch (error) {
@@ -2461,7 +2500,7 @@ async function runBackgroundDashboardSnapshotRefresh() {
   if (backgroundDashboardSnapshotRefreshRunning) return { skipped: true, reason: "already_running", retryDelaySeconds: 30 };
   backgroundDashboardSnapshotRefreshRunning = true;
   try {
-    const result = await services.refreshDashboardSnapshot({});
+    const result = await runTenantScheduledWork(tenantId => services.refreshDashboardSnapshot({}, tenantId));
     console.log(`background dashboard snapshot refresh ok: ${result?.commerce?.date_key || ""} ${result?.snapshot?.refreshed_at || ""}`);
     return {
       ok: true,
@@ -2487,14 +2526,27 @@ function createBackgroundTaskSignal(timeoutMs, label) {
 
 async function listActiveAdvertisingShopIds() {
   const rows = await mysqlQuery(`
-    SELECT id
-    FROM shops
-    WHERE status = 'active'
+    SELECT s.id
+    FROM shops s
+    JOIN tenants t ON t.id = s.tenant_id OR (s.tenant_id IS NULL AND t.slug = 'default')
+    WHERE s.status = 'active' AND t.status = 'active'
+      AND t.subscription_status IN ('active', 'trial')
+      AND (t.subscription_expires_at IS NULL OR t.subscription_expires_at > UTC_TIMESTAMP())
       AND COALESCE(NULLIF(TRIM(performance_client_id), ''), '') <> ''
       AND COALESCE(NULLIF(TRIM(performance_client_secret), ''), '') <> ''
-    ORDER BY id
+    ORDER BY s.id
   `);
   return rows.map((row) => Number(row.id)).filter((id) => id > 0);
+}
+
+async function withAdvertisingShopTenant(shopId, run) {
+  const rows = await mysqlQuery(`SELECT t.id FROM shops s
+    JOIN tenants t ON t.id = s.tenant_id OR (s.tenant_id IS NULL AND t.slug = 'default')
+    WHERE s.id = ? AND s.status = 'active' AND t.status = 'active'
+      AND t.subscription_status IN ('active', 'trial')
+      AND (t.subscription_expires_at IS NULL OR t.subscription_expires_at > UTC_TIMESTAMP()) LIMIT 1`, [shopId]);
+  if (!rows[0]) throw new Error('广告任务所属企业或店铺已停用');
+  return withAdvertisingTenant(Number(rows[0].id), run);
 }
 
 function getSellerAnalyticsStoreId(shop = {}) {
@@ -2572,7 +2624,7 @@ async function runConcurrentAdvertisingShopSyncs(shopIds = [], buildBody, option
     while (cursor < ids.length) {
       const shopId = ids[cursor];
       cursor += 1;
-      const result = await services.syncAdvertisingDailyFromOzon(buildBody(shopId), { signal: options.signal });
+      const result = await withAdvertisingShopTenant(shopId, () => services.syncAdvertisingDailyFromOzon(buildBody(shopId), { signal: options.signal }));
       aggregate.imported += Number(result.imported || 0);
       aggregate.totalRows += Number(result.totalRows || result.total_rows || 0);
       aggregate.total_rows += Number(result.total_rows || result.totalRows || 0);
@@ -2612,17 +2664,17 @@ async function runBackgroundAdvertisingSync(context = {}) {
     const { selectedShopIds, nextCursor } = rotateShopIds(activeShopIds, context?.config?.shopCursor || 0, maxShopsPerRun);
     if (!selectedShopIds.length) return { skipped: true, reason: "no_active_performance_shops", retryDelaySeconds: 300 };
     const window = await advertisingBackfillWindow(selectedShopIds, syncDays);
-    const result = await services.syncAdvertisingDailyFromOzon({
+    const result = await runConcurrentAdvertisingShopSyncs(selectedShopIds, (shopId) => ({
       from: window.from,
       to: window.to,
-      shop_ids: selectedShopIds,
+      shop_ids: [shopId],
       campaign_chunk_size: campaignChunkSize,
       max_campaigns_per_shop: maxCampaignsPerRun,
       campaign_cursor: campaignCursor,
       report_retry_delay_ms: reportRetryDelayMs,
       run_id: context?.runId,
       job_key: "advertising_sync"
-    }, { signal: taskSignal.signal });
+    }), { concurrency: 1, signal: taskSignal.signal });
     await persistScheduledJobConfigPatch("advertising_sync", {
       shopCursor: nextCursor,
       maxShopsPerRun,
@@ -3106,7 +3158,7 @@ async function runBackgroundOzonFinanceSync(context = {}) {
       status: "info",
       message: `Starting Ozon finance sync for ${window.from}~${window.to}`
     }).catch(() => {});
-    const result = await services.syncOzonFinance({ from: window.from, to: window.to }, { signal: context?.signal });
+    const result = await runTenantScheduledWork(tenantId => services.syncOzonFinance({ from: window.from, to: window.to }, { signal: context?.signal, tenantId }));
     const errors = Array.isArray(result?.errors) ? result.errors : [];
     const status = errors.length ? "partial_error" : "success";
     await logScheduledJobEvent({
@@ -3151,12 +3203,12 @@ async function runBackgroundHistoricalFinanceProfitRepair(context = {}) {
   const limit = Math.min(Math.max(Number(context?.config?.limit || 5000), 100), 5000);
   const to = shanghaiDateDaysAgo(ageDays);
   try {
-    const result = await services.repairHistoricalFinanceProfitFacts({
+    const result = await runTenantScheduledWork(tenantId => services.repairHistoricalFinanceProfitFacts({
       to,
       limit,
       only_issues: "1",
       write: true
-    });
+    }, tenantId));
     await logScheduledJobEvent({
       runId: context?.runId,
       jobKey,
@@ -3186,7 +3238,7 @@ async function runBackgroundOzonStockSync() {
   if (laneBusy) return { skipped: true, reason: laneBusy, retryDelaySeconds: 60 };
   backgroundOzonStockSyncRunning = true;
   try {
-    const result = await services.syncOzonStocks({ mode: "scheduled_fbp" });
+    const result = await runTenantScheduledWork(tenantId => services.syncOzonStocks({ mode: "scheduled_fbp" }, { tenantId }));
     console.log(`background Ozon stock sync ok: fetched ${result.fetched || 0}, upserted ${result.upserted || 0}, status ${result.status || "ok"}`);
     if (result.errors?.length) console.warn(`background Ozon stock sync warnings: ${result.errors.join("; ")}`);
     return result;
@@ -3305,13 +3357,15 @@ async function syncExceptionWorkbenchOrders(req = null) {
   // Reuse the same rolling synchronization window for both manual and
   // background refreshes so operators and cron-like jobs see the same scope.
   const window = services.exceptionWorkbenchSyncWindow();
-  const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal });
+  const current = await authorizeBusinessTaskSession(req?._session);
+  const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal, session: current, tenantId: tenantIdFromRequest({ _session: current }) });
   return { window, result };
 }
 
 async function syncRollingOrderStatusWindow(req = null) {
   const window = rollingOrderSyncWindow(BACKGROUND_ORDER_SYNC_DAYS);
-  const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal });
+  const current = await authorizeBusinessTaskSession(req?._session);
+  const result = await services.syncDemoOrders({ from: window.from, to: window.to }, { signal: req?._abortSignal, session: current, tenantId: tenantIdFromRequest({ _session: current }) });
   return { window, result };
 }
 

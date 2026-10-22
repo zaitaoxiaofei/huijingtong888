@@ -7,7 +7,7 @@ function routeArgs(path, serviceName, service) {
   return {
     responses,
     args: {
-      req: { method: "POST", _session: { personId: 7 } },
+      req: { method: "POST", _session: { personId: 7, tenant: { id: 1, slug: "default" } } },
       res: {},
       url: new URL(`http://localhost${path}`),
       parts: path.split("/").filter(Boolean),

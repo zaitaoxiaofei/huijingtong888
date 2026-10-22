@@ -16,7 +16,8 @@ test("development overview skips unrelated data bootstrap and reuses the task-ce
 
 test("team task reads schedule operational refresh outside the critical response path", () => {
   assert.match(serviceSource, /function scheduleOperationalTeamTaskRefresh\(\)/);
-  assert.match(serviceSource, /\.catch\(\(\) => \{\}\)\s*\.finally\(\(\) => \{ operationalTasksRefreshPromise = null; \}\)/);
+  assert.match(serviceSource, /\.finally\(\(\) => \{ state\.promise = null; \}\)/);
+  assert.match(serviceSource, /operationalTaskRefreshes\.get\(key\)/);
   assert.match(serviceSource, /scheduleOperationalTeamTaskRefresh\(\);\s*const where = \["t\.active = 1"\]/);
   assert.doesNotMatch(serviceSource, /await scheduleOperationalTeamTaskRefresh\(\)/);
 });

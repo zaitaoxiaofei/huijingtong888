@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 
 function harness() {
   const settings = new Map([['procurement_daily', null], ['shipping_daily', null]]);
@@ -13,14 +14,14 @@ function harness() {
   ];
   tasks.forEach((row, index) => { row.id = index + 1; });
   const writes = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     isMysqlPrimaryEnabled: () => true,
     mysqlQuery: async (sql, params) => {
-      if (sql.includes('SELECT id, automation_key FROM team_tasks')) {
+      if (sql.includes('SELECT id, automation_key FROM') && sql.includes('FROM team_tasks')) {
         const row = tasks.find(row => row.id === params[0]);
         return row ? [{ id: row.id, automation_key: `${row.type}:${row.date}` }] : [];
       }
-      if (sql.includes('FROM people')) return params[0] === 404 ? [] : [{ id: params[0] }];
+      if (sql.startsWith('SELECT id FROM') && sql.includes('FROM people')) return params[0] === 404 ? [] : [{ id: params[0] }];
       if (sql.includes('FROM team_operational_owners')) return [...settings].map(([type, owner_person_id]) => ({ type, owner_person_id, term_until: terms.get(type) || null, term_expired: terms.get(type) && terms.get(type) < '2026-09-16' ? 1 : 0 }));
       throw new Error(sql);
     },
@@ -51,7 +52,7 @@ function harness() {
   });
   const source = fs.readFileSync(new URL('../src/services/team-tasks.js', import.meta.url), 'utf8')
     .replace(/^import .*;\n/gm, '').replaceAll('export async function', 'async function');
-  vm.runInContext(`${source}\nteamTasksSchemaReady=true;`, context);
+  vm.runInContext(`${source}\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null });`, context);
   return { context, tasks, settings, terms, writes };
 }
 

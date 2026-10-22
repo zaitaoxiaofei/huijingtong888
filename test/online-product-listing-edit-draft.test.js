@@ -12,7 +12,7 @@ test("runtime online product edit draft uses listing standardizer wrapper", () =
 
 test("online product listing edit draft standardizes template before returning", () => {
   assert.match(listingSource, /export async function onlineProductListingEditDraft/);
-  assert.match(listingSource, /onlineProductEditDraftMysql\(targetId\)/);
+  assert.match(listingSource, /onlineProductEditDraftMysql\(targetId, Number\(session\.tenant\.id\)\)/);
   assert.match(listingSource, /latestPublishRecordTemplateSnapshotForOnlineProduct/);
   assert.match(listingSource, /listing_publish_record_snapshot/);
   assert.match(listingSource, /standardizeListingTemplatePayload/);

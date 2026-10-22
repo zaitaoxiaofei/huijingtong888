@@ -15,7 +15,8 @@ export async function refreshOrderProfitDetailSnapshotsMysqlService(deps, body =
   const to = deps.normalizeDate(body.to);
   const explicitIds = Array.isArray(body.order_ids) ? body.order_ids.map(Number).filter(Boolean) : [];
   const limit = Math.min(Math.max(Number(body.limit || 5000), 1), 50000);
-  const where = [];
+  if (!deps.tenantOrderSql) throw new Error("Order snapshot refresh requires enterprise ownership scope");
+  const where = [deps.tenantOrderSql];
   const params = [];
   if (explicitIds.length) {
     where.push(`o.id IN (${explicitIds.map(() => "?").join(",")})`);

@@ -175,6 +175,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Keep enterprise shop management, enterprise personnel, and matrix configuration under the current enterprise. Shared exchange/profit/logistics/cancellation settings, task/monitoring administration, AI provider configuration, and prompt-library management belong to the platform management boundary.
 - A menu move or configuration-only slice must not open unfinished enterprise generation, publishing, order, inventory, or procurement routes. Preserve exact route gates until the complete data and background-task paths have passed A/B enterprise isolation checks.
 - Platform-only configuration management must preserve required safe business reads and existing default-enterprise business execution. Check inventory, selection, listing, orders and procurement consumers before restricting shared endpoints; test the business consumption path separately from configuration writes.
+- Ordinary default-enterprise members must use the same reviewed business route gates as customer enterprises. A default slug is not authorization for a global query. Preserve verified daily workflows and document any advanced workflow that remains unavailable pending isolation acceptance.
+- Readiness must verify tenant columns and natural-key uniqueness together. A tenant column with an old global unique key is an incomplete migration; nullable ownership can also break import idempotence. Keep fresh schema and explicit administrator migrations consistent and test old writers during release overlap.
 
 ---
 

@@ -6,6 +6,9 @@ import { spawn } from "node:child_process";
 import { mysqlExecute, mysqlQuery } from "../../../mysql-pool.js";
 import { invalidateMasterDataCache } from "../../../services/mysql-cutover.js";
 import { resolveUploadSubdir, resolveUploadSubdirRoots } from "../../../runtime-uploads.js";
+import { authorizeBusinessTaskSession, businessTaskTenantKey, assertBusinessTaskPermission } from "../../../services/business-task-tenant.js";
+import { currentAiTenantSession } from "../../../services/ai-tenant-context.js";
+import { assertAiImageTaskOwner, registerAiImageTaskOwner } from "../../../services/ai-image-task-ownership.js";
 
 const ROOT_DIR = process.cwd();
 const TEMP_ROOT = path.resolve(ROOT_DIR, "uploads", "temp", "image-cropper");
@@ -23,7 +26,8 @@ export const imageCropperPaths = {
   tempRoot: TEMP_ROOT
 };
 
-export async function saveUploadedImage({ filename, contentType, buffer }) {
+export async function saveUploadedImage({ filename, contentType, buffer }, session = null) {
+  session = await authorizeBusinessTaskSession(session);
   const safeName = sanitizeFilename(filename || "upload.png");
   const extension = path.extname(safeName).toLowerCase();
   if (!ALLOWED_EXTENSIONS.has(extension) || !ALLOWED_MIME_TYPES.has(String(contentType || "").toLowerCase())) {
@@ -43,6 +47,7 @@ export async function saveUploadedImage({ filename, contentType, buffer }) {
   }
 
   const taskId = crypto.randomUUID();
+  await registerAiImageTaskOwner(`image-cropper:${taskId}`, session);
   const taskDir = resolveTaskDir(taskId);
   await fs.mkdir(path.join(taskDir, "crops"), { recursive: true });
 
@@ -60,8 +65,10 @@ export async function saveUploadedImage({ filename, contentType, buffer }) {
   };
 }
 
-export async function saveShopWatermark({ shopId, filename, contentType, buffer }) {
-  const shop = await getShopForWatermark(shopId);
+export async function saveShopWatermark({ shopId, filename, contentType, buffer }, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
+  const shop = await getShopForWatermark(shopId, session);
   if (!shop) {
     const error = new Error("店铺不存在");
     error.status = 404;
@@ -90,7 +97,7 @@ export async function saveShopWatermark({ shopId, filename, contentType, buffer 
   const storedName = `shop-${Number(shop.id)}-${crypto.randomUUID()}${extension}`;
   const filePath = path.join(SHOP_WATERMARK_ROOT, storedName);
   await fs.writeFile(filePath, buffer);
-  await updateShopWatermark(shop.id, storedName, safeName);
+  await updateShopWatermark(shop.id, storedName, safeName, session);
 
   return {
     ok: true,
@@ -115,10 +122,11 @@ export async function detectAndCropImage({
   padding = 4,
   roundCornerTolerance = true,
   manualBoxes = []
-}) {
+}, session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const sourcePath = resolveTempPath(imagePath);
-  if (!sourcePath.startsWith(taskDir)) {
+  if (!sourcePath.startsWith(`${taskDir}${path.sep}`)) {
     const error = new Error("图片路径与任务不匹配");
     error.status = 400;
     throw error;
@@ -160,7 +168,8 @@ export async function detectAndCropImage({
   };
 }
 
-export async function enhanceTaskCrops({ taskId, filenames = [] }) {
+export async function enhanceTaskCrops({ taskId, filenames = [] }, session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const input = await chooseInputDir(taskDir, filenames);
   const batch = createBatchName("enhanced");
@@ -192,7 +201,8 @@ export async function enhanceTaskCrops({ taskId, filenames = [] }) {
   };
 }
 
-export async function convertTaskCropsToRatio({ taskId, filenames = [] }) {
+export async function convertTaskCropsToRatio({ taskId, filenames = [] }, session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const input = await chooseInputDir(taskDir, filenames);
   const batch = createBatchName("ratio");
@@ -224,8 +234,9 @@ export async function convertTaskCropsToRatio({ taskId, filenames = [] }) {
   };
 }
 
-export async function watermarkTaskCrops({ taskId, shopId, filenames = [], options = {} }) {
-  const shop = await getShopForWatermark(shopId);
+export async function watermarkTaskCrops({ taskId, shopId, filenames = [], options = {} }, session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
+  const shop = await getShopForWatermark(shopId, session);
   const watermark = await getWatermarkFileForShop(shop);
 
   const taskDir = resolveTaskDir(taskId);
@@ -262,15 +273,16 @@ export async function watermarkTaskCrops({ taskId, shopId, filenames = [], optio
   };
 }
 
-export async function getShopWatermarkFile(shopId) {
-  const shop = await getShopForWatermark(shopId);
+export async function getShopWatermarkFile(shopId, session = null) {
+  const shop = await getShopForWatermark(shopId, session);
   return getWatermarkFileForShop(shop);
 }
 
-export async function getTaskFile(taskId, filename) {
+export async function getTaskFile(taskId, filename, session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const filePath = path.resolve(taskDir, filename);
-  if (!filePath.startsWith(taskDir)) {
+  if (!filePath.startsWith(`${taskDir}${path.sep}`)) {
     const error = new Error("非法文件路径");
     error.status = 400;
     throw error;
@@ -291,7 +303,8 @@ export async function getTaskFile(taskId, filename) {
   };
 }
 
-export async function createTaskZip(taskId, batch = "") {
+export async function createTaskZip(taskId, batch = "", session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   const taskDir = resolveTaskDir(taskId);
   const cropsDir = resolveScopedOutputDir(taskDir, "crops", batch);
   const imageEntries = await listImageFiles(cropsDir);
@@ -316,7 +329,8 @@ export async function createTaskZip(taskId, batch = "") {
   };
 }
 
-export async function createEnhancedTaskZip(taskId, batch = "") {
+export async function createEnhancedTaskZip(taskId, batch = "", session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   if (batch) {
     return createScopedTaskZip({
       taskId,
@@ -353,7 +367,8 @@ export async function createEnhancedTaskZip(taskId, batch = "") {
   };
 }
 
-export async function createRatioTaskZip(taskId, batch = "") {
+export async function createRatioTaskZip(taskId, batch = "", session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   return createScopedTaskZip({
     taskId,
     scope: "ratio-3x4",
@@ -363,7 +378,8 @@ export async function createRatioTaskZip(taskId, batch = "") {
   });
 }
 
-export async function createWatermarkedTaskZip(taskId, batch = "") {
+export async function createWatermarkedTaskZip(taskId, batch = "", session = null) {
+  await assertImageCropperTaskOwner(taskId, session);
   return createScopedTaskZip({
     taskId,
     scope: "watermarked",
@@ -596,7 +612,8 @@ function runPythonImageProcess(scriptPath, args, fallbackMessage) {
   });
 }
 
-async function getShopForWatermark(shopId) {
+async function getShopForWatermark(shopId, session) {
+  session = await authorizeBusinessTaskSession(session || currentAiTenantSession());
   const id = Number(shopId);
   if (!Number.isInteger(id) || id <= 0) return null;
   await ensureMysqlShopWatermarkColumns();
@@ -604,16 +621,21 @@ async function getShopForWatermark(shopId) {
     SELECT id, name, watermark_path, watermark_name,
       watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent
     FROM shops
-    WHERE id = ? AND status != 'deleted'
+    WHERE id = ? AND status != 'deleted' AND (tenant_id = ?${businessTaskTenantKey(session) === "admin" ? " OR tenant_id IS NULL" : ""})
     LIMIT 1
-  `, [id]))[0] || null;
+  `, [id, Number(session.tenant.id)]))[0] || null;
 }
 
-async function updateShopWatermark(shopId, storedName, originalName) {
+async function updateShopWatermark(shopId, storedName, originalName, session) {
   const relativePath = toWatermarkReference(storedName);
   await ensureMysqlShopWatermarkColumns();
-  await mysqlExecute("UPDATE shops SET watermark_path = ?, watermark_name = ? WHERE id = ?", [relativePath, originalName, Number(shopId)]);
+  await mysqlExecute(`UPDATE shops SET watermark_path = ?, watermark_name = ? WHERE id = ? AND (tenant_id = ?${businessTaskTenantKey(session) === "admin" ? " OR tenant_id IS NULL" : ""})`, [relativePath, originalName, Number(shopId), Number(session.tenant.id)]);
   invalidateMasterDataCache("shops");
+}
+
+export async function assertImageCropperTaskOwner(taskId, session = currentAiTenantSession()) {
+  resolveTaskDir(taskId);
+  return assertAiImageTaskOwner(`image-cropper:${taskId}`, session || currentAiTenantSession());
 }
 
 let mysqlShopWatermarkColumnsReady = false;
@@ -761,6 +783,9 @@ function normalizeCropFilenames(filenames) {
 }
 
 function normalizeRelativeImagePath(value) {
+  if (String(value || "").replace(/\\/g, "/").split("/").some(part => part === "." || part === "..")) {
+    throw Object.assign(new Error("非法文件路径"), { status: 400 });
+  }
   const parts = String(value || "")
     .replace(/\\/g, "/")
     .split("/")
@@ -795,7 +820,7 @@ function resolveScopedOutputDir(taskDir, scope, batch = "") {
   if (!batch) return root;
   const cleanBatch = normalizeRelativeImagePath(batch);
   const dir = path.resolve(root, cleanBatch);
-  if (!dir.startsWith(root)) {
+  if (dir !== root && !dir.startsWith(`${root}${path.sep}`)) {
     const error = new Error("闈炴硶鏂囦欢璺緞");
     error.status = 400;
     throw error;
@@ -841,7 +866,7 @@ function resolveTaskDir(taskId) {
     throw error;
   }
   const taskDir = path.resolve(TEMP_ROOT, safeTaskId);
-  if (!taskDir.startsWith(TEMP_ROOT)) {
+  if (!taskDir.startsWith(`${TEMP_ROOT}${path.sep}`)) {
     const error = new Error("非法任务路径");
     error.status = 400;
     throw error;
@@ -852,7 +877,7 @@ function resolveTaskDir(taskId) {
 function resolveTempPath(relativePath) {
   const clean = String(relativePath || "").replace(/\\/g, "/");
   const absolutePath = path.resolve(TEMP_ROOT, clean);
-  if (!absolutePath.startsWith(TEMP_ROOT)) {
+  if (!absolutePath.startsWith(`${TEMP_ROOT}${path.sep}`)) {
     const error = new Error("非法图片路径");
     error.status = 400;
     throw error;

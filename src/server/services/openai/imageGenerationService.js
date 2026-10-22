@@ -6,6 +6,7 @@ import path from "node:path";
 import { clampImageCount } from "./promptService.js";
 import { aiImageRuntimeConfig } from "../../../services/ai-provider-settings.js";
 import { withAiImageRuntimeSlot } from "../../../services/ai-image-runtime-limiter.js";
+import { reserveTenantAiRequest } from "../../../services/ai-tenant-context.js";
 
 export const ROOT_DIR = process.cwd();
 export const GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
@@ -108,6 +109,7 @@ export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate"
 }
 
 async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob = null, onProviderJob = null }) {
+  if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
     return request65535TaskImage({ runtimeConfig, prompt, size, providerJob, onProviderJob });
   }
@@ -142,6 +144,7 @@ async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob
 }
 
 async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFilePath = "", filename, contentType, prompt, size, providerJob = null, onProviderJob = null }) {
+  if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
     const resolvedImageBuffer = providerJob?.jobId
       ? null

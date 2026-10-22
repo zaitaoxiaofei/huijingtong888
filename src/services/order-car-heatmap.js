@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
+import { resolveInventoryTenantScope, inventoryTenantSql } from "./inventory-tenant-scope.js";
+import { authorizeBusinessTaskSession } from "./business-task-tenant.js";
+import { hasPermission } from "../shared/permissions.js";
+import { withAiTenantSession } from "./ai-tenant-context.js";
+import { ORDER_HEATMAP_TENANT_SCHEMA } from "./order-heatmap-tenant-schema.js";
 
 const WORD_BOUNDARY = "[^a-z0-9а-яё]";
 
@@ -211,6 +216,24 @@ function titleHash(value = "") {
   return crypto.createHash("sha256").update(normalizeText(value)).digest("hex");
 }
 
+function storedTitleHash(value, scope) {
+  return scope.isDefault ? titleHash(value) : titleHash(`tenant:${scope.id}:${normalizeText(value)}`);
+}
+
+async function assertHeatmapTaskAccess(scope, options = {}) {
+  if (options.signal?.aborted) throw Object.assign(new Error("任务已取消"), { statusCode: 409 });
+  const tenants = await mysqlQuery(`SELECT id FROM tenants WHERE id = ? AND status = 'active'
+    AND subscription_status IN ('active', 'trial')
+    AND (subscription_expires_at IS NULL OR subscription_expires_at > UTC_TIMESTAMP()) LIMIT 1`, [scope.id]);
+  if (!tenants.length) throw Object.assign(new Error("任务所属企业或订阅已不可用"), { statusCode: 403 });
+  if (options.session) {
+    const current = await authorizeBusinessTaskSession(options.session, mysqlQuery);
+    if (Number(current.tenant.id) !== scope.id || !hasPermission(current, "analytics")) {
+      throw Object.assign(new Error("当前企业岗位已无权执行车型分析任务"), { statusCode: 403 });
+    }
+  }
+}
+
 function safeJsonParse(value, fallback) {
   try {
     return value ? JSON.parse(String(value)) : fallback;
@@ -220,32 +243,9 @@ function safeJsonParse(value, fallback) {
 }
 
 async function ensureOrderCarHeatmapSchema() {
-  await mysqlExecute(`
-    CREATE TABLE IF NOT EXISTS order_vehicle_title_tags (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-      title_hash CHAR(64) NOT NULL,
-      title_text TEXT NOT NULL,
-      brand VARCHAR(128) NOT NULL DEFAULT '',
-      model VARCHAR(128) NOT NULL DEFAULT '',
-      product_key VARCHAR(128) NOT NULL DEFAULT '',
-      product_label VARCHAR(128) NOT NULL DEFAULT '',
-      years_json JSON NULL,
-      confidence DECIMAL(5,4) NOT NULL DEFAULT 0,
-      source VARCHAR(32) NOT NULL DEFAULT 'rule',
-      status VARCHAR(32) NOT NULL DEFAULT 'pending',
-      sample_ozon_sku VARCHAR(128) NOT NULL DEFAULT '',
-      sample_offer_id VARCHAR(255) NOT NULL DEFAULT '',
-      raw_response_json LONGTEXT NULL,
-      reviewed_by_person_id BIGINT NULL,
-      reviewed_at DATETIME NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_order_vehicle_title_tags_hash (title_hash),
-      KEY idx_order_vehicle_title_tags_status (status, source, updated_at),
-      KEY idx_order_vehicle_title_tags_vehicle (brand, model),
-      KEY idx_order_vehicle_title_tags_product (product_key)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  `);
+  await mysqlExecute(ORDER_HEATMAP_TENANT_SCHEMA);
+  const columns = await mysqlQuery("SHOW COLUMNS FROM order_vehicle_title_tags LIKE 'tenant_id'");
+  if (!columns.length) throw Object.assign(new Error("车型识别缓存尚未完成企业隔离迁移，请运行 scripts/migrate-tenant-order-heatmap.mjs --apply"), { statusCode: 503 });
 }
 
 function normalizeTagRecord(value = {}) {
@@ -301,9 +301,10 @@ function dbTagToParsed(row = {}) {
   };
 }
 
-async function loadTagCacheForRows(rows = []) {
+async function loadTagCacheForRows(rows = [], scope) {
   await ensureOrderCarHeatmapSchema();
-  const hashes = [...new Set(rows.map((row) => titleHash(rowTitle(row))).filter(Boolean))];
+  const logicalHashes = new Map(rows.map((row) => [storedTitleHash(rowTitle(row), scope), titleHash(rowTitle(row))]));
+  const hashes = [...logicalHashes.keys()];
   if (!hashes.length) return new Map();
   const cache = new Map();
   const chunkSize = 500;
@@ -312,11 +313,12 @@ async function loadTagCacheForRows(rows = []) {
     const placeholders = chunk.map(() => "?").join(",");
     const records = await mysqlQuery(`
       SELECT *
-      FROM order_vehicle_title_tags
-      WHERE title_hash IN (${placeholders})
+      FROM order_vehicle_title_tags tags
+      WHERE ${inventoryTenantSql(scope, "tags")} AND title_hash IN (${placeholders})
     `, chunk);
     for (const record of records) {
-      cache.set(record.title_hash, dbTagToParsed(record));
+      const logicalHash = logicalHashes.get(record.title_hash);
+      cache.set(logicalHash, { ...dbTagToParsed(record), title_hash: logicalHash });
     }
   }
   return cache;
@@ -337,18 +339,25 @@ function parsedForRow(row = {}, cache = new Map()) {
 
 async function saveTitleTag(tag = {}, options = {}) {
   await ensureOrderCarHeatmapSchema();
+  const scope = options.scope;
+  await assertHeatmapTaskAccess(scope, options);
   const title = String(tag.title || tag.title_text || "").trim();
   if (!title) throw new Error("标题不能为空");
-  const hash = String(tag.title_hash || titleHash(title));
+  const hash = storedTitleHash(title, scope);
+  const existing = await mysqlQuery("SELECT tenant_id FROM order_vehicle_title_tags WHERE title_hash = ? LIMIT 1", [hash]);
+  if (existing.length && !(Number(existing[0].tenant_id) === scope.id || (scope.isDefault && existing[0].tenant_id === null))) {
+    throw Object.assign(new Error("车型识别缓存不属于当前企业"), { statusCode: 403 });
+  }
   const normalized = normalizeTagRecord(tag);
   await mysqlExecute(`
     INSERT INTO order_vehicle_title_tags (
-      title_hash, title_text, brand, model, product_key, product_label, years_json,
+      tenant_id, title_hash, title_text, brand, model, product_key, product_label, years_json,
       confidence, source, status, sample_ozon_sku, sample_offer_id, raw_response_json,
       reviewed_by_person_id, reviewed_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
+      tenant_id = VALUES(tenant_id),
       title_text = VALUES(title_text),
       brand = VALUES(brand),
       model = VALUES(model),
@@ -365,6 +374,7 @@ async function saveTitleTag(tag = {}, options = {}) {
       reviewed_at = COALESCE(VALUES(reviewed_at), reviewed_at),
       updated_at = CURRENT_TIMESTAMP
   `, [
+    scope.id,
     hash,
     title,
     normalized.brand,
@@ -381,7 +391,7 @@ async function saveTitleTag(tag = {}, options = {}) {
     options.personId || null,
     options.personId ? new Date() : null
   ]);
-  return { ok: true, title_hash: hash, ...normalized };
+  return { ok: true, title_hash: titleHash(title), ...normalized };
 }
 
 function escapeRegExp(value = "") {
@@ -809,7 +819,7 @@ function buildAiPrompt(items = []) {
   ].join("\n");
 }
 
-async function classifyTitlesWithAi(items = []) {
+async function classifyTitlesWithAi(items = [], options = {}) {
   if (!items.length) return [];
   const result = await chatWithAiProvider({
     messages: [
@@ -851,7 +861,7 @@ async function classifyTitlesWithAi(items = []) {
       sample_offer_id: source.offer_id,
       ...normalized,
       raw_response_json: aiRow
-    });
+    }, options);
     saved.push({ ...savedRow, title: source.title });
   }
   return saved;
@@ -878,7 +888,8 @@ function buildOrderItemWhere(query = {}) {
   return { where: where.join(" AND "), params, from, to, shopId };
 }
 
-async function orderCarHeatmapSourceRows(query = {}) {
+async function orderCarHeatmapSourceRows(query = {}, tenantId = "admin", matchingTitle = null) {
+  const scope = await resolveInventoryTenantScope(tenantId, mysqlQuery);
   const base = buildOrderItemWhere(query);
   const limit = Math.min(Math.max(Number(query.sourceLimit || query.source_limit || query.rowLimit || query.row_limit || 60000), 1), 200000);
   const rows = await mysqlQuery(`
@@ -900,9 +911,9 @@ async function orderCarHeatmapSourceRows(query = {}) {
       oi.sale_price,
       oi.estimated_profit,
       oi.actual_profit,
-      oi.sku_mapping_id,
+      sm.id AS sku_mapping_id,
       sm.offer_id,
-      sm.product_id,
+      p.id AS product_id,
       p.code AS product_code,
       p.name AS product_name,
       op.id AS online_product_id,
@@ -910,15 +921,16 @@ async function orderCarHeatmapSourceRows(query = {}) {
       op.offer_id AS online_offer_id
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
-    LEFT JOIN shops s ON s.id = o.shop_id
-    LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id
-    LEFT JOIN products p ON p.id = sm.product_id
+    JOIN shops s ON s.id = o.shop_id AND ${inventoryTenantSql(scope, "s")}
+    LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND ${inventoryTenantSql(scope, "sm")}
+    LEFT JOIN products p ON p.id = sm.product_id AND ${inventoryTenantSql(scope, "p")}
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     WHERE ${base.where}
+      ${matchingTitle === null ? "" : "AND COALESCE(NULLIF(TRIM(oi.ozon_name), ''), NULLIF(TRIM(op.name), ''), NULLIF(TRIM(p.name), ''), '') = ?"}
     ORDER BY o.ordered_at DESC, oi.id DESC
     LIMIT ?
-  `, [...base.params, limit]);
-  return { rows, filters: base, limit };
+  `, [...base.params, ...(matchingTitle === null ? [] : [matchingTitle]), limit]);
+  return { rows, filters: base, limit, scope };
 }
 
 function responseFilters(source, query = {}) {
@@ -931,9 +943,9 @@ function responseFilters(source, query = {}) {
   };
 }
 
-export async function orderCarHeatmapModelsMysql(query = {}) {
-  const source = await orderCarHeatmapSourceRows(query);
-  const cache = await loadTagCacheForRows(source.rows);
+export async function orderCarHeatmapModelsMysql(query = {}, tenantId = "admin") {
+  const source = await orderCarHeatmapSourceRows(query, tenantId);
+  const cache = await loadTagCacheForRows(source.rows, source.scope);
   const result = aggregateOrderCarHeatmapRows(source.rows, query, { cache });
   return {
     rows: result.models,
@@ -944,9 +956,9 @@ export async function orderCarHeatmapModelsMysql(query = {}) {
   };
 }
 
-export async function orderCarHeatmapProductsMysql(query = {}) {
-  const source = await orderCarHeatmapSourceRows(query);
-  const cache = await loadTagCacheForRows(source.rows);
+export async function orderCarHeatmapProductsMysql(query = {}, tenantId = "admin") {
+  const source = await orderCarHeatmapSourceRows(query, tenantId);
+  const cache = await loadTagCacheForRows(source.rows, source.scope);
   const result = aggregateOrderCarHeatmapRows(source.rows, query, { cache });
   return {
     rows: result.products,
@@ -966,9 +978,9 @@ export async function orderCarHeatmapProductsMysql(query = {}) {
   };
 }
 
-export async function orderCarHeatmapSkusMysql(query = {}) {
-  const source = await orderCarHeatmapSourceRows(query);
-  const cache = await loadTagCacheForRows(source.rows);
+export async function orderCarHeatmapSkusMysql(query = {}, tenantId = "admin") {
+  const source = await orderCarHeatmapSourceRows(query, tenantId);
+  const cache = await loadTagCacheForRows(source.rows, source.scope);
   const result = aggregateOrderCarHeatmapRows(source.rows, query, { cache });
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -998,9 +1010,9 @@ export async function orderCarHeatmapSkusMysql(query = {}) {
   };
 }
 
-export async function orderCarHeatmapUnmatchedMysql(query = {}) {
-  const source = await orderCarHeatmapSourceRows(query);
-  const cache = await loadTagCacheForRows(source.rows);
+export async function orderCarHeatmapUnmatchedMysql(query = {}, tenantId = "admin") {
+  const source = await orderCarHeatmapSourceRows(query, tenantId);
+  const cache = await loadTagCacheForRows(source.rows, source.scope);
   const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
   const rows = uniqueUnmatchedRows(source.rows, cache, limit, query);
   return {
@@ -1011,12 +1023,14 @@ export async function orderCarHeatmapUnmatchedMysql(query = {}) {
   };
 }
 
-export async function orderCarHeatmapAiClassifyMysql(body = {}) {
-  const source = await orderCarHeatmapSourceRows(body);
-  const cache = await loadTagCacheForRows(source.rows);
+export async function orderCarHeatmapAiClassifyMysql(body = {}, tenantId = "admin", options = {}) {
+  if (!options.session) throw Object.assign(new Error("车型 AI 分析需要有效企业成员会话"), { statusCode: 403 });
+  const source = await orderCarHeatmapSourceRows(body, tenantId);
+  await assertHeatmapTaskAccess(source.scope, options);
+  const cache = await loadTagCacheForRows(source.rows, source.scope);
   const limit = Math.min(Math.max(Number(body.aiLimit || body.ai_limit || body.classifyLimit || body.classify_limit || body.limit || 5), 1), 10);
   const candidates = uniqueUnmatchedRows(source.rows, cache, limit, body);
-  const saved = await classifyTitlesWithAi(candidates);
+  const saved = await withAiTenantSession(options.session, () => classifyTitlesWithAi(candidates, { ...options, scope: source.scope }), { permission: "analytics" });
   return {
     ok: true,
     requested: candidates.length,
@@ -1027,10 +1041,15 @@ export async function orderCarHeatmapAiClassifyMysql(body = {}) {
   };
 }
 
-export async function orderCarHeatmapConfirmTagMysql(body = {}, personId = null) {
+export async function orderCarHeatmapConfirmTagMysql(body = {}, personId = null, tenantId = "admin", options = {}) {
+  const title = String(body.title || body.title_text || "").trim();
+  if (!title) throw new Error("标题不能为空");
+  const source = await orderCarHeatmapSourceRows({ sourceLimit: 1 }, tenantId, title);
+  await assertHeatmapTaskAccess(source.scope, options);
+  const sample = source.rows[0];
+  if (!sample) throw Object.assign(new Error("标题不存在于当前企业订单中，无法确认分类"), { statusCode: 404 });
   const result = await saveTitleTag({
-    title: body.title || body.title_text,
-    title_hash: body.title_hash,
+    title: rowTitle(sample),
     brand: body.brand,
     model: body.model,
     product_key: body.product_key || body.productKey,
@@ -1039,9 +1058,9 @@ export async function orderCarHeatmapConfirmTagMysql(body = {}, personId = null)
     confidence: Number(body.confidence || 1),
     source: "manual",
     status: "accepted",
-    sample_ozon_sku: body.ozon_sku || body.sample_ozon_sku,
-    sample_offer_id: body.offer_id || body.sample_offer_id,
+    sample_ozon_sku: sample.ozon_sku,
+    sample_offer_id: sample.offer_id || sample.online_offer_id,
     raw_response_json: { manual: true, at: new Date().toISOString() }
-  }, { personId });
+  }, { ...options, personId, scope: source.scope });
   return result;
 }

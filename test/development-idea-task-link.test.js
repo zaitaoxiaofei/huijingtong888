@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 import { readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable } from "../src/services/development-task-plan.js";
 
 const source = fs.readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
@@ -9,7 +10,7 @@ const view = fs.readFileSync(new URL("../frontend/admin/views/team/ProductDevelo
 function harness() {
   const writes = [];
   const state = { ideas: [], tasks: [] };
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     Buffer, Date, console, isMysqlPrimaryEnabled: () => true,
     readDevelopmentPlan, normalizeDevelopmentPlan, developmentPlanProgress, developmentPlanDeliverable,
     aiVehicleCatalog: async () => ({ brands: [{ name: "TENET", models: [] }] }),
@@ -17,15 +18,15 @@ function harness() {
     mysqlQuery: async (sql) => {
       if (sql.includes("SELECT idea.*")) return state.ideas;
       if (sql.includes("SELECT t.*")) return state.tasks;
-      if (sql.includes("SELECT id, automation_key FROM team_tasks")) return state.tasks;
-      if (sql.includes("FROM people")) return [{ id: 7 }];
+      if (sql.startsWith("SELECT id, automation_key FROM")) return state.tasks;
+      if (sql.startsWith("SELECT id FROM") && sql.includes("FROM people")) return [{ id: 7 }];
       if (sql.includes("FROM product_development_idea_drafts") || sql.includes("SELECT link.idea_id")) return [];
       throw new Error(`Unexpected query: ${sql}`);
     },
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); return { insertId: 12, affectedRows: 1 }; }
   });
   vm.runInContext(source.replace(/^import .*;\n/gm, "").replaceAll("export async function", "async function")
-    + "\nteamTasksSchemaReady = true; operationalTasksRefreshedAt = Date.now();", context);
+    + "\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null }); operationalTasksRefreshedAt = Date.now();", context);
   return { context, state, writes };
 }
 const idea = { title: "脚垫开发", development_brand: "TENET", development_category: "汽车脚垫", target_product_count: 10 };
@@ -39,7 +40,7 @@ test("quick inspiration requires a catalog brand and category but can remain una
   await context.createDevelopmentIdeaMysql(idea, 7);
   assert.equal(writes[0].params[7], null);
   assert.deepEqual(Array.from(writes[0].params.slice(-2)), ["TENET", "汽车脚垫"]);
-  assert.equal(vm.runInContext("operationalTasksRefreshedAt", context), 0);
+  assert.equal(vm.runInContext("operationalTaskRefreshes.get('admin').refreshedAt", context), 0);
   await context.createDevelopmentIdeaMysql({ ...idea, development_brand: "非汽车" }, 7);
 });
 
@@ -52,7 +53,7 @@ test("idea synchronization includes unstarted ideas with one stable automation k
   assert.match(sql, /'brand',idea.development_brand,'category',idea.development_category/);
   assert.match(sql, /WHEN idea.status='idea' OR idea.assignee_person_id IS NULL THEN 'todo'/);
   assert.doesNotMatch(sql, /AND idea.target_product_count>0|AND \(\s*idea.development_started_at/);
-  assert.match(writes[1].sql, /SET task.active=0 WHERE \(idea.active=0 OR idea.development_matrix_enabled=1\)/);
+  assert.ok(writes.some(write => /SET task.active=0 WHERE task.tenant_id = 'admin' AND \(idea.active=0 OR idea.development_matrix_enabled=1\)/.test(write.sql)));
 });
 
 test("task center plans appear once in inspirations and retain their original task for editing", async () => {

@@ -1,4 +1,7 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { inventoryTenantSql } from "./inventory-tenant-scope.js";
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const ACTION_CLEANUP_SETTING_PREFIX = "ozon.actions.cleanup:";
@@ -12,6 +15,13 @@ const ACTION_DELETE_VERIFY_DELAYS_MS = [2000, 5000];
 const ACTION_PRODUCTS_MAX_PAGES = 200;
 const cleanupRunningStores = new Set();
 let enabledCleanupSweepRunning = false;
+const ACTION_CLEANUP_DISCOVERY = Symbol("internal action cleanup discovery");
+
+async function actionTenantScope() {
+  const session = await authorizeBusinessTaskSession(currentAiTenantSession());
+  assertBusinessTaskPermission(session, "operations");
+  return { id: session.tenant.id, isDefault: session.tenant.slug === "default", session };
+}
 
 function statusError(message, status = 400) {
   const error = new Error(message);
@@ -30,12 +40,13 @@ function normalizeLimit(value, fallback = 100, max = 100) {
 }
 
 async function readShop(storeId) {
+  const scope = await actionTenantScope();
   const id = Number(storeId || 0);
   if (!Number.isFinite(id) || id <= 0) throw statusError("请选择店铺");
   const rows = await mysqlQuery(`
     SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS ozon_api_key, api_key_hint, status
     FROM shops
-    WHERE id = ? AND status <> 'deleted'
+    WHERE id = ? AND status <> 'deleted' AND ${inventoryTenantSql(scope, "shops")}
     LIMIT 1
   `, [id]);
   const shop = rows[0];
@@ -56,6 +67,7 @@ function ozonHeaders(shop) {
 }
 
 async function ozonRequest(path, { method = "POST", payload = null, shop, signal } = {}) {
+  shop = await readShop(shop?.id);
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(signal.reason || new Error("请求已取消"));
   if (signal?.aborted) abortFromParent();
@@ -190,6 +202,7 @@ async function enrichActionProductsWithImages(shop, products, signal) {
 }
 
 export async function listOzonActionsMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => listOzonActionsMysql(body, options));
   const mode = normalizeMode(body.mode);
   const shop = await readShop(body.storeId);
   if (mode === "seller") {
@@ -208,6 +221,7 @@ export async function listOzonActionsMysql(body = {}, options = {}) {
 }
 
 export async function listOzonActionCandidatesMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => listOzonActionCandidatesMysql(body, options));
   const mode = normalizeMode(body.mode);
   if (!body.actionId) throw statusError("Missing actionId");
   const shop = await readShop(body.storeId);
@@ -227,6 +241,7 @@ export async function listOzonActionCandidatesMysql(body = {}, options = {}) {
 }
 
 export async function listOzonActionProductsMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => listOzonActionProductsMysql(body, options));
   const mode = normalizeMode(body.mode);
   if (!body.actionId) throw statusError("Missing actionId");
   const shop = await readShop(body.storeId);
@@ -246,6 +261,7 @@ export async function listOzonActionProductsMysql(body = {}, options = {}) {
 }
 
 export async function addOzonActionProductsMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => addOzonActionProductsMysql(body, options));
   const mode = normalizeMode(body.mode);
   if (!body.actionId) throw statusError("Missing actionId");
   const products = Array.isArray(body.products) ? body.products : [];
@@ -270,6 +286,7 @@ export async function addOzonActionProductsMysql(body = {}, options = {}) {
 }
 
 export async function removeOzonActionProductsMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => removeOzonActionProductsMysql(body, options));
   const mode = normalizeMode(body.mode);
   if (!body.actionId) throw statusError("Missing actionId");
   const products = Array.isArray(body.products) ? body.products : [];
@@ -294,6 +311,7 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
 }
 
 export async function toggleOzonSellerActionMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => toggleOzonSellerActionMysql(body, options));
   if (!body.actionId) throw statusError("Missing actionId");
   const shop = await readShop(body.storeId);
   return ozonRequest("/v1/seller-actions/change-activity", {
@@ -304,6 +322,7 @@ export async function toggleOzonSellerActionMysql(body = {}, options = {}) {
 }
 
 export async function archiveOzonSellerActionMysql(body = {}, options = {}) {
+  if (needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => archiveOzonSellerActionMysql(body, options));
   if (!body.actionId) throw statusError("Missing actionId");
   const shop = await readShop(body.storeId);
   return ozonRequest("/v1/seller-actions/archive", {
@@ -553,6 +572,8 @@ function normalizeCleanupConfig(storeId, rawValue = null, options = {}) {
   const enabled = hasStoredValue ? parsed.enabled === true : options.defaultEnabled === true;
   return {
     storeId: normalizedStoreId,
+    tenant_key: parsed.tenant_key || "",
+    created_by_person_id: Number(parsed.created_by_person_id || 0) || null,
     storeName: "",
     enabled,
     actionIds,
@@ -579,7 +600,8 @@ async function ensureSettingsTables() {
   `);
 }
 
-export async function getOzonActionCleanupConfigMysql(query = {}) {
+export async function getOzonActionCleanupConfigMysql(query = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => getOzonActionCleanupConfigMysql(query, session));
   const storeId = String(query.storeId || query.store_id || "").trim();
   if (!storeId) throw statusError("Missing storeId");
   const shop = await readShop(storeId);
@@ -592,6 +614,8 @@ export async function getOzonActionCleanupConfigMysql(query = {}) {
 }
 
 async function persistCleanupConfig(storeId, config) {
+  const scope = await actionTenantScope();
+  await readShop(storeId);
   await ensureSettingsTables();
   const next = {
     ...normalizeCleanupConfig(storeId, config),
@@ -602,6 +626,8 @@ async function persistCleanupConfig(storeId, config) {
     knownActions: normalizeKnownActionCatalog(config?.knownActions || config?.knownActionCatalog || []),
     updatedAt: new Date().toISOString()
   };
+  next.tenant_key = businessTaskTenantKey(scope.session);
+  next.created_by_person_id = scope.session.personId;
   await mysqlExecute(`
     INSERT INTO system_settings (\`key\`, value_json, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -700,7 +726,8 @@ function isOzonActionNotFoundError(error) {
   return /resource not found/i.test(String(error?.message || error || ""));
 }
 
-export async function listOzonActionCleanupConfigsMysql() {
+export async function listOzonActionCleanupConfigsMysql(options = {}) {
+  const scope = options.discovery === ACTION_CLEANUP_DISCOVERY ? null : await actionTenantScope();
   await ensureSettingsTables();
   const settingRows = await mysqlQuery(
     "SELECT `key`, value_json FROM system_settings WHERE `key` LIKE ?",
@@ -717,6 +744,7 @@ export async function listOzonActionCleanupConfigsMysql() {
     SELECT id, name
     FROM shops
     WHERE status = 'active'
+      ${scope ? `AND ${inventoryTenantSql(scope, "shops")}` : ""}
       AND COALESCE(NULLIF(TRIM(ozon_client_id), ''), '') <> ''
       AND COALESCE(NULLIF(TRIM(ozon_api_key), ''), NULLIF(TRIM(api_key_hint), ''), '') <> ''
     ORDER BY id
@@ -731,6 +759,17 @@ export async function listOzonActionCleanupConfigsMysql() {
 }
 
 export async function runOzonActionCleanupForStoreMysql(storeId, config = null, options = {}) {
+  if (needsAiTenantSession(options.session)) {
+    let session = options.session;
+    if (!session) {
+      await ensureSettingsTables();
+      const stored = await mysqlQuery("SELECT value_json FROM system_settings WHERE `key` = ? LIMIT 1", [settingKey(storeId)]);
+      const principal = normalizeCleanupConfig(storeId, stored[0]?.value_json);
+      session = await restoreBusinessTaskSession(principal.tenant_key, principal.created_by_person_id);
+    }
+    return withAiTenantSession(session, () => runOzonActionCleanupForStoreMysql(storeId, config, { ...options, session }));
+  }
+  await readShop(storeId);
   const normalizedStoreId = String(storeId || "").trim();
   if (!normalizedStoreId) throw statusError("Missing storeId");
   if (cleanupRunningStores.has(normalizedStoreId)) {
@@ -881,14 +920,16 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
 }
 
 export async function runEnabledOzonActionCleanupMysql(options = {}) {
+  if (options.session && needsAiTenantSession(options.session)) return withAiTenantSession(options.session, () => runEnabledOzonActionCleanupMysql(options));
   if (enabledCleanupSweepRunning) return [];
   enabledCleanupSweepRunning = true;
   try {
-    const configs = await listOzonActionCleanupConfigsMysql();
+    const configs = await listOzonActionCleanupConfigsMysql(currentAiTenantSession() ? {} : { discovery: ACTION_CLEANUP_DISCOVERY });
     const enabledConfigs = configs.filter((item) => item.enabled === true);
     const results = [];
     for (const config of enabledConfigs) {
-      results.push(await runOzonActionCleanupForStoreMysql(config.storeId, config, options));
+      try { results.push(await runOzonActionCleanupForStoreMysql(config.storeId, config, options)); }
+      catch (error) { results.push({ success: false, storeId: config.storeId, count: 0, error: error.message }); }
     }
     return results;
   } finally {
@@ -896,7 +937,8 @@ export async function runEnabledOzonActionCleanupMysql(options = {}) {
   }
 }
 
-export async function saveOzonActionCleanupConfigMysql(body = {}) {
+export async function saveOzonActionCleanupConfigMysql(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => saveOzonActionCleanupConfigMysql(body, session));
   const storeId = String(body.storeId || body.store_id || "").trim();
   if (!storeId) throw statusError("Missing storeId");
   const shop = await readShop(storeId);

@@ -22,18 +22,18 @@ test("collector-box routes forward the authenticated tenant session", async () =
   assert.deepEqual(calls, [["list", req.query, session], ["delete", body, session]]);
 });
 
-test("collector-box isolation opens only tenant-scoped list, detail, and delete routes", () => {
+test("collector-box isolation opens reviewed reads, delete and edit routes", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["GET", ["api", "listing", "collector-box"]],
     ["GET", ["api", "listing", "collector-box", "sku-a"]],
-    ["DELETE", ["api", "listing", "collector-box"]]
+    ["DELETE", ["api", "listing", "collector-box"]],
+    ["PUT", ["api", "listing", "collector-box", "sku-a", "edit"]],
+    ["DELETE", ["api", "listing", "collector-box", "sku-a"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
   for (const [method, parts] of [
     ["POST", ["api", "listing", "collector-box"]],
-    ["PUT", ["api", "listing", "collector-box", "sku-a", "edit"]],
-    ["GET", ["api", "listing", "collector-box", "sku-a", "diagnostics"]],
-    ["DELETE", ["api", "listing", "collector-box", "sku-a"]]
+    ["GET", ["api", "listing", "collector-box", "sku-a", "diagnostics"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
 });
 
@@ -47,10 +47,10 @@ test("collector-box storage reads and deletes use session tenant, never client s
   assert.match(list, /const tenantId = listingTenantId\(session\)/);
   assert.doesNotMatch(list, /query\.tenant_?id/);
   assert.match(list, /WHERE \$\{whereSql\}/);
-  assert.match(list, /tenantId === "admin" && pageSkus\.length/);
-  assert.match(list, /selection_product_id: null, listing_template_id: null/);
+  assert.match(list, /COALESCE\(NULLIF\(tenant_id, ''\), 'admin'\) = \?/);
+  assert.match(list, /collectorBoxOwnedLinks\(rows, tenantId\)/);
   assert.match(detail, /listingTenantId\(session, tenantId\)/);
-  assert.match(detail, /normalizedTenantId !== "admin"[\s\S]*?normalized\.listing_template_id = null/);
+  assert.match(detail, /collectorBoxOwnedLinks\(\[detail\], normalizedTenantId\)/);
   assert.match(deletion, /const tenantId = listingTenantId\(session\)/);
   assert.doesNotMatch(deletion, /body\.tenant_?id/);
   assert.match(deletion, /WHERE tenant_id = \? AND sku IN/);

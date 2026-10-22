@@ -1,0 +1,18 @@
+export const TENANT_AI_LIMITS_SCHEMA = `CREATE TABLE IF NOT EXISTS tenant_ai_limits (
+  tenant_id BIGINT UNSIGNED PRIMARY KEY, monthly_request_limit INT UNSIGNED NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+
+export const TENANT_AI_USAGE_SCHEMA = `CREATE TABLE IF NOT EXISTS tenant_ai_usage (
+  tenant_id BIGINT UNSIGNED NOT NULL, period_key CHAR(7) NOT NULL, request_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  text_count BIGINT UNSIGNED NOT NULL DEFAULT 0, image_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (tenant_id, period_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+
+export const AI_IMAGE_TASK_OWNERS_SCHEMA = `CREATE TABLE IF NOT EXISTS ai_image_task_owners (
+  task_id VARCHAR(80) COLLATE utf8mb4_bin PRIMARY KEY,
+  tenant_id VARCHAR(64) NOT NULL,
+  created_by_person_id BIGINT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_ai_image_task_owner_tenant (tenant_id, task_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;

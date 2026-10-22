@@ -221,7 +221,7 @@ test("ai variant lab uses compact recognition rows and a cross-filter vehicle pi
 test("vehicle catalog persists document models, tags, and user additions", () => {
   const service = read("src/services/ai-vehicle-catalog.js");
   const routes = read("src/server/routes/aiVariantLab.js");
-  assert.match(service, /CREATE TABLE IF NOT EXISTS ai_vehicle_catalog/);
+  assert.match(read("src/services/ai-vehicle-catalog-schema.js"), /CREATE TABLE IF NOT EXISTS ai_vehicle_catalog/);
   assert.match(service, /\["HAVAL", \["Jolion"/);
   assert.match(service, /\["CHERY", \["Tiggo 4 Pro"/);
   assert.match(service, /\["TENET", \["T7"/);
@@ -1050,7 +1050,7 @@ test("ai variant lab generation results expose preview, errors, and accurate fai
   assert.match(service, /global_waiting_image_requests/);
   assert.match(service, /JSON\.stringify\(\{ attempts, elapsedMs, failedAt:/);
   assert.match(service, /function startBatchImageBackgroundJob/);
-  assert.match(service, /pendingBatchImageJobWakeups\.add\(jobNo\)/);
+  assert.match(service, /pendingBatchImageJobWakeups\.add\(batchImageRuntimeKey\(jobNo\)\)/);
   assert.match(service, /queued: true/);
   assert.match(service, /background: true/);
   assert.match(service, /aiImageRuntimePoolConfig/);
@@ -1210,7 +1210,8 @@ test("ai variant draft saves are persisted, rate-limited, and recoverable", () =
   assert.match(service, /const BATCH_INSERT_CHUNK_SIZE = 20/);
   assert.match(service, /withMysqlTransaction/);
   assert.match(service, /payloads\.slice\(offset, offset \+ BATCH_INSERT_CHUNK_SIZE\)/);
-  assert.match(service, /chunk\.map\(\(\) => "\(\?, \?, \?, \?\)"\)/);
+  assert.match(service, /chunk\.map\(\(\) => "\(\?, \?, \?, \?, \?\)"\)/);
+  assert.match(service, /restoreBusinessTaskSession\(item\.tenant_id, item\.created_by_person_id\)/);
   assert.match(service, /SELECT item_no, status, stage, progress_percent, result_draft_id/);
   assert.doesNotMatch(service, /SELECT \* FROM ai_variant_draft_save_items WHERE batch_no/);
   assert.match(service, /payload_json LONGTEXT NOT NULL/);

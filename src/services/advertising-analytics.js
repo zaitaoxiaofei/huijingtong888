@@ -1,3 +1,4 @@
+import { advertisingTenantScope, advertisingTenantSql, advertisingShopSql, assertAdvertisingShop, isAdvertisingBusinessRequest } from './advertising-tenant-context.js';
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { logScheduledJobEvent } from "./scheduled-jobs.js";
 import { estimateItemProfit } from "../profit.js";
@@ -118,13 +119,11 @@ function ignoreDuplicateColumn(error) {
 }
 
 function todayKey() {
-  return new Date().toISOString().slice(0, 10);
+  return beijingDateDaysAgo(0);
 }
 
 function dateDaysAgo(days) {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - Number(days || 0));
-  return date.toISOString().slice(0, 10);
+  return beijingDateDaysAgo(days);
 }
 
 function toNumber(value, fallback = 0) {
@@ -293,8 +292,8 @@ function buildDateRange(query = {}) {
   };
 }
 
-function buildAdDailyWhere(query = {}) {
-  const where = [];
+function buildAdDailyWhere(query = {}, scope) {
+  const where = [advertisingTenantSql(scope, 's')];
   const params = [];
   const { from, to } = buildDateRange(query);
 
@@ -383,8 +382,9 @@ function rowMetrics(row = {}) {
 }
 
 export async function advertisingDailyMysql(query = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
-  const { sql, params, from, to } = buildAdDailyWhere(query);
+  const { sql, params, from, to } = buildAdDailyWhere(query, scope);
   const { page, pageSize, offset } = pagination(query);
   const sortBy = String(query.sortBy || query.sort_by || "spend_rub");
   const sortable = new Map([
@@ -425,7 +425,7 @@ export async function advertisingDailyMysql(query = {}) {
       MAX(COALESCE(ad.offer_id, sm.offer_id, op.offer_id, '')) AS offer_id,
       MAX(COALESCE(ad.product_name, sm.display_name, op.name, p.name, '')) AS product_name,
       MAX(COALESCE(oi_img.image_url, op.image_url, op.primary_image, op_offer.image_url, op_offer.primary_image, p.image_url, '')) AS image_url,
-      MAX(COALESCE(ad.product_id, sm.product_id, op.product_id)) AS product_id,
+      MAX(p.id) AS product_id,
       MIN(ad.date_key) AS first_date,
       MAX(ad.date_key) AS last_date,
       COUNT(DISTINCT ad.date_key) AS active_days,
@@ -477,10 +477,10 @@ export async function advertisingDailyMysql(query = {}) {
       CASE WHEN COALESCE(SUM(ad.spend_rub), 0) > 0 THEN COALESCE(SUM(ad.revenue_rub), 0) / COALESCE(SUM(ad.spend_rub), 0) ELSE 0 END AS roas
     FROM ozon_ad_sku_daily ad
     JOIN shops s ON s.id = ad.shop_id
-    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1
+    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1 AND ${advertisingTenantSql(scope, 'sm')}
     LEFT JOIN online_products op ON op.shop_id = ad.shop_id AND op.ozon_sku = ad.ozon_sku
     LEFT JOIN online_products op_offer ON op_offer.shop_id = ad.shop_id AND op_offer.offer_id = COALESCE(NULLIF(ad.offer_id, ''), sm.offer_id)
-    LEFT JOIN products p ON p.id = COALESCE(ad.product_id, sm.product_id, op.product_id)
+    LEFT JOIN products p ON p.id = COALESCE(ad.product_id, sm.product_id, op.product_id) AND ${advertisingTenantSql(scope, 'p')}
     LEFT JOIN (
       SELECT base.shop_id, base.ozon_sku, base.campaign_id, base.campaign_state
       FROM ozon_ad_sku_daily base
@@ -537,8 +537,9 @@ export async function advertisingDailyMysql(query = {}) {
 }
 
 export async function advertisingDailySummaryMysql(query = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
-  const { sql, params, from, to } = buildAdDailyWhere(query);
+  const { sql, params, from, to } = buildAdDailyWhere(query, scope);
   const rows = await mysqlQuery(`
     SELECT
       COUNT(DISTINCT ad.shop_id) AS shop_count,
@@ -581,13 +582,14 @@ function advertisingMetricBasis() {
 }
 
 export async function advertisingDailyQualityMysql(query = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   await ensurePerformanceCredentialSchema();
   const { from, to } = buildDateRange(query);
   const shopId = query.shopId || query.shop_id;
   const scopedShopFilter = shopId && String(shopId) !== "all";
   const shopParams = scopedShopFilter ? [Number(shopId)] : [];
-  const shopWhere = scopedShopFilter ? "AND s.id = ?" : "";
+  const shopWhere = `AND ${advertisingTenantSql(scope, "s")} ${scopedShopFilter ? "AND s.id = ?" : ""}`;
 
   const shops = await mysqlQuery(`
     SELECT
@@ -642,7 +644,7 @@ export async function advertisingDailyQualityMysql(query = {}) {
       COUNT(DISTINCT CASE WHEN ad.source = 'ozon_performance_pending' THEN ad.shop_id END) AS pending_shop_count,
       COUNT(DISTINCT CASE WHEN ad.source = 'ozon_performance_pending' THEN ad.ozon_sku END) AS pending_sku_count
     FROM ozon_ad_sku_daily ad
-    WHERE ad.date_key >= ? AND ad.date_key <= ?
+    WHERE ad.date_key >= ? AND ad.date_key <= ? AND ${advertisingShopSql(scope, "ad.shop_id")}
       ${scopedShopFilter ? "AND ad.shop_id = ?" : ""}
   `, scopedShopFilter ? [from, to, Number(shopId)] : [from, to]);
 
@@ -651,7 +653,7 @@ export async function advertisingDailyQualityMysql(query = {}) {
     FROM (
       SELECT date_key, shop_id, ozon_sku
       FROM ozon_ad_sku_daily
-      WHERE date_key >= ? AND date_key <= ?
+      WHERE date_key >= ? AND date_key <= ? AND ${advertisingShopSql(scope, "shop_id")}
         ${scopedShopFilter ? "AND shop_id = ?" : ""}
       GROUP BY date_key, shop_id, ozon_sku
       HAVING COUNT(DISTINCT campaign_id) > 1
@@ -661,34 +663,21 @@ export async function advertisingDailyQualityMysql(query = {}) {
   const missingBindingRows = await mysqlQuery(`
     SELECT COUNT(*) AS count, COALESCE(SUM(ad.spend_rub), 0) AS spend_rub
     FROM ozon_ad_sku_daily ad
-    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1
+    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1 AND ${advertisingTenantSql(scope, 'sm')}
     LEFT JOIN online_products op ON op.shop_id = ad.shop_id AND op.ozon_sku = ad.ozon_sku
-    WHERE ad.date_key >= ? AND ad.date_key <= ?
+    WHERE ad.date_key >= ? AND ad.date_key <= ? AND ${advertisingShopSql(scope, "ad.shop_id")}
       ${scopedShopFilter ? "AND ad.shop_id = ?" : ""}
       AND COALESCE(ad.product_id, sm.product_id, op.product_id) IS NULL
   `, scopedShopFilter ? [from, to, Number(shopId)] : [from, to]);
 
-  const syncRuns = await mysqlQuery(`
-    SELECT job_key, status, COUNT(*) AS count, MAX(started_at) AS latest_started_at, MAX(finished_at) AS latest_finished_at
-    FROM scheduled_job_runs
-    WHERE job_key IN ('advertising_sync', 'advertising_today_sync')
-      AND started_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 2 DAY)
-    GROUP BY job_key, status
-    ORDER BY job_key, status
-  `);
-
-  const jobRows = await mysqlQuery(`
-    SELECT job_key, last_status, fail_count, last_success_at, last_attempt_at, next_run_at, last_error
-    FROM scheduled_jobs
-    WHERE job_key IN ('advertising_sync', 'advertising_today_sync')
-    ORDER BY job_key
-  `);
+  const syncRuns = [];
+  const jobRows = [];
 
   const forbiddenCampaignRows = await mysqlQuery(`
     SELECT f.shop_id, s.name AS shop_name, COUNT(*) AS count, MAX(f.updated_at) AS latest_updated_at
     FROM ozon_ad_forbidden_campaigns f
     LEFT JOIN shops s ON s.id = f.shop_id
-    WHERE f.updated_at >= ?
+    WHERE f.updated_at >= ? AND ${advertisingTenantSql(scope, "s")}
       ${scopedShopFilter ? "AND f.shop_id = ?" : ""}
     GROUP BY f.shop_id, s.name
     ORDER BY f.shop_id
@@ -856,8 +845,9 @@ export async function advertisingDailyQualityMysql(query = {}) {
 }
 
 export async function advertisingDailyDetailsMysql(query = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
-  const { sql, params, from, to } = buildAdDailyWhere(query);
+  const { sql, params, from, to } = buildAdDailyWhere(query, scope);
   const where = [sql ? sql.replace(/^WHERE\s+/i, "") : "1=1"];
   const detailParams = [...params];
 
@@ -874,10 +864,10 @@ export async function advertisingDailyDetailsMysql(query = {}) {
       COALESCE(oi_img.image_url, op.image_url, op.primary_image, op_offer.image_url, op_offer.primary_image, p.image_url, '') AS image_url
     FROM ozon_ad_sku_daily ad
     JOIN shops s ON s.id = ad.shop_id
-    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1
+    LEFT JOIN sku_mappings sm ON sm.shop_id = ad.shop_id AND sm.ozon_sku = ad.ozon_sku AND sm.active = 1 AND ${advertisingTenantSql(scope, 'sm')}
     LEFT JOIN online_products op ON op.shop_id = ad.shop_id AND op.ozon_sku = ad.ozon_sku
     LEFT JOIN online_products op_offer ON op_offer.shop_id = ad.shop_id AND op_offer.offer_id = COALESCE(NULLIF(ad.offer_id, ''), sm.offer_id)
-    LEFT JOIN products p ON p.id = COALESCE(ad.product_id, sm.product_id, op.product_id)
+    LEFT JOIN products p ON p.id = COALESCE(ad.product_id, sm.product_id, op.product_id) AND ${advertisingTenantSql(scope, 'p')}
     LEFT JOIN (
       SELECT o.shop_id, oi.ozon_sku, MAX(NULLIF(oi.ozon_image_url, '')) AS image_url
       FROM order_items oi
@@ -894,10 +884,21 @@ export async function advertisingDailyDetailsMysql(query = {}) {
 }
 
 export async function upsertAdvertisingDailyRowsMysql(body = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   const rows = Array.isArray(body.rows) ? body.rows : [];
   if (!rows.length) return { inserted: 0, updated: 0, total: 0 };
 
+  // Validate the whole import before the first row is written.
+  for (const row of rows) {
+    await assertAdvertisingShop(row.shop_id || row.shopId || body.shop_id || body.shopId);
+    const productId = row.product_id || row.productId;
+    if (productId) {
+      if (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0) throw Object.assign(new Error('广告商品编号无效'), { status: 403, statusCode: 403 });
+      const owned = await mysqlQuery(`SELECT id FROM products p WHERE p.id = ? AND ${advertisingTenantSql(scope, 'p')} LIMIT 1`, [Number(productId)]);
+      if (!owned.length) throw Object.assign(new Error('广告商品不属于当前企业'), { status: 403 });
+    }
+  }
   let affected = 0;
   for (const row of rows) {
     const shopId = Number(row.shop_id || row.shopId || body.shop_id || body.shopId);
@@ -909,6 +910,7 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
       throw error;
     }
 
+    await assertAdvertisingShop(shopId);
     const rawJson = row.raw_json
       ? (typeof row.raw_json === "string" ? row.raw_json : JSON.stringify(row.raw_json))
       : JSON.stringify(row);
@@ -987,11 +989,12 @@ export async function upsertAdvertisingDailyRowsMysql(body = {}) {
 }
 
 export async function advertisingPilotShopMysql() {
+  const scope = await advertisingTenantScope();
   await ensurePerformanceCredentialSchema();
   const rows = await mysqlQuery(`
     SELECT id, name
-    FROM shops
-    WHERE status = 'active'
+    FROM shops s
+    WHERE status = 'active' AND ${advertisingTenantSql(scope, 's')}
       AND COALESCE(NULLIF(TRIM(performance_client_id), ''), '') <> ''
       AND COALESCE(NULLIF(TRIM(performance_client_secret), ''), NULLIF(TRIM(performance_client_secret_hint), ''), '') <> ''
     ORDER BY id
@@ -1001,6 +1004,7 @@ export async function advertisingPilotShopMysql() {
 }
 
 export async function advertisingHistoryAuditMysql(query = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   await ensurePerformanceCredentialSchema();
   const from = String(query.from || "2000-01-01").slice(0, 10);
@@ -1020,7 +1024,7 @@ export async function advertisingHistoryAuditMysql(query = {}) {
       COUNT(DISTINCT ad.date_key) AS covered_dates
     FROM ozon_ad_sku_daily ad
     LEFT JOIN shops s ON s.id = ad.shop_id
-    WHERE ad.date_key BETWEEN ? AND ?
+    WHERE ad.date_key BETWEEN ? AND ? AND ${advertisingTenantSql(scope, "s")}
       AND (? = 0 OR ad.shop_id = ?)
     GROUP BY ad.shop_id, s.name, LEFT(ad.date_key, 7)
     ORDER BY month_key, ad.shop_id
@@ -1028,7 +1032,7 @@ export async function advertisingHistoryAuditMysql(query = {}) {
   const catalogRows = await mysqlQuery(`
     SELECT shop_id, COUNT(*) AS catalog_campaigns
     FROM ozon_ad_campaign_catalog
-    WHERE (? = 0 OR shop_id = ?)
+    WHERE (? = 0 OR shop_id = ?) AND ${advertisingShopSql(scope, "shop_id")}
     GROUP BY shop_id
   `, [shopId, shopId]);
   const reconciliationRows = await mysqlQuery(`
@@ -1037,7 +1041,7 @@ export async function advertisingHistoryAuditMysql(query = {}) {
       SUM(status = 'pending') AS reconciliation_pending,
       SUM(status = 'error') AS reconciliation_errors
     FROM ozon_ad_history_reconciliation
-    WHERE month_key BETWEEN LEFT(?, 7) AND LEFT(?, 7)
+    WHERE month_key BETWEEN LEFT(?, 7) AND LEFT(?, 7) AND ${advertisingShopSql(scope, "shop_id")}
       AND (? = 0 OR shop_id = ?)
     GROUP BY shop_id, month_key
   `, [from, to, shopId, shopId]);
@@ -1079,6 +1083,7 @@ export async function advertisingHistoryAuditMysql(query = {}) {
 }
 
 export async function repairAdvertisingHistoryMysql(body = {}, options = {}) {
+  await advertisingTenantScope();
   const from = String(body.from || "").slice(0, 10);
   const requestedTo = String(body.to || "").slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(requestedTo)) {
@@ -1102,6 +1107,7 @@ export async function repairAdvertisingHistoryMysql(body = {}, options = {}) {
     error.status = 400;
     throw error;
   }
+  for (const shopId of shopIds) await assertAdvertisingShop(shopId);
   const campaignCursor = Math.max(0, Number(body.campaign_cursor || body.campaignCursor || 0));
   const maxCampaignsPerShop = Math.max(1, Math.min(10, Number(body.max_campaigns_per_shop || body.maxCampaignsPerShop || 1)));
   const windows = splitCalendarMonths(from, safeTo);
@@ -1152,6 +1158,7 @@ export async function repairAdvertisingHistoryMysql(body = {}, options = {}) {
 }
 
 async function recordAdvertisingHistoryReconciliationMysql(shopId, from, sync = {}) {
+  await assertAdvertisingShop(shopId);
   const monthKey = String(from).slice(0, 7);
   const shopResult = (sync.results || []).find((item) => Number(item.shop_id) === Number(shopId));
   const campaignIds = Array.isArray(shopResult?.campaign_ids) ? shopResult.campaign_ids : [];
@@ -1159,6 +1166,7 @@ async function recordAdvertisingHistoryReconciliationMysql(shopId, from, sync = 
     : shopResult?.status === "report_pending" ? "pending"
       : "error";
   for (const campaignId of campaignIds) {
+    await assertAdvertisingShop(shopId);
     await mysqlExecute(`
       INSERT INTO ozon_ad_history_reconciliation (
         shop_id, campaign_id, month_key, status, attempts, message, checked_at
@@ -1193,13 +1201,14 @@ function splitCalendarMonths(from, to) {
 }
 
 async function advertisingSpendSnapshotMysql(from, to, shopIds = []) {
+  const scope = await advertisingTenantScope();
   const rows = await mysqlQuery(`
     SELECT
       ROUND(COALESCE(SUM(CASE WHEN source <> 'ozon_performance_pending' THEN spend_rub ELSE 0 END), 0), 2) AS spend_rub,
       SUM(CASE WHEN source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
       COUNT(DISTINCT NULLIF(campaign_id, '')) AS campaigns
     FROM ozon_ad_sku_daily
-    WHERE date_key BETWEEN ? AND ?
+    WHERE date_key BETWEEN ? AND ? AND ${advertisingShopSql(scope, "shop_id")}
       AND (${shopIds.length ? `shop_id IN (${shopIds.map(() => "?").join(", ")})` : "1=1"})
   `, [from, to, ...shopIds]);
   return {
@@ -1224,6 +1233,7 @@ function minDateKey(left, right) {
 }
 
 export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {}) {
+  const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   await ensurePerformanceCredentialSchema();
   const { from, to } = buildDateRange(body);
@@ -1233,8 +1243,8 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
     : [];
   const shops = await mysqlQuery(`
     SELECT *
-    FROM shops
-    WHERE status = 'active'
+    FROM shops s
+    WHERE status = 'active' AND ${advertisingTenantSql(scope, 's')}
       AND (? = 0 OR id = ?)
       AND (${shopIds.length ? `id IN (${shopIds.map(() => "?").join(", ")})` : "1=1"})
     ORDER BY id
@@ -1246,6 +1256,8 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
   const errors = [];
 
   for (const shop of shops) {
+    await assertAdvertisingShop(shop.id);
+    options = { ...options, shop_id: shop.id };
     const clientId = String(shop.performance_client_id || "").trim();
     const clientSecret = String(shop.performance_client_secret || "").trim();
     await logAdvertisingSyncEvent(body, {
@@ -1444,6 +1456,7 @@ export async function syncAdvertisingDailyFromOzonMysql(body = {}, options = {})
 export async function updateAdvertisingCampaignProductSettingMysql(body = {}, options = {}) {
   await ensureAdDailySchema();
   const shop = await resolvePerformanceShop(body);
+  options = { ...options, shop_id: shop.id };
   const campaignId = String(body.campaign_id || body.campaignId || "").trim();
   const sku = String(body.ozon_sku || body.sku || "").trim();
   const mode = String(body.mode || "").trim();
@@ -1482,6 +1495,7 @@ export async function updateAdvertisingCampaignProductSettingMysql(body = {}, op
     }
   }
 
+  await assertAdvertisingShop(shop.id);
   const { from, to } = buildDateRange(body);
   if (mode === "bid") {
     await mysqlExecute(`
@@ -1511,6 +1525,7 @@ export async function applyAdvertisingCampaignProductSettingMysql(body = {}) {
   const value = mode === "bid" ? toNumber(body.bid_rub || body.bidRub) : toNumber(body.target_cir || body.targetCir);
   if (value <= 0) throw new Error(mode === "bid" ? "点击出价必须大于 0" : "目标广告费用份额必须大于 0");
 
+  await assertAdvertisingShop(shop.id);
   const { from, to } = buildDateRange(body);
   if (mode === "bid") {
     await mysqlExecute(`
@@ -1532,6 +1547,7 @@ export async function applyAdvertisingCampaignProductSettingMysql(body = {}) {
 export async function stopAdvertisingCampaignMysql(body = {}, options = {}) {
   await ensureAdDailySchema();
   const shop = await resolvePerformanceShop(body);
+  options = { ...options, shop_id: shop.id };
   const campaignId = String(body.campaign_id || body.campaignId || "").trim();
   if (!campaignId) throw new Error("campaign_id 不能为空");
   const token = await fetchPerformanceToken({
@@ -1539,6 +1555,7 @@ export async function stopAdvertisingCampaignMysql(body = {}, options = {}) {
     clientSecret: String(shop.performance_client_secret || "").trim()
   }, options);
   const result = await performanceRequest(`/api/client/campaign/${campaignId}/deactivate`, null, { ...options, token, method: "POST" });
+  await assertAdvertisingShop(shop.id);
   const { from, to } = buildDateRange(body);
   await mysqlExecute(`
     UPDATE ozon_ad_sku_daily
@@ -1552,6 +1569,7 @@ async function resolvePerformanceShop(body = {}) {
   await ensurePerformanceCredentialSchema();
   const shopId = Number(body.shop_id || body.shopId || 0);
   if (!shopId) throw new Error("shop_id 不能为空");
+  await assertAdvertisingShop(shopId);
   const rows = await mysqlQuery(`
     SELECT *
     FROM shops
@@ -1567,8 +1585,10 @@ async function resolvePerformanceShop(body = {}) {
 }
 
 async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {
+  await assertAdvertisingShop(shopId);
   const rows = campaigns.filter((campaign) => campaign.id);
   for (const campaign of rows) {
+    await assertAdvertisingShop(shopId);
     await mysqlExecute(`
       UPDATE ozon_ad_sku_daily
       SET campaign_name = COALESCE(NULLIF(?, ''), campaign_name),
@@ -1598,10 +1618,12 @@ async function refreshCampaignMetadataRows(shopId, campaigns = [], range = {}) {
 }
 
 async function refreshCampaignProductSettingsRows(shopId, campaigns = [], range = {}) {
+  await assertAdvertisingShop(shopId);
   for (const campaign of campaigns) {
     const settings = campaign.productSettings || [];
     for (const product of settings) {
-      await mysqlExecute(`
+      await assertAdvertisingShop(shopId);
+    await mysqlExecute(`
         UPDATE ozon_ad_sku_daily
         SET campaign_bid_rub = COALESCE(NULLIF(?, 0), campaign_bid_rub),
             campaign_target_cir = COALESCE(NULLIF(?, 0), campaign_target_cir),
@@ -1666,6 +1688,7 @@ function isInactiveCampaignProduct(product = {}) {
 }
 
 async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = [], range = {}) {
+  await assertAdvertisingShop(shopId);
   const from = String(range.from || "").slice(0, 10);
   const to = String(range.to || "").slice(0, 10);
   if (!shopId || !from || !to) return;
@@ -1674,7 +1697,8 @@ async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = []
     const campaignId = String(campaign.id || "").trim();
     if (!campaignId) continue;
     if (isInactiveCampaign(campaign)) {
-      await mysqlExecute(`
+      await assertAdvertisingShop(shopId);
+    await mysqlExecute(`
         DELETE FROM ozon_ad_sku_daily
         WHERE shop_id = ?
           AND campaign_id = ?
@@ -1688,7 +1712,8 @@ async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = []
     if (!campaign.productSettingsFetched) continue;
     const activeSkus = (campaign.productSettings || []).map((product) => String(product.sku || "").trim()).filter(Boolean);
     if (!activeSkus.length) {
-      await mysqlExecute(`
+      await assertAdvertisingShop(shopId);
+    await mysqlExecute(`
         DELETE FROM ozon_ad_sku_daily
         WHERE shop_id = ?
           AND campaign_id = ?
@@ -1698,6 +1723,7 @@ async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = []
       `, [Number(shopId), campaignId, from, to]);
       continue;
     }
+    await assertAdvertisingShop(shopId);
     await mysqlExecute(`
       DELETE FROM ozon_ad_sku_daily
       WHERE shop_id = ?
@@ -1711,6 +1737,7 @@ async function cleanupInactivePendingAdvertisingRowsMysql(shopId, campaigns = []
 }
 
 async function settleReturnedAdvertisingReportsMysql(shopId, campaignIds = [], range = {}) {
+  await assertAdvertisingShop(shopId);
   const ids = Array.from(new Set(
     (campaignIds || []).map((item) => String(item || "").trim()).filter(Boolean)
   ));
@@ -1730,6 +1757,7 @@ async function settleReturnedAdvertisingReportsMysql(shopId, campaignIds = [], r
 }
 
 async function pendingAdvertisingCampaignIdsMysql(shopId, range = {}) {
+  await assertAdvertisingShop(shopId);
   if (!shopId) return new Set();
   const from = String(range.from || "").slice(0, 10);
   const to = String(range.to || "").slice(0, 10);
@@ -1749,6 +1777,7 @@ async function pendingAdvertisingCampaignIdsMysql(shopId, range = {}) {
 }
 
 async function countTargetPendingAdvertisingRowsMysql(shopId, body = {}, range = {}) {
+  await assertAdvertisingShop(shopId);
   const from = String(range.from || "").slice(0, 10);
   const to = String(range.to || "").slice(0, 10);
   const targetSkus = Array.isArray(body.target_skus || body.targetSkus)
@@ -1773,6 +1802,7 @@ async function countTargetPendingAdvertisingRowsMysql(shopId, body = {}, range =
 }
 
 async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], context = {}) {
+  await assertAdvertisingShop(shop.id);
   const normalizedKeys = new Set((context.normalized || []).map((row) => [
     row.date_key,
     row.shop_id,
@@ -1863,6 +1893,7 @@ async function buildPendingAdvertisingRowsMysql(shop = {}, campaigns = [], conte
 }
 
 async function pendingCampaignProductsMysql(shop = {}, campaign = {}) {
+  await assertAdvertisingShop(shop.id);
   const settings = Array.isArray(campaign.productSettings) ? campaign.productSettings : [];
   if (campaign.productSettingsFetched) return settings.filter((product) => String(product.sku || "").trim());
   const productsBySku = new Map(settings.map((product) => [String(product.sku || "").trim(), product]).filter(([sku]) => sku));
@@ -1947,9 +1978,11 @@ function mergeAdvertisingCampaigns(...groups) {
 }
 
 async function rememberAdvertisingCampaignsMysql(shopId, campaigns = []) {
+  await assertAdvertisingShop(shopId);
   for (const campaign of campaigns) {
     const campaignId = String(campaign.id || "").trim();
     if (!campaignId) continue;
+    await assertAdvertisingShop(shopId);
     await mysqlExecute(`
       INSERT INTO ozon_ad_campaign_catalog (
         shop_id, campaign_id, campaign_name, campaign_state, adv_object_type,
@@ -1971,6 +2004,7 @@ async function rememberAdvertisingCampaignsMysql(shopId, campaigns = []) {
 }
 
 async function knownAdvertisingCampaignsMysql(shopId) {
+  await assertAdvertisingShop(shopId);
   const rows = await mysqlQuery(`
     SELECT campaign_id AS id, campaign_name AS title, campaign_state AS state, adv_object_type AS advObjectType
     FROM ozon_ad_campaign_catalog
@@ -1995,6 +2029,7 @@ async function knownAdvertisingCampaignsMysql(shopId) {
 }
 
 async function forbiddenCampaignIdsMysql(shopId) {
+  await assertAdvertisingShop(shopId);
   if (!shopId) return new Set();
   const rows = await mysqlQuery(`
     SELECT campaign_id
@@ -2013,6 +2048,7 @@ function forbiddenCampaignCutoff() {
 }
 
 async function markForbiddenCampaignMysql(shopId, campaignId, reason = "") {
+  await assertAdvertisingShop(shopId);
   if (!shopId || !campaignId) return;
   await mysqlExecute(`
     INSERT INTO ozon_ad_forbidden_campaigns (shop_id, campaign_id, reason)
@@ -2113,6 +2149,7 @@ function filterCampaigns(campaigns = [], body = {}) {
 }
 
 export async function countSyncableAdvertisingCampaignsForShopsMysql(body = {}, options = {}) {
+  const scope = await advertisingTenantScope();
   await ensurePerformanceCredentialSchema();
   const shopIds = Array.isArray(body.shop_ids || body.shopIds)
     ? (body.shop_ids || body.shopIds).map((item) => Number(item || 0)).filter((item) => item > 0)
@@ -2120,14 +2157,16 @@ export async function countSyncableAdvertisingCampaignsForShopsMysql(body = {}, 
   if (!shopIds.length) return { count: 0, byShop: [] };
   const shops = await mysqlQuery(`
     SELECT *
-    FROM shops
-    WHERE status = 'active'
+    FROM shops s
+    WHERE status = 'active' AND ${advertisingTenantSql(scope, 's')}
       AND id IN (${shopIds.map(() => "?").join(", ")})
     ORDER BY id
   `, shopIds);
   const byShop = [];
   let count = 0;
   for (const shop of shops) {
+    await assertAdvertisingShop(shop.id);
+    options = { ...options, shop_id: shop.id };
     const clientId = String(shop.performance_client_id || "").trim();
     const clientSecret = String(shop.performance_client_secret || "").trim();
     if (!clientId || !clientSecret) {
@@ -2428,6 +2467,8 @@ function classifyAdvertisingSyncError(error) {
 }
 
 async function logAdvertisingSyncEvent(source = {}, event = {}) {
+  await advertisingTenantScope();
+  if (isAdvertisingBusinessRequest()) return;
   const runId = Number(source?.run_id || source?.runId || 0);
   const jobKey = String(source?.job_key || source?.jobKey || "");
   if (!runId || !jobKey) return;
@@ -2659,6 +2700,8 @@ function numericCandidates(value, depth = 0) {
 }
 
 async function performanceRequest(path, payload, options = {}) {
+  if (options.shop_id) await assertAdvertisingShop(options.shop_id);
+  else await advertisingTenantScope();
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(options.signal.reason || new Error("广告同步已取消"));
   if (options.signal?.aborted) abortFromParent();
@@ -2687,6 +2730,8 @@ async function performanceRequest(path, payload, options = {}) {
       const message = data.message || data.error || data.raw || `HTTP ${response.status}`;
       throw new Error(`Performance API ${path} failed: ${message}`);
     }
+    if (options.shop_id) await assertAdvertisingShop(options.shop_id);
+    else await advertisingTenantScope();
     return data;
   } catch (error) {
     if (error.name === "AbortError") throw new Error(`Performance API ${path} 请求超时`);

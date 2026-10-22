@@ -5,20 +5,20 @@ export function createOrderRoutes({ services, readJson, notFound, writeHead, jso
   return {
     "GET /api/orders": (req, url) => url?.searchParams?.get("paged")
       ? services.ordersPaged(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req))
-      : services.orders(),
+      : services.orders(tenantIdFromRequest(req)),
     "GET /api/orders/inventory-availability": (req, url) => orderInventoryAvailability(services, req, url),
     "GET /api/sku-order-tracking": (req, url) => services.skuOrderTrackingList(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "POST /api/sku-order-tracking": async (req) => services.saveSkuOrderTracker(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-    "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/order-car-heatmap/products": (req, url) => services.orderCarHeatmapProducts(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/order-car-heatmap/skus": (req, url) => services.orderCarHeatmapSkus(Object.fromEntries(url.searchParams.entries())),
-    "GET /api/order-car-heatmap/unmatched": (req, url) => services.orderCarHeatmapUnmatched(Object.fromEntries(url.searchParams.entries())),
-    "POST /api/order-car-heatmap/ai-classify": async (req) => services.orderCarHeatmapAiClassify(await readJson(req)),
-    "POST /api/order-car-heatmap/confirm-tag": async (req) => services.orderCarHeatmapConfirmTag(await readJson(req), req._session?.personId),
-    "GET /api/orders/status-history/summary": () => services.orderStatusHistorySummary?.() || { total_history_rows: 0, open_orders: 0 },
+    "GET /api/order-car-heatmap/models": (req, url) => services.orderCarHeatmapModels(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/order-car-heatmap/products": (req, url) => services.orderCarHeatmapProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/order-car-heatmap/skus": (req, url) => services.orderCarHeatmapSkus(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/order-car-heatmap/unmatched": (req, url) => services.orderCarHeatmapUnmatched(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "POST /api/order-car-heatmap/ai-classify": async (req) => services.orderCarHeatmapAiClassify(await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
+    "POST /api/order-car-heatmap/confirm-tag": async (req) => services.orderCarHeatmapConfirmTag(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
+    "GET /api/orders/status-history/summary": (req) => services.orderStatusHistorySummary?.(tenantIdFromRequest(req)) || { total_history_rows: 0, open_orders: 0 },
     "GET /api/order-quality-rules": () => services.orderQualityRules(),
-    "POST /api/orders/repair-outbound": async () => services.repairOrderOutbound(),
-    "POST /api/orders/recalculate-profits": async (req) => services.recalculateAllMappedOrderProfits(await readJson(req))
+    "POST /api/orders/repair-outbound": async (req) => services.repairOrderOutbound(tenantIdFromRequest(req), { session: req._session }),
+    "POST /api/orders/recalculate-profits": async (req) => services.recalculateAllMappedOrderProfits(await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal })
   };
 }
 
@@ -35,7 +35,7 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "status-history" && parts[3] === "summary") {
-    return json(res, await (services.orderStatusHistorySummary?.() || { total_history_rows: 0, open_orders: 0 }));
+    return json(res, await (services.orderStatusHistorySummary?.(tenantIdFromRequest(req)) || { total_history_rows: 0, open_orders: 0 }));
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "status-history") {
@@ -46,17 +46,14 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "procurement-preview") {
     const tenantId = tenantIdFromRequest(req);
-    if (tenantId !== "admin") {
-      throw Object.assign(new Error("企业订单采购预览暂不可用：采购、入库与库存关联数据尚未完成租户隔离。"), { statusCode: 503 });
-    }
     return json(res, services.previewOrderProcurement
-      ? await services.previewOrderProcurement(Number(parts[2]))
+      ? await services.previewOrderProcurement(Number(parts[2]), tenantId)
       : { ok: true, purchasable_count: 0, total_quantity: 0, product_count: 0, missing_count: 0, products: [], missing_items: [] });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "procurement-batches") {
     return json(res, services.orderProcurementBatches
-      ? await services.orderProcurementBatches(Number(parts[2]))
+      ? await services.orderProcurementBatches(Number(parts[2]), tenantIdFromRequest(req))
       : { batches: [], items: [] });
   }
 
@@ -64,19 +61,19 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
     const detail = await services.orderDetail(Number(parts[2]), tenantIdFromRequest(req));
     if (detail && !detail.profit_detail_snapshot) {
       if (typeof services.orderProfitDetailSnapshot === "function") {
-        detail.profit_detail_snapshot = await services.orderProfitDetailSnapshot(Number(parts[2]));
+        detail.profit_detail_snapshot = await services.orderProfitDetailSnapshot(Number(parts[2]), tenantIdFromRequest(req));
       }
     }
     return detail ? json(res, detail) : notFound(res);
   }
 
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "mark") {
-    return json(res, services.updateOrderMark(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
+    return json(res, await services.updateOrderMark(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label") {
     const body = await readJson(req);
-    const label = await services.orderPackageLabel(body, req._session?.personId);
+    const label = await services.orderPackageLabel(body, req._session?.personId, tenantIdFromRequest(req), { session: req._session });
     // Browser preview should preserve the ordered PDF pages returned by
     // orderPackageLabel and must not depend on a server-side rasterizer.
     const buffer = body.browser_preview === true
@@ -97,25 +94,25 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label-printed") {
-    return json(res, await services.markOrderLabelsPrinted(await readJson(req), req._session?.personId));
+    return json(res, await services.markOrderLabelsPrinted(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label-print-failed") {
-    return json(res, await services.removeFailedOrderLabelPrintBatch(await readJson(req), req._session?.personId));
+    return json(res, await services.removeFailedOrderLabelPrintBatch(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "ship") {
-    return json(res, await services.shipOrders(await readJson(req), req._session?.personId));
+    return json(res, await services.shipOrders(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "procurement-requests") {
     return json(res, services.createOrderProcurementRequests
-      ? await services.createOrderProcurementRequests(Number(parts[2]), await readJson(req), req._session?.personId)
+      ? await services.createOrderProcurementRequests(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req))
       : { ok: true, created_count: 0, request_ids: [] });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "recalculate-profit") {
-    return json(res, await services.recalculateOrderProfit(Number(parts[2])));
+    return json(res, await services.recalculateOrderProfit(Number(parts[2]), { tenantId: tenantIdFromRequest(req), session: req._session, signal: req._abortSignal }));
   }
 
   return false;

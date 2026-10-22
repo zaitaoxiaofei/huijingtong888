@@ -11,7 +11,7 @@ const allowed = (session, method, path) => authorizeApiRequest({ method, _sessio
   && tenantIsolationDecision(session, parts(path), method).allowed;
 
 test("platform-only accounts can operate platform resources without acquiring enterprise business access", () => {
-  for (const path of ["platform/accounts", "tenants", "settings/packaging-fee-rule", "scheduled-jobs", "system-monitoring", "ai-provider", "ai-prompt-templates"]) {
+  for (const path of ["platform/accounts", "tenants", "scheduled-jobs", "system-monitoring", "ai-provider", "ai-prompt-templates"]) {
     assert.equal(allowed(platform, "GET", path), true, path);
     assert.equal(allowed(owner, "GET", path), false, path);
     assert.equal(allowed({ ...owner, tenant: { ...owner.tenant, slug: "default" } }, "GET", path), false, `default ${path}`);
@@ -26,6 +26,8 @@ test("platform-only accounts can operate platform resources without acquiring en
   assert.equal(allowed(owner, "GET", "logistics-rules"), true);
   assert.equal(allowed(owner, "POST", "logistics-rules"), false);
   assert.equal(allowed(platform, "POST", "logistics-rules"), true);
+  assert.equal(allowed(owner, 'GET', 'settings/packaging-fee-rule'), true);
+  assert.equal(allowed(owner, 'POST', 'settings/packaging-fee-rule'), false);
 });
 
 test("enterprise matrix configuration opens only exact scoped routes, while execution remains closed", () => {
@@ -33,7 +35,8 @@ test("enterprise matrix configuration opens only exact scoped routes, while exec
     assert.equal(allowed(owner, method, `asset-variant-engine/${path}`), true, `${method} ${path}`);
     assert.equal(allowed({ ...owner, tenant: { ...owner.tenant, role: "member" } }, method, `asset-variant-engine/${path}`), false, path);
   }
-  for (const [method, path] of [["GET", "jobs"], ["GET", "files/123/image.png"], ["POST", "generate"], ["POST", "generate-async"], ["POST", "publish-to-ozon"], ["POST", "rules/12"], ["DELETE", "tail-templates"], ["GET", "tail-template-files/12/extra"]]) {
+  for (const path of ['jobs', 'files/123/image.png']) assert.equal(allowed(owner, 'GET', `asset-variant-engine/${path}`), true);
+  for (const [method, path] of [["POST", "generate"], ["POST", "generate-async"], ["POST", "publish-to-ozon"], ["POST", "rules/12"], ["DELETE", "tail-templates"], ["GET", "tail-template-files/12/extra"]]) {
     assert.equal(allowed(owner, method, `asset-variant-engine/${path}`), false, `${method} ${path}`);
   }
 });

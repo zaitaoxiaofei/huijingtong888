@@ -1,7 +1,7 @@
 export function createMaterialAssetRoutes({ services, readJson }) {
   return {
-    "GET /api/material-assets": (req) => services.materialAssets(req.query || {}),
-    "POST /api/material-assets": async (req) => services.createMaterialAsset(await readJson(req), req._session?.personId)
+    "GET /api/material-assets": (req) => services.materialAssets(req.query || {}, req._session),
+    "POST /api/material-assets": async (req) => services.createMaterialAsset(await readJson(req), req._session?.personId, req._session)
   };
 }
 
@@ -10,10 +10,10 @@ export async function handleMaterialAssetRestRoute({ req, res, parts, services, 
   const id = Number(parts[2] || 0);
   if (!id) return false;
   try {
-    if (req.method === "GET" && !parts[3]) return json(res, await services.materialAssetDetail(id));
-    if (req.method === "PUT" && !parts[3]) return json(res, await services.updateMaterialAsset(id, await readJson(req)));
-    if (req.method === "DELETE" && !parts[3]) return json(res, await services.deleteMaterialAsset(id));
-    if (req.method === "POST" && parts[3] === "archive") return json(res, await services.archiveMaterialAsset(id));
+    if (req.method === "GET" && !parts[3]) return json(res, await services.materialAssetDetail(id, req._session));
+    if (req.method === "PUT" && !parts[3]) return json(res, await services.updateMaterialAsset(id, await readJson(req), req._session));
+    if (req.method === "DELETE" && !parts[3]) return json(res, await services.deleteMaterialAsset(id, req._session));
+    if (req.method === "POST" && parts[3] === "archive") return json(res, await services.archiveMaterialAsset(id, req._session));
   } catch (error) {
     return json(res, { error: error.message }, error.status || 500);
   }

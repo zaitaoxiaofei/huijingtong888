@@ -19,6 +19,8 @@ for (const scenario of [
     const receipts = [];
     const context = vm.createContext({
       ensureMysqlCutoverEnabled() {}, ensureOzonStockStorageSchemaMysql() {},
+      resolveInventoryTenantScope: async () => ({id:1,isDefault:true}),
+      assertInventoryReferences: async () => {},
       nullableNumber: (value) => value ? Number(value) : null,
       shopsMysql: async () => [{ id: 4, name: "Shop", status: "active" }],
       stockSyncFiltersMysql: async () => ({}),
@@ -33,6 +35,7 @@ for (const scenario of [
       upsertStockSnapshotMysql: async (_, row) => { stock = row.present; },
       reclassifyStockSnapshotsMysql: async () => {},
       invalidateMasterDataCache() {}, stockAlertsMysql: async () => [],
+      invalidateMasterDataCachePrefix() {},
       mysqlQuery: async (sql) => sql.includes("FROM ozon_stock_snapshots")
         ? [{ shop_id: 4, product_id: 48, ozon_sku: "4069090137", fbp_quantity: stock }]
         : [{ id: 191, quantity: 200, listed_quantity: 0 }],

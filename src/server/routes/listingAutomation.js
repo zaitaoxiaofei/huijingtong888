@@ -42,7 +42,7 @@ export function createListingAutomationRoutes({ services, readJson }) {
     "POST /api/listing/media/repair": async (req) => services.repairListingEditorMedia(await readJson(req), req._session),
     "POST /api/listing/media/watermark": async (req) => services.watermarkListingMedia(await readJson(req), req._session),
     "GET /api/listing/drafts": (req, url) => services.listingDrafts(Object.fromEntries(url.searchParams.entries()), req._session),
-    "GET /api/listing/draft-binding-options": () => services.listingDraftBindingOptions(),
+    "GET /api/listing/draft-binding-options": (req) => services.listingDraftBindingOptions(req.query || {}, req._session),
     "GET /api/listing/draft-bindings": (req, url) => services.listingDraftBindings(Object.fromEntries(url.searchParams.entries()), req._session),
     "POST /api/listing/drafts/bind": async (req) => services.bindListingDrafts(await readJson(req), req._session),
     "POST /api/listing/development-review": async (req) => services.listingDevelopmentReview(await readJson(req), req._session),

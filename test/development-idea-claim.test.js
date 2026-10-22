@@ -2,19 +2,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { teamTenantVmContext } from "./helpers/team-tenant-vm.js";
 
 const service = fs.readFileSync(new URL("../src/services/team-tasks.js", import.meta.url), "utf8");
 const view = fs.readFileSync(new URL("../frontend/admin/views/team/ProductDevelopmentCenterView.vue", import.meta.url), "utf8");
 function harness(idea, affectedRows = 1) {
   const writes = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ ...teamTenantVmContext(),
     isMysqlPrimaryEnabled: () => true,
     withMysqlTransaction: async callback => callback({ execute: async (sql,params) => { writes.push({sql,params}); return [{affectedRows}]; } }),
     mysqlQuery: async () => idea ? [idea] : [],
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); return { affectedRows }; }
   });
   vm.runInContext(service.replace(/^import .*;\n/gm, "").replaceAll("export async function", "async function")
-    + "\nteamTasksSchemaReady = true;", context);
+    + "\nteamTasksSchemaReady=true; initializedTenantOwners.add('admin'); operationalTaskRefreshes.set('admin', { refreshedAt: Date.now(), promise: null });", context);
   return { context, writes };
 }
 
@@ -28,9 +29,12 @@ test("another person's unassigned inspiration can be claimed before development 
 
 test("assigned owner can claim, but other people and unlinked accounts cannot", async () => {
   const { context, writes } = harness({ status: "assigned", assignee_person_id: 7 });
+  context.setTeamTestPerson(9);
   await assert.rejects(context.claimDevelopmentIdeaMysql(12, 9), /只有指定负责人/);
+  context.setTeamTestPerson(null);
   await assert.rejects(context.claimDevelopmentIdeaMysql(12, null), /未关联人员/);
   assert.equal(writes.length, 0);
+  context.setTeamTestPerson(7);
   await context.claimDevelopmentIdeaMysql(12, 7);
   assert.equal(writes.length, 2);
   assert.match(writes[1].sql, /owner_person_id IS NULL/);

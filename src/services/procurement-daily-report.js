@@ -1,4 +1,5 @@
 import { mysqlQuery } from "../mysql-pool.js";
+import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
 
 function dateSql(value) {
   return value.toISOString().slice(0, 19).replace("T", " ");
@@ -42,10 +43,13 @@ function listValue(value) {
   return [...new Set(String(value || "").split(",").map((item) => item.trim()).filter(Boolean))];
 }
 
-export async function procurementDailyReport(query = {}, queryRows = mysqlQuery) {
+export async function procurementDailyReport(query = {}, tenantId = 'admin', queryRows = mysqlQuery) {
+  const scope = await resolveInventoryTenantScope(tenantId, queryRows);
   const { dateFrom, dateTo, sqlRange } = procurementReportRange(query);
   const params = [...sqlRange];
   const where = [
+    inventoryTenantSql(scope, 'po'), inventoryTenantSql(scope, 'poi'),
+    `(poi.product_id IS NULL OR ${inventoryTenantSql(scope, 'p')})`,
     "po.status IN ('purchased', 'partial_inbound', 'inbound_done')",
     "COALESCE(poi.status, '') != 'cancelled'",
     "COALESCE(po.purchased_at, po.created_at) >= ?",
@@ -75,9 +79,10 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
       OR LOWER(COALESCE(poi.purchase_url, '')) LIKE ?
       OR EXISTS (
         SELECT 1 FROM procurement_requests search_request
-        LEFT JOIN people search_person ON search_person.id = search_request.person_id
-        LEFT JOIN suppliers search_supplier ON search_supplier.id = search_request.supplier_id
+        LEFT JOIN people search_person ON search_person.id = search_request.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = search_person.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
+        LEFT JOIN suppliers search_supplier ON search_supplier.id = search_request.supplier_id AND ${inventoryTenantSql(scope, 'search_supplier')}
         WHERE search_request.purchase_order_id = po.id AND search_request.product_id = poi.product_id
+          AND ${inventoryTenantSql(scope, 'search_request')}
           AND (LOWER(COALESCE(search_person.name, '')) LIKE ?
             OR LOWER(COALESCE(search_supplier.name, '')) LIKE ?
             OR LOWER(COALESCE(search_request.purchase_url, '')) LIKE ?)
@@ -104,7 +109,7 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
   }
   if (process) { where.push("p.surface_process = ?"); params.push(process); }
 
-  const requestWhere = ["filtered_request.purchase_order_id = po.id", "filtered_request.product_id = poi.product_id"];
+  const requestWhere = ["filtered_request.purchase_order_id = po.id", "filtered_request.product_id = poi.product_id", inventoryTenantSql(scope, 'filtered_request')];
   const requestParams = [];
   if (personId && personId !== "all") { requestWhere.push("filtered_request.person_id = ?"); requestParams.push(Number(personId)); }
   if (supplierId && supplierId !== "all") { requestWhere.push("COALESCE(filtered_request.supplier_id, p.supplier_id) = ?"); requestParams.push(Number(supplierId)); }
@@ -116,7 +121,7 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
   if (demandType === "real_order") requestWhere.push("filtered_request.demand_type = 'real_order'");
   else if (["advance_stock", "inventory_warning"].includes(demandType)) requestWhere.push("filtered_request.demand_type = 'advance_stock'");
   else if (demandType === "warehouse_request") requestWhere.push("filtered_request.demand_type = 'warehouse_request'");
-  if (requestWhere.length > 2) {
+  if (requestWhere.length > 3) {
     where.push(`EXISTS (SELECT 1 FROM procurement_requests filtered_request WHERE ${requestWhere.join(" AND ")})`);
     params.push(...requestParams);
   }
@@ -132,7 +137,7 @@ export async function procurementDailyReport(query = {}, queryRows = mysqlQuery)
     FROM purchase_order_items poi
     JOIN purchase_orders po ON po.id = poi.purchase_order_id
     LEFT JOIN products p ON p.id = poi.product_id
-    LEFT JOIN people pe ON pe.id = po.created_by_person_id
+    LEFT JOIN people pe ON pe.id = po.created_by_person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
     WHERE ${where.join("\n      AND ")}
     ORDER BY COALESCE(po.purchased_at, po.created_at), po.id, poi.id
   `, params);

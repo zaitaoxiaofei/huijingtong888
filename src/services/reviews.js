@@ -1,5 +1,13 @@
 import { createOzonReviewComment, fetchOzonReviewComments, fetchOzonReviews } from "../ozonClient.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
+import { inventoryTenantSql } from "./inventory-tenant-scope.js";
+
+async function reviewTenantScope(session) {
+  const authorized = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(authorized, "operations");
+  return { id: authorized.tenant.id, isDefault: authorized.tenant.slug === "default", session: authorized };
+}
 
 let reviewSchemaReady = false;
 
@@ -84,9 +92,9 @@ function shopCredentialsSelect() {
   return "id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint";
 }
 
-async function shopsForSync(shopId) {
+async function shopsForSync(shopId, scope) {
   const params = [];
-  let where = "status <> 'deleted'";
+  let where = `status <> 'deleted' AND ${inventoryTenantSql(scope, "shops")}`;
   if (shopId && String(shopId) !== "all") {
     where += " AND id = ?";
     params.push(Number(shopId));
@@ -142,11 +150,12 @@ async function upsertReview(shop, review) {
   return true;
 }
 
-export async function reviewCenterMysql(query = {}) {
+export async function reviewCenterMysql(query = {}, session = null) {
+  const scope = await reviewTenantScope(session);
   await ensureReviewSchema();
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(Math.max(Number(query.pageSize || 30), 1), 100);
-  const where = [];
+  const where = [`EXISTS (SELECT 1 FROM shops owner_shop WHERE owner_shop.id = r.shop_id AND ${inventoryTenantSql(scope, "owner_shop")})`];
   const params = [];
   if (query.shopId && String(query.shopId) !== "all") {
     where.push("r.shop_id = ?");
@@ -179,11 +188,14 @@ export async function reviewCenterMysql(query = {}) {
 }
 
 export async function syncOzonReviewsMysql(body = {}, options = {}) {
+  const scope = await reviewTenantScope(options.session);
   await ensureReviewSchema();
-  const shops = await shopsForSync(body.shop_id || body.shopId);
+  const shops = await shopsForSync(body.shop_id || body.shopId, scope);
+  if ((body.shop_id || body.shopId) && String(body.shop_id || body.shopId) !== "all" && !shops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const result = { shops: [], fetched: 0, upserted: 0, requests: 0, errors: [] };
   for (const shop of shops) {
     try {
+      await reviewTenantScope(scope.session);
       const response = await fetchOzonReviews(shop, {
         status: body.status || "",
         limit: body.limit || 100,
@@ -192,6 +204,7 @@ export async function syncOzonReviewsMysql(body = {}, options = {}) {
       });
       let upserted = 0;
       for (const review of response.reviews) {
+        if (!(await shopsForSync(shop.id, scope)).length) throw Object.assign(new Error("店铺已不属于当前企业"), { statusCode: 403 });
         const ok = await upsertReview(shop, review);
         if (ok) upserted += 1;
       }
@@ -208,24 +221,27 @@ export async function syncOzonReviewsMysql(body = {}, options = {}) {
   return result;
 }
 
-export async function replyOzonReviewMysql(id, body = {}, personId = null) {
+export async function replyOzonReviewMysql(id, body = {}, personId = null, session = null) {
+  const scope = await reviewTenantScope(session);
+  personId = scope.session.personId;
   await ensureReviewSchema();
   const rows = await mysqlQuery(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM ozon_reviews r
     JOIN shops s ON s.id = r.shop_id
-    WHERE r.id = ?
+    WHERE r.id = ? AND ${inventoryTenantSql(scope, "s")}
   `, [Number(id)]);
   const review = rows[0];
   if (!review) throw new Error("评价不存在");
   const text = String(body.reply_text || body.text || "").trim();
   if (!text) throw new Error("回复内容不能为空");
+  await reviewTenantScope(scope.session);
   const response = await createOzonReviewComment(review, review.review_id, text);
   const commentId = String(response?.result?.comment_id || response?.comment_id || "");
   await mysqlExecute(`
     UPDATE ozon_reviews
     SET reply_status = 'replied', reply_text = ?, has_reply = 1, replied_at = NOW()
-    WHERE id = ?
+    WHERE id = ? AND EXISTS (SELECT 1 FROM shops owner_shop WHERE owner_shop.id = ozon_reviews.shop_id AND ${inventoryTenantSql(scope, "owner_shop")})
   `, [text, Number(id)]);
   await mysqlExecute(`
     INSERT INTO ozon_review_replies (review_local_id, shop_id, review_id, comment_id, reply_text, source, status, created_by_person_id, raw_json)
@@ -243,21 +259,24 @@ export async function replyOzonReviewMysql(id, body = {}, personId = null) {
   return { ok: true, comment_id: commentId, demo: Boolean(response?.demo) };
 }
 
-export async function reviewReplyTemplatesMysql() {
+export async function reviewReplyTemplatesMysql(session = null) {
+  await reviewTenantScope(session);
   await ensureReviewSchema();
   return mysqlQuery("SELECT * FROM ozon_review_reply_templates WHERE active = 1 ORDER BY min_rating DESC, id ASC");
 }
 
-export async function reviewCommentsMysql(id) {
+export async function reviewCommentsMysql(id, session = null) {
+  const scope = await reviewTenantScope(session);
   await ensureReviewSchema();
   const rows = await mysqlQuery(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM ozon_reviews r
     JOIN shops s ON s.id = r.shop_id
-    WHERE r.id = ?
+    WHERE r.id = ? AND ${inventoryTenantSql(scope, "s")}
   `, [Number(id)]);
   const review = rows[0];
   if (!review) return [];
+  await reviewTenantScope(scope.session);
   return fetchOzonReviewComments(review, review.review_id);
 }
 

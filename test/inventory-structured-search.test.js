@@ -63,8 +63,14 @@ test("structured search reuses controlled naming options and the AI vehicle cata
 });
 
 test("structured vehicle brand normalization removes legacy separators before exact matching", () => {
-  const normalizedQueryPattern = /normalizeVehicleBrand\(query\.vehicleBrand \|\| query\.vehicle_brand, \{ strict: false \}\)/g;
-  assert.equal(service.match(normalizedQueryPattern)?.length, 3);
+  const normalizedQueryPattern = /normalizeVehicleBrand\(query\.vehicleBrand \|\| query\.vehicle_brand, \{ strict: false \}\)/;
+  for (const name of ['tenantProductsMysql','productsMysql','inboundRecordsWhereMysql','procurementGroupedPageIdsMysql']) {
+    const start=service.search(new RegExp(`^(?:export )?(?:async )?function ${name}\\(`,'m'));
+    assert.ok(start>=0,`${name} remains available`);
+    const rest=service.slice(start+1);
+    const next=rest.search(/^(?:export )?(?:async )?function \w+\(/m);
+    assert.match(next<0?rest:rest.slice(0,next),normalizedQueryPattern,`${name} normalizes legacy brand separators`);
+  }
   assert.match(namingService, /normalizeVehicleBrand\(query\.brand, \{ strict: false \}\)/);
 });
 

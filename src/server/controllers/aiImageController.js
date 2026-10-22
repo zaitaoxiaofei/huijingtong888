@@ -1,3 +1,4 @@
+import { withAiTenantSession } from "../../services/ai-tenant-context.js";
 import {
   createAiTaskZip,
   generateCommerceCopy,
@@ -15,27 +16,32 @@ export function status() {
 }
 
 export async function optimizePromptAction(req, readJson) {
-  return optimizePrompt(await readJson(req));
+  const body = await readJson(req);
+  return withAiTenantSession(req._session, () => optimizePrompt(body));
 }
 
 export async function generateImagesAction(req, readJson) {
-  return generateImages(await readJson(req));
+  const body = await readJson(req);
+  return withAiTenantSession(req._session, () => generateImages(body));
 }
 
 export async function generateWorkflowAction(req, readJson) {
-  return generateWorkflow(await readJson(req));
+  const body = await readJson(req);
+  return withAiTenantSession(req._session, () => generateWorkflow(body));
 }
 
 export async function generateCommerceCopyAction(req, readJson) {
-  return generateCommerceCopy(await readJson(req));
+  const body = await readJson(req);
+  return withAiTenantSession(req._session, () => generateCommerceCopy(body));
 }
 
 export async function testCopyGenerationAction(req, readJson) {
-  return testCopyGeneration(await readJson(req));
+  const body = await readJson(req);
+  return withAiTenantSession(req._session, () => testCopyGeneration(body));
 }
 
-export async function sendAiTaskImage({ res, writeHead, taskId, scope, filename }) {
-  const file = await getAiTaskFile(taskId, scope, filename);
+export async function sendAiTaskImage({ res, writeHead, taskId, scope, filename, session }) {
+  const file = await getAiTaskFile(taskId, scope, filename, session);
   writeHead(res, 200, {
     "Content-Type": file.contentType,
     "Content-Length": file.size,
@@ -44,8 +50,8 @@ export async function sendAiTaskImage({ res, writeHead, taskId, scope, filename 
   return streamAiFile(file.filePath).pipe(res);
 }
 
-export async function downloadAiZip({ res, writeHead, taskId }) {
-  const zip = await createAiTaskZip(taskId);
+export async function downloadAiZip({ res, writeHead, taskId, session }) {
+  const zip = await createAiTaskZip(taskId, session);
   writeHead(res, 200, {
     "Content-Type": "application/zip",
     "Content-Length": zip.buffer.length,

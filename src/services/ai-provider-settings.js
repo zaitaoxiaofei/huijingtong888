@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { currentAiTenantSession, needsAiTenantSession, reserveTenantAiRequest, withAiTenantSession } from "./ai-tenant-context.js";
 import { config } from "../config.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { testOpenAiImageProvider } from "../server/services/openai/imageGenerationService.js";
@@ -411,6 +412,7 @@ export async function chatWithAiProvider(payload = {}) {
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "text" });
   const messages = normalizeMessages(payload.messages, payload.prompt);
   if (!messages.length) throw new Error("AI 调用内容不能为空");
+  await reserveTenantAiRequest("text");
   const result = await callOpenAiCompatibleChat(runtimeConfig, {
     messages,
     temperature: finiteNumber(payload.temperature, 0.2),
@@ -435,6 +437,7 @@ export async function streamAiProviderResponse(payload = {}, handlers = {}) {
   });
   const messages = route === "vision" ? normalizeVisionMessages(payload.messages) : normalizeMessages(payload.messages, payload.prompt);
   if (!messages.length) throw new Error("AI 调用内容不能为空");
+  await reserveTenantAiRequest("text");
   return streamOpenAiCompatibleChat(runtimeConfig, {
     messages,
     temperature: finiteNumber(payload.temperature, route === "vision" ? 0.1 : 0.2),
@@ -447,6 +450,7 @@ export async function visionWithAiProvider(payload = {}) {
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "vision", fallbackRoute: "text" });
   const messages = normalizeVisionMessages(payload.messages);
   if (!messages.length) throw new Error("AI vision content cannot be empty");
+  await reserveTenantAiRequest("text");
   const callOptions = {
     messages,
     temperature: finiteNumber(payload.temperature, 0.1),
@@ -486,7 +490,8 @@ function visionProviderError(error, runtimeConfig = {}) {
   return statusError(`视觉识别服务失败：${provider} / ${model}；${error?.message || "上游未返回错误详情"}`, Number(error?.status || 0) || 502);
 }
 
-export async function generateSelectionSellingPoints(payload = {}) {
+export async function generateSelectionSellingPoints(payload = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateSelectionSellingPoints(payload, session));
   const runtimeConfig = await resolveRuntimeConfig({}, { requireEnabled: true, route: "text" });
   const context = buildSelectionSellingPointContext(payload);
   if (!context.hasUsefulInfo) {

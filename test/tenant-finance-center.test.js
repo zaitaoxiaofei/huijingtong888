@@ -41,20 +41,19 @@ test("finance company lists and writes derive scope from the authenticated reque
   assert.match(route, /saveFinanceExpense\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(route, /saveFinanceVoucher\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(service, /SELECT \* FROM finance_companies WHERE status != 'deleted' \$\{companyFilter\}/);
-  assert.match(service, /s\.tenant_id = \?/);
+  assert.match(service, /financeShopScope/);
   assert.match(service, /c\.tenant_id = \?/);
   assert.match(service, /a\.tenant_id = \?/);
-  assert.match(service, /SELECT id FROM shops WHERE id = \? AND tenant_id = \?/);
-  assert.match(service, /SELECT id FROM finance_companies WHERE id = \? AND tenant_id = \?/);
+  assert.match(service, /SELECT s\.id FROM shops s WHERE s\.id = \?/);
   assert.match(service, /公司档案不存在或不属于当前企业/);
-  assert.match(service, /finance_expenses WHERE id=\? AND company_id=\? AND tenant_id=\?/);
-  assert.match(service, /finance_vouchers WHERE id=\? AND company_id=\? AND tenant_id=\?/);
-  assert.match(service, /企业凭证附件隔离尚未完成/);
+  assert.match(service, /finance_expenses WHERE id=\? AND company_id=\?/);
+  assert.match(service, /finance_vouchers WHERE id=\? AND company_id=\?/);
+  assert.match(service, /assertFinanceAttachment\(body\.attachment_url, tenantId\)/);
   assert.match(service, /a\.tenant_id = \?/);
-  assert.match(service, /finance_tenant_shop\.tenant_id = \?/);
+  assert.match(service, /financeShopScope\(tenantId, "finance_tenant_shop"\)/);
 });
 
-test("tenant finance routes open only the scoped accounting workflow; shared attachments stay closed", () => {
+test("tenant finance routes include authenticated enterprise-private voucher attachments", () => {
   const tenant = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["GET", ["api", "finance-center", "companies"]],
@@ -67,13 +66,14 @@ test("tenant finance routes open only the scoped accounting workflow; shared att
     ["GET", ["api", "finance-center", "export"]],
     ["POST", ["api", "finance-center", "expenses"]],
     ["POST", ["api", "finance-center", "vouchers"]],
+    ["POST", ["api", "finance-center", "voucher-attachments"]],
     ["POST", ["api", "finance-center", "close"]],
     ["DELETE", ["api", "finance-center", "expenses", "12"]]
   ]) {
     assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, true, `${method} ${parts.join("/")}`);
     assert.equal(authorizeApiRequest({ method, _session: { roles: ["operator"], tenant: { ...tenant.tenant, role: "owner" } } }, parts).allowed, true);
   }
-  assert.equal(tenantIsolationDecision(tenant, ["api", "finance-center", "voucher-attachments"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(tenant, ["api", "finance-center", "voucher-attachments", "all"], "POST").allowed, false);
   assert.equal(authorizeApiRequest({ method: "GET", _session: { roles: ["operator"], tenant: { ...tenant.tenant, role: "operator" } } }, ["api", "finance-center", "report"]).allowed, false);
   assert.equal(tenantIsolationDecision(tenant, ["api", "finance-center", "expenses", "all"], "DELETE").allowed, false);
   assert.equal(canAccessPage({ roles: ["operator"], tenant: { ...tenant.tenant, role: "owner" } }, "/finance-center"), true);

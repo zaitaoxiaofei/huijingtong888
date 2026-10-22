@@ -11,6 +11,10 @@ import { config } from "../config.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope } from "./asset-variant-tenant-scope.js";
+import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
+import { getTaskFile as getCropperTaskFile } from "../server/services/tools/imageCropperService.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
 import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
@@ -119,6 +123,10 @@ let schemaReady = false;
 const assetVariantJobQueue = [];
 let assetVariantJobRunning = false;
 
+function assetTenantParams(params, index = 0) {
+  return [...params.slice(0, index), aiTenantId(), ...params.slice(index)];
+}
+
 function envInt(name, fallback, min = 1, max = 10) {
   const value = Number(process.env[name]);
   if (!Number.isFinite(value)) return fallback;
@@ -202,7 +210,8 @@ export async function assetVariantBootstrap(query = {}, session = null) {
   };
 }
 
-export async function selectionPublishShops(query = {}) {
+export async function selectionPublishShops(query = {}, session = null) {
+  const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   const productId = Number(query.productId || query.product_id || query.selectionId || query.selection_id || 0);
   let ownerPersonId = 0;
@@ -213,9 +222,10 @@ export async function selectionPublishShops(query = {}) {
       SELECT p.owner_person_id, p.image_url, p.detail_image_urls, pe.name AS owner_name
       FROM products p
       LEFT JOIN people pe ON pe.id = p.owner_person_id
-      WHERE p.id = ? AND p.active = 1
+      WHERE p.id = ? AND p.active = 1 AND ${assetVariantTenantPredicate(scope, "p")}
       LIMIT 1
-    `, [productId]);
+    `, [productId, scope.id]);
+    if (!productRows.length) throw Object.assign(new Error("选品不存在或不属于当前企业"), { statusCode: 404 });
     ownerPersonId = Number(productRows[0]?.owner_person_id || 0) || 0;
     ownerName = String(productRows[0]?.owner_name || "").trim();
     productMedia = {
@@ -230,9 +240,9 @@ export async function selectionPublishShops(query = {}) {
       r.price_role, r.price_index
     FROM shops s
     LEFT JOIN shop_variant_rules r ON r.shop_id = s.id
-    WHERE s.status <> 'deleted'
+    WHERE s.status <> 'deleted' AND ${assetVariantTenantPredicate(scope, "s")}
     ORDER BY s.id
-  `);
+  `, [scope.id]);
   return {
     productId,
     ownerPersonId,
@@ -320,10 +330,12 @@ export async function saveShopVariantRule(body = {}, session = null) {
 }
 
 export async function generateAssetVariants(body = {}, session = null, context = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariants(body, session, context));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   await context.throwIfCancelled?.();
   const material = normalizeMaterialPayload(body.material || body);
+  await assertAssetSourceProductTenant(material.sourceProductId || material.source_product_id);
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   const rulesInput = Array.isArray(body.rules) ? body.rules : [];
   const preparedMediaByShop = body.preparedMediaByShop || body.prepared_media_by_shop || {};
@@ -333,7 +345,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
 
   const bootstrap = await assetVariantBootstrap({}, session);
   const shops = bootstrap.shops.filter((shop) => shopIds.includes(Number(shop.id)));
-  if (!shops.length) throw new Error("No available shops");
+  if (!shops.length || shops.length !== shopIds.length) throw new Error("目标店铺不存在或不属于当前企业");
 
   const templateMap = new Map(bootstrap.watermarkTemplates.map((template) => [String(template.id), template]));
   const tailTemplateMap = new Map(bootstrap.tailTemplates.map((template) => [Number(template.id), template]));
@@ -510,12 +522,16 @@ export async function generateAssetVariants(body = {}, session = null, context =
 }
 
 export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => deleteAssetVariantMediaGroup(body, session));
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const batchId = String(body.batchId || body.batch_id || "").trim();
   const shopId = Number(body.shopId || body.shop_id || 0) || null;
   const assetIds = uniqueNumbers(body.assetIds || body.asset_ids);
   if (!batchId && !assetIds.length) throw new Error("Missing batchId or assetIds");
+  const scope = assetVariantTenantScope(session || currentAiTenantSession());
+  const mediaScope = "COALESCE(NULLIF(tenant_id, ''), 'admin') = ?";
+  const variantScope = `shop_id IN (SELECT s.id FROM shops s WHERE ${assetVariantTenantPredicate(scope, "s")})`;
 
   let mediaAssets = [];
   let variants = [];
@@ -533,26 +549,26 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
     mediaAssets = await mysqlQuery(`
       SELECT id, local_path, source_path
       FROM listing_media_assets
-      WHERE status <> 'deleted' AND batch_id = ?${shopWhere}
-    `, params);
+      WHERE ${mediaScope} AND status <> 'deleted' AND batch_id = ?${shopWhere}
+    `, [aiTenantId(), ...params]);
     variants = await mysqlQuery(`
       SELECT id, output_dir
       FROM asset_variants
-      WHERE batch_id = ?${shopWhere}
-    `, params);
-    deleteMediaSql = `DELETE FROM listing_media_assets WHERE batch_id = ?${shopWhere}`;
-    deleteMediaParams = params;
-    deleteVariantSql = `DELETE FROM asset_variants WHERE batch_id = ?${shopWhere}`;
-    deleteVariantParams = params;
+      WHERE ${variantScope} AND batch_id = ?${shopWhere}
+    `, [scope.id, ...params]);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE ${mediaScope} AND batch_id = ?${shopWhere}`;
+    deleteMediaParams = [aiTenantId(), ...params];
+    deleteVariantSql = `DELETE FROM asset_variants WHERE ${variantScope} AND batch_id = ?${shopWhere}`;
+    deleteVariantParams = [scope.id, ...params];
   } else {
     const placeholders = assetIds.map(() => "?").join(",");
     mediaAssets = await mysqlQuery(`
       SELECT id, local_path, source_path
       FROM listing_media_assets
-      WHERE status <> 'deleted' AND id IN (${placeholders})
-    `, assetIds);
-    deleteMediaSql = `DELETE FROM listing_media_assets WHERE id IN (${placeholders})`;
-    deleteMediaParams = assetIds;
+      WHERE ${mediaScope} AND status <> 'deleted' AND id IN (${placeholders})
+    `, [aiTenantId(), ...assetIds]);
+    deleteMediaSql = `DELETE FROM listing_media_assets WHERE ${mediaScope} AND id IN (${placeholders})`;
+    deleteMediaParams = [aiTenantId(), ...assetIds];
   }
 
   const files = new Set();
@@ -564,11 +580,14 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
   for (const variant of variants) {
     if (variant.output_dir) dirs.add(variant.output_dir);
   }
-  if (batchId && !shopId) dirs.add(path.relative(ROOT_DIR, path.join(VARIANT_ROOT, sanitizeFilename(batchId))).replace(/\\/g, "/"));
 
   let deletedFiles = 0;
   let deletedDirs = 0;
   for (const filePath of files) {
+    const retained = await mysqlQuery(`SELECT id FROM listing_media_assets WHERE
+      (local_path = ? OR source_path = ?) AND id NOT IN (${mediaAssets.map(() => "?").join(",")}) LIMIT 1`,
+      [filePath, filePath, ...mediaAssets.map(asset => Number(asset.id))]);
+    if (retained.length) continue;
     if (await removeLocalAssetPath(filePath, { recursive: false })) deletedFiles += 1;
   }
   for (const dirPath of dirs) {
@@ -595,6 +614,7 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
 }
 
 export async function generateAssetVariantTitlePreview(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantTitlePreview(body, session));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const material = normalizeMaterialPayload(body.material || body);
@@ -625,6 +645,7 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
 }
 
 export async function generateAssetVariantVideoFromImage(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantVideoFromImage(body, session));
   await ensureAssetVariantSchema();
   const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
   if (!imageUrl) throw new Error("请先准备主图后再生成视频");
@@ -636,6 +657,7 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
     let materializedSourceBuffer = null;
     let sourceHash = "";
     if (sourcePath && fsSync.existsSync(sourcePath)) {
+      await assertAssetLocalSourceTenant(sourcePath, imageUrl);
       sourceHash = await fileSha256(sourcePath).catch(() => "");
       const cachedVideo = sourceHash ? await loadCachedAssetVariantVideo(sourceHash, recipe) : null;
       if (cachedVideo) return { video: normalizeGeneratedVideoForResponse(cachedVideo) };
@@ -691,6 +713,7 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
 }
 
 export async function generateListingVariantMediaFromImage(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateListingVariantMediaFromImage(body, session));
   await ensureAssetVariantSchema();
   const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
   if (!imageUrl) throw new Error("请先准备变体主图");
@@ -741,7 +764,7 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
       shop_id: context.shopId ?? context.shop_id ?? null,
       role: context.role || "rich_text_image",
       sort_order: context.sortOrder || context.sort_order || 1
-    });
+    }, currentAiTenantSession());
     return {
       url: persisted.finalUrl || persisted.publishUrl || persisted.localUrl || sourceUrl,
       publishUrl: persisted.publishUrl || persisted.finalUrl || "",
@@ -763,6 +786,7 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
   if (!localPath || !fsSync.existsSync(localPath)) {
     return { url: sourceUrl, publishUrl: "", previewUrl: sourceUrl, status: "local_missing" };
   }
+  await assertAssetLocalSourceTenant(localPath, sourceUrl);
   const asset = await registerListingMediaAssetFromFile({
     filePath: localPath,
     source_module: context.sourceModule || context.source_module || "ai_variant_rich_text",
@@ -778,7 +802,7 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
       resultId: context.resultId || context.result_id || "",
       workflowId: context.workflowId || context.workflow_id || ""
     }
-  });
+  }, currentAiTenantSession());
   const publishUrl = asset.publishUrl || asset.publish_url || "";
   const previewUrl = asset.previewUrl || asset.preview_url || "";
   return {
@@ -791,6 +815,7 @@ export async function ensureAssetVariantImagePublishUrl(source = "", context = {
 }
 
 export async function registerAssetVariantRichTextImage(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => registerAssetVariantRichTextImage(body, session));
   const source = body.source || body.url || body.imageUrl || body.image_url || "";
   const result = await ensureAssetVariantImagePublishUrl(source, {
     sourceModule: body.sourceModule || body.source_module || "ai_variant_workbench",
@@ -809,6 +834,8 @@ export async function registerAssetVariantRichTextImage(body = {}, session = nul
 }
 
 export async function importAssetVariantToListingAutomation(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => importAssetVariantToListingAutomation(body, session));
+  const scope = assetVariantTenantScope(session || currentAiTenantSession());
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const variantIds = uniqueNumbers(body.variantIds || body.variant_ids);
@@ -817,11 +844,11 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
   const variants = await mysqlQuery(`
     SELECT v.*, s.name AS shop_name, s.watermark_path
     FROM asset_variants v
-    LEFT JOIN shops s ON s.id = v.shop_id
+    JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(scope, "s")}
     WHERE v.id IN (${variantIds.map(() => "?").join(",")})
     ORDER BY v.id ASC
-  `, variantIds);
-  if (!variants.length) return { ok: true, imported: 0, drafts: [], note: "No variant rows found" };
+  `, [scope.id, ...variantIds]);
+  if (variants.length !== variantIds.length) throw Object.assign(new Error("素材不存在或不属于当前企业"), { statusCode: 404 });
 
   const drafts = [];
   const descriptionCache = new Map();
@@ -858,6 +885,7 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
 }
 
 export async function publishAssetVariantsToOzon(body = {}, session = null, context = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishAssetVariantsToOzon(body, session, context));
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   await context.throwIfCancelled?.();
@@ -882,7 +910,7 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
         variantId
       });
       await context.throwIfCancelled?.();
-      const draftRows = await mysqlQuery("SELECT template_id FROM listing_drafts WHERE id = ? LIMIT 1", [draftId]);
+      const draftRows = await mysqlQuery("SELECT template_id FROM listing_drafts WHERE COALESCE(NULLIF(tenant_id, ''), 'admin') = ? AND id = ? LIMIT 1", assetTenantParams([draftId], 0));
       const templateId = Number(draftRows[0]?.template_id || 0);
       if (!templateId || !shopId) throw new Error("Missing templateId or shopId");
 
@@ -1191,6 +1219,7 @@ function objectValue(value) {
 }
 
 export async function publishSelectionProductToOzon(body = {}, session = null, context = {}) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishSelectionProductToOzon(body, session, context));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
@@ -1198,7 +1227,8 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
   if (!productId) throw new Error("缺少选品 ID");
 
   await context.markStage?.("load_product", { productId });
-  const productRows = await mysqlQuery("SELECT * FROM products WHERE id = ? AND active = 1 LIMIT 1", [productId]);
+  const scope = assetVariantTenantScope(session || currentAiTenantSession());
+  const productRows = await mysqlQuery(`SELECT * FROM products p WHERE p.id = ? AND p.active = 1 AND ${assetVariantTenantPredicate(scope, "p")} LIMIT 1`, [productId, scope.id]);
   const product = productRows[0];
   if (!product) throw new Error("Product not found");
   if (!Number(product.package_weight_g || product.weight_g || 0)) throw new Error("请先填写包装克重后再一键上架");
@@ -1274,6 +1304,7 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
 }
 
 export async function enqueuePublishSelectionProductToOzon(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
   const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
@@ -1284,10 +1315,11 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
   const jobNo = `AVJ-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   const insertResult = await mysqlExecute(`
     INSERT INTO asset_variant_jobs
-    (job_no, job_type, status, product_id, request_json, created_by_person_id)
-    VALUES (?, 'publish_selection', 'queued', ?, ?, ?)
+    (job_no, tenant_id, job_type, status, product_id, request_json, created_by_person_id)
+    VALUES (?, ?, 'publish_selection', 'queued', ?, ?, ?)
   `, [
     jobNo,
+    businessTaskTenantKey(session),
     productId,
     JSON.stringify(requestBody),
     personId(session)
@@ -1306,6 +1338,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
 }
 
 export async function enqueueGenerateAssetVariants(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
   const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
@@ -1324,10 +1357,11 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
   const jobNo = `AVG-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   const insertResult = await mysqlExecute(`
     INSERT INTO asset_variant_jobs
-    (job_no, job_type, status, product_id, request_json, created_by_person_id)
-    VALUES (?, 'generate_variants', 'queued', ?, ?, ?)
+    (job_no, tenant_id, job_type, status, product_id, request_json, created_by_person_id)
+    VALUES (?, ?, 'generate_variants', 'queued', ?, ?, ?)
   `, [
     jobNo,
+    businessTaskTenantKey(session),
     productId,
     JSON.stringify(requestBody),
     personId(session)
@@ -1346,10 +1380,12 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
 }
 
 export async function assetVariantJobs(query = {}, session = null) {
+  const scope = assetVariantTenantScope(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
-  const where = [];
-  const params = [];
+  const where = ["j.tenant_id = ?"];
+  const params = [scope.id, tenantId];
   const createdByPersonId = Number(query.createdByPersonId || query.created_by_person_id || 0) || 0;
   const personScope = createdByPersonId || Number(personId(session) || 0) || 0;
   const jobType = cleanText(query.jobType || query.job_type || "", 64);
@@ -1379,7 +1415,7 @@ export async function assetVariantJobs(query = {}, session = null) {
   const rows = await mysqlQuery(`
     SELECT j.*, p.name AS product_name, p.selection_id
     FROM asset_variant_jobs j
-    LEFT JOIN products p ON p.id = j.product_id
+    LEFT JOIN products p ON p.id = j.product_id AND ${assetVariantTenantPredicate(scope, "p")}
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY j.id DESC
     LIMIT ?
@@ -1388,25 +1424,28 @@ export async function assetVariantJobs(query = {}, session = null) {
 }
 
 export async function assetVariantJobDetail(id, session = null) {
+  const scope = assetVariantTenantScope(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   const jobId = Number(id || 0);
   if (!jobId) return null;
   const rows = await mysqlQuery(`
     SELECT j.*, p.name AS product_name, p.selection_id
     FROM asset_variant_jobs j
-    LEFT JOIN products p ON p.id = j.product_id
-    WHERE j.id = ?
-      AND (? = 0 OR j.created_by_person_id = ?)
+    LEFT JOIN products p ON p.id = j.product_id AND ${assetVariantTenantPredicate(scope, "p")}
+    WHERE j.id = ? AND j.tenant_id = ?
     LIMIT 1
-  `, [jobId, Number(personId(session) || 0) || 0, Number(personId(session) || 0) || 0]);
+  `, [scope.id, jobId, tenantId]);
   return rows[0] ? normalizeAssetVariantJobRow(rows[0]) : null;
 }
 
 export async function cancelAssetVariantJob(id, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   const jobId = Number(id || 0);
   if (!jobId) throw new Error("Missing jobId");
-  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [jobId]);
+  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? LIMIT 1", [jobId, tenantId]);
   const job = rows[0];
   if (!job) throw new Error("Asset variant job not found");
   if (!["queued", "running"].includes(String(job.status || ""))) {
@@ -1430,8 +1469,8 @@ export async function cancelAssetVariantJob(id, session = null) {
       error_json = ?,
       finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP),
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND status IN ('queued', 'running')
-  `, [JSON.stringify({ message: "Cancelled by user", personId: personId(session) || null }), jobId]);
+    WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running')
+  `, [JSON.stringify({ message: "Cancelled by user", personId: personId(session) || null }), jobId, tenantId]);
   return {
     ok: true,
     cancelled: true,
@@ -1443,11 +1482,13 @@ export async function cancelAssetVariantJob(id, session = null) {
 }
 
 export async function retryAssetVariantJobFailures(id, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const jobId = Number(id || 0);
   if (!jobId) throw new Error("Missing jobId");
-  const jobRows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? LIMIT 1", [jobId]);
+  const jobRows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? LIMIT 1", [jobId, tenantId]);
   const job = jobRows[0];
   if (!job) throw new Error("Asset variant job not found");
   const result = parseJson(job.result_json, {});
@@ -1525,16 +1566,9 @@ async function runAssetVariantJob(job) {
     WHERE id = ?
   `, [JSON.stringify(progress.snapshot("starting")), row.id]);
   try {
-    const defaultTenants = await mysqlQuery("SELECT id, slug FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1");
-    const defaultTenant = defaultTenants[0];
-    if (!defaultTenant) throw new Error("默认企业不可用，无法恢复素材任务");
-    const storedScope = request._tenantScope || job.session?.tenant;
-    if (storedScope && (Number(storedScope.id) !== Number(defaultTenant.id) || storedScope.slug !== "default")) {
-      throw new Error("企业素材执行隔离尚未完成，无法执行该企业任务");
-    }
-    // Jobs created before enterprise support belonged to the legacy default
-    // workspace. This only restores job scope, never account memberships.
-    const session = { personId: Number(row.created_by_person_id || 0) || null, tenant: { id: Number(defaultTenant.id), slug: "default" } };
+    const session = await restoreBusinessTaskSession(row.tenant_id, row.created_by_person_id);
+    assertBusinessTaskPermission(session, "operations");
+    await withAiTenantSession(session, async () => {
     let result;
     if (row.job_type === "publish_selection") {
       result = await publishSelectionProductToOzon(request, session, {
@@ -1603,6 +1637,7 @@ async function runAssetVariantJob(job) {
       JSON.stringify(finalProgress),
       row.id
     ]);
+    });
   } catch (error) {
     if (isAssetVariantJobCancelledError(error)) {
       await mysqlExecute(`
@@ -1674,8 +1709,10 @@ async function updateAssetVariantJobStage(jobId, progress, stage, detail = {}) {
 }
 
 async function throwIfAssetVariantJobCancelled(jobId) {
-  const rows = await mysqlQuery("SELECT status FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
+  const rows = await mysqlQuery("SELECT status, tenant_id, created_by_person_id FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
+  if (!rows[0]) throw new AssetVariantJobCancelledError();
   if (String(rows[0]?.status || "") === "cancelled") throw new AssetVariantJobCancelledError();
+  assertBusinessTaskPermission(await restoreBusinessTaskSession(rows[0].tenant_id, rows[0].created_by_person_id), "operations");
 }
 
 function normalizeAssetVariantJobRow(row = {}) {
@@ -1952,12 +1989,20 @@ export async function resolveAssetTailTemplateFile(id, session = null) {
   return null;
 }
 
-export async function resolveAssetVariantFile(batchId, filename) {
+export async function resolveAssetVariantFile(batchId, filename, session = null) {
+  const scope = assetVariantTenantScope(session);
   const safeBatch = sanitizeFilename(batchId);
   const cleanName = String(filename || "").replace(/\\/g, "/").split("/").filter(Boolean).map(sanitizeFilename).join("/");
   const filePath = path.resolve(VARIANT_ROOT, safeBatch, cleanName);
   const batchDir = path.resolve(VARIANT_ROOT, safeBatch);
-  if (!filePath.startsWith(batchDir)) return null;
+  if (!filePath.startsWith(`${batchDir}${path.sep}`)) return null;
+  const owned = await mysqlQuery(`SELECT v.output_dir FROM asset_variants v
+    JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(scope, "s")}
+    WHERE v.batch_id = ?`, [scope.id, safeBatch]);
+  if (!owned.some(row => {
+    const output = path.resolve(ROOT_DIR, String(row.output_dir || ""));
+    return output.startsWith(`${batchDir}${path.sep}`) && filePath.startsWith(`${output}${path.sep}`);
+  })) return null;
   try {
     const buffer = await fs.readFile(filePath);
     return { buffer, mime: mimeForPath(filePath) };
@@ -2100,6 +2145,7 @@ async function ensureAssetVariantSchema() {
   await mysqlExecute(`
     CREATE TABLE IF NOT EXISTS asset_variant_jobs (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       job_no VARCHAR(64) NOT NULL,
       job_type VARCHAR(64) NOT NULL DEFAULT 'publish_selection',
       status VARCHAR(32) NOT NULL DEFAULT 'queued',
@@ -2653,7 +2699,7 @@ function buildListingProductFacts(material = {}, shop = {}) {
 }
 
 async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", request = {}, maxAttempts = 2 } = {}) {
-  const cacheKey = stableHash({ kind, provider, cacheInput });
+  const cacheKey = stableHash({ tenant: aiTenantId(), kind, provider, cacheInput });
   const rows = await mysqlQuery(`
     SELECT response_json
     FROM asset_variant_ai_cache
@@ -2741,13 +2787,13 @@ async function loadAssetVariantMediaRows(connection, variant) {
   const sql = `
     SELECT *
     FROM listing_media_assets
-    WHERE source_module = 'asset_variant'
+    WHERE tenant_id = ? AND source_module = 'asset_variant'
       AND status <> 'deleted'
       AND batch_id = ?
       AND (shop_id = ? OR shop_id IS NULL)
     ORDER BY FIELD(role, 'main', 'detail', 'tail', 'video'), sort_order ASC, id ASC
   `;
-  const params = [variant.batch_id || "", Number(variant.shop_id || 0)];
+  const params = [aiTenantId(), variant.batch_id || "", Number(variant.shop_id || 0)];
   const rows = connection
     ? (await connection.execute(sql, params))[0]
     : await mysqlQuery(sql, params);
@@ -2827,7 +2873,7 @@ async function loadCachedAssetVariantVideo(sourceHash, recipe = serverVideoRecip
     FROM asset_variant_video_cache
     WHERE source_hash = ? AND recipe_version = ?
     LIMIT 1
-  `, [sourceHash, recipe.version]).catch(() => []);
+  `, [stableHash({ tenant: aiTenantId(), sourceHash }), recipe.version]).catch(() => []);
   const cached = cachedRows[0];
   if (!cached?.publish_url) return null;
   return {
@@ -2889,7 +2935,7 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
   }
   await context.throwIfCancelled?.();
 
-  const inflightKey = sourceHash ? `${sourceHash}:${recipe.version}` : "";
+  const inflightKey = sourceHash ? `${aiTenantId()}:${sourceHash}:${recipe.version}` : "";
   if (inflightKey && assetVideoInflight.has(inflightKey)) {
     return assetVideoInflight.get(inflightKey);
   }
@@ -2949,7 +2995,7 @@ async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage 
       assetVariantId: Number(variant.id || 0),
       sourceImage: sourceImage.outputPath || sourceImage.url || ""
     }
-  });
+  }, currentAiTenantSession());
   if (sourceHash && asset.publish_url) {
     await mysqlExecute(`
       INSERT INTO asset_variant_video_cache (source_hash, recipe_version, publish_url, preview_url, original_name, metadata_json)
@@ -2957,7 +3003,7 @@ async function generateAndRegisterAssetVariantVideo({ variant = {}, sourceImage 
       ON DUPLICATE KEY UPDATE publish_url = VALUES(publish_url), preview_url = VALUES(preview_url),
         original_name = VALUES(original_name), metadata_json = VALUES(metadata_json), updated_at = CURRENT_TIMESTAMP
     `, [
-      sourceHash,
+      stableHash({ tenant: aiTenantId(), sourceHash }),
       recipe.version,
       asset.publish_url || asset.publishUrl || asset.url || "",
       asset.preview_url || asset.previewUrl || "",
@@ -3489,17 +3535,17 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
   const [rows] = await connection.execute(`
     SELECT id
     FROM listing_category_templates
-    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
+    WHERE COALESCE(NULLIF(tenant_id, ''), 'admin') = ? AND source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
     ORDER BY id ASC
     LIMIT 1
-  `, [name, ozonCategoryId]);
+  `, assetTenantParams([name, ozonCategoryId], 0));
   if (rows[0]?.id) {
     await connection.execute(`
       UPDATE listing_category_templates
       SET category_name = ?, source_raw_json = ?, editable_payload_json = ?, title = ?, description = ?,
           attributes_json = ?, images_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [
+      WHERE COALESCE(NULLIF(tenant_id, ''), 'admin') = ? AND id = ?
+    `, assetTenantParams([
       templatePayload.category_name || ozonCategoryName,
       JSON.stringify(compactAssetVariantSourceProvenance(templatePayload.source_raw || sourceRaw)),
       JSON.stringify(compactAssetVariantPersistencePayload(templatePayload.editable_payload || editablePayload)),
@@ -3508,16 +3554,16 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
       JSON.stringify(templatePayload.attributes || attributes),
       JSON.stringify(templatePayload.images || images),
       Number(rows[0].id)
-    ]);
+    ], 7));
     return Number(rows[0].id);
   }
   const [result] = await connection.execute(`
     INSERT INTO listing_category_templates
-    (ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
+    (tenant_id, ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
      description_prompt, image_rules_json, source_type, source_raw_json, editable_payload_json, title, description,
      attributes_json, images_json, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     templatePayload.ozon_category_id || ozonCategoryId,
     templatePayload.category_name || ozonCategoryName,
     name,
@@ -3528,7 +3574,7 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     JSON.stringify(templatePayload.attributes || attributes),
     JSON.stringify(templatePayload.images || images),
     personId(session)
-  ]);
+  ], 0));
   return Number(result.insertId);
 }
 
@@ -3554,11 +3600,11 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
   };
   const [result] = await connection.execute(`
     INSERT INTO listing_drafts
-    (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
+    (tenant_id, template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     templateId,
     variant.variant_title || variant.source_title || `asset variant ${variant.id}`,
     `AV-${variant.id}`,
@@ -3574,7 +3620,7 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
     JSON.stringify(manualFacts),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text, videos }),
     personId(session)
-  ]);
+  ], 0));
   return Number(result.insertId);
 }
 
@@ -3596,10 +3642,10 @@ async function insertListingShopCopyFromPackage(connection, draftId, variant, im
   const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
-    (draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
+    (tenant_id, draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     draftId,
     Number(variant.shop_id),
     offerId,
@@ -3610,7 +3656,7 @@ async function insertListingShopCopyFromPackage(connection, draftId, variant, im
     JSON.stringify([...mappedImages, ...mappedVideos]),
     JSON.stringify(validation),
     personId(session)
-  ]);
+  ], 0));
 }
 
 function compactAssetVariantSourceProvenance(value = {}) {
@@ -3641,14 +3687,14 @@ async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shop
       SET status = ?, publish_response_json = ?,
           published_at = CASE WHEN ? IN ('imported', 'published', 'success') THEN CURRENT_TIMESTAMP ELSE published_at END,
           updated_at = CURRENT_TIMESTAMP
-      WHERE draft_id = ? AND shop_id = ?
-    `, [
+      WHERE COALESCE(NULLIF(tenant_id, ''), 'admin') = ? AND draft_id = ? AND shop_id = ?
+    `, assetTenantParams([
       normalizedStatus,
       publishResult ? JSON.stringify(publishResult) : null,
       normalizedStatus,
       Number(draftId),
       Number(shopId)
-    ]);
+    ], 3));
   }
   if (variantId) {
     await mysqlExecute("UPDATE asset_variants SET status = ? WHERE id = ?", [normalizedStatus || "generated", Number(variantId)]);
@@ -3707,10 +3753,10 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
   const [rows] = await connection.execute(`
     SELECT id
     FROM listing_category_templates
-    WHERE source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
+    WHERE COALESCE(NULLIF(tenant_id, ''), 'admin') = ? AND source_type = 'asset_variant_engine' AND template_name = ? AND ozon_category_id = ? AND status <> 'deleted'
     ORDER BY id ASC
     LIMIT 1
-  `, [name, ozonCategoryId]);
+  `, assetTenantParams([name, ozonCategoryId], 0));
   if (rows[0]?.id) return Number(rows[0].id);
   const editablePayload = {
     title: variant.variant_title || variant.source_title || "",
@@ -3729,11 +3775,11 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
   };
   const [result] = await connection.execute(`
     INSERT INTO listing_category_templates
-    (ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
+    (tenant_id, ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
      description_prompt, image_rules_json, source_type, source_raw_json, editable_payload_json, title, description,
      attributes_json, images_json, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, '[]', '{}', '', '', '{}', 'asset_variant_engine', ?, ?, ?, ?, ?, '[]', ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     ozonCategoryId,
     ozonCategoryName,
     name,
@@ -3750,7 +3796,7 @@ async function ensureAssetVariantListingTemplate(connection, variant, session) {
     editablePayload.description,
     JSON.stringify(editablePayload.attributes),
     personId(session)
-  ]);
+  ], 0));
   return Number(result.insertId);
 }
 
@@ -3775,11 +3821,11 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
   };
   const [result] = await connection.execute(`
     INSERT INTO listing_drafts
-    (template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
+    (tenant_id, template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
      length_cm, width_cm, height_cm, weight_g, color, spec, quantity, manual_facts_json, ai_payload_json,
      created_by_person_id, updated_at)
-    VALUES (?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, '[]', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     templateId,
     variant.variant_title || variant.source_title || `缂備浇浜慨闈涱焽濡ゅ啯鍟戦柛灞捐壘缂?${variant.id}`,
     `AV-${variant.id}`,
@@ -3795,7 +3841,7 @@ async function insertListingDraft(connection, templateId, variant, images, sessi
     JSON.stringify(manualFacts),
     JSON.stringify({ title: variant.variant_title, description: variant.description_text }),
     personId(session)
-  ]);
+  ], 0));
   return Number(result.insertId);
 }
 
@@ -3808,10 +3854,10 @@ async function insertListingShopCopy(connection, draftId, variant, images, sessi
   const validation = { blocked: false, level: "green", errors: [], warnings: [] };
   await connection.execute(`
     INSERT INTO listing_shop_copies
-    (draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
+    (tenant_id, draft_id, shop_id, offer_id, source_product_id, title, price, stock_quantity, watermark_path, images_json, validation_json,
      status, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
-  `, [
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'prepared', ?, CURRENT_TIMESTAMP)
+  `, assetTenantParams([
     draftId,
     Number(variant.shop_id),
     offerId,
@@ -3822,7 +3868,7 @@ async function insertListingShopCopy(connection, draftId, variant, images, sessi
     JSON.stringify(mappedImages),
     JSON.stringify(validation),
     personId(session)
-  ]);
+  ], 0));
 }
 
 function normalizeMaterialPayload(raw = {}) {
@@ -3999,6 +4045,10 @@ function sanitizeFilename(value = "") {
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 120) || "asset";
+}
+
+function mimeForPath(filePath) {
+  return ({ ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4" })[path.extname(filePath).toLowerCase()] || "application/octet-stream";
 }
 
 function normalizeShopRuleRow(row, index = 0) {
@@ -4253,18 +4303,30 @@ function defaultShopWatermark(shop) {
 }
 
 async function readImageBuffer(source) {
-  const text = String(source || "").trim();
+  let text = String(source || "").trim();
+  if (/^https?:\/\//i.test(text)) {
+    const parsed = new URL(text);
+    if (["localhost", "127.0.0.1", "erp.hjt888.xyz"].includes(parsed.hostname) && parsed.pathname.startsWith("/api/")) text = parsed.pathname;
+  }
   if (!text) throw new Error("Missing text");
   const dataUrlMatch = text.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
   if (dataUrlMatch) return Buffer.from(dataUrlMatch[1], "base64");
+  const cropper = text.match(/^\/?api\/tools\/image-cropper\/file\/([^/]+)\/(.+)$/i);
+  if (cropper) {
+    const file = await getCropperTaskFile(decodeURIComponent(cropper[1]), decodeURIComponent(cropper[2]), currentAiTenantSession());
+    return fs.readFile(file.filePath);
+  }
   const productImageMatch = text.match(/^\/?api\/products\/(\d+)\/image$/i);
   if (productImageMatch) {
-    const rows = await mysqlQuery("SELECT image_url FROM products WHERE id = ? LIMIT 1", [Number(productImageMatch[1])]);
+    const scope = assetVariantTenantScope(currentAiTenantSession());
+    const rows = await mysqlQuery(`SELECT image_url FROM products p WHERE p.id = ? AND ${assetVariantTenantPredicate(scope, "p")} LIMIT 1`, [Number(productImageMatch[1]), scope.id]);
+    if (!rows[0]) throw Object.assign(new Error("商品图片不存在或不属于当前企业"), { statusCode: 404 });
     const storedImage = String(rows[0]?.image_url || "").trim();
     if (storedImage && storedImage !== text) return readImageBuffer(storedImage);
   }
   if (isLocalFileApiSource(text)) {
     const localPath = resolveLocalAssetPath(text);
+    await assertAssetLocalSourceTenant(localPath, text);
     if (!fsSync.existsSync(localPath)) {
       const error = new Error(`本地图片文件不存在：${text}`);
       error.code = "LOCAL_ASSET_MISSING";
@@ -4283,6 +4345,7 @@ async function readImageBuffer(source) {
     return Buffer.from(await response.arrayBuffer());
   }
   const localPath = resolveLocalAssetPath(text);
+  await assertAssetLocalSourceTenant(localPath, text);
   if (!fsSync.existsSync(localPath)) {
     const error = new Error(`本地图片文件不存在：${text}`);
     error.code = "LOCAL_ASSET_MISSING";
@@ -4291,6 +4354,45 @@ async function readImageBuffer(source) {
     throw error;
   }
   return fs.readFile(localPath);
+}
+
+async function assertAssetSourceProductTenant(productId) {
+  const id = Number(productId || 0);
+  if (!id) return;
+  const scope = assetVariantTenantScope(currentAiTenantSession());
+  const rows = await mysqlQuery(`SELECT p.id FROM products p WHERE p.id = ? AND ${assetVariantTenantPredicate(scope, "p")} LIMIT 1`, [id, scope.id]);
+  if (!rows[0]) throw Object.assign(new Error("来源商品不存在或不属于当前企业"), { statusCode: 404 });
+}
+
+async function assertAssetLocalSourceTenant(filePath, source = "") {
+  const session = currentAiTenantSession();
+  const scope = assetVariantTenantScope(session);
+  const resolved = path.resolve(String(filePath || ""));
+  let pathname = String(source || "");
+  if (/^https?:\/\//i.test(pathname)) pathname = new URL(pathname).pathname;
+  const task = /^\/api\/ai\/(?:file|preview-file)\/([^/]+)\/([^/]+)\/(.+)$/i.exec(pathname);
+  if (task) {
+    const file = await getAiTaskFile(decodeURIComponent(task[1]), task[2], decodeURIComponent(task[3]), session);
+    if (path.resolve(file.filePath) === resolved) return;
+  }
+  const cropper = /^\/api\/tools\/image-cropper\/file\/([^/]+)\/(.+)$/i.exec(pathname);
+  if (cropper) {
+    const file = await getCropperTaskFile(decodeURIComponent(cropper[1]), decodeURIComponent(cropper[2]), session);
+    if (path.resolve(file.filePath) === resolved) return;
+  }
+  const relative = path.relative(ROOT_DIR, resolved).replace(/\\/g, "/");
+  const media = await mysqlQuery(`SELECT id FROM listing_media_assets WHERE
+    (local_path = ? OR source_path = ? OR preview_url = ? OR publish_url = ?)
+    AND ${scope.isDefault ? "(tenant_id = ? OR tenant_id IS NULL OR tenant_id = '')" : "tenant_id = ?"}
+    AND status <> 'deleted' LIMIT 1`, [relative, relative, source, source, businessTaskTenantKey(session)]);
+  if (media.length) return;
+  const shops = await mysqlQuery(`SELECT s.id FROM shops s WHERE ${assetVariantTenantPredicate(scope, "s")}
+    AND (s.watermark_path = ? OR s.watermark_path = ?) LIMIT 1`, [scope.id, relative, source]);
+  if (shops.length) return;
+  const variants = await mysqlQuery(`SELECT v.output_dir FROM asset_variants v JOIN shops s ON s.id = v.shop_id
+    AND ${assetVariantTenantPredicate(scope, "s")} WHERE v.output_dir IS NOT NULL`, [scope.id]);
+  if (variants.some(row => resolved.startsWith(`${path.resolve(ROOT_DIR, row.output_dir)}${path.sep}`))) return;
+  throw Object.assign(new Error("本地素材不存在或不属于当前企业，请重新上传企业素材"), { statusCode: 404 });
 }
 
 async function fetchImageBuffer(url) {
@@ -4319,7 +4421,7 @@ async function imageResult(filePath, type, sortOrder = 1, context = {}) {
       productTitle: context.sourceTitle || "",
       variantTitle: context.variantTitle || ""
     }
-  });
+  }, currentAiTenantSession());
   return {
     assetId: asset.id,
     type,

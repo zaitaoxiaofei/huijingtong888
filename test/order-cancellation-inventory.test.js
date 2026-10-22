@@ -6,19 +6,23 @@ import { DatabaseSync } from 'node:sqlite';
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from '../src/services/order-transport-evidence.js';
 
 const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
+const orderTenantPredicateMysql = vm.runInNewContext('('+source.match(/^function orderTenantPredicateMysql\([^]*?^}/m)[0]+')');
+const scopeContext = {orderTenantPredicateMysql,orderOwnershipTenantScopeMysql:async()=>({id:1,defaultTenant:true}),orderListTenantScopeMysql:async()=>({id:1,defaultTenant:true}),assertOrderTaskAccessMysql:async()=>{}};
 function database() {
   const db = new DatabaseSync(':memory:');
   db.function('CONCAT_WS', { varargs: true }, (sep, ...args) => args.filter(v => v != null).join(sep));
   db.function('CONCAT', { varargs: true }, (...args) => args.join(''));
   db.function('regexp', (pattern, value) => Number(new RegExp(pattern).test(value || '')));
-  db.exec(`CREATE TABLE orders (id INTEGER, status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT);
+  db.exec(`CREATE TABLE shops(id INTEGER,tenant_id INTEGER); INSERT INTO shops VALUES(1,1);
+    CREATE TABLE products(id INTEGER,tenant_id INTEGER); INSERT INTO products VALUES(94,1);
+    CREATE TABLE orders (id INTEGER, status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT,shop_id INTEGER DEFAULT 1);
     CREATE TABLE order_items (id INTEGER, order_id INTEGER);
     CREATE TABLE order_status_history (order_id INTEGER, status TEXT);
-    INSERT INTO orders VALUES (1, 'cancelled', 'posting_canceled', '', 0, NULL);
+    INSERT INTO orders(id,status,tracking_stage,logistics_status,cancelled_after_ship,delivered_at) VALUES (1, 'cancelled', 'posting_canceled', '', 0, NULL);
     INSERT INTO order_items VALUES (10, 1);
     CREATE TABLE inventory_movements (id INTEGER PRIMARY KEY, product_id INTEGER, related_order_item_id INTEGER,
-      source_type TEXT, source_ref TEXT, status TEXT, quantity_delta INTEGER, note TEXT);
-    INSERT INTO inventory_movements VALUES (1, 94, 10, 'order_outbound', 'posting', 'posted', -1, 'original outbound'),
+      source_type TEXT, source_ref TEXT, status TEXT, quantity_delta INTEGER, note TEXT,tenant_id INTEGER DEFAULT 1);
+    INSERT INTO inventory_movements(id,product_id,related_order_item_id,source_type,source_ref,status,quantity_delta,note) VALUES (1, 94, 10, 'order_outbound', 'posting', 'posted', -1, 'original outbound'),
       (2, 94, 10, 'return_in', 'cancel_10_94', 'posted', 1, 'Order cancelled, inventory restored'),
       (3, 94, 10, 'return_in', 'manual_receipt_10', 'posted', 1, 'physical return');`);
   return db;
@@ -52,6 +56,7 @@ test('reversal preserves original outbound/manual receipt, is repeat-safe, and r
   let failRebuild = false, rebuilt = 0;
   const block = source.match(/export async function revokeShippedCancellationReturnsMysql\([^]*?\n}/)[0].replace('export ', '');
   const revoke = vm.runInNewContext(`${block};revokeShippedCancellationReturnsMysql`, {
+    ...scopeContext,
     orderTransportEvidenceSql, automaticCancellationReturnSql,
     withMysqlTransaction: async fn => {
       db.exec('BEGIN');
@@ -86,6 +91,7 @@ test('the cancellation sync exits before any stock restoration for shipped order
   let revokeCalls = 0, outboundQueries = 0;
   let shipped = 1;
   const sync = vm.runInNewContext(`${block};syncOutboundForOpenOrdersMysql`, {
+    ...scopeContext,
     orderOutboundSyncScopeMysql: () => ({ sql: '', params: [] }), orderTransportEvidenceSql,
     mysqlQuery: async sql => {
       if (sql.includes('FROM order_items oi')) return [{ entered_transport: shipped, order_item_id: 10 }];
@@ -110,6 +116,7 @@ test('pre-shipping cancellation restores only the deducted units and repeat sync
   let existingReturn = null;
   const posted = [];
   const sync = vm.runInNewContext(`${block};syncOutboundForOpenOrdersMysql`, {
+    ...scopeContext,
     orderOutboundSyncScopeMysql: () => ({ sql: '', params: [] }), orderTransportEvidenceSql,
     mysqlQuery: async sql => sql.includes('FROM order_items oi')
       ? [{ entered_transport: 0, order_item_id: 10, product_id: 94, quantity: 99 }]

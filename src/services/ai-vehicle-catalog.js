@@ -1,5 +1,8 @@
 import { normalizeVehicleBrand, VEHICLE_BRAND_CHINESE } from "../shared/vehicle-brand.js";
-import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { hasPermission } from "../shared/permissions.js";
+import { authorizeBusinessTaskSession, businessTaskTenantKey } from "./business-task-tenant.js";
+import { migrateAiVehicleCatalogSchema } from "./ai-vehicle-catalog-schema.js";
 
 const TAGS = [
   { key: "hot_all", label: "热门车（新车 + 二手车）" },
@@ -86,18 +89,41 @@ const HOT_NEW_ENERGY_MODELS = new Set([
   "LYNK & CO 900"
 ]);
 let schemaReady = false;
+let schemaReadyPromise;
 
-export async function aiVehicleCatalog() {
+export function vehicleCatalogTenantPredicate(tenantKey, alias = "") {
+  const key = String(tenantKey ?? "").trim();
+  if ((key !== "admin" && (!/^\d+$/.test(key) || !Number.isSafeInteger(Number(key)) || Number(key) <= 0)) || (alias && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias))) {
+    throw statusError("当前企业上下文无效，无法访问车型目录", 403);
+  }
+  const prefix = alias ? `${alias}.` : "";
+  return { sql: `((${prefix}tenant_id = 'builtin' AND ${prefix}source = 'builtin') OR (${prefix}source <> 'builtin' AND COALESCE(NULLIF(${prefix}tenant_id, ''), 'admin') = ?))`, params: [key === "admin" ? key : String(Number(key))] };
+}
+
+async function catalogSession(session, write = false) {
+  const authorized = await authorizeBusinessTaskSession(session);
+  const permissions = write ? ["inventory.write", "operations"] : ["inventory.read", "operations", "team"];
+  if (!permissions.some(permission => hasPermission(authorized, permission))) throw statusError("当前企业岗位无权访问或维护车型目录，请联系企业管理员", 403);
+  return authorized;
+}
+
+export async function aiVehicleCatalog(query = {}, session = {}) {
+  const authorized = await catalogSession(session);
+  const scope = vehicleCatalogTenantPredicate(businessTaskTenantKey(authorized));
   await ensureVehicleCatalogSchema();
   const rows = await mysqlQuery(`
-    SELECT id, brand_name, model_name, tags_json, aliases_json, supply_anchor, search_keywords_json, vehicle_reference_image_url,
+    SELECT id, brand_key, model_key, brand_name, model_name, tags_json, aliases_json, supply_anchor, search_keywords_json, vehicle_reference_image_url,
       recommended_products_json, ozon_competition, user_priority, source
     FROM ai_vehicle_catalog
-    WHERE enabled = 1
-    ORDER BY brand_name, CASE WHEN model_name = '' THEN 0 ELSE 1 END, model_name
-  `);
+    WHERE enabled = 1 AND ${scope.sql}
+    ORDER BY brand_name, CASE WHEN model_name = '' THEN 0 ELSE 1 END, model_name, source = 'builtin', id
+  `, scope.params);
   const brands = new Map();
+  const seen = new Set();
   for (const row of rows) {
+    const identity = `${row.brand_key}\n${row.model_key}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
     const brandZh = VEHICLE_BRAND_ZH[row.brand_name] || "";
     const brand = brands.get(row.brand_name) || {
       name: row.brand_name,
@@ -133,6 +159,9 @@ export async function aiVehicleCatalog() {
 }
 
 export async function addAiVehicleCatalogEntry(body = {}, session = {}) {
+  session = await catalogSession(session, true);
+  const tenantKey = businessTaskTenantKey(session);
+  const scope = vehicleCatalogTenantPredicate(tenantKey);
   await ensureVehicleCatalogSchema();
   const brand = normalizeVehicleBrand(body.brand || body.brandName);
   const model = cleanName(body.model || body.modelName);
@@ -141,39 +170,33 @@ export async function addAiVehicleCatalogEntry(body = {}, session = {}) {
   if (!brand) throw statusError("汽车品牌不能为空", 400);
   if (brand.length > 128) throw statusError("汽车品牌（brand）最多 128 个字符，请缩短后再保存。", 400);
   if (!isLatinVehicleBrand(brand)) throw statusError("汽车品牌必须使用俄罗斯市场可识别的英文名称，不能填写中文或俄文字母", 400);
+  const [existing] = await mysqlQuery(`SELECT * FROM ai_vehicle_catalog WHERE brand_key = ? AND model_key = ? AND ${scope.sql}
+    ORDER BY source = 'builtin', id LIMIT 1`, [keyOf(brand), model ? keyOf(model) : "__brand__", ...scope.params]);
+  if (existing && !existing.enabled) throw statusError("该品牌或车型（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
+  const builtin = existing?.source === "builtin" ? existing : {};
   const result = await mysqlExecute(`
     INSERT INTO ai_vehicle_catalog
-      (brand_key, brand_name, model_key, model_name, tags_json, vehicle_reference_image_url, source, created_by_person_id)
-    VALUES (?, ?, ?, ?, ?, ?, 'user', ?)
+      (brand_key, brand_name, model_key, model_name, tags_json, vehicle_reference_image_url, tenant_id,
+       aliases_json, supply_anchor, search_keywords_json, recommended_products_json, ozon_competition, user_priority, source, created_by_person_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', ?)
     ON DUPLICATE KEY UPDATE
       vehicle_reference_image_url = IF(VALUES(vehicle_reference_image_url) <> '', VALUES(vehicle_reference_image_url), vehicle_reference_image_url),
       id = LAST_INSERT_ID(id)
-  `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags), vehicleReferenceImageUrl, personId(session)]);
-  const [saved] = await mysqlQuery("SELECT id,brand_name,model_name,tags_json,vehicle_reference_image_url,enabled FROM ai_vehicle_catalog WHERE id=?", [Number(result.insertId)]);
+  `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags.length ? tags : parseTags(builtin.tags_json)), vehicleReferenceImageUrl || builtin.vehicle_reference_image_url || "", tenantKey,
+    JSON.stringify(parseJsonArray(builtin.aliases_json)), builtin.supply_anchor || "", JSON.stringify(parseJsonArray(builtin.search_keywords_json)), JSON.stringify(parseJsonArray(builtin.recommended_products_json)), builtin.ozon_competition || "", builtin.user_priority || "", personId(session)]);
+  const [saved] = await mysqlQuery("SELECT id,brand_name,model_name,tags_json,vehicle_reference_image_url,enabled FROM ai_vehicle_catalog WHERE id=? AND tenant_id=? AND source <> 'builtin'", [Number(result.insertId), tenantKey]);
   if (!saved?.enabled) throw statusError("该品牌或车型（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
   return { ok: true, id: Number(saved.id), brand: saved.brand_name, model: saved.model_name, tags: parseTags(saved.tags_json), vehicleReferenceImageUrl: saved.vehicle_reference_image_url || "" };
 }
 
-async function ensureVehicleCatalogSchema() {
+export async function ensureVehicleCatalogSchema() {
   if (schemaReady) return;
-  await mysqlExecute(`
-    CREATE TABLE IF NOT EXISTS ai_vehicle_catalog (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-      brand_key VARCHAR(128) NOT NULL,
-      brand_name VARCHAR(128) NOT NULL,
-      model_key VARCHAR(191) NOT NULL,
-      model_name VARCHAR(191) NOT NULL DEFAULT '',
-      tags_json JSON NULL,
-      source VARCHAR(32) NOT NULL DEFAULT 'builtin',
-      enabled TINYINT(1) NOT NULL DEFAULT 1,
-      created_by_person_id BIGINT NULL,
-      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_ai_vehicle_catalog_brand_model (brand_key, model_key),
-      KEY idx_ai_vehicle_catalog_brand (brand_name),
-      KEY idx_ai_vehicle_catalog_source (source, enabled)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  `);
+  if (!schemaReadyPromise) schemaReadyPromise = initializeVehicleCatalogSchema().catch(error => { schemaReadyPromise = null; throw error; });
+  await schemaReadyPromise;
+}
+
+async function initializeVehicleCatalogSchema() {
+  await withMysqlTransaction(connection => migrateAiVehicleCatalogSchema(connection, { apply: true }));
   await ensureCatalogMetadataColumns();
   for (const [baseTag, groups] of [["hot_new", NEW_VEHICLES], ["hot_used", USED_VEHICLES]]) {
     for (const [brand, models] of groups) {
@@ -220,8 +243,8 @@ async function seedAnchoredRow(brand, model, tags, metadata) {
   await mysqlExecute(`
     INSERT INTO ai_vehicle_catalog
       (brand_key, brand_name, model_key, model_name, tags_json, aliases_json, supply_anchor,
-       search_keywords_json, recommended_products_json, ozon_competition, user_priority, source)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'builtin')
+       search_keywords_json, recommended_products_json, ozon_competition, user_priority, source, tenant_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'builtin', 'builtin')
     ON DUPLICATE KEY UPDATE
       tags_json = IF(source = 'builtin', VALUES(tags_json), tags_json),
       aliases_json = VALUES(aliases_json), supply_anchor = VALUES(supply_anchor),
@@ -234,8 +257,8 @@ async function seedAnchoredRow(brand, model, tags, metadata) {
 async function seedRow(brand, model, tags) {
   await mysqlExecute(`
     INSERT INTO ai_vehicle_catalog
-      (brand_key, brand_name, model_key, model_name, tags_json, source)
-    VALUES (?, ?, ?, ?, ?, 'builtin')
+      (brand_key, brand_name, model_key, model_name, tags_json, source, tenant_id)
+    VALUES (?, ?, ?, ?, ?, 'builtin', 'builtin')
     ON DUPLICATE KEY UPDATE
       tags_json = IF(source = 'builtin', VALUES(tags_json), tags_json),
       updated_at = CURRENT_TIMESTAMP
@@ -281,5 +304,6 @@ function personId(session) {
 function statusError(message, status) {
   const error = new Error(message);
   error.status = status;
+  error.statusCode = status;
   return error;
 }

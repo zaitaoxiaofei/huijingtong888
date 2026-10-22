@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
+import { tenantPrivateFiles } from "./tenant-private-files.js";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
@@ -34,6 +35,10 @@ import {
 import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 import { deriveCollectedAttributesFromFacts } from "./listing-collected-attribute-deriver.js";
 import { listingTenantLookup } from "./listing-tenant-scope.js";
+import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
+import { assertBusinessTaskPermission, authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { assertImageCropperTaskOwner } from "../server/services/tools/imageCropperService.js";
 import { buildOrderOutcomeSql } from "./order-outcome.js";
 import { listingVariantInventoryCandidates, propagateListingVariantInventory } from "./listing-variant-inventory.js";
 import { ensurePersistedDraftVariantIds, publishedItemVariantIds } from "./listing-variant-identity.js";
@@ -508,25 +513,30 @@ export async function listingCategoryTemplateDetail(id, session, query = {}) {
 }
 
 export async function listingCopyJobs(session) {
+  session = await authorizeBusinessTaskSession(session);
   await ensureListingAutomationSchema();
   return all(`
     SELECT j.*, s.name AS shop_name, p.name AS created_by_name
     FROM listing_ozon_copy_jobs j
-    LEFT JOIN shops s ON s.id = j.shop_id
+    JOIN shops s ON s.id = j.shop_id AND ${listingStoredShopTenantPredicate("j", "s")}
     LEFT JOIN people p ON p.id = j.created_by_person_id
+    WHERE j.tenant_id = ?
     ORDER BY j.updated_at DESC, j.id DESC
     LIMIT 100
-  `).then((rows) => rows.map(normalizeCopyJobRow));
+  `, [listingTenantId(session)]).then((rows) => rows.map(normalizeCopyJobRow));
 }
 
 export async function copyListingTemplateFromOzonSku(body, session) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
+  const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
   const sku = Number(body?.sku || body?.ozon_sku || body?.ozonSku || 0);
   const shopId = Number(body?.shop_id || body?.shopId || 0);
   if (!Number.isFinite(sku) || sku <= 0) throw new Error("璇疯緭鍏?Ozon 鍓嶅彴 SKU");
   if (!shopId) throw new Error("Please select a shop for product copy");
 
-  const shop = await row("SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint FROM shops WHERE id = ? AND status <> 'deleted'", [shopId]);
+  const shop = await row(`SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint FROM shops WHERE id = ? AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`, [shopId, Number(session.tenant.id)]);
   if (!shop) throw new Error("Shop not found");
 
   const offerId = String(body?.offer_id || body?.offerId || `COPY-${sku}-${Date.now().toString(36)}`).slice(0, 128);
@@ -615,9 +625,10 @@ export async function copyListingTemplateFromOzonSku(body, session) {
 
   const jobId = await insert(`
     INSERT INTO listing_ozon_copy_jobs
-    (shop_id, ozon_sku, offer_id, task_id, template_id, status, request_json, response_json, created_by_person_id, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    (tenant_id, shop_id, ozon_sku, offer_id, task_id, template_id, status, request_json, response_json, created_by_person_id, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   `, [
+    tenantId,
     shopId,
     String(sku),
     offerId,
@@ -632,14 +643,16 @@ export async function copyListingTemplateFromOzonSku(body, session) {
   return {
     ok: true,
     reused: Boolean(existingTemplate?.id),
-    job: await listingCopyJob(jobId),
+    job: await listingCopyJob(jobId, session),
     template: await listingCategoryTemplate(templateId, session)
   };
 }
 
-export async function refreshListingCopyJob(jobId) {
+export async function refreshListingCopyJob(jobId, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
-  const job = await listingCopyJob(jobId);
+  const job = await listingCopyJob(jobId, session);
   if (!job) throw new Error("Copy job not found");
   if (!job.task_id) return job;
   const shop = await row("SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint FROM shops WHERE id = ?", [job.shop_id]);
@@ -665,7 +678,7 @@ export async function refreshListingCopyJob(jobId) {
           job,
           refs,
           categoryAttributes
-        }, null);
+        }, session);
       }
     } catch (error) {
       detailError = error;
@@ -674,17 +687,17 @@ export async function refreshListingCopyJob(jobId) {
   await mysqlExecute(`
     UPDATE listing_ozon_copy_jobs
     SET status = ?, response_json = ?, product_id = ?, product_detail_json = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+    WHERE id = ? AND tenant_id = ?
   `, [
     productDetail ? "template_synced" : status,
     JSON.stringify(response),
     refs.productIds[0] ? String(refs.productIds[0]) : "",
     productDetail ? JSON.stringify(productDetail) : (detailError ? JSON.stringify({ error: detailError.message }) : ""),
-    Number(jobId)
+    Number(jobId), listingTenantId(session)
   ]);
   return {
-    job: await listingCopyJob(jobId),
-    template: template || (job.template_id ? await listingCategoryTemplate(job.template_id, null) : null),
+    job: await listingCopyJob(jobId, session),
+    template: template || (job.template_id ? await listingCategoryTemplate(job.template_id, session) : null),
     product_detail: productDetail,
     category_attributes: categoryAttributes,
     detail_error: detailError ? detailError.message : ""
@@ -2070,7 +2083,7 @@ export async function collectorBoxProducts(query = {}, session = null) {
     includeSummary ? all(summarySql, [shanghaiDateKey(), tenantId]) : Promise.resolve([])
   ]);
   const pageSkus = rows.map((item) => String(item.sku || "").trim()).filter(Boolean);
-  const publishStats = tenantId === "admin" && pageSkus.length
+  const publishStats = pageSkus.length
     ? await all(`
         SELECT
           source_collector_sku,
@@ -2080,16 +2093,17 @@ export async function collectorBoxProducts(query = {}, session = null) {
           SUM(status IN ('failed', 'ozon_status_error')) AS publish_failed_count
         FROM listing_publish_records
         WHERE source_collector_sku IN (${pageSkus.map(() => "?").join(", ")})
+          AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?
           AND status <> 'deleted'
         GROUP BY source_collector_sku
-      `, pageSkus)
+      `, [...pageSkus, tenantId])
     : [];
   const publishStatsBySku = new Map(publishStats.map((item) => [String(item.source_collector_sku || ""), item]));
+  const ownedRows = await collectorBoxOwnedLinks(rows, tenantId);
   return {
-    rows: rows.map((item) => buildCollectorBoxRow({
+    rows: ownedRows.map((item) => buildCollectorBoxRow({
       ...item,
-      ...(tenantId === "admin" ? publishStatsBySku.get(String(item.sku || "")) || {} : {}),
-      ...(tenantId === "admin" ? {} : { selection_product_id: null, listing_template_id: null })
+      ...(publishStatsBySku.get(String(item.sku || "")) || {})
     })),
     ...(includeCount ? { total: Number(totalRow?.total || 0) } : {}),
     page,
@@ -2109,16 +2123,14 @@ export async function collectorBoxProductDetail(sku, session = null, tenantId = 
     LIMIT 1
   `, [normalizedTenantId, String(sku || "").trim()]);
   if (!detail) return null;
+  const [ownedDetail] = await collectorBoxOwnedLinks([detail], normalizedTenantId);
   const normalized = {
-    ...buildCollectorBoxRow(detail),
+    ...buildCollectorBoxRow(ownedDetail),
     payload: buildPluginCollectedProductPayload(detail),
     rawPayload: parseCollectedPayloadJson(detail.payload_json),
     editPayload: parseCollectedPayloadJson(detail.edit_payload_json)
   };
-  if (normalizedTenantId !== "admin") {
-    normalized.selection_product_id = null;
-    normalized.listing_template_id = null;
-  } else if (normalized.listing_template_id) {
+  if (normalized.listing_template_id) {
     const template = await listingCategoryTemplate(normalized.listing_template_id, session).catch(() => null);
     if (template) {
       normalized.templateSnapshot = compactTemplateForEditor(template);
@@ -2128,6 +2140,26 @@ export async function collectorBoxProductDetail(sku, session = null, tenantId = 
     }
   }
   return normalized;
+}
+
+async function collectorBoxOwnedLinks(rows, tenantKey) {
+  const productIds = [...new Set(rows.map(item => Number(item.selection_product_id || 0)).filter(Boolean))];
+  const templateIds = [...new Set(rows.map(item => Number(item.listing_template_id || 0)).filter(Boolean))];
+  if (!productIds.length && !templateIds.length) return rows;
+  const lookup = listingTenantLookup(tenantKey);
+  const owner = await row(`SELECT id FROM tenants WHERE ${lookup.column} = ? AND status = 'active' LIMIT 1`, [lookup.value]);
+  const ownedProducts = owner && productIds.length ? await all(`SELECT id FROM products
+    WHERE id IN (${productIds.map(() => "?").join(",")}) AND active = 1
+      AND (tenant_id = ?${tenantKey === "admin" ? " OR tenant_id IS NULL" : ""})`, [...productIds, Number(owner.id)]) : [];
+  const ownedTemplates = templateIds.length ? await all(`SELECT id FROM listing_category_templates
+    WHERE id IN (${templateIds.map(() => "?").join(",")}) AND status <> 'deleted'
+      AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?`, [...templateIds, tenantKey]) : [];
+  const productSet = new Set(ownedProducts.map(item => Number(item.id)));
+  const templateSet = new Set(ownedTemplates.map(item => Number(item.id)));
+  return rows.map(item => ({ ...item,
+    selection_product_id: productSet.has(Number(item.selection_product_id)) ? item.selection_product_id : null,
+    listing_template_id: templateSet.has(Number(item.listing_template_id)) ? item.listing_template_id : null
+  }));
 }
 
 export async function deleteCollectorBoxProducts(body = {}, session = null) {
@@ -2241,6 +2273,8 @@ function collectorBoxTemplateBlockingIssues(normalized = {}) {
 }
 
 export async function createListingTemplateFromCollectorBox(sku, body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
   if (!detail) throw new Error("閲囬泦绠卞晢鍝佷笉瀛樺湪");
   const forceRebuild = Boolean(body?.force || body?.force_rebuild || body?.forceRebuild || body?.refresh || body?.rebuild);
@@ -3059,16 +3093,17 @@ export async function createListingTemplateFromOnlineProduct(onlineProductId, bo
 }
 
 export async function onlineProductListingEditDraft(onlineProductId, body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
   await ensureListingAutomationSchema();
   const targetId = Number(onlineProductId || body?.online_product_id || body?.onlineProductId || body?.id || 0);
   if (!targetId) throw new Error("缂哄皯鍦ㄧ嚎鍟嗗搧 ID");
-  const draft = await onlineProductEditDraftMysql(targetId);
+  const draft = await onlineProductEditDraftMysql(targetId, Number(session.tenant.id));
   const latestSnapshot = await latestPublishRecordTemplateSnapshotForOnlineProduct({
     shopId: draft?.shop_id,
     offerId: draft?.offer_id || draft?.template?.editable_payload?.sku || draft?.template?.source_raw?.offer_id || "",
     onlineProductId: targetId,
     ozonProductId: draft?.ozon_product_id || draft?.template?.source_raw?.ozon_product_id || ""
-  }).catch(() => null);
+  }, session).catch(() => null);
   const template = latestSnapshot?.template || draft?.template || {};
   const sourceRaw = {
     ...(template.source_raw || {}),
@@ -3096,6 +3131,7 @@ export async function onlineProductListingEditDraft(onlineProductId, body = {}, 
     autoSync: body?.auto_sync !== false && body?.autoSync !== false,
     diagnostics: body?.diagnostics !== false
   }));
+  await authorizeBusinessTaskSession(session);
   return {
     ...draft,
     template: standardizedTemplate,
@@ -3103,19 +3139,22 @@ export async function onlineProductListingEditDraft(onlineProductId, body = {}, 
   };
 }
 
-async function latestPublishRecordTemplateSnapshotForOnlineProduct({ shopId = 0, offerId = "", onlineProductId = 0, ozonProductId = "" } = {}) {
+async function latestPublishRecordTemplateSnapshotForOnlineProduct({ shopId = 0, offerId = "", onlineProductId = 0, ozonProductId = "" } = {}, session = null) {
+  const tenantId = listingTenantId(session);
   const normalizedShopId = Number(shopId || 0);
   const normalizedOfferId = String(offerId || "").trim();
   const normalizedOnlineProductId = Number(onlineProductId || 0);
   const normalizedOzonProductId = String(ozonProductId || "").trim();
   if (!normalizedShopId || (!normalizedOfferId && !normalizedOnlineProductId && !normalizedOzonProductId)) return null;
   const where = [
+    "COALESCE(tenant_id, 'admin') = ?",
+    `EXISTS (SELECT 1 FROM shops snapshot_shop WHERE snapshot_shop.id = listing_publish_records.shop_id AND ${listingStoredShopTenantPredicate("listing_publish_records", "snapshot_shop")})`,
     "shop_id = ?",
     "status <> 'deleted'",
     "template_snapshot_json IS NOT NULL",
     "template_snapshot_json <> ''"
   ];
-  const params = [normalizedShopId];
+  const params = [tenantId, normalizedShopId];
   const matches = [];
   if (normalizedOfferId) {
     matches.push("offer_id = ?");
@@ -3295,6 +3334,9 @@ function editorAttributeOptionValueCandidates(option = {}) {
   ].map(editorAttributeOptionText).filter(Boolean);
 }
 export async function createSelectionFromCollectorBox(sku, body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
+  const tenantId = listingTenantId(session);
   const detail = await collectorBoxProductDetail(sku, session, body?.tenant_id || body?.tenantId || "admin");
   if (!detail) throw new Error("閲囬泦绠卞晢鍝佷笉瀛樺湪");
   const editInput = body.editPayload || body.edit_payload || body || {};
@@ -3308,7 +3350,8 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
   const productBodies = buildSelectionProductBodiesFromCollectorBox(detail, body, session);
   const isVariantSplit = productBodies.length > 1 || normalizeArray(body.variantSelections || body.variant_selections || body.variants).length > 0;
   if (detail.selection_product_id) {
-    let existingProduct = await selectionProductMysql(detail.selection_product_id);
+    await assertDraftSourceProductTenant(detail.selection_product_id, tenantId);
+    let existingProduct = await selectionProductMysql(detail.selection_product_id, {}, tenantId);
     if (existingProduct && !isVariantSplit) {
       const productBody = productBodies[0] || {};
       const imageUrls = [productBody.image_url, ...normalizeArray(productBody.detail_image_urls)].filter(Boolean);
@@ -3316,9 +3359,9 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
         await mysqlExecute(`
           UPDATE products
           SET image_url = ?, detail_image_urls = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `, [imageUrls[0], JSON.stringify(imageUrls.slice(1)), detail.selection_product_id]);
-        existingProduct = await selectionProductMysql(detail.selection_product_id);
+          WHERE id = ? AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})
+        `, [imageUrls[0], JSON.stringify(imageUrls.slice(1)), detail.selection_product_id, Number(session.tenant.id)]);
+        existingProduct = await selectionProductMysql(detail.selection_product_id, {}, tenantId);
       }
       if (body.name || body.internal_product_name || body.title || body.editPayload || body.edit_payload) {
         const updatedName = String(body.name || body.internal_product_name || body.title || productBody.name || existingProduct.name || `Ozon ${detail.sku}`).trim();
@@ -3331,7 +3374,7 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
               package_weight_g = ?, length_cm = ?, width_cm = ?, height_cm = ?, listing_price_rub = ?,
               air_sale_price_rmb = ?, listing_title_ru = ?, listing_tags_ru = ?, listing_description_ru = ?,
               exchange_rate = COALESCE(?, exchange_rate), updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
+          WHERE id = ? AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})
         `, [
           updatedName,
           productBody.image_url || existingProduct.image_url || detail.image_url || "",
@@ -3361,9 +3404,10 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
           productBody.listing_tags_ru || existingProduct.listing_tags_ru || "",
           productBody.listing_description_ru || existingProduct.listing_description_ru || "",
           productBody.exchange_rate || null,
-          detail.selection_product_id
+          detail.selection_product_id,
+          Number(session.tenant.id)
         ]);
-        existingProduct = await selectionProductMysql(detail.selection_product_id);
+        existingProduct = await selectionProductMysql(detail.selection_product_id, {}, tenantId);
       }
       await mysqlExecute(`
         UPDATE ozon_plugin_collected_products
@@ -3382,11 +3426,11 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
   const created = [];
   for (const productBody of productBodies) {
     const { __variant, ...createBody } = productBody;
-    const result = await createProductMysql(createBody);
+    const result = await createProductMysql(createBody, null, tenantId);
     created.push({
       ...result,
       variant: __variant,
-      product: await selectionProductMysql(result.id)
+      product: await selectionProductMysql(result.id, {}, tenantId)
     });
   }
   const firstResult = created[0] || {};
@@ -3404,7 +3448,7 @@ export async function createSelectionFromCollectorBox(sku, body = {}, session = 
     ...firstResult,
     products: created.map((item) => item.product).filter(Boolean),
     created_count: created.length,
-    product: firstResult.product || await selectionProductMysql(firstResult.id),
+    product: firstResult.product || await selectionProductMysql(firstResult.id, {}, tenantId),
     collectorProduct: await collectorBoxProductDetail(detail.sku, session, detail.tenant_id || body?.tenant_id || body?.tenantId || "admin")
   };
 }
@@ -3434,6 +3478,10 @@ export async function createListingTemplateFromCollectedProductId(id, session = 
 }
 
 export async function uploadListingMedia(req, options = {}) {
+  if (!options.publicUpload) {
+    options = { ...options, session: await authorizeBusinessTaskSession(options.session || req?._session) };
+    assertBusinessTaskPermission(options.session, "operations");
+  }
   return withListingMediaUploadSlot(() => uploadListingMediaWithSlot(req, options));
 }
 
@@ -3574,7 +3622,8 @@ function listingMediaUploadResult(asset, options = {}) {
   };
 }
 
-export async function uploadTeamAttachment(req) {
+export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
+  const session = await authorizeBusinessTaskSession(req._session);
   const file = await readTeamAttachmentMultipart(req);
   const safeName = sanitizeListingMediaFilename(file.filename || "attachment");
   const extension = path.extname(safeName).toLowerCase();
@@ -3597,13 +3646,14 @@ export async function uploadTeamAttachment(req) {
   const baseName = path.basename(safeName, extension).slice(0, 90) || "attachment";
   const storedName = `${Date.now()}-${crypto.randomUUID()}-${baseName}${extension}`;
   await writeTeamAttachmentFile(storedName, file.buffer);
+  const url = await tenantPrivateFiles.register({ storageName: storedName, name: safeName, size: file.buffer.length, contentType: expectedContentType }, session, purpose);
   return {
     ok: true,
-    url: `/uploads/team-attachments/${storedName}`,
+    url,
     name: safeName,
     storageName: storedName,
     size: file.buffer.length,
-    contentType: file.contentType || expectedContentType,
+    contentType: expectedContentType,
     extension
   };
 }
@@ -4142,11 +4192,13 @@ export async function listingMediaAssets(query = {}, session = null) {
     )`);
     params.push(...Array(9).fill(`%${keyword}%`));
   }
-  const variantJoinSql = tenantId === "admin" ? `
+  const variantJoinSql = `
       LEFT JOIN asset_variants v
         ON v.batch_id = m.batch_id
        AND (v.shop_id = m.shop_id OR m.shop_id IS NULL)
-  ` : "LEFT JOIN asset_variants v ON 1 = 0";
+       AND EXISTS (SELECT 1 FROM shops variant_shop WHERE variant_shop.id = v.shop_id
+         AND ${listingStoredShopTenantPredicate("m", "variant_shop")})
+  `;
   const joinedFrom = `
       FROM listing_media_assets m
       ${variantJoinSql}
@@ -4641,7 +4693,7 @@ export async function searchMaterialPackages(query = {}, session = null) {
   const rows = await all(`
     SELECT t.*, s.name AS shop_name
     FROM listing_category_templates t
-    LEFT JOIN shops s ON s.id = t.source_shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(t.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = t.source_shop_id AND ${listingStoredShopTenantPredicate("t", "s")}
     WHERE COALESCE(t.tenant_id, 'admin') = ? AND ${where.join(" AND ")}
     ORDER BY t.updated_at DESC, t.id DESC
     LIMIT ? OFFSET ?
@@ -4658,7 +4710,7 @@ export async function materialPackageDetail(id, session = null) {
   const item = await row(`
     SELECT t.*, s.name AS shop_name
     FROM listing_category_templates t
-    LEFT JOIN shops s ON s.id = t.source_shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(t.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = t.source_shop_id AND ${listingStoredShopTenantPredicate("t", "s")}
     WHERE t.id = ? AND t.status <> 'deleted' AND COALESCE(t.tenant_id, 'admin') = ?
     LIMIT 1
   `, [Number(id), listingTenantId(session)]);
@@ -4671,6 +4723,7 @@ export async function materialPackageDetail(id, session = null) {
 }
 
 export async function generateDeepSeekListingContent(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateDeepSeekListingContent(body, session));
   const type = cleanText(body.type, 64);
   const context = objectValue(body.context || {});
   const allowed = new Set(["listingForm", "title", "keywords", "tags", "description", "shortDescription", "categorySuggest", "attributeFill", "translateRu", "translateZh", "optimizeSeo", "imageCopy"]);
@@ -4727,7 +4780,7 @@ async function listingOfferIdExistsInTenant(offerId = "", { excludeDraftId = 0, 
     ? `COALESCE(${alias}.tenant_id, 'admin') = ?`
     : `${alias}.tenant_id = ?`;
   const [online, record, copy, draft] = await Promise.all([
-    row(`SELECT op.id FROM online_products op JOIN shops s ON s.id = op.shop_id AND ${tenantScope("s")} WHERE op.offer_id = ? LIMIT 1`, [tenantId, offer]).catch(() => null),
+    row(`SELECT op.id FROM online_products op JOIN shops s ON s.id = op.shop_id AND ${tenantId === "admin" ? "(s.tenant_id IS NULL OR s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1))" : "s.tenant_id = ?"} WHERE op.offer_id = ? LIMIT 1`, [...(tenantId === "admin" ? [] : [Number(tenantId)]), offer]).catch(() => null),
     row(`SELECT r.id FROM listing_publish_records r WHERE r.offer_id = ? AND r.status <> 'deleted' AND ${tenantScope("r")} LIMIT 1`, [offer, tenantId]).catch(() => null),
     row(`SELECT c.id FROM listing_shop_copies c WHERE c.offer_id = ? AND c.status <> 'deleted' AND ${tenantScope("c")} LIMIT 1`, [offer, tenantId]).catch(() => null),
     row(`SELECT d.id FROM listing_drafts d WHERE d.internal_code = ? AND d.status <> 'deleted' AND d.id <> ? AND ${tenantScope("d")} LIMIT 1`, [offer, draftId, tenantId]).catch(() => null)
@@ -5145,14 +5198,15 @@ function isColorAttributeValueQuery({ attributeId, cacheHint } = {}) {
 
 export async function listingOzonCategorySyncJobs(query = {}, session = null) {
   await ensureListingAutomationSchema();
+  const tenantId = listingTenantId(session);
   const limit = Math.min(Math.max(Number(query.limit || 50), 1), 200);
   const rows = await all(`
     SELECT j.*, s.name AS shop_name
     FROM ozon_category_sync_jobs j
-    LEFT JOIN shops s ON s.id = j.shop_id
+    JOIN shops s ON s.id = j.shop_id AND (s.tenant_id = ?${tenantId === "admin" ? " OR s.tenant_id IS NULL" : ""})
     ORDER BY j.started_at DESC, j.id DESC
     LIMIT ?
-  `, [limit]);
+  `, [Number(session?.tenant?.id), limit]);
   return rows.map(normalizeOzonCategorySyncJobRow);
 }
 
@@ -5438,6 +5492,16 @@ export async function registerListingMediaAssetFromFile(body = {}, session = nul
 export async function registerListingMediaAsset(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const payload = normalizeListingMediaAssetPayload(body, session);
+  if (payload.shop_id) {
+    const lookup = listingTenantLookup(payload.tenant_id);
+    const owned = await row(`SELECT s.id FROM shops s JOIN tenants t ON t.${lookup.column} = ?
+      WHERE s.id = ? AND s.status <> 'deleted' AND (s.tenant_id = t.id${lookup.key === "admin" ? " OR s.tenant_id IS NULL" : ""}) LIMIT 1`, [lookup.value, payload.shop_id]);
+    if (!owned) throw Object.assign(new Error("素材关联店铺不存在或不属于当前企业"), { status: 404, statusCode: 404 });
+  }
+  if (payload.template_id) {
+    const owned = await row("SELECT id FROM listing_category_templates WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted' LIMIT 1", [payload.template_id, payload.tenant_id]);
+    if (!owned) throw Object.assign(new Error("素材关联模板不存在或不属于当前企业"), { status: 404, statusCode: 404 });
+  }
   const id = await insert(`
     INSERT INTO listing_media_assets
     (tenant_id, source_module, source_id, batch_id, shop_id, template_id, variant_id, media_type, role,
@@ -6056,7 +6120,7 @@ async function materializeListingMediaUrlRecord(url = "", metadata = {}, session
     };
   }
   try {
-    const source = await readListingMediaBuffer(sourceUrl);
+    const source = await readListingMediaBuffer(sourceUrl, session);
     const extension = listingMediaExtensionForSource(sourceUrl, source.contentType);
     const sourceContentType = source.contentType || mimeTypeForListingMediaExtension(extension);
     const optimizedMedia = await optimizeListingImageForPublish(source.buffer, {
@@ -6163,7 +6227,7 @@ async function materializeListingMediaUrlRecord(url = "", metadata = {}, session
   }
 }
 
-async function readListingMediaBuffer(url = "") {
+async function readListingMediaBuffer(url = "", session = null) {
   const value = String(url || "").trim();
   if (!value) throw new Error("media URL is empty");
   const localPath = resolveListingMediaLocalPath(value);
@@ -6176,7 +6240,7 @@ async function readListingMediaBuffer(url = "") {
       contentType: mimeTypeForListingMediaExtension(extension)
     };
   }
-  const aiTaskFile = await resolveLocalAiTaskMedia(value);
+  const aiTaskFile = await resolveLocalAiTaskMedia(value, session);
   if (aiTaskFile) {
     return {
       buffer: await fs.readFile(aiTaskFile.filePath),
@@ -6185,7 +6249,7 @@ async function readListingMediaBuffer(url = "") {
       contentType: aiTaskFile.contentType
     };
   }
-  const cropperFile = await resolveLocalImageCropperMedia(value);
+  const cropperFile = await resolveLocalImageCropperMedia(value, session);
   if (cropperFile) {
     return {
       buffer: await fs.readFile(cropperFile.filePath),
@@ -6261,7 +6325,7 @@ function normalizedListingMediaSourceProtocol(protocol = "") {
   return value === "http:" || value === "https:" ? value : "https:";
 }
 
-async function resolveLocalAiTaskMedia(url = "") {
+async function resolveLocalAiTaskMedia(url = "", session = null) {
   const value = String(url || "").trim();
   if (!value) return null;
   let pathname = value;
@@ -6281,12 +6345,15 @@ async function resolveLocalAiTaskMedia(url = "") {
   const taskId = decodeURIComponent((match || legacyMatch)[1]);
   const scope = match ? decodeURIComponent(match[2]) : "generated";
   const filename = (match ? match[3] : legacyMatch[2]).split("/").map(decodeURIComponent).join("/");
-  const direct = await getAiTaskFile(taskId, scope, filename).catch(() => null);
+  const direct = await getAiTaskFile(taskId, scope, filename, session || currentAiTenantSession()).catch(error => {
+    if (error?.status === 403 || error?.statusCode === 403 || /不属于当前企业/.test(error?.message || "")) throw error;
+    return null;
+  });
   if (direct) return direct;
   return resolvePreviewAiTaskMedia(taskId, scope, filename);
 }
 
-async function resolveLocalImageCropperMedia(url = "") {
+async function resolveLocalImageCropperMedia(url = "", session = null) {
   const value = String(url || "").trim();
   if (!value) return null;
   let pathname = value;
@@ -6303,6 +6370,7 @@ async function resolveLocalImageCropperMedia(url = "") {
   const match = /^\/api\/tools\/image-cropper\/file\/([^/]+)\/(.+)$/i.exec(pathname);
   if (!match) return null;
   const taskId = decodeURIComponent(match[1]);
+  await assertImageCropperTaskOwner(taskId, session || currentAiTenantSession());
   if (!/^[a-zA-Z0-9_-]{8,80}$/.test(taskId)) return null;
   const filename = match[2].split("/").map(decodeURIComponent).join("/").replace(/\\/g, "/");
   const root = path.resolve(process.cwd(), "uploads", "temp", "image-cropper", taskId);
@@ -6841,14 +6909,16 @@ async function buildListingCategoryPublishDiagnostics(template = {}, context = {
 }
 
 export async function validateListingTemplatePublishForShop(body = {}, shopId = 0, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = listingTenantId(session);
   const validation = await validateListingTemplatePublish(body, session);
   const targetShopId = Number(shopId || 0);
   if (!targetShopId || !normalizeArray(validation.payload?.items).length) return validation;
   const shop = await row(
-    "SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint FROM shops WHERE id = ? AND status <> 'deleted'",
-    [targetShopId]
-  ).catch(() => null);
-  if (!shop) return validation;
+    `SELECT id, name, ozon_client_id, COALESCE(NULLIF(ozon_api_key, ''), api_key_hint) AS api_key_hint FROM shops WHERE id = ? AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [targetShopId, Number(session.tenant.id)]
+  );
+  if (!shop) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404, statusCode: 404 });
   const payload = await applyShopPublishDefaults(validation.payload, shop).catch(() => validation.payload);
   const updatedCategoryHealth = validation.category_health
     ? await buildListingCategoryPublishDiagnostics(body.template || body, { payload }).catch(() => validation.category_health)
@@ -7010,14 +7080,16 @@ function cleanAttributeDisplayName(attr = {}) {
 }
 
 export async function prepareListingTemplatePublishMediaPreview(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
   const shopIds = [...new Set((body.shop_ids || body.shopIds || body.template?.shop_ids || []).map(Number).filter(Boolean))];
   if (!shopIds.length) throw new Error("请至少选择一个目标店铺");
   const shops = await all(
-    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted'`,
-    shopIds
+    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [...shopIds, Number(session.tenant.id)]
   );
-  if (!shops.length) throw new Error("没有可用的目标店铺");
+  if (!shops.length || shops.length !== shopIds.length) throw new Error("目标店铺不存在或不属于当前企业");
 
   const previewTemplate = body.template || body;
   previewTemplate.include_category_health = true;
@@ -7592,15 +7664,18 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
 }
 
 export async function publishListingTemplateToOzon(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishListingTemplateToOzon(body, session));
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
   const shopIds = [...new Set((body.shop_ids || body.shopIds || body.template?.shop_ids || []).map(Number).filter(Boolean))];
   if (!shopIds.length) throw new Error("Please select at least one shop");
 
   const shops = await all(
-    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted'`,
-    shopIds
+    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [...shopIds, Number(session.tenant.id)]
   );
-  if (!shops.length) throw new Error("没有可用的目标店铺");
+  if (!shops.length || shops.length !== shopIds.length) throw new Error("目标店铺不存在或不属于当前企业");
 
   const publishTemplate = body.template || body;
   publishTemplate.include_category_health = true;
@@ -8058,8 +8133,8 @@ async function createListingPublishTask({ draftIds = [], shops = [], body = {}, 
   const shopRows = await all(`
     SELECT id FROM shops
     WHERE id IN (${uniqueShops.map(() => "?").join(",")})
-      AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?
-  `, [...uniqueShops.map((shop) => Number(shop.id)), tenantId]);
+      AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})
+  `, [...uniqueShops.map((shop) => Number(shop.id)), Number(session?.tenant?.id)]);
   if (shopRows.length !== uniqueShops.length) throw new Error("一个或多个店铺在当前企业中不存在");
   const draftNameById = new Map(draftRows.map((item) => [Number(item.id), String(item.draft_name || `草稿 ${item.id}`)]));
   const taskNo = createListingPublishTaskNo();
@@ -8337,6 +8412,8 @@ async function claimListingPublishTaskItemForSubmit(itemId = 0, tenantId = "admi
 }
 
 export async function retryListingPublishTask(id, body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => retryListingPublishTask(id, body, session));
+  session = await authorizeBusinessTaskSession(session);
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const task = await listingPublishTaskDetail(Number(id), session);
@@ -8357,8 +8434,8 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
 
   const shopIds = [...new Set(candidates.map((item) => Number(item.shop_id || 0)).filter(Boolean))];
   const shops = await all(
-    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?`,
-    [...shopIds, tenantId]
+    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [...shopIds, Number(session.tenant.id)]
   );
   const shopById = new Map(shops.map((shop) => [Number(shop.id), shop]));
   const textVariantPolicySource = task.request?.text_variant_policy || body.text_variant_policy || body.textVariantPolicy || {};
@@ -8665,6 +8742,8 @@ async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = []
 }
 
 export async function publishListingDraftsToOzon(body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishListingDraftsToOzon(body, session));
+  session = await authorizeBusinessTaskSession(session);
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const draftIds = [...new Set(normalizeArray(body.draft_ids || body.draftIds || body.ids).map(Number).filter(Boolean))];
@@ -8673,8 +8752,8 @@ export async function publishListingDraftsToOzon(body = {}, session = null) {
   if (!shopIds.length) throw new Error("请至少选择一个店铺");
 
   const shops = await all(
-    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?`,
-    [...shopIds, tenantId]
+    `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [...shopIds, Number(session.tenant.id)]
   );
   if (!shops.length || shops.length !== shopIds.length) throw new Error("No available target shops in this tenant");
   const draftsInTenant = await all(`
@@ -8814,35 +8893,41 @@ async function submitPreparedListingPublishRecord({
   if (!recordId) return null;
   const submitStartedAt = Date.now();
   const timings = {};
-  if (!shop || !shopPayload) {
+  let session;
+  let tenantId;
+  {
     const loadStartedAt = Date.now();
     const preparedRows = await all(`
-      SELECT r.request_json, shops.id, shops.name, shops.ozon_client_id,
+      SELECT r.request_json, r.tenant_id AS task_tenant_id, r.created_by_person_id, shops.id, shops.name, shops.ozon_client_id,
         COALESCE(NULLIF(shops.ozon_api_key, ''), shops.api_key_hint) AS api_key_hint,
         shops.watermark_path, shops.watermark_name, shops.watermark_position,
         shops.watermark_x_percent, shops.watermark_y_percent, shops.watermark_scale_percent,
         shops.watermark_opacity_percent
       FROM listing_publish_records r
-      JOIN shops ON shops.id = r.shop_id
+      JOIN shops ON shops.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "shops")}
       WHERE r.id = ? AND r.status <> 'deleted'
       LIMIT 1
     `, [Number(recordId)]);
     const prepared = preparedRows[0];
     if (!prepared) throw new Error(`Listing publish record not found: ${recordId}`);
+    session = await restoreBusinessTaskSession(prepared.task_tenant_id || "admin", prepared.created_by_person_id);
+    assertBusinessTaskPermission(session, "operations");
+    tenantId = listingTenantId(session);
     shop = prepared;
     shopPayload = parseJson(prepared.request_json, {});
     timings.load_record_ms = Date.now() - loadStartedAt;
   }
+  return withAiTenantSession(session, async () => {
   try {
     const mediaRepairStartedAt = Date.now();
     const mediaRepair = await repairOzonPublishPayloadMedia(shopPayload, {
-      session: null,
+      session,
       shop,
       sourceModule: "listing_publish_record_submit",
       sourceId: String(recordId || "")
     });
     const ozonSellerMedia = await prepareOzonSellerMediaForPublishPayload(mediaRepair.payload, {
-      session: null,
+      session,
       shop,
       sourceModule: "listing_publish_record_submit_ozon_media",
       sourceId: String(recordId || "")
@@ -8857,10 +8942,11 @@ async function submitPreparedListingPublishRecord({
       await run(`
         UPDATE listing_publish_records
         SET request_json = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [JSON.stringify(finalPayload), Number(recordId)]).catch(() => null);
+        WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+      `, [JSON.stringify(finalPayload), Number(recordId), tenantId]).catch(() => null);
     }
     const ozonSubmitStartedAt = Date.now();
+    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
     const response = await importOzonProducts(shop, finalPayload);
     timings.ozon_submit_ms = Date.now() - ozonSubmitStartedAt;
     const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
@@ -8889,7 +8975,8 @@ async function submitPreparedListingPublishRecord({
         }
       },
       importInfo,
-      status: importInfoStatus(importInfo)
+      status: importInfoStatus(importInfo),
+      tenantId
     });
     timings.db_finalize_ms = Date.now() - finalizeStartedAt;
     timings.total_ms = Date.now() - submitStartedAt;
@@ -8898,7 +8985,7 @@ async function submitPreparedListingPublishRecord({
       payload_bytes: Buffer.byteLength(JSON.stringify(finalPayload)),
       ...timings
     }));
-    await refreshPublishRecordQuality(recordId).catch((error) => ({
+    await refreshPublishRecordQuality(recordId, tenantId).catch((error) => ({
       score: 0,
       source: "refresh_failed",
       issues: [error.message]
@@ -8916,10 +9003,11 @@ async function submitPreparedListingPublishRecord({
     await run(`
       UPDATE listing_publish_records
       SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [JSON.stringify(errorPayload), Number(recordId)]).catch(() => null);
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+    `, [JSON.stringify(errorPayload), Number(recordId), tenantId]).catch(() => null);
     return { ok: false, record_id: recordId, error: errorPayload.message };
   }
+  });
 }
 
 async function buildPublishTemplateFromListingDraft(draft = {}, session = null) {
@@ -9143,6 +9231,10 @@ async function preparePublishRecordForSubmit({
   initialStatus = "submitted"
 }) {
   const tenantId = listingTenantId(session);
+  await assertDraftSourceProductTenant(sourceProductId, tenantId);
+  const ownedShop = await row(`SELECT id FROM shops WHERE id = ? AND status <> 'deleted'
+    AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`, [Number(shop.id), Number(session?.tenant?.id)]);
+  if (!ownedShop) throw new Error("目标店铺不存在或不属于当前企业");
   assertNoEmbeddedMediaForPersistence(shopPayload, "listing publish request");
   const requestJson = JSON.stringify(shopPayload);
   const listSummaryJson = JSON.stringify(buildPublishRecordListSummary(shopPayload));
@@ -9263,7 +9355,7 @@ async function persistListingVariantLineageForRecord(recordId, tenantId) {
     FROM listing_publish_variant_links l
     JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
     LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
-    JOIN shops shop ON shop.id=l.shop_id AND COALESCE(NULLIF(shop.tenant_id,''),'admin')=l.tenant_id
+    JOIN shops shop ON shop.id=l.shop_id AND ${listingStoredShopTenantPredicate("l", "shop")}
     LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
       AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
     LEFT JOIN (
@@ -9489,7 +9581,7 @@ export async function listingPublishRecords(query = {}, session = null) {
 
   const fromSql = (includeCategory) => `
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     LEFT JOIN tenant_members creator_members
       ON creator_members.person_id = r.created_by_person_id
      AND creator_members.tenant_id = ?
@@ -9644,7 +9736,7 @@ async function listingPublishProjectCandidates(query = {}, limit = 100, session 
 
   const fromSql = `
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE ${where.join(" AND ")}
   `;
   const [countRow, rows] = await Promise.all([
@@ -9807,7 +9899,7 @@ export async function listingPublishRecordDetail(id, session = null) {
       COALESCE(NULLIF(op.primary_image, ''), NULLIF(op.image_url, '')) AS online_primary_image,
       COALESCE(NULLIF(m.path_zh, ''), NULLIF(m.name_zh, ''), NULLIF(m.path_ru, ''), NULLIF(m.name_ru, '')) AS category_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     LEFT JOIN online_products op
       ON op.shop_id = r.shop_id
      AND s.id IS NOT NULL
@@ -9853,8 +9945,8 @@ export async function listingPublishRecordDetail(id, session = null) {
       FROM listing_publish_variant_links l
       JOIN listing_publish_records r ON r.id = l.record_id AND r.status <> 'deleted'
         AND COALESCE(r.tenant_id, 'admin') = l.tenant_id
-      LEFT JOIN shops s ON s.id = l.shop_id AND COALESCE(s.tenant_id, 'admin') = l.tenant_id
-      LEFT JOIN products p ON p.id = l.source_product_id
+      LEFT JOIN shops s ON s.id = l.shop_id AND ${listingStoredShopTenantPredicate("l", "s")}
+      LEFT JOIN products p ON p.id = l.source_product_id AND ${listingStoredShopTenantPredicate("l", "p")}
       WHERE l.draft_id = ? AND l.tenant_id = ?
       ORDER BY l.variant_id, l.shop_id, l.record_id`, [Number(record.draft_id), tenantId])
     : variantLinks;
@@ -9872,7 +9964,7 @@ export async function listingPublishSkuReview(id, session = null) {
   const record = await row(`SELECT r.id, r.draft_id, r.shop_id, r.offer_id, r.ozon_sku,
       r.status, r.list_summary_json, s.name AS shop_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND r.status <> 'deleted' AND COALESCE(r.tenant_id, 'admin') = ?`, [Number(id), tenantId]);
   if (!record) throw listingPublishRecordNotFoundError();
   const links = await all(`SELECT l.variant_id, l.record_id, l.shop_id, s.name AS shop_name,
@@ -9883,12 +9975,13 @@ export async function listingPublishSkuReview(id, session = null) {
     FROM listing_publish_variant_links l
     JOIN listing_publish_records r ON r.id = l.record_id AND r.status <> 'deleted'
       AND COALESCE(r.tenant_id, 'admin') = l.tenant_id
-    LEFT JOIN shops s ON s.id = l.shop_id AND COALESCE(s.tenant_id, 'admin') = l.tenant_id
+    LEFT JOIN shops s ON s.id = l.shop_id AND ${listingStoredShopTenantPredicate("l", "s")}
     LEFT JOIN online_products op ON op.shop_id = l.shop_id
       AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
     LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.active = 1
+      AND ${listingStoredShopTenantPredicate("l", "sm")}
       AND sm.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
-    LEFT JOIN products p ON p.id = COALESCE(sm.product_id, op.product_id, l.source_product_id)
+    LEFT JOIN products p ON p.id = COALESCE(sm.product_id, op.product_id, l.source_product_id) AND ${listingStoredShopTenantPredicate("l", "p")}
     WHERE l.tenant_id = ? AND ${Number(record.draft_id) ? "l.draft_id = ?" : "l.record_id = ?"}
     ORDER BY l.variant_id, l.shop_id, l.record_id LIMIT 200`, [tenantId, Number(record.draft_id) || Number(record.id)]);
   const summary = parseJson(record.list_summary_json, {});
@@ -9921,17 +10014,19 @@ async function publishVariantLinksForRecord(recordId, tenantId) {
       l.ozon_status, l.price, l.currency_code, l.quality_score,
       l.source_product_id, p.id AS inventory_id
     FROM listing_publish_variant_links l
-    LEFT JOIN products p ON p.id = l.source_product_id
+    LEFT JOIN products p ON p.id = l.source_product_id AND ${listingStoredShopTenantPredicate("l", "p")}
     WHERE l.record_id = ? AND l.tenant_id = ? ORDER BY l.item_index, l.id`, [Number(recordId), tenantId]);
 }
 
 export async function refreshListingPublishRecord(id, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const record = await row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
   `, [Number(id), tenantId]);
   if (!record) throw listingPublishRecordNotFoundError();
@@ -9987,7 +10082,7 @@ export async function refreshListingPublishRecord(id, session = null) {
     const recovered = await row(`
       SELECT r.*, s.name AS shop_name
       FROM listing_publish_records r
-      LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+      LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
       WHERE r.id = ? AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
     `, [Number(id), tenantId]);
     if (!recovered) throw listingPublishRecordNotFoundError();
@@ -10010,7 +10105,7 @@ export async function refreshListingPublishRecord(id, session = null) {
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
   `, [Number(id), tenantId]);
   if (!updated) throw listingPublishRecordNotFoundError();
@@ -10057,11 +10152,11 @@ async function syncPublishRecordOzonSku(record, tenantId) {
     if (link.id && tenantPk) {
       const bound = await row(`SELECT sm.product_id AS mapping_product_id, op.product_id AS online_product_id
         FROM online_products op JOIN shops s ON s.id = op.shop_id
-          AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = ?
+          AND (s.tenant_id = ?${tenantId === "admin" ? " OR s.tenant_id IS NULL" : ""})
         LEFT JOIN sku_mappings sm ON sm.shop_id = op.shop_id AND sm.ozon_sku = op.ozon_sku
           AND sm.active = 1 AND sm.tenant_id = ?
         WHERE op.shop_id = ? AND op.ozon_sku = ? ORDER BY op.id DESC LIMIT 1`,
-      [tenantId, tenantPk, Number(record.shop_id), sku]);
+      [tenantPk, tenantPk, Number(record.shop_id), sku]);
       const mappedProductId = Number(bound?.mapping_product_id || 0);
       const onlineProductId = Number(bound?.online_product_id || 0);
       const sourceProductId = Number(link.source_product_id || 0);
@@ -10095,7 +10190,7 @@ export async function autoSyncListingPublishRecords(options = {}) {
     AND r.sku_sync_attempt_count < 2
     AND ${missingSkuSql}`;
   const rows = await all(`
-    SELECT r.id, r.tenant_id, r.status, r.quality_source, r.quality_checked_at,
+    SELECT r.id, r.tenant_id, r.created_by_person_id, r.status, r.quality_source, r.quality_checked_at,
       (${skuDueSql}) AS sku_due
     FROM listing_publish_records r
     WHERE r.status <> 'deleted'
@@ -10123,7 +10218,8 @@ export async function autoSyncListingPublishRecords(options = {}) {
     try {
       const status = String(item.status || "");
       const tenantId = String(item.tenant_id || "admin");
-      const session = tenantId === "admin" ? null : { tenant: { id: Number(tenantId), slug: "scheduled-job" } };
+      const session = await restoreBusinessTaskSession(tenantId, item.created_by_person_id);
+      assertBusinessTaskPermission(session, "operations");
       if (["submitted", "processing", "resubmitting", "ozon_status_pending", "ozon_status_error", "failed"].includes(status)) {
         await refreshListingPublishRecord(Number(item.id), session);
         stats.refreshed += 1;
@@ -10150,11 +10246,11 @@ export async function autoSyncListingPublishRecords(options = {}) {
           op.product_id AS online_inventory_id, sm.product_id AS mapped_inventory_id
         FROM listing_variant_lineage l
         JOIN shops lineage_shop ON lineage_shop.id = l.shop_id
-          AND COALESCE(NULLIF(lineage_shop.tenant_id, ''), 'admin') = l.tenant_id
+          AND ${listingStoredShopTenantPredicate("l", "lineage_shop")}
         LEFT JOIN online_products op ON op.shop_id = l.shop_id
           AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
         LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.active = 1
-          AND COALESCE(NULLIF(sm.tenant_id, ''), 'admin') = l.tenant_id
+          AND ${listingStoredShopTenantPredicate("l", "sm")}
           AND sm.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci
         WHERE l.ozon_sku <> '' AND l.updated_at >= DATE_SUB(NOW(), INTERVAL 60 DAY)
         ORDER BY l.id DESC LIMIT 2000`);
@@ -10196,7 +10292,7 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
     SELECT r.*, s.name AS shop_name, s.ozon_client_id,
       COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
-    JOIN shops s ON s.id = r.shop_id AND s.status <> 'deleted'
+    JOIN shops s ON s.id = r.shop_id AND s.status <> 'deleted' AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.status = 'processing'
       AND COALESCE(r.task_id, '') = ''
       AND r.publish_task_id IS NULL
@@ -10207,8 +10303,12 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
     LIMIT ?
   `, [minAgeMinutes, limit]);
   const stats = { scanned: records.length, discovered: 0, resubmitted: 0, failed: 0 };
+  const authorizedTenants = new Map();
   for (const record of records) {
     try {
+      const session = await restoreBusinessTaskSession(record.tenant_id || "admin", record.created_by_person_id);
+      assertBusinessTaskPermission(session, "operations");
+      authorizedTenants.set(listingTenantId(session), session);
       const request = parseJson(record.request_json, {});
       const offerId = String(record.offer_id || firstOfferId(request) || "").trim();
       const existing = offerId
@@ -10223,13 +10323,13 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
           SET status = 'imported', request_json = ?, response_json = ?,
             ozon_product_id = ?, ozon_sku = ?, published_at = COALESCE(published_at, CURRENT_TIMESTAMP),
             error_json = NULL, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND status = 'processing' AND COALESCE(task_id, '') = ''
+          WHERE id = ? AND status = 'processing' AND COALESCE(task_id, '') = '' AND COALESCE(tenant_id, 'admin') = ?
         `, [
           JSON.stringify(mergedRequest),
           JSON.stringify({ recovery: { discovered_on_ozon: true, detail } }),
           String(source.id || source.product_id || source.productId || ""),
           String(source.sku || source.ozon_sku || source.fbo_sku || source.fbs_sku || ""),
-          Number(record.id)
+          Number(record.id), listingTenantId(session)
         ]);
         stats.discovered += 1;
         continue;
@@ -10245,9 +10345,13 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
       console.warn(`[listing-automation] direct publish recovery ${record.id} failed:`, error?.message || error);
     }
   }
-  const binding = await retryListingInventoryBindings({}).catch((error) => ({ total: 0, bound: 0, error: String(error?.message || error) }));
-  stats.binding_scanned = Number(binding.total || 0);
-  stats.binding_completed = Number(binding.bound || 0);
+  stats.binding_scanned = 0;
+  stats.binding_completed = 0;
+  for (const session of authorizedTenants.values()) {
+    const binding = await retryListingInventoryBindings({}, session).catch(() => ({ total: 0, bound: 0 }));
+    stats.binding_scanned += Number(binding.total || 0);
+    stats.binding_completed += Number(binding.bound || 0);
+  }
   return stats;
 }
 
@@ -10528,13 +10632,16 @@ async function buildTemplateSnapshotFromPublishRecord(record = {}, options = {})
 }
 
 export async function retryListingPublishRecord(id, body = {}, session = null) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => retryListingPublishRecord(id, body, session));
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
   const record = await row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id
-    WHERE r.id = ?
-  `, [Number(id)]);
+    JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
+    WHERE r.id = ? AND r.status <> 'deleted' AND COALESCE(r.tenant_id, 'admin') = ?
+  `, [Number(id), tenantId]);
   if (!record) throw listingPublishRecordNotFoundError();
   const expectedUpdatedAt = body?.updated_at || body?.updatedAt || body?.version_updated_at || body?.versionUpdatedAt || "";
   if (expectedUpdatedAt && !sameTimestamp(expectedUpdatedAt, record.updated_at)) {
@@ -10550,11 +10657,15 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
   const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
   if (!normalizeArray(payload.items).length) throw new Error("Publish record has no retryable Ozon payload");
 
-  await run(`
+  const retryClaim = await run(`
     UPDATE listing_publish_records
     SET status = 'resubmitting', request_json = ?, error_json = NULL, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [JSON.stringify(payload), Number(id)]);
+    WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+      AND status NOT IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
+  `, [JSON.stringify(payload), Number(id), tenantId]);
+  if (!Number(retryClaim?.affectedRows || 0)) {
+    throw Object.assign(new Error("发布记录已被其他任务处理，请刷新后重试"), { status: 409, statusCode: 409 });
+  }
 
   try {
     let shopPayload = await applyShopPublishDefaults(payload, record);
@@ -10568,8 +10679,9 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
     await run(`
       UPDATE listing_publish_records
       SET request_json = ?, template_snapshot_json = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [JSON.stringify(shopPayload), Number(id)]);
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+    `, [JSON.stringify(shopPayload), Number(id), tenantId]);
+    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
     const response = await importOzonProducts(record, shopPayload);
     const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
     let importInfo = null;
@@ -10581,24 +10693,25 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
       taskId,
       response,
       importInfo,
-      status: importInfoStatus(importInfo)
+      status: importInfoStatus(importInfo),
+      tenantId
     });
-    await refreshPublishRecordQuality(Number(id)).catch(() => null);
+    await refreshPublishRecordQuality(Number(id), tenantId).catch(() => null);
   } catch (error) {
     const errorPayload = buildOzonPublishErrorPayload(error, { shop: record, recordId: id });
     await run(`
       UPDATE listing_publish_records
       SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `, [JSON.stringify(errorPayload), Number(id)]);
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+    `, [JSON.stringify(errorPayload), Number(id), tenantId]);
   }
 
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id
-    WHERE r.id = ?
-  `, [Number(id)]);
+    JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
+    WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ?
+  `, [Number(id), tenantId]);
   return normalizePublishRecordRow(updated);
 }
 
@@ -10614,7 +10727,7 @@ export async function saveListingPublishRecordDraft(id, body = {}, session = nul
   const record = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND r.status <> 'deleted' AND ${tenantScope} AND s.id IS NOT NULL
   `, [Number(id), tenantId]);
   if (!record) throw listingPublishRecordNotFoundError();
@@ -10668,7 +10781,7 @@ export async function saveListingPublishRecordDraft(id, body = {}, session = nul
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(r.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND r.status <> 'deleted' AND ${tenantScope} AND s.id IS NOT NULL
   `, [Number(id), tenantId]);
   if (!updated) throw listingPublishRecordNotFoundError();
@@ -10964,20 +11077,22 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(categoryPath, `${categoryPath} / %`);
   }
   if (vehicleBrand) {
+    const catalog = vehicleCatalogTenantPredicate(tenantId, "vehicle");
     where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR EXISTS (
       SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
-      WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin') AND LOWER(vehicle.brand_name) LIKE ?))`);
-    params.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
-    countParams.push(`%${vehicleBrand}%`, `%${vehicleBrand}%`);
+      WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin') AND ${catalog.sql} AND LOWER(vehicle.brand_name) LIKE ?))`);
+    params.push(`%${vehicleBrand}%`, ...catalog.params, `%${vehicleBrand}%`);
+    countParams.push(`%${vehicleBrand}%`, ...catalog.params, `%${vehicleBrand}%`);
   }
   if (vehicleModel) {
+    const catalog = vehicleCatalogTenantPredicate(tenantId, "vehicle");
     where.push(`(LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR LOWER(COALESCE(d.vehicle_model, '')) LIKE ?
       OR LOWER(COALESCE(d.vehicle_model_key, '')) LIKE ? OR LOWER(COALESCE(d.product_name, '')) LIKE ? OR EXISTS (
         SELECT 1 FROM listing_draft_vehicle_links link JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id
-        WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin')
+        WHERE link.draft_id = d.id AND link.tenant_id = COALESCE(d.tenant_id, 'admin') AND ${catalog.sql}
           AND (LOWER(vehicle.brand_name) LIKE ? OR LOWER(vehicle.model_name) LIKE ?)))`);
-    params.push(...Array(6).fill(`%${vehicleModel}%`));
-    countParams.push(...Array(6).fill(`%${vehicleModel}%`));
+    params.push(...Array(4).fill(`%${vehicleModel}%`), ...catalog.params, ...Array(2).fill(`%${vehicleModel}%`));
+    countParams.push(...Array(4).fill(`%${vehicleModel}%`), ...catalog.params, ...Array(2).fill(`%${vehicleModel}%`));
   }
   if (minPrice !== null && Number.isFinite(minPrice) && minPrice >= 0) {
     where.push("CAST(NULLIF(d.list_price, '') AS DECIMAL(12, 2)) >= ?");
@@ -11311,12 +11426,12 @@ async function attachDevelopmentReviewSkus(drafts, requestedIds, tenantId) {
     FROM listing_publish_records r
     LEFT JOIN listing_publish_task_items i ON i.id = r.publish_task_item_id AND CONVERT(COALESCE(i.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
     JOIN listing_drafts d ON d.id = COALESCE(NULLIF(r.draft_id, 0), i.draft_id)
-    LEFT JOIN shops s ON s.id = r.shop_id AND CONVERT(COALESCE(s.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     LEFT JOIN online_products op ON op.shop_id = r.shop_id AND (
       (TRIM(COALESCE(r.ozon_sku, '')) <> '' AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.ozon_sku USING utf8mb4) COLLATE utf8mb4_unicode_ci)
       OR (TRIM(COALESCE(r.offer_id, '')) <> '' AND CONVERT(op.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(r.offer_id USING utf8mb4) COLLATE utf8mb4_unicode_ci)
     )
-    LEFT JOIN products inventory ON inventory.id = op.product_id
+    LEFT JOIN products inventory ON inventory.id = op.product_id AND ${listingStoredShopTenantPredicate("r", "inventory")}
     WHERE COALESCE(NULLIF(r.draft_id, 0), i.draft_id) IN (${placeholders})
       AND CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci
       AND CONVERT(COALESCE(r.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
@@ -12697,6 +12812,10 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
 }
 
 export async function createInventoryProductListingDraft(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "inventory.write");
+  const tenantId = listingTenantId(session);
+  const tenantPk = Number(session.tenant.id);
   await ensureListingAutomationSchema();
   const productId = Number(body.product_id || body.productId || 0);
   if (!productId) throw new Error("缺少库存商品 ID，无法创建草稿");
@@ -12705,17 +12824,17 @@ export async function createInventoryProductListingDraft(body = {}, session = nu
       length_cm, width_cm, height_cm, package_weight_g, color, accessory_name,
       product_quantity, stock_unit, vehicle_brand, vehicle_model
     FROM products
-    WHERE id = ? AND active = 1
+    WHERE id = ? AND active = 1 AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})
     LIMIT 1
-  `, [productId]);
-  if (!product) throw new Error("库存商品不存在或已停用");
+  `, [productId, tenantPk]);
+  if (!product) throw Object.assign(new Error("库存商品不存在、已停用或不属于当前企业"), { statusCode: 404 });
 
   const existing = await row(`
     SELECT id FROM listing_drafts
-    WHERE source_product_id = ? AND status = 'draft'
+    WHERE source_product_id = ? AND status = 'draft' AND COALESCE(tenant_id, 'admin') = ?
     ORDER BY updated_at DESC, id DESC
     LIMIT 1
-  `, [productId]);
+  `, [productId, tenantId]);
   if (existing?.id) return { ...(await listingDraft(existing.id, session)), reused: true };
 
   const images = [String(product.image_url || "").trim()].filter(Boolean);
@@ -12732,16 +12851,18 @@ export async function createInventoryProductListingDraft(body = {}, session = nu
     vehicle_brand: product.vehicle_brand || "",
     vehicle_model: product.vehicle_model || ""
   };
+  assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "inventory.write");
   const draftId = await insert(`
     INSERT INTO listing_drafts
-      (template_id, product_name, internal_code, source_urls_json, source_images_json,
+      (tenant_id, template_id, product_name, internal_code, source_urls_json, source_images_json,
        cost_price, sale_price, length_cm, width_cm, height_cm, weight_g, color, spec, quantity,
        template_payload_json, manual_facts_json, ai_payload_json, created_by_person_id,
        development_type, vehicle_brand, vehicle_model, vehicle_model_key,
        source_product_id, parent_draft_id, creation_method, updated_at)
-    VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?,
+    VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?,
       'new', ?, ?, ?, ?, NULL, 'inventory_quick_draft', CURRENT_TIMESTAMP)
   `, [
+    tenantId,
     product.name || "",
     product.code || `P-${productId}`,
     JSON.stringify(sourceUrls),
@@ -13830,8 +13951,8 @@ export async function generateListingShopCopies(draftId, body, session, options 
   if (!shopIds.length) throw new Error("Please select at least one shop");
 
   const shops = await all(
-    `SELECT id, name, watermark_path FROM shops WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?`,
-    [...shopIds, tenantId]
+    `SELECT id, name, watermark_path FROM shops WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
+    [...shopIds, Number(session?.tenant?.id)]
   );
   if (!shops.length || shops.length !== shopIds.length) throw new Error("No available target shops in this tenant");
 
@@ -13868,7 +13989,7 @@ export async function listingShopCopies(draftId, session) {
   return all(`
     SELECT c.*, s.name AS shop_name
     FROM listing_shop_copies c
-    LEFT JOIN shops s ON s.id = c.shop_id AND COALESCE(s.tenant_id, 'admin') = COALESCE(c.tenant_id, 'admin')
+    LEFT JOIN shops s ON s.id = c.shop_id AND ${listingStoredShopTenantPredicate("c", "s")}
     WHERE c.draft_id = ? AND COALESCE(c.tenant_id, 'admin') = ?
     ORDER BY c.updated_at DESC, c.id DESC
   `, [Number(draftId), tenantId]).then((rows) => rows.map((item) => ({
@@ -13902,14 +14023,14 @@ async function listingCategoryTemplateRaw(id, session) {
   return normalizeTemplateRow(template);
 }
 
-async function listingCopyJob(id) {
+async function listingCopyJob(id, session) {
   const job = await row(`
     SELECT j.*, s.name AS shop_name, p.name AS created_by_name
     FROM listing_ozon_copy_jobs j
-    LEFT JOIN shops s ON s.id = j.shop_id
+    JOIN shops s ON s.id = j.shop_id AND ${listingStoredShopTenantPredicate("j", "s")}
     LEFT JOIN people p ON p.id = j.created_by_person_id
-    WHERE j.id = ?
-  `, [Number(id)]);
+    WHERE j.id = ? AND j.tenant_id = ?
+  `, [Number(id), listingTenantId(session)]);
   return job ? normalizeCopyJobRow(job) : null;
 }
 
@@ -13944,7 +14065,7 @@ async function applyOzonProductDetailToTemplate(templateId, detail, context = {}
     SET ozon_category_id = ?, category_name = ?, template_name = ?, editable_payload_json = ?,
         title = ?, description = ?, attributes_json = ?, images_json = ?, source_raw_json = ?, category_attributes_json = ?,
         updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND status <> 'deleted'
+    WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?
   `, [
     parsed.ozon_category_id || current.ozon_category_id,
     parsed.category_name || current.category_name,
@@ -13956,7 +14077,7 @@ async function applyOzonProductDetailToTemplate(templateId, detail, context = {}
     JSON.stringify(parsed.images.length ? parsed.images : current.images),
     JSON.stringify(sourceRaw),
     JSON.stringify(context.categoryAttributes || []),
-    Number(templateId)
+    Number(templateId), listingTenantId(session)
   ]);
   return listingCategoryTemplate(templateId, session);
 }
@@ -14637,6 +14758,7 @@ async function initializeListingAutomationSchema() {
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_ozon_copy_jobs (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
         shop_id BIGINT NOT NULL,
         ozon_sku VARCHAR(128) NOT NULL,
         offer_id VARCHAR(128) NOT NULL DEFAULT '',
@@ -14797,7 +14919,7 @@ async function initializeListingAutomationSchema() {
       FROM listing_publish_variant_links l
       LEFT JOIN listing_publish_records r ON r.id=l.record_id AND COALESCE(NULLIF(r.tenant_id,''),'admin')=l.tenant_id
       LEFT JOIN listing_drafts d ON d.id=l.draft_id AND COALESCE(NULLIF(d.tenant_id,''),'admin')=l.tenant_id
-      JOIN shops shop ON shop.id=l.shop_id AND COALESCE(NULLIF(shop.tenant_id,''),'admin')=l.tenant_id
+      JOIN shops shop ON shop.id=l.shop_id AND ${listingStoredShopTenantPredicate("l", "shop")}
       LEFT JOIN online_products op ON op.shop_id=l.shop_id AND l.ozon_sku<>''
         AND CONVERT(op.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
       LEFT JOIN (
@@ -19360,7 +19482,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
   const record = await row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
-    LEFT JOIN shops s ON s.id = r.shop_id AND COALESCE(NULLIF(s.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+    LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? ${tenantRecordScope}
   `, tenantId ? [Number(recordId), tenantId] : [Number(recordId)]);
   if (!record) return null;
@@ -19673,8 +19795,9 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
     Number(recordId),
     ...(tenantId ? [tenantId] : [])
   ]);
-  await run("UPDATE listing_publish_variant_links SET ozon_status = ? WHERE record_id = ?",
-    [String(status || "submitted").slice(0, 64), Number(recordId)]);
+  await run(`UPDATE listing_publish_variant_links SET ozon_status = ? WHERE record_id = ?
+    ${tenantId ? "AND tenant_id = ?" : ""}`,
+    [String(status || "submitted").slice(0, 64), Number(recordId), ...(tenantId ? [tenantId] : [])]);
   await persistListingVariantLineageForRecord(recordId, tenantId || "admin");
   await autoBindPublishRecordInventory(recordId, tenantId).catch((error) => {
     console.warn("[listing-automation] auto bind inventory failed:", error.message);
@@ -22242,6 +22365,12 @@ function listingTenantId(session, fallback = "admin") {
   if (!tenant) return listingTenantLookup(fallback).key;
   if (!tenant.id || !tenant.slug) throw new Error("当前会话缺少有效企业上下文，无法访问企业数据。");
   return listingTenantLookup(tenant.slug === "default" ? "admin" : tenant.id).key;
+}
+
+function listingStoredShopTenantPredicate(record, shop) {
+  const key = `COALESCE(NULLIF(${record}.tenant_id, ''), 'admin')`;
+  return `((${key} = 'admin' AND (${shop}.tenant_id IS NULL OR ${shop}.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1)))
+    OR (${key} <> 'admin' AND CONVERT(${shop}.tenant_id USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(${key} USING utf8mb4) COLLATE utf8mb4_unicode_ci))`;
 }
 
 async function all(sql, params = []) {

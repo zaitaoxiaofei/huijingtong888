@@ -635,10 +635,11 @@ test("listing draft uploads use publishable listing media instead of cropper tem
 });
 
 test("legacy cropper temp draft images are materialized before Ozon publish", () => {
-  assert.match(listingAutomationServiceSource, /async function resolveLocalImageCropperMedia\(url = ""\)/);
+  assert.match(listingAutomationServiceSource, /async function resolveLocalImageCropperMedia\(url = "", session = null\)/);
   assert.match(listingAutomationServiceSource, /\/api\/tools\/image-cropper\/file\//);
   assert.match(listingAutomationServiceSource, /"uploads", "temp", "image-cropper"/);
-  assert.match(listingAutomationServiceSource, /const cropperFile = await resolveLocalImageCropperMedia\(value\)/);
+  assert.match(listingAutomationServiceSource, /const cropperFile = await resolveLocalImageCropperMedia\(value, session\)/);
+  assert.match(listingAutomationServiceSource, /assertImageCropperTaskOwner\(taskId, session \|\| currentAiTenantSession\(\)\)/);
 });
 
 test("legacy AI temp draft images can be repaired from local or LAN URLs", () => {

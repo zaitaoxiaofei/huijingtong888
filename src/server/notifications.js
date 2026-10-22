@@ -157,21 +157,36 @@ function writeUpdateStatusFile(payload) {
   fs.writeFileSync(statusFile, `${JSON.stringify(normalizeUpdatePayload(payload), null, 2)}\n`);
 }
 
-function sendUpdateEvent(res, eventName, payload) {
+function sendUpdateEvent(res, eventName, payload, serializedPayload = null) {
   if (res.destroyed || res.writableEnded) return false;
-  res.write(`event: ${eventName}\n`);
-  res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  return true;
+  try {
+    res.write(`event: ${eventName}\n`);
+    res.write(`data: ${serializedPayload ?? JSON.stringify(payload)}\n\n`);
+    return true;
+  } catch { return false; }
 }
 
-export function subscribeGlobalUpdateEvents(res, query = {}, trustedSession = {}) {
+export function subscribeGlobalUpdateEvents(res, query = {}, trustedSession = {}, { authorize } = {}) {
+  let heartbeat;
   const client = {
     res,
     personId: Number(trustedSession?.personId || 0) || 0,
     tenantId: Number(trustedSession?.tenant?.id || 0) || 0,
     tenantSlug: String(trustedSession?.tenant?.slug || ""),
     appVersion: String(query.app_version || query.appVersion || "").trim(),
-    pluginVersion: String(query.plugin_version || query.pluginVersion || "").trim()
+    pluginVersion: String(query.plugin_version || query.pluginVersion || "").trim(),
+    authorize,
+    pending: Promise.resolve(),
+    closed: false,
+    unsubscribe() {
+      client.closed = true;
+      clearInterval(heartbeat);
+      updateSubscribers.delete(client);
+    },
+    disconnect() {
+      client.unsubscribe();
+      try { if (!res.destroyed && !res.writableEnded) res.end?.(); } catch {}
+    }
   };
   updateSubscribers.add(client);
 
@@ -184,17 +199,13 @@ export function subscribeGlobalUpdateEvents(res, query = {}, trustedSession = {}
     })
   });
 
-  const heartbeat = setInterval(() => {
+  heartbeat = setInterval(() => {
     if (!sendUpdateEvent(res, "ping", { server_time: new Date().toISOString() })) {
-      clearInterval(heartbeat);
-      updateSubscribers.delete(client);
+      client.unsubscribe();
     }
   }, 25000);
 
-  return () => {
-    clearInterval(heartbeat);
-    updateSubscribers.delete(client);
-  };
+  return client.unsubscribe;
 }
 
 export function broadcastGlobalUpdateStatus(status = readUpdateStatusFile()) {
@@ -203,7 +214,7 @@ export function broadcastGlobalUpdateStatus(status = readUpdateStatusFile()) {
       app_version: client.appVersion,
       plugin_version: client.pluginVersion
     });
-    if (!sendUpdateEvent(client.res, "update", payload)) updateSubscribers.delete(client);
+    if (!sendUpdateEvent(client.res, "update", payload)) client.unsubscribe();
   }
 }
 
@@ -212,13 +223,31 @@ export function broadcastGlobalEvent(eventName, payload = {}, options = {}) {
   const personId = Number(options.personId || 0) || 0;
   const tenantScoped = Object.hasOwn(options, "tenantId");
   const tenantId = Number(options.tenantId || 0);
+  // Capture the payload while it still belongs to this event's resolved scope.
+  const serializedPayload = JSON.stringify(payload);
+  const deliveries = [];
   for (const client of [...updateSubscribers]) {
     if (personId && Number(client.personId || 0) !== personId) continue;
     if (tenantScoped) {
       if (!Number.isSafeInteger(tenantId) || tenantId <= 0 || client.tenantId !== tenantId) continue;
     } else if (client.tenantSlug !== "default") continue;
-    if (!sendUpdateEvent(client.res, eventName, payload)) updateSubscribers.delete(client);
+    const delivery = client.pending.then(async () => {
+      if (client.closed) return;
+      if (typeof client.authorize !== "function") return client.disconnect();
+      const current = await client.authorize();
+      if (client.closed) return;
+      if (!Number.isSafeInteger(client.personId) || client.personId <= 0
+        || !Number.isSafeInteger(client.tenantId) || client.tenantId <= 0
+        || Number(current?.personId) !== client.personId
+        || Number(current?.tenant?.id) !== client.tenantId
+        || String(current?.tenant?.slug || "") !== client.tenantSlug
+        || current?.tenant?.access_allowed !== true) return client.disconnect();
+      if (!sendUpdateEvent(client.res, eventName, null, serializedPayload)) client.disconnect();
+    }).catch(() => client.disconnect());
+    client.pending = delivery;
+    deliveries.push(delivery);
   }
+  return Promise.all(deliveries);
 }
 
 export function globalUpdateStatus(query = {}) {

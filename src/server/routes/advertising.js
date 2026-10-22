@@ -1,5 +1,7 @@
+import { withAdvertisingTenantSession } from "../../services/advertising-tenant-context.js";
+
 export function createAdvertisingRoutes({ services, readJson }) {
-  return {
+  const routes = {
     "GET /api/advertising/daily": (req, url) => services.advertisingDaily(Object.fromEntries(url.searchParams.entries())),
     "GET /api/advertising/daily/summary": (req, url) => services.advertisingDailySummary(Object.fromEntries(url.searchParams.entries())),
     "GET /api/advertising/daily/details": (req, url) => services.advertisingDailyDetails(Object.fromEntries(url.searchParams.entries())),
@@ -13,4 +15,6 @@ export function createAdvertisingRoutes({ services, readJson }) {
     "POST /api/advertising/campaign/product-setting": async (req) => services.updateAdvertisingCampaignProductSetting(await readJson(req), { signal: req._abortSignal }),
     "POST /api/advertising/campaign/stop": async (req) => services.stopAdvertisingCampaign(await readJson(req), { signal: req._abortSignal })
   };
+  return Object.fromEntries(Object.entries(routes).map(([route, handler]) => [route,
+    (req, ...args) => withAdvertisingTenantSession(req._session, () => handler(req, ...args))]));
 }

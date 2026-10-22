@@ -14,6 +14,7 @@ function fixture() {
   let rowCount = 0;
   let failInsert = false;
   const deps = {
+    tenantScope: { id: 1, defaultTenant: true },
     normalizeDate: (value) => String(value || "").trim(),
     todayDateKey: () => "2026-10-20",
     orderedAtUtcRange: (_alias, from, to) => ({
@@ -81,7 +82,9 @@ test("daily sales count quantities, exclude only pre-transport cancellations and
       CREATE TABLE orders (id INTEGER, shop_id INTEGER, posting_number TEXT, ordered_at TEXT,
         status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT);
       CREATE TABLE order_items (id INTEGER, order_id INTEGER, sku_mapping_id INTEGER, ozon_sku TEXT, quantity INTEGER);
-      CREATE TABLE sku_mappings (id INTEGER, shop_id INTEGER, ozon_sku TEXT);
+      CREATE TABLE shops (id INTEGER, tenant_id INTEGER);
+      INSERT INTO shops VALUES (11, 1);
+      CREATE TABLE sku_mappings (id INTEGER, shop_id INTEGER, ozon_sku TEXT, tenant_id INTEGER);
       CREATE TABLE order_status_history (order_id INTEGER, status TEXT);
       CREATE TABLE ozon_orders_raw (store_id INTEGER, posting_number TEXT, query_stock_location TEXT);
       INSERT INTO orders VALUES
@@ -96,7 +99,7 @@ test("daily sales count quantities, exclude only pre-transport cancellations and
         (4, 4, NULL, 'S1', 5), (5, 5, NULL, 'S1', 6), (6, 6, 91, '', 7);
       INSERT INTO order_status_history VALUES (3, 'delivering');
       INSERT INTO ozon_orders_raw VALUES (11, 'fbp', 'FBP');
-      INSERT INTO sku_mappings VALUES (91, 11, 'S2');
+      INSERT INTO sku_mappings VALUES (91, 11, 'S2', 1);
     `);
     const rows = db.prepare(selectSql).all("2026-10-19", "2026-10-20");
     assert.deepEqual(rows.map((row) => Object.values(row).slice(2, 5)), [["S1", 17, 11], ["S2", 7, 7]]);

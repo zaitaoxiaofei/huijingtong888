@@ -78,7 +78,7 @@ test("enterprise matrix configuration and tail fallback against a disposable MyS
       await assert.rejects(service.createAssetTailTemplate({ image: "data:image/png;base64,AA==" }, operations), { statusCode: 403 });
       assert.equal((await query("SELECT COUNT(*) AS total FROM shop_variant_rules WHERE shop_id = 11"))[0].total, 0);
       assert.equal((await query("SELECT COUNT(*) AS total FROM asset_tail_templates"))[0].total, 7);
-      assert.throws(() => assetVariantExecutionScope(session(2)), { statusCode: 403 });
+      assert.equal(assetVariantExecutionScope(session(2)).id, 2);
     });
 
     await t.test("A can edit its own rule while cross-tenant shop, watermark, and template references fail", async () => {

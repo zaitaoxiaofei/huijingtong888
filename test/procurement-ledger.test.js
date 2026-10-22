@@ -223,6 +223,7 @@ function fixture(failSecond = false, overrides = {}) {
     return [{ insertId: 1 }];
   } };
   const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
+    resolveScope: async () => ({ id: 1, isDefault: true }), assertActor: async () => {}, assertReferences: async () => {},
     recordCost: async (_, row) => { recordedCosts.push(row); }, refreshPurchase: async () => {},
     receive: async (_, id, payload) => { state.movements.push({ product_id: 10, quantity_delta: payload.receive_quantity, stock_location: 'LOCAL', source_type: 'purchase_inbound', source_ref: `inbound_${id}` }); },
     requirePerson: async () => 1, invalidate: () => {},
@@ -230,6 +231,12 @@ function fixture(failSecond = false, overrides = {}) {
     postMovement: async (_, row) => { writes++; if (failSecond && writes === 2) throw new Error('模拟第二条库存流水失败'); state.movements.push({ ...row, id: writes + 1 }); }
   });
   return { service, state: () => state, executed, coverageProducts, recordedCosts };
+}
+
+function insertedValues(statement) {
+  const columns = statement.sql.match(/INSERT INTO \w+\s*\(([^)]+)\)/i)[1].split(',').map(value => value.trim());
+  assert.equal(columns.length, statement.args.length);
+  return Object.fromEntries(columns.map((column, index) => [column, statement.args[index]]));
 }
 
 test('last stocktake time comes from the existing product-scoped movement summary', async () => {
@@ -529,7 +536,8 @@ test('history backfill creates one dated purchase and explicit source without a 
   assert.equal(f.state().movements.length, 1);
   assert.equal(f.executed.filter(row => row.sql.includes('INSERT INTO purchase_orders')).length, 1);
   const inbound = f.executed.find(row => row.sql.includes('INSERT INTO inbound_records'));
-  assert.equal(inbound.args[6], 'approved');
+  assert.equal(insertedValues(inbound).status, 'approved');
+  assert.equal(insertedValues(inbound).tenant_id, 1);
   assert.doesNotMatch(inbound.sql, /pending_arrival/);
   assert.ok(f.executed.some(row => row.sql.includes('INSERT INTO procurement_history_sources')));
 });
@@ -575,11 +583,13 @@ test('dated purchase backfill is idempotent and distinguishes transit, missing r
     assert.equal(result.local_delta, effect === 'missing_inbound' ? 5 : 0);
     assert.equal(f.state().movements.length, effect === 'missing_inbound' ? 2 : 1);
     const order = f.executed.find(row => row.sql.includes('INSERT INTO purchase_orders'));
-    assert.equal(order.args[2], effect === 'in_transit' ? 'purchased' : 'inbound_done');
-    assert.equal(order.args[6], '2026-07-31 16:15:00');
+    assert.equal(insertedValues(order).status, effect === 'in_transit' ? 'purchased' : 'inbound_done');
+    assert.equal(insertedValues(order).purchased_at, '2026-07-31 16:15:00');
+    assert.equal(insertedValues(order).tenant_id, 1);
     const receipt = f.executed.find(row => row.sql.includes('INSERT INTO inbound_records'));
-    assert.equal(receipt.args[6], effect === 'in_transit' ? 'pending_arrival' : 'approved');
-    assert.equal(receipt.args[10], effect === 'in_transit' ? null : '2026-07-31 16:15:00');
+    assert.equal(insertedValues(receipt).status, effect === 'in_transit' ? 'pending_arrival' : 'approved');
+    assert.equal(insertedValues(receipt).approved_at, effect === 'in_transit' ? null : '2026-07-31 16:15:00');
+    assert.equal(insertedValues(receipt).tenant_id, 1);
     assert.equal(f.executed.filter(row => /INSERT INTO procurement_(requests|history_sources)/.test(row.sql)).length, 0);
     assert.deepEqual(await f.service.apply(payload, 1), result);
     assert.equal(f.executed.filter(row => row.sql.includes('INSERT INTO purchase_orders')).length, 1);

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { executeMysqlStatementWithRetry, getMysqlPoolMetrics, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { createAiVariantListingDraftLightweight, generateListingOfferId } from "./listing-automation.js";
+import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { withAiTenantSession } from "./ai-tenant-context.js";
 
 const WORKER_CONCURRENCY = Math.max(1, Math.min(12, Number(process.env.AI_VARIANT_DRAFT_SAVE_CONCURRENCY || 8)));
 const BATCH_INSERT_CHUNK_SIZE = 20;
@@ -17,6 +19,7 @@ export async function ensureAiVariantDraftSaveBatchSchema() {
     CREATE TABLE IF NOT EXISTS ai_variant_draft_save_batches (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
       batch_no VARCHAR(64) NOT NULL,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       status VARCHAR(32) NOT NULL DEFAULT 'queued',
       total_count INT NOT NULL DEFAULT 0,
       success_count INT NOT NULL DEFAULT 0,
@@ -32,6 +35,7 @@ export async function ensureAiVariantDraftSaveBatchSchema() {
     CREATE TABLE IF NOT EXISTS ai_variant_draft_save_items (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
       item_no VARCHAR(96) NOT NULL,
+      tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin',
       batch_no VARCHAR(64) NOT NULL,
       status VARCHAR(32) NOT NULL DEFAULT 'queued',
       stage VARCHAR(64) NOT NULL DEFAULT 'queued',
@@ -55,6 +59,9 @@ export async function ensureAiVariantDraftSaveBatchSchema() {
 }
 
 export async function createAiVariantDraftSaveBatch(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
+  const tenantId = businessTaskTenantKey(session);
   await ensureAiVariantDraftSaveBatchSchema();
   const payloads = Array.isArray(body.items) ? body.items.filter((item) => item && typeof item === "object") : [];
   if (!payloads.length) throw statusError("请至少选择一个要保存的草稿", 400);
@@ -63,18 +70,19 @@ export async function createAiVariantDraftSaveBatch(body = {}, session = null) {
   const personId = Number(session?.personId || session?.id || 0) || null;
   await withMysqlTransaction(async (connection) => {
     await executeMysqlStatementWithRetry(connection, `INSERT INTO ai_variant_draft_save_batches
-      (batch_no, status, total_count, created_by_person_id) VALUES (?, 'queued', ?, ?)`, [batchNo, payloads.length, personId]);
+      (batch_no, tenant_id, status, total_count, created_by_person_id) VALUES (?, ?, 'queued', ?, ?)`, [batchNo, tenantId, payloads.length, personId]);
     for (let offset = 0; offset < payloads.length; offset += BATCH_INSERT_CHUNK_SIZE) {
       const chunk = payloads.slice(offset, offset + BATCH_INSERT_CHUNK_SIZE);
-      const placeholders = chunk.map(() => "(?, ?, ?, ?)").join(", ");
+      const placeholders = chunk.map(() => "(?, ?, ?, ?, ?)").join(", ");
       const params = chunk.flatMap((payload, index) => [
         `${batchNo}-${offset + index + 1}`,
         batchNo,
+        tenantId,
         JSON.stringify(payload),
         personId
       ]);
       await executeMysqlStatementWithRetry(connection, `INSERT INTO ai_variant_draft_save_items
-        (item_no, batch_no, payload_json, created_by_person_id) VALUES ${placeholders}`, params);
+        (item_no, batch_no, tenant_id, payload_json, created_by_person_id) VALUES ${placeholders}`, params);
     }
   });
   startAiVariantDraftSaveBatchWorker();
@@ -90,23 +98,27 @@ export async function createAiVariantDraftSaveBatch(body = {}, session = null) {
 }
 
 export async function aiVariantDraftSaveBatchDetail(batchNo = "", session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAiVariantDraftSaveBatchSchema();
   const owner = Number(session?.personId || session?.id || 0) || 0;
-  const params = [String(batchNo || ""), ...(owner ? [owner] : [])];
-  const rows = await mysqlQuery(`SELECT * FROM ai_variant_draft_save_batches WHERE batch_no = ?${owner ? " AND created_by_person_id = ?" : ""} LIMIT 1`, params);
+  const params = [String(batchNo || ""), tenantId, owner];
+  const rows = await mysqlQuery("SELECT * FROM ai_variant_draft_save_batches WHERE batch_no = ? AND tenant_id = ? AND created_by_person_id = ? LIMIT 1", params);
   if (!rows.length) throw statusError("草稿保存批次不存在", 404);
   const items = await mysqlQuery(`SELECT item_no, status, stage, progress_percent, result_draft_id,
     shop_copy_count, error_message, attempts
-    FROM ai_variant_draft_save_items WHERE batch_no = ? ORDER BY id`, [batchNo]);
+    FROM ai_variant_draft_save_items WHERE batch_no = ? AND tenant_id = ? ORDER BY id`, [batchNo, tenantId]);
   return { ...mapBatch(rows[0]), items: items.map(mapItem) };
 }
 
 export async function retryAiVariantDraftSaveItem(itemNo = "", session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  const tenantId = businessTaskTenantKey(session);
   await ensureAiVariantDraftSaveBatchSchema();
   const owner = Number(session?.personId || session?.id || 0) || 0;
   await mysqlExecute(`UPDATE ai_variant_draft_save_items SET status = 'queued', stage = 'queued', progress_percent = 0,
-    error_message = NULL, finished_at = NULL WHERE item_no = ? AND status = 'failed'${owner ? " AND created_by_person_id = ?" : ""}`,
-  [itemNo, ...(owner ? [owner] : [])]);
+    error_message = NULL, finished_at = NULL WHERE item_no = ? AND status = 'failed' AND tenant_id = ? AND created_by_person_id = ?`,
+  [itemNo, tenantId, owner]);
   startAiVariantDraftSaveBatchWorker();
   scheduleWorker(10);
   return { ok: true };
@@ -178,14 +190,15 @@ function adaptiveDraftSaveConcurrency() {
 }
 
 async function executeClaimedItem(item) {
-  const session = { personId: Number(item.created_by_person_id || 0) || null };
   try {
+    const session = await restoreBusinessTaskSession(item.tenant_id, item.created_by_person_id);
+    assertBusinessTaskPermission(session, "operations");
     const payload = JSON.parse(item.payload_json || "{}");
     if (!batchWatermarkCaches.has(item.batch_no)) batchWatermarkCaches.set(item.batch_no, new Map());
-    const draft = await createWithOfferRetry({ ...payload, save_trace_id: payload.save_trace_id || item.item_no }, session, {
+    const draft = await withAiTenantSession(session, () => createWithOfferRetry({ ...payload, save_trace_id: payload.save_trace_id || item.item_no }, session, {
       summaryOnly: true,
       watermarkCache: batchWatermarkCaches.get(item.batch_no)
-    });
+    }));
     const draftId = Number(draft.id || draft.draft_id || 0) || null;
     await mysqlExecute("UPDATE ai_variant_draft_save_items SET status = 'completed', stage = 'completed', progress_percent = 100, result_draft_id = ?, shop_copy_count = ?, payload_json = '{}', finished_at = CURRENT_TIMESTAMP WHERE id = ?", [draftId, Number(draft.shop_copy_count || draft.shop_copies?.length || 0), item.id]);
   } catch (error) {

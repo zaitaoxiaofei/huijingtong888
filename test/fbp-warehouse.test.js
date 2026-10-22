@@ -56,17 +56,19 @@ test('shipment uses adjusted final quantity and zero rows release their reservat
   const released = [], outbound = [], inserts = [];
   const run = new Function('resolvePersonIdOrFirstMysql', 'mysqlConnectionQueryOne', 'nullableInteger',
     'releaseFbpReplenishmentReservationMysql', 'postFbpTransferInventoryMovementMysql',
+    'assertInventoryRecord','assertInventoryMember','currentFbpSkuBindingMysql','assertFbpSkuBindingMysql','inventoryTenantSql',
     source.slice(start, end) + '; return createFbpReplenishmentApprovedTransfersMysql;')(
     async () => 1, async () => null, value => value || null,
-    async (_, order, item) => released.push(item), async (_, transfer, quantity) => outbound.push(quantity));
+    async (_, order, item) => released.push(item), async (_, transfer, quantity) => outbound.push(quantity),
+    async()=>({shop_id:1}),async()=>1,async()=>({}),()=>{},()=>"tenant_id=1");
   const connection = { execute: async (sql, args) => {
     if (sql.includes('SELECT i.*')) {
       assert.match(sql, /SUM\(a.adjustment_qty\)/);
-      return [[{ id: 1, product_id: 10, approved_qty: 100, final_qty: 0 }, { id: 2, product_id: 10, approved_qty: 100, final_qty: 50 }]];
+      return [[{ id: 1, shop_id:1, product_id: 10, approved_qty: 100, final_qty: 0 }, { id: 2, shop_id:1, product_id: 10, approved_qty: 100, final_qty: 50 }]];
     }
     inserts.push(args); return [{ insertId: 10 }];
   } };
-  assert.deepEqual(await run(connection, 1, 1), { transferCount: 1, outboundQuantity: 50 });
+  assert.deepEqual(await run(connection, 1, 1,{id:1,isDefault:true}), { transferCount: 1, outboundQuantity: 50 });
   assert.deepEqual(released, [1, 2]);
   assert.deepEqual(outbound, [-50]);
   assert.equal(inserts[0][4], 50);
@@ -85,8 +87,10 @@ test('allocation rejects stale edits and requires explicit acknowledgment of cur
     return [[]];
   } };
   const run = new Function('ensureMysqlCutoverEnabled', 'ensureFbpReplenishmentSchemaMysql', 'withMysqlTransaction', 'localStockLocationPredicateMysql',
+    'resolveInventoryTenantScope','assertInventoryMember','assertInventoryRecord','inventoryTenantSql',
     source.slice(start, end).replace('export ', '') + '; return saveFbpReplenishmentInventoryAllocationMysql;')(
-    () => {}, async () => {}, callback => callback(connection), () => "stock_location = 'LOCAL'");
+    () => {}, async () => {}, callback => callback(connection), () => "stock_location = 'LOCAL'",
+    async()=>({id:1,isDefault:true}),async()=>1,async()=>({}),()=>"tenant_id=1");
   const body = { inventory_key: '10', reason: '仓库重新分配', items: [{ item_id: 1, order_id: 1, final_qty: 30, expected_final_qty: 9 }] };
   await assert.rejects(run(body, 1), /其他人调整/);
   body.items[0].expected_final_qty = 10;

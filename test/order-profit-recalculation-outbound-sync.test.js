@@ -9,6 +9,6 @@ test("single-order profit recalculation syncs outbound records within the order 
   const end = source.indexOf("export async function recalculateAllMappedOrderProfitsMysql", start);
   const block = source.slice(start, end);
 
-  assert.match(block, /syncOutboundForOpenOrdersMysql\(\{ order_ids: \[Number\(orderId\)\] \}\)/);
+  assert.match(block, /syncOutboundForOpenOrdersMysql\(\{ \.\.\.options, tenantId: tenantScope\.id, order_ids: \[Number\(orderId\)\] \}\)/);
   assert.doesNotMatch(block, /order_item_id: item\.id/);
 });

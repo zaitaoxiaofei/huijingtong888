@@ -1,8 +1,29 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-calculation-schema.js";
+import { TENANT_PRIVATE_FILES_SCHEMA } from "../src/services/tenant-private-files-schema.js";
+import { TENANT_INVENTORY_SALES_REFRESH_SCHEMA } from "../src/services/mysql-inventory-alert-snapshots.js";
+import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA, AI_IMAGE_TASK_OWNERS_SCHEMA } from "../src/services/ai-tenant-schema.js";
+import { TEAM_TASKS_SCHEMA } from "../src/services/team-task-schema.js";
+import { ORDER_HEATMAP_TENANT_SCHEMA } from "../src/services/order-heatmap-tenant-schema.js";
+import { MATERIAL_ASSETS_SCHEMA } from "../src/services/material-assets-schema.js";
+import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from "../src/services/customer-message-template-schema.js";
+import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "../src/services/customer-message-core-schema.js";
+import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-schema.js";
 
 const mysqlSchemaSql = `
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
+${TENANT_PRIVATE_FILES_SCHEMA};
+${TENANT_INVENTORY_SALES_REFRESH_SCHEMA};
+${TENANT_AI_LIMITS_SCHEMA};
+${TENANT_AI_USAGE_SCHEMA};
+${AI_IMAGE_TASK_OWNERS_SCHEMA};
+${TEAM_TASKS_SCHEMA};
+${ORDER_HEATMAP_TENANT_SCHEMA};
+${MATERIAL_ASSETS_SCHEMA};
+${CUSTOMER_MESSAGE_TEMPLATES_SCHEMA};
+${CUSTOMER_MESSAGE_SHOP_SCHEMA};
+${CUSTOMER_MESSAGE_TASKS_SCHEMA};
+${AI_VEHICLE_CATALOG_SCHEMA};
 CREATE TABLE IF NOT EXISTS media_migration_map (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   source_fingerprint CHAR(64) NOT NULL,
@@ -73,6 +94,7 @@ CREATE TABLE IF NOT EXISTS people (
 
 CREATE TABLE IF NOT EXISTS system_notifications (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
   recipient_person_id BIGINT UNSIGNED NOT NULL,
   notification_type VARCHAR(64) NOT NULL DEFAULT 'system',
   title VARCHAR(255) NOT NULL,
@@ -88,6 +110,7 @@ CREATE TABLE IF NOT EXISTS system_notifications (
   resolved_at DATETIME NULL,
   UNIQUE KEY uk_system_notifications_dedupe (dedupe_key),
   KEY idx_system_notifications_recipient_status (recipient_person_id, status, created_at),
+  KEY idx_system_notifications_tenant_recipient (tenant_id, recipient_person_id, status, created_at),
   KEY idx_system_notifications_created (created_at)
  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -96,6 +119,12 @@ CREATE TABLE IF NOT EXISTS tenants (
   slug VARCHAR(80) NOT NULL,
   name VARCHAR(255) NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
+  plan_code VARCHAR(32) NOT NULL DEFAULT 'trial_7d',
+  subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial',
+  subscription_expires_at DATETIME NULL,
+  feature_flags_json JSON NULL,
+  member_limit INT UNSIGNED NULL,
+  shop_limit INT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_tenants_slug (slug)
@@ -424,6 +453,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 
 CREATE TABLE IF NOT EXISTS products (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  logistics_rule_id BIGINT UNSIGNED NULL,
   tenant_id BIGINT UNSIGNED NULL,
   selection_id VARCHAR(128) NULL,
   code VARCHAR(128) NULL,
@@ -432,6 +462,20 @@ CREATE TABLE IF NOT EXISTS products (
   detail_image_urls LONGTEXT NULL,
   material VARCHAR(255) NULL,
   color VARCHAR(255) NULL,
+  vehicle_brand VARCHAR(255) NULL,
+  vehicle_model VARCHAR(255) NULL,
+  development_type VARCHAR(32) NOT NULL DEFAULT 'new',
+  vehicle_model_key VARCHAR(255) NOT NULL DEFAULT '',
+  inventory_category VARCHAR(255) NOT NULL DEFAULT '',
+  fitment_type VARCHAR(16) NOT NULL DEFAULT '',
+  accessory_name VARCHAR(255) NOT NULL DEFAULT '',
+  package_mode VARCHAR(16) NOT NULL DEFAULT '',
+  package_contents VARCHAR(500) NOT NULL DEFAULT '',
+  included_accessories VARCHAR(500) NOT NULL DEFAULT '',
+  gift_contents VARCHAR(500) NOT NULL DEFAULT '',
+  product_quantity INT NOT NULL DEFAULT 0,
+  surface_process VARCHAR(255) NOT NULL DEFAULT '',
+  vehicle_models_json JSON NULL,
   selling_points TEXT NULL,
   selection_has_main_image TINYINT(1) GENERATED ALWAYS AS (CASE WHEN COALESCE(OCTET_LENGTH(TRIM(image_url)), 0) > 0 THEN 1 ELSE 0 END) STORED,
   selection_has_detail_images TINYINT(1) GENERATED ALWAYS AS (CASE WHEN TRIM(COALESCE(detail_image_urls, '')) NOT IN ('', '[]') THEN 1 ELSE 0 END) STORED,
@@ -483,6 +527,7 @@ CREATE TABLE IF NOT EXISTS products (
   KEY idx_products_tenant_owner_active (tenant_id, owner_person_id, active, id),
   KEY idx_products_owner (owner_person_id),
   KEY idx_products_parent (parent_product_id),
+  KEY idx_products_inventory_naming (inventory_category(128), vehicle_brand(128), vehicle_model(128), accessory_name(128)),
   KEY idx_products_active_id (active, id),
   KEY idx_products_selection_readiness (active, selection_has_main_image, selection_has_detail_images, selection_has_selling_points)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -525,6 +570,7 @@ CREATE TABLE IF NOT EXISTS online_products (
 
 CREATE TABLE IF NOT EXISTS sku_mappings (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  person_id BIGINT UNSIGNED NULL,
   tenant_id BIGINT UNSIGNED NULL,
   shop_id BIGINT UNSIGNED NOT NULL,
   product_id BIGINT UNSIGNED NOT NULL,
@@ -609,6 +655,8 @@ CREATE TABLE IF NOT EXISTS procurement_history_sources (
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
+  KEY idx_purchase_orders_tenant_id (tenant_id, id),
   order_no VARCHAR(128) NOT NULL,
   created_by_person_id BIGINT UNSIGNED NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'pending_purchase',
@@ -663,6 +711,8 @@ CREATE TABLE IF NOT EXISTS procurement_purchase_group_items (
 
 CREATE TABLE IF NOT EXISTS procurement_platform_orders (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  KEY idx_procurement_platform_orders_tenant_id (tenant_id, id),
   platform VARCHAR(32) NOT NULL,
   platform_order_no VARCHAR(128) NOT NULL,
   order_time DATETIME NULL,
@@ -681,7 +731,7 @@ CREATE TABLE IF NOT EXISTS procurement_platform_orders (
   imported_by_person_id BIGINT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_procurement_platform_order (platform, platform_order_no),
+  UNIQUE KEY uk_procurement_platform_order (tenant_id, platform, platform_order_no),
   KEY idx_procurement_platform_order_binding (binding_status, order_time),
   KEY idx_procurement_platform_order_time (platform, order_time)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -700,6 +750,8 @@ CREATE TABLE IF NOT EXISTS procurement_platform_order_links (
 
 CREATE TABLE IF NOT EXISTS procurement_payment_transactions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  KEY idx_procurement_payment_transactions_tenant_id (tenant_id, id),
   provider VARCHAR(32) NOT NULL,
   external_no VARCHAR(160) NOT NULL,
   transaction_time DATETIME NULL,
@@ -714,13 +766,15 @@ CREATE TABLE IF NOT EXISTS procurement_payment_transactions (
   imported_by_person_id BIGINT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_procurement_payment_transaction (provider, external_no),
+  UNIQUE KEY uk_procurement_payment_transaction (tenant_id, provider, external_no),
   KEY idx_procurement_payment_time_amount (transaction_time, amount),
   KEY idx_procurement_payment_counterparty (counterparty)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS procurement_payment_matches (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  KEY idx_procurement_payment_matches_tenant_id (tenant_id, id),
   platform_order_id BIGINT UNSIGNED NOT NULL,
   payment_transaction_id BIGINT UNSIGNED NOT NULL,
   match_status VARCHAR(32) NOT NULL DEFAULT 'suggested',
@@ -732,13 +786,15 @@ CREATE TABLE IF NOT EXISTS procurement_payment_matches (
   confirmed_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_procurement_payment_match_order (platform_order_id),
+  UNIQUE KEY uk_procurement_payment_match_order (tenant_id, platform_order_id),
   KEY idx_procurement_payment_match_payment (payment_transaction_id),
   KEY idx_procurement_payment_match_status (match_status, confidence)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS purchase_order_items (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
+  KEY idx_purchase_order_items_tenant_id (tenant_id, id),
   purchase_order_id BIGINT UNSIGNED NOT NULL,
   product_id BIGINT UNSIGNED NOT NULL,
   requested_quantity INT NOT NULL DEFAULT 0,
@@ -757,6 +813,8 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
 
 CREATE TABLE IF NOT EXISTS purchase_cost_versions (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
+  KEY idx_purchase_cost_versions_tenant_id (tenant_id, id),
   product_id BIGINT UNSIGNED NOT NULL,
   version_no INT NOT NULL,
   source_key VARCHAR(160) NOT NULL,
@@ -830,6 +888,8 @@ CREATE TABLE IF NOT EXISTS procurement_order_allocations (
 
 CREATE TABLE IF NOT EXISTS inbound_records (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
+  KEY idx_inbound_records_tenant_id (tenant_id, id),
   product_id BIGINT UNSIGNED NOT NULL,
   person_id BIGINT UNSIGNED NULL,
   quantity INT NOT NULL,
@@ -1219,6 +1279,7 @@ CREATE TABLE IF NOT EXISTS ozon_ad_sku_daily (
   spend_cny DECIMAL(18,4) NOT NULL DEFAULT 0,
   impressions INT NOT NULL DEFAULT 0,
   clicks INT NOT NULL DEFAULT 0,
+  add_to_cart INT NOT NULL DEFAULT 0,
   orders INT NOT NULL DEFAULT 0,
   units INT NOT NULL DEFAULT 0,
   revenue_rub DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -1359,6 +1420,8 @@ CREATE TABLE IF NOT EXISTS order_quality_rules (
 
 CREATE TABLE IF NOT EXISTS sync_logs (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NULL,
+  KEY idx_sync_logs_tenant_id (tenant_id, id),
   job VARCHAR(128) NOT NULL,
   status VARCHAR(32) NOT NULL,
   message TEXT NULL,

@@ -26,7 +26,7 @@ test('cost-only purchases cannot turn a cost task into incoming stock and keep t
 
 test('cost task list is read-only, bounded, searchable, and does not depend on active purchase requests', async () => {
   const statements = [];
-  const service = createProcurementLedgerService({ prepare: async () => {}, query: async (sql, args) => {
+  const service = createProcurementLedgerService({ prepare: async () => {}, resolveScope: async () => ({ id: 1, isDefault: true }), query: async (sql, args) => {
     statements.push({ sql, args });
     return sql.includes('COUNT(*)') ? [{ total: 31 }] : [{ id: 7, product_id: 10, quantity: 10, resolved_quantity: 2 }];
   } });
@@ -46,5 +46,6 @@ test('manual priority requires inventory management permission; cost tasks use t
   await routes['POST /api/procurement/ledger']({ _session: { roles: ['procurement'], personId: 2,
     tenant: { id: 1, slug: 'default' } } });
   assert.equal(called, true);
-  assert.deepEqual(await routes['GET /api/procurement/stock-cost-tasks']({}, new URL('https://example.test/api/procurement/stock-cost-tasks?page=2')), { page: '2' });
+  assert.throws(() => routes['GET /api/procurement/stock-cost-tasks']({}, new URL('https://example.test/api/procurement/stock-cost-tasks?page=2')), { statusCode: 403 });
+  assert.deepEqual(await routes['GET /api/procurement/stock-cost-tasks']({ _session: { tenant: { id: 2, slug: 'a' } } }, new URL('https://example.test/api/procurement/stock-cost-tasks?page=2')), { page: '2' });
 });

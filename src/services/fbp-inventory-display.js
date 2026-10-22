@@ -1,3 +1,5 @@
+import { inventoryTenantSql } from './inventory-tenant-scope.js';
+
 // Read synchronized Ozon stock only. Displaying it must never post inventory movements.
 export async function loadOrderFbpStocks(query, orderIds) {
   if (!orderIds.length) return new Map();
@@ -39,24 +41,25 @@ export function summarizeFbpInventory(mappings, snapshots) {
     incomplete: !rows.length || rows.some(row => row.present === null) };
 }
 
-export async function loadProductFbpStocks(query, productId) {
+export async function loadProductFbpStocks(query, productId, scope = null) {
+  const tenant = alias => scope ? ` AND ${inventoryTenantSql(scope, alias)}` : '';
   const mappings = await query(`SELECT candidates.shop_id, candidates.ozon_sku, shop.name AS shop_name,
       MAX(op.name) AS product_name, MAX(op.offer_id) AS offer_id,
       CASE WHEN recipe.id IS NULL AND sm.product_id = ? THEN 1
         ELSE SUM(COALESCE(ri.quantity, pc.quantity, 1)) END AS per_set_quantity
     FROM (
-      SELECT shop_id, ozon_sku FROM sku_mappings WHERE active = 1
-        AND (product_id = ? OR product_id IN (SELECT product_id FROM product_components WHERE component_product_id = ?))
+      SELECT shop_id, ozon_sku FROM sku_mappings WHERE active = 1${tenant('')}
+        AND (product_id = ? OR product_id IN (SELECT product_id FROM product_components WHERE component_product_id = ?${tenant('')}))
       UNION
       SELECT r.shop_id, r.ozon_sku FROM sku_inventory_recipes r
         JOIN sku_inventory_recipe_items i ON i.recipe_id = r.id WHERE r.active = 1 AND i.product_id = ?
     ) candidates
-    JOIN shops shop ON shop.id = candidates.shop_id
+    JOIN shops shop ON shop.id = candidates.shop_id${tenant('shop')}
     LEFT JOIN sku_mappings sm ON sm.id = (SELECT MIN(m.id) FROM sku_mappings m
-      WHERE m.active = 1 AND m.shop_id = candidates.shop_id AND m.ozon_sku = candidates.ozon_sku)
+      WHERE m.active = 1 AND m.shop_id = candidates.shop_id AND m.ozon_sku = candidates.ozon_sku${tenant('m')})
     LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id = candidates.shop_id AND recipe.ozon_sku = candidates.ozon_sku AND recipe.active = 1
     LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
-    LEFT JOIN product_components pc ON pc.product_id = sm.product_id AND recipe.id IS NULL
+    LEFT JOIN product_components pc ON pc.product_id = sm.product_id AND recipe.id IS NULL${tenant('pc')}
     LEFT JOIN online_products op ON op.shop_id = candidates.shop_id AND op.ozon_sku = candidates.ozon_sku
     WHERE (recipe.id IS NULL AND sm.product_id = ?) OR COALESCE(ri.product_id, pc.component_product_id, sm.product_id) = ?
     GROUP BY candidates.shop_id, candidates.ozon_sku, shop.name, recipe.id, sm.product_id`, Array(6).fill(productId));

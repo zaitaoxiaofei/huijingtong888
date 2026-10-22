@@ -151,6 +151,9 @@ export function createStaticHandler(publicDir, options = {}) {
   return function serveStatic(pathname, req, res) {
     const normalizedPath = normalizeStaticPath(pathname);
     const cleanPath = normalizedPath === "/" || normalizedPath === "/index.html" ? "/admin.html" : normalizedPath;
+    // Enterprise attachments must pass the authenticated registry reader.
+    if (/(?:^|\/)uploads\/(?:team-attachments|ai-generated|ai-cropped|shop-variants|shop-watermarks)(?:\/|$)/i.test(cleanPath)
+      || /(?:^|\/)uploads\/temp\/image-cropper(?:\/|$)/i.test(cleanPath)) return notFound(res);
     const filePath = path.join(publicRoot, cleanPath);
     const isFileRequest = path.posix.extname(cleanPath) !== "";
 

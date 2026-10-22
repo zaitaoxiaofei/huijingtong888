@@ -8,6 +8,7 @@ export async function createMysqlConnection(options = {}) {
     port = config.dbPort,
     user = config.dbUser,
     password = config.dbPassword,
+    socketPath = process.env.DB_SOCKET_PATH,
     database = config.dbName,
     multipleStatements = true
   } = options;
@@ -17,6 +18,7 @@ export async function createMysqlConnection(options = {}) {
   }
 
   return mysql.createConnection({
+    ...(socketPath ? { socketPath } : {}),
     host,
     port,
     user,
