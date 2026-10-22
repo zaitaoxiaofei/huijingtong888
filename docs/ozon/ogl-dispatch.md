@@ -27,6 +27,7 @@
 新增表为 `ogl_dispatch_settings`、`ogl_dispatch_batches`、`ogl_dispatch_members`、`ogl_dispatch_official_locks`、`ogl_dispatch_events`。各表显式保存企业 ID，默认企业的历史 NULL 店铺也必须通过当前企业和原店铺验证。
 
 - 订单 `status/tracking_stage/logistics_status` 继续保存 Ozon 原始信息。有效官方申请或真实交运记录派生 `display_status=ogl_dispatched`，兼容原统计键；界面统一称「发运跟踪」，逐行区分「已申请·待交接」与「已实际交运」。`ogl_dispatch.tracking/applied` 只表示申请跟踪；`dispatched/dispatched_at` 严格表示操作员显式登记的实物交运。
+- 「已申请·待交接」不得遮住原平台允许的订单面单打印：尚无实际交运记录、真实平台仍为等待发货且 Ozon 已开放标签下载时保留打印；接口明确禁用、标签未就绪、FBP、运输或终态继续禁止，不因此恢复备货、拆分或采购操作。
 - 已上网、签收、取消、退回或争议等真实订单状态始终优先。申请的 `formed/received/closed` 不能代替订单轨迹，也不能将订单倒退为待发或冒充运输。
 - 非 OGL 订单没有新成员记录，沿用现有状态、打印及发货规则。订单原店铺、SKU、财务归属不变。
 - 活动成员唯一约束与创建请求幂等键阻止重复组批；撤回保留旧成员和原因，再加入新批次会产生新成员记录。

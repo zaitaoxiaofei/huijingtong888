@@ -81,6 +81,41 @@ test("acceptance display and optimistic counts cannot regress transit or termina
   }
 });
 
+test("OGL applications awaiting physical handover preserve ready Ozon labels without enabling preparation", () => {
+  const page = loadFunctions(pageSource, ["rowDisplayStateKey", "rowAvailableActions"]);
+  for (const platform of [...acceptanceRows, { status: "awaiting_deliver" }]) {
+    const pending = {
+      ...platform, display_status: "ogl_dispatched", total_quantity: 2,
+      ogl_dispatch: { tracking: true, applied: true, dispatched: false, dispatched_at: null, stage: "applied" },
+      ozon_available_actions: ["label_download"], availableActions: { prepare: true, print: true, purchase: true }
+    };
+    assert.equal(page.rowDisplayStateKey(pending), "ogl_dispatched");
+    const actions = page.rowAvailableActions(pending);
+    assert.equal(actions.showPrint, true, JSON.stringify(platform));
+    assert.equal(actions.print, true, JSON.stringify(platform));
+    for (const key of ["prepare", "showPrepare", "splitPrepare", "showSplitPrepare", "showPurchase", "purchase"]) {
+      assert.equal(actions[key], false, `${key} must not change with the print fix`);
+    }
+    for (const patch of [
+      { ozon_available_actions: ["click_track_number"] },
+      { ozon_available_actions: [] },
+      { ozon_available_actions: undefined },
+      { availableActions: { print: false } },
+      { fulfillment_type_key: "fbp" },
+      { procurement_coverage: { stock_location: "FBP" } },
+      { ogl_dispatch: { ...pending.ogl_dispatch, dispatched: true, dispatched_at: null } },
+      { ogl_dispatch: { ...pending.ogl_dispatch, dispatched: true, dispatched_at: "2026-10-22 06:00:00" } },
+      { ogl_dispatch: { ...pending.ogl_dispatch, dispatched: false, dispatched_at: "2026-10-22 06:00:00" } },
+      ...["delivering", "delivered", "cancelled", "returned", "rejected", "dispute"].map(status => ({ status })),
+      ...["posting_in_transit", "posting_received_by_buyer", "posting_cancelled"].map(tracking_stage => ({ tracking_stage })),
+      { status: "awaiting_packaging", tracking_stage: "", logistics_status: "" }
+    ]) {
+      assert.equal(page.rowAvailableActions({ ...pending, ...patch }).print, false, JSON.stringify(patch));
+    }
+    assert.equal(page.rowAvailableActions({ ...pending, ozon_available_actions: ["label_download_small"], availableActions: {} }).print, true);
+  }
+});
+
 test("assembled orders being registered appear under awaiting delivery, with label permissions from Ozon", () => {
   const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
   for (const row of registrationRows) {

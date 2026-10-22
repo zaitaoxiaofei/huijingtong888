@@ -677,6 +677,9 @@ function rowAvailableActions(row) {
   const isDispute = displayStateKey === "dispute" || statusText.includes("dispute") || statusText.includes("arbitration");
   const isDelivering = displayStateKey === "delivering";
   const isAwaitingDeliver = displayStateKey === "awaiting_deliver";
+  const isOglAwaitingHandover = displayStateKey === "ogl_dispatched"
+    && row?.ogl_dispatch?.dispatched !== true && !row?.ogl_dispatch?.dispatched_at
+    && rowDisplayStateKey({ ...row, ogl_dispatch: undefined, display_status: undefined }) === "awaiting_deliver";
   const logisticsText = [
     row?.warehouse_name,
     row?.delivery_method_name,
@@ -698,11 +701,12 @@ function rowAvailableActions(row) {
   const quantitySummary = Number(row?.total_quantity || row?.quantity_total || row?.quantity || row?.item_count || 1);
   const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
   const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
-  const showPrint = beforeTransit && isAwaitingDeliver && apiActions.print !== false;
   const isRegistering = statusText.includes("acceptance_in_progress") || statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
   const ozonActions = Array.isArray(row?.ozon_available_actions) ? row.ozon_available_actions : [];
   const labelReady = ozonActions.some((action) => ["label_download", "label_download_small"].includes(action));
-  const canPrint = showPrint && !isFbp && (!isRegistering || labelReady) && (Boolean(apiActions.print) || printed || isAwaitingDeliver);
+  const printAwaitingDeliver = isAwaitingDeliver || (isOglAwaitingHandover && labelReady);
+  const showPrint = beforeTransit && printAwaitingDeliver && apiActions.print !== false;
+  const canPrint = showPrint && !isFbp && (!isRegistering || labelReady) && (Boolean(apiActions.print) || printed || printAwaitingDeliver);
   return {
     ...apiActions,
     print: canPrint,
