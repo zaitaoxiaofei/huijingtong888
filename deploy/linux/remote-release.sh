@@ -213,7 +213,7 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" ]]; then
   backup_database
 fi
 
@@ -298,6 +298,17 @@ if [[ -f "$staging_dir/scripts/init-order-query-facts.mjs" ]]; then
 fi
 else
   echo "Skipping database maintenance for $release_version"
+fi
+
+# Case target history requires this additive index before candidate readiness,
+# including releases that skip broad database maintenance. The backup above is
+# mandatory whenever this migration is packaged.
+if [[ -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" ]]; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/migrate-ai-variant-draft-history-index.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node scripts/migrate-ai-variant-draft-history-index.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 fi
 
 # This additive schema is required even when broad maintenance is disabled.

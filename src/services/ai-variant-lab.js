@@ -2119,35 +2119,49 @@ async function variantCaseTargetHistory(caseRow, caseJson) {
   // Standalone AI installs can precede listing setup; reading a case must not create listing tables.
   const draftTables = await mysqlQuery("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'listing_drafts' LIMIT 1");
   if (draftTables.length) {
+    // The reviewed generated index selects source candidates without scanning large historical JSON;
+    // parsed source IDs and same-enterprise job lineage below remain the actual authority.
     const drafts = await mysqlQuery(`
-      SELECT d.manual_facts_json, d.ai_payload_json, d.spec,
-        j.source_product_id AS linked_case_no
-      FROM listing_drafts d
-      LEFT JOIN ai_variant_lab_batch_jobs j ON BINARY j.tenant_id = BINARY COALESCE(d.tenant_id, 'admin')
-        AND BINARY j.job_no = BINARY COALESCE(
+      SELECT d.ai_variant_source_key AS source_id,
+        COALESCE(
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.ai_variant_lab_job_no')), ''),
           NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.job_no')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.ai_variant_lab_job_no')), ''),
           JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.job_no'))
-        )
-      WHERE COALESCE(d.tenant_id, 'admin') = ? AND d.status <> 'deleted'
-        AND BINARY COALESCE(
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.source_product_id')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.source_product_id')), ''),
-          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.source_product_id'))
-        ) IN (BINARY ?${hasOriginTrace ? ", BINARY ?" : ""})
+        ) AS job_no,
+        COALESCE(
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.source')), ''),
+          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.source'))
+        ) AS workflow,
+        COALESCE(
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.target_variant_value')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.target_variant_value')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.target_variant_value')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.target_variant_value')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.target_variant_value')), ''), d.spec
+        ) AS target_value
+      FROM listing_drafts d
+      WHERE (d.tenant_id = ?${aiTenantId() === "admin" ? " OR d.tenant_id IS NULL" : ""}) AND d.status <> 'deleted'
+        AND d.ai_variant_source_key IN (?${hasOriginTrace ? ", ?" : ""})
     `, [aiTenantId(), caseRow.case_no, ...(hasOriginTrace ? [originSourceId] : [])]);
+    const candidates = [];
     for (const draft of drafts) {
-      const facts = objectValue(parseStoredJson(draft.manual_facts_json, {}));
-      const ai = objectValue(parseStoredJson(draft.ai_payload_json, {}));
-      const optimization = objectValue(facts.ai_optimization || ai.ai_optimization);
-      if (optimization.source !== "ai_variant_lab") continue;
-      const userFacts = objectValue(facts.user_facts || ai.manual_facts || facts);
-      const jobNo = cleanText(userFacts.ai_variant_lab_job_no || optimization.job_no);
-      const sourceId = cleanText(userFacts.source_product_id || ai.manual_facts?.source_product_id);
-      const fromCase = sourceId === caseRow.case_no && (!jobNo || draft.linked_case_no === caseRow.case_no);
-      const fromOrigin = hasOriginTrace && sourceId === originSourceId && jobNo === originJobNo && draft.linked_case_no === originSourceId;
+      if (draft.workflow !== "ai_variant_lab") continue;
+      candidates.push({ jobNo: cleanText(draft.job_no), sourceId: cleanText(draft.source_id), target: draft.target_value });
+    }
+    // Keep the unique (tenant_id, job_no) key usable: never join JSON draft fields to cast job columns.
+    const jobNos = [...new Set(candidates.map(draft => draft.jobNo).filter(Boolean))];
+    const linkedJobs = jobNos.length ? await mysqlQuery(`
+      SELECT job_no, source_product_id FROM ai_variant_lab_batch_jobs
+      WHERE tenant_id = ? AND job_no IN (${jobNos.map(() => "?").join(", ")})
+    `, [aiTenantId(), ...jobNos]) : [];
+    const linkedSources = new Map(linkedJobs.map(job => [job.job_no, job.source_product_id]));
+    for (const draft of candidates) {
+      const linkedSource = linkedSources.get(draft.jobNo);
+      const fromCase = draft.sourceId === caseRow.case_no && (!draft.jobNo || linkedSource === caseRow.case_no);
+      const fromOrigin = hasOriginTrace && draft.sourceId === originSourceId && draft.jobNo === originJobNo && linkedSource === originSourceId;
       if (!fromCase && !fromOrigin) continue;
-      record(userFacts.target_variant_value || optimization.target_variant_value || draft.spec, "completed", { savedDraft: true });
+      record(draft.target, "completed", { savedDraft: true });
     }
   }
   return [...history.values()].sort((a, b) => a.target_value.localeCompare(b.target_value));

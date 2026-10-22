@@ -38,6 +38,7 @@ import { listingTenantLookup } from "./listing-tenant-scope.js";
 import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { AI_VARIANT_SOURCE_COLUMN_SQL, AI_VARIANT_SOURCE_INDEX_SQL } from "./ai-variant-draft-history-schema.js";
 import { assertImageCropperTaskOwner } from "../server/services/tools/imageCropperService.js";
 import { buildOrderOutcomeSql } from "./order-outcome.js";
 import { listingVariantInventoryCandidates, propagateListingVariantInventory } from "./listing-variant-inventory.js";
@@ -14659,6 +14660,7 @@ async function initializeListingAutomationSchema() {
         )) STORED,
         manual_facts_json LONGTEXT NOT NULL,
         ai_payload_json LONGTEXT NOT NULL,
+        ${AI_VARIANT_SOURCE_COLUMN_SQL},
         status VARCHAR(32) NOT NULL DEFAULT 'draft',
         development_type VARCHAR(32) NOT NULL DEFAULT 'new',
         source_product_id BIGINT NULL,
@@ -14672,7 +14674,8 @@ async function initializeListingAutomationSchema() {
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_listing_drafts_owner_status (created_by_person_id, status, updated_at),
         INDEX idx_listing_drafts_tenant_status_updated (tenant_id, status, updated_at, id),
-        INDEX idx_listing_drafts_tenant_template (tenant_id, template_id, status, updated_at)
+        INDEX idx_listing_drafts_tenant_template (tenant_id, template_id, status, updated_at),
+        ${AI_VARIANT_SOURCE_INDEX_SQL}
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
     await ensureMysqlColumn("listing_drafts", "tenant_id", "VARCHAR(80) NULL");

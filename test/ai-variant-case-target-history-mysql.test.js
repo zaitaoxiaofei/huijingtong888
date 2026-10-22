@@ -10,6 +10,7 @@ import mysql from "mysql2/promise";
 import { shanghaiDateKey } from "../src/shanghai-time.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey } from "../src/services/business-task-tenant.js";
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "../src/services/ai-tenant-schema.js";
+import { AI_VARIANT_SOURCE_COLUMN_SQL, AI_VARIANT_SOURCE_INDEX_SQL, assertAiVariantDraftHistorySchemaReady } from "../src/services/ai-variant-draft-history-schema.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const session = id => ({ personId: 7, tenant: { id, slug: id === 1 ? "default" : `enterprise-${id}` } });
@@ -20,12 +21,14 @@ test("case target history uses actual results from only the current case and ent
 }, async t => {
   const database = `ozon_case_history_${randomBytes(8).toString("hex")}`;
   const admin = await mysql.createConnection({ socketPath, user: "root" });
+  const queries = [];
   let created = false, pool, businessReads = 0;
   try {
     await admin.query(`CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
     created = true;
     pool = mysql.createPool({ socketPath, user: "root", database, connectionLimit: 3 });
     const query = async (sql, params = []) => {
+      queries.push({ sql, params });
       if (/FROM (?:ai_variant_lab_batch_jobs|listing_drafts)/.test(sql)) businessReads += 1;
       return (await pool.query(sql, params))[0];
     };
@@ -34,7 +37,7 @@ test("case target history uses actual results from only the current case and ent
       "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
       "CREATE TABLE people (id BIGINT PRIMARY KEY, name VARCHAR(80), active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'operations', roles_json JSON NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON NULL, PRIMARY KEY(tenant_id, person_id))",
-      "CREATE TABLE listing_drafts (id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(64) NULL, status VARCHAR(32) DEFAULT 'draft', manual_facts_json LONGTEXT NULL, ai_payload_json LONGTEXT NULL, spec VARCHAR(255) DEFAULT '')"
+      `CREATE TABLE listing_drafts (id BIGINT AUTO_INCREMENT PRIMARY KEY, tenant_id VARCHAR(64) NULL, status VARCHAR(32) DEFAULT 'draft', manual_facts_json LONGTEXT NULL, ai_payload_json LONGTEXT NULL, spec VARCHAR(255) DEFAULT '', ${AI_VARIANT_SOURCE_COLUMN_SQL}, ${AI_VARIANT_SOURCE_INDEX_SQL})`
     ]) await query(sql);
     await query("INSERT INTO tenants (id, slug) VALUES (1, 'default'), (2, 'enterprise-2'), (3, 'enterprise-3')");
     await query("INSERT INTO people (id, name) VALUES (7, 'Operator')");
@@ -57,6 +60,7 @@ test("case target history uses actual results from only the current case and ent
       vm.runInContext(read(file).replace(/^import[^;]*;\r?\n/gm, "").replaceAll("export ", ""), context, { filename: file });
     }
     await context.ensureAiVariantLabSchema();
+    assert.equal((await assertAiVariantDraftHistorySchemaReady(query)).ready, true);
     for (const id of [1, 2, 3]) {
       await context.aiVariantLabSaveCase({ caseNo: "AVC-P4", caseName: `Case ${id}`, case: {} }, session(id));
       await context.aiVariantLabSaveCase({ caseNo: "AVC-OTHER", caseName: `Other ${id}`, case: {} }, session(id));
@@ -129,7 +133,9 @@ test("case target history uses actual results from only the current case and ent
       await draft("2", "Foreign linked draft", { jobNo: "foreign-job" });
       await draft("2", "Wrong-case linked draft", { jobNo: "other-case-job" });
       await draft("2", "Other AI workflow", { source: "ai_product_material_optimizer" });
-      await query("INSERT INTO listing_drafts (tenant_id, manual_facts_json) VALUES ('2', 'broken JSON')");
+      await draft("2", "AVC-P4 occurs only in unrelated text", { caseNo: "AVC-OTHER" });
+      await draft("2", "Lookalike case number", { caseNo: "avc-p4" });
+      await query("INSERT INTO listing_drafts (tenant_id, manual_facts_json) VALUES ('2', 'broken JSON AVC-P4')");
       const rows = await history();
       assert.deepEqual(rows.map(row => row.target_value), ["Legacy saved", "Saved before image"]);
       assert.ok(rows.every(row => row.status === "completed" && row.saved_draft_count === 1));
@@ -149,6 +155,7 @@ test("case target history uses actual results from only the current case and ent
       await job("2", "unrelated-job", "mother-P4");
       await item("2", "unrelated-job", "Unrelated same SKU", "image_done");
       await draft("2", "Unrelated draft", { caseNo: "mother-P4", jobNo: "unrelated-job" });
+      await draft("2", "original-job occurs only in target text", { caseNo: "mother-P4", jobNo: "unrelated-job" });
       await draft("2", "Unverified SKU draft", { caseNo: "mother-P4" });
       await draft("2", "Wrong-source linked draft", { caseNo: "wrong-source", jobNo: "original-job" });
       await job("3", "original-job", "mother-P4");
@@ -205,6 +212,84 @@ test("case target history uses actual results from only the current case and ent
       assert.equal((await history())[0].status, "in_progress");
       await query("UPDATE ai_variant_lab_batch_items SET status = 'image_done' WHERE tenant_id = '2'");
       assert.equal((await history())[0].status, "completed");
+    });
+
+    await t.test("large draft/job history stays bounded and verifies lineage through the indexed batched lookup", async () => {
+      await reset();
+      const noise = JSON.stringify({ user_facts: { source_product_id: "unrelated-SKU" }, legacy_content: "x".repeat(5000) });
+      for (let offset = 0; offset < 2000; offset += 100) {
+        const indexes = Array.from({ length: 100 }, (_, index) => offset + index);
+        await query(`INSERT INTO ai_variant_lab_batch_jobs (tenant_id, job_no, source_product_id) VALUES ${indexes.map(() => "('2', ?, 'unrelated-SKU')").join(", ")}`,
+          indexes.map(index => `noise-job-${index}`));
+        await query(`INSERT INTO listing_drafts (tenant_id, manual_facts_json) VALUES ${indexes.map(() => "('2', ?)").join(", ")}`,
+          indexes.map(() => noise));
+      }
+      for (let index = 0; index < 10; index += 1) {
+        await job("2", `saved-${index}`);
+        await draft("2", `Saved ${index}`, { jobNo: `saved-${index}` });
+      }
+      const start = queries.length;
+      const beganAt = Date.now();
+      assert.equal((await history()).length, 10);
+      assert.ok(Date.now() - beganAt < 10000, "2000 unrelated jobs and 10 MB of draft JSON must not turn a case read into a long query");
+      const lookups = queries.slice(start).filter(({ sql }) => /SELECT job_no, source_product_id FROM ai_variant_lab_batch_jobs/.test(sql));
+      assert.equal(lookups.length, 1, "all draft job references are checked in one lookup");
+      const planRows = await query(`EXPLAIN FORMAT=JSON ${lookups[0].sql}`, lookups[0].params);
+      const plan = JSON.parse(planRows[0].EXPLAIN);
+      const tables = [];
+      const visit = node => {
+        if (!node || typeof node !== "object") return;
+        if (node.table_name === "ai_variant_lab_batch_jobs") tables.push(node);
+        for (const value of Object.values(node)) if (value && typeof value === "object") visit(value);
+      };
+      visit(plan);
+      assert.equal(tables.length, 1);
+      assert.equal(tables[0].key, "uniq_ai_variant_lab_batch_jobs_no");
+      assert.deepEqual(tables[0].used_key_parts, ["tenant_id", "job_no"]);
+      assert.ok(tables[0].rows_examined_per_scan <= 10, "lineage verification must examine only candidate jobs, not every enterprise job");
+      const [draftLookup] = queries.slice(start).filter(({ sql }) => /FROM listing_drafts d/.test(sql));
+      const [draftPlanRow] = await query(`EXPLAIN FORMAT=JSON ${draftLookup.sql}`, draftLookup.params);
+      const draftPlan = JSON.parse(draftPlanRow.EXPLAIN);
+      const planTables = [];
+      const visitDrafts = node => {
+        if (!node || typeof node !== "object") return;
+        if (node.table_name === "d") planTables.push(node);
+        for (const value of Object.values(node)) if (value && typeof value === "object") visitDrafts(value);
+      };
+      visitDrafts(draftPlan);
+      assert.equal(planTables[0].key, "idx_listing_drafts_tenant_ai_source");
+      assert.deepEqual(planTables[0].used_key_parts, ["tenant_id", "ai_variant_source_key"]);
+      assert.ok(planTables[0].rows_examined_per_scan <= 10, "large unrelated JSON drafts must never be read to find source lineage");
+    });
+
+    await t.test("generated source keys preserve 128 characters, reject truncated aliases, and track old writers automatically", async () => {
+      await reset();
+      for (const source of ["x".repeat(128), "x".repeat(129)]) await draft("2", "Boundary", { caseNo: source });
+      const rows = await query("SELECT id, ai_variant_source_key FROM listing_drafts ORDER BY id");
+      assert.equal(rows[0].ai_variant_source_key, "x".repeat(128));
+      assert.equal(rows[1].ai_variant_source_key, null);
+      await query("UPDATE listing_drafts SET manual_facts_json = ? WHERE id = ?", [JSON.stringify({ user_facts: { source_product_id: "new-source" } }), rows[0].id]);
+      assert.equal((await query("SELECT ai_variant_source_key FROM listing_drafts WHERE id = ?", [rows[0].id]))[0].ai_variant_source_key, "new-source");
+      await query("INSERT INTO listing_drafts(tenant_id,manual_facts_json,ai_payload_json) VALUES ('2','broken JSON',?)", [JSON.stringify({ manual_facts: { source_product_id: "fallback-source" } })]);
+      assert.equal((await query("SELECT ai_variant_source_key FROM listing_drafts ORDER BY id DESC LIMIT 1"))[0].ai_variant_source_key, "fallback-source");
+    });
+
+    await t.test("startup refuses a missing, incorrectly ordered, or changed source projection index", async () => {
+      await reset();
+      await query("ALTER TABLE listing_drafts DROP INDEX idx_listing_drafts_tenant_ai_source");
+      await assert.rejects(assertAiVariantDraftHistorySchemaReady(query), { statusCode: 503 });
+      await query("ALTER TABLE listing_drafts ADD INDEX idx_listing_drafts_tenant_ai_source(ai_variant_source_key, tenant_id)");
+      await assert.rejects(assertAiVariantDraftHistorySchemaReady(query), { statusCode: 503 });
+      await query("ALTER TABLE listing_drafts DROP INDEX idx_listing_drafts_tenant_ai_source, DROP COLUMN ai_variant_source_key");
+      await query("ALTER TABLE listing_drafts ADD COLUMN ai_variant_source_key VARCHAR(128) GENERATED ALWAYS AS ('wrong-source') VIRTUAL, ADD INDEX idx_listing_drafts_tenant_ai_source(tenant_id, ai_variant_source_key)");
+      await assert.rejects(assertAiVariantDraftHistorySchemaReady(query), { statusCode: 503 });
+      await query("ALTER TABLE listing_drafts DROP INDEX idx_listing_drafts_tenant_ai_source, DROP COLUMN ai_variant_source_key");
+      await query(`ALTER TABLE listing_drafts ADD COLUMN ${AI_VARIANT_SOURCE_COLUMN_SQL}, ADD ${AI_VARIANT_SOURCE_INDEX_SQL}`);
+      assert.equal((await assertAiVariantDraftHistorySchemaReady(query)).ready, true);
+      await query("ALTER TABLE listing_drafts ALTER INDEX idx_listing_drafts_tenant_ai_source INVISIBLE");
+      await assert.rejects(assertAiVariantDraftHistorySchemaReady(query), { statusCode: 503 });
+      await query("ALTER TABLE listing_drafts ALTER INDEX idx_listing_drafts_tenant_ai_source VISIBLE");
+      assert.equal((await assertAiVariantDraftHistorySchemaReady(query)).ready, true);
     });
 
     await t.test("missing/foreign cases and revoked memberships fail before reading result history", async () => {
