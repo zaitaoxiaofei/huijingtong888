@@ -40,6 +40,7 @@ function tabTone(value) {
     all: "slate",
     awaiting_packaging: "amber",
     awaiting_deliver: "blue",
+    ogl_dispatched: "blue",
     delivering: "green",
     dispute: "red",
     delivered: "teal",
@@ -59,6 +60,7 @@ function tabTone(value) {
           <button
             v-for="tab in statusTabs"
             :key="tab.value"
+            :title="tab.title || ''"
             type="button"
             class="orders-status-item"
             :class="[`tone-${tabTone(tab.value)}`, { active: activeStatus === tab.value }]"

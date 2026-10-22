@@ -1,5 +1,6 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-calculation-schema.js";
+import { OGL_DISPATCH_SCHEMA_SQL } from "../src/services/ogl-dispatch-schema.js";
 import { TENANT_PRIVATE_FILES_SCHEMA } from "../src/services/tenant-private-files-schema.js";
 import { TENANT_INVENTORY_SALES_REFRESH_SCHEMA } from "../src/services/mysql-inventory-alert-snapshots.js";
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA, AI_IMAGE_TASK_OWNERS_SCHEMA } from "../src/services/ai-tenant-schema.js";
@@ -12,6 +13,7 @@ import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-sc
 
 const mysqlSchemaSql = `
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
+${OGL_DISPATCH_SCHEMA_SQL.join(";\n")};
 ${TENANT_PRIVATE_FILES_SCHEMA};
 ${TENANT_INVENTORY_SALES_REFRESH_SCHEMA};
 ${TENANT_AI_LIMITS_SCHEMA};

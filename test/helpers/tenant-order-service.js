@@ -3,6 +3,9 @@ import vm from 'node:vm';
 import { createHash } from 'node:crypto';
 import { loadOrderProcurementCoverage, procurementQueueSql } from '../../src/services/mysql-order-procurement-coverage.js';
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from '../../src/services/order-profit-calculation-schema.js';
+import { OGL_DISPATCH_SCHEMA_SQL } from '../../src/services/ogl-dispatch-schema.js';
+import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql, withOglDispatch } from '../../src/services/ogl-dispatch-state.js';
+import { OGL_DISPATCH_REFRESH } from '../../src/services/ogl-dispatch-access.js';
 import { initializeOrderQueryFacts } from '../../src/services/order-query-facts.js';
 import { authorizeBusinessTaskSession } from '../../src/services/business-task-tenant.js';
 import { hasPermission, primaryRole, getRoles } from '../../src/shared/permissions.js';
@@ -53,7 +56,7 @@ export async function createOrderFixtureSchema(connection) {
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
-  for (const statement of [...ORDER_PROFIT_CALCULATION_SCHEMA, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
+  for (const statement of [...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
   const exceptionSnapshot = source.match(/CREATE TABLE IF NOT EXISTS exception_workbench_snapshots[\s\S]*?ENGINE=InnoDB[^\r\n]*/)?.[0];
   if (!exceptionSnapshot) throw new Error('Missing exception snapshot schema');
   await connection.query(exceptionSnapshot);
@@ -88,10 +91,11 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
+    'loadOglDispatchMembersMysql',
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,
+  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
     mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,

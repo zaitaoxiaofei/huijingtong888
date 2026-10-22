@@ -9,6 +9,7 @@ const waitingDispatchStatuses = new Set(['awaiting_packaging', 'awaiting_approve
   'posting_in_carriage', 'posting_transferring_to_delivery']);
 
 export function isOrderInTransport(order = {}) {
+  if (order.ogl_dispatch?.dispatched === true && !order.ogl_dispatch.withdrawn_at) return true;
   const primary = String(order.status || order.tracking_stage || '').toLowerCase();
   if (waitingDispatchStatuses.has(primary)) return false;
   const state = [order.status, order.logistics_status, order.tracking_stage, order.substatus]

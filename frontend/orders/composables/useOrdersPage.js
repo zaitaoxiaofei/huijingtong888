@@ -98,6 +98,7 @@ function writeOrdersMetaCache(filters = {}, counts = {}) {
 const STATUS_TABS = [
   { value: "awaiting_packaging", label: "等待备货" },
   { value: "awaiting_deliver", label: "等待发货" },
+  { value: "ogl_dispatched", label: "已发运", title: "运往集运仓" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
@@ -134,6 +135,8 @@ const FULFILLMENT_TYPE_OPTIONS = [
 ];
 
 const MORE_ACTIONS = [
+  { value: "ogl-create-batch", label: "创建 OGL 发运批次" },
+  { value: "ogl-batch-history", label: "OGL 发运批次" },
   { value: "recalculate-profit", label: "重算利润" },
   { value: "print-selected", label: "打印所选" },
   { value: "prepare-selected", label: "备货所选" }
@@ -214,6 +217,7 @@ function friendlyPrepareError(error) {
 }
 
 function orderTabKey(row = {}) {
+  if (row.ogl_dispatch?.dispatched === true && ["ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(row.display_status)) return row.display_status;
   const values = [row.status, row.tracking_stage].map((value) => String(value || "").toLowerCase());
   if (values.some((value) => AWAITING_PACKAGING_STATES.includes(value))) return "awaiting_packaging";
   if (values.some((value) => AWAITING_DELIVER_STATES.includes(value))) return "awaiting_deliver";

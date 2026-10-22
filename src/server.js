@@ -23,6 +23,11 @@ import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/te
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
+import { createOglDispatchRoutes, handleOglDispatchFileRoute } from "./server/routes/ogl-dispatch.js";
+import { createOglDispatchService } from "./services/ogl-dispatch.js";
+import { ensureOglDispatchSchema } from "./services/ogl-dispatch-schema.js";
+import { oglCarriageClient } from "./services/ogl-carriage-client.js";
+import { OGL_DISPATCH_REFRESH } from "./services/ogl-dispatch-access.js";
 import { createPrintRoutes } from "./server/routes/print.js";
 import { createOperationsRoutes, handleOperationsRestRoute } from "./server/routes/operations.js";
 import { createTeamRoutes, handleTeamRestRoute } from "./server/routes/team.js";
@@ -105,6 +110,13 @@ import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTena
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices,
   enterprisePeople: listEnterprisePeopleMysql, createEnterprisePerson: createEnterprisePersonMysql,
   updateEnterprisePerson: updateEnterprisePersonMysql, platformAccounts: listPlatformAccountsMysql, tenantMembers: tenantMembersMysql };
+const oglDispatch = createOglDispatchService({
+  transaction: withMysqlTransaction,
+  api: oglCarriageClient,
+  syncPostings: (session, shopId, postingNumbers) => services.syncOzonPostingsByNumber({
+    shop_id: shopId, posting_numbers: postingNumbers
+  }, { session, tenantId: tenantIdFromRequest({ _session: session }), [OGL_DISPATCH_REFRESH]: true })
+});
 const IMAGE_SESSION_COOKIE = "erp_image_session";
 const runtimeReadiness = {
   ready: false,
@@ -219,6 +231,7 @@ const routeModules = {
   ...createOzonActionRoutes({ services, readJson }),
   ...createReviewRoutes({ services, readJson }),
   ...createOrderRoutes({ services, readJson, notFound, writeHead, json }),
+  ...createOglDispatchRoutes({ dispatch: oglDispatch, readJson }),
   ...createPrintRoutes({ services, readJson }),
   ...createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders }),
   ...createListingAutomationRoutes({ services, readJson }),
@@ -1067,6 +1080,8 @@ async function handleSiteAccess(req, res, url) {
 }
 
 async function handleRestRoute(req, res, url, parts) {
+  const oglFileHandled = await handleOglDispatchFileRoute({ req, res, url, dispatch: oglDispatch, writeHead });
+  if (oglFileHandled !== false) return oglFileHandled;
   const enterpriseHandled = await handleEnterpriseManagementRestRoute({ req, res, parts, services, readJson, json });
   if (enterpriseHandled !== false) return enterpriseHandled;
   const systemNotificationHandled = await handleSystemNotificationRestRoute({ req, res, parts, services, json });
@@ -2212,6 +2227,7 @@ const server = http.createServer(async (req, res) => {
 async function prepareRuntimeBeforeListen() {
   try {
     await warmMysqlPool();
+    await ensureOglDispatchSchema(mysqlExecute);
     await services.warmCoreInventoryRuntime?.();
     await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();

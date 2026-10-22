@@ -30,6 +30,7 @@ import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
+import { isOglDispatched, oglDispatchDisplayStatus } from "./services/ogl-dispatch-service.js";
 import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
 
@@ -38,6 +39,18 @@ const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
 const ProfitCalculationVersions = defineAsyncComponent(() => import("./components/ProfitCalculationVersions.vue"));
+const OglDispatchPanel = defineAsyncComponent(() => import("./components/OglDispatchPanel.vue"));
+const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [] });
+
+function openOglDispatch(mode = "history", batchId = 0) {
+  if (mode === "create" && !selectedOrderIds.value.size) return ElMessage.warning("请先勾选本次要发运的 OGL 已打印订单");
+  Object.assign(oglDispatchPanel, { visible: true, mode, batchId: Number(batchId), orderIds: [...selectedOrderIds.value] });
+}
+
+async function refreshOglDispatchOrders() {
+  orderDetailCache.clear();
+  await loadOrders({ forceRefresh: true, includeCounts: true });
+}
 const profitVersionsExpanded = ref(false);
 const inventoryDetail = reactive({ visible: false, productId: 0, orderId: 0 });
 const historicalPurchaseProducts = ref([]);
@@ -625,6 +638,8 @@ async function saveStatusPreference() {
 }
 
 function rowStateLabel(row) {
+  const oglDisplayStatus = oglDispatchDisplayStatus(row);
+  if (oglDisplayStatus) return STATE_META[oglDisplayStatus].label;
   const status = String(row?.status || "").toLowerCase();
   const stage = String(row?.tracking_stage || "").toLowerCase();
   const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
@@ -649,6 +664,8 @@ function rowStateLabel(row) {
 }
 
 function rowDisplayStateKey(row) {
+  const oglDisplayStatus = oglDispatchDisplayStatus(row);
+  if (oglDisplayStatus) return oglDisplayStatus;
   const status = String(row?.status || "").toLowerCase();
   const stage = String(row?.tracking_stage || "").toLowerCase();
   const logisticsStatus = String(row?.logistics_status || "").toLowerCase();
@@ -1289,6 +1306,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
+    statusHint: isOglDispatched(row) ? "运往集运仓" : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     qualityCheckOrder: isQualityCheckOrderRow(row),
@@ -1726,6 +1744,8 @@ function bulkPrintSelected() {
 }
 
 function handleToolbarMoreAction(action) {
+  if (action === "ogl-create-batch") return openOglDispatch("create");
+  if (action === "ogl-batch-history") return openOglDispatch("history");
   if (action === "print-selected") return bulkPrintSelected();
   return handleMoreAction(action);
 }
@@ -2634,6 +2654,13 @@ onBeforeUnmount(() => {
       </OrdersStatusTabs>
     </OrdersToolbar>
 
+    <div v-if="selectedCount > 0" class="orders-inline-actions">
+      <el-button type="primary" plain @click="openOglDispatch('create')">创建 OGL 发运批次（已选 {{ selectedCount }} 单）</el-button>
+      <el-button @click="openOglDispatch('history')">OGL 发运批次</el-button>
+      <span>支持全部店铺＋等待发货＋OGL＋已打印筛选；保存前核对实际跨页选择。</span>
+    </div>
+    <OglDispatchPanel v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" />
+
     <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">
       <el-button type="primary" plain :disabled="!selectedCount" :loading="shippedReceiptDialog.loading" @click="previewShippedReceipts()">批量补登记实收（已选 {{ selectedCount }} 单）</el-button>
       <span>仅预览明确关联的已运输订单，确认后才入库。</span>
@@ -2724,6 +2751,7 @@ onBeforeUnmount(() => {
         @view-inventory-detail="openInventoryDetail"
         @inventory-saved="loadOrders({ forceRefresh: true, silent: true, includeCounts: true })"
         @quick-history-purchase="historicalPurchaseProducts = $event"
+        @open-ogl-batch="id => openOglDispatch('history', id)"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 

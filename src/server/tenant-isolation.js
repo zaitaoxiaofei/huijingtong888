@@ -1,6 +1,7 @@
 import { isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
+import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 
 const PLATFORM_API_RESOURCES = new Set([
   "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -78,6 +79,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   }
 
   const path = parts.slice(1).join("/");
+  if (isOglDispatchRoute(parts, method)) return { allowed: true };
   if (isTenantPilotRoute(path, method)) return { allowed: true };
   if (TENANT_SCOPED_SAFE_PATHS.has(path)) return { allowed: true };
   const verb = String(method || "GET").toUpperCase();
