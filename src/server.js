@@ -360,7 +360,7 @@ const routes = {
   "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),
-  "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}, tenantIdFromRequest(req)),
+  "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}, tenantIdFromRequest(req), { session: req._session }),
   "GET /api/fbp-replenishment-orders": (req) => services.fbpReplenishmentOrders(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-transfer-records": (req) => services.fbpTransferRecords(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-warehouse-rules": () => services.stockWarehouseRules(),
@@ -1186,11 +1186,11 @@ async function handleRestRoute(req, res, url, parts) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] === "barcode-label" && parts[3] === "generate") {
-    return json(res, await services.generateProductBarcodeLabel(await readJson(req)));
+    return json(res, await services.generateProductBarcodeLabel(await readJson(req), req._session));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "products" && parts[2] === "barcode-label") {
-    const label = await services.productBarcodeLabel(await readJson(req));
+    const label = await services.productBarcodeLabel(await readJson(req), req._session);
     writeHead(res, 200, {
       "Content-Type": "application/pdf",
       "Content-Disposition": `attachment; filename="${label.filename}"`,

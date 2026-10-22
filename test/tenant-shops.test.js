@@ -47,11 +47,26 @@ test("shop management is limited to tenant owners/admins and exact scoped routes
   }
   assert.equal(tenantIsolationDecision(owner, ["api", "shops", "12", "credentials"], "DELETE").allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "shops"]).allowed, false);
-  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "shops"]).allowed, false);
+  assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "shops"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "people"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: member }, ["api", "tenants", "members"]).allowed, true);
   assert.equal(canAccessPage(owner, "/tenant-shops"), true);
   assert.equal(canAccessPage(member, "/tenant-shops"), false);
+});
+
+test("ordinary default and customer staff receive only scoped shop dictionary fields", async () => {
+  const rows = [{ id: 20, name: 'Own shop', status: 'active', platform: 'ozon', currency_code: 'RUB',
+    ozon_client_id: 'private-client', api_key_hint: 'private-key', performance_client_secret: 'private-secret', watermark_path: '/private/path', watermark_opacity_percent: 40 }];
+  const routes = createOperationsRoutes({ services: { shops: async () => rows }, readJson: async () => ({}) });
+  for (const slug of ['default', 'customer-a']) {
+    const member = { roles: ['operations'], tenant: { id: 2, slug, role: 'member' } };
+    const projected = JSON.parse(JSON.stringify(await routes['GET /api/shops']({ _session: member })));
+    assert.deepEqual(projected, [{ id: 20, name: 'Own shop', status: 'active', platform: 'ozon', currency_code: 'RUB',
+      watermark_path: '/api/tools/image-cropper/shop-watermark/20/file', watermark_opacity_percent: 40 }]);
+    assert.equal(canAccessPage(member, '/online-products'), true);
+    assert.equal(authorizeApiRequest({ method: 'PUT', _session: member }, ['api', 'shops', '20']).allowed, false);
+  }
+  assert.deepEqual(await routes['GET /api/shops']({ _session: { tenant: { id: 2, slug: 'customer-a', role: 'owner' } } }), rows);
 });
 
 test("legacy people selector reads only current enterprise members and strips identity secrets", async () => {

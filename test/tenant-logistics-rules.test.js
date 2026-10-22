@@ -223,11 +223,37 @@ test("shared tariff SQL includes canonical platform rows and excludes historical
   }
 });
 
-test("default logistics matching and historical version selection cannot choose another tenant rule", () => {
+test("default logistics matching and historical version selection cannot choose another tenant rule", async () => {
   const service = read("../src/services/mysql-cutover.js");
   assert.match(service, /const scope = await logisticsTenantScopeMysql\(tenantId, alias\);[\s\S]*?scope\.sql} OR \(\$\{alias}\.tenant_id IS NULL AND \$\{alias}\.carrier = 'OGL'\)/);
   assert.match(service, /const tenantScope = await readableLogisticsTenantScopeMysql\(tenantId, "l"\);[\s\S]*?FROM logistics_fee_rules l\s+WHERE l\.enabled != 0 AND \$\{tenantScope\.sql\}/);
-  assert.match(service, /const defaultScope = hasTenantColumn\s+\? await readableLogisticsTenantScopeMysql\(product\?\.tenant_id \|\| "admin", "candidate"\)\s+: \{ sql: "1 = 1", params: \[\] \};[\s\S]*?WHERE \$\{defaultScope\.sql\}/);
+  const scopeHelpers = service.slice(service.indexOf('async function logisticsTenantScopeMysql('), service.indexOf('function logisticsProductTenantPredicateMysql('));
+  const matching = service.slice(service.indexOf('async function actualOrderLogisticsRuleMysql('), service.indexOf('async function productForProfitEstimateMysql('));
+  const calls = [];
+  let hasTenantColumn = true;
+  const context = vm.createContext({
+    resolveShopTenantIdMysql: async value => value === 'admin' ? 17 : Number(value),
+    isDefaultShopTenantMysql: async id => id === 17,
+    mysqlSchemaColumnExists: async () => hasTenantColumn,
+    resolveOrderFreightDescriptor: () => ({ carrier: 'CEL', channel: 'standard', serviceClass: 'Small' }),
+    normalizeMysqlDateTime: value => value,
+    mysqlQueryOne: async (sql, params) => { calls.push({ sql, params: Array.from(params) }); return null; }
+  });
+  vm.runInContext(`${scopeHelpers}\n${matching}`, context);
+  for (const [tenantId, expectedId, defaultTenant] of [['admin', 17, true], [17, 17, true], [42, 42, false], [43, 43, false]]) {
+    const scope = await context.readableLogisticsTenantScopeMysql(tenantId, 'candidate');
+    assert.deepEqual(Array.from(scope.params), [expectedId]);
+    assert.equal(scope.sql, `((candidate.tenant_id = ?${defaultTenant ? ' OR candidate.tenant_id IS NULL' : ''}) OR (candidate.tenant_id IS NULL AND candidate.carrier = 'OGL'))`);
+    await context.actualOrderLogisticsRuleMysql({}, '2026-10-01 00:00:00', { tenant_id: tenantId === 'admin' ? null : tenantId });
+    const call = calls.at(-1);
+    assert.ok(call.sql.includes(`WHERE ${scope.sql}`));
+    assert.deepEqual(call.params, [expectedId, 'CEL', 'standard', 'Small', '2026-10-01 00:00:00', '2026-10-01 00:00:00']);
+  }
+  hasTenantColumn = false;
+  const before = calls.length;
+  await assert.rejects(context.actualOrderLogisticsRuleMysql({}, '2026-10-01 00:00:00', { tenant_id: 42 }), { statusCode: 503 });
+  await assert.rejects(context.readableLogisticsTenantScopeMysql('admin'), { statusCode: 503 });
+  assert.equal(calls.length, before, 'missing ownership schema must fail before an unscoped tariff query');
   assert.match(service, /rule\.tenant_id <=> p\.tenant_id/);
   assert.match(service, /WHERE selected\.id = \?[\s\S]*?AND \(selected\.tenant_id <=> \? OR \(selected\.tenant_id IS NULL AND selected\.carrier = 'OGL'\)\)/);
   assert.match(service, /AND candidate\.tenant_id <=> selected\.tenant_id/);

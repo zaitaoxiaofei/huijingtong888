@@ -4,6 +4,8 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { InfoFilled, MagicStick, Plus, Search, UploadFilled, View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
+import { readListingRecordDraft } from "../../utils/listing-record-draft.js";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import { generateAiVideo } from "../../api/tools/aiImageGenerator.js";
@@ -754,7 +756,7 @@ async function applyRecordDraftFromRoute() {
   if (!key) return;
   recordDraftApplied.value = true;
   try {
-    const draft = JSON.parse(sessionStorage.getItem(key) || "{}");
+    const draft = readListingRecordDraft(key, useAuthStore().user);
     if (!draft?.template) throw new Error("empty draft");
     fillTemplateEditor(draft.template, { safeOpen: true });
     const shopId = draft.shop_id || draft.template?.source_raw?.shop_id || "";

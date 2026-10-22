@@ -7,19 +7,23 @@ import { authorizeApiRequest } from "../src/server/authorization.js";
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const tenant = { tenant: { id: 42, slug: "company-a", role: "owner" } };
 
-test("tenant manual outbound exposes only its dedicated list and numeric mutation routes", () => {
+test("tenant manual outbound exposes scoped dedicated routes and verified legacy aliases", () => {
   for (const [method, parts] of [
     ["GET", ["api", "inventory", "manual-outbound-records"]],
     ["PUT", ["api", "inventory", "manual-outbound-records", "123"]],
-    ["DELETE", ["api", "inventory", "manual-outbound-records", "123"]]
+    ["DELETE", ["api", "inventory", "manual-outbound-records", "123"]],
+    ["GET", ["api", "inventory"]],
+    ["POST", ["api", "inventory", "movements"]],
+    ["PUT", ["api", "inventory", "movements", "123"]],
+    ["DELETE", ["api", "inventory", "movements", "123"]]
   ]) assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, true);
 
   for (const [method, parts] of [
     ["POST", ["api", "inventory", "manual-outbound-records"]],
     ["PUT", ["api", "inventory", "manual-outbound-records", "all"]],
     ["DELETE", ["api", "inventory", "manual-outbound-records", "123", "extra"]],
-    ["PUT", ["api", "inventory", "movements", "123"]],
-    ["DELETE", ["api", "inventory", "movements", "123"]]
+    ["PUT", ["api", "inventory", "movements", "all"]],
+    ["DELETE", ["api", "inventory", "movements", "123", "extra"]]
   ]) assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, false);
 });
 
@@ -44,15 +48,19 @@ test("tenant manual outbound reads and mutations enforce tenant and record type 
   const updateService = service.match(/export async function updateInventoryMovementMysql\([\s\S]*?(?=export async function deleteInventoryMovementMysql)/)?.[0] || "";
   const deleteService = service.match(/export async function deleteInventoryMovementMysql\([\s\S]*?(?=export async function inventoryManualOutboundRecordsMysql)/)?.[0] || "";
 
-  assert.match(readService, /im\.tenant_id = \? AND p\.tenant_id = \? AND p\.active = 1/);
+  assert.match(readService, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(readService, /scope\.predicate\('im'\)\.sql\} AND \$\{scope\.predicate\('p'\)\.sql\} AND p\.active = 1/);
   assert.match(readService, /im\.source_type = 'manual_outbound'/);
-  assert.match(readService, /parent_pc\.tenant_id = \?/);
-  assert.match(readService, /s\.tenant_id = \?/);
-  assert.match(updateService, /AND tenant_id = \? AND source_type = 'manual_outbound'/);
-  assert.match(updateService, /SELECT id FROM products WHERE id = \? AND tenant_id = \? AND active = 1 FOR UPDATE/);
-  assert.match(updateService, /DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = \? \$\{tenantScoped \? "AND tenant_id = \?" : ""\}/);
-  assert.match(deleteService, /AND tenant_id = \? AND source_type = 'manual_outbound'/);
-  assert.match(deleteService, /DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = \? \$\{tenantScoped \? "AND tenant_id = \?" : ""\}/);
+  assert.match(readService, /scope\.predicate\('parent_pc'\)\.sql/);
+  assert.match(readService, /scope\.predicate\('s'\)\.sql/);
+  for (const mutation of [updateService,deleteService]) {
+    assert.match(mutation, /resolveInventoryTenantScope\(tenantId\)/);
+    assert.match(mutation, /AND \$\{scope\.predicate\(\)\.sql\} AND source_type = 'manual_outbound' FOR UPDATE/);
+    assert.match(mutation, /DELETE FROM inventory_movements WHERE source_type = 'manual_outbound' AND source_ref = \? AND \$\{scope\.predicate\(\)\.sql\}/);
+    assert.match(mutation, /const tenantScoped = true/);
+  }
+  assert.match(updateService, /SELECT id FROM products WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND active = 1 FOR UPDATE/);
+  assert.match(updateService, /assertInventoryReferences\(scope, body,/);
 });
 
 test("tenant inventory UI uses dedicated manual outbound routes and respects write roles", () => {

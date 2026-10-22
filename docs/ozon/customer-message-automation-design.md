@@ -220,4 +220,6 @@ retry 超过上限 -> failed
 
 部署前先对明确指定的数据库运行 `scripts/migrate-tenant-customer-messages.mjs --database=<database>`，默认仅输出审计。应用迁移还必须指定本机管理 socket、`--apply` 和 `--assign-legacy-customer-default`。迁移拒绝归属重复及未知唯一键；仅把旧全局模板明确归入实际默认企业，并设置该企业 ID 为旧程序省略字段时的默认值，与复合主键同时生效，保持切换期间的旧写入去重。其他客服记录、店铺和人员不重新分配。MySQL DDL 分步提交，日志显示前后状态，重复执行可恢复。
 
+已知的另一种旧表结构为 `PRIMARY(id INT AUTO_INCREMENT)` 加 `uk_customer_message_template_scope(scenario,shop_id)`。显式迁移仅接受其中 `shop_id=0` 的全局模板，保留全部原 ID、模板内容、更新时间和自增序列；同一条 ALTER 将 ID 转为独立唯一键、移除旧店铺场景唯一键，并建立企业场景复合主键与实际默认企业默认值，防止旧程序省略企业字段时覆盖新企业模板。非零店铺范围、未知或前缀唯一键、归属重复以及依赖旧 ID 的外键均要求人工审阅，不自动合并或重新分配；已有明确企业归属保持原值。
+
 实库验证：`test/tenant-customer-messages-mysql.test.js` 使用独立 socket MySQL 随机数据库，覆盖 A/B/默认企业、合法历史数据、跨企业与污染引用、并发上下文、迁移 CLI 审计/应用/重复应用及旧写入去重、真实路由包装、聊天同步、Push 队列、模板预览、人工发送幂等、自动任务原人员恢复和请求期间撤权。外部 Ozon 请求全部模拟，不联系真实客户。该验证代表源码隔离证据；正式环境的迁移、接口放行和部署仍需随发布流程验收，不能据此宣称已经上线。

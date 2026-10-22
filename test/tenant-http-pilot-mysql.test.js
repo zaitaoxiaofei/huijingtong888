@@ -117,6 +117,74 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       const noMembership = await request('/api/auth/switch-tenant', sessions.get(3).token, 'POST', { tenant_id: 2 });
       assert.ok(noMembership.status >= 400);
     });
+    await t.test('daily purchase, direct receipt and manual outbound aliases work for default and customers', async () => {
+      for (const id of [1, 2, 3]) {
+        const token = sessions.get(id).token, productId = id * 10;
+        const bought = await request('/api/procurement/purchases', token, 'POST', {
+          tenant_id: id === 2 ? 3 : 2,
+          items: [{ product_id: productId, quantity: 2, amount: 12, shipping_amount: 0 }]
+        });
+        assert.equal(bought.status, 200, JSON.stringify(bought.data));
+        const before = await fixture.query('SELECT COUNT(*) n FROM procurement_requests');
+        const foreign = await request('/api/procurement/purchases', token, 'POST', {
+          items: [{ product_id: id === 2 ? 30 : 20, quantity: 3, amount: 12 }]
+        });
+        assert.ok([400, 403, 404].includes(foreign.status), JSON.stringify(foreign.data));
+        assert.deepEqual(await fixture.query('SELECT COUNT(*) n FROM procurement_requests'), before);
+        const created = await request('/api/procurement/requests', token, 'POST', { product_id: productId, quantity: 1, amount: 4 });
+        assert.equal(created.status, 200, JSON.stringify(created.data));
+        const received = await request('/api/procurement/requests/direct-inbound', token, 'POST', { request_ids: [created.data.id] });
+        assert.equal(received.status, 200, JSON.stringify(received.data));
+        const moved = await request('/api/inventory/movements', token, 'POST', { product_id: productId, source_type: 'manual_outbound', quantity: 1 });
+        assert.equal(moved.status, 200, JSON.stringify(moved.data));
+        const updated = await request(`/api/inventory/movements/${moved.data.id}`, token, 'PUT', { product_id: productId, quantity: 2 });
+        assert.equal(updated.status, 200, JSON.stringify(updated.data));
+        const removed = await request(`/api/inventory/movements/${updated.data.id}`, token, 'DELETE');
+        assert.equal(removed.status, 200, JSON.stringify(removed.data));
+      }
+    });
+    await t.test('listing category selection and basic validation remain available to ordinary enterprise operators', async () => {
+      for (const id of [1, 2, 3]) {
+        const token = sessions.get(id).token;
+        const categories = await request('/api/listing/ozon-categories?keyword=pilot-fixture-only', token);
+        assert.equal(categories.status, 200, JSON.stringify(categories.data));
+        const validation = await request('/api/listing/templates/validate-publish', token, 'POST', { include_category_health: true });
+        assert.equal(validation.status, 200, JSON.stringify(validation.data));
+        assert.equal(validation.data.ok, false);
+        assert.ok(validation.data.errors.length);
+      }
+    });
+    await t.test('ordinary default and customer FBP applications, transfers and barcode PDFs use their own shop', async () => {
+      for (const id of [1, 2, 3]) {
+        await fixture.query("INSERT INTO online_products(id,shop_id,product_id,ozon_sku,offer_id,ozon_product_id,name,barcodes_json) VALUES(?,?,?,?,?,?,?,JSON_ARRAY('OZN00112233'))",
+          [id * 10, id * 10, id * 10, `HTTP-sku-${id}`, `HTTP-offer-${id}`, String(id * 111), `HTTP online ${id}`]);
+        await fixture.query('INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,online_product_id,ozon_sku,offer_id) VALUES(?,?,?,?,?,?,?)',
+          [id * 10, id === 1 ? null : id, id * 10, id * 10, id * 10, `HTTP-sku-${id}`, `HTTP-offer-${id}`]);
+      }
+      for (const id of [1, 2, 3]) {
+        const token = sessions.get(id).token, ownId = id * 10;
+        const opportunities = await request(`/api/fbp-opportunities?manualSku=HTTP-sku-${id}`, token);
+        assert.equal(opportunities.status, 200, JSON.stringify(opportunities.data));
+        assert.ok(opportunities.data.rows.every(row => Number(row.shop_id) === ownId));
+        const created = await request('/api/fbp-replenishment-orders', token, 'POST', { rows: [{ shop_id: ownId, product_id: ownId, mapping_id: ownId, ozon_sku: `HTTP-sku-${id}`, requested_qty: 2 }] });
+        assert.equal(created.status, 200, JSON.stringify(created.data));
+        const transfer = await request('/api/fbp-transfer-records', token, 'POST', { product_id: ownId, shop_id: ownId, mapping_id: ownId, quantity: 1 });
+        assert.equal(transfer.status, 200, JSON.stringify(transfer.data));
+        const foreignId = id === 2 ? 3 : 2;
+        const foreign = await request('/api/fbp-replenishment-orders', token, 'POST', { rows: [{ shop_id: foreignId * 10, product_id: foreignId * 10,
+          mapping_id: foreignId * 10, ozon_sku: `HTTP-sku-${foreignId}`, requested_qty: 2 }] });
+        assert.ok([400, 403, 404].includes(foreign.status), `HTTP ${foreign.status}: ${JSON.stringify(foreign.data)}`);
+        const label = await fetch(`${base}/api/products/barcode-label`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ online_product_id: ownId, quantity: 1 }), signal: AbortSignal.timeout(20000) });
+        assert.equal(label.status, 200);
+        assert.match(label.headers.get('content-type'), /application\/pdf/);
+        assert.equal(Buffer.from(await label.arrayBuffer()).subarray(0, 4).toString(), '%PDF');
+      }
+      const shops = await request('/api/shops', sessions.get(2).token);
+      assert.equal(shops.status, 200);
+      assert.deepEqual(shops.data.map(row => Number(row.id)), [20]);
+      assert.ok(shops.data.every(row => !('api_key_hint' in row) && !('ozon_client_id' in row)));
+    });
     await t.test('image proxy refuses private network and metadata URLs before fetching or using cache', async () => {
       for (const target of [`${base}/uploads/team-attachments/private.png`, 'http://169.254.169.254/private.png', 'http://[::1]/private.png']) {
         const response = await request('/api/image-proxy?url=' + encodeURIComponent(target));

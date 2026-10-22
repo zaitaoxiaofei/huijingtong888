@@ -122,11 +122,13 @@ test("tenant inventory movement creation passes session scope and rejects produc
 
   assert.match(routes, /createInventoryMovement\(body, req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
   assert.match(isolation, /parts\[1\] === "inventory" && parts\[2\] === "movements"[\s\S]*?verb === "POST"/);
-  assert.match(createMovement, /SELECT id FROM products WHERE id = \? AND tenant_id = \? AND active = 1 FOR UPDATE/);
+  assert.match(createMovement, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(createMovement, /assertInventoryReferences\(scope, body,/);
+  assert.match(createMovement, /SELECT id FROM products WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND active = 1 FOR UPDATE/);
   assert.match(createMovement, /库存产品不存在或不属于当前企业，未创建库存流水/);
   assert.match(createMovement, /\["products", "inventory_movements"\]/);
-  assert.match(createMovement, /shops WHERE id = \? AND tenant_id = \? AND status = 'active'/);
-  assert.match(createMovement, /sku_mappings WHERE id = \? AND tenant_id = \? AND active = 1/);
+  assert.match(createMovement, /shops WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND status = 'active'/);
+  assert.match(createMovement, /sku_mappings WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND active = 1/);
   assert.match(createMovement, /postProductInventoryWithComponentsMysql\(connection, payload, tenantScoped \? String\(tenantPk\) : "admin"\)/);
 });
 
@@ -135,13 +137,15 @@ test("hidden product reads carry tenant scope and fail closed when ownership mig
   const service = read("../src/services/mysql-cutover.js");
   const hiddenProducts = service.match(/export async function hiddenProductsMysql\([\s\S]*?(?=export async function selectionProductsMysql)/)?.[0] || "";
   assert.match(catalogRoutes, /services\.hiddenProducts\(Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
-  assert.match(hiddenProducts, /p\.tenant_id = \?/);
-  assert.match(hiddenProducts, /sm_filter\.tenant_id = \? AND sm_filter\.product_id = p\.id/);
-  assert.match(hiddenProducts, /sh_filter\.tenant_id = \?/);
+  assert.match(hiddenProducts, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(hiddenProducts, /where\.push\(scope\.predicate\('p'\)\.sql\)/);
+  assert.match(hiddenProducts, /scope\.predicate\('sm_filter'\)\.sql\} AND sm_filter\.product_id = p\.id/);
+  assert.match(hiddenProducts, /scope\.predicate\('sh_filter'\)\.sql/);
   assert.match(hiddenProducts, /owner_member\.tenant_id = \$\{tenantPk\}/);
   assert.match(hiddenProducts, /creator_member\.tenant_id = \$\{tenantPk\}/);
-  assert.match(hiddenProducts, /NULL AS supplier_id/);
-  assert.match(hiddenProducts, /NULL AS supplier_name/);
+  assert.match(hiddenProducts, /LEFT JOIN suppliers supplier ON supplier\.id = p\.supplier_id AND \$\{inventoryTenantSql\(scope, 'supplier'\)\}/);
+  assert.match(hiddenProducts, /supplier\.id AS supplier_id/);
+  assert.match(hiddenProducts, /supplier\.name AS supplier_name/);
   assert.match(hiddenProducts, /mysqlSchemaColumnExists\(table, "tenant_id"\)/);
   assert.match(hiddenProducts, /statusCode: 503/);
 });
@@ -154,9 +158,10 @@ test("hidden product image reads verify product tenant ownership and expose only
   const detailImage = service.match(/export async function productDetailImageMysql\([\s\S]*?(?=\nasync function productOrderDetailRowsMysql)/)?.[0] || "";
   const restore = service.match(/export async function restoreProductMysql\([\s\S]*?(?=\nexport async function createProductFromOnlineProductMysql)/)?.[0] || "";
   const session = { tenant: { id: 42, slug: "company-a" } };
-  assert.match(images, /WHERE id = \? AND tenant_id = \?/);
-  assert.match(detailImage, /WHERE id = \? AND tenant_id = \?/);
-  assert.match(images, /products\.tenant_id/);
+  for (const imageRead of [images,detailImage]) {
+    assert.match(imageRead, /resolveInventoryTenantScope\(tenantId\)/);
+    assert.match(imageRead, /WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND active = 1/);
+  }
   assert.match(routes, /services\.productImage\(id, tenantIdFromRequest\(req\)\)/);
   assert.match(routes, /services\.productDetailImage\(Number\(parts\[2\]\), Number\(parts\[4\]\), tenantIdFromRequest\(req\)\)/);
   assert.match(routes, /allowRefresh: tenantIdFromRequest\(req\) === "admin"/);
@@ -181,22 +186,23 @@ test("hidden product image reads verify product tenant ownership and expose only
   ]) assert.equal(tenantIsolationDecision(session, path, method).allowed, false);
 });
 
-test("tenant product APIs expose only tenant-scoped reads and selection creation", () => {
+test("tenant product APIs expose reviewed scoped reads, creation and numeric deletion", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   assert.equal(tenantIsolationDecision(session, ["api", "products"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "products", "42"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "products", "hidden"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "products", "selection"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "products"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "products", "1"], "DELETE").allowed, true);
   for (const [method, parts] of [
     ["GET", ["api", "products", "other"]],
     ["GET", ["api", "products", "42", "selection"]],
-    ["DELETE", ["api", "products", "1"]]
+    ["DELETE", ["api", "products", "all"]],
+    ["DELETE", ["api", "products", "1", "hard"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
 });
 
-test("tenant product creation is limited to tenant-owned selections and rejects unscoped dependencies", () => {
-  const tenant = { tenant: { id: 42, slug: "company-a" } };
+test("tenant product creation and editing validate references and keep inventory approval session-scoped", () => {
   const service = read("../src/services/mysql-cutover.js");
   const routes = read("../src/server/routes/catalog.js");
   const selectionView = read("../frontend/admin/views/selection/SelectionView.vue");
@@ -204,36 +210,38 @@ test("tenant product creation is limited to tenant-owned selections and rejects 
   const tenantDetail = service.match(/async function tenantInventoryProductDetailMysql\([\s\S]*?(?=export async function selectionProductMysql)/)?.[0] || "";
 
   assert.match(createProduct, /createProductMysql\(body = \{\}, transactionConnection = null, tenantId = "admin"\)/);
-  assert.match(createProduct, /String\(body\.product_type \|\| ""\) !== "selection" \|\| structuredNaming/);
+  assert.match(createProduct, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(createProduct, /assertInventoryReferences\(scope, body,/);
   assert.match(createProduct, /JOIN tenant_members tm ON tm\.person_id = p\.id AND tm\.tenant_id = \? AND tm\.active = 1/);
-  assert.match(createProduct, /SELECT id FROM suppliers WHERE id = \? AND tenant_id = \?/);
+  assert.match(createProduct, /SELECT id FROM suppliers WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND status = 'active'/);
   assert.match(createProduct, /const productColumns = \[[\s\S]*?\.\.\.\(tenantScoped \? \["tenant_id"\] : \[\]\)/);
   assert.match(createProduct, /const productValues = \[[\s\S]*?\.\.\.\(tenantScoped \? \[tenantPk\] : \[\]\)/);
   assert.match(createProduct, /productColumns\.length !== productValues\.length/);
   assert.match(createProduct, /INSERT INTO products \(\$\{productColumns\.join\(", "\)\}\)[\s\S]*?productColumns\.map\(\(\) => "\?"\)/);
   assert.match(createProduct, /saveProductComponentsTxMysql\(connection, productId, body\.composition_items \|\| body\.components \|\| \[\], tenantScoped \? String\(tenantPk\) : "admin"\)/);
   assert.match(createProduct, /incrementLogisticsRuleUsageMysqlTx\(connection, logisticsRuleId, tenantScoped \? String\(tenantPk\) : "admin"\)/);
-  assert.match(createProduct, /不支持同时创建采购申请/);
+  assert.match(createProduct, /maybeCreateProcurementForProductMysql\(connection, productId, body,[\s\S]*?String\(tenantPk\)\)/);
   const updateProduct = service.match(/export async function updateProductMysql\([\s\S]*?(?=export async function updateProductComponentsMysql)/)?.[0] || "";
   assert.match(updateProduct, /updateProductMysql\(id, body = \{\}, tenantId = "admin"\)/);
-  assert.match(updateProduct, /WHERE id = \? AND active = 1 \$\{tenantScoped \? "AND tenant_id = \?" : ""\}/);
-  assert.match(updateProduct, /WHERE id = \? \$\{tenantScoped \? "AND tenant_id = \?" : ""\}/);
+  assert.match(updateProduct, /assertInventoryRecord\(scope, 'product', productId, run, \{ lock: true \}\)/);
+  assert.match(updateProduct, /assertInventoryReferences\(scope, body, run\)/);
+  assert.match(updateProduct, /WHERE id = \? AND active = 1 AND \$\{scope\.predicate\(\)\.sql\}/);
+  assert.match(updateProduct, /WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\}/);
   assert.match(updateProduct, /所选供应商不存在或不属于当前企业/);
   assert.match(updateProduct, /所选物流规则不存在或不属于当前企业/);
-  assert.match(updateProduct, /当前企业只能编辑本企业选品/);
-  assert.match(updateProduct, /shouldSyncOutbound = !tenantScoped/);
+  assert.match(updateProduct, /syncOutboundForOpenOrdersMysql\(\{ product_id: productId, open_only: true, tenantId: tenantPk \}\)/);
   const usageUpdate = service.match(/async function incrementLogisticsRuleUsageMysqlTx\([\s\S]*?(?=export async function prepareInventoryProductCreationMysql)/)?.[0] || "";
-  assert.match(usageUpdate, /readableLogisticsTenantScopeMysql\(tenantId\)/);
+  assert.match(usageUpdate, /logisticsTenantScopeMysql\('admin'\)/);
   assert.match(usageUpdate, /WHERE l\.id = \? AND \$\{scope\.sql\}/);
   assert.match(usageUpdate, /所选物流规则不存在或不属于当前企业/);
-  assert.match(tenantDetail, /p\.tenant_id = \?/);
-  assert.match(tenantDetail, /supplier\.tenant_id = p\.tenant_id/);
-  assert.match(tenantDetail, /logistics\.tenant_id = p\.tenant_id/);
+  assert.match(tenantDetail, /scope\.predicate\('p'\)\.sql/);
+  assert.match(tenantDetail, /inventoryTenantSql\(scope, 'supplier'\)/);
+  assert.match(tenantDetail, /sharedRules = await resolveInventoryTenantScope\('admin'\)/);
+  assert.match(tenantDetail, /inventoryTenantSql\(sharedRules, 'logistics'\)/);
   assert.match(routes, /services\.createProduct\(payload, null, tenantId\)/);
   assert.match(routes, /services\.selectionProduct\(created\.id, \{ includeDetails: 0 \}, tenantId\)/);
   assert.match(routes, /services\.updateProduct\(productId, await readProductSaveJson\(readJson, req\), tenantIdFromRequest\(req\)\)/);
-  assert.match(tenantDetail, /p\.tenant_id = \?/);
-  assert.match(routes, /企业库存建品审批流程尚未完成租户隔离/);
+  assert.match(routes, /isInventoryCreation[\s\S]*?services\.submitInventoryProductRequest\(payload, req\._session\)/);
   const tenantSelectionList = service.match(/async function tenantSelectionProductsMysql\([\s\S]*?(?=export async function selectionProductsMysql)/)?.[0] || "";
   assert.match(tenantSelectionList, /p\.tenant_id = \?/);
   assert.match(tenantSelectionList, /supplier\.tenant_id = p\.tenant_id/);
@@ -242,11 +250,20 @@ test("tenant product creation is limited to tenant-owned selections and rejects 
   assert.match(routes, /services\.selectionProducts\(Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
   assert.match(selectionView, /isTenantScoped = computed\(\(\) => Boolean\(authStore\.user\?\.tenant\?\.id && authStore\.user\?\.tenant\?\.slug !== "default"\)\)/);
   assert.match(selectionView, /isTenantScoped\.value \? apiClient\.get\("\/api\/tenants\/members"\) : apiClient\.get\("\/api\/people"\)/);
-  assert.match(selectionView, /v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" @click="openImportDialog"/);
+  assert.match(selectionView, /<el-button class="erp-btn erp-btn-secondary" @click="openImportDialog"/);
   assert.match(selectionView, /v-if="!isTenantScoped" label="上架任务"/);
   assert.match(selectionView, /v-if="!isTenantScoped" label="流转操作"/);
   assert.match(selectionView, /label="维护操作"[\s\S]*?isTenantScoped \? openEditDialog\(row\) : openSelectionEditPage\(row\)/);
-  assert.match(selectionView, /v-if="!isTenantScoped" class="erp-btn-link-danger" link type="danger" @click="handleDelete\(row\)"/);
+  assert.match(selectionView, /<el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete\(row\)"/);
+});
+
+test("pilot selection CSV and deletion entries are available while advanced workflows remain gated", () => {
+  const view=read("../frontend/admin/views/selection/SelectionView.vue");
+  assert.equal((view.match(/<el-button class="erp-btn erp-btn-secondary" @click="openImportDialog"/g)||[]).length,2);
+  assert.match(view, /<el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete\(row\)"/);
+  assert.match(view, /v-if="!isTenantScoped"[^>]*@click="startBatchVariant"/);
+  assert.match(view, /v-if="!isTenantScoped" label="上架任务"/);
+  assert.match(view, /v-if="!isTenantScoped" label="流转操作"/);
 });
 
 test("tenant product edits and composition changes are enabled only on their scoped write routes", () => {
@@ -254,8 +271,10 @@ test("tenant product edits and composition changes are enabled only on their sco
   assert.equal(tenantIsolationDecision(tenant, ["api", "products", "42", "components"], "PUT").allowed, true);
   assert.equal(tenantIsolationDecision(tenant, ["api", "products", "42"], "PUT").allowed, true);
   for (const [parts, method] of [
+    [["api", "products", "all", "components"], "PUT"],
+    [["api", "products", "42", "components", "extra"], "PUT"],
     [["api", "products", "42", "development-meta"], "PUT"],
-    [["api", "products", "42"], "DELETE"],
+    [["api", "products", "42", "publish"], "POST"],
   ]) assert.equal(tenantIsolationDecision(tenant, parts, method).allowed, false);
 });
 
@@ -264,16 +283,15 @@ test("tenant inventory product list is session-scoped and requires tenant owners
   const routes = read("../src/server/routes/catalog.js");
   const list = service.match(/async function tenantProductsMysql\([\s\S]*?(?=export async function productsMysql)/)?.[0] || "";
   assert.match(routes, /services\.products\(Object\.fromEntries\(url\.searchParams\.entries\(\)\), tenantIdFromRequest\(req\)\)/);
-  assert.match(list, /p\.tenant_id = \?/);
-  assert.match(list, /inventory_sm\.tenant_id = \$\{tenantPk\}/);
-  assert.match(list, /inventory_im\.tenant_id = \$\{tenantPk\}/);
-  assert.match(list, /inventory_movements\s+WHERE tenant_id = \?/);
-  assert.match(list, /procurement_requests WHERE tenant_id = \?/);
-  assert.match(list, /sm_search\.tenant_id = \$\{tenantPk\}/);
-  assert.match(list, /s_search\.tenant_id = \$\{tenantPk\}/);
+  assert.match(list, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(list, /const where = \[scope\.predicate\('p'\)\.sql/);
+  for (const alias of ["inventory_sm","inventory_im","sm_search","s_search"]) assert.match(list,new RegExp(`inventoryTenantSql\\(scope, '${alias}'\\)`));
+  assert.match(list, /inventory_movements WHERE \$\{scope\.predicate\(\)\.sql\}/);
+  assert.match(list, /procurement_requests WHERE \$\{scope\.predicate\(\)\.sql\}/);
   assert.match(list, /productMappingSummariesMysql\(productIds, String\(tenantPk\)\)/);
   assert.match(list, /productCompositionSummariesMysql\(productIds, String\(tenantPk\)\)/);
-  assert.match(list, /NULL AS supplier_id/);
+  assert.match(list, /LEFT JOIN suppliers supplier ON supplier\.id = p\.supplier_id AND \$\{inventoryTenantSql\(scope, 'supplier'\)\}/);
+  assert.match(list, /sales_order\.shop_id = obr\.shop_id/);
   assert.match(list, /missingColumns\.length/);
   const detail = service.match(/async function tenantInventoryProductDetailMysql\([\s\S]*?(?=export async function selectionProductMysql)/)?.[0] || "";
   const components = service.match(/async function productComponentRowsMysql\([\s\S]*?(?=async function productCompositionSummariesMysql)/)?.[0] || "";
@@ -283,26 +301,24 @@ test("tenant inventory product list is session-scoped and requires tenant owners
   assert.match(routes, /services\.updateProductComponents\(productId, await readJson\(req\), tenantIdFromRequest\(req\)\)/);
   assert.equal(tenantIsolationDecision({ tenant: { id: 42, slug: "company-a" } }, ["api", "products", "42", "components"], "PUT").allowed, true);
   assert.equal(tenantIsolationDecision({ tenant: { id: 42, slug: "company-a" } }, ["api", "products", "42", "components"], "POST").allowed, false);
-  assert.match(detail, /WHERE p\.id = \? AND p\.tenant_id = \? AND p\.active = 1/);
+  assert.match(detail, /WHERE p\.id = \? AND \$\{scope\.predicate\('p'\)\.sql\} AND p\.active = 1/);
   assert.match(detail, /productComponentRowsMysql\(Number\(id\), String\(tenantPk\)\)/);
-  assert.match(components, /pc\.tenant_id = \$\{tenantPk\}/);
-  assert.match(components, /p\.tenant_id = \$\{tenantPk\}/);
-  assert.match(components, /AND tenant_id = \$\{tenantPk\}/);
-  assert.match(components, /stock_shop\.tenant_id = \$\{tenantPk\}/);
-  assert.match(components, /pr\.tenant_id = \$\{tenantPk\}/);
-  assert.match(componentWriteTx, /SELECT id FROM products WHERE id = \? AND tenant_id = \? AND active = 1 FOR UPDATE/);
-  assert.match(componentWriteTx, /AND tenant_id = \?/);
+  for (const alias of ["parent_product","pc","p","inventory_movements","stock_shop","inbound_records","pr"]) assert.match(components,new RegExp(`scope\\.predicate\\('${alias}'\\)\\.sql`));
+  assert.match(componentWriteTx, /SELECT id FROM products WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} AND active = 1 FOR UPDATE/);
+  assert.match(componentWriteTx, /AND active = 1 AND \$\{scope\.predicate\(\)\.sql\}/);
   assert.match(componentWriteTx, /INSERT INTO product_components \(\$\{tenantScoped \? "tenant_id, " : ""\}product_id/);
-  assert.match(componentSave, /tenantScoped \? null : await syncOutboundForOpenOrdersMysql/);
+  assert.match(componentSave, /assertInventoryRecord\(scope, 'product', productId,[\s\S]*?\{ lock: true \}\)/);
+  assert.match(componentSave, /assertInventoryReferences\(scope, body,/);
+  assert.match(componentSave, /syncOutboundForOpenOrdersMysql\(\{ product_id: productId, open_only: true, tenantId: scope\.id \}\)/);
   const view = read("../frontend/admin/views/inventory/InventoryProductsPage.vue");
   assert.match(view, /isTenantScoped = computed\(\(\) => Boolean\(authStore\.user\?\.tenant\?\.id && authStore\.user\?\.tenant\?\.slug !== "default"\)\)/);
-  assert.match(view, /v-if="!isTenantScoped" type="selection"/);
-  assert.match(view, /canWriteInventory = computed\(\(\) => !isTenantScoped\.value/);
+  assert.match(view, /v-if="canWriteInventory \|\| canSubmitProcurementRequest" type="selection"/);
+  assert.match(view, /canWriteInventory = computed\(\(\) => hasPermission\(authStore\.user, "inventory\.write"\)\)/);
   assert.match(view, /v-if="!isTenantScoped" class="metric-cell-link"/);
   assert.match(view, /<el-button class="erp-btn-link" link @click="openManualOutboundRecords/);
-  assert.match(view, /if \(isTenantScoped\.value\) \{[\s\S]*?loadShopDictionary\(\)[\s\S]*?return dictionaryLoading;[\s\S]*?apiClient\.get\("\/api\/people"\)/);
+  assert.match(view, /loadShopDictionary\(\),\s*apiClient\.get\("\/api\/people"\)/);
   assert.match(view, /v-if="hasProductComponents\(row\)"/);
   assert.match(view, /canManageProductComponents = computed\(\(\) => hasPermission\(authStore\.user, "inventory\.write"\)\)/);
-  assert.match(view, /allow-quick-create="!isTenantScoped"/);
+  assert.match(view, /:allow-quick-create="canWriteInventory"/);
   assert.match(read("../frontend/admin/components/inventory/ProductCompositionDialog.vue"), /v-if="allowQuickCreate"/);
 });

@@ -32,34 +32,39 @@ test("online product stock and shop lookup routes derive scope from the session"
       performOnlineProductAction: async (...args) => { calls.push(["action", ...args]); return {}; }
     }
   });
-  const req = { headers: { "x-tenant-id": "99" }, _session: { personId: 7, tenant: { id: 42, slug: "company-a" } } };
+  const req = { headers: { "x-tenant-id": "99" }, _session: { personId: 7, tenant: { id: 42, slug: "company-a" } }, _abortSignal: new AbortController().signal };
   await routes["GET /api/online-products/limits"](req, new URL("http://localhost/api/online-products/limits?shop_id=10"));
   await routes["GET /api/online-products/warehouses"](req, new URL("http://localhost/api/online-products/warehouses?shop_id=10"));
   await routes["POST /api/online-products/batch-stock"](req);
   await routes["POST /api/online-products/action"](req);
-  assert.deepEqual(calls.map(([name, ...args]) => [name, args.at(-1)]), [
-    ["limits", "42"],
-    ["warehouses", "42"],
-    ["stock", "42"],
-    ["action", "42"]
+  assert.deepEqual(calls, [
+    ["limits", { shop_id: "10" }, "42"],
+    ["warehouses", { shop_id: "10" }, "42"],
+    ["stock", { online_product_ids: [10], tenant_id: 99 }, 7, "42"],
+    ["action", { online_product_ids: [10], tenant_id: 99 }, 7, "42", { session: req._session, signal: req._abortSignal }]
   ]);
+  assert.equal(calls[3][4].session, req._session);
+  assert.equal(calls[3][4].signal, req._abortSignal);
 });
 
-test("online product binding forwards session tenant and remains closed to non-default tenants", async () => {
+test("online product binding forwards authenticated tenant, current session and cancellation signal", async () => {
   const calls = [];
   const routes = createCatalogRoutes({
     readJson: async () => ({ online_product_id: 10, product_id: 20 }),
     services: { bindOnlineProduct: async (...args) => { calls.push(args); return { ok: true }; } }
   });
-  const req = { headers: { "x-tenant-id": "99" }, _session: { tenant: { id: 42, slug: "company-a" } } };
+  const req = { headers: { "x-tenant-id": "99" }, _session: { tenant: { id: 42, slug: "company-a" } }, _abortSignal: new AbortController().signal };
   await routes["POST /api/online-products/bind"](req);
-  assert.deepEqual(calls[0], [{ online_product_id: 10, product_id: 20 }, "42"]);
-  assert.equal(tenantIsolationDecision(req._session, ["api", "online-products", "bind"], "POST").allowed, false);
+  assert.deepEqual(calls[0], [{ online_product_id: 10, product_id: 20 }, "42", { session: req._session, signal: req._abortSignal }]);
+  assert.equal(calls[0][2].session, req._session);
+  assert.equal(calls[0][2].signal, req._abortSignal);
+  assert.equal(tenantIsolationDecision(req._session, ["api", "online-products", "bind"], "POST").allowed, true);
 });
 
 test("tenant online product access is limited to exact scoped routes", () => {
   const owner = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "owner" } };
-  const member = { roles: ["operations"], tenant: { id: 42, slug: "company-a", role: "member" } };
+  const member = { roles: ["packing"], tenant: { id: 42, slug: "company-a", role: "member" } };
+  const operator = { ...member, roles: ["operations"] };
   const platformAdmin = { roles: ["admin"], platform_role: "super_admin", tenant: { id: 42, slug: "company-a", role: "member" } };
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products"], "GET").allowed, true);
   assert.equal(authorizeApiRequest({ method: "GET", _session: owner }, ["api", "online-products"]).allowed, true);
@@ -70,14 +75,33 @@ test("tenant online product access is limited to exact scoped routes", () => {
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "action"], "POST").allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: owner }, ["api", "online-products", "batch-stock"]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: owner }, ["api", "online-products", "action"]).allowed, true);
+  for (const endpoint of ["batch-stock", "action", "bind", "create-product"]) assert.equal(authorizeApiRequest({ method: "POST", _session: operator }, ["api", "online-products", endpoint]).allowed, true);
   assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "online-products", "batch-stock"]).allowed, false);
   assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "online-products", "action"]).allowed, false);
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "action"], "POST").allowed, true);
-  assert.equal(tenantIsolationDecision(owner, ["api", "online-products", "123", "edit-draft"], "GET").allowed, false);
+  for (const [method, parts] of [
+    ["POST", ["api", "online-products", "bind"]],
+    ["POST", ["api", "online-products", "create-product"]],
+    ["GET", ["api", "online-products", "123", "edit-draft"]]
+  ]) {
+    assert.equal(tenantIsolationDecision(owner, parts, method).allowed, true);
+    assert.equal(authorizeApiRequest({ method, _session: owner }, parts).allowed, true);
+  }
+  for (const [method, parts] of [
+    ["POST", ["api", "online-products", "sync"]],
+    ["POST", ["api", "online-products", "bind", "all"]],
+    ["POST", ["api", "online-products", "create-product", "all"]],
+    ["GET", ["api", "online-products", "123", "edit-draft", "all"]]
+  ]) {
+    assert.equal(tenantIsolationDecision(owner, parts, method).allowed, false);
+    assert.equal(authorizeApiRequest({ method, _session: owner }, parts).allowed, false);
+  }
+  for (const endpoint of ["bind", "create-product"]) assert.equal(authorizeApiRequest({ method: "POST", _session: member }, ["api", "online-products", endpoint]).allowed, false);
   assert.equal(tenantIsolationDecision(owner, ["api", "online-products"], "POST").allowed, false);
   assert.equal(canAccessPage(owner, "/online-products"), true);
   assert.equal(canAccessPage(owner, "/batch-stock-update"), true);
   assert.equal(canAccessPage(platformAdmin, "/online-products"), true);
+  assert.equal(canAccessPage(operator, "/online-products"), true);
   assert.equal(canAccessPage(member, "/online-products"), false);
 });
 
@@ -106,13 +130,20 @@ test("online product mutations and shop credentials are resolved inside active t
   const action = service.match(/export async function performOnlineProductActionMysql\([\s\S]*?(?=\nexport async function mappingsMysql)/)?.[0] || "";
   assert.match(action, /resolveShopTenantIdMysql\(tenantId\)/);
   assert.match(action, /WHERE op\.id = \? AND s\.status != 'deleted' AND \$\{shopScope\}/);
-  assert.match(action, /!defaultTenant && action !== "zero_stock"/);
+  assert.match(action, /assertOrderTaskAccessMysql\(scope, options, \["operations"\]\)/);
+  assert.match(action, /if \(!\["archive", "zero_stock", "zero_then_archive"\]\.includes\(action\)\)/);
+  assert.match(action, /const checkCurrentShop = async \(\) => \{\s*await checkAccess\(\);/);
+  assert.match(action, /await checkCurrentShop\(\);\s*const stockResult = await updateOzonProductStocks\(shop, stockTargets\);\s*await checkCurrentShop\(\);/);
+  assert.match(action, /await checkCurrentShop\(\);\s*archiveResult = await archiveOzonProducts\(shop, \[ozonProductId\]\)/);
+  assert.match(action, /resolveFreshOzonProductIdForArchiveMysql\(shop, online, checkCurrentShop\)/);
+  assert.match(action, /WHERE id = \? AND shop_id = \?/);
   assert.match(action, /activeShopForTenantMysql\(Number\(online\.shop_id\), normalizedTenantId\)/);
-  assert.match(routes, /performOnlineProductAction\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
+  assert.match(routes, /performOnlineProductAction\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\), \{ session: req\._session, signal: req\._abortSignal \}\)/);
   assert.match(warehouses, /activeShopForTenantMysql\(shopId, tenantId\)/);
   assert.match(limits, /tenantShopPredicateMysql\("shops", defaultTenant\)/);
   const bind = service.match(/export async function bindOnlineProductMysql\([\s\S]*?(?=\nexport async function createOnlineProductMysql)/)?.[0] || "";
   assert.match(bind, /resolveShopTenantIdMysql\(tenantId\)/);
+  assert.match(bind, /assertOrderTaskAccessMysql\(\{ id: scope\.id \}, options, \["inventory\.write"\]\)/);
   assert.match(bind, /JOIN shops s ON s\.id = op\.shop_id/);
   assert.match(bind, /tenantShopPredicateMysql\("s", defaultTenant\)/);
   assert.match(bind, /tenant_id = \?\$\{defaultTenant \? " OR tenant_id IS NULL" : ""\}/);
@@ -129,15 +160,17 @@ test("online-product tenant UI exposes only the scoped stock action and avoids g
   assert.match(view, /const tenantReadOnly = computed\(\(\) => authStore\.user\?\.tenant\?\.slug !== "default"\)/);
   assert.match(view, /!dictionaryLoaded && !tenantReadOnly\.value && !showProductLimitPanel\.value/);
   assert.match(view, /el-button[^\n]+@click="handleSearch"/);
-  assert.match(view, /<el-button v-if="!tenantReadOnly"[^\n]+@click="syncOnlineProducts/);
+  assert.match(view, /<el-button v-if="canSyncOnline"[^\n]+@click="syncOnlineProducts/);
+  assert.match(view, /if \(!canSyncOnline\.value\) return;/);
   assert.match(view, /v-if="tenantCanUpdateStocks"[^\n]+@click="openBatchStockDialog"/);
   assert.match(view, /if \(showProductLimitPanel\.value\) params\.set\("batchStock", "1"\)/);
   assert.match(view, /const normalizedShopId = `\$\{tenantKey\}:\$\{String\(shopId \|\| ""\)\}`/);
-  assert.match(view, /v-if="!tenantReadOnly \|\| \(tenantCanUpdateStocks && tenantReadOnly\)" label="操作"/);
-  assert.match(view, /v-else-if="tenantCanUpdateStocks"[^\n]+@click="zeroOnlineProductStock\(row\)"/);
+  assert.match(view, /v-if="canOperate \|\| canManageInventory \|\| tenantCanUpdateStocks" label="操作"/);
+  assert.match(view, /v-if="tenantReadOnly && tenantCanUpdateStocks"[^\n]+@click="zeroOnlineProductStock\(row\)"/);
   assert.match(view, /action: "zero_stock"/);
-  assert.match(view, /<template v-if="!tenantReadOnly">[\s\S]*?archiveOnlineProduct\(row\)/);
-  assert.match(view, /负责人和管理员可进行批量库存更新或清零单个商品/);
+  assert.match(view, /<template v-if="canOperate">[\s\S]*?archiveOnlineProduct\(row\)/);
+  assert.match(view, /<template v-if="canManageInventory">[\s\S]*?openBindDialog\(row\)/);
+  assert.match(view, /商品绑定、建品、编辑上架及归档按岗位权限开放/);
   assert.match(cache, /cacheByTenant\.get\(tenantKey\)/);
   assert.match(api, /__erp_scope=\$\{encodeURIComponent\(currentApiCacheScope\(\)\)\}/);
 });

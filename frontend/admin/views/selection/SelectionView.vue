@@ -2531,7 +2531,7 @@ onBeforeUnmount(() => {
         <h2>选品计价表</h2>
       </div>
       <div class="page-card-actions">
-        <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
         <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
       </div>
     </section>
@@ -2569,7 +2569,7 @@ onBeforeUnmount(() => {
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
             <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             <el-button class="erp-btn erp-btn-primary" type="primary" @click="openCreateDialog">新增选品</el-button>
-            <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
+            <el-button class="erp-btn erp-btn-secondary" @click="openImportDialog">批量导入</el-button>
             <el-button v-if="!isTenantScoped" class="erp-btn erp-btn-secondary" :icon="MagicStick" :disabled="!selectedRows.length" @click="startBatchVariant">
               批量AI优化
             </el-button>
@@ -2777,7 +2777,7 @@ onBeforeUnmount(() => {
             <template #default="{ row }">
               <div class="table-actions is-vertical">
                 <el-button class="erp-btn-link" link type="primary" @click="isTenantScoped ? openEditDialog(row) : openSelectionEditPage(row)">编辑</el-button>
-                <el-button v-if="!isTenantScoped" class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
+                <el-button class="erp-btn-link-danger" link type="danger" @click="handleDelete(row)">删除</el-button>
               </div>
             </template>
           </el-table-column>

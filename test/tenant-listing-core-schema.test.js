@@ -6,7 +6,7 @@ import { assertNoDuplicateCategoryUsage, assertNoDuplicateTenantRequest, assertT
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-test("tenant-scoped template and core draft CRUD routes open without exposing batch or conversion routes", () => {
+test("reviewed template, core draft CRUD, and inventory conversion routes open without exposing batch publishing", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "templates"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "templates", "1"], "GET").allowed, true);
@@ -14,16 +14,19 @@ test("tenant-scoped template and core draft CRUD routes open without exposing ba
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "templates", "1"], "PUT").allowed, true);
   for (const [method, parts] of [
     ["POST", ["api", "listing", "drafts", "batch-publish"]],
-    ["POST", ["api", "listing", "drafts", "from-inventory-product"]],
+    ["GET", ["api", "listing", "drafts", "from-inventory-product"]],
+    ["POST", ["api", "listing", "drafts", "from-inventory-product", "extra"]],
     ["GET", ["api", "listing", "drafts", "not-numeric"]],
     ["PUT", ["api", "listing", "drafts", "not-numeric"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
   for (const [method, parts] of [
     ["GET", ["api", "listing", "drafts"]],
     ["POST", ["api", "listing", "drafts"]],
+    ["POST", ["api", "listing", "drafts", "from-inventory-product"]],
     ["PUT", ["api", "listing", "drafts", "1"]],
     ["DELETE", ["api", "listing", "drafts", "1"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
+  assert.equal(tenantIsolationDecision({}, ["api", "listing", "drafts", "from-inventory-product"], "POST").allowed, false);
 });
 
 test("listing core tables define nullable tenant ownership with query-first indexes", () => {

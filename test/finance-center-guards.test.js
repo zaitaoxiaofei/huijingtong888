@@ -53,3 +53,10 @@ test("finance export contains four accounting worksheets", () => {
   assert.match(service, /excelSheet\("凭证目录"/);
   assert.match(service, /excelSheet\("缺口清单"/);
 });
+
+test("private finance voucher upload and preview remain available to enterprise users without external URL entry", () => {
+  assert.match(view, /<el-upload :show-file-list="false" :http-request="uploadVoucherFile"/);
+  assert.match(view, /v-if="voucherForm\.attachment_url" link :icon="Link" @click="openAttachment\(voucherForm\.attachment_url\)"/);
+  assert.match(view, /voucherForm\.attachment_url = data\.url/);
+  assert.doesNotMatch(view, /企业凭证附件隔离尚未完成|外部归档地址|v-model="voucherForm\.attachment_url"|tenantScoped/);
+});

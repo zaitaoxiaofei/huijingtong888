@@ -6,7 +6,7 @@ import { ensureProcurementLedgerSchema, createProcurementLedgerService } from ".
 import { inventoryLedgerView, inventoryStocktakeBody, inventoryStocktakePreviewView, inventoryStocktakeResultView } from "./inventory-ledger-view.js";
 import { ensurePeopleRolesSchemaMysql, personRoleFields } from "./people-roles.js";
 import { getRoles, hasPermission, primaryRole } from "../shared/permissions.js";
-import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { createTenantBackgroundTasks } from "./tenant-background-tasks.js";
 import { customerMessageShopSql, customerMessageTemplateSql, assertCustomerMessageAccess, runCustomerMessageTaskOperation } from './customer-message-tenant-scope.js';
 import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from './customer-message-template-schema.js';
@@ -2750,7 +2750,7 @@ async function activeShopForTenantMysql(shopId, tenantId) {
   const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const statusPredicate = defaultTenant ? "status != 'deleted'" : "status = 'active'";
   const shop = await mysqlQueryOne(`SELECT * FROM shops WHERE id = ? AND ${statusPredicate} AND ${tenantShopPredicateMysql("shops", defaultTenant)} LIMIT 1`, [Number(shopId), normalizedTenantId]);
-  if (!shop) throw new Error("店铺不存在、已停用或不属于当前企业");
+  if (!shop) throw Object.assign(new Error("店铺不存在、已停用或不属于当前企业"), { statusCode: 404 });
   return shop;
 }
 
@@ -5194,9 +5194,12 @@ function applyFbpOpportunityQuery(rows, query = {}) {
   return { rows: rowsPage, total, page, pageSize, summary };
 }
 
-export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin") {
+export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
+  const current = await authorizeBusinessTaskSession(options.session);
+  if (Number(current.tenant.id) !== scope.id) throw Object.assign(new Error("FBP 企业上下文不一致"), { statusCode: 403 });
+  assertBusinessTaskPermission(current, "inventory.read");
   await ensureProductNamingSchemaMysql();
   await ensureOzonStockStorageSchemaMysql();
   await ensureStockLocationSchemaMysql();
@@ -5237,7 +5240,7 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin") {
     LEFT JOIN products p ON p.id = sm.product_id AND ${inventoryTenantSql(scope, 'p')}
     LEFT JOIN online_products op_by_id ON op_by_id.id = sm.online_product_id AND op_by_id.shop_id = sm.shop_id
     LEFT JOIN online_products op_by_sku ON op_by_sku.shop_id = sm.shop_id AND op_by_sku.ozon_sku = sm.ozon_sku
-    LEFT JOIN product_barcode_label_cache cache ON cache.online_product_id = COALESCE(op_by_id.id, op_by_sku.id)
+    LEFT JOIN product_barcode_label_cache cache ON cache.online_product_id = COALESCE(op_by_id.id, op_by_sku.id) AND cache.shop_id = sm.shop_id
     LEFT JOIN (
       SELECT shop_id, ozon_sku,
         SUM(CASE WHEN stock_type = 'fbp_real' THEN present ELSE 0 END) AS fbp_present,
@@ -5304,6 +5307,8 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin") {
       inventory_needs_review: false
     })
   }));
+  const fresh = await authorizeBusinessTaskSession(options.session);
+  assertBusinessTaskPermission(fresh, "inventory.read");
   return applyFbpOpportunityQuery(normalizedRows, query);
 }
 
@@ -5553,12 +5558,22 @@ function assertFbpSkuBindingMysql(row, binding, ozonSku, requireBound = false) {
   }
 }
 
+async function requireCurrentProcurementActorMysql(scope, userId, connection = null) {
+  const query = connection
+    ? (sql, params) => mysqlConnectionQuery(connection, `${sql} FOR SHARE`, params)
+    : mysqlQuery;
+  const current = await restoreBusinessTaskSession(scope.isDefault ? "admin" : scope.id, userId, query);
+  assertBusinessTaskPermission(current, "procurement");
+  return current;
+}
+
 export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
   const tenantPk = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(tenantPk);
   const scope = await resolveInventoryTenantScope(tenantPk);
+  await requireCurrentProcurementActorMysql(scope, userId);
   await assertInventoryMember(scope, userId);
   const sourceRows = Array.isArray(body.rows) ? body.rows : (Array.isArray(body.items) ? body.items : []);
   if (!sourceRows.length) throw new Error("请先选择要加入备货单的 FBP SKU。");
@@ -5591,7 +5606,24 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
     }
   }
 
+  await requireCurrentProcurementActorMysql(scope, userId);
   await backfillFbpReplenishmentOrderDatesMysql(scope);
+  return withMysqlTransaction(async (connection) => {
+  const mysqlQueryOne = (sql, params) => mysqlConnectionQueryOne(connection, sql, params);
+  const mysqlExecute = async (sql, params) => {
+    await requireCurrentProcurementActorMysql(scope, userId, connection);
+    return (await connection.execute(sql, params))[0];
+  };
+  for (const [shopId, rows] of grouped) {
+    const shop = await assertInventoryRecord(scope, "shop", shopId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+    if (shop.status === "deleted") throw Object.assign(new Error("店铺已停用"), { statusCode: 403 });
+    for (const row of rows) {
+      if (row.product_id) await assertInventoryRecord(scope, "product", row.product_id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+      if (row.mapping_id) await assertInventoryRecord(scope, "mapping", row.mapping_id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+      const binding = await currentFbpSkuBindingMysql((sql, params) => mysqlConnectionQuery(connection, sql, params), shopId, row.ozon_sku || row.ozonSku, tenantPk, defaultTenant);
+      assertFbpSkuBindingMysql(row, binding, row.ozon_sku || row.ozonSku);
+    }
+  }
   const created = [];
   for (const [shopId, rows] of grouped.entries()) {
     let order = await mysqlQueryOne(`
@@ -5731,7 +5763,9 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
     await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
     created.push({ id: orderId, order_no: orderNo, shop_id: shopId, order_date: orderDate, item_count: rows.length, inserted_count: insertedCount, updated_count: updatedCount });
   }
+  await requireCurrentProcurementActorMysql(scope, userId, connection);
   return { ok: true, rows: created };
+  });
 }
 
 export async function updateFbpReplenishmentOrderItemsMysql(body = {}, tenantId = "admin") {
@@ -6848,6 +6882,7 @@ async function createFbpReplenishmentApprovedTransfersMysql(connection, orderId,
 export async function createFbpTransferRecordMysql(body = {}, userId = null, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
+  await requireCurrentProcurementActorMysql(scope, userId);
   await assertInventoryReferences(scope, body);
   await assertInventoryMember(scope, userId);
   await ensureFbpTransferRecordsSchemaMysql();
@@ -6866,7 +6901,7 @@ export async function createFbpTransferRecordMysql(body = {}, userId = null, ten
   }
   if (mappingId) {
     const mapping = await assertInventoryRecord(scope, "mapping", mappingId);
-    if (Number(mapping.product_id) !== productId || Number(mapping.shop_id) !== Number(shopId)) throw new Error("发仓 SKU 绑定与商品、店铺不一致");
+    if (Number(mapping.product_id) !== productId || Number(mapping.shop_id) !== Number(shopId) || String(mapping.ozon_sku) !== ozonSku) throw new Error("发仓 SKU 绑定与商品、店铺不一致");
   }
   const status = FBP_TRANSFER_STATUSES.has(String(body.status || "")) ? String(body.status) : "sent";
   const personId = await resolvePersonIdOrFirstMysql(body.person_id || body.personId || userId);
@@ -6874,6 +6909,16 @@ export async function createFbpTransferRecordMysql(body = {}, userId = null, ten
   const listedQuantity = Math.min(quantity, Math.max(0, Math.round(Number(body.listed_quantity || body.listedQuantity || 0))));
   const id = await withMysqlTransaction(async (connection) => {
     await assertInventoryRecord(scope, 'product', productId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+    if (shopId) {
+      const shop = await assertInventoryRecord(scope, 'shop', shopId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+      if (shop.status === 'deleted') throw Object.assign(new Error('店铺已停用'), { statusCode: 403 });
+    }
+    if (mappingId) {
+      const mapping = await assertInventoryRecord(scope, 'mapping', mappingId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
+      if (Number(mapping.product_id) !== productId || Number(mapping.shop_id) !== Number(shopId) || String(mapping.ozon_sku) !== ozonSku) throw new Error('发仓 SKU 绑定与商品、店铺不一致');
+    }
+    await requireCurrentProcurementActorMysql(scope, userId, connection);
+    await assertInventoryReferences(scope, body, (sql, params) => mysqlConnectionQuery(connection, sql, params));
     const [result] = await connection.execute(`
       INSERT INTO fbp_transfer_records
         (product_id, mapping_id, shop_id, ozon_sku, quantity, listed_quantity, status, tracking_no, box_no, note, person_id, shipped_at, expected_arrival_at)
@@ -6901,6 +6946,7 @@ export async function createFbpTransferRecordMysql(body = {}, userId = null, ten
         await postFbpTransferInventoryMovementMysql(connection, record, listedQuantity, "FBP", `FBP确认入仓 ${listedQuantity} 件`, scope);
       }
     }
+    await requireCurrentProcurementActorMysql(scope, userId, connection);
     return transferId;
   });
   invalidateFbpPlanningCachesMysql();
@@ -25004,9 +25050,12 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
   const guard = async () => { if (options.session) await assertProcurementTaskAccessMysql(options.session, scope, options.signal); };
   await guard();
   const defaultTenantId = scope.id;
-  const actor = await assertInventoryMember(scope, sessionPersonId);
-  await assertInventoryReferences(scope, body);
-  for (const id of body.request_ids || []) await assertInventoryRecord(scope, 'request', id);
+  // Free purchases create requests in the caller's uncommitted transaction.
+  // Ownership validation must read that same transaction before confirming them.
+  const inspect = transactionConnection ? (sql, params) => mysqlConnectionQuery(transactionConnection, sql, params) : mysqlQuery;
+  const actor = await assertInventoryMember(scope, sessionPersonId, inspect);
+  await assertInventoryReferences(scope, body, inspect);
+  for (const id of body.request_ids || []) await assertInventoryRecord(scope, 'request', id, inspect);
   const submittedItems = Array.isArray(body.items) ? body.items : [];
   const directItems = submittedItems.filter(item => ['inventory_update', 'historical_debt_backfill'].includes(normalizeProcurementPurchaseMode(item.purchase_mode)));
   const shortageItems = submittedItems.filter(item => !directItems.includes(item));
@@ -25064,6 +25113,7 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
 
 export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
+  const current = await requireCurrentProcurementActorMysql(scope, sessionPersonId);
   const defaultTenantId = scope.id;
   await assertInventoryMember(scope, sessionPersonId);
   await assertInventoryReferences(scope, body);
@@ -25084,16 +25134,35 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     await ensurePurchaseOrderShipmentSchemaMysql();
   }
   const result = await withMysqlTransaction(async (connection) => {
+    await requireCurrentProcurementActorMysql(scope, sessionPersonId);
+    const inspect = (sql, params) => mysqlConnectionQuery(connection, sql, params);
+    for (const id of [...new Set(items.map(item => Number(item.product_id)))].sort((a, b) => a - b)) {
+      await assertInventoryRecord(scope, 'product', id, inspect, { lock: true });
+    }
+    // Current locking reads follow all entity lock waits. These shared locks
+    // serialize authority changes with this purchase's atomic commit.
+    const guard = () => requireCurrentProcurementActorMysql(scope, sessionPersonId, connection);
+    await guard();
+    await assertInventoryReferences(scope, body, inspect);
     const directResults = [];
-    for (const item of directItems) directResults.push(await applyDirectProcurementModeMysql(item, sessionPersonId, connection, scope.id));
-    if (!shortageItems.length) return { ok: true, stage: 'direct', direct_results: directResults, ids: [] };
+    for (const item of directItems) {
+      await guard();
+      directResults.push(await applyDirectProcurementModeMysql(item, sessionPersonId, connection, scope.id));
+    }
+    if (!shortageItems.length) {
+      await guard();
+      return { ok: true, stage: 'direct', direct_results: directResults, ids: [] };
+    }
     const shortageBody = { ...body, items: shortageItems };
+    await guard();
     const created = await createProcurementRequestMysql(shortageBody, sessionPersonId, tenantId, connection);
+    await guard();
     const purchased = await confirmProcurementRequestsPurchasedMysql({
       ...shortageBody,
       request_ids: created.ids,
       note: body.note || "采购工作台登记采购"
-    }, sessionPersonId, tenantId, connection);
+    }, sessionPersonId, tenantId, connection, { session: current });
+    await guard();
     return { ...created, ...purchased, direct_results: directResults };
   });
   invalidateOrderProcurementCoverage();

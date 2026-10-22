@@ -15,15 +15,15 @@ test("FBP replenishment list SQL scopes parent and print-record reads through te
   assert.match(list, /tenantShopPredicateMysql\("scoped_shop", defaultTenant\)/);
   assert.match(list, /JOIN fbp_replenishment_orders o ON o\.id = i\.order_id[\s\S]*tenantShopPredicateMysql\("scoped_shop", defaultTenant\)/);
   assert.match(list, /const params = \[normalizedTenantId\]/);
-  assert.match(list, /query\.inventory === '1' && defaultTenant/);
-  assert.match(list, /defaultTenant \? "COALESCE\(NULLIF\(current_product\.name/);
-  assert.match(list, /defaultTenant \? "LEFT JOIN products current_product[\s\S]*: ""/);
+  assert.match(list, /query\.inventory === ['"]1['"]/);
+  assert.match(list, /LEFT JOIN products current_product[\s\S]*inventoryTenantSql\(scope, "current_product"\)/);
+  assert.match(list, /current_member\.tenant_id = \$\{scope\.id\}/);
 });
 
-test("only the FBP replenishment collection route is opened and its tenant comes from the session", () => {
+test("reviewed daily FBP routes are open for default/customer members and tenant comes from the session", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "GET").allowed, true);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items", "adjustments"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "items"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "delete"], "POST").allowed, true);
@@ -35,9 +35,16 @@ test("only the FBP replenishment collection route is opened and its tenant comes
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "unlink"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-preview"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "merge"], "POST").allowed, false);
-  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-results"], "POST").allowed, false);
+  assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-batches", "fill-results"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "status"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "fbp-replenishment-orders", "inventory-allocation"], "POST").allowed, false);
+  for (const tenant of [{ id: 1, slug: "default" }, { id: 42, slug: "company-a" }]) {
+    const member = { roles: ["procurement"], tenant: { ...tenant, role: "member" } };
+    for (const [verb, route] of [["GET", "fbp-opportunities"], ["POST", "fbp-replenishment-orders"], ["POST", "fbp-transfer-records"], ["POST", "products/barcode-label"], ["POST", "products/barcode-label/generate"]]) {
+      assert.equal(tenantIsolationDecision(member, ["api", ...route.split("/")], verb).allowed, true, `${tenant.slug} ${verb} ${route}`);
+    }
+    assert.equal(tenantIsolationDecision(member, ["api", "fbp-replenishment-orders", "unreviewed"], "POST").allowed, false);
+  }
   const server = read("../src/server.js");
   assert.match(server, /services\.fbpReplenishmentOrders\(req\.query \|\| \{\}, tenantIdFromRequest\(req\)\)/);
   assert.match(server, /services\.createFbpReplenishmentOrders\(await readJson\(req\), req\._session\?\.personId, tenantIdFromRequest\(req\)\)/);
@@ -93,13 +100,13 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
     assert.match(method, /withMysqlTransaction/, name);
   }
   const status = source.slice(source.indexOf("export async function updateFbpReplenishmentOrderStatusMysql"), source.indexOf("const FBP_TRANSFER_STATUSES"));
-  assert.match(status, /!defaultTenant && \["approved", "sent", "ozon_created", "completed"\]\.includes\(status\)/);
-  assert.match(status, /!defaultTenant && status === "cancelled"/);
+  assert.match(status, /status === "approved"/);
+  assert.match(status, /status === "cancelled"/);
   const adjustmentStart = source.indexOf("export async function addFbpReplenishmentItemAdjustmentMysql");
   const adjustmentEnd = source.indexOf("const fbpAdjustmentReasonLabels", adjustmentStart);
   const adjustment = source.slice(adjustmentStart, adjustmentEnd);
   assert.match(adjustment, /reasonCode === "stock_shortage"/);
-  assert.match(adjustment, /!defaultTenant && reasonCode === "stock_shortage"/);
+  assert.match(adjustment, /assertInventoryRecord\(scope, ['"]fbpItem['"]/);
   assert.match(adjustment, /JOIN shops s ON s\.id = o\.shop_id/);
   assert.match(adjustment, /LIMIT 1 FOR UPDATE/);
   const adjustmentReadStart = source.indexOf("export async function fbpReplenishmentItemAdjustmentsMysql");
@@ -110,6 +117,5 @@ test("FBP draft writes lock and validate the parent order through tenant shop ow
   const reason = source.slice(reasonStart, reasonEnd);
   assert.match(reason, /resolveShopTenantIdMysql\(tenantId\)/);
   assert.match(reason, /JOIN shops s ON s\.id = o\.shop_id/);
-  assert.match(reason, /!defaultTenant && reasonCode === "stock_shortage"/);
-  assert.match(reason, /defaultTenant \? \(Number\(adjustment\.procurement_request_id \|\| 0\) \|\| null\) : null/);
+  assert.match(reason, /assertInventoryRecord\(scope, ['"]fbpItem['"]/);
 });

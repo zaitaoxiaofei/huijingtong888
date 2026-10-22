@@ -31,41 +31,54 @@ test("tenant procurement request routes take tenant scope only from the authenti
   ]);
 });
 
-test("tenant procurement gate allows only list/create and numeric record edit/delete", () => {
+test("tenant procurement gate admits reviewed daily routes and rejects unreviewed or malformed actions", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["GET", ["api", "procurement", "requests"]],
     ["POST", ["api", "procurement", "requests"]],
     ["PUT", ["api", "procurement", "requests", "12"]],
-    ["DELETE", ["api", "procurement", "requests", "12"]]
+    ["DELETE", ["api", "procurement", "requests", "12"]],
+    ["GET", ["api", "procurement", "requests", "12"]],
+    ["POST", ["api", "procurement", "requests", "direct-inbound"]],
+    ["POST", ["api", "procurement", "purchases"]],
+    ["POST", ["api", "procurement", "warehouse-requests"]],
+    ["GET", ["api", "procurement", "summary"]],
+    ["GET", ["api", "procurement", "ledger"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
   for (const [method, parts] of [
-    ["GET", ["api", "procurement", "requests", "12"]],
     ["POST", ["api", "procurement", "requests", "submit"]],
     ["POST", ["api", "procurement", "requests", "12"]],
     ["DELETE", ["api", "procurement", "requests", "12", "hard"]],
-    ["GET", ["api", "procurement", "ledger"]]
+    ["PUT", ["api", "procurement", "requests", "all"]],
+    ["POST", ["api", "procurement", "requests", "batch-delete"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
 });
 
-test("tenant procurement service fails closed and keeps requests free of shared business joins", () => {
+test("tenant procurement service validates every referenced domain before scoped reads and transactional writes", () => {
   const service = read("../src/services/mysql-cutover.js");
-  const tenantList = service.slice(service.indexOf("async function tenantProcurementRequestsMysql"), service.indexOf("async function createTenantProcurementRequestMysql"));
-  const tenantCreate = service.slice(service.indexOf("async function createTenantProcurementRequestMysql"), service.indexOf("async function updateTenantProcurementRequestMysql"));
-  const tenantUpdate = service.slice(service.indexOf("async function updateTenantProcurementRequestMysql"), service.indexOf("async function deleteTenantProcurementRequestMysql"));
-  const tenantDelete = service.slice(service.indexOf("async function deleteTenantProcurementRequestMysql"), service.indexOf("export async function procurementRequestsMysql"));
+  const section = name => service.match(new RegExp(`export async function ${name}\\([\\s\\S]*?(?=\\n(?:export )?(?:async )?function )`))?.[0] || "";
+  const tenantList = section("procurementRequestsMysql");
+  const tenantCreate = section("createProcurementRequestMysql");
+  const tenantUpdate = section("updateProcurementRequestMysql");
+  const tenantDelete = section("deleteProcurementRequestMysql");
   assert.match(service, /mysqlSchemaColumnExists\("procurement_requests", "tenant_id"\)/);
   assert.match(service, /mysqlSchemaIndexExists\("procurement_requests", "idx_procurement_tenant_status_created"\)/);
-  assert.match(tenantList, /pr\.tenant_id = \?/);
-  assert.match(tenantList, /pr\.purchase_order_id IS NULL/);
-  assert.match(tenantList, /pr\.product_id IS NULL/);
-  assert.match(tenantList, /pr\.supplier_id IS NULL/);
-  assert.doesNotMatch(tenantList, /JOIN\s+(?:products|people|suppliers|purchase_orders|orders)\b/i);
-  assert.match(tenantCreate, /tenant_members WHERE tenant_id = \? AND person_id = \? AND active = 1/);
-  assert.match(tenantCreate, /\[item, body\]\.some/);
+  assert.match(tenantList, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(tenantList, /requireProcurementTenantSchemaMysql\(\)/);
+  for (const alias of ["pr","p","s","po"]) assert.match(tenantList, new RegExp(`inventoryTenantSql\\(scope, '${alias}'\\)`));
+  assert.match(tenantList, /pr\.product_id IS NULL OR p\.id IS NOT NULL/);
+  assert.match(tenantList, /pr\.supplier_id IS NULL OR s\.id IS NOT NULL/);
+  assert.match(tenantList, /pr\.purchase_order_id IS NULL OR po\.id IS NOT NULL/);
+  assert.match(tenantList, /pr\.source_order_id IS NULL OR source_shop\.id IS NOT NULL/);
+  assert.match(tenantCreate, /assertInventoryMember\(scope, personId, run\)/);
+  assert.match(tenantCreate, /assertInventoryReferences\(scope, body, run\)/);
+  assert.match(tenantCreate, /SELECT id FROM products WHERE id = \? AND \$\{scope\.predicate\(\)\.sql\} FOR UPDATE/);
   assert.match(tenantCreate, /\(tenant_id, request_group_no, product_id/);
-  assert.match(tenantUpdate, /WHERE id = \? AND tenant_id = \?/);
-  assert.match(tenantUpdate, /AND purchase_order_id IS NULL AND product_id IS NULL/);
-  assert.match(tenantDelete, /WHERE id = \? AND tenant_id = \?/);
-  assert.match(tenantDelete, /AND source_order_id IS NULL AND source_order_item_id IS NULL AND supplier_id IS NULL/);
+  assert.match(tenantUpdate, /assertInventoryRecord\(scope, 'request', requestId, run, \{ lock: true \}\)/);
+  assert.match(tenantUpdate, /assertInventoryReferences\(scope, body, run\)/);
+  assert.match(tenantUpdate, /scope\.predicate\('request'\)\.sql/);
+  assert.match(tenantUpdate, /scope\.predicate\('product'\)\.sql/);
+  assert.match(tenantDelete, /withMysqlTransaction/);
+  assert.match(tenantDelete, /assertInventoryRecord\(scope, 'request', requestId,[\s\S]*?\{ lock: true \}\)/);
+  assert.ok(tenantDelete.indexOf("assertInventoryRecord") < tenantDelete.indexOf("DELETE FROM procurement_requests"));
 });

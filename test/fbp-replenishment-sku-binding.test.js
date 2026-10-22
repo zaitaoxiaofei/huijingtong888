@@ -12,6 +12,14 @@ const reserveEnd = service.indexOf("async function fbpReplenishmentCompletionSta
 
 function createContext(overrides = {}) {
   const writes = [];
+  const connection = {
+    execute: async (sql, params) => {
+      if (sql.includes("FROM sku_mappings sm")) return [await context.mysqlQuery(sql, params)];
+      if (/^\s*SELECT\b/.test(sql)) return [[]];
+      writes.push({ sql, params });
+      return [{ insertId: 100 }];
+    }
+  };
   const context = vm.createContext({
     ensureMysqlCutoverEnabled() {},
     ensureFbpReplenishmentSchemaMysql: async () => {},
@@ -20,7 +28,11 @@ function createContext(overrides = {}) {
     resolveInventoryTenantScope: async () => ({ id:7, isDefault:false }),
     assertInventoryMember: async () => 3,
     assertInventoryRecord: async () => ({ id:100, shop_id:5 }),
+    restoreBusinessTaskSession: async () => ({ personId: 3, roles: ["procurement"], tenant: { id: 7, slug: "tenant-seven", role: "member" } }),
+    assertBusinessTaskPermission() {},
     mysqlConnectionQuery: async (connection,sql,params) => (await connection.execute(sql,params))[0],
+    mysqlConnectionQueryOne: async (connection,sql,params) => (await connection.execute(sql,params))[0][0],
+    withMysqlTransaction: async run => run(connection),
     inventoryTenantSql: () => "tenant_id = 7",
     backfillFbpReplenishmentOrderDatesMysql: async () => {},
     activeShopForTenantMysql: async () => ({ id: 5 }),

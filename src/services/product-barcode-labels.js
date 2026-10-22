@@ -9,6 +9,8 @@ import {
   generateOzonBarcodes
 } from "../ozonClient.js";
 import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
+import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord } from "./inventory-tenant-scope.js";
 
 const MM_TO_PT = 72 / 25.4;
 const LABEL_LAYOUT_TYPE = "ozon_70x30_inventory_name_v8";
@@ -131,7 +133,23 @@ function sortRowsByInput(rows = [], ids = []) {
   return [...rows].sort((a, b) => (order.get(String(a.online_product_id)) ?? 0) - (order.get(String(b.online_product_id)) ?? 0));
 }
 
-async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
+async function barcodeSessionScope(session, permission = "inventory.read") {
+  const current = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(current, permission);
+  return resolveInventoryTenantScope(current.tenant.id);
+}
+
+async function barcodeRowShop(row, session, permission = "inventory.read") {
+  const scope = await barcodeSessionScope(session, permission);
+  const online = await assertInventoryRecord(scope, "online", row.online_product_id);
+  if (Number(online.shop_id) !== Number(row.shop_id)) throw Object.assign(new Error("条码商品店铺已变更，请刷新后重试"), { statusCode: 409 });
+  const shop = await assertInventoryRecord(scope, "shop", online.shop_id);
+  if (shop.status === "deleted") throw Object.assign(new Error("店铺已停用"), { statusCode: 403 });
+  if (online.product_id) await assertInventoryRecord(scope, "product", online.product_id);
+  return shop;
+}
+
+async function resolveOnlineProductsForBarcodeLabels(inputItems = [], scope) {
   if (!inputItems.length) throw new Error("Select products to download barcodes");
   const ids = [...new Set(inputItems.map((item) => Number(item.online_product_id)).filter(Boolean))];
   const directRows = ids.length ? await mysqlQuery(`
@@ -148,27 +166,28 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
       p.name AS inventory_name,
       s.name AS shop_name,
       s.ozon_client_id,
-      s.api_key_hint,
-      s.ozon_api_key
+      s.api_key_hint
     FROM online_products op
     JOIN shops s ON s.id = op.shop_id
     LEFT JOIN products p ON p.id = COALESCE(op.product_id, (
       SELECT sm.product_id
       FROM sku_mappings sm
       WHERE sm.active = 1
+        AND ${inventoryTenantSql(scope, "sm")}
         AND sm.shop_id = op.shop_id
         AND sm.product_id IS NOT NULL
         AND (sm.online_product_id = op.id OR sm.ozon_sku = op.ozon_sku)
       ORDER BY CASE WHEN sm.online_product_id = op.id THEN 0 ELSE 1 END, sm.id DESC
       LIMIT 1
-    ))
-    WHERE op.id IN (${ids.map(() => "?").join(",")})
+    )) AND ${inventoryTenantSql(scope, "p")}
+    WHERE op.id IN (${ids.map(() => "?").join(",")}) AND ${inventoryTenantSql(scope, "s")} AND s.status != 'deleted'
   `, ids) : [];
   const rowsById = new Map(directRows.map((row) => [String(row.online_product_id), row]));
   const resolved = [];
   for (const item of inputItems) {
     let row = item.online_product_id ? rowsById.get(String(item.online_product_id)) : null;
-    if (!row && item.shop_id && (item.ozon_sku || item.offer_id)) {
+    if (!row && !item.online_product_id && item.shop_id && (item.ozon_sku || item.offer_id)) {
+      await assertInventoryRecord(scope, "shop", item.shop_id);
       const fallbackRows = await mysqlQuery(`
         SELECT
           op.id AS online_product_id,
@@ -183,21 +202,22 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
           p.name AS inventory_name,
           s.name AS shop_name,
           s.ozon_client_id,
-          s.api_key_hint,
-          s.ozon_api_key
+          s.api_key_hint
         FROM online_products op
         JOIN shops s ON s.id = op.shop_id
         LEFT JOIN products p ON p.id = COALESCE(op.product_id, (
           SELECT sm.product_id
           FROM sku_mappings sm
           WHERE sm.active = 1
+            AND ${inventoryTenantSql(scope, "sm")}
             AND sm.shop_id = op.shop_id
             AND sm.product_id IS NOT NULL
             AND (sm.online_product_id = op.id OR sm.ozon_sku = op.ozon_sku)
           ORDER BY CASE WHEN sm.online_product_id = op.id THEN 0 ELSE 1 END, sm.id DESC
           LIMIT 1
-        ))
+        )) AND ${inventoryTenantSql(scope, "p")}
         WHERE op.shop_id = ?
+          AND ${inventoryTenantSql(scope, "s")} AND s.status != 'deleted'
           AND (op.ozon_sku = ? OR op.offer_id = ?)
         ORDER BY CASE WHEN op.ozon_sku = ? THEN 0 WHEN op.offer_id = ? THEN 1 ELSE 2 END, op.id DESC
         LIMIT 1
@@ -212,8 +232,9 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
     }
     if (!row) {
       const label = item.ozon_sku || item.offer_id || item.online_product_id || "unknown";
-      throw new Error(`Online product not found for ${label}`);
+      throw Object.assign(new Error(`条码商品不存在或不属于当前企业：${label}`), { statusCode: 404 });
     }
+    if (item.shop_id && Number(item.shop_id) !== Number(row.shop_id)) throw Object.assign(new Error("条码商品与所选店铺不一致"), { statusCode: 404 });
     resolved.push({
       ...row,
       quantity: item.quantity || 1
@@ -222,33 +243,36 @@ async function resolveOnlineProductsForBarcodeLabels(inputItems = []) {
   return resolved;
 }
 
-async function resolveOzonProductIdFromStocks(shop, row) {
+async function resolveOzonProductIdFromStocks(shop, row, options = {}) {
   const offerIds = [row.offer_id, row.ozon_sku].map((item) => String(item || "").trim()).filter(Boolean);
   if (!offerIds.length) return 0;
-  const stockRows = await fetchOzonProductStocks(shop, { offerIds, limit: 1000 });
+  shop = await barcodeRowShop(row, options.session, "inventory.write");
+  const stockRows = await fetchOzonProductStocks(shop, { offerIds, limit: 1000, beforeRequest: () => barcodeRowShop(row, options.session, "inventory.write") });
   const matched = stockRows.find((item) => offerIds.includes(String(item.offer_id || "").trim()) || offerIds.includes(String(item.ozon_sku || "").trim()));
   return Number(matched?.ozon_product_id || 0);
 }
 
-async function resolveEffectiveOzonProductId(shop, row) {
-  const resolved = await resolveOzonProductIdFromStocks(shop, row);
+async function resolveEffectiveOzonProductId(shop, row, options = {}) {
+  const resolved = await resolveOzonProductIdFromStocks(shop, row, options);
   if (resolved) return resolved;
   return Number(row.ozon_product_id || 0);
 }
 
 async function syncOnlineProductBarcodeData(shop, row, options = {}) {
-  let ozonProductId = await resolveEffectiveOzonProductId(shop, row);
+  let ozonProductId = await resolveEffectiveOzonProductId(shop, row, options);
   if (!ozonProductId) {
     throw new Error(`Product ${row.name || row.offer_id || row.ozon_sku || row.online_product_id} is missing Ozon product_id`);
   }
 
-  const fetched = await fetchOzonProductsByIds(shop, [ozonProductId]);
+  shop = await barcodeRowShop(row, options.session, "inventory.write");
+  const fetched = await fetchOzonProductsByIds(shop, [ozonProductId], { beforeRequest: () => barcodeRowShop(row, options.session, "inventory.write") });
   const matched = fetched.find((item) => Number(item.ozon_product_id || 0) === ozonProductId)
     || fetched.find((item) => String(item.offer_id || "") === String(row.offer_id || ""))
     || null;
   const barcodes = matched ? parseJsonArray(matched.barcodes_json) : [];
   const fallbackBarcode = String(options.generatedBarcode || "").trim();
   const nextBarcodes = barcodes.length ? barcodes : (fallbackBarcode ? [fallbackBarcode] : []);
+  await barcodeRowShop(row, options.session, "inventory.write");
   await mysqlExecute(`
     UPDATE online_products
     SET
@@ -258,14 +282,14 @@ async function syncOnlineProductBarcodeData(shop, row, options = {}) {
       image_url = COALESCE(NULLIF(?, ''), image_url),
       barcodes_json = ?,
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
+    WHERE id = ? AND shop_id = ?
   `, [
     String(ozonProductId),
     matched?.name || row.name || "",
     matched?.primary_image || row.primary_image || "",
     matched?.image_url || row.image_url || "",
     JSON.stringify(nextBarcodes),
-    Number(row.online_product_id)
+    Number(row.online_product_id), Number(row.shop_id)
   ]);
   return {
     ...row,
@@ -278,6 +302,7 @@ async function syncOnlineProductBarcodeData(shop, row, options = {}) {
 }
 
 async function ensureProductBarcode(row, options = {}) {
+  await barcodeRowShop(row, options.session);
   const currentBarcodes = parseJsonArray(row.barcodes_json);
   const existing = chooseBarcode(currentBarcodes);
   if (existing && hasOzonBarcode(currentBarcodes) && !options.forceGenerate) {
@@ -291,18 +316,20 @@ async function ensureProductBarcode(row, options = {}) {
     api_key_hint: row.api_key_hint,
     ozon_api_key: row.ozon_api_key
   };
-  let ozonProductId = await resolveEffectiveOzonProductId(shop, row);
+  await barcodeRowShop(row, options.session, "inventory.write");
+  let ozonProductId = await resolveEffectiveOzonProductId(shop, row, options);
   if (!ozonProductId) {
     throw new Error(`Product ${row.name || row.offer_id || row.ozon_sku || row.online_product_id} cannot generate a barcode without Ozon product_id`);
   }
-  const generated = await generateOzonBarcodes(shop, [ozonProductId]);
+  const currentShop = await barcodeRowShop(row, options.session, "inventory.write");
+  const generated = await generateOzonBarcodes(currentShop, [ozonProductId], { beforeRequest: () => barcodeRowShop(row, options.session, "inventory.write") });
   const generatedBarcode = String(
     generated?.result?.[0]?.barcode
     || generated?.result?.barcode
     || generated?.barcode
     || ""
   ).trim();
-  const syncedRow = await syncOnlineProductBarcodeData(shop, { ...row, ozon_product_id: String(ozonProductId) }, { generatedBarcode });
+  const syncedRow = await syncOnlineProductBarcodeData(shop, { ...row, ozon_product_id: String(ozonProductId) }, { generatedBarcode, session: options.session });
   const nextBarcode = chooseBarcode(parseJsonArray(syncedRow.barcodes_json)) || generatedBarcode;
   if (!nextBarcode) throw new Error(`Ozon did not return a barcode for ${row.name || row.offer_id || row.ozon_sku || row.online_product_id}`);
   return { row: syncedRow, barcode: nextBarcode, generated: true };
@@ -500,13 +527,13 @@ function truncateText(text, font, size, maxWidth) {
   return `${value}${suffix}`;
 }
 
-async function loadCachedBarcodeLabel(onlineProductId) {
+async function loadCachedBarcodeLabel(row) {
   const rows = await mysqlQuery(`
     SELECT barcode_value, layout_type, product_name, label_pdf
     FROM product_barcode_label_cache
-    WHERE online_product_id = ?
+    WHERE online_product_id = ? AND shop_id = ? AND ozon_product_id = ?
     LIMIT 1
-  `, [Number(onlineProductId)]);
+  `, [Number(row.online_product_id), Number(row.shop_id), String(row.ozon_product_id || "")]);
   const cached = rows[0];
   if (!cached?.label_pdf) return null;
   return {
@@ -558,7 +585,8 @@ async function cacheBarcodeLabel(row, barcode, buffer, source = "render") {
 }
 
 async function singleBarcodeLabelBuffer(row, barcode, options = {}) {
-  const cached = options.refreshCache ? null : await loadCachedBarcodeLabel(row.online_product_id);
+  await barcodeRowShop(row, options.session);
+  const cached = options.refreshCache ? null : await loadCachedBarcodeLabel(row);
   if (
     cached?.buffer?.length &&
     cached.barcode_value === String(barcode || "") &&
@@ -568,6 +596,7 @@ async function singleBarcodeLabelBuffer(row, barcode, options = {}) {
     return { buffer: cached.buffer, cached: true };
   }
   const buffer = await renderThermalBarcodeLabelPdf(row, barcode);
+  await barcodeRowShop(row, options.session);
   await cacheBarcodeLabel(row, barcode, buffer, "render");
   return { buffer, cached: false };
 }
@@ -594,20 +623,22 @@ async function mergePdfBuffers(buffers = []) {
   return Buffer.from(await merged.save());
 }
 
-export async function generateProductBarcodeLabelMysql(body = {}) {
+export async function generateProductBarcodeLabelMysql(body = {}, session) {
   ensureMysqlCutoverEnabled();
+  const scope = await barcodeSessionScope(session, "inventory.write");
   await ensureProductBarcodeLabelCacheSchemaMysql();
   const inputItems = decodeInputItems(body);
   if (!inputItems.length) throw new Error("Select products to generate barcodes");
   if (inputItems.length > 50) throw new Error("Generate at most 50 products per batch");
   const forceGenerate = body.force_generate === true;
   const refreshCache = body.refresh_cache !== false;
-  const rows = await resolveOnlineProductsForBarcodeLabels(inputItems);
+  const rows = await resolveOnlineProductsForBarcodeLabels(inputItems, scope);
+  for (const row of rows) await barcodeRowShop(row, session, "inventory.write");
   const items = [];
 
   for (const row of rows) {
-    const ensured = await ensureProductBarcode(row, { forceGenerate });
-    const single = await singleBarcodeLabelBuffer(ensured.row, ensured.barcode, { refreshCache });
+    const ensured = await ensureProductBarcode(row, { forceGenerate, session });
+    const single = await singleBarcodeLabelBuffer(ensured.row, ensured.barcode, { refreshCache, session });
     items.push({
       online_product_id: Number(ensured.row.online_product_id),
       ozon_sku: String(ensured.row.ozon_sku || ""),
@@ -625,28 +656,31 @@ export async function generateProductBarcodeLabelMysql(body = {}) {
   };
 }
 
-export async function productBarcodeLabelMysql(body = {}) {
+export async function productBarcodeLabelMysql(body = {}, session) {
   ensureMysqlCutoverEnabled();
+  const scope = await barcodeSessionScope(session);
   await ensureProductBarcodeLabelCacheSchemaMysql();
   const inputItems = decodeInputItems(body);
   if (!inputItems.length) throw new Error("Select products to download barcodes");
   if (inputItems.length > 50) throw new Error("Download at most 50 products per batch");
   const forceGenerate = body.force_generate === true;
   const refreshCache = body.refresh_cache === true;
-  const rows = await resolveOnlineProductsForBarcodeLabels(inputItems);
+  const rows = await resolveOnlineProductsForBarcodeLabels(inputItems, scope);
+  for (const row of rows) await barcodeRowShop(row, session);
   const buffers = [];
   let generatedCount = 0;
   let cacheHits = 0;
 
   for (const row of rows) {
-    const ensured = await ensureProductBarcode(row, { forceGenerate });
+    const ensured = await ensureProductBarcode(row, { forceGenerate, session });
     if (ensured.generated) generatedCount += 1;
-    const single = await singleBarcodeLabelBuffer(ensured.row, ensured.barcode, { refreshCache });
+    const single = await singleBarcodeLabelBuffer(ensured.row, ensured.barcode, { refreshCache, session });
     if (single.cached) cacheHits += 1;
     buffers.push(await mergePdfCopies(single.buffer, Math.max(1, Number(row.quantity || 1))));
   }
 
   const buffer = await mergePdfBuffers(buffers);
+  await barcodeSessionScope(session);
   const suffix = rows.length === 1
     ? filenameSafeText(rows[0].offer_id || rows[0].ozon_sku || rows[0].name || "barcode")
     : `${rows.length}-products`;

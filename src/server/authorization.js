@@ -64,6 +64,9 @@ export function authorizeApiRequest(req, parts = []) {
     )) return { allowed: true };
     return deny("仅平台超级管理员可以管理平台企业授权");
   }
+  // Ordinary staff need the scoped dictionary; its route projects safe fields.
+  // Full authorization details and all writes remain enterprise administration.
+  if (resource === "shops" && parts.length === 2 && method === "GET") return { allowed: true };
   if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
     const collection = parts.length === 2 && ["GET", "POST"].includes(method);
     const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
@@ -120,6 +123,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "suppliers") return read ? require("inventory.read") : require("procurement");
   if (resource === "inventory" && parts[2] === "manual-outbound-records") return read ? require("inventory.read") : require("packing", "inventory.write");
   if (resource === "inventory" && parts[2] === "movements") return require("packing", "inventory.write");
+  if (path === "products/barcode-label" && method === "POST") return require("inventory.read");
   if (["products", "mappings", "sku-inventory-recipes", "inventory", "stock-alerts"].includes(resource)) return require(read ? "inventory.read" : "inventory.write");
   if (resource.startsWith("fbp-")) return read ? require("inventory.read") : require("procurement");
   if (resource === "online-products") return read ? require("orders.read", "operations")

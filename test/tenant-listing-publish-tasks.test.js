@@ -5,7 +5,7 @@ import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const service = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 
-test("reviewed listing reads and record retry are enabled while advanced mutations stay closed", () => {
+test("reviewed listing reads, record retry, and refresh open while batch publishing and task retry stay closed", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["POST", ["api", "listing", "publish-tasks", "12", "retry"]],
@@ -17,11 +17,15 @@ test("reviewed listing reads and record retry are enabled while advanced mutatio
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "12"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "draft-projects"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "12", "retry"], "POST").allowed, true);
+  assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "12", "refresh"], "POST").allowed, true);
   for (const [method, parts] of [
-    ["POST", ["api", "listing", "publish-records", "12", "refresh"]],
+    ["GET", ["api", "listing", "publish-records", "12", "refresh"]],
+    ["POST", ["api", "listing", "publish-records", "not-numeric", "refresh"]],
+    ["POST", ["api", "listing", "publish-records", "12", "refresh", "extra"]],
     ["DELETE", ["api", "listing", "publish-records", "batch-delete"]],
     ["POST", ["api", "listing", "publish-records", "unknown"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
+  assert.equal(tenantIsolationDecision({}, ["api", "listing", "publish-records", "12", "refresh"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "12"], "DELETE").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "batch-delete"], "POST").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records", "12", "draft"], "POST").allowed, true);

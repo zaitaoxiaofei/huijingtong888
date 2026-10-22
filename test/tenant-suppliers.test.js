@@ -27,18 +27,22 @@ test("supplier migration is opt-in and does not infer ownership for legacy recor
 
 test("supplier service scopes list, counts, and every write by the authenticated tenant", () => {
   const service = read("../src/services/mysql-suppliers.js");
-  assert.match(service, /function supplierTenantScope\(tenantId/);
-  assert.match(service, /tenant_id = \?/);
-  assert.match(service, /tenant_id IS NULL/);
+  assert.match(service, /async function resolveSupplierTenantScope\(tenantId/);
+  assert.match(service, /resolveInventoryTenantScope\(tenantId\)/);
+  assert.match(service, /scope: tenant\.predicate\(alias\)/);
   assert.match(service, /async function hasSupplierTenantSchema\(\)/);
-  assert.match(service, /if \(!hasTenantColumn && String\(tenantId\) !== "admin"\)/);
+  assert.match(service, /if \(!hasTenantColumn\) \{/);
   assert.match(service, /供应商企业隔离暂不可用：suppliers\.tenant_id 尚未迁移/);
   assert.match(service, /suppliersMysql\(query = \{\}, tenantId = "admin"\)/);
   assert.match(service, /createSupplierMysql\(body = \{\}, tenantId = "admin"\)/);
   assert.match(service, /updateSupplierMysql\(id, body = \{\}, tenantId = "admin"\)/);
   assert.match(service, /deleteSupplierMysql\(id, tenantId = "admin"\)/);
-  assert.match(service, /WHERE id = \? AND \$\{scope\.sql\}/);
-  assert.match(service, /productScope = !hasTenantColumn \? "1 = 1" : String\(tenantId\) === "admin" \? "tenant_id IS NULL" : "tenant_id = \?"/);
+  assert.match(service, /WHERE s\.id = \? AND \$\{scope\.sql\}/);
+  assert.match(service, /const productScope = tenant\.predicate\(\)/);
+  assert.match(service, /WHERE active = 1 AND \$\{productScope\.sql\} AND supplier_id IN/);
+  assert.match(service, /supplier_id = \? AND active = 1 AND \$\{productScope\.sql\}/);
+  assert.match(service, /WHERE \$\{where\.join\(" AND "\)\}/);
+  assert.match(service, /const where = \["s.status = 'active'", scope\.sql\]/);
   assert.match(service, /invalidateMasterDataCachePrefix\("suppliers:"\)/);
 });
 

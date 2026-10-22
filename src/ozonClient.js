@@ -194,7 +194,7 @@ export async function fetchOzonProductsByIds(shop, productIds = [], options = {}
     : new Map(Object.entries(options.visibilityById || {}).map(([id, visibility]) => [String(id), visibility]));
   const chunks = chunkOzonFilterValues(ids);
   const chunkProducts = await mapOzonConcurrencyResults(chunks, options.detailConcurrency || 1, async (chunk) => {
-    const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
+    const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk }, options);
     const items = data.result?.items || data.items || [];
     return items.map((item) => {
       const id = String(item.id || item.product_id || "");
@@ -373,7 +373,7 @@ export async function fetchOzonProductStocks(shop, options = {}) {
         cursor,
         filter,
         limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
-      }, { signal: options.signal });
+      }, { signal: options.signal, beforeRequest: options.beforeRequest });
       const result = data.result || data;
       const items = result.items || result.products || [];
       for (const item of items) rows.push(...normalizeOzonStockItem(item));
@@ -1382,6 +1382,7 @@ function isOzonRateLimitError(error) {
 }
 
 async function ozonRequestOnce(shop, path, payload, options = {}) {
+  if (options.beforeRequest) shop = await options.beforeRequest() || shop;
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次拉取已取消"));
   if (options.signal?.aborted) abortFromParent();

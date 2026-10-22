@@ -4,6 +4,8 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { ArrowLeft, Check, Delete, MagicStick, Refresh, View } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
+import { readListingRecordDraft } from "../../utils/listing-record-draft.js";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import OzonRichContentEditor from "../../components/listing/OzonRichContentEditor.vue";
 
@@ -85,8 +87,7 @@ async function loadDraft() {
   try {
     let draft = null;
     if (key) {
-      const raw = sessionStorage.getItem(key);
-      if (raw) draft = JSON.parse(raw);
+      draft = readListingRecordDraft(key, useAuthStore().user);
     }
     if (!draft && recordId) {
       const row = await apiClient.get(`/api/listing/publish-records/${recordId}`, { noCache: true });

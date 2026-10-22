@@ -81,7 +81,6 @@ export function canAccessPage(subject, path) {
   if (subject && typeof subject === "object" && !Array.isArray(subject) && !subject.tenant?.id) return false;
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
   if (permission === "finance") return isPlatformAdmin(subject) || (path === "/finance-center" && isEnterpriseAdmin(subject));
-  if (subject?.tenant?.slug !== "default" && ["/online-products", "/batch-stock-update"].includes(path)) return isPlatformAdmin(subject) || isEnterpriseAdmin(subject);
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;
   return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
 }

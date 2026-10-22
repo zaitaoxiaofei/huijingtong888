@@ -2,8 +2,10 @@
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { storeListingRecordDraft } from "../../utils/listing-record-draft.js";
 import { useAuthStore } from "../../stores/auth";
+import { hasPermission, isPlatformAdmin } from "../../../../src/shared/permissions.js";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
@@ -96,9 +98,10 @@ const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
 
 const pagedRows = computed(() => state.onlineProducts);
 const tenantReadOnly = computed(() => authStore.user?.tenant?.slug !== "default");
-const tenantCanUpdateStocks = computed(() => !tenantReadOnly.value
-  || ["owner", "admin"].includes(authStore.user?.tenant?.role)
-  || (Array.isArray(authStore.user?.roles) && authStore.user.roles.includes("admin")));
+const canSyncOnline = computed(() => !tenantReadOnly.value && isPlatformAdmin(authStore.user));
+const canManageInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
+const canOperate = computed(() => hasPermission(authStore.user, "operations"));
+const tenantCanUpdateStocks = computed(() => hasPermission(authStore.user, "operations"));
 const stockDialogShopName = computed(() => {
   const shopId = Number(stockForm.shop_id || 0);
   return state.shops.find((shop) => Number(shop.id) === shopId)?.name || "当前店铺";
@@ -477,7 +480,7 @@ async function ensureProductOptions(row = null) {
 }
 
 async function ensurePeople() {
-  if (dictionaryLoaded || tenantReadOnly.value) return;
+  if (dictionaryLoaded) return;
   try {
     const people = await apiClient.get("/api/people");
     state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
@@ -546,6 +549,21 @@ async function submitBind() {
   } finally {
     bindSubmitting.value = false;
   }
+}
+
+async function openOnlineProductEditor(row) {
+  if (!row?.id || openingEditId.value) return;
+  const scope = currentApiCacheScope();
+  openingEditId.value = Number(row.id);
+  try {
+    const draft = await apiClient.get(`/api/online-products/${row.id}/edit-draft`, { noCache: true });
+    if (scope !== currentApiCacheScope()) return;
+    if (!draft?.template) throw new Error("未取得商品编辑内容，请刷新后重试");
+    const recordDraft = storeListingRecordDraft(draft, authStore.user);
+    await router.push({ path: "/listing-automation", query: { recordDraft, workbenchId: recordDraft } });
+  } catch (error) {
+    ElMessage.error(error.message || "打开商品编辑失败");
+  } finally { openingEditId.value = 0; }
 }
 
 async function createProductFromOnline(row) {
@@ -672,6 +690,7 @@ function stopOnlineProductSyncPolling() {
 }
 
 async function pollOnlineProductSyncStatus() {
+  if (!canSyncOnline.value) return;
   try {
     const result = await apiClient.get("/api/sync/online-products/status", { routeScoped: false });
     if (result?.running) {
@@ -728,8 +747,10 @@ onMounted(async () => {
   applyRouteState();
   await loadPageData();
   try {
-    const status = await apiClient.get("/api/sync/online-products/status", { routeScoped: false });
-    if (status?.running) startOnlineProductSyncPolling();
+    if (canSyncOnline.value) {
+      const status = await apiClient.get("/api/sync/online-products/status", { routeScoped: false });
+      if (status?.running) startOnlineProductSyncPolling();
+    }
   } catch {}
   const openAction = String(route.query.action || "");
   const onlineProductId = Number(route.query.onlineProductId || 0);
@@ -744,6 +765,7 @@ onBeforeUnmount(() => {
 });
 
 onActivated(async () => {
+  if (!canSyncOnline.value) return;
   try {
     const status = await apiClient.get("/api/sync/online-products/status", { routeScoped: false });
     if (status?.running) startOnlineProductSyncPolling();
@@ -755,7 +777,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
-    <el-alert v-if="tenantReadOnly" title="企业安全模式" description="仅展示本企业店铺商品；负责人和管理员可进行批量库存更新或清零单个商品。归档、商品绑定、上架编辑、建品及同步功能待完成租户化后开放。" type="info" :closable="false" show-icon />
+    <el-alert v-if="tenantReadOnly" title="企业商品空间" description="仅展示本企业店铺商品。商品绑定、建品、编辑上架及归档按岗位权限开放；高级同步功能尚未开放。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -777,10 +799,10 @@ onDeactivated(stopOnlineProductSyncPolling);
               <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
             <el-form-item>
-              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
+              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
-              <el-button v-if="!tenantReadOnly" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
+              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
                 刷新库存数量
               </el-button>
               <el-button v-if="tenantCanUpdateStocks" class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">
@@ -937,18 +959,20 @@ onDeactivated(stopOnlineProductSyncPolling);
           <el-table-column label="最后同步时间" min-width="160">
             <template #default="{ row }">{{ dateText(row.synced_at || row.updated_at) }}</template>
           </el-table-column>
-          <el-table-column v-if="!tenantReadOnly || (tenantCanUpdateStocks && tenantReadOnly)" label="操作" width="470" fixed="right">
+          <el-table-column v-if="canOperate || canManageInventory || tenantCanUpdateStocks" label="操作" width="470" fixed="right">
             <template #default="{ row }">
               <div class="erp-inline-actions">
-                <template v-if="!tenantReadOnly">
+                <template v-if="canOperate">
                   <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
                   <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
                   <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
-                  <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
-                  <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
                   <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
                 </template>
-                <el-button v-else-if="tenantCanUpdateStocks" class="erp-btn-link erp-btn-link-danger" link type="danger" :loading="zeroStockLoadingId === Number(row.id)" @click="zeroOnlineProductStock(row)">清零库存</el-button>
+                <template v-if="canManageInventory">
+                  <el-button class="erp-btn-link" link type="primary" @click="openBindDialog(row)">去绑定</el-button>
+                  <el-button class="erp-btn-link" link @click="createProductFromOnline(row)">创建库存</el-button>
+                </template>
+                <el-button v-if="tenantReadOnly && tenantCanUpdateStocks" class="erp-btn-link erp-btn-link-danger" link type="danger" :loading="zeroStockLoadingId === Number(row.id)" @click="zeroOnlineProductStock(row)">清零库存</el-button>
               </div>
             </template>
           </el-table-column>

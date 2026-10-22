@@ -1,4 +1,4 @@
-import { hasPermission, isPlatformAdmin } from "../../shared/permissions.js";
+import { hasPermission, isPlatformAdmin, isEnterpriseAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
 import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
@@ -78,7 +78,16 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/customer-message-customer-orders": customer((req, url) => services.customerMessageCustomerOrders(Object.fromEntries(url.searchParams.entries()))),
     "GET /api/customer-message-settings": customer(() => services.customerMessageSettings()),
     "GET /api/user-preferences": (req, url) => services.userPreference(Object.fromEntries(url.searchParams.entries()), req._session?.personId),
-    "GET /api/shops": (req) => services.shops(tenantIdFromRequest(req)),
+    "GET /api/shops": async (req) => {
+      const shops = await services.shops(tenantIdFromRequest(req));
+      if (isPlatformAdmin(req._session) || isEnterpriseAdmin(req._session)) return shops;
+      return shops.map(({ id, name, status, platform, currency_code, watermark_path, watermark_name,
+        watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent }) => ({
+        id, name, status, platform, currency_code,
+        watermark_path: watermark_path ? `/api/tools/image-cropper/shop-watermark/${id}/file` : '',
+        watermark_name, watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent
+      }));
+    },
     "GET /api/people": (req) => services.people(tenantIdFromRequest(req)),
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },

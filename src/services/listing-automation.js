@@ -6651,7 +6651,7 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   const payload = buildOzonImportPreviewPayload(facts, template);
   const includeCategoryHealth = shouldIncludeCategoryPublishDiagnostics(body, template);
   const categoryHealth = includeCategoryHealth
-    ? await buildListingCategoryPublishDiagnostics(template, { facts, payload }).catch((error) => ({
+    ? await buildListingCategoryPublishDiagnostics(template, { facts, payload, session }).catch((error) => ({
       ok: false,
       level: "yellow",
       errors: [],
@@ -6723,7 +6723,7 @@ export async function listingCategoryPublishDiagnostics(body = {}, session = nul
     categoryId: String(template.ozon_category_id || editable.category_id || "").trim(),
     richContent: normalizeRichContentMediaForPublish(editable.rich_content_json || editable.rich_content || "")
   }, template);
-  return buildListingCategoryPublishDiagnostics(template, { facts, payload });
+  return buildListingCategoryPublishDiagnostics(template, { facts, payload, session });
 }
 
 async function buildListingCategoryPublishDiagnostics(template = {}, context = {}) {
@@ -6865,15 +6865,19 @@ async function buildListingCategoryPublishDiagnostics(template = {}, context = {
     addCheck("dictionary_values", "字典值", "success", "当前缓存类目没有字典属性");
   }
 
+  const tenantLookup = listingTenantLookup(listingTenantId(context.session || currentAiTenantSession()));
   const latestSyncJob = await row(`
-    SELECT id, job_type, shop_id, status, started_at, finished_at, result_json, error_message
-    FROM ozon_category_sync_jobs
-    WHERE JSON_EXTRACT(payload_json, '$.description_category_id') = ?
-       OR JSON_EXTRACT(payload_json, '$.descriptionCategoryId') = ?
-       OR job_type IN ('scheduled', 'manual', 'category_cache_refresh')
-    ORDER BY started_at DESC, id DESC
+    SELECT j.id, j.job_type, j.shop_id, j.status, j.started_at, j.finished_at, j.result_json, j.error_message
+    FROM ozon_category_sync_jobs j
+    JOIN shops s ON s.id = j.shop_id
+    JOIN tenants t ON t.${tenantLookup.column} = ?
+    WHERE (s.tenant_id = t.id OR (t.slug = 'default' AND s.tenant_id IS NULL))
+      AND (JSON_EXTRACT(j.payload_json, '$.description_category_id') = ?
+       OR JSON_EXTRACT(j.payload_json, '$.descriptionCategoryId') = ?
+       OR j.job_type IN ('scheduled', 'manual', 'category_cache_refresh'))
+    ORDER BY j.started_at DESC, j.id DESC
     LIMIT 1
-  `, [descriptionCategoryId, descriptionCategoryId]).catch(() => null);
+  `, [tenantLookup.value, descriptionCategoryId, descriptionCategoryId]).catch(() => null);
 
   const level = errors.length ? "red" : warnings.length ? "yellow" : "green";
   return {
@@ -6921,7 +6925,7 @@ export async function validateListingTemplatePublishForShop(body = {}, shopId = 
   if (!shop) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404, statusCode: 404 });
   const payload = await applyShopPublishDefaults(validation.payload, shop).catch(() => validation.payload);
   const updatedCategoryHealth = validation.category_health
-    ? await buildListingCategoryPublishDiagnostics(body.template || body, { payload }).catch(() => validation.category_health)
+    ? await buildListingCategoryPublishDiagnostics(body.template || body, { payload, session }).catch(() => validation.category_health)
     : null;
   const resolvedAttributeIds = new Set(normalizeArray(payload.items)
     .flatMap((item) => normalizeArray(item.attributes))
@@ -9340,7 +9344,8 @@ async function savePublishVariantLinks({ recordId, draftId, tenantId, shopId, sh
   return true;
 }
 
-async function persistListingVariantLineageForRecord(recordId, tenantId) {
+async function persistListingVariantLineageForRecord(recordId, tenantId, { assertAccess } = {}) {
+  await assertAccess?.();
   await run(`
     INSERT INTO listing_variant_lineage
       (tenant_id,draft_id,template_id,variant_id,record_id,publish_task_id,publish_task_item_id,ozon_task_id,
@@ -9349,7 +9354,7 @@ async function persistListingVariantLineageForRecord(recordId, tenantId) {
     SELECT l.tenant_id,l.draft_id,d.template_id,l.variant_id,l.record_id,r.publish_task_id,r.publish_task_item_id,
       r.task_id,COALESCE(l.source_product_id,r.source_product_id,
         CASE WHEN op.product_id IS NOT NULL AND sm.product_id IS NOT NULL AND op.product_id<>sm.product_id
-          THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),binding.task_id,COALESCE(task.title,''),
+          THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),task.id,COALESCE(task.title,''),
       l.shop_id,COALESCE(shop.name,''),l.offer_id,l.ozon_product_id,l.ozon_sku,l.ozon_status,l.price,l.currency_code,
       l.quality_score,l.quality_checked_at,r.created_by_person_id,COALESCE(d.product_name,'')
     FROM listing_publish_variant_links l
@@ -9367,6 +9372,8 @@ async function persistListingVariantLineageForRecord(recordId, tenantId) {
       AND CONVERT(sm.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
     LEFT JOIN listing_draft_bindings binding ON binding.draft_id=l.draft_id AND binding.tenant_id=l.tenant_id
     LEFT JOIN team_tasks task ON task.id=binding.task_id
+      AND CONVERT(COALESCE(NULLIF(task.tenant_id,''),'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+        = CONVERT(l.tenant_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
     WHERE l.record_id=? AND l.tenant_id=? AND l.variant_id<>''
     ON DUPLICATE KEY UPDATE
       template_id=COALESCE(VALUES(template_id),listing_variant_lineage.template_id),record_id=VALUES(record_id),
@@ -10023,24 +10030,75 @@ export async function refreshListingPublishRecord(id, session = null) {
   assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
+  if (!Number.isSafeInteger(Number(id)) || Number(id) <= 0) throw listingPublishRecordNotFoundError();
   const record = await row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
     LEFT JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
-    WHERE r.id = ? AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
+    WHERE r.id = ? AND r.status <> 'deleted'
+      AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
+      AND ${tenantId === "admin" ? "s.status <> 'deleted'" : "s.status = 'active'"}
   `, [Number(id), tenantId]);
   if (!record) throw listingPublishRecordNotFoundError();
+  // Recheck the original actor and target after external awaits. A revoked
+  // membership or a moved shop must not continue into binding/quality writes.
+  const assertAccess = async ({ productId } = {}) => {
+    session = await authorizeBusinessTaskSession(session);
+    assertBusinessTaskPermission(session, "operations");
+    const current = await row(`SELECT r.id FROM listing_publish_records r
+      JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
+      LEFT JOIN products p ON p.id = r.source_product_id AND ${listingStoredShopTenantPredicate("r", "p")}
+      LEFT JOIN listing_publish_tasks pt ON pt.id = r.publish_task_id
+        AND COALESCE(NULLIF(pt.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+      LEFT JOIN listing_publish_task_items pti ON pti.id = r.publish_task_item_id
+        AND COALESCE(NULLIF(pti.tenant_id, ''), 'admin') = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+        AND pti.shop_id = r.shop_id AND pti.draft_id = r.draft_id
+        AND (COALESCE(r.publish_task_id, 0) = 0 OR pti.publish_task_id = r.publish_task_id)
+      WHERE r.id = ? AND r.shop_id = ? AND r.status <> 'deleted'
+        AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ?
+        AND ${tenantId === "admin" ? "s.status <> 'deleted'" : "s.status = 'active'"}
+        AND (COALESCE(r.source_product_id, 0) = 0 OR p.id IS NOT NULL)
+        AND (COALESCE(r.publish_task_id, 0) = 0 OR pt.id IS NOT NULL)
+        AND (COALESCE(r.publish_task_item_id, 0) = 0 OR pti.id IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM listing_publish_variant_links l
+          LEFT JOIN products lp ON lp.id = l.source_product_id AND ${listingStoredShopTenantPredicate("l", "lp")}
+          LEFT JOIN online_products op ON op.shop_id = l.shop_id
+            AND ((l.offer_id <> '' AND op.offer_id = l.offer_id COLLATE utf8mb4_0900_ai_ci)
+              OR (l.ozon_sku <> '' AND op.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci))
+          LEFT JOIN products online_product ON online_product.id = op.product_id AND ${listingStoredShopTenantPredicate("l", "online_product")}
+          LEFT JOIN sku_mappings sm ON sm.shop_id = l.shop_id AND sm.active = 1 AND ${listingStoredShopTenantPredicate("l", "sm")}
+            AND (sm.online_product_id = op.id
+              OR (l.offer_id <> '' AND sm.offer_id = l.offer_id COLLATE utf8mb4_0900_ai_ci)
+              OR (l.ozon_sku <> '' AND sm.ozon_sku = l.ozon_sku COLLATE utf8mb4_0900_ai_ci))
+          LEFT JOIN products mapped_product ON mapped_product.id = sm.product_id AND ${listingStoredShopTenantPredicate("l", "mapped_product")}
+          WHERE l.record_id = r.id AND l.tenant_id = COALESCE(NULLIF(r.tenant_id, ''), 'admin')
+            AND (l.shop_id <> r.shop_id OR (COALESCE(l.source_product_id, 0) <> 0 AND lp.id IS NULL)
+              OR (COALESCE(op.product_id, 0) <> 0 AND online_product.id IS NULL)
+              OR (COALESCE(sm.product_id, 0) <> 0 AND mapped_product.id IS NULL)))`,
+    [Number(id), Number(record.shop_id), tenantId]);
+    if (!current) throw listingPublishRecordNotFoundError();
+    if (productId) await assertDraftSourceProductTenant(productId, tenantId);
+  };
+  const refreshQuality = async () => {
+    try { await refreshPublishRecordQuality(Number(id), tenantId, { assertAccess }); }
+    catch { await assertAccess(); }
+  };
+  await assertAccess();
   if (!record.task_id) {
-    await syncPublishRecordOzonSku(record, tenantId);
-    await refreshPublishRecordQuality(Number(id), tenantId).catch(() => null);
+    await syncPublishRecordOzonSku(record, tenantId, { assertAccess });
+    await refreshQuality();
+    await assertAccess();
     const updated = await row("SELECT * FROM listing_publish_records WHERE id = ? AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?", [Number(id), tenantId]);
     return { ...normalizePublishRecordRow({ ...updated, shop_name: record.shop_name }),
       variant_links: await publishVariantLinksForRecord(id, tenantId) };
   }
   let importInfo;
   try {
+    await assertAccess();
     importInfo = await fetchOzonProductImportInfo(record, record.task_id);
+    await assertAccess();
   } catch (error) {
+    await assertAccess();
     const ageMs = Date.now() - new Date(record.created_at || record.updated_at || 0).getTime();
     const taskNotFound = /task not found/i.test(String(error?.message || error));
     if (!taskNotFound || !Number.isFinite(ageMs) || ageMs < 24 * 60 * 60 * 1000) throw error;
@@ -10049,6 +10107,7 @@ export async function refreshListingPublishRecord(id, session = null) {
     const matches = offerId
       ? await fetchOzonProductInfoAttributes(record, { offerIds: [offerId], limit: 1 })
       : [];
+    await assertAccess();
     const detail = normalizeArray(matches)[0] || null;
     if (detail) {
       const source = unwrapOzonProductDetail(detail);
@@ -10086,7 +10145,8 @@ export async function refreshListingPublishRecord(id, session = null) {
       WHERE r.id = ? AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ? AND s.id IS NOT NULL
     `, [Number(id), tenantId]);
     if (!recovered) throw listingPublishRecordNotFoundError();
-    if (detail) await syncPublishRecordOzonSku(record, tenantId);
+    if (detail) await syncPublishRecordOzonSku(record, tenantId, { assertAccess });
+    await assertAccess();
     const finalRecord = detail
       ? await row("SELECT * FROM listing_publish_records WHERE id = ? AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?", [Number(id), tenantId])
       : recovered;
@@ -10098,10 +10158,12 @@ export async function refreshListingPublishRecord(id, session = null) {
     response: parseJson(record.response_json, {}),
     importInfo,
     status: importInfoStatus(importInfo),
-    tenantId
+    tenantId,
+    assertAccess
   });
-  await syncPublishRecordOzonSku(record, tenantId);
-  await refreshPublishRecordQuality(Number(id), tenantId).catch(() => null);
+  await syncPublishRecordOzonSku(record, tenantId, { assertAccess });
+  await refreshQuality();
+  await assertAccess();
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
@@ -10112,10 +10174,12 @@ export async function refreshListingPublishRecord(id, session = null) {
   return { ...normalizePublishRecordRow(updated), variant_links: await publishVariantLinksForRecord(id, tenantId) };
 }
 
-async function syncPublishRecordOzonSku(record, tenantId) {
+async function syncPublishRecordOzonSku(record, tenantId, { assertAccess } = {}) {
+  await assertAccess?.();
   let links = await all(`SELECT id, item_index, offer_id, source_product_id FROM listing_publish_variant_links
     WHERE record_id = ? AND tenant_id = ? ORDER BY item_index, id`, [Number(record.id), tenantId]);
   if (!links.length && Number(record.draft_id) && normalizeArray(parseJson(record.request_json, {}).items).length) {
+    await assertAccess?.();
     await savePublishVariantLinks({ recordId: record.id, draftId: record.draft_id, tenantId,
       shopId: record.shop_id, shopPayload: parseJson(record.request_json, {}), sourceProductId: record.source_product_id, legacy: true });
     links = await all(`SELECT id, item_index, offer_id, source_product_id FROM listing_publish_variant_links
@@ -10124,7 +10188,9 @@ async function syncPublishRecordOzonSku(record, tenantId) {
   const offers = [...new Set((links.length ? links.map((link) => link.offer_id) : [record.offer_id])
     .map((value) => String(value || "").trim()).filter(Boolean))];
   if (!offers.length) return;
+  await assertAccess?.();
   const details = await fetchOzonProductInfoAttributes(record, { offerIds: offers, limit: Math.max(20, offers.length) });
+  await assertAccess?.();
   const byOffer = new Map();
   for (const detail of normalizeArray(details)) {
     const source = unwrapOzonProductDetail(detail);
@@ -10145,6 +10211,7 @@ async function syncPublishRecordOzonSku(record, tenantId) {
     const ozonStatus = [source.statuses?.status, source.status, source.visibility]
       .find((value) => typeof value === "string" && value.trim()) || "imported";
     const onlinePrice = Number(source.price);
+    await assertAccess?.();
     if (link.id) await run(`UPDATE listing_publish_variant_links SET ozon_sku = ?, ozon_product_id = ?, ozon_status = ?,
       price = COALESCE(?, price)
       WHERE id = ? AND tenant_id = ?`,
@@ -10161,20 +10228,24 @@ async function syncPublishRecordOzonSku(record, tenantId) {
       const onlineProductId = Number(bound?.online_product_id || 0);
       const sourceProductId = Number(link.source_product_id || 0);
       if ((!mappedProductId || !onlineProductId || mappedProductId === onlineProductId)
-        && (sourceProductId || mappedProductId || onlineProductId)) await propagateListingVariantInventory({
+        && (sourceProductId || mappedProductId || onlineProductId)) {
+        await assertAccess?.({ productId: sourceProductId || mappedProductId || onlineProductId });
+        await propagateListingVariantInventory({
         tenantKey: tenantId, tenantPk, shopId: Number(record.shop_id), ozonSku: sku,
         offerId: link.offer_id, productId: sourceProductId || mappedProductId || onlineProductId
       });
+      }
     }
     if (Number(link.item_index) === 0 && String(link.offer_id || "") === String(record.offer_id || "")) {
+      await assertAccess?.();
       await run(`UPDATE listing_publish_records SET ozon_sku = ?, ozon_product_id = COALESCE(NULLIF(ozon_product_id, ''), ?),
         status = CASE WHEN status IN ('submitted', 'processing', 'ozon_status_pending') THEN 'imported' ELSE status END,
         updated_at = CURRENT_TIMESTAMP WHERE id = ? AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?`,
       [sku, productId, Number(record.id), tenantId]);
-      await autoBindPublishRecordInventory(Number(record.id), tenantId);
+      await autoBindPublishRecordInventory(Number(record.id), tenantId, { assertAccess });
     }
   }
-  await persistListingVariantLineageForRecord(record.id, tenantId);
+  await persistListingVariantLineageForRecord(record.id, tenantId, { assertAccess });
 }
 
 export async function autoSyncListingPublishRecords(options = {}) {
@@ -14913,7 +14984,7 @@ async function initializeListingAutomationSchema() {
       SELECT l.tenant_id,l.draft_id,d.template_id,l.variant_id,l.record_id,r.publish_task_id,r.publish_task_item_id,
         r.task_id,COALESCE(l.source_product_id,r.source_product_id,
           CASE WHEN op.product_id IS NOT NULL AND sm.product_id IS NOT NULL AND op.product_id<>sm.product_id
-            THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),binding.task_id,COALESCE(task.title,''),
+            THEN NULL ELSE COALESCE(op.product_id,sm.product_id) END),task.id,COALESCE(task.title,''),
         l.shop_id,COALESCE(shop.name,''),l.offer_id,l.ozon_product_id,l.ozon_sku,l.ozon_status,l.price,l.currency_code,
         l.quality_score,l.quality_checked_at,r.created_by_person_id,COALESCE(d.product_name,'')
       FROM listing_publish_variant_links l
@@ -14931,6 +15002,8 @@ async function initializeListingAutomationSchema() {
         AND CONVERT(sm.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci=CONVERT(l.ozon_sku USING utf8mb4) COLLATE utf8mb4_0900_ai_ci
       LEFT JOIN listing_draft_bindings binding ON binding.draft_id=l.draft_id AND binding.tenant_id=l.tenant_id
       LEFT JOIN team_tasks task ON task.id=binding.task_id
+        AND CONVERT(COALESCE(NULLIF(task.tenant_id,''),'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci
+          = CONVERT(l.tenant_id USING utf8mb4) COLLATE utf8mb4_unicode_ci
       WHERE l.variant_id<>''
       ORDER BY l.updated_at DESC,l.id DESC
     `);
@@ -19477,7 +19550,8 @@ function normalizeOzonContentRating(row = {}) {
   };
 }
 
-async function refreshPublishRecordQuality(recordId, tenantId = "") {
+async function refreshPublishRecordQuality(recordId, tenantId = "", { assertAccess } = {}) {
+  await assertAccess?.();
   const tenantRecordScope = tenantId ? "AND COALESCE(NULLIF(r.tenant_id, ''), 'admin') = ?" : "";
   const record = await row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
@@ -19486,6 +19560,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
     WHERE r.id = ? ${tenantRecordScope}
   `, tenantId ? [Number(recordId), tenantId] : [Number(recordId)]);
   if (!record) return null;
+  await assertAccess?.();
   let quality = {
     score: 0,
     source: "ozon_rating_pending",
@@ -19498,6 +19573,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
     let skus = [];
     if (productIds.length) {
       const products = await fetchOzonProductsByIds(record, productIds);
+      await assertAccess?.();
       skus.push(...products.map((item) => item.ozon_sku || item.sku || item.fbo_sku || item.fbs_sku).filter(Boolean));
     }
     if (!skus.length) {
@@ -19506,6 +19582,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
         offerIds: refs.offerIds.length ? refs.offerIds : [record.offer_id].filter(Boolean),
         limit: 20
       });
+      await assertAccess?.();
       skus.push(...attrs.map((item) => item.sku || item.fbo_sku || item.fbs_sku || item.ozon_sku).filter(Boolean));
     }
     skus = [...new Set(skus
@@ -19513,13 +19590,16 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
       .filter((item) => /^\d+$/.test(item)))];
     if (skus.length) {
       const ratings = await fetchOzonProductContentRating(record, { skus });
+      await assertAccess?.();
       const normalized = ratings.map(normalizeOzonContentRating).filter((item) => item.score > 0);
       for (const rating of normalized) {
         const sku = String(rating.raw?.sku || rating.raw?.ozon_sku || "").trim();
         if (!sku) continue;
+        await assertAccess?.();
         await run(`UPDATE listing_publish_variant_links SET quality_score = ?, quality_checked_at = CURRENT_TIMESTAMP
           WHERE record_id = ? AND tenant_id = ? AND ozon_sku = ?`,
         [rating.score, Number(recordId), tenantId || record.tenant_id || "admin", sku]);
+        await assertAccess?.();
         await run(`UPDATE listing_variant_lineage SET quality_score = ?, quality_checked_at = CURRENT_TIMESTAMP
           WHERE tenant_id = ? AND shop_id = ? AND ozon_sku = ?`,
         [rating.score, tenantId || record.tenant_id || "admin", Number(record.shop_id), sku]);
@@ -19536,10 +19616,12 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
       };
     }
   } catch (error) {
+    await assertAccess?.();
     quality = localQualityFallbackFromRecord(record, "local_estimate_after_ozon_rating_error", ["Ozon 鍐呭璇勫垎鎺ュ彛鏌ヨ澶辫触"]);
     quality.rating_error = error.message;
   }
   const updateTenantScope = tenantId ? "AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?" : "";
+  await assertAccess?.();
   await run(`
     UPDATE listing_publish_records
     SET quality_score = ?, quality_source = ?, quality_json = ?, quality_checked_at = CURRENT_TIMESTAMP
@@ -19551,7 +19633,7 @@ async function refreshPublishRecordQuality(recordId, tenantId = "") {
     Number(recordId),
     ...(tenantId ? [tenantId] : [])
   ]);
-  await persistListingVariantLineageForRecord(recordId, tenantId || record.tenant_id || "admin");
+  await persistListingVariantLineageForRecord(recordId, tenantId || record.tenant_id || "admin", { assertAccess });
   return quality;
 }
 
@@ -19762,8 +19844,9 @@ function firstOfferId(payload = {}) {
   return String(first.offer_id || "").trim();
 }
 
-async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response = null, importInfo = null, status = "submitted", tenantId = "" } = {}) {
+async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response = null, importInfo = null, status = "submitted", tenantId = "", assertAccess } = {}) {
   if (!recordId) return;
+  await assertAccess?.();
   const tenantRecordScope = tenantId ? "AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?" : "";
   const refs = extractImportedProductRefs(importInfo || response || {}, {});
   const importErrorSummary = normalizeOzonImportInfoErrors(importInfo);
@@ -19795,16 +19878,19 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
     Number(recordId),
     ...(tenantId ? [tenantId] : [])
   ]);
+  await assertAccess?.();
   await run(`UPDATE listing_publish_variant_links SET ozon_status = ? WHERE record_id = ?
     ${tenantId ? "AND tenant_id = ?" : ""}`,
     [String(status || "submitted").slice(0, 64), Number(recordId), ...(tenantId ? [tenantId] : [])]);
-  await persistListingVariantLineageForRecord(recordId, tenantId || "admin");
-  await autoBindPublishRecordInventory(recordId, tenantId).catch((error) => {
+  await persistListingVariantLineageForRecord(recordId, tenantId || "admin", { assertAccess });
+  await autoBindPublishRecordInventory(recordId, tenantId, { assertAccess }).catch(async (error) => {
+    await assertAccess?.();
     console.warn("[listing-automation] auto bind inventory failed:", error.message);
   });
 }
 
-async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
+async function autoBindPublishRecordInventory(recordId, expectedTenantId = "", { assertAccess } = {}) {
+  await assertAccess?.();
   const tenantRecordScope = expectedTenantId ? "AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?" : "";
   const record = await row(`
     SELECT id, tenant_id, shop_id, offer_id, ozon_product_id, ozon_sku, source_product_id
@@ -19825,6 +19911,7 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
       AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
     LIMIT 1`, [shopId, tenantPk]);
   if (!ownedShop) throw new Error("发布记录的店铺不属于当前企业，无法绑定库存");
+  await assertAccess?.();
   const offerId = String(record.offer_id || "").trim();
   const ozonProductId = String(record.ozon_product_id || "").trim();
   const recordSku = String(record.ozon_sku || "").trim();
@@ -19847,16 +19934,21 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
     ORDER BY op.updated_at DESC, op.id DESC
     LIMIT 1
   `, [shopId, shopId, tenantPk, offerId, offerId, ozonProductId, ozonProductId, recordSku, recordSku]).catch(() => null);
+  await assertAccess?.();
   let bindingSource = sourceProductId ? "draft_source" : "";
   if (!sourceProductId && online) {
     const inferred = await inferHistoricalInventoryBinding(online, tenantPk, defaultTenant);
+    await assertAccess?.();
     if (inferred.conflict) {
       await run(`UPDATE listing_publish_records SET binding_status='conflict',binding_source='history_conflict',binding_attempt_count=binding_attempt_count+1,binding_error=?,binding_checked_at=CURRENT_TIMESTAMP WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [inferred.error, Number(recordId), expectedTenantId] : [inferred.error, Number(recordId)]);
       return { ok: false, status: "conflict", candidates: inferred.product_ids };
     }
     sourceProductId = Number(inferred.product_id || 0);
     bindingSource = inferred.source || "";
-    if (sourceProductId) await run(`UPDATE listing_publish_records SET source_product_id=?,binding_source=? WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [sourceProductId, bindingSource, Number(recordId), expectedTenantId] : [sourceProductId, bindingSource, Number(recordId)]);
+    if (sourceProductId) {
+      await assertAccess?.({ productId: sourceProductId });
+      await run(`UPDATE listing_publish_records SET source_product_id=?,binding_source=? WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [sourceProductId, bindingSource, Number(recordId), expectedTenantId] : [sourceProductId, bindingSource, Number(recordId)]);
+    }
   }
   if (!sourceProductId) {
     await run(`UPDATE listing_publish_records SET binding_status='unbound', binding_source='',binding_attempt_count=binding_attempt_count+1, binding_error='缺少库存产品', binding_checked_at=CURRENT_TIMESTAMP WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [Number(recordId), expectedTenantId] : [Number(recordId)]);
@@ -19867,6 +19959,7 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
       AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
     LIMIT 1`, [sourceProductId, tenantPk]).catch(() => null);
   if (!product) return null;
+  await assertAccess?.();
   if (!online) {
     await run(`UPDATE listing_publish_records SET binding_status='waiting_online', binding_attempt_count=binding_attempt_count+1, binding_error='等待在线商品同步', binding_checked_at=CURRENT_TIMESTAMP WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [Number(recordId), expectedTenantId] : [Number(recordId)]);
     return { ok: false, status: "waiting_online" };
@@ -19888,6 +19981,7 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
       WHERE online_product_id = ? AND shop_id = ?
         AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
       LIMIT 1`, [Number(online.id), shopId, tenantPk]).catch(() => null);
+    await assertAccess?.();
     if (existingByOnline) {
       await run(`
         UPDATE sku_mappings
@@ -19896,6 +19990,7 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
           AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
       `, [sourceProductId, tenantPk, String(online.offer_id || offerId), String(online.name || ""), Number(existingByOnline.id), Number(online.id), shopId, tenantPk]);
     }
+    await assertAccess?.();
     await run(`UPDATE listing_publish_records SET binding_status='waiting_sku', binding_attempt_count=binding_attempt_count+1, binding_error='等待 Ozon SKU', binding_checked_at=CURRENT_TIMESTAMP WHERE id=? ${tenantRecordScope}`, expectedTenantId ? [Number(recordId), expectedTenantId] : [Number(recordId)]);
     return { ok: false, status: "waiting_sku", online_product_id: Number(online.id), mapping_id: existingByOnline?.id || null };
   }
@@ -19907,6 +20002,7 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
     ozonSku,
     tenantPk
   ]).catch(() => null);
+  await assertAccess?.();
   if (existing) {
     if (Number(existing.product_id || 0) && Number(existing.product_id) !== sourceProductId) {
       const error = `现有 SKU 映射指向库存 #${existing.product_id}，开发来源指向库存 #${sourceProductId}`;
@@ -19919,7 +20015,9 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
       WHERE id = ? AND shop_id = ? AND ozon_sku = ?
         AND (tenant_id = ?${defaultTenant ? " OR tenant_id IS NULL" : ""})
     `, [sourceProductId, tenantPk, Number(online.id), String(online.offer_id || offerId), String(online.name || ""), Number(existing.id), shopId, ozonSku, tenantPk]);
+    await assertAccess?.();
     await markPublishRecordInventoryBound(recordId, bindingSource, expectedTenantId);
+    await assertAccess?.({ productId: sourceProductId });
     const variantBinding = await propagateListingVariantInventory({ tenantKey: record.tenant_id || "admin", tenantPk, shopId, ozonSku, offerId, productId: sourceProductId });
     return { ok: true, status: "bound", online_product_id: Number(online.id), mapping_id: Number(existing.id), variant_binding: variantBinding };
   }
@@ -19936,7 +20034,9 @@ async function autoBindPublishRecordInventory(recordId, expectedTenantId = "") {
     String(online.offer_id || offerId),
     String(online.name || "")
   ]);
+  await assertAccess?.();
   await markPublishRecordInventoryBound(recordId, bindingSource, expectedTenantId);
+  await assertAccess?.({ productId: sourceProductId });
   const variantBinding = await propagateListingVariantInventory({ tenantKey: record.tenant_id || "admin", tenantPk, shopId, ozonSku, offerId, productId: sourceProductId });
   return { ok: true, status: "bound", online_product_id: Number(online.id), mapping_id: Number(result?.insertId || 0) || null, variant_binding: variantBinding };
 }

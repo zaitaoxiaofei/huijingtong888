@@ -102,7 +102,7 @@ test("publish refresh helpers propagate the request tenant through quality and i
 
   assert.match(submit, /tenantId = ""/);
   assert.match(submit, /WHERE id = \? \$\{tenantRecordScope\}/);
-  assert.match(submit, /autoBindPublishRecordInventory\(recordId, tenantId\)/);
+  assert.match(submit, /autoBindPublishRecordInventory\(recordId, tenantId(?:, \{ assertAccess \})?\)/);
   assert.match(bind, /WHERE id = \? AND status <> 'deleted' \$\{tenantRecordScope\}/);
   assert.ok((bind.match(/\$\{tenantRecordScope\}/g) || []).length >= 8);
   assert.match(bind, /markPublishRecordInventoryBound\(recordId, bindingSource, expectedTenantId\)/);

@@ -25,18 +25,21 @@ test("listing media asset routes pass tenant session and expose only scoped list
   ]);
 });
 
-test("only the listing media collection read and upload routes are tenant-enabled", () => {
+test("reviewed listing media collection, upload, and repair use exact tenant-enabled routes", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["GET", ["api", "listing", "media", "assets"]],
-    ["POST", ["api", "listing", "media", "upload"]]
+    ["POST", ["api", "listing", "media", "upload"]],
+    ["POST", ["api", "listing", "media", "repair"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
   for (const [method, parts] of [
     ["GET", ["api", "listing", "media", "assets", "12"]],
     ["POST", ["api", "listing", "media", "assets"]],
     ["GET", ["api", "listing", "media", "upload"]],
-    ["POST", ["api", "listing", "media", "repair"]]
+    ["GET", ["api", "listing", "media", "repair"]],
+    ["POST", ["api", "listing", "media", "repair", "extra"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
+  assert.equal(tenantIsolationDecision({}, ["api", "listing", "media", "repair"], "POST").allowed, false);
 });
 
 test("listing media asset list, idempotent upload, and registration are tenant-scoped", () => {
@@ -47,7 +50,8 @@ test("listing media asset list, idempotent upload, and registration are tenant-s
   const normalize = service.slice(service.indexOf("function normalizeListingMediaAssetPayload"), service.indexOf("function normalizeListingMediaAssetRow"));
   assert.match(list, /const tenantId = listingTenantId\(session\)/);
   assert.match(list, /m\.tenant_id = \?/);
-  assert.match(list, /LEFT JOIN asset_variants v ON 1 = 0/);
+  assert.match(list, /LEFT JOIN asset_variants v\s+ON v\.batch_id = m\.batch_id\s+AND \(v\.shop_id = m\.shop_id OR m\.shop_id IS NULL\)/);
+  assert.match(list, /EXISTS \(SELECT 1 FROM shops variant_shop WHERE variant_shop\.id = v\.shop_id\s+AND \$\{listingStoredShopTenantPredicate\("m", "variant_shop"\)\}/);
   assert.match(upload, /WHERE \$\{tenantId === "admin" \? "\(tenant_id = \? OR tenant_id IS NULL\)" : "tenant_id = \?"\}\s+AND source_module = \? AND source_id = \? AND role = \?/);
   assert.match(upload, /\}, session\);/);
   assert.match(normalize, /tenant_id: listingTenantId\(session\)/);

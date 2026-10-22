@@ -42,10 +42,10 @@ function cacheInventoryList(requestUrl, result) {
 
 const authStore = useAuthStore();
 const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user?.tenant?.slug !== "default"));
-const canWriteInventory = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "inventory.write"));
+const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canManageProductComponents = computed(() => hasPermission(authStore.user, "inventory.write"));
-const canProcure = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "procurement"));
-const canSubmitProcurementRequest = computed(() => !isTenantScoped.value && hasPermission(authStore.user, "procurement.request.submit"));
+const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
+const canSubmitProcurementRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
 const canOutbound = computed(() => hasPermission(authStore.user, "packing") || hasPermission(authStore.user, "inventory.write"));
 const route = useRoute();
 const router = useRouter();
@@ -67,20 +67,6 @@ function refreshAfterProductRequest() {
 function loadInventoryDictionaries() {
   if (dictionaryLoaded) return Promise.resolve();
   if (dictionaryLoading) return dictionaryLoading;
-  if (isTenantScoped.value) {
-    dictionaryLoading = loadShopDictionary().then((shops) => {
-      state.shops = Array.isArray(shops) ? shops : [];
-      state.people = [];
-      state.suppliers = [];
-      state.logisticsRules = [];
-      dictionaryLoaded = true;
-    }).catch((error) => {
-      ElMessage.warning(error.message || "企业店铺数据加载失败，请稍后重试");
-    }).finally(() => {
-      dictionaryLoading = null;
-    });
-    return dictionaryLoading;
-  }
   dictionaryLoading = Promise.all([
     loadShopDictionary(),
     apiClient.get("/api/people"),
@@ -1977,7 +1963,7 @@ onActivated(() => {
         @selection-change="handleSelectionChange"
         @sort-change="handleTableSortChange"
       >
-        <el-table-column v-if="!isTenantScoped" type="selection" width="48" fixed="left" />
+        <el-table-column v-if="canWriteInventory || canSubmitProcurementRequest" type="selection" width="48" fixed="left" />
         <el-table-column label="库存编号" prop="inventory_number" width="125" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
         </el-table-column>
@@ -2502,7 +2488,7 @@ onActivated(() => {
       v-model:visible="compositionDialogVisible"
       :product="compositionDialogProduct"
       :refresh-key="compositionDialogRefreshKey"
-      :allow-quick-create="!isTenantScoped"
+      :allow-quick-create="canWriteInventory"
       @saved="handleCompositionSaved"
       @quick-create="openQuickCreateFromComposition"
     />
