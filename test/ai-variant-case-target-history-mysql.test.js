@@ -11,6 +11,7 @@ import { shanghaiDateKey } from "../src/shanghai-time.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey } from "../src/services/business-task-tenant.js";
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "../src/services/ai-tenant-schema.js";
 import { AI_VARIANT_SOURCE_COLUMN_SQL, AI_VARIANT_SOURCE_INDEX_SQL, assertAiVariantDraftHistorySchemaReady } from "../src/services/ai-variant-draft-history-schema.js";
+import { availableQuickTargets } from "../frontend/admin/utils/ai-variant-quick-targets.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const session = id => ({ personId: 7, tenant: { id, slug: id === 1 ? "default" : `enterprise-${id}` } });
@@ -76,8 +77,9 @@ test("case target history uses actual results from only the current case and ent
     const item = async (tenant, jobNo, target, status) => query(
       "INSERT INTO ai_variant_lab_batch_items (tenant_id, item_no, job_no, target_variant_value, status) VALUES (?, ?, ?, ?, ?)",
       [tenant, `item-${++itemNumber}`, jobNo, target, status]);
-    const draft = async (tenant, target, { caseNo = "AVC-P4", jobNo = "", status = "draft", source = "ai_variant_lab", shape = "facts" } = {}) => {
-      const userFacts = { source_product_id: caseNo, target_variant_value: target, ...(jobNo ? { ai_variant_lab_job_no: jobNo } : {}) };
+    const draft = async (tenant, target, { caseNo = "AVC-P4", jobNo = "", status = "draft", source = "ai_variant_lab", shape = "facts", imageStatus = "image_done" } = {}) => {
+      const userFacts = { source_product_id: caseNo, target_variant_value: target, ...(jobNo ? { ai_variant_lab_job_no: jobNo } : {}),
+        ...(imageStatus == null ? {} : { image_generation_status: imageStatus }) };
       const optimization = { source, ...(jobNo ? { job_no: jobNo } : {}) };
       return query("INSERT INTO listing_drafts (tenant_id, status, manual_facts_json, ai_payload_json, spec) VALUES (?, ?, ?, ?, ?)",
         [tenant, status, JSON.stringify(shape === "facts" ? { user_facts: userFacts, ai_optimization: optimization } : {}),
@@ -214,6 +216,50 @@ test("case target history uses actual results from only the current case and ent
       assert.equal((await history())[0].status, "completed");
     });
 
+    await t.test("a failed mother-image fallback draft stays retryable and only actual image success marks completion", async () => {
+      await reset();
+      await job("2", "fallback-job");
+      await item("2", "fallback-job", "Retry model", "failed");
+      await draft("2", "Retry model", { jobNo: "fallback-job", imageStatus: "failed" });
+      let rows = await history();
+      assert.equal(rows[0].status, "failed");
+      assert.equal(rows[0].completed_count, 0);
+      assert.equal(rows[0].saved_draft_count, 1);
+      assert.deepEqual(availableQuickTargets([{ fullName: "Retry model" }], "Mother", rows), ["Retry model"]);
+      await query("UPDATE ai_variant_lab_batch_items SET status = 'image_done' WHERE tenant_id = '2' AND job_no = 'fallback-job'");
+      rows = await history();
+      assert.equal(rows[0].status, "completed");
+      assert.deepEqual(availableQuickTargets([{ fullName: "Retry model" }], "Mother", rows), []);
+      await query("UPDATE ai_variant_lab_batch_items SET status = 'failed' WHERE tenant_id = '2' AND job_no = 'fallback-job'");
+      await draft("2", "Retry model", { jobNo: "fallback-job", imageStatus: "image_done", shape: "ai" });
+      assert.equal((await history())[0].status, "completed", "an independently successful saved image remains proof despite another failed attempt");
+      for (const imageStatus of ["queued_image", "generating_image", "provider_pending"]) {
+        await draft("2", `Active ${imageStatus}`, { jobNo: "fallback-job", imageStatus });
+      }
+      for (const imageStatus of ["planned", "unknown", null]) {
+        await draft("2", `Unproven ${String(imageStatus)}`, { jobNo: "fallback-job", imageStatus });
+      }
+      rows = await history();
+      assert.equal(rows.length, 4);
+      assert.ok(rows.filter(row => row.target_value.startsWith("Active ")).every(row => row.status === "in_progress" && row.completed_count === 0));
+      assert.ok(!rows.some(row => row.target_value.startsWith("Unproven ")));
+    });
+
+    await t.test("one-pass JSON projections preserve long values and fall back across null, empty and missing fields", async () => {
+      await reset();
+      await job("2", "projection-job");
+      const target = "Long target ".repeat(8000).trim();
+      const facts = { user_facts: { source_product_id: "AVC-P4", target_variant_value: target, ai_variant_lab_job_no: null, image_generation_status: null },
+        ai_optimization: { source: "", job_no: "" } };
+      const ai = { manual_facts: { ai_variant_lab_job_no: "projection-job", image_generation_status: "image_done" }, ai_optimization: { source: "ai_variant_lab" } };
+      await query("INSERT INTO listing_drafts(tenant_id,manual_facts_json,ai_payload_json,spec) VALUES('2',?,?, 'short fallback')", [JSON.stringify(facts), JSON.stringify(ai)]);
+      const rows = await history();
+      assert.equal(rows.length, 1);
+      assert.ok(rows[0].target_value.length > 65535, "LONGTEXT projections must not silently truncate historical fields");
+      assert.equal(rows[0].target_value, target);
+      assert.equal(rows[0].status, "completed");
+    });
+
     await t.test("large draft/job history stays bounded and verifies lineage through the indexed batched lookup", async () => {
       await reset();
       const noise = JSON.stringify({ user_facts: { source_product_id: "unrelated-SKU" }, legacy_content: "x".repeat(5000) });
@@ -251,8 +297,10 @@ test("case target history uses actual results from only the current case and ent
       const [draftPlanRow] = await query(`EXPLAIN FORMAT=JSON ${draftLookup.sql}`, draftLookup.params);
       const draftPlan = JSON.parse(draftPlanRow.EXPLAIN);
       const planTables = [];
+      const tableOrder = [];
       const visitDrafts = node => {
         if (!node || typeof node !== "object") return;
+        if (node.table_name) tableOrder.push(node.table_name);
         if (node.table_name === "d") planTables.push(node);
         for (const value of Object.values(node)) if (value && typeof value === "object") visitDrafts(value);
       };
@@ -260,6 +308,7 @@ test("case target history uses actual results from only the current case and ent
       assert.equal(planTables[0].key, "idx_listing_drafts_tenant_ai_source");
       assert.deepEqual(planTables[0].used_key_parts, ["tenant_id", "ai_variant_source_key"]);
       assert.ok(planTables[0].rows_examined_per_scan <= 10, "large unrelated JSON drafts must never be read to find source lineage");
+      assert.deepEqual(tableOrder, ["d", "facts", "ai"], "JSON_TABLE must execute only after the source-index candidates are selected");
     });
 
     await t.test("generated source keys preserve 128 characters, reject truncated aliases, and track old writers automatically", async () => {

@@ -2124,30 +2124,47 @@ async function variantCaseTargetHistory(caseRow, caseJson) {
     const drafts = await mysqlQuery(`
       SELECT d.ai_variant_source_key AS source_id,
         COALESCE(
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.ai_variant_lab_job_no')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.job_no')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.ai_variant_lab_job_no')), ''),
-          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.job_no'))
+          NULLIF(facts.user_job_no, ''), NULLIF(facts.optimization_job_no, ''),
+          NULLIF(ai.user_job_no, ''), ai.optimization_job_no
         ) AS job_no,
+        COALESCE(NULLIF(facts.workflow, ''), ai.workflow) AS workflow,
         COALESCE(
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.source')), ''),
-          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.source'))
-        ) AS workflow,
+          NULLIF(facts.user_image_status, ''), NULLIF(facts.root_image_status, ''), ai.user_image_status
+        ) AS image_generation_status,
         COALESCE(
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.target_variant_value')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.target_variant_value')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.target_variant_value')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.target_variant_value')), ''),
-          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.target_variant_value')), ''), d.spec
+          NULLIF(facts.user_target, ''), NULLIF(facts.root_target, ''), NULLIF(ai.user_target, ''),
+          NULLIF(facts.optimization_target, ''), NULLIF(ai.optimization_target, ''), d.spec
         ) AS target_value
       FROM listing_drafts d
+      JOIN JSON_TABLE(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$' COLUMNS (
+        user_job_no LONGTEXT PATH '$.user_facts.ai_variant_lab_job_no' NULL ON EMPTY NULL ON ERROR,
+        optimization_job_no LONGTEXT PATH '$.ai_optimization.job_no' NULL ON EMPTY NULL ON ERROR,
+        workflow LONGTEXT PATH '$.ai_optimization.source' NULL ON EMPTY NULL ON ERROR,
+        user_image_status LONGTEXT PATH '$.user_facts.image_generation_status' NULL ON EMPTY NULL ON ERROR,
+        root_image_status LONGTEXT PATH '$.image_generation_status' NULL ON EMPTY NULL ON ERROR,
+        user_target LONGTEXT PATH '$.user_facts.target_variant_value' NULL ON EMPTY NULL ON ERROR,
+        root_target LONGTEXT PATH '$.target_variant_value' NULL ON EMPTY NULL ON ERROR,
+        optimization_target LONGTEXT PATH '$.ai_optimization.target_variant_value' NULL ON EMPTY NULL ON ERROR
+      )) AS facts ON TRUE
+      JOIN JSON_TABLE(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$' COLUMNS (
+        user_job_no LONGTEXT PATH '$.manual_facts.ai_variant_lab_job_no' NULL ON EMPTY NULL ON ERROR,
+        optimization_job_no LONGTEXT PATH '$.ai_optimization.job_no' NULL ON EMPTY NULL ON ERROR,
+        workflow LONGTEXT PATH '$.ai_optimization.source' NULL ON EMPTY NULL ON ERROR,
+        user_image_status LONGTEXT PATH '$.manual_facts.image_generation_status' NULL ON EMPTY NULL ON ERROR,
+        user_target LONGTEXT PATH '$.manual_facts.target_variant_value' NULL ON EMPTY NULL ON ERROR,
+        optimization_target LONGTEXT PATH '$.ai_optimization.target_variant_value' NULL ON EMPTY NULL ON ERROR
+      )) AS ai ON TRUE
       WHERE (d.tenant_id = ?${aiTenantId() === "admin" ? " OR d.tenant_id IS NULL" : ""}) AND d.status <> 'deleted'
         AND d.ai_variant_source_key IN (?${hasOriginTrace ? ", ?" : ""})
     `, [aiTenantId(), caseRow.case_no, ...(hasOriginTrace ? [originSourceId] : [])]);
     const candidates = [];
     for (const draft of drafts) {
       if (draft.workflow !== "ai_variant_lab") continue;
-      candidates.push({ jobNo: cleanText(draft.job_no), sourceId: cleanText(draft.source_id), target: draft.target_value });
+      const imageStatus = cleanText(draft.image_generation_status);
+      const status = imageStatus === "image_done" ? "completed" : imageStatus === "failed" ? "failed"
+        : ["queued_image", "generating_image", "provider_pending"].includes(imageStatus) ? "in_progress" : "";
+      if (!status) continue;
+      candidates.push({ jobNo: cleanText(draft.job_no), sourceId: cleanText(draft.source_id), target: draft.target_value, status });
     }
     // Keep the unique (tenant_id, job_no) key usable: never join JSON draft fields to cast job columns.
     const jobNos = [...new Set(candidates.map(draft => draft.jobNo).filter(Boolean))];
@@ -2161,7 +2178,7 @@ async function variantCaseTargetHistory(caseRow, caseJson) {
       const fromCase = draft.sourceId === caseRow.case_no && (!draft.jobNo || linkedSource === caseRow.case_no);
       const fromOrigin = hasOriginTrace && draft.sourceId === originSourceId && draft.jobNo === originJobNo && linkedSource === originSourceId;
       if (!fromCase && !fromOrigin) continue;
-      record(draft.target, "completed", { savedDraft: true });
+      record(draft.target, draft.status, { savedDraft: true });
     }
   }
   return [...history.values()].sort((a, b) => a.target_value.localeCompare(b.target_value));
