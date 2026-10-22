@@ -8,7 +8,7 @@ process.env.DB_PORT = "1";
 process.env.AUTH_RATE_LIMIT_MAX_ATTEMPTS = "3";
 
 const { createAuthHandler } = await import("../src/server/session.js");
-const { createQrLoginSession, consumeConfirmedQrSession } = await import("../src/server/internal-qr-login.js");
+const { createQrLoginSession, consumeConfirmedQrSession, qrCredentialVersion } = await import("../src/server/internal-qr-login.js");
 const { consumeRateLimit, clearRateLimit } = await import("../src/server/access.js");
 
 const user = { id: 9, name: "Bob", username: "bob", role: "operator", active: 1, password_hash: "hash" };
@@ -77,7 +77,8 @@ test("QR password confirmation and ordinary login share the same rate-limit buck
       const body = { ...createQrBody(), password: "wrong" };
       const ip = `qr-rate-limit-${firstUrl.pathname}`;
       const state = fixture(body, { consumeRateLimit, clearRateLimit, getClientIp: () => ip });
-      t.after(() => clearRateLimit(`auth:${ip}`));
+      clearRateLimit('auth-account:id:9');
+      t.after(() => { clearRateLimit(`auth:${ip}`); clearRateLimit('auth-account:id:9'); });
       for (let attempt = 0; attempt < 3; attempt++) {
         assert.match((await state.run(firstUrl)).error, /用户名或密码错误/);
       }
@@ -91,7 +92,7 @@ test("QR password confirmation and ordinary login share the same rate-limit buck
   }
 });
 
-test("QR password success clears the existing login limit only after desktop confirmation", async () => {
+test("QR password success clears only its account limit after desktop confirmation", async () => {
   const body = createQrBody();
   const state = fixture(body);
   const result = await state.run();
@@ -101,13 +102,13 @@ test("QR password success clears the existing login limit only after desktop con
   assert.equal(result.__cookies[0].value, "remembered-mobile-token");
   assert.deepEqual(state.events[0].slice(0, 3), ["rate", "auth:qr-security-test", 3]);
   assert.ok(state.events[0][3] > 0);
-  assert.deepEqual(state.events.slice(-3), [["create", "desktop-1"], ["clear", "auth:qr-security-test"], "mobile-cookie"]);
-  assert.deepEqual(consumeConfirmedQrSession(body.sid), {
+  assert.deepEqual(state.events.slice(-3), [["create", "desktop-1"], ["clear", "auth-account:id:9"], "mobile-cookie"]);
+  assert.deepEqual(await consumeConfirmedQrSession(body.sid, async () => true), {
     status: "confirmed", token: "desktop-1",
     user: { id: 9, name: "Bob", username: "bob", role: "operator", roles: ["operator"], avatar_url: "", tenant: null },
     redirect: "/orders"
   });
-  assert.deepEqual(consumeConfirmedQrSession(body.sid), { status: "expired" });
+  assert.deepEqual(await consumeConfirmedQrSession(body.sid, async () => true), { status: "expired" });
 });
 
 test("QR wrong credentials and disabled accounts do not create sessions or clear login failures", async (t) => {
@@ -136,7 +137,7 @@ test("QR remembered mobile confirmation rechecks the account without using passw
       delete body.password;
       let checkedId;
       const state = fixture(body, {
-        getQrMobileSession: () => ({ user: { id: user.id } }),
+        getQrMobileSession: () => ({ user: { id: user.id }, credentialVersion: qrCredentialVersion(user.password_hash) }),
         findPersonById: async (id) => { checkedId = id; return { ...user, active }; }
       });
       const result = await state.run();
@@ -149,8 +150,8 @@ test("QR remembered mobile confirmation rechecks the account without using passw
       assert.ok(!state.events.some((event) => Array.isArray(event) && ["rate", "clear"].includes(event[0])));
       if (active) {
         assert.equal(result.__cookies[0].name, "erp_qr_mobile");
-        assert.equal(consumeConfirmedQrSession(body.sid).token, "desktop-1");
-      } else assert.equal(result.__cookies, undefined);
+        assert.equal((await consumeConfirmedQrSession(body.sid, async () => true)).token, "desktop-1");
+      } else assert.equal(result.__cookies[0].options.maxAge, 0);
     });
   }
 });
@@ -185,7 +186,7 @@ test("QR expiry during session persistence revokes the unconfirmed token", async
   assert.deepEqual(state.events.at(-1), ["destroy", "expired-token"]);
   assert.ok(!state.events.some((event) => Array.isArray(event) && event[0] === "clear"));
   assert.equal(result.__cookies, undefined);
-  assert.deepEqual(consumeConfirmedQrSession(body.sid), { status: "expired" });
+  assert.deepEqual(await consumeConfirmedQrSession(body.sid, async () => true), { status: "expired" });
 });
 
 test("QR repeat confirmation cannot create a second token or remembered account", async () => {
@@ -198,7 +199,7 @@ test("QR repeat confirmation cannot create a second token or remembered account"
   assert.equal(result.__cookies, undefined);
   assert.deepEqual(state.events, firstEvents);
   assert.deepEqual([...state.tokens], ["desktop-1"]);
-  assert.equal(consumeConfirmedQrSession(body.sid).token, "desktop-1");
+  assert.equal((await consumeConfirmedQrSession(body.sid, async () => true)).token, "desktop-1");
 });
 
 test("QR concurrent confirmation revokes the losing token before and after desktop consumption", async (t) => {
@@ -224,7 +225,7 @@ test("QR concurrent confirmation revokes the losing token before and after deskt
       await bothStarted;
       releases[0]();
       assert.equal((await first).ok, true);
-      if (consumeFirst) assert.equal(consumeConfirmedQrSession(body.sid).token, "race-1");
+      if (consumeFirst) assert.equal((await consumeConfirmedQrSession(body.sid, async () => true)).token, "race-1");
       releases[1]();
       const rejected = await second;
       assert.equal(rejected.__status, consumeFirst ? 410 : 409);
@@ -232,7 +233,7 @@ test("QR concurrent confirmation revokes the losing token before and after deskt
       assert.deepEqual([...state.tokens], ["race-1"]);
       assert.ok(state.events.some((event) => Array.isArray(event) && event[0] === "destroy" && event[1] === "race-2"));
       assert.equal(state.events.filter((event) => event === "mobile-cookie").length, 1);
-      if (!consumeFirst) assert.equal(consumeConfirmedQrSession(body.sid).token, "race-1");
+      if (!consumeFirst) assert.equal((await consumeConfirmedQrSession(body.sid, async () => true)).token, "race-1");
     });
   }
 });

@@ -24,7 +24,9 @@ test("batch listing publish prepares drafts with configured concurrency", () => 
 
 test("queued Ozon submissions retain only record ids and reload payloads on demand", () => {
   assert.match(source, /submitPreparedListingPublishRecord\(\{ recordId \}\)/);
-  assert.match(source, /SELECT r\.request_json, shops\.id, shops\.name, shops\.ozon_client_id/);
+  const submit = source.match(/async function submitPreparedListingPublishRecord[\s\S]*?async function buildPublishTemplateFromListingDraft/)?.[0] || "";
+  assert.match(submit, /SELECT r\.request_json, r\.task_id, r\.response_json, r\.tenant_id AS task_tenant_id, r\.created_by_person_id, shops\.id, shops\.name, shops\.ozon_client_id/);
+  assert.match(submit, /restoreBusinessTaskSession\(prepared\.task_tenant_id \|\| "admin", prepared\.created_by_person_id\)/);
   assert.match(source, /shopPayload = parseJson\(prepared\.request_json, \{\}\)/);
   const directQueue = source.match(/runBackgroundListingPublish\(`direct publish record[\s\S]*?\n\s*}\);/)?.[0] || "";
   assert.doesNotMatch(directQueue, /shopPayload|validation|mediaRepair/);

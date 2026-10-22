@@ -17,8 +17,9 @@ import { canAccessPage, needsMembershipActivation } from "../../../src/shared/pe
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
-import MembershipActivationForm from "../components/MembershipActivationForm.vue";
+import { consumeMembershipDialogRequest, membershipDialogRequest } from "../utils/membership-dialog.js";
 
+const MembershipView = defineAsyncComponent(() => import("../views/MembershipView.vue"));
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
 const EnterpriseMessenger = defineAsyncComponent(() => import("../components/EnterpriseMessenger.vue"));
 
@@ -77,6 +78,7 @@ const quickToolScope = computed(() => {
   return user ? `${user.id || user.person_id || ""}:${user.tenant?.id || ""}:${quickToolAuthScope.value}` : "signed-out";
 });
 function resetQuickToolsForScope() {
+  activationDialogVisible.value = false;
   quickToolsVisible.value = false;
   quickToolsMounted.value = false;
   quickToolAuthScope.value = currentApiCacheScope();
@@ -231,18 +233,18 @@ async function handleLogout() {
 }
 
 function openActivationDialog() {
-  if (!canActivateMembership.value) {
-    router.push("/membership");
-    return;
-  }
   activationDialogVisible.value = true;
 }
 
 function handleAccountCommand(command) {
   if (command === "activate") openActivationDialog();
-  if (command === "membership") router.push("/membership");
+  if (command === "membership") openActivationDialog();
   if (command === "logout") handleLogout();
 }
+
+watch(membershipDialogRequest, () => {
+  if (consumeMembershipDialogRequest()) openActivationDialog();
+}, { immediate: true, flush: "sync" });
 
 async function loadNotifications({ quiet = false } = {}) {
   const scope = currentApiCacheScope();
@@ -744,7 +746,7 @@ watch(
   { flush: "sync" }
 );
 
-watch([() => authStore.user?.id, () => authStore.user?.tenant?.id], () => {
+watch([() => authStore.user?.id, () => authStore.user?.tenant?.id, () => authStore.user?.tenant?.role], () => {
   activationDialogVisible.value = false;
 }, { flush: "sync" });
 
@@ -989,12 +991,8 @@ onBeforeUnmount(() => {
     </el-container>
   </el-container>
 
-  <el-dialog v-model="activationDialogVisible" title="激活 / 续期会员" width="440px" align-center destroy-on-close class="erp-activation-dialog">
-    <div class="erp-activation-summary">
-      <span class="erp-activation-icon"><el-icon><Ticket /></el-icon></span>
-      <div><strong>{{ membership.label }}</strong><small>{{ membershipExpiryText }}</small></div>
-    </div>
-    <MembershipActivationForm v-if="activationDialogVisible" :active="membership.active" @activated="activationDialogVisible = false" />
+  <el-dialog v-model="activationDialogVisible" title="会员中心" width="min(940px, 94vw)" align-center destroy-on-close :close-on-press-escape="true" class="erp-membership-dialog">
+    <MembershipView v-if="activationDialogVisible" embedded />
   </el-dialog>
 
   <el-dialog v-model="profileDialogVisible" width="620px" align-center destroy-on-close class="erp-profile-dialog">
@@ -1194,11 +1192,6 @@ onBeforeUnmount(() => {
 .erp-account-membership small { color: var(--erp-text-secondary); font-size: 11px; line-height: 1.6; }
 .erp-account-menu :deep(.el-dropdown-menu__item) { min-height: 36px; border-radius: 6px; gap: 6px; font-size: 13px; }
 .erp-account-menu :deep(.erp-account-logout) { color: var(--erp-danger-text); }
-.erp-activation-summary { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; padding: 16px; border: 1px solid var(--erp-border); border-radius: 10px; background: var(--erp-surface-alt); }
-.erp-activation-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 10px; background: var(--erp-primary-soft); color: var(--erp-primary); font-size: 20px; }
-.erp-activation-summary > div { display: grid; gap: 5px; }
-.erp-activation-summary strong { color: var(--erp-text-main); font-size: 14px; }
-.erp-activation-summary small { color: var(--erp-text-secondary); font-size: 11px; line-height: 1.6; }
 .erp-profile-avatar-upload button:disabled { cursor: not-allowed; opacity: .5; box-shadow: none; }
 .erp-profile-avatar-upload button:disabled:hover { transform: none; }
 @media (max-width: 1366px) {

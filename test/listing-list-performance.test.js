@@ -29,7 +29,7 @@ test("publish record and task lists run count and page reads concurrently", () =
 test("publish record and task pages restore bounded fresh snapshots", () => {
   assert.match(viewSource, /const LIST_CACHE_MAX_ENTRIES = 30/);
   assert.match(viewSource, /const publishTaskListCache = new Map\(\)/);
-  assert.match(viewSource, /const cacheKey = requestUrl/);
+  assert.match(viewSource, /const cacheKey = `\$\{requestScope\}:\$\{requestUrl\}`/);
   assert.match(viewSource, /taskLoading\.value = !hasFreshCache/);
 });
 

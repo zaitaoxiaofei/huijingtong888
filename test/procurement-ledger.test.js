@@ -223,7 +223,7 @@ function fixture(failSecond = false, overrides = {}) {
     return [{ insertId: 1 }];
   } };
   const service = createProcurementLedgerService({ prepare: async () => {}, query: run, coverage: async (_, productId) => { coverageProducts.push(productId); return overrides.coverage || new Map(); },
-    resolveScope: async () => ({ id: 1, isDefault: true }), assertActor: async () => {}, assertReferences: async () => {},
+    resolveScope: async () => ({ id: 1, isDefault: true }), assertActor: async () => {}, assertReferences: async () => {}, assertCurrentActor: async () => {},
     recordCost: async (_, row) => { recordedCosts.push(row); }, refreshPurchase: async () => {},
     receive: async (_, id, payload) => { state.movements.push({ product_id: 10, quantity_delta: payload.receive_quantity, stock_location: 'LOCAL', source_type: 'purchase_inbound', source_ref: `inbound_${id}` }); },
     requirePerson: async () => 1, invalidate: () => {},

@@ -24932,9 +24932,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
       await connection.execute(`
         UPDATE purchase_order_items
         SET inbound_quantity = GREATEST(0, inbound_quantity + ?),
-          status = CASE WHEN GREATEST(0, inbound_quantity + ?) >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
+          status = CASE WHEN inbound_quantity <= 0 THEN 'purchased' WHEN inbound_quantity >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
         WHERE id = ?
-      `, [diff, diff, existing.purchase_order_item_id]);
+      `, [diff, existing.purchase_order_item_id]);
       await markPurchaseOrderChanged();
     }
   } else if (existing.status !== "approved" && status === "approved") {
@@ -24952,9 +24952,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
       await connection.execute(`
         UPDATE purchase_order_items
         SET inbound_quantity = inbound_quantity + ?,
-          status = CASE WHEN inbound_quantity + ? >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
+          status = CASE WHEN inbound_quantity <= 0 THEN 'purchased' WHEN inbound_quantity >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
         WHERE id = ?
-      `, [quantity, quantity, existing.purchase_order_item_id]);
+      `, [quantity, existing.purchase_order_item_id]);
       await markPurchaseOrderChanged();
     }
   } else if (existing.status === "approved" && status !== "approved") {
@@ -24963,9 +24963,9 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
       await connection.execute(`
         UPDATE purchase_order_items
         SET inbound_quantity = GREATEST(0, inbound_quantity - ?),
-          status = CASE WHEN GREATEST(0, inbound_quantity - ?) <= 0 THEN 'purchased' ELSE 'partial_inbound' END
+          status = CASE WHEN inbound_quantity <= 0 THEN 'purchased' WHEN inbound_quantity >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
         WHERE id = ?
-      `, [Number(existing.quantity || 0), Number(existing.quantity || 0), existing.purchase_order_item_id]);
+      `, [Number(existing.quantity || 0), existing.purchase_order_item_id]);
       await markPurchaseOrderChanged();
     }
   }
@@ -25438,9 +25438,9 @@ export async function deleteInboundRecordMysql(id, tenantId = "admin") {
         await connection.execute(`
           UPDATE purchase_order_items
           SET inbound_quantity = GREATEST(0, inbound_quantity - ?),
-            status = CASE WHEN GREATEST(0, inbound_quantity - ?) <= 0 THEN 'purchased' ELSE 'partial_inbound' END
+            status = CASE WHEN inbound_quantity <= 0 THEN 'purchased' WHEN inbound_quantity >= actual_quantity THEN 'inbound_done' ELSE 'partial_inbound' END
           WHERE id = ?
-        `, [Number(existing.quantity || 0), Number(existing.quantity || 0), existing.purchase_order_item_id]);
+        `, [Number(existing.quantity || 0), existing.purchase_order_item_id]);
         await refreshPurchaseOrderStatusMysql(connection, existing.purchase_order_id);
       }
     }
@@ -34006,4 +34006,4 @@ export const inventoryLedgerMysql = async (query, tenantId = "admin") => {
 export const previewInventoryStocktakeMysql = async (body, tenantId = "admin") => inventoryStocktakePreviewView(
   await procurementLedgerService.preview(inventoryStocktakeBody(body), tenantId));
 export const applyInventoryStocktakeMysql = async (body, personId, tenantId = "admin") => inventoryStocktakeResultView(
-  await procurementLedgerService.apply(inventoryStocktakeBody(body), personId, null, tenantId));
+  await procurementLedgerService.apply(inventoryStocktakeBody(body), personId, null, tenantId, 'inventory'));

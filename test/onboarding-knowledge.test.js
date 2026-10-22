@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { canAccessPage, hasPermission, isPlatformAdmin } from "../src/shared/permissions.js";
+import { canAccessPage, hasPermission, isPlatformAdmin, needsMembershipActivation } from "../src/shared/permissions.js";
 
 const read = path => fs.readFileSync(new URL(path, import.meta.url), "utf8");
 const moduleBody = source => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
@@ -16,7 +16,8 @@ function routerFixture(user = employee) {
     ...(route.children ? { children: withStubComponents(route.children) } : {})
   }));
   const context = vm.createContext({
-    canAccessPage, hasPermission, isPlatformAdmin,
+    canAccessPage, hasPermission, isPlatformAdmin, needsMembershipActivation,
+    membershipDialogRequest: { value: null }, requestMembershipDialog() {},
     createRouter: options => createRouter({ ...options, routes: withStubComponents(options.routes) }),
     createWebHashHistory: createMemoryHistory,
     AdminLayout: {}, MobileLayout: {}, LoginView: {}, useAuthStore: () => auth,

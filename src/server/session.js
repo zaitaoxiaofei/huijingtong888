@@ -1,5 +1,5 @@
 import { getRoles, primaryRole } from "../shared/permissions.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { hashPassword, verifyPassword, isLegacyHash, validatePasswordStrength } from "../auth-password.js";
 import { switchSessionTenantMysql, tenantMembershipsMysql } from "../services/tenants.js";
@@ -17,13 +17,16 @@ import {
   updateOwnProfileMysql,
   updatePersonPasswordMysql
 } from "../services/mysql-auth-session.js";
-import { clearRateLimit, consumeRateLimit, getClientIp } from "./access.js";
+import { clearRateLimit, consumeRateLimit, getClientIp, releaseRateLimit } from "./access.js";
 import {
   confirmQrLoginSession,
   createQrMobileSession,
+  destroyQrMobileSession,
   consumeConfirmedQrSession,
   createQrLoginSession,
   getQrMobileSession,
+  matchesQrCredential,
+  qrCredentialVersion,
   QR_MOBILE_COOKIE_MAX_AGE_SECONDS,
   QR_MOBILE_COOKIE_NAME,
   renderQrCodePng,
@@ -100,7 +103,10 @@ export function createAuthHandler(readJson, overrides = {}) {
     destroySessionsByPersonId,
     createQrLoginSession,
     createQrMobileSession,
+    destroyQrMobileSession,
     getQrMobileSession,
+    matchesQrCredential,
+    qrCredentialVersion,
     renderQrCodePng,
     renderQrConfirmPage,
     consumeConfirmedQrSession,
@@ -114,10 +120,17 @@ export function createAuthHandler(readJson, overrides = {}) {
     createWechatRedirectUrl,
     isWechatLoginEnabled,
     clearRateLimit,
+    releaseRateLimit,
     consumeRateLimit,
     getClientIp,
     ...overrides
   };
+
+  const accountLimitKey = (username, row) => `auth-account:${row?.id ? `id:${row.id}` : createHash("sha256").update(String(username || "").normalize("NFKC").trim().toLowerCase()).digest("hex")}`;
+  function expiredMobile(req) {
+    deps.destroyQrMobileSession(req);
+    return { error: "手机登录态已失效，请重新输入密码", __status: 401, __cookies: [{ name: QR_MOBILE_COOKIE_NAME, value: "", options: { path: "/api/auth/qr", httpOnly: true, sameSite: "Lax", secure: config.appBaseUrl.startsWith("https://"), maxAge: 0 } }] };
+  }
 
   return function handleAuth(req, url) {
     const key = `${req.method} ${url.pathname}`;
@@ -153,6 +166,8 @@ export function createAuthHandler(readJson, overrides = {}) {
 
         const body = await readJson(req);
         const row = await deps.findPersonForLogin(body.username);
+        const accountKey = accountLimitKey(body.username, row);
+        if (!deps.consumeRateLimit(accountKey, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS).allowed) return { error: "登录尝试过多，请稍后再试", __status: 429 };
         if (!row || !row.active) return { error: "用户名或密码错误" };
         if (!deps.verifyPassword(body.password || "", row.password_hash)) return { error: "用户名或密码错误" };
 
@@ -160,8 +175,9 @@ export function createAuthHandler(readJson, overrides = {}) {
           await deps.updatePersonPassword(row.id, deps.hashPassword(body.password));
         }
 
-        deps.clearRateLimit(loginKey);
         const token = await deps.createSession(row.id, row.name, primaryRole(row), row.username);
+        deps.clearRateLimit(accountKey);
+        deps.releaseRateLimit(loginKey, rate.resetAt);
         return { ok: true, token, user: authUser(row, await deps.getSession(token)) };
       };
     }
@@ -221,7 +237,20 @@ export function createAuthHandler(readJson, overrides = {}) {
     }
 
     if (key === "GET /api/auth/qr/status") {
-      return async () => deps.consumeConfirmedQrSession(url.searchParams.get("sid"));
+      return async () => {
+        let user;
+        const result = await deps.consumeConfirmedQrSession(url.searchParams.get("sid"), async pending => {
+          const row = await deps.findPersonById(pending.user?.id);
+          const session = row?.active && deps.matchesQrCredential(pending.credentialVersion, row.password_hash) ? await deps.getSession(pending.token) : null;
+          if (!session || Number(session.personId) !== Number(row?.id)) {
+            await deps.destroySession(pending.token);
+            return false;
+          }
+          user = authUser(row, session);
+          return true;
+        });
+        return result.status === "confirmed" ? { ...result, user } : result;
+      };
     }
 
     if (key === "GET /api/auth/qr/image") {
@@ -233,14 +262,20 @@ export function createAuthHandler(readJson, overrides = {}) {
     }
 
     if (key === "GET /api/auth/qr/confirm-page") {
-      return async () => ({
-        __html: deps.renderQrConfirmPage({
+      return async () => {
+        let mobile = deps.getQrMobileSession(req);
+        if (mobile) {
+          const row = await deps.findPersonById(mobile.user?.id);
+          if (!row?.active || !deps.matchesQrCredential(mobile.credentialVersion, row.password_hash)) { deps.destroyQrMobileSession(req); mobile = null; }
+        }
+        return { __html: deps.renderQrConfirmPage({
           sid: url.searchParams.get("sid"),
           secret: url.searchParams.get("secret"),
-          mobileUser: deps.getQrMobileSession(req)?.user || null
+          mobileUser: mobile?.user || null
         }),
         __status: 200
-      });
+        };
+      };
     }
 
     if (key === "POST /api/auth/qr/confirm") {
@@ -250,15 +285,20 @@ export function createAuthHandler(readJson, overrides = {}) {
         if (!validation.ok) return { error: validation.error, __status: validation.status || 400 };
         const mobileSession = deps.getQrMobileSession(req);
         let loginKey = "";
+        let loginResetAt;
+        let accountKey = "";
         let row = null;
         if (mobileSession?.user?.id) {
           row = await deps.findPersonById(mobileSession.user.id);
-          if (!row?.active) return { error: "手机登录态已失效，请重新输入密码", __status: 401 };
+          if (!row?.active || !deps.matchesQrCredential(mobileSession.credentialVersion, row.password_hash)) return expiredMobile(req);
         } else {
           loginKey = `auth:${deps.getClientIp(req)}`;
           const rate = deps.consumeRateLimit(loginKey, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS);
+          loginResetAt = rate.resetAt;
           if (!rate.allowed) return { error: "登录尝试过多，请稍后再试", __status: 429 };
           row = await deps.findPersonForLogin(body.username);
+          accountKey = accountLimitKey(body.username, row);
+          if (!deps.consumeRateLimit(accountKey, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS).allowed) return { error: "登录尝试过多，请稍后再试", __status: 429 };
           if (!row || !row.active || !deps.verifyPassword(body.password || "", row.password_hash)) {
             return { error: "用户名或密码错误", __status: 401 };
           }
@@ -275,15 +315,17 @@ export function createAuthHandler(readJson, overrides = {}) {
             sid: body.sid,
             secret: body.secret,
             token,
-            user
+            user,
+            credentialVersion: deps.qrCredentialVersion(row.password_hash)
           });
           if (!result.ok) return { error: result.error, __status: result.status || 400 };
           confirmed = true;
         } finally {
           if (!confirmed) await deps.destroySession(token);
         }
-        if (loginKey) deps.clearRateLimit(loginKey);
-        const mobileToken = deps.createQrMobileSession(user);
+        if (accountKey) deps.clearRateLimit(accountKey);
+        if (loginKey) deps.releaseRateLimit(loginKey, loginResetAt);
+        const mobileToken = deps.createQrMobileSession(user, deps.qrCredentialVersion(row.password_hash));
         return {
           ...result,
           __cookies: [{

@@ -6,6 +6,8 @@
 
 未激活或已到期用户可以登录、打开会员中心、修改本人资料、使用基础定价/利润计算器及本人外观偏好。服务端仅保留以下订阅豁免，随后仍经过原身份、岗位及企业隔离校验：
 
+会员中心通过顶部会员剩余/到期徽标或账户菜单打开弹窗，不再占用侧栏菜单或工作页标签。关闭弹窗保留当前业务页、搜索和选择；关闭、切换登录身份或企业、撤销负责人身份时清空激活码，并丢弃迟到响应。旧 `/membership` 链接仍可打开弹窗；直接访问时先进入当前账号可用的基础工具或首页。已保存的旧会员标签会在恢复工作区时清理。
+
 - `auth` 中按端点鉴权的本人资料、登录和会员接口。
 - `GET tools/pricing/reference-rate`、`GET tools/pricing/rfbs-marketplace`、`GET tools/pricing/logistics-rules` 三个安全参考投影。
 - `GET system/info`、`GET system/update-status` 及本人 `GET/POST user-preferences`。

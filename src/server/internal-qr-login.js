@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import bwipjs from "bwip-js";
 import { config } from "../config.js";
 import { escapeHtml, parseCookies } from "./access.js";
@@ -79,7 +79,7 @@ export async function renderQrCodePng(sid) {
   });
 }
 
-export function consumeConfirmedQrSession(sid) {
+export async function consumeConfirmedQrSession(sid, validateCredential) {
   const session = getQrSession(sid);
   if (!session) return { status: "expired" };
   if (session.status !== "confirmed") {
@@ -87,6 +87,13 @@ export function consumeConfirmedQrSession(sid) {
       status: session.status,
       expiresAt: new Date(session.expiresAt).toISOString()
     };
+  }
+  // A confirmed challenge is still a credential until the desktop consumes it.
+  // Password changes, disabled identities and revoked sessions must invalidate it.
+  const valid = typeof validateCredential === "function" && await validateCredential(session);
+  if (!valid || getQrSession(sid) !== session || session.status !== "confirmed") {
+    qrSessions.delete(session.sid);
+    return { status: "expired" };
   }
   qrSessions.delete(session.sid);
   return {
@@ -110,21 +117,33 @@ export function validateQrLoginSession(payload) {
   return result.ok ? { ok: true } : result;
 }
 
-export function confirmQrLoginSession({ sid, secret, token, user }) {
+export function confirmQrLoginSession({ sid, secret, token, user, credentialVersion }) {
   const result = pendingQrLoginSession({ sid, secret });
   if (!result.ok) return result;
   const session = result.session;
   session.status = "confirmed";
   session.token = token;
   session.user = user;
+  session.credentialVersion = credentialVersion;
   return { ok: true, redirect: session.redirect };
 }
 
-export function createQrMobileSession(user) {
+export function qrCredentialVersion(passwordHash) {
+  return typeof passwordHash === "string" && passwordHash ? createHash("sha256").update(passwordHash).digest("hex") : "";
+}
+
+export function matchesQrCredential(version, passwordHash) {
+  const expected = qrCredentialVersion(passwordHash);
+  if (!expected || typeof version !== "string" || !/^[a-f0-9]{64}$/.test(version)) return false;
+  return timingSafeEqual(Buffer.from(version, "hex"), Buffer.from(expected, "hex"));
+}
+
+export function createQrMobileSession(user, credentialVersion) {
   pruneExpiredQrSessions();
   const token = randomBytes(32).toString("hex");
   mobileSessions.set(token, {
     user,
+    credentialVersion,
     expiresAt: now() + QR_MOBILE_COOKIE_MAX_AGE_SECONDS * 1000
   });
   return token;
@@ -135,6 +154,11 @@ export function getQrMobileSession(req) {
   const token = parseCookies(req)[QR_MOBILE_COOKIE_NAME];
   if (!token) return null;
   return mobileSessions.get(token) || null;
+}
+
+export function destroyQrMobileSession(req) {
+  const token = parseCookies(req)[QR_MOBILE_COOKIE_NAME];
+  if (token) mobileSessions.delete(token);
 }
 
 export function renderQrConfirmPage({ sid, secret, mobileUser = null, error = "" }) {

@@ -18,15 +18,16 @@ function resetForScope() {
   errorText.value = "";
   saving.value = false;
 }
-watch([() => auth.user?.id, () => auth.user?.tenant?.id], resetForScope, { flush: "sync" });
+watch([() => auth.user?.id, () => auth.user?.tenant?.id, () => auth.user?.tenant?.role], resetForScope, { flush: "sync" });
 window.addEventListener("erp:auth-scope-changed", resetForScope);
 onBeforeUnmount(() => {
-  generation += 1;
+  resetForScope();
   window.removeEventListener("erp:auth-scope-changed", resetForScope);
 });
 
 async function submit() {
   if (saving.value) return;
+  if (auth.user?.tenant?.role !== "owner") { resetForScope(); return; }
   const activationCode = String(code.value || "").trim();
   if (!activationCode) {
     errorText.value = "请输入激活码";
@@ -34,7 +35,10 @@ async function submit() {
   }
   const scope = currentApiCacheScope();
   const requestGeneration = generation;
-  const isCurrent = () => requestGeneration === generation && scope === currentApiCacheScope();
+  const personId = auth.user?.id;
+  const tenantId = auth.user?.tenant?.id;
+  const isCurrent = () => requestGeneration === generation && scope === currentApiCacheScope()
+    && auth.user?.id === personId && auth.user?.tenant?.id === tenantId && auth.user?.tenant?.role === "owner";
   saving.value = true;
   errorText.value = "";
   try {

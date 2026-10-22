@@ -9031,6 +9031,11 @@ async function submitPreparedListingPublishRecord({
   let session;
   let tenantId;
   let persistedTaskId = "";
+  let submitResponse = null;
+  let pendingReceipt = "";
+  let submissionClaimed = false;
+  let submissionAttempted = false;
+  let receiptSaved = false;
   {
     const loadStartedAt = Date.now();
     const preparedRows = await all(`
@@ -9058,16 +9063,32 @@ async function submitPreparedListingPublishRecord({
   }
   const assertAccess = async () => {
     assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
-    const owned = await row(`SELECT r.id FROM listing_publish_records r
+    const owned = await row(`SELECT shops.id, shops.name, shops.ozon_client_id,
+        COALESCE(NULLIF(shops.ozon_api_key, ''), shops.api_key_hint) AS api_key_hint FROM listing_publish_records r
       JOIN shops ON shops.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "shops")}
       WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ? AND r.created_by_person_id = ?
-        AND r.shop_id = ? AND r.status <> 'deleted' AND shops.status <> 'deleted'`,
+        AND r.shop_id = ? AND r.status <> 'deleted'
+        AND ${tenantId === "admin" ? "shops.status <> 'deleted'" : "shops.status = 'active'"}`,
     [Number(recordId), tenantId, Number(session.personId), Number(shop.id)]);
     if (!owned) throw Object.assign(new Error("上架记录或目标店铺已不属于当前企业"), { status: 404 });
-    return shop;
+    return { ...shop, ...owned };
   };
   listingPublishExecutionGuards.set(shop, assertAccess);
   listingPublishExecutionGuards.set(session, assertAccess);
+  const receiptJson = () => JSON.stringify(persistedTaskId ? { submit: submitResponse }
+    : { ...parseJson(pendingReceipt, {}), submit: submitResponse });
+  const saveReceipt = async () => {
+    const saved = await run(`UPDATE listing_publish_records
+      SET task_id = ?, response_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?
+        AND (response_json <=> ? OR (task_id <> '' AND task_id = ?))`,
+    [String(persistedTaskId), receiptJson(), persistedTaskId ? "submitted" : "resubmitting",
+      Number(recordId), tenantId, Number(session.personId), Number(shop.id), pendingReceipt, String(persistedTaskId)]);
+    if (!Number(saved?.affectedRows || 0)) throw Object.assign(new Error("上架回执尚未保存，请先核对原店铺结果，勿重复提交。"), {
+      status: 409, statusCode: 409, code: "LISTING_PUBLISH_RECEIPT_PENDING"
+    });
+    receiptSaved = true;
+  };
   return withAiTenantSession(session, async () => {
   try {
     await assertAccess();
@@ -9102,15 +9123,31 @@ async function submitPreparedListingPublishRecord({
     }
     const ozonSubmitStartedAt = Date.now();
     await assertAccess();
-    const response = await importOzonProducts(shop, finalPayload, { beforeRequest: assertAccess });
+    // Persist the uncertain-attempt marker before the mutation. Startup recovery
+    // must not automatically repeat a request whose receipt was lost in flight.
+    pendingReceipt = JSON.stringify({ submission: { state: "pending", attempt_id: crypto.randomUUID() } });
+    const claim = await run(`UPDATE listing_publish_records
+      SET status = 'resubmitting', response_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?
+        AND status IN ('processing', 'resubmitting') AND COALESCE(task_id, '') = '' AND response_json IS NULL`,
+    [pendingReceipt, Number(recordId), tenantId, Number(session.personId), Number(shop.id)]);
+    if (!Number(claim?.affectedRows || 0)) throw Object.assign(new Error("上架记录已被其他任务处理，请先刷新状态。"), { status: 409 });
+    submissionClaimed = true;
+    const response = await importOzonProducts(shop, finalPayload, { beforeRequest: async () => {
+      const current = await assertAccess();
+      submissionAttempted = true;
+      return current;
+    } });
     timings.ozon_submit_ms = Date.now() - ozonSubmitStartedAt;
     const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
     persistedTaskId = taskId;
+    submitResponse = response;
     // A mutation already sent to Ozon must retain its receipt even if authority
     // was revoked in flight. Recovery must never submit it a second time.
-    await run(`UPDATE listing_publish_records SET task_id = ?, response_json = ?, status = 'submitted', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?`,
-    [String(taskId), JSON.stringify({ submit: response }), Number(recordId), tenantId, Number(session.personId), Number(shop.id)]);
+    await saveReceipt();
+    if (!taskId) throw Object.assign(new Error("Ozon 未返回任务编号，上架结果待核对；请核对原店铺商品，勿重复提交。"), {
+      status: 409, statusCode: 409, code: "LISTING_PUBLISH_RESULT_UNKNOWN"
+    });
     await assertAccess();
     let importInfo = null;
     if (taskId) {
@@ -9121,7 +9158,7 @@ async function submitPreparedListingPublishRecord({
     }
     const importErrorSummary = normalizeOzonImportInfoErrors(importInfo);
     const finalizeStartedAt = Date.now();
-    await updatePublishRecordAfterSubmit(recordId, {
+    const assertFinalizedReceipt = await updatePublishRecordAfterSubmit(recordId, {
       taskId,
       response: {
         submit: response,
@@ -9140,7 +9177,8 @@ async function submitPreparedListingPublishRecord({
       importInfo,
       status: importInfoStatus(importInfo),
       tenantId,
-      assertAccess
+      assertAccess,
+      expectedReceipt: { shopId: Number(shop.id), taskId: String(taskId), responseJson: JSON.stringify({ submit: response }) }
     });
     timings.db_finalize_ms = Date.now() - finalizeStartedAt;
     timings.total_ms = Date.now() - submitStartedAt;
@@ -9149,7 +9187,7 @@ async function submitPreparedListingPublishRecord({
       payload_bytes: Buffer.byteLength(JSON.stringify(finalPayload)),
       ...timings
     }));
-    await refreshPublishRecordQuality(recordId, tenantId, { assertAccess }).catch((error) => ({
+    await refreshPublishRecordQuality(recordId, tenantId, { assertAccess: assertFinalizedReceipt }).catch((error) => ({
       score: 0,
       source: "refresh_failed",
       issues: [error.message]
@@ -9163,14 +9201,24 @@ async function submitPreparedListingPublishRecord({
       import_error_summary: importErrorSummary.has_errors ? importErrorSummary : null
     };
   } catch (error) {
+    if (!receiptSaved && submitResponse) await saveReceipt().catch(() => null);
     const errorPayload = buildOzonPublishErrorPayload(error, { shop, recordId });
-    await run(`
+    if (submissionAttempted || submitResponse) {
+      errorPayload.fix_tip = "上架结果待核对，请先刷新状态并核对原店铺商品编号；确认结果前不要重复上架。";
+    }
+    // A losing concurrent claimant must not change the winner's pending marker.
+    if (!pendingReceipt || submissionClaimed) await run(`
       UPDATE listing_publish_records
-      SET status = CASE WHEN COALESCE(task_id, '') <> '' OR response_json IS NOT NULL THEN 'submitted' ELSE 'failed' END,
+      SET status = CASE WHEN COALESCE(task_id, '') <> '' THEN status WHEN ? THEN 'resubmitting' ELSE 'failed' END,
+          response_json = CASE WHEN ? THEN response_json ELSE NULL END,
           error_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-    `, [JSON.stringify(errorPayload), Number(recordId), tenantId]).catch(() => null);
-    return { ok: false, record_id: recordId, task_id: persistedTaskId, error: errorPayload.message };
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?
+        AND (response_json <=> ? OR (? <> '' AND task_id = ?))
+    `, [Boolean(submissionAttempted || submitResponse), Boolean(submissionAttempted || submitResponse),
+      JSON.stringify(errorPayload), Number(recordId), tenantId, Number(session.personId), Number(shop.id),
+      receiptSaved && !persistedTaskId ? receiptJson() : pendingReceipt || null,
+      String(persistedTaskId), String(persistedTaskId)]).catch(() => null);
+    return { ok: false, record_id: recordId, task_id: persistedTaskId, error: errorPayload.message, fix_tip: errorPayload.fix_tip || "" };
   }
   });
 }
@@ -10879,40 +10927,99 @@ async function buildTemplateSnapshotFromPublishRecord(record = {}, options = {})
 export async function retryListingPublishRecord(id, body = {}, session = null) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => retryListingPublishRecord(id, body, session));
   session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   const tenantId = listingTenantId(session);
   await ensureListingAutomationSchema();
-  const record = await row(`
+  const loadRecord = () => row(`
     SELECT r.*, s.name AS shop_name, s.ozon_client_id, COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
     FROM listing_publish_records r
     JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
     WHERE r.id = ? AND r.status <> 'deleted' AND COALESCE(r.tenant_id, 'admin') = ?
   `, [Number(id), tenantId]);
+  let record = await loadRecord();
   if (!record) throw listingPublishRecordNotFoundError();
+  const originalShopId = Number(record.shop_id);
+  const assertAccess = async ({ productId } = {}) => {
+    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
+    const shop = await row(`SELECT s.id, s.name, s.ozon_client_id,
+        COALESCE(NULLIF(s.ozon_api_key, ''), s.api_key_hint) AS api_key_hint
+      FROM listing_publish_records r
+      JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
+      WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ? AND r.shop_id = ? AND r.status <> 'deleted'
+        AND ${tenantId === "admin" ? "s.status <> 'deleted'" : "s.status = 'active'"}`,
+    [Number(id), tenantId, originalShopId]);
+    if (!shop) throw listingPublishRecordNotFoundError();
+    if (productId) await assertDraftSourceProductTenant(productId, tenantId);
+    return shop;
+  };
+  await assertAccess();
   const expectedUpdatedAt = body?.updated_at || body?.updatedAt || body?.version_updated_at || body?.versionUpdatedAt || "";
   if (expectedUpdatedAt && !sameTimestamp(expectedUpdatedAt, record.updated_at)) {
     const error = new Error("Publish record was changed by another user; refresh and try again");
     error.status = 409;
     throw error;
   }
-  if (["submitted", "processing", "resubmitting", "ozon_status_pending"].includes(String(record.status || ""))) {
-    const error = new Error("This publish record is being processed; refresh status before retrying");
-    error.status = 409;
-    throw error;
+  // A previous receipt must be reconciled, even when an old error handler left
+  // it marked failed. Only an explicit official failure permits a new submit.
+  if (["imported", "published", "success"].includes(String(record.status || ""))) return normalizePublishRecordRow(record);
+  const previousResponse = parseJson(record.response_json, {});
+  const previousTaskId = String(record.task_id || previousResponse?.submit?.result?.task_id
+    || previousResponse?.submit?.task_id || previousResponse?.submit?.result?.taskId
+    || previousResponse?.submit?.submit?.result?.task_id || "").trim();
+  if (previousTaskId) {
+    const importInfo = await fetchOzonProductImportInfo(record, previousTaskId, { beforeRequest: assertAccess });
+    await assertAccess();
+    const status = importInfoStatus(importInfo);
+    const assertReconciledReceipt = await updatePublishRecordAfterSubmit(Number(id), { taskId: previousTaskId, response: previousResponse?.submit || previousResponse,
+      importInfo, status, tenantId, assertAccess,
+      expectedReceipt: { shopId: originalShopId, taskId: record.task_id, responseJson: record.response_json } });
+    await assertReconciledReceipt();
+    record = await loadRecord();
+    if (!record || Number(record.shop_id) !== originalShopId) throw listingPublishRecordNotFoundError();
+    if (status !== "failed") return normalizePublishRecordRow(record);
+  } else if (["submitted", "processing", "resubmitting", "ozon_status_pending", "imported", "published", "success"].includes(String(record.status || ""))
+    || record.response_json) {
+    throw Object.assign(new Error("上次上架结果仍待核对；请先刷新状态并核对原店铺的商品编号，确认未上架后由管理员处理，勿重复提交。"), {
+      status: 409, statusCode: 409, code: "LISTING_PUBLISH_RECONCILIATION_REQUIRED"
+    });
   }
   const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
   if (!normalizeArray(payload.items).length) throw new Error("Publish record has no retryable Ozon payload");
-
+  await assertAccess();
+  const pendingReceipt = JSON.stringify({ retry_submission: { state: "pending", attempt_id: crypto.randomUUID() } });
   const retryClaim = await run(`
     UPDATE listing_publish_records
-    SET status = 'resubmitting', request_json = ?, error_json = NULL, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-      AND status NOT IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
-  `, [JSON.stringify(payload), Number(id), tenantId]);
+    SET status = 'resubmitting', request_json = ?, task_id = '', response_json = ?, error_json = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ?
+      AND status NOT IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending', 'deleted', 'imported', 'published', 'success')
+      AND task_id <=> ? AND response_json <=> ? AND request_json <=> ?
+  `, [JSON.stringify(payload), pendingReceipt, Number(id), tenantId, originalShopId,
+    record.task_id, record.response_json, record.request_json]);
   if (!Number(retryClaim?.affectedRows || 0)) {
     throw Object.assign(new Error("发布记录已被其他任务处理，请刷新后重试"), { status: 409, statusCode: 409 });
   }
 
+  let submissionAttempted = false;
+  let response = null;
+  let taskId = "";
+  let receiptSaved = false;
+  const receiptJson = () => JSON.stringify(taskId ? { submit: response } : { ...parseJson(pendingReceipt, {}), submit: response });
+  const saveReceipt = async () => {
+    const saved = await run(`UPDATE listing_publish_records
+      SET task_id = ?, response_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ?
+        AND (response_json <=> ? OR (task_id <> '' AND task_id = ?))`,
+    [String(taskId), receiptJson(), taskId ? "submitted" : "resubmitting",
+      Number(id), tenantId, originalShopId, pendingReceipt, String(taskId)]);
+    if (!Number(saved?.affectedRows || 0)) throw Object.assign(new Error("上架回执尚未保存，请先核对原店铺结果，勿重复提交。"), {
+      status: 409, statusCode: 409, code: "LISTING_PUBLISH_RECEIPT_PENDING"
+    });
+    receiptSaved = true;
+  };
+  listingPublishExecutionGuards.set(record, assertAccess);
+  listingPublishExecutionGuards.set(session, assertAccess);
   try {
+    await assertAccess();
     let shopPayload = await applyShopPublishDefaults(payload, record);
     const mediaRepair = await repairOzonPublishPayloadMedia(shopPayload, {
       session,
@@ -10921,42 +11028,69 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
       sourceId: String(id || "")
     });
     shopPayload = mediaRepair.payload;
+    await assertAccess();
     await run(`
       UPDATE listing_publish_records
       SET request_json = ?, template_snapshot_json = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-    `, [JSON.stringify(shopPayload), Number(id), tenantId]);
-    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
-    const response = await importOzonProducts(record, shopPayload);
-    const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ? AND response_json <=> ?
+    `, [JSON.stringify(shopPayload), Number(id), tenantId, originalShopId, pendingReceipt]);
+    response = await importOzonProducts(record, shopPayload, { beforeRequest: async () => {
+      const shop = await assertAccess();
+      submissionAttempted = true;
+      return shop;
+    } });
+    taskId = String(response?.result?.task_id || response?.task_id || response?.result?.taskId || "");
+    // Do not put authorization, status lookups or variant binding ahead of the
+    // receipt. This narrow write remains necessary after in-flight revocation.
+    await saveReceipt();
+    if (!taskId) throw Object.assign(new Error("Ozon 未返回任务编号，上架结果待核对；请核对原店铺商品，勿重复提交。"), {
+      status: 409, statusCode: 409, code: "LISTING_PUBLISH_RESULT_UNKNOWN"
+    });
+    await assertAccess();
     let importInfo = null;
     if (taskId) {
-      importInfo = await fetchOzonProductImportInfo(record, taskId).catch((error) => ({ error: error.message }));
+      importInfo = await fetchOzonProductImportInfo(record, taskId, { beforeRequest: assertAccess });
+      await assertAccess();
     }
-    const importErrorSummary = normalizeOzonImportInfoErrors(importInfo);
-    await updatePublishRecordAfterSubmit(Number(id), {
+    const assertFinalizedReceipt = await updatePublishRecordAfterSubmit(Number(id), {
       taskId,
       response,
       importInfo,
       status: importInfoStatus(importInfo),
-      tenantId
+      tenantId,
+      assertAccess,
+      expectedReceipt: { shopId: originalShopId, taskId: String(taskId), responseJson: JSON.stringify({ submit: response }) }
     });
-    await refreshPublishRecordQuality(Number(id), tenantId).catch(() => null);
+    await refreshPublishRecordQuality(Number(id), tenantId, { assertAccess: assertFinalizedReceipt }).catch(async () => { await assertFinalizedReceipt(); });
   } catch (error) {
+    // A lost database acknowledgement can be retried safely with the exact
+    // receipt; it must never cause a second Ozon submission.
+    if (!receiptSaved && response) await saveReceipt().catch(() => null);
     const errorPayload = buildOzonPublishErrorPayload(error, { shop: record, recordId: id });
+    if (submissionAttempted || response) {
+      errorPayload.code = errorPayload.code || "LISTING_PUBLISH_RECONCILIATION_REQUIRED";
+      errorPayload.fix_tip = "请先刷新状态并核对原店铺商品编号；上次提交结果未确认前，不要重复上架。";
+    }
     await run(`
       UPDATE listing_publish_records
-      SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-    `, [JSON.stringify(errorPayload), Number(id), tenantId]);
+      SET status = CASE
+            WHEN COALESCE(task_id, '') <> '' THEN status
+            WHEN ? THEN 'resubmitting' ELSE 'failed' END,
+          response_json = CASE WHEN ? THEN response_json ELSE NULL END,
+          error_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ?
+        AND (response_json <=> ? OR (? <> '' AND task_id = ?))
+    `, [Boolean(submissionAttempted || response), Boolean(submissionAttempted || response), JSON.stringify(errorPayload),
+      Number(id), tenantId, originalShopId, receiptSaved && !taskId ? receiptJson() : pendingReceipt,
+      String(taskId), String(taskId)]).catch(() => null);
   }
-
+  await assertAccess();
   const updated = await row(`
     SELECT r.*, s.name AS shop_name
     FROM listing_publish_records r
     JOIN shops s ON s.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "s")}
-    WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ?
-  `, [Number(id), tenantId]);
+    WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ? AND r.shop_id = ? AND r.status <> 'deleted'
+  `, [Number(id), tenantId, originalShopId]);
   return normalizePublishRecordRow(updated);
 }
 
@@ -11394,14 +11528,16 @@ export async function listingDrafts(query = {}, session) {
     WHERE ${where.join(" AND ")}
   `;
   if (paged && lightweight) {
-    const totalRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams);
-    const total = Number(totalRow?.total || 0);
-    const idRows = await all(`
+    const [totalRow, idRows] = await Promise.all([
+      row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams),
+      all(`
       SELECT d.id
       ${fromSql}
       ORDER BY ${sortColumn} DESC, d.id DESC
       LIMIT ? OFFSET ?
-    `, [...fromParams, pageSize, offset]);
+      `, [...fromParams, pageSize, offset])
+    ]);
+    const total = Number(totalRow?.total || 0);
     const pageIds = idRows.map((item) => Number(item.id || 0)).filter((item) => item > 0);
     if (!pageIds.length) {
       return {
@@ -20101,7 +20237,7 @@ function firstOfferId(payload = {}) {
   return String(first.offer_id || "").trim();
 }
 
-async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response = null, importInfo = null, status = "submitted", tenantId = "", assertAccess } = {}) {
+async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response = null, importInfo = null, status = "submitted", tenantId = "", assertAccess, expectedReceipt } = {}) {
   if (!recordId) return;
   await assertAccess?.();
   const tenantRecordScope = tenantId ? "AND COALESCE(NULLIF(tenant_id, ''), 'admin') = ?" : "";
@@ -20119,11 +20255,12 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
       fix_tip: importErrorSummary.fix_tip || buildOzonPublishErrorPayload(importFailure, { source: "import_info" }).fix_tip,
       import_errors: importErrorSummary.items
     } : null);
-  await run(`
+  const updated = await run(`
     UPDATE listing_publish_records
     SET task_id = ?, status = ?, response_json = ?, error_json = ?, ozon_product_id = ?, offer_id = COALESCE(NULLIF(offer_id, ''), ?), updated_at = CURRENT_TIMESTAMP,
         published_at = CASE WHEN ? IN ('imported', 'published', 'success') THEN CURRENT_TIMESTAMP ELSE published_at END
     WHERE id = ? ${tenantRecordScope}
+      ${expectedReceipt ? "AND shop_id = ? AND task_id <=> ? AND response_json <=> ?" : ""}
   `, [
     String(taskId || ""),
     status || "submitted",
@@ -20133,17 +20270,39 @@ async function updatePublishRecordAfterSubmit(recordId, { taskId = "", response 
     refs.offerIds[0] || "",
     status || "submitted",
     Number(recordId),
-    ...(tenantId ? [tenantId] : [])
+    ...(tenantId ? [tenantId] : []),
+    ...(expectedReceipt ? [expectedReceipt.shopId, expectedReceipt.taskId, expectedReceipt.responseJson] : [])
   ]);
+  if (expectedReceipt && !Number(updated?.affectedRows || 0)) {
+    throw Object.assign(new Error("上架回执已被其他任务更新，请刷新状态，勿重复提交。"), { status: 409, statusCode: 409 });
+  }
+  if (expectedReceipt) {
+    const callerAssertAccess = assertAccess;
+    const savedResponse = JSON.stringify({ submit: response, import_info: importInfo });
+    assertAccess = async (options) => {
+      const shop = await callerAssertAccess?.(options);
+      const current = await row(`SELECT id FROM listing_publish_records WHERE id = ? ${tenantRecordScope}
+        AND shop_id = ? AND task_id = ? AND response_json <=> ?`,
+      [Number(recordId), ...(tenantId ? [tenantId] : []), expectedReceipt.shopId, String(taskId), savedResponse]);
+      if (!current) throw Object.assign(new Error("上架回执已被其他任务更新，请刷新状态，勿重复提交。"), { status: 409, statusCode: 409 });
+      return shop;
+    };
+  }
   await assertAccess?.();
   await run(`UPDATE listing_publish_variant_links SET ozon_status = ? WHERE record_id = ?
-    ${tenantId ? "AND tenant_id = ?" : ""}`,
-    [String(status || "submitted").slice(0, 64), Number(recordId), ...(tenantId ? [tenantId] : [])]);
+    ${tenantId ? "AND tenant_id = ?" : ""}
+    ${expectedReceipt ? `AND EXISTS (SELECT 1 FROM listing_publish_records receipt WHERE receipt.id = ?
+      ${tenantId ? "AND COALESCE(NULLIF(receipt.tenant_id, ''), 'admin') = ?" : ""}
+      AND receipt.shop_id = ? AND receipt.task_id = ? AND receipt.response_json <=> ?)` : ""}`,
+    [String(status || "submitted").slice(0, 64), Number(recordId), ...(tenantId ? [tenantId] : []),
+      ...(expectedReceipt ? [Number(recordId), ...(tenantId ? [tenantId] : []), expectedReceipt.shopId, String(taskId),
+        JSON.stringify({ submit: response, import_info: importInfo })] : [])]);
   await persistListingVariantLineageForRecord(recordId, tenantId || "admin", { assertAccess });
   await autoBindPublishRecordInventory(recordId, tenantId, { assertAccess }).catch(async (error) => {
     await assertAccess?.();
     console.warn("[listing-automation] auto bind inventory failed:", error.message);
   });
+  return assertAccess;
 }
 
 async function autoBindPublishRecordInventory(recordId, expectedTenantId = "", { assertAccess } = {}) {

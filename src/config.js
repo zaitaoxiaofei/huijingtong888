@@ -133,6 +133,7 @@ export const config = {
   wechatLoginRedirectUri: process.env.WECHAT_LOGIN_REDIRECT_URI || "",
   authRateLimitWindowMinutes: readNumberEnv("AUTH_RATE_LIMIT_WINDOW_MINUTES", 15),
   authRateLimitMaxAttempts: readNumberEnv("AUTH_RATE_LIMIT_MAX_ATTEMPTS", 8),
+  authTrustedProxyIps: process.env.AUTH_TRUSTED_PROXY_IPS || "",
   httpJsonBodyLimitBytes: readNumberEnv("HTTP_JSON_BODY_LIMIT_BYTES", 25 * 1024 * 1024),
   httpFormBodyLimitBytes: readNumberEnv("HTTP_FORM_BODY_LIMIT_BYTES", 1024 * 1024),
   scheduledJobsEnabled: readBooleanEnv("SCHEDULED_JOBS_ENABLED", Number(process.env.PORT || 8788) === 8788),

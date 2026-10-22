@@ -171,10 +171,14 @@ async function refreshOfficialCarriages() {
   const sequence = ++readSequence;
   refreshingOfficial.value = true;
   try {
-    await service.discoverOfficial({ ...dateRangeQuery(), shop_id: Number(selectedShop.id) });
+    const synced = await service.discoverOfficial({ ...dateRangeQuery(), shop_id: Number(selectedShop.id) });
     if (!current() || sequence !== readSequence) return;
     const result = await service.officialSnapshot(dateRangeQuery());
-    if (current() && sequence === readSequence) { applyOfficialList(result); ElMessage.success("所选店铺申请已同步，已更新本企业全部已保存申请"); }
+    if (current() && sequence === readSequence) {
+      applyOfficialList(result);
+      if (synced.partial || Number(synced.failed) > 0) ElMessage.warning(synced.notice || `已保留成功同步的申请，${Number(synced.failed) || '部分'} 份暂未同步，请稍后重试`);
+      else ElMessage.success("所选店铺申请已同步，已更新本企业全部已保存申请");
+    }
   } catch (cause) {
     if (current() && sequence === readSequence) ElMessage.error(`暂未同步官方申请，已保留列表：${cause.message || "请稍后重试"}`);
   } finally { if (current()) refreshingOfficial.value = false; }
@@ -438,7 +442,7 @@ onMounted(() => run(async () => {
   <el-drawer v-model="visible" title="OGL 发运" size="min(1380px, 96vw)" destroy-on-close :close-on-click-modal="!busy" :close-on-press-escape="!busy" :show-close="!busy" @closed="emit('close')">
     <div ref="panelElement" class="ogl-dispatch-panel" v-loading="busy">
       <el-alert v-if="error" :title="error" type="error" :closable="true" show-icon @close="error = ''" />
-      <el-alert v-if="bootstrap.monitoring?.status === 'paused'" :title="bootstrap.monitoring.notice || '自动跟踪已暂停，请由企业管理员核对权限并重新保存默认发运店铺。'" type="warning" :closable="false" show-icon />
+      <el-alert v-if="['paused', 'partial', 'error'].includes(bootstrap.monitoring?.status)" :title="bootstrap.monitoring.notice || '自动跟踪暂未完成，请稍后重试；权限暂停时请由企业管理员核对设置。'" type="warning" :closable="false" show-icon />
       <div class="ogl-dispatch-nav">
         <el-button :disabled="busy" :type="tab.startsWith('official') ? 'primary' : 'default'" @click="showOfficialCarriages()">已申请</el-button>
         <el-button :disabled="busy" :type="tab === 'history' ? 'primary' : 'default'" @click="tab = 'history'; run(loadHistory)">发运历史</el-button>

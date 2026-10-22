@@ -28,7 +28,7 @@ test("draft inbox can explicitly sort by creation time without changing other ca
 });
 
 test("listing drafts avoid unnecessary joins for paged lightweight queries", () => {
-  assert.match(listingDraftsSource, /const fromSqlJoins = \[\s*"LEFT JOIN listing_category_templates t ON t\.id = d\.template_id/);
+  assert.match(listingDraftsSource, /const fromSqlJoins = \[\s*`LEFT JOIN listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\(`LEFT JOIN tenant_members creator_members/);
   assert.match(listingDraftsSource, /fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id AND creator_members\.person_id = p\.id"\)/);
   assert.doesNotMatch(listingDraftsSource, /GROUP BY draft_id/);
@@ -43,12 +43,16 @@ test("listing drafts keep status predicates index friendly", () => {
   assert.doesNotMatch(listingDraftsSource, /LOWER\(TRIM\(COALESCE\(d\.status/);
 });
 
-test("paged lightweight drafts read stored list projections instead of parsing large JSON", () => {
+test("paged lightweight drafts keep stored projections and only read canonical image fields from large JSON", () => {
   const lightweightPageSource = listingDraftsSource.match(/if \(paged && lightweight\) \{[\s\S]*?const rowsSql = lightweight/)?.[0] || "";
-  assert.match(lightweightPageSource, /JSON_ARRAY\(d\.list_image_url\) AS source_images_json/);
+  assert.match(lightweightPageSource, /COALESCE\(d\.source_images_json, JSON_ARRAY\(d\.list_image_url\)\) AS source_images_json/);
   assert.match(lightweightPageSource, /d\.list_price AS draft_variant_price/);
   assert.match(lightweightPageSource, /d\.list_image_url AS draft_template_primary_image/);
-  assert.doesNotMatch(lightweightPageSource, /JSON_EXTRACT\(d\.template_payload_json/);
+  assert.match(lightweightPageSource, /'\{\}' AS manual_facts_json, '\{\}' AS ai_payload_json/);
+  const extractedPaths = [...lightweightPageSource.matchAll(/JSON_EXTRACT\(d\.template_payload_json, '([^']+)'\)/g)].map(match => match[1]);
+  assert.deepEqual(extractedPaths, ['$.editable_payload.variants[0].images', '$.editable_payload.variants[0].images_manually_edited',
+    '$.editable_payload.variants[0].image_edit_intent', '$.editable_payload.images', '$.images']);
+  assert.match(lightweightPageSource, /WHERE d\.id IN \(\$\{placeholders\}\) AND \$\{tenantScope\}/);
 });
 
 test("listing draft schema stores image and price projections in one migration", () => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
+import crypto from "node:crypto";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
@@ -50,7 +51,7 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
     const externalCalls = [], queued = [], mediaContexts = [];
     let beforeExternal = null;
     const context = vm.createContext({
-      console: { info() {}, warn() {} }, process, Buffer, Date, Number, String, Object, Array, Map, Set, JSON, Math, Promise, AsyncLocalStorage,
+      console: { info() {}, warn() {} }, process, Buffer, crypto, Date, Number, String, Object, Array, Map, Set, JSON, Math, Promise, AsyncLocalStorage,
       mysqlQuery: query, mysqlExecute: query, listingTenantLookup, assertBusinessTaskPermission, businessTaskTenantKey,
       authorizeBusinessTaskSession: value => authorizeBusinessTaskSession(value, query),
       restoreBusinessTaskSession: (tenant, person) => restoreBusinessTaskSession(tenant, person, query),
@@ -145,7 +146,7 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
 
     await t.test("foreign retries cannot change records and own concurrent retry submits once", async () => {
       const record = records.get(3)[0];
-      await query("UPDATE listing_publish_records SET status = 'failed' WHERE id = ?", [record]);
+      await query("UPDATE listing_publish_records SET status = 'failed', task_id = '', response_json = NULL WHERE id = ?", [record]);
       for (const id of [1, 2]) await assert.rejects(context.retryListingPublishRecord(record, {}, session(id)), { status: 404 });
       assert.equal((await query("SELECT status FROM listing_publish_records WHERE id = ?", [record]))[0].status, "failed");
       const results = await Promise.allSettled([context.retryListingPublishRecord(record, {}, session(3)), context.retryListingPublishRecord(record, {}, session(3))]);
@@ -162,11 +163,12 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
       await query("UPDATE tenant_members SET active = 1, business_roles_json = JSON_ARRAY('packing') WHERE tenant_id = 2");
       await assert.rejects(context.submitPreparedListingPublishRecord({ recordId: record }), { statusCode: 403 });
       await query("UPDATE tenant_members SET business_roles_json = JSON_ARRAY('operations') WHERE tenant_id = 2");
-      await query("UPDATE listing_publish_records SET status = 'failed' WHERE id = ?", [record]);
+      await query("UPDATE listing_publish_records SET status = 'failed', task_id = '', response_json = NULL WHERE id = ?", [record]);
       beforeExternal = async () => { await query("UPDATE tenant_members SET business_roles_json = JSON_ARRAY('packing') WHERE tenant_id = 2"); };
-      const retried = await context.retryListingPublishRecord(record, {}, session(2));
-      assert.equal(retried.status, "failed");
+      await assert.rejects(context.retryListingPublishRecord(record, {}, session(2)), { statusCode: 403 });
       assert.equal(externalCalls.filter(call => call.type === "import").length, before);
+      const [retried] = await query("SELECT status, error_json FROM listing_publish_records WHERE id = ?", [record]);
+      assert.equal(retried.status, "failed");
       assert.match(retried.error_json, /无权/);
     });
   } finally {

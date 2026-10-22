@@ -5,6 +5,7 @@ import MobileLayout from "../layouts/MobileLayout.vue";
 import LoginView from "../views/LoginView.vue";
 import { useAuthStore } from "../stores/auth";
 import { markRouteReadyPerf, startRoutePerf } from "../utils/performance-monitor";
+import { membershipDialogRequest, requestMembershipDialog } from "../utils/membership-dialog.js";
 
 const DashboardView = () => import("../views/DashboardView.vue");
 const MembershipView = () => import("../views/MembershipView.vue");
@@ -240,12 +241,12 @@ function safeRedirectTarget(target = "/dashboard") {
 }
 
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
   startRoutePerf(to);
   document.title = to.meta?.title ? `${to.meta.title} - 爆单ERP` : "爆单ERP";
   const auth = useAuthStore();
   const home = () => isPlatformAdmin(auth.user) && !auth.user?.tenant?.id ? "/platform-accounts"
-    : needsMembershipActivation(auth.user) ? "/membership" : "/dashboard";
+    : needsMembershipActivation(auth.user) ? "/tools/profit-calculator" : "/dashboard";
   if (to.name === "login") {
     await auth.bootstrap();
     if (auth.isAuthenticated) {
@@ -257,11 +258,20 @@ router.beforeEach(async (to) => {
   if (!to.meta?.public) {
     await auth.bootstrap();
     if (!auth.isAuthenticated) return { name: "login", query: { redirect: to.fullPath } };
+    if (to.path === "/membership" && canAccessPage(auth.user, to.path)) {
+      requestMembershipDialog();
+      if (from?.matched?.length && !from.meta?.public && !from.meta?.mobile && from.path !== "/membership" && canAccessPage(auth.user, from.path)) {
+        document.title = from.meta?.title ? `${from.meta.title} - 爆单ERP` : "爆单ERP";
+        return false;
+      }
+      return { path: home(), replace: true };
+    }
     if (!canAccessPage(auth.user, to.path)) {
+      if (needsMembershipActivation(auth.user)) requestMembershipDialog();
       return { path: home(), query: { denied: needsMembershipActivation(auth.user) ? "activation" : "permission" } };
     }
   }
-  if (!to.meta?.mobile && to.path !== "/membership" && !needsMembershipActivation(auth.user) && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
+  if (!to.meta?.mobile && !membershipDialogRequest.value && !needsMembershipActivation(auth.user) && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
     return {
       path: "/mobile/orders",
       query: {

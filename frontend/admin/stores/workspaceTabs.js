@@ -88,8 +88,8 @@ function toPersistedTab(tab) {
 }
 
 function isRetiredRoute(route) {
-  return route?.name === "onboarding" || [route?.path, route?.fullPath].some(value =>
-    String(value || "").split(/[?#]/)[0].replace(/\/+$/, "") === "/onboarding");
+  return ["onboarding", "membership"].includes(route?.name) || [route?.path, route?.fullPath].some(value =>
+    ["/onboarding", "/membership"].includes(String(value || "").split(/[?#]/)[0].replace(/\/+$/, "")));
 }
 
 function canPersistRoute(route) {

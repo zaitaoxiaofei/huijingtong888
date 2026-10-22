@@ -175,6 +175,7 @@ test("qr confirm authenticates credentials and confirms the desktop session", as
 
 test("qr confirm can use remembered mobile account without password", async () => {
   const createAuthHandler = await loadCreateAuthHandler();
+  const { qrCredentialVersion } = await import("../src/server/internal-qr-login.js");
   const user = {
     id: 10,
     name: "Carol",
@@ -188,7 +189,7 @@ test("qr confirm can use remembered mobile account without password", async () =
     secret: "secret"
   }), {
     ...createNoSessionOverrides(),
-    getQrMobileSession: () => ({ user: { id: 10, username: "carol" } }),
+    getQrMobileSession: () => ({ user: { id: 10, username: "carol" }, credentialVersion: qrCredentialVersion(user.password_hash) }),
     findPersonById: async () => user,
     createSession: async () => "remembered-token",
     confirmQrLoginSession: () => ({ ok: true, redirect: "/dashboard" })

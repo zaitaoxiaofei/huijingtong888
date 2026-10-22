@@ -6,10 +6,10 @@ const routes = await readFile(new URL("../src/server/routes/operations.js", impo
 const service = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 
 test("procurement purchase routes pass the authenticated person", () => {
-  assert.match(routes, /startConfirmProcurementRequestsPurchased\(await readJson\(req\), req\._session\?\.personId\)/);
-  assert.match(routes, /confirmProcurementRequestsPurchased\(await readJson\(req\), req\._session\?\.personId\)/);
-  assert.match(routes, /mergeProcurementRequests\(await readJson\(req\), req\._session\?\.personId\)/);
-  assert.match(routes, /confirmPurchaseOrder\(Number\(parts\[3\]\), await readJson\(req\), req\._session\?\.personId\)/);
+  assert.match(routes, /startConfirmProcurementRequestsPurchased\(await readJson\(req\), req\._session\?\.personId,/);
+  assert.match(routes, /confirmProcurementRequestsPurchased\(await readJson\(req\), req\._session\?\.personId,/);
+  assert.match(routes, /mergeProcurementRequests\(await readJson\(req\), req\._session\?\.personId,/);
+  assert.match(routes, /confirmPurchaseOrder\(Number\(parts\[3\]\), await readJson\(req\), req\._session\?\.personId,/);
 });
 
 test("procurement creation uses only a valid authenticated person", () => {

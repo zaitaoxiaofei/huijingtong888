@@ -40,13 +40,32 @@ test("listing publish validation includes category cache diagnostics", () => {
   assert.match(routeSource, /POST \/api\/listing\/templates\/category-diagnostics/);
 });
 
-test("listing automation view exposes a common template health panel", () => {
-  assert.match(listingAutomationViewSource, /templateHealthFilters = reactive\(\{/);
-  assert.match(listingAutomationViewSource, /onlineProducts: false/);
-  assert.match(listingAutomationViewSource, /\/api\/listing\/template-health-check\?\$\{buildTemplateHealthQuery\(\)\.toString\(\)\}/);
-  assert.match(listingAutomationViewSource, /公共上架模板体检/);
-  assert.match(listingAutomationViewSource, /path: "\/listing-records\/edit"/);
-  assert.match(listingAutomationViewSource, /path: "\/online-products"/);
+test("listing automation requests template health through the lazy publish validation panel", async () => {
+  const validateSource = listingAutomationViewSource.match(/async function validatePublishPayload\(\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(validateSource, "the current editor must retain category-health validation");
+  const calls = [];
+  const messages = [];
+  const validatingPublish = { value: false };
+  const publishValidation = { visible: false, result: null };
+  const template = { title: "Current template", variants: [{ offer_id: "current-sku" }] };
+  const result = { ok: false, errors: ["Missing required attribute"], category_health: { level: "red" } };
+  const validate = new Function("validatingPublish", "applyOzonAttributeMappings", "buildTemplatePayload", "apiClient", "publishValidation", "ElMessage",
+    `${validateSource}\nreturn validatePublishPayload;`)(validatingPublish, () => calls.push("mapping"), () => template,
+    { post: async (path, payload) => { calls.push({ path, payload, busy: validatingPublish.value }); return result; } },
+    publishValidation, { success: (message) => messages.push(message), warning: (message) => messages.push(message) });
+  await validate();
+  assert.equal(calls[0], "mapping");
+  assert.equal(calls.length, 2, "health validation must not issue a publishing request");
+  assert.deepEqual(calls[1], { path: "/api/listing/templates/validate-publish", payload: { ...template, include_category_health: true }, busy: true });
+  assert.equal(publishValidation.result, result);
+  assert.equal(publishValidation.visible, true);
+  assert.equal(validatingPublish.value, false);
+  assert.match(messages[0], /1 个阻断项/);
+  const publishSource = listingAutomationViewSource.match(/async function publishTemplateToOzon\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+  assert.match(publishSource, /template\.include_category_health = true/);
+  assert.match(publishSource, /const validation = error\?\.validation \|\| error\?\.payload\?\.validation;[\s\S]*?if \(validation\) \{\s*publishValidation\.result = validation;\s*publishValidation\.visible = true;/);
+  assert.match(listingAutomationViewSource, /@click="publishTemplateToOzon"/);
+  assert.match(listingAutomationViewSource, /<el-drawer v-if="publishValidation\.visible"[\s\S]*?<section v-if="publishCategoryHealth" class="category-health-section">/);
 });
 
 test("listing automation publish drawer renders category diagnostics", () => {
@@ -207,7 +226,7 @@ test("listing automation renders SKU variants in an Ozon-like flat table", () =>
   assert.match(listingAutomationViewSource, /@update:model-value="updateVariantModelValue\(row, \$event\)"/);
   assert.match(listingAutomationViewSource, /class="flat-dimensions-cell"/);
   assert.match(listingAutomationViewSource, /@update:model-value="updateFixedTags"/);
-  assert.match(listingAutomationViewSource, /@update:model-value="updateFixedField\('summary', \$event\)"/);
+  assert.match(listingAutomationViewSource, /<el-table-column v-if="mediaSummaryAttribute"[\s\S]*?@click="applyFirstVariantAttribute\(mediaSummaryAttribute\)"[\s\S]*?#default="\{ row \}"[\s\S]*?:model-value="variantAttributeSelectModelValue\(row, mediaSummaryAttribute\)"[\s\S]*?@update:model-value="updateVariantAttributeSelectValue\(row, mediaSummaryAttribute, \$event\)"/);
   assert.match(listingAutomationViewSource, /class="flat-attribute-control"/);
   assert.match(listingAutomationViewSource, /@update:model-value="updateVariantAttributeSelectValue\(row, field, \$event\)"/);
   assert.match(listingAutomationViewSource, /function generateVariantRichContentJson\(row = \{\}, field = \{\}, position = "last"\)/);
@@ -222,7 +241,7 @@ test("listing automation renders SKU variants in an Ozon-like flat table", () =>
   assert.match(listingAutomationViewSource, /@click="generateVariantRichContentJson\(row, field, 'last'\)">尾图生成/);
   assert.match(listingAutomationViewSource, /const fixedVariantAttributeDefinitions = \{/);
   assert.match(listingAutomationViewSource, /function toggleFixedVariantAttributeField\(key\)/);
-  assert.match(listingAutomationViewSource, /isFixedVariantAttributeFieldEnabled\('summary'\)/);
+  assert.match(listingAutomationViewSource, /const mediaSummaryAttribute = computed\(\(\) => ensureFixedVariantAttribute\("summary"\)\)/);
   assert.match(listingAutomationViewSource, /\.copy-form \{ display: flex; flex-direction: column; \}/);
   assert.match(listingAutomationViewSource, /\.variants-block \{ order: 2;/);
 
@@ -267,10 +286,25 @@ test("listing dictionary dropdowns keep Chinese labels clean and tags beside med
   assert.ok(tagsIndex < featureIndex);
 });
 
-test("listing automation does not render variant media previews on first paint", () => {
-  assert.match(listingAutomationViewSource, /if \(!row\?\._mediaPreviewEnabled\) return \[\];/);
-  assert.match(listingAutomationViewSource, /row\._mediaPreviewEnabled = true;/);
-  assert.match(listingAutomationViewSource, /return images\.filter\(\(item\) => editorImageKey\(item\)\)\.slice\(0, 1\);/);
+test("listing automation bounds first-paint media thumbnails while retaining the full image preview", () => {
+  const helperNames = ["variantPreviewImages", "variantImageOverflow", "variantPreviewList"];
+  const helpers = helperNames.map((name) => {
+    const source = listingAutomationViewSource.match(new RegExp(`function ${name}\\(row\\) \\{[\\s\\S]*?\\n\\}`))?.[0];
+    assert.ok(source, `${name} must remain available to the SKU media cell`);
+    return source;
+  });
+  const preview = new Function("templateEditor", `${helpers.join("\n")}\nreturn { ${helperNames.join(", ")} };`)({ images: [] });
+  const images = Array.from({ length: 8 }, (_, index) => ({ url: `https://example.com/image-${index}.jpg`, previewUrl: `https://example.com/preview-${index}.jpg` }));
+  const row = { images: [null, ...images, {}] };
+  const original = structuredClone(row);
+  assert.deepEqual(preview.variantPreviewImages(row), [images[0], images[1], images[7]]);
+  assert.equal(preview.variantImageOverflow(row), 5);
+  assert.deepEqual(preview.variantPreviewList(row), images.map((image) => image.previewUrl));
+  assert.deepEqual(preview.variantPreviewImages({ images: images.slice(0, 3) }), images.slice(0, 3));
+  assert.deepEqual(preview.variantPreviewImages({ images: [] }), []);
+  assert.deepEqual(row, original, "thumbnail selection must not rewrite the authoritative image set or order");
+  assert.match(listingAutomationViewSource, /<el-table\s+:data="variantPageRows"/);
+  assert.match(listingAutomationViewSource, /v-for="\(image, imageIndex\) in variantPreviewImages\(row\)"[\s\S]*?@click\.stop="openVariantImageEditor\(row\)"[\s\S]*?<img[^>]+loading="lazy"/);
 });
 
 test("listing automation safe opens routed templates without full page blocking work", () => {

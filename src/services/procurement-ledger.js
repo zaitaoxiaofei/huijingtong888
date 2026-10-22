@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
 import { inferProcurementSources } from './procurement-source-inference.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryReferences, assertInventoryMember } from './inventory-tenant-scope.js';
+import { assertBusinessTaskPermission, restoreBusinessTaskSession } from './business-task-tenant.js';
 
 export const procurementLedgerSchema = [
   `CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
@@ -433,7 +434,7 @@ export function createProcurementLedgerService(hooks) {
       WHERE ${where} ORDER BY t.id ASC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     return { rows, total: Number(count?.total || 0), page, pageSize };
   }
-  async function apply(body, personId, existingConnection = null, tenantId = 'admin') {
+  async function apply(body, personId, existingConnection = null, tenantId = 'admin', access = 'procurement') {
     if (!existingConnection) await prepare();
     const productId = integer(body.product_id, '库存商品 ID');
     const requestKey = String(body.request_key || '');
@@ -445,11 +446,24 @@ export function createProcurementLedgerService(hooks) {
       const actor = await requirePerson(personId, connection);
       await (hooks.assertActor || assertInventoryMember)(scope, actor, run);
       await (hooks.assertReferences || assertInventoryReferences)(scope, body, run);
+      const checkActor = async (lock = false) => {
+        const permissions = access === 'inventory' ? ['inventory.write'] : ['procurement'];
+        if (['convert', 'substitute', 'damage', 'loss', 'stocktake', 'set_priority', 'receive_and_count'].includes(body.action_type)) permissions.push('inventory.write');
+        if (hooks.assertCurrentActor) return hooks.assertCurrentActor(scope, actor, run, permissions, lock);
+        const current = await restoreBusinessTaskSession(scope.isDefault ? 'admin' : scope.id, actor,
+          (sql, params) => run(lock ? `${sql} FOR SHARE` : sql, params));
+        for (const permission of permissions) assertBusinessTaskPermission(current, permission);
+      };
+      await checkActor();
       const scopedRequestKey = createHash('sha256').update(`tenant:${scope.id}:${requestKey}`).digest('hex');
       const extraSources = conversionSources(body, productId);
       const ids = [...new Set([productId, Number(body.target_product_id || 0), ...extraSources.map(row => row.product_id)].filter(Boolean))].sort((a, b) => a - b);
       for (const id of ids) if (hooks.assertProductAccess) await hooks.assertProductAccess(id, tenantId, run);
       for (const id of ids) await run('SELECT id FROM products WHERE id = ? FOR UPDATE', [id]);
+      // Entity lock waits can outlive a role, member or subscription change.
+      // A current locking read sees the latest authority even under REPEATABLE
+      // READ and keeps it stable until this transaction commits or rolls back.
+      await checkActor(true);
       const previous = await run('SELECT * FROM procurement_ledger_actions WHERE request_key = ? FOR UPDATE', [scopedRequestKey]);
       if (previous[0]) {
         if (Number(previous[0].product_id) !== productId || Number(previous[0].person_id) !== actor) throw new Error('操作标识重复，请刷新重试');

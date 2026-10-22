@@ -11,6 +11,8 @@ function receiver(quantity, note = '') {
   const receive = vm.runInNewContext(`${block};batchUpdateInboundRecordsMysql`, {
     ensureMysqlCutoverEnabled: () => {}, ensureInboundRecordTimestampSchemaMysql: async () => {},
     ensurePurchaseCostVersionSchemaMysql: async () => {},
+    resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
+    assertInventoryMember: async () => {}, assertInventoryRecord: async () => {},
     withMysqlTransaction: async callback => callback({}),
     mysqlConnectionQueryOne: async () => ({ quantity, note }),
     applyInboundRecordUpdateMysql: async (_connection, _id, payload) => { updates.push(payload); },

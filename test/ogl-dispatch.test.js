@@ -218,7 +218,12 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       const remote=official.get(Number(approved.batch.official_carriage_id));
       for(const [field,value] of [['numbers',['A7']],['containers',4],['method',78]]) {
         const previous=remote[field];remote[field]=value;mode='approved-rediscovery';
-        if(field==='method')await assert.rejects(service.discover(session(2),{date:'2026-10-23'}),/配送方式不一致/);
+        if(field==='method') {
+          const partial=await service.discover(session(2),{date:'2026-10-23'});
+          assert.equal(partial.partial,true);assert.equal(partial.failed,1);
+          assert.ok(partial.rows.every(row=>row.carriage_id!==String(approved.batch.official_carriage_id)),'The invalid application is not associated while independent good applications may continue');
+          assert.equal(partial.failures[0].status,502,'A mismatched official method is rejected for this application without aborting later applications');
+        }
         else {
           await service.discover(session(2),{date:'2026-10-23'});
           assert.equal((await service.detail(session(2),first.batch.id)).batch.official_status,'approved','Discovery metadata cannot itself imply a new physical handover');

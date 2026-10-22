@@ -20,7 +20,8 @@ function fixture(t) {
     { path: "/orders", component, meta: { title: "Orders" } },
     { path: "/procurement", component, meta: { title: "Procurement" } },
     { path: "/listing-automation", component, meta: { title: "Listing", tabKey: "workbench" } },
-    { path: "/record", component, meta: { title: "Record", tabKey: "fullPath" } }
+    { path: "/record", component, meta: { title: "Record", tabKey: "fullPath" } },
+    { path: "/membership", name: "membership", component, meta: { title: "Membership" } }
   ] });
   t.after(() => {
     disposePinia(pinia);
@@ -41,6 +42,22 @@ test("render identity follows the supplied route even while closing changes the 
   assert.equal(store.activeKey, "/orders");
   assert.equal(store.tabKeyForRoute(procurement), "/procurement");
   assert.equal(store.tabKeyForRoute(orders), "/orders");
+});
+
+test("retired membership tabs are pruned even when active or pinned without changing business queries", t => {
+  const { router, store } = fixture(t);
+  sessionStorage.setItem("ozon-admin-workspace-tabs", JSON.stringify({ activeKey: "/membership", tabs: [
+    { key: "/orders", route: { path: "/orders", fullPath: "/orders?shopId=42&search=retained" } },
+    { key: "/membership", pinned: true, closable: false, route: { path: "/membership", fullPath: "/membership?denied=activation", name: "membership" } }
+  ] }));
+  store.restoreTabs(router);
+  assert.equal(store.tabs.length, 1);
+  assert.equal(store.activeKey, "/orders");
+  assert.equal(store.activeTab.route.fullPath, "/orders?shopId=42&search=retained");
+  store.openRoute(router.resolve("/membership"));
+  assert.equal(store.tabs.length, 1);
+  const saved = JSON.parse(sessionStorage.getItem("ozon-admin-workspace-tabs"));
+  assert.equal(saved.tabs.some(tab => tab.route.path === "/membership"), false);
 });
 
 test("render keys preserve path, workbench and normalized full-path query identities", t => {

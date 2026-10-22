@@ -12,7 +12,7 @@ const panelSource = readFileSync(new URL("../frontend/orders/components/OglDispa
 
 const detail = (changes = {}) => ({ batch: { id: 71, batch_number: "OGL-TEST", containers_count: 3, official_status: "not_created", ...changes }, members: [], events: [], summary: {} });
 function fixture({ preview, action, bootstrap, props = {}, officialList, officialSnapshot, officialDetail, officialTracking, discoverOfficial, file, prompt } = {}) {
-  const calls = [], emitted = [], mounts = [], notices = [];
+  const calls = [], emitted = [], mounts = [], notices = [], successes = [];
   let session = "A";
   const service = {
     bootstrap: async () => bootstrap ? bootstrap() : ({ settings: { dispatch_shop_id: 8 }, shops: [{ id: 8, name: "Creation Shop" }], can_manage_settings: true }),
@@ -37,14 +37,14 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     ref: (value) => ({ value }), reactive: (value) => value,
     computed: (getter) => ({ get value() { return getter(); } }),
     onMounted: (callback) => mounts.push(callback), onBeforeUnmount() {}, watch() {},
-    ElMessage: { success() {}, info() {}, error: message => notices.push(message) },
+    ElMessage: { success: message => successes.push(message), info() {}, error: message => notices.push(message), warning: message => notices.push(message) },
     ElMessageBox: { prompt: async () => ({ value: prompt ?? "核实缺货未交出" }), confirm: async () => true },
     shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, orderStateKey, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
   });
   vm.runInContext(serviceSource, context);
   // The component deliberately consumes the injected transport, never a real API.
   vm.runInContext(panelSource, context);
-  return { context, calls, emitted, notices, mount: () => mounts[0](), get: (code) => vm.runInContext(code, context), rotate: () => { session = "B"; } };
+  return { context, calls, emitted, notices, successes, mount: () => mounts[0](), get: (code) => vm.runInContext(code, context), rotate: () => { session = "B"; } };
 }
 
 test("OGL preview sends the actual deduplicated cross-page selection and requires explicit rejection exclusion", async () => {
@@ -431,6 +431,21 @@ test("official refresh keeps saved rows visible and never reloads parent orders"
   const calls = f.calls.length;
   await f.get("returnOfficialList()");
   assert.equal(f.calls.length, calls, "returning to the list must not start network work");
+});
+
+test("partial application synchronization reloads successful snapshots and warns without claiming full success", async () => {
+  let reads = 0;
+  const f = fixture({ props: { mode: "official", orderIds: [] },
+    discoverOfficial: async () => ({ partial: true, discovered: 1, failed: 1, notice: "已同步 1 份申请，1 份暂未同步，请稍后重试；成功记录已保留" }),
+    officialSnapshot: async () => ({ rows: [{ carriage_id: ++reads === 1 ? "88001" : "88002" }], total: 1 }) });
+  await f.mount();
+  f.get("syncShopId.value = 8");
+  await f.get("refreshOfficialCarriages()");
+  assert.equal(f.get("officialRows.value[0].carriage_id"), "88002");
+  assert.match(f.notices[0], /1 份暂未同步.*成功记录已保留/);
+  assert.equal(f.successes.length, 0);
+  assert.equal(f.emitted.length, 0);
+  assert.equal(f.get("error.value"), "");
 });
 
 test("late refresh cannot replace newer snapshots or closed/rotated dialogs", async () => {

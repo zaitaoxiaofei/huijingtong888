@@ -466,6 +466,9 @@ export async function visionWithAiProvider(payload = {}) {
       throw visionProviderError(error, runtimeConfig);
     }
     await delay(1500);
+    // Each submitted attempt consumes its own quota and rechecks the current
+    // member's authority. Keep permission/quota errors outside provider wrapping.
+    await reserveTenantAiRequest("text");
     try {
       result = await callOpenAiCompatibleChat(runtimeConfig, callOptions);
     } catch (retryError) {

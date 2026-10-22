@@ -38,7 +38,12 @@ test("listing draft inserts keep explicit columns and values aligned", () => {
 
 test("collector and selection inserts keep explicit columns and values aligned", () => {
   assertInsertColumnValueAlignment([source], "ozon_plugin_collected_products", 1);
-  assertInsertColumnValueAlignment([mysqlCutoverSource], "products", 1);
+  // The tenant-aware product writer derives its placeholders from its column
+  // list; keep its runtime value-count guard and the actual bound values.
+  assert.match(mysqlCutoverSource, /if \(productColumns\.length !== productValues\.length\) throw new Error\("Product insert column\/value count mismatch"\)/);
+  assert.ok(mysqlCutoverSource.includes('INSERT INTO products (${productColumns.join(", ")})'));
+  assert.ok(mysqlCutoverSource.includes('VALUES (${productColumns.map(() => "?").join(", ")})'));
+  assert.match(mysqlCutoverSource, /VALUES \(\$\{productColumns[\s\S]*?\}\)\s*`, productValues\)/);
 });
 
 test("listing draft save fills missing price without overwriting variant price", () => {

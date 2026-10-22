@@ -8,6 +8,7 @@ import { membershipDisplay } from "../utils/account-membership";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import MembershipActivationForm from "../components/MembershipActivationForm.vue";
 
+const props = defineProps({ embedded: { type: Boolean, default: false } });
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
@@ -67,7 +68,7 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
 
 <template>
   <main class="membership-page">
-    <header class="membership-heading"><div><h1>会员中心</h1><p>{{ tenant?.name || "当前账号" }} · 查看会员时长与激活服务</p></div><el-button :loading="loading" @click="load">刷新</el-button></header>
+    <header class="membership-heading"><div><h1 v-if="!props.embedded">会员中心</h1><p>{{ tenant?.name || "当前账号" }} · 查看会员时长与激活服务</p></div><el-button :loading="loading" @click="load">刷新</el-button></header>
     <el-alert v-if="route.query.denied === 'activation'" title="此功能需要开通会员，激活后即可继续使用。" type="info" :closable="false" show-icon />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <div class="membership-grid">
@@ -77,7 +78,7 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
         <p v-if="status.active">服务已开通，可以按你的岗位权限使用业务功能。</p>
         <p v-else>基础工具可直接使用，业务功能需要有效会员。</p>
         <dl><div><dt>所属空间</dt><dd>{{ membership?.tenant_name || tenant?.name || "未加入企业" }}</dd></div><div><dt>到期时间（北京时间）</dt><dd>{{ expiryText }}</dd></div></dl>
-        <el-button v-if="status.active" type="primary" @click="router.push('/dashboard')">进入工作台</el-button>
+        <el-button v-if="status.active && !props.embedded" type="primary" @click="router.push('/dashboard')">进入工作台</el-button>
       </el-card>
       <el-card shadow="never" class="membership-activation">
         <template #header><strong>{{ status.active ? "续期会员" : "激活会员" }}</strong></template>
@@ -85,7 +86,7 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
         <el-empty v-else :image-size="64" :description="status.kind === 'permanent' ? '当前授权无需兑换时长' : status.kind === 'suspended' ? '会员已暂停，请联系平台管理员' : tenant ? '请联系企业负责人激活或续期会员' : '平台账号无需开通企业会员'" />
       </el-card>
     </div>
-    <el-card shadow="never" class="membership-tools">
+    <el-card v-if="!props.embedded" shadow="never" class="membership-tools">
       <template #header><strong>基础工具</strong></template>
       <p>无需激活即可使用，先算清成本，再开始运营。</p>
       <div><el-button @click="router.push('/tools/profit-calculator')">利润计算器</el-button><el-button @click="router.push('/tools/pricing')">定价工具</el-button></div>

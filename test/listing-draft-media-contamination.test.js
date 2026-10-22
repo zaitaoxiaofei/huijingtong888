@@ -53,7 +53,10 @@ test("draft source images never replace images explicitly owned by another varia
 
 test("draft-selected images override stale template snapshot images during publish", () => {
   const publishSource = source.match(/async function buildPublishTemplateFromListingDraft[\s\S]*?async function buildCanonicalDraftTemplatePayload/)?.[0] || "";
-  assert.match(publishSource, /const finalImages = draftImages\.length \? draftImages : images;/);
+  assert.equal([...publishSource.matchAll(/const finalImages = normalizeImages\(draft\.effective_images \|\| \[\]\);/g)].length, 2,
+    'both saved-snapshot and category-template publishing must consume the canonical draft images');
+  assert.match(publishSource, /editable_payload: \{[\s\S]*?images: finalImages/);
+  assert.doesNotMatch(publishSource, /const finalImages = draftImages\.length \? draftImages : images;/);
 });
 
 test("draft reads expose one canonical effective image set with variant ownership", () => {

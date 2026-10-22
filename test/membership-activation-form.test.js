@@ -8,8 +8,8 @@ const source = readFileSync(new URL("../frontend/admin/components/MembershipActi
   .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import .*;\r?\n/gm, "");
 function fixture(t) {
   const calls = [], messages = [], events = [], emitted = [], listeners = new Map(), unmount = [];
-  const auth = reactive({ user: { id: 1, tenant: { id: 10 } }, async verifySession() {
-    auth.user = { id: 1, tenant: { id: 10, access_allowed: true } };
+  const auth = reactive({ user: { id: 1, tenant: { id: 10, role: "owner" } }, async verifySession() {
+    auth.user = { id: 1, tenant: { id: 10, role: "owner", access_allowed: true } };
     return auth.user;
   } });
   let resolve, reject, scope = "a";
@@ -24,7 +24,7 @@ function fixture(t) {
   const effects = effectScope();
   effects.run(() => vm.runInContext(`${source}\nglobalThis.form = { code, errorText, saving, submit };`, context));
   t.after(() => { unmount.forEach(fn => fn()); effects.stop(); });
-  return { form: context.form, auth, calls, messages, events, emitted, resolve, reject,
+  return { form: context.form, auth, calls, messages, events, emitted, resolve, reject, close: () => unmount.forEach(fn => fn()),
     rotate() { scope = "b"; listeners.get("erp:auth-scope-changed")?.(); } };
 }
 
@@ -44,6 +44,35 @@ test("activation validates empty input and submits only once while awaiting rede
   assert.equal(f.messages.length, 1);
   assert.deepEqual(f.events, ["erp:membership-updated"]);
   assert.equal(f.emitted[0][0], "activated");
+});
+
+test("closing the membership dialog clears the code and rejects a late redemption reply", async t => {
+  const f = fixture(t);
+  f.form.code.value = "BD-FIXTURE";
+  const pending = f.form.submit();
+  f.close();
+  assert.equal(f.form.code.value, "");
+  f.resolve({ ok: true });
+  await pending;
+  assert.equal(f.messages.length, 0);
+  assert.equal(f.events.length, 0);
+  assert.equal(f.emitted.length, 0);
+});
+
+test("same-tenant owner revocation clears input immediately and prevents both stale success and new redemption", async t => {
+  const f = fixture(t);
+  f.form.code.value = "BD-FIXTURE";
+  const pending = f.form.submit();
+  f.auth.user.tenant.role = "member";
+  assert.equal(f.form.code.value, "");
+  f.resolve({ ok: true });
+  await pending;
+  f.form.code.value = "BD-SECOND";
+  await f.form.submit();
+  assert.deepEqual(f.calls, ["BD-FIXTURE"]);
+  assert.equal(f.form.code.value, "");
+  assert.equal(f.messages.length, 0);
+  assert.equal(f.emitted.length, 0);
 });
 
 test("late redemption cannot announce success in a different authentication scope", async t => {

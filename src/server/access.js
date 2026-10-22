@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { config } from "../config.js";
 
 const attempts = new Map();
@@ -30,8 +31,12 @@ export function parseCookies(req) {
 }
 
 export function getClientIp(req) {
-  const forwarded = String(req.headers["cf-connecting-ip"] || req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  return forwarded || req.socket.remoteAddress || "";
+  const remote = String(req.socket?.remoteAddress || "").replace(/^::ffff:(?=\d+\.)/i, "");
+  const trusted = isLoopbackAddress(remote) || String(config.authTrustedProxyIps || "").split(",").map(value => value.trim()).filter(value => isIP(value)).includes(remote);
+  // Our nginx overwrites X-Real-IP. Its X-Forwarded-For may retain an untrusted
+  // leftmost value, and a CF header alone does not prove Cloudflare provenance.
+  const real = String(req.headers["x-real-ip"] || "").trim();
+  return trusted && isIP(real) ? real : remote;
 }
 
 function isLoopbackAddress(address) {
@@ -58,6 +63,15 @@ export function consumeRateLimit(key, limit = AUTH_RATE_LIMIT_MAX_ATTEMPTS, wind
 
 export function clearRateLimit(key) {
   attempts.delete(key);
+}
+
+// Release only this successful request's reservation; preserve earlier failed
+// attempts and never decrement a newer window after a slow authentication.
+export function releaseRateLimit(key, resetAt) {
+  const record = attempts.get(key);
+  if (!record || record.resetAt !== resetAt) return;
+  record.count -= 1;
+  if (record.count <= 0) attempts.delete(key);
 }
 
 function safeEqualText(left, right) {

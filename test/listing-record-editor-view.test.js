@@ -671,7 +671,7 @@ test("listing media publish path optimizes images and verifies complete download
   assert.match(listingAutomationServiceSource, /async function prewarmPublishMediaUrls/);
   assert.match(listingAutomationServiceSource, /verifyRemoteImagesReadyForOzon\(imageUrls/);
   assert.match(listingAutomationServiceSource, /mapWithConcurrency\(otherUrls, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY/);
-  assert.match(listingAutomationServiceSource, /const prewarm = await prewarmPublishMediaUrls\(mediaUrls\)/);
+  assert.match(listingAutomationServiceSource, /const prewarm = await prewarmPublishMediaUrls\(mediaUrls, mediaOptions\)/);
 });
 
 test("Ozon seller media upload jobs are claimable by the collector plugin", () => {

@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "../../stores/auth.js";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Edit, MagicStick, Plus, Refresh, Search, VideoCamera, View } from "@element-plus/icons-vue";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { prepareBrowserWatermarkJobs } from "../../utils/browser-watermark-batch";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
@@ -25,6 +25,7 @@ import {
 } from "../../utils/product-development-meta";
 
 const loading = ref(false);
+const draftBindingsLoading = ref(false);
 const refreshingId = ref(null);
 const detailLoadingId = ref(null);
 const retrying = ref(false);
@@ -126,6 +127,17 @@ const state = reactive({
   pageSize: 20,
   total: 0
 });
+
+watch(() => [currentPersonId.value, authStore.user?.tenant?.id, authStore.user?.tenant?.role, authStore.user?.tenant?.access_allowed, JSON.stringify(authStore.user?.roles || [])], () => {
+  recordsRequestSeq += 1;
+  draftListCache.clear();
+  publishTaskListCache.clear();
+  state.rows = [];
+  state.total = 0;
+  selectedRows.value = [];
+  loading.value = false;
+  draftBindingsLoading.value = false;
+}, { flush: "sync" });
 
 const drawer = reactive({
   visible: false,
@@ -297,6 +309,9 @@ const summary = computed(() => {
 
 async function loadRecords() {
   const requestSeq = ++recordsRequestSeq;
+  const requestScope = currentApiCacheScope();
+  const current = () => requestSeq === recordsRequestSeq && requestScope === currentApiCacheScope();
+  draftBindingsLoading.value = false;
   const endpoint = isPublishMode.value ? "/api/listing/publish-records" : "/api/listing/drafts";
   const params = new URLSearchParams({
     paged: "1",
@@ -343,21 +358,31 @@ async function loadRecords() {
     params.set("dateTimeZone", "Asia/Shanghai");
   }
   const requestUrl = `${endpoint}?${params.toString()}`;
-  const cacheKey = requestUrl;
+  const cacheKey = `${requestScope}:${requestUrl}`;
   const cached = cacheKey ? draftListCache.get(cacheKey) : null;
   const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < DRAFT_LIST_CACHE_TTL_MS);
   if (hasFreshCache) applyDraftListResult(cached.result);
   loading.value = !hasFreshCache;
   try {
     const result = await apiClient.get(requestUrl, { noCache: true });
-    if (requestSeq !== recordsRequestSeq) return;
+    if (!current()) return;
     setBoundedListCache(draftListCache, cacheKey, result);
     applyDraftListResult(result);
+    // The page is usable as soon as its rows arrive. Secondary bindings must
+    // not keep the whole table covered by the loading mask.
+    loading.value = false;
     if (isDraftMode.value && state.rows.length) {
       const ids = state.rows.filter((row) => row.row_type === "draft").map((row) => row.id);
       if (ids.length) {
-        const bindings = await apiClient.get(`/api/listing/draft-bindings?ids=${ids.join(",")}`, { noCache: true });
-        if (requestSeq !== recordsRequestSeq) return;
+        draftBindingsLoading.value = true;
+        let bindings;
+        try {
+          bindings = await apiClient.get(`/api/listing/draft-bindings?ids=${ids.join(",")}`, { noCache: true });
+        } catch {
+          if (current()) ElMessage.warning("草稿已加载，车型与任务关联暂未更新，请刷新列表重试。");
+          return;
+        }
+        if (!current()) return;
         const byDraft = new Map(bindings.map((item) => [Number(item.draft_id), item]));
         for (const row of state.rows) {
           const binding = byDraft.get(Number(row.id));
@@ -374,7 +399,7 @@ async function loadRecords() {
       }
     }
   } finally {
-    if (requestSeq === recordsRequestSeq) loading.value = false;
+    if (current()) { loading.value = false; draftBindingsLoading.value = false; }
   }
 }
 
@@ -1946,7 +1971,10 @@ onMounted(async () => {
   }
 });
 
-onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBatchBrowserPublishClose));
+onBeforeUnmount(() => {
+  recordsRequestSeq += 1;
+  window.removeEventListener("beforeunload", guardBatchBrowserPublishClose);
+});
 
 watch(pageMode, () => {
   resetModeFiltersFromRoute();
@@ -2052,6 +2080,7 @@ watch(() => route.query.taskId, () => {
         <el-button v-if="isDraftMode" link type="primary" @click="advancedFiltersVisible = !advancedFiltersVisible">{{ advancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ advancedFilterCount ? ` (${advancedFilterCount})` : "" }}</el-button>
         <el-button v-if="isPublishMode" link type="primary" @click="publishAdvancedFiltersVisible = !publishAdvancedFiltersVisible">{{ publishAdvancedFiltersVisible ? "收起筛选" : "更多筛选" }}{{ state.quality !== 'all' || state.updatedRange?.length === 2 ? ' · 已设置' : '' }}</el-button>
         <span class="selection-count">已选 {{ selectedRows.length }} / 当前 {{ filteredRows.length }}</span>
+        <span v-if="isDraftMode && draftBindingsLoading" class="selection-count" aria-live="polite">关联信息加载中…</span>
         <el-button class="erp-btn erp-btn-primary" type="primary" :icon="Search" @click="searchRecords">查询</el-button>
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="refreshToolbarRecords">刷新列表</el-button>
         <el-button v-if="isPublishMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedPublishRows.length" @click="batchRefreshRecords">批量同步状态 / SKU</el-button>

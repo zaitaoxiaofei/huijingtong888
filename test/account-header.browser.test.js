@@ -50,7 +50,8 @@ test("account header supports avatars, Chinese logout and real membership states
   const browser = await chromium.launch({ executablePath, headless: true });
   const expiry = new Date(Date.now() + 5 * 86400000).toISOString();
   const activeUser = { id: 81, name: "小单同学", username: "header-fixture", roles: ["operator"], tenant: { id: 18, name: "演示企业", role: "owner", status: "active", subscription_status: "active", subscription_expires_at: expiry, access_allowed: true } };
-  const errors = [], calls = [];
+    const errors = [], calls = [];
+    let redeemed = false;
   try {
     const page = await browser.newPage({ viewport: { width: 1480, height: 900 } });
     page.setDefaultTimeout(10000);
@@ -65,7 +66,8 @@ test("account header supports avatars, Chinese logout and real membership states
         calls.push({ path: url.pathname, method: route.request().method(), body: route.request().postDataJSON() });
         let body;
         if (url.pathname === "/api/auth/me") body = activeUser;
-        else if (url.pathname === "/api/auth/activate") body = { ok: true, membership: { tenant_id: 18, status: "active", expires_at: expiry, access_allowed: true } };
+        else if (url.pathname === "/api/auth/membership") body = { tenant_id: 18, status: redeemed ? "active" : "unactivated", expires_at: redeemed ? expiry : null, access_allowed: redeemed, can_activate: true };
+        else if (url.pathname === "/api/auth/activate") { redeemed = true; body = { ok: true, membership: { tenant_id: 18, status: "active", expires_at: expiry, access_allowed: true } }; }
         else if (url.pathname === "/api/auth/logout") body = { ok: true };
         else if (url.pathname === "/api/system-notifications") body = { rows: [], unread: 0 };
         else throw new Error(`Unexpected API ${url.pathname}`);
@@ -111,10 +113,12 @@ test("account header supports avatars, Chinese logout and real membership states
     await page.keyboard.press("Escape");
     await profile.waitFor({ state: "hidden" });
     await page.locator(".erp-membership-chip").click();
-    const activation = page.getByRole("dialog", { name: "激活 / 续期会员", exact: true });
+    const activation = page.getByRole("dialog", { name: "会员中心", exact: true });
     await activation.waitFor();
     await activation.getByPlaceholder("请输入会员激活码").fill(" BD-FIXTURE-CODE ");
     await activation.getByRole("button", { name: "激活会员", exact: true }).click();
+    await activation.getByRole("heading", { name: /会员剩余/ }).waitFor();
+    await page.keyboard.press("Escape");
     await activation.waitFor({ state: "hidden" });
     assert.deepEqual(calls.find(call => call.path === "/api/auth/activate").body, { activation_code: "BD-FIXTURE-CODE" });
     assert.match(await page.locator(".erp-membership-chip").innerText(), /会员剩余 [45] 天/);

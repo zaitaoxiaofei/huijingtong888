@@ -15,7 +15,8 @@ test("draft box restores a fresh lightweight snapshot before background refresh"
 
 test("draft box prevents stale requests and invalidates snapshots for destructive refreshes", () => {
   assert.match(source, /const requestSeq = \+\+recordsRequestSeq/);
-  assert.match(source, /if \(requestSeq !== recordsRequestSeq\) return/);
+  assert.match(source, /const current = \(\) => requestSeq === recordsRequestSeq && requestScope === currentApiCacheScope\(\)/);
+  assert.match(source, /if \(!current\(\)\) return/);
   assert.match(source, /async function reloadRecordsAfterDelete[\s\S]*?draftListCache\.clear\(\)/);
   assert.match(source, /async function refreshToolbarRecords[\s\S]*?draftListCache\.clear\(\)/);
 });
