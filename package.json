@@ -113,7 +113,7 @@
     "pdf-lib": "^1.17.1",
     "pinia": "^3.0.3",
     "playwright-core": "^1.55.0",
-    "sharp": "^0.34.5"
+    "sharp": "0.35.5"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.7",
