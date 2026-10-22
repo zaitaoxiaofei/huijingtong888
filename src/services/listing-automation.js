@@ -9,6 +9,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { shanghaiDateKey } from "../shanghai-time.js";
+import { requestPublicImage, requestPublicMedia } from "../http/public-image-request.js";
 import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
@@ -94,6 +95,7 @@ const LISTING_WATERMARK_CONCURRENCY = 1;
 let activeListingWatermarkJobs = 0;
 const pendingListingWatermarkJobs = [];
 const pendingListingMediaUploads = [];
+const listingPublishExecutionGuards = new WeakMap();
 let activeListingMediaUploads = 0;
 // Batch watermarking handles many unrelated large images. Keeping Sharp's
 // decoded pixel cache across requests makes RSS grow until the service is
@@ -3660,6 +3662,8 @@ export async function uploadTeamAttachment(req, { purpose = "team" } = {}) {
 }
 
 export async function watermarkListingMedia(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   return withListingWatermarkSlot(() => processListingMediaWatermark(body, session));
 }
 
@@ -3677,6 +3681,8 @@ async function withListingWatermarkSlot(worker) {
 }
 
 async function processListingMediaWatermark(body = {}, session = null) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
   const shopId = Number(body.shop_id || body.shopId || 0);
   const images = normalizeArray(body.images || body.urls || body.image_urls)
@@ -3687,7 +3693,7 @@ async function processListingMediaWatermark(body = {}, session = null) {
     }))
     .filter((item) => item.url);
   if (!shopId) {
-    const error = new Error("璇烽€夋嫨瑕佷娇鐢ㄦ按鍗扮殑搴楅摵");
+    const error = new Error("请选择用于水印的店铺");
     error.status = 400;
     throw error;
   }
@@ -3696,12 +3702,19 @@ async function processListingMediaWatermark(body = {}, session = null) {
     error.status = 400;
     throw error;
   }
-  const shop = await listingWatermarkShop(shopId);
+  const shop = await listingWatermarkShop(shopId, session);
+  const assertAccess = async () => {
+    session = await authorizeBusinessTaskSession(session);
+    assertBusinessTaskPermission(session, "operations");
+    await listingWatermarkShop(shopId, session);
+  };
   const watermarkPath = await resolveListingShopWatermarkPath(shop);
   const options = listingShopWatermarkOptions(shop);
   const results = [];
   for (const [index, image] of images.entries()) {
-    const source = await readListingImageBuffer(image.url);
+    await assertAccess();
+    const source = await readListingImageBuffer(image.url, session, assertAccess);
+    await assertAccess();
     const output = await applyListingWatermark(source.buffer, watermarkPath, options);
     const optimizedMedia = await optimizeListingImageForPublish(output, {
       contentType: "image/png",
@@ -3713,10 +3726,12 @@ async function processListingMediaWatermark(body = {}, session = null) {
     const mediaContentType = optimizedMedia.contentType || "image/png";
     const originalName = sanitizeListingMediaFilename(image.name || `watermarked-${index + 1}.png`).replace(/\.[^.]+$/, "");
     const storedName = `${Date.now()}-${crypto.randomUUID()}-watermarked${mediaExtension}`;
+    await assertAccess();
     const storedMedia = await writeListingMediaFile(storedName, mediaBuffer, mediaContentType);
     const filePath = storedMedia.localPath;
     const url = storedMedia.previewUrl;
     const publishUrl = storedMedia.publishUrl || buildListingMediaPublishUrl(url);
+    await assertAccess();
     const asset = await registerListingMediaAsset({
       source_module: body.source_module || body.sourceModule || "listing_watermark",
       source_id: body.source_id || body.sourceId || "",
@@ -3744,6 +3759,7 @@ async function processListingMediaWatermark(body = {}, session = null) {
         originalBytes: optimizedMedia.originalBytes || output.length
       }
     }, session);
+    await assertAccess();
     results.push({
       url: publishUrl || url,
       localUrl: url,
@@ -3993,7 +4009,7 @@ async function materializeShopTailImageForPublish(value = "", shop = {}, session
   if (!localPath) {
     const normalized = normalizeShopTailImageUrl(raw);
     if (!normalized) return "";
-    if (/^https:\/\//i.test(normalized) && !isLocalImportMedia(normalized) && await isReachableRemoteMediaUrl(normalized)) {
+    if (/^https:\/\//i.test(normalized) && !isLocalImportMedia(normalized) && await isReachableRemoteMediaUrl(normalized, { beforeRequest: () => assertListingPublishExecution(shop) })) {
       return normalized;
     }
     const error = new Error(`Tail image is not publicly reachable: ${normalized}`);
@@ -5336,19 +5352,27 @@ async function fetchLocalizedOzonAttributeValues(shop, options = {}) {
   const limit = Number(options.limit || (keyword ? 80 : 1000));
   const displayLanguage = String(options.language || "ZH_HANS").trim() || "ZH_HANS";
   const baseLanguage = String(options.baseLanguage || "DEFAULT").trim() || "DEFAULT";
-  const fetchValues = (language) => keyword
-    ? searchOzonCategoryAttributeValues(shop, { descriptionCategoryId, typeId, attributeId, value: keyword, language, limit })
-    : fetchOzonCategoryAttributeValues(shop, { descriptionCategoryId, typeId, attributeId, language, limit });
+  const fetchValues = async (language) => {
+    await assertListingPublishExecution(shop);
+    const values = keyword
+      ? await searchOzonCategoryAttributeValues(shop, { descriptionCategoryId, typeId, attributeId, value: keyword, language, limit, ...listingPublishRequestOptions(shop) })
+      : await fetchOzonCategoryAttributeValues(shop, { descriptionCategoryId, typeId, attributeId, language, limit, ...listingPublishRequestOptions(shop) });
+    await assertListingPublishExecution(shop);
+    return values;
+  };
   const baseValues = await fetchValues(baseLanguage);
   let displayValues = displayLanguage === baseLanguage ? baseValues : await fetchValues(displayLanguage).catch(() => []);
   if (keyword && displayLanguage !== baseLanguage && !hasDictionaryValueIdCoverage(baseValues, displayValues)) {
+    await assertListingPublishExecution(shop);
     displayValues = await fetchOzonCategoryAttributeValues(shop, {
       descriptionCategoryId,
       typeId,
       attributeId,
       language: displayLanguage,
-      limit: Math.max(limit, 1000)
+      limit: Math.max(limit, 1000),
+      ...listingPublishRequestOptions(shop)
     }).catch(() => displayValues);
+    await assertListingPublishExecution(shop);
   }
   return mergeLocalizedOzonAttributeValues(baseValues, displayValues, attributeId);
 }
@@ -5578,14 +5602,16 @@ async function enqueueOzonSellerMediaUploadForListingAsset(asset = {}, session =
   return result;
 }
 
-async function listingWatermarkShop(shopId) {
+async function listingWatermarkShop(shopId, session) {
+  const tenantId = listingTenantId(session);
   const shop = await row(`
     SELECT id, name, watermark_path, watermark_name,
       watermark_position, watermark_x_percent, watermark_y_percent, watermark_scale_percent, watermark_opacity_percent
     FROM shops
     WHERE id = ? AND status <> 'deleted'
+      AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})
     LIMIT 1
-  `, [Number(shopId)]);
+  `, [Number(shopId), Number(session?.tenant?.id)]);
   if (!shop) {
     const error = new Error("Shop not found");
     error.status = 404;
@@ -5619,18 +5645,27 @@ function listingShopWatermarkOptions(shop = {}) {
   };
 }
 
-async function readListingImageBuffer(url = "") {
+async function readListingImageBuffer(url = "", session = null, beforeRequest) {
   const value = String(url || "").trim();
   if (!value) throw new Error("鍥剧墖 URL 涓虹┖");
   const localPath = resolveListingMediaLocalPath(value);
-  if (localPath) return { buffer: await fs.readFile(localPath), source: localPath };
+  if (localPath) {
+    if (beforeRequest) await beforeRequest();
+    const buffer = await fs.readFile(localPath);
+    if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error("Watermark image is empty or exceeds 30MB");
+    return { buffer, source: localPath };
+  }
+  const privateFile = await resolveLocalAiTaskMedia(value, session) || await resolveLocalImageCropperMedia(value, session);
+  if (privateFile) {
+    if (beforeRequest) await beforeRequest();
+    const buffer = await fs.readFile(privateFile.filePath);
+    if (!buffer.length || buffer.length > 30 * 1024 * 1024) throw new Error("Watermark image is empty or exceeds 30MB");
+    return { buffer, source: privateFile.filePath };
+  }
   if (/^https?:\/\//i.test(value)) {
-    const response = await fetch(value);
-    if (!response.ok) throw new Error(`涓嬭浇鍥剧墖澶辫触锛?{response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (!buffer.length) throw new Error("涓嬭浇鍒扮殑鍥剧墖涓虹┖");
-    if (buffer.length > 30 * 1024 * 1024) throw new Error("鍥剧墖瓒呰繃 30MB锛屾棤娉曟壒閲忓姞姘村嵃");
-    return { buffer, source: value };
+    const response = await requestPublicImage(value, { maxBytes: 30 * 1024 * 1024, signal: AbortSignal.timeout(20000), beforeRequest });
+    if (!response?.buffer?.length) throw new Error("Watermark image must be a nonempty public image under 30MB");
+    return { buffer: response.buffer, source: value };
   }
   throw new Error("浠呮敮鎸?listing-media 鏈湴鍥剧墖鎴栧叕缃戝浘鐗?URL");
 }
@@ -6229,6 +6264,12 @@ async function materializeListingMediaUrlRecord(url = "", metadata = {}, session
 }
 
 async function readListingMediaBuffer(url = "", session = null) {
+  session = session || currentAiTenantSession();
+  const assertAccess = async () => {
+    if (session) assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
+    if (session) await assertListingPublishExecution(session);
+  };
+  await assertAccess();
   const value = String(url || "").trim();
   if (!value) throw new Error("media URL is empty");
   const localPath = resolveListingMediaLocalPath(value);
@@ -6260,24 +6301,12 @@ async function readListingMediaBuffer(url = "", session = null) {
     };
   }
   const fetchableUrl = normalizeListingMediaSourceUrl(value);
-  if (fetchableUrl) {
-    const response = await fetch(fetchableUrl);
-    if (!response.ok) throw new Error(`download media failed: ${response.status}`);
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (!buffer.length) throw new Error("downloaded media is empty");
-    if (buffer.length > LISTING_MEDIA_MAX_BYTES) throw new Error("media exceeds listing upload size limit");
-    const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim();
-    return {
-      buffer,
-      source: fetchableUrl,
-      filename: path.basename(new URL(fetchableUrl).pathname),
-      contentType: contentType || mimeTypeForListingMediaExtension(path.extname(new URL(fetchableUrl).pathname))
-    };
-  }
+  if (fetchableUrl) throw new Error("Private task media must be resolved through its authenticated owner");
   if (!/^https?:\/\//i.test(value)) throw new Error("media URL must be local listing media or http(s)");
-  const response = await fetch(value);
-  if (!response.ok) throw new Error(`download media failed: ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const response = await requestPublicMedia(value, { maxBytes: LISTING_MEDIA_MAX_BYTES, signal: AbortSignal.timeout(30000), beforeRequest: assertAccess });
+  await assertAccess();
+  if (!response?.ok) throw new Error(`download media failed or exceeds size limit: ${response?.status || 0}`);
+  const buffer = response.buffer;
   if (!buffer.length) throw new Error("downloaded media is empty");
   if (buffer.length > LISTING_MEDIA_MAX_BYTES) throw new Error("media exceeds listing upload size limit");
   const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim();
@@ -6913,7 +6942,7 @@ async function buildListingCategoryPublishDiagnostics(template = {}, context = {
   };
 }
 
-export async function validateListingTemplatePublishForShop(body = {}, shopId = 0, session = null) {
+export async function validateListingTemplatePublishForShop(body = {}, shopId = 0, session = null, executionShop = null) {
   session = await authorizeBusinessTaskSession(session);
   const tenantId = listingTenantId(session);
   const validation = await validateListingTemplatePublish(body, session);
@@ -6924,7 +6953,11 @@ export async function validateListingTemplatePublishForShop(body = {}, shopId = 
     [targetShopId, Number(session.tenant.id)]
   );
   if (!shop) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404, statusCode: 404 });
+  const executionGuard = executionShop && listingPublishExecutionGuards.get(executionShop);
+  if (executionGuard) listingPublishExecutionGuards.set(shop, executionGuard);
+  await assertListingPublishExecution(shop);
   const payload = await applyShopPublishDefaults(validation.payload, shop).catch(() => validation.payload);
+  await assertListingPublishExecution(shop);
   const updatedCategoryHealth = validation.category_health
     ? await buildListingCategoryPublishDiagnostics(body.template || body, { payload, session }).catch(() => validation.category_health)
     : null;
@@ -6947,10 +6980,12 @@ export async function validateListingTemplatePublishForShop(body = {}, shopId = 
     return ![...resolvedMissingNames].some((name) => text === missingRequiredAttributeMessage({ name }));
   });
   if (updatedCategoryHealth?.errors?.length) errors.push(...updatedCategoryHealth.errors);
-  const publishLimit = await fetchOzonProductInfoLimit(shop).catch((error) => ({
+  await assertListingPublishExecution(shop);
+  const publishLimit = await fetchOzonProductInfoLimit(shop, listingPublishRequestOptions(shop)).catch((error) => ({
     ok: false,
     error: error?.message || String(error)
   }));
+  await assertListingPublishExecution(shop);
   const limitWarnings = publishLimit?.ok === false
     ? [`Ozon 商品额度检查失败：${localizePublishMessage(publishLimit.error)}`]
     : ozonProductLimitWarnings(publishLimit, normalizeArray(payload.items).length);
@@ -7172,16 +7207,23 @@ async function buildShopPublishPayloadForOzon({
   updateExisting = false,
   sourceProductId = 0
 } = {}) {
+  const guard = listingPublishExecutionGuards.get(shop);
+  if (guard && session) listingPublishExecutionGuards.set(session, guard);
+  await assertListingPublishExecution(shop);
   const textVariantPayload = await applyShopTextVariantToPayload(basePayload, shop, textVariantPolicy);
+  await assertListingPublishExecution(shop);
   const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
+  await assertListingPublishExecution(shop);
   const reusePreparedMedia = shouldReusePreparedShopWatermarkMedia(body, shop);
   const watermarkedPayload = reusePreparedMedia
     ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
     : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
+  await assertListingPublishExecution(shop);
   // Asset-variant payloads already contain the generated per-shop tail image.
   // Re-appending the configured template can duplicate it and can reintroduce a stale URL.
   const skipConfiguredTail = reusePreparedMedia && !body.skip_publish_watermark && !body.skipPublishWatermark;
   const tailImageUrl = skipConfiguredTail ? "" : await resolveShopTailImageUrl(shop, session);
+  await assertListingPublishExecution(shop);
   const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
   let shopPayload = await prepareSafeShopOfferIds(tailApplied.payload, {
     shop,
@@ -7195,6 +7237,7 @@ async function buildShopPublishPayloadForOzon({
     sourceModule: "listing_publish",
     sourceId: String(sourceRecordId || sourceProductId || "")
   });
+  await assertListingPublishExecution(shop);
   shopPayload = mediaRepair.payload;
   return {
     textVariantPayload,
@@ -7216,6 +7259,7 @@ export async function repairOzonPublishPayloadMedia(payload = {}, options = {}) 
   }
   const urlMap = new Map();
   for (const url of urls) {
+    if (options.shop) await assertListingPublishExecution(options.shop);
     const repaired = await materializeListingMediaUrl(url, {
       source_module: options.sourceModule || options.source_module || "listing_publish_media_repair",
       source_id: options.sourceId || options.source_id || "",
@@ -7223,6 +7267,7 @@ export async function repairOzonPublishPayloadMedia(payload = {}, options = {}) 
       shop_id: options.shop?.id || options.shopId || options.shop_id || "",
       role: options.role || "publish_media_repair"
     }, options.session || null, urlMap).catch(() => "");
+    if (options.shop) await assertListingPublishExecution(options.shop);
     if (repaired && repaired !== url && isPublishableMediaUrlForOzon(repaired)) {
       replacements.set(url, repaired);
     } else {
@@ -7359,6 +7404,7 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
   const maxAttempts = 3;
   let jobs = [];
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (options.shop) await assertListingPublishExecution(options.shop);
     candidates = collectOzonSellerMediaPublishCandidates(workingPayload);
     const result = await createOzonSellerMediaUploadJobs({
       sourceModule: options.sourceModule || options.source_module || "listing_publish_ozon_media",
@@ -7372,6 +7418,7 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
         }
       }))
     }, options.session || null);
+    if (options.shop) await assertListingPublishExecution(options.shop);
     const initialJobs = normalizeArray(result.jobs);
     const mediaJobIds = initialJobs
       .map((job) => String(job.mediaJobId || job.media_job_id || job.id || "").trim())
@@ -7382,6 +7429,7 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
         pollIntervalMs: 1500,
         maxPollIntervalMs: 5000,
         loadJobs: async () => {
+          if (options.shop) await assertListingPublishExecution(options.shop);
           if (!mediaJobIds.length) return [];
           const tenantId = listingTenantId(options.session || null);
           const rows = await all(`
@@ -7393,10 +7441,11 @@ async function prepareOzonSellerMediaForPublishPayload(payload = {}, options = {
           return rows.map(normalizeOzonSellerMediaJobRow);
         }
       });
+      if (options.shop) await assertListingPublishExecution(options.shop);
       break;
     } catch (error) {
       if (attempt >= maxAttempts || !isRetryableOzonSellerMediaError(error)) throw error;
-      workingPayload = await tryRepairPayloadListingMediaReachability(workingPayload);
+      workingPayload = await tryRepairPayloadListingMediaReachability(workingPayload, { beforeRequest: () => assertListingPublishExecution(options.shop || options.session) });
       await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
     }
   }
@@ -7525,14 +7574,17 @@ function assertPublishPayloadHasOnlyPublicMedia(payload = {}, validation = null)
   throw error;
 }
 
-async function tryRepairPayloadListingMediaReachability(payload = {}) {
+async function tryRepairPayloadListingMediaReachability(payload = {}, options = {}) {
   const replacements = new Map();
   const remoteUrls = collectPublishPayloadMediaUrls(payload)
     .filter((url) => /^https?:\/\//i.test(url))
     .filter(isListingMediaPublicUrl);
   for (const url of remoteUrls) {
-    if (await isReachableRemoteMediaUrl(url).catch(() => false)) continue;
+    if (options.beforeRequest) await options.beforeRequest();
+    if (await isReachableRemoteMediaUrl(url, options).catch(() => false)) continue;
+    if (options.beforeRequest) await options.beforeRequest();
     const repairedUrl = await syncUnreachableListingMediaAssetUrl(url);
+    if (options.beforeRequest) await options.beforeRequest();
     if (repairedUrl && repairedUrl !== url) replacements.set(url, repairedUrl);
   }
   if (!replacements.size) return payload;
@@ -7633,8 +7685,8 @@ async function syncUnreachableListingMediaAssetUrl(url = "") {
   return syncedUrl;
 }
 
-async function assertPublishPayloadMediaReachable(payload = {}, validation = null) {
-  const repairedPayload = await tryRepairPayloadListingMediaReachability(payload);
+async function assertPublishPayloadMediaReachable(payload = {}, validation = null, options = {}) {
+  const repairedPayload = await tryRepairPayloadListingMediaReachability(payload, options);
   if (repairedPayload !== payload) {
     payload.items = normalizeArray(repairedPayload.items);
   }
@@ -7645,11 +7697,11 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
     ...normalizeArray(item.complex_attributes).flatMap((group) => normalizeArray(group.attributes || group)
       .flatMap((attr) => normalizeArray(attr.values).map((value) => value.value)))
   ]);
-  const prewarm = await prewarmPublishMediaUrls(mediaUrls);
+  const prewarm = await prewarmPublishMediaUrls(mediaUrls, options);
   if (prewarm.total) {
     if (validation) validation.media_prewarm_summary = prewarm;
   }
-  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls);
+  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls, options);
   const unavailableRemoteMedia = uniqueStringValues([
     ...normalizeArray(prewarm.failed_urls),
     ...unreachableRemoteMedia
@@ -8121,6 +8173,8 @@ async function existingListingPublishTaskByRequestId(requestId = "", session = n
 }
 
 async function createListingPublishTask({ draftIds = [], shops = [], body = {}, session = null } = {}) {
+  session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   const tenantId = listingTenantId(session);
   const requestId = cleanText(body.request_id || body.requestId || "", 128);
   const existingTask = await existingListingPublishTaskByRequestId(requestId, session);
@@ -8573,16 +8627,61 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
   };
 }
 
-async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = [], shops = [], textVariantPolicySource = {}, preparedMediaByDraftShop = {}, publishTask, session = null } = {}) {
-  const tenantId = String(publishTask?.tenant_id || listingTenantId(session));
+async function restoreListingPublishTaskSession(publishTask = {}) {
+  const tenantId = String(publishTask.tenant_id || "");
+  if (!tenantId) throw Object.assign(new Error("发布任务缺少企业归属"), { status: 403 });
+  const stored = await row(`SELECT tenant_id, created_by_person_id FROM listing_publish_tasks
+    WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?`, [Number(publishTask.id), tenantId]);
+  if (!stored) throw Object.assign(new Error("上架任务不存在"), { status: 404 });
+  const session = await restoreBusinessTaskSession(stored.tenant_id || "admin", stored.created_by_person_id);
+  assertBusinessTaskPermission(session, "operations");
+  return session;
+}
+
+async function listingPublishTaskShop(publishTask, shopId) {
+  const session = await restoreListingPublishTaskSession(publishTask);
+  const tenantId = listingTenantId(session);
+  const shop = await row(`${LISTING_PUBLISH_SHOP_SELECT} WHERE id = ? AND status <> 'deleted'
+    AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`, [Number(shopId), Number(session.tenant.id)]);
+  if (!shop) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404 });
+  listingPublishExecutionGuards.set(shop, async () => {
+    const fresh = await restoreListingPublishTaskSession(publishTask);
+    const owned = await row(`SELECT id FROM shops WHERE id = ? AND status <> 'deleted'
+      AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`, [Number(shopId), Number(fresh.tenant.id)]);
+    if (!owned) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404 });
+    return shop;
+  });
+  return shop;
+}
+
+async function assertListingPublishExecution(shop) {
+  const guard = listingPublishExecutionGuards.get(shop);
+  if (guard) await guard();
+}
+
+function listingPublishRequestOptions(shop) {
+  const guard = listingPublishExecutionGuards.get(shop);
+  return guard ? { beforeRequest: guard } : {};
+}
+
+async function processListingDraftBatchPublishTask(options = {}) {
+  const session = await restoreListingPublishTaskSession(options.publishTask);
+  return withAiTenantSession(session, () => processAuthorizedListingDraftBatchPublishTask({ ...options, session }));
+}
+
+async function processAuthorizedListingDraftBatchPublishTask({ draftIds = [], shopIds = [], shops = [], textVariantPolicySource = {}, preparedMediaByDraftShop = {}, publishTask } = {}) {
+  const tenantId = String(publishTask.tenant_id);
   const results = [];
   await mapWithConcurrency(draftIds, LISTING_PUBLISH_DRAFT_CONCURRENCY, async (draftId) => {
     let draft = null;
     try {
+      const session = await restoreListingPublishTaskSession(publishTask);
       draft = await listingDraft(draftId, session);
       const template = await buildPublishTemplateFromListingDraft(draft, session);
       template.include_category_health = true;
-      const validation = await validateListingTemplatePublishForShop(template, shops[0].id, session);
+      const validationShop = await listingPublishTaskShop(publishTask, shops[0].id);
+      const validation = await validateListingTemplatePublishForShop(template, validationShop.id, session, validationShop);
+      await assertListingPublishExecution(validationShop);
       const blockingErrors = normalizeArray(validation.errors);
       if (blockingErrors.length) {
         const error = new Error(localizePublishMessage(validation.errors[0]) || "发布前校验未通过");
@@ -8595,10 +8694,13 @@ async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = []
 
       const sourceProductId = await resolveListingSourceProductId(template, validation.payload);
       const textVariantPolicy = normalizeShopTextVariantPolicy(textVariantPolicySource, shops);
-      await mapWithConcurrency(shops, LISTING_PUBLISH_SHOP_CONCURRENCY, async (shop) => {
+      await mapWithConcurrency(shops, LISTING_PUBLISH_SHOP_CONCURRENCY, async (queuedShop) => {
+        let shop = queuedShop;
         let recordId = null;
         const taskItemId = publishTask.itemByPair.get(`${Number(draftId)}:${Number(shop.id)}`) || 0;
         try {
+          const session = await restoreListingPublishTaskSession(publishTask);
+          shop = await listingPublishTaskShop(publishTask, queuedShop.id);
           const claim = await claimListingPublishTaskItemForSubmit(taskItemId, tenantId);
           if (!claim?.claimed) {
             if (claim?.record?.id) {
@@ -8616,6 +8718,10 @@ async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = []
               });
             }
             return;
+          }
+          if (Number(claim.item?.publish_task_id) !== Number(publishTask.id)
+            || Number(claim.item?.draft_id) !== Number(draftId) || Number(claim.item?.shop_id) !== Number(shop.id)) {
+            throw Object.assign(new Error("发布任务明细归属不一致"), { status: 404 });
           }
           const preparedMedia = preparedMediaByDraftShop[`${Number(draftId)}:${Number(shop.id)}`] || [];
           const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia);
@@ -8642,6 +8748,7 @@ async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = []
             sourceModule: "listing_draft_publish_ozon_media",
             sourceId: String(sourceProductId || draftId || "")
           });
+          await assertListingPublishExecution(shop);
           const shopPayload = ozonSellerMedia.payload;
           recordId = await preparePublishRecordForSubmit({
             shop,
@@ -8749,12 +8856,13 @@ async function processListingDraftBatchPublishTask({ draftIds = [], shopIds = []
 export async function publishListingDraftsToOzon(body = {}, session = null) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishListingDraftsToOzon(body, session));
   session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const draftIds = [...new Set(normalizeArray(body.draft_ids || body.draftIds || body.ids).map(Number).filter(Boolean))];
   const shopIds = [...new Set(normalizeArray(body.shop_ids || body.shopIds).map(Number).filter(Boolean))];
-  if (!draftIds.length) throw new Error("请先选择要上架的草稿");
-  if (!shopIds.length) throw new Error("请至少选择一个店铺");
+  if (!draftIds.length) throw Object.assign(new Error("请先选择要上架的草稿"), { status: 400 });
+  if (!shopIds.length) throw Object.assign(new Error("请至少选择一个店铺"), { status: 400 });
 
   const shops = await all(
     `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
@@ -8900,10 +9008,11 @@ async function submitPreparedListingPublishRecord({
   const timings = {};
   let session;
   let tenantId;
+  let persistedTaskId = "";
   {
     const loadStartedAt = Date.now();
     const preparedRows = await all(`
-      SELECT r.request_json, r.tenant_id AS task_tenant_id, r.created_by_person_id, shops.id, shops.name, shops.ozon_client_id,
+      SELECT r.request_json, r.task_id, r.response_json, r.tenant_id AS task_tenant_id, r.created_by_person_id, shops.id, shops.name, shops.ozon_client_id,
         COALESCE(NULLIF(shops.ozon_api_key, ''), shops.api_key_hint) AS api_key_hint,
         shops.watermark_path, shops.watermark_name, shops.watermark_position,
         shops.watermark_x_percent, shops.watermark_y_percent, shops.watermark_scale_percent,
@@ -8918,12 +9027,28 @@ async function submitPreparedListingPublishRecord({
     session = await restoreBusinessTaskSession(prepared.task_tenant_id || "admin", prepared.created_by_person_id);
     assertBusinessTaskPermission(session, "operations");
     tenantId = listingTenantId(session);
+    if (String(prepared.task_id || "").trim() || prepared.response_json) {
+      return { ok: true, reused: true, record_id: Number(recordId), task_id: prepared.task_id || "" };
+    }
     shop = prepared;
     shopPayload = parseJson(prepared.request_json, {});
     timings.load_record_ms = Date.now() - loadStartedAt;
   }
+  const assertAccess = async () => {
+    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
+    const owned = await row(`SELECT r.id FROM listing_publish_records r
+      JOIN shops ON shops.id = r.shop_id AND ${listingStoredShopTenantPredicate("r", "shops")}
+      WHERE r.id = ? AND COALESCE(r.tenant_id, 'admin') = ? AND r.created_by_person_id = ?
+        AND r.shop_id = ? AND r.status <> 'deleted' AND shops.status <> 'deleted'`,
+    [Number(recordId), tenantId, Number(session.personId), Number(shop.id)]);
+    if (!owned) throw Object.assign(new Error("上架记录或目标店铺已不属于当前企业"), { status: 404 });
+    return shop;
+  };
+  listingPublishExecutionGuards.set(shop, assertAccess);
+  listingPublishExecutionGuards.set(session, assertAccess);
   return withAiTenantSession(session, async () => {
   try {
+    await assertAccess();
     const mediaRepairStartedAt = Date.now();
     const mediaRepair = await repairOzonPublishPayloadMedia(shopPayload, {
       session,
@@ -8931,17 +9056,20 @@ async function submitPreparedListingPublishRecord({
       sourceModule: "listing_publish_record_submit",
       sourceId: String(recordId || "")
     });
+    await assertAccess();
     const ozonSellerMedia = await prepareOzonSellerMediaForPublishPayload(mediaRepair.payload, {
       session,
       shop,
       sourceModule: "listing_publish_record_submit_ozon_media",
       sourceId: String(recordId || "")
     });
+    await assertAccess();
     timings.media_repair_ms = Date.now() - mediaRepairStartedAt;
     const finalPayload = ozonSellerMedia.payload;
     assertPublishPayloadHasOnlyPublicMedia(finalPayload);
     const mediaCheckStartedAt = Date.now();
-    await assertPublishPayloadMediaReachable(finalPayload);
+    await assertPublishPayloadMediaReachable(finalPayload, null, { beforeRequest: assertAccess });
+    await assertAccess();
     timings.media_check_ms = Date.now() - mediaCheckStartedAt;
     if (mediaRepair.changed || ozonSellerMedia.changed) {
       await run(`
@@ -8951,14 +9079,22 @@ async function submitPreparedListingPublishRecord({
       `, [JSON.stringify(finalPayload), Number(recordId), tenantId]).catch(() => null);
     }
     const ozonSubmitStartedAt = Date.now();
-    assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), "operations");
-    const response = await importOzonProducts(shop, finalPayload);
+    await assertAccess();
+    const response = await importOzonProducts(shop, finalPayload, { beforeRequest: assertAccess });
     timings.ozon_submit_ms = Date.now() - ozonSubmitStartedAt;
     const taskId = response?.result?.task_id || response?.task_id || response?.result?.taskId || "";
+    persistedTaskId = taskId;
+    // A mutation already sent to Ozon must retain its receipt even if authority
+    // was revoked in flight. Recovery must never submit it a second time.
+    await run(`UPDATE listing_publish_records SET task_id = ?, response_json = ?, status = 'submitted', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?`,
+    [String(taskId), JSON.stringify({ submit: response }), Number(recordId), tenantId, Number(session.personId), Number(shop.id)]);
+    await assertAccess();
     let importInfo = null;
     if (taskId) {
       const importCheckStartedAt = Date.now();
-      importInfo = await fetchOzonProductImportInfo(shop, taskId).catch((error) => ({ error: error.message }));
+      importInfo = await fetchOzonProductImportInfo(shop, taskId, { beforeRequest: assertAccess }).catch((error) => ({ error: error.message }));
+      await assertAccess();
       timings.import_check_ms = Date.now() - importCheckStartedAt;
     }
     const importErrorSummary = normalizeOzonImportInfoErrors(importInfo);
@@ -8981,7 +9117,8 @@ async function submitPreparedListingPublishRecord({
       },
       importInfo,
       status: importInfoStatus(importInfo),
-      tenantId
+      tenantId,
+      assertAccess
     });
     timings.db_finalize_ms = Date.now() - finalizeStartedAt;
     timings.total_ms = Date.now() - submitStartedAt;
@@ -8990,7 +9127,7 @@ async function submitPreparedListingPublishRecord({
       payload_bytes: Buffer.byteLength(JSON.stringify(finalPayload)),
       ...timings
     }));
-    await refreshPublishRecordQuality(recordId, tenantId).catch((error) => ({
+    await refreshPublishRecordQuality(recordId, tenantId, { assertAccess }).catch((error) => ({
       score: 0,
       source: "refresh_failed",
       issues: [error.message]
@@ -9007,10 +9144,11 @@ async function submitPreparedListingPublishRecord({
     const errorPayload = buildOzonPublishErrorPayload(error, { shop, recordId });
     await run(`
       UPDATE listing_publish_records
-      SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+      SET status = CASE WHEN COALESCE(task_id, '') <> '' OR response_json IS NOT NULL THEN 'submitted' ELSE 'failed' END,
+          error_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
     `, [JSON.stringify(errorPayload), Number(recordId), tenantId]).catch(() => null);
-    return { ok: false, record_id: recordId, error: errorPayload.message };
+    return { ok: false, record_id: recordId, task_id: persistedTaskId, error: errorPayload.message };
   }
   });
 }
@@ -10431,19 +10569,27 @@ export async function recoverInterruptedListingPublishTasksOnStartup(options = {
   await ensureListingAutomationSchema();
   const minAgeMinutes = Math.max(1, Math.min(30, Number(options.minAgeMinutes || 2) || 2));
   const taskRows = await all(`
-    SELECT DISTINCT i.publish_task_id
+    SELECT DISTINCT i.publish_task_id, COALESCE(i.tenant_id, 'admin') AS tenant_id
     FROM listing_publish_task_items i
+    JOIN listing_publish_tasks t ON t.id = i.publish_task_id AND COALESCE(t.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
     LEFT JOIN listing_publish_records r ON r.id = i.record_id
+      AND COALESCE(r.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
+      AND r.publish_task_id = i.publish_task_id AND r.publish_task_item_id = i.id
+      AND r.draft_id = i.draft_id AND r.shop_id = i.shop_id
     WHERE i.status IN ('pending', 'preparing', 'processing', 'submitted')
       AND i.updated_at <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
       AND (i.record_id IS NULL OR (COALESCE(r.task_id, '') = '' AND r.response_json IS NULL))
   `, [minAgeMinutes]);
-  const taskIds = taskRows.map((item) => Number(item.publish_task_id || 0)).filter(Boolean);
   let interruptedItems = 0;
-  for (const taskId of taskIds) {
+  for (const task of taskRows) {
+    const taskId = Number(task.publish_task_id);
+    const tenantId = String(task.tenant_id);
     const result = await run(`
       UPDATE listing_publish_task_items i
       LEFT JOIN listing_publish_records r ON r.id = i.record_id
+        AND COALESCE(r.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
+        AND r.publish_task_id = i.publish_task_id AND r.publish_task_item_id = i.id
+        AND r.draft_id = i.draft_id AND r.shop_id = i.shop_id
       SET i.status = 'interrupted',
           i.error_json = JSON_OBJECT(
             'message', '后台服务重启，上架准备任务已安全中断，尚未提交到 Ozon',
@@ -10452,25 +10598,30 @@ export async function recoverInterruptedListingPublishTasksOnStartup(options = {
           i.finished_at = CURRENT_TIMESTAMP,
           i.updated_at = CURRENT_TIMESTAMP
       WHERE i.publish_task_id = ?
+        AND COALESCE(i.tenant_id, 'admin') = ?
         AND i.status IN ('pending', 'preparing', 'processing', 'submitted')
         AND (i.record_id IS NULL OR (COALESCE(r.task_id, '') = '' AND r.response_json IS NULL))
-    `, [taskId]);
+    `, [taskId, tenantId]);
     interruptedItems += Number(result?.affectedRows || 0);
     await run(`
       UPDATE listing_publish_records r
       JOIN listing_publish_task_items i ON i.record_id = r.id
+        AND COALESCE(r.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
+        AND r.publish_task_id = i.publish_task_id AND r.publish_task_item_id = i.id
+        AND r.draft_id = i.draft_id AND r.shop_id = i.shop_id
       SET r.status = 'failed',
           r.error_json = COALESCE(i.error_json, JSON_OBJECT('message', '上架准备任务中断，尚未提交到 Ozon，可安全重试')),
           r.updated_at = CURRENT_TIMESTAMP
       WHERE i.publish_task_id = ?
+        AND COALESCE(i.tenant_id, 'admin') = ?
         AND i.status = 'interrupted'
         AND r.status IN ('submitted', 'processing', 'resubmitting')
         AND COALESCE(r.task_id, '') = ''
         AND r.response_json IS NULL
-    `, [taskId]);
-    await refreshListingPublishTaskStats(taskId).catch(() => null);
+    `, [taskId, tenantId]);
+    await refreshListingPublishTaskStats(taskId, tenantId).catch(() => null);
   }
-  return { tasks: taskIds.length, interruptedItems };
+  return { tasks: taskRows.length, interruptedItems };
 }
 
 async function enrichPublishRecordRowFromOzon(record = {}) {
@@ -16485,11 +16636,12 @@ async function syncListingMediaFileToPublicBaseOnce({
   return "";
 }
 
-async function isReachableRemoteMediaUrl(url = "") {
-  return (await inspectRemoteMediaUrlForOzon(url)).ok;
+async function isReachableRemoteMediaUrl(url = "", options = {}) {
+  return (await inspectRemoteMediaUrlForOzon(url, options)).ok;
 }
 
-async function inspectRemoteMediaUrlForOzon(url = "") {
+async function inspectRemoteMediaUrlForOzon(url = "", options = {}) {
+  if (options.beforeRequest) await options.beforeRequest();
   const value = String(url || "").trim();
   if (!/^https?:\/\//i.test(value)) return { ok: false, url: value, status: 0, error: "not_http_url" };
   const cached = listingMediaReachabilityCache.get(value);
@@ -16497,8 +16649,9 @@ async function inspectRemoteMediaUrlForOzon(url = "") {
   if (cached) listingMediaReachabilityCache.delete(value);
   const startedAt = Date.now();
   try {
-    const response = await fetch(value, { method: "HEAD", signal: AbortSignal.timeout(15000) });
-    if (response.ok) {
+    const response = await requestPublicMedia(value, { method: "HEAD", maxBytes: 1024, signal: AbortSignal.timeout(15000), beforeRequest: options.beforeRequest });
+    if (options.beforeRequest) await options.beforeRequest();
+    if (response?.ok) {
       const result = {
         ok: true,
         url: value,
@@ -16511,18 +16664,20 @@ async function inspectRemoteMediaUrlForOzon(url = "") {
       cacheReachableListingMedia(value, result);
       return result;
     }
-    const rangeResponse = await fetch(value, {
+    const rangeResponse = await requestPublicMedia(value, {
       method: "GET",
       headers: { Range: "bytes=0-1023" },
-      signal: AbortSignal.timeout(15000)
+      maxBytes: 1024, allowPartialBody: true,
+      signal: AbortSignal.timeout(15000), beforeRequest: options.beforeRequest
     }).catch(() => null);
+    if (options.beforeRequest) await options.beforeRequest();
     const result = {
       ok: Boolean(rangeResponse?.ok || rangeResponse?.status === 206),
       url: value,
-      status: rangeResponse?.status || response.status,
-      contentLength: Number(rangeResponse?.headers?.get?.("content-length") || response.headers.get("content-length") || 0),
-      contentType: rangeResponse?.headers?.get?.("content-type") || response.headers.get("content-type") || "",
-      cacheControl: rangeResponse?.headers?.get?.("cache-control") || response.headers.get("cache-control") || "",
+      status: rangeResponse?.status || response?.status || 0,
+      contentLength: Number(rangeResponse?.headers?.get?.("content-length") || response?.headers.get("content-length") || 0),
+      contentType: rangeResponse?.headers?.get?.("content-type") || response?.headers.get("content-type") || "",
+      cacheControl: rangeResponse?.headers?.get?.("cache-control") || response?.headers.get("cache-control") || "",
       elapsedMs: Date.now() - startedAt
     };
     if (result.ok) cacheReachableListingMedia(value, result);
@@ -16538,7 +16693,7 @@ async function inspectRemoteMediaUrlForOzon(url = "") {
   }
 }
 
-async function unreachablePublishMediaUrls(urls = []) {
+async function unreachablePublishMediaUrls(urls = [], options = {}) {
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
     .filter((url) => /^https?:\/\//i.test(url))
@@ -16547,7 +16702,7 @@ async function unreachablePublishMediaUrls(urls = []) {
   const reachabilityLimit = Math.max(1, LISTING_PUBLISH_MEDIA_PREWARM_LIMIT || 50);
   const checks = await mapWithConcurrency(remoteUrls.slice(0, reachabilityLimit), LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY, async (url) => {
     try {
-      const result = await inspectRemoteMediaUrlForOzon(url);
+      const result = await inspectRemoteMediaUrlForOzon(url, options);
       if (result.ok) return null;
       return `${url} (${result.error || result.status || "unreachable"})`;
     } catch (error) {
@@ -16557,7 +16712,7 @@ async function unreachablePublishMediaUrls(urls = []) {
   return checks.filter(Boolean);
 }
 
-async function prewarmPublishMediaUrls(urls = []) {
+async function prewarmPublishMediaUrls(urls = [], options = {}) {
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
     .filter((url) => /^https?:\/\//i.test(url))
@@ -16571,16 +16726,24 @@ async function prewarmPublishMediaUrls(urls = []) {
     requiredConsecutiveSuccesses: 2,
     retryDelayMs: 750,
     timeoutMs: 30000,
-    concurrency: Math.min(2, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY)
+    concurrency: Math.min(2, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY),
+    fetchImpl: async (url, request = {}) => {
+      const response = await requestPublicMedia(url, { ...request, maxBytes: 30 * 1024 * 1024, beforeRequest: options.beforeRequest });
+      if (options.beforeRequest) await options.beforeRequest();
+      if (!response) throw new Error("Image exceeds public media size limit");
+      return { ...response, arrayBuffer: async () => response.buffer, body: { cancel: async () => {} } };
+    }
   });
   const otherResults = await mapWithConcurrency(otherUrls, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY, async (url) => {
     try {
-      const response = await fetch(url, {
+      const response = await requestPublicMedia(url, {
         method: "GET",
         headers: { Range: "bytes=0-1023" },
-        signal: AbortSignal.timeout(10000)
+        maxBytes: 1024, allowPartialBody: true,
+        signal: AbortSignal.timeout(10000), beforeRequest: options.beforeRequest
       });
-      return Boolean(response.ok || response.status === 206);
+      if (options.beforeRequest) await options.beforeRequest();
+      return Boolean(response?.ok || response?.status === 206);
     } catch {
       return false;
     }
@@ -18047,6 +18210,7 @@ async function withDictionaryValue(attr = {}, shop, descriptionCategoryId, typeI
     };
   }
   for (const query of expandDictionaryQueries(queries)) {
+    await assertListingPublishExecution(shop);
     const cached = await findCachedDictionaryValue(descriptionCategoryId, typeId, attributeId, query).catch(() => null);
     if (cached?.dictionary_value_id) {
       return {
@@ -18060,8 +18224,10 @@ async function withDictionaryValue(attr = {}, shop, descriptionCategoryId, typeI
       attributeId,
       value: query,
       language: "DEFAULT",
-      limit: 50
+      limit: 50,
+      ...listingPublishRequestOptions(shop)
     }).catch(() => []);
+    await assertListingPublishExecution(shop);
     const exact = chooseDictionaryMatch(values, query);
     if (exact?.id || exact?.dictionary_value_id) {
       await upsertLocalizedDictionaryValueCache(shop, descriptionCategoryId, typeId, attributeId, exact).catch(() => null);

@@ -6,10 +6,10 @@ const source = readFileSync(new URL("../src/services/listing-automation.js", imp
 
 test("batch listing publish claims each pending task item before building its payload", () => {
   const batchSource = source.match(/async function processListingDraftBatchPublishTask[\s\S]*?export async function publishListingDraftsToOzon/)?.[0] || "";
-  assert.match(source, /async function claimListingPublishTaskItemForSubmit\(itemId = 0\)/);
-  assert.match(source, /WHERE id = \?\s+FOR UPDATE/);
-  assert.match(batchSource, /const claim = await claimListingPublishTaskItemForSubmit\(taskItemId\)/);
-  assert.ok(batchSource.indexOf("claimListingPublishTaskItemForSubmit(taskItemId)") < batchSource.indexOf("buildShopPublishPayloadForOzon"));
+  assert.match(source, /async function claimListingPublishTaskItemForSubmit\(itemId = 0, tenantId = "admin"\)/);
+  assert.match(source, /WHERE id = \? AND COALESCE\(tenant_id, 'admin'\) = \?\s+FOR UPDATE/);
+  assert.match(batchSource, /const claim = await claimListingPublishTaskItemForSubmit\(taskItemId, tenantId\)/);
+  assert.ok(batchSource.indexOf("claimListingPublishTaskItemForSubmit(taskItemId, tenantId)") < batchSource.indexOf("buildShopPublishPayloadForOzon"));
 });
 
 test("duplicate publish-record keys recover the existing task record for retries", () => {

@@ -49,7 +49,7 @@ export function authorizeApiRequest(req, parts = []) {
     if (configWrite) return isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或企业管理员可以修改店铺矩阵配置");
     const configRead = method === "GET" && ((parts.length === 3 && ["bootstrap", "tail-templates"].includes(parts[2]))
       || (parts.length === 4 && parts[2] === "tail-template-files" && /^\d+$/.test(String(parts[3] || ""))));
-    if (configRead && isEnterpriseAdmin(session)) return { allowed: true };
+    if (configRead) return isEnterpriseAdmin(session) ? { allowed: true } : require("operations");
     const verifiedJob = (method === 'GET' && ((parts[2] === 'jobs' && [3, 4].includes(parts.length)) || (parts[2] === 'files' && parts.length === 5)))
       || (method === 'POST' && ((parts[2] === 'jobs' && parts.length === 5 && ['cancel', 'retry-failures'].includes(parts[4])) || (parts[2] === 'delete-media-group' && parts.length === 3)));
     if (verifiedJob) return require('operations');

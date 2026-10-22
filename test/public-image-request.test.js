@@ -31,3 +31,18 @@ test('DNS is fully checked and the selected public address is returned for conne
   // No local listener or production socket is probed when DNS resolves privately.
   await assert.rejects(requestPublicImage('https://image.example/private.png', { maxBytes: 100, resolve: async () => [{ address: '127.0.0.1', family: 4 }] }));
 });
+
+test('fresh authorization rejects before DNS and again before the validated connection', async () => {
+  let lookups = 0;
+  const resolve = async () => { lookups += 1; return [{ address: '8.8.8.8', family: 4 }]; };
+  await assert.rejects(requestPublicImage('https://image.example/file.png', {
+    maxBytes: 100, resolve, beforeRequest: async () => { throw new Error('revoked before DNS'); }
+  }), /revoked before DNS/);
+  assert.equal(lookups, 0);
+  let checks = 0;
+  await assert.rejects(requestPublicImage('https://image.example/file.png', {
+    maxBytes: 100, resolve, beforeRequest: async () => { if (++checks === 2) throw new Error('revoked during DNS'); }
+  }), /revoked during DNS/);
+  assert.equal(checks, 2);
+  assert.equal(lookups, 1);
+});

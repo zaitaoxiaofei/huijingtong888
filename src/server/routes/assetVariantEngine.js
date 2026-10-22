@@ -1,9 +1,28 @@
+import { isEnterpriseAdmin, isPlatformAdmin } from "../../shared/permissions.js";
+
+function businessTailTemplate(template) {
+  const url = `/api/asset-variant-engine/tail-template-files/${Number(template.id)}`;
+  return { ...template, imagePath: url, imageUrl: url, image_path: undefined };
+}
+
+function businessBootstrap(payload, session) {
+  if (!payload || isEnterpriseAdmin(session) || isPlatformAdmin(session)) return payload;
+  return {
+    ...payload,
+    watermarkTemplates: (payload.watermarkTemplates || []).map(({ logoPath, logo_path, ...template }) => template),
+    tailTemplates: (payload.tailTemplates || []).map(businessTailTemplate)
+  };
+}
+
 export function createAssetVariantEngineRoutes({ services, readJson }) {
   return {
-    "GET /api/asset-variant-engine/bootstrap": (req) => services.assetVariantBootstrap(req.query || {}, req._session),
+    "GET /api/asset-variant-engine/bootstrap": async (req) => businessBootstrap(await services.assetVariantBootstrap(req.query || {}, req._session), req._session),
     "GET /api/asset-variant-engine/selection-publish-shops": (req) => services.selectionPublishShops(req.query || {}, req._session),
     "GET /api/asset-variant-engine/jobs": (req) => services.assetVariantJobs(req.query || {}, req._session),
-    "GET /api/asset-variant-engine/tail-templates": (req) => services.assetTailTemplates(req.query || {}, req._session),
+    "GET /api/asset-variant-engine/tail-templates": async (req) => {
+      const templates = await services.assetTailTemplates(req.query || {}, req._session);
+      return isEnterpriseAdmin(req._session) || isPlatformAdmin(req._session) ? templates : templates.map(businessTailTemplate);
+    },
     "POST /api/asset-variant-engine/tail-templates": async (req) => services.createAssetTailTemplate(await readJson(req), req._session),
     "POST /api/asset-variant-engine/generate": async (req) => services.generateAssetVariants(await readJson(req), req._session),
     "POST /api/asset-variant-engine/generate-async": async (req) => services.enqueueGenerateAssetVariants(await readJson(req), req._session),

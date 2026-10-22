@@ -62,6 +62,25 @@ test("configuration and private tail routes forward only the authenticated sessi
   assert.deepEqual(readArgs, ["55", session]);
 });
 
+test("ordinary bootstrap reads preserve internal settings while returning private tail API URLs without disk paths", async () => {
+  const payload = {
+    shops: [{ id: 20, watermarkPath: "/uploads/shop-watermarks/own.png" }],
+    watermarkTemplates: [{ id: "shop-20", logoUrl: "/uploads/shop-watermarks/own.png", logoPath: "/opt/app/uploads/shop-watermarks/own.png" }],
+    tailTemplates: [{ id: 200, imagePath: "/opt/app/private/tail.png", imageUrl: "/opt/app/private/tail.png" }]
+  };
+  const routes = createAssetVariantEngineRoutes({ services: {
+    assetVariantBootstrap: async () => payload, assetTailTemplates: async () => payload.tailTemplates
+  } });
+  const req = { _session: enterprise(2, "member") };
+  const result = await routes["GET /api/asset-variant-engine/bootstrap"](req);
+  assert.doesNotMatch(JSON.stringify(result), /\/opt\/app/);
+  assert.equal(result.watermarkTemplates[0].logoUrl, "/uploads/shop-watermarks/own.png");
+  assert.equal(result.tailTemplates[0].imageUrl, "/api/asset-variant-engine/tail-template-files/200");
+  assert.equal((await routes["GET /api/asset-variant-engine/tail-templates"](req))[0].imagePath, result.tailTemplates[0].imageUrl);
+  assert.equal(await routes["GET /api/asset-variant-engine/bootstrap"]({ _session: enterprise() }), payload);
+  assert.equal(payload.watermarkTemplates[0].logoPath, "/opt/app/uploads/shop-watermarks/own.png");
+});
+
 test("bootstrap binds current enterprise for shops and private templates and never reads legacy global watermarks", async () => {
   const calls = [];
   const service = loadAssetVariantConfigService({ query: async (sql, params = []) => {

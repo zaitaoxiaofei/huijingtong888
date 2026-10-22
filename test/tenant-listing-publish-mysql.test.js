@@ -69,6 +69,7 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
       resolveShopTailImageUrl: async () => "https://fixture.invalid/tail.png",
       mapWithConcurrency: async (items, _limit, action) => Promise.all(items.map(action)),
       LISTING_PUBLISH_SHOP_CONCURRENCY: 2,
+      listingPublishExecutionGuards: new WeakMap(),
       LISTING_PUBLISH_SHOP_SELECT: source.match(/const LISTING_PUBLISH_SHOP_SELECT = (`[\s\S]*?`);/)[1].slice(1, -1),
       validateListingTemplatePublish: async () => ({ ok: true, payload: { items: [{ offer_id: "own-offer", name: "own" }] }, errors: [], warnings: [] }),
       applyShopPublishDefaults: async payload => payload,
@@ -103,7 +104,7 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
     });
     const contextSource = readFileSync(new URL("../src/services/ai-tenant-context.js", import.meta.url), "utf8").replace(/^import[^;]*;\r?\n/gm, "").replaceAll("export ", "");
     vm.runInContext(contextSource, context);
-    for (const name of ["listingTenantId", "listingStoredShopTenantPredicate", "all", "row", "run", "insert", "assertDraftSourceProductTenant", "listingPublishRecordNotFoundError", "savePublishVariantLinks", "ozonProductLimitWarnings", "validateListingTemplatePublishForShop", "preparePublishRecordForSubmit", "updatePublishRecordAfterSubmit", "publishListingTemplateToOzon", "submitPreparedListingPublishRecord", "retryListingPublishRecord"]) vm.runInContext(implementation(name), context);
+    for (const name of ["listingTenantId", "listingStoredShopTenantPredicate", "all", "row", "run", "insert", "assertDraftSourceProductTenant", "listingPublishRecordNotFoundError", "savePublishVariantLinks", "ozonProductLimitWarnings", "assertListingPublishExecution", "listingPublishRequestOptions", "validateListingTemplatePublishForShop", "preparePublishRecordForSubmit", "updatePublishRecordAfterSubmit", "publishListingTemplateToOzon", "submitPreparedListingPublishRecord", "retryListingPublishRecord"]) vm.runInContext(implementation(name), context);
 
     const records = new Map();
     await t.test("foreign and mixed-shop publication reject before Ozon validation or record writes", async () => {

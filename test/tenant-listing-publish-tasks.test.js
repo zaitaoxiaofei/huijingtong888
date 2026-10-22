@@ -5,12 +5,19 @@ import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
 
 const service = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 
-test("reviewed listing reads, record retry, and refresh open while batch publishing and task retry stay closed", () => {
+test("reviewed listing reads and batch publication open while advanced task retry stays closed", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
     ["POST", ["api", "listing", "publish-tasks", "12", "retry"]],
-    ["POST", ["api", "listing", "drafts", "batch-publish"]]
+    ["POST", ["api", "listing", "drafts", "batch-update"]],
+    ["GET", ["api", "listing", "drafts", "batch-publish"]],
+    ["POST", ["api", "listing", "drafts", "batch-publish", "extra"]]
   ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
+  for (const tenant of [{ id: 1, slug: "default" }, { id: 42, slug: "company-a" }, { id: 43, slug: "company-b" }]) {
+    assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "drafts", "batch-publish"], "POST").allowed, true);
+    assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "media", "watermark"], "POST").allowed, true);
+  }
+  assert.equal(tenantIsolationDecision({}, ["api", "listing", "drafts", "batch-publish"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-tasks"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-tasks", "12"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-records"], "GET").allowed, true);

@@ -46,7 +46,11 @@ test("enterprise administrators manage own configuration and operations members 
       assert.equal(tenantIsolationDecision(session, parts(path), method).allowed, reviewedJobs.has(path), path);
     }
     if (role === "member") {
-      for (const path of configurationReads) assert.equal(allowed(session, "GET", path), false, path);
+      for (const path of configurationReads) {
+        assert.equal(allowed(session, "GET", path), true, path);
+        assert.equal(tenantIsolationDecision(session, parts(path), "GET").allowed, true, path);
+        assert.equal(allowed(employee("company-a", "member", ["packing"]), "GET", path), false, path);
+      }
       for (const path of configurationWrites) assert.equal(allowed(session, "POST", path), false, path);
     }
   }

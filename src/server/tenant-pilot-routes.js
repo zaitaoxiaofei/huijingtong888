@@ -61,6 +61,7 @@ const routes = new Set([
   'POST ozon/actions/activity/toggle', 'POST ozon/actions/activity/archive',
   'GET ozon/actions/cleanup-config', 'POST ozon/actions/cleanup-config',
   'POST listing/templates/publish-to-ozon', 'POST listing/media/repair',
+  'POST listing/drafts/batch-publish', 'POST listing/media/watermark',
   'GET customer-messages', 'GET customer-chats', 'GET customer-chats/messages',
   'GET customer-message-customer-orders', 'GET customer-message-settings',
   'POST customer-messages/preview', 'POST customer-messages/record', 'POST customer-messages/send',

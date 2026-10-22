@@ -170,8 +170,10 @@ const batchListing = reactive({
   shopStyles: {},
   requestId: "",
   browserPreparing: false,
+  browserStage: "",
   browserCompleted: 0,
   browserTotal: 0,
+  error: "",
   result: null
 });
 
@@ -1637,6 +1639,7 @@ function openBatchListingDialog() {
   batchListing.shopIds = state.shops.map((shop) => shop.id).slice(0, 1);
   batchListing.requestId = createListingPublishRequestId();
   batchListing.result = null;
+  batchListing.error = "";
   ensureBatchTextVariantBaseShop();
   batchListing.visible = true;
 }
@@ -1706,9 +1709,12 @@ async function publishBatchListingDrafts() {
   );
   batchListing.publishing = true;
   batchListing.browserPreparing = true;
+  batchListing.browserStage = "shop_configuration";
   batchListing.browserCompleted = 0;
   batchListing.browserTotal = 0;
   batchListing.result = null;
+  batchListing.error = "";
+  let submitted = false;
   try {
     const bootstrap = await apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true });
     const selectedShopIds = new Set(batchListing.shopIds.map(Number));
@@ -1725,6 +1731,7 @@ async function publishBatchListingDrafts() {
         watermarkOpacityPercent: Number(shop.watermarkOpacityPercent ?? shop.watermark_opacity_percent ?? 82)
       }));
     if (selectedShops.length !== selectedShopIds.size) throw new Error("部分目标店铺的浏览器素材配置加载失败");
+    batchListing.browserStage = "materials";
     const mediaJobs = rows.map((row) => {
       const images = [...new Set(draftListImages(row).filter(Boolean))];
       if (!images.length) throw new Error(`草稿 ${row.id} 没有可处理的商品图片`);
@@ -1745,6 +1752,7 @@ async function publishBatchListingDrafts() {
       }
     }
     batchListing.browserPreparing = false;
+    submitted = true;
     const result = await apiClient.post("/api/listing/drafts/batch-publish", {
       draft_ids: rows.map((row) => row.id),
       shop_ids: batchListing.shopIds,
@@ -1766,10 +1774,23 @@ async function publishBatchListingDrafts() {
       ElMessage.error("批量上架任务创建失败，请查看结果");
     }
     if (failed && success) ElMessage.warning(`${failed} 条任务创建失败，请查看结果`);
+  } catch (error) {
+    const reason = error?.message || "请求失败，请检查网络后重试";
+    batchListing.error = submitted
+      ? `上架任务提交未确认：${reason}。请先检查上架记录，再重试此批次。`
+      : `素材准备失败，尚未提交上架任务：${reason}`;
+    ElMessage.error(batchListing.error);
   } finally {
     batchListing.browserPreparing = false;
+    batchListing.browserStage = "";
     batchListing.publishing = false;
   }
+}
+
+function batchListingProgressTitle() {
+  if (batchListing.browserStage === "shop_configuration") return "正在加载目标店铺素材配置，请稍候";
+  if (!batchListing.browserTotal) return "正在核对批量素材，无需水印的图片将使用原素材";
+  return `浏览器正在以并发 10 处理批量素材：${batchListing.browserCompleted}/${batchListing.browserTotal}`;
 }
 
 function guardBatchBrowserPublishClose(event) {
@@ -2613,13 +2634,13 @@ watch(() => route.query.taskId, () => {
         type="info"
         show-icon
         :closable="false"
-        :title="`浏览器正在以并发 10 处理批量素材：${batchListing.browserCompleted}/${batchListing.browserTotal}`"
+        :title="batchListingProgressTitle()"
       />
       <el-alert
-        v-if="batchListing.result"
+        v-if="batchListing.error || batchListing.result"
         class="batch-publish-result"
-        :type="batchListing.result.ok ? 'success' : 'warning'"
-        :title="`提交结果：成功 ${batchListing.result.summary?.success || 0}，失败 ${batchListing.result.summary?.failed || 0}`"
+        :type="batchListing.error ? 'error' : batchListing.result.ok ? 'success' : 'warning'"
+        :title="batchListing.error || `提交结果：成功 ${batchListing.result.summary?.success || 0}，失败 ${batchListing.result.summary?.failed || 0}`"
         show-icon
         :closable="false"
       >

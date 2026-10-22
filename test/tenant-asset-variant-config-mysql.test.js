@@ -81,6 +81,23 @@ test("enterprise matrix configuration and tail fallback against a disposable MyS
       assert.equal(assetVariantExecutionScope(session(2)).id, 2);
     });
 
+    await t.test("customer operations consume only their enterprise publishing configuration without write authority", async () => {
+      for (const [id, shopId, tailId, foreignTail] of [[2, 20, 201, 301], [3, 30, 301, 201]]) {
+        const operations = { personId: 9, roles: ["operations"], tenant: { id, slug: `enterprise-${id}`, role: "member" } };
+        const before = await query("SELECT * FROM shop_variant_rules ORDER BY id");
+        const bootstrap = await service.assetVariantBootstrap({ tenant_id: id === 2 ? 3 : 2 }, operations);
+        assert.deepEqual(Array.from(bootstrap.shops, row => row.id), [shopId]);
+        assert.equal(bootstrap.watermarkTemplates.some(row => row.id === `shop-${shopId}`), true);
+        assert.equal(bootstrap.watermarkTemplates.some(row => row.id === `shop-${id === 2 ? 30 : 20}`), false);
+        assert.equal(bootstrap.tailTemplates.every(row => Number(row.tenant_id) === id), true);
+        assert.equal((await service.resolveAssetTailTemplateFile(tailId, operations)).buffer.toString(), "own-tail-bytes");
+        assert.equal(await service.resolveAssetTailTemplateFile(foreignTail, operations), null);
+        await assert.rejects(service.saveShopVariantRule({ shopId, priceIndex: 2 }, operations), { statusCode: 403 });
+        await assert.rejects(service.createAssetTailTemplate({ image: "data:image/png;base64,AA==" }, operations), { statusCode: 403 });
+        assert.deepEqual(await query("SELECT * FROM shop_variant_rules ORDER BY id"), before);
+      }
+    });
+
     await t.test("A can edit its own rule while cross-tenant shop, watermark, and template references fail", async () => {
       await service.saveShopVariantRule({ tenant_id: 3, shopId: 20, priceIndex: 1.25, watermarkTemplateId: "shop-20", tailTemplateId: 201 }, session(2));
       for (const body of [{ shopId: 30 }, { shopId: 20, watermarkTemplateId: "shop-30" }, { shopId: 20, tailTemplateId: 300 }]) {

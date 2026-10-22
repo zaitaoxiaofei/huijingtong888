@@ -30,38 +30,61 @@ export async function resolvePublicImageTarget(value, resolve = lookup) {
 }
 
 // Pin the validated DNS result to the actual connection, including redirects.
-// A second DNS lookup by fetch must not turn a public name into an internal host.
-export async function requestPublicImage(value, { signal, headers, maxBytes, resolve = lookup, redirects = 4 } = {}) {
+// This internal reader supports listing image/video downloads and bounded probes;
+// it is not exposed as a URL proxy.
+export async function requestPublicMedia(value, { signal, headers, maxBytes, resolve = lookup, redirects = 4, beforeRequest, method = 'GET', allowPartialBody = false } = {}) {
+  if (!['GET', 'HEAD'].includes(method) || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 200 * 1024 * 1024) {
+    throw new Error('Invalid public media request limits');
+  }
+  if (beforeRequest) await beforeRequest();
   const { url, address } = await resolvePublicImageTarget(value, resolve);
+  if (beforeRequest) await beforeRequest();
   return new Promise((resolveResult, reject) => {
     const client = url.protocol === 'https:' ? https : http;
     const req = client.get(url, {
-      signal, headers, agent: false,
+      signal, headers, method, agent: false,
       lookup: (_hostname, options, callback) => options?.all
         ? callback(null, [address]) : callback(null, address.address, address.family)
     }, async response => {
       try {
         if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
-          response.resume();
+          response.destroy();
           if (redirects <= 0 || !response.headers.location) throw new Error('Image redirect limit exceeded');
-          resolveResult(await requestPublicImage(new URL(response.headers.location, url).href, { signal, headers, maxBytes, resolve, redirects: redirects - 1 }));
+          resolveResult(await requestPublicMedia(new URL(response.headers.location, url).href, { signal, headers, maxBytes, resolve, redirects: redirects - 1, beforeRequest, method, allowPartialBody }));
           return;
         }
         const contentType = String(response.headers['content-type'] || '').toLowerCase();
-        if (response.statusCode < 200 || response.statusCode >= 300 || !contentType.startsWith('image/')
-          || Number(response.headers['content-length'] || 0) > maxBytes) {
+        const result = { ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode,
+          contentType, url: url.href, buffer: Buffer.alloc(0), truncated: false,
+          headers: { get: name => String(response.headers[String(name).toLowerCase()] || '') } };
+        if (method === 'HEAD' || !result.ok) {
+          response.destroy(); resolveResult(result); return;
+        }
+        if (!allowPartialBody && Number(response.headers['content-length'] || 0) > maxBytes) {
           response.destroy(); resolveResult(null); return;
         }
         let received = 0;
         const chunks = [];
         for await (const chunk of response) {
+          if (received + chunk.length > maxBytes) {
+            if (!allowPartialBody) { response.destroy(); resolveResult(null); return; }
+            chunks.push(chunk.subarray(0, maxBytes - received));
+            result.buffer = Buffer.concat(chunks, maxBytes);
+            result.truncated = true;
+            response.destroy(); resolveResult(result); return;
+          }
           received += chunk.length;
-          if (received > maxBytes) { response.destroy(); resolveResult(null); return; }
           chunks.push(chunk);
         }
-        resolveResult({ buffer: Buffer.concat(chunks, received), contentType });
+        result.buffer = Buffer.concat(chunks, received);
+        resolveResult(result);
       } catch (error) { response.destroy(); reject(error); }
     });
     req.on('error', reject);
   });
+}
+
+export async function requestPublicImage(value, options = {}) {
+  const result = await requestPublicMedia(value, options);
+  return result?.ok && result.contentType.startsWith('image/') ? { buffer: result.buffer, contentType: result.contentType } : null;
 }
