@@ -25,6 +25,13 @@ test("supplier migration is opt-in and does not infer ownership for legacy recor
   assert.match(packageJson, /"db:migrate:tenant-suppliers": "node scripts\/migrate-tenant-suppliers\.mjs"/);
 });
 
+test("ECS applies supplier ownership before starting the tenant-aware candidate", () => {
+  const release = read("../deploy/linux/remote-release.sh");
+  const ordered = release.slice(release.indexOf("for tenant_migration in"), release.indexOf("done", release.indexOf("for tenant_migration in")));
+  assert.match(ordered, /migrate-tenant-products-ownership\.mjs[\s\S]*migrate-tenant-suppliers\.mjs[\s\S]*migrate-tenant-inventory-procurement\.mjs/);
+  assert.ok(release.indexOf("migrate-tenant-suppliers.mjs") < release.lastIndexOf("start_candidate"));
+});
+
 test("supplier service scopes list, counts, and every write by the authenticated tenant", () => {
   const service = read("../src/services/mysql-suppliers.js");
   assert.match(service, /async function resolveSupplierTenantScope\(tenantId/);

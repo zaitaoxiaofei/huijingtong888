@@ -4,7 +4,7 @@ import { AI_BACKGROUND_TENANT_TABLES } from './ai-background-tenant-tables.js';
 // Some optional workflows create their tables lazily. An absent table is safe;
 // an existing legacy table without ownership must never reach a business query.
 const optionalOwnedTables = [
-  'product_components', 'inventory_product_requests', 'inventory_product_naming_options',
+  'product_components', 'product_name_aliases', 'asset_tail_templates', 'inventory_product_requests', 'inventory_product_naming_options',
   'ai_variant_lab_analyses', 'ai_variant_lab_plans', 'ai_variant_templates', 'ai_variant_template_cases',
   'ai_variant_case_templates', 'ai_variant_case_runs', 'ai_variant_lab_batch_jobs', 'ai_variant_lab_batch_items',
   'ai_image_usage_events', 'ai_image_optimizer_jobs', 'ai_generation_tasks', 'ai_variant_draft_save_batches', 'ai_vehicle_catalog',
@@ -16,6 +16,7 @@ const optionalOwnedTables = [
 export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
   const required = {
     products: ["tenant_id"], shops: ["tenant_id"], sku_mappings: ["tenant_id"],
+    suppliers: ["tenant_id"], logistics_fee_rules: ["tenant_id"],
     procurement_requests: ["tenant_id"], inventory_movements: ["tenant_id"],
     purchase_orders: ["tenant_id"], purchase_order_items: ["tenant_id"], inbound_records: ["tenant_id"],
     purchase_cost_versions: ["tenant_id"], procurement_platform_orders: ["tenant_id"],
@@ -53,8 +54,9 @@ export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
   ];
   const existing = new Set(columns.map(row => row.TABLE_NAME || row.table_name));
   const checked = uniqueKeys.filter(([table])=>existing.has(table));
+  const indexedTables = [...new Set([...checked.map(([table])=>table), 'suppliers'])];
   const statistics = await query(`SELECT table_name,index_name,column_name,seq_in_index,non_unique FROM information_schema.statistics
-    WHERE table_schema=DATABASE() AND table_name IN (${checked.map(()=>'?').join(',')})`,checked.map(([table])=>table));
+    WHERE table_schema=DATABASE() AND table_name IN (${indexedTables.map(()=>'?').join(',')})`,indexedTables);
   const indexes = new Map();
   for(const row of statistics){
     const table=row.TABLE_NAME||row.table_name,name=row.INDEX_NAME||row.index_name;
@@ -62,6 +64,10 @@ export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
     const index=indexes.get(key)||{table,name,columns:[],unique:Number(row.NON_UNIQUE??row.non_unique)===0};
     index.columns[Number(row.SEQ_IN_INDEX??row.seq_in_index)-1]=row.COLUMN_NAME||row.column_name;
     indexes.set(key,index);
+  }
+  const supplierIndex = indexes.get('suppliers.idx_suppliers_tenant_status_id');
+  if (!supplierIndex || supplierIndex.unique || supplierIndex.columns.join(',') !== 'tenant_id,status,id') {
+    throw Object.assign(new Error('供应商企业索引迁移未完成，请运行 scripts/migrate-tenant-suppliers.mjs --apply 后再启动：suppliers.idx_suppliers_tenant_status_id (tenant_id,status,id)'), { statusCode: 503 });
   }
   const invalid=[];
   for(const [table,name,expected]of checked){

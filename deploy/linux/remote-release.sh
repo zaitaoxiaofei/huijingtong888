@@ -232,6 +232,7 @@ install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
 if [[ "$run_db_maintenance" == "1" ]]; then
 for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
+  migrate-tenant-suppliers.mjs \
   migrate-tenant-product-relations.mjs \
   migrate-tenant-sku-mappings.mjs \
   migrate-tenant-logistics-rules.mjs \

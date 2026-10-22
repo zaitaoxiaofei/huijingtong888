@@ -18,7 +18,7 @@ async function inspect(query = mysqlQuery) {
   return {
     exists: true,
     row_count: Number(counts.row_count || 0),
-    legacy_unattributed_rows: Number(counts.legacy_unattributed_rows || 0),
+    legacy_unattributed_rows: hasTenantColumn ? Number(counts.legacy_unattributed_rows || 0) : Number(counts.row_count || 0),
     tenant_id_column: hasTenantColumn,
     indexes: [...new Set(indexes.map((index) => index.Key_name))]
   };
