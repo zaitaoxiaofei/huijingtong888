@@ -213,7 +213,7 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" ]]; then
   backup_database
 fi
 
@@ -235,6 +235,19 @@ if [[ "$run_db_maintenance" == "1" && "$run_db_init" == "1" ]]; then
   (cd "$staging_dir" && npm run db:init:mysql)
 fi
 
+# These additive schemas are required by the candidate's membership and people
+# APIs, even when ordinary maintenance is skipped. Never classify people here.
+for membership_schema in migrate-enterprise-messages.mjs migrate-subscription-vouchers.mjs; do
+  if [[ ! -f "$staging_dir/scripts/$membership_schema" ]]; then
+    continue
+  fi
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node "scripts/$membership_schema" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node "scripts/$membership_schema" --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+done
+
 # Tenant-aware order sync and inventory binding require these ownership columns.
 # Existing installations need explicit, idempotent migrations because CREATE TABLE
 # IF NOT EXISTS cannot add ownership columns to legacy tables.
@@ -248,9 +261,7 @@ for tenant_migration in \
   migrate-tenant-logistics-rules.mjs \
   migrate-tenant-asset-variant-config.mjs \
   migrate-tenant-finance-center.mjs \
-  migrate-tenant-inventory-procurement.mjs \
-  migrate-enterprise-messages.mjs \
-  migrate-subscription-vouchers.mjs; do
+  migrate-tenant-inventory-procurement.mjs; do
   if [[ ! -f "$staging_dir/scripts/$tenant_migration" ]]; then
     continue
   fi

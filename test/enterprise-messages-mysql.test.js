@@ -145,6 +145,16 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
       await assert.rejects(service.unread(session(10)), {statusCode:403});
       await query("UPDATE tenants SET status='active' WHERE id=1");
     });
+    await t.test("subscription suspension and expiry close every message surface even for a platform administrator with membership", async () => {
+      for (const changes of ["subscription_status='suspended',subscription_expires_at=NULL", "subscription_status='active',subscription_expires_at=UTC_TIMESTAMP()-INTERVAL 1 DAY", "subscription_status='trial',subscription_expires_at=UTC_TIMESTAMP()-INTERVAL 1 DAY"]) {
+        await query(`UPDATE tenants SET ${changes} WHERE id=1`);
+        try {
+          const actor=session(10,1,{platform_role:"super_admin"});
+          for (const action of [()=>service.contacts(actor),()=>service.conversations(actor),()=>service.unread(actor),()=>service.thread(actor,{peer_id:11}),()=>service.read(actor,{peer_id:11,message_ids:[]}),()=>service.send(actor,{peer_id:11,text:"blocked",client_message_id:"expired-message-fixture"}),()=>service.references(actor,{type:"order",q:"101"}),()=>service.reference(actor,{type:"procurement",id:501})]) await assert.rejects(action,{statusCode:403});
+        } finally { await query("UPDATE tenants SET subscription_status='active',subscription_expires_at=NULL WHERE id=1"); }
+      }
+      assert.equal((await query("SELECT COUNT(*) AS n FROM enterprise_direct_messages WHERE client_message_id='expired-message-fixture'"))[0].n,0);
+    });
     await t.test("retries including concurrent retries persist one message and reject changed content", async () => {
       const input = {peer_id:11,text:"retry",client_message_id:"retry-key-same"};
       const results = await Promise.all([service.send(session(10),input),service.send(session(10),input)]);
@@ -157,6 +167,22 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
       await assert.rejects(send(10,11," "), {statusCode:400});
       await assert.rejects(send(10,11,"x".repeat(4001)), {statusCode:400});
       await assert.rejects(service.send(session(10), {text:"missing peer",client_message_id:"missing-peer-test"}),{statusCode:400});
+    });
+    await t.test("retrying an existing message cannot bypass a newly disabled recipient account or enterprise membership", async () => {
+      const input={peer_id:11,text:"recipient revalidation",client_message_id:"recipient-revalidation-fixture"};
+      const original=await service.send(session(10),input);
+      for (const [disable,restore] of [["UPDATE people SET active=0 WHERE id=11","UPDATE people SET active=1 WHERE id=11"],["UPDATE tenant_members SET active=0 WHERE tenant_id=1 AND person_id=11","UPDATE tenant_members SET active=1 WHERE tenant_id=1 AND person_id=11"]]) {
+        await query(disable);
+        try {
+          await assert.rejects(service.send(session(10),input),{statusCode:403});
+          await assert.rejects(service.thread(session(10),{peer_id:11}),{statusCode:403});
+          await assert.rejects(service.read(session(10),{peer_id:11,message_ids:[original.message.id]}),{statusCode:403});
+          assert.equal((await service.contacts(session(10))).rows.some(row=>row.id===11),false);
+          assert.equal((await service.conversations(session(10))).rows.some(row=>row.peer.id===11),false);
+        } finally { await query(restore); }
+      }
+      assert.equal((await service.send(session(10),input)).message.id,original.message.id);
+      assert.equal((await query("SELECT COUNT(*) AS n FROM enterprise_direct_messages WHERE client_message_id=?",[input.client_message_id]))[0].n,1);
     });
     await t.test("an uncommitted low message ID blocks a reversed sender and polling cursor until ordered commit", async () => {
       let release, reached;
@@ -223,6 +249,29 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
       assert.equal(thread.rows.find(row=>row.id===result.message.id).reference.available,false);
       await assert.rejects(service.send(session(11),{peer_id:10,text:"no permission",client_message_id:"no-permission-ref",reference:{type:"order",id:101}}),{statusCode:403});
       await query("UPDATE tenant_members SET business_roles_json='[\"operator\"]' WHERE tenant_id=1 AND person_id=11");
+    });
+    await t.test("procurement references reject foreign or missing product lineage, including saved messages and legacy default ownership", async () => {
+      await query("INSERT INTO products VALUES (3,1,'product later moved'),(4,1,'product later deleted')");
+      await query("INSERT INTO procurement_requests (id,tenant_id,product_id,raw_name,note) VALUES (505,1,3,'owned request','owned request detail'),(506,NULL,2,'foreign product request','foreign detail'),(507,1,999,'missing product request','orphan detail'),(508,NULL,1,'legacy owned request','legacy detail'),(509,2,1,'mismatched B request','mismatched detail'),(510,2,2,'owned B request','owned B detail'),(511,1,4,'deleted product request','deleted detail')");
+      const saved = await send(10,11,"reference before product ownership changed",1,{reference:{type:"procurement",id:505}});
+      const deleted = await send(10,11,"reference before product deleted",1,{reference:{type:"procurement",id:511}});
+      await query("UPDATE products SET tenant_id=2 WHERE id=3");
+      await query("DELETE FROM products WHERE id=4");
+      for (const requestId of [505,506,507,511]) {
+        await assert.rejects(service.reference(session(10),{type:"procurement",id:requestId}),{statusCode:403});
+        assert.deepEqual((await service.references(session(10),{type:"procurement",q:String(requestId)})).rows,[]);
+        await assert.rejects(send(10,11,"foreign product reference",1,{reference:{type:"procurement",id:requestId}}),{statusCode:403});
+      }
+      const thread=await service.thread(session(11),{peer_id:10});
+      for (const result of [saved,deleted]) {
+        const reference=thread.rows.find(row=>row.id===result.message.id).reference;
+        assert.equal(reference.available,false);assert.equal(reference.route,"");assert.equal(reference.label,"记录暂不可访问");
+      }
+      assert.equal((await service.conversations(session(11))).rows.find(row=>row.peer.id===10).last_message.reference.available,false);
+      assert.equal((await service.reference(session(10),{type:"procurement",id:508})).record.product_name,"A product");
+      await assert.rejects(service.reference(session(10,2),{type:"procurement",id:509}),{statusCode:403});
+      await assert.rejects(service.reference(session(10,2),{type:"procurement",id:508}),{statusCode:403});
+      assert.equal((await service.reference(session(10,2),{type:"procurement",id:510})).record.product_name,"B product");
     });
     await t.test("explicit system accounts disappear from all chat surfaces without using names or platform authority", async () => {
       await query("UPDATE people SET username='e2e', name='health check' WHERE id=11");

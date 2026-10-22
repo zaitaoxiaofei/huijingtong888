@@ -87,11 +87,12 @@ export function createEnterpriseMessagesService({ transaction }) {
       labelColumn = "r.posting_number";
     } else {
       const columns = await context.query("SHOW COLUMNS FROM procurement_requests LIKE 'tenant_id'");
-      from = "procurement_requests r LEFT JOIN orders source_order ON source_order.id = r.source_order_id LEFT JOIN shops s ON s.id = source_order.shop_id";
+      from = `procurement_requests r LEFT JOIN orders source_order ON source_order.id = r.source_order_id LEFT JOIN shops s ON s.id = source_order.shop_id
+        LEFT JOIN products p ON p.id = r.product_id AND (p.tenant_id = ${context.tenantId}${defaultTenant ? " OR p.tenant_id IS NULL" : ""})`;
       const sourceScope = `(r.source_order_id IS NULL OR (s.id IS NOT NULL AND (s.tenant_id = ${context.tenantId}${defaultTenant ? " OR s.tenant_id IS NULL" : ""})))`;
-      scope = columns.length ? `(r.tenant_id = ?${defaultTenant ? " OR r.tenant_id IS NULL" : ""}) AND ${sourceScope}` : defaultTenant ? `(? > 0 AND ${sourceScope})` : "(? < 0)";
+      const productScope = "(r.product_id IS NULL OR p.id IS NOT NULL)";
+      scope = columns.length ? `(r.tenant_id = ?${defaultTenant ? " OR r.tenant_id IS NULL" : ""}) AND ${sourceScope} AND ${productScope}` : defaultTenant ? `(? > 0 AND ${sourceScope} AND ${productScope})` : "(? < 0)";
       labelColumn = "CAST(r.id AS CHAR)";
-      if (detail) from += ` LEFT JOIN products p ON p.id = r.product_id AND (p.tenant_id = ${context.tenantId}${defaultTenant ? " OR p.tenant_id IS NULL" : ""})`;
     }
     const params = [context.tenantId];
     let filter = "";

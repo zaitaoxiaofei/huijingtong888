@@ -193,13 +193,14 @@ export function createSelfServiceMembershipService(overrides = {}) {
     await prepareSchema();
     return deps.withMysqlTransaction(async connection => {
       const { tenant, role } = await currentTenant(connection, session, true);
-      const now = deps.now();
-      const current = membershipSummary(tenant, role, now);
       if (role !== "owner") fail("仅当前企业负责人可以激活或续费会员", 403);
       if (tenant.subscription_status === "suspended") fail("企业已暂停，请联系平台管理员恢复后再兑换", 403);
-      if (current.access_allowed && !tenant.subscription_expires_at) fail("当前企业为长期授权，无需兑换时长", 409);
+      if (["active", "trial"].includes(tenant.subscription_status) && !tenant.subscription_expires_at) fail("当前企业为长期授权，无需兑换时长", 409);
       const [vouchers] = await connection.execute(`SELECT * FROM tenant_subscription_vouchers
         WHERE code_hash = ? FOR UPDATE`, [hash]);
+      // Lock acquisition may wait beyond the voucher deadline or tenant expiry.
+      const now = deps.now();
+      const current = membershipSummary(tenant, role, now);
       const voucher = vouchers[0];
       if (!voucher || voucher.status !== "active" || new Date(voucher.redeemable_until).getTime() <= now) fail("激活码无效、已过期或已使用，请核对后重试");
       const snapshot = typeof voucher.plan_snapshot_json === "string" ? JSON.parse(voucher.plan_snapshot_json) : voucher.plan_snapshot_json;

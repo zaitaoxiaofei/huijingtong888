@@ -30,6 +30,8 @@ test("complete HTTP registration, basic access, voucher redemption and re-login"
     await fixture.query("INSERT INTO tenants (id,slug,name,plan_code,subscription_status) VALUES (1,'default','历史默认企业','yearly','active')");
     await fixture.query("INSERT INTO people (id,name,username,password_hash,role,roles_json) VALUES (1,'发码管理员','voucher-admin',?,'operator',JSON_ARRAY('operator'))", [hashPassword(password)]);
     await fixture.query("INSERT INTO platform_grants (person_id,role,active,reason) VALUES (1,'super_admin',1,'Isolated HTTP test')");
+    await fixture.query("INSERT INTO people (id,name,username,password_hash,role,roles_json) VALUES (2,'旧默认企业发货员','legacy-packing',?,'packing',NULL),(3,'旧默认企业管理员','legacy-admin',?,'admin',NULL)", [hashPassword(password), hashPassword(password)]);
+    await fixture.query("INSERT INTO tenant_members (tenant_id,person_id,role,business_roles_json) VALUES (1,2,'owner',NULL),(1,3,'owner',NULL)");
     child = spawn(process.execPath, [fileURLToPath(new URL("../src/server.js", import.meta.url))], {
       cwd: directory, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, ...fixture.env, HOST: "127.0.0.1", APP_BASE_URL: base, SCHEDULED_JOBS_ENABLED: "0", DEPLOYMENT_CANDIDATE: "1",
@@ -45,6 +47,30 @@ test("complete HTTP registration, basic access, voucher redemption and re-login"
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     assert.equal(ready, true, output);
+
+    await t.test("historical default-enterprise staff retain login and business roles without new platform authority", async () => {
+      for (const [username, role, tenantRole] of [["legacy-packing", "packing", "member"], ["legacy-admin", "admin", "owner"]]) {
+        const login = await request("/api/auth/login", "", "POST", { username, password });
+        assert.equal(login.status, 200, JSON.stringify(login.data));
+        assert.ok(login.data.token);
+        assert.equal(login.data.user.platform_role, null);
+        assert.equal(login.data.user.tenant.id, 1);
+        assert.equal(login.data.user.tenant.role, tenantRole);
+        assert.equal(login.data.user.tenant.access_allowed, true);
+        assert.deepEqual(login.data.user.roles, [role]);
+        const me = await request("/api/auth/me", login.data.token);
+        assert.equal(me.status, 200);
+        assert.equal(me.data.tenant.role, tenantRole);
+        assert.equal((await request("/api/shops", login.data.token)).status, 200);
+        assert.equal((await request("/api/tenants/subscription-vouchers", login.data.token)).status, 403);
+        assert.equal((await request("/api/auth/membership", login.data.token)).data.can_activate, false);
+      }
+      assert.equal((await fixture.query("SELECT COUNT(*) AS count FROM platform_grants"))[0].count, 1);
+      const members = await fixture.query("SELECT person_id,role,business_roles_json FROM tenant_members WHERE tenant_id=1 ORDER BY person_id");
+      assert.deepEqual(members.map(row => ({ ...row, person_id: Number(row.person_id) })), [
+        { person_id: 2, role: "owner", business_roles_json: null }, { person_id: 3, role: "owner", business_roles_json: null }
+      ]);
+    });
 
     await t.test("register returns an authenticated but unactivated isolated owner, who can log in again", async () => {
       const signup = await request("/api/auth/register", "", "POST", { name: "注册卖家甲", username: "seller-alpha", password, enterprise_name: "卖家甲企业" });
@@ -64,7 +90,7 @@ test("complete HTTP registration, basic access, voucher redemption and re-login"
       assert.equal(second.status, 200, JSON.stringify(second.data));
       otherToken = second.data.token;
       assert.notEqual(second.data.user.tenant.id, account.tenant.id);
-      assert.equal((await fixture.query("SELECT COUNT(*) AS count FROM tenant_members WHERE tenant_id=1"))[0].count, 0);
+      assert.equal((await fixture.query("SELECT COUNT(*) AS count FROM tenant_members WHERE tenant_id=1 AND person_id NOT IN (2,3)"))[0].count, 0);
     });
 
     await t.test("unactivated accounts can read membership and basic calculator projections but not business data or mutations", async () => {

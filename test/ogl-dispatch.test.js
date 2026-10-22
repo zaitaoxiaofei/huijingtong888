@@ -77,7 +77,7 @@ test('official-only views show yesterday and today without local batches, remain
   assert.equal(detail.members[0].platform_status,'awaiting_deliver');assert.equal(detail.members[0].online,false,'Carriage formed never promotes member logistics');
   assert.equal(detail.members[1].matched_local,false);assert.equal(detail.members[1].order_id,null);
   assert.ok(!/fixture-key|secret-phone|private-customer/.test(JSON.stringify({today,yesterday,detail})));
-  const before=apiCalls.length;await assert.rejects(service.officialDetail(session,{id:901,date:'2026-10-22'}),/不在默认店铺/);assert.equal(apiCalls.slice(before).filter(call=>call.path!=='delivery-list').length,0);
+  const before=apiCalls.length;await assert.rejects(service.officialDetail(session,{id:901,date:'2026-10-22'}),/不在所选原店铺/);assert.equal(apiCalls.slice(before).filter(call=>call.path!=='delivery-list').length,0);
   await assert.rejects(service.listOfficial(session,{date:'2026-02-30'}),/有效的北京日期/);
   linked=true;assert.equal((await service.listOfficial(session,{date:'2026-10-21'})).rows[0].local_batch_id,8);
   const [tracking,concurrent]=await Promise.all([service.officialTracking(session,{id:902,date:'2026-10-22'}),service.officialTracking(session,{id:902,date:'2026-10-22'})]);

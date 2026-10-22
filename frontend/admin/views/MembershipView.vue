@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAuthStore } from "../stores/auth";
 import { getMembership } from "../api/account";
@@ -14,34 +14,55 @@ const router = useRouter();
 const membership = ref(null);
 const loading = ref(false);
 const error = ref("");
+let disposed = false;
+let active = true;
+let requestSequence = 0;
 const tenant = computed(() => auth.user?.tenant || null);
 const status = computed(() => membershipDisplay(membership.value || tenant.value));
 const canActivate = computed(() => !["permanent", "suspended", "no-tenant", "unavailable"].includes(status.value.kind)
-  && (membership.value?.can_activate ?? tenant.value?.role === "owner"));
+  && tenant.value?.role === "owner" && membership.value?.can_activate !== false);
 const expiryText = computed(() => status.value.expiresAt
   ? shanghaiDateTimeText(status.value.expiresAt, { assumeUtcWhenNaive: true })
   : status.value.active ? "未设置到期时间" : "尚未开通");
 
 async function load() {
+  const sequence = ++requestSequence;
   const scope = currentApiCacheScope();
   const tenantId = Number(tenant.value?.id || 0);
+  const current = () => !disposed && active && sequence === requestSequence
+    && scope === currentApiCacheScope() && tenantId === Number(tenant.value?.id || 0);
   membership.value = null;
-  if (!tenantId) return;
-  loading.value = true;
+  loading.value = false;
   error.value = "";
+  if (disposed || !active || !tenantId) return;
+  loading.value = true;
   try {
     const result = await getMembership();
-    if (scope !== currentApiCacheScope() || tenantId !== Number(tenant.value?.id || 0)) return;
+    if (!current()) return;
     if (Number(result.tenant_id) !== tenantId) throw new Error("会员信息已变更，请刷新后重试");
     membership.value = result;
   } catch (failure) {
-    if (scope === currentApiCacheScope()) error.value = failure.message || "会员信息加载失败，请重试";
+    if (current()) error.value = failure.message || "会员信息加载失败，请重试";
   } finally {
-    if (scope === currentApiCacheScope()) loading.value = false;
+    if (current()) loading.value = false;
   }
 }
 
-watch(() => [auth.user?.id, tenant.value?.id, tenant.value?.subscription_status, tenant.value?.subscription_expires_at], load, { immediate: true });
+function clearMembership() {
+  requestSequence += 1;
+  membership.value = null;
+  loading.value = false;
+  error.value = "";
+}
+function handleScopeChange() {
+  clearMembership();
+  if (active && !disposed) void load();
+}
+watch(() => [auth.user?.id, tenant.value?.id, tenant.value?.role, tenant.value?.subscription_status, tenant.value?.subscription_expires_at], load, { immediate: true, flush: "sync" });
+window.addEventListener("erp:auth-scope-changed", handleScopeChange);
+onActivated(() => { const returning = !active; active = true; if (returning) void load(); });
+onDeactivated(() => { active = false; clearMembership(); });
+onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventListener("erp:auth-scope-changed", handleScopeChange); });
 </script>
 
 <template>

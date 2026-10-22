@@ -219,7 +219,7 @@ test("Windows release guard runs after DryRun and before any build or upload", (
 });
 
 test("ECS release verifies a private complete database backup before initialization or ownership migrations", () => {
-  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \]\]; then\s+backup_database/);
+  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-enterprise-messages\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-subscription-vouchers\.mjs" \]\]; then\s+backup_database/);
   const backup = remote.indexOf("\n  backup_database\n");
   assert.ok(backup >= 0);
   assert.ok(backup < remote.indexOf("npm run db:init:mysql"));
@@ -240,6 +240,41 @@ const bashExecutable = process.platform === "win32"
   ? path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe")
   : "bash";
 const missingGitBash = process.platform === "win32" && !fs.existsSync(bashExecutable);
+
+test("membership schemas require a verified backup and run before the candidate even with maintenance skipped", { skip: missingGitBash }, async () => {
+  const fixtureDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-membership-deploy-"));
+  try {
+    const gate = remote.match(/^if \[\[ "\$run_db_maintenance" == "1"[^\r\n]*\r?\n  backup_database\r?\nfi/m)?.[0];
+    const hookStart = remote.indexOf("for membership_schema in ");
+    const hookEnd = remote.indexOf("\n# Tenant-aware order sync", hookStart);
+    assert.ok(gate && hookStart > remote.indexOf("\n  backup_database\n") && hookEnd > hookStart);
+    assert.ok(hookStart < remote.indexOf("\nstart_candidate\n"));
+    const hook = remote.slice(hookStart, hookEnd);
+    assert.doesNotMatch(hook, /review-people-account-kinds|assign-legacy|migrate-platform-enterprise-identities/);
+    await fsPromises.mkdir(path.join(fixtureDir, "scripts"));
+    await fsPromises.writeFile(path.join(fixtureDir, "env"), "DB_NAME=isolated_schema_fixture\n", "utf8");
+    for (const schema of ["migrate-enterprise-messages.mjs", "migrate-subscription-vouchers.mjs"]) {
+      const file = path.join(fixtureDir, "scripts", schema);
+      await fsPromises.writeFile(file, "fixture", "utf8");
+      const { stdout } = await execFileAsync(bashExecutable, ["--noprofile", "--norc", "-c", `
+        set -Eeuo pipefail
+        staging_dir="$PWD"
+        env_file="$PWD/env"
+        run_db_maintenance=0
+        reviewed_identity_manifest=""
+        backup_database() { printf 'backup-required\\n'; }
+        node() { printf '%s\\n' "$*"; }
+        ${gate}
+        ${hook}
+      `], { cwd: fixtureDir, env: { ...process.env, BASH_ENV: "" } });
+      const lines = stdout.trim().split(/\r?\n/);
+      assert.deepEqual(lines, ["backup-required", `scripts/${schema} --mysql-admin-socket=/var/run/mysqld/mysqld.sock`, `scripts/${schema} --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock`]);
+      await fsPromises.rm(file);
+    }
+  } finally {
+    await fsPromises.rm(fixtureDir, { recursive: true, force: true });
+  }
+});
 
 test("profit schema preparation still requires a backup when ordinary maintenance is skipped", { skip: missingGitBash }, async () => {
   const fixtureDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-backup-gate-"));
@@ -399,7 +434,7 @@ test("ECS release migrates tenant ownership dependencies before starting order s
   assert.ok(remote.indexOf("migrate-tenant-sku-mappings.mjs") < remote.indexOf("migrate-tenant-logistics-rules.mjs"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("\nstart_candidate\n"));
   assert.ok(remote.indexOf("migrate-tenant-logistics-rules.mjs") < remote.indexOf("migrate-tenant-asset-variant-config.mjs"));
-  assert.ok(remote.indexOf("migrate-tenant-asset-variant-config.mjs") < remote.indexOf("migrate-enterprise-messages.mjs"));
+  assert.ok(remote.indexOf("for membership_schema") < remote.indexOf("for tenant_migration"));
   assert.ok(remote.indexOf("migrate-enterprise-messages.mjs") < remote.indexOf("\nstart_candidate\n"));
   assert.ok(remote.indexOf("migrate-tenant-asset-variant-config.mjs") < remote.indexOf("\nstart_candidate\n"));
 });

@@ -152,5 +152,50 @@ test("registration and sale vouchers against disposable socket-only MySQL", {
       await assert.rejects(service.activate({ activation_code: fresh.activation_code }, second.session), error => error.statusCode === 403);
       assert.equal((await fixture.query("SELECT status FROM tenant_subscription_vouchers WHERE id=?", [fresh.id]))[0].status, "active");
     });
+
+    await t.test("a voucher expiring while its row is locked cannot be consumed using the pre-wait clock", async () => {
+      const owner = await register("lock-expiry");
+      const deadline = now + 1000;
+      const code = await service.issueVoucher({ plan_code: "weekly", redeemable_until: new Date(deadline).toISOString() }, platform);
+      let reachedVoucher;
+      const waiting = new Promise(resolve => { reachedVoucher = resolve; });
+      const blockedService = createSelfServiceMembershipService({ ensureTenantSchemaMysql: async () => {}, mysqlExecute: fixture.query,
+        now: () => now, withMysqlTransaction: action => transaction(connection => action({
+          async execute(sql, params) {
+            if (sql.startsWith("SELECT * FROM tenant_subscription_vouchers")) reachedVoucher();
+            return connection.execute(sql, params);
+          }
+        })) });
+      let activation;
+      await fixture.connection.beginTransaction();
+      try {
+        await fixture.connection.execute("SELECT id FROM tenant_subscription_vouchers WHERE id=? FOR UPDATE", [code.id]);
+        activation = blockedService.activate({ activation_code: code.activation_code }, owner.session);
+        const outcome = activation.then(value => ({ value }), error => ({ error }));
+        await waiting;
+        now = deadline;
+        await fixture.connection.commit();
+        const result = await outcome;
+        assert.equal(result.error?.statusCode, 400, "Redemption must check expiration after acquiring the voucher row lock");
+        assert.equal((await fixture.query("SELECT status FROM tenant_subscription_vouchers WHERE id=?", [code.id]))[0].status, "active");
+        assert.equal((await service.membership(owner.session)).status, "unactivated");
+      } finally {
+        await fixture.connection.rollback();
+        await activation?.catch(() => {});
+      }
+    });
+
+    await t.test("forged current-tenant and platform flags cannot redeem or manage another enterprise", async () => {
+      const owner = await register("scope-owner");
+      const foreign = await register("scope-foreign");
+      const code = await service.issueVoucher({ plan_code: "weekly" }, platform);
+      await assert.rejects(service.activate({ activation_code: code.activation_code }, { ...owner.session, platform_role: "super_admin", tenant: foreign.session.tenant }), error => error.statusCode === 403);
+      await assert.rejects(service.listVouchers({ ...owner.session, platform_role: "super_admin" }), error => error.statusCode === 403);
+      await assert.rejects(service.issueVoucher({ plan_code: "weekly" }, { ...owner.session, role: "admin", roles: ["admin"] }), error => error.statusCode === 403);
+      await assert.rejects(service.activate({ activation_code: code.activation_code, tenant_id: foreign.row.tenant_id }, owner.session), error => error.statusCode === 400);
+      assert.equal((await fixture.query("SELECT status FROM tenant_subscription_vouchers WHERE id=?", [code.id]))[0].status, "active");
+      assert.equal((await service.membership(owner.session)).access_allowed, false);
+      assert.equal((await service.membership(foreign.session)).access_allowed, false);
+    });
   } finally { await fixture.cleanup(); }
 });
