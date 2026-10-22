@@ -1,6 +1,7 @@
 import { mysqlQuery } from "../mysql-pool.js";
 import { AI_BACKGROUND_TENANT_TABLES } from './ai-background-tenant-tables.js';
 import { assertAiVariantDraftHistorySchemaReady } from './ai-variant-draft-history-schema.js';
+import { assertOglDispatchSchemaReady } from './ogl-dispatch-schema.js';
 
 // Some optional workflows create their tables lazily. An absent table is safe;
 // an existing legacy table without ownership must never reach a business query.
@@ -16,6 +17,7 @@ const optionalOwnedTables = [
 // required ownership migration was skipped or applied to the wrong database.
 export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
   await assertAiVariantDraftHistorySchemaReady(query);
+  await assertOglDispatchSchemaReady(query);
   const required = {
     products: ["tenant_id"], shops: ["tenant_id"], sku_mappings: ["tenant_id"],
     suppliers: ["tenant_id"], logistics_fee_rules: ["tenant_id"],

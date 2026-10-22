@@ -1,5 +1,6 @@
 import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
+import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -24,6 +25,12 @@ export function authorizeApiRequest(req, parts = []) {
   const resource = parts[1];
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
+
+  if (resource === "ogl-dispatch") {
+    if (!session.tenant?.id || !session.tenant?.slug || !isOglDispatchRoute(parts, method)) return deny("请在有效企业中使用已开放的 OGL 发运操作");
+    if (parts[2] === "settings") return isEnterpriseAdmin(session) ? { allowed: true } : deny("仅本企业负责人或管理员可以设置默认发运店铺");
+    return read || parts[2] === "preview" ? require("orders.read", "packing") : require("packing", "orders.manage");
+  }
 
   if (read && ["system/info", "system/update-status"].includes(path)) return { allowed: true };
   if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug) return { allowed: true };

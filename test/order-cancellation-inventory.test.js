@@ -14,6 +14,9 @@ function database() {
   db.function('CONCAT', { varargs: true }, (...args) => args.join(''));
   db.function('regexp', (pattern, value) => Number(new RegExp(pattern).test(value || '')));
   db.exec(`CREATE TABLE shops(id INTEGER,tenant_id INTEGER); INSERT INTO shops VALUES(1,1);
+    CREATE TABLE tenants(id INTEGER,slug TEXT); INSERT INTO tenants VALUES(1,'default');
+    CREATE TABLE ogl_dispatch_batches(id INTEGER,tenant_id INTEGER);
+    CREATE TABLE ogl_dispatch_members(id INTEGER,tenant_id INTEGER,batch_id INTEGER,order_id INTEGER,active_order_id INTEGER,shop_id INTEGER,dispatched_at TEXT,withdrawn_at TEXT);
     CREATE TABLE products(id INTEGER,tenant_id INTEGER); INSERT INTO products VALUES(94,1);
     CREATE TABLE orders (id INTEGER, status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT,shop_id INTEGER DEFAULT 1);
     CREATE TABLE order_items (id INTEGER, order_id INTEGER);

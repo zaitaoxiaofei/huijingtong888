@@ -74,7 +74,10 @@ test("企业汇总批量重算、原子写入，并验证租户隔离、组件�
     /im\.source_type IN \('order_outbound', 'order_outbound_adjustment'\)/);
   for (const { sql } of statements.filter(({ sql }) => !sql.includes("FROM inventory_product_balance"))) {
     assert.match(sql, /tenant_id = 29/);
-    assert.doesNotMatch(sql, /tenant_id IS NULL/);
+    // Source ledgers remain strictly scoped. The separate OGL evidence lookup
+    // may recognize legacy NULL shops only when its joined tenant is default.
+    assert.doesNotMatch(sql, /(?<!ogl_shop\.)tenant_id IS NULL/);
+    if (sql.includes('ogl_shop.tenant_id IS NULL')) assert.match(sql, /ogl_shop\.tenant_id IS NULL AND ogl_tenant\.slug = 'default'/);
   }
   await loadInventoryProductBalances(query, transaction, 29, false, [1, 2]);
   assert.equal(transactions, 1, "fresh projection should be read without recomputing order history");

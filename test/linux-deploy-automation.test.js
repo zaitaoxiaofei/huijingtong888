@@ -219,7 +219,7 @@ test("Windows release guard runs after DryRun and before any build or upload", (
 });
 
 test("ECS release verifies a private complete database backup before initialization or ownership migrations", () => {
-  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \]\]; then\s+backup_database/);
+  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \]\]; then\s+backup_database/);
   const backup = remote.indexOf("\n  backup_database\n");
   assert.ok(backup >= 0);
   assert.ok(backup < remote.indexOf("npm run db:init:mysql"));

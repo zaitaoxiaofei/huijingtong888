@@ -14,6 +14,7 @@ export const STATE_META = {
   all: { label: "全部订单", color: "slate" },
   awaiting_packaging: { label: "等待备货", color: "amber" },
   awaiting_deliver: { label: "等待发货", color: "blue" },
+  ogl_dispatched: { label: "已发运", color: "blue" },
   delivering: { label: "运输中", color: "green" },
   dispute: { label: "有争议", color: "red" },
   delivered: { label: "已签收", color: "green" },
@@ -36,7 +37,11 @@ export function orderStateKey(row = {}) {
   if (text.includes("delivered")) return "delivered";
   if (text.includes("dispute") || text.includes("arbitration")) return "dispute";
   // A stale acceptance substatus must not move an already-transiting order back.
-  if (text.includes("delivering")) return "delivering";
+  if (/(^|\s)(delivering|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^\s]*|posting_in_courier_service|posting_in_pickup_point)(\s|$)/.test(text)) return "delivering";
+  const oglDisplayStatus = row?.ogl_dispatch?.dispatched === true ? String(row?.display_status || "") : "";
+  if (["delivering", "delivered", "cancelled", "dispute"].includes(oglDisplayStatus)) return oglDisplayStatus;
+  if (DELIVERING_KEYWORDS.some(value => text.includes(value)) && !AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "delivering";
+  if (oglDisplayStatus === "ogl_dispatched") return "ogl_dispatched";
   if (AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "awaiting_deliver";
   if (DELIVERING_KEYWORDS.some(value => text.includes(value))) return "delivering";
   if (AWAITING_PACKAGING_STATES.some(value => text.includes(value))) return "awaiting_packaging";

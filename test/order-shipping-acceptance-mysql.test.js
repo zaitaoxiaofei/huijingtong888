@@ -7,6 +7,7 @@ import { saveOrderPostingLogistics } from "../src/services/mysql-order-posting-l
 import { isOrderInTransport } from "../src/services/order-query-facts.js";
 import { buildLiveShippingProductsMysql, buildSplitShippingPackagesMysql } from "../src/services/mysql-order-shipping-packages.js";
 import { strictOzonSkuValue } from "../src/services/mysql-online-product-sku.js";
+import { orderStateKey } from "../frontend/orders/constants/orders-ui.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const labels = ["click_track_number", "label_download", "label_download_small"];
@@ -93,6 +94,38 @@ test("FBS acceptance shipping compensation preserves real SQL state, stock, prin
     });
 
     const a = fixtures[2];
+    await t.test("default/A/B exact transport facts override old acceptance without physical members or tracking-number inference", async () => {
+      assert.equal(Number((await query("SELECT COUNT(*) AS n FROM ogl_dispatch_members"))[0].n), 0);
+      const before = await untouched();
+      const stored = await query("SELECT id,status,tracking_stage,logistics_status,tracking_number FROM orders ORDER BY id");
+      const transit = ["delivering", "posting_in_transit", "posting_in_customs", "posting_sorting", "posting_on_way", "posting_on_way_to_city", "posting_in_courier_service", "posting_in_pickup_point"];
+      const states = transit.flatMap(value => ["status", "tracking_stage", "logistics_status"].map(field => ({
+        status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", logistics_status: "", [field]: value
+      })));
+      states.push(
+        ...["delivering", "posting_in_transit", "delivered", "cancelled", "dispute"].map(tracking_number => ({ status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", tracking_number })),
+        ...["not_posting_in_transit", "xposting_on_way", "posting_in_customs_extra"].map(logistics_status => ({ status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", logistics_status })),
+        ...["delivered", "cancelled", "returned", "dispute"].map(status => ({ status, tracking_stage: "posting_acceptance_in_progress", logistics_status: "posting_in_transit" }))
+      );
+      try {
+        await query("UPDATE orders SET status='awaiting_packaging',tracking_stage='posting_created',logistics_status='',tracking_number=''");
+        for (const row of fixtures) {
+          const scope = await service.orderListTenantScopeMysql(row.key);
+          const matches = async status => (await query(`SELECT o.id FROM orders o JOIN shops s ON s.id=o.shop_id
+            WHERE ${service.orderTenantPredicateMysql("s", scope)} AND ${service.orderStatusSqlMysql(status, null, scope)} ORDER BY o.id`)).map(value => Number(value.id));
+          for (const state of states) {
+            await query("UPDATE orders SET status=?,tracking_stage=?,logistics_status=?,tracking_number=? WHERE id=?", [state.status, state.tracking_stage, state.logistics_status || "", state.tracking_number || "", row.id]);
+            const expected = orderStateKey(state), label = `${row.key}/${row.id} ${JSON.stringify(state)}`;
+            assert.deepEqual(await matches("awaiting_deliver"), expected === "awaiting_deliver" ? [row.id] : [], label);
+            assert.deepEqual(await matches("delivering"), expected === "delivering" ? [row.id] : [], label);
+          }
+        }
+        assert.deepEqual(await untouched(), before);
+        assert.deepEqual(remote, []);
+      } finally {
+        for (const row of stored) await query("UPDATE orders SET status=?,tracking_stage=?,logistics_status=?,tracking_number=? WHERE id=?", [row.status, row.tracking_stage, row.logistics_status, row.tracking_number, row.id]);
+      }
+    });
     await t.test("a detail response for another posting cannot update the selected order or raw row", async () => {
       await reset(a); const before = await untouched();
       const stored = await query("SELECT * FROM orders WHERE id=20");

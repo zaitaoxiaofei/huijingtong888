@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import mysql from 'mysql2/promise';
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from '../../src/services/order-profit-calculation-schema.js';
+import { OGL_DISPATCH_SCHEMA_SQL } from '../../src/services/ogl-dispatch-schema.js';
 import { initializeOrderQueryFacts } from '../../src/services/order-query-facts.js';
 
 // Never uses application credentials or an existing database. The caller must
@@ -36,7 +37,7 @@ export async function createTenantMysqlFixture(prefix = 'inventory') {
     };
     const privateFiles = await staticSchema('tenant-private-files-schema.js', 'TENANT_PRIVATE_FILES_SCHEMA');
     const salesRefresh = await staticSchema('mysql-inventory-alert-snapshots.js', 'TENANT_INVENTORY_SALES_REFRESH_SCHEMA');
-    const constants = { ORDER_PROFIT_CALCULATION_SCHEMA, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
+    const constants = { ORDER_PROFIT_CALCULATION_SCHEMA, OGL_DISPATCH_SCHEMA_SQL, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
     for (const name of ['TENANT_AI_LIMITS_SCHEMA', 'TENANT_AI_USAGE_SCHEMA', 'AI_IMAGE_TASK_OWNERS_SCHEMA']) {
       constants[name] = await staticSchema('ai-tenant-schema.js', name);
     }

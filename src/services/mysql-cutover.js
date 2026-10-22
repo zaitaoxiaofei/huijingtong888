@@ -20,6 +20,8 @@ import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidat
 import { isOrderInTransport as isOrderInTransportMysql } from "./order-query-facts.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
+import { withOglDispatch, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql } from "./ogl-dispatch-state.js";
+import { OGL_DISPATCH_REFRESH } from "./ogl-dispatch-access.js";
 import { orderStatusHistoryBusinessFingerprint } from "./order-history-fingerprint.js";
 import { PDFDocument } from "pdf-lib";
 import { createHash, randomUUID } from "node:crypto";
@@ -2968,7 +2970,7 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
   const tenantScope = await orderListTenantScopeMysql(tenantId);
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "rule");
   const formulaLabelsPromise = orderProfitFormulaLabels(orderIds);
-  const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks] = await Promise.all([
+  const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks, oglMembers] = await Promise.all([
     coveragePromise === null ? new Map() : (coveragePromise || orderTenantCoverageMysql(tenantScope)),
     orderQualityPrefixesMysql(),
     orderInventoryPickingMysql(orderIds, tenantScope.id),
@@ -2983,13 +2985,14 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
     GROUP BY oi.order_id
     `, [...orderIds, ...billingScope.params]) : [],
     rows.length ? activeOrderLogisticsFilterMethodsMysql(tenantScoped ? tenantId : "admin") : undefined,
-    loadOrderFbpStocks(mysqlQuery, orderIds)
+    loadOrderFbpStocks(mysqlQuery, orderIds),
+    loadOglDispatchMembersMysql(orderIds, tenantScope)
   ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
   const formulaLabels = await formulaLabelsPromise;
   return await mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
-    const enriched = await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null }, tenantScoped ? tenantId : "admin");
+    const enriched = withOglDispatch(await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null }, tenantScoped ? tenantId : "admin"), oglMembers.get(Number(row.id)));
     const accounting = classifyOrderAccounting(enriched, { qualityPrefixes });
     const cancellation = cancellationDisplay({
       ...enriched,
@@ -19762,7 +19765,13 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
     await assertOrderTaskAccessMysql(tenantScope, options);
       throwIfAbortedMysql(options.signal);
       try {
-        const posting = await fetchOzonPostingByNumber(shop, postingNumber, { signal: options.signal });
+        const posting = await fetchOzonPostingByNumber(shop, postingNumber, {
+          signal: options.signal,
+          beforeRequest: async () => {
+            await assertOrderTaskAccessMysql(tenantScope, options);
+            return activeShopForTenantMysql(cachedShop.id, tenantScope.id);
+          }
+        });
         if (!posting?.posting_number) continue;
         const stats = await upsertPostingMysql(shop, posting, "sync", { ...options, tenantId });
         inserted += stats.inserted;
@@ -29761,6 +29770,8 @@ function orderTenantPredicateMysql(alias, scope) {
 }
 
 async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["orders.manage", "technical"]) {
+  if (options[OGL_DISPATCH_REFRESH] === true && permissions.length === 2
+    && permissions[0] === "orders.manage" && permissions[1] === "technical") permissions = ["packing", "orders.manage"];
   throwIfAbortedMysql(options.signal);
   const tenant = await mysqlQueryOne(`SELECT id FROM tenants WHERE id = ? AND status = 'active'
     AND subscription_status IN ('active', 'trial')
@@ -29784,10 +29795,24 @@ async function orderTenantCoverageMysql(scope) {
   });
 }
 
+async function loadOglDispatchMembersMysql(ids, tenantScope) {
+  if (!ids.length) return new Map();
+  const rows = await mysqlQuery(`SELECT m.*, b.batch_number FROM ogl_dispatch_members m
+    JOIN ogl_dispatch_batches b ON b.id = m.batch_id AND b.tenant_id = m.tenant_id
+    JOIN orders member_order ON member_order.id = m.order_id AND member_order.shop_id = m.shop_id
+    JOIN shops member_shop ON member_shop.id = member_order.shop_id
+    WHERE m.tenant_id = ? AND ${orderTenantPredicateMysql("member_shop", tenantScope)}
+      AND m.order_id IN (${ids.map(() => "?").join(",")})
+    ORDER BY (m.active_order_id IS NOT NULL) DESC, m.id DESC`, [tenantScope.id, ...ids]);
+  const members = new Map();
+  for (const row of rows) if (!members.has(Number(row.order_id))) members.set(Number(row.order_id), row);
+  return members;
+}
+
 function assertTenantOrderListFiltersMysql(query = {}, tenantScope = null) {
   if (!tenantScope) return;
   const status = String(query.status || "all");
-  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing"]);
+  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing"]);
   if (!tenantSafeStatuses.has(status)) {
     throw Object.assign(new Error("企业订单列表暂不支持该状态筛选：关联库存或采购数据租户隔离尚未完成。"), { statusCode: 503 });
   }
@@ -30405,6 +30430,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
       COUNT(*) AS all_count,
       SUM(CASE WHEN ${orderStatusSqlMysql("awaiting_packaging", null, tenantScope)} THEN 1 ELSE 0 END) AS awaiting_packaging,
       SUM(CASE WHEN ${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)} THEN 1 ELSE 0 END) AS awaiting_deliver,
+      SUM(CASE WHEN ${orderStatusSqlMysql("ogl_dispatched", null, tenantScope)} THEN 1 ELSE 0 END) AS ogl_dispatched,
       SUM(CASE WHEN ${orderStatusSqlMysql("delivering", null, tenantScope)} THEN 1 ELSE 0 END) AS delivering,
       SUM(CASE WHEN ${orderStatusSqlMysql("dispute", null, tenantScope)} THEN 1 ELSE 0 END) AS dispute,
       SUM(CASE WHEN ${orderStatusSqlMysql("delivered", null, tenantScope)} THEN 1 ELSE 0 END) AS delivered,
@@ -30420,6 +30446,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
     all: Number(row?.all_count || 0),
     awaiting_packaging: Number(row?.awaiting_packaging || 0),
     awaiting_deliver: Number(row?.awaiting_deliver || 0),
+    ogl_dispatched: Number(row?.ogl_dispatched || 0),
     delivering: Number(row?.delivering || 0),
     dispute: Number(row?.dispute || 0),
     delivered: Number(row?.delivered || 0),
@@ -30724,10 +30751,15 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
   }
   const state = "LOWER(COALESCE(o.status, ''))";
   const stage = "LOWER(COALESCE(o.tracking_stage, ''))";
-  const value = `LOWER(CONCAT(COALESCE(o.status, ''), ' ', COALESCE(o.tracking_stage, ''), ' ', COALESCE(o.logistics_status, ''), ' ', COALESCE(o.tracking_number, '')))`;
+  const value = `LOWER(CONCAT(COALESCE(o.status, ''), ' ', COALESCE(o.tracking_stage, ''), ' ', COALESCE(o.logistics_status, '')))`;
+  const exactTransit = `${value} REGEXP '(^|[[:space:]])(delivering|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^[:space:]]*|posting_in_courier_service|posting_in_pickup_point)([[:space:]]|$)'`;
+  const waitingStates = "'acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'";
+  const awaitingDelivery = `(${state} IN (${waitingStates}) OR ${stage} IN (${waitingStates}) OR LOWER(COALESCE(o.logistics_status, '')) IN (${waitingStates}))`;
+  if (status === "ogl_dispatched") return oglDispatchedStatusSql("o");
   if (status === "awaiting_packaging") {
     return `((${state} IN ('awaiting_approve','awaiting_packaging','posting_created')
       OR ${stage} IN ('awaiting_approve','awaiting_packaging','posting_created'))
+      AND NOT ${oglDispatchedStatusSql("o")}
       AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
@@ -30735,18 +30767,20 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
   }
   if (status === "awaiting_deliver") {
-    return `((${state} IN ('acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
-      OR ${stage} IN ('acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'))
-      AND ${value} NOT LIKE '%delivering%'
+    return `(${awaitingDelivery}
+      AND NOT (${exactTransit})
+      AND NOT ${oglDispatchedStatusSql("o")} AND NOT ${oglOnlineStatusSql("o")} AND NOT ${oglTerminalStatusSql("o")}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
   }
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
-  if (status === "delivered") return `(${value} LIKE '%delivered%' AND NOT (${orderStatusSqlMysql("cancelled")}))`;
+  if (status === "delivered") return `((${value} LIKE '%delivered%' OR (${oglPhysicalDispatchSql("o")} AND ${value} LIKE '%posting_received_by_buyer%')) AND NOT (${orderStatusSqlMysql("cancelled")}))`;
   if (status === "delivering") {
-    return `(
+    return `((${exactTransit}) OR ${oglOnlineStatusSql("o")} OR (
+      NOT ${awaitingDelivery}
+      AND
       ${value} NOT LIKE '%awaiting_packaging%' AND ${value} NOT LIKE '%awaiting_deliver%' AND ${value} NOT LIKE '%pending_stock%'
       AND ${value} NOT LIKE '%posting_in_carriage%' AND ${value} NOT LIKE '%posting_transferring%' AND ${value} NOT LIKE '%posting_transferring_to_delivery%'
       AND (
@@ -30754,7 +30788,10 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
         OR ${value} LIKE '%sorting%' OR ${value} LIKE '%customs%' OR ${value} LIKE '%shipped%' OR ${value} LIKE '%sent%'
         OR ${value} LIKE '%on_way%'
       )
-    )`;
+    )) AND NOT ${oglDispatchedStatusSql("o")} AND NOT ${oglTerminalStatusSql("o")}
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)})`;
   }
   return "1 = 1";
 }
@@ -30890,6 +30927,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   );
   if (!order) return null;
   order = await enrichOrderLogisticsMysql(order, tenantScoped ? String(normalizedTenantId) : "admin");
+  order = withOglDispatch(order, (await loadOglDispatchMembersMysql([Number(order.id)], scope)).get(Number(order.id)));
 
   const itemTenantJoinSql = tenantScoped
     ? `LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = ? AND ${tenantShopPredicateMysql("sm", scope.defaultTenant)}

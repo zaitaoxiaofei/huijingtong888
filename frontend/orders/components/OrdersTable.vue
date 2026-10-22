@@ -39,6 +39,7 @@ const emit = defineEmits([
   "view-inventory-detail",
   "inventory-saved",
   "quick-history-purchase",
+  "open-ogl-batch",
   "confirm-procurement-inbound"
 ]);
 
@@ -417,7 +418,9 @@ function procurementTimeText(row) {
       <el-table-column label="状态" width="124" align="center">
         <template #default="{ row }">
           <div class="orders-cell-stack orders-cell-center orders-status-cell">
-            <el-tag effect="light" :type="statusTagType(row.statusColor)">{{ row.statusLabel }}</el-tag>
+            <el-tag effect="light" :type="statusTagType(row.statusColor)" :title="row.statusHint || ''">{{ row.statusLabel }}</el-tag>
+            <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" :title="row.ogl_dispatch.batch_number || 'OGL 批次'" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">{{ row.ogl_dispatch.batch_number || 'OGL 批次' }} · {{ row.ogl_dispatch.container_no ? `货位 ${row.ogl_dispatch.container_no}` : '货位未记录' }}</el-button>
+            <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
             <div
               v-if="row.statusDeadlineHint"
               class="orders-status-deadline"
@@ -858,6 +861,7 @@ function procurementTimeText(row) {
 </template>
 
 <style scoped>
+.orders-ogl-batch-link { max-width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
 .orders-mark-cell { --orders-mark-note-color: var(--erp-text-secondary, #64748b); }
 .orders-mark-cell.is-red { --orders-mark-note-color: var(--erp-danger-text, #b91c1c); }
 .orders-mark-cell.is-orange { --orders-mark-note-color: var(--erp-warning-text, #b45309); }

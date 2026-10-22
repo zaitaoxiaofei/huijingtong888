@@ -1,5 +1,6 @@
 import { calculateOrderProcurementCoverage } from './order-procurement-coverage.js';
 import { transportStatusesSql } from './order-query-facts.js';
+import { oglPhysicalDispatchSql } from './ogl-dispatch-state.js';
 import { loadFbpReservations } from './fbp-warehouse.js';
 import { resolveInventoryTenantScope } from './inventory-tenant-scope.js';
 
@@ -74,8 +75,10 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         CASE WHEN (o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
           OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))
           AND LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) NOT REGEXP 'cancel|return|reject|delivered|dispute|arbitration'
+          AND NOT ${oglPhysicalDispatchSql('o')}
           THEN 1 ELSE 0 END AS needs_fulfillment,
         CASE WHEN COALESCE(o.cancelled_after_ship, 0) > 0 OR o.delivered_at IS NOT NULL
+          OR ${oglPhysicalDispatchSql('o')}
           OR LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way)( |$)'
           OR (LOWER(CONCAT_WS(' ', o.status, o.tracking_stage)) REGEXP 'cancel|return|reject'
             AND ${hasTransportHistory}) THEN 1 ELSE 0 END AS entered_transport,

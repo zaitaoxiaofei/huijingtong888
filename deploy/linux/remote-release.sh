@@ -213,8 +213,18 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" ]]; then
   backup_database
+fi
+
+# Order, procurement and inventory SQL depend on the new OGL evidence tables.
+# Create and verify them before any maintenance readers, even with skip enabled.
+if [[ -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" ]]; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/migrate-ogl-dispatch-schema.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node scripts/migrate-ogl-dispatch-schema.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 fi
 
 if [[ "$run_db_maintenance" == "1" && "$run_db_init" == "1" ]]; then

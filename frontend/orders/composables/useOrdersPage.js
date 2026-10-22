@@ -99,6 +99,7 @@ function writeOrdersMetaCache(filters = {}, counts = {}) {
 const STATUS_TABS = [
   { value: "awaiting_packaging", label: "等待备货" },
   { value: "awaiting_deliver", label: "等待发货" },
+  { value: "ogl_dispatched", label: "已发运", title: "运往集运仓" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
@@ -135,6 +136,9 @@ const FULFILLMENT_TYPE_OPTIONS = [
 ];
 
 const MORE_ACTIONS = [
+  { value: "ogl-official-carriages", label: "Ozon 后台已有申请" },
+  { value: "ogl-create-batch", label: "创建 OGL 发运批次" },
+  { value: "ogl-batch-history", label: "OGL 发运批次" },
   { value: "recalculate-profit", label: "重算利润" },
   { value: "print-selected", label: "打印所选" },
   { value: "prepare-selected", label: "备货所选" }
@@ -213,7 +217,7 @@ function friendlyPrepareError(error) {
 
 function orderTabKey(row = {}) {
   const key = orderStateKey(row);
-  return ["awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled"].includes(key) ? key : "all";
+  return ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
 }
 
 export function useOrdersPage() {

@@ -20,6 +20,12 @@ function loadFunctions(source, names, context = {}) {
   return vm.runInNewContext(`${names.map((name) => functionSource(source, name)).join("\n")}\n({${names.join(",")}})`, { STATE_META, orderStateKey, ...context });
 }
 
+function registerStatusSqlFunctions(db) {
+  db.function("CONCAT", { varargs: true }, (...values) => values.join(""));
+  db.function("REGEXP", (pattern, value) => Number(new RegExp(String(pattern)
+    .replaceAll("[^[:space:]]", "\\S").replaceAll("[[:space:]]", "\\s")).test(String(value || ""))));
+}
+
 const registrationRows = [
   { status: "awaiting_registration", tracking_stage: "posting_registration_error" },
   { status: "awaiting_registration", tracking_stage: "posting_awaiting_registration" },
@@ -125,9 +131,11 @@ test("order list enrichment exposes label permissions without exposing the raw p
 });
 
 test("SQL filters put registration in the same tab as the frontend without rewriting stored status", () => {
-  const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"]);
+  const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
+    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+  });
   const db = new DatabaseSync(":memory:");
-  db.function("CONCAT", { varargs: true }, (...values) => values.join(""));
+  registerStatusSqlFunctions(db);
   try {
     db.exec("CREATE TABLE orders (status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
     const insert = db.prepare("INSERT INTO orders VALUES (?, ?, '', '')");
@@ -140,6 +148,36 @@ test("SQL filters put registration in the same tab as the frontend without rewri
   } finally {
     db.close();
   }
+});
+
+test("SQL and frontend give exact transit facts priority over stale acceptance without reading tracking numbers", () => {
+  const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
+    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+  });
+  const transit = ["delivering", "posting_in_transit", "posting_in_customs", "posting_sorting", "posting_on_way", "posting_on_way_to_city", "posting_in_courier_service", "posting_in_pickup_point"];
+  const rows = transit.flatMap(value => ["status", "tracking_stage", "logistics_status"].map(field => ({
+    status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", logistics_status: "", [field]: value
+  })));
+  rows.push(
+    { status: "awaiting_packaging", tracking_stage: "posting_created", logistics_status: "posting_acceptance_in_progress" },
+    ...["delivering", "posting_in_transit", "delivered", "cancelled", "dispute"].map(tracking_number => ({ status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", tracking_number })),
+    ...["not_posting_in_transit", "xposting_on_way", "posting_in_customs_extra"].map(logistics_status => ({ status: "acceptance_in_progress", tracking_stage: "posting_acceptance_in_progress", logistics_status })),
+    ...["delivered", "cancelled", "returned", "dispute"].map(status => ({ status, tracking_stage: "posting_acceptance_in_progress", logistics_status: "posting_in_transit" }))
+  );
+  const db = new DatabaseSync(":memory:");
+  registerStatusSqlFunctions(db);
+  try {
+    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
+    const insert = db.prepare("INSERT INTO orders VALUES (?, ?, ?, ?, ?)");
+    const waiting = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("awaiting_deliver")}`);
+    const delivering = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("delivering")}`);
+    for (const [index, row] of rows.entries()) {
+      insert.run(index + 1, row.status || "", row.tracking_stage || "", row.logistics_status || "", row.tracking_number || "");
+      const expected = orderStateKey(row);
+      assert.equal(Boolean(waiting.get(index + 1)), expected === "awaiting_deliver", JSON.stringify(row));
+      assert.equal(Boolean(delivering.get(index + 1)), expected === "delivering", JSON.stringify(row));
+    }
+  } finally { db.close(); }
 });
 
 test("shipping reconciliation recognizes registration but preserves the actual Ozon substatus", () => {
