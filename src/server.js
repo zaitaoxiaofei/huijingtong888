@@ -578,6 +578,7 @@ setInterval(() => {
 const BACKGROUND_TASK_FOREGROUND_IDLE_MS = Math.max(0, Number(config.backgroundTaskForegroundIdleSeconds || 20)) * 1000;
 const BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS = Math.max(0, Number(config.backgroundCriticalJobMaxDeferralSeconds || 300)) * 1000;
 const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
+  "ogl_official_monitor",
   "customer_message_dispatch",
   "order_status_sync",
   "cancelled_order_sync",
@@ -588,10 +589,13 @@ const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
   "ozon_finance_sync",
   "historical_finance_profit_repair"
 ]);
+let oglMonitorFirstDueAt = 0;
 
 function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
   if (!FOREGROUND_DEFERRAL_BOUNDED_JOBS.has(String(jobKey || ""))) return false;
-  const maxDeferralMs = jobKey === "order_status_sync"
+  const maxDeferralMs = jobKey === "ogl_official_monitor"
+    ? Math.max(300_000, BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS)
+    : jobKey === "order_status_sync"
     ? Math.min(BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS, 60_000)
     : BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS;
   if (maxDeferralMs <= 0) return true;
@@ -606,6 +610,12 @@ function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
     ? context.plannedFor
     : new Date(context?.plannedFor || "");
   if (!Number.isFinite(plannedFor.getTime())) return false;
+  if (jobKey === "ogl_official_monitor") {
+    // The scheduler advances next_run_at after a foreground deferral. Preserve
+    // this monitor's first due time until it actually obtains its own lane.
+    if (!oglMonitorFirstDueAt) oglMonitorFirstDueAt = plannedFor.getTime();
+    return Date.now() - oglMonitorFirstDueAt >= maxDeferralMs;
+  }
   return Date.now() - plannedFor.getTime() >= maxDeferralMs;
 }
 const BACKGROUND_ORDER_SYNC_INTERVAL_MS = Math.max(1, Number(config.backgroundOrderSyncIntervalMinutes || 10)) * 60 * 1000;
@@ -830,13 +840,13 @@ const scheduledJobDefinitions = [
   {
     key: "ogl_official_monitor",
     name: "OGL 发运申请跟踪",
-    category: "orders",
-    priority: "low",
+    category: "ogl",
+    priority: "high",
     enabled: true,
     intervalMinutes: 5,
     initialDelaySeconds: 120,
-    catchupEnabled: false,
-    maxCatchupRuns: 0
+    catchupEnabled: true,
+    maxCatchupRuns: 1
   },
   {
     key: "inventory_alert_snapshot_refresh",
@@ -994,7 +1004,8 @@ const scheduledJobHandlers = {
   ozon_stock_sync: withForegroundApiDeferral("ozon_stock_sync", runBackgroundOzonStockSync),
   ogl_official_monitor: withForegroundApiDeferral("ogl_official_monitor", async () => {
     const busy = claimBackgroundModuleLane("ogl_monitor", "ogl_official_monitor");
-    if (busy) return { deferred: true, reason: busy };
+    if (busy) return { skipped: true, reason: busy, retryDelaySeconds: 30 };
+    oglMonitorFirstDueAt = 0;
     try { return await oglDispatch.monitorRecent(); }
     finally { releaseBackgroundModuleLane("ogl_monitor", "ogl_official_monitor"); }
   }),
