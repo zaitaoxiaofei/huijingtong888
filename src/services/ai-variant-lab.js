@@ -2051,15 +2051,106 @@ export async function aiVariantLabCaseDetail(caseNo, session = {}) {
   `, aiTenantParams([key], 0));
   if (!rows.length) throw statusError(`case not found: ${key}`, 404);
   const row = rows[0];
+  const caseJson = parseStoredJson(row.case_json, {});
+  const targetHistory = await variantCaseTargetHistory(row, caseJson);
   return {
     ok: true,
     case: {
       ...row,
       usage_count: Number(row.usage_count || 0),
       success_score: row.success_score == null ? null : Number(row.success_score),
-      case_json: parseStoredJson(row.case_json, {})
+      case_json: caseJson,
+      target_history: targetHistory
     }
   };
+}
+
+async function variantCaseTargetHistory(caseRow, caseJson) {
+  const history = new Map();
+  const sourceTrace = objectValue(caseJson.source_trace);
+  const originJobNo = cleanText(sourceTrace.batch_job_no);
+  const originSourceId = cleanText(sourceTrace.source_product_id);
+  const hasOriginTrace = Boolean(originJobNo && originSourceId);
+  const record = (target, status, { jobNo = "", savedDraft = false } = {}) => {
+    const value = cleanText(target).normalize("NFKC");
+    if (!value) return;
+    const key = value.toLowerCase();
+    let summary = history.get(key);
+    if (!summary) {
+      summary = { target_value: value, status, completed_count: 0, in_progress_count: 0, failed_count: 0, saved_draft_count: 0, latest_batch_job_no: "" };
+      history.set(key, summary);
+    }
+    summary[`${status}_count`] += 1;
+    if (savedDraft) summary.saved_draft_count += 1;
+    if (!summary.latest_batch_job_no && jobNo) summary.latest_batch_job_no = cleanText(jobNo);
+    summary.status = summary.completed_count ? "completed" : summary.in_progress_count ? "in_progress" : "failed";
+  };
+
+  // The saved successful sample belongs to this case; a target label alone is not a generated result.
+  const samples = arrayValue(caseJson.sample_rows);
+  for (const sample of samples) {
+    const image = sample.generated_main_image_url || sample.generated_main_image_original_url
+      || sample.assets?.main_image?.publishUrl || sample.assets?.main_image?.url;
+    if (image && sample.status !== "failed") record(sample.target_variant_value, "completed");
+  }
+  const successTarget = cleanText(caseRow.success_target_value || caseJson.success_target_value);
+  if (successTarget && !history.has(successTarget.normalize("NFKC").toLowerCase())
+    && (caseJson.sample_assets?.generated_main_image_url || caseJson.sample_assets?.generated_main_image_asset_url)) {
+    record(successTarget, "completed");
+  }
+
+  // Quick reuse persists the case number as source_product_id. An original batch is included only
+  // when both its exact job number and original product ID match this case's saved provenance.
+  // Never infer lineage from all jobs of the same SKU, a source model, or a product-name substring.
+  const items = await mysqlQuery(`
+    SELECT i.target_variant_value, i.status, j.job_no
+    FROM ai_variant_lab_batch_jobs j
+    JOIN ai_variant_lab_batch_items i ON i.tenant_id = j.tenant_id AND i.job_no = j.job_no
+    WHERE j.tenant_id = ? AND (BINARY j.source_product_id = BINARY ?
+      ${hasOriginTrace ? "OR (BINARY j.job_no = BINARY ? AND BINARY j.source_product_id = BINARY ?)" : ""})
+      AND i.status IN ('image_done', 'queued_image', 'generating_image', 'provider_pending', 'failed')
+    ORDER BY i.updated_at DESC, i.id DESC
+  `, [aiTenantId(), caseRow.case_no, ...(hasOriginTrace ? [originJobNo, originSourceId] : [])]);
+  for (const item of items) {
+    const status = item.status === "image_done" ? "completed" : item.status === "failed" ? "failed" : "in_progress";
+    record(item.target_variant_value, status, { jobNo: item.job_no });
+  }
+
+  // Standalone AI installs can precede listing setup; reading a case must not create listing tables.
+  const draftTables = await mysqlQuery("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'listing_drafts' LIMIT 1");
+  if (draftTables.length) {
+    const drafts = await mysqlQuery(`
+      SELECT d.manual_facts_json, d.ai_payload_json, d.spec,
+        j.source_product_id AS linked_case_no
+      FROM listing_drafts d
+      LEFT JOIN ai_variant_lab_batch_jobs j ON BINARY j.tenant_id = BINARY COALESCE(d.tenant_id, 'admin')
+        AND BINARY j.job_no = BINARY COALESCE(
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.ai_variant_lab_job_no')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.ai_optimization.job_no')), ''),
+          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.ai_optimization.job_no'))
+        )
+      WHERE COALESCE(d.tenant_id, 'admin') = ? AND d.status <> 'deleted'
+        AND BINARY COALESCE(
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.user_facts.source_product_id')), ''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.manual_facts_json), d.manual_facts_json, '{}'), '$.source_product_id')), ''),
+          JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(d.ai_payload_json), d.ai_payload_json, '{}'), '$.manual_facts.source_product_id'))
+        ) IN (BINARY ?${hasOriginTrace ? ", BINARY ?" : ""})
+    `, [aiTenantId(), caseRow.case_no, ...(hasOriginTrace ? [originSourceId] : [])]);
+    for (const draft of drafts) {
+      const facts = objectValue(parseStoredJson(draft.manual_facts_json, {}));
+      const ai = objectValue(parseStoredJson(draft.ai_payload_json, {}));
+      const optimization = objectValue(facts.ai_optimization || ai.ai_optimization);
+      if (optimization.source !== "ai_variant_lab") continue;
+      const userFacts = objectValue(facts.user_facts || ai.manual_facts || facts);
+      const jobNo = cleanText(userFacts.ai_variant_lab_job_no || optimization.job_no);
+      const sourceId = cleanText(userFacts.source_product_id || ai.manual_facts?.source_product_id);
+      const fromCase = sourceId === caseRow.case_no && (!jobNo || draft.linked_case_no === caseRow.case_no);
+      const fromOrigin = hasOriginTrace && sourceId === originSourceId && jobNo === originJobNo && draft.linked_case_no === originSourceId;
+      if (!fromCase && !fromOrigin) continue;
+      record(userFacts.target_variant_value || optimization.target_variant_value || draft.spec, "completed", { savedDraft: true });
+    }
+  }
+  return [...history.values()].sort((a, b) => a.target_value.localeCompare(b.target_value));
 }
 
 export async function aiVariantLabDeleteCase(caseNo, session = {}) {

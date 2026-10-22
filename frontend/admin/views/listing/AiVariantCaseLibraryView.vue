@@ -2,13 +2,17 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Position, Refresh, Search, View } from "@element-plus/icons-vue";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import QuickFissionVehiclePicker from "../../components/listing/QuickFissionVehiclePicker.vue";
 import { openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { parseQuickTargets, vehicleTargetKey } from "../../utils/ai-variant-quick-targets.js";
 
 const loading = ref(false);
 const detailLoading = ref(false);
+const detailError = ref("");
+const detailRow = ref(null);
 const detailVisible = ref(false);
 const detailTab = ref("reuse");
 const cases = ref([]);
@@ -34,6 +38,16 @@ const quickReuse = reactive({
   targetValues: "",
   offerPrefix: ""
 });
+const vehicleCatalog = reactive({ brands: [], loading: false, error: "" });
+const manualTargetExpanded = ref(false);
+const historyLoading = ref(false);
+let detailRequest = 0;
+const vehicleSource = computed(() => activeCase.value?.source_value || variantContract.value.source_value || "");
+const isVehicleCase = computed(() => !["color_swap", "audience_variant", "logo_swap"].includes(activeCase.value?.variant_type));
+const selectedTargets = computed({
+  get: () => parseTargetValues(quickReuse.targetValues).filter(target => !isVehicleCase.value || vehicleTargetKey(target) !== vehicleTargetKey(vehicleSource.value)),
+  set: values => { quickReuse.targetValues = parseQuickTargets(values).join("\n"); }
+});
 
 const tableHeight = computed(() => Math.max(360, viewportHeight.value - 430));
 const activeCaseJson = computed(() => activeCase.value?.case_json || {});
@@ -47,11 +61,14 @@ const sourceTrace = computed(() => activeCaseJson.value.source_trace || {});
 onMounted(() => {
   updateViewportHeight();
   window.addEventListener("resize", updateViewportHeight);
+  window.addEventListener("erp:auth-scope-changed", resetDetail);
   void loadCases();
 });
 
 onUnmounted(() => {
   window.removeEventListener("resize", updateViewportHeight);
+  window.removeEventListener("erp:auth-scope-changed", resetDetail);
+  detailRequest += 1;
 });
 
 function updateViewportHeight() {
@@ -83,18 +100,81 @@ async function loadCases() {
 
 async function openDetail(row, tab = "overview") {
   if (!row?.case_no) return;
+  const scope = currentApiCacheScope();
+  const request = ++detailRequest;
+  detailRow.value = row;
+  detailError.value = "";
+  historyLoading.value = false;
+  activeCase.value = null;
+  quickReuse.targetValues = "";
+  quickReuse.offerPrefix = "";
+  manualTargetExpanded.value = false;
+  vehicleCatalog.brands = [];
+  vehicleCatalog.error = "";
   detailVisible.value = true;
   detailTab.value = tab;
   detailLoading.value = true;
+  void loadVehicleCatalog(request, scope);
   try {
     const result = await apiClient.get(`/api/ai-variant-lab/cases/${encodeURIComponent(row.case_no)}`, { noCache: true });
-    activeCase.value = result.case || row;
-    quickReuse.targetValues = "";
-    quickReuse.offerPrefix = "";
+    if (request !== detailRequest || scope !== currentApiCacheScope()) return;
+    activeCase.value = result.case || null;
   } catch (error) {
-    ElMessage.error(error.message || "加载案例详情失败");
+    if (request === detailRequest && scope === currentApiCacheScope()) {
+      detailError.value = error.message || "加载案例详情失败，请重试。";
+      ElMessage.error(detailError.value);
+    }
   } finally {
-    detailLoading.value = false;
+    if (request === detailRequest) detailLoading.value = false;
+  }
+}
+
+function resetDetail() {
+  detailRequest += 1;
+  detailVisible.value = false;
+  activeCase.value = null;
+  detailRow.value = null;
+  detailError.value = "";
+  quickReuse.targetValues = "";
+  quickReuse.offerPrefix = "";
+  vehicleCatalog.brands = [];
+  vehicleCatalog.error = "";
+  vehicleCatalog.loading = false;
+  historyLoading.value = false;
+  detailLoading.value = false;
+}
+
+async function loadVehicleCatalog(request, scope) {
+  const currentScope = currentApiCacheScope();
+  request ??= detailRequest;
+  scope ??= currentScope;
+  if (request !== detailRequest || scope !== currentScope || !detailVisible.value) return;
+  vehicleCatalog.loading = true;
+  try {
+    const result = await apiClient.get("/api/ai-variant-lab/vehicle-catalog", { noCache: true });
+    if (request !== detailRequest || scope !== currentApiCacheScope()) return;
+    vehicleCatalog.brands = result.brands || [];
+    vehicleCatalog.error = "";
+  } catch (error) {
+    if (request === detailRequest && scope === currentApiCacheScope()) vehicleCatalog.error = error.message || "车型库加载失败，可重试或手工补充。";
+  } finally {
+    if (request === detailRequest) vehicleCatalog.loading = false;
+  }
+}
+
+async function refreshCaseHistory() {
+  const scope = currentApiCacheScope();
+  const caseNo = activeCase.value?.case_no;
+  if (!caseNo) return;
+  const request = detailRequest;
+  historyLoading.value = true;
+  try {
+    const result = await apiClient.get(`/api/ai-variant-lab/cases/${encodeURIComponent(caseNo)}`, { noCache: true });
+    if (request === detailRequest && scope === currentApiCacheScope()) activeCase.value = result.case || null;
+  } catch (error) {
+    if (request === detailRequest && scope === currentApiCacheScope()) ElMessage.error(error.message || "刷新裂变记录失败");
+  } finally {
+    if (request === detailRequest) historyLoading.value = false;
   }
 }
 
@@ -124,19 +204,24 @@ function changePageSize(pageSize) {
 
 function startQuickReuse(row = activeCase.value) {
   const caseNo = String(row?.case_no || "").trim();
-  const targets = parseTargetValues(quickReuse.targetValues);
+  const targets = selectedTargets.value;
   if (!caseNo) {
     ElMessage.warning("请先选择一个案例。");
     return;
   }
   if (!targets.length) {
-    ElMessage.warning("请先填写要裂变的新型号，一行一个。");
+    ElMessage.warning("请先勾选目标车型，或手工补充新型号。");
+    return;
+  }
+  if (targets.length > 100) {
+    ElMessage.warning("单次最多选择 100 个目标，请分批进入生成队列。");
     return;
   }
   openAiVariantLabWindow({
     source: "case",
     caseNo,
     caseTargets: targets.join("\n"),
+    caseTargetValues: JSON.stringify(targets),
     offerPrefix: quickReuse.offerPrefix,
     importAt: Date.now()
   });
@@ -200,16 +285,7 @@ function onCaseSelectionChange(rows) {
 }
 
 function parseTargetValues(value) {
-  const seen = new Set();
-  return String(value || "")
-    .split(/[,\n;，；、/|]+/)
-    .map((item) => item.trim())
-    .filter((item) => {
-      const key = item.toLowerCase();
-      if (!item || seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  return parseQuickTargets(value);
 }
 
 function imageFromCase(row, key) {
@@ -372,18 +448,44 @@ function tagsText(value) {
       </template>
 
       <div v-loading="detailLoading" class="dialog-body">
+        <div v-if="detailError" class="detail-error" role="alert">
+          <span>{{ detailError }}</span>
+          <el-button type="primary" plain :loading="detailLoading" @click="openDetail(detailRow, detailTab)">重新加载案例</el-button>
+        </div>
         <el-tabs v-model="detailTab">
           <el-tab-pane label="快速裂变" name="reuse">
             <section class="quick-reuse-panel">
               <div class="quick-text">
                 <h2>直接复用这个案例</h2>
-                <p>填写新型号后，会打开独立 AI 裂变页，并直接进入最后的生成队列。</p>
+                <p>勾选目标车型后，会打开独立 AI 裂变页，并直接进入最后的生成队列。</p>
               </div>
-              <el-input v-model="quickReuse.targetValues" type="textarea" :rows="5" placeholder="一行一个新型号，例如：EXEED VX&#10;TENET T7&#10;OMODA C5" />
+              <QuickFissionVehiclePicker
+                v-if="activeCase && isVehicleCase"
+                :key="activeCase.case_no"
+                v-model="selectedTargets"
+                :brands="vehicleCatalog.brands"
+                :loading="vehicleCatalog.loading"
+                :error="vehicleCatalog.error"
+                :history="activeCase.target_history || []"
+                :source-value="vehicleSource"
+                @reload="loadVehicleCatalog()"
+              />
+              <div class="selected-target-heading">
+                <strong>已选 {{ selectedTargets.length }} 个目标</strong>
+                <div>
+                  <el-button v-if="activeCase" link type="primary" :loading="historyLoading" @click="refreshCaseHistory">刷新记录</el-button>
+                  <el-button v-if="selectedTargets.length" link @click="selectedTargets = []">清空</el-button>
+                  <el-button link type="primary" @click="manualTargetExpanded = !manualTargetExpanded">{{ manualTargetExpanded ? "收起手工补充" : "手工补充" }}</el-button>
+                </div>
+              </div>
+              <div v-if="selectedTargets.length" class="selected-target-chips">
+                <el-tag v-for="target in selectedTargets" :key="vehicleTargetKey(target)" closable effect="plain" @close="selectedTargets = selectedTargets.filter(value => vehicleTargetKey(value) !== vehicleTargetKey(target))">{{ target }}</el-tag>
+              </div>
+              <el-input v-if="manualTargetExpanded || !isVehicleCase" v-model="quickReuse.targetValues" type="textarea" :rows="3" placeholder="一行一个新型号，例如：EXEED VX&#10;TENET T7&#10;OMODA C5" aria-label="手工补充目标车型" />
               <el-input v-model="quickReuse.offerPrefix" placeholder="货号前缀，选填；不填则由 AI 裂变页按车型生成" />
               <div class="dialog-actions">
                 <el-button @click="detailVisible = false">取消</el-button>
-                <el-button type="success" :icon="Position" :disabled="detailLoading" @click="startQuickReuse()">进入生成队列</el-button>
+                <el-button type="success" :icon="Position" :disabled="detailLoading || !activeCase || !selectedTargets.length" @click="startQuickReuse()">进入生成队列</el-button>
               </div>
             </section>
           </el-tab-pane>
@@ -485,7 +587,10 @@ function tagsText(value) {
 .dialog-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dialog-title span { color: var(--erp-text-regular, #64748b); font-size: 12px; }
 .dialog-body { min-height: 420px; }
+.detail-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: var(--erp-danger-text, #f56c6c); }
 .quick-reuse-panel { display: grid; gap: 12px; }
+.selected-target-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.selected-target-chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .quick-text h2, .detail-section h2 { margin: 0 0 6px; font-size: 15px; letter-spacing: 0; }
 .quick-text p { margin: 0; color: var(--erp-text-regular, #64748b); line-height: 1.5; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }

@@ -8,6 +8,7 @@ import { generateAiVideo } from "../../api/tools/aiImageGenerator.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
 import AiProductImportDialog from "../../components/listing/AiProductImportDialog.vue";
+import { parseQuickTargets, quickTargetsFromQuery } from "../../utils/ai-variant-quick-targets.js";
 
 const route = useRoute();
 const currentStep = ref("material");
@@ -173,10 +174,11 @@ const operatorRulePresets = [
   }
 ];
 
-const sourceModel = computed(() => firstTarget(material.sourceVariantValue));
+const sourceModel = computed(() => material.sourceType === "case" ? (parseQuickTargets(material.sourceVariantValue)[0] || "") : firstTarget(material.sourceVariantValue));
 const targetModels = computed(() => {
   const source = sourceModel.value.toLowerCase();
-  return parseTargets(material.targetInput).filter((item) => item.toLowerCase() !== source);
+  const targets = material.sourceType === "case" ? parseQuickTargets(material.targetInput) : parseTargets(material.targetInput);
+  return targets.filter((item) => item.toLowerCase() !== source);
 });
 const hasSourceImage = computed(() => Boolean(material.mainImageDataUrl || material.mainImageUrl));
 const canAnalyze = computed(() => hasSourceImage.value);
@@ -344,7 +346,7 @@ async function autoImportRouteMaterial() {
 async function autoImportRouteCase() {
   if (String(route.query.source || "") !== "case") return;
   const caseNo = String(route.query.caseNo || route.query.case_no || "").trim();
-  const targets = parseTargets(route.query.caseTargets || route.query.targets || route.query.targetModels);
+  const targets = quickTargetsFromQuery(route.query) ?? parseTargets(route.query.caseTargets || route.query.targets || route.query.targetModels);
   if (!caseNo || !targets.length) return;
   currentStep.value = "generate";
   quickCaseImport.active = true;
