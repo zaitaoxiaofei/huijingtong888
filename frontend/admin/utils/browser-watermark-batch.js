@@ -5,7 +5,7 @@ export const BROWSER_WATERMARK_CONCURRENCY = 10;
 // same limit because each Sharp job holds full image buffers in memory.
 export const SERVER_WATERMARK_FALLBACK_CONCURRENCY = 1;
 const MAX_EDGE = 2000;
-const CACHE_PREFIX = "browserWatermark:v1:";
+const CACHE_PREFIX = "browserWatermark:v2:";
 let activeServerFallbacks = 0;
 const pendingServerFallbacks = [];
 
@@ -28,14 +28,63 @@ export async function prepareBrowserWatermarkJobs({ jobs, onProgress = () => {} 
   onProgress({ stage: "browser_watermark", completed, total: tasks.length, concurrency: BROWSER_WATERMARK_CONCURRENCY });
   await mapConcurrent(tasks, BROWSER_WATERMARK_CONCURRENCY, async (task) => {
     const item = await prepareOne(task);
-    results[String(task.productId)][task.shop.id][task.index] = item;
+    results[String(task.productId)][task.shop.id][task.index] = {
+      ...item, source_url: task.sourceUrl, type: task.index === 0 ? "main" : "detail",
+      sortOrder: task.index + 1, sort_order: task.index + 1
+    };
     completed += 1;
     onProgress({ stage: "browser_watermark", completed, total: tasks.length, concurrency: BROWSER_WATERMARK_CONCURRENCY, shopId: task.shop.id });
   });
+  await recoverDuplicatePreparedImages(tasks, results, onProgress);
   return Object.fromEntries(Object.entries(results).map(([productId, shops]) => [
     productId,
     Object.fromEntries(Object.entries(shops).map(([shopId, values]) => [shopId, values.filter(Boolean)]))
   ]));
+}
+
+function duplicatePreparedTasks(tasks, results) {
+  const groups = new Map();
+  for (const task of tasks) {
+    const key = JSON.stringify([String(task.productId), String(task.shop.id)]);
+    if (!groups.has(key)) groups.set(key, new Map());
+    const byUrl = groups.get(key);
+    const output = results[String(task.productId)]?.[task.shop.id]?.[task.index];
+    const url = String(output?.publishUrl || output?.url || "").trim();
+    if (!byUrl.has(url)) byUrl.set(url, []);
+    byUrl.get(url).push(task);
+  }
+  return [...groups.values()].flatMap((byUrl) => [...byUrl.values()]
+    .filter((matches) => new Set(matches.map((task) => task.sourceUrl)).size > 1).flat());
+}
+
+async function recoverDuplicatePreparedImages(tasks, results, onProgress) {
+  const affected = duplicatePreparedTasks(tasks, results);
+  if (!affected.length) return;
+  const fingerprints = new Map();
+  for (const task of affected) {
+    const fingerprint = await watermarkFingerprint(task);
+    fingerprints.set(task, fingerprint);
+    try { localStorage.removeItem(`${CACHE_PREFIX}${fingerprint}`); } catch { /* Cache is optional. */ }
+  }
+  onProgress({ stage: "browser_watermark_recovery", completed: 0, total: affected.length, concurrency: 1 });
+  let completed = 0;
+  for (const task of affected) {
+    const response = await withServerFallbackSlot(() => watermarkListingMedia({
+      shopId: task.shop.id,
+      images: [{ url: task.sourceUrl, name: `image-${task.index + 1}.jpg` }],
+      sourceModule: "browser_batch_watermark_recovery",
+      sourceId: `${task.productId}:${task.shop.id}:${task.index + 1}`
+    }));
+    const item = normalizeUploaded(response?.images?.[0] || {}, task.index, "server_recovery");
+    if (!item.publishUrl) throw new Error(`草稿 ${task.productId} 的第 ${task.index + 1} 张图片重新处理后没有返回公网地址，请重新准备素材。`);
+    results[String(task.productId)][task.shop.id][task.index] = { ...item, source_url: task.sourceUrl };
+    completed += 1;
+    onProgress({ stage: "browser_watermark_recovery", completed, total: affected.length, concurrency: 1, shopId: task.shop.id });
+  }
+  if (duplicatePreparedTasks(tasks, results).length) {
+    throw new Error("部分不同图片重新处理后仍为相同素材，已停止上架。请检查原图是否内容相同，移除重复图片后重新准备。");
+  }
+  for (const task of affected) writeCache(fingerprints.get(task), results[String(task.productId)][task.shop.id][task.index]);
 }
 
 function appendTasks(tasks, results, { productId, images, shops }) {
@@ -144,14 +193,18 @@ async function renderWatermarkedFile({ sourceUrl, shop, index }) {
 
 function toCanvasReadableUrl(url) {
   const value = String(url || "").trim();
-  if (!/^https?:\/\//i.test(value)) return value;
   try {
     const parsed = new URL(value, window.location.origin);
+    if (parsed.origin === window.location.origin && parsed.pathname === "/api/image-proxy") {
+      parsed.searchParams.set("require_original", "1");
+      return /^https?:\/\//i.test(value) ? parsed.href : `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+    if (!/^https?:\/\//i.test(value)) return value;
     if (parsed.origin === window.location.origin) return value;
   } catch {
     return value;
   }
-  return `/api/image-proxy?url=${encodeURIComponent(value)}`;
+  return `/api/image-proxy?url=${encodeURIComponent(value)}&require_original=1`;
 }
 
 function shopWatermarkUrl(shop = {}) {

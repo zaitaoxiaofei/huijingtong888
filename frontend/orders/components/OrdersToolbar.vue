@@ -12,7 +12,8 @@ const props = defineProps({
   syncStatus: { type: String, default: "" },
   syncRunning: { type: Boolean, default: false },
   lastSyncText: { type: String, default: "暂无同步记录" },
-  moreActions: { type: Array, default: () => [] }
+  moreActions: { type: Array, default: () => [] },
+  selectedCount: { type: Number, default: 0 }
 });
 
 const emit = defineEmits([
@@ -192,7 +193,16 @@ function handleCommand(command) {
         </div>
 
         <div class="orders-toolbar-actions-side">
-          <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :disabled="syncRunning" @click="emit('open-quality-rules')">质检规则</el-button>
+          <el-dropdown trigger="click" @command="handleCommand">
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">OGL 发运</el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="ogl-create-batch" :disabled="!selectedCount">创建发运（已选 {{ selectedCount }} 单）</el-dropdown-item>
+                <el-dropdown-item command="ogl-official-carriages">已申请</el-dropdown-item>
+                <el-dropdown-item command="ogl-batch-history">发运历史</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
     </el-form>

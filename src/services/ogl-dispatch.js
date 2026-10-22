@@ -7,6 +7,8 @@ import { invalidateMasterDataCache } from './mysql-master-data-cache.js';
 import { invalidateOrderProcurementCoverage } from './mysql-order-procurement-coverage.js';
 import { invalidateInventoryProductBalance } from './mysql-inventory-product-balance.js';
 import { normalizeShanghaiDateInput, shanghaiDateKey } from '../shanghai-time.js';
+import { restoreBusinessTaskSession } from './business-task-tenant.js';
+import { oglOfficialDateRange, oglOfficialCreatedAt } from './ogl-official-range.js';
 export { OGL_DISPATCH_SCHEMA_SQL, ensureOglDispatchSchema, ensureSchema } from './ogl-dispatch-schema.js';
 
 function fail(message, statusCode = 400, code = 'OGL_DISPATCH_INVALID') {
@@ -85,6 +87,9 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   // Cache parsed tracking identifiers only; never retain labels or customer data.
   const trackingCache=new Map();
   const trackingPending=new Map();
+  const monitorState=new Map();
+  let monitorCursor=0;
+  let monitorRunning=false;
   async function scope(connection, session, write = false) {
     const tenantId = id(session?.tenant?.id, '当前企业'); const personId = id(session?.personId, '操作账号');
     const [rows] = await connection.execute(`SELECT t.id, t.slug, tm.role AS tenant_role, tm.business_roles_json,
@@ -121,9 +126,9 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   }
   async function members(connection, current, batchId, lock = false) {
     const [rows] = await connection.execute(`SELECT m.*, o.status AS platform_status, o.logistics_status, o.tracking_stage,
-      o.last_synced_at AS order_last_synced_at, raw.raw_json, raw.substatus, s.name AS shop_name,
+      o.ordered_at, o.last_synced_at AS order_last_synced_at, raw.raw_json, raw.substatus, s.name AS shop_name,
       s.status AS shop_status FROM ogl_dispatch_members m
-      JOIN orders o ON o.id = m.order_id AND o.shop_id = m.shop_id
+      JOIN orders o ON o.id = m.order_id AND o.shop_id = m.shop_id AND o.posting_number = m.posting_number
       JOIN shops s ON s.id = o.shop_id AND ${shopScope(current)}
       LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
       WHERE m.tenant_id = ? AND m.batch_id = ? ORDER BY m.id${lock ? ' FOR UPDATE' : ''}`, [current.id, current.id, batchId]);
@@ -136,7 +141,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const member={ ...row, ...progress, active: Number(row.active_order_id) === Number(row.order_id) && !row.withdrawn_at,
         exception_reason: row.exception_note || '', last_synced_at: lastSynced, sync_error:refreshedAfterFailure?null:row.sync_error,
         logistics_status: row.substatus || row.logistics_status || row.tracking_stage || row.platform_status };
-      return {...member,logistics_fresh:isOglLogisticsFresh(member)};
+      return {...member,order_path:`/orders?orderId=${Number(row.order_id)}&shopId=${Number(row.shop_id)}&searchType=order&searchQuery=${encodeURIComponent(row.posting_number)}${row.ordered_at?`&dateFrom=${shanghaiDateKey(row.ordered_at)}&dateTo=${shanghaiDateKey(row.ordered_at)}`:''}`,logistics_fresh:isOglLogisticsFresh(member)};
     });
   }
   async function event(connection, current, batchId, action, details = {}, memberId = null, why = '') {
@@ -179,7 +184,8 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     return transaction(async connection => {
       const current = await scope(connection, session); const available = await shops(connection, current);
       const [settings] = await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?', [current.id]);
-      return { settings: { dispatch_shop_id: Number(settings[0]?.default_shop_id) || null }, can_manage_settings: current.can_settings,
+      const monitoring=monitorState.get(current.id);
+      return { settings: { dispatch_shop_id: Number(settings[0]?.default_shop_id) || null }, monitoring:monitoring?{status:monitoring.status,notice:monitoring.notice||'',checked_at:monitoring.checked_at}:null, can_manage_settings: current.can_settings,
         shops: available.filter(row=>text(row.ozon_client_id)&&text(row.ozon_api_key||row.api_key_hint)).map(row => ({ id: Number(row.id), name: row.name, authorized: true })) };
     });
   }
@@ -226,6 +232,11 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     return transaction(async connection => {
       const current = await scope(connection, session); const params = [current.id]; let filter = '';
       if (query.status && query.status !== 'all') { filter=' AND b.status = ?'; params.push(text(query.status,32)); }
+      if(query.date_from||query.date_to) {
+        const range=oglOfficialDateRange(query,now());
+        filter+=' AND b.created_at >= ? AND b.created_at < ?';
+        params.push(sqlDate(`${range.date_from}T00:00:00+08:00`),sqlDate(new Date(Date.parse(`${range.date_to}T00:00:00+08:00`)+86400000)));
+      }
       const page = Math.max(1,Math.floor(Number(query.page)||1)); const size = Math.min(100,Math.max(1,Math.floor(Number(query.page_size)||20)));
       const [total] = await connection.execute(`SELECT COUNT(*) AS total FROM ogl_dispatch_batches b WHERE b.tenant_id = ?${filter}`,params);
       const [rows] = await connection.query(`SELECT b.id FROM ogl_dispatch_batches b WHERE b.tenant_id = ?${filter} ORDER BY b.id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
@@ -269,6 +280,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   async function externalDeliveryMethods(ctx,filter={}) {
     const selected=await verifyExternalContext(ctx);
     const result=await api.deliveryMethods(selected,filter,{
+      maxPages:10,
       beforeRequest:()=>verifyExternalContext(ctx),
       afterRequest:()=>verifyExternalContext(ctx)
     });
@@ -287,7 +299,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         if(!/^\d+$/.test(carriageId)||Number(carriageId)<=0||seen.has(carriageId)) continue;
         seen.add(carriageId);
         rows.push({id:carriageId,carriage_id:carriageId,delivery_method_id:String(method.delivery_method_id??''),
-          delivery_method_name:text(method.delivery_method_name??method.name,255),departure_date:method.departure_date,
+          delivery_method_name:text(method.delivery_method_name??method.name,255),departure_date:day,departure_at:method.departure_date,
           has_entrusted_acceptance:method.has_entrusted_acceptance===true,status:text(carriage.status,64),status_label:officialStatusLabel(carriage.status),
           available_actions:Array.isArray(carriage.available_actions)?carriage.available_actions.filter(value=>typeof value==='string'):[],
           postings_count:optionalCount(carriage.postings_count),containers_count:optionalCount(carriage.containers_count),official_only:true});
@@ -295,24 +307,59 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     }
     return rows;
   }
+  function officialCarriageRow(listed,info={}) {
+    if(info.carriage_id!=null&&String(info.carriage_id)!==listed.carriage_id)fail('Ozon 返回的官方发运编号与查询编号不一致，请重新查询',502,'OGL_OFFICIAL_SCOPE_MISMATCH');
+    if(info.delivery_method_id!=null&&String(info.delivery_method_id)!==listed.delivery_method_id)fail('Ozon 官方详情与列表配送方式不一致，请重新查询',502,'OGL_OFFICIAL_SCOPE_MISMATCH');
+    const status=text(info.status||listed.status,64);
+    return {...listed,status,status_label:officialStatusLabel(status),created_at:oglOfficialCreatedAt(info.created_at),
+      containers_count:info.containers_count==null?listed.containers_count:optionalCount(info.containers_count),
+      postings_count:info.postings_count==null?listed.postings_count:optionalCount(info.postings_count),
+      available_actions:Array.isArray(info.available_actions)?info.available_actions.filter(value=>typeof value==='string'):listed.available_actions,
+      first_mile_type:text(info.first_mile_type,64),integration_type:text(info.integration_type,64)};
+  }
   async function listOfficial(session,query={}) {
-    const day=beijingDay(query.date??query.departure_date,now); const ctx=await officialReadContext(session);
-    const rows=await officialRows(ctx,day);
+    const range=oglOfficialDateRange(query,now()); const ctx=await officialReadContext(session);
+    const byId=new Map();
+    for(const day of range.days)for(const row of await officialRows(ctx,day)) {
+      if(!byId.has(row.carriage_id))byId.set(row.carriage_id,row);
+      if(byId.size>100)fail('此日期范围的官方申请超过 100 单，请缩小北京日期范围后查询',409);
+    }
+    const rows=[];
+    for(const listed of byId.values()) {
+      try {
+        const response=await externalRequest(ctx,'/v1/carriage/get',{carriage_id:Number(listed.carriage_id)});
+        rows.push(officialCarriageRow(listed,response?.result||response));
+      } catch(error) {
+        if([403,409].includes(error.statusCode||error.status)||error.code==='OGL_OFFICIAL_SCOPE_MISMATCH')throw error;
+        rows.push({...listed,created_at:null,metadata_error:'官方创建时间与数量待获取'});
+      }
+    }
+    rows.sort((a,b)=>(Date.parse(b.created_at)||0)-(Date.parse(a.created_at)||0)||b.departure_date.localeCompare(a.departure_date)||Number(b.carriage_id)-Number(a.carriage_id));
     return transaction(async connection=>{
       const current=await scope(connection,session); await shop(connection,current,ctx.shop.id,true);
       // A default-shop change while the request was in flight must not display
       // one shop's response under another shop's current setting.
       const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
-      if(Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
-      const [batches]=await connection.execute('SELECT id,batch_number,official_carriage_id FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id IS NOT NULL',[current.id,ctx.shop.id]);
+      if(ctx.currentSettings&&Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
+      const [batches]=await connection.execute(`SELECT b.id,b.batch_number,b.official_carriage_id,b.official_result_json,
+        EXISTS(SELECT 1 FROM ogl_dispatch_members m WHERE m.tenant_id=b.tenant_id AND m.batch_id=b.id AND m.active_order_id=m.order_id AND m.withdrawn_at IS NULL AND m.dispatched_at IS NOT NULL) AS physically_dispatched
+        FROM ogl_dispatch_batches b WHERE b.tenant_id = ? AND b.default_shop_id = ? AND b.official_carriage_id IS NOT NULL`,[current.id,ctx.shop.id]);
       const local=new Map(batches.map(row=>[String(row.official_carriage_id),row]));
-      return {rows:rows.map(row=>({...row,official_only:!local.has(row.carriage_id),local_batch_id:local.has(row.carriage_id)?Number(local.get(row.carriage_id).id):null,local_batch_number:local.get(row.carriage_id)?.batch_number||''})),total:rows.length,
-        dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day};
+      return {rows:rows.map(row=>{
+        const linked=local.get(row.carriage_id),tracking=parsed(linked?.official_result_json).label_tracking||{};
+        const valid=tracking.source==='official_container_label'&&!['cancelled','canceled'].includes(row.status);
+        return {...row,official_only:!linked,local_batch_id:linked?Number(linked.id):null,batch_id:linked?Number(linked.id):null,local_batch_number:linked?.batch_number||'',
+          carrier_name:valid?tracking.carrier_name||null:null,master_tracking_number:valid?tracking.master_tracking_number||null:null,
+          tracking_numbers:valid&&Array.isArray(tracking.tracking_numbers)?tracking.tracking_numbers:[],tracking_status:valid?tracking.status:'pending',tracking_source:valid?tracking.source:null,
+          dispatch_stage:['cancelled','canceled'].includes(row.status)?'cancelled':Number(linked?.physically_dispatched)?'dispatched':'applied',
+          dispatch_stage_label:['cancelled','canceled'].includes(row.status)?'官方已取消':Number(linked?.physically_dispatched)?'已实际交运':'已申请·待交接'};
+      }),total:rows.length,dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},date_from:range.date_from,date_to:range.date_to,
+        departure_date:range.days.length===1?range.date_from:null};
     });
   }
-  async function officialDetail(session,query={}) {
+  async function officialDetail(session,query={},internal=null) {
     const day=beijingDay(query.date??query.departure_date,now); const carriageId=String(id(query.id??query.carriage_id,'官方发运编号'));
-    const ctx=await officialReadContext(session); const rows=await officialRows(ctx,day); const listed=rows.find(row=>row.carriage_id===carriageId);
+    const ctx=internal?.ctx||await officialReadContext(session); const rows=internal?.listed?[internal.listed]:await officialRows(ctx,day); const listed=rows.find(row=>row.carriage_id===carriageId);
     if(!listed) fail('该官方发运不在默认店铺所选北京日期的已有单中，请核对日期或默认店铺',404);
     const data=await readOfficial(ctx,carriageId);
     if(data.info?.carriage_id!=null&&String(data.info.carriage_id)!==carriageId) fail('Ozon 返回的官方发运编号与查询编号不一致，请重新查询',502);
@@ -320,13 +367,13 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     return transaction(async connection=>{
       const current=await scope(connection,session); await shop(connection,current,ctx.shop.id,true);
       const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
-      if(Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
+      if(ctx.currentSettings&&Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
       const numbers=[...new Set(data.numbers)]; const localOrders=[];
       // Match both shop and posting number. A number belonging to another shop
       // never becomes an authorized local member of this official manifest.
       for(let offset=0;offset<numbers.length;offset+=500) {
         const part=numbers.slice(offset,offset+500);
-        const [orders]=await connection.execute(`SELECT o.id,o.posting_number,o.shop_id,o.status AS platform_status,o.logistics_status,o.tracking_stage,o.last_synced_at,s.name AS shop_name
+        const [orders]=await connection.execute(`SELECT o.id,o.posting_number,o.shop_id,o.ordered_at,o.status AS platform_status,o.logistics_status,o.tracking_stage,o.last_synced_at,s.name AS shop_name
           FROM orders o JOIN shops s ON s.id=o.shop_id AND ${shopScope(current)}
           WHERE o.shop_id = ? AND o.posting_number IN (${marks(part)})`,[current.id,ctx.shop.id,...part]);
         localOrders.push(...orders);
@@ -337,15 +384,16 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         const platformStatus=row?.platform_status||text(rawPosting?.status,64); const logisticsStatus=row?.logistics_status||text(rawPosting?.substatus,128);
         const progress=oglPlatformProgress({status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage});
         return {posting_number:postingNumber,order_id:row?Number(row.id):null,shop_id:Number(ctx.shop.id),shop_name:ctx.shop.name,matched_local:Boolean(row),
+          ordered_at:row?.ordered_at||null,order_path:row?`/orders?orderId=${Number(row.id)}&shopId=${Number(ctx.shop.id)}&searchType=order&searchQuery=${encodeURIComponent(postingNumber)}${row.ordered_at?`&dateFrom=${shanghaiDateKey(row.ordered_at)}&dateTo=${shanghaiDateKey(row.ordered_at)}`:''}`:null,
           platform_status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage||'',last_synced_at:row?.last_synced_at||null,
           online:progress.online,delivered:progress.delivered,cancelled:progress.cancelled};
       });
       const [batches]=await connection.execute('SELECT id,batch_number FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id = ?',[current.id,ctx.shop.id,carriageId]);
       const status=text(data.info?.status||listed.status,64);
-      const carriage={...listed,status,status_label:officialStatusLabel(status),containers_count:data.info?.containers_count==null?listed.containers_count:optionalCount(data.info.containers_count),
+      const carriage={...officialCarriageRow(listed,data.info),status,status_label:officialStatusLabel(status),postings_count:numbers.length,
         available_actions:Array.isArray(data.info?.available_actions)?data.info.available_actions.filter(value=>typeof value==='string'):listed.available_actions,
         first_mile_type:text(data.info?.first_mile_type,64),integration_type:text(data.info?.integration_type,64),
-        official_only:!batches.length,local_batch_id:batches[0]?Number(batches[0].id):null,local_batch_number:batches[0]?.batch_number||''};
+        official_only:!batches.length,local_batch_id:batches[0]?Number(batches[0].id):null,batch_id:batches[0]?Number(batches[0].id):null,local_batch_number:batches[0]?.batch_number||''};
       return {carriage,members,summary:{official_members:members.length,matched_local:localOrders.length,unmatched_local:members.length-localOrders.length,online:members.filter(row=>row.online).length},
         dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day};
     });
@@ -397,7 +445,187 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     trackingPending.set(key,operation);
     try{return await operation;}finally{if(trackingPending.get(key)===operation)trackingPending.delete(key);}
   }
-  async function localAction(session, body) {
+  async function discoveryTracking(ctx,carriage) {
+    if(['cancelled','canceled'].includes(carriage.status))return null;
+    try {
+      const file=await externalRequest(ctx,'/v2/posting/fbs/act/get-container-labels',{id:Number(carriage.carriage_id)},{binary:true});
+      if(!Buffer.isBuffer(file?.buffer)||file.contentType!=='application/pdf')return null;
+      const extract=extractLabelTracking||(await import('./ogl-label-tracking.js')).extractOglLabelTracking;
+      const tracking=await extract(file.buffer,{containersCount:carriage.containers_count});
+      await verifyExternalContext(ctx);
+      if(tracking?.source!=='official_container_label'||!['found','ambiguous'].includes(tracking.status)||!tracking.tracking_numbers?.length)return null;
+      // Persist identifiers only, never label bytes, contact fields or PDF text.
+      return {source:'official_container_label',status:tracking.status,carrier_name:text(tracking.carrier_name,128)||null,
+        master_tracking_number:tracking.status==='found'?text(tracking.master_tracking_number,128)||null:null,
+        tracking_numbers:[...new Set(tracking.tracking_numbers.map(value=>text(value,128)).filter(Boolean))].slice(0,1000)};
+    } catch(error) {
+      await verifyExternalContext(ctx);
+      if([403,409].includes(error.statusCode||error.status))throw error;
+      return null;
+    }
+  }
+  async function associateOfficial(session,ctx,detail,tracking) {
+    const carriage=detail.carriage;
+    return transaction(async connection=>{
+      const current=await scope(connection,session,true);await shop(connection,current,ctx.shop.id,true);
+      await connection.execute('SELECT id FROM tenants WHERE id = ? FOR UPDATE',[current.id]);
+      if(ctx.currentSettings) {
+        const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
+        if(Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id))fail('默认发运店铺已变更，请重新查询',409);
+      }
+      const [existing]=await connection.execute('SELECT * FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id = ? FOR UPDATE',[current.id,ctx.shop.id,carriage.carriage_id]);
+      let item=existing[0];
+      if(item&&ctx.batch&&(Number(item.id)!==Number(ctx.batch.id)||(item.official_operation_token??null)!==ctx.operationToken))fail('官方操作已变化，请刷新批次',409);
+      if(item&&['creating','confirming'].includes(item.official_status))fail('官方操作正在处理中，请稍后刷新',409);
+      const previous=parsed(item?.official_result_json),imported=!item||previous.source==='official_discovery';
+      const cancelled=['cancelled','canceled'].includes(carriage.status);
+      const metadata={...previous,...(imported?{source:'official_discovery'}:{}),official_status:carriage.status,carriage:{...carriage,local_batch_id:undefined,batch_id:undefined},
+        discovered_at:previous.discovered_at||now().toISOString(),last_observed_at:now().toISOString(),
+        label_tracking:cancelled?null:tracking||previous.label_tracking||null};
+      if(!item) {
+        const [insert]=await connection.execute(`INSERT INTO ogl_dispatch_batches
+          (tenant_id,batch_number,client_request_id,default_shop_id,containers_count,status,delivery_method_id,departure_date,
+           official_carriage_id,official_status,official_result_json,created_by,created_at)
+          VALUES (?,?,?,?,?,'preparing',?,?,?,'observed',?,?,?)`,[current.id,`OGL-${ctx.shop.id}-${carriage.carriage_id}`,`official:${ctx.shop.id}:${carriage.carriage_id}`,ctx.shop.id,carriage.containers_count??0,
+          carriage.delivery_method_id,carriage.departure_at||carriage.departure_date,carriage.carriage_id,JSON.stringify(metadata),current.personId,carriage.created_at?sqlDate(carriage.created_at):timestamp()]);
+        item={id:insert.insertId};
+        await event(connection,current,item.id,'official-discovered',{carriage_id:carriage.carriage_id,postings_count:detail.members.length,physical_dispatch:false});
+      } else {
+        // A local batch keeps its reviewed create/approve status and member set.
+        // Discovery only enriches metadata; it cannot confirm or dispatch it.
+        await connection.execute(`UPDATE ogl_dispatch_batches SET official_result_json = ?,
+          containers_count = CASE WHEN ? = 1 AND ? IS NOT NULL THEN ? ELSE containers_count END,
+          official_status=CASE WHEN ? = 1 AND ? = 0 THEN 'cancelled' ELSE official_status END,
+          official_error = NULL WHERE tenant_id = ? AND id = ?`,[JSON.stringify(metadata),Number(imported),carriage.containers_count,carriage.containers_count,Number(cancelled),Number(imported),current.id,item.id]);
+        if(cancelled&&!imported)await connection.execute('UPDATE ogl_dispatch_members SET official_member=0 WHERE tenant_id=? AND batch_id=?',[current.id,item.id]);
+      }
+      if(imported) {
+        const wanted=cancelled?[]:detail.members.filter(row=>row.matched_local).map(row=>Number(row.order_id));
+        const [old]=await connection.execute('SELECT * FROM ogl_dispatch_members WHERE tenant_id = ? AND batch_id = ? FOR UPDATE',[current.id,item.id]);
+        for(const member of old)if(!wanted.includes(Number(member.order_id))) {
+          await connection.execute(`UPDATE ogl_dispatch_members SET official_member=0,
+            active_order_id=CASE WHEN dispatched_at IS NULL THEN NULL ELSE active_order_id END,
+            withdrawn_at=CASE WHEN dispatched_at IS NULL THEN COALESCE(withdrawn_at,?) ELSE withdrawn_at END
+            WHERE tenant_id=? AND id=?`,[timestamp(),current.id,member.id]);
+        }
+        const conflicts=[];
+        for(const orderId of wanted) {
+          const [owned]=await connection.execute(`SELECT o.*,raw.raw_json FROM orders o JOIN shops s ON s.id=o.shop_id AND ${shopScope(current)}
+            LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
+            WHERE o.id=? AND o.shop_id=? FOR UPDATE`,[current.id,orderId,ctx.shop.id]);
+          const order=owned[0];if(!order||!detail.members.some(row=>Number(row.order_id)===orderId&&row.posting_number===order.posting_number)||classifyOrderLogistics(order).logistics_carrier!=='ogl')continue;
+          const [active]=await connection.execute('SELECT batch_id FROM ogl_dispatch_members WHERE tenant_id=? AND active_order_id=? FOR UPDATE',[current.id,orderId]);
+          if(active[0]&&Number(active[0].batch_id)!==Number(item.id)){conflicts.push(orderId);continue;}
+          const member=old.find(row=>Number(row.order_id)===orderId);
+          if(member?.withdrawn_by){conflicts.push(orderId);continue;}
+          if(member)await connection.execute('UPDATE ogl_dispatch_members SET official_member=1,active_order_id=order_id,withdrawn_at=NULL WHERE tenant_id=? AND id=?',[current.id,member.id]);
+          else await connection.execute(`INSERT INTO ogl_dispatch_members (tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number,official_member)
+            VALUES (?,?,?,?,?,?,1)`,[current.id,item.id,orderId,orderId,ctx.shop.id,order.posting_number]);
+        }
+        if(conflicts.length)await connection.execute('UPDATE ogl_dispatch_batches SET official_error=? WHERE tenant_id=? AND id=?',[`${conflicts.length} 个订单已关联其他活动批次，请人工核对；未自动移动`,current.id,item.id]);
+      }
+      return Number(item.id);
+    });
+  }
+  async function discover(session,query={}) {
+    await transaction(async connection=>scope(connection,session,true));
+    const listed=await listOfficial(session,query);const ctx=await officialReadContext(session);ctx.write=true;
+    if(Number(listed.dispatch_shop.id)!==Number(ctx.shop.id))fail('默认发运店铺已变更，请重新查询',409);
+    const discovered=[];
+    for(const row of listed.rows) {
+      const detail=await officialDetail(session,{id:row.carriage_id,date:row.departure_date},{ctx,listed:row});
+      const tracking=await discoveryTracking(ctx,detail.carriage);
+      const batchId=await associateOfficial(session,ctx,detail,tracking);
+      discovered.push({...row,...detail.carriage,batch_id:batchId,local_batch_id:batchId,official_only:false,
+        carrier_name:tracking?.carrier_name||row.carrier_name,master_tracking_number:tracking?.master_tracking_number||row.master_tracking_number,
+        tracking_numbers:tracking?.tracking_numbers||row.tracking_numbers,tracking_status:tracking?.status||row.tracking_status,tracking_source:tracking?.source||row.tracking_source});
+    }
+    invalidateWorkflowCaches();return {...listed,rows:discovered,discovered:discovered.length};
+  }
+  async function monitorRecent() {
+    if(monitorRunning)return {skipped:'running'};
+    monitorRunning=true;
+    try {
+      // Internal scheduler inventory only. This query is never exposed by an API.
+      let settings=await transaction(async connection=>(await connection.execute('SELECT tenant_id,default_shop_id,updated_by FROM ogl_dispatch_settings WHERE tenant_id > ? ORDER BY tenant_id LIMIT 20',[monitorCursor]))[0]);
+      if(!settings.length){monitorCursor=0;settings=await transaction(async connection=>(await connection.execute('SELECT tenant_id,default_shop_id,updated_by FROM ogl_dispatch_settings ORDER BY tenant_id LIMIT 20'))[0]);}
+      const results=[];
+      for(const setting of settings) {
+        const tenantId=Number(setting.tenant_id);monitorCursor=tenantId;
+        try {
+          const session=await restoreBusinessTaskSession(tenantId,setting.updated_by,async(sql,params)=>transaction(async connection=>(await connection.execute(sql,params))[0]));
+          await transaction(async connection=>{const current=await scope(connection,session,true);await shop(connection,current,setting.default_shop_id,true);});
+          const days=monitorState.get(tenantId)?.status==='active'?2:7;
+          const dateTo=shanghaiDateKey(now()),dateFrom=shanghaiDateKey(new Date(now().getTime()-(days-1)*86400000));
+          await discover(session,{date_from:dateFrom,date_to:dateTo});
+          const batches=await transaction(async connection=>{
+            const current=await scope(connection,session,true),cursor=Number(monitorState.get(tenantId)?.batch_cursor)||0;
+            const sql="SELECT id FROM ogl_dispatch_batches WHERE tenant_id=? AND official_carriage_id IS NOT NULL AND status IN ('preparing','ready','tracking') AND id>? ORDER BY id LIMIT 20";
+            let [rows]=await connection.execute(sql,[current.id,cursor]);
+            if(!rows.length&&cursor)[rows]=await connection.execute(sql,[current.id,0]);
+            return rows;
+          });
+          for(const item of batches) {
+            const ctx=await context(session,item.id,true);
+            if(['creating','confirming'].includes(ctx.batch.official_status))continue;
+            if(parsed(ctx.batch.official_result_json).source==='official_discovery') {
+              const raw=await readOfficial(ctx,ctx.batch.official_carriage_id);
+              const saved=parsed(ctx.batch.official_result_json).carriage;
+              if(!saved)continue;
+              const listed=officialCarriageRow(saved,raw.info);
+              const found=await officialDetail(session,{id:listed.carriage_id,date:listed.departure_date},{ctx,listed});
+              await associateOfficial(session,ctx,found,await discoveryTracking(ctx,found.carriage));
+            } else await recordOfficial(session,ctx,ctx.batch.official_carriage_id,await readOfficial(ctx,ctx.batch.official_carriage_id));
+            if(typeof syncPostings==='function')await refresh(session,{batch_id:item.id});
+          }
+          monitorState.set(tenantId,{status:'active',checked_at:now().toISOString(),batch_cursor:Number(batches.at(-1)?.id)||0});results.push({tenant_id:tenantId,status:'active'});
+        } catch(error) {
+          const paused=[403,409].includes(error.statusCode||error.status);
+          monitorState.set(tenantId,{status:paused?'paused':'error',checked_at:now().toISOString(),notice:paused?'自动跟踪已暂停，请企业管理员检查默认发运店铺、保存设置人员的岗位和企业订阅后重新保存设置':'官方跟踪暂未更新，后台会重试；可手动重新读取'});
+          results.push({tenant_id:tenantId,status:paused?'paused':'error'});
+        }
+        while(monitorState.size>500)monitorState.delete(monitorState.keys().next().value);
+      }
+      return {tenants:results.length,results};
+    } finally {monitorRunning=false;}
+  }
+  const memberSignature=rows=>rows.filter(row=>row.active).map(row=>`${Number(row.order_id)}:${Number(row.shop_id)}:${row.posting_number}`).sort().join('|');
+  async function verifyObservedManagement(session,body,adopt=false) {
+    const ctx=await context(session,body.batch_id,true);
+    const saved=parsed(ctx.batch.official_result_json);
+    if(ctx.batch.official_status!=='observed'||saved.source!=='official_discovery'||!ctx.batch.official_carriage_id)fail('仅已发现的官方申请可进行本地接管，请刷新申请详情',409);
+    const result=await readOfficial(ctx,ctx.batch.official_carriage_id);
+    officialCarriageRow(saved.carriage,result.info);
+    if(!['formed','sended','received','closed'].includes(String(result.info?.status||'').toLowerCase()))fail('官方申请尚未形成或已取消，不能登记实际交运，请在 Ozon 后台核对',409);
+    const count=optionalCount(result.info?.containers_count);
+    if(!count||count!==Number(ctx.batch.containers_count))fail('官方实际货位数未知或已变化，请刷新申请后核对实际装袋数量',409);
+    if(adopt&&containers(body.container_count)!==count)fail('输入的实际货位数与官方数量不一致，请核对装袋和官方标签',409);
+    const active=ctx.members.filter(row=>row.active);
+    if(!active.length||active.some(row=>Number(row.shop_id)!==Number(ctx.shop.id)||!row.official_member)
+      ||active.length!==result.numbers.length||active.some(row=>!result.numbers.includes(row.posting_number)))fail('官方清单与本地本店订单未完全匹配，请先同步缺失订单或处理其他活动批次，再重新核对接管',409);
+    const signature=memberSignature(active);
+    if(!adopt&&(!saved.local_management?.adopted_at||saved.local_management.member_signature!==signature||Number(saved.local_management.container_count)!==count))fail('请先核对实际货位数并接管跟踪；清单变化后需要重新确认',409);
+    if(adopt)return transaction(async connection=>{
+      const current=await scope(connection,session,true);const item=await batch(connection,current,ctx.batch.id,true);await shop(connection,current,item.default_shop_id,true);
+      const latest=await members(connection,current,item.id,true);
+      if(item.official_status!=='observed'||(item.official_operation_token??null)!==ctx.operationToken||memberSignature(latest)!==signature||Number(item.containers_count)!==count)fail('申请或成员已变化，请刷新后重新核对',409);
+      const metadata={...parsed(item.official_result_json),local_management:{adopted_at:now().toISOString(),adopted_by:current.personId,container_count:count,member_signature:signature}};
+      await connection.execute('UPDATE ogl_dispatch_batches SET official_result_json=? WHERE tenant_id=? AND id=?',[JSON.stringify(metadata),current.id,item.id]);
+      await event(connection,current,item.id,'official-adopt',{containers_count:count,physical_dispatch:false});return getDetail(connection,current,item.id);
+    });
+    return {signature,count,kind:'observed',carriageId:String(ctx.batch.official_carriage_id)};
+  }
+  async function verifyApprovedDispatch(session,body,ctx) {
+    const result=await readOfficial(ctx,ctx.batch.official_carriage_id);
+    if(result.info?.carriage_id!=null&&String(result.info.carriage_id)!==String(ctx.batch.official_carriage_id))fail('官方申请号核对失败，请重新查询',502);
+    // Refresh the reviewed proof before any physical write. A changed manifest,
+    // count or method is persisted as mismatch/pending, never accepted from the
+    // old approved snapshot or a client-supplied verification object.
+    const checked=await recordOfficial(session,ctx,ctx.batch.official_carriage_id,result);
+    if(checked.batch.official_status!=='approved')fail('官方组成、货位数、配送方式或状态已变化，已更新核对结果；请先处理不一致，再登记实际交运',409);
+    return {kind:'approved',signature:memberSignature(checked.members),count:Number(checked.batch.containers_count),carriageId:String(checked.batch.official_carriage_id)};
+  }
+  async function localAction(session, body,verifiedOfficial=null) {
     return transaction(async connection => {
       const current = await scope(connection,session,true); const item=await batch(connection,current,body.batch_id,true);
       if (['cancelled','closed'].includes(item.status)) fail('该批次已结束，不能继续修改',409);
@@ -418,8 +646,12 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         }
       } else if (action==='dispatch') {
         if(!selected.length) fail('该批次没有可交运订单',409);
-        if(selected.some(row=>row.shop_status!=='active'||!row.awaiting_delivery||row.online||row.cancelled||classifyOrderLogistics(row).logistics_carrier!=='ogl')) fail('部分订单已变更平台状态、物流方式或店铺已停用，请先刷新并核实',409);
-        if(!['approved'].includes(item.official_status)) fail('请先创建、核对并确认官方发运，下载货位标签后再标记实际交运',409);
+        const waiting=row=>row.awaiting_delivery||String(row.platform_status||'')==='acceptance_in_progress'||String(row.tracking_stage||'')==='posting_acceptance_in_progress';
+        if(selected.some(row=>row.shop_status!=='active'||!waiting(row)||row.online||row.cancelled||classifyOrderLogistics(row).logistics_carrier!=='ogl')) fail('部分订单已变更平台状态、物流方式或店铺已停用，请先刷新并核实',409);
+        const verified=verifiedOfficial&&verifiedOfficial.signature===memberSignature(all)&&verifiedOfficial.count===Number(item.containers_count)
+          &&verifiedOfficial.carriageId===String(item.official_carriage_id);
+        const observed=item.official_status==='observed'&&parsed(item.official_result_json).local_management?.adopted_at&&verifiedOfficial?.kind==='observed';
+        if(!verified||!(item.official_status==='approved'&&verifiedOfficial.kind==='approved'||observed)) fail('请先创建、核对并确认官方发运，或核对并接管已有申请，再显式登记实际交运',409);
         for(const row of selected.filter(row=>!row.dispatched_at)) {
           await connection.execute('UPDATE ogl_dispatch_members SET dispatched_at = ?, dispatched_by = ? WHERE tenant_id = ? AND id = ?',[timestamp(),current.personId,current.id,row.id]);
           await event(connection,current,item.id,'dispatch',{},row.id,why);
@@ -476,6 +708,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     const list=Array.isArray(postings?.result)?postings.result:Array.isArray(postings?.postings)?postings.postings:[];
     // Missing/malformed membership data is not an empty verified official manifest.
     if(!Array.isArray(postings?.result)&&!Array.isArray(postings?.postings)) fail('Ozon 官方组成响应缺少货件列表，不能确认已核对清单',502);
+    if(list.length>2000)fail('官方申请超过 2000 个货件，暂不能完整关联，请拆分后联系管理员核对',409);
     const numbers=list.map(row=>typeof row==='string'?row:row.posting_number).filter(Boolean);
     const info=result?.result||result;
     if(info?.carriage_id!=null&&String(info.carriage_id)!==String(carriageId)) fail('Ozon 返回的官方发运编号与查询编号不一致，请重新查询',502);
@@ -593,6 +826,12 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(['creating','confirming'].includes(ctx.batch.official_status)&&Date.now()-new Date(ctx.batch.updated_at).getTime()<300000) fail('官方操作正在处理中，请等待请求完成再同步；中断的请求五分钟后可回读核实',409);
     if(!carriageId||!/^\d+$/.test(carriageId)) fail('请填写待核实的 Ozon 官方发运编号（official_carriage_id），可在默认店铺后台查看');
     if(ctx.batch.official_carriage_id&&String(ctx.batch.official_carriage_id)!==carriageId) fail('历史批次不能更换官方发运编号',409);
+    const saved=parsed(ctx.batch.official_result_json);
+    if(saved.source==='official_discovery') {
+      const found=await officialDetail(session,{id:carriageId,date:saved.carriage.departure_date},{ctx,listed:saved.carriage});
+      await associateOfficial(session,ctx,found,await discoveryTracking(ctx,found.carriage));
+      return detail(session,ctx.batch.id);
+    }
     return recordOfficial(session,ctx,carriageId,await readOfficial(ctx,carriageId));
   }
   async function officialConfirm(session,body) {
@@ -673,7 +912,16 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     else if(body.action==='official-create') result=await officialCreate(session,body);
     else if(body.action==='official-confirm') result=await officialConfirm(session,body);
     else if(body.action==='official-sync') result=await officialSync(session,body);
-    else result=await localAction(session,body);
+    else if(body.action==='official-adopt')result=await verifyObservedManagement(session,body,true);
+    else {
+      let verified=null;
+      if(body.action==='dispatch') {
+        const ctx=await context(session,body.batch_id,true);
+        if(ctx.batch.official_status==='observed')verified=await verifyObservedManagement(session,body);
+        else if(ctx.batch.official_status==='approved'&&ctx.batch.official_carriage_id)verified=await verifyApprovedDispatch(session,body,ctx);
+      }
+      result=await localAction(session,body,verified);
+    }
     invalidateWorkflowCaches(); return result;
   }
   async function file(session,queryOrId,typeArg) {
@@ -681,12 +929,20 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     const ctx=await context(session,query.batch_id);
     const path={'container-labels':'/v2/posting/fbs/act/get-container-labels',barcode:'/v2/posting/fbs/act/get-barcode'}[query.type];
     if(!path) fail('文件类型必须为货位标签或发运条码');
-    if(ctx.batch.official_status!=='approved'||!ctx.batch.official_carriage_id) fail('官方发运尚未核实确认，暂不能下载有效标签',409);
-    ctx.requiredOfficialStatus='approved';
+    if(!ctx.batch.official_carriage_id)fail('官方申请号尚未取得，请先刷新申请详情',409);
+    if(ctx.batch.official_status==='observed'&&parsed(ctx.batch.official_result_json).source==='official_discovery') {
+      const response=await externalRequest(ctx,'/v1/carriage/get',{carriage_id:Number(ctx.batch.official_carriage_id)});
+      const info=response?.result||response;
+      if(info?.carriage_id!=null&&String(info.carriage_id)!==String(ctx.batch.official_carriage_id))fail('官方申请号核对失败，请重新查询',502);
+      const actions=Array.isArray(info?.available_actions)?info.available_actions:[];
+      const allowed=query.type==='container-labels'?actions.includes('get_label_containers'):actions.includes('get_barcode')||actions.includes('get_label_barcode');
+      if(['cancelled','canceled'].includes(String(info?.status||'').toLowerCase())||!allowed)fail('官方尚未开放此文件或申请已取消，请在 Ozon 后台核对后刷新',409);
+    } else if(ctx.batch.official_status!=='approved')fail('官方发运尚未核实确认，暂不能下载有效标签',409);
+    ctx.requiredOfficialStatus=ctx.batch.official_status;
     const result=await externalRequest(ctx,path,{id:Number(ctx.batch.official_carriage_id)},{binary:true});
     if(!result?.buffer) fail('Ozon 尚未生成文件，请稍后重试',502);
     const extension=result.contentType==='image/png'?'png':result.contentType==='image/jpeg'?'jpg':'pdf';
     return {...result,filename:`${ctx.batch.batch_number}-${query.type}.${extension}`};
   }
-  return {bootstrap,saveSettings,preview,createBatch,listBatches,detail,listOfficial,officialDetail,officialTracking,action,file};
+  return {bootstrap,saveSettings,preview,createBatch,listBatches,detail,listOfficial,officialDetail,officialTracking,discover,monitorRecent,action,file};
 }

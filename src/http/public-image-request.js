@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { Readable } from 'node:stream';
 
 export function isPublicImageAddress(value) {
   const address = String(value || '').toLowerCase();
@@ -87,4 +88,40 @@ export async function requestPublicMedia(value, { signal, headers, maxBytes, res
 export async function requestPublicImage(value, options = {}) {
   const result = await requestPublicMedia(value, options);
   return result?.ok && result.contentType.startsWith('image/') ? { buffer: result.buffer, contentType: result.contentType } : null;
+}
+
+// Streaming downloads use the same DNS/redirect boundary without retaining a
+// whole product gallery in memory while it is archived to object storage.
+export async function requestPublicMediaStream(value, { signal, resolve = lookup, redirects = 4, beforeRequest } = {}) {
+  signal?.throwIfAborted();
+  await beforeRequest?.();
+  const { url, address } = await resolvePublicImageTarget(value, resolve);
+  await beforeRequest?.();
+  signal?.throwIfAborted();
+  return new Promise((done, reject) => {
+    const client = url.protocol === 'https:' ? https : http;
+    const request = client.get(url, { signal, agent: false,
+      lookup: (_hostname, options, callback) => options?.all
+        ? callback(null, [address]) : callback(null, address.address, address.family)
+    }, async response => {
+      try {
+        if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+          const location = response.headers.location;
+          response.destroy();
+          if (redirects <= 0 || !location) throw new Error('Image redirect limit exceeded');
+          done(await requestPublicMediaStream(new URL(location, url).href, { signal, resolve, redirects: redirects - 1, beforeRequest }));
+          return;
+        }
+        await beforeRequest?.();
+        signal?.throwIfAborted();
+        const ok = response.statusCode >= 200 && response.statusCode < 300;
+        const result = { ok, status: response.statusCode,
+          headers: { get: name => String(response.headers[String(name).toLowerCase()] || '') },
+          body: ok ? Readable.toWeb(response) : null };
+        if (!ok) response.destroy();
+        done(result);
+      } catch (error) { response.destroy(); reject(error); }
+    });
+    request.on('error', reject);
+  });
 }

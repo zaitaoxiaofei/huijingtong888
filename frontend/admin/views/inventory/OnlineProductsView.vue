@@ -21,6 +21,7 @@ const router = useRouter();
 const authStore = useAuthStore();
 let syncingRoute = false;
 let onlineProductSyncPollTimer = 0;
+let onlineProductSyncPollInFlight = false;
 let productLimitsLoadedShopId = null;
 const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
@@ -28,6 +29,7 @@ let dictionaryLoaded = false;
 
 const loading = ref(false);
 const syncLoading = ref(false);
+const onlineProductSyncProgress = ref(null);
 const stockSyncLoading = ref(false);
 const openingEditId = ref(0);
 const zeroStockLoadingId = ref(0);
@@ -98,7 +100,8 @@ const statusOptions = computed(() => statusLabels.map(([value, label]) => ({
 
 const pagedRows = computed(() => state.onlineProducts);
 const tenantReadOnly = computed(() => authStore.user?.tenant?.slug !== "default");
-const canSyncOnline = computed(() => !tenantReadOnly.value && isPlatformAdmin(authStore.user));
+const canSyncOnline = computed(() => Boolean(authStore.user?.tenant?.id) && hasPermission(authStore.user, "operations"));
+const canSyncOzonStocks = computed(() => !tenantReadOnly.value && isPlatformAdmin(authStore.user));
 const canManageInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canOperate = computed(() => hasPermission(authStore.user, "operations"));
 const tenantCanUpdateStocks = computed(() => hasPermission(authStore.user, "operations"));
@@ -644,13 +647,17 @@ async function zeroOnlineProductStock(row) {
 }
 
 async function syncOnlineProducts(mode = "pending_listing") {
+  if (!canSyncOnline.value || syncLoading.value) return;
+  stopOnlineProductSyncPolling();
   syncLoading.value = true;
+  onlineProductSyncProgress.value = { phase: "starting", message: "正在启动商品拉取任务" };
   try {
     const pendingListing = mode === "pending_listing";
     const payload = pendingListing ? { pending_listing: true, scope: "pending_listing", concurrency: 5 } : {};
     if (state.filters.shopId !== "all") payload.shop_id = Number(state.filters.shopId);
     const result = await apiClient.post("/api/sync/online-products", payload);
     if (result?.started === false && result?.running) {
+      onlineProductSyncProgress.value = result.progress || null;
       ElMessage.warning("商品拉取任务已在后台运行，请等待当前任务完成");
       startOnlineProductSyncPolling();
       return;
@@ -658,9 +665,21 @@ async function syncOnlineProducts(mode = "pending_listing") {
     ElMessage.success(pendingListing ? "已开始后台拉取待上架商品" : "已开始后台拉取商品");
     startOnlineProductSyncPolling();
   } catch (error) {
-    ElMessage.error(error.message || "拉取 Ozon 商品失败");
     stopOnlineProductSyncPolling();
+    syncLoading.value = false;
+    onlineProductSyncProgress.value = null;
+    ElMessage.error(`启动商品拉取失败：${error.message || "请求失败，请稍后重试"}`);
   }
+}
+
+function onlineProductSyncProgressText() {
+  const progress = onlineProductSyncProgress.value || {};
+  const parts = [String(progress.message || "后台正在拉取商品，请稍候")];
+  if (progress.shop_name) parts.push(String(progress.shop_name));
+  if (Number(progress.total_shops) > 0) parts.push(`店铺 ${Number(progress.completed_shops || 0)}/${Number(progress.total_shops)}`);
+  if (progress.fetched !== undefined) parts.push(`已拉取 ${Number(progress.fetched || 0)} 条`);
+  if (progress.upserted !== undefined) parts.push(`已更新 ${Number(progress.upserted || 0)} 条`);
+  return parts.join(" · ");
 }
 
 async function syncOzonStocks() {
@@ -691,8 +710,11 @@ function stopOnlineProductSyncPolling() {
 
 async function pollOnlineProductSyncStatus() {
   if (!canSyncOnline.value) return;
+  if (onlineProductSyncPollInFlight) return;
+  onlineProductSyncPollInFlight = true;
   try {
     const result = await apiClient.get("/api/sync/online-products/status", { routeScoped: false });
+    onlineProductSyncProgress.value = result?.progress || null;
     if (result?.running) {
       syncLoading.value = true;
       return;
@@ -720,6 +742,8 @@ async function pollOnlineProductSyncStatus() {
     stopOnlineProductSyncPolling();
     syncLoading.value = false;
     ElMessage.error(error.message || "获取商品拉取状态失败");
+  } finally {
+    onlineProductSyncPollInFlight = false;
   }
 }
 
@@ -777,7 +801,7 @@ onDeactivated(stopOnlineProductSyncPolling);
 
 <template>
   <div class="page-stack online-products-page erp-paged-page">
-    <el-alert v-if="tenantReadOnly" title="企业商品空间" description="仅展示本企业店铺商品。商品绑定、建品、编辑上架及归档按岗位权限开放；高级同步功能尚未开放。" type="info" :closable="false" show-icon />
+    <el-alert v-if="tenantReadOnly" title="企业商品空间" description="仅展示本企业店铺商品。商品拉取按运营岗位开放；商品绑定、建品、编辑上架及归档按岗位权限开放；库存全量同步仍受管理员限制。" type="info" :closable="false" show-icon />
     <el-card shadow="never" class="page-card online-products-card erp-paged-card">
       <div class="online-toolbar online-toolbar-sticky">
         <div class="online-toolbar-main">
@@ -802,7 +826,8 @@ onDeactivated(stopOnlineProductSyncPolling);
               <el-button v-if="canSyncOnline" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
-              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
+              <el-text v-if="syncLoading" type="info" size="small" aria-live="polite">{{ onlineProductSyncProgressText() }}</el-text>
+              <el-button v-if="canSyncOzonStocks" class="erp-btn erp-btn-secondary" :loading="stockSyncLoading" @click="syncOzonStocks">
                 刷新库存数量
               </el-button>
               <el-button v-if="tenantCanUpdateStocks" class="erp-btn erp-btn-secondary" :disabled="!state.selectedIds.length" @click="openBatchStockDialog">

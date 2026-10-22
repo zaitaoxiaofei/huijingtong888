@@ -63,6 +63,7 @@ import { destroySessionsByPersonIdMysql } from "./mysql-auth-session.js";
 import { stockWarehouseRulesMysql } from "./mysql-stock-warehouse-rules.js";
 import { ensureProductBarcodeLabelCacheReadyMysql } from "./product-barcode-labels.js";
 import { compactOnlineProductRawJson, prepareOnlineProductMediaForStorage } from "./online-product-media-storage.js";
+import { requestPublicMediaStream } from "../http/public-image-request.js";
 import { hasMeaningfulPostingMethod, isFbpPosting, mergeOrderPostingLogistics } from "./order-posting-logistics-merge.js";
 import { saveOrderPostingLogistics } from "./mysql-order-posting-logistics.js";
 import { recordInventoryProductNamingUsage } from "./inventory-product-naming.js";
@@ -3065,8 +3066,9 @@ function resolveOnlineProductPublishedAtMysql(row = {}) {
   );
 }
 
-async function upsertOnlineProductDualWrite(shopId, item = {}) {
-  const storageItem = await prepareOnlineProductMediaForStorage(item);
+async function upsertOnlineProductDualWrite(shopId, item = {}, options = {}) {
+  const storageItem = await prepareOnlineProductMediaForStorage(item, options.mediaOptions);
+  await options.beforeWrite?.();
   const payload = buildOnlineProductPayload(shopId, storageItem);
   await mysqlExecute(`
     INSERT INTO online_products
@@ -3102,11 +3104,14 @@ async function upsertOnlineProductDualWrite(shopId, item = {}) {
 
 
 
-  await archiveOnlineProductSkuAliasRowsMysql(shopId, storageItem, payload[1]);
+  await archiveOnlineProductSkuAliasRowsMysql(shopId, storageItem, payload[1], options.beforeWrite);
+  if (options.skipReadback) return null;
+  await options.beforeWrite?.();
   return await mysqlQueryOne("SELECT * FROM online_products WHERE shop_id = ? AND ozon_sku = ?", [Number(shopId), String(payload[1] || "")]);
 }
 
-async function archiveOnlineProductSkuAliasRowsMysql(shopId, item = {}, canonicalSku = "") {
+async function archiveOnlineProductSkuAliasRowsMysql(shopId, item = {}, canonicalSku = "", beforeWrite = null) {
+  await beforeWrite?.();
   const realSku = normalizedOzonSkuCandidateMysql(item, canonicalSku);
   if (!realSku) return;
   const offerId = String(item.offer_id || "").trim();
@@ -3128,12 +3133,14 @@ async function archiveOnlineProductSkuAliasRowsMysql(shopId, item = {}, canonica
       )
   `, [Number(shopId), realSku, offerId, offerId, productId, productId]);
   for (const row of duplicateRows) {
+    await beforeWrite?.();
     await mysqlExecute(`
       UPDATE online_products
       SET archived = 1, status = 'archived_duplicate', visibility = 'DUPLICATE_SKU_ALIAS', updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `, [Number(row.id)]);
 
+    await beforeWrite?.();
     await mysqlExecute(`
       DELETE FROM ozon_stock_snapshots
       WHERE shop_id = ? AND online_product_id = ? AND ozon_sku != ?
@@ -7544,7 +7551,8 @@ async function fallbackStockRowsFromOnlineProductsMysql(shopId, productId = null
   return result;
 }
 
-async function upsertStockSnapshotMysql(shopId, row) {
+async function upsertStockSnapshotMysql(shopId, row, { beforeWrite = null } = {}) {
+  await beforeWrite?.();
   await ensureOzonStockStorageSchemaMysql();
   const [owner] = await mysqlQuery("SELECT tenant_id FROM shops WHERE id = ?", [Number(shopId)]);
   if (!owner) throw Object.assign(new Error('Shop not found'), { statusCode: 404 });
@@ -7575,6 +7583,7 @@ async function upsertStockSnapshotMysql(shopId, row) {
         [Number(shopId), repairedSku, Number(online.online_product_id || 0)]
       );
       if (!duplicate) {
+        await beforeWrite?.();
         await mysqlExecute(
           "UPDATE online_products SET ozon_sku = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
           [repairedSku, Number(online.online_product_id)]
@@ -7586,10 +7595,12 @@ async function upsertStockSnapshotMysql(shopId, row) {
   const stockType = resolveStockTypeMysql({ ...row, rules: await stockWarehouseRulesEnabledMysql() });
   const normalizedSku = normalizedOzonSkuCandidateMysql(row, row.ozon_sku) || missingOnlineProductSkuMarker(row);
   const warehouseId = String(row.warehouse_id || row.warehouse_name || "default");
+  await beforeWrite?.();
   await mysqlExecute(`
     DELETE FROM ozon_stock_snapshots
     WHERE shop_id = ? AND ozon_sku = ? AND warehouse_id = ? AND stock_type != ?
   `, [Number(shopId), normalizedSku, warehouseId, stockType]);
+  await beforeWrite?.();
   await mysqlExecute(`
     INSERT INTO ozon_stock_snapshots
     (shop_id, online_product_id, product_id, ozon_product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type,
@@ -9299,30 +9310,36 @@ async function buildExceptionWorkbenchMysql(query = {}, tenantId = "admin") {
 
 export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
   ensureMysqlCutoverEnabled();
+  if (!options.session) throw Object.assign(new Error("商品拉取缺少有效的企业操作人员，请重新登录后重试"), { statusCode: 403 });
   const scope = await resolveInventoryTenantScope(options.tenantId ?? "admin");
+  const checkAccess = () => assertOrderTaskAccessMysql(scope, options, ["operations"]);
+  await checkAccess();
   await assertInventoryReferences(scope, body);
   const targetShopId = nullableNumber(body.shop_id);
   const selectedIds = Array.isArray(body.online_product_ids)
-    ? body.online_product_ids.map(Number).filter(Boolean)
+    ? [...new Set(body.online_product_ids.map(Number).filter(Boolean))]
     : [];
+  if (selectedIds.length > 200) throw Object.assign(new Error("一次最多拉取 200 个已选商品，请分批操作"), { statusCode: 400 });
   for (const id of selectedIds) await assertInventoryRecord(scope, 'online', id);
   const requestedOfferIds = [...new Set((Array.isArray(body.offer_ids || body.offerIds) ? (body.offer_ids || body.offerIds) : [])
     .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 200);
 
   const selectedRows = selectedIds.length
     ? await mysqlQuery(
-      `SELECT id, shop_id, ozon_product_id, ozon_sku, offer_id FROM online_products WHERE id IN (${selectedIds.map(() => "?").join(",")})`,
-      selectedIds
+      `SELECT op.id, op.shop_id, op.ozon_product_id, op.ozon_sku, op.offer_id FROM online_products op
+        JOIN shops s ON s.id = op.shop_id WHERE ${scope.predicate('s').sql} AND s.status = 'active'
+        AND op.id IN (${selectedIds.map(() => "?").join(",")})`,
+      [scope.id, ...selectedIds]
     )
     : [];
 
-  const selectedProductIds = new Set(selectedRows.map((row) => String(row.ozon_product_id || "")).filter(Boolean));
-  const selectedSkus = new Set(selectedRows.map((row) => String(row.ozon_sku || "")).filter(Boolean));
-  const selectedOffers = new Set(selectedRows.map((row) => String(row.offer_id || "")).filter(Boolean));
+  if (selectedRows.length !== new Set(selectedIds).size) throw Object.assign(new Error("所选商品不存在、店铺已停用或不属于当前企业"), { statusCode: 404 });
   const selectedShopIds = new Set(selectedRows.map((row) => Number(row.shop_id)).filter(Boolean));
   const pendingListingOnly = Boolean(body.pending_listing || body.pendingListing || body.scope === "pending_listing");
+  const syncScope = pendingListingOnly ? "pending_listing" : selectedIds.length ? "selected" : requestedOfferIds.length ? "publish_offers" : "all";
   const defaultConcurrency = pendingListingOnly ? 5 : 3;
-  const concurrency = Math.min(Math.max(Number(body.concurrency || defaultConcurrency), 1), 8);
+  // Leave room in the shared DB pool for orders and other employees' requests.
+  const concurrency = Math.min(Math.max(Number(body.concurrency || defaultConcurrency), 1), 3);
   const productFetchOptions = pendingListingOnly
     ? {
         visibilityFilters: pendingListingVisibilityFilters(), signal: options.signal,
@@ -9338,8 +9355,14 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
 
   let fetched = 0;
   let upserted = 0;
+  let completedShops = 0;
   const errors = [];
   const shopResults = [];
+  const mediaCache = new Map();
+  const report = (phase, message, shop = {}) => options.onProgress?.({ phase, message,
+    total_shops: targetShops.length, completed_shops: completedShops, fetched, upserted,
+    shop_id: Number(shop.id || 0), shop_name: String(shop.name || "") });
+  report("starting", "正在准备商品拉取");
 
   await mapWithConcurrencyMysql(targetShops, concurrency, async (shop) => {
     if (options.signal?.aborted) throw options.signal.reason || new Error('任务已取消');
@@ -9354,32 +9377,59 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
       error: ""
     };
     try {
+      const checkCurrentShop = async () => {
+        await checkAccess();
+        const current = await assertInventoryRecord(scope, "shop", shop.id);
+        if (current.status !== "active") throw Object.assign(new Error("店铺已停用，商品拉取已停止"), { statusCode: 403 });
+        return current;
+      };
+      await checkCurrentShop();
+      const fetchOptions = { ...productFetchOptions, beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop };
       let items;
       let archivedRefs = [];
       if (pendingListingOnly) {
+        report("product_list", "正在获取待上架商品编号和归档状态", shop);
         const [refs, currentArchivedRefs] = await Promise.all([
-          fetchOzonProductRefs(shop, productFetchOptions),
-          fetchOzonProductRefs(shop, { visibilityFilters: ["ARCHIVED"], visibilityConcurrency: 1, signal: options.signal })
+          fetchOzonProductRefs(shop, fetchOptions),
+          fetchOzonProductRefs(shop, { visibilityFilters: ["ARCHIVED"], visibilityConcurrency: 1, signal: options.signal,
+            beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop })
         ]);
+        await checkCurrentShop();
         archivedRefs = currentArchivedRefs;
         shopResult.candidates = refs.length;
         const productIds = refs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean);
-        const stockRows = await fetchOzonProductStocks(shop, { productIds, stockConcurrency: 3, signal: options.signal });
-        await refreshPendingListingStockSnapshotsMysql(shop.id, productIds, stockRows);
+        report("stocks", `正在核对 ${productIds.length} 个候选商品的库存`, shop);
+        // An empty product filter means ALL products in Ozon, not an empty list.
+        const stockRows = productIds.length ? await fetchOzonProductStocks(shop, { productIds, stockConcurrency: 3, signal: options.signal,
+          beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop }) : [];
+        await checkCurrentShop();
+        await refreshPendingListingStockSnapshotsMysql(shop.id, productIds, stockRows, checkCurrentShop);
         const pendingRefs = filterPendingListingProductsWithoutFbsStock(refs, stockRows, { requireSku: false });
         const visibilityById = new Map(pendingRefs.map((item) => [String(item.ozon_product_id || item.id || ""), item.visibility || ""]));
+        report("details", `正在获取 ${pendingRefs.length} 个待上架商品的详情`, shop);
         const detailedItems = await fetchOzonProductsByIds(
           shop,
           pendingRefs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean),
-          { visibilityById, detailConcurrency: 3, signal: options.signal }
+          { ...fetchOptions, visibilityById, detailConcurrency: 3 }
         );
         items = filterPendingListingProductsWithoutFbsStock(detailedItems, stockRows);
         shopResult.filtered_out = Math.max(0, shopResult.candidates - items.length);
       } else {
-        items = await fetchOzonProducts(shop, productFetchOptions);
+        report("details", "正在获取商品详情", shop);
+        const localSelection = selectedRows.filter(row => Number(row.shop_id) === Number(shop.id));
+        const ids = localSelection.map(row => Number(row.ozon_product_id)).filter(Boolean);
+        items = ids.length === localSelection.length && ids.length
+          ? await fetchOzonProductsByIds(shop, ids, fetchOptions)
+          : await fetchOzonProducts(shop, fetchOptions);
         shopResult.candidates = items.length;
       }
       shopResult.fetched = items.length;
+      fetched += shopResult.fetched;
+      await checkCurrentShop();
+      const localSelection = selectedRows.filter(row => Number(row.shop_id) === Number(shop.id));
+      const selectedProductIds = new Set(localSelection.map(row => String(row.ozon_product_id || "")).filter(Boolean));
+      const selectedSkus = new Set(localSelection.map(row => String(row.ozon_sku || "")).filter(Boolean));
+      const selectedOffers = new Set(localSelection.map(row => String(row.offer_id || "")).filter(Boolean));
       const matchingItems = items.filter((item) => {
         if (requestedOfferIds.length && !requestedOfferIds.includes(String(item.offer_id || "").trim())) return false;
         if (
@@ -9392,24 +9442,46 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
         }
         return true;
       });
-      await mapWithConcurrencyMysql(matchingItems, 8, async (item) => {
-        await upsertOnlineProductDualWrite(shop.id, item);
+      const previousBySku = new Map();
+      for (let start = 0; start < matchingItems.length; start += 500) {
+        await checkCurrentShop();
+        const skus = [...new Set(matchingItems.slice(start, start + 500).map(item => String(item.ozon_sku || "")).filter(Boolean))];
+        if (!skus.length) continue;
+        const previous = await mysqlQuery(`SELECT op.ozon_sku, op.raw_json FROM online_products op JOIN shops s ON s.id = op.shop_id
+          WHERE op.shop_id = ? AND ${scope.predicate('s').sql} AND s.status = 'active'
+          AND op.ozon_sku IN (${skus.map(() => "?").join(",")})`, [shop.id, scope.id, ...skus]);
+        await checkCurrentShop();
+        for (const row of previous) previousBySku.set(String(row.ozon_sku), row);
+      }
+      report("saving", `正在保存 ${matchingItems.length} 个商品及图片`, shop);
+      await mapWithConcurrencyMysql(matchingItems, 2, async (item) => {
+        await checkCurrentShop();
+        await upsertOnlineProductDualWrite(shop.id, item, { beforeWrite: checkCurrentShop, skipReadback: true,
+          mediaOptions: { previousItem: previousBySku.get(String(item.ozon_sku)), cache: mediaCache,
+            beforeRequest: checkCurrentShop, signal: options.signal,
+            fetchImpl: (url, requestOptions) => requestPublicMediaStream(url, { ...requestOptions, beforeRequest: checkCurrentShop }) } });
         shopResult.upserted += 1;
+        upserted += 1;
+        report("saving", `正在保存商品和图片：${shopResult.upserted}/${matchingItems.length}`, shop);
       });
       if (pendingListingOnly) {
-        shopResult.archived_reconciled = await reconcileArchivedOnlineProductsMysql(shop.id, archivedRefs);
+        report("archived", "正在核对已归档商品", shop);
+        shopResult.archived_reconciled = await reconcileArchivedOnlineProductsMysql(shop.id, archivedRefs, checkCurrentShop);
       }
+      await checkCurrentShop();
     } catch (error) {
+      if (options.signal?.aborted || [401, 403, 404].includes(Number(error?.statusCode || error?.status))) throw error;
       shopResult.error = error?.message || String(error);
       errors.push(`${shop.name}: ${shopResult.error}`);
     }
-    fetched += shopResult.fetched;
-    upserted += shopResult.upserted;
     shopResults.push(shopResult);
+    completedShops += 1;
+    report("shop_done", shopResult.error ? "部分店铺拉取失败，请查看结果" : "店铺商品拉取完成", shop);
   });
 
+  await checkAccess();
   const status = errors.length ? "partial_error" : "ok";
-  const message = `Fetched ${fetched}, upserted ${upserted}, shops ${targetShops.length}, scope ${pendingListingOnly ? "pending_listing" : "all"}, concurrency ${concurrency}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
+  const message = `Fetched ${fetched}, upserted ${upserted}, shops ${targetShops.length}, scope ${syncScope}, concurrency ${concurrency}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
 
   const logResult = await mysqlExecute(
     "INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_online_products', ?, ?)",
@@ -9419,10 +9491,10 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
 
   invalidateMasterDataCachePrefix("online-products:");
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
-  return { fetched, upserted, errors, concurrency, scope: pendingListingOnly ? "pending_listing" : "all", shops: shopResults };
+  return { fetched, upserted, errors, concurrency, scope: syncScope, shops: shopResults };
 }
 
-async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
+async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = [], beforeWrite = null) {
   let updated = 0;
   for (let index = 0; index < archivedRefs.length; index += 500) {
     const chunk = archivedRefs.slice(index, index + 500);
@@ -9434,6 +9506,7 @@ async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
     if (skus.length) matches.push(`ozon_sku IN (${skus.map(() => "?").join(",")})`);
     if (offerIds.length) matches.push(`offer_id IN (${offerIds.map(() => "?").join(",")})`);
     if (!matches.length) continue;
+    await beforeWrite?.();
     const result = await mysqlExecute(`
       UPDATE online_products
       SET archived = 1,
@@ -9454,13 +9527,16 @@ async function reconcileArchivedOnlineProductsMysql(shopId, archivedRefs = []) {
   return updated;
 }
 
-async function refreshPendingListingStockSnapshotsMysql(shopId, productIds = [], stockRows = []) {
+async function refreshPendingListingStockSnapshotsMysql(shopId, productIds = [], stockRows = [], beforeWrite = null) {
   const ids = [...new Set((productIds || []).map(Number).filter(Boolean))];
+  if (!ids.length) return;
+  await beforeWrite?.();
   await ensureOzonStockStorageSchemaMysql();
   if (ids.length) {
+    await beforeWrite?.();
     await clearStockSnapshotsForSyncMysql(shopId, { filters: { productIds: ids } });
   }
-  await mapWithConcurrencyMysql(stockRows || [], 8, (row) => upsertStockSnapshotMysql(shopId, row));
+  await mapWithConcurrencyMysql(stockRows || [], 2, (row) => upsertStockSnapshotMysql(shopId, row, { beforeWrite }));
 }
 
 async function upsertFinanceOperationMysql(shopId, operation) {
@@ -29797,9 +29873,10 @@ async function orderTenantCoverageMysql(scope) {
 
 async function loadOglDispatchMembersMysql(ids, tenantScope) {
   if (!ids.length) return new Map();
-  const rows = await mysqlQuery(`SELECT m.*, b.batch_number FROM ogl_dispatch_members m
+  const rows = await mysqlQuery(`SELECT m.*, b.batch_number, b.default_shop_id, b.official_carriage_id,
+    b.official_status, b.status AS batch_status FROM ogl_dispatch_members m
     JOIN ogl_dispatch_batches b ON b.id = m.batch_id AND b.tenant_id = m.tenant_id
-    JOIN orders member_order ON member_order.id = m.order_id AND member_order.shop_id = m.shop_id
+    JOIN orders member_order ON member_order.id = m.order_id AND member_order.shop_id = m.shop_id AND member_order.posting_number = m.posting_number
     JOIN shops member_shop ON member_shop.id = member_order.shop_id
     WHERE m.tenant_id = ? AND ${orderTenantPredicateMysql("member_shop", tenantScope)}
       AND m.order_id IN (${ids.map(() => "?").join(",")})
@@ -30776,7 +30853,7 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
   }
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
-  if (status === "delivered") return `((${value} LIKE '%delivered%' OR (${oglPhysicalDispatchSql("o")} AND ${value} LIKE '%posting_received_by_buyer%')) AND NOT (${orderStatusSqlMysql("cancelled")}))`;
+  if (status === "delivered") return `((${value} LIKE '%delivered%' OR (${oglTerminalStatusSql("o")} AND ${value} LIKE '%posting_received_by_buyer%')) AND NOT (${orderStatusSqlMysql("cancelled")}))`;
   if (status === "delivering") {
     return `((${exactTransit}) OR ${oglOnlineStatusSql("o")} OR (
       NOT ${awaitingDelivery}

@@ -11,7 +11,7 @@ const panelSource = readFileSync(new URL("../frontend/orders/components/OglDispa
   .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, "");
 
 const detail = (changes = {}) => ({ batch: { id: 71, batch_number: "OGL-TEST", containers_count: 3, official_status: "not_created", ...changes }, members: [], events: [], summary: {} });
-function fixture({ preview, action, bootstrap, props = {}, officialList, officialDetail, officialTracking } = {}) {
+function fixture({ preview, action, bootstrap, props = {}, officialList, officialDetail, officialTracking, discoverOfficial, prompt } = {}) {
   const calls = [], emitted = [], mounts = [];
   let session = "A";
   const service = {
@@ -20,7 +20,9 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     create: async (payload) => { calls.push(["create", payload]); return detail(); },
     action: async (...args) => { calls.push(["action", ...args]); return action ? action(...args) : detail(); },
     detail: async (id) => { calls.push(["detail", id]); return detail({ official_status: "create_unknown" }); },
-    list: async () => ({ rows: [], total: 0 }),
+    settings: async (id) => { calls.push(["settings", id]); return {}; },
+    list: async (page, range) => { calls.push(["history", page, range]); return { rows: [], total: 0 }; },
+    discoverOfficial: async (range) => { calls.push(["official-discover", range]); return discoverOfficial ? discoverOfficial(range) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: range.date_to, created_at: "2026-10-21T20:40:00Z", local_batch_id: 71, dispatch_stage: "applied" }], total: 1, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
     officialList: async (date) => { calls.push(["official-list", date]); return officialList ? officialList(date) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: `${date}T02:00:00Z` }], total: 1, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
     officialDetail: async (id, date) => { calls.push(["official-detail", id, date]); return officialDetail ? officialDetail(id, date) : { carriage: { carriage_id: id, status: "formed", containers_count: 4 }, members: [{ posting_number: "fixture-only", matched_local: false }], summary: { official_members: 1, matched_local: 0, unmatched_local: 1, online: 0 }, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
     officialTracking: async (id, date) => { calls.push(["official-tracking", id, date]); return officialTracking ? officialTracking(id, date) : { tracking: { status: "found", source: "official_container_label", carrier_name: "圆通", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], page_count: 1, containers_count: 4, labels: [{ label_page: 1, tracking_numbers: ["YT000000000001"] }], container_mapping_confirmed: false } }; }
@@ -34,8 +36,8 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     computed: (getter) => ({ get value() { return getter(); } }),
     onMounted: (callback) => mounts.push(callback), onBeforeUnmount() {}, watch() {},
     ElMessage: { success() {}, info() {} },
-    ElMessageBox: { prompt: async () => ({ value: "核实缺货未交出" }), confirm: async () => true },
-    shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
+    ElMessageBox: { prompt: async () => ({ value: prompt ?? "核实缺货未交出" }), confirm: async () => true },
+    shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, orderStateKey, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
   });
   vm.runInContext(serviceSource, context);
   // The component deliberately consumes the injected transport, never a real API.
@@ -119,6 +121,18 @@ test("local historical handover cannot override a later platform status or non-O
   assert.equal(f.context.isOglDispatched({ display_status: "ogl_dispatched", ogl_dispatch: { dispatched: false } }), false);
 });
 
+test("validated applications enter tracking without becoming physical handovers and later platform states still win", () => {
+  const f = fixture();
+  const applied = { status: "awaiting_deliver", display_status: "ogl_dispatched", ogl_dispatch: { tracking: true, applied: true, dispatched: false, stage: "applied", stage_label: "已申请·待交接" } };
+  assert.equal(orderStateKey(applied), "ogl_dispatched");
+  assert.equal(f.context.isOglDispatched(applied), false);
+  assert.equal(f.context.oglDispatchDisplayStatus(applied), "ogl_dispatched");
+  for (const [status, expected] of [["delivered", "delivered"], ["cancelled", "cancelled"], ["posting_in_transit", "delivering"]]) {
+    assert.equal(orderStateKey({ ...applied, status }), expected);
+  }
+  assert.equal(orderStateKey({ ...applied, ogl_dispatch: { applied: true, dispatched: false } }), "awaiting_deliver", "an unvalidated applied flag alone is not a tracking boundary");
+});
+
 test("OGL files use the authenticated blob transport and accept only supported file kinds", async () => {
   const f = fixture();
   const calls = [];
@@ -160,7 +174,7 @@ test("authoritative OGL platform state overrides stale awaiting-deliver fields i
     const row = { status: "awaiting_deliver", tracking_stage: "awaiting_deliver", logistics_status: "awaiting_deliver", display_status: state, ogl_dispatch: { dispatched: true } };
     assert.equal(f.context.orderTabKey(row), state);
     assert.equal(f.context.rowDisplayStateKey(row), state);
-    assert.equal(f.context.rowStateLabel(row), STATE_META[state].label);
+    assert.equal(f.context.rowStateLabel(row), state === "ogl_dispatched" ? "已实际交运" : STATE_META[state].label);
   }
   const ordinary = { status: "awaiting_deliver", display_status: "delivering" };
   assert.equal(f.context.orderTabKey(ordinary), "awaiting_deliver");
@@ -183,11 +197,11 @@ test("duplicate method IDs display all Beijing departure days and preserve an av
   assert.equal(f.get("form.departure_date"), "2026-10-23");
 });
 
-test("existing Ozon carriages can be read for today and yesterday with no selected orders or internal batch writes", async () => {
+test("existing Ozon applications are discovered for seven Beijing days without creating or dispatching official orders", async () => {
   const f = fixture({ props: { mode: "official", orderIds: [] } });
   await f.mount();
   assert.equal(f.get("tab.value"), "official");
-  assert.deepEqual(f.calls[0], ["official-list", shanghaiDateKey()]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0])), ["official-discover", { date_from: shanghaiDateDaysAgo(6), date_to: shanghaiDateKey() }]);
   assert.equal(f.get("officialRows.value.length"), 1);
   await f.get("showOfficialCarriages('2026-10-21')");
   await f.get("openOfficialCarriage('88001')");
@@ -195,14 +209,79 @@ test("existing Ozon carriages can be read for today and yesterday with no select
   assert.equal(f.get("officialCarriage.value.containers_count"), 4, "use the actual detail count rather than assuming the list/member count");
   assert.equal(f.get("officialMembers.value[0].matched_local"), false);
   assert.deepEqual(f.calls.find(([name]) => name === "official-detail"), ["official-detail", "88001", "2026-10-21"]);
-  assert.ok(f.calls.every(([name]) => ["official-list", "official-detail", "official-tracking"].includes(name)), "read-only workflow must not create, preview, approve or dispatch a batch");
-  assert.equal(f.emitted.length, 0);
+  assert.ok(f.calls.every(([name]) => ["official-discover", "official-detail", "official-tracking"].includes(name)), "discovery may associate applications but must never create, approve or physically dispatch an official order");
+  assert.ok(f.emitted.every(([name]) => name === "changed"));
   assert.equal(f.get("carriageStatus({status:'formed'})"), "已生成");
-  assert.equal(f.get("carriageStatus({status:'received'})"), "承运方已接收");
+  assert.equal(f.get("carriageStatus({status:'received'})"), "验收中");
   assert.equal(f.get("carriageStatus({status:'received',status_label:'验收中'})"), "验收中");
   assert.equal(f.get("officialMemberStatus({platform_status:'acceptance_in_progress',logistics_status:'posting_acceptance_in_progress'})"), "平台验收中");
   assert.equal(f.get("platformStatusLabel({platform_status:'acceptance_in_progress',logistics_status:'posting_acceptance_in_progress'})"), "交接处理中");
   assert.equal(f.get("officialMemberStatus({platform_status:'awaiting_deliver',logistics_status:'posting_in_carriage'})"), "已加入发运");
+  assert.equal(f.get("officialMemberStatus({platform_status:'delivered',tracking_stage:'posting_acceptance_in_progress'})"), "已签收");
+  assert.equal(f.get("officialMemberStatus({platform_status:'cancelled',tracking_stage:'posting_acceptance_in_progress'})"), "已取消");
+});
+
+test("application discovery requires a bound enterprise shop and rejects invalid or excessive date ranges", async () => {
+  const unbound = fixture({ props: { mode: "official", orderIds: [] }, bootstrap: async () => ({ settings: {}, shops: [], can_manage_settings: false }) });
+  await unbound.mount();
+  assert.equal(unbound.calls.length, 0, "first use must bind a shop before querying or associating applications");
+  const f = fixture({ props: { mode: "official", orderIds: [] } });
+  await f.mount();
+  f.get("officialRange.value = ['2026-01-01','2026-02-01']");
+  await f.get("showOfficialCarriages()");
+  assert.match(f.get("error.value"), /最多查询 31 天/);
+  assert.equal(f.calls.filter(([name]) => name === "official-discover").length, 1);
+  f.get("chooseMonth('2026-02')");
+  assert.deepEqual(Array.from(f.get("officialRange.value")), ["2026-02-01", "2026-02-28"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.get("dateRangeQuery()"))), { date_from: "2026-02-01", date_to: "2026-02-28" });
+  f.get("officialRange.value = ['2026-02-30','2026-03-03']");
+  assert.throws(() => f.get("dateRangeQuery()"), /有效的北京日期范围/);
+});
+
+test("application detail uses its own departure day and links an exact local order without inferring handover", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] } });
+  await f.mount();
+  await f.get("openOfficialCarriage({carriage_id:'88003', departure_date:'2026-10-18'})");
+  assert.deepEqual(f.calls.find(([name]) => name === "official-detail"), ["official-detail", "88003", "2026-10-18"]);
+  assert.equal(f.get("orderPath({order_id:42,shop_id:8,posting_number:'exact'})"), "/orders?orderId=42&shopId=8");
+  assert.equal(f.get("orderPath({posting_number:'unmatched'})"), "");
+  f.get("useDetail({batch:{id:71,source:'official_discovery',official_status:'observed',official_carriage_id:'88003'},members:[]}); selectedMembers.value=[{order_id:42}]");
+  assert.equal(f.get("observedBatch.value"), true);
+  assert.equal(f.get("canDownloadOfficial.value"), true);
+  assert.equal(f.get("canDispatch.value"), false);
+  assert.equal(f.get("canCreateOfficial.value"), false);
+  assert.equal(f.get("dispatchStage({dispatch_stage:'applied'})"), "已申请·待交接");
+});
+
+test("an observed application needs explicit verified adoption before a separate physical handover", async () => {
+  const f = fixture({ prompt: "2", action: async () => detail({ containers_count: 2, source: "official_discovery", official_status: "observed", official_carriage_id: "88003", official_result: { local_management: { adopted_at: "2026-10-22T08:00:00Z" } } }) });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,containers_count:2,source:'official_discovery',official_status:'observed',official_carriage_id:'88003'},members:[{order_id:42}]}); selectedMembers.value=[{order_id:42}]");
+  assert.equal(f.get("canDispatch.value"), false);
+  await f.get("adoptOfficialTracking()");
+  const adopted = f.calls.find(([name]) => name === "action");
+  assert.equal(adopted[2], "official-adopt");
+  assert.equal(adopted[3].container_count, 2);
+  assert.equal(f.calls.some((call) => call[0] === "action" && call[2] === "dispatch"), false, "adoption never records physical dispatch");
+  f.get("selectedMembers.value=[{order_id:42}]");
+  assert.equal(f.get("canDispatch.value"), true);
+  const wrong = fixture({ prompt: "3" });
+  wrong.get("useDetail({batch:{id:71,containers_count:2,official_status:'observed',official_carriage_id:'88003'},members:[{order_id:42}]})");
+  await wrong.get("adoptOfficialTracking()");
+  assert.equal(wrong.calls.length, 0, "mismatched container counts cannot adopt an application");
+});
+
+test("application list preserves unknown official counts and timestamps and keeps printing controls", () => {
+  const source = readFileSync(new URL("../frontend/orders/components/OglDispatchPanel.vue", import.meta.url), "utf8");
+  const toolbar = readFileSync(new URL("../frontend/orders/components/OrdersToolbar.vue", import.meta.url), "utf8");
+  assert.match(source, /row\.created_at \? formatTime\(row\.created_at\) : '待获取'/);
+  assert.match(source, /row\.containers_count \?\? '待获取'/);
+  assert.match(source, /row\.postings_count \?\? '待获取'/);
+  assert.match(source, /downloadFile\('container-labels', true, officialBatchId\)/);
+  assert.match(source, /downloadFile\('barcode', true, officialBatchId\)/);
+  assert.doesNotMatch(source, /label="ERP 关联"/);
+  assert.match(toolbar, /command="ogl-official-carriages"/);
+  assert.match(toolbar, /command="ogl-batch-history"/);
 });
 
 test("late existing-carriage details cannot appear after tenant/session rotation", async () => {
@@ -226,6 +305,21 @@ test("existing-carriage transport uses only authenticated date-filtered GET endp
   await transport.officialDetail("88001", "2026-10-21");
   await transport.officialTracking("88001", "2026-10-21");
   assert.deepEqual(calls, ["/api/ogl-dispatch/official-carriages?date=2026-10-21", "/api/ogl-dispatch/official-carriage?id=88001&date=2026-10-21", "/api/ogl-dispatch/official-carriage-tracking?id=88001&date=2026-10-21"]);
+});
+
+test("discovery and history transport preserve explicit Beijing date ranges", async () => {
+  const f = fixture();
+  const calls = [];
+  const transport = f.context.createOglDispatchService({ get: async (url) => { calls.push(["get", url]); return {}; }, post: async (url, body) => { calls.push(["post", url, body]); return {}; } });
+  const range = { date_from: "2026-10-16", date_to: "2026-10-22" };
+  await transport.discoverOfficial(range);
+  await transport.officialList(range);
+  await transport.list(2, range);
+  assert.deepEqual(calls, [
+    ["post", "/api/ogl-dispatch/discover", range],
+    ["get", "/api/ogl-dispatch/official-carriages?date_from=2026-10-16&date_to=2026-10-22"],
+    ["get", "/api/ogl-dispatch/batches?page=2&page_size=20&date_from=2026-10-16&date_to=2026-10-22"]
+  ]);
 });
 
 test("official carriage details render without waiting for the separate label tracking read", async () => {

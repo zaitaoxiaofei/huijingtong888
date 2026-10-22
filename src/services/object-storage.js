@@ -222,14 +222,17 @@ export async function putContentAddressedFile(filePath, {
   contentType = "application/octet-stream",
   timeoutMs = DEFAULT_OSS_REQUEST_TIMEOUT_MS,
   env = process.env,
-  client = null
+  client = null,
+  beforeRequest,
+  signal
 } = {}) {
+  await assertMediaStorageAccess(beforeRequest, signal);
   const storage = ossStorageConfig(env);
   if (!storage.enabled) return null;
   const hash = crypto.createHash("sha256");
   let size = 0;
   await new Promise((resolve, reject) => {
-    const stream = fs.createReadStream(filePath);
+    const stream = fs.createReadStream(filePath, { signal });
     stream.on("data", (chunk) => { hash.update(chunk); size += chunk.length; });
     stream.on("end", resolve);
     stream.on("error", reject);
@@ -240,20 +243,29 @@ export async function putContentAddressedFile(filePath, {
   const objectKey = [cleanPrefix, hashSha256.slice(0, 2), objectName].filter(Boolean).join("/");
   const ossClient = createOssClient(storage, timeoutMs, client);
   let exists = false;
+  await assertMediaStorageAccess(beforeRequest, signal);
   try { await ossClient.head(objectKey); exists = true; } catch (error) {
     if (!isMissingOssObject(error)) throw error;
   }
+  await assertMediaStorageAccess(beforeRequest, signal);
   if (!exists) {
-    await ossClient.putStream(objectKey, fs.createReadStream(filePath), {
+    await ossClient.putStream(objectKey, fs.createReadStream(filePath, { signal }), {
       contentLength: size,
       headers: { "Content-Type": contentType, "Cache-Control": "public, max-age=31536000, immutable" }
     });
   }
+  await assertMediaStorageAccess(beforeRequest, signal);
   return {
     driver: "oss", bucket: storage.bucket, objectKey, storageName: objectKey,
     hashSha256, size, reused: exists,
     url: publicOssObjectUrl({ region: storage.region, bucket: storage.bucket, objectKey, publicBaseUrl: storage.publicBaseUrl })
   };
+}
+
+async function assertMediaStorageAccess(beforeRequest, signal) {
+  signal?.throwIfAborted();
+  if (beforeRequest) await beforeRequest();
+  signal?.throwIfAborted();
 }
 
 export async function promoteManagedOssObjectUrl(url, {
@@ -332,8 +344,11 @@ export async function archiveRemoteMediaObjectUrl(url, {
   timeoutMs = DEFAULT_REMOTE_MEDIA_TIMEOUT_MS,
   env = process.env,
   client = null,
-  fetchImpl = fetch
+  fetchImpl = fetch,
+  beforeRequest,
+  signal
 } = {}) {
+  await assertMediaStorageAccess(beforeRequest, signal);
   const sourceUrl = String(url || "").trim();
   if (!sourceUrl) return "";
   const storage = ossStorageConfig(env);
@@ -341,14 +356,28 @@ export async function archiveRemoteMediaObjectUrl(url, {
   if (!/^https:\/\//i.test(sourceUrl)) {
     throw new Error(`Only HTTPS media can be archived to OSS: ${sourceUrl.slice(0, 160)}`);
   }
-  const response = await fetchImpl(sourceUrl, {
-    signal: AbortSignal.timeout(Math.max(1000, Number(timeoutMs) || DEFAULT_REMOTE_MEDIA_TIMEOUT_MS))
-  });
-  if (!response.ok) throw new Error(`Download media failed with HTTP ${response.status}`);
+  const timeoutSignal = AbortSignal.timeout(Math.max(1000, Number(timeoutMs) || DEFAULT_REMOTE_MEDIA_TIMEOUT_MS));
+  const downloadSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const response = await fetchImpl(sourceUrl, { signal: downloadSignal });
+  const discardResponse = async () => {
+    try { await response.body?.cancel?.(); } catch { /* Preserve the original download error. */ }
+  };
+  try { await assertMediaStorageAccess(beforeRequest, signal); }
+  catch (error) { await discardResponse(); throw error; }
+  if (!response.ok) {
+    await discardResponse();
+    throw new Error(`Download media failed with HTTP ${response.status}`);
+  }
   const contentLength = Number(response.headers?.get?.("content-length") || 0);
   const byteLimit = Math.max(1, Number(maxBytes) || DEFAULT_REMOTE_MEDIA_MAX_BYTES);
-  if (contentLength > byteLimit) throw new Error(`Remote media exceeds ${byteLimit} bytes`);
-  if (!response.body) throw new Error("Downloaded media is empty");
+  if (contentLength > byteLimit) {
+    await discardResponse();
+    throw new Error(`Remote media exceeds ${byteLimit} bytes`);
+  }
+  if (!response.body) {
+    await discardResponse();
+    throw new Error("Downloaded media is empty");
+  }
   const contentType = String(response.headers?.get?.("content-type") || "application/octet-stream").split(";")[0].trim();
   const temporaryPath = path.join(os.tmpdir(), `ozon-media-${crypto.randomUUID()}${extensionForRemoteMedia(sourceUrl, contentType) || ".bin"}`);
   let receivedBytes = 0;
@@ -360,17 +389,21 @@ export async function archiveRemoteMediaObjectUrl(url, {
     }
   });
   try {
-    await pipeline(Readable.fromWeb(response.body), byteLimiter, fs.createWriteStream(temporaryPath));
+    await pipeline(Readable.fromWeb(response.body), byteLimiter, fs.createWriteStream(temporaryPath), { signal: downloadSignal });
     if (!receivedBytes) throw new Error("Downloaded media is empty");
+    await assertMediaStorageAccess(beforeRequest, signal);
     const stored = await putContentAddressedFile(temporaryPath, {
       prefix,
       extension: extensionForRemoteMedia(sourceUrl, contentType),
       contentType,
       timeoutMs,
       env,
-      client
+      client,
+      beforeRequest,
+      signal
     });
     if (!stored?.url) throw new Error("OSS did not return a public media URL");
+    await assertMediaStorageAccess(beforeRequest, signal);
     return stored.url;
   } finally {
     await fsPromises.rm(temporaryPath, { force: true }).catch(() => {});

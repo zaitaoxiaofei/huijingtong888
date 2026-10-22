@@ -828,6 +828,17 @@ const scheduledJobDefinitions = [
     maxCatchupRuns: 1
   },
   {
+    key: "ogl_official_monitor",
+    name: "OGL 发运申请跟踪",
+    category: "orders",
+    priority: "low",
+    enabled: true,
+    intervalMinutes: 5,
+    initialDelaySeconds: 120,
+    catchupEnabled: false,
+    maxCatchupRuns: 0
+  },
+  {
     key: "inventory_alert_snapshot_refresh",
     name: "库存告警快照预热",
     category: "inventory",
@@ -981,6 +992,12 @@ const scheduledJobHandlers = {
   seller_analytics_daily_sync: withForegroundApiDeferral("seller_analytics_daily_sync", runBackgroundSellerAnalyticsDailySync),
   seller_analytics_28d_sync: withForegroundApiDeferral("seller_analytics_28d_sync", runBackgroundSellerAnalyticsDailySync),
   ozon_stock_sync: withForegroundApiDeferral("ozon_stock_sync", runBackgroundOzonStockSync),
+  ogl_official_monitor: withForegroundApiDeferral("ogl_official_monitor", async () => {
+    const busy = claimBackgroundModuleLane("ogl_monitor", "ogl_official_monitor");
+    if (busy) return { deferred: true, reason: busy };
+    try { return await oglDispatch.monitorRecent(); }
+    finally { releaseBackgroundModuleLane("ogl_monitor", "ogl_official_monitor"); }
+  }),
   inventory_alert_snapshot_refresh: withForegroundApiDeferral("inventory_alert_snapshot_refresh", () => services.stockAlerts({
     mode: "alerts",
     paged: "1",
@@ -1859,7 +1876,10 @@ async function resolveAiImageFile(imageUrl, session) {
   );
 }
 
-function sendImagePlaceholder(res) {
+function sendImagePlaceholder(res, { requireOriginal = false } = {}) {
+  if (requireOriginal) {
+    return json(res, { error: "原始图片读取失败，已停止生成上架素材，请重试或检查原图。" }, 502, { "Cache-Control": "no-store" });
+  }
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" rx="12" fill="#f4f7fb"/><path d="M42 104l25-28 18 20 12-14 21 22H42z" fill="#c9d3e3"/><circle cx="106" cy="55" r="11" fill="#c9d3e3"/><text x="80" y="132" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" fill="#7b8798">NO IMG</text></svg>`;
   const buffer = Buffer.from(svg);
   writeHead(res, 200, {
@@ -1973,6 +1993,7 @@ function releaseImageProxyFetchSlot() {
 
 async function sendRemoteImage(req, res, url) {
   const target = String(url.searchParams.get("url") || "").trim();
+  const requireOriginal = url.searchParams.get("require_original") === "1";
   if (!/^https?:\/\//i.test(target)) return json(res, { error: "Invalid image url" }, 400);
   try { await resolvePublicImageTarget(target); }
   catch { return json(res, { error: "图片代理仅支持公网图片地址" }, 400); }
@@ -1981,6 +2002,7 @@ async function sendRemoteImage(req, res, url) {
   if (cached) return sendRemoteImageBuffer(res, cached, "HIT");
   const failedUntil = Number(imageProxyFailureCache.get(target) || 0);
   if (failedUntil > Date.now()) {
+    if (requireOriginal) return sendImagePlaceholder(res, { requireOriginal });
     const stale = await readCachedRemoteImage(target, { allowStale: true });
     return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
   }
@@ -2002,6 +2024,7 @@ async function sendRemoteImage(req, res, url) {
     if (res.writableEnded || res.destroyed) return;
     if (!payload) {
       imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
+      if (requireOriginal) return sendImagePlaceholder(res, { requireOriginal });
       const stale = await readCachedRemoteImage(target, { allowStale: true });
       return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
     }
@@ -2013,6 +2036,7 @@ async function sendRemoteImage(req, res, url) {
   } catch (error) {
     if (res.writableEnded || res.destroyed) return;
     imageProxyFailureCache.set(target, Date.now() + IMAGE_PROXY_FAILURE_TTL_MS);
+    if (requireOriginal) return sendImagePlaceholder(res, { requireOriginal });
     const stale = await readCachedRemoteImage(target, { allowStale: true });
     return stale ? sendRemoteImageBuffer(res, stale, "STALE") : sendImagePlaceholder(res);
   } finally {

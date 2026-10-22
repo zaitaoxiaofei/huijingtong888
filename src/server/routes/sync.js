@@ -1,6 +1,6 @@
 import { tenantIdFromRequest } from "../tenant-context.js";
 import { createTenantBackgroundTasks } from "../../services/tenant-background-tasks.js";
-import { authorizeBusinessTaskSession } from "../../services/business-task-tenant.js";
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "../../services/business-task-tenant.js";
 
 function onlineProductSyncScope(body = {}) {
   if (body.pending_listing || body.pendingListing || body.scope === "pending_listing") return "pending_listing";
@@ -9,6 +9,11 @@ function onlineProductSyncScope(body = {}) {
 }
 
 export function createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrders, tasks = createTenantBackgroundTasks(), authorize = authorizeBusinessTaskSession }) {
+  const onlineSession = async req => {
+    const session = await authorize(req._session);
+    assertBusinessTaskPermission(session, "operations");
+    return session;
+  };
   const options = async req => {
     const session = await authorize(req._session);
     return { session, tenantId: tenantIdFromRequest({ _session: session }), signal: req._abortSignal };
@@ -35,10 +40,10 @@ export function createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrd
     "POST /api/sync/ozon/details": async req => services.syncKnownOzonPostingDetails(await readJson(req), await options(req)),
     "POST /api/sync/ozon/incremental": req => startOrders(req, "incremental"),
     "POST /api/sync/ozon/postings": async req => services.syncOzonPostingsByNumber(await readJson(req), await options(req)),
-    "GET /api/sync/online-products/status": req => tasks.snapshot(req._session, "online-products"),
+    "GET /api/sync/online-products/status": async req => tasks.snapshot(await onlineSession(req), "online-products"),
     "POST /api/sync/online-products": async req => {
       const body = await readJson(req);
-      return tasks.start(req._session, "online-products", ({ session, signal }) => services.syncOzonOnlineProducts(body, { session, signal, tenantId: tenantIdFromRequest({ _session: session }) }),
+      return tasks.start(await onlineSession(req), "online-products", ({ session, signal, onProgress }) => services.syncOzonOnlineProducts(body, { session, signal, onProgress, tenantId: tenantIdFromRequest({ _session: session }) }),
         { scope: onlineProductSyncScope(body), payload: body });
     },
     "POST /api/sync/ozon-stocks": async req => services.syncOzonStocks(await readJson(req), await options(req)),

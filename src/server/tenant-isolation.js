@@ -159,6 +159,11 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
     && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && ["PUT", "DELETE"].includes(verb);
   if (tenantManualOutboundCollection || tenantManualOutboundRecord) return { allowed: true };
   if (parts[1] === "online-products" && parts.length === 2 && verb === "GET") return { allowed: true };
+  const tenantOnlineProductSync = parts[1] === "sync" && parts[2] === "online-products" && (
+    (parts.length === 3 && verb === "POST")
+    || (parts.length === 4 && parts[3] === "status" && verb === "GET")
+  );
+  if (tenantOnlineProductSync) return { allowed: true };
   if (parts[1] === "fbp-replenishment-orders" && parts.length === 2 && verb === "GET") return { allowed: true };
   const tenantFbpDraftMutation = parts[1] === "fbp-replenishment-orders" && verb === "POST" && (
     (parts.length === 3 && ["delete", "items"].includes(parts[2]))

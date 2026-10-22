@@ -39,6 +39,9 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
     });
     child.stdout.on('data', chunk => { output = (output + chunk).slice(-16000); });
     child.stderr.on('data', chunk => { output = (output + chunk).slice(-16000); });
+    child.once('exit', (code, signal) => {
+      if (code !== null && code !== 0) t.diagnostic(`Isolated HTTP child exited (${code}, ${signal || 'no signal'}): ${output}`);
+    });
     const until = Date.now() + 90000;
     while (Date.now() < until) {
       if (child.exitCode !== null) throw new Error(`Isolated HTTP startup failed: ${output}`);
@@ -134,6 +137,35 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       }
       assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_tasks'))[0].n), 0);
       assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_records'))[0].n), 0);
+    });
+    await t.test('online-product sync admits ordinary operations while rejecting foreign shops before external work', async () => {
+      const before = Number((await fixture.query('SELECT COUNT(*) n FROM online_products'))[0].n);
+      for (const [person, tenant] of [[6, 1], [7, 2], [8, 3]]) {
+        const operator = await login(person);
+        const snapshot = await request('/api/sync/online-products/status?tenant_id=999', operator.token);
+        assert.equal(snapshot.status, 200, JSON.stringify(snapshot.data));
+        assert.notEqual(snapshot.data.code, 'TENANT_ISOLATION_PENDING');
+        const started = await request('/api/sync/online-products', operator.token, 'POST', {
+          shop_id: tenant === 2 ? 30 : 20, tenant_id: 999, pending_listing: true
+        });
+        assert.equal(started.status, 200, JSON.stringify(started.data));
+        assert.equal(started.data.started, true);
+        let completed;
+        for (let attempt = 0; attempt < 100; attempt++) {
+          completed = await request('/api/sync/online-products/status', operator.token);
+          assert.equal(completed.status, 200, JSON.stringify(completed.data));
+          if (!completed.data.running) break;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert.equal(completed.data.running, false);
+        assert.match(completed.data.error, /不属于当前企业|不存在/);
+      }
+      for (const method of ['GET', 'POST']) {
+        const result = await request(`/api/sync/online-products${method === 'GET' ? '/status' : ''}`, sessions.get(4).token, method, method === 'POST' ? {} : undefined);
+        assert.equal(result.status, 403);
+        assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+      }
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM online_products'))[0].n), before);
     });
     await t.test('HTTP lists/details/mutations use session enterprise and ignore body/query tenant selectors', async () => {
       for (const id of [1, 2, 3, 4]) {

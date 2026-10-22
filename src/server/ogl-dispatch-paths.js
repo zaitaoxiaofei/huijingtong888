@@ -1,7 +1,7 @@
 const ROUTES = new Set([
   'GET bootstrap', 'PUT settings', 'POST preview', 'POST batches',
   'GET batches', 'GET batch', 'POST action', 'GET file',
-  'GET official-carriages', 'GET official-carriage', 'GET official-carriage-tracking'
+  'GET official-carriages', 'GET official-carriage', 'GET official-carriage-tracking', 'POST discover'
 ]);
 
 export function isOglDispatchRoute(parts, method = 'GET') {

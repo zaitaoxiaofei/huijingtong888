@@ -148,7 +148,8 @@ export function createOglCarriageClient({ fetchImpl = globalThis.fetch, timeoutM
       if (filter[key] != null && filter[key] !== "") requestFilter[key] = filter[key];
     }
     let cursor = "";
-    for (let page = 0; page < 100; page += 1) {
+    const maxPages=Math.min(100,Math.max(1,Math.floor(Number(requestOptions.maxPages)||100)));
+    for (let page = 0; page < maxPages; page += 1) {
       const data = await request(shop, "/v2/carriage/delivery/list", { cursor, filter: requestFilter, limit: 1000 }, requestOptions);
       if (!Array.isArray(data?.methods) || typeof data.has_next !== "boolean") {
         throw requestError("Ozon 配送方式列表响应不完整，请稍后重新查询。", { code: "OGL_DELIVERY_INVALID_RESPONSE" });

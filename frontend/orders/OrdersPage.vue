@@ -639,6 +639,7 @@ async function saveStatusPreference() {
 
 function rowStateLabel(row) {
   const key = rowDisplayStateKey(row);
+  if (key === "ogl_dispatched") return row?.ogl_dispatch?.stage_label || (row?.ogl_dispatch?.dispatched === true ? "已实际交运" : "已申请·待交接");
   if (key === "returned") return "已退货";
   if (key === "rejected") return "拒收/未领取";
   if (key === "all") return row?.tracking_stage || row?.status || "-";
@@ -1268,7 +1269,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: displayStateKey === "ogl_dispatched" ? "运往集运仓" : "",
+    statusHint: displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     qualityCheckOrder: isQualityCheckOrderRow(row),
@@ -1706,6 +1707,7 @@ function bulkPrintSelected() {
 }
 
 function handleToolbarMoreAction(action) {
+  if (action === "quality-rules") return showQualityRules();
   if (action === "ogl-official-carriages") return openOglDispatch("official");
   if (action === "ogl-create-batch") return openOglDispatch("create");
   if (action === "ogl-batch-history") return openOglDispatch("history");
@@ -2587,6 +2589,7 @@ onBeforeUnmount(() => {
       :sync-running="vm.syncRunning"
       :last-sync-text="vm.lastSyncText"
       :more-actions="vm.moreActions"
+      :selected-count="selectedCount"
       @update:filters="vm.filters = $event"
       @submit="submitFilters"
       @sync-incremental="syncRecentOrdersAction"
@@ -2617,11 +2620,6 @@ onBeforeUnmount(() => {
       </OrdersStatusTabs>
     </OrdersToolbar>
 
-    <div v-if="selectedCount > 0" class="orders-inline-actions">
-      <el-button type="primary" plain @click="openOglDispatch('create')">创建 OGL 发运批次（已选 {{ selectedCount }} 单）</el-button>
-      <el-button @click="openOglDispatch('history')">OGL 发运批次</el-button>
-      <span>支持全部店铺＋等待发货＋OGL＋已打印筛选；保存前核对实际跨页选择。</span>
-    </div>
     <OglDispatchPanel v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" />
 
     <div v-if="vm.filters.status === 'purchase_in_transit' || selectedCount > 0" class="orders-inline-actions">

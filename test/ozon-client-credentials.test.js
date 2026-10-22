@@ -152,7 +152,7 @@ test("pending listing sync only pulls the strict pending visibility buckets", ()
 test("pending listing sync reconciles Ozon archived products into local status", () => {
   const source = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
   assert.match(source, /fetchOzonProductRefs\(shop, \{ visibilityFilters: \["ARCHIVED"\]/);
-  assert.match(source, /reconcileArchivedOnlineProductsMysql\(shop\.id, archivedRefs\)/);
+  assert.match(source, /reconcileArchivedOnlineProductsMysql\(shop\.id, archivedRefs, checkCurrentShop\)/);
   assert.match(source, /SET archived = 1,[\s\S]*status = 'archived',[\s\S]*visibility = 'ARCHIVED'/);
   assert.match(source, /ozon_sku IN \(\$\{skus\.map/);
   assert.match(source, /offer_id IN \(\$\{offerIds\.map/);

@@ -241,10 +241,11 @@ function listingFixture(network, overrides = {}) {
     resolveLocalImageCropperMedia: async () => null,
     normalizeArray: value => Array.isArray(value) ? value : [],
     isLikelyRemoteImageUrl,
+    isManagedOssObjectUrl: () => false,
     verifyRemoteImagesReadyForOzon: (urls, options) => verifyRemoteImagesReadyForOzon(urls, { ...options, waitImpl: async () => {} }),
     ...overrides });
   for (const name of ["assertListingPublishExecution", "readListingMediaBuffer", "normalizeListingMediaSourceUrl", "normalizeListingMediaSourceBaseUrl", "normalizedListingMediaSourceProtocol",
-    "cacheReachableListingMedia", "inspectRemoteMediaUrlForOzon", "isReachableRemoteMediaUrl", "isListingMediaPublicUrl", "uniqueStringValues", "mapWithConcurrency", "prewarmPublishMediaUrls"]) {
+    "cacheReachableListingMedia", "inspectRemoteMediaUrlForOzon", "isReachableRemoteMediaUrl", "isListingMediaPublicUrl", "isListingPublishManagedMediaUrl", "uniqueStringValues", "mapWithConcurrency", "prewarmPublishMediaUrls"]) {
     vm.runInContext(listingFunction(name), context);
   }
   return context;

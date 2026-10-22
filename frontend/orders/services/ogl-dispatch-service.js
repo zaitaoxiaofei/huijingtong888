@@ -21,7 +21,7 @@ export function isOglDispatched(row = {}) {
 }
 
 export function oglDispatchDisplayStatus(row = {}) {
-  if (row.ogl_dispatch?.dispatched !== true) return "";
+  if (row.ogl_dispatch?.dispatched !== true && row.ogl_dispatch?.tracking !== true) return "";
   return ["ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(row.display_status) ? row.display_status : "";
 }
 
@@ -31,9 +31,10 @@ export function createOglDispatchService(client = apiClient) {
     settings: (dispatchShopId) => client.put("/api/ogl-dispatch/settings", { dispatch_shop_id: Number(dispatchShopId) }),
     preview: (orderIds) => client.post("/api/ogl-dispatch/preview", { order_ids: normalizeOglOrderIds(orderIds) }),
     create: (payload) => client.post("/api/ogl-dispatch/batches", { ...payload, order_ids: normalizeOglOrderIds(payload.order_ids) }),
-    list: (page = 1) => client.get(`/api/ogl-dispatch/batches?${new URLSearchParams({ page: String(page), page_size: "20" })}`),
+    list: (page = 1, range = {}) => client.get(`/api/ogl-dispatch/batches?${new URLSearchParams({ page: String(page), page_size: "20", ...range })}`),
     detail: (id) => client.get(`/api/ogl-dispatch/batch?id=${encodeURIComponent(id)}`),
-    officialList: (date) => client.get(`/api/ogl-dispatch/official-carriages?${new URLSearchParams({ date })}`),
+    officialList: (date) => client.get(`/api/ogl-dispatch/official-carriages?${new URLSearchParams(typeof date === "string" ? { date } : date)}`),
+    discoverOfficial: (range) => client.post("/api/ogl-dispatch/discover", range),
     officialDetail: (id, date) => client.get(`/api/ogl-dispatch/official-carriage?${new URLSearchParams({ id: String(id), date })}`),
     officialTracking: (id, date) => client.get(`/api/ogl-dispatch/official-carriage-tracking?${new URLSearchParams({ id: String(id), date })}`),
     action: (batchId, action, payload = {}) => client.post("/api/ogl-dispatch/action", { ...payload, batch_id: batchId, action }),

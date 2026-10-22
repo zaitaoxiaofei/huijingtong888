@@ -4299,24 +4299,36 @@ export async function listingMediaAssets(query = {}, session = null) {
   return rows.map(normalizeListingMediaAssetRow);
 }
 
-function applyPreparedDraftShopMedia(payload = {}, preparedMedia = []) {
-  const urls = normalizeArray(preparedMedia)
+function applyPreparedDraftShopMedia(payload = {}, preparedMedia = [], sourceImages = null) {
+  const prepared = normalizeArray(preparedMedia);
+  if (!prepared.length) return { payload, reused: false };
+  const urls = prepared
     .map((item) => String(item?.publishUrl || item?.publish_url || item?.url || item || "").trim())
     .filter(Boolean);
   const items = normalizeArray(payload.items);
-  const expectedCount = items.reduce((total, item) => {
-    return total + new Set([item?.primary_image, ...normalizeArray(item?.images)].map((value) => String(value || "").trim()).filter(Boolean)).size;
-  }, 0);
-  if (!urls.length || urls.length < expectedCount || !items.length) return { payload, reused: false };
-  let offset = 0;
-  const nextItems = items.map((item) => {
-    const count = Math.max(1, new Set([item?.primary_image, ...normalizeArray(item?.images)].map((value) => String(value || "").trim()).filter(Boolean)).size);
-    const prepared = urls.slice(offset, offset + count);
-    offset += count;
+  const itemImages = items.map((item) => uniqueStringValues([item?.primary_image, ...normalizeArray(item?.images)]));
+  const payloadSources = uniqueStringValues(itemImages.flat());
+  const expectedSources = sourceImages === null ? payloadSources : cleanListingImageUrls(sourceImages);
+  const preparedSources = prepared.map((item) => String(item?.source_url || item?.sourceUrl || "").trim());
+  if (!items.length || payloadSources.length !== expectedSources.length
+    || prepared.length !== expectedSources.length || urls.length !== expectedSources.length
+    || preparedSources.some((source, index) => source !== expectedSources[index])) {
+    throw Object.assign(new Error("草稿图片已变化或素材准备版本过旧，已停止上架以免遗漏、重排或错配图片。请刷新草稿列表后重新选择上架。"), {
+      status: 409, code: "LISTING_PREPARED_MEDIA_CHANGED"
+    });
+  }
+  if (new Set(urls).size !== urls.length) {
+    throw Object.assign(new Error("不同草稿图片生成了重复的上架素材，已停止上架以免图片被合并。请刷新草稿后重新准备素材。"), {
+      status: 409, code: "LISTING_PREPARED_MEDIA_DUPLICATED"
+    });
+  }
+  const bySource = new Map(payloadSources.map((source, index) => [source, urls[index]]));
+  const nextItems = items.map((item, index) => {
+    const remapped = itemImages[index].map((source) => bySource.get(source));
     return {
       ...item,
-      primary_image: prepared[0] || item.primary_image || "",
-      images: prepared.slice(1)
+      primary_image: remapped[0] || "",
+      images: remapped.slice(1)
     };
   });
   return { payload: { ...payload, items: nextItems }, reused: true };
@@ -7690,6 +7702,14 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
   if (repairedPayload !== payload) {
     payload.items = normalizeArray(repairedPayload.items);
   }
+  for (const item of normalizeArray(payload.items)) {
+    const images = [item.primary_image, ...normalizeArray(item.images)].map((value) => String(value || "").trim()).filter(Boolean);
+    if (new Set(images).size !== images.length) {
+      throw Object.assign(new Error("上架图片存在重复素材，已停止提交以免 Ozon 合并图片。请重新准备该草稿的图片后再上架。"), {
+        status: 400, code: "LISTING_PUBLISH_IMAGES_DUPLICATED"
+      });
+    }
+  }
   const mediaUrls = normalizeArray(payload.items).flatMap((item) => [
     item.primary_image,
     ...normalizeArray(item.images),
@@ -7697,11 +7717,13 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
     ...normalizeArray(item.complex_attributes).flatMap((group) => normalizeArray(group.attributes || group)
       .flatMap((attr) => normalizeArray(attr.values).map((value) => value.value)))
   ]);
-  const prewarm = await prewarmPublishMediaUrls(mediaUrls, options);
+  const imageUrls = uniqueStringValues(normalizeArray(payload.items).flatMap((item) => [item.primary_image, ...normalizeArray(item.images)]));
+  const mediaOptions = { ...options, imageUrls };
+  const prewarm = await prewarmPublishMediaUrls(mediaUrls, mediaOptions);
   if (prewarm.total) {
     if (validation) validation.media_prewarm_summary = prewarm;
   }
-  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls, options);
+  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls, mediaOptions);
   const unavailableRemoteMedia = uniqueStringValues([
     ...normalizeArray(prewarm.failed_urls),
     ...unreachableRemoteMedia
@@ -8527,7 +8549,7 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
       validation.errors = blockingErrors;
       validation.ok = true;
       const preparedMedia = preparedMediaByDraftShop[`${draftId}:${Number(shop.id)}`] || [];
-      const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia);
+      const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.effective_images);
       const sourceProductId = await resolveListingSourceProductId(template, validation.payload);
       const textVariantPolicy = normalizeShopTextVariantPolicy(textVariantPolicySource, [shop]);
       const {
@@ -8724,7 +8746,7 @@ async function processAuthorizedListingDraftBatchPublishTask({ draftIds = [], sh
             throw Object.assign(new Error("发布任务明细归属不一致"), { status: 404 });
           }
           const preparedMedia = preparedMediaByDraftShop[`${Number(draftId)}:${Number(shop.id)}`] || [];
-          const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia);
+          const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.effective_images);
           const {
             textVariantPayload,
             watermarkedPayload,
@@ -12916,13 +12938,21 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   }, session);
   payload.template_id = draftTemplateId;
   const draftTemplate = await listingCategoryTemplateRaw(draftTemplateId, session).catch(() => null);
-  const templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
+  let templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
     ? applyDraftSalePriceToTemplatePayload(normalizeAiVariantTemplateLogisticsPayload(mergeAiVariantTemplateSnapshot(draftTemplate || {}, payload.template_payload)), payload.sale_price)
     : await buildCanonicalDraftTemplatePayload({
       ...payload,
       manual_facts: manualFacts,
       ai_payload: aiPayload
     }, draftTemplate, session);
+  const finalEditable = syncAiVariantDraftRichContent(objectValue(templatePayload?.editable_payload), {
+    richContentJson: editable.rich_content_json || editable.richContentJson
+  });
+  templatePayload = {
+    ...templatePayload,
+    editable_payload: finalEditable,
+    attributes: syncAiVariantTextAttributes(templatePayload?.attributes || [], { richContentJson: finalEditable.rich_content_json })
+  };
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.template_upsert", stageStarted, {
     templateId: draftTemplateId,
     mode: Number(existing?.template_id || 0) ? "update" : "insert"
@@ -13171,6 +13201,7 @@ function normalizeAiVariantDraftShopIds(value) {
 }
 
 function applyAiVariantDraftPatch(editable = {}, patch = {}) {
+  const previousMainImage = resolveDraftEffectiveImages({ editable_payload: editable }).images[0] || "";
   const next = cloneJsonValue(editable, {});
   const offerId = normalizeListingOfferId(patch.offer_id || patch.offerId);
   const title = String(patch.title || "").trim();
@@ -13236,7 +13267,60 @@ function applyAiVariantDraftPatch(editable = {}, patch = {}) {
     }
     return syncAiVariantVariantDescription(nextVariant, description);
   });
-  return next;
+  return syncAiVariantDraftRichContent(next, { richContentJson, previousMainImage });
+}
+
+function syncAiVariantDraftRichContent(editable = {}, { richContentJson = "", previousMainImage = "" } = {}) {
+  const mainImage = resolveDraftEffectiveImages({ editable_payload: editable }).images[0] || "";
+  if (!mainImage) return editable;
+  const variant = objectValue(normalizeArray(editable.variants)[0]);
+  const dynamic = { ...objectValue(variant.dynamicAttributes), ...objectValue(variant.dynamic_attributes) };
+  const richEntry = (entries) => normalizeArray(entries).find((entry) => Number(entry?.attribute_id || entry?.id) === 11254);
+  const dynamicEntries = Object.entries(dynamic).filter(([key, entry]) => Number(entry?.attribute_id || entry?.id || key) === 11254);
+  const entryValue = (entry) => entry?.value || entry?.values?.[0]?.value || entry?.selected_values?.[0]?.value || "";
+  const raw = richContentJson || variant.rich_content_json || variant.richContentJson || variant.rich_content || variant.richContent
+    || entryValue(dynamicEntries[0]?.[1]) || editable.rich_content_json || editable.richContentJson || editable.rich_content || editable.richContent
+    || entryValue(richEntry(variant.attributes)) || entryValue(richEntry(editable.attributes));
+  let parsed;
+  try { parsed = typeof raw === "string" ? JSON.parse(raw) : cloneJsonValue(raw, null); } catch { return editable; }
+  if (!parsed || typeof parsed !== "object") return editable;
+  let firstImage = true;
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) { value.forEach(visit); return; }
+    const image = value.img && typeof value.img === "object" ? value.img
+      : ["img", "image"].includes(String(value.type || "").toLowerCase()) ? value : null;
+    if (image) {
+      for (const key of ["src", "srcMobile", "url", "image_url"]) {
+        if (typeof image[key] === "string" && (firstImage || (previousMainImage && image[key] === previousMainImage))) image[key] = mainImage;
+      }
+      firstImage = false;
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(parsed);
+  const rich = JSON.stringify(parsed);
+  const richFields = (value) => ({
+    ...value, rich_content_json: rich, richContentJson: rich,
+    ...(Object.prototype.hasOwnProperty.call(value, "rich_content") ? { rich_content: rich } : {}),
+    ...(Object.prototype.hasOwnProperty.call(value, "richContent") ? { richContent: rich } : {})
+  });
+  const richAttributes = (attributes) => syncAiVariantTextAttributes(attributes || [], { richContentJson: rich })
+    .map((entry) => Number(entry.attribute_id || entry.id) === 11254
+      ? { ...entry, value: rich, values: [{ value: rich }], selected_values: [{ value: rich }] } : entry);
+  const nextDynamic = { ...dynamic };
+  for (const [key, entry] of dynamicEntries.length ? dynamicEntries : [["11254", {}]]) {
+    nextDynamic[key] = { ...objectValue(entry), attribute_id: 11254, name: entry?.name || "rich_content_json",
+      value: rich, values: [{ value: rich }], selected_values: [{ value: rich }], type: entry?.type || "rich_json" };
+  }
+  const syncedVariant = {
+    ...richFields(variant), attributes: richAttributes(variant.attributes),
+    dynamic_attributes: nextDynamic, dynamicAttributes: nextDynamic
+  };
+  return {
+    ...richFields(editable), attributes: richAttributes(editable.attributes),
+    variants: normalizeArray(editable.variants).map((item, index) => index === 0 ? syncedVariant : item)
+  };
 }
 
 function syncAiVariantVariantDescription(variant = {}, description = "") {
@@ -16694,13 +16778,13 @@ async function inspectRemoteMediaUrlForOzon(url = "", options = {}) {
 }
 
 async function unreachablePublishMediaUrls(urls = [], options = {}) {
+  const imageUrls = new Set(normalizeArray(options.imageUrls));
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
     .filter((url) => /^https?:\/\//i.test(url))
-    .filter(isListingMediaPublicUrl));
+    .filter((url) => imageUrls.has(url) || isListingPublishManagedMediaUrl(url) || isLikelyRemoteImageUrl(url)));
   if (!remoteUrls.length) return [];
-  const reachabilityLimit = Math.max(1, LISTING_PUBLISH_MEDIA_PREWARM_LIMIT || 50);
-  const checks = await mapWithConcurrency(remoteUrls.slice(0, reachabilityLimit), LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY, async (url) => {
+  const checks = await mapWithConcurrency(remoteUrls, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY, async (url) => {
     try {
       const result = await inspectRemoteMediaUrlForOzon(url, options);
       if (result.ok) return null;
@@ -16713,14 +16797,14 @@ async function unreachablePublishMediaUrls(urls = [], options = {}) {
 }
 
 async function prewarmPublishMediaUrls(urls = [], options = {}) {
+  const imageUrlSet = new Set(normalizeArray(options.imageUrls));
   const remoteUrls = uniqueStringValues(normalizeArray(urls)
     .map((url) => String(url || "").trim())
     .filter((url) => /^https?:\/\//i.test(url))
-    .filter(isListingMediaPublicUrl))
-    .slice(0, LISTING_PUBLISH_MEDIA_PREWARM_LIMIT);
+    .filter((url) => imageUrlSet.has(url) || isListingPublishManagedMediaUrl(url) || isLikelyRemoteImageUrl(url)));
   if (!remoteUrls.length) return { total: 0, ok: 0, failed: 0 };
-  const imageUrls = remoteUrls.filter(isLikelyRemoteImageUrl);
-  const otherUrls = remoteUrls.filter((url) => !isLikelyRemoteImageUrl(url));
+  const imageUrls = remoteUrls.filter((url) => imageUrlSet.has(url) || isLikelyRemoteImageUrl(url));
+  const otherUrls = remoteUrls.filter((url) => !imageUrlSet.has(url) && !isLikelyRemoteImageUrl(url));
   const imageReadiness = await verifyRemoteImagesReadyForOzon(imageUrls, {
     attempts: 3,
     requiredConsecutiveSuccesses: 2,
@@ -16772,6 +16856,10 @@ function isListingMediaPublicUrl(url = "") {
   } catch {
     return false;
   }
+}
+
+function isListingPublishManagedMediaUrl(url = "") {
+  return isListingMediaPublicUrl(url) || isManagedOssObjectUrl(url);
 }
 
 function buildOzonCategoryKey({ description_category_id = "", type_id = "", category_id = "", fallback = "" } = {}) {

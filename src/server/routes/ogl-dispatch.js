@@ -7,6 +7,7 @@ export function createOglDispatchRoutes({ dispatch, readJson }) {
     "GET /api/ogl-dispatch/batches": (req, url) => dispatch.listBatches(req._session, Object.fromEntries(url.searchParams)),
     "GET /api/ogl-dispatch/batch": (req, url) => dispatch.detail(req._session, url.searchParams.get("id")),
     "GET /api/ogl-dispatch/official-carriages": (req, url) => dispatch.listOfficial(req._session, Object.fromEntries(url.searchParams)),
+    "POST /api/ogl-dispatch/discover": async (req) => dispatch.discover(req._session, await readJson(req)),
     "GET /api/ogl-dispatch/official-carriage": (req, url) => dispatch.officialDetail(req._session, Object.fromEntries(url.searchParams)),
     "GET /api/ogl-dispatch/official-carriage-tracking": (req, url) => dispatch.officialTracking(req._session, Object.fromEntries(url.searchParams)),
     "POST /api/ogl-dispatch/action": async (req) => dispatch.action(req._session, await readJson(req))

@@ -157,3 +157,10 @@ test("deliveryMethods rejects repeated or missing cursors and incomplete schema"
   await assert.rejects(client.deliveryMethods(shop), { code: "OGL_DELIVERY_CURSOR_INVALID" });
   assert.equal(calls, 2);
 });
+
+test('daily discovery can bound complete pagination without returning a partial successful list',async()=>{
+  let calls=0;
+  const client=createOglCarriageClient({fetchImpl:async()=>jsonResponse({methods:[],has_next:true,cursor:`next-${++calls}`})});
+  await assert.rejects(client.deliveryMethods(shop,{departure_date:'2026-10-22'},{maxPages:2}),{code:'OGL_DELIVERY_PAGE_LIMIT'});
+  assert.equal(calls,2);
+});

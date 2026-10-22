@@ -145,6 +145,11 @@ export function authorizeApiRequest(req, parts = []) {
   if (["ai-prompt-templates", "ai-strategies", "ai-strategy-bundles", "ai-strategy-category-nodes", "ai-strategy-layer-rules"].includes(resource)) return require("technical", "operations");
   if (["listing", "selection", "ai", "ai-generation", "ai-material-optimization", "ai-variant-draft-save", "ai-variant-lab", "asset-variant-engine", "material-assets", "material-packages", "tools", "ozon", "customer-chats", "customer-message-customer-orders", "customer-message-settings", "customer-messages", "reviews", "review-reply-templates"].includes(resource)) return require("operations");
   if (resource === "sync") {
+    if (parts[2] === "online-products") {
+      const start = parts.length === 3 && method === "POST";
+      const status = parts.length === 4 && parts[3] === "status" && method === "GET";
+      return start || status ? require("operations") : deny("该商品同步操作尚未开放");
+    }
     if (read) return require("orders.read", "technical");
     if (["ozon-stocks", "ozon-fbo-supplies"].includes(parts[2])) return require("procurement", "operations", "technical");
     if (String(parts[2] || "").includes("finance")) return deny("仅管理员可以同步财务数据");

@@ -155,7 +155,8 @@ export async function fetchOzonProducts(shop, options = {}) {
     chunks.push(productIds.slice(index, index + 1000));
   }
   const chunkProducts = await mapOzonConcurrencyResults(chunks, options.detailConcurrency || 1, async (chunk) => {
-    const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk });
+    const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk }, options);
+    await options.afterRequest?.();
     const items = data.result?.items || data.items || [];
     return items.map((item) => normalizeOzonProduct(item, visibilityById.get(String(item.id || item.product_id || ""))));
   });
@@ -195,6 +196,7 @@ export async function fetchOzonProductsByIds(shop, productIds = [], options = {}
   const chunks = chunkOzonFilterValues(ids);
   const chunkProducts = await mapOzonConcurrencyResults(chunks, options.detailConcurrency || 1, async (chunk) => {
     const data = await ozonRequest(shop, "/v3/product/info/list", { product_id: chunk }, options);
+    await options.afterRequest?.();
     const items = data.result?.items || data.items || [];
     return items.map((item) => {
       const id = String(item.id || item.product_id || "");
@@ -375,6 +377,7 @@ export async function fetchOzonProductStocks(shop, options = {}) {
         limit: Math.min(Math.max(Number(options.limit || 1000), 1), 1000)
       }, { signal: options.signal, beforeRequest: options.beforeRequest });
       const result = data.result || data;
+      await options.afterRequest?.();
       const items = result.items || result.products || [];
       for (const item of items) rows.push(...normalizeOzonStockItem(item));
       cursor = result.cursor || result.last_id || "";
@@ -1258,7 +1261,7 @@ async function fetchOzonProductIds(shop, options = {}) {
 
   await mapOzonConcurrency(visibilityFilters, visibilityConcurrency, async (visibility) => {
     try {
-      const refs = await fetchOzonProductIdsByVisibility(shop, visibility);
+      const refs = await fetchOzonProductIdsByVisibility(shop, visibility, options);
       for (const ref of refs) {
         const key = String(ref.id);
         const current = productIds.get(key);
@@ -1267,7 +1270,8 @@ async function fetchOzonProductIds(shop, options = {}) {
         }
       }
     } catch (error) {
-      if (visibility === "ALL" || visibility === "ARCHIVED") throw error;
+      if (options.signal?.aborted || options.visibilityFilters?.length || visibility === "ALL" || visibility === "ARCHIVED"
+        || [401, 403, 404].includes(Number(error?.statusCode || error?.status))) throw error;
     }
   });
 
@@ -1305,9 +1309,10 @@ function ozonProductVisibilityRank(value = "") {
   return 5;
 }
 
-async function fetchOzonProductIdsByVisibility(shop, visibility) {
+async function fetchOzonProductIdsByVisibility(shop, visibility, options = {}) {
   const productRefs = [];
   let lastId = "";
+  const cursors = new Set();
 
   do {
     const payload = {
@@ -1315,7 +1320,9 @@ async function fetchOzonProductIdsByVisibility(shop, visibility) {
       limit: 1000,
       last_id: lastId
     };
-    const data = await ozonRequest(shop, "/v3/product/list", payload);
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, "/v3/product/list", payload, options);
+    await options.afterRequest?.();
     const result = data.result || {};
     const items = result.items || [];
     for (const item of items) {
@@ -1323,6 +1330,8 @@ async function fetchOzonProductIdsByVisibility(shop, visibility) {
       if (id) productRefs.push({ id: Number(id), offer_id: item.offer_id, ozon_sku: item.sku });
     }
     lastId = result.last_id || "";
+    if (lastId && cursors.has(lastId)) throw new Error("Ozon 商品列表返回重复分页游标，请稍后重试");
+    if (lastId) cursors.add(lastId);
   } while (lastId);
 
   return productRefs;

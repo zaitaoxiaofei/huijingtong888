@@ -71,7 +71,7 @@ test('official-only views show yesterday and today without local batches, remain
   }});
   const service=makeService();
   const yesterday=await service.listOfficial(session,{date:'2026-10-21'});assert.equal(yesterday.total,1);assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status_label,'验收中');assert.equal(yesterday.rows[0].official_only,true);
-  const today=await service.listOfficial(session,{});assert.equal(today.departure_date,'2026-10-22');assert.equal(today.rows[0].carriage_id,'902');assert.equal(today.rows[0].status_label,'已生成');
+  const today=await service.listOfficial(session,{date:'2026-10-22'});assert.equal(today.departure_date,'2026-10-22');assert.equal(today.rows[0].carriage_id,'902');assert.equal(today.rows[0].status_label,'已生成');
   const detail=await service.officialDetail(session,{id:902,date:'2026-10-22'});
   assert.equal(detail.carriage.status,'formed');assert.equal(detail.carriage.status_label,'已生成');assert.equal(detail.summary.matched_local,1);assert.equal(detail.summary.unmatched_local,2);
   assert.equal(detail.members[0].platform_status,'awaiting_deliver');assert.equal(detail.members[0].online,false,'Carriage formed never promotes member logistics');
@@ -107,6 +107,8 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
   const calls=[]; const official=new Map(); let mode='normal'; let nextId=1000; let pauseDelivery=null; let pauseGet=null;let labelPdfBuffer=Buffer.from('%PDF-fixture');
   const api={
     async deliveryMethods(shop,filter){calls.push({shop:shop.id,path:'delivery',filter});if(pauseDelivery){const pause=pauseDelivery;pauseDelivery=null;pause.enter();await pause.wait;}
+      if(mode==='approved-rediscovery')return [{delivery_method_id:77,departure_date:'2026-10-22T16:00:00Z',has_entrusted_acceptance:true,
+        carriages:[...official.entries()].map(([id,value])=>({id,status:value.status,containers_count:value.containers,available_actions:['get_label_containers']}))}];
       if(mode==='official-readonly')return [{delivery_method_id:77,delivery_method_name:'OGL fixture pickup',departure_date:filter.departure_date==='2026-10-21'?'2026-10-20T16:00:00Z':'2026-10-21T16:00:00Z',has_entrusted_acceptance:true,
         carriages:[{id:0,available_actions:['create']},{id:Number(shop.id)===30?991:filter.departure_date==='2026-10-21'?901:902,status:filter.departure_date==='2026-10-21'?'received':'formed',postings_count:4,available_actions:['get_label_containers']}]}];
       return [{delivery_method_id:77,name:'OGL pickup',departure_date:'2026-10-22T16:00:00Z',has_entrusted_acceptance:true,carriages:[{id:0,available_actions:['create']}]}];},
@@ -160,7 +162,7 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       const offset=calls.length;
       const yesterday=await service.listOfficial(session(2),{date:'2026-10-21',tenant_id:3,shop_id:30});
       assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status,'received');assert.equal(yesterday.rows[0].official_only,true);assert.equal(yesterday.rows[0].local_batch_id,null);
-      const today=await service.listOfficial(session(2),{date:'2026-10-22'});assert.equal(today.rows[0].status_label,'已生成');assert.equal(today.rows[0].containers_count,null);
+      const today=await service.listOfficial(session(2),{date:'2026-10-22'});assert.equal(today.rows[0].status_label,'已生成');assert.equal(today.rows[0].containers_count,1);
       const current=await service.officialDetail(session(2),{id:902,date:'2026-10-22',tenant_id:3,shop_id:30});
       assert.deepEqual(current.summary,{official_members:4,matched_local:1,unmatched_local:3,online:0});assert.equal(current.members[0].order_id,1);
       assert.equal(current.members.find(row=>row.posting_number==='A2').matched_local,false,'Same-enterprise other shop is not the official source shop');
@@ -213,6 +215,21 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       assert.equal(calls.find(call=>call.path.endsWith('/courier-contact/set')).body.phone,'+86(138)1234-5678');
       assert.match((await service.file(session(2),first.batch.id,'container-labels')).filename,/container-labels.pdf$/);
       const remote=official.get(Number(approved.batch.official_carriage_id));
+      for(const [field,value] of [['numbers',['A7']],['containers',4],['method',78]]) {
+        const previous=remote[field];remote[field]=value;mode='approved-rediscovery';
+        if(field==='method')await assert.rejects(service.discover(session(2),{date:'2026-10-23'}),/配送方式不一致/);
+        else {
+          await service.discover(session(2),{date:'2026-10-23'});
+          assert.equal((await service.detail(session(2),first.batch.id)).batch.official_status,'approved','Discovery metadata cannot itself imply a new physical handover');
+        }
+        const offset=calls.length;
+        await assert.rejects(service.action(session(2),{batch_id:first.batch.id,action:'dispatch',verifiedOfficial:{kind:'approved',count:3}}),error=>error.statusCode===409&&/已变化/.test(error.message));
+        const blocked=await service.detail(session(2),first.batch.id);
+        assert.ok(['mismatch','sync_required'].includes(blocked.batch.official_status));assert.ok(blocked.members.every(row=>!row.dispatched_at));
+        assert.ok(calls.slice(offset).some(row=>row.path.endsWith('/get-postings')),'Every approved dispatch reads the current official manifest');
+        assert.ok(calls.slice(offset).every(row=>!['/v1/carriage/create','/v1/carriage/approve','/v1/carriage/set-postings'].includes(row.path)));
+        remote[field]=previous;mode='normal';await service.action(session(2),{batch_id:first.batch.id,action:'official-sync'});
+      }
       for(const [field,value,flag] of [['containers',4,'container_count_mismatch'],['containers',undefined,'container_count_mismatch'],['method',78,'delivery_method_mismatch'],['method',undefined,'delivery_method_mismatch']]) {
         const previous=remote[field];remote[field]=value;
         const conflict=await service.action(session(2),{batch_id:first.batch.id,action:'official-sync'});
