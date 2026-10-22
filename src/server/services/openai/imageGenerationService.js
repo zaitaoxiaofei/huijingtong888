@@ -6,7 +6,7 @@ import path from "node:path";
 import { clampImageCount } from "./promptService.js";
 import { aiImageRuntimeConfig } from "../../../services/ai-provider-settings.js";
 import { withAiImageRuntimeSlot } from "../../../services/ai-image-runtime-limiter.js";
-import { reserveTenantAiRequest } from "../../../services/ai-tenant-context.js";
+import { assertCurrentAiTenantPermission, reserveTenantAiRequest } from "../../../services/ai-tenant-context.js";
 
 export const ROOT_DIR = process.cwd();
 export const GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
@@ -41,6 +41,7 @@ export async function generateOpenAiImages({ taskId, finalPrompt, ratio = "3:4",
       providerJob: providerJob?.jobs?.[index - 1] || (index === 1 ? providerJob : null),
       onProviderJob: onProviderJob ? (job) => onProviderJob(job, index - 1) : null
     });
+    await assertCurrentAiTenantPermission();
     if (image?.remoteUrl) await downloadGeneratedImageToFile(image.remoteUrl, filePath);
     else await fs.writeFile(filePath, image);
     generatedImages.push(createImageRecord(safeTaskId, "generated", filename, filePath));
@@ -409,6 +410,7 @@ async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
   let lastPayload = null;
   while (Date.now() - started < AI_IMAGE_GENERATION_WAIT_MS) {
     await delay(2000);
+    await assertCurrentAiTenantPermission();
     let response;
     try {
       response = await fetch(statusUrl, {
@@ -518,6 +520,7 @@ export async function downloadGeneratedImageToFile(imageUrl, filePath) {
   let lastError = null;
   for (let attempt = 1; attempt <= AI_IMAGE_DOWNLOAD_ATTEMPTS; attempt += 1) {
     try {
+      await assertCurrentAiTenantPermission();
       const response = await fetch(imageUrl, { signal: AbortSignal.timeout(AI_IMAGE_DOWNLOAD_TIMEOUT_MS) });
       if (!response.ok || !response.body) throw Object.assign(new Error(`Failed to stream generated image: ${response.status}`), { status: response.status >= 500 ? 502 : 400 });
       await pipeline(Readable.fromWeb(response.body), fsSync.createWriteStream(filePath));

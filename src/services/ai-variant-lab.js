@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import sharp from "sharp";
 import { config } from "../config.js";
+import { requestPublicImage, resolvePublicImageTarget } from "../http/public-image-request.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { chatWithAiProvider, visionWithAiProvider } from "./ai-provider-settings.js";
 import { generateImages } from "../server/services/ai/aiWorkflowService.js";
@@ -382,6 +383,8 @@ export async function aiVariantLabBatchRunImages(body = {}, session = {}) {
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
+  const jobs = await mysqlQuery("SELECT job_no FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", [aiTenantId(), jobNo]);
+  if (!jobs.length) throw statusError(`batch job not found: ${jobNo}`, 404);
   const sourceImageUrl = await resolveImageUrl(body);
   const limit = clampInteger(body.limit, 1, 100, 100);
   const execute = body.execute === true;
@@ -536,17 +539,20 @@ export async function aiVariantLabBatchResumeImages(body = {}, session = {}) {
 }
 
 function startBatchImageBackgroundJob(jobNo, options = {}) {
-  if (runningBatchImageJobs.has(batchImageRuntimeKey(jobNo))) {
-    pendingBatchImageJobWakeups.add(batchImageRuntimeKey(jobNo));
+  const tenantId = aiTenantId();
+  const runtimeKey = `${tenantId}:${jobNo}`;
+  options = { ...options, tenantId };
+  if (runningBatchImageJobs.has(runtimeKey)) {
+    pendingBatchImageJobWakeups.add(runtimeKey);
     return false;
   }
-  runningBatchImageJobs.add(batchImageRuntimeKey(jobNo));
+  runningBatchImageJobs.add(runtimeKey);
   Promise.resolve()
     .then(() => runBatchImageBackgroundJob(jobNo, options))
     .catch(async (error) => {
       console.error("[ai-variant-lab] background image batch failed", { jobNo, error: error?.message || error });
-      const summary = await summarizeBatchJob(jobNo).catch(() => ({}));
-      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([
+      const summary = await summarizeBatchJob(jobNo, tenantId).catch(() => ({}));
+      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", [
         "failed",
         JSON.stringify({
           source_image_url: cleanText(options.sourceImageUrl || ""),
@@ -556,23 +562,50 @@ function startBatchImageBackgroundJob(jobNo, options = {}) {
           background_error: formatImageGenerationError(error),
           failed_at: new Date().toISOString()
         }),
+        tenantId,
         jobNo
-      ], 2)).catch(() => {});
+      ]).catch(() => {});
     })
-    .finally(() => {
-      const shouldWake = pendingBatchImageJobWakeups.has(batchImageRuntimeKey(jobNo));
-      pendingBatchImageJobWakeups.delete(batchImageRuntimeKey(jobNo));
-      runningBatchImageJobs.delete(batchImageRuntimeKey(jobNo));
-      if (shouldWake) startBatchImageBackgroundJob(jobNo, options);
+    .finally(async () => {
+      const shouldWake = pendingBatchImageJobWakeups.has(runtimeKey);
+      pendingBatchImageJobWakeups.delete(runtimeKey);
+      runningBatchImageJobs.delete(runtimeKey);
+      if (shouldWake) {
+        try {
+          const session = await restoreBatchImageActor(jobNo, tenantId);
+          await withAiTenantSession(session, () => startBatchImageBackgroundJob(jobNo, options));
+        } catch (error) {
+          console.warn("[ai-variant-lab] background image batch wakeup denied", { jobNo, error: error?.message || error });
+        }
+      }
     });
   return true;
 }
 
-async function runBatchImageBackgroundJob(jobNo, options = {}) {
-  const jobs = await mysqlQuery("SELECT tenant_id, created_by_person_id FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", [aiTenantId(), jobNo]);
+async function restoreBatchImageActor(jobNo, tenantId = aiTenantId()) {
+  const jobs = await mysqlQuery("SELECT tenant_id, created_by_person_id FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1", [tenantId, jobNo]);
   if (!jobs[0]) throw statusError("图片任务不存在或不属于当前企业", 404);
   const session = await restoreBusinessTaskSession(jobs[0].tenant_id, jobs[0].created_by_person_id);
   assertBusinessTaskPermission(session, "operations");
+  return session;
+}
+
+async function assertCurrentBatchImageActor(jobNo) {
+  const session = await restoreBatchImageActor(jobNo);
+  if (Number(currentAiTenantSession()?.personId) !== Number(session.personId)) {
+    throw statusError("图片任务操作人已变更，请重新恢复任务后重试", 403);
+  }
+  return session;
+}
+
+async function runBatchImageBackgroundJob(jobNo, options = {}) {
+  const session = await restoreBatchImageActor(jobNo, options.tenantId || aiTenantId());
+  return withAiTenantSession(session, () => runAuthorizedBatchImageBackgroundJob(jobNo, {
+    ...options, tenantId: aiTenantId(), sessionPersonId: session.personId
+  }));
+}
+
+async function runAuthorizedBatchImageBackgroundJob(jobNo, options) {
   const resultSummary = [];
   const queueConfig = await resolveImageRuntimeQueueConfig(options);
   const { runtimeChannels, hasChannelPool, channelCapacity, poolMaxConcurrency, effectiveConcurrency } = queueConfig;
@@ -586,6 +619,7 @@ async function runBatchImageBackgroundJob(jobNo, options = {}) {
     workerChannels = hasChannelPool ? buildWeightedChannelWorkers(runtimeChannels, concurrency) : [];
     async function worker(workerIndex = 0) {
       while (true) {
+        await assertCurrentBatchImageActor(jobNo);
         const row = await fetchNextQueuedBatchImageRow(jobNo);
         if (!row) return;
         const result = await runBatchImageRow(jobNo, row, options, runtimeChannels, workerIndex, workerChannels[workerIndex] || null);
@@ -719,6 +753,7 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
           personId: options.sessionPersonId || null
         }
       }, runtimeChannels, rowIndex, attempts, preferredChannel);
+      await assertCurrentBatchImageActor(jobNo);
       const durableImageResult = await persistAiVariantImageResult(imageResult, {
         jobNo,
         itemNo: row.item_no,
@@ -727,6 +762,7 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
       });
       const completedResult = durableImageResult;
       const elapsedMs = Date.now() - started;
+      await assertCurrentBatchImageActor(jobNo);
       await mysqlExecute(`
         UPDATE ai_variant_lab_batch_items
         SET status = ?, image_result_json = ?, provider_job_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP
@@ -753,27 +789,32 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
 }
 
 function scheduleProviderPendingBatchResume(jobNo, options = {}) {
-  if (pendingBatchImageResumeTimers.has(batchImageRuntimeKey(jobNo))) return;
+  const tenantId = aiTenantId();
+  const runtimeKey = batchImageRuntimeKey(jobNo);
+  if (pendingBatchImageResumeTimers.has(runtimeKey)) return;
   const delayMs = Math.max(5000, Number(process.env.AI_VARIANT_PROVIDER_REPOLL_DELAY_MS || 30000));
   const timer = setTimeout(async () => {
-    pendingBatchImageResumeTimers.delete(batchImageRuntimeKey(jobNo));
+    pendingBatchImageResumeTimers.delete(runtimeKey);
     try {
-      const result = await mysqlExecute(`
-        UPDATE ai_variant_lab_batch_items
-        SET status = 'queued_image',
-            error_message = '服务商仍在生成，已自动继续拉回原任务',
-            updated_at = CURRENT_TIMESTAMP
-        WHERE tenant_id = ? AND job_no = ? AND status = 'provider_pending'
-      `, aiTenantParams([jobNo], 0));
-      if (!result.affectedRows) return;
-      await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([jobNo], 0));
-      startBatchImageBackgroundJob(jobNo, options);
+      const session = await restoreBatchImageActor(jobNo, tenantId);
+      await withAiTenantSession(session, async () => {
+        const result = await mysqlExecute(`
+          UPDATE ai_variant_lab_batch_items
+          SET status = 'queued_image',
+              error_message = '服务商仍在生成，已自动继续拉回原任务',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE tenant_id = ? AND job_no = ? AND status = 'provider_pending'
+        `, aiTenantParams([jobNo], 0));
+        if (!result.affectedRows) return;
+        await mysqlExecute("UPDATE ai_variant_lab_batch_jobs SET status = 'generating_images', updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND job_no = ?", aiTenantParams([jobNo], 0));
+        startBatchImageBackgroundJob(jobNo, { ...options, sessionPersonId: session.personId });
+      });
     } catch (error) {
       console.warn("[ai-variant-lab] provider image repoll scheduling failed", { jobNo, error: error?.message || error });
     }
   }, delayMs);
   timer.unref?.();
-  pendingBatchImageResumeTimers.set(batchImageRuntimeKey(jobNo), timer);
+  pendingBatchImageResumeTimers.set(runtimeKey, timer);
 }
 
 async function persistAiVariantImageResult(imageResult = {}, context = {}) {
@@ -834,6 +875,7 @@ async function generateImagesWithChannelRetry(payload, runtimeChannels = [], row
   }
   let lastError = null;
   for (const channel of channels) {
+    await assertCurrentBatchImageActor(payload.usageContext.jobNo);
     const attempt = {
       channelId: channel.channelId || "",
       channelName: channel.channelName || channel.name || "",
@@ -852,6 +894,7 @@ async function generateImagesWithChannelRetry(payload, runtimeChannels = [], row
       await finishAiImageUsageAttempt(usageId, error?.code === "provider_pending" ? "pending" : "failed", error);
       if (savedProviderJob?.jobId && isProviderJobTerminalUnavailable(error)) {
         await payload.onProviderJob?.(null, 0);
+        await assertCurrentBatchImageActor(payload.usageContext.jobNo);
         const resubmitUsageId = await startAiImageUsageAttempt(payload.usageContext, channel, "resubmit");
         try {
           const result = await generateImages({
@@ -2489,6 +2532,8 @@ async function resolveImageUrl(body = {}) {
   if (/^https?:\/\//i.test(imageUrl)) {
     const localPublicFile = resolveLocalPublicImageFile(imageUrl);
     if (localPublicFile) return localImageToDataUrl(localPublicFile);
+    try { await resolvePublicImageTarget(imageUrl); }
+    catch { throw statusError("商品图片地址不可用，请选择公开图片或在本企业素材库重新上传", 400); }
     return imageUrl;
   }
   if (imageUrl.startsWith("data:image/")) return imageUrl;
@@ -2547,16 +2592,14 @@ async function resolveOptimizerImageInputs(body = {}) {
 }
 
 async function fetchImageAsDataUrl(url) {
-  let response;
+  let image;
   try {
-    response = await fetch(url);
+    image = await requestPublicImage(url, { maxBytes: 20 * 1024 * 1024, signal: AbortSignal.timeout(20000) });
   } catch (error) {
     throw statusError(`商品图片读取失败：${new URL(url).hostname} 无法访问，请检查图片是否已保存到本地素材库`, 400);
   }
-  if (!response.ok) throw statusError(`failed to fetch image: ${response.status}`, 400);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const contentType = response.headers.get("content-type") || "image/png";
-  return `data:${contentType};base64,${buffer.toString("base64")}`;
+  if (!image) throw statusError("商品图片读取失败，请使用不超过 20 MB 的公开图片或本企业素材", 400);
+  return `data:${image.contentType};base64,${image.buffer.toString("base64")}`;
 }
 
 function isInternalAiTaskImageUrl(value = "") {
@@ -2569,9 +2612,10 @@ function resolveLocalPublicImageFile(value = "") {
     if (!new Set(["erp.hjt888.xyz", "localhost", "127.0.0.1"]).has(parsed.hostname.toLowerCase())) return "";
     const relative = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
     if (!relative.startsWith("uploads/listing-media/")) return "";
-    const publicRoot = path.resolve("public");
-    const resolved = path.resolve(publicRoot, relative);
-    if (!resolved.startsWith(`${publicRoot}${path.sep}`) || !fs.existsSync(resolved)) return "";
+    const mediaRoot = fs.realpathSync(path.resolve("public", "uploads", "listing-media"));
+    const resolved = fs.realpathSync(path.resolve(mediaRoot, relative.slice("uploads/listing-media/".length)));
+    const withinRoot = path.relative(mediaRoot, resolved);
+    if (!withinRoot || withinRoot === ".." || withinRoot.startsWith(`..${path.sep}`) || path.isAbsolute(withinRoot) || !fs.statSync(resolved).isFile()) return "";
     return resolved;
   } catch {
     return "";
@@ -4614,13 +4658,13 @@ async function replaceBatchItems(jobNo, items) {
   }
 }
 
-async function summarizeBatchJob(jobNo) {
+async function summarizeBatchJob(jobNo, tenantId = aiTenantId()) {
   const rows = await mysqlQuery(`
     SELECT status, COUNT(*) AS count
     FROM ai_variant_lab_batch_items
     WHERE tenant_id = ? AND job_no = ?
     GROUP BY status
-  `, aiTenantParams([jobNo], 0));
+  `, [tenantId, jobNo]);
   const summary = { total: 0, planned: 0, queued: 0, generating: 0, providerPending: 0, done: 0, failed: 0, pending: 0 };
   for (const row of rows) {
     const count = Number(row.count || 0);

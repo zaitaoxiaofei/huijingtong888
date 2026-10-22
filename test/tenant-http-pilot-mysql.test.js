@@ -71,6 +71,10 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       if (id !== 5) await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(?,?,'member',JSON_ARRAY(?))", [id === 4 ? 1 : id, id, id === 4 ? 'packing' : 'admin']);
     }
     await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(3,2,'member',JSON_ARRAY('admin'))");
+    for (const [person, tenant] of [[6, 1], [7, 2]]) {
+      await fixture.query('INSERT INTO people(id,name,username,password_hash,role) VALUES(?,?,?,?,?)', [person, `Pilot ${person}`, `pilot${person}`, hashPassword(password), 'operations']);
+      await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(?,?,'member',JSON_ARRAY('operations'))", [tenant, person]);
+    }
     for (const id of [1, 2, 3]) {
       await fixture.query('INSERT INTO shops(id,tenant_id,name) VALUES(?,?,?)', [id * 10, id === 1 ? null : id, `HTTP own shop ${id}`]);
       await fixture.query('INSERT INTO products(id,tenant_id,name,code) VALUES(?,?,?,?)', [id * 10, id === 1 ? null : id, `HTTP own product ${id}`, `HTTP-${id}`]);
@@ -85,6 +89,25 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       const unjoined = await request('/api/auth/login', '', 'POST', { username: 'pilot5', password });
       assert.ok(!unjoined.data.token);
       assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_members WHERE person_id=5'))[0].n), 0);
+    });
+    await t.test('ordinary default and customer operations pass fission route gates through real login without paid calls', async () => {
+      for (const id of [6, 7]) {
+        const operator = await login(id);
+        assert.notEqual(operator.user.platform_role, 'super_admin');
+        for (const action of ['analyze-image', 'batch-plan', 'batch-run-images', 'batch-resume-images']) {
+          const result = await request(`/api/ai-variant-lab/${action}`, operator.token, 'POST', {});
+          assert.equal(result.status, 400, `${id} ${action}: ${JSON.stringify(result.data)}`);
+          assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+        const offer = await request('/api/listing/generate-offer-id', operator.token, 'POST', {});
+        assert.equal(offer.status, 200);
+        assert.ok(offer.data.offerId);
+      }
+      const blocked = await request('/api/ai-variant-lab/analyze-image', sessions.get(4).token, 'POST', {});
+      assert.equal(blocked.status, 403);
+      assert.notEqual(blocked.data.code, 'TENANT_ISOLATION_PENDING');
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM ai_variant_lab_batch_jobs'))[0].n), 0);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
     });
     await t.test('HTTP lists/details/mutations use session enterprise and ignore body/query tenant selectors', async () => {
       for (const id of [1, 2, 3, 4]) {

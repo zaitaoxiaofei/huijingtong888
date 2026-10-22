@@ -1050,7 +1050,7 @@ test("ai variant lab generation results expose preview, errors, and accurate fai
   assert.match(service, /global_waiting_image_requests/);
   assert.match(service, /JSON\.stringify\(\{ attempts, elapsedMs, failedAt:/);
   assert.match(service, /function startBatchImageBackgroundJob/);
-  assert.match(service, /pendingBatchImageJobWakeups\.add\(batchImageRuntimeKey\(jobNo\)\)/);
+  // Tenant-bound wakeups are exercised with real jobs in tenant-ai-business-mysql.test.js.
   assert.match(service, /queued: true/);
   assert.match(service, /background: true/);
   assert.match(service, /aiImageRuntimePoolConfig/);

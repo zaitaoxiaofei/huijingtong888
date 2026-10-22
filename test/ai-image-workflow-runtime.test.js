@@ -194,7 +194,7 @@ test("AI image source fetch retries draft images with browser-like headers", () 
   assert.match(workflowSource, /function sourceImageFetchHeaders/);
   assert.match(workflowSource, /User-Agent/);
   assert.match(workflowSource, /Referer/);
-  assert.match(workflowSource, /\[401, 403, 404\]\.includes\(response\.status\)/);
+  assert.match(workflowSource, /requestPublicImage\(url,/);
   assert.doesNotMatch(workflowSource, /falling back to text-to-image/);
 });
 

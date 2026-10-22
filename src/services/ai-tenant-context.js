@@ -29,10 +29,17 @@ export async function withAiTenantSession(session, operation, { permission = "op
   return context.run({ session: authorized, permission }, operation);
 }
 
-export async function reserveTenantAiRequest(kind = "text", count = 1) {
+export async function assertCurrentAiTenantPermission() {
   const session = currentAiTenantSession();
   if (!session) return null; // Platform diagnostics are authorized separately.
-  assertBusinessTaskPermission(await authorizeBusinessTaskSession(session), context.getStore().permission || "operations");
+  const authorized = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(authorized, context.getStore().permission || "operations");
+  return authorized;
+}
+
+export async function reserveTenantAiRequest(kind = "text", count = 1) {
+  const session = await assertCurrentAiTenantPermission();
+  if (!session) return null;
   if (!usageSchema) usageSchema = (async () => {
     await mysqlExecute(TENANT_AI_LIMITS_SCHEMA);
     await mysqlExecute(TENANT_AI_USAGE_SCHEMA);

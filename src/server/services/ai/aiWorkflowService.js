@@ -6,8 +6,9 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { config } from "../../../config.js";
+import { requestPublicImage } from "../../../http/public-image-request.js";
 import { mysqlQuery } from "../../../mysql-pool.js";
-import { aiTenantId, currentAiTenantSession } from "../../../services/ai-tenant-context.js";
+import { aiTenantId, assertCurrentAiTenantPermission, currentAiTenantSession } from "../../../services/ai-tenant-context.js";
 import { assertAiImageTaskOwner, registerAiImageTaskOwner } from "../../../services/ai-image-task-ownership.js";
 import { buildZip, runPythonCropper } from "../tools/imageCropperService.js";
 import { aiProviderConfig, chatWithAiProvider } from "../../../services/ai-provider-settings.js";
@@ -230,6 +231,7 @@ async function generateImageEdits({ taskId, finalPrompt, ratio, imageCount, sour
       providerJob: providerJob?.jobs?.[index - 1] || (index === 1 ? providerJob : null),
       onProviderJob: onProviderJob ? (job) => onProviderJob(job, index - 1) : null
     });
+    await assertCurrentAiTenantPermission();
     if (image?.remoteUrl) await downloadGeneratedImageToFile(image.remoteUrl, filePath);
     else await fs.writeFile(filePath, image);
     generatedImages.push({
@@ -379,9 +381,10 @@ function resolveLocalPublicSourceImage(value = "", pathname = "") {
     if (!new Set(["erp.hjt888.xyz", "localhost", "127.0.0.1"]).has(hostname)) return null;
     const relative = decodeURIComponent(String(pathname || "")).replace(/^\/+/, "");
     if (!relative.startsWith("uploads/listing-media/")) return null;
-    const publicRoot = path.resolve("public");
-    const filePath = path.resolve(publicRoot, relative);
-    if (!filePath.startsWith(`${publicRoot}${path.sep}`) || !fsSync.existsSync(filePath)) return null;
+    const mediaRoot = fsSync.realpathSync(path.resolve("public", "uploads", "listing-media"));
+    const filePath = fsSync.realpathSync(path.resolve(mediaRoot, relative.slice("uploads/listing-media/".length)));
+    const withinRoot = path.relative(mediaRoot, filePath);
+    if (!withinRoot || withinRoot === ".." || withinRoot.startsWith(`..${path.sep}`) || path.isAbsolute(withinRoot) || !fsSync.statSync(filePath).isFile()) return null;
     const extension = path.extname(filePath).toLowerCase();
     const contentType = extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : extension === ".webp" ? "image/webp" : "image/png";
     return { filePath, contentType, filename: path.basename(filePath), source: value };
@@ -391,15 +394,15 @@ function resolveLocalPublicSourceImage(value = "", pathname = "") {
 }
 
 async function fetchSourceImageResponse(url) {
-  const response = await fetch(url, {
-    headers: sourceImageFetchHeaders(url),
-    signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS)
-  });
-  if (response.ok || ![401, 403, 404].includes(response.status)) return response;
-  return fetch(url, {
-    headers: sourceImageFetchHeaders(url, { retry: true }),
-    signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS)
-  });
+  for (const retry of [false, true]) {
+    const image = await requestPublicImage(url, {
+      headers: sourceImageFetchHeaders(url, { retry }),
+      signal: AbortSignal.timeout(AI_SOURCE_IMAGE_FETCH_TIMEOUT_MS),
+      maxBytes: 20 * 1024 * 1024
+    });
+    if (image) return new Response(image.buffer, { headers: { "Content-Type": image.contentType } });
+  }
+  throw Object.assign(new Error("参考图读取失败，请使用不超过 20 MB 的公开图片或本企业素材"), { status: 400 });
 }
 
 function sourceImageFetchHeaders(url, { retry = false } = {}) {
