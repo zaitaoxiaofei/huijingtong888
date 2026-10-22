@@ -38,6 +38,18 @@ export function isOglLogisticsFresh(member) {
 function invalidateWorkflowCaches() {
   invalidateMasterDataCache(); invalidateOrderProcurementCoverage(); invalidateInventoryProductBalance();
 }
+function officialStatusLabel(value) {
+  return {new:'待确认',formed:'已生成',sended:'已发送',received:'验收中',closed:'已完成',cancelled:'已取消',canceled:'已取消'}[String(value||'').toLowerCase()]||'待核实';
+}
+function optionalCount(value) {
+  const number=Number(value);
+  return value!=null&&value!==''&&Number.isSafeInteger(number)&&number>=0?number:null;
+}
+function beijingDay(value, now) {
+  const day=value==null||value===''?shanghaiDateKey(now()):String(value).trim();
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(day)||shanghaiDateKey(`${day}T00:00:00+08:00`)!==day) fail('请选择有效的北京日期（YYYY-MM-DD）');
+  return day;
+}
 const shopScope = (scope, alias = 's') => `(${alias}.tenant_id = ?${scope.slug === 'default' ? ` OR ${alias}.tenant_id IS NULL` : ''})`;
 
 // Raw platform status remains authoritative; local handover is separate data.
@@ -67,9 +79,12 @@ export function summarizeOglMembers(members = []) {
   };
 }
 
-export function createOglDispatchService({ transaction, api, syncPostings, now = () => new Date() }) {
+export function createOglDispatchService({ transaction, api, syncPostings, extractLabelTracking, now = () => new Date() }) {
   if (typeof transaction !== 'function') throw new Error('OGL dispatch requires a transaction');
   const timestamp = () => sqlDate(now());
+  // Cache parsed tracking identifiers only; never retain labels or customer data.
+  const trackingCache=new Map();
+  const trackingPending=new Map();
   async function scope(connection, session, write = false) {
     const tenantId = id(session?.tenant?.id, '当前企业'); const personId = id(session?.personId, '操作账号');
     const [rows] = await connection.execute(`SELECT t.id, t.slug, tm.role AS tenant_role, tm.business_roles_json,
@@ -219,6 +234,137 @@ export function createOglDispatchService({ transaction, api, syncPostings, now =
     });
   }
   async function detail(session, batchId) { return transaction(async connection => getDetail(connection,await scope(connection,session),batchId)); }
+  async function officialReadContext(session) {
+    if(!api?.deliveryMethods||!api?.request) fail('当前环境未配置 Ozon 发运 API',503);
+    return transaction(async connection=>{
+      const current=await scope(connection,session);
+      const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
+      if(!settings[0]) fail('尚未配置本企业默认 OGL 发运店铺，请让企业管理员先选择有 OGL 发运的店铺，再查询后台已有单',409);
+      return {current,shop:await shop(connection,current,settings[0].default_shop_id,true)};
+    });
+  }
+  async function officialRows(ctx, day) {
+    // A date filter also includes historical carriages that the default window
+    // can omit. Keep the calendar-day check explicit across UTC boundaries.
+    const methods=await api.deliveryMethods(ctx.shop,{departure_date:day});
+    const rows=[]; const seen=new Set();
+    for(const method of methods) {
+      if(shanghaiDateKey(method.departure_date)!==day||!Array.isArray(method.carriages)) continue;
+      for(const carriage of method.carriages) {
+        const carriageId=String(carriage.id??carriage.carriage_id??'');
+        if(!/^\d+$/.test(carriageId)||Number(carriageId)<=0||seen.has(carriageId)) continue;
+        seen.add(carriageId);
+        rows.push({id:carriageId,carriage_id:carriageId,delivery_method_id:String(method.delivery_method_id??''),
+          delivery_method_name:text(method.delivery_method_name??method.name,255),departure_date:method.departure_date,
+          has_entrusted_acceptance:method.has_entrusted_acceptance===true,status:text(carriage.status,64),status_label:officialStatusLabel(carriage.status),
+          available_actions:Array.isArray(carriage.available_actions)?carriage.available_actions.filter(value=>typeof value==='string'):[],
+          postings_count:optionalCount(carriage.postings_count),containers_count:optionalCount(carriage.containers_count),official_only:true});
+      }
+    }
+    return rows;
+  }
+  async function listOfficial(session,query={}) {
+    const day=beijingDay(query.date??query.departure_date,now); const ctx=await officialReadContext(session);
+    const rows=await officialRows(ctx,day);
+    return transaction(async connection=>{
+      const current=await scope(connection,session); await shop(connection,current,ctx.shop.id,true);
+      // A default-shop change while the request was in flight must not display
+      // one shop's response under another shop's current setting.
+      const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
+      if(Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
+      const [batches]=await connection.execute('SELECT id,batch_number,official_carriage_id FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id IS NOT NULL',[current.id,ctx.shop.id]);
+      const local=new Map(batches.map(row=>[String(row.official_carriage_id),row]));
+      return {rows:rows.map(row=>({...row,official_only:!local.has(row.carriage_id),local_batch_id:local.has(row.carriage_id)?Number(local.get(row.carriage_id).id):null,local_batch_number:local.get(row.carriage_id)?.batch_number||''})),total:rows.length,
+        dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day};
+    });
+  }
+  async function officialDetail(session,query={}) {
+    const day=beijingDay(query.date??query.departure_date,now); const carriageId=String(id(query.id??query.carriage_id,'官方发运编号'));
+    const ctx=await officialReadContext(session); const rows=await officialRows(ctx,day); const listed=rows.find(row=>row.carriage_id===carriageId);
+    if(!listed) fail('该官方发运不在默认店铺所选北京日期的已有单中，请核对日期或默认店铺',404);
+    const data=await readOfficial(ctx,carriageId);
+    if(data.info?.carriage_id!=null&&String(data.info.carriage_id)!==carriageId) fail('Ozon 返回的官方发运编号与查询编号不一致，请重新查询',502);
+    if(data.info?.delivery_method_id!=null&&String(data.info.delivery_method_id)!==listed.delivery_method_id) fail('Ozon 官方详情与列表配送方式不一致，请重新查询',502);
+    return transaction(async connection=>{
+      const current=await scope(connection,session); await shop(connection,current,ctx.shop.id,true);
+      const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
+      if(Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409);
+      const numbers=[...new Set(data.numbers)]; const localOrders=[];
+      // Match both shop and posting number. A number belonging to another shop
+      // never becomes an authorized local member of this official manifest.
+      for(let offset=0;offset<numbers.length;offset+=500) {
+        const part=numbers.slice(offset,offset+500);
+        const [orders]=await connection.execute(`SELECT o.id,o.posting_number,o.shop_id,o.status AS platform_status,o.logistics_status,o.tracking_stage,o.last_synced_at,s.name AS shop_name
+          FROM orders o JOIN shops s ON s.id=o.shop_id AND ${shopScope(current)}
+          WHERE o.shop_id = ? AND o.posting_number IN (${marks(part)})`,[current.id,ctx.shop.id,...part]);
+        localOrders.push(...orders);
+      }
+      const local=new Map(localOrders.map(row=>[row.posting_number,row]));
+      const members=numbers.map(postingNumber=>{
+        const row=local.get(postingNumber); const rawPosting=data.list.find(value=>value&&typeof value==='object'&&value.posting_number===postingNumber);
+        const platformStatus=row?.platform_status||text(rawPosting?.status,64); const logisticsStatus=row?.logistics_status||text(rawPosting?.substatus,128);
+        const progress=oglPlatformProgress({status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage});
+        return {posting_number:postingNumber,order_id:row?Number(row.id):null,shop_id:Number(ctx.shop.id),shop_name:ctx.shop.name,matched_local:Boolean(row),
+          platform_status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage||'',last_synced_at:row?.last_synced_at||null,
+          online:progress.online,delivered:progress.delivered,cancelled:progress.cancelled};
+      });
+      const [batches]=await connection.execute('SELECT id,batch_number FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id = ?',[current.id,ctx.shop.id,carriageId]);
+      const status=text(data.info?.status||listed.status,64);
+      const carriage={...listed,status,status_label:officialStatusLabel(status),containers_count:data.info?.containers_count==null?listed.containers_count:optionalCount(data.info.containers_count),
+        available_actions:Array.isArray(data.info?.available_actions)?data.info.available_actions.filter(value=>typeof value==='string'):listed.available_actions,
+        first_mile_type:text(data.info?.first_mile_type,64),integration_type:text(data.info?.integration_type,64),
+        official_only:!batches.length,local_batch_id:batches[0]?Number(batches[0].id):null,local_batch_number:batches[0]?.batch_number||''};
+      return {carriage,members,summary:{official_members:members.length,matched_local:localOrders.length,unmatched_local:members.length-localOrders.length,online:members.filter(row=>row.online).length},
+        dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day};
+    });
+  }
+  async function verifyOfficialReadScope(session,ctx) {
+    return transaction(async connection=>{
+      const current=await scope(connection,session);await shop(connection,current,ctx.shop.id,true);
+      const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
+      if(current.id!==ctx.current.id||Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有申请',409);
+    });
+  }
+  async function officialTracking(session,query={}) {
+    const day=beijingDay(query.date??query.departure_date,now);const carriageId=String(id(query.id??query.carriage_id,'官方申请号'));
+    const ctx=await officialReadContext(session);
+    // Validate the existing application and its exact default-shop/date scope.
+    // This is a read-only detail lookup; it never imports or takes over a batch.
+    const detail=await officialDetail(session,{id:carriageId,date:day});
+    if(Number(detail.dispatch_shop.id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有申请',409);
+    const key=`${ctx.current.id}:${ctx.shop.id}:${carriageId}:${day}:${detail.carriage.containers_count??'unknown'}`;
+    for(const [cacheKey,entry] of trackingCache)if(entry.expires<=Date.now())trackingCache.delete(cacheKey);
+    const cached=trackingCache.get(key);
+    if(cached) {
+      await verifyOfficialReadScope(session,ctx);
+      return {carriage_id:carriageId,dispatch_shop:detail.dispatch_shop,departure_date:day,tracking:structuredClone(cached.tracking)};
+    }
+    if(trackingPending.has(key)) {
+      const result=await trackingPending.get(key);await verifyOfficialReadScope(session,ctx);return structuredClone(result);
+    }
+    const operation=(async()=>{
+    let tracking;
+    try {
+      const file=await api.request(ctx.shop,'/v2/posting/fbs/act/get-container-labels',{id:Number(carriageId)},{binary:true});
+      if(!Buffer.isBuffer(file?.buffer)||file.contentType!=='application/pdf') throw new Error('Official labels are not a PDF');
+      const extract=extractLabelTracking||(await import('./ogl-label-tracking.js')).extractOglLabelTracking;
+      tracking=await extract(file.buffer,{containersCount:detail.carriage.containers_count});
+      if(!tracking||!['found','ambiguous','not_found'].includes(tracking.status)) throw new Error('Invalid tracking extraction result');
+    } catch {
+      await verifyOfficialReadScope(session,ctx);
+      fail('未取得标签中的运单号，请稍后重新读取；已有申请详情仍可查看',502,'OGL_TRACKING_LABEL_UNAVAILABLE');
+    }
+    await verifyOfficialReadScope(session,ctx);
+    if(tracking.status==='not_found') tracking={...tracking,notice:`未取得标签中的运单号。${text(tracking.notice,500)}`};
+    else if(Array.isArray(tracking.tracking_numbers)&&tracking.tracking_numbers.length) {
+      trackingCache.set(key,{expires:Date.now()+60000,tracking:structuredClone(tracking)});
+      while(trackingCache.size>100)trackingCache.delete(trackingCache.keys().next().value);
+    }
+    return {carriage_id:carriageId,dispatch_shop:detail.dispatch_shop,departure_date:day,tracking};
+    })();
+    trackingPending.set(key,operation);
+    try{return await operation;}finally{if(trackingPending.get(key)===operation)trackingPending.delete(key);}
+  }
   async function localAction(session, body) {
     return transaction(async connection => {
       const current = await scope(connection,session,true); const item=await batch(connection,current,body.batch_id,true);
@@ -355,8 +501,8 @@ export function createOglDispatchService({ transaction, api, syncPostings, now =
       if(memberMethod==null) fail(`订单 ${member.posting_number} 缺少平台配送方式（delivery_method.id），请先按来源店铺刷新物流后再创建官方发运`,409);
       if(String(memberMethod)!==method) fail(`订单 ${member.posting_number} 的配送方式与所选官方配送方式不一致，请将默认店铺不同仓库／配送方式的订单分成不同批次`,409);
     }
-    const options=await api.deliveryMethods(ctx.shop,{delivery_method_id:Number(method)});
     const selectedDay=normalizeShanghaiDateInput(inputDate);
+    const options=await api.deliveryMethods(ctx.shop,{delivery_method_id:Number(method),departure_date:selectedDay});
     const capability=options.find(row=>String(row.delivery_method_id??row.id)===method&&shanghaiDateKey(row.departure_date)===selectedDay);
     if(!capability) fail('默认店铺当前没有该配送方式与所选日期的可用组合，请重新获取官方发运选项',409);
     // The create API requires date-time. Reuse the exact official slot value;
@@ -502,5 +648,5 @@ export function createOglDispatchService({ transaction, api, syncPostings, now =
     const extension=result.contentType==='image/png'?'png':result.contentType==='image/jpeg'?'jpg':'pdf';
     return {...result,filename:`${ctx.batch.batch_number}-${query.type}.${extension}`};
   }
-  return {bootstrap,saveSettings,preview,createBatch,listBatches,detail,action,file};
+  return {bootstrap,saveSettings,preview,createBatch,listBatches,detail,listOfficial,officialDetail,officialTracking,action,file};
 }

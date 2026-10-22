@@ -33,6 +33,9 @@ export function createOglDispatchService(client = apiClient) {
     create: (payload) => client.post("/api/ogl-dispatch/batches", { ...payload, order_ids: normalizeOglOrderIds(payload.order_ids) }),
     list: (page = 1) => client.get(`/api/ogl-dispatch/batches?${new URLSearchParams({ page: String(page), page_size: "20" })}`),
     detail: (id) => client.get(`/api/ogl-dispatch/batch?id=${encodeURIComponent(id)}`),
+    officialList: (date) => client.get(`/api/ogl-dispatch/official-carriages?${new URLSearchParams({ date })}`),
+    officialDetail: (id, date) => client.get(`/api/ogl-dispatch/official-carriage?${new URLSearchParams({ id: String(id), date })}`),
+    officialTracking: (id, date) => client.get(`/api/ogl-dispatch/official-carriage-tracking?${new URLSearchParams({ id: String(id), date })}`),
     action: (batchId, action, payload = {}) => client.post("/api/ogl-dispatch/action", { ...payload, batch_id: batchId, action }),
     file: (batchId, type) => {
       if (!["container-labels", "barcode"].includes(type)) throw new Error("未知发运文件类型");

@@ -25,7 +25,7 @@ test('OGL display is derived from physical handover and gives platform terminal/
 
 test('OGL routes allow only exact reviewed enterprise paths and preserve settings permission', () => {
   const session = { personId: 2, roles: ['packing'], tenant: { id: 2, slug: 'company', role: 'member' } };
-  for (const [method, path] of [['GET', 'bootstrap'], ['POST', 'preview'], ['POST', 'batches'], ['GET', 'batch'], ['POST', 'action'], ['GET', 'file']]) {
+  for (const [method, path] of [['GET', 'bootstrap'], ['POST', 'preview'], ['POST', 'batches'], ['GET', 'batch'], ['POST', 'action'], ['GET', 'file'], ['GET','official-carriages'], ['GET','official-carriage'], ['GET','official-carriage-tracking']]) {
     const parts = ['api', 'ogl-dispatch', path];
     assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
     assert.equal(authorizeApiRequest({ _session: session, method }, parts).allowed, true);
@@ -33,6 +33,9 @@ test('OGL routes allow only exact reviewed enterprise paths and preserve setting
   assert.equal(authorizeApiRequest({ _session: session, method: 'PUT' }, ['api','ogl-dispatch','settings']).allowed, false);
   assert.equal(tenantIsolationDecision(session, ['api','ogl-dispatch','action','unreviewed'], 'POST').allowed, false);
   assert.equal(tenantIsolationDecision(session, ['api','ogl-dispatch','file'], 'POST').allowed, false);
+  assert.equal(tenantIsolationDecision(session, ['api','ogl-dispatch','official-carriage'], 'POST').allowed, false);
+  assert.equal(tenantIsolationDecision(session, ['api','ogl-dispatch','official-carriages','other'], 'GET').allowed, false);
+  assert.equal(tenantIsolationDecision(session, ['api','ogl-dispatch','official-carriage-tracking'], 'POST').allowed, false);
 });
 
 test('OGL MySQL tabs, counts, rollback and stock transport evidence share one scoped handover record', {

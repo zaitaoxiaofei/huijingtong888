@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../admin/stores/auth.js";
 import { currentApiCacheScope } from "../../admin/utils/api.js";
-import { shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
+import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { oglDispatchService as service, normalizeOglOrderIds, oglMemberMatches } from "../services/ogl-dispatch-service.js";
 
 const props = defineProps({ orderIds: { type: Array, default: () => [] }, batchId: { type: Number, default: 0 }, mode: { type: String, default: "history" } });
@@ -19,7 +19,7 @@ const current = () => alive && currentScope() === initialScope;
 const visible = ref(true);
 const busy = ref(false);
 const error = ref("");
-const tab = ref(props.mode === "create" ? "create" : "history");
+const tab = ref(props.mode === "create" ? "create" : props.mode === "official" ? "official" : "history");
 const bootstrap = ref({ settings: {}, shops: [], can_manage_settings: false });
 const defaultShopId = ref(null);
 const selectedIds = normalizeOglOrderIds(props.orderIds);
@@ -29,6 +29,19 @@ const rows = ref([]);
 const page = ref(1);
 const total = ref(0);
 const detail = ref(null);
+const officialDate = ref(shanghaiDateKey());
+const officialRows = ref([]);
+const officialTotal = ref(0);
+const officialShop = ref(null);
+const officialDetail = ref(null);
+const officialDetailDate = ref("");
+const officialTracking = ref(null);
+const trackingLoading = ref(false);
+const trackingError = ref("");
+let trackingSequence = 0;
+const officialCarriage = computed(() => officialDetail.value?.carriage || {});
+const officialMembers = computed(() => officialDetail.value?.members || []);
+const masterTrackingLabel = computed(() => officialTracking.value?.master_tracking_number || (officialTracking.value?.status === "ambiguous" ? "多个运单，主单关系待确认" : "待获取"));
 const selectedMembers = ref([]);
 const memberFilter = ref("all");
 const assignment = ref(1);
@@ -71,11 +84,14 @@ const canAssign = computed(() => !closed.value && hasSelected.value && ["not_cre
 const canDispatch = computed(() => !closed.value && hasSelected.value && officialReady.value && selectedMembers.value.every((row) => !row.dispatched_at && !row.online && !row.cancelled));
 const canCreate = computed(() => eligible.value.length > 0 && (!rejected.value.length || acceptEligible.value) && Boolean(bootstrap.value.settings.dispatch_shop_id));
 const formatTime = (value) => shanghaiDateTimeText(value, { assumeUtcWhenNaive: true });
+const formatDeparture = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim()) ? shanghaiDateText(value) : formatTime(value);
 const batchStatus = (value) => ({ draft: "准备中", preparing: "准备中", ready: "待交运", ready_to_dispatch: "待交运", in_transit: "跟进中", dispatched: "跟进中", following: "跟进中", tracking: "跟进中", closed: "已结束", cancelled: "已取消" }[value] || value || "准备中");
 const officialStatus = (value) => ({ pending: "待创建", not_created: "待创建", created: "已创建", approved: "已确认", confirmed: "已确认", error: "处理失败", failed: "创建失败", creating: "创建中", unknown: "待核实", create_unknown: "创建结果待核实", sync_required: "清单待核实", mismatch: "清单不一致", confirming: "确认中", confirm_unknown: "确认结果待核实", cancelled: "已取消" }[value] || value || "待创建");
+const carriageStatus = (row) => row.status_label || ({ formed: "已生成", received: "承运方已接收", new: "待确认", created: "已创建", approved: "已确认", confirmed: "已确认", handed_over: "已交接", delivering: "运输中", completed: "已完成", cancelled: "已取消", canceled: "已取消" }[row.status]) || "平台状态待核对";
 const eventLabel = (value) => ({ create: "创建内部批次", assign: "分配货位", dispatch: "标记实际交运", withdraw: "撤回待发", exception: "标记异常", resolve: "解决异常", cancel: "取消批次", close: "结束跟进", refresh: "刷新物流", "official-sync": "核对官方单", "official-create-start": "开始创建官方单", "official-created": "官方单已创建", "official-create-error": "官方创建失败或待核实", "official-confirm-start": "开始确认官方单", "official-confirm-error": "官方确认待核实" }[value] || "批次操作");
 const memberPhase = (row) => row.withdrawn_at || row.active === 0 || row.active === false ? "已撤回" : row.online ? "已上网" : row.dispatched_at ? "已发运" : "待交运";
 const platformStatusLabel = (row) => row.logistics_status_label || ({ awaiting_packaging: "等待备货", awaiting_deliver: "等待发货", awaiting_registration: "等待配送注册", posting_awaiting_registration: "等待配送注册", posting_registered: "配送已注册", posting_registration_error: "配送注册异常", sent_by_seller: "卖家已交运", posting_ready_for_pickup: "等待取件", posting_transferring_to_delivery: "正在移交配送", posting_in_carriage: "已加入发运", posting_transferring: "正在转运", delivering: "运输中", delivered: "已签收", cancelled: "已取消" }[row.logistics_status || row.tracking_stage || row.platform_status || row.status]) || (row.online ? "平台已上网" : row.cancelled ? "平台已取消" : "平台状态待核对");
+const officialMemberStatus = (row) => [row.platform_status, row.logistics_status, row.tracking_stage].some((value) => ["acceptance_in_progress", "posting_acceptance_in_progress"].includes(value)) ? "平台验收中" : platformStatusLabel(row);
 const memberIds = () => normalizeOglOrderIds(selectedMembers.value.map((row) => row.order_id));
 
 watch(scope, () => { alive = false; visible.value = false; emit("close"); });
@@ -101,6 +117,68 @@ async function loadHistory() {
   if (!current()) return;
   rows.value = result.rows || [];
   total.value = Number(result.total || 0);
+}
+
+async function loadOfficialCarriages() {
+  if (!officialDate.value) { error.value = "请选择要查看的北京日期"; return; }
+  const result = await service.officialList(officialDate.value);
+  if (!current()) return;
+  officialRows.value = result.rows || [];
+  officialTotal.value = Number(result.total ?? officialRows.value.length);
+  officialShop.value = result.dispatch_shop || null;
+}
+
+async function showOfficialCarriages(date = officialDate.value) {
+  if (!current() || busy.value) return;
+  officialDate.value = date || shanghaiDateKey();
+  tab.value = "official";
+  officialDetail.value = null;
+  resetOfficialTracking();
+  officialRows.value = [];
+  officialTotal.value = 0;
+  officialShop.value = null;
+  await run(loadOfficialCarriages);
+}
+
+async function openOfficialCarriage(id) {
+  if (!current() || busy.value) return;
+  const sequence = ++readSequence;
+  const date = officialDate.value;
+  resetOfficialTracking();
+  officialDetail.value = null;
+  await run(async () => {
+    const result = await service.officialDetail(id, date);
+    if (!current() || sequence !== readSequence) return;
+    officialDetail.value = result;
+    officialDetailDate.value = date;
+    officialShop.value = result.dispatch_shop || officialShop.value;
+    tab.value = "official-detail";
+    void loadOfficialTracking();
+  });
+}
+
+function resetOfficialTracking() {
+  trackingSequence += 1;
+  officialTracking.value = null;
+  trackingLoading.value = false;
+  trackingError.value = "";
+}
+
+async function loadOfficialTracking() {
+  if (!current() || !officialDetail.value || tab.value !== "official-detail") return;
+  const sequence = ++trackingSequence;
+  const id = String(officialCarriage.value.carriage_id || officialCarriage.value.id);
+  const date = officialDetailDate.value;
+  const stillCurrent = () => current() && sequence === trackingSequence && tab.value === "official-detail" && String(officialCarriage.value.carriage_id || officialCarriage.value.id) === id && officialDetailDate.value === date;
+  officialTracking.value = null;
+  trackingError.value = "";
+  trackingLoading.value = true;
+  try {
+    const result = await service.officialTracking(id, date);
+    if (stillCurrent()) officialTracking.value = result.tracking || { status: "not_found" };
+  } catch (cause) {
+    if (stillCurrent()) trackingError.value = cause.message || "暂未取得官方标签中的运单号，请重试";
+  } finally { if (stillCurrent()) trackingLoading.value = false; }
 }
 
 function useDetail(result) {
@@ -229,7 +307,8 @@ onMounted(() => run(async () => {
   if (props.mode === "create") {
     const result = await service.preview(selectedIds);
     if (current()) preview.value = result;
-  } else if (props.batchId) useDetail(await service.detail(props.batchId));
+  } else if (props.mode === "official") await loadOfficialCarriages();
+  else if (props.batchId) useDetail(await service.detail(props.batchId));
   else await loadHistory();
 }));
 </script>
@@ -240,6 +319,7 @@ onMounted(() => run(async () => {
       <el-alert v-if="error" :title="error" type="error" :closable="true" show-icon @close="error = ''" />
       <div class="ogl-dispatch-nav">
         <el-button :disabled="busy" @click="tab = 'history'; run(loadHistory)">批次历史</el-button>
+        <el-button :disabled="busy" :type="tab.startsWith('official') ? 'primary' : 'default'" @click="showOfficialCarriages()">Ozon 后台已有单</el-button>
         <el-button v-if="preview" :disabled="busy" @click="tab = 'create'">创建批次（已选 {{ selectedIds.length }} 单）</el-button>
         <span>时间均为北京时间</span>
       </div>
@@ -251,6 +331,70 @@ onMounted(() => run(async () => {
           <p>更改只影响新批次。历史批次继续使用创建时的店铺。</p>
         </el-collapse-item>
       </el-collapse>
+
+      <template v-if="tab === 'official'">
+        <h3>Ozon 后台已有发运单</h3>
+        <p>查看默认发运店铺在 Ozon 后台已创建的单据，无需先选订单或建立 ERP 批次。此处仅查看，不确认官方单或标记实际交运。</p>
+        <div class="ogl-dispatch-actions">
+          <el-button :disabled="busy" @click="showOfficialCarriages(shanghaiDateKey())">今天</el-button>
+          <el-button :disabled="busy" @click="showOfficialCarriages(shanghaiDateDaysAgo(1))">昨天</el-button>
+          <el-date-picker v-model="officialDate" :disabled="busy" type="date" value-format="YYYY-MM-DD" placeholder="发运日期（北京时间）" aria-label="后台发运日期（北京时间）" />
+          <el-button :disabled="busy || !officialDate" @click="showOfficialCarriages()">查询后台单</el-button>
+        </div>
+        <p>创建店铺：{{ officialShop?.name || defaultShopName }} · 北京日期 {{ officialDate }} · 共 {{ officialTotal }} 单</p>
+        <el-table :data="officialRows" border @row-dblclick="row => openOfficialCarriage(row.carriage_id || row.id)">
+          <el-table-column label="Ozon 申请号" min-width="145"><template #default="{ row }"><el-button link type="primary" :disabled="busy" @click="openOfficialCarriage(row.carriage_id || row.id)">{{ row.carriage_id || row.id }}</el-button></template></el-table-column>
+          <el-table-column label="官方状态" min-width="120"><template #default="{ row }"><span :title="row.status || ''">{{ carriageStatus(row) }}</span></template></el-table-column>
+          <el-table-column prop="delivery_method_name" label="发运方式" min-width="170" />
+          <el-table-column label="发运日期（北京时间）" min-width="180"><template #default="{ row }">{{ formatDeparture(row.departure_date) }}</template></el-table-column>
+          <el-table-column label="官方货件" width="100"><template #default="{ row }">{{ row.postings_count ?? '详情查看' }}</template></el-table-column>
+          <el-table-column label="货位" width="110"><template #default="{ row }">{{ row.containers_count ?? '详情查看' }}</template></el-table-column>
+          <el-table-column label="ERP 关联" min-width="170"><template #default="{ row }">{{ row.local_batch_id ? (row.local_batch_number || `内部批次 #${row.local_batch_id}`) : '只读，未关联内部批次' }}</template></el-table-column>
+        </el-table>
+      </template>
+
+      <template v-if="tab === 'official-detail' && officialDetail">
+        <div class="ogl-dispatch-actions"><el-button :disabled="busy" @click="tab = 'official'; resetOfficialTracking()">返回后台单列表</el-button><el-button :disabled="busy" @click="openOfficialCarriage(officialCarriage.carriage_id || officialCarriage.id)">刷新只读详情</el-button></div>
+        <h3>Ozon 申请 {{ officialCarriage.carriage_id || officialCarriage.id }} <el-tag>{{ carriageStatus(officialCarriage) }}</el-tag></h3>
+        <el-alert type="info" :closable="false" :title="officialCarriage.local_batch_id ? '此页面仅查看官方记录与本地订单匹配结果，不改变官方状态、ERP 批次或实际交运记录。' : '此单仅作只读展示，尚未关联 ERP 内部批次；匹配到本地订单不代表已建立批次或已实际交运。'" />
+        <el-descriptions :column="2" border class="ogl-dispatch-readonly-detail">
+          <el-descriptions-item label="创建店铺">{{ officialShop?.name || defaultShopName }}</el-descriptions-item>
+          <el-descriptions-item label="官方状态"><span :title="officialCarriage.status || ''">{{ carriageStatus(officialCarriage) }}</span></el-descriptions-item>
+          <el-descriptions-item label="实际货位（官方回读）">{{ officialCarriage.containers_count ?? '官方尚未返回' }}</el-descriptions-item>
+          <el-descriptions-item label="发运日期（北京时间）">{{ formatDeparture(officialCarriage.departure_date) }}</el-descriptions-item>
+          <el-descriptions-item label="发运方式">{{ officialCarriage.delivery_method_name || '官方尚未返回' }}</el-descriptions-item>
+          <el-descriptions-item label="ERP 关联">{{ officialCarriage.local_batch_id ? (officialCarriage.local_batch_number || `内部批次 #${officialCarriage.local_batch_id}`) : '未关联内部批次' }}</el-descriptions-item>
+        </el-descriptions>
+        <section class="ogl-dispatch-tracking" aria-label="承运商运单与货位标签">
+          <div class="ogl-dispatch-actions"><h4>承运商运单与货位标签</h4><el-button :loading="trackingLoading" :disabled="trackingLoading" @click="loadOfficialTracking">{{ trackingLoading ? '正在读取官方标签' : '重新获取运单信息' }}</el-button></div>
+          <el-alert v-if="trackingError" type="warning" :closable="false" :title="`主运单号待获取：${trackingError}`" />
+          <el-alert v-else-if="!trackingLoading && officialTracking?.status === 'not_found'" type="info" :closable="false" :title="officialTracking.notice || '官方标签中暂未取得可核实运单号，可稍后重新获取。'" />
+          <el-descriptions :column="2" border>
+            <el-descriptions-item label="承运商">{{ officialTracking?.carrier_name || '待获取' }}</el-descriptions-item>
+            <el-descriptions-item label="主运单号"><strong class="ogl-dispatch-tracking-number">{{ masterTrackingLabel }}</strong></el-descriptions-item>
+            <el-descriptions-item label="实际货位数量">{{ officialTracking?.containers_count ?? officialCarriage.containers_count ?? '待获取' }}</el-descriptions-item>
+            <el-descriptions-item label="标签页数">{{ officialTracking?.page_count ?? (trackingLoading ? '读取中' : '待获取') }}</el-descriptions-item>
+          </el-descriptions>
+          <p v-if="trackingLoading">申请详情已加载；正在单独读取官方货位标签中的承运商运单。</p>
+          <p v-if="officialTracking?.source === 'official_container_label'">来源：Ozon 官方货位标签。Ozon 申请号与承运商运单号分别展示。</p>
+          <div v-if="officialTracking?.tracking_numbers?.length" class="ogl-dispatch-actions"><span>标签中全部运单号：</span><el-tag v-for="number in officialTracking.tracking_numbers" :key="number" class="ogl-dispatch-tracking-number">{{ number }}</el-tag></div>
+          <el-alert v-if="officialTracking?.status === 'ambiguous'" type="warning" :closable="false" :title="officialTracking.notice || '标签识别到多个运单号，尚未确认主单或子母关系，请逐项核对。'" />
+          <el-table v-if="officialTracking?.labels?.length" :data="officialTracking.labels" border max-height="250">
+            <el-table-column label="标签页序" width="130"><template #default="{ row }">第 {{ row.label_page }} 页</template></el-table-column>
+            <el-table-column label="该页运单号" min-width="230"><template #default="{ row }">{{ row.tracking_numbers?.length ? row.tracking_numbers.join('、') : '该页未识别到可核实运单号' }}</template></el-table-column>
+          </el-table>
+          <p>标签页序仅用于定位 PDF，不代表已核实的官方货位编号；多个运单号不会据此推断子母单关系。</p>
+        </section>
+        <p class="ogl-dispatch-progress">官方货件 {{ officialDetail.summary?.official_members ?? officialMembers.length }} · 本地精确匹配 {{ officialDetail.summary?.matched_local || 0 }} · 本地未匹配 {{ officialDetail.summary?.unmatched_local || 0 }} · 平台已上网 {{ officialDetail.summary?.online || 0 }}</p>
+        <el-table :data="officialMembers" border max-height="500">
+          <el-table-column prop="posting_number" label="官方货件号" min-width="180" />
+          <el-table-column label="本地匹配" min-width="145"><template #default="{ row }">{{ row.matched_local ? `已匹配订单 #${row.order_id}` : '本地未匹配' }}</template></el-table-column>
+          <el-table-column prop="shop_name" label="订单原店铺" min-width="140" />
+          <el-table-column label="平台物流" min-width="150"><template #default="{ row }"><span v-if="row.matched_local" :title="row.logistics_status || row.platform_status || ''">{{ officialMemberStatus(row) }}</span><span v-else>本地无物流数据</span></template></el-table-column>
+          <el-table-column label="上网情况" width="125"><template #default="{ row }">{{ !row.matched_local ? '待匹配核对' : row.online ? '平台已上网' : '未取得上网证据' }}</template></el-table-column>
+          <el-table-column label="本地最近同步（北京时间）" min-width="200"><template #default="{ row }">{{ formatTime(row.last_synced_at) }}</template></el-table-column>
+        </el-table>
+      </template>
 
       <template v-if="tab === 'create'">
         <h3>核对本次所选订单</h3>
@@ -371,6 +515,10 @@ onMounted(() => run(async () => {
 .ogl-dispatch-nav > span, .ogl-dispatch-note, .ogl-dispatch-panel small { color: var(--el-text-color-secondary); font-size: 12px; }
 .ogl-dispatch-panel p { line-height: 1.7; }
 .ogl-dispatch-settings, .ogl-dispatch-events { margin: 16px 0; }
+.ogl-dispatch-readonly-detail { margin-top: 16px; }
+.ogl-dispatch-tracking { margin: 18px 0; }
+.ogl-dispatch-tracking h4 { margin: 0; }
+.ogl-dispatch-tracking-number { font-family: Consolas, monospace; overflow-wrap: anywhere; }
 .ogl-dispatch-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 8px 20px; margin-top: 18px; }
 .ogl-dispatch-form .el-form-item { margin-bottom: 12px; }
 .ogl-dispatch-note { margin-left: 8px; }

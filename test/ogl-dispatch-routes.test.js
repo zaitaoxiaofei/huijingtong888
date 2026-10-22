@@ -6,7 +6,7 @@ const session = { personId: 7, tenant: { id: 12 } };
 
 test("OGL routes forward authenticated session independently from payload or query tenant", async () => {
   const calls = [];
-  const dispatch = Object.fromEntries(["bootstrap", "saveSettings", "preview", "createBatch", "listBatches", "detail", "action"].map((method) => [method, async (...args) => { calls.push({ method, args }); return { ok: true }; }]));
+  const dispatch = Object.fromEntries(["bootstrap", "saveSettings", "preview", "createBatch", "listBatches", "detail", "listOfficial", "officialDetail", "officialTracking", "action"].map((method) => [method, async (...args) => { calls.push({ method, args }); return { ok: true }; }]));
   const payload = { order_ids: [2, 3], tenant_id: 999 };
   const routes = createOglDispatchRoutes({ dispatch, readJson: async () => payload });
   const url = new URL("http://localhost/api/ogl-dispatch/batch?id=8&tenant_id=999");
@@ -16,6 +16,20 @@ test("OGL routes forward authenticated session independently from payload or que
   assert.equal(calls.find((call) => call.method === "detail").args[1], "8");
   assert.equal(calls.find((call) => call.method === "createBatch").args[1], payload);
   assert.equal(routes["GET /api/ogl-dispatch/file"], undefined);
+  assert.deepEqual(calls.find((call) => call.method === "listOfficial").args[1], { id: "8", tenant_id: "999" });
+  assert.deepEqual(calls.find((call) => call.method === "officialDetail").args[1], { id: "8", tenant_id: "999" });
+  assert.deepEqual(calls.find((call) => call.method === "officialTracking").args[1], { id: "8", tenant_id: "999" });
+});
+
+test("existing official carriage queries stay read-only and propagate dates without a local batch", async () => {
+  const calls=[];
+  const routes=createOglDispatchRoutes({dispatch:{listOfficial:async(...args)=>{calls.push(args);return {rows:[]};},officialDetail:async(...args)=>{calls.push(args);return {carriage:{id:321}};}},readJson:()=>assert.fail('GET must not read or mutate a body')});
+  const url=new URL('http://localhost/api/ogl-dispatch/official-carriage?id=321&date=2026-10-21&shop_id=999&tenant_id=999');
+  await routes['GET /api/ogl-dispatch/official-carriages']({_session:session},url);
+  await routes['GET /api/ogl-dispatch/official-carriage']({_session:session},url);
+  assert.equal(calls.length,2);
+  for(const [current,query] of calls){assert.equal(current,session);assert.equal(query.date,'2026-10-21');assert.equal(query.id,'321');}
+  assert.equal(routes['POST /api/ogl-dispatch/official-carriage'],undefined);
 });
 
 test("OGL routes await mutations and preserve service rejection", async () => {

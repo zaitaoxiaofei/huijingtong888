@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import mysql from 'mysql2/promise';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { createOglDispatchService, oglPlatformProgress, summarizeOglMembers, isOglLogisticsFresh } from '../src/services/ogl-dispatch.js';
 import { ensureOglDispatchSchema } from '../src/services/ogl-dispatch-schema.js';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
@@ -26,6 +27,75 @@ test('OGL progress uses platform evidence; handover, missing data and cancellati
   assert.equal(summarizeOglMembers(mixed).online,97);assert.equal(summarizeOglMembers(mixed).not_online,3);
 });
 
+test('official-only views show yesterday and today without local batches, remain read-only and redact unrelated fields',async()=>{
+  const session={personId:2,tenant:{id:2,slug:'fixture-enterprise'}};
+  let defaultShop=20;let linked=false;let changeDuringRequest=false;let revoked=false;let labelMode='found';let labelReads=0;let containersCount=1;const sqlCalls=[];const apiCalls=[];
+  const connection={async execute(sql,params=[]){
+    sqlCalls.push({sql,params});assert.match(sql.trim(),/^SELECT/,'Official-only viewing must never write workflow data');
+    if(sql.includes('FROM tenants t'))return [revoked?[]:[{id:2,slug:'fixture-enterprise',tenant_role:'member',business_roles_json:['packing']}]];
+    if(sql.includes('FROM ogl_dispatch_settings'))return [[{default_shop_id:defaultShop}]];
+    if(sql.includes('FROM shops s'))return [[{id:Number(params[0]),name:'Fixture default shop',ozon_client_id:'fixture-client',ozon_api_key:'fixture-key'}]];
+    if(sql.includes('FROM ogl_dispatch_batches'))return [linked?[{id:8,batch_number:'OGL-fixture',official_carriage_id:'901'}]:[]];
+    if(sql.includes('FROM orders o')){assert.equal(params[1],20);return [[{id:1,posting_number:'LOCAL-OWN',shop_id:20,platform_status:'awaiting_deliver',tracking_stage:'posting_in_carriage',last_synced_at:'2026-10-22 01:00:00'}]];}
+    throw new Error(`Unexpected SQL ${sql}`);
+  }};
+  const api={
+    async deliveryMethods(shop,filter){
+      apiCalls.push({shop:shop.id,path:'delivery-list',filter});assert.ok(['2026-10-21','2026-10-22'].includes(filter.departure_date));
+      if(changeDuringRequest)defaultShop=21;
+      const yesterday=filter.departure_date==='2026-10-21';
+      return [{delivery_method_id:77,delivery_method_name:'OGL fixture pickup',departure_date:yesterday?'2026-10-20T16:00:00Z':'2026-10-21T16:00:00Z',has_entrusted_acceptance:true,
+        carriages:[{id:0,status:'new',available_actions:['create']},{id:yesterday?901:902,status:yesterday?'received':'formed',postings_count:3,available_actions:['get_details']}]},
+        {delivery_method_id:88,departure_date:'2026-10-19T16:00:00Z',carriages:[{id:903,status:'formed'}]}];
+    },
+    async request(shop,path,body){
+      apiCalls.push({shop:shop.id,path,body});assert.equal(shop.id,20);
+      if(path==='/v1/carriage/get')return {carriage_id:body.carriage_id,delivery_method_id:77,status:body.carriage_id===901?'received':'formed',containers_count:containersCount,
+        first_mile_type:'pickup',integration_type:'ozon_outsourced',phone:'secret-phone',recipient:{name:'private-customer'},available_actions:['get_label_containers']};
+      if(path==='/v2/posting/fbs/act/get-postings')return {result:[{posting_number:'LOCAL-OWN'},{posting_number:'OTHER-SHOP'},{posting_number:'NOT-SYNCED',customer:{name:'private-customer'}}]};
+      if(path==='/v2/posting/fbs/act/get-container-labels') {
+        labelReads++;
+        if(labelMode==='network-error')throw new Error('private-customer remote error');
+        if(labelMode==='revoke')revoked=true;
+        if(labelMode==='change-default')defaultShop=21;
+        return {buffer:Buffer.from('%PDF-fixture'),contentType:'application/pdf'};
+      }
+      throw new Error(`Read-only views attempted an unsupported API ${path}`);
+    }
+  };
+  const makeService=()=>createOglDispatchService({transaction:fn=>fn(connection),api,now:()=>new Date('2026-10-21T16:30:00Z'),extractLabelTracking:async(buffer,{containersCount})=>{
+    assert.equal(buffer.toString(),'%PDF-fixture');
+    const numbers=labelMode==='not_found'?[]:labelMode==='ambiguous'?['YT3000000000001','YT3000000000002']:['YT3000000000001'];
+    return {status:labelMode==='not_found'?'not_found':numbers.length>1?'ambiguous':'found',source:'official_container_label',carrier_name:numbers.length?'圆通':null,
+      tracking_numbers:numbers,master_tracking_number:numbers.length===1?numbers[0]:null,labels:[{label_page:1,tracking_numbers:numbers}],page_count:1,containers_count:containersCount,container_mapping_confirmed:false,notice:numbers.length?'标签读取结果':'标签没有可识别文字'};
+  }});
+  const service=makeService();
+  const yesterday=await service.listOfficial(session,{date:'2026-10-21'});assert.equal(yesterday.total,1);assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status_label,'验收中');assert.equal(yesterday.rows[0].official_only,true);
+  const today=await service.listOfficial(session,{});assert.equal(today.departure_date,'2026-10-22');assert.equal(today.rows[0].carriage_id,'902');assert.equal(today.rows[0].status_label,'已生成');
+  const detail=await service.officialDetail(session,{id:902,date:'2026-10-22'});
+  assert.equal(detail.carriage.status,'formed');assert.equal(detail.carriage.status_label,'已生成');assert.equal(detail.summary.matched_local,1);assert.equal(detail.summary.unmatched_local,2);
+  assert.equal(detail.members[0].platform_status,'awaiting_deliver');assert.equal(detail.members[0].online,false,'Carriage formed never promotes member logistics');
+  assert.equal(detail.members[1].matched_local,false);assert.equal(detail.members[1].order_id,null);
+  assert.ok(!/fixture-key|secret-phone|private-customer/.test(JSON.stringify({today,yesterday,detail})));
+  const before=apiCalls.length;await assert.rejects(service.officialDetail(session,{id:901,date:'2026-10-22'}),/不在默认店铺/);assert.equal(apiCalls.slice(before).filter(call=>call.path!=='delivery-list').length,0);
+  await assert.rejects(service.listOfficial(session,{date:'2026-02-30'}),/有效的北京日期/);
+  linked=true;assert.equal((await service.listOfficial(session,{date:'2026-10-21'})).rows[0].local_batch_id,8);
+  const [tracking,concurrent]=await Promise.all([service.officialTracking(session,{id:902,date:'2026-10-22'}),service.officialTracking(session,{id:902,date:'2026-10-22'})]);
+  assert.equal(labelReads,1,'Concurrent reads share a single label/PDF parse');assert.equal(tracking.tracking.master_tracking_number,'YT3000000000001');assert.equal(concurrent.tracking.master_tracking_number,tracking.tracking.master_tracking_number);
+  tracking.tracking.tracking_numbers.push('tampered');assert.deepEqual((await service.officialTracking(session,{id:902,date:'2026-10-22'})).tracking.tracking_numbers,['YT3000000000001']);assert.equal(labelReads,1);
+  containersCount=2;assert.equal((await service.officialTracking(session,{id:902,date:'2026-10-22'})).tracking.containers_count,2);assert.equal(labelReads,2,'A fresh detail count change must not reuse the old parsed-label cache');
+  const uncached=makeService();labelMode='not_found';const beforeMissing=labelReads;
+  assert.equal((await uncached.officialTracking(session,{id:902,date:'2026-10-22'})).tracking.status,'not_found');
+  assert.match((await uncached.officialTracking(session,{id:902,date:'2026-10-22'})).tracking.notice,/未取得标签中的运单号/);assert.equal(labelReads,beforeMissing+2,'Not-found results are never cached');
+  labelMode='ambiguous';const ambiguous=await uncached.officialTracking(session,{id:902,date:'2026-10-22'});assert.equal(ambiguous.tracking.master_tracking_number,null);assert.equal(ambiguous.tracking.container_mapping_confirmed,false);
+  labelMode='network-error';await assert.rejects(makeService().officialTracking(session,{id:902,date:'2026-10-22'}),error=>error.statusCode===502&&/未取得标签中的运单号/.test(error.message)&&!error.message.includes('private-customer'));
+  assert.equal((await service.officialDetail(session,{id:902,date:'2026-10-22'})).carriage.status,'formed','A tracking failure never destroys the independently readable application detail');
+  labelMode='revoke';await assert.rejects(makeService().officialTracking(session,{id:902,date:'2026-10-22'}),error=>error.statusCode===403);revoked=false;
+  labelMode='change-default';await assert.rejects(makeService().officialTracking(session,{id:902,date:'2026-10-22'}),/默认发运店铺已变更/);defaultShop=20;labelMode='found';
+  changeDuringRequest=true;await assert.rejects(service.listOfficial(session,{date:'2026-10-22'}),/默认发运店铺已变更/);
+  assert.ok(sqlCalls.every(call=>/^SELECT/.test(call.sql.trim())));assert.ok(apiCalls.every(call=>['delivery-list','/v1/carriage/get','/v2/posting/fbs/act/get-postings','/v2/posting/fbs/act/get-container-labels'].includes(call.path)));
+});
+
 test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concurrent retries', {
   skip:!process.env.TENANT_TEST_MYSQL_SOCKET&&'Requires independent socket-only MySQL',timeout:120000
 }, async t=>{
@@ -34,9 +104,12 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
   const pool=mysql.createPool({socketPath:process.env.TENANT_TEST_MYSQL_SOCKET,user:'root',database:fixture.database,connectionLimit:4,timezone:'Z'});
   const transaction=async fn=>{const connection=await pool.getConnection();try{await connection.beginTransaction();const result=await fn(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}finally{connection.release();}};
   const query=fixture.query; const session=id=>({personId:id,tenant:{id,slug:id===1?'default':`ogl-${id}`}});
-  const calls=[]; const official=new Map(); let mode='normal'; let nextId=1000; let pauseDelivery=null; let pauseGet=null;
+  const calls=[]; const official=new Map(); let mode='normal'; let nextId=1000; let pauseDelivery=null; let pauseGet=null;let labelPdfBuffer=Buffer.from('%PDF-fixture');
   const api={
-    async deliveryMethods(shop,filter){calls.push({shop:shop.id,path:'delivery',filter});if(pauseDelivery){const pause=pauseDelivery;pauseDelivery=null;pause.enter();await pause.wait;}return [{delivery_method_id:77,name:'OGL pickup',departure_date:'2026-10-22T16:00:00Z',has_entrusted_acceptance:true,carriages:[{id:0,available_actions:['create']}]}];},
+    async deliveryMethods(shop,filter){calls.push({shop:shop.id,path:'delivery',filter});if(pauseDelivery){const pause=pauseDelivery;pauseDelivery=null;pause.enter();await pause.wait;}
+      if(mode==='official-readonly')return [{delivery_method_id:77,delivery_method_name:'OGL fixture pickup',departure_date:filter.departure_date==='2026-10-21'?'2026-10-20T16:00:00Z':'2026-10-21T16:00:00Z',has_entrusted_acceptance:true,
+        carriages:[{id:0,available_actions:['create']},{id:Number(shop.id)===30?991:filter.departure_date==='2026-10-21'?901:902,status:filter.departure_date==='2026-10-21'?'received':'formed',postings_count:4,available_actions:['get_label_containers']}]}];
+      return [{delivery_method_id:77,name:'OGL pickup',departure_date:'2026-10-22T16:00:00Z',has_entrusted_acceptance:true,carriages:[{id:0,available_actions:['create']}]}];},
     async request(shop,path,body,options){
       calls.push({shop:Number(shop.id),path,body,options});
       if(path.endsWith('/create')) {
@@ -49,7 +122,7 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       if(path.endsWith('/set-postings')) {item.numbers=body.posting_numbers;return {result:body.posting_numbers.map(posting_number=>({posting_number,result:true,error:''}))};}
       if(path.endsWith('/approve')) {item.status='sended';item.containers=body.containers_count;return {};}
       if(path.endsWith('/courier-contact/set'))return {};
-      if(options?.binary)return {buffer:Buffer.from('%PDF-fixture'),contentType:'application/pdf'};
+      if(options?.binary)return {buffer:labelPdfBuffer,contentType:'application/pdf'};
       throw new Error(`Unexpected API fixture ${path}`);
     }
   };
@@ -79,6 +152,36 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       await assert.rejects(service.saveSettings({personId:4,tenant:{id:2,slug:'ogl-2'}},{dispatch_shop_id:20}),/负责人|管理员/);
       await assert.rejects(service.saveSettings(session(2),{dispatch_shop_id:30}),/不属于/);
       await service.saveSettings(session(2),{dispatch_shop_id:20});
+    });
+    await t.test('existing official carriages need no ERP batch and exact original-shop matching does not cross enterprises',async()=>{
+      await service.saveSettings(session(3),{dispatch_shop_id:30});mode='official-readonly';
+      for(const [carriageId,status] of [[901,'received'],[902,'formed']])official.set(carriageId,{status,method:77,containers:1,numbers:['A1','A2','B1','NOT-SYNCED']});
+      const snapshot=await query('SELECT (SELECT COUNT(*) FROM ogl_dispatch_batches) AS batches,(SELECT COUNT(*) FROM ogl_dispatch_members) AS members,(SELECT COUNT(*) FROM ogl_dispatch_events) AS events,(SELECT COUNT(*) FROM ogl_dispatch_official_locks) AS locks');
+      const offset=calls.length;
+      const yesterday=await service.listOfficial(session(2),{date:'2026-10-21',tenant_id:3,shop_id:30});
+      assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status,'received');assert.equal(yesterday.rows[0].official_only,true);assert.equal(yesterday.rows[0].local_batch_id,null);
+      const today=await service.listOfficial(session(2),{date:'2026-10-22'});assert.equal(today.rows[0].status_label,'已生成');assert.equal(today.rows[0].containers_count,null);
+      const current=await service.officialDetail(session(2),{id:902,date:'2026-10-22',tenant_id:3,shop_id:30});
+      assert.deepEqual(current.summary,{official_members:4,matched_local:1,unmatched_local:3,online:0});assert.equal(current.members[0].order_id,1);
+      assert.equal(current.members.find(row=>row.posting_number==='A2').matched_local,false,'Same-enterprise other shop is not the official source shop');
+      assert.equal(current.members.find(row=>row.posting_number==='B1').order_id,null,'Foreign-enterprise order details are not exposed');
+      assert.equal(current.carriage.status,'formed');assert.equal(current.members[0].platform_status,'awaiting_deliver');assert.equal(current.members[0].online,false);
+      await assert.rejects(service.officialDetail(session(3),{id:902,date:'2026-10-22',tenant_id:2,shop_id:20}),/不在默认店铺/);
+      const pdf=await PDFDocument.create();const font=await pdf.embedFont(StandardFonts.Helvetica);pdf.addPage().drawText('YT3000000000001',{font,size:18,x:30,y:300});labelPdfBuffer=Buffer.from(await pdf.save());
+      const [tracking,concurrent]=await Promise.all([service.officialTracking(session(2),{id:902,date:'2026-10-22'}),service.officialTracking(session(2),{id:902,date:'2026-10-22'})]);
+      assert.equal(tracking.tracking.master_tracking_number,'YT3000000000001');assert.equal(concurrent.tracking.master_tracking_number,tracking.tracking.master_tracking_number);
+      assert.equal(tracking.tracking.containers_count,1);assert.equal(tracking.tracking.container_mapping_confirmed,false);
+      assert.equal(calls.slice(offset).filter(call=>call.path==='/v2/posting/fbs/act/get-container-labels').length,1);
+      official.get(902).containers=2;const revalidated=await service.officialTracking(session(2),{id:902,date:'2026-10-22'});assert.equal(revalidated.tracking.containers_count,2);
+      assert.equal(calls.slice(offset).filter(call=>call.path==='/v2/posting/fbs/act/get-container-labels').length,2,'The real parser is called again after a verified count change');official.get(902).containers=1;
+      let enter,release;const entered=new Promise(resolve=>{enter=resolve;});const wait=new Promise(resolve=>{release=resolve;});pauseDelivery={enter,wait};
+      const pending=service.listOfficial(session(2),{date:'2026-10-22'}).then(value=>({value}),error=>({error}));
+      await entered;await query('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=2');release();assert.equal((await pending).error.statusCode,403);
+      await query('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=2');
+      assert.deepEqual(await query('SELECT (SELECT COUNT(*) FROM ogl_dispatch_batches) AS batches,(SELECT COUNT(*) FROM ogl_dispatch_members) AS members,(SELECT COUNT(*) FROM ogl_dispatch_events) AS events,(SELECT COUNT(*) FROM ogl_dispatch_official_locks) AS locks'),snapshot);
+      assert.ok(calls.slice(offset).every(call=>['delivery','/v1/carriage/get','/v2/posting/fbs/act/get-postings','/v2/posting/fbs/act/get-container-labels'].includes(call.path)));
+      assert.ok(calls.slice(offset).filter(call=>call.path==='delivery').every(call=>/^2026-10-(21|22)$/.test(call.filter.departure_date)));
+      mode='normal';
     });
     await t.test('idempotent creation and concurrent overlap preserve one active association',async()=>{
       const payload={order_ids:[1,2],container_count:3,client_request_id:'retry-one'};

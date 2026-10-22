@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
-import { shanghaiDateKey } from "../frontend/admin/utils/shanghai-date.js";
+import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText } from "../frontend/admin/utils/shanghai-date.js";
 import { STATE_META } from "../frontend/orders/constants/orders-ui.js";
 
 const serviceSource = readFileSync(new URL("../frontend/orders/services/ogl-dispatch-service.js", import.meta.url), "utf8")
@@ -11,7 +11,7 @@ const panelSource = readFileSync(new URL("../frontend/orders/components/OglDispa
   .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, "");
 
 const detail = (changes = {}) => ({ batch: { id: 71, batch_number: "OGL-TEST", containers_count: 3, official_status: "not_created", ...changes }, members: [], events: [], summary: {} });
-function fixture({ preview, action, bootstrap } = {}) {
+function fixture({ preview, action, bootstrap, props = {}, officialList, officialDetail, officialTracking } = {}) {
   const calls = [], emitted = [], mounts = [];
   let session = "A";
   const service = {
@@ -20,11 +20,14 @@ function fixture({ preview, action, bootstrap } = {}) {
     create: async (payload) => { calls.push(["create", payload]); return detail(); },
     action: async (...args) => { calls.push(["action", ...args]); return action ? action(...args) : detail(); },
     detail: async (id) => { calls.push(["detail", id]); return detail({ official_status: "create_unknown" }); },
-    list: async () => ({ rows: [], total: 0 })
+    list: async () => ({ rows: [], total: 0 }),
+    officialList: async (date) => { calls.push(["official-list", date]); return officialList ? officialList(date) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: `${date}T02:00:00Z` }], total: 1, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
+    officialDetail: async (id, date) => { calls.push(["official-detail", id, date]); return officialDetail ? officialDetail(id, date) : { carriage: { carriage_id: id, status: "formed", containers_count: 4 }, members: [{ posting_number: "fixture-only", matched_local: false }], summary: { official_members: 1, matched_local: 0, unmatched_local: 1, online: 0 }, dispatch_shop: { id: 8, name: "Creation Shop" } }; },
+    officialTracking: async (id, date) => { calls.push(["official-tracking", id, date]); return officialTracking ? officialTracking(id, date) : { tracking: { status: "found", source: "official_container_label", carrier_name: "圆通", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], page_count: 1, containers_count: 4, labels: [{ label_page: 1, tracking_numbers: ["YT000000000001"] }], container_mapping_confirmed: false } }; }
   };
   const context = vm.createContext({
     URLSearchParams, console, apiClient: {}, service,
-    defineProps: () => ({ mode: "create", orderIds: [11, "22", 33, 11], batchId: 0 }),
+    defineProps: () => ({ mode: "create", orderIds: [11, "22", 33, 11], batchId: 0, ...props }),
     defineEmits: () => (...args) => emitted.push(args),
     useAuthStore: () => ({ user: { id: 1, tenant: { id: 10 } } }), currentApiCacheScope: () => session,
     ref: (value) => ({ value }), reactive: (value) => value,
@@ -32,7 +35,7 @@ function fixture({ preview, action, bootstrap } = {}) {
     onMounted: (callback) => mounts.push(callback), onBeforeUnmount() {}, watch() {},
     ElMessage: { success() {}, info() {} },
     ElMessageBox: { prompt: async () => ({ value: "核实缺货未交出" }), confirm: async () => true },
-    shanghaiDateKey, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
+    shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
   });
   vm.runInContext(serviceSource, context);
   // The component deliberately consumes the injected transport, never a real API.
@@ -136,6 +139,15 @@ test("official date-time options and saved batches become Beijing-calendar date-
   assert.equal(f.get("form.departure_date"), "2026-10-24");
 });
 
+test("official date-only departures display the Beijing calendar day without inventing a time", () => {
+  const f = fixture();
+  assert.equal(f.get("formatDeparture('2026-10-21')"), "2026-10-21");
+  assert.equal(f.get("formatDeparture('2026-10-22')"), "2026-10-22");
+  assert.doesNotMatch(f.get("formatDeparture('2026-10-21')"), /08:00|00:00|T|Z/);
+  assert.equal(f.get("formatDeparture('2026-10-22T02:00:00Z')"), "2026-10-22T02:00:00Z", "complete timestamps still use the shared date-time formatter");
+  assert.equal(f.get("formatDeparture(null)"), "-");
+});
+
 test("authoritative OGL platform state overrides stale awaiting-deliver fields in tabs, labels and actions", () => {
   const f = fixture();
   const composable = readFileSync(new URL("../frontend/orders/composables/useOrdersPage.js", import.meta.url), "utf8");
@@ -163,4 +175,110 @@ test("duplicate method IDs display all Beijing departure days and preserve an av
   assert.equal(f.get("officialMethodOptions.value.length"), 1);
   assert.equal(f.get("officialMethodOptions.value[0].label"), "OGL（2026-10-22、2026-10-23）");
   assert.equal(f.get("form.departure_date"), "2026-10-23");
+});
+
+test("existing Ozon carriages can be read for today and yesterday with no selected orders or internal batch writes", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] } });
+  await f.mount();
+  assert.equal(f.get("tab.value"), "official");
+  assert.deepEqual(f.calls[0], ["official-list", shanghaiDateKey()]);
+  assert.equal(f.get("officialRows.value.length"), 1);
+  await f.get("showOfficialCarriages('2026-10-21')");
+  await f.get("openOfficialCarriage('88001')");
+  assert.equal(f.get("tab.value"), "official-detail");
+  assert.equal(f.get("officialCarriage.value.containers_count"), 4, "use the actual detail count rather than assuming the list/member count");
+  assert.equal(f.get("officialMembers.value[0].matched_local"), false);
+  assert.deepEqual(f.calls.find(([name]) => name === "official-detail"), ["official-detail", "88001", "2026-10-21"]);
+  assert.ok(f.calls.every(([name]) => ["official-list", "official-detail", "official-tracking"].includes(name)), "read-only workflow must not create, preview, approve or dispatch a batch");
+  assert.equal(f.emitted.length, 0);
+  assert.equal(f.get("carriageStatus({status:'formed'})"), "已生成");
+  assert.equal(f.get("carriageStatus({status:'received'})"), "承运方已接收");
+  assert.equal(f.get("carriageStatus({status:'received',status_label:'验收中'})"), "验收中");
+  assert.equal(f.get("officialMemberStatus({platform_status:'acceptance_in_progress',logistics_status:'posting_acceptance_in_progress'})"), "平台验收中");
+  assert.equal(f.get("officialMemberStatus({platform_status:'awaiting_deliver',logistics_status:'posting_in_carriage'})"), "已加入发运");
+});
+
+test("late existing-carriage details cannot appear after tenant/session rotation", async () => {
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialDetail: () => pending });
+  await f.mount();
+  const read = f.get("openOfficialCarriage('88001')");
+  f.rotate();
+  finish({ carriage: { carriage_id: "private-old-tenant" }, members: [{ posting_number: "private-old-tenant" }] });
+  await read;
+  assert.equal(f.get("officialDetail.value"), null);
+  assert.equal(f.get("tab.value"), "official");
+});
+
+test("existing-carriage transport uses only authenticated date-filtered GET endpoints", async () => {
+  const f = fixture();
+  const calls = [];
+  const transport = f.context.createOglDispatchService({ get: async (url) => { calls.push(url); return {}; } });
+  await transport.officialList("2026-10-21");
+  await transport.officialDetail("88001", "2026-10-21");
+  await transport.officialTracking("88001", "2026-10-21");
+  assert.deepEqual(calls, ["/api/ogl-dispatch/official-carriages?date=2026-10-21", "/api/ogl-dispatch/official-carriage?id=88001&date=2026-10-21", "/api/ogl-dispatch/official-carriage-tracking?id=88001&date=2026-10-21"]);
+});
+
+test("official carriage details render without waiting for the separate label tracking read", async () => {
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialTracking: () => pending });
+  await f.mount();
+  assert.equal(f.calls.some(([name]) => name === "official-tracking"), false, "list loading must not download every label PDF");
+  await f.get("openOfficialCarriage('88001')");
+  assert.equal(f.get("officialCarriage.value.carriage_id"), "88001");
+  assert.equal(f.get("busy.value"), false);
+  assert.equal(f.get("trackingLoading.value"), true);
+  assert.equal(f.get("masterTrackingLabel.value"), "待获取");
+  finish({ tracking: { status: "found", master_tracking_number: "YT000000000001", tracking_numbers: ["YT000000000001"], containers_count: 4 } });
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  assert.equal(f.get("masterTrackingLabel.value"), "YT000000000001");
+  assert.equal(f.get("trackingLoading.value"), false);
+});
+
+test("late tracking reads cannot leak another carriage, Beijing date or tenant into the current detail", async () => {
+  const pending = [];
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialTracking: () => new Promise((resolve) => pending.push(resolve)) });
+  await f.mount();
+  await f.get("openOfficialCarriage('88001')");
+  await f.get("showOfficialCarriages('2026-10-21');");
+  await f.get("openOfficialCarriage('88002')");
+  pending[0]({ tracking: { status: "found", master_tracking_number: "YT000000000001" } });
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  assert.equal(f.get("officialTracking.value"), null);
+  assert.equal(f.get("masterTrackingLabel.value"), "待获取");
+  pending[1]({ tracking: { status: "found", master_tracking_number: "YT000000000002" } });
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  assert.equal(f.get("masterTrackingLabel.value"), "YT000000000002");
+  const read = f.get("loadOfficialTracking()");
+  assert.equal(f.get("officialTracking.value"), null, "retry must clear the last number immediately");
+  f.rotate();
+  pending[2]({ tracking: { status: "found", master_tracking_number: "private-old-tenant" } });
+  await read;
+  assert.equal(f.get("officialTracking.value"), null);
+});
+
+test("tracking failures and multiple label numbers do not guess a master number or overwrite the main detail", async () => {
+  let attempt = 0;
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialTracking: async () => {
+    if (++attempt === 1) throw new Error("标签读取暂不可用");
+    if (attempt === 2) return { tracking: { status: "not_found", master_tracking_number: null, tracking_numbers: [], labels: [] } };
+    return { tracking: { status: "ambiguous", master_tracking_number: null, tracking_numbers: ["YT000000000001", "YT000000000002"], page_count: 3, containers_count: 2, labels: [{ label_page: 1, tracking_numbers: ["YT000000000001"] }, { label_page: 2, tracking_numbers: ["YT000000000001"] }, { label_page: 3, tracking_numbers: ["YT000000000002"] }], container_mapping_confirmed: false } };
+  } });
+  await f.mount();
+  await f.get("openOfficialCarriage('88001')");
+  assert.match(f.get("trackingError.value"), /标签读取暂不可用/);
+  assert.equal(f.get("error.value"), "");
+  assert.equal(f.get("officialCarriage.value.carriage_id"), "88001");
+  await f.get("loadOfficialTracking()");
+  assert.equal(f.get("trackingError.value"), "");
+  assert.equal(f.get("masterTrackingLabel.value"), "待获取");
+  await f.get("loadOfficialTracking()");
+  assert.equal(f.get("masterTrackingLabel.value"), "多个运单，主单关系待确认");
+  assert.equal(f.get("officialTracking.value.tracking_numbers.length"), 2);
+  assert.equal(f.get("officialTracking.value.labels.length"), 3);
+  assert.equal(f.get("officialTracking.value.containers_count"), 2);
+  assert.equal(f.get("officialTracking.value.container_mapping_confirmed"), false);
 });

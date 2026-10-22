@@ -1744,6 +1744,7 @@ function bulkPrintSelected() {
 }
 
 function handleToolbarMoreAction(action) {
+  if (action === "ogl-official-carriages") return openOglDispatch("official");
   if (action === "ogl-create-batch") return openOglDispatch("create");
   if (action === "ogl-batch-history") return openOglDispatch("history");
   if (action === "print-selected") return bulkPrintSelected();

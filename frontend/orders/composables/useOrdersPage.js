@@ -135,6 +135,7 @@ const FULFILLMENT_TYPE_OPTIONS = [
 ];
 
 const MORE_ACTIONS = [
+  { value: "ogl-official-carriages", label: "Ozon 后台已有申请" },
   { value: "ogl-create-batch", label: "创建 OGL 发运批次" },
   { value: "ogl-batch-history", label: "OGL 发运批次" },
   { value: "recalculate-profit", label: "重算利润" },
