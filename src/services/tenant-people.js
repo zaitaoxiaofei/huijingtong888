@@ -10,6 +10,13 @@ function fail(message, statusCode = 400) {
   throw Object.assign(new Error(message), { statusCode });
 }
 
+function accountKindQueryFailure(error) {
+  if (error.code === "ER_BAD_FIELD_ERROR" && String(error.sqlMessage || error.message).includes("account_kind")) {
+    fail("企业人员的账号类型字段尚未迁移，请联系平台维护人员执行私信数据库迁移", 503);
+  }
+  throw error;
+}
+
 function positiveId(value, label) {
   const id = Number(value);
   if (!Number.isSafeInteger(id) || id <= 0) fail(`${label}无效`, 403);
@@ -76,7 +83,7 @@ function memberResult(row) {
 async function memberById(connection, tenantId, personId, lock = false) {
   const [rows] = await connection.execute(`SELECT ${MEMBER_COLUMNS}
     FROM tenant_members tm JOIN people p ON p.id = tm.person_id JOIN tenants t ON t.id = tm.tenant_id
-    WHERE tm.tenant_id = ? AND tm.person_id = ?${lock ? " FOR UPDATE" : ""}`, [tenantId, personId]);
+    WHERE tm.tenant_id = ? AND tm.person_id = ? AND p.account_kind = 'person'${lock ? " FOR UPDATE" : ""}`, [tenantId, personId]).catch(accountKindQueryFailure);
   if (!rows[0]) fail("该人员不属于当前企业", 404);
   return memberResult(rows[0]);
 }
@@ -110,7 +117,7 @@ export async function listEnterprisePeopleMysql(session) {
     const tenant = await requireEnterpriseAdmin(connection, session);
     const [rows] = await connection.execute(`SELECT ${MEMBER_COLUMNS}
       FROM tenant_members tm JOIN people p ON p.id = tm.person_id JOIN tenants t ON t.id = tm.tenant_id
-      WHERE tm.tenant_id = ? ORDER BY tm.active DESC, p.id`, [Number(tenant.id)]);
+      WHERE tm.tenant_id = ? AND p.account_kind = 'person' ORDER BY tm.active DESC, p.id`, [Number(tenant.id)]).catch(accountKindQueryFailure);
     return rows.map(memberResult);
   });
 }

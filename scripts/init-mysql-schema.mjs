@@ -10,6 +10,7 @@ import { MATERIAL_ASSETS_SCHEMA } from "../src/services/material-assets-schema.j
 import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from "../src/services/customer-message-template-schema.js";
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "../src/services/customer-message-core-schema.js";
 import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-schema.js";
+import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-voucher-schema.js";
 
 const mysqlSchemaSql = `
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
@@ -26,6 +27,7 @@ ${CUSTOMER_MESSAGE_TEMPLATES_SCHEMA};
 ${CUSTOMER_MESSAGE_SHOP_SCHEMA};
 ${CUSTOMER_MESSAGE_TASKS_SCHEMA};
 ${AI_VEHICLE_CATALOG_SCHEMA};
+${SUBSCRIPTION_VOUCHER_SCHEMA};
 CREATE TABLE IF NOT EXISTS media_migration_map (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   source_fingerprint CHAR(64) NOT NULL,
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS shops (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS people (
+  account_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'person',
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
   username VARCHAR(255) NULL,

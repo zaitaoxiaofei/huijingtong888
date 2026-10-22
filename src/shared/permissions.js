@@ -59,7 +59,7 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
-  if (["/dashboard", "/onboarding", "/login"].includes(path)) return "common";
+  if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
   if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";
   if (path === "/tenant-management" || path === "/platform-accounts" || path.startsWith("/settings")) return "platform.admin";
   if (path.startsWith("/asset-variant-center") || path === "/tenant-shops" || path === "/tenant-people") return "enterprise.admin";
@@ -74,11 +74,19 @@ export function pagePermission(path = "") {
   return "operations";
 }
 
+export function needsMembershipActivation(subject) {
+  if (isPlatformAdmin(subject) || !subject?.tenant?.id) return false;
+  return subject.tenant.access_allowed === false
+    || ["unactivated", "expired", "suspended"].includes(subject.tenant.subscription_status);
+}
+
 export function canAccessPage(subject, path) {
   const permission = pagePermission(path);
   if (permission === "platform.admin") return isPlatformAdmin(subject);
   if (path === "/login") return true;
+  if (path === "/membership") return Boolean(subject?.tenant?.id) || isPlatformAdmin(subject);
   if (subject && typeof subject === "object" && !Array.isArray(subject) && !subject.tenant?.id) return false;
+  if (needsMembershipActivation(subject) && !["/tools/pricing", "/tools/profit-calculator"].includes(path)) return false;
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
   if (permission === "finance") return isPlatformAdmin(subject) || (path === "/finance-center" && isEnterpriseAdmin(subject));
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;

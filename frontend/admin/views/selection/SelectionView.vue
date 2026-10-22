@@ -1873,7 +1873,7 @@ async function loadSelectionMetaData(options = {}) {
   if (!force && state.people.length && state.suppliers.length && state.logisticsRules.length) return true;
   try {
     const [people, suppliers, logisticsRules] = await Promise.all([
-      isTenantScoped.value ? apiClient.get("/api/tenants/members") : apiClient.get("/api/people"),
+      apiClient.get("/api/people"),
       apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100"),
       apiClient.get("/api/logistics-rules")
     ]);
@@ -1905,7 +1905,7 @@ async function loadPageData(options = {}) {
   try {
     const shouldLoadMeta = !deferMeta && (!silent || !state.people.length || !state.suppliers.length || !state.logisticsRules.length);
     const metaPromise = Promise.all([
-      shouldLoadMeta ? (isTenantScoped.value ? apiClient.get("/api/tenants/members") : apiClient.get("/api/people")) : Promise.resolve(state.people),
+      shouldLoadMeta ? apiClient.get("/api/people") : Promise.resolve(state.people),
       shouldLoadMeta ? apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100") : Promise.resolve(state.suppliers),
       shouldLoadMeta ? apiClient.get("/api/logistics-rules") : Promise.resolve(state.logisticsRules)
     ]).then((values) => ({ values }), (error) => ({ error }));

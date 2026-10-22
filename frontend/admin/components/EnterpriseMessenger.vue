@@ -15,8 +15,20 @@ const detailVisible = ref(false), detailLoading = ref(false), detailError = ref(
 const drafts = reactive(new Map());
 let scope = currentApiCacheScope(), generation = 0, threadVersion = 0, referenceVersion = 0, detailVersion = 0, afterId = 0, timer = 0, polling = false, disposed = false;
 const controllers = new Set();
+let composing = false, compositionEndedAt = 0;
 const me = computed(() => Number(auth.user?.id || auth.user?.person_id));
 const peer = computed(() => contacts.value.find(person => Number(person.id) === Number(peerId.value)) || conversations.value.find(item => Number(item.peer.id) === Number(peerId.value))?.peer);
+function personName(person) { return person?.name || person?.username || "同事"; }
+function personInitial(person) { return Array.from(personName(person).trim())[0] || "?"; }
+function messagePerson(message) { return Number(message.sender_id) === me.value ? auth.user : peer.value; }
+function referenceKind(reference) { return reference?.type === "procurement" ? "采购需求" : "订单"; }
+function onComposerKeydown(event) {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  // Some IMEs end composition immediately before their confirming keydown.
+  if (event.isComposing || event.keyCode === 229 || composing || Date.now() - compositionEndedAt < 50) return;
+  event.preventDefault();
+  if (!event.repeat) void send();
+}
 const draft = computed(() => {
   if (!drafts.has(peerId.value)) drafts.set(peerId.value, { text: "", reference: null, pending: null });
   return drafts.get(peerId.value);
@@ -37,6 +49,7 @@ function reset() {
   messages.value = []; afterId = 0; drafts.clear(); references.value = []; pendingReference.value = null; referenceQuery.value = ""; referenceType.value = "order"; referenceLoading.value = false;
   error.value = ""; loading.value = false; sending.value = false; referencePicker.value = false;
   detailVisible.value = false; detailRecord.value = null; detailError.value = ""; detailLoading.value = false;
+  composing = false; compositionEndedAt = 0;
 }
 async function refreshSummary() {
   const version = generation;
@@ -164,6 +177,12 @@ async function visit(reference) {
   finally { if (sameScope(version) && ticket === detailVersion) detailLoading.value = false; }
 }
 function procurementStatus(value) { return ({ pending: "待采购", ordered: "已下单", purchased: "已采购", completed: "已完成", cancelled: "已取消", rejected: "已拒绝", partially_received: "部分收货", received: "已收货" })[value] || value || "—"; }
+function openProcurementRecord() {
+  if (!detailRecord.value) return;
+  const requestId = Number(detailRecord.value.id);
+  detailVisible.value = false; visible.value = false;
+  router.push({ path: "/procurement/workspace", query: { message_request_id: requestId } }).catch(fail);
+}
 onMounted(() => {
   window.addEventListener("erp:auth-scope-changed", reset); window.addEventListener("erp:open-private-message", handleOpen);
   document.addEventListener("visibilitychange", poll); timer = window.setInterval(poll, 15000); void poll();
@@ -183,27 +202,30 @@ onBeforeUnmount(() => {
       <aside class="messenger-contacts">
         <span class="messenger-hint">{{ auth.user?.tenant?.name }} · 仅企业内一对一私信</span>
         <el-select :model-value="peerId" aria-label="选择私信同事" placeholder="选择同事，开始私信" filterable clearable @change="choosePeer">
-          <el-option v-for="person in contacts" :key="person.id" :label="person.name || person.username" :value="Number(person.id)" />
+          <el-option v-for="person in contacts" :key="person.id" :label="personName(person)" :value="Number(person.id)"><span class="messenger-contact-option"><el-avatar :src="person.avatar_url" :size="28" aria-hidden="true">{{ personInitial(person) }}</el-avatar><span>{{ personName(person) }}</span></span></el-option>
         </el-select>
         <div class="messenger-conversations">
           <button v-for="conversation in conversations" :key="conversation.peer.id" type="button" class="messenger-conversation" :class="{ 'is-active': Number(peerId) === Number(conversation.peer.id) }" @click="choosePeer(conversation.peer.id)">
-            <strong>{{ conversation.peer.name || conversation.peer.username }} <el-badge v-if="conversation.unread_count" :value="conversation.unread_count" :max="99" /></strong>
-            <span>{{ conversation.last_message?.text || '暂无消息' }}</span>
+            <el-avatar :src="conversation.peer.avatar_url" :size="38" aria-hidden="true">{{ personInitial(conversation.peer) }}</el-avatar>
+            <span class="messenger-conversation__copy"><strong>{{ personName(conversation.peer) }} <el-badge v-if="conversation.unread_count" :value="conversation.unread_count" :max="99" /></strong><span>{{ conversation.last_message?.text || '暂无消息' }}</span></span>
           </button>
           <p v-if="!conversations.length" class="messenger-hint">选择同事开始对话，消息会保存在当前企业中。</p>
         </div>
       </aside>
       <section class="messenger-thread">
-        <header><strong>{{ peer?.name || peer?.username || '选择一位同事' }}</strong><small>私信内容仅收发双方可见</small></header>
+        <header><span class="messenger-peer"><el-avatar v-if="peer" :src="peer.avatar_url" :size="36" aria-hidden="true">{{ personInitial(peer) }}</el-avatar><strong>{{ peer ? personName(peer) : '选择一位同事' }}</strong></span><small>私信内容仅收发双方可见</small></header>
         <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
         <div ref="transcript" v-loading="loading" class="messenger-transcript" aria-label="私信记录">
           <el-button v-if="hasOlder" text :loading="loading" @click="loadThread({ older: true })">加载更早消息</el-button>
           <p v-if="peerId && !messages.length && !loading" class="messenger-hint">还没有消息，发送第一条私信吧。</p>
           <article v-for="message in messages" :key="message.id" class="messenger-message" :class="{ 'is-mine': Number(message.sender_id) === me }">
-            <small>{{ Number(message.sender_id) === me ? '我' : (peer?.name || peer?.username) }} · {{ shanghaiDateTimeText(message.created_at, { assumeUtcWhenNaive: true }) }}</small>
-            <div class="messenger-message__bubble">
-              <button v-if="message.reference" type="button" class="messenger-reference" :disabled="!message.reference.available" @click="visit(message.reference)">{{ message.reference.label }} <span v-if="message.reference.available">↗</span></button>
-              <p>{{ message.text }}</p>
+            <el-avatar :src="messagePerson(message)?.avatar_url" :size="34" aria-hidden="true">{{ personInitial(messagePerson(message)) }}</el-avatar>
+            <div class="messenger-message__content">
+              <small>{{ Number(message.sender_id) === me ? '我' : personName(peer) }} · {{ shanghaiDateTimeText(message.created_at, { assumeUtcWhenNaive: true }) }}</small>
+              <div class="messenger-message__bubble">
+                <button v-if="message.reference" type="button" class="messenger-reference messenger-reference--card" :disabled="!message.reference.available" @click="visit(message.reference)"><span class="messenger-reference__kind">{{ referenceKind(message.reference) }}</span><strong>{{ message.reference.label }}</strong><small>{{ message.reference.available ? `查看${referenceKind(message.reference)}详情 ↗` : '当前记录暂不可访问' }}</small></button>
+                <p>{{ message.text }}</p>
+              </div>
             </div>
           </article>
         </div>
@@ -211,11 +233,11 @@ onBeforeUnmount(() => {
           <div class="messenger-compose-tools"><el-button text size="small" :disabled="sending" @click="referencePicker = !referencePicker; references = []">引用订单 / 采购需求</el-button><el-tag v-if="draft.reference" closable @close="draft.reference = null">{{ draft.reference.label || `${draft.reference.type === 'order' ? '订单' : '采购需求'} #${draft.reference.id}` }}</el-tag></div>
           <div v-if="referencePicker" class="messenger-reference-picker">
             <div><el-select v-model="referenceType" aria-label="引用记录类型" @change="references = []"><el-option label="订单" value="order" /><el-option label="采购需求" value="procurement" /></el-select><el-input v-model="referenceQuery" aria-label="查找引用记录" placeholder="输入订单号或采购需求 ID" @keyup.enter="findReferences" /><el-button :loading="referenceLoading" @click="findReferences">查找</el-button></div>
-            <button v-for="reference in references" :key="`${reference.type}:${reference.id}`" type="button" class="messenger-reference" @click="chooseReference(reference)">{{ reference.label }}</button>
+            <button v-for="reference in references" :key="`${reference.type}:${reference.id}`" type="button" class="messenger-reference messenger-reference--result" @click="chooseReference(reference)"><span class="messenger-reference__kind">{{ referenceKind(reference) }}</span><strong>{{ reference.label }}</strong><small>关联此记录</small></button>
             <p v-if="!references.length" class="messenger-hint">仅可引用当前企业且你有权查看的记录。</p>
           </div>
-          <el-input v-model="draft.text" type="textarea" :rows="3" maxlength="4000" show-word-limit :disabled="sending" resize="none" aria-label="私信内容" placeholder="输入消息，Ctrl / Cmd + Enter 发送" @keydown.ctrl.enter.prevent="send" @keydown.meta.enter.prevent="send" />
-          <div class="messenger-send"><span>Enter 换行 · Ctrl / Cmd + Enter 发送</span><el-button type="primary" :disabled="!draft.text.trim()" :loading="sending" @click="send">发送私信</el-button></div>
+          <el-input v-model="draft.text" type="textarea" :rows="3" maxlength="4000" show-word-limit :disabled="sending" resize="none" aria-label="私信内容" placeholder="输入消息，Enter 发送，Shift + Enter 换行" @compositionstart="composing = true" @compositionend="composing = false; compositionEndedAt = Date.now()" @keydown="onComposerKeydown" />
+          <div class="messenger-send"><span>Enter 发送 · Shift + Enter 换行</span><el-button type="primary" :disabled="!draft.text.trim()" :loading="sending" @click="send">发送私信</el-button></div>
         </div>
         <p v-else-if="pendingReference" class="messenger-hint">已选中引用记录，请先选择收件同事。</p>
       </section>
@@ -234,7 +256,7 @@ onBeforeUnmount(() => {
         <el-descriptions-item label="备注">{{ detailRecord.note || '—' }}</el-descriptions-item>
       </el-descriptions>
     </div>
-    <template #footer><el-button @click="detailVisible = false">关闭</el-button><el-button v-if="detailRecord" type="primary" @click="detailVisible = false; visible = false; router.push('/procurement/workspace').catch(fail)">打开采购工作台</el-button></template>
+    <template #footer><el-button @click="detailVisible = false">关闭</el-button><el-button v-if="detailRecord" type="primary" @click="openProcurementRecord">在采购工作台查看</el-button></template>
   </el-dialog>
 </template>
 
@@ -245,26 +267,44 @@ onBeforeUnmount(() => {
 .messenger-contacts { min-width: 0; padding-right: 16px; border-right: 1px solid var(--erp-border); display: flex; flex-direction: column; gap: 14px; }
 .messenger-hint { color: var(--erp-text-regular); font-size: 12px; line-height: 1.7; }
 .messenger-conversations { min-height: 0; overflow: auto; }
-.messenger-conversation { display: grid; gap: 7px; width: 100%; text-align: left; padding: 12px; border: 1px solid transparent; background: transparent; color: inherit; border-radius: 8px; cursor: pointer; }
+.messenger-contact-option, .messenger-peer { display: flex; align-items: center; gap: 9px; }
+.messenger-contact-option { min-height: 34px; }
+.messenger-contacts :deep(.el-select__wrapper) { background: var(--erp-surface-alt); }
+.messenger-contacts :deep(.el-select__selected-item) { color: var(--erp-text-main); }
+.messenger-conversation { display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; text-align: left; padding: 12px 9px; border: 1px solid transparent; background: transparent; color: inherit; border-radius: 10px; cursor: pointer; }
 .messenger-conversation strong { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
-.messenger-conversation > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--erp-text-regular); font-size: 12px; }
+.messenger-conversation__copy { min-width: 0; display: grid; gap: 6px; }
+.messenger-conversation__copy > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--erp-text-regular); font-size: 12px; }
 .messenger-conversation:hover, .messenger-conversation.is-active { background: var(--erp-primary-soft); border-color: var(--erp-primary-border); }
 .messenger-thread { min-width: 0; min-height: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 10px; }
 .messenger-thread > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--erp-border); }
 .messenger-thread > header small { font-size: 11px; color: var(--erp-text-regular); }
 .messenger-transcript { flex: 1; min-height: 80px; overflow: auto; padding: 4px 8px; overscroll-behavior: contain; }
-.messenger-message { display: flex; align-items: flex-start; flex-direction: column; margin: 0 0 15px; gap: 5px; }
-.messenger-message > small { font-size: 11px; color: var(--erp-text-regular); }
-.messenger-message.is-mine { align-items: flex-end; }
-.messenger-message__bubble { max-width: 88%; border-radius: 10px; padding: 10px 13px; background: var(--erp-surface-alt); border: 1px solid var(--erp-border); }
+.messenger-message { display: flex; align-items: flex-start; margin: 0 0 18px; gap: 9px; }
+.messenger-message > .el-avatar { flex: none; margin-top: 18px; }
+.messenger-message__content { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: calc(100% - 54px); gap: 5px; }
+.messenger-message__content > small { font-size: 11px; color: var(--erp-text-regular); }
+.messenger-message.is-mine { flex-direction: row-reverse; }
+.is-mine .messenger-message__content { align-items: flex-end; }
+.messenger-message__bubble { max-width: 100%; border-radius: 3px 12px 12px; padding: 10px 13px; background: var(--erp-surface-alt); border: 1px solid var(--erp-border); }
 .is-mine .messenger-message__bubble { background: var(--erp-primary-soft); border-color: var(--erp-primary-border); }
 .messenger-message__bubble p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; font-size: 13px; }
 .messenger-composer { flex: none; border-top: 1px solid var(--erp-border); padding-top: 8px; display: grid; gap: 8px; }
 .messenger-compose-tools { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.messenger-compose-tools :deep(.el-button:not(.is-disabled)) { color: var(--erp-primary); }
 .messenger-compose-tools :deep(.el-tag) { max-width: 100%; height: auto; white-space: normal; }
 .messenger-reference { color: var(--erp-primary); background: var(--erp-primary-soft); padding: 7px 9px; border: 1px solid var(--erp-primary-border); border-radius: 6px; font: inherit; font-size: 12px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
 .messenger-reference:disabled { color: var(--erp-text-regular); background: var(--erp-surface-alt); border-color: var(--erp-border); cursor: default; }
 .messenger-message .messenger-reference { display: block; margin-bottom: 7px; }
+.messenger-reference--card { min-width: min(220px, 100%); width: 100%; padding: 10px 12px; background: var(--erp-surface); }
+.messenger-reference--card strong, .messenger-reference--card small { display: block; margin-top: 6px; }
+.messenger-reference--card strong { font-size: 13px; }
+.messenger-reference--card small { color: var(--erp-text-regular); font-size: 11px; }
+.messenger-reference__kind { display: inline-block; padding: 2px 5px; border-radius: 4px; background: var(--erp-primary-soft); font-size: 10px; font-weight: 600; }
+.messenger-reference--result { display: flex; align-items: center; gap: 8px; }
+.messenger-reference--result strong { flex: 1; font-size: 12px; }
+.messenger-reference--result small { color: var(--erp-text-regular); font-size: 11px; }
+.messenger-reference:focus-visible, .messenger-conversation:focus-visible { outline: 2px solid var(--erp-primary); outline-offset: 2px; }
 .messenger-reference-picker { max-height: 180px; overflow: auto; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--erp-border); border-radius: 8px; }
 .messenger-reference-picker > div { display: flex; gap: 6px; }
 .messenger-reference-picker :deep(.el-select) { width: 125px; flex: none; }
@@ -278,5 +318,7 @@ onBeforeUnmount(() => {
   .messenger-thread { padding: 0; }
   .messenger-thread > header small, .messenger-send > span { display: none; }
   .messenger-send { justify-content: flex-end; }
+  .messenger-reference-picker > div { flex-wrap: wrap; }
+  .messenger-reference-picker :deep(.el-input) { flex: 1; min-width: 140px; }
 }
 </style>

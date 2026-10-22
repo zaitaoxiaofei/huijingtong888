@@ -42,6 +42,15 @@ test("default member directory does not display an automatic owner as a reviewed
   assert.equal(member.business_role, "packing");
 });
 
+test("business people selector fails with actionable 503 only when its account kind column is missing", async () => {
+  const missing = Object.assign(new Error("Unknown column 'p.account_kind' in 'where clause'"), { code: "ER_BAD_FIELD_ERROR" });
+  const api = service(async () => { throw missing; });
+  await assert.rejects(api.tenantMembersMysql(1, { peopleOnly: true }), error => error.statusCode === 503 && /账号类型字段尚未迁移/.test(error.message));
+  await assert.rejects(api.tenantMembersMysql(1), error => error === missing);
+  const other = Object.assign(new Error("Unknown column 'p.other_field'"), { code: "ER_BAD_FIELD_ERROR" });
+  await assert.rejects(service(async () => { throw other; }).tenantMembersMysql(1, { peopleOnly: true }), error => error === other);
+});
+
 test("explicit platform membership saves materialize duties and preserve existing enterprise duties in real MySQL", {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && "Requires an explicitly isolated MySQL named pipe; only a random fixture database is used."
 }, async () => {
@@ -53,7 +62,7 @@ test("explicit platform membership saves materialize duties and preserve existin
     created = true;
     await connection.changeUser({ database });
     for (const sql of [
-      "CREATE TABLE people (id BIGINT PRIMARY KEY, name VARCHAR(64), username VARCHAR(64), avatar_url VARCHAR(255), role VARCHAR(64), roles_json JSON NULL, active TINYINT DEFAULT 1)",
+      "CREATE TABLE people (id BIGINT PRIMARY KEY, name VARCHAR(64), username VARCHAR(64), avatar_url VARCHAR(255), role VARCHAR(64), roles_json JSON NULL, active TINYINT DEFAULT 1, account_kind VARCHAR(16) DEFAULT 'person')",
       "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), name VARCHAR(80), status VARCHAR(32), plan_code VARCHAR(32), subscription_status VARCHAR(32), subscription_expires_at DATETIME NULL, member_limit INT NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, role VARCHAR(32), active TINYINT, business_roles_json JSON NULL, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(tenant_id,person_id))"
     ]) await connection.execute(sql);
@@ -70,6 +79,10 @@ test("explicit platform membership saves materialize duties and preserve existin
     assert.equal((await api.resolveActiveTenantMysql(20, 1)).role, "owner");
     assert.equal((await api.resolveActiveTenantMysql(10, 2)).role, "owner");
     assert.equal((await api.tenantMembersMysql(1))[0].role, "member");
+    await query("UPDATE people SET account_kind='system' WHERE id=10");
+    assert.deepEqual((await api.tenantMembersMysql(1, { peopleOnly: true })).map(person => person.person_id), [20]);
+    assert.deepEqual((await api.tenantMembersMysql(1)).map(person => person.person_id), [10, 20], "platform membership management retains system identities");
+    await query("UPDATE people SET account_kind='person' WHERE id=10");
     await api.upsertTenantMemberMysql(1, { person_id: 10, role: "admin" });
     assert.equal((await api.resolveActiveTenantMysql(10, 1)).role, "admin");
     assert.deepEqual((await query("SELECT business_roles_json FROM tenant_members WHERE tenant_id=1 AND person_id=10"))[0].business_roles_json, ["packing"]);

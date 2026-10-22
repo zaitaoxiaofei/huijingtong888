@@ -29,6 +29,14 @@ test("private messages open only exact member routes without opening enterprise 
   assert.equal(calls[1][0], member);
 });
 
+test("an unmigrated account kind fails closed with an actionable message", async () => {
+  const service = createEnterpriseMessagesService({ transaction: action => action({ execute: async sql => {
+    if (sql.startsWith("SELECT id, slug")) return [[{ id: 1, slug: "default", status: "active", subscription_status: "active" }]];
+    throw Object.assign(new Error("Unknown column 'p.account_kind' in 'where clause'"), { code: "ER_BAD_FIELD_ERROR" });
+  } }) });
+  await assert.rejects(service.contacts(session(10)), error => error.statusCode === 503 && /账号类型字段尚未迁移/.test(error.message));
+});
+
 test("enterprise private messages execute scoped SQL against an isolated MySQL fixture", {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && "Set TENANT_TEST_MYSQL_SOCKET to a dedicated isolated instance", timeout: 60000
 }, async t => {
@@ -68,7 +76,7 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
     let counter = 0;
     const send = (from = 10, peer = 11, text = "fixture message", tenantId = 1, extra = {}) => service.send(session(from, tenantId), { peer_id: peer, text, client_message_id: `fixture-message-${++counter}`, ...extra });
 
-    await t.test("official administrator migration creates only the new table and is idempotent", async () => {
+    await t.test("official administrator migration prepares private messages and account kinds idempotently without classifying people", async () => {
       await query("DROP TABLE enterprise_direct_messages");
       const args = ["scripts/migrate-enterprise-messages.mjs", "--apply", `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`];
       const options = { cwd: new URL("..", import.meta.url), env: { ...process.env, DB_CLIENT: "mysql", DB_HOST: "127.0.0.1", DB_PORT: "1", DB_NAME: database, DB_USER: "fixture_no_application_connection" } };
@@ -78,6 +86,7 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
       }
       const [people] = await query("SELECT COUNT(*) AS n FROM people");
       assert.equal(people.n,6);
+      assert.equal((await query("SELECT COUNT(*) AS n FROM people WHERE account_kind='person'"))[0].n, 6, "schema preparation never guesses system identities");
       const [messages] = await query("SELECT COUNT(*) AS n FROM enterprise_direct_messages");
       assert.equal(messages.n,0);
     });
@@ -214,6 +223,22 @@ test("enterprise private messages execute scoped SQL against an isolated MySQL f
       assert.equal(thread.rows.find(row=>row.id===result.message.id).reference.available,false);
       await assert.rejects(service.send(session(11),{peer_id:10,text:"no permission",client_message_id:"no-permission-ref",reference:{type:"order",id:101}}),{statusCode:403});
       await query("UPDATE tenant_members SET business_roles_json='[\"operator\"]' WHERE tenant_id=1 AND person_id=11");
+    });
+    await t.test("explicit system accounts disappear from all chat surfaces without using names or platform authority", async () => {
+      await query("UPDATE people SET username='e2e', name='health check' WHERE id=11");
+      assert.ok((await service.contacts(session(10))).rows.some(person => person.id === 11), "names alone do not classify a real person");
+      await query("UPDATE people SET account_kind='system' WHERE id=12");
+      assert.deepEqual((await service.contacts(session(10))).rows.map(person => person.id), [11, 30]);
+      assert.ok(!(await service.conversations(session(11))).rows.some(row => row.peer.id === 12));
+      const [unread] = await query("SELECT COUNT(*) AS n FROM enterprise_direct_messages WHERE tenant_id=1 AND recipient_id=11 AND sender_id<>12 AND read_at IS NULL");
+      assert.equal((await service.unread(session(11))).unread_count, unread.n);
+      await assert.rejects(service.contacts(session(12)), { statusCode: 403 });
+      await assert.rejects(service.thread(session(10), { peer_id: 12 }), { statusCode: 403 });
+      await assert.rejects(service.read(session(10), { peer_id: 12, message_ids: [] }), { statusCode: 403 });
+      await assert.rejects(send(10, 12), { statusCode: 403 });
+      await assert.rejects(send(12, 10), { statusCode: 403 });
+      await query("UPDATE people SET account_kind='person' WHERE id=12");
+      assert.ok((await service.contacts(session(10))).rows.some(person => person.id === 30), "a platform administrator with a real enterprise membership stays visible");
     });
   } finally {
     await pool?.end();

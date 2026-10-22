@@ -46,6 +46,7 @@ export async function createTenantMysqlFixture(prefix = 'inventory') {
     constants.MATERIAL_ASSETS_SCHEMA = await staticSchema('material-assets-schema.js', 'MATERIAL_ASSETS_SCHEMA');
     constants.CUSTOMER_MESSAGE_TEMPLATES_SCHEMA = await staticSchema('customer-message-template-schema.js', 'CUSTOMER_MESSAGE_TEMPLATES_SCHEMA');
     constants.AI_VEHICLE_CATALOG_SCHEMA = await staticSchema('ai-vehicle-catalog-schema.js', 'AI_VEHICLE_CATALOG_SCHEMA');
+    constants.SUBSCRIPTION_VOUCHER_SCHEMA = await staticSchema('subscription-voucher-schema.js', 'SUBSCRIPTION_VOUCHER_SCHEMA');
     for (const name of ['CUSTOMER_MESSAGE_SHOP_SCHEMA', 'CUSTOMER_MESSAGE_TASKS_SCHEMA']) {
       constants[name] = await staticSchema('customer-message-core-schema.js', name);
     }

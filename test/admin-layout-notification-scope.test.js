@@ -26,6 +26,13 @@ test("platform-only accounts never request enterprise business notifications", a
   assert.equal(f.context.notificationUnread.value, 0);
 });
 
+test("unactivated enterprises do not poll paid business notifications", async () => {
+  const f = fixture({ id: 42, access_allowed: false });
+  await f.context.loadNotifications();
+  assert.equal(f.calls(), 0);
+  assert.equal(f.context.notificationUnread.value, 0);
+});
+
 test("an earlier enterprise notification response cannot replace the next session's state", async () => {
   const f = fixture();
   const pending = f.context.loadNotifications();

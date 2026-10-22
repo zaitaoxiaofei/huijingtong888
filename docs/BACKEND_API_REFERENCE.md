@@ -241,6 +241,60 @@ Login payload.
 | `username` | `string` | Yes | Username to authenticate. |
 | `password` | `string` | Yes | Plain-text password. |
 
+### SelfRegistrationRequest
+
+Create an ordinary login identity and a new isolated, unactivated enterprise. No existing enterprise, role, trial, platform grant or verified email is inferred.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `username` | `string` | Yes | 3-64 ASCII letters/digits or . _ @ + -; first character must be alphanumeric. |
+| `name` | `string` | Yes | Display name, 1-100 characters; existing unique-name constraint applies. |
+| `password` | `string` | Yes | 8-128 characters, subject to the shared password policy. |
+| `enterprise_name` | `string` | No | Optional new enterprise display name, at most 100 characters. |
+
+### MembershipStatus
+
+Current enterprise subscription. Null remaining_days means an existing active perpetual entitlement; zero means no current paid/trial access.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tenant_id` | `number` | Yes | Current enterprise ID. |
+| `tenant_name` | `string` | Yes | Current enterprise display name. |
+| `plan_code` | `string` | Yes | Current plan code or unactivated. |
+| `status` | `string` | Yes | unactivated, active, trial, expired or suspended. |
+| `expires_at` | `string|null` | Yes | UTC ISO timestamp; display with the shared Beijing formatter. |
+| `remaining_days` | `number|null` | Yes | Remaining duration rounded upward to whole days; null means perpetual. |
+| `access_allowed` | `boolean` | Yes | Whether subscription permits business features; role/isolation checks still apply. |
+| `can_activate` | `boolean` | Yes | Only the current active owner can redeem; suspended or already perpetual enterprises cannot redeem. |
+| `server_time` | `string` | Yes | UTC ISO server time for display calculations. |
+
+### SubscriptionVoucher
+
+Platform-issued entitlement snapshot, separate from legacy enterprise-bound activation codes and browser plugin credentials. Full secrets and hashes are never returned here.
+
+`additionalProperties: false`
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `number` | Yes | Voucher ID. |
+| `code_hint` | `string` | Yes | Last six characters only. |
+| `status` | `string` | Yes | active, expired, revoked or used. |
+| `plan_code` | `string` | Yes | Immutable issued plan code. |
+| `plan_name` | `string` | Yes | Immutable issued plan name. |
+| `duration_days` | `number` | Yes | Entitlement duration beginning on redemption. |
+| `subscription_status` | `string` | Yes | Issued entitlement type: active or trial. |
+| `account_limit` | `number|null` | Yes | Total accounts including owner; null means unlimited. |
+| `member_limit` | `number|null` | Yes | Additional-account limit; null means unlimited. |
+| `shop_limit` | `number|null` | Yes | Shop quota; null means unlimited. |
+| `redeemable_until` | `string` | Yes | UTC ISO redemption deadline, distinct from membership expiry. |
+| `created_at` | `string` | Yes | UTC ISO creation timestamp. |
+| `used_at` | `string|null` | Yes | UTC ISO redemption timestamp. |
+| `used_by_tenant_id` | `number|null` | Yes | Redeeming enterprise ID; no membership transfer occurs. |
+
 ### QrConfirmRequest
 
 Confirm a pending QR login. Username and password are required unless a valid remembered mobile cookie is present.
@@ -1627,6 +1681,82 @@ Update a scheduled background task runtime configuration.
 - Responses:
   - `200` `application/json` -> `ScheduledJob`
 
+### Membership
+
+#### `POST /api/auth/register`
+
+Register with a password and create one isolated enterprise/owner membership in unactivated state; never joins the default enterprise or grants platform authority. Five attempts per IP per authentication window. Existing site access protection remains in force.
+
+- Auth: `public`
+- Request body: required
+  - Schema: `SelfRegistrationRequest`
+- Responses:
+  - `200` `application/json` -> `AuthSession`
+  - `400` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`: Display/login name already in use; all inserts roll back.
+  - `429` `application/json` -> `ErrorResponse`
+  - `503` `application/json` -> `ErrorResponse`: Administrator voucher schema migration is missing or incompatible; no registration rows are inserted.
+
+#### `GET /api/auth/membership`
+
+Read the current active enterprise membership and subscription, including remaining time. Available before activation; fresh person/membership checks apply.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `MembershipStatus`
+  - `401` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `503` `application/json` -> `ErrorResponse`: Run the explicit subscription-voucher schema migration.
+
+#### `POST /api/auth/activate`
+
+Current enterprise owner redeems a plan-backed sale voucher exactly once. Renewal extends from max(now, current valid expiry), applies the issued quota snapshot, and never joins, moves or reads another enterprise. Suspended enterprises and existing perpetual entitlements cannot redeem. Legacy OZ enterprise-bound codes are not sale vouchers.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`: Invalid, expired, revoked, consumed or malformed voucher.
+  - `401` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`: Not the current active enterprise owner, or enterprise suspended.
+  - `409` `application/json` -> `ErrorResponse`
+  - `429` `application/json` -> `ErrorResponse`
+  - `503` `application/json` -> `ErrorResponse`: Run the explicit subscription-voucher schema migration.
+
+#### `GET /api/tenants/subscription-vouchers`
+
+Platform super admins list the 100 latest sale vouchers, without full codes or hashes. Active platform grant is rechecked. Responses are not cacheable.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/tenants/subscription-vouchers`
+
+Platform super admin issues an independent, one-use subscription voucher with immutable plan duration/type/account/shop quota snapshot. Issuance does not activate an enterprise. Only the SHA-256 hash and six-character hint are stored; plaintext is revealed once in this private response.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `DELETE /api/tenants/subscription-vouchers`
+
+Platform super admin revokes an unused voucher. Used vouchers are unchanged; revocation does not modify an enterprise subscription.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
 ### Auth
 
 #### `POST /api/auth/login`
@@ -1686,7 +1816,7 @@ Change the current user's password.
 
 #### `GET /api/enterprise/messages/contacts`
 
-List other active members of the current enterprise. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.
+List other active person identities in the current enterprise. Explicit account_kind=system identities cannot use contacts, conversations, unread, thread, send or read APIs, and cannot be contacted. Missing account_kind migration returns 503. Membership/account/enterprise validity is rechecked in the database; platform authority never adds chat visibility. Responses use Cache-Control: no-store.
 
 - Auth: `authenticated`
 - Responses:
@@ -1790,7 +1920,7 @@ List explicit platform grants. Requires an active super_admin grant verified aga
 
 #### `GET /api/enterprise/people`
 
-List all memberships of the current enterprise. Requires its database-verified owner/admin; request selectors cannot change the enterprise.
+List person memberships of the current enterprise, including disabled people for management. Explicit system identities remain absent. Requires its database-verified owner/admin; request selectors cannot change the enterprise. Missing account_kind migration returns 503.
 
 - Auth: `authenticated`
 - Responses:
@@ -1812,7 +1942,7 @@ Create a new login identity and current-enterprise membership transactionally, w
 
 #### `PUT /api/enterprise/people/:id`
 
-Update only a current-enterprise membership. Protect the last owner and shared login identities; changes revoke affected sessions.
+Update only a current-enterprise person membership; system identities cannot be edited through enterprise personnel. Protect the last owner and shared login identities; changes revoke affected sessions.
 
 - Auth: `authenticated`
 - Path parameters:
@@ -3173,9 +3303,11 @@ Delete or deactivate a shop.
 
 #### `GET /api/people`
 
-Return a safe current-enterprise person selector for enterprise users, ignoring request tenant selectors. Only an explicit platform super_admin receives global account master data.
+Return enabled person identities from the current enterprise, including for dual platform/enterprise accounts; ignore request tenant selectors and exclude system identities. Explicit scope=platform requires super_admin and preserves the legacy platform selector projection (currently default-enterprise members). Platform-only accounts retain that projection. Missing person-kind schema returns 503 for enterprise selectors.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `scope` (`string`, optional): Optional platform selects the legacy platform-management roster; requires super_admin.
 - Responses:
   - `200` `application/json` -> `array<PersonRecord>`
 

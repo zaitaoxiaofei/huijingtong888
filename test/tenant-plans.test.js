@@ -66,7 +66,8 @@ test("tenant operations separate customer-space work from plan-catalog work", ()
   assert.match(view, /el-drawer v-model="detailVisible"/);
   assert.match(view, /子账号用量/);
   assert.match(view, /店铺用量/);
-  assert.match(view, /每个新客户空间会自动生成客户激活码/);
+  assert.match(view, /el-tab-pane label="会员激活码" name="vouchers"/);
+  assert.match(view, /SubscriptionVouchersPanel :plans="plans"/);
   assert.match(view, /不是客户购买或注册用的激活码/);
   assert.match(view, /高级接入：浏览器插件令牌/);
 });
@@ -94,6 +95,6 @@ test("tenant creation reveals the activation code once and the view distinguishe
   assert.match(tenantService, /return \{ ok: true, id: result, activation_code: activationCode \}/);
   assert.match(view, /完整码只显示这一次/);
   assert.match(view, /activationCodeStatus\.code_hint/);
-  assert.match(view, /客户自助注册兑换将在下一步接入/);
+  assert.match(view, /客户注册后进入独立空间/);
   assert.match(view, /copyActivationCode/);
 });
