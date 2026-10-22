@@ -75,12 +75,12 @@ function statusType(status) { return { completed: "success", in_progress: "warni
 .picker-heading span, .picker-hint, .picker-empty { color: var(--erp-text-regular); font-size: 12px; }
 .picker-toolbar { margin: 10px 0; }
 .picker-toolbar .el-input { flex: 1; min-width: 170px; }
-.picker-grid { display: grid; grid-template-columns: 148px minmax(0, 1fr); min-height: 180px; max-height: 250px; border: 1px solid var(--erp-border-light); border-radius: 6px; overflow: hidden; }
-.brand-list { overflow-y: auto; padding: 6px; border-right: 1px solid var(--erp-border-light); background: var(--erp-surface-alt); }
+.picker-grid { display: grid; grid-template-columns: 148px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); height: 250px; min-height: 180px; max-height: 250px; border: 1px solid var(--erp-border-light); border-radius: 6px; overflow: hidden; }
+.brand-list { min-height: 0; overflow-y: auto; padding: 6px; border-right: 1px solid var(--erp-border-light); background: var(--erp-surface-alt); }
 .brand-list button { display: flex; justify-content: space-between; gap: 6px; width: 100%; border: 0; border-radius: 4px; padding: 8px; cursor: pointer; text-align: left; color: var(--erp-text-main); background: transparent; }
 .brand-list button:hover, .brand-list button.active { color: var(--erp-primary); background: var(--erp-primary-soft); }
 .brand-list small { color: var(--erp-text-regular); }
-.model-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; gap: 8px; padding: 10px; overflow-y: auto; }
+.model-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; align-content: start; gap: 8px; padding: 10px; overflow-y: auto; }
 .model-list :deep(.el-checkbox) { min-height: 42px; height: auto; margin: 0; padding: 8px; border: 1px solid var(--erp-border); border-radius: 6px; align-items: flex-start; }
 .model-list :deep(.el-checkbox__label) { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; min-width: 0; white-space: normal; }
 .model-label { overflow-wrap: anywhere; }
