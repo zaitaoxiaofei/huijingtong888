@@ -19,12 +19,41 @@ test("only previous built-in tab orders migrate; custom orders and unrelated pre
   const legacy = ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "all", "unbound", "pending_purchase", "purchase_in_transit"];
   assert.deepEqual(array(state.normalizeStatusTabOrder(legacy)), expected);
   assert.deepEqual(array(state.normalizeStatusTabOrder(legacy.filter(value => value !== "ogl_dispatched"))), expected);
+  const allFirst = ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound", "ogl_dispatched", "pending_purchase", "purchase_in_transit"];
+  assert.deepEqual(array(state.normalizeStatusTabOrder(allFirst)), expected);
+  assert.deepEqual(array(state.normalizeStatusTabOrder(allFirst.filter(value => value !== "ogl_dispatched"))), expected);
+  const initialDefault = ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "dispute", "unbound"];
+  assert.deepEqual(array(state.normalizeStatusTabOrder(initialDefault)), expected);
+  assert.deepEqual(array(state.normalizeStatusTabOrder(initialDefault.filter(value => value !== "dispute"))), expected);
+  const fullyCustom = [...allFirst];
+  [fullyCustom[1], fullyCustom[2]] = [fullyCustom[2], fullyCustom[1]];
+  assert.deepEqual(array(state.normalizeStatusTabOrder(fullyCustom)), fullyCustom);
   const custom = ["pending_purchase", "all", "ogl_dispatched"];
   assert.deepEqual(array(state.normalizeStatusTabOrder(custom)).slice(0, 3), custom);
   assert.deepEqual(array(state.normalizeStatusTabOrder(["unknown", "all", "all"])), expected);
   assert.deepEqual(custom, ["pending_purchase", "all", "ogl_dispatched"]);
   const load = source.slice(source.indexOf("  async function loadStatusTabPreference("), source.indexOf("  async function saveStatusTabPreference("));
   assert.doesNotMatch(load, /apiClient\.(post|put|delete)/);
+});
+
+test("loading the original eight-tab preference migrates the displayed order without writing saved preferences", async () => {
+  const load = source.slice(source.indexOf("  async function loadStatusTabPreference("), source.indexOf("  async function saveStatusTabPreference("));
+  const stored = ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "dispute", "unbound"];
+  const calls = [], statusTabOrder = { value: [] };
+  const run = vm.runInNewContext(`${load};loadStatusTabPreference`, {
+    ensureOrdersViewScope: () => "current", currentOrdersCacheScope: () => "current", URLSearchParams,
+    ORDER_STATUS_TAB_PREFERENCE_KEY: "orders.status_tabs", statusTabOrder,
+    applyStatusTabOrder: order => { statusTabOrder.value = array(state.normalizeStatusTabOrder(order)); },
+    apiClient: { get: async (url, options) => { calls.push([url, options]); return { value: { order: stored } }; } },
+    DEFAULT_STATUS_TAB_ORDER: state.DEFAULT_STATUS_TAB_ORDER,
+    console: { warn(message) { throw new Error(message); } }
+  });
+  assert.deepEqual(array(await run()), expected);
+  assert.deepEqual(statusTabOrder.value, expected);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/api/user-preferences?key=orders.status_tabs");
+  assert.equal(calls[0][1].noCache, true);
+  assert.deepEqual(stored, ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "dispute", "unbound"]);
 });
 test("More actions keeps batch receipt preview in the requested order and leaves OGL separate", () => {
   assert.deepEqual(array(state.MORE_ACTIONS.map(row => row.label)), ["批量打印", "批量备货", "批量登记实收", "重算利润", "质检规则"]);

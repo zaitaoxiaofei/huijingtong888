@@ -245,7 +245,9 @@ export function useOrdersPage() {
       ? order.map((item) => String(item || "")).filter((item) => validValues.has(item))
       : [];
     const legacyDefault = ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "all", "unbound", "pending_purchase", "purchase_in_transit"];
-    if ([legacyDefault, legacyDefault.filter(value => value !== "ogl_dispatched")].some(previous => previous.length === selected.length && previous.every((value, index) => value === selected[index]))) return [...DEFAULT_STATUS_TAB_ORDER];
+    const legacyAllFirst = ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound", "ogl_dispatched", "pending_purchase", "purchase_in_transit"];
+    const legacyInitial = ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "unbound"];
+    if ([legacyDefault, legacyAllFirst, legacyInitial].flatMap(previous => [previous, previous.filter(value => value !== "ogl_dispatched")]).some(previous => previous.length === selected.length && previous.every((value, index) => value === selected[index]))) return [...DEFAULT_STATUS_TAB_ORDER];
     return [...new Set([...selected, ...DEFAULT_STATUS_TAB_ORDER])];
   }
 

@@ -35,6 +35,12 @@ function oglPlatformDisplayStatus(order, member) {
 }
 
 export function withOglDispatch(order, member) {
+  const deadlineRule = oglTransportDeadlineRule();
+  const isFbp = [order.fulfillment_type_key, order.logistics_fulfillment_type, order.fulfillment_schema].some(value => String(value || '').toLowerCase() === 'fbp');
+  if (order.logistics_carrier === 'ogl' && !isFbp) {
+    const stopped = isOglPlatformOnline(order) || /cancel|return|reject|not_accepted|unclaimed|arbitration|dispute/.test(platformText(order));
+    order = { ...order, ogl_transport_deadline: { at: stopped ? null : oglTransportDeadlineAt(order.ordered_at, deadlineRule), rule: deadlineRule, stopped } };
+  }
   if (!member) return order;
   const active=!member.withdrawn_at&&(member.active_order_id === undefined || Number(member.active_order_id) === Number(order.id));
   const applied=Boolean(active&&Number(member.official_member)===1&&member.official_carriage_id
@@ -53,7 +59,7 @@ export function withOglDispatch(order, member) {
   const status = oglPlatformDisplayStatus(order, dispatch) || (dispatch.tracking?oglOrderDisplayStatus(order, dispatch):'');
   dispatch.stage=status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':applied?'applied':'preparing';
   dispatch.stage_label={delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',preparing:'准备中'}[dispatch.stage];
-  dispatch.transport_deadline_rule = oglTransportDeadlineRule();
+  dispatch.transport_deadline_rule = deadlineRule;
   dispatch.transport_deadline_at = status === 'ogl_dispatched' ? oglTransportDeadlineAt(order.ordered_at, dispatch.transport_deadline_rule) : null;
   return { ...order, ogl_dispatch: dispatch, ...(status ? { display_status: status } : {}) };
 }
@@ -72,8 +78,14 @@ export function oglPhysicalDispatchSql(alias = 'o') {
       AND (ogl_shop.tenant_id = ogl_member.tenant_id OR (ogl_shop.tenant_id IS NULL AND ogl_tenant.slug = 'default')))`;
 }
 
-export function oglDispatchedStatusSql(alias = 'o') {
-  const evidence = `(${oglPhysicalDispatchSql(alias)} OR ${oglAppliedDispatchSql(alias)})`;
+function oglStatusEvidenceSql(alias, evidenceAlias) {
+  if (evidenceAlias == null) return `(${oglPhysicalDispatchSql(alias)} OR ${oglAppliedDispatchSql(alias)})`;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias) || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(evidenceAlias)) throw new Error('Invalid order evidence alias');
+  return `${evidenceAlias}.order_id IS NOT NULL`;
+}
+
+export function oglDispatchedStatusSql(alias = 'o', evidenceAlias = null) {
+  const evidence = oglStatusEvidenceSql(alias, evidenceAlias);
   const text = `LOWER(CONCAT_WS(' ', ${alias}.status, ${alias}.tracking_stage, ${alias}.logistics_status))`;
   return `(${evidence} AND ${text} NOT REGEXP 'cancel|return|reject|not_accepted|arbitration|dispute'
     AND ${text} NOT REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^ ]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer)( |$)')`;
@@ -94,15 +106,15 @@ export function oglAppliedDispatchSql(alias = 'o') {
       AND (ogl_shop.tenant_id=ogl_member.tenant_id OR (ogl_shop.tenant_id IS NULL AND ogl_tenant.slug='default')))`;
 }
 
-export function oglOnlineStatusSql(alias = 'o') {
-  const evidence = `(${oglPhysicalDispatchSql(alias)} OR ${oglAppliedDispatchSql(alias)})`;
+export function oglOnlineStatusSql(alias = 'o', evidenceAlias = null) {
+  const evidence = oglStatusEvidenceSql(alias, evidenceAlias);
   const text = `LOWER(CONCAT_WS(' ', ${alias}.status, ${alias}.tracking_stage, ${alias}.logistics_status))`;
   return `(${evidence} AND ${text} NOT REGEXP 'cancel|return|reject|not_accepted|arbitration|dispute'
     AND ${text} REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^ ]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer)( |$)')`;
 }
 
-export function oglTerminalStatusSql(alias = 'o') {
-  const evidence = `(${oglPhysicalDispatchSql(alias)} OR ${oglAppliedDispatchSql(alias)})`;
+export function oglTerminalStatusSql(alias = 'o', evidenceAlias = null) {
+  const evidence = oglStatusEvidenceSql(alias, evidenceAlias);
   const text = `LOWER(CONCAT_WS(' ', ${alias}.status, ${alias}.tracking_stage, ${alias}.logistics_status))`;
   return `(${evidence} AND ${text} REGEXP 'cancel|return|reject|not_accepted|arbitration|dispute|(^| )(delivered|posting_delivered|posting_received_by_buyer)( |$)')`;
 }

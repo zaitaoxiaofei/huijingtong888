@@ -422,7 +422,7 @@ function procurementTimeText(row) {
             <div
               v-if="row.statusDeadlineHint"
               class="orders-status-deadline"
-              :class="{ 'is-danger': row.statusDeadlineHint.startsWith('超时') }"
+              :class="{ 'is-danger': row.statusDeadlineDanger || row.statusDeadlineHint.startsWith('超时') }"
             >
               {{ row.statusDeadlineHint }}
             </div>

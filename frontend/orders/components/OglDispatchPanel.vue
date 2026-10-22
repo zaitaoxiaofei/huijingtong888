@@ -104,6 +104,12 @@ const officialStatus = (value) => ({ observed: "已申请·待交接", pending: 
 const carriageStatus = (row) => row.status_label || ({ formed: "已生成", received: "验收中", new: "待确认", created: "已创建", approved: "已确认", confirmed: "已确认", handed_over: "已交接", delivering: "运输中", completed: "已完成", cancelled: "已取消", canceled: "已取消" }[row.status]) || "平台状态待核对";
 const dispatchStage = (row) => row.dispatch_stage_label || ({ applied: "已申请·待交接", dispatched: "已实际交运", in_transit: "运输中", delivered: "已签收", cancelled: "已取消" }[row.dispatch_stage]) || "待核对交接";
 const carriageTracking = (row) => row.master_tracking_number || (row.tracking_status === "ambiguous" ? "多个运单，待核对" : "待获取");
+const carriageDeliveryMethod = (row) => {
+  const carrier = String(row.carrier_name || "").trim();
+  if (carrier) return carrier;
+  const method = String(row.delivery_method_name || "").trim();
+  return /[\u3400-\u9fff]/.test(method) && !/[\u0400-\u04ff]/.test(method) ? method : "承运商待核实";
+};
 const officialCarriageKey = (row) => `${row.dispatch_shop?.id || ""}:${row.carriage_id || row.id}:${row.departure_date || ""}`;
 function orderPath(row) {
   const id = Number(row.order_id || 0);
@@ -436,6 +442,7 @@ onMounted(() => run(async () => {
       <div class="ogl-dispatch-nav">
         <el-button :disabled="busy" :type="tab.startsWith('official') ? 'primary' : 'default'" @click="showOfficialCarriages()">已申请</el-button>
         <el-button :disabled="busy" :type="tab === 'history' ? 'primary' : 'default'" @click="tab = 'history'; run(loadHistory)">发运历史</el-button>
+        <el-button v-if="tab === 'official-detail'" :disabled="busy" @click="returnOfficialList">返回申请列表</el-button>
         <el-button v-if="preview" :disabled="busy" @click="tab = 'create'">创建批次（已选 {{ selectedIds.length }} 单）</el-button>
         <span>时间均为北京时间</span>
       </div>
@@ -478,16 +485,16 @@ onMounted(() => run(async () => {
       </template>
 
       <template v-if="tab === 'official-detail' && officialDetail">
-        <div class="ogl-dispatch-actions"><el-button :disabled="busy" @click="returnOfficialList">返回申请列表</el-button><el-button :disabled="busy" @click="openOfficialCarriage(officialCarriage, true)">读取最新详情</el-button><el-button v-if="officialBatchId" :loading="isFileLoading(officialBatchId, 'container-labels')" :disabled="fileCapability(officialCarriage, 'container-labels').available !== true" @click="downloadFile('container-labels', false, officialBatchId)">下载货位标签</el-button><el-button v-if="officialBatchId" :disabled="busy" @click="openBatch(officialBatchId)">发运跟踪与货位</el-button></div>
+        <div v-if="officialBatchId" class="ogl-dispatch-actions"><el-tooltip :content="fileCapability(officialCarriage, 'container-labels').reason || '下载官方货位标签 PDF'" placement="top"><span><el-button type="primary" :loading="isFileLoading(officialBatchId, 'container-labels')" :disabled="fileCapability(officialCarriage, 'container-labels').available !== true" @click="downloadFile('container-labels', false, officialBatchId)">下载货位标签</el-button></span></el-tooltip></div>
         <h3>Ozon 申请 {{ officialCarriage.carriage_id || officialCarriage.id }} <el-tag>{{ carriageStatus(officialCarriage) }}</el-tag></h3>
-        <p class="ogl-dispatch-snapshot-note">{{ officialDetail.notice || (officialDetail.source === 'snapshot' ? '已保存的申请快照，需最新状态时请读取最新详情。' : '已读取官方申请详情。') }} 缓存 / 核对时间：{{ officialCarriage.snapshot_at || officialDetail.last_checked_at ? formatTime(officialCarriage.snapshot_at || officialDetail.last_checked_at) : '尚未获取' }}</p>
-        <el-alert type="info" :closable="false" title="官方申请已生成不等于实际交运。订单交给取件人员后才记录实际交运，官方状态不会替代这一步。" />
+        <p class="ogl-dispatch-snapshot-note">{{ officialDetail.notice || (officialDetail.source === 'snapshot' ? '已保存的申请快照，需最新状态时请返回列表同步申请。' : '已读取官方申请详情。') }} 缓存 / 核对时间：{{ officialCarriage.snapshot_at || officialDetail.last_checked_at ? formatTime(officialCarriage.snapshot_at || officialDetail.last_checked_at) : '尚未获取' }}</p>
+        <el-alert type="info" :closable="false" :title="officialCarriage.status === 'received' ? '官方申请验收中不代表每个订单已进入运输；订单物流以平台轨迹为准。' : '官方申请已生成不等于实际交运。订单交给取件人员后才记录实际交运，官方状态不会替代这一步。'" />
         <el-descriptions :column="3" border class="ogl-dispatch-readonly-detail">
           <el-descriptions-item label="创建店铺">{{ officialShop?.name || defaultShopName }}</el-descriptions-item>
           <el-descriptions-item label="官方状态"><span :title="officialCarriage.status || ''">{{ carriageStatus(officialCarriage) }}</span></el-descriptions-item>
           <el-descriptions-item label="实际货位（官方回读）">{{ officialCarriage.containers_count ?? '官方尚未返回' }}</el-descriptions-item>
           <el-descriptions-item label="发运日期（北京时间）">{{ formatDeparture(officialCarriage.departure_date) }}</el-descriptions-item>
-          <el-descriptions-item label="发运方式">{{ officialCarriage.delivery_method_name || '官方尚未返回' }}</el-descriptions-item>
+          <el-descriptions-item label="发运方式">{{ carriageDeliveryMethod(officialCarriage) }}</el-descriptions-item>
           <el-descriptions-item label="申请创建时间">{{ officialCarriage.created_at ? formatTime(officialCarriage.created_at) : '官方尚未返回' }}</el-descriptions-item>
         </el-descriptions>
         <p class="ogl-dispatch-progress">官方货件 {{ officialDetail.summary?.official_members ?? '待获取' }} · 本地精确匹配 {{ officialDetail.summary?.matched_local ?? '待获取' }} · 本地未匹配 {{ officialDetail.summary?.unmatched_local ?? '待获取' }} · 平台已上网 {{ officialDetail.summary?.online ?? '待获取' }}</p>
@@ -499,13 +506,6 @@ onMounted(() => run(async () => {
           <el-table-column label="上网情况" width="125"><template #default="{ row }">{{ !row.matched_local ? '待匹配核对' : row.online ? '平台已上网' : '未取得上网证据' }}</template></el-table-column>
           <el-table-column label="本地最近同步（北京时间）" min-width="200"><template #default="{ row }">{{ formatTime(row.last_synced_at) }}</template></el-table-column>
         </el-table>
-        <div v-if="officialBatchId" class="ogl-dispatch-actions">
-          <el-button :loading="isFileLoading(officialBatchId, 'container-labels')" :disabled="fileCapability(officialCarriage, 'container-labels').available !== true" @click="downloadFile('container-labels', false, officialBatchId)">下载货位标签</el-button>
-          <el-button :loading="isFileLoading(officialBatchId, 'container-labels')" :disabled="fileCapability(officialCarriage, 'container-labels').available !== true" @click="downloadFile('container-labels', true, officialBatchId)">打开标签 / 打印</el-button>
-          <el-tooltip :content="fileCapability(officialCarriage, 'barcode').reason || '下载官方交接条码'" placement="top"><span><el-button :loading="isFileLoading(officialBatchId, 'barcode')" :disabled="fileCapability(officialCarriage, 'barcode').available !== true" @click="downloadFile('barcode', false, officialBatchId)">下载交接条码</el-button></span></el-tooltip>
-          <el-button :loading="isFileLoading(officialBatchId, 'barcode')" :disabled="fileCapability(officialCarriage, 'barcode').available !== true" @click="downloadFile('barcode', true, officialBatchId)">打开条码 / 打印</el-button>
-          <small v-if="fileCapability(officialCarriage, 'barcode').available !== true">{{ fileCapability(officialCarriage, 'barcode').reason }}</small>
-        </div>
         <section class="ogl-dispatch-tracking" aria-label="货位标签与交接文件">
           <el-collapse>
             <el-collapse-item title="货位标签与交接文件" name="labels">
@@ -590,7 +590,7 @@ onMounted(() => run(async () => {
           <el-button :disabled="busy || closed" @click="endBatch('cancel')">取消批次</el-button>
         </div>
         <el-collapse>
-          <el-collapse-item title="官方发运单、货位标签与交接条码" name="official">
+          <el-collapse-item title="官方发运单与货位标签" name="official">
             <p>本次发运使用 {{ batch.dispatch_shop_name || '创建时的默认店铺' }} 的官方申请；来源订单的店铺归属保持原样。</p>
             <el-button v-if="!observedBatch" :disabled="busy || !canCreateOfficial" @click="loadOfficialOptions">获取可用发运方式</el-button>
             <p v-if="officialNotice">{{ officialNotice }}</p>
@@ -616,10 +616,6 @@ onMounted(() => run(async () => {
             <el-alert v-if="officialSummary.cross_shop_local_only?.length" type="info" :closable="false" :title="`本批次有 ${officialSummary.cross_shop_local_only.length} 个其他店铺订单，仅记录在 ERP 混装批次中，尚未作为成员写入该官方单。请按已确认的物流商混装方式核对交接；跨店 API 收录待验证。`" />
             <div class="ogl-dispatch-actions">
               <el-button :loading="isFileLoading(batch.id, 'container-labels')" :disabled="!canDownloadOfficial || fileCapability(batch, 'container-labels').available !== true" @click="downloadFile('container-labels')">下载货位标签</el-button>
-              <el-button :loading="isFileLoading(batch.id, 'container-labels')" :disabled="!canDownloadOfficial || fileCapability(batch, 'container-labels').available !== true" @click="downloadFile('container-labels', true)">打开标签 / 打印</el-button>
-              <el-button :loading="isFileLoading(batch.id, 'barcode')" :disabled="!canDownloadOfficial || fileCapability(batch, 'barcode').available !== true" @click="downloadFile('barcode')">下载交接条码</el-button>
-              <el-button :loading="isFileLoading(batch.id, 'barcode')" :disabled="!canDownloadOfficial || fileCapability(batch, 'barcode').available !== true" @click="downloadFile('barcode', true)">打开条码 / 打印</el-button>
-              <small v-if="fileCapability(batch, 'barcode').available !== true">{{ fileCapability(batch, 'barcode').reason }}</small>
             </div>
             <p>每个货位的标签打印 3 份，贴在三个面；打印份数与实际货位数分别计算。打印完成仍需实际交运后手动标记。</p>
           </el-collapse-item>

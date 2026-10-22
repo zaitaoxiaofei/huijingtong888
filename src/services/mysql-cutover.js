@@ -30501,22 +30501,49 @@ function withRestrictedOrderIdsMysql(base, ids) {
   };
 }
 
+function orderPagedOglEvidenceJoinMysql(tenantScope) {
+  if (!tenantScope) return "";
+  // Aggregate once rather than re-running the same evidence EXISTS in every
+  // nested status predicate. Grouping also keeps one result per source order.
+  return `LEFT JOIN (
+    SELECT ogl_count_member.order_id
+    FROM ogl_dispatch_members ogl_count_member
+    JOIN ogl_dispatch_batches ogl_count_batch ON ogl_count_batch.id = ogl_count_member.batch_id
+      AND ogl_count_batch.tenant_id = ogl_count_member.tenant_id
+    JOIN orders ogl_count_order ON ogl_count_order.id = ogl_count_member.order_id
+      AND ogl_count_order.id = ogl_count_member.active_order_id AND ogl_count_order.shop_id = ogl_count_member.shop_id
+    JOIN shops ogl_count_shop ON ogl_count_shop.id = ogl_count_order.shop_id
+    WHERE ogl_count_member.tenant_id = ${tenantScope.id} AND ${orderTenantPredicateMysql("ogl_count_shop", tenantScope)}
+      AND ogl_count_member.withdrawn_at IS NULL
+      AND (ogl_count_member.dispatched_at IS NOT NULL OR (
+        ogl_count_member.posting_number = ogl_count_order.posting_number AND ogl_count_member.official_member = 1
+        AND ogl_count_batch.default_shop_id = ogl_count_member.shop_id AND ogl_count_batch.official_carriage_id IS NOT NULL
+        AND ogl_count_batch.status NOT IN ('cancelled','closed')
+        AND ogl_count_batch.official_status IN ('observed','created','approved','sync_required','confirm_unknown','mismatch')
+      ))
+    GROUP BY ogl_count_member.order_id
+  ) ogl_count_evidence ON ogl_count_evidence.order_id = o.id`;
+}
+
 async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
+  const evidenceAlias = tenantScope ? "ogl_count_evidence" : null;
+  const statusSql = status => orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias);
   const row = await mysqlQueryOne(`
     SELECT
       COUNT(*) AS all_count,
-      SUM(CASE WHEN ${orderStatusSqlMysql("awaiting_packaging", null, tenantScope)} THEN 1 ELSE 0 END) AS awaiting_packaging,
-      SUM(CASE WHEN ${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)} THEN 1 ELSE 0 END) AS awaiting_deliver,
-      SUM(CASE WHEN ${orderStatusSqlMysql("ogl_dispatched", null, tenantScope)} THEN 1 ELSE 0 END) AS ogl_dispatched,
-      SUM(CASE WHEN ${orderStatusSqlMysql("delivering", null, tenantScope)} THEN 1 ELSE 0 END) AS delivering,
-      SUM(CASE WHEN ${orderStatusSqlMysql("dispute", null, tenantScope)} THEN 1 ELSE 0 END) AS dispute,
-      SUM(CASE WHEN ${orderStatusSqlMysql("delivered", null, tenantScope)} THEN 1 ELSE 0 END) AS delivered,
-      SUM(CASE WHEN ${orderStatusSqlMysql("cancelled", null, tenantScope)} THEN 1 ELSE 0 END) AS cancelled,
-      SUM(CASE WHEN ${orderStatusSqlMysql("unbound", null, tenantScope)} THEN 1 ELSE 0 END) AS unbound,
-      SUM(CASE WHEN ${orderStatusSqlMysql("pending_purchase", coverage, tenantScope)} THEN 1 ELSE 0 END) AS pending_purchase,
-      SUM(CASE WHEN ${orderStatusSqlMysql("purchase_in_transit", coverage, tenantScope)} THEN 1 ELSE 0 END) AS purchase_in_transit,
-      SUM(CASE WHEN ${orderStatusSqlMysql("purchase_records_missing", coverage, tenantScope)} THEN 1 ELSE 0 END) AS purchase_records_missing
+      SUM(CASE WHEN ${statusSql("awaiting_packaging")} THEN 1 ELSE 0 END) AS awaiting_packaging,
+      SUM(CASE WHEN ${statusSql("awaiting_deliver")} THEN 1 ELSE 0 END) AS awaiting_deliver,
+      SUM(CASE WHEN ${statusSql("ogl_dispatched")} THEN 1 ELSE 0 END) AS ogl_dispatched,
+      SUM(CASE WHEN ${statusSql("delivering")} THEN 1 ELSE 0 END) AS delivering,
+      SUM(CASE WHEN ${statusSql("dispute")} THEN 1 ELSE 0 END) AS dispute,
+      SUM(CASE WHEN ${statusSql("delivered")} THEN 1 ELSE 0 END) AS delivered,
+      SUM(CASE WHEN ${statusSql("cancelled")} THEN 1 ELSE 0 END) AS cancelled,
+      SUM(CASE WHEN ${statusSql("unbound")} THEN 1 ELSE 0 END) AS unbound,
+      SUM(CASE WHEN ${statusSql("pending_purchase")} THEN 1 ELSE 0 END) AS pending_purchase,
+      SUM(CASE WHEN ${statusSql("purchase_in_transit")} THEN 1 ELSE 0 END) AS purchase_in_transit,
+      SUM(CASE WHEN ${statusSql("purchase_records_missing")} THEN 1 ELSE 0 END) AS purchase_records_missing
     FROM orders o
+    ${orderPagedOglEvidenceJoinMysql(tenantScope)}
     WHERE ${base.where}
   `, base.params);
   return {
@@ -30708,12 +30735,12 @@ async function addOrderLogisticsMethodSqlMysql(where, params, query, tenantId = 
   if (clause) where.push(clause);
 }
 
-function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
+function orderStatusSqlMysql(status, coverage = null, tenantScope = null, evidenceAlias = null) {
   if (coverage && ["pending_purchase", "purchase_in_transit", "purchase_records_missing"].includes(status)) return procurementQueueSql(coverage, status);
   if (status === "all") return "1 = 1";
   if (status === "pending_purchase") {
     return `(
-      (${orderStatusSqlMysql("awaiting_packaging")} OR ${orderStatusSqlMysql("awaiting_deliver")})
+      (${orderStatusSqlMysql("awaiting_packaging", null, tenantScope, evidenceAlias)} OR ${orderStatusSqlMysql("awaiting_deliver", null, tenantScope, evidenceAlias)})
       AND NOT EXISTS (
         SELECT 1 FROM ozon_orders_raw purchase_raw
         WHERE purchase_raw.store_id = o.shop_id
@@ -30832,30 +30859,30 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
   const exactTransit = `${value} REGEXP '(^|[[:space:]])(delivering|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^[:space:]]*|posting_in_courier_service|posting_in_pickup_point)([[:space:]]|$)'`;
   const waitingStates = "'acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'";
   const awaitingDelivery = `(${state} IN (${waitingStates}) OR ${stage} IN (${waitingStates}) OR LOWER(COALESCE(o.logistics_status, '')) IN (${waitingStates}))`;
-  if (status === "ogl_dispatched") return oglDispatchedStatusSql("o");
+  if (status === "ogl_dispatched") return oglDispatchedStatusSql("o", evidenceAlias);
   if (status === "awaiting_packaging") {
     return `((${state} IN ('awaiting_approve','awaiting_packaging','posting_created')
       OR ${stage} IN ('awaiting_approve','awaiting_packaging','posting_created'))
-      AND NOT ${oglDispatchedStatusSql("o")}
-      AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
+      AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)}
+      AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
   }
   if (status === "awaiting_deliver") {
     return `(${awaitingDelivery}
       AND NOT (${exactTransit})
-      AND NOT ${oglDispatchedStatusSql("o")} AND NOT ${oglOnlineStatusSql("o")} AND NOT ${oglTerminalStatusSql("o")}
-      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)}))`;
+      AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
   }
   if (status === "dispute") return `(${value} LIKE '%arbitration%' OR ${value} LIKE '%dispute%')`;
   if (status === "cancelled") return `(${value} LIKE '%cancel%' OR ${value} LIKE '%return%' OR ${value} LIKE '%not_accepted%')`;
-  if (status === "delivered") return `((${value} LIKE '%delivered%' OR (${oglTerminalStatusSql("o")} AND ${value} LIKE '%posting_received_by_buyer%')) AND NOT (${orderStatusSqlMysql("cancelled")}))`;
+  if (status === "delivered") return `((${value} LIKE '%delivered%' OR (${oglTerminalStatusSql("o", evidenceAlias)} AND ${value} LIKE '%posting_received_by_buyer%')) AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)}))`;
   if (status === "delivering") {
-    return `((${exactTransit}) OR ${oglOnlineStatusSql("o")} OR (
+    return `((${exactTransit}) OR ${oglOnlineStatusSql("o", evidenceAlias)} OR (
       NOT ${awaitingDelivery}
       AND
       ${value} NOT LIKE '%awaiting_packaging%' AND ${value} NOT LIKE '%awaiting_deliver%' AND ${value} NOT LIKE '%pending_stock%'
@@ -30865,10 +30892,10 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null) {
         OR ${value} LIKE '%sorting%' OR ${value} LIKE '%customs%' OR ${value} LIKE '%shipped%' OR ${value} LIKE '%sent%'
         OR ${value} LIKE '%on_way%'
       )
-    )) AND NOT ${oglDispatchedStatusSql("o")} AND NOT ${oglTerminalStatusSql("o")}
-      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope)})
-      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope)})`;
+    )) AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+      AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
+      AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)})`;
   }
   return "1 = 1";
 }

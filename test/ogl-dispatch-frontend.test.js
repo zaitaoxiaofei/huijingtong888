@@ -275,17 +275,33 @@ test("an observed application needs explicit verified adoption before a separate
   assert.equal(wrong.calls.length, 0, "mismatched container counts cannot adopt an application");
 });
 
-test("application list preserves unknown official counts and timestamps and keeps printing controls", () => {
+test("application details keep one label download and a same-row return without redundant file controls", () => {
   const source = readFileSync(new URL("../frontend/orders/components/OglDispatchPanel.vue", import.meta.url), "utf8");
   const toolbar = readFileSync(new URL("../frontend/orders/components/OrdersToolbar.vue", import.meta.url), "utf8");
   assert.match(source, /row\.created_at \? formatTime\(row\.created_at\) : '待获取'/);
   assert.match(source, /row\.containers_count \?\? '待获取'/);
   assert.match(source, /row\.postings_count \?\? '待获取'/);
-  assert.match(source, /downloadFile\('container-labels', true, officialBatchId\)/);
-  assert.match(source, /downloadFile\('barcode', true, officialBatchId\)/);
+  const official = source.slice(source.indexOf('<template v-if="tab === \'official-detail\''), source.indexOf('<template v-if="tab === \'create\''));
+  assert.equal((official.match(/>下载货位标签</g) || []).length, 1);
+  assert.match(official, /fileCapability\(officialCarriage, 'container-labels'\)\.available !== true/);
+  assert.doesNotMatch(source, />打开标签 \/ 打印<|>下载交接条码<|>打开条码 \/ 打印<|>读取最新详情<|>发运跟踪与货位</);
+  const nav = source.match(/<div class="ogl-dispatch-nav">([\s\S]*?)<\/div>/)[1];
+  assert.match(nav, />已申请</);
+  assert.match(nav, />发运历史</);
+  assert.match(nav, />返回申请列表</);
   assert.doesNotMatch(source, /label="ERP 关联"/);
   assert.match(toolbar, /command="ogl-official-carriages"/);
   assert.match(toolbar, /command="ogl-batch-history"/);
+});
+
+test("official delivery method prefers verified carrier and never guesses one from a city or Russian label", () => {
+  const f = fixture();
+  assert.equal(f.get("carriageDeliveryMethod({carrier_name:'圆通',delivery_method_name:'Доставка до Hefei'})"), "圆通");
+  assert.equal(f.get("carriageDeliveryMethod({carrier_name:'YTO Express'})"), "YTO Express");
+  assert.equal(f.get("carriageDeliveryMethod({delivery_method_name:'Доставка до Hefei'})"), "承运商待核实");
+  assert.equal(f.get("carriageDeliveryMethod({delivery_method_name:'Hefei'})"), "承运商待核实");
+  assert.equal(f.get("carriageDeliveryMethod({delivery_method_name:'邮政上门取件'})"), "邮政上门取件");
+  assert.equal(f.get("carriageStatus({status:'received'})"), "验收中");
 });
 
 test("late existing-carriage details cannot appear after tenant/session rotation", async () => {

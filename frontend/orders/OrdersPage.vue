@@ -29,7 +29,7 @@ import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, s
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
-import { oglTransportDeadlineHint } from "./utils/ogl-transport-deadline.js";
+import { oglTransportDeadlineHint, oglTransportDeadlineUrgent, usesOglTransportDeadline } from "./utils/ogl-transport-deadline.js";
 import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/utils/inventory-similarity.js";
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
@@ -1277,7 +1277,8 @@ function buildTableRow(row) {
     statusLabel: rowStateLabel(row),
     statusHint: displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
-    statusDeadlineHint: displayStateKey === "ogl_dispatched" ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
+    statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
+    statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),
     qualityCheckOrder: isQualityCheckOrderRow(row),
     passportMissingOrder: isPassportMissingOrderRow(row),
     procurementState: buildProcurementState(row),
