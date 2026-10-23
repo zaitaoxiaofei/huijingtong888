@@ -4,6 +4,14 @@ export function normalizeOglOrderIds(ids = []) {
   return [...new Set(Array.from(ids).map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))];
 }
 
+export function oglHandoverType(method = {}) {
+  const firstMile = String(method.first_mile_type || "").toLowerCase().replace(/[_-]/g, "");
+  if (firstMile === "pickup") return "courier";
+  if (firstMile === "dropoff") return "self";
+  if (["courier", "self"].includes(method.handover_type)) return method.handover_type;
+  return "";
+}
+
 export function oglMemberMatches(member, filter) {
   if (filter === "withdrawn") return Boolean(member.withdrawn_at || member.active === false || member.active === 0);
   const active = !member.withdrawn_at && member.active !== false && member.active !== 0;

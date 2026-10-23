@@ -88,7 +88,7 @@ test("OGL official requests and cached files retain real MySQL enterprise and fr
     const foreignBefore = await foreignSnapshot();
 
     await t.test("default legacy shop and A/B share carriage IDs without sharing order matches or label caches", async () => {
-      await reset();
+      await reset(); state.remoteStatus = "formed";
       for (const tenant of [1, 2, 3]) {
         const detail = await service.officialDetail(session(tenant), {...officialQuery,shop_id:tenant*10});
         assert.equal(detail.dispatch_shop.id, tenant * 10);

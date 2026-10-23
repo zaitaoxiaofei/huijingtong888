@@ -1,0 +1,75 @@
+@startuml
+title 爆单 ERP · 业务域关系总览（聚合引用，无业务执行方向含义）
+hide methods
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam defaultFontName Microsoft YaHei
+skinparam classAttributeIconSize 0
+skinparam nodesep 45
+skinparam ranksep 55
+caption 结构基线：2026/10/23 13:42:11（北京时间） / commit 51f39f8。只含结构与源码证据，不代表数据已核平。
+rectangle "身份、企业与会员\n10 张表" as d_identity
+rectangle "配置、定时任务与运行审计\n10 张表" as d_platform
+rectangle "店铺、在线商品与平台同步\n10 张表" as d_shop
+rectangle "基础字典与 Ozon 类目\n11 张表" as d_dictionary
+rectangle "产品、库存与物理台账\n16 张表" as d_inventory
+rectangle "订单、履约与利润\n21 张表" as d_order
+rectangle "采购、收货与成本\n18 张表" as d_procurement
+rectangle "OGL 发运\n5 张表" as d_ogl
+rectangle "FBP 补货与调拨\n10 张表" as d_fbp
+rectangle "采集、草稿与上架\n18 张表" as d_listing
+rectangle "AI 策略、裂变与生成\n23 张表" as d_ai
+rectangle "素材、媒体与资产\n12 张表" as d_asset
+rectangle "财务与薪资\n11 张表" as d_finance
+rectangle "团队任务与产品开发\n9 张表" as d_team
+rectangle "私信、客户消息与评论\n12 张表" as d_communication
+rectangle "分析、广告、看板与预警\n21 张表" as d_analytics
+rectangle "历史备份表\n2 张表" as d_archive
+d_order -[#64748B]- d_shop : 9 条引用
+d_inventory -[#64748B]- d_order : 7 条引用
+d_inventory -[#64748B]- d_shop : 12 条引用
+d_inventory -[#64748B]- d_procurement : 13 条引用
+d_order -[#64748B]- d_procurement : 5 条引用
+d_fbp -[#64748B]- d_procurement : 2 条引用
+d_finance -[#64748B]- d_shop : 3 条引用
+d_asset -[#64748B]- d_finance : 1 条引用
+d_fbp -[#64748B]- d_shop : 6 条引用
+d_fbp -[#64748B]- d_inventory : 7 条引用
+d_ogl -[#64748B]- d_shop : 3 条引用
+d_ogl -[#64748B]- d_order : 2 条引用
+d_inventory -[#64748B]- d_listing : 5 条引用
+d_listing -[#64748B]- d_shop : 5 条引用
+d_listing -[#64748B]- d_team : 4 条引用
+d_asset -[#64748B]- d_shop : 5 条引用
+d_asset -[#64748B]- d_listing : 1 条引用
+d_dictionary -[#64748B]- d_listing : 2 条引用
+d_dictionary -[#64748B]- d_team : 1 条引用
+d_identity -[#64748B]- d_team : 7 条引用
+d_inventory -[#64748B]- d_team : 2 条引用
+d_ai -[#64748B]- d_listing : 4 条引用
+d_ai -[#64748B]- d_identity : 6 条引用
+d_communication -[#64748B]- d_identity : 5 条引用
+d_communication -[#64748B]- d_order : 5 条引用
+d_communication -[#64748B]- d_procurement : 1 条引用
+d_communication -[#64748B]- d_shop : 4 条引用
+d_asset -[#64748B]- d_inventory : 2 条引用
+d_analytics -[#64748B]- d_shop : 5 条引用
+d_analytics -[#64748B]- d_inventory : 2 条引用
+d_asset -[#64748B]- d_identity : 1 条引用
+d_identity -[#64748B]- d_platform : 5 条引用
+d_dictionary -[#64748B]- d_inventory : 1 条引用
+d_identity -[#64748B]- d_inventory : 2 条引用
+d_identity -[#64748B]- d_order : 1 条引用
+d_finance -[#64748B]- d_identity : 5 条引用
+d_identity -[#64748B]- d_listing : 2 条引用
+d_identity -[#64748B]- d_shop : 1 条引用
+d_dictionary -[#64748B]- d_shop : 4 条引用
+d_dictionary -[#64748B]- d_identity : 1 条引用
+legend left
+每条连线汇总两个业务域之间已核查的结构 / 代码引用。
+不表示业务执行顺序，不包含仅凭字段名猜测的关系。
+全部表、字段及证据见 erp-database-all.puml 与交互浏览器。
+endlegend
+@enduml

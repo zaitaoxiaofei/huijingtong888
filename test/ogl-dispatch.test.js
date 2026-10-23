@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import mysql from 'mysql2/promise';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { createOglDispatchService, oglPlatformProgress, summarizeOglMembers, isOglLogisticsFresh } from '../src/services/ogl-dispatch.js';
+import { createOglDispatchService, oglPlatformProgress, summarizeOglMembers, isOglLogisticsFresh, normalizeOglHandoverType } from '../src/services/ogl-dispatch.js';
 import { ensureOglDispatchSchema } from '../src/services/ogl-dispatch-schema.js';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 
@@ -27,6 +27,12 @@ test('OGL progress uses platform evidence; handover, missing data and cancellati
   assert.equal(summarizeOglMembers(mixed).online,97);assert.equal(summarizeOglMembers(mixed).not_online,3);
 });
 
+test('handover display normalizes only official pickup/dropoff fields without inventing a mode',()=>{
+  for(const first_mile_type of ['pickup','pick_up','PICK_UP'])assert.equal(normalizeOglHandoverType({first_mile_type}),'courier');
+  for(const first_mile_type of ['dropoff','drop_off','DROP_OFF'])assert.equal(normalizeOglHandoverType({first_mile_type}),'self');
+  for(const info of [{},{first_mile_type:'future'},null])assert.equal(normalizeOglHandoverType(info),null);
+});
+
 test('official-only views show yesterday and today without local batches, remain read-only and redact unrelated fields',async()=>{
   const session={personId:2,tenant:{id:2,slug:'fixture-enterprise'}};
   let defaultShop=20;let linked=false;let changeDuringRequest=false;let revoked=false;let labelMode='found';let labelReads=0;let containersCount=1;const sqlCalls=[];const apiCalls=[];
@@ -35,7 +41,7 @@ test('official-only views show yesterday and today without local batches, remain
     if(sql.includes('FROM tenants t'))return [revoked?[]:[{id:2,slug:'fixture-enterprise',tenant_role:'member',business_roles_json:['packing']}]];
     if(sql.includes('FROM ogl_dispatch_settings'))return [[{default_shop_id:defaultShop}]];
     if(sql.includes('FROM shops s'))return [[{id:Number(params[0]),name:'Fixture default shop',ozon_client_id:'fixture-client',ozon_api_key:'fixture-key'}]];
-    if(sql.includes('FROM ogl_dispatch_batches'))return [linked?[{id:8,batch_number:'OGL-fixture',official_carriage_id:'901'}]:[]];
+    if(sql.includes('FROM ogl_dispatch_batches'))return [linked&&(!sql.includes('official_carriage_id = ?')||String(params.at(-1))==='901')?[{id:8,batch_number:'OGL-fixture',official_carriage_id:'901'}]:[]];
     if(sql.includes('FROM orders o')){assert.equal(params[1],20);return [[{id:1,posting_number:'LOCAL-OWN',shop_id:20,platform_status:'awaiting_deliver',tracking_stage:'posting_in_carriage',last_synced_at:'2026-10-22 01:00:00'}]];}
     throw new Error(`Unexpected SQL ${sql}`);
   }};
@@ -111,19 +117,19 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
         carriages:[...official.entries()].map(([id,value])=>({id,status:value.status,containers_count:value.containers,available_actions:['get_label_containers']}))}];
       if(mode==='official-readonly')return [{delivery_method_id:77,delivery_method_name:'OGL fixture pickup',departure_date:filter.departure_date==='2026-10-21'?'2026-10-20T16:00:00Z':'2026-10-21T16:00:00Z',has_entrusted_acceptance:true,
         carriages:[{id:0,available_actions:['create']},{id:Number(shop.id)===30?991:filter.departure_date==='2026-10-21'?901:902,status:filter.departure_date==='2026-10-21'?'received':'formed',postings_count:4,available_actions:['get_label_containers']}]}];
-      return [{delivery_method_id:77,name:'OGL pickup',departure_date:'2026-10-22T16:00:00Z',has_entrusted_acceptance:true,carriages:[{id:0,available_actions:['create']}]}];},
+      return [{delivery_method_id:77,name:'OGL pickup',departure_date:'2026-10-22T16:00:00Z',first_mile_type:'PICK_UP',integration_type:'ozon_outsourced',has_entrusted_acceptance:true,carriages:[{id:0,available_actions:['create']}]}];},
     async request(shop,path,body,options){
       calls.push({shop:Number(shop.id),path,body,options});
       if(path.endsWith('/create')) {
         if(mode==='timeout') throw Object.assign(new Error('transport timeout'),{unknown:true,operationOutcome:'unknown'});
-        const carriage_id=++nextId;official.set(carriage_id,{status:'new',numbers:['A1','EXTRA'],method:body.delivery_method_id});return {carriage_id};
+        const carriage_id=++nextId;official.set(carriage_id,{status:'new',numbers:['A1','EXTRA'],method:body.delivery_method_id,containers:0});return {carriage_id};
       }
       const carriageId=Number(body.carriage_id??body.id);const item=official.get(carriageId);
-      if(path.endsWith('/get')) {if(pauseGet){const pause=pauseGet;pauseGet=null;pause.enter();await pause.wait;}if(!item)throw new Error('Unknown official carriage');return {status:item.status,containers_count:item.containers,delivery_method_id:item.method,first_mile_type:'pickup',integration_type:'ozon_outsourced',available_actions:['get_label_containers','get_barcode']};}
-      if(path.endsWith('/get-postings')) return {result:item.numbers.map(posting_number=>({posting_number}))};
+      if(path.endsWith('/get')) {if(pauseGet){const pause=pauseGet;pauseGet=null;pause.enter();await pause.wait;}if(!item)throw new Error('Unknown official carriage');return {status:item.status,containers_count:item.containers,delivery_method_id:item.method,first_mile_type:item.first_mile_type||'pickup',integration_type:item.integration_type||'ozon_outsourced',available_actions:item.available_actions||['get_label_containers','get_barcode']};}
+      if(path.endsWith('/get-postings')) return {result:item.numbers.map(posting_number=>({posting_number,...(item.posting_results?.[posting_number]||{})}))};
       if(path.endsWith('/set-postings')) {item.numbers=body.posting_numbers;return {result:body.posting_numbers.map(posting_number=>({posting_number,result:true,error:''}))};}
-      if(path.endsWith('/approve')) {item.status='sended';item.containers=body.containers_count;return {};}
-      if(path.endsWith('/courier-contact/set'))return {};
+      if(path.endsWith('/approve')) {item.status=item.confirmed_status||'sended';item.containers=body.containers_count;if(mode==='approve-timeout')throw Object.assign(new Error('approve timeout after remote acceptance'),{unknown:true,operationOutcome:'unknown'});return {};}
+      if(path.endsWith('/courier-contact/set')) {if(mode==='revoke-after-contact')await query('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=2');return {};}
       if(options?.binary)return {buffer:labelPdfBuffer,contentType:'application/pdf'};
       throw new Error(`Unexpected API fixture ${path}`);
     }
@@ -139,7 +145,7 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
     await query("INSERT INTO people(id,name,role) VALUES(4,'Packing user','packing')");
     await query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(2,4,'member',JSON_ARRAY('packing'))");
     for(const [shopId,tenantId] of [[10,null],[20,2],[21,2],[30,3]]) await query("INSERT INTO shops(id,tenant_id,name,ozon_client_id,api_key_hint) VALUES(?,?,?,'fixture-client','fixture-key')",[shopId,tenantId,`Shop ${shopId}`]);
-    const seeds=[[1,20,'A1','OGL','awaiting_deliver',true],[2,21,'A2','OGL','awaiting_deliver',true],[3,30,'B1','OGL','awaiting_deliver',true],[4,20,'A4','GUOO','awaiting_deliver',true],[5,20,'A5','OGL','awaiting_deliver',false],[6,20,'A6','OGL','awaiting_packaging',true],[7,20,'A7','OGL','awaiting_deliver',true],[8,20,'A8','OGL','awaiting_deliver',true],[9,20,'A9','OGL','awaiting_deliver',true],[10,10,'LEGACY','OGL','awaiting_deliver',true],[11,20,'A11','OGL','awaiting_deliver',true]];
+    const seeds=[[1,20,'A1','OGL','awaiting_deliver',true],[2,21,'A2','OGL','awaiting_deliver',true],[3,30,'B1','OGL','awaiting_deliver',true],[4,20,'A4','GUOO','awaiting_deliver',true],[5,20,'A5','OGL','awaiting_deliver',false],[6,20,'A6','OGL','awaiting_packaging',true],[7,20,'A7','OGL','awaiting_deliver',true],[8,20,'A8','OGL','awaiting_deliver',true],[9,20,'A9','OGL','awaiting_deliver',true],[10,10,'LEGACY','OGL','awaiting_deliver',true],[11,20,'A11','OGL','awaiting_deliver',true],[12,20,'A12','OGL','awaiting_deliver',true],[13,20,'A13','OGL','awaiting_deliver',true],[14,20,'A14','OGL','awaiting_deliver',true]];
     for(const [orderId,shopId,number,carrier,status,printed] of seeds) {
       await query('INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(?,?,?,?,UTC_TIMESTAMP())',[orderId,shopId,number,status]);
       await query("INSERT INTO ozon_orders_raw(store_id,posting_number,status,raw_json) VALUES(?,?,?,?)",[shopId,number,status,JSON.stringify({posting_number:number,status,delivery_method:{id:77,name:`${carrier} pickup`}})]);
@@ -165,7 +171,7 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       assert.equal(yesterday.rows[0].carriage_id,'901');assert.equal(yesterday.rows[0].status,'received');assert.equal(yesterday.rows[0].official_only,true);assert.equal(yesterday.rows[0].local_batch_id,null);
       const today=await service.listOfficial(session(2),{date:'2026-10-22'});assert.equal(today.rows[0].status_label,'已生成');assert.equal(today.rows[0].containers_count,1);
       const current=await service.officialDetail(session(2),{id:902,date:'2026-10-22',tenant_id:3,shop_id:20});
-      assert.deepEqual(current.summary,{official_members:4,matched_local:1,unmatched_local:3,online:0});assert.equal(current.members[0].order_id,1);
+      assert.deepEqual(current.summary,{official_members:4,matched_local:1,unmatched_local:3,online:0,failed_postings:[],local_members_count:0,local_only_count:0});assert.equal(current.members[0].order_id,1);
       assert.equal(current.members.find(row=>row.posting_number==='A2').matched_local,false,'Same-enterprise other shop is not the official source shop');
       assert.equal(current.members.find(row=>row.posting_number==='B1').order_id,null,'Foreign-enterprise order details are not exposed');
       assert.equal(current.carriage.status,'formed');assert.equal(current.members[0].platform_status,'awaiting_deliver');assert.equal(current.members[0].online,false);
@@ -207,15 +213,42 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       await query("UPDATE ozon_orders_raw SET raw_json=JSON_SET(raw_json,'$.delivery_method.id',77) WHERE store_id=20 AND posting_number='A1'");
       const created=await service.action(session(2),{batch_id:first.batch.id,action:'official-create',delivery_method_id:77,departure_date:'2026-10-23'});
       assert.equal(created.batch.official_status,'created');
+      assert.equal(created.batch.official_result.info.containers_count,0,'new applications have no confirmed containers before approve; local intended count is not official proof');
       assert.equal(calls.find(call=>call.path.endsWith('/create')).body.departure_date,'2026-10-22T16:00:00Z','Match the Beijing-calendar day but submit the exact official date-time across the UTC midnight boundary');
       const set=calls.find(call=>call.path.endsWith('/set-postings'));assert.deepEqual(set.body.posting_numbers,['A1']);assert.equal(set.shop,20);
       assert.deepEqual(created.batch.official_result.cross_shop_local_only,['A2']);
       assert.equal(created.members.find(row=>row.posting_number==='A2').official_member,0);
+      official.get(Number(created.batch.official_carriage_id)).confirmed_status='formed';
+      const beforeContact=calls.length;
+      await assert.rejects(service.action(session(2),{batch_id:first.batch.id,action:'official-confirm'}),{code:'OGL_COURIER_CONTACT_REQUIRED'});
+      await assert.rejects(service.action(session(2),{batch_id:first.batch.id,action:'official-confirm',courier_contact:{wechat_nickname:'fixture'}}),{code:'OGL_COURIER_CONTACT_REQUIRED'});
+      assert.ok(calls.slice(beforeContact).every(call=>!['/v1/carriage/courier-contact/set','/v1/carriage/approve'].includes(call.path)),'Missing pickup phone is rejected before any official write');
       const approved=await service.action(session(2),{batch_id:first.batch.id,action:'official-confirm',courier_contact:{phone:'+8613812345678',wechat_nickname:'fixture'}});
       assert.equal(approved.batch.official_status,'approved');assert.equal(approved.batch.status,'ready');assert.equal(calls.find(call=>call.path.endsWith('/approve')).body.containers_count,3);
       assert.equal(calls.find(call=>call.path.endsWith('/courier-contact/set')).body.phone,'+86(138)1234-5678');
       assert.match((await service.file(session(2),first.batch.id,'container-labels')).filename,/container-labels.pdf$/);
       const remote=official.get(Number(approved.batch.official_carriage_id));
+      remote.status='formed';
+      const formed=await service.action(session(2),{batch_id:first.batch.id,action:'official-sync'});
+      assert.equal(formed.batch.official_status,'approved','OGL formed with precise current manifest, method, positive count and label capability is confirmed');
+      assert.ok(formed.members.every(row=>!row.dispatched_at),'Official formation never manufactures physical handover');
+      assert.equal(formed.members.find(row=>row.posting_number==='A2').official_member,0,'Other same-enterprise shop remains local mixed membership');
+      assert.match((await service.file(session(2),first.batch.id,'container-labels')).filename,/container-labels.pdf$/);
+      await assert.rejects(service.file(session(3),first.batch.id,'container-labels'),/不存在/);
+      for(const change of [{containers:0},{containers:4},{numbers:['A7']},{method:78},{available_actions:[]}]) {
+        const previous={...remote};Object.assign(remote,change);
+        const offset=calls.length;
+        await assert.rejects(service.file(session(2),first.batch.id,'container-labels'),error=>error.statusCode===409);
+        assert.ok(calls.slice(offset).every(call=>call.path!=='/v2/posting/fbs/act/get-container-labels'),'Current official mismatch blocks binary reads even when local approval is still saved');
+        const refused=await service.action(session(2),{batch_id:first.batch.id,action:'official-sync'});
+        assert.ok(['mismatch','sync_required'].includes(refused.batch.official_status));
+        await assert.rejects(service.file(session(2),first.batch.id,'container-labels'),/尚未核实确认/);
+        assert.ok(refused.members.every(row=>!row.dispatched_at));
+        assert.ok(calls.slice(offset).every(call=>!['/v1/carriage/create','/v1/carriage/approve','/v1/carriage/set-postings'].includes(call.path)),'Unproven formed must not trigger an automatic official mutation');
+        for(const key of Object.keys(remote))delete remote[key];Object.assign(remote,previous);
+        assert.equal((await service.action(session(2),{batch_id:first.batch.id,action:'official-sync'})).batch.official_status,'approved');
+      }
+      remote.status='sended';
       for(const [field,value] of [['numbers',['A7']],['containers',4],['method',78]]) {
         const previous=remote[field];remote[field]=value;mode='approved-rediscovery';
         if(field==='method') {
@@ -260,6 +293,53 @@ test('OGL isolated MySQL batches, official fixtures, tenant boundaries and concu
       assert.equal(automaticallyUpdated.members[0].sync_error,null);assert.equal(automaticallyUpdated.summary.sync_pending,0);assert.equal(automaticallyUpdated.summary.online,1);
       const [failureHistory]=await query('SELECT sync_error FROM ogl_dispatch_members WHERE batch_id=?',[newer.batch.id]);assert.ok(failureHistory.sync_error,'Failed attempt remains stored for audit while view uses newer successful platform sync');
       const old=await service.detail(session(2),first.batch.id);assert.equal(old.summary.withdrawn,1);assert.ok(old.events.some(row=>row.action==='withdraw'));
+    });
+    await t.test('confirmation unknown outcomes recover only through official evidence without repeated mutation',async()=>{
+      const draft=await service.createBatch(session(2),{order_ids:[12],container_count:2,client_request_id:'approve-unknown'});
+      const created=await service.action(session(2),{batch_id:draft.batch.id,action:'official-create',delivery_method_id:77,departure_date:'2026-10-23'});
+      const remote=official.get(Number(created.batch.official_carriage_id));remote.confirmed_status='formed';mode='approve-timeout';
+      const offset=calls.length;
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',courier_contact:{phone:'13812345678'}}),/approve timeout/);
+      assert.equal((await service.detail(session(2),draft.batch.id)).batch.official_status,'confirm_unknown');
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',courier_contact:{phone:'13812345678'}}),/结果未知时先同步/);
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-create',delivery_method_id:77,departure_date:'2026-10-23'}),/勿重复创建/);
+      mode='normal';
+      const recovered=await service.action(session(2),{batch_id:draft.batch.id,action:'official-sync'});
+      assert.equal(recovered.batch.official_status,'approved');assert.ok(recovered.members.every(row=>!row.dispatched_at));
+      assert.equal(calls.slice(offset).filter(call=>call.path==='/v1/carriage/approve').length,1);
+      assert.equal(calls.slice(offset).filter(call=>call.path==='/v1/carriage/create').length,0);
+      assert.match((await service.file(session(2),draft.batch.id,'container-labels')).filename,/container-labels.pdf$/);
+    });
+    await t.test('revocation after contact submission prevents approval and file exposure',async()=>{
+      const draft=await service.createBatch(session(2),{order_ids:[14],container_count:1,client_request_id:'contact-revoked'});
+      await service.action(session(2),{batch_id:draft.batch.id,action:'official-create',delivery_method_id:77,departure_date:'2026-10-23'});
+      mode='revoke-after-contact';const offset=calls.length;
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',courier_contact:{phone:'13812345678'}}),{statusCode:403});
+      await assert.rejects(service.file(session(2),draft.batch.id,'container-labels'),{statusCode:403});
+      assert.ok(calls.slice(offset).every(call=>!['/v1/carriage/approve','/v2/posting/fbs/act/get-container-labels'].includes(call.path)));
+      await query('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=2');mode='normal';
+      const held=await service.detail(session(2),draft.batch.id);
+      assert.equal(held.batch.official_status,'confirming','Revocation prevents even the error writer from clearing the held operation token');
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-sync'}),/五分钟/);
+      await query('UPDATE ogl_dispatch_batches SET updated_at=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 6 MINUTE) WHERE id=?',[draft.batch.id]);
+      assert.equal((await service.action(session(2),{batch_id:draft.batch.id,action:'official-sync'})).batch.official_status,'confirm_unknown');
+      assert.equal((await service.action(session(2),{batch_id:draft.batch.id,action:'official-sync'})).batch.official_status,'created');
+      assert.equal((await service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',courier_contact:{phone:'13812345678'}})).batch.official_status,'approved');
+    });
+    await t.test('pending confirmation accepts a reviewed positive count without guessing or clearing container assignments',async()=>{
+      const draft=await service.createBatch(session(2),{order_ids:[13],container_count:3,client_request_id:'confirm-updated-count'});
+      await service.action(session(2),{batch_id:draft.batch.id,action:'assign',order_ids:[13],container_no:3});
+      await service.action(session(2),{batch_id:draft.batch.id,action:'official-create',delivery_method_id:77,departure_date:'2026-10-23'});
+      const offset=calls.length;
+      for(const invalid of [0,-1,1.5,1001])await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',container_count:invalid,courier_contact:{phone:'13812345678'}}),/货位数量/);
+      await assert.rejects(service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',container_count:2,courier_contact:{phone:'13812345678'}}),{code:'OGL_CONTAINER_ASSIGNMENT_CONFLICT'});
+      const unchanged=await service.detail(session(2),draft.batch.id);
+      assert.equal(Number(unchanged.batch.containers_count),3);assert.equal(Number(unchanged.members[0].container_no),3);
+      assert.ok(calls.slice(offset).every(call=>!['/v1/carriage/approve','/v1/carriage/courier-contact/set'].includes(call.path)),'Invalid count and out-of-range assignments stop before official writes');
+      const confirmed=await service.action(session(2),{batch_id:draft.batch.id,action:'official-confirm',container_count:4,courier_contact:{phone:'13812345678'}});
+      assert.equal(Number(confirmed.batch.containers_count),4);assert.equal(confirmed.batch.official_status,'approved');
+      assert.equal(Number(confirmed.members[0].container_no),3);assert.equal(confirmed.members[0].dispatched_at,null);
+      assert.equal(calls.slice(offset).find(call=>call.path==='/v1/carriage/approve').body.containers_count,4);
     });
     await t.test('real handover blocks local withdrawal; refresh failures stay separate from not-online',async()=>{
       await query("UPDATE orders SET tracking_stage='driver_pickup' WHERE id=7");
