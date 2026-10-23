@@ -38,7 +38,7 @@ import { deriveCollectedAttributesFromFacts } from "./listing-collected-attribut
 import { listingTenantLookup } from "./listing-tenant-scope.js";
 import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./business-task-tenant.js";
-import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { currentAiTenantSession, needsAiTenantSession, withAiTenantRequestGuard, withAiTenantSession } from "./ai-tenant-context.js";
 import { AI_VARIANT_SOURCE_COLUMN_SQL, AI_VARIANT_SOURCE_INDEX_SQL } from "./ai-variant-draft-history-schema.js";
 import { assertImageCropperTaskOwner } from "../server/services/tools/imageCropperService.js";
 import { buildOrderOutcomeSql } from "./order-outcome.js";
@@ -4800,7 +4800,7 @@ function normalizeListingOfferId(value = "", maxLength = 128) {
     .slice(0, maxLength);
 }
 
-async function listingOfferIdExistsInTenant(offerId = "", { excludeDraftId = 0, session = null } = {}) {
+async function listingOfferIdExistsInTenant(offerId = "", { excludeDraftId = 0, session = null, connection = null } = {}) {
   const offer = normalizeListingOfferId(offerId);
   if (!offer) return false;
   const draftId = Number(excludeDraftId || 0);
@@ -4808,11 +4808,18 @@ async function listingOfferIdExistsInTenant(offerId = "", { excludeDraftId = 0, 
   const tenantScope = (alias) => tenantId === "admin"
     ? `COALESCE(${alias}.tenant_id, 'admin') = ?`
     : `${alias}.tenant_id = ?`;
+  const scopedRow = async(sql,params)=>{
+    if (!connection) return row(sql,params).catch(()=>null);
+    // Use the current transaction instead of borrowing a second pool slot.
+    // Current locking reads also see offers committed during source lock waits.
+    const [rows] = await connection.execute(`${sql} FOR SHARE`,params);
+    return rows[0] || null;
+  };
   const [online, record, copy, draft] = await Promise.all([
-    row(`SELECT op.id FROM online_products op JOIN shops s ON s.id = op.shop_id AND ${tenantId === "admin" ? "(s.tenant_id IS NULL OR s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1))" : "s.tenant_id = ?"} WHERE op.offer_id = ? LIMIT 1`, [...(tenantId === "admin" ? [] : [Number(tenantId)]), offer]).catch(() => null),
-    row(`SELECT r.id FROM listing_publish_records r WHERE r.offer_id = ? AND r.status <> 'deleted' AND ${tenantScope("r")} LIMIT 1`, [offer, tenantId]).catch(() => null),
-    row(`SELECT c.id FROM listing_shop_copies c WHERE c.offer_id = ? AND c.status <> 'deleted' AND ${tenantScope("c")} LIMIT 1`, [offer, tenantId]).catch(() => null),
-    row(`SELECT d.id FROM listing_drafts d WHERE d.internal_code = ? AND d.status <> 'deleted' AND d.id <> ? AND ${tenantScope("d")} LIMIT 1`, [offer, draftId, tenantId]).catch(() => null)
+    scopedRow(`SELECT op.id FROM online_products op JOIN shops s ON s.id = op.shop_id AND ${tenantId === "admin" ? "(s.tenant_id IS NULL OR s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1))" : "s.tenant_id = ?"} WHERE op.offer_id = ? LIMIT 1`, [...(tenantId === "admin" ? [] : [Number(tenantId)]), offer]),
+    scopedRow(`SELECT r.id FROM listing_publish_records r WHERE r.offer_id = ? AND r.status <> 'deleted' AND ${tenantScope("r")} LIMIT 1`, [offer, tenantId]),
+    scopedRow(`SELECT c.id FROM listing_shop_copies c WHERE c.offer_id = ? AND c.status <> 'deleted' AND ${tenantScope("c")} LIMIT 1`, [offer, tenantId]),
+    scopedRow(`SELECT d.id FROM listing_drafts d WHERE d.internal_code = ? AND d.status <> 'deleted' AND d.id <> ? AND ${tenantScope("d")} LIMIT 1`, [offer, draftId, tenantId])
   ]);
   return Boolean(online || record || copy || draft);
 }
@@ -12878,7 +12885,91 @@ function normalizeAiVariantTemplateLogisticsPayload(templatePayload = {}) {
   };
 }
 
-export async function createAiVariantListingDraftLightweight(body = {}, session = null, options = {}) {
+function aiVariantLightweightSaveError(message,status = 404) {
+  return Object.assign(new Error(message),{status,statusCode:status});
+}
+
+async function assertAiVariantLightweightReferences(body,session,{connection = null,payload = {},lock = false,additionalDraftIds = [],additionalTemplateIds = [],additionalProductIds = []} = {}) {
+  const query = connection ? async (sql,params) => (await connection.execute(sql,params))[0] : mysqlQuery;
+  const actor = await authorizeBusinessTaskSession(session,query);
+  assertBusinessTaskPermission(actor,"operations");
+  const tenantId = listingTenantId(actor), numericTenant = Number(actor.tenant.id);
+  const refs = (values,label) => [...new Set(values.filter(value=>value !== undefined && value !== null && value !== "" && value !== 0).map(value=>{
+    const id = Number(value);
+    if (!Number.isSafeInteger(id) || id <= 0) throw aiVariantLightweightSaveError(`${label}编号无效，请重新选择本企业记录`,400);
+    return id;
+  }))];
+  const draftIds = refs([body.source_draft_id,body.sourceDraftId,body.base_draft_id,body.baseDraftId,body.parent_draft_id,body.parentDraftId,...additionalDraftIds],"来源草稿");
+  const templateIds = refs([body.template_id,body.templateId,body.base_template_id,body.baseTemplateId,...additionalTemplateIds],"上架模板");
+  const productReferences = [body.source_product_id,body.sourceProductId,body.product_id,body.productId,payload.source_product_id,payload.sourceProductId,...additionalProductIds];
+  for (const snapshot of [objectValue(body.template_payload || body.templatePayload || body.template),objectValue(payload.template_payload)]) {
+    const editable = objectValue(snapshot.editable_payload || snapshot.editablePayload);
+    const sourceRaw = objectValue(snapshot.source_raw || snapshot.sourceRaw || editable.source_raw || editable.sourceRaw);
+    productReferences.push(snapshot.source_product_id,snapshot.sourceProductId,sourceRaw.source_product_id,sourceRaw.sourceProductId,sourceRaw.selection_product_id,sourceRaw.selectionProductId);
+  }
+  const productIds = refs(productReferences,"来源商品");
+  const lockSql = connection && lock ? " FOR UPDATE" : "";
+  const ownedSourceSnapshots = new Set();
+  for (const id of draftIds) {
+    const rows = await query(`SELECT id,template_id,source_product_id,template_payload_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted'${lockSql}`,[id,tenantId]);
+    if (!rows.length) throw aiVariantLightweightSaveError("来源或母草稿不存在或不属于当前企业，请重新导入本企业草稿");
+    if (rows[0].template_id) {
+      const savedTemplateId = Number(rows[0].template_id);
+      templateIds.push(savedTemplateId);
+      if (normalizeAiVariantSourceTemplateSnapshot({template_payload:parseJson(rows[0].template_payload_json,{})},savedTemplateId)) ownedSourceSnapshots.add(savedTemplateId);
+    }
+    if (rows[0].source_product_id) productIds.push(Number(rows[0].source_product_id));
+  }
+  for (const id of new Set(templateIds)) {
+    const rows = await query(`SELECT id FROM listing_category_templates WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted'${lockSql}`,[id,tenantId]);
+    if (!rows.length) {
+      const original = ownedSourceSnapshots.has(id) ? await query("SELECT COALESCE(tenant_id, 'admin') tenant_id FROM listing_category_templates WHERE id = ?",[id]) : [];
+      // A saved snapshot from an owned draft survives deletion of its original
+      // local template. It never authorizes an existing foreign template ID.
+      if (!ownedSourceSnapshots.has(id) || original.length && original[0].tenant_id !== tenantId) {
+        throw aiVariantLightweightSaveError("上架模板不存在或不属于当前企业；请重新选择本企业模板，或导入不带本地模板编号的完整快照");
+      }
+    }
+  }
+  for (const id of new Set(productIds)) {
+    const rows = await query(`SELECT id FROM products WHERE id = ? AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})${lockSql}`,[id,numericTenant]);
+    if (!rows.length) throw aiVariantLightweightSaveError("来源库存商品不存在或不属于当前企业，请在本企业重新选择来源商品");
+  }
+  const shopIds = normalizeAiVariantDraftShopIds(body.shop_ids || body.shopIds || body.target_shop_ids || body.targetShopIds);
+  for (const id of shopIds) {
+    const rows = await query(`SELECT id FROM shops WHERE id = ? AND status = 'active' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})${lockSql}`,[id,numericTenant]);
+    if (!rows.length) throw aiVariantLightweightSaveError("目标店铺不存在、已停用或不属于当前企业");
+  }
+  if (connection && lock) {
+    // Earlier consistent reads may have established an RR snapshot before a
+    // source/template lock wait. A current locking authorization must happen
+    // after all such waits, and its membership lock lasts through the write.
+    const lockedActor = await authorizeBusinessTaskSession(session,async(sql,params)=>(await connection.execute(`${sql.trim()} FOR SHARE`,params))[0]);
+    assertBusinessTaskPermission(lockedActor,"operations");
+    return lockedActor;
+  }
+  return actor;
+}
+
+export async function createAiVariantListingDraftLightweight(body = {},session = null,options = {}) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw aiVariantLightweightSaveError("草稿保存内容无效，请重新导入商品素材并确认上架模板",400);
+  return withAiTenantSession(session,() => {
+    const actor = currentAiTenantSession();
+    return withAiTenantRequestGuard(requestOptions=>assertAiVariantLightweightReferences(body,actor,requestOptions),async()=>{
+      const previous = listingPublishExecutionGuards.get(actor);
+      const guard = async()=>{ await previous?.(); await assertAiVariantLightweightReferences(body,actor); };
+      listingPublishExecutionGuards.set(actor,guard);
+      try {
+        await guard();
+        return await createAuthorizedAiVariantListingDraftLightweight(body,actor,options);
+      } finally {
+        if (previous) listingPublishExecutionGuards.set(actor,previous); else listingPublishExecutionGuards.delete(actor);
+      }
+    });
+  });
+}
+
+async function createAuthorizedAiVariantListingDraftLightweight(body = {}, session = null, options = {}) {
   const totalStarted = Date.now();
   const traceId = aiVariantSaveTraceId(body);
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.start", totalStarted, {
@@ -12906,10 +12997,10 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   const useCurrentSourceSnapshot = String(body.ai_optimization?.source || body.aiOptimization?.source || "") === "ai_variant_lab"
     && sourceDraftId > 0 && !body.template_payload && !body.templatePayload;
   if (useCurrentSourceSnapshot && !sourceDraftMediaRow) {
-    throw new Error("母草稿已不存在，无法继承上架信息。请从草稿箱重新导入母商品后保存。");
+    throw aiVariantLightweightSaveError("母草稿已不存在，无法继承上架信息。请从草稿箱重新导入母商品后保存。");
   }
   if (cloneSourceDraft && sourceDraftId > 0 && !sourceDraftMediaRow) {
-    throw new Error("母草稿在当前企业中不存在，无法继承上架信息。");
+    throw aiVariantLightweightSaveError("母草稿在当前企业中不存在，无法继承上架信息。");
   }
   const sourceDraftTemplatePayload = parseJson((useCurrentSourceSnapshot ? sourceDraftMediaRow : sourceDraftRow)?.template_payload_json, {});
   if (useCurrentSourceSnapshot) body = { ...body, template_payload: sourceDraftTemplatePayload };
@@ -12931,7 +13022,7 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     template = mergeAiVariantTemplateSnapshot(template || sourceSnapshot, sourceSnapshot);
   }
   if (!template) {
-    throw new Error("AI 裂变保存草稿失败：母商品缺少可用上架模板或模板快照。请从草稿箱或已有上架模板重新导入母商品。");
+    throw aiVariantLightweightSaveError("AI 裂变保存草稿失败：母商品缺少可用上架模板或模板快照。请从草稿箱或已有上架模板重新导入母商品。",400);
   }
 
   const sourceVariantKey = String(body.source_variant_key || body.sourceVariantKey || "").trim();
@@ -13045,9 +13136,10 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
   manualFacts = objectValue(payload.manual_facts || manualFacts);
   editable = objectValue(payload.template_payload?.editable_payload || editable);
   assertAiVariantDraftHasNoTemporaryImages(payload);
-  if (!payload.product_name) throw new Error("商品名称不能为空");
+  if (!payload.product_name) throw aiVariantLightweightSaveError("商品名称不能为空",400);
   if (!payload.internal_code) payload.internal_code = `VAR-${Date.now().toString(36)}`;
 
+  await assertAiVariantLightweightReferences(body,session,{payload});
   stageStarted = Date.now();
   const existing = await findExistingAiVariantDraft(payload, aiPayload, session);
   if (await listingOfferIdExistsInTenant(offerId, { excludeDraftId: existing?.id || 0, session })) {
@@ -13060,116 +13152,133 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     internalCode: payload.internal_code
   });
 
-  stageStarted = Date.now();
-  const draftTemplateId = await upsertAiVariantListingDraftTemplate({
-    existingTemplateId: existing?.template_id,
-    baseTemplate: template,
-    editable: objectValue(payload.template_payload?.editable_payload || editable),
-    title,
-    description,
-    images: normalizeImages(payload.source_images || images),
-    manualFacts,
-    aiPayload,
-    payload
-  }, session);
-  payload.template_id = draftTemplateId;
-  const draftTemplate = await listingCategoryTemplateRaw(draftTemplateId, session).catch(() => null);
-  let templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
-    ? applyDraftSalePriceToTemplatePayload(normalizeAiVariantTemplateLogisticsPayload(mergeAiVariantTemplateSnapshot(draftTemplate || {}, payload.template_payload)), payload.sale_price)
-    : await buildCanonicalDraftTemplatePayload({
-      ...payload,
-      manual_facts: manualFacts,
-      ai_payload: aiPayload
-    }, draftTemplate, session);
-  const finalEditable = syncAiVariantDraftRichContent(objectValue(templatePayload?.editable_payload), {
-    richContentJson: editable.rich_content_json || editable.richContentJson
-  });
-  templatePayload = {
-    ...templatePayload,
-    editable_payload: finalEditable,
-    attributes: syncAiVariantTextAttributes(templatePayload?.attributes || [], { richContentJson: finalEditable.rich_content_json })
-  };
-  logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.template_upsert", stageStarted, {
-    templateId: draftTemplateId,
-    mode: Number(existing?.template_id || 0) ? "update" : "insert"
-  });
+  let draftId = 0, draftTemplateId = 0;
+  await withMysqlTransaction(async connection=>{
+    // Serialize same-enterprise saves, then recheck membership and all source
+    // references after lock waits, before creating even a temporary template.
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE",[Number(session.tenant.id)]);
+    await assertAiVariantLightweightReferences(body,session,{connection,payload,lock:true,
+      additionalDraftIds:[existing?.id || 0],additionalTemplateIds:[existing?.template_id || 0]});
+    if (await listingOfferIdExistsInTenant(offerId,{excludeDraftId:existing?.id || 0,session,connection})) throw aiVariantLightweightSaveError("货号 offer_id 已存在，请重新生成后保存",409);
+    stageStarted = Date.now();
+    draftTemplateId = await upsertAiVariantListingDraftTemplate({
+      connection,
+      existingTemplateId: existing?.template_id,
+      baseTemplate: template,
+      editable: objectValue(payload.template_payload?.editable_payload || editable),
+      title,
+      description,
+      images: normalizeImages(payload.source_images || images),
+      manualFacts,
+      aiPayload,
+      payload
+    }, session);
+    payload.template_id = draftTemplateId;
+    const [savedTemplates] = await connection.execute("SELECT * FROM listing_category_templates WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?",[draftTemplateId,tenantId]);
+    const draftTemplate = savedTemplates[0] ? normalizeTemplateRow(savedTemplates[0]) : null;
+    let templatePayload = Object.keys(objectValue(payload.template_payload || {})).length
+      ? applyDraftSalePriceToTemplatePayload(normalizeAiVariantTemplateLogisticsPayload(mergeAiVariantTemplateSnapshot(draftTemplate || {}, payload.template_payload)), payload.sale_price)
+      : await buildCanonicalDraftTemplatePayload({
+        ...payload,
+        manual_facts: manualFacts,
+        ai_payload: aiPayload
+      }, draftTemplate, session);
+    const finalEditable = syncAiVariantDraftRichContent(objectValue(templatePayload?.editable_payload), {
+      richContentJson: editable.rich_content_json || editable.richContentJson
+    });
+    templatePayload = {
+      ...templatePayload,
+      editable_payload: finalEditable,
+      attributes: syncAiVariantTextAttributes(templatePayload?.attributes || [], { richContentJson: finalEditable.rich_content_json })
+    };
+    logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.template_upsert", stageStarted, {
+      templateId: draftTemplateId,
+      mode: Number(existing?.template_id || 0) ? "update" : "insert"
+    });
 
-  stageStarted = Date.now();
-  let draftId = Number(existing?.id || 0);
-  const optimizationSource = String(body.ai_optimization?.source || body.aiOptimization?.source || "").trim();
-  const developmentType = optimizationSource === "ai_ecommerce_suite_workbench"
-    ? "new"
-    : optimizationSource === "ai_product_material_optimizer"
-      ? "copy"
-      : cloneSourceDraft ? String(sourceDraftRow?.development_type || "fission") : "fission";
-  const developmentMeta = resolveDraftDevelopmentMeta(payload, { body, sourceDraft: sourceDraftRow || {}, fallbackType: developmentType });
-  // An explicit material-optimizer type must win over the generic AI-* code heuristic.
-  if (optimizationSource === "ai_product_material_optimizer") developmentMeta.development_type = "copy";
-  if (optimizationSource === "ai_ecommerce_suite_workbench") developmentMeta.development_type = "new";
-  const sourceProductId = draftSourceProductId(body, payload) || Number(sourceDraftMediaRow?.source_product_id || 0);
-  const parentDraftId = sourceDraftId || Number(sourceDraftMediaRow?.parent_draft_id || 0);
-  if (parentDraftId && !await row("SELECT id FROM listing_drafts WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?", [parentDraftId, tenantId])) {
-    throw new Error("母草稿在当前企业中不存在，无法建立草稿关联。");
-  }
-  const creationMethod = "ai_fission";
-  const params = [
-    tenantId,
-    payload.template_id,
-    payload.product_name,
-    payload.internal_code,
-    JSON.stringify(payload.source_urls),
-    JSON.stringify(payload.source_images),
-    payload.cost_price,
-    payload.sale_price,
-    payload.length_cm,
-    payload.width_cm,
-    payload.height_cm,
-    payload.weight_g,
-    payload.color,
-    payload.spec,
-    payload.quantity,
-    JSON.stringify(compactListingPersistencePayload(templatePayload || {})),
-    JSON.stringify(compactListingPersistencePayload(manualFacts)),
-    JSON.stringify(compactListingPersistencePayload(aiPayload)),
-    personId(session),
-    developmentType,
-    developmentMeta.vehicle_brand,
-    developmentMeta.vehicle_model,
-    developmentMeta.vehicle_model_key,
-    sourceProductId || null,
-    parentDraftId || null,
-    creationMethod
-  ];
-  if (draftId) {
-    await mysqlExecute(`
-      UPDATE listing_drafts
-      SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
-          cost_price = ?, sale_price = ?, length_cm = ?, width_cm = ?, height_cm = ?, weight_g = ?,
-          color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
-          created_by_person_id = COALESCE(created_by_person_id, ?),
-          development_type = ?, vehicle_brand = ?, vehicle_model = ?, vehicle_model_key = ?,
-          source_product_id = ?, parent_draft_id = ?, creation_method = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?
-    `, [...params.slice(1), draftId, tenantId]);
-  } else {
-    draftId = await insert(`
-      INSERT INTO listing_drafts
-      (tenant_id, template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
-       length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
-       created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key,
-       source_product_id, parent_draft_id, creation_method, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-    `, params);
-  }
+    stageStarted = Date.now();
+    draftId = Number(existing?.id || 0);
+    const optimizationSource = String(body.ai_optimization?.source || body.aiOptimization?.source || "").trim();
+    const developmentType = optimizationSource === "ai_ecommerce_suite_workbench"
+      ? "new"
+      : optimizationSource === "ai_product_material_optimizer"
+        ? "copy"
+        : cloneSourceDraft ? String(sourceDraftRow?.development_type || "fission") : "fission";
+    const developmentMeta = resolveDraftDevelopmentMeta(payload, { body, sourceDraft: sourceDraftRow || {}, fallbackType: developmentType });
+    // An explicit material-optimizer type must win over the generic AI-* code heuristic.
+    if (optimizationSource === "ai_product_material_optimizer") developmentMeta.development_type = "copy";
+    if (optimizationSource === "ai_ecommerce_suite_workbench") developmentMeta.development_type = "new";
+    const sourceProductId = draftSourceProductId(body, payload) || Number(sourceDraftMediaRow?.source_product_id || 0);
+    const parentDraftId = sourceDraftId || Number(sourceDraftMediaRow?.parent_draft_id || 0);
+    await assertAiVariantLightweightReferences(body,session,{connection,payload,lock:true,additionalDraftIds:[parentDraftId],additionalProductIds:[sourceProductId]});
+    const creationMethod = "ai_fission";
+    const params = [
+      tenantId,
+      payload.template_id,
+      payload.product_name,
+      payload.internal_code,
+      JSON.stringify(payload.source_urls),
+      JSON.stringify(payload.source_images),
+      payload.cost_price,
+      payload.sale_price,
+      payload.length_cm,
+      payload.width_cm,
+      payload.height_cm,
+      payload.weight_g,
+      payload.color,
+      payload.spec,
+      payload.quantity,
+      JSON.stringify(compactListingPersistencePayload(templatePayload || {})),
+      JSON.stringify(compactListingPersistencePayload(manualFacts)),
+      JSON.stringify(compactListingPersistencePayload(aiPayload)),
+      personId(session),
+      developmentType,
+      developmentMeta.vehicle_brand,
+      developmentMeta.vehicle_model,
+      developmentMeta.vehicle_model_key,
+      sourceProductId || null,
+      parentDraftId || null,
+      creationMethod
+    ];
+    if (draftId) {
+      await connection.execute(`
+        UPDATE listing_drafts
+        SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
+            cost_price = ?, sale_price = ?, length_cm = ?, width_cm = ?, height_cm = ?, weight_g = ?,
+            color = ?, spec = ?, quantity = ?, template_payload_json = ?, manual_facts_json = ?, ai_payload_json = ?,
+            created_by_person_id = COALESCE(created_by_person_id, ?),
+            development_type = ?, vehicle_brand = ?, vehicle_model = ?, vehicle_model_key = ?,
+            source_product_id = ?, parent_draft_id = ?, creation_method = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?
+      `, [...params.slice(1), draftId, tenantId]);
+    } else {
+      const [savedDraft] = await connection.execute(`
+        INSERT INTO listing_drafts
+        (tenant_id, template_id, product_name, internal_code, source_urls_json, source_images_json, cost_price, sale_price,
+         length_cm, width_cm, height_cm, weight_g, color, spec, quantity, template_payload_json, manual_facts_json, ai_payload_json,
+         created_by_person_id, development_type, vehicle_brand, vehicle_model, vehicle_model_key,
+         source_product_id, parent_draft_id, creation_method, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `, params);
+      draftId = Number(savedDraft.insertId);
+    }
+  });
   logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.upsert", stageStarted, { draftId, mode: existing ? "update" : "insert" });
   let shopCopies = [];
   let shopCopyError = "";
+  await assertAiVariantLightweightReferences(body,session);
   const shopIds = await resolveAiVariantDraftShopIds(body, session);
   if (shopIds.length) {
     stageStarted = Date.now();
     try {
-      shopCopies = await generateListingShopCopies(draftId, { shop_ids: shopIds }, session, options);
+      const copyBody = {...body,shop_ids:shopIds};
+      await assertAiVariantLightweightReferences(copyBody,session);
+      shopCopies = await generateListingShopCopies(draftId,{shop_ids:shopIds},session,{...options,beforePersist:async connection=>{
+        await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE",[Number(session.tenant.id)]);
+        await options.beforePersist?.(connection);
+        await assertAiVariantLightweightReferences(copyBody,session,{connection,payload,lock:true,additionalDraftIds:[draftId]});
+      }});
       logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.shop_copies", stageStarted, {
         draftId,
         shopCopyCount: shopCopies.length
@@ -13183,11 +13292,13 @@ export async function createAiVariantListingDraftLightweight(body = {}, session 
     }
   }
   stageStarted = Date.now();
+  await assertAiVariantLightweightReferences(body,session);
   if (options.summaryOnly) {
     logAiVariantSavePerf(traceId, "backend.ai_variant_light_draft.done", totalStarted, { draftId, templateId });
     return { id: draftId, template_id: payload.template_id, shop_copy_count: shopCopies.length, shop_copy_error: shopCopyError };
   }
   const detail = await listingDraft(draftId, session);
+  await assertAiVariantLightweightReferences(body,session);
   if (shopCopies.length) {
     detail.shop_copies = shopCopies;
     detail.shop_copy_count = shopCopies.length;
@@ -13672,6 +13783,8 @@ function syncAiVariantTextAttributes(attributes = [], facts = {}) {
 
 async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
   const tenantId = listingTenantId(session);
+  const execute = input.connection ? async(sql,params)=>(await input.connection.execute(sql,params))[0] : mysqlExecute;
+  const insertTemplate = async(sql,params)=>Number((await execute(sql,params)).insertId);
   const baseTemplate = input.baseTemplate || {};
   const editable = {
     ...(baseTemplate.editable_payload || {}),
@@ -13727,7 +13840,7 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
   const templateName = String(baseTemplate.template_name || title || "AI variant listing template").slice(0, 255);
   const templateId = Number(input.existingTemplateId || 0);
   if (templateId && templateId !== Number(baseTemplate.id || 0)) {
-    await mysqlExecute(`
+    await execute(`
       UPDATE listing_category_templates
       SET ozon_category_id = ?, category_name = ?, template_name = ?, required_attributes_json = ?,
           ai_rules_json = ?, title_prompt = ?, description_prompt = ?, image_rules_json = ?,
@@ -13755,7 +13868,7 @@ async function upsertAiVariantListingDraftTemplate(input = {}, session = null) {
     ]);
     return templateId;
   }
-  return insert(`
+  return insertTemplate(`
     INSERT INTO listing_category_templates
     (tenant_id, ozon_category_id, category_name, template_name, required_attributes_json, ai_rules_json, title_prompt,
      description_prompt, image_rules_json, source_type, source_ozon_sku, source_raw_json,
@@ -14401,6 +14514,7 @@ export async function generateListingShopCopies(draftId, body, session, options 
 
   const copies = await Promise.all(shops.map((shop) => buildShopCopy(draft, shop, session, options)));
   await withMysqlTransaction(async (connection) => {
+    await options.beforePersist?.(connection);
     for (const copy of copies) {
       await connection.execute(`
         INSERT INTO listing_shop_copies

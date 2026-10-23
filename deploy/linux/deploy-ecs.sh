@@ -13,6 +13,7 @@ Options:
   --identity-file PATH        SSH private key (or OZON_ECS_IDENTITY_FILE)
   --version VERSION           Release version (default: local timestamp)
   --reviewed-identity-manifest PATH  Apply an explicitly reviewed identity manifest
+  --reviewed-ai-material-manifest PATH  Apply an explicitly reviewed material ownership manifest
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
@@ -71,6 +72,7 @@ ssh_port="${OZON_ECS_PORT:-}"
 identity_file="${OZON_ECS_IDENTITY_FILE:-}"
 version=""
 reviewed_identity_manifest=""
+reviewed_ai_material_manifest=""
 skip_build=0
 skip_database_init=0
 skip_database_maintenance=0
@@ -79,7 +81,7 @@ allow_dirty=0
 
 while (($#)); do
   case "$1" in
-    --host|--user|--port|--identity-file|--version|--reviewed-identity-manifest)
+    --host|--user|--port|--identity-file|--version|--reviewed-identity-manifest|--reviewed-ai-material-manifest)
       (($# >= 2)) || fail "$1 requires a value"
       case "$1" in
         --host) host="$2" ;;
@@ -88,6 +90,7 @@ while (($#)); do
         --identity-file) identity_file="$2" ;;
         --version) version="$2" ;;
         --reviewed-identity-manifest) reviewed_identity_manifest="$2" ;;
+        --reviewed-ai-material-manifest) reviewed_ai_material_manifest="$2" ;;
       esac
       shift 2
       ;;
@@ -125,12 +128,25 @@ archive_path="$artifact_root/ozon-erp-$version.zip"
 remote_archive="/tmp/ozon-erp-$version.zip"
 remote_script="/tmp/ozon-erp-remote-release.sh"
 remote_identity_manifest=""
+remote_ai_material_manifest=""
 if [[ -n "$reviewed_identity_manifest" ]]; then
   [[ -f "$reviewed_identity_manifest" ]] || fail "reviewed identity manifest does not exist"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$reviewed_identity_manifest"
   reviewed_identity_manifest="$(CDPATH= cd -- "$(dirname -- "$reviewed_identity_manifest")" && pwd -P)/$(basename -- "$reviewed_identity_manifest")"
   remote_identity_manifest="/tmp/ozon-erp-identity-$version.json"
 fi
+if [[ -n "$reviewed_ai_material_manifest" ]]; then
+  [[ -f "$reviewed_ai_material_manifest" ]] || fail "reviewed AI material manifest does not exist"
+  node -e 'try { JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); } catch { console.error("Reviewed AI material manifest is not valid JSON."); process.exit(1); }' "$reviewed_ai_material_manifest"
+  reviewed_ai_material_manifest="$(CDPATH= cd -- "$(dirname -- "$reviewed_ai_material_manifest")" && pwd -P)/$(basename -- "$reviewed_ai_material_manifest")"
+  material_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
+  remote_ai_material_manifest="/tmp/ozon-erp-ai-material-$version-$material_token.json"
+fi
+db_init_flag=1
+((skip_database_init)) && db_init_flag=0
+db_maintenance_flag=1
+((skip_database_maintenance)) && db_maintenance_flag=0
+activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest'"
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'
@@ -138,6 +154,7 @@ if ((dry_run)); then
   printf 'Target: %s@%s:%s\n' "$ssh_user" "$host" "$ssh_port"
   printf 'Version: %s\n' "$version"
   printf 'Artifact: %s\n' "$archive_path"
+  printf 'Activation arguments: %s\n' "$activation_command"
   exit 0
 fi
 
@@ -157,7 +174,13 @@ identity_file="$(expand_home_path "$identity_file")"
 
 mkdir -p "$artifact_root"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/ozon-erp-deploy-$version.XXXXXX")"
-cleanup() { rm -rf -- "$work_dir"; }
+material_upload_attempted=0
+cleanup() {
+  if ((material_upload_attempted)); then
+    ssh "${ssh_options[@]}" "$remote_target" "rm -f -- '$remote_ai_material_manifest'" >/dev/null 2>&1 || printf 'Private AI material manifest cleanup could not be confirmed.\n' >&2
+  fi
+  rm -rf -- "$work_dir"
+}
 trap cleanup EXIT
 
 cd "$project_root"
@@ -194,19 +217,18 @@ scp "${scp_options[@]}" "$script_dir/remote-release.sh" "$remote_target:$remote_
 if [[ -n "$reviewed_identity_manifest" ]]; then
   scp "${scp_options[@]}" "$reviewed_identity_manifest" "$remote_target:$remote_identity_manifest"
 fi
+if [[ -n "$reviewed_ai_material_manifest" ]]; then
+  material_upload_attempted=1
+  ssh "${ssh_options[@]}" "$remote_target" "set -Ce; umask 077; : > '$remote_ai_material_manifest'; chmod 600 '$remote_ai_material_manifest'"
+  scp "${scp_options[@]}" "$reviewed_ai_material_manifest" "$remote_target:$remote_ai_material_manifest"
+fi
 
-db_init_flag=1
-((skip_database_init)) && db_init_flag=0
-db_maintenance_flag=1
-((skip_database_maintenance)) && db_maintenance_flag=0
 printf 'Activating release on ECS...\n'
-identity_argument=""
 if [[ -n "$remote_identity_manifest" ]]; then
   ssh "${ssh_options[@]}" "$remote_target" "chmod 600 '$remote_identity_manifest'"
-  identity_argument=" '$remote_identity_manifest'"
 fi
 ssh "${ssh_options[@]}" "$remote_target" \
-  "bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag'$identity_argument"
+  "$activation_command"
 
 if command -v shasum >/dev/null 2>&1; then
   archive_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"

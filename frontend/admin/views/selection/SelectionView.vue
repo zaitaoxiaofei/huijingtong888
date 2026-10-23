@@ -1548,6 +1548,7 @@ function listingJobStatusLabel(row = {}) {
     running: "执行中",
     success: "已完成",
     failed: "失败",
+    reconciliation_required: "结果待核对",
     cancelled: "已中断",
     idle: "未发起"
   };
@@ -1560,6 +1561,7 @@ function isListingJobActive(row = {}) {
 
 function listingJobText(row = {}) {
   const status = listingJobStatus(row);
+  if (status === "reconciliation_required") return "原任务结果待核对";
   if (status === "cancelled") return "已中断上架";
   const ahead = Number(row.listing_job_queue_ahead || 0);
   if (status === "queued") return ahead > 0 ? `排队中，前方 ${ahead} 个任务` : "排队中，即将开始";
@@ -1571,6 +1573,7 @@ function listingJobText(row = {}) {
 
 function listingJobSubText(row = {}) {
   const status = listingJobStatus(row);
+  if (status === "reconciliation_required") return "已暂停，避免重复付费生成或发布";
   if (status === "cancelled") return row.listing_job_no || "已手动中断，可重新上架";
   if (status === "success") return `${Number(row.listing_job_success_count || 0)} 个店铺成功`;
   if (status === "failed") return Number(row.listing_job_failed_count || 0) ? `${Number(row.listing_job_failed_count || 0)} 个失败` : "请查看任务错误";
@@ -1621,7 +1624,8 @@ function listingJobStageText(row = {}) {
     done: "完成收尾",
     success: "已完成",
     failed: "已失败",
-    recovered: "恢复排队"
+    recovered: "恢复排队",
+    reconciliation_required: "核对原任务结果"
   };
   return map[stage] || (stage ? "未知阶段" : "");
 }

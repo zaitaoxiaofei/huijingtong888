@@ -30,13 +30,14 @@ test("platform-only accounts can operate platform resources without acquiring en
   assert.equal(allowed(owner, 'POST', 'settings/packaging-fee-rule'), false);
 });
 
-test("enterprise matrix configuration opens only exact scoped routes, while execution remains closed", () => {
+test("enterprise matrix configuration writes stay administrative while reviewed business execution opens to operators", () => {
   for (const [method, path] of [["GET", "bootstrap"], ["POST", "rules"], ["GET", "tail-templates"], ["POST", "tail-templates"], ["GET", "tail-template-files/12"]]) {
     assert.equal(allowed(owner, method, `asset-variant-engine/${path}`), true, `${method} ${path}`);
-    assert.equal(allowed({ ...owner, tenant: { ...owner.tenant, role: "member" } }, method, `asset-variant-engine/${path}`), false, path);
+    assert.equal(allowed({ ...owner, tenant: { ...owner.tenant, role: "member" } }, method, `asset-variant-engine/${path}`), method === 'GET', path);
   }
   for (const path of ['jobs', 'files/123/image.png']) assert.equal(allowed(owner, 'GET', `asset-variant-engine/${path}`), true);
-  for (const [method, path] of [["POST", "generate"], ["POST", "generate-async"], ["POST", "publish-to-ozon"], ["POST", "rules/12"], ["DELETE", "tail-templates"], ["GET", "tail-template-files/12/extra"]]) {
+  for (const path of ['generate', 'generate-async', 'publish-to-ozon']) assert.equal(allowed(owner, 'POST', `asset-variant-engine/${path}`), true, path);
+  for (const [method, path] of [["POST", "rules/12"], ["DELETE", "tail-templates"], ["GET", "tail-template-files/12/extra"]]) {
     assert.equal(allowed(owner, method, `asset-variant-engine/${path}`), false, `${method} ${path}`);
   }
 });

@@ -18,7 +18,8 @@ const stageLabels = {
   queued: "等待处理", loading_draft: "读取草稿", analyzing: "产品识别", confirming_analysis: "自动确认识别",
   planning: "生成方案", confirming_plan: "自动审批方案", generating_main_image: "生成主图",
   reviewing_main_image: "主图质检", generating_details: "生成详情图", generating_copy: "生成文案",
-  preparing_draft: "准备草稿", creating_draft: "创建复制草稿", completed: "已完成", failed: "失败"
+  preparing_draft: "准备草稿", creating_draft: "创建复制草稿", completed: "已完成", failed: "失败",
+  paused_review: "历史归属待核对", unknown_review: "执行结果待核对", reconciliation_required: "执行结果待核对"
 };
 
 async function loadBatches(options = {}) {
@@ -50,10 +51,12 @@ function openDraft(id) {
 }
 
 function batchStatusLabel(status) {
-  return { queued: "等待处理", running: "处理中", completed: "已完成", partial: "部分完成", failed: "失败" }[status] || status;
+  return { queued: "等待处理", running: "处理中", completed: "已完成", partial: "部分完成", failed: "失败",
+    paused_review: "历史归属待核对", unknown_review: "执行结果待核对", reconciliation_required: "执行结果待核对" }[status] || status;
 }
 function statusType(status) {
-  return { completed: "success", partial: "warning", failed: "danger", running: "primary" }[status] || "info";
+  return { completed: "success", partial: "warning", failed: "danger", running: "primary",
+    paused_review: "warning", unknown_review: "warning", reconciliation_required: "warning" }[status] || "info";
 }
 
 function startRefreshTimer() {
@@ -102,10 +105,10 @@ onUnmounted(stopRefreshTimer);
             <el-table-column label="来源草稿" min-width="220">
               <template #default="{ row }"><strong>{{ row.source_title || `草稿 ${row.source_draft_id}` }}</strong><div class="muted">#{{ row.source_draft_id }}</div></template>
             </el-table-column>
-            <el-table-column label="当前阶段" width="170"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ stageLabels[row.stage] || row.stage }}</el-tag></template></el-table-column>
+            <el-table-column label="当前阶段" width="170"><template #default="{ row }"><el-tag :type="statusType(row.status)">{{ row.requires_review ? row.status === 'paused_review' ? '历史归属待核对' : '执行结果待核对' : stageLabels[row.stage] || row.stage }}</el-tag></template></el-table-column>
             <el-table-column label="进度" width="180"><template #default="{ row }"><el-progress :percentage="row.progress_percent" /></template></el-table-column>
             <el-table-column label="结果" min-width="230"><template #default="{ row }"><span v-if="row.error_message" class="error-text">{{ row.error_message }}</span><span v-else-if="row.result_draft_id">新草稿 #{{ row.result_draft_id }}</span><span v-else class="muted">-</span></template></el-table-column>
-            <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }"><el-button v-if="row.result_draft_id" link type="primary" :icon="View" @click="openDraft(row.result_draft_id)">打开草稿</el-button><el-button v-if="row.status === 'failed'" link type="warning" @click="retryItem(row)">重试</el-button></template></el-table-column>
+            <el-table-column label="操作" width="150" fixed="right"><template #default="{ row }"><el-button v-if="row.result_draft_id" link type="primary" :icon="View" @click="openDraft(row.result_draft_id)">打开草稿</el-button><el-button v-if="row.can_retry === true" link type="warning" @click="retryItem(row)">重试</el-button></template></el-table-column>
           </el-table>
         </template>
         <el-empty v-else description="选择一个批次查看明细" />

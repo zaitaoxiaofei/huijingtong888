@@ -68,20 +68,22 @@ async function withWindowsDeployFixture(run) {
     const capturePath = path.join(fixtureDir, "ssh-arguments.json");
     const tracePath = path.join(fixtureDir, "steps.jsonl");
     const manifestPath = path.join(fixtureDir, "reviewed identities with spaces.json");
+    const materialManifestPath = path.join(fixtureDir, "reviewed material with spaces.json");
     await fsPromises.mkdir(scriptDir, { recursive: true });
     await fsPromises.mkdir(scriptsDir, { recursive: true });
     await fsPromises.mkdir(outputDir, { recursive: true });
     await fsPromises.writeFile(scriptPath, client, "utf8");
     await fsPromises.writeFile(path.join(outputDir, "deploy-manifest.json"), "{}", "utf8");
     await fsPromises.writeFile(manifestPath, "{}", "utf8");
+    await fsPromises.writeFile(materialManifestPath, JSON.stringify({ reason: "MATERIAL_CONTENT_MUST_NOT_BE_PRINTED", batches: [] }), "utf8");
     await fsPromises.writeFile(path.join(scriptsDir, "verify-release-worktree.mjs"), `
       import fs from "node:fs";
       fs.appendFileSync(process.env.OZON_DEPLOY_TEST_TRACE, JSON.stringify({ step: "guard", cwd: process.cwd() }) + "\\n");
       process.exit(Number(process.env.OZON_DEPLOY_TEST_GUARD_EXIT || 0));
     `, "utf8");
-    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, guardExit = 0, dryRun = false } = {}) => {
+    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false } = {}) => {
       await fsPromises.writeFile(tracePath, "", "utf8");
-      await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+      return execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
         $ErrorActionPreference = 'Stop'
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
         function global:Record-DeployStep($entry) {
@@ -103,18 +105,19 @@ async function withWindowsDeployFixture(run) {
         }
         function global:scp {
           Record-DeployStep @{ step = 'upload'; arguments = @($args) }
-          $global:LASTEXITCODE = 0
+          $global:LASTEXITCODE = if ($args[-1] -like '*ozon-erp-ai-material-*') { [int]$env:OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT } else { 0 }
         }
         function global:ssh {
-          Record-DeployStep @{ step = 'ssh' }
+          Record-DeployStep @{ step = 'ssh'; arguments = @($args) }
           [System.IO.File]::WriteAllText($env:OZON_DEPLOY_TEST_CAPTURE, (ConvertTo-Json -InputObject @($args) -Compress), [System.Text.UTF8Encoding]::new($false))
-          $global:LASTEXITCODE = 0
+          $global:LASTEXITCODE = if ($args[-1] -like '*bash*remote-release.sh*') { [int]$env:OZON_DEPLOY_TEST_ACTIVATION_EXIT } else { 0 }
         }
         $options = @{ EcsHost = 'deployment.test.invalid'; SshUser = 'test'; SshPort = 22; IdentityFile = ''; Version = 'test-release' }
         if ($env:OZON_DEPLOY_TEST_SKIP_BUILD -eq '1') { $options.SkipBuild = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_INIT -eq '1') { $options.SkipDatabaseInit = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_MAINTENANCE -eq '1') { $options.SkipDatabaseMaintenance = $true }
         if ($env:OZON_DEPLOY_TEST_MANIFEST) { $options.ReviewedIdentityManifest = $env:OZON_DEPLOY_TEST_MANIFEST }
+        if ($env:OZON_DEPLOY_TEST_MATERIAL) { $options.ReviewedAiMaterialManifest = $env:OZON_DEPLOY_TEST_MATERIAL }
         if ($env:OZON_DEPLOY_TEST_DRY_RUN -eq '1') { $options.DryRun = $true }
         & $env:OZON_DEPLOY_TEST_SCRIPT @options
       `], {
@@ -129,13 +132,16 @@ async function withWindowsDeployFixture(run) {
           OZON_DEPLOY_TEST_SKIP_INIT: skipInit ? "1" : "0",
           OZON_DEPLOY_TEST_SKIP_MAINTENANCE: skipMaintenance ? "1" : "0",
           OZON_DEPLOY_TEST_MANIFEST: manifest ? manifestPath : "",
+          OZON_DEPLOY_TEST_MATERIAL: material ? materialManifestPath : "",
+          OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT: String(materialUploadExit),
+          OZON_DEPLOY_TEST_ACTIVATION_EXIT: String(activationExit),
           OZON_DEPLOY_TEST_GUARD_EXIT: String(guardExit),
           OZON_DEPLOY_TEST_DRY_RUN: dryRun ? "1" : "0"
         }
       });
     };
     const trace = async () => (await fsPromises.readFile(tracePath, "utf8")).split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
-    await run({ fixtureDir, capturePath, manifestPath, execute, trace });
+    await run({ fixtureDir, capturePath, manifestPath, materialManifestPath, execute, trace });
   } finally {
     await fsPromises.rm(fixtureDir, { recursive: true, force: true });
   }
@@ -148,7 +154,7 @@ test("Windows database skip switches preserve defaults and forward all remote re
       const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
       assert.equal(sshArguments.at(-2), "test@deployment.test.invalid");
       assert.ok(sshArguments.at(-1).endsWith(
-        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}'`
+        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}' '' ''`
       ), `incorrect remote flags for SkipDatabaseInit=${skipInit}, SkipDatabaseMaintenance=${skipMaintenance}`);
     }
   });
@@ -191,19 +197,59 @@ test("Windows deployment uploads a reviewed manifest with spaces and forwards it
     const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
     const command = sshArguments.at(-1);
     assert.match(command, /chmod 600 '\/tmp\/ozon-erp-identity-test-release\.json'/);
-    assert.ok(command.endsWith("bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '0' '0' '/tmp/ozon-erp-identity-test-release.json'"));
+    assert.ok(command.endsWith("bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '0' '0' '/tmp/ozon-erp-identity-test-release.json' ''"));
   });
 });
 
 test("both deployment clients explicitly forward the optional reviewed identity manifest", () => {
   assert.match(client, /\[string\]\$ReviewedIdentityManifest/);
   assert.match(client, /Resolve-Path -LiteralPath \$ReviewedIdentityManifest/);
-  assert.match(client, /if \(\$remoteIdentityManifest\) \{[\s\S]*\$remoteCommand = .*'\$remoteIdentityManifest'/);
+  assert.match(client, /\$activationCommand = .*'\$remoteIdentityManifest' '\$remoteAiMaterialManifest'/);
   assert.match(unixClient, /--reviewed-identity-manifest/);
   assert.match(unixClient, /scp "\$\{scp_options\[@\]\}" "\$reviewed_identity_manifest" "\$remote_target:\$remote_identity_manifest"/);
-  assert.match(unixClient, /identity_argument=""/);
-  assert.match(unixClient, /if \[\[ -n "\$remote_identity_manifest" \]\]; then[\s\S]*identity_argument=" '\$remote_identity_manifest'"/);
+  assert.match(unixClient, /activation_command=.*'\$remote_identity_manifest' '\$remote_ai_material_manifest'/);
   assert.match(remote, /reviewed_identity_manifest="\$\{5:-\}"/);
+});
+
+test("Windows material manifest is private before upload, stays sixth, and is cleaned on success or failure", { skip: process.platform !== "win32" }, async () => {
+  await withWindowsDeployFixture(async ({ execute, trace, materialManifestPath }) => {
+    for (const identity of [false, true]) {
+      const { stdout } = await execute({ material: true, manifest: identity, skipInit: true, skipMaintenance: true });
+      assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
+      const steps = await trace();
+      const preparation = steps.findIndex(step => step.step === "ssh" && step.arguments.at(-1).includes("umask 077"));
+      const upload = steps.findIndex(step => step.step === "upload" && step.arguments.at(-2) === materialManifestPath);
+      const activation = steps.find(step => step.step === "ssh" && step.arguments.at(-1).includes("&& bash "));
+      assert.ok(preparation >= 0 && upload > preparation);
+      assert.match(steps[preparation].arguments.at(-1), /set -Ce; umask 077; : > '.*'; chmod 600/);
+      assert.match(activation.arguments.at(-1), new RegExp(`'0' '0' '${identity ? "/tmp/ozon-erp-identity-test-release.json" : ""}' '/tmp/ozon-erp-ai-material-test-release-[a-f0-9]{32}\\.json'$`));
+      assert.match(steps.at(-1).arguments.at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
+    }
+    for (const failure of [{ materialUploadExit: 41 }, { activationExit: 42 }]) {
+      await assert.rejects(execute({ material: true, ...failure }));
+      const steps = await trace();
+      assert.match(steps.at(-1).arguments.at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
+      if (failure.materialUploadExit) assert.equal(steps.some(step => step.step === "ssh" && step.arguments.at(-1).includes("&& bash ")), false);
+    }
+    const { stdout } = await execute({ dryRun: true, material: true });
+    assert.deepEqual(await trace(), []);
+    assert.match(stdout, /'1' '1' '' '\/tmp\/ozon-erp-ai-material-test-release-[a-f0-9]{32}\.json'/);
+    assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
+    await fsPromises.writeFile(materialManifestPath,"MATERIAL_CONTENT_MUST_NOT_BE_PRINTED invalid JSON");
+    await assert.rejects(execute({dryRun:true,material:true}),error => /not valid JSON/.test(error.stderr) && !/MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/.test(error.stderr));
+    assert.deepEqual(await trace(),[]);
+  });
+});
+
+test("material deployment does not mix identity and material review contracts", () => {
+  assert.match(remote, /reviewed_identity_manifest="\$\{5:-\}"/);
+  assert.match(remote, /reviewed_ai_material_manifest="\$\{6:-\}"/);
+  assert.match(remote, /material_migration_args\+=\(--review-manifest="\$reviewed_ai_material_manifest"\)/);
+  assert.doesNotMatch(remote, /migrate-platform-enterprise-identities[^\n]*reviewed_ai_material/);
+  assert.doesNotMatch(remote, /migrate-tenant-ai-material-optimization[^\n]*reviewed_identity/);
+  assert.match(remote, /trap cleanup_material_manifest EXIT/);
+  assert.match(unixClient, /--reviewed-ai-material-manifest/);
+  assert.match(unixClient, /set -Ce; umask 077; : > '\$remote_ai_material_manifest'; chmod 600/);
 });
 
 test("Windows release guard runs after DryRun and before any build or upload", () => {
@@ -219,7 +265,7 @@ test("Windows release guard runs after DryRun and before any build or upload", (
 });
 
 test("ECS release verifies a private complete database backup before initialization or ownership migrations", () => {
-  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-enterprise-messages\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-subscription-vouchers\.mjs" \]\]; then\s+backup_database/);
+  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-enterprise-messages\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-subscription-vouchers\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-tenant-ai-material-optimization\.mjs" \]\]; then\s+backup_database/);
   const backup = remote.indexOf("\n  backup_database\n");
   assert.ok(backup >= 0);
   assert.ok(backup < remote.indexOf("npm run db:init:mysql"));
@@ -240,6 +286,200 @@ const bashExecutable = process.platform === "win32"
   ? path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe")
   : "bash";
 const missingGitBash = process.platform === "win32" && !fs.existsSync(bashExecutable);
+
+const bashPath = value => process.platform === "win32" ? value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`) : value;
+
+test("real Git Bash client forwards material as argument six with an empty identity placeholder and cleans private uploads", { skip: missingGitBash }, async () => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-client-"));
+  try {
+    const scripts = path.join(fixture, "deploy", "linux"), artifacts = path.join(fixture, ".deploy-artifacts", "fixture-package");
+    await fsPromises.mkdir(scripts, { recursive: true }); await fsPromises.mkdir(artifacts, { recursive: true });
+    const script = path.join(scripts, "deploy-ecs.sh"), mock = path.join(fixture, "mock.sh"), trace = path.join(fixture, "trace.jsonl");
+    const material = path.join(fixture, "material review with spaces.json"), identity = path.join(fixture, "identity review.json"), key = path.join(fixture, "key");
+    await fsPromises.writeFile(script, unixClient.replaceAll("\r\n", "\n"));
+    await fsPromises.writeFile(path.join(scripts, "remote-release.sh"), "fixture");
+    await fsPromises.writeFile(path.join(artifacts, "deploy-manifest.json"), "{}");
+    await fsPromises.writeFile(material, JSON.stringify({ reason: "MATERIAL_CONTENT_MUST_NOT_BE_PRINTED" }));
+    await fsPromises.writeFile(identity, "{}"); await fsPromises.writeFile(key, "fixture");
+    await fsPromises.writeFile(mock, `
+record() { node -e 'require("node:fs").appendFileSync(process.env.OZON_DEPLOY_BASH_TRACE, JSON.stringify(process.argv.slice(1))+"\\n")' "$@"; }
+ssh() { record ssh "$@"; return 0; }
+scp() { record scp "$@"; if [[ "$*" == *ozon-erp-ai-material-* ]]; then return "\${OZON_DEPLOY_BASH_UPLOAD_EXIT:-0}"; fi; }
+zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
+`, "utf8");
+    const execute = async (options = [], env = {}) => execFileAsync(bashExecutable, ["--noprofile", "--norc", bashPath(script), "--host", "deployment.test.invalid", "--version", "fixture", "--identity-file", bashPath(key), "--reviewed-ai-material-manifest", bashPath(material), "--skip-build", "--allow-dirty", ...options], {
+      cwd: fixture, env: { ...process.env, BASH_ENV: bashPath(mock), OZON_DEPLOY_BASH_TRACE: trace, ...env }
+    });
+    for (const withIdentity of [false, true]) {
+      await fsPromises.writeFile(trace, "");
+      const { stdout } = await execute(withIdentity ? ["--reviewed-identity-manifest", bashPath(identity)] : []);
+      assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
+      const calls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+      const activation = calls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash "));
+      assert.match(activation.at(-1), new RegExp(`'1' '1' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json'$`));
+      const prepare = calls.findIndex(call => call[0] === "ssh" && call.at(-1).includes("umask 077"));
+      const upload = calls.findIndex(call => call[0] === "scp" && call.at(-1).includes("ozon-erp-ai-material-"));
+      assert.ok(prepare >= 0 && upload > prepare);
+      assert.match(calls.at(-1).at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
+    }
+    await fsPromises.writeFile(trace, "");
+    await assert.rejects(execute([], { OZON_DEPLOY_BASH_UPLOAD_EXIT: "41" }));
+    const failedCalls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    assert.match(failedCalls.at(-1).at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
+    assert.equal(failedCalls.some(call => call[0] === "ssh" && call.at(-1).startsWith("bash ")), false);
+    await fsPromises.writeFile(trace, "");
+    const { stdout } = await execute(["--dry-run"]);
+    assert.equal(await fsPromises.readFile(trace, "utf8"), "");
+    assert.match(stdout, /'1' '1' '' '\/tmp\/ozon-erp-ai-material-fixture-[a-f0-9]{32}\.json'/);
+    assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
+    await fsPromises.writeFile(material,"MATERIAL_CONTENT_MUST_NOT_BE_PRINTED invalid JSON");
+    await assert.rejects(execute(["--dry-run"]),error => /not valid JSON/.test(error.stderr) && !/MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/.test(error.stderr));
+  } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
+});
+
+test("remote private material manifests are removed on both success and failure exits", { skip: missingGitBash }, async () => {
+  const cleanup = remote.match(/^cleanup_material_manifest\(\) \{\r?\n[\s\S]*?^\}\r?\n/m)?.[0];
+  assert.ok(cleanup);
+  for (const status of [0, 42]) {
+    const { stdout } = await execFileAsync(bashExecutable, ["--noprofile", "--norc", "-c", `
+set -Eeuo pipefail
+manifest="$(mktemp /tmp/ozon-erp-ai-material-fixture.XXXXXX.json)"
+printf '{}' > "$manifest"
+${cleanup.replaceAll("\r\n", "\n")}
+if (reviewed_ai_material_manifest="$manifest"; trap cleanup_material_manifest EXIT; exit ${status}); then actual=0; else actual=$?; fi
+[[ "$actual" == '${status}' ]]
+[[ ! -e "$manifest" ]]
+printf 'removed'
+`], { env: { ...process.env, BASH_ENV: "" } });
+    assert.equal(stdout, "removed");
+  }
+});
+
+test("material short-stop candidate uses a bounded deadline and timeout restores the previous primary", { skip: missingGitBash }, async () => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-warmup-"));
+  try {
+    const start = remote.match(/^start_candidate\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=\r?\ninstall -d)/m)?.[0];
+    const rollback = remote.match(/^rollback\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=trap rollback ERR)/m)?.[0];
+    assert.ok(start && rollback);
+    assert.match(remote, /material_candidate_warmup_seconds=0/);
+    assert.match(remote, /systemctl stop ozon-erp\s+material_candidate_warmup_seconds=45/);
+    assert.match(start, /for _ in \{1\.\.180\}/);
+    await fsPromises.mkdir(path.join(fixture,"previous")); await fsPromises.writeFile(path.join(fixture,"env"),"DB_NAME=fixture_only\n");
+    const beginning = Date.now();
+    await assert.rejects(execFileAsync(bashExecutable,["--noprofile","--norc","-c",`
+set -Eeuo pipefail
+release_dir="$PWD"
+previous_target="$PWD/previous"
+current_link="$PWD/current"
+env_file="$PWD/env"
+candidate_log="$PWD/candidate.log"
+candidate_pid_file="$PWD/candidate.pid"
+candidate_pid=""
+candidate_port=8788
+release_version=fixture
+material_candidate_warmup_seconds=1
+stop_existing_candidate() { :; }
+runuser() { printf '424242' > "$candidate_pid_file"; }
+kill() { if [[ "$1" != -0 ]]; then printf 'candidate-stop\\n' >> "$PWD/trace"; fi; }
+curl() { printf '503'; }
+systemctl() { printf '%s\\n' "$*" >> "$PWD/trace"; }
+${rollback.replaceAll("\r\n","\n")}
+${start.replaceAll("\r\n","\n")}
+trap rollback ERR
+start_candidate
+printf 'unexpected acceptance' > "$PWD/accepted"
+`],{cwd:fixture,env:{...process.env,BASH_ENV:""}}),error=> /Candidate process did not become ready/.test(error.stderr));
+    assert.ok(Date.now()-beginning < 7000,"short-stop deadline must not run the ordinary 180 warmup attempts");
+    assert.match(await fsPromises.readFile(path.join(fixture,"trace"),"utf8"),/restart ozon-erp/);
+    await assert.rejects(fsPromises.access(path.join(fixture,"accepted")),{code:"ENOENT"});
+  } finally {await fsPromises.rm(fixture,{recursive:true,force:true});}
+});
+
+test("material preflight is read only, requires complete review and refuses active work before stopping writers", { skip: missingGitBash }, async () => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-plan-"));
+  try {
+    const helper = remote.match(/^material_optimization_preflight\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=\r?\nbackup_database)/m)?.[0];
+    assert.ok(helper);
+    await fsPromises.mkdir(path.join(fixture, "scripts")); await fsPromises.mkdir(path.join(fixture, "node_modules", "mysql2"), { recursive: true });
+    await fsPromises.writeFile(path.join(fixture, "env"), "DB_NAME=fixture_only\n");
+    await fsPromises.writeFile(path.join(fixture, "manifest.json"), JSON.stringify({ reason: "MATERIAL_CONTENT_MUST_NOT_BE_PRINTED" }));
+    await fsPromises.writeFile(path.join(fixture, "node_modules", "mysql2", "package.json"), JSON.stringify({ type: "module", exports: { "./promise": "./promise.js" } }));
+    await fsPromises.writeFile(path.join(fixture, "node_modules", "mysql2", "promise.js"), `export default {createConnection:async()=>({execute:async()=>[[{}]],query:async()=>[[{n:Number(process.env.MATERIAL_ACTIVE||0)}]],end:async()=>{}})};`);
+    await fsPromises.writeFile(path.join(fixture, "scripts", "migrate-tenant-ai-material-optimization.mjs"), `export async function migrateTenantAiMaterialOptimization(_connection, options) { if (options.apply) throw Error("Unexpected apply in preflight"); if (process.env.MATERIAL_EXPECT_REVIEW && options.reviewManifest?.reason !== "MATERIAL_CONTENT_MUST_NOT_BE_PRINTED") throw Error("Manifest not forwarded"); return JSON.parse(process.env.MATERIAL_PLAN); }`);
+    const execute = (plan, active = 0, manifest = "") => execFileAsync(bashExecutable, ["--noprofile", "--norc", "-c", `
+set -Eeuo pipefail
+staging_dir="$PWD"
+env_file="$PWD/env"
+reviewed_ai_material_manifest="${manifest ? "$PWD/manifest.json" : ""}"
+${helper.replaceAll("\r\n", "\n")}
+material_optimization_preflight
+`], { cwd: fixture, env: { ...process.env, BASH_ENV: "", MATERIAL_PLAN: JSON.stringify(plan), MATERIAL_ACTIVE: String(active), MATERIAL_EXPECT_REVIEW: manifest } });
+    const ready = { review: [], reviewed_batches: [], tables: [] };
+    assert.equal((await execute(ready, 3)).stdout, "ready", "no schema change must not interrupt compatible running jobs");
+    assert.equal((await execute({ ...ready, tables: [{ create: true }] })).stdout, "change");
+    assert.equal((await execute({ ...ready, reviewed_batches: [{ batch_id: 1 }] }, 0, "yes")).stdout, "change");
+    await assert.rejects(execute({ ...ready, review: [{ id: 1 }] }), error => /explicit complete reviewed manifest/.test(error.stderr));
+    await assert.rejects(execute({ ...ready, tables: [{ create: true }] }, 1), error => /queued or running/.test(error.stderr));
+  } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
+});
+
+test("material migration is backed up, rechecks after a short stop, skips no-op changes and restores primary on failure", { skip: missingGitBash }, async () => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-hook-"));
+  try {
+    const gate = remote.match(/^if \[\[ "\$run_db_maintenance" == "1"[^\r\n]*\r?\n  backup_database\r?\nfi/m)?.[0];
+    const earlyStart = remote.indexOf('if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" ]]; then', remote.indexOf("npm ci --omit=dev"));
+    const early = remote.slice(earlyStart, remote.indexOf('\n\nif [[ "$run_db_maintenance"', earlyStart));
+    const hookStart = remote.indexOf('# Material jobs must have reviewed ownership');
+    const hook = remote.slice(hookStart, remote.indexOf('\n# This additive schema', hookStart));
+    const rollback = remote.match(/^rollback\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=trap rollback ERR)/m)?.[0];
+    assert.ok(gate && early && hook && rollback);
+    assert.ok(remote.indexOf("\n  backup_database\n") < hookStart && hookStart < remote.indexOf("\nstart_candidate\n"));
+    await fsPromises.mkdir(path.join(fixture, "scripts")); await fsPromises.mkdir(path.join(fixture, "previous"));
+    await fsPromises.writeFile(path.join(fixture, "scripts", "migrate-tenant-ai-material-optimization.mjs"), "fixture");
+    await fsPromises.writeFile(path.join(fixture, "env"), "DB_NAME=fixture_only\n");
+    for (const scenario of ["change", "ready", "early-refusal", "second-refusal", "apply-failure"]) {
+      const trace = path.join(fixture, "trace"); await fsPromises.writeFile(trace, "");
+      const execute = () => execFileAsync(bashExecutable, ["--noprofile", "--norc", "-c", `
+set -Eeuo pipefail
+staging_dir="$PWD"
+env_file="$PWD/env"
+current_link="$PWD/current"
+previous_target="$PWD/previous"
+candidate_pid=""
+run_db_maintenance=0
+reviewed_identity_manifest=""
+reviewed_ai_material_manifest="/tmp/ozon-erp-ai-material-fixture.json"
+material_change_required=ready
+material_optimization_preflight() {
+  printf 'preflight\\n' >> "$PWD/trace"
+  local count; count="$(wc -l < "$PWD/trace")"
+  if [[ "${scenario}" == early-refusal || ("${scenario}" == second-refusal && "$count" -gt 1) ]]; then return 41; fi
+  printf '%s' '${scenario === "ready" ? "ready" : "change"}'
+}
+backup_database() { printf 'backup\\n' >> "$PWD/trace"; }
+stop_existing_candidate() { printf 'stop-candidate\\n' >> "$PWD/trace"; }
+systemctl() { printf 'service %s\\n' "$*" >> "$PWD/trace"; }
+node() { printf 'apply %s\\n' "$*" >> "$PWD/trace"; return ${scenario === "apply-failure" ? 42 : 0}; }
+${rollback.replaceAll("\r\n", "\n")}
+trap rollback ERR
+${early}
+${gate}
+${hook}
+printf 'candidate\\n' >> "$PWD/trace"
+`], { cwd: fixture, env: { ...process.env, BASH_ENV: "" } });
+      if (scenario.includes("refusal") || scenario === "apply-failure") await assert.rejects(execute()); else await execute();
+      const lines = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/);
+      if (scenario === "early-refusal") assert.deepEqual(lines, ["preflight"]);
+      else if (scenario === "ready") assert.deepEqual(lines, ["preflight", "backup", "candidate"]);
+      else {
+        assert.deepEqual(lines.slice(0, 5), ["preflight", "backup", "stop-candidate", "service stop ozon-erp", "preflight"]);
+        if (scenario !== "second-refusal") assert.match(lines[5], /^apply scripts\/migrate-tenant-ai-material-optimization\.mjs --apply .*--review-manifest=\/tmp\/ozon-erp-ai-material-fixture\.json$/);
+        if (scenario === "change") assert.equal(lines.at(-1), "candidate");
+        else { assert.equal(lines.at(-1), "service restart ozon-erp"); assert.ok(!lines.includes("candidate")); }
+      }
+    }
+  } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
+});
 
 test("membership schemas require a verified backup and run before the candidate even with maintenance skipped", { skip: missingGitBash }, async () => {
   const fixtureDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-membership-deploy-"));

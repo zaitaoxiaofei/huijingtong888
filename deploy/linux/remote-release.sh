@@ -6,6 +6,9 @@ release_version="${2:-}"
 run_db_init="${3:-1}"
 run_db_maintenance="${4:-1}"
 reviewed_identity_manifest="${5:-}"
+reviewed_ai_material_manifest="${6:-}"
+material_change_required="ready"
+material_candidate_warmup_seconds=0
 app_root="/opt/ozon-erp"
 releases_root="$app_root/releases"
 shared_root="$app_root/shared"
@@ -17,8 +20,15 @@ candidate_log="/tmp/ozon-erp-candidate-${release_version}.log"
 candidate_pid_file="/tmp/ozon-erp-candidate.pid"
 release_lock_file="/var/lock/ozon-erp-release.lock"
 
+cleanup_material_manifest() {
+  if [[ "$reviewed_ai_material_manifest" =~ ^/tmp/ozon-erp-ai-material-[0-9A-Za-z._-]+\.json$ ]]; then
+    rm -f -- "$reviewed_ai_material_manifest"
+  fi
+}
+trap cleanup_material_manifest EXIT
+
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
-  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest]" >&2
+  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest]" >&2
   exit 2
 fi
 if [[ ! -f "$archive_path" ]]; then
@@ -40,6 +50,13 @@ fi
 if [[ -n "$reviewed_identity_manifest" && (! -f "$reviewed_identity_manifest" || ! -s "$reviewed_identity_manifest") ]]; then
   echo "Reviewed identity manifest not found or empty: $reviewed_identity_manifest" >&2
   exit 2
+fi
+if [[ -n "$reviewed_ai_material_manifest" ]]; then
+  if [[ ! "$reviewed_ai_material_manifest" =~ ^/tmp/ozon-erp-ai-material-[0-9A-Za-z._-]+\.json$ || -L "$reviewed_ai_material_manifest" || ! -s "$reviewed_ai_material_manifest" ]]; then
+    echo "Reviewed AI material manifest must be a private uploaded temporary file." >&2
+    exit 2
+  fi
+  chmod 600 "$reviewed_ai_material_manifest"
 fi
 
 # ECS has one shared current release link and one blue/green candidate port.
@@ -139,6 +156,41 @@ stop_existing_candidate() {
   fi
 }
 
+# Read-only, before backup or stopping a service. No unreviewed historical row
+# may disappear into quarantine as an incidental effect of a normal release.
+material_optimization_preflight() {
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node --input-type=module - "$DB_NAME" "$reviewed_ai_material_manifest" <<'NODE'
+import fs from "node:fs/promises";
+import mysql from "mysql2/promise";
+import { migrateTenantAiMaterialOptimization } from "./scripts/migrate-tenant-ai-material-optimization.mjs";
+const [database, manifestPath] = process.argv.slice(2);
+if (!database) throw new Error("Explicit deployment database is required for AI material preflight.");
+const connection = await mysql.createConnection({ socketPath: "/var/run/mysqld/mysqld.sock", user: "root", database });
+try {
+  let reviewManifest = null;
+  if (manifestPath) {
+    try { reviewManifest = JSON.parse(await fs.readFile(manifestPath, "utf8")); }
+    catch { throw new Error("Reviewed AI material manifest is not valid JSON."); }
+  }
+  const report = await migrateTenantAiMaterialOptimization(connection, { reviewManifest });
+  if (report.review.length) throw new Error("AI material ownership requires an explicit complete reviewed manifest; no historical rows were changed.");
+  const changed = report.reviewed_batches.length > 0 || report.tables.some(table => table.create || table.change_tenant_definition
+    || table.add_checkpoint || table.add_review_metadata || table.replace_unique || table.remove_unscoped_unique_indexes?.length);
+  if (changed) for (const table of ["ai_material_optimization_batches", "ai_material_optimization_items"]) {
+    const [exists] = await connection.execute("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?", [table]);
+    if (!exists.length) continue;
+    const [[active]] = await connection.query(`SELECT COUNT(*) n FROM ${table} WHERE status IN ('queued', 'running')`);
+    if (Number(active.n)) throw new Error("AI material jobs are queued or running; let existing jobs finish before retrying this release. No task was cancelled.");
+  }
+  process.stdout.write(changed ? "change" : "ready");
+} finally { await connection.end(); }
+NODE
+  )
+}
+
 backup_database() {
   local backup_dir="$shared_root/backups/identity-releases"
   local backup_path="$backup_dir/pre-release-${release_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$$.sql.gz"
@@ -176,22 +228,44 @@ start_candidate() {
   candidate_pid="$(cat "$candidate_pid_file")"
 
   local candidate_ok=0
-  # Allow schema warmup to finish while the primary is serving traffic.
+  local deadline=0
+  if ((material_candidate_warmup_seconds > 0)); then
+    deadline=$((SECONDS + material_candidate_warmup_seconds))
+  fi
+  # Ordinary releases warm while the primary serves. A reviewed material
+  # short stop has a bounded warmup budget and rolls back instead of waiting.
   for _ in {1..180}; do
     if ! kill -0 "$candidate_pid" 2>/dev/null; then
       cat "$candidate_log" >&2 || true
       echo "Candidate process exited before readiness." >&2
       return 1
     fi
+    local request_timeout=5
+    if ((deadline > 0)); then
+      local remaining=$((deadline - SECONDS))
+      ((remaining > 0)) || break
+      ((remaining < request_timeout)) && request_timeout=$remaining
+    fi
     local status
-    status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${candidate_port}/api/ready" || true)"
+    status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time "$request_timeout" "http://127.0.0.1:${candidate_port}/api/ready" || true)"
+    if ((deadline > 0)); then
+      local remaining=$((deadline - SECONDS))
+      ((remaining > 0)) || break
+      ((remaining < request_timeout)) && request_timeout=$remaining
+    fi
     local candidate_version
-    candidate_version="$(curl -fsS --max-time 5 "http://127.0.0.1:${candidate_port}/release.json" | node -e 'let text="";process.stdin.on("data", c => text+=c);process.stdin.on("end", () => { try { process.stdout.write(JSON.parse(text).version || ""); } catch {} });' || true)"
+    candidate_version="$(curl -fsS --max-time "$request_timeout" "http://127.0.0.1:${candidate_port}/release.json" | node -e 'let text="";process.stdin.on("data", c => text+=c);process.stdin.on("end", () => { try { process.stdout.write(JSON.parse(text).version || ""); } catch {} });' || true)"
     if [[ "$status" == "200" && "$candidate_version" == "$release_version" ]]; then
       candidate_ok=1
       break
     fi
-    sleep 2
+    local pause_seconds=2
+    if ((deadline > 0)); then
+      local remaining=$((deadline - SECONDS))
+      ((remaining > 0)) || break
+      ((remaining < pause_seconds)) && pause_seconds=$remaining
+    fi
+    sleep "$pause_seconds"
   done
   if [[ "$candidate_ok" != "1" ]]; then
     cat "$candidate_log" >&2 || true
@@ -213,7 +287,17 @@ fi
 chown -R ozon-erp:ozon-erp "$staging_dir"
 runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" ]]; then
+if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" ]]; then
+  if ! material_change_required="$(material_optimization_preflight)"; then
+    echo "AI material preflight refused this release; existing services were left running." >&2
+    exit 1
+  fi
+elif [[ -n "$reviewed_ai_material_manifest" ]]; then
+  echo "This release does not contain the reviewed AI material migration." >&2
+  exit 1
+fi
+
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" || -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" ]]; then
   backup_database
 fi
 
@@ -331,6 +415,32 @@ if [[ -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" ]]; t
   set +a
   (cd "$staging_dir" && node scripts/migrate-ai-variant-draft-history-index.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
   (cd "$staging_dir" && node scripts/migrate-ai-variant-draft-history-index.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
+
+# Material jobs must have reviewed ownership before the new worker is started.
+# This does not run the unrelated historical inventory/unique-key repair.
+if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" && "$material_change_required" == "change" ]]; then
+  # No active job was cancelled or waited on. Stop both old writers only when
+  # material ownership/schema actually changes, then close the preflight race.
+  stop_existing_candidate
+  systemctl stop ozon-erp
+  material_candidate_warmup_seconds=45
+  if ! material_change_required="$(material_optimization_preflight)"; then
+    echo "AI material preflight changed after stopping old writers; restoring the previous service." >&2
+    false
+  fi
+  set -a
+  source "$env_file"
+  set +a
+  material_migration_args=(--database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  if [[ -n "$reviewed_ai_material_manifest" ]]; then
+    material_migration_args+=(--review-manifest="$reviewed_ai_material_manifest")
+  fi
+  if ! (cd "$staging_dir" && node scripts/migrate-tenant-ai-material-optimization.mjs --apply "${material_migration_args[@]}" >/dev/null); then
+    echo "Reviewed AI material migration failed; restoring the previous service." >&2
+    false
+  fi
+  echo "Reviewed AI material schema and ownership migration verified."
 fi
 
 # This additive schema is required even when broad maintenance is disabled.

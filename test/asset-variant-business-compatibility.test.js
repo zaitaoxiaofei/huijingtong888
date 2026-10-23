@@ -15,9 +15,7 @@ const executionRoutes = [
   ["POST", "publish-selection"], ["POST", "generate"], ["POST", "generate-async"], ["POST", "publish-to-ozon"],
   ["POST", "import-listing-automation"], ["POST", "jobs/12/retry-failures"]
 ];
-const reviewedJobs = new Set(['jobs', 'jobs/12', 'files/job/example.png', 'jobs/12/retry-failures']);
-
-test("default operations members retain reviewed matrix jobs while unverified execution fails closed", () => {
+test("default operations members retain reviewed matrix generation and publishing without configuration writes", () => {
   const session = employee();
   for (const path of configurationReads) {
     assert.equal(allowed(session, "GET", path), true, path);
@@ -25,7 +23,7 @@ test("default operations members retain reviewed matrix jobs while unverified ex
   }
   for (const [method, path] of executionRoutes) {
     assert.equal(allowed(session, method, path), true, path);
-    assert.equal(tenantIsolationDecision(session, parts(path), method).allowed, reviewedJobs.has(path), path);
+    assert.equal(tenantIsolationDecision(session, parts(path), method).allowed, true, path);
   }
   for (const path of configurationWrites) assert.equal(allowed(session, "POST", path), false, path);
   for (const [method, path] of [...configurationReads.map(path => ["GET", path]), ...executionRoutes]) {
@@ -33,7 +31,7 @@ test("default operations members retain reviewed matrix jobs while unverified ex
   }
 });
 
-test("enterprise administrators manage own configuration and operations members use reviewed jobs only", () => {
+test("enterprise administrators manage own configuration and operations members execute the reviewed matrix workflow", () => {
   for (const slug of ["default", "company-a"]) {
     const session = employee(slug, "owner", ["packing"]);
     for (const path of configurationReads) assert.equal(allowed(session, "GET", path), true, `${slug}: ${path}`);
@@ -42,8 +40,8 @@ test("enterprise administrators manage own configuration and operations members 
   for (const role of ["member", "owner", "admin"]) {
     const session = employee("company-a", role);
     for (const [method, path] of executionRoutes) {
-      assert.equal(allowed(session, method, path), reviewedJobs.has(path), path);
-      assert.equal(tenantIsolationDecision(session, parts(path), method).allowed, reviewedJobs.has(path), path);
+      assert.equal(allowed(session, method, path), true, path);
+      assert.equal(tenantIsolationDecision(session, parts(path), method).allowed, true, path);
     }
     if (role === "member") {
       for (const path of configurationReads) {

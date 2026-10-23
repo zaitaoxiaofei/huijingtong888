@@ -88,7 +88,6 @@ test("the fission gate does not admit other methods, extended paths, or adjacent
     ["POST", "/api/ai-variant-lab/batch-delete"],
     ["POST", "/api/listing/generate-offer-ids"],
     ["POST", "/api/listing/publish-tasks/12/retry"],
-    ["POST", "/api/asset-variant-engine/generate"],
     ["POST", "/api/asset-variant-engine/publish"]
   ];
   for (const tenant of enterprises) {

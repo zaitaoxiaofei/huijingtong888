@@ -2,6 +2,7 @@ import { mysqlQuery } from "../mysql-pool.js";
 import { AI_BACKGROUND_TENANT_TABLES } from './ai-background-tenant-tables.js';
 import { assertAiVariantDraftHistorySchemaReady } from './ai-variant-draft-history-schema.js';
 import { assertOglDispatchSchemaReady } from './ogl-dispatch-schema.js';
+import { verifyAiMaterialOptimizationSchema } from './ai-material-optimization-schema.js';
 
 // Some optional workflows create their tables lazily. An absent table is safe;
 // an existing legacy table without ownership must never reach a business query.
@@ -10,7 +11,8 @@ const optionalOwnedTables = [
   'ai_variant_lab_analyses', 'ai_variant_lab_plans', 'ai_variant_templates', 'ai_variant_template_cases',
   'ai_variant_case_templates', 'ai_variant_case_runs', 'ai_variant_lab_batch_jobs', 'ai_variant_lab_batch_items',
   'ai_image_usage_events', 'ai_image_optimizer_jobs', 'ai_generation_tasks', 'ai_variant_draft_save_batches', 'ai_vehicle_catalog',
-  'ai_variant_draft_save_items', 'asset_variant_jobs', 'listing_ozon_copy_jobs'
+  'ai_variant_draft_save_items', 'asset_variant_jobs', 'listing_ozon_copy_jobs',
+  'ai_material_optimization_batches', 'ai_material_optimization_items'
 ];
 
 // Readiness must fail before a candidate can replace production when its
@@ -57,6 +59,11 @@ export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
     ...AI_BACKGROUND_TENANT_TABLES.filter(([,name])=>name).map(([table,name,key])=>[table,name,['tenant_id',key]])
   ];
   const existing = new Set(columns.map(row => row.TABLE_NAME || row.table_name));
+  const materialTables = ['ai_material_optimization_batches', 'ai_material_optimization_items'];
+  if (materialTables.some(table => existing.has(table))) {
+    if (!materialTables.every(table => existing.has(table))) throw Object.assign(new Error('素材优化企业隔离迁移未完成：批次和明细结构必须同时就绪'), { statusCode: 503 });
+    await verifyAiMaterialOptimizationSchema(query);
+  }
   const checked = uniqueKeys.filter(([table])=>existing.has(table));
   const indexedTables = [...new Set([...checked.map(([table])=>table), 'suppliers'])];
   const statistics = await query(`SELECT table_name,index_name,column_name,seq_in_index,non_unique FROM information_schema.statistics

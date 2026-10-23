@@ -2,12 +2,29 @@
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { aiProductMaterialOptimizerPrepareTemplate, applyOperatorFactOverrides, buildImageEditContract, buildOzonVariantTitle, buildVariantTitleFromSource, parseOperatorInstructions, removeSourceModelFromProductSubject } from "../src/services/ai-variant-lab.js";
+import vm from "node:vm";
+import { applyOperatorFactOverrides, buildImageEditContract, buildOzonVariantTitle, buildVariantTitleFromSource, parseOperatorInstructions, removeSourceModelFromProductSubject } from "../src/services/ai-variant-lab.js";
 
 const ROOT = path.resolve(".");
 
 function read(relativePath) {
   return fs.readFileSync(path.join(ROOT, relativePath), "utf8");
+}
+
+// Pure preview-shape checks use a pre-authorized fixture boundary. Real
+// membership, file ownership and cross-enterprise references are exercised in
+// tenant-ai-material-optimization-mysql.test.js; production never bypasses auth.
+async function aiProductMaterialOptimizerPrepareTemplate(body) {
+  const actor = { personId: 7, tenant: { id: 2, slug: "enterprise-2" } };
+  const context = vm.createContext({ console, Buffer, URL, fs, path, crypto: {}, config: {appBaseUrl:"http://localhost:8788"},
+    needsAiTenantSession: () => false,
+    currentAiTenantSession: () => actor,
+    assertCurrentAiTenantPermission: async () => actor,
+    aiTenantId: () => "2",
+    mysqlQuery: async () => []
+  });
+  vm.runInContext(read("src/services/ai-variant-lab.js").replace(/^import[^;]*;\r?\n/gm, "").replaceAll("export ", ""), context);
+  return JSON.parse(JSON.stringify(await context.aiProductMaterialOptimizerPrepareTemplate(body, actor)));
 }
 
 test("operator instructions separate main-image scope from regenerated listing copy", () => {

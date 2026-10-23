@@ -203,7 +203,8 @@ test("asset variant on-demand video reports unreadable source images as validati
   assert.match(videoSection, /remote_image_unavailable/);
   assert.match(videoSection, /normalized\.status = 400/);
   assert.match(videoSection, /normalized\.validation = payload/);
-  assert.match(assetVariantSource, /远程图片下载失败：\$\{response\.status\}/);
+  assert.match(assetVariantSource, /REMOTE_IMAGE_UNAVAILABLE/);
+  assert.match(assetVariantSource, /requestPublicImage\(url, \{ maxBytes: 20 \* 1024 \* 1024/);
 });
 
 test("listing variant media reuses the generated MP4 for video cover and video", () => {

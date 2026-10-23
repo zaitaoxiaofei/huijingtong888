@@ -4,6 +4,7 @@ import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { AI_BACKGROUND_TENANT_TABLES } from '../src/services/ai-background-tenant-tables.js';
 import { migrateTenantAiBackground } from '../scripts/migrate-tenant-ai-background.mjs';
 import { AI_VEHICLE_CATALOG_SCHEMA, migrateAiVehicleCatalogSchema } from '../src/services/ai-vehicle-catalog-schema.js';
+import { AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA, AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA } from '../src/services/ai-material-optimization-schema.js';
 
 test('actual startup readiness rejects legacy global keys, nonunique replacements and nullable ownership',{
   skip:!process.env.TENANT_TEST_MYSQL_SOCKET&&'Requires isolated socket-only MySQL',timeout:180000
@@ -63,6 +64,26 @@ test('actual startup readiness rejects legacy global keys, nonunique replacement
       await assert.rejects(assertTenantPilotSchemaReady(query),/uniq_ai_vehicle_catalog_brand_model/);
       await migrateAiVehicleCatalogSchema(fixture.connection,{apply:true});
       assert.equal((await assertTenantPilotSchemaReady(query)).ok,true);
+    });
+    await t.test('material batch/item ownership must be complete, nonnullable, typed and scoped before startup',async()=>{
+      await query(AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA);
+      await assert.rejects(assertTenantPilotSchemaReady(query), { statusCode:503 });
+      await query(AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA);
+      assert.equal((await assertTenantPilotSchemaReady(query)).ok, true);
+      for (const sql of [
+        "ALTER TABLE ai_material_optimization_items MODIFY tenant_id VARCHAR(64) NULL DEFAULT 'legacy_review'",
+        "ALTER TABLE ai_material_optimization_items MODIFY tenant_id VARCHAR(80) NOT NULL DEFAULT 'legacy_review'",
+        "ALTER TABLE ai_material_optimization_items MODIFY tenant_id VARCHAR(64) NOT NULL DEFAULT 'admin'"
+      ]) {
+        await query(sql);
+        await assert.rejects(assertTenantPilotSchemaReady(query), /素材优化/);
+        await query("ALTER TABLE ai_material_optimization_items MODIFY tenant_id VARCHAR(64) NOT NULL DEFAULT 'legacy_review'");
+      }
+      await query('ALTER TABLE ai_material_optimization_items ADD UNIQUE KEY unsafe_material_key(item_no)');
+      await assert.rejects(assertTenantPilotSchemaReady(query), /素材优化/);
+      await query('ALTER TABLE ai_material_optimization_items DROP INDEX unsafe_material_key');
+      assert.equal((await assertTenantPilotSchemaReady(query)).ok,true);
+      await query('DROP TABLE ai_material_optimization_items,ai_material_optimization_batches');
     });
     await t.test('each optional AI unique-key migration is required only after that table exists',async()=>{
       for(const [table,index,key]of AI_BACKGROUND_TENANT_TABLES){
