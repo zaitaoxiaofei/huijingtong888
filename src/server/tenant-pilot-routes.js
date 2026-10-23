@@ -36,7 +36,7 @@ const routes = new Set([
   'POST products/import-preview', 'POST products/import-commit',
   'POST products/merge-preview', 'POST products/merge', 'GET products/merge-history',
   'POST online-products/bind', 'POST online-products/create-product',
-  'POST listing/drafts/from-inventory-product', 'GET listing/ozon-categories',
+  'POST listing/drafts/from-inventory-product', 'GET listing/ozon-categories', 'GET listing/draft-bindings',
   'POST listing/generate-offer-id',
   'POST listing/templates/validate-publish',
   'GET procurement/summary', 'GET procurement/requests', 'POST procurement/requests', 'POST procurement/warehouse-requests',

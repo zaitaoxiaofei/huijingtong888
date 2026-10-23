@@ -61,7 +61,7 @@ function createMysqlBusyError(message, cause) {
 
 function normalizeMysqlAcquireError(error) {
   const code = String(error?.code || "");
-  if (code === "POOL_ENQUEUELIMIT") {
+  if (code === "POOL_ENQUEUELIMIT" || (!code && error?.message === "Queue limit reached.")) {
     return createMysqlBusyError("系统繁忙，请稍后重试", error);
   }
   return error;

@@ -10,6 +10,7 @@ import { hasPermission } from '../src/shared/permissions.js';
 import { readDevelopmentPlan, developmentPlanProgress } from '../src/services/development-task-plan.js';
 import { normalizeVehicleModelKey } from '../src/services/product-development-meta.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryReferences, assertInventoryMember } from '../src/services/inventory-tenant-scope.js';
+import { AI_VARIANT_SOURCE_COLUMN_SQL, AI_VARIANT_SOURCE_INDEX_SQL } from '../src/services/ai-variant-draft-history-schema.js';
 
 const read = file => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const load = (context, file) => vm.runInContext(read(file).replace(/^import[^;]*;\r?\n/gm, '').replaceAll('export ', ''), context, { filename: file });
@@ -100,7 +101,7 @@ test('vehicle catalog, inventory use, draft binding and AI references isolate A/
     for (const table of ['listing_drafts', 'listing_category_templates', 'listing_shop_copies', 'listing_publish_records']) {
       const sql = listingSource.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\([\\s\\S]*?\\) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`))?.[0];
       assert.ok(sql, `Runtime schema missing: ${table}`);
-      await query(sql);
+      await query(sql.replaceAll('${AI_VARIANT_SOURCE_COLUMN_SQL}', AI_VARIANT_SOURCE_COLUMN_SQL).replaceAll('${AI_VARIANT_SOURCE_INDEX_SQL}', AI_VARIANT_SOURCE_INDEX_SQL));
     }
     const bindings = vm.createContext({ ...context });
     load(bindings, 'src/services/listing-draft-bindings.js');

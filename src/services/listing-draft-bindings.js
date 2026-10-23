@@ -29,10 +29,14 @@ async function ensureSchema() {
   schemaReady = true;
 }
 
-async function tenantId(session) {
+async function tenantContext(session) {
   const authorized = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(authorized, "operations");
-  return businessTaskTenantKey(authorized);
+  return { key: businessTaskTenantKey(authorized), id: Number(authorized.tenant.id) };
+}
+
+async function tenantId(session) {
+  return (await tenantContext(session)).key;
 }
 
 function draftIds(body) {
@@ -44,20 +48,23 @@ function draftIds(body) {
 }
 
 export async function listingDraftBindingOptions(query = {}, session = null) {
-  const tenant = await tenantId(session);
+  const { key: tenant, id: enterpriseId } = await tenantContext(session);
   const catalog = vehicleCatalogTenantPredicate(tenant);
   await ensureSchema();
   await ensureVehicleCatalogSchema();
   const [vehicles, tasks] = await Promise.all([
     mysqlQuery(`SELECT id, brand_name, model_name FROM ai_vehicle_catalog WHERE enabled = 1 AND ${catalog.sql} AND model_name <> '' ORDER BY brand_name, model_name`, catalog.params),
-    mysqlQuery(`SELECT task.id, task.title, task.status, task.work_type, task.owner_person_id,
+    mysqlQuery(`SELECT task.id, task.title, task.status, task.work_type, owner.id AS owner_person_id,
       task.created_by_person_id, task.created_at, task.start_at, task.due_at, task.priority,
       task.target_count, task.done_count, task.related_object, owner.name AS owner_name,
       owner.avatar_url AS owner_avatar_url
       FROM team_tasks task
-      LEFT JOIN people owner ON owner.id = task.owner_person_id
-      WHERE task.tenant_id = ? AND task.active = 1 ORDER BY task.created_at DESC, task.id DESC`, [tenant])
+      LEFT JOIN people owner ON owner.id = task.owner_person_id AND owner.active = 1
+        AND EXISTS (SELECT 1 FROM tenant_members owner_member
+          WHERE owner_member.tenant_id = ? AND owner_member.person_id = owner.id AND owner_member.active = 1)
+      WHERE task.tenant_id = ? AND task.active = 1 ORDER BY task.created_at DESC, task.id DESC`, [enterpriseId, tenant])
   ]);
+  await tenantId(session);
   return { vehicles, tasks: tasks.map((task) => {
     const plan = readDevelopmentPlan(task.related_object);
     let related;
@@ -74,12 +81,12 @@ export async function listingDraftBindingOptions(query = {}, session = null) {
 }
 
 export async function listingDraftBindings(query = {}, session = null) {
-  const tenant = await tenantId(session);
+  const { key: tenant, id: enterpriseId } = await tenantContext(session);
   const catalog = vehicleCatalogTenantPredicate(tenant, "vehicle");
   await ensureSchema();
   await ensureVehicleCatalogSchema();
   const ids = [...new Set(String(query.ids || "").split(",").map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 100);
-  if (!ids.length) return [];
+  if (!ids.length) { await tenantId(session); return []; }
   const placeholders = ids.map(() => "?").join(",");
   const [rows, vehicleLinks, taskPlanLinks] = await Promise.all([
     mysqlQuery(`SELECT draft.id AS draft_id,
@@ -97,11 +104,13 @@ export async function listingDraftBindings(query = {}, session = null) {
     LEFT JOIN listing_draft_bindings binding ON binding.draft_id = draft.id AND binding.tenant_id = COALESCE(draft.tenant_id, 'admin')
     LEFT JOIN ai_vehicle_catalog vehicle ON vehicle.id = binding.vehicle_catalog_id AND vehicle.enabled = 1 AND ${catalog.sql}
     LEFT JOIN team_tasks task ON task.id = binding.task_id AND task.tenant_id COLLATE utf8mb4_unicode_ci = binding.tenant_id AND task.active = 1
-    LEFT JOIN people owner ON owner.id = task.owner_person_id
+    LEFT JOIN people owner ON owner.id = task.owner_person_id AND owner.active = 1
+      AND EXISTS (SELECT 1 FROM tenant_members owner_member
+        WHERE owner_member.tenant_id = ? AND owner_member.person_id = owner.id AND owner_member.active = 1)
     LEFT JOIN products inventory ON inventory.id = draft.source_product_id AND inventory.active = 1
       AND inventory.tenant_id = CASE WHEN COALESCE(draft.tenant_id, 'admin') = 'admin'
         THEN (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1) ELSE CAST(draft.tenant_id AS UNSIGNED) END
-    WHERE COALESCE(draft.tenant_id, 'admin') = ? AND draft.status <> 'deleted' AND draft.id IN (${placeholders})`, [...catalog.params, tenant, ...ids]),
+    WHERE COALESCE(draft.tenant_id, 'admin') = ? AND draft.status <> 'deleted' AND draft.id IN (${placeholders})`, [...catalog.params, enterpriseId, tenant, ...ids]),
     mysqlQuery(`SELECT link.draft_id, link.vehicle_catalog_id AS id, vehicle.brand_name, vehicle.model_name
       FROM listing_draft_vehicle_links link
       JOIN ai_vehicle_catalog vehicle ON vehicle.id = link.vehicle_catalog_id AND vehicle.enabled = 1 AND ${catalog.sql}
@@ -114,7 +123,9 @@ export async function listingDraftBindings(query = {}, session = null) {
       FROM team_tasks task
       JOIN JSON_TABLE(CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END,
         '$.models[*].draft_ids[*]' COLUMNS (draft_id BIGINT PATH '$')) linked
-      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      LEFT JOIN people owner ON owner.id = task.owner_person_id AND owner.active = 1
+        AND EXISTS (SELECT 1 FROM tenant_members owner_member
+          WHERE owner_member.tenant_id = ? AND owner_member.person_id = owner.id AND owner_member.active = 1)
       WHERE task.tenant_id = ? AND task.active = 1 AND task.work_type = 'product_development' AND linked.draft_id IN (${placeholders})
       UNION ALL
       SELECT task.id, task.title, owner.name, owner.avatar_url,
@@ -122,7 +133,9 @@ export async function listingDraftBindings(query = {}, session = null) {
       FROM team_tasks task
       JOIN JSON_TABLE(CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END,
         '$.unallocated_draft_ids[*]' COLUMNS (draft_id BIGINT PATH '$')) linked
-      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      LEFT JOIN people owner ON owner.id = task.owner_person_id AND owner.active = 1
+        AND EXISTS (SELECT 1 FROM tenant_members owner_member
+          WHERE owner_member.tenant_id = ? AND owner_member.person_id = owner.id AND owner_member.active = 1)
       WHERE task.tenant_id = ? AND task.active = 1 AND task.work_type = 'product_development' AND linked.draft_id IN (${placeholders})
       UNION ALL
       SELECT task.id, task.title, owner.name, owner.avatar_url,
@@ -131,10 +144,13 @@ export async function listingDraftBindings(query = {}, session = null) {
       JOIN product_development_idea_drafts idea_draft
         ON idea_draft.tenant_id = task.tenant_id AND idea_draft.idea_id = CAST(JSON_UNQUOTE(JSON_EXTRACT(
           CASE WHEN JSON_VALID(task.related_object) THEN task.related_object ELSE '{}' END, '$.idea_id')) AS UNSIGNED)
-      LEFT JOIN people owner ON owner.id = task.owner_person_id
+      LEFT JOIN people owner ON owner.id = task.owner_person_id AND owner.active = 1
+        AND EXISTS (SELECT 1 FROM tenant_members owner_member
+          WHERE owner_member.tenant_id = ? AND owner_member.person_id = owner.id AND owner_member.active = 1)
       WHERE task.tenant_id = ? AND task.active = 1 AND task.work_type = 'product_development'
-        AND JSON_VALID(task.related_object) AND idea_draft.draft_id IN (${placeholders})`, [tenant, ...ids, tenant, ...ids, tenant, ...ids])
+        AND JSON_VALID(task.related_object) AND idea_draft.draft_id IN (${placeholders})`, [enterpriseId, tenant, ...ids, enterpriseId, tenant, ...ids, enterpriseId, tenant, ...ids])
   ]);
+  await tenantId(session);
   const vehiclesByDraft = new Map();
   for (const link of vehicleLinks) {
     const draftId = Number(link.draft_id);
