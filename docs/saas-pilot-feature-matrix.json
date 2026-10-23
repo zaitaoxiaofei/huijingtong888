@@ -74,7 +74,21 @@
       "log": ".verification/saas-ai-isolation-build-final.log",
       "warnings": "已有 AI 工作台 runtime proxy 与大 chunk 提示；不宣称已消除"
     },
-    "productionDeployment": "pending_formal_release_pipeline",
+    "productionDeployment": {
+      "status": "deployed_and_read_only_verified",
+      "version": "2026.10.23-saas-ai-88f6312",
+      "commit": "88f63123a7ab62081fb739e4eac31ecab86157fe",
+      "primaryReady": 200,
+      "candidateReady": 200,
+      "anonymousBusinessAPIs": 403,
+      "uiAssetHashesMatched": 4,
+      "evidence": [
+        ".verification/ecs-saas-ai-public-verification.json",
+        ".verification/ecs-ai-isolation-after.json",
+        ".verification/ecs-saas-ai-reviewed-resume.log"
+      ],
+      "limits": "首次短窗口候选超时回滚，随后在旧主服务旁预热并切换成功；没有真实付费 AI/Ozon 客户写入验收"
+    },
     "sqlBindingsCheck": "passed",
     "apiDocumentationCheck": "passed",
     "focusedAcceptance": {
@@ -109,14 +123,23 @@
         "evidence": ".verification/saas-ai-gates-ui-test.log",
         "scope": "stream-to-file assertion refers to absent baseline implementation; unchanged workflow service"
       }
-    ]
+    ],
+    "productionDependencies": {
+      "baselineUnchanged": true,
+      "high": 6,
+      "moderate": 4,
+      "critical": 0,
+      "knownExploitPathConfirmed": false,
+      "status": "controlled_patch_and_regression_pending_before_sale",
+      "evidence": ".verification/release-production-audit-assessment.json"
+    }
   },
   "historicalDataPolicy": {
     "status": "current_real_history_default_enterprise_confirmed",
     "strictProductionRepair": "paused",
     "currentBusinessBaseline": "用户确认当前尚无第二家真实企业，已有真实业务历史均归默认企业；新客户独立开户写入自己的企业空间",
     "anomalyStrategy": "库存数量、商品身份和订单关联冲突保留原记录并单独讨论；不自动合并身份、降级唯一键、修改库存或恢复已暂停维护",
-    "legacyMaterialMigration": "已获用户确认：两批四条补归默认企业，保持原状态和完整原记录、不重新执行 AI；生产只读原行指纹及来源、结果、操作人核查通过，正式发布仍须再次核对后才应用"
+    "legacyMaterialMigration": "已按用户确认完成两批四条默认企业归属；逐条原始指纹、内容与状态一致，不重跑 AI；账号、成员、平台授权及订阅摘要一致。无关库存历史修复继续暂停。"
   },
   "knownIntegrationGaps": [],
   "implementationEntryPoints": [
