@@ -91,7 +91,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
-    'loadOglDispatchMembersMysql',
+    'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql',
     ...extraMethods
   ];
   const noop=async()=>{};

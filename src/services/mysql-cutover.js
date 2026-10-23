@@ -17895,14 +17895,74 @@ function orderOutboundSyncScopeMysql(options = {}, tenantScope) {
   };
 }
 
-export async function revokeShippedCancellationReturnsMysql(orderItemId, tenantId = "admin") {
+async function assertCancellationInventoryAnchorsMysql(connection, orderItemId, scope) {
+  const order = await mysqlConnectionQueryOne(connection, `
+    SELECT o.id AS order_id, o.shop_id, o.posting_number, o.status AS order_status, o.tracking_stage,
+      oi.id AS order_item_id, oi.quantity, oi.sku_mapping_id, oi.ozon_sku,
+      ${orderTransportEvidenceSql('o')} AS entered_transport
+    FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops owned_shop ON owned_shop.id = o.shop_id
+    WHERE oi.id = ? AND ${orderTenantPredicateMysql("owned_shop", scope)} FOR UPDATE
+  `, [Number(orderItemId)]);
+  if (!order) return null;
+  const requireReview = () => {
+    throw Object.assign(new Error("订单的历史出库或取消回补与当前店铺、货件号不一致或缺少原始凭据，已跳过该商品的库存变更，请先核对历史关联。"), {
+      statusCode: 409, code: "HISTORY_ORDER_LINK_REVIEW_REQUIRED", orderItemId: Number(orderItemId)
+    });
+  };
+  const posting = String(order.posting_number || "");
+  if (!posting || !Number(order.shop_id)) requireReview();
+  const outboundSelect = `
+    SELECT id, shop_id, order_ref,
+      EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = outbound_records.product_id AND ${orderTenantPredicateMysql("owned_product", scope)}) AS product_owned
+    FROM outbound_records`;
+  const [itemOutbounds] = await connection.query(`${outboundSelect} WHERE order_item_id = ? FOR UPDATE`, [Number(orderItemId)]);
+  const [legacyOutbounds] = await connection.query(`${outboundSelect}
+    WHERE order_item_id IS NULL AND shop_id = ? AND order_ref = ? FOR UPDATE`, [order.shop_id, posting]);
+  const outbounds = [...itemOutbounds, ...legacyOutbounds];
+  for (const outbound of outbounds) {
+    if (!Number(outbound.product_owned) || Number(outbound.shop_id) !== Number(order.shop_id) || String(outbound.order_ref || "") !== posting) requireReview();
+  }
+  const cancelSource = `cancel_${Number(orderItemId)}`;
+  const cancelPrefix = `${cancelSource}_`;
+  const movementSelect = `
+    SELECT anchor.*, ${orderTenantPredicateMysql("anchor", scope)} AS tenant_owned,
+      EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = anchor.product_id AND ${orderTenantPredicateMysql("owned_product", scope)}) AS product_owned
+    FROM inventory_movements anchor`;
+  // Keep each locking read bounded by an existing item/source index. Combining
+  // the two keys with an OR makes MySQL scan and lock unrelated enterprises.
+  const [itemMovements] = await connection.query(`${movementSelect}
+    WHERE related_order_item_id = ? AND ((source_type = 'order_outbound' AND status = 'posted' AND quantity_delta < 0)
+      OR (source_type = 'return_in' AND LEFT(source_ref, 7) = 'cancel_')) FOR UPDATE`, [Number(orderItemId)]);
+  const [exactReturns] = await connection.query(`${movementSelect}
+    WHERE source_type = 'return_in' AND source_ref = ? FOR UPDATE`, [cancelSource]);
+  const literalPrefix = cancelPrefix.replace(/[!_%]/g, "!$&") + "%";
+  const [prefixedReturns] = await connection.query(`${movementSelect}
+    WHERE source_type = 'return_in' AND source_ref LIKE ? ESCAPE '!' FOR UPDATE`, [literalPrefix]);
+  const movements = [...new Map([...itemMovements, ...exactReturns, ...prefixedReturns].map(row => [String(row.id), row])).values()];
+  let originalAnchors = outbounds.length;
+  for (const movement of movements) {
+    if (!Number(movement.tenant_owned) || !Number(movement.product_owned) || Number(movement.shop_id) !== Number(order.shop_id)
+      || Number(movement.related_order_item_id) !== Number(orderItemId)) requireReview();
+    const source = String(movement.source_ref || ""), related = String(movement.related_posting_number || "");
+    if (movement.source_type === "order_outbound") {
+      if ((!source && !related) || (source && source !== posting) || (related && related !== posting)) requireReview();
+      originalAnchors += 1;
+    } else {
+      if (source !== cancelSource && source !== `${cancelPrefix}${Number(movement.product_id)}`) requireReview();
+      // Older automatic returns stored their own synthetic source as related
+      // posting. It is not proof of an original posting; require a real anchor.
+      if (related && related !== posting && related !== source) requireReview();
+    }
+  }
+  if (movements.some(movement => movement.source_type === "return_in") && !originalAnchors) requireReview();
+  return order;
+}
+
+export async function revokeShippedCancellationReturnsMysql(orderItemId, tenantId = "admin", transaction = null) {
   const scope = await orderOwnershipTenantScopeMysql(tenantId);
-  return await withMysqlTransaction(async (connection) => {
-    const order = await mysqlConnectionQueryOne(connection, `
-      SELECT o.id FROM orders o JOIN order_items oi ON oi.order_id = o.id JOIN shops owned_shop ON owned_shop.id = o.shop_id
-      WHERE ${orderTenantPredicateMysql("owned_shop", scope)} AND oi.id = ? AND ${orderTransportEvidenceSql('o')}
-    `, [Number(orderItemId)]);
-    if (!order) return 0;
+  const revoke = async (connection) => {
+    const order = await assertCancellationInventoryAnchorsMysql(connection, orderItemId, scope);
+    if (!order || !Number(order.entered_transport)) return 0;
     const [returns] = await connection.query(`SELECT id, product_id FROM inventory_movements
       WHERE ${orderTenantPredicateMysql("inventory_movements", scope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", scope)}) AND related_order_item_id = ? AND status = 'posted' AND quantity_delta > 0
         AND ${automaticCancellationReturnSql} FOR UPDATE`, [Number(orderItemId)]);
@@ -17916,7 +17976,8 @@ export async function revokeShippedCancellationReturnsMysql(orderItemId, tenantI
     invalidateOrderProcurementCoverage();
     invalidateMasterDataCache();
     return returns.length;
-  });
+  };
+  return transaction ? await revoke(transaction) : await withMysqlTransaction(revoke);
 }
 
 async function syncOutboundForOpenOrdersMysql(options = {}) {
@@ -17957,97 +18018,125 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     )
        ${scope.sql}
   `, scope.params);
-  for (const row of cancelledRows) {
+  const cancellationReviewRequired = [];
+  for (const candidateRow of cancelledRows) {
     await assertOrderTaskAccessMysql(tenantScope, options, ["packing", "orders.manage", "inventory.write", "procurement"]);
-    if (Number(row.entered_transport)) {
-      await revokeShippedCancellationReturnsMysql(row.order_item_id, tenantScope.id);
-      continue;
-    }
-    const outboundMovements = await mysqlQuery(`
-      SELECT id, product_id, shop_id, sku_mapping_id, owner_person_id, quantity_delta, unit_cost, status, stock_location, stock_location_source
-      FROM inventory_movements
-      WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
-        AND status = 'posted' AND quantity_delta < 0
-    `, [row.order_item_id]);
-    if (!outboundMovements.length) continue;
-    const resolvedStockLocation = resolveOrderStockLocationMysql(row);
-    await mysqlExecute(`
-      UPDATE outbound_records
-      SET status = 'cancelled', reason = 'cancelled_order',
-        stock_location = ?,
-        stock_location_source = ?,
-        note = 'Order cancelled, inventory restored'
-      WHERE (order_item_id = ? OR (order_item_id IS NULL AND order_ref = ? AND product_id = ?)) AND shop_id IN (SELECT owned_shop.id FROM shops owned_shop WHERE ${orderTenantPredicateMysql("owned_shop", tenantScope)})
-    `, [resolvedStockLocation.stockLocation, resolvedStockLocation.stockLocationSource, row.order_item_id, row.posting_number, row.product_id]);
-    await mysqlExecute(`
-      UPDATE inventory_movements
-      SET status = 'posted',
-        stock_location = ?,
-        stock_location_source = ?,
-        note = 'Cancelled order outbound, restored by return movement'
-      WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
-        AND status = 'posted' AND quantity_delta < 0
-    `, [resolvedStockLocation.stockLocation, resolvedStockLocation.stockLocationSource, row.order_item_id]);
-    for (const outboundMovement of outboundMovements) {
-      const restoreProductId = outboundMovement.product_id || row.product_id;
-      if (!restoreProductId) continue;
-      const restoreShopId = outboundMovement.shop_id || row.shop_id;
-      const restoreMappingId = outboundMovement.sku_mapping_id || row.mapping_id;
-      const restorePersonId = outboundMovement.owner_person_id || row.person_id;
-      const restoreUnitCost = Number(outboundMovement.unit_cost || row.purchase_cost || 0);
-      const restoreQuantity = Math.abs(Number(outboundMovement.quantity_delta || row.quantity || 1));
-      const restoreStockLocation = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
-        ? resolvedStockLocation.stockLocation
-        : normalizeStockLocationMysql(outboundMovement.stock_location);
-      const restoreStockLocationSource = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
-        ? resolvedStockLocation.stockLocationSource
-        : String(outboundMovement.stock_location_source || "order_outbound").slice(0, 64);
-      const returnSourceRef = `cancel_${row.order_item_id}_${restoreProductId}`;
-      const existingReturn = await mysqlQueryOne(`
-        SELECT id, product_id
-        FROM inventory_movements
-        WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND source_type = 'return_in' AND source_ref = ?
-        LIMIT 1
-      `, [returnSourceRef]);
-    if (existingReturn) {
-        const hasTenantColumn = await inventoryMovementTenantColumnExistsMysql();
+    try {
+      await withMysqlTransaction(async (connection) => {
+        const current = await assertCancellationInventoryAnchorsMysql(connection, candidateRow.order_item_id, tenantScope);
+        if (!current) return;
+        await assertOrderTaskAccessMysql(tenantScope, options, ["packing", "orders.manage", "inventory.write", "procurement"]);
+        if (Number(current.entered_transport)) {
+          await revokeShippedCancellationReturnsMysql(current.order_item_id, tenantScope.id, connection);
+          return;
+        }
+        if (!/cancel/i.test(`${current.order_status || ""} ${current.tracking_stage || ""}`)) return;
+        const mysqlQuery = async (sql, params = []) => (await connection.query(sql, params))[0];
+        const mysqlQueryOne = async (sql, params = []) => (await mysqlQuery(sql, params))[0] || null;
+        const mysqlExecute = async (sql, params = []) => (await connection.execute(sql, params))[0];
+        const mysqlPoolConnectionAdapter = connection;
+        const freshContext = await mysqlQueryOne(`
+          SELECT sm.id AS mapping_id, p.id AS product_id, p.purchase_cost,
+            CASE WHEN EXISTS (SELECT 1 FROM tenant_members member WHERE member.tenant_id = ${tenantScope.id} AND member.person_id = sm.person_id AND member.active = 1) THEN sm.person_id ELSE NULL END AS person_id
+          FROM order_items oi JOIN orders o ON o.id = oi.order_id
+          LEFT JOIN sku_mappings sm ON (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
+            AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)}
+          LEFT JOIN products p ON p.id = sm.product_id AND ${orderTenantPredicateMysql("p", tenantScope)}
+          WHERE oi.id = ? FOR SHARE
+        `, [current.order_item_id]);
+        const row = { ...candidateRow, ...current, ...(freshContext || {}) };
+        const outboundMovements = await mysqlQuery(`
+          SELECT id, product_id, shop_id, sku_mapping_id, owner_person_id, quantity_delta, unit_cost, status, stock_location, stock_location_source
+          FROM inventory_movements
+          WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
+            AND status = 'posted' AND quantity_delta < 0
+        `, [row.order_item_id]);
+        if (!outboundMovements.length) return;
+        const resolvedStockLocation = resolveOrderStockLocationMysql(row);
+        await mysqlExecute(`
+          UPDATE outbound_records
+          SET status = 'cancelled', reason = 'cancelled_order',
+            stock_location = ?,
+            stock_location_source = ?,
+            note = 'Order cancelled, inventory restored'
+          WHERE (order_item_id = ? OR (order_item_id IS NULL AND product_id = ?)) AND shop_id = ? AND order_ref = ?
+            AND shop_id IN (SELECT owned_shop.id FROM shops owned_shop WHERE ${orderTenantPredicateMysql("owned_shop", tenantScope)})
+        `, [resolvedStockLocation.stockLocation, resolvedStockLocation.stockLocationSource, row.order_item_id, row.product_id, row.shop_id, row.posting_number]);
         await mysqlExecute(`
           UPDATE inventory_movements
-          SET ${hasTenantColumn ? "tenant_id = COALESCE((SELECT p.tenant_id FROM products p WHERE p.id = ?), (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1)), " : ""}product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
-            quantity_delta = ?, stock_location = ?, stock_location_source = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Order cancelled, inventory restored'
-          WHERE id = ?
-        `, [
-          ...(hasTenantColumn ? [restoreProductId] : []),
-          restoreProductId,
-          restoreShopId,
-          restoreMappingId,
-          restorePersonId,
-          restoreQuantity,
-          restoreStockLocation,
-          restoreStockLocationSource,
-          restoreUnitCost,
-          restoreQuantity * restoreUnitCost,
-          existingReturn.id
-        ]);
-        await rebuildInventoryCurrentForProductMysql(mysqlPoolConnectionAdapter, existingReturn.product_id);
-      } else {
-        await postInventoryMysql(mysqlPoolConnectionAdapter, {
-          product_id: restoreProductId,
-          shop_id: restoreShopId,
-          sku_mapping_id: restoreMappingId,
-          owner_person_id: restorePersonId,
-          source_type: "return_in",
-          source_ref: returnSourceRef,
-          quantity_delta: restoreQuantity,
-          stock_location: restoreStockLocation,
-          stock_location_source: restoreStockLocationSource,
-          unit_cost: restoreUnitCost,
-          amount: restoreQuantity * restoreUnitCost,
-          related_order_item_id: row.order_item_id,
-          note: "Order cancelled, inventory restored"
-        });
-      }
-      await rebuildInventoryCurrentForProductMysql(mysqlPoolConnectionAdapter, restoreProductId);
+          SET status = 'posted',
+            stock_location = ?,
+            stock_location_source = ?,
+            note = 'Cancelled order outbound, restored by return movement'
+          WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND related_order_item_id = ? AND source_type = 'order_outbound'
+            AND status = 'posted' AND quantity_delta < 0
+        `, [resolvedStockLocation.stockLocation, resolvedStockLocation.stockLocationSource, row.order_item_id]);
+        for (const outboundMovement of outboundMovements) {
+          const restoreProductId = outboundMovement.product_id || row.product_id;
+          if (!restoreProductId) continue;
+          const restoreShopId = outboundMovement.shop_id || row.shop_id;
+          const restoreMappingId = outboundMovement.sku_mapping_id || row.mapping_id;
+          const restorePersonId = outboundMovement.owner_person_id || row.person_id;
+          const restoreUnitCost = Number(outboundMovement.unit_cost || row.purchase_cost || 0);
+          const restoreQuantity = Math.abs(Number(outboundMovement.quantity_delta || row.quantity || 1));
+          const restoreStockLocation = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
+            ? resolvedStockLocation.stockLocation
+            : normalizeStockLocationMysql(outboundMovement.stock_location);
+          const restoreStockLocationSource = normalizeStockLocationMysql(outboundMovement.stock_location) === "UNKNOWN"
+            ? resolvedStockLocation.stockLocationSource
+            : String(outboundMovement.stock_location_source || "order_outbound").slice(0, 64);
+          const returnSourceRef = `cancel_${row.order_item_id}_${restoreProductId}`;
+          const existingReturn = await mysqlQueryOne(`
+            SELECT id, product_id
+            FROM inventory_movements
+            WHERE ${orderTenantPredicateMysql("inventory_movements", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = inventory_movements.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)}) AND source_type = 'return_in' AND source_ref = ?
+            LIMIT 1
+          `, [returnSourceRef]);
+          if (existingReturn) {
+            const hasTenantColumn = await inventoryMovementTenantColumnExistsMysql();
+            await mysqlExecute(`
+              UPDATE inventory_movements
+              SET ${hasTenantColumn ? "tenant_id = COALESCE((SELECT p.tenant_id FROM products p WHERE p.id = ?), (SELECT id FROM tenants WHERE slug = 'default' AND status = 'active' LIMIT 1)), " : ""}product_id = ?, shop_id = ?, sku_mapping_id = ?, owner_person_id = ?,
+                quantity_delta = ?, stock_location = ?, stock_location_source = ?, unit_cost = ?, amount = ?, status = 'posted', note = 'Order cancelled, inventory restored'
+              WHERE id = ?
+            `, [
+              ...(hasTenantColumn ? [restoreProductId] : []),
+              restoreProductId,
+              restoreShopId,
+              restoreMappingId,
+              restorePersonId,
+              restoreQuantity,
+              restoreStockLocation,
+              restoreStockLocationSource,
+              restoreUnitCost,
+              restoreQuantity * restoreUnitCost,
+              existingReturn.id
+            ]);
+            await rebuildInventoryCurrentForProductMysql(mysqlPoolConnectionAdapter, existingReturn.product_id);
+          } else {
+            await postInventoryMysql(mysqlPoolConnectionAdapter, {
+              product_id: restoreProductId,
+              shop_id: restoreShopId,
+              sku_mapping_id: restoreMappingId,
+              owner_person_id: restorePersonId,
+              source_type: "return_in",
+              source_ref: returnSourceRef,
+              quantity_delta: restoreQuantity,
+              stock_location: restoreStockLocation,
+              stock_location_source: restoreStockLocationSource,
+              unit_cost: restoreUnitCost,
+              amount: restoreQuantity * restoreUnitCost,
+              related_order_item_id: row.order_item_id,
+              related_posting_number: row.posting_number,
+              note: "Order cancelled, inventory restored"
+            });
+          }
+          await rebuildInventoryCurrentForProductMysql(mysqlPoolConnectionAdapter, restoreProductId);
+        }
+      });
+    } catch (error) {
+      if (error.code !== "HISTORY_ORDER_LINK_REVIEW_REQUIRED") throw error;
+      cancellationReviewRequired.push({ order_item_id: Number(candidateRow.order_item_id), code: error.code, message: error.message });
     }
   }
 
@@ -18214,7 +18303,8 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     deducted,
     pending,
     outbound_records_synced: outboundRecordsSynced,
-    component_migrations: componentMigrations
+    component_migrations: componentMigrations,
+    cancellation_review_required: cancellationReviewRequired
   };
 }
 

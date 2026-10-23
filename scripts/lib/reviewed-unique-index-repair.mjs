@@ -42,6 +42,21 @@ function checkedPlan(plan, apply = false) {
     || plan.maintenance_confirmed !== true || plan.rollback_restores_nonunique_schema !== true
     || !/^[a-f0-9]{64}$/.test(plan.expected_reference_digest || ''))) refuse('Apply requires reviewed_by, reason, maintenance and NONUNIQUE rollback acknowledgements, and inspected reference digest');
   if (apply && names.has('online_products') && (plan.invalidate_barcode_cache !== true || plan.preserve_historical_json !== true)) refuse('Online repair requires explicit archived-cache invalidation and historical JSON preservation acknowledgements');
+  if (Object.hasOwn(plan, 'unchanged_outbound_references')) refuse('Only one exact unchanged outbound reference is supported, never an exception list');
+  if (Object.hasOwn(plan, 'unchanged_outbound_reference')) {
+    const exception = plan.unchanged_outbound_reference;
+    const fields = ['table', 'row_id', 'shop_id', 'online_product_id', 'order_item_id', 'expected_parent_order_id', 'expected_parent_shop_id', 'expected_tenant_id', 'expected_full_row_sha256', 'user_confirmation_reference', 'reason'];
+    if (!exception || Array.isArray(exception) || typeof exception !== 'object' || Object.keys(exception).length !== fields.length
+      || Object.keys(exception).some(name => !fields.includes(name)) || exception.table !== 'outbound_records') refuse('An unchanged exception must name exactly one complete outbound_records identity');
+    for (const field of ['row_id', 'shop_id', 'online_product_id', 'order_item_id', 'expected_parent_order_id', 'expected_parent_shop_id', 'expected_tenant_id']) {
+      if (!['string', 'number'].includes(typeof exception[field])) refuse('Unchanged outbound identifiers must be explicit integer IDs');
+      id(exception[field]);
+    }
+    if (!/^[a-f0-9]{64}$/.test(exception.expected_full_row_sha256 || '')
+      || !['user_confirmation_reference', 'reason'].every(field => typeof exception[field] === 'string' && exception[field].trim())) refuse('Unchanged outbound preservation requires an exact native hash, explicit user confirmation and reason');
+    const group = plan.tables.find(entry => entry.table === 'online_products')?.groups.find(value => value.keeper_id != null && id(value.keeper_id) === id(exception.online_product_id));
+    if (!group) refuse('Unchanged outbound online identity must already be a reviewed group keeper; it cannot be remapped');
+  }
   return plan;
 }
 async function metadata(db, table, optional = false) {
@@ -54,8 +69,9 @@ async function metadata(db, table, optional = false) {
   const primary = indexes.filter(row => row.INDEX_NAME === 'PRIMARY').map(row => row.COLUMN_NAME);
   if (primary.length !== 1 || !['id', 'online_product_id'].includes(primary[0])) refuse(`Unsupported primary key: ${table}`);
   const triggers = await sql(db, 'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE=?', [table]);
-  const foreign = await sql(db, `SELECT TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE CONSTRAINT_SCHEMA=DATABASE()
-    AND REFERENCED_TABLE_NAME IS NOT NULL AND (TABLE_NAME=? OR REFERENCED_TABLE_NAME=?)`, [table, table]);
+  const foreign = await sql(db, `SELECT TABLE_SCHEMA,TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE
+    WHERE REFERENCED_TABLE_NAME IS NOT NULL AND ((TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?)
+      OR (REFERENCED_TABLE_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME=?))`, [table, table]);
   if (triggers.length || foreign.length) refuse(`Triggers or foreign keys require separate reviewed handling: ${table}`);
   const create = await sql(db, `SHOW CREATE TABLE ${q(table)}`);
   return { table, columns: columns.map(row => row.COLUMN_NAME), primary: primary[0], indexes, create_sql: create[0]['Create Table'] };
@@ -84,20 +100,20 @@ function refPredicate(table, allIds) {
     ? `IF(JSON_VALID(payload_json),JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.online_product_id')),NULL) IN (${allIds.map(value => `'${value}'`).join(',')})`
     : `online_product_id IN (${values})`;
 }
-async function defaultTenant(db) {
-  const rows = await sql(db, "SELECT id FROM tenants WHERE slug='default'");
+async function defaultTenant(db, lock = false) {
+  const rows = await sql(db, `SELECT id FROM tenants WHERE slug='default'${lock ? ' FOR SHARE' : ''}`);
   if (rows.length !== 1) refuse('Exactly one default tenant is required to interpret legacy NULL ownership');
   return id(rows[0].id);
 }
 function tenantOf(value, defaultId) { return value == null || value === 'admin' ? defaultId : id(value); }
-async function shopTenant(db, shopId, defaultId) {
-  const rows = await sql(db, 'SELECT id,tenant_id FROM shops WHERE id=?', [id(shopId)]);
+async function shopTenant(db, shopId, defaultId, lock = false) {
+  const rows = await sql(db, `SELECT id,tenant_id FROM shops WHERE id=?${lock ? ' FOR SHARE' : ''}`, [id(shopId)]);
   if (rows.length !== 1) refuse('A duplicate/reference has no valid owning shop');
   return tenantOf(rows[0].tenant_id, defaultId);
 }
-async function productTenant(db, productId, tenantId, defaultId) {
+async function productTenant(db, productId, tenantId, defaultId, lock = false) {
   if (!productId || String(productId) === '0') return;
-  const rows = await sql(db, 'SELECT id,tenant_id FROM products WHERE id=?', [id(productId)]);
+  const rows = await sql(db, `SELECT id,tenant_id FROM products WHERE id=?${lock ? ' FOR SHARE' : ''}`, [id(productId)]);
   if (rows.length !== 1 || tenantOf(rows[0].tenant_id, defaultId) !== tenantId) refuse('A product binding crosses or lacks enterprise ownership');
 }
 async function ownership(db, table, rows, defaultId) {
@@ -128,8 +144,39 @@ function identityKeepers(rows) {
   return rows.filter(row => values.every(entry => entry.values.length === 0 || (entry.values.length === 1 && String(row[entry.column]) === entry.values[0])));
 }
 
+// This is a single reviewed preservation case, not permission to repair a
+// guessed parent. Its only relaxation is a same-enterprise parent-shop
+// mismatch. The entire outbound row, including its old parent, stays intact.
+export async function inspectUnchangedOutboundReference(db, input, { lock = false } = {}) {
+  const plan = checkedPlan(input), exception = plan.unchanged_outbound_reference;
+  if (!exception) return null;
+  const meta = await metadata(db, 'outbound_records');
+  if (meta.primary !== 'id') refuse('Unchanged outbound preservation requires the exact row primary key');
+  const rows = await sql(db, `SELECT *,${rowHash(meta)} AS repair_reference_hash FROM outbound_records FORCE INDEX(PRIMARY) WHERE id=?${lock ? ' FOR UPDATE' : ''}`, [id(exception.row_id)]);
+  const row = rows[0];
+  if (rows.length !== 1 || ['shop_id', 'online_product_id', 'order_item_id'].some(field => row[field] == null || id(row[field]) !== id(exception[field]))
+    || row.repair_reference_hash !== exception.expected_full_row_sha256) refuse('Unchanged outbound exact identity or native row hash changed');
+  const online = await sql(db, `SELECT * FROM online_products FORCE INDEX(PRIMARY) WHERE id=?${lock ? ' FOR SHARE' : ''}`, [id(exception.online_product_id)]);
+  if (online.length !== 1 || String(online[0].shop_id) !== id(exception.shop_id)) refuse('Unchanged outbound and keeper shop ownership disagree');
+  const defaultId = await defaultTenant(db, lock), tenant = await shopTenant(db, row.shop_id, defaultId, lock);
+  if (tenant !== id(exception.expected_tenant_id) || (meta.columns.includes('tenant_id') && tenantOf(row.tenant_id, defaultId) !== tenant)) refuse('Unchanged outbound preservation crosses enterprises');
+  if (Object.hasOwn(online[0], 'tenant_id') && tenantOf(online[0].tenant_id, defaultId) !== tenant) refuse('Unchanged outbound keeper enterprise ownership disagrees');
+  await productTenant(db, row.product_id, tenant, defaultId, lock);
+  await productTenant(db, online[0].product_id, tenant, defaultId, lock);
+  const parent = await sql(db, `SELECT oi.order_id,o.shop_id FROM order_items oi FORCE INDEX(PRIMARY) JOIN orders o FORCE INDEX(PRIMARY) ON o.id=oi.order_id WHERE oi.id=?${lock ? ' FOR SHARE' : ''}`, [id(exception.order_item_id)]);
+  if (parent.length !== 1 || String(parent[0].order_id) !== id(exception.expected_parent_order_id)
+    || String(parent[0].shop_id) !== id(exception.expected_parent_shop_id)) refuse('Unchanged outbound old parent is missing or changed');
+  if (await shopTenant(db, parent[0].shop_id, defaultId, lock) !== tenant) refuse('Unchanged outbound old parent crosses enterprises');
+  if (String(parent[0].shop_id) === String(row.shop_id)) refuse('Unchanged outbound exception is unnecessary; parent-shop ownership already agrees');
+  return { table: 'outbound_records', row_id: id(exception.row_id), shop_id: id(exception.shop_id), online_product_id: id(exception.online_product_id), order_item_id: id(exception.order_item_id),
+    parent_order_id: id(exception.expected_parent_order_id), parent_shop_id: id(exception.expected_parent_shop_id), tenant_id: tenant, full_row_sha256: row.repair_reference_hash, native_digest: await digest(db, meta, `id=${id(exception.row_id)}`),
+    relationship_reconciled: false, warning: 'Original historical parent relationship remains unreconciled; retain every field unchanged pending business review',
+    user_confirmation_reference: exception.user_confirmation_reference, reason: exception.reason };
+}
+
 export async function inspectReviewedUniqueRepair(db, input) {
   const plan = checkedPlan(input);
+  const unchangedOutbound = await inspectUnchangedOutboundReference(db, plan);
   const unknownHistoryCategoryRefs = await sql(db, `SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()
     AND COLUMN_NAME IN ('order_status_history_id','status_history_id','category_mapping_id','ozon_category_mapping_id')`);
   if (unknownHistoryCategoryRefs.length) refuse('An unaudited history/category local-ID reference exists');
@@ -182,7 +229,8 @@ export async function inspectReviewedUniqueRepair(db, input) {
         if (payload?.shop_id != null && String(payload.shop_id) !== String(online.shop_id)) refuse('Inventory request payload crosses shops');
         if (row.order_item_id) {
           const parent = await sql(db, 'SELECT o.shop_id FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.id=?', [id(row.order_item_id)]);
-          if (parent.length !== 1 || String(parent[0].shop_id) !== String(online.shop_id)) refuse('Outbound reference and order-item ownership disagree');
+          if (parent.length !== 1 || (String(parent[0].shop_id) !== String(online.shop_id)
+            && !(table === 'outbound_records' && unchangedOutbound?.row_id === String(row.id)))) refuse('Outbound reference and order-item ownership disagree');
         }
       }
       references.push({ table, row_ids: rows.map(row => String(row[meta.primary])), online_ids: rows.map(row => String(table === REQUESTS ? (typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json).online_product_id : row.online_product_id)).sort(), digest: await digest(db, meta, predicate) });
@@ -198,7 +246,8 @@ export async function inspectReviewedUniqueRepair(db, input) {
     }
   }
   return { version: 1, repair_id: plan.repair_id, changes_database: false, tables, references, conflicts,
-    expected_reference_digest: hash(JSON.stringify(references)), historical_json_policy: 'preserve original evidence; no generic JSON replacement' };
+    expected_reference_digest: hash(JSON.stringify(references)), historical_json_policy: 'preserve original evidence; no generic JSON replacement',
+    ...(unchangedOutbound ? { unchanged_outbound_reference: unchangedOutbound } : {}) };
 }
 
 function artifact(run, kind, table) { return `_uir_${run}_${kind}_${table}`; }
@@ -275,6 +324,7 @@ export async function applyReviewedUniqueRepair(db, input, database) {
       for (const entry of plan.tables) await sql(db, `SELECT id FROM ${q(entry.table)} FORCE INDEX(PRIMARY) WHERE id IN (${entry.groups.flatMap(group => group.row_ids.map(id)).join(',')}) FOR UPDATE`);
       const fresh = await inspectReviewedUniqueRepair(db, plan);
       if (fresh.expected_reference_digest !== report.expected_reference_digest || JSON.stringify(fresh.tables) !== JSON.stringify(report.tables)) refuse('Rows changed during repair preparation');
+      const preservedBefore = await inspectUnchangedOutboundReference(db, plan, { lock: true });
       for (const ref of state.references) {
         const meta = await metadata(db, ref.table);
         await sql(db, `SELECT ${q(meta.primary)} FROM ${q(ref.table)} FORCE INDEX(PRIMARY) WHERE ${ref.predicate} FOR UPDATE`);
@@ -288,6 +338,11 @@ export async function applyReviewedUniqueRepair(db, input, database) {
         }
         await sql(db, `INSERT INTO ${q(ref.after)} SELECT * FROM ${q(ref.table)} FORCE INDEX(PRIMARY) WHERE ${ref.predicate}`);
         ref.after_digest = await digest(db, meta, ref.predicate);
+      }
+      if (preservedBefore) {
+        const preservedAfter = await inspectUnchangedOutboundReference(db, plan, { lock: true });
+        if (!equalDigest(preservedBefore.native_digest, preservedAfter.native_digest)) refuse('Reviewed unchanged outbound bytes changed during reference repair');
+        state.unchanged_outbound_reference = { ...preservedAfter, before_digest: preservedBefore.native_digest, after_digest: preservedAfter.native_digest, byte_unchanged: true };
       }
       state.phase = 'references_applied'; await storeState(db, state); await db.commit();
     } catch (error) { await db.rollback(); throw error; }
@@ -305,8 +360,10 @@ export async function applyReviewedUniqueRepair(db, input, database) {
       if (!equalDigest(await digest(db, await metadata(db, target.table)), target.after)
         || !equalDigest(await digest(db, await metadata(db, target.archive)), target.before)) refuse('Post-swap verification failed; keep maintenance mode and recover from journal');
     }
+    if (state.unchanged_outbound_reference) await inspectUnchangedOutboundReference(db, plan);
     state.phase = 'applied'; await storeState(db, state);
-    return { repair_id: state.repair_id, phase: state.phase, rows_archived: state.targets.map(target => ({ table: target.table, archive: target.archive, original_rows: target.before.count, canonical_rows: target.after.count })), references_archived: state.references.map(ref => ({ table: ref.table, rows: ref.before_digest.count })), rollback_schema_exact: false };
+    return { repair_id: state.repair_id, phase: state.phase, rows_archived: state.targets.map(target => ({ table: target.table, archive: target.archive, original_rows: target.before.count, canonical_rows: target.after.count })), references_archived: state.references.map(ref => ({ table: ref.table, rows: ref.before_digest.count })), rollback_schema_exact: false,
+      ...(state.unchanged_outbound_reference ? { unchanged_outbound_reference: state.unchanged_outbound_reference } : {}) };
   });
 }
 
@@ -323,8 +380,10 @@ export async function rollbackReviewedUniqueRepair(db, repairId, database, maint
   if (!maintenanceConfirmed) refuse('Rollback requires confirmed maintenance; it restores original DATA with NONUNIQUE schema');
   return repairLock(db, database, async () => {
     const state = await inspectUniqueRepairJournal(db, repairId);
+    if (state.mode === 'combined-shadow') refuse('Combined shadow repair requires its matching coordinator rollback; keep maintenance active');
     checkedPlan(state.plan, true);
     if (state.database !== database || state.repair_id !== repairId || state.phase === 'rolled_back') refuse('Journal database/phase mismatch');
+    await inspectUnchangedOutboundReference(db, state.plan);
     const exists = async name => (await sql(db, 'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?', [name])).length === 1;
     const swapped = [];
     for (const target of state.targets) {

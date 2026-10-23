@@ -145,7 +145,7 @@ test('orders use current enterprise for SQL queries and mutations, including def
   const legacy=await finance.applyOzonFinanceToOrdersMysql({tenantId:'admin'});assert.equal(legacy.items,1);assert.equal((await query('SELECT COUNT(*) n FROM order_profit_calc_revisions WHERE tenant_key=\'admin\' AND order_item_id=10'))[0].n,2);
   assert.ok(snapshotTenants.every(id=>id==='2'||id==='admin'));remote.length=0;await assert.rejects(finance.syncOzonFinanceRawMysql({shop_id:30},{tenantId:'2'}),/不属于/);assert.equal(remote.length,0);
  });
- await t.test('outbound sync, cancellation restores and stock rebuild ignore foreign movements and same posting numbers',async()=>{
+ await t.test('outbound reads stay scoped and cancellation fails closed on a foreign historical item anchor',async()=>{
   const {service:outbound}=loadTenantOrderService(connection,{extraMethods:['syncOutboundForOpenOrdersMysql','orderOutboundSyncScopeMysql','upsertOrderOutboundRecordMysql','revokeShippedCancellationReturnsMysql','recordOrderExceptionMysql','postInventoryMysql','postProductInventoryWithComponentsMysql','desiredProductInventoryMovementRowsMysql','productComponentRowsMysql','applyInventoryCurrentMysql','inventoryDeltasMysql','movementTypeFromSourceMysql','rebuildInventoryCurrentForProductMysql','mysqlConnectionQuery','mysqlConnectionQueryOne','normalizeStockLocationMysql'],
    ensureStockLocationSchemaMysql:async()=>{},inventoryMovementTenantColumnExistsMysql:async()=>true,compactProductImageUrlForListMysql:()=>'',resolveOrderStockLocationMysql:()=>({stockLocation:'LOCAL',stockLocationSource:'fixture'}),isOrderInTransportMysql:row=>/delivering|delivered/.test(row.status||''),invalidateOrderProcurementCoverage(){}
   });
@@ -157,9 +157,16 @@ test('orders use current enterprise for SQL queries and mutations, including def
   await outbound.syncOutboundForOpenOrdersMysql({tenantId:'2'});assert.equal((await query("SELECT COUNT(*) n FROM inventory_movements WHERE tenant_id=2 AND source_type='order_outbound'"))[0].n,1);
   assert.equal(Number((await query('SELECT available_stock FROM inventory_current WHERE real_product_id=20'))[0].available_stock),-1);
   await query("UPDATE orders SET status='cancelled',tracking_stage='cancelled' WHERE id=20");
+  const blocked=await outbound.syncOutboundForOpenOrdersMysql({tenantId:'2'});
+  assert.deepEqual(Array.from(blocked.cancellation_review_required,row=>row.order_item_id),[20]);
+  assert.equal((await query("SELECT COUNT(*) n FROM inventory_movements WHERE tenant_id=2 AND source_ref='cancel_20_20'"))[0].n,0);
+  assert.equal(Number((await query('SELECT available_stock FROM inventory_current WHERE real_product_id=20'))[0].available_stock),-1);
+  assert.deepEqual(await query('SELECT * FROM inventory_movements WHERE tenant_id=3 ORDER BY id'),foreign);
+  await query("UPDATE inventory_movements SET related_order_item_id=30 WHERE tenant_id=3 AND source_type='order_outbound'");
+  const reviewedForeign=await query('SELECT * FROM inventory_movements WHERE tenant_id=3 ORDER BY id');
   await outbound.syncOutboundForOpenOrdersMysql({tenantId:'2'});
   assert.equal(Number((await query("SELECT quantity_delta FROM inventory_movements WHERE tenant_id=2 AND source_ref='cancel_20_20'"))[0].quantity_delta),1);
-  assert.deepEqual(await query('SELECT * FROM inventory_movements WHERE tenant_id=3 ORDER BY id'),foreign);
+  assert.deepEqual(await query('SELECT * FROM inventory_movements WHERE tenant_id=3 ORDER BY id'),reviewedForeign);
   assert.equal(Number((await query('SELECT available_stock FROM inventory_current WHERE real_product_id=20'))[0].available_stock),0);
   await outbound.syncOutboundForOpenOrdersMysql({tenantId:'admin'});
   assert.deepEqual((await query('SELECT order_item_id FROM outbound_records ORDER BY order_item_id')).map(row=>row.order_item_id),[10,11,20]);

@@ -18,13 +18,14 @@ function database() {
     CREATE TABLE ogl_dispatch_batches(id INTEGER,tenant_id INTEGER);
     CREATE TABLE ogl_dispatch_members(id INTEGER,tenant_id INTEGER,batch_id INTEGER,order_id INTEGER,active_order_id INTEGER,shop_id INTEGER,dispatched_at TEXT,withdrawn_at TEXT);
     CREATE TABLE products(id INTEGER,tenant_id INTEGER); INSERT INTO products VALUES(94,1);
-    CREATE TABLE orders (id INTEGER, status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT,shop_id INTEGER DEFAULT 1);
-    CREATE TABLE order_items (id INTEGER, order_id INTEGER);
+    CREATE TABLE orders (id INTEGER, status TEXT, tracking_stage TEXT, logistics_status TEXT, cancelled_after_ship INTEGER, delivered_at TEXT,shop_id INTEGER DEFAULT 1,posting_number TEXT DEFAULT 'posting');
+    CREATE TABLE order_items (id INTEGER, order_id INTEGER, quantity INTEGER, sku_mapping_id INTEGER, ozon_sku TEXT);
+    CREATE TABLE outbound_records (id INTEGER, product_id INTEGER, shop_id INTEGER,order_ref TEXT,order_item_id INTEGER);
     CREATE TABLE order_status_history (order_id INTEGER, status TEXT);
     INSERT INTO orders(id,status,tracking_stage,logistics_status,cancelled_after_ship,delivered_at) VALUES (1, 'cancelled', 'posting_canceled', '', 0, NULL);
-    INSERT INTO order_items VALUES (10, 1);
+    INSERT INTO order_items(id,order_id) VALUES (10, 1);
     CREATE TABLE inventory_movements (id INTEGER PRIMARY KEY, product_id INTEGER, related_order_item_id INTEGER,
-      source_type TEXT, source_ref TEXT, status TEXT, quantity_delta INTEGER, note TEXT,tenant_id INTEGER DEFAULT 1);
+      source_type TEXT, source_ref TEXT, status TEXT, quantity_delta INTEGER, note TEXT,tenant_id INTEGER DEFAULT 1,shop_id INTEGER DEFAULT 1,related_posting_number TEXT);
     INSERT INTO inventory_movements(id,product_id,related_order_item_id,source_type,source_ref,status,quantity_delta,note) VALUES (1, 94, 10, 'order_outbound', 'posting', 'posted', -1, 'original outbound'),
       (2, 94, 10, 'return_in', 'cancel_10_94', 'posted', 1, 'Order cancelled, inventory restored'),
       (3, 94, 10, 'return_in', 'manual_receipt_10', 'posted', 1, 'physical return');`);
@@ -54,11 +55,12 @@ test('transport history wins over current cancellation; registration alone never
 
 test('reversal preserves original outbound/manual receipt, is repeat-safe, and rolls back with cache rebuild', async () => {
   const db = database();
-  const query = async (sql, params = []) => [db.prepare(sql.replace(' FOR UPDATE', '')).all(...params)];
+  const query = async (sql, params = []) => [db.prepare(sql.replace(' FOR UPDATE', '').replace(/LEFT\(source_ref, (\?|7)\)/g,'SUBSTR(source_ref, 1, $1)')).all(...params)];
   const connection = { query, execute: async (sql, params) => [db.prepare(sql).run(...params)] };
   let failRebuild = false, rebuilt = 0;
   const block = source.match(/export async function revokeShippedCancellationReturnsMysql\([^]*?\n}/)[0].replace('export ', '');
-  const revoke = vm.runInNewContext(`${block};revokeShippedCancellationReturnsMysql`, {
+  const guard = source.match(/^async function assertCancellationInventoryAnchorsMysql\([^]*?^}/m)[0];
+  const revoke = vm.runInNewContext(`${guard}\n${block};revokeShippedCancellationReturnsMysql`, {
     ...scopeContext,
     orderTransportEvidenceSql, automaticCancellationReturnSql,
     withMysqlTransaction: async fn => {
@@ -96,6 +98,8 @@ test('the cancellation sync exits before any stock restoration for shipped order
   const sync = vm.runInNewContext(`${block};syncOutboundForOpenOrdersMysql`, {
     ...scopeContext,
     orderOutboundSyncScopeMysql: () => ({ sql: '', params: [] }), orderTransportEvidenceSql,
+    withMysqlTransaction: async fn => fn({query:async sql=>sql.includes('FROM order_items oi')?[[{}]]:[(outboundQueries++,assert.match(sql,/status = 'posted' AND quantity_delta < 0/),[])]}),
+    assertCancellationInventoryAnchorsMysql: async () => ({ entered_transport:shipped,order_item_id:10,order_status:'cancelled' }),
     mysqlQuery: async sql => {
       if (sql.includes('FROM order_items oi')) return [{ entered_transport: shipped, order_item_id: 10 }];
       outboundQueries++;
@@ -118,9 +122,17 @@ test('pre-shipping cancellation restores only the deducted units and repeat sync
   const block = source.slice(start, source.indexOf('\n  const rows = await mysqlQuery', start)) + '\n}';
   let existingReturn = null;
   const posted = [];
+  const connection = {
+    query:async sql => [sql.includes('FROM order_items oi') ? [{product_id:94,purchase_cost:55}]
+      : sql.includes("source_type = 'return_in'") ? (existingReturn?[existingReturn]:[])
+      : [{ product_id:94,quantity_delta:-2,stock_location:'LOCAL',unit_cost:55 }]],
+    execute:async()=>[{}]
+  };
   const sync = vm.runInNewContext(`${block};syncOutboundForOpenOrdersMysql`, {
     ...scopeContext,
     orderOutboundSyncScopeMysql: () => ({ sql: '', params: [] }), orderTransportEvidenceSql,
+    withMysqlTransaction:async fn=>fn(connection),
+    assertCancellationInventoryAnchorsMysql:async()=>({entered_transport:0,order_item_id:10,product_id:94,quantity:99,order_status:'cancelled',posting_number:'posting',shop_id:1}),
     mysqlQuery: async sql => sql.includes('FROM order_items oi')
       ? [{ entered_transport: 0, order_item_id: 10, product_id: 94, quantity: 99 }]
       : [{ product_id: 94, quantity_delta: -2, stock_location: 'LOCAL', unit_cost: 55 }],
