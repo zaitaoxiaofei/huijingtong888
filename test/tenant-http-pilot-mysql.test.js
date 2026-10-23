@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { hashPassword } from '../src/auth-password.js';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
+import { AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA, AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA } from '../src/services/ai-material-optimization-schema.js';
 
 test('complete HTTP service keeps enterprise isolation through login, switching and restart', {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && 'Requires isolated socket-only MySQL and dedicated port 8788', timeout: 240000
@@ -74,6 +75,11 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       if (id !== 5) await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(?,?,'member',JSON_ARRAY(?))", [id === 4 ? 1 : id, id, id === 4 ? 'packing' : 'admin']);
     }
     await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(3,2,'member',JSON_ARRAY('admin'))");
+    // Explicitly deny paid requests even for the historical default enterprise.
+    // The HTTP checks below exercise validation/ownership, never a provider.
+    await fixture.query("INSERT INTO tenant_ai_limits(tenant_id,monthly_request_limit) VALUES(1,0),(2,0),(3,0)");
+    await fixture.query(AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA);
+    await fixture.query(AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA);
     for (const [person, tenant] of [[6, 1], [7, 2], [8, 3]]) {
       await fixture.query('INSERT INTO people(id,name,username,password_hash,role) VALUES(?,?,?,?,?)', [person, `Pilot ${person}`, `pilot${person}`, hashPassword(password), 'operations']);
       await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(?,?,'member',JSON_ARRAY('operations'))", [tenant, person]);
@@ -265,6 +271,244 @@ test('complete HTTP service keeps enterprise isolation through login, switching 
       assert.equal(shops.status, 200);
       assert.deepEqual(shops.data.map(row => Number(row.id)), [20]);
       assert.ok(shops.data.every(row => !('api_key_hint' in row) && !('ozon_client_id' in row)));
+    });
+    await t.test('AI optimization exact routes validate ordinary default/A/B requests without paid work or cross-enterprise results', async () => {
+      const postCases = [
+        ['analysis/lookup', 200], ['analyze', 400], ['analysis/confirm', 400], ['plan', 400],
+        ['plan/confirm', 400], ['result', 400], ['review-image', 400], ['compose-text', 400],
+        ['test-image', 400], ['prepare-template', 400]
+      ];
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const key = tenant === 1 ? 'admin' : String(tenant), draft = 9000 + tenant;
+        await fixture.query(`INSERT INTO listing_drafts
+          (id,tenant_id,product_name,source_urls_json,source_images_json,manual_facts_json,ai_payload_json,created_by_person_id)
+          VALUES(?,?,?,'[]','[]','{}','{}',?)`, [draft,key,`Private optimizer draft ${tenant}`,person]);
+        await fixture.query(`INSERT INTO ai_image_optimizer_jobs
+          (tenant_id,job_no,status,analysis_json,created_by_person_id) VALUES(?,?,'analysis_confirmed',?,?)`,
+        [key,`HTTP-OPT-${tenant}`,JSON.stringify({ marker: `Private optimizer ${tenant}` }),person]);
+      }
+      const countBefore = Number((await fixture.query('SELECT COUNT(*) n FROM ai_image_optimizer_jobs'))[0].n);
+      const draftCountBefore = Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n);
+      const templateCountBefore = Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n);
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const operator = await login(person), foreign = tenant === 2 ? 3 : 2;
+        assert.notEqual(operator.user.platform_role, 'super_admin');
+        const fissionLookup = await request('/api/ai-variant-lab/analysis/lookup', operator.token, 'POST', {});
+        assert.equal(fissionLookup.status, 200, JSON.stringify(fissionLookup.data));
+        for (const [action, status] of postCases) {
+          const endpoint = `/api/ai-variant-lab/optimize/${action}`;
+          const result = await request(endpoint, operator.token, 'POST', { tenant_id: 'forged', created_by_person_id: 1 });
+          assert.equal(result.status, status, `${person} ${action}: ${JSON.stringify(result.data)}`);
+          assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+          const refused = await request(endpoint, operator.token, 'POST', {
+            sourceDraftId: 9000 + foreign, optimizerJobNo: `HTTP-OPT-${foreign}`, tenant_id: foreign,
+            finalImageSlots: [{ url: 'https://must-not-fetch.invalid/private.jpg' }]
+          });
+          assert.equal(refused.status, 404, `${person} foreign ${action}: ${JSON.stringify(refused.data)}`);
+          assert.ok(!JSON.stringify(refused.data).includes(`Private optimizer ${foreign}`));
+          const packer = await request(endpoint, sessions.get(4).token, 'POST', {});
+          assert.equal(packer.status, 403);
+          assert.notEqual(packer.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+        const own = await request(`/api/ai-variant-lab/optimize/jobs/HTTP-OPT-${tenant}`, operator.token);
+        assert.equal(own.status, 200, JSON.stringify(own.data));
+        assert.ok(JSON.stringify(own.data).includes(`Private optimizer ${tenant}`));
+        const other = await request(`/api/ai-variant-lab/optimize/jobs/HTTP-OPT-${foreign}`, operator.token);
+        assert.equal(other.status, 404);
+        for (const field of ['sourceDraftId','source_draft_id']) {
+          const rejectedSave = await request('/api/listing/drafts/ai-variant-lightweight', operator.token, 'POST', {
+            [field]: 9000 + foreign, clone_source_draft: false, tenant_id: foreign, created_by_person_id: 1,
+            templatePayload: { title: 'Must not persist foreign save', source_type: 'ai_product_material_optimizer',
+              editable_payload: { title: 'Must not persist foreign save', variants: [{ images: [] }] } }
+          });
+          assert.equal(rejectedSave.status, 404, `${person} ${field}: ${JSON.stringify(rejectedSave.data)}`);
+          assert.notEqual(rejectedSave.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+        for (const [url, method] of [
+          ['/api/ai-variant-lab/optimize/plan/extra', 'POST'],
+          ['/api/ai-variant-lab/optimize/analysis/confirm', 'PUT'],
+          ['/api/ai-variant-lab/optimize/jobs/HTTP-OPT-1', 'POST']
+        ]) {
+          const blocked = await request(url, operator.token, method, {});
+          assert.equal(blocked.status, 403, `${method} ${url}: ${JSON.stringify(blocked.data)}`);
+          assert.equal(blocked.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+      }
+      const deniedSave = await request('/api/listing/drafts/ai-variant-lightweight', sessions.get(4).token, 'POST', {});
+      assert.equal(deniedSave.status, 403); assert.notEqual(deniedSave.data.code, 'TENANT_ISOLATION_PENDING');
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM ai_image_optimizer_jobs'))[0].n), countBefore);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n), draftCountBefore);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n), templateCountBefore);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
+    });
+    await t.test('AI optimization final save creates default/A/B drafts and templates under the authenticated enterprise', async () => {
+      const beforeDrafts = Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n);
+      const beforeTemplates = Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n);
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const operator = await login(person), key = tenant === 1 ? 'admin' : String(tenant);
+        // Empty image slots are a legitimate incomplete draft. They exercise
+        // the deployed save/SQL implementation without any remote media I/O.
+        const saved = await request('/api/listing/drafts/ai-variant-lightweight', operator.token, 'POST', {
+          source_draft_id: 9000 + tenant, source_product_id: tenant * 10, clone_source_draft: true,
+          offer_id: `HTTP-OPT-SAVED-${tenant}`, product_name: `Saved HTTP optimizer ${tenant}`,
+          tenant_id: tenant === 2 ? 3 : 2, created_by_person_id: 1,
+          source_images: [], patch: { images: [] }, ai_optimization: { source: 'ai_product_material_optimizer' },
+          template_payload: { title: `Saved HTTP optimizer ${tenant}`, editable_payload: {
+            title: `Saved HTTP optimizer ${tenant}`, images: [], variants: [{ images: [] }]
+          } }
+        });
+        assert.equal(saved.status, 200, `${person}: ${JSON.stringify(saved.data)}`);
+        const own = (await fixture.query('SELECT tenant_id,created_by_person_id,parent_draft_id,source_product_id,template_id FROM listing_drafts WHERE id=?', [saved.data.id]))[0];
+        assert.equal(own.tenant_id, key); assert.equal(Number(own.created_by_person_id), person);
+        assert.equal(Number(own.parent_draft_id), 9000 + tenant); assert.equal(Number(own.source_product_id), tenant * 10);
+        const template = (await fixture.query('SELECT tenant_id,created_by_person_id FROM listing_category_templates WHERE id=?', [own.template_id]))[0];
+        assert.equal(template.tenant_id, key); assert.equal(Number(template.created_by_person_id), person);
+      }
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n), beforeDrafts + 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n), beforeTemplates + 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_records'))[0].n), 0);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
+    });
+    await t.test('material batch list/detail/retry remain enterprise scoped and cannot enqueue validation requests', async () => {
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const key = tenant === 1 ? 'admin' : String(tenant);
+        await fixture.query(`INSERT INTO ai_material_optimization_batches
+          (tenant_id,batch_no,status,total_count,success_count,created_by_person_id) VALUES(?,?,'success',1,1,?)`,
+        [key,`HTTP-MAT-${tenant}`,person]);
+        await fixture.query(`INSERT INTO ai_material_optimization_items
+          (tenant_id,item_no,batch_no,source_draft_id,status,source_title,created_by_person_id)
+          VALUES(?,?,?,?,'success',?,?)`, [key,`HTTP-MAT-ITEM-${tenant}`,`HTTP-MAT-${tenant}`,9000 + tenant,`Private material ${tenant}`,person]);
+      }
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const operator = await login(person), foreign = tenant === 2 ? 3 : 2;
+        const list = await request('/api/ai-material-optimization/batches?tenant_id=forged', operator.token);
+        assert.equal(list.status, 200, JSON.stringify(list.data));
+        assert.deepEqual(list.data.map(batch => batch.batch_no), [`HTTP-MAT-${tenant}`]);
+        const detail = await request(`/api/ai-material-optimization/batches/HTTP-MAT-${tenant}`, operator.token);
+        assert.equal(detail.status, 200, JSON.stringify(detail.data));
+        assert.ok(JSON.stringify(detail.data).includes(`Private material ${tenant}`));
+        const other = await request(`/api/ai-material-optimization/batches/HTTP-MAT-${foreign}`, operator.token);
+        assert.equal(other.status, 404);
+        assert.ok(!JSON.stringify(other.data).includes(`Private material ${foreign}`));
+        for (const [item, status] of [[tenant,409],[foreign,404]]) {
+          const retry = await request(`/api/ai-material-optimization/items/HTTP-MAT-ITEM-${item}/retry`, operator.token, 'POST', { tenant_id: foreign });
+          assert.equal(retry.status, status, JSON.stringify(retry.data));
+        }
+        const empty = await request('/api/ai-material-optimization/batches', operator.token, 'POST', {});
+        assert.equal(empty.status, 400);
+        const deniedDraft = 9000 + foreign;
+        const foreignCreate = await request('/api/ai-material-optimization/batches', operator.token, 'POST', {
+          draftIds: [deniedDraft], items: [{ draftId: deniedDraft, operatorFacts: { product_title_zh: '汽车配件',
+            selling_points_zh: ['保护外壳','安装方便'], confirmed_by_operator: true } }]
+        });
+        assert.equal(foreignCreate.status, 404, JSON.stringify(foreignCreate.data));
+        for (const [url, method] of [[`/api/ai-material-optimization/batches/HTTP-MAT-${tenant}`, 'POST'],
+          [`/api/ai-material-optimization/items/HTTP-MAT-ITEM-${tenant}/retry`, 'PUT']]) {
+          const blocked = await request(url, operator.token, method, {});
+          assert.equal(blocked.status, 403); assert.equal(blocked.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+      }
+      for (const [url, method, body] of [
+        ['/api/ai-material-optimization/batches', 'GET'], ['/api/ai-material-optimization/batches', 'POST', {}],
+        ['/api/ai-material-optimization/batches/HTTP-MAT-1', 'GET'], ['/api/ai-material-optimization/items/HTTP-MAT-ITEM-1/retry', 'POST', {}]
+      ]) {
+        assert.equal((await request(url, sessions.get(4).token, method, body)).status, 403);
+      }
+      assert.equal(Number((await fixture.query("SELECT COUNT(*) n FROM ai_material_optimization_items WHERE status <> 'success'"))[0].n), 0);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM ai_material_optimization_batches'))[0].n), 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
+    });
+    await t.test('matrix ordinary operations reject foreign source/shop/variant before saving jobs or publishing', async () => {
+      // Read initializes the actual matrix schema; only fixture seeding writes
+      // variants, while all HTTP generation/publication attempts are rejected.
+      const seeded = await login(6);
+      assert.equal((await request('/api/asset-variant-engine/jobs', seeded.token)).status, 200);
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        await fixture.query('INSERT INTO asset_variants(id,batch_id,shop_id,created_by_person_id) VALUES(?,?,?,?)',
+          [9100 + tenant,`HTTP-MATRIX-${tenant}`,tenant * 10,person]);
+      }
+      const jobsBefore = Number((await fixture.query('SELECT COUNT(*) n FROM asset_variant_jobs'))[0].n);
+      const recordsBefore = Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_records'))[0].n);
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const operator = await login(person), foreign = tenant === 2 ? 3 : 2;
+        const product = await request(`/api/asset-variant-engine/selection-publish-shops?productId=${foreign * 10}`, operator.token);
+        assert.equal(product.status, 404, JSON.stringify(product.data));
+        const material = { title: 'Protected fixture', mainImage: 'https://must-not-fetch.invalid/main.jpg', sourceProductId: foreign * 10 };
+        for (const action of ['generate','generate-async']) {
+          const result = await request(`/api/asset-variant-engine/${action}`, operator.token, 'POST', { material, shopIds: [tenant * 10] });
+          assert.equal(result.status, 404, `${action}: ${JSON.stringify(result.data)}`);
+        }
+        for (const action of ['generate','generate-async','publish-selection']) {
+          const result = await request(`/api/asset-variant-engine/${action}`, operator.token, 'POST', {
+            productId: tenant * 10, material: { ...material, sourceProductId: tenant * 10 }, shopIds: [foreign * 10]
+          });
+          assert.equal(result.status, 403, `${action}: ${JSON.stringify(result.data)}`);
+          assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+        for (const action of ['title-preview','generate-video','register-richtext-image']) {
+          const result = await request(`/api/asset-variant-engine/${action}`, operator.token, 'POST', {
+            material: { ...material, sourceProductId: tenant * 10 }, shopId: foreign * 10,
+            imageUrl: 'https://must-not-fetch.invalid/source.jpg', source: 'https://must-not-fetch.invalid/source.jpg'
+          });
+          assert.equal(result.status, 403, `${action}: ${JSON.stringify(result.data)}`);
+          assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+        for (const action of ['import-listing-automation','publish-to-ozon']) {
+          const result = await request(`/api/asset-variant-engine/${action}`, operator.token, 'POST', { variantIds: [9100 + foreign] });
+          assert.equal(result.status, 404, JSON.stringify(result.data));
+        }
+        const nestedFile = await request('/api/asset-variant-engine/files/not-a-batch/shop/images/main.jpg', operator.token);
+        assert.equal(nestedFile.status, 404);
+        for (const [url, method] of [['/api/asset-variant-engine/generate/extra','POST'],['/api/asset-variant-engine/generate','PUT']]) {
+          const blocked = await request(url, operator.token, method, {});
+          assert.equal(blocked.status, 403); assert.equal(blocked.data.code, 'TENANT_ISOLATION_PENDING');
+        }
+      }
+      for (const action of ['generate','generate-async','publish-selection','title-preview','generate-video','register-richtext-image','import-listing-automation','publish-to-ozon']) {
+        const result = await request(`/api/asset-variant-engine/${action}`, sessions.get(4).token, 'POST', {});
+        assert.equal(result.status, 403); assert.notEqual(result.data.code, 'TENANT_ISOLATION_PENDING');
+      }
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM asset_variant_jobs'))[0].n), jobsBefore);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_records'))[0].n), recordsBefore);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
+    });
+    await t.test('matrix ordinary default/A/B import persists owned drafts and reuses them without provider calls', async () => {
+      const beforeDrafts = Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n);
+      const beforeTemplates = Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n);
+      const beforeCopies = Number((await fixture.query('SELECT COUNT(*) n FROM listing_shop_copies'))[0].n);
+      for (const [person, tenant] of [[6,1],[7,2],[8,3]]) {
+        const key = tenant === 1 ? 'admin' : String(tenant), variantId = 9100 + tenant;
+        // A completed copy description and an intentionally empty image set
+        // save an incomplete draft without remote media, video or paid AI work.
+        await fixture.query(`UPDATE asset_variants SET source_product_id=?, source_title=?, variant_title=?,
+          description_text=?, tags_json='[]', images_json='[]', output_dir='' WHERE id=?`,
+        [tenant * 10, `Защитный чехол ${tenant}`, `Защитный чехол ${tenant}`,
+          'Защитный чехол для автомобильного ключа из прочного материала для ежедневного использования', variantId]);
+        const operator = await login(person);
+        const input = { variantIds: [variantId], tenant_id: tenant === 2 ? 3 : 2, created_by_person_id: 1 };
+        const imported = await request('/api/asset-variant-engine/import-listing-automation', operator.token, 'POST', input);
+        assert.equal(imported.status, 200, `${person}: ${JSON.stringify(imported.data)}`);
+        assert.equal(imported.data.imported, 1);
+        const saved = imported.data.drafts[0];
+        assert.equal(Number(saved.variantId), variantId); assert.equal(Number(saved.shopId), tenant * 10);
+        const draft = (await fixture.query('SELECT tenant_id,created_by_person_id,template_id,manual_facts_json FROM listing_drafts WHERE id=?', [saved.draftId]))[0];
+        assert.equal(draft.tenant_id, key); assert.equal(Number(draft.created_by_person_id), person);
+        assert.equal(Number(JSON.parse(draft.manual_facts_json).asset_variant_id), variantId);
+        const template = (await fixture.query('SELECT tenant_id,created_by_person_id FROM listing_category_templates WHERE id=?', [draft.template_id]))[0];
+        assert.equal(template.tenant_id, key); assert.equal(Number(template.created_by_person_id), person);
+        const copy = (await fixture.query('SELECT tenant_id,created_by_person_id,shop_id,source_product_id FROM listing_shop_copies WHERE draft_id=?', [saved.draftId]))[0];
+        assert.equal(copy.tenant_id, key); assert.equal(Number(copy.created_by_person_id), person);
+        assert.equal(Number(copy.shop_id), tenant * 10); assert.equal(Number(copy.source_product_id), tenant * 10);
+        const repeated = await request('/api/asset-variant-engine/import-listing-automation', operator.token, 'POST', input);
+        assert.equal(repeated.status, 200, JSON.stringify(repeated.data));
+        assert.equal(Number(repeated.data.drafts[0].draftId), Number(saved.draftId));
+        assert.equal(repeated.data.drafts[0].reused, true);
+      }
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_drafts'))[0].n), beforeDrafts + 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n), beforeTemplates + 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_shop_copies'))[0].n), beforeCopies + 3);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM listing_publish_records'))[0].n), 0);
+      assert.equal(Number((await fixture.query('SELECT COUNT(*) n FROM tenant_ai_usage'))[0].n), 0);
     });
     await t.test('image proxy refuses private network and metadata URLs before fetching or using cache', async () => {
       for (const target of [`${base}/uploads/team-attachments/private.png`, 'http://169.254.169.254/private.png', 'http://[::1]/private.png']) {

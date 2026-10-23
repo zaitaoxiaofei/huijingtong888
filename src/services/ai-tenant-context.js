@@ -26,14 +26,34 @@ export async function withAiTenantSession(session, operation, { permission = "op
   if (!["operations", "analytics"].includes(permission)) throw new Error("Invalid AI business permission");
   const authorized = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(authorized, permission);
-  return context.run({ session: authorized, permission }, operation);
+  const previous = context.getStore();
+  const sameIdentity = previous?.session && businessTaskTenantKey(previous.session) === businessTaskTenantKey(authorized)
+    && Number(previous.session.personId) === Number(authorized.personId) && previous.permission === permission;
+  return context.run({ session: authorized, permission, beforeRequest: sameIdentity ? previous.beforeRequest : undefined }, operation);
 }
 
-export async function assertCurrentAiTenantPermission() {
+// Resource ownership/cancellation belongs to the workflow, while provider
+// retries and polls live below it. Carry a server-created guard to that boundary.
+export async function withAiTenantRequestGuard(guard, operation) {
+  const current = context.getStore();
+  if (!current?.session || typeof guard !== "function") throw new Error("AI resource guard requires a current enterprise task");
+  return context.run({ ...current, beforeRequest: async options => {
+    await current.beforeRequest?.(options);
+    await guard(options || {});
+  } }, operation);
+}
+
+export async function assertCurrentAiTenantPermission({ connection = null, lock = false } = {}) {
   const session = currentAiTenantSession();
   if (!session) return null; // Platform diagnostics are authorized separately.
-  const authorized = await authorizeBusinessTaskSession(session);
+  const options = connection ? { connection, lock } : {};
+  // Resource locks can themselves wait. Take them before the final current
+  // authorization read, whose shared locks remain held through the write.
+  if (connection && lock) await context.getStore().beforeRequest?.(options);
+  const query = connection ? async (sql, params) => (await connection.execute(lock ? `${sql.trim()} FOR SHARE` : sql, params))[0] : undefined;
+  const authorized = await authorizeBusinessTaskSession(session, query);
   assertBusinessTaskPermission(authorized, context.getStore().permission || "operations");
+  if (!connection || !lock) await context.getStore().beforeRequest?.(options);
   return authorized;
 }
 
@@ -51,6 +71,9 @@ export async function reserveTenantAiRequest(kind = "text", count = 1) {
   const period = shanghaiDateKey(new Date()).slice(0, 7);
   return withMysqlTransaction(async connection => {
     await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [tenantId]);
+    // The quota mutex can wait behind another request. Resolve current access
+    // after acquiring it, through this transaction rather than another pool slot.
+    await assertCurrentAiTenantPermission({connection,lock:true});
     const [limits] = await connection.execute("SELECT monthly_request_limit FROM tenant_ai_limits WHERE tenant_id = ?", [tenantId]);
     const [usage] = await connection.execute("SELECT request_count FROM tenant_ai_usage WHERE tenant_id = ? AND period_key = ?", [tenantId, period]);
     const limit = limits.length ? limits[0].monthly_request_limit : session.tenant.slug === "default" ? null : 0;

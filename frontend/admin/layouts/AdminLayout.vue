@@ -981,7 +981,7 @@ onBeforeUnmount(() => {
               <RouterView v-slot="{ Component, route: currentRoute }">
                 <!-- Closing a tab can change activeKey before its route navigation finishes. -->
                 <KeepAlive :max="6">
-                  <component :is="Component" :key="`${tabsStore.tabKeyForRoute(currentRoute)}:${tabsStore.refreshToken}`" />
+                  <component :is="Component" :key="`${tabsStore.tabKeyForRoute(currentRoute)}:${tabsStore.refreshToken}${['asset-variant-center', 'ai-product-material-optimizer', 'ai-material-optimization-records'].includes(currentRoute.name) ? `:${quickToolScope}` : ''}`" />
                 </KeepAlive>
               </RouterView>
             </div>

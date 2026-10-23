@@ -1,6 +1,7 @@
 import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
+import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -50,10 +51,8 @@ export function authorizeApiRequest(req, parts = []) {
     const configRead = method === "GET" && ((parts.length === 3 && ["bootstrap", "tail-templates"].includes(parts[2]))
       || (parts.length === 4 && parts[2] === "tail-template-files" && /^\d+$/.test(String(parts[3] || ""))));
     if (configRead) return isEnterpriseAdmin(session) ? { allowed: true } : require("operations");
-    const verifiedJob = (method === 'GET' && ((parts[2] === 'jobs' && [3, 4].includes(parts.length)) || (parts[2] === 'files' && parts.length === 5)))
-      || (method === 'POST' && ((parts[2] === 'jobs' && parts.length === 5 && ['cancel', 'retry-failures'].includes(parts[4])) || (parts[2] === 'delete-media-group' && parts.length === 3)));
-    if (verifiedJob) return require('operations');
-    return session.tenant?.slug === "default" ? require("operations") : deny("当前企业仅开放负责人或管理员的矩阵配置；生成及发布功能尚未开放");
+    if (session.tenant?.id && session.tenant?.slug && isTenantPilotRoute(path, method)) return require('operations');
+    return deny("该矩阵操作尚未完成企业隔离验收或请求路径无效");
   }
 
   if (method === "GET" && [

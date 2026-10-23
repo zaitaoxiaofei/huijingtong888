@@ -6,6 +6,7 @@ param(
   [string]$IdentityFile = $env:OZON_ECS_IDENTITY_FILE,
   [string]$Version = (Get-Date -Format "yyyy.MM.dd-HHmmss"),
   [string]$ReviewedIdentityManifest,
+  [string]$ReviewedAiMaterialManifest,
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
@@ -31,11 +32,20 @@ $remoteScript = "/tmp/ozon-erp-remote-release.sh"
 $remoteTarget = "$SshUser@$EcsHost"
 $remoteIdentityManifest = ""
 $resolvedReviewedManifest = ""
+$remoteAiMaterialManifest = ""
+$resolvedAiMaterialManifest = ""
 if ($ReviewedIdentityManifest) {
   $resolvedReviewedManifest = (Resolve-Path -LiteralPath $ReviewedIdentityManifest).Path
   if (-not (Test-Path -LiteralPath $resolvedReviewedManifest -PathType Leaf)) { throw "Reviewed identity manifest must be a file." }
   $null = Get-Content -LiteralPath $resolvedReviewedManifest -Raw -Encoding UTF8 | ConvertFrom-Json
   $remoteIdentityManifest = "/tmp/ozon-erp-identity-$Version.json"
+}
+if ($ReviewedAiMaterialManifest) {
+  $resolvedAiMaterialManifest = (Resolve-Path -LiteralPath $ReviewedAiMaterialManifest).Path
+  if (-not (Test-Path -LiteralPath $resolvedAiMaterialManifest -PathType Leaf)) { throw "Reviewed AI material manifest must be a file." }
+  try { $null = Get-Content -LiteralPath $resolvedAiMaterialManifest -Raw -Encoding UTF8 | ConvertFrom-Json }
+  catch { throw "Reviewed AI material manifest is not valid JSON." }
+  $remoteAiMaterialManifest = "/tmp/ozon-erp-ai-material-$Version-$([guid]::NewGuid().ToString('N')).json"
 }
 
 foreach ($command in @("ssh", "scp", "tar.exe")) {
@@ -53,12 +63,16 @@ if ($IdentityFile) {
   $sshOptions += @("-i", $resolvedIdentity)
   $scpOptions += @("-i", $resolvedIdentity)
 }
+$dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
+$dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
+$activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest'"
 
 if ($DryRun) {
   Write-Host "Dry run only."
   Write-Host "Host: $remoteTarget`:$SshPort"
   Write-Host "Version: $Version"
   Write-Host "Artifact: $archivePath"
+  Write-Host "Activation arguments: $activationCommand"
   exit 0
 }
 
@@ -100,21 +114,36 @@ if ($LASTEXITCODE -ne 0) { throw "Archive creation failed with exit code $LASTEX
 
 $remoteReleaseScript = Join-Path $projectRoot "deploy\linux\remote-release.sh"
 Write-Host "Uploading release $Version to $remoteTarget..."
+try {
 & scp @scpOptions $archivePath $remoteReleaseScript "${remoteTarget}:/tmp/"
 if ($LASTEXITCODE -ne 0) { throw "Upload failed with exit code $LASTEXITCODE." }
 if ($resolvedReviewedManifest) {
   & scp @scpOptions $resolvedReviewedManifest "${remoteTarget}:$remoteIdentityManifest"
   if ($LASTEXITCODE -ne 0) { throw "Reviewed identity manifest upload failed with exit code $LASTEXITCODE." }
 }
+if ($resolvedAiMaterialManifest) {
+  # Create the destination privately before SCP; never leave a world-readable
+  # manifest between upload and chmod. A unique filename also isolates releases.
+  & ssh @sshOptions $remoteTarget "set -Ce; umask 077; : > '$remoteAiMaterialManifest'; chmod 600 '$remoteAiMaterialManifest'"
+  if ($LASTEXITCODE -ne 0) { throw "Private AI material manifest preparation failed with exit code $LASTEXITCODE." }
+  & scp @scpOptions $resolvedAiMaterialManifest "${remoteTarget}:$remoteAiMaterialManifest"
+  if ($LASTEXITCODE -ne 0) { throw "Reviewed AI material manifest upload failed with exit code $LASTEXITCODE." }
+}
 
-$dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
-$dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
-$remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag'"
+$remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && $activationCommand"
 if ($remoteIdentityManifest) {
-  $remoteCommand = "chmod 600 '$remoteIdentityManifest' && $remoteCommand '$remoteIdentityManifest'"
+  $remoteCommand = "chmod 600 '$remoteIdentityManifest' && $remoteCommand"
 }
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
+} finally {
+  if ($remoteAiMaterialManifest) {
+    try {
+      & ssh @sshOptions $remoteTarget "rm -f -- '$remoteAiMaterialManifest'" 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Private AI material manifest cleanup could not be confirmed." }
+    } catch { Write-Warning "Private AI material manifest cleanup could not be confirmed." }
+  }
+}
 
 if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
   $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash

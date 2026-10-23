@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const batchService = fs.readFileSync(new URL("../src/services/ai-material-optimization-batches.js", import.meta.url), "utf8");
+const batchSchema = fs.readFileSync(new URL("../src/services/ai-material-optimization-schema.js", import.meta.url), "utf8");
 const routes = fs.readFileSync(new URL("../src/server/routes/aiVariantLab.js", import.meta.url), "utf8");
 const draftBox = fs.readFileSync(new URL("../frontend/admin/views/listing/ListingPublishRecordsView.vue", import.meta.url), "utf8");
 const recordsView = fs.readFileSync(new URL("../frontend/admin/views/listing/AiMaterialOptimizationRecordsView.vue", import.meta.url), "utf8");
@@ -16,10 +17,12 @@ test("draft batch material optimization submits a backend batch without opening 
 });
 
 test("material optimization batches persist item stages and recover running work", () => {
-  assert.match(batchService, /CREATE TABLE IF NOT EXISTS ai_material_optimization_batches/);
-  assert.match(batchService, /CREATE TABLE IF NOT EXISTS ai_material_optimization_items/);
+  assert.match(batchSchema, /CREATE TABLE IF NOT EXISTS ai_material_optimization_batches/);
+  assert.match(batchSchema, /CREATE TABLE IF NOT EXISTS ai_material_optimization_items/);
   assert.match(batchService, /recoverAiMaterialOptimizationBatchesOnStartup/);
-  assert.match(batchService, /SET status = 'queued'.*WHERE status = 'running'/s);
+  assert.match(batchService, /unknown_review/);
+  assert.match(batchService, /checkpoint\.text_pending/);
+  assert.match(batchService, /restoreBusinessTaskSession\(item.tenant_id, item.created_by_person_id\)/);
   assert.match(batchService, /aiImageOptimizerConfirmAnalysis/);
   assert.match(batchService, /aiImageOptimizerConfirmPlan/);
   assert.match(batchService, /createAiVariantListingDraftLightweight/);
@@ -27,7 +30,7 @@ test("material optimization batches persist item stages and recover running work
 });
 
 test("material optimization requires operator-confirmed product facts for every draft", () => {
-  assert.match(batchService, /operator_facts_json LONGTEXT/);
+  assert.match(batchSchema, /operator_facts_json LONGTEXT/);
   assert.match(batchService, /normalizeOperatorFacts/);
   assert.match(batchService, /operatorFactsReady/);
   assert.match(batchService, /product_title_zh/);
@@ -40,7 +43,7 @@ test("material optimization requires operator-confirmed product facts for every 
 test("full material optimization overlaps copy generation with bounded detail image concurrency", () => {
   assert.match(batchService, /const DETAIL_IMAGE_CONCURRENCY = 3/);
   assert.match(batchService, /mapWithConcurrency\(source\.detailImages\.slice\(0, 6\), DETAIL_IMAGE_CONCURRENCY/);
-  assert.match(batchService, /Promise\.all\(\[detailPromise, copyPromise\]\)/);
+  assert.match(batchService, /Promise\.allSettled\(\[detailPromise, copyPromise\]\)/);
   assert.doesNotMatch(batchService, /for \(const \[index, image\] of source\.detailImages\.slice\(0, 6\)\.entries\(\)\)/);
 });
 

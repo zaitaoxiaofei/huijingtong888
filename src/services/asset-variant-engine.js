@@ -5,14 +5,16 @@ import path from "node:path";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { AsyncResource } from "node:async_hooks";
 import sharp from "sharp";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { config } from "../config.js";
+import { requestPublicImage } from "../http/public-image-request.js";
 import { resolveUploadSubdirRoots } from "../runtime-uploads.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope } from "./asset-variant-tenant-scope.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
-import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantRequestGuard, withAiTenantSession } from "./ai-tenant-context.js";
 import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
 import { getTaskFile as getCropperTaskFile } from "../server/services/tools/imageCropperService.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
@@ -25,6 +27,7 @@ import {
   listingCategoryTemplateDetail,
   materializeListingMediaAssetUrl,
   publishListingTemplateToOzon,
+  retryListingPublishRecord,
   registerListingMediaAssetFromFile,
   standardizeListingTemplateForAutomation,
   validateListingTemplatePublish,
@@ -122,9 +125,81 @@ const REAL_RUSSIA_VEHICLE_MODELS = [
 let schemaReady = false;
 const assetVariantJobQueue = [];
 let assetVariantJobRunning = false;
+const assetVariantImportLocks = new Map();
+
+// Queue preparation without holding a database connection or business row lock.
+// The final transaction still rechecks persisted drafts for other processes.
+async function withAssetVariantImportLocks(ids, operation) {
+  const releases = [];
+  try {
+    for (const id of [...ids].sort((a, b) => a - b)) {
+      const key = `${aiTenantId()}:${id}`;
+      const previous = assetVariantImportLocks.get(key);
+      let release;
+      const current = new Promise(resolve => { release = resolve; });
+      assetVariantImportLocks.set(key, current);
+      releases.push(() => {
+        release();
+        if (assetVariantImportLocks.get(key) === current) assetVariantImportLocks.delete(key);
+      });
+      await previous;
+    }
+    return await operation();
+  } finally {
+    for (const release of releases.reverse()) release();
+  }
+}
 
 function assetTenantParams(params, index = 0) {
   return [...params.slice(0, index), aiTenantId(), ...params.slice(index)];
+}
+
+// Recheck the persisted actor and every original resource after queue waits,
+// remote work and transaction locks. A request body never supplies authority.
+async function assertAssetExecutionAccess(session = currentAiTenantSession(), { shopIds = [], productId = 0, productIds = [], connection = null } = {}) {
+  const query = connection ? async (sql, params) => (await connection.execute(sql, params))[0] : mysqlQuery;
+  const authorized = await authorizeBusinessTaskSession(session, query);
+  assertBusinessTaskPermission(authorized, "operations");
+  const scope = assetVariantExecutionScope(authorized);
+  const ids = uniqueNumbers(shopIds);
+  if (ids.length) {
+    const shops = await query(`SELECT s.id FROM shops s WHERE s.id IN (${ids.map(() => "?").join(",")})
+      AND s.status = 'active' AND ${assetVariantTenantPredicate(scope, "s")}${connection ? " FOR SHARE" : ""}`, [...ids, scope.id]);
+    if (shops.length !== ids.length) throw Object.assign(new Error("目标店铺已停用或不属于当前企业"), { statusCode: 403 });
+  }
+  const sourceIds = uniqueNumbers([productId, ...productIds]);
+  if (sourceIds.length) {
+    const products = await query(`SELECT p.id FROM products p WHERE p.id IN (${sourceIds.map(() => "?").join(",")}) AND p.active = 1
+      AND ${assetVariantTenantPredicate(scope, "p")}${connection ? " FOR SHARE" : ""}`, [...sourceIds, scope.id]);
+    if (products.length !== sourceIds.length) throw Object.assign(new Error("来源商品不存在或不属于当前企业"), { statusCode: 404 });
+  }
+  if (connection) {
+    // Resource locks can wait while membership is revoked. Use a current read,
+    // not the earlier REPEATABLE READ snapshot, and retain authorization locks.
+    const current = await authorizeBusinessTaskSession(session, async (sql, params) =>
+      (await connection.execute(`${sql.trim()} FOR SHARE`, params))[0]);
+    assertBusinessTaskPermission(current, "operations");
+    return current;
+  }
+  return authorized;
+}
+
+function withAssetProviderGuard(session, context, resources, operation) {
+  return withAiTenantRequestGuard(async ({ connection } = {}) => {
+    if (context?.jobId) await throwIfAssetVariantJobCancelled(context.jobId, connection);
+    await assertAssetExecutionAccess(session, { ...resources, connection });
+  }, operation);
+}
+
+function assetExecutionContext(session, context = {}, resources = {}) {
+  return { ...context, throwIfCancelled: async () => {
+    await context.throwIfCancelled?.();
+    await assertAssetExecutionAccess(session, resources);
+  } };
+}
+
+function rethrowAssetAccessError(error) {
+  if (isAssetVariantJobCancelledError(error) || [403, 404, 409].includes(Number(error?.statusCode || error?.status))) throw error;
 }
 
 function envInt(name, fallback, min = 1, max = 10) {
@@ -211,6 +286,7 @@ export async function assetVariantBootstrap(query = {}, session = null) {
 }
 
 export async function selectionPublishShops(query = {}, session = null) {
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   await ensureAssetVariantSchema();
   const productId = Number(query.productId || query.product_id || query.selectionId || query.selection_id || 0);
@@ -221,10 +297,11 @@ export async function selectionPublishShops(query = {}, session = null) {
     const productRows = await mysqlQuery(`
       SELECT p.owner_person_id, p.image_url, p.detail_image_urls, pe.name AS owner_name
       FROM products p
-      LEFT JOIN people pe ON pe.id = p.owner_person_id
+      LEFT JOIN tenant_members owner_members ON owner_members.person_id = p.owner_person_id AND owner_members.tenant_id = ? AND owner_members.active = 1
+      LEFT JOIN people pe ON pe.id = owner_members.person_id AND pe.active = 1
       WHERE p.id = ? AND p.active = 1 AND ${assetVariantTenantPredicate(scope, "p")}
       LIMIT 1
-    `, [productId, scope.id]);
+    `, [scope.id, productId, scope.id]);
     if (!productRows.length) throw Object.assign(new Error("选品不存在或不属于当前企业"), { statusCode: 404 });
     ownerPersonId = Number(productRows[0]?.owner_person_id || 0) || 0;
     ownerName = String(productRows[0]?.owner_name || "").trim();
@@ -337,6 +414,11 @@ export async function generateAssetVariants(body = {}, session = null, context =
   const material = normalizeMaterialPayload(body.material || body);
   await assertAssetSourceProductTenant(material.sourceProductId || material.source_product_id);
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
+  if (!context.matrixGenerateGuard) return withAssetProviderGuard(session, context,
+    { shopIds, productId: material.sourceProductId || material.source_product_id },
+    () => generateAssetVariants(body, session, { ...context, matrixGenerateGuard: true }));
+  context = assetExecutionContext(session, context, { shopIds, productId: material.sourceProductId || material.source_product_id });
+  await context.throwIfCancelled();
   const rulesInput = Array.isArray(body.rules) ? body.rules : [];
   const preparedMediaByShop = body.preparedMediaByShop || body.prepared_media_by_shop || {};
   if (!material.title) throw new Error("Missing source title");
@@ -359,6 +441,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
     const mergedRule = normalizeRule({ ...shop.rule, ...(ruleMap.get(Number(shop.id)) || {}) });
     await context.throwIfCancelled?.();
     const copyPack = await generateVariantCopyPack(material, shop, mergedRule).catch((error) => {
+      rethrowAssetAccessError(error);
       console.warn("asset variant copy pack AI failed:", error?.message || error);
       return null;
     });
@@ -436,6 +519,7 @@ export async function generateAssetVariants(body = {}, session = null, context =
 
     const outputDir = path.relative(ROOT_DIR, shopDir).replace(/\\/g, "/");
     const localOutputDir = shopDir;
+    await context.throwIfCancelled();
     const insertResult = await mysqlExecute(`
       INSERT INTO asset_variants
       (batch_id, shop_id, source_title, variant_title, variant_title_zh, title_style, tag_style, price_index, internal_price, ozon_price, ozon_old_price, tags_json, description_text, images_json,
@@ -527,6 +611,7 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const batchId = String(body.batchId || body.batch_id || "").trim();
   const shopId = Number(body.shopId || body.shop_id || 0) || null;
+  await assertAssetExecutionAccess(session, { shopIds: [shopId] });
   const assetIds = uniqueNumbers(body.assetIds || body.asset_ids);
   if (!batchId && !assetIds.length) throw new Error("Missing batchId or assetIds");
   const scope = assetVariantTenantScope(session || currentAiTenantSession());
@@ -588,16 +673,20 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
       (local_path = ? OR source_path = ?) AND id NOT IN (${mediaAssets.map(() => "?").join(",")}) LIMIT 1`,
       [filePath, filePath, ...mediaAssets.map(asset => Number(asset.id))]);
     if (retained.length) continue;
+    await assertAssetExecutionAccess(session, { shopIds: [shopId] });
     if (await removeLocalAssetPath(filePath, { recursive: false })) deletedFiles += 1;
   }
   for (const dirPath of dirs) {
+    await assertAssetExecutionAccess(session, { shopIds: [shopId] });
     if (await removeLocalAssetPath(dirPath, { recursive: true })) deletedDirs += 1;
   }
 
   if (variants.length) {
+    await assertAssetExecutionAccess(session, { shopIds: [shopId] });
     const placeholders = variants.map(() => "?").join(",");
     await mysqlExecute(`DELETE FROM generated_titles WHERE asset_variant_id IN (${placeholders})`, variants.map((row) => Number(row.id)));
   }
+  await assertAssetExecutionAccess(session, { shopIds: [shopId] });
   if (deleteMediaSql) await mysqlExecute(deleteMediaSql, deleteMediaParams);
   if (deleteVariantSql) await mysqlExecute(deleteVariantSql, deleteVariantParams);
 
@@ -613,12 +702,16 @@ export async function deleteAssetVariantMediaGroup(body = {}, session = null) {
   };
 }
 
-export async function generateAssetVariantTitlePreview(body = {}, session = null) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantTitlePreview(body, session));
+export async function generateAssetVariantTitlePreview(body = {}, session = null, guarded = false) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantTitlePreview(body, session, guarded));
   assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const material = normalizeMaterialPayload(body.material || body);
   const shopId = Number(body.shopId || body.shop_id || 0);
+  if (!guarded) return withAssetProviderGuard(session, {},
+    { shopIds: [shopId], productId: material.sourceProductId || material.source_product_id },
+    () => generateAssetVariantTitlePreview(body, session, true));
+  await assertAssetExecutionAccess(session, { shopIds: [shopId], productId: material.sourceProductId || material.source_product_id });
   if (!material.title) throw new Error("Missing material title");
   if (!shopId) throw new Error("请选择店铺");
   const bootstrap = await assetVariantBootstrap({}, session);
@@ -626,6 +719,7 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
   if (!shop) throw new Error("Shop not found");
   const rule = normalizeRule({ ...shop.rule, ...(body.rule || {}) });
   const candidates = await generateTitleCandidates(material, shop);
+  await assertAssetExecutionAccess(session, { shopIds: [shopId], productId: material.sourceProductId || material.source_product_id });
   const selected = selectListingTitleForShop({
     manualTitleRu: material.listingTitleRu,
     titleCandidates: candidates,
@@ -647,6 +741,7 @@ export async function generateAssetVariantTitlePreview(body = {}, session = null
 export async function generateAssetVariantVideoFromImage(body = {}, session = null) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateAssetVariantVideoFromImage(body, session));
   await ensureAssetVariantSchema();
+  await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
   const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
   if (!imageUrl) throw new Error("请先准备主图后再生成视频");
   try {
@@ -697,8 +792,9 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
       outputPath: sourcePath,
       localListingPath: sourcePath,
       name: sourceName
-    }], { skipPublicSync: true }), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
+    }], { skipPublicSync: true, sourceAlreadyAuthorized: true }), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
     if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
+    await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
     return { video: normalizeGeneratedVideoForResponse(generatedVideo) };
   } catch (error) {
     const payload = buildAssetVariantJobErrorPayload(error);
@@ -715,6 +811,7 @@ export async function generateAssetVariantVideoFromImage(body = {}, session = nu
 export async function generateListingVariantMediaFromImage(body = {}, session = null) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => generateListingVariantMediaFromImage(body, session));
   await ensureAssetVariantSchema();
+  await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
   const imageUrl = cleanText(body.imageUrl || body.image_url || body.mainImageUrl || body.main_image_url);
   if (!imageUrl) throw new Error("请先准备变体主图");
   const sourceBuffer = await readImageBuffer(imageUrl);
@@ -742,8 +839,9 @@ export async function generateListingVariantMediaFromImage(body = {}, session = 
     outputPath: sourcePath,
     localListingPath: sourcePath,
     name: "video-source.jpg"
-  }]), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
+  }], { sourceAlreadyAuthorized: true }), SERVER_VIDEO_GENERATION_TIMEOUT_MS, "视频生成超时，请稍后重试或先保存草稿");
   if (!generatedVideo) throw new Error("视频生成失败，请确认主图可访问");
+  await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id], productId: body.productId || body.product_id });
   const video = normalizeGeneratedVideoForResponse(generatedVideo);
   if (!video.publishUrl) throw new Error("视频已生成，但未获得公网素材地址，暂不能写入 Ozon 上架字段");
   return {
@@ -754,6 +852,7 @@ export async function generateListingVariantMediaFromImage(body = {}, session = 
 }
 
 export async function ensureAssetVariantImagePublishUrl(source = "", context = {}) {
+  await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [context.shopId || context.shop_id] });
   const sourceUrl = cleanText(source, 2000);
   if (!sourceUrl) return { url: "", publishUrl: "", previewUrl: "", status: "empty" };
   if (isManagedOssObjectUrl(sourceUrl, { prefix: "ai-unused" })) {
@@ -827,15 +926,17 @@ export async function registerAssetVariantRichTextImage(body = {}, session = nul
     resultId: body.resultId || body.result_id || "",
     workflowId: body.workflowId || body.workflow_id || ""
   });
+  await assertAssetExecutionAccess(session, { shopIds: [body.shopId || body.shop_id] });
   return {
     ok: true,
     ...result
   };
 }
 
-export async function importAssetVariantToListingAutomation(body = {}, session = null) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => importAssetVariantToListingAutomation(body, session));
+export async function importAssetVariantToListingAutomation(body = {}, session = null, guarded = false) {
+  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => importAssetVariantToListingAutomation(body, session, guarded));
   const scope = assetVariantTenantScope(session || currentAiTenantSession());
+  await assertAssetExecutionAccess(session);
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const variantIds = uniqueNumbers(body.variantIds || body.variant_ids);
@@ -849,45 +950,82 @@ export async function importAssetVariantToListingAutomation(body = {}, session =
     ORDER BY v.id ASC
   `, [scope.id, ...variantIds]);
   if (variants.length !== variantIds.length) throw Object.assign(new Error("素材不存在或不属于当前企业"), { statusCode: 404 });
+  if (!guarded) return withAssetProviderGuard(session, {}, { shopIds: variants.map(row => row.shop_id), productIds: variants.map(row => row.source_product_id) },
+    () => importAssetVariantToListingAutomation(body, session, true));
 
-  const drafts = [];
-  const descriptionCache = new Map();
-  await withMysqlTransaction(async (connection) => {
+  return withAssetVariantImportLocks(variantIds, async () => {
+    const prepared = new Map();
+    const descriptionCache = new Map();
     for (const variant of variants) {
-      const mediaRows = await loadAssetVariantMediaRows(connection, variant);
+      await assertAssetExecutionAccess(session, { shopIds: [variant.shop_id], productId: variant.source_product_id });
+      // Repeated imports must reuse their offer without another paid/media run.
+      if ((await findImportedAssetVariantDraft(null, variant)).length) continue;
+      const mediaRows = await loadAssetVariantMediaRows(null, variant);
       const images = assetVariantImageItems(variant, mediaRows);
       let videos = assetVariantVideoItems(mediaRows);
       if (!videos.length) {
-        const generatedVideo = await ensureAssetVariantVideoFromImages(connection, variant, images).catch((error) => {
+        const generatedVideo = await ensureAssetVariantVideoFromImages(null, variant, images).catch(error => {
+          rethrowAssetAccessError(error);
           console.warn("asset variant video generation failed:", error.message || error);
           return null;
         });
         if (generatedVideo) videos = [generatedVideo];
       }
-      const templateId = await ensureAssetVariantListingTemplateFromPackage(connection, variant, images, videos, session, descriptionCache);
-      const draftId = await insertListingDraftFromPackage(connection, templateId, variant, images, videos, session);
-      await insertListingShopCopyFromPackage(connection, draftId, variant, images, videos, session);
-      await connection.execute(`
-        UPDATE asset_variants
-        SET imported_to_listing = 1, imported_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [variant.id]);
-      drafts.push({ variantId: Number(variant.id), templateId, draftId, shopId: Number(variant.shop_id), shopName: variant.shop_name });
+      const template = await prepareAssetVariantListingTemplate(variant, images, videos, descriptionCache);
+      const offerId = await generateUniqueListingOfferId({ shopId: Number(variant.shop_id), sourceProductId: Number(variant.source_product_id || 0) });
+      await assertAssetExecutionAccess(session, { shopIds: [variant.shop_id], productId: variant.source_product_id });
+      prepared.set(Number(variant.id), { images, videos, template, offerId });
     }
+    const drafts = await withMysqlTransaction(async connection => {
+      // All tenant business writers and quota reservations take this first.
+      // No provider, media work or second pool connection is used below.
+      await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [scope.id]);
+      const results = [];
+      for (const variant of variants) {
+        const [current] = await connection.execute("SELECT * FROM asset_variants WHERE id = ? FOR UPDATE", [variant.id]);
+        if (!current.length || Number(current[0].shop_id) !== Number(variant.shop_id)) throw Object.assign(new Error("素材归属已变化，请刷新后重试"), { statusCode: 409 });
+        await assertAssetExecutionAccess(session, { shopIds: [variant.shop_id], productId: current[0].source_product_id, connection });
+        const existing = await findImportedAssetVariantDraft(connection, variant);
+        if (existing.length) {
+          results.push({ variantId: Number(variant.id), templateId: Number(existing[0].template_id), draftId: Number(existing[0].draft_id), shopId: Number(variant.shop_id), shopName: variant.shop_name, reused: true });
+          continue;
+        }
+        const item = prepared.get(Number(variant.id));
+        if (!item || assetVariantImportFingerprint(current[0]) !== assetVariantImportFingerprint(variant)) {
+          throw Object.assign(new Error("素材内容已变化，请刷新后重试"), { statusCode: 409 });
+        }
+        const templateId = await ensureAssetVariantListingTemplateFromPackage(connection, variant, item.template, session);
+        const draftId = await insertListingDraftFromPackage(connection, templateId, variant, item.images, item.videos, session);
+        await insertListingShopCopyFromPackage(connection, draftId, variant, item.images, item.videos, session, item.offerId);
+        await connection.execute("UPDATE asset_variants SET imported_to_listing = 1, imported_at = CURRENT_TIMESTAMP WHERE id = ?", [variant.id]);
+        results.push({ variantId: Number(variant.id), templateId, draftId, shopId: Number(variant.shop_id), shopName: variant.shop_name });
+      }
+      return results;
+    });
+    return { ok: true, imported: drafts.length, drafts, note: `已导入 ${drafts.length} 个素材包到编辑上架` };
   });
+}
 
-  return {
-    ok: true,
-    imported: drafts.length,
-    drafts,
-    note: `已导入 ${drafts.length} 个素材包到编辑上架`
-  };
+function assetVariantImportFingerprint(variant) {
+  const excluded = new Set(["status", "imported_to_listing", "imported_at", "created_at", "shop_name", "watermark_path"]);
+  return JSON.stringify(Object.entries(variant).filter(([key]) => !excluded.has(key)).sort(([a], [b]) => a.localeCompare(b)));
+}
+
+async function findImportedAssetVariantDraft(connection, variant) {
+  const sql = `SELECT d.id AS draft_id, d.template_id FROM listing_drafts d
+    JOIN listing_shop_copies c ON c.draft_id = d.id AND c.shop_id = ? AND c.tenant_id = ?
+    WHERE d.tenant_id = ? AND d.internal_code = ? AND d.status <> 'deleted'
+      AND CAST(JSON_UNQUOTE(JSON_EXTRACT(d.manual_facts_json, '$.asset_variant_id')) AS UNSIGNED) = ?
+    ORDER BY d.id ASC LIMIT 1${connection ? " FOR SHARE" : ""}`;
+  const params = [Number(variant.shop_id), aiTenantId(), aiTenantId(), `AV-${variant.id}`, Number(variant.id)];
+  return connection ? (await connection.execute(sql, params))[0] : mysqlQuery(sql, params);
 }
 
 export async function publishAssetVariantsToOzon(body = {}, session = null, context = {}) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => publishAssetVariantsToOzon(body, session, context));
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
+  context = assetExecutionContext(session, context);
   await context.throwIfCancelled?.();
   const variantIds = uniqueNumbers(body.variantIds || body.variant_ids);
   if (!variantIds.length) return { ok: false, imported: 0, published: 0, results: [], note: "No variants selected" };
@@ -916,6 +1054,7 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
 
       const template = await listingCategoryTemplateDetail(templateId, session);
       await context.throwIfCancelled?.();
+      const previousRecord = await claimAssetVariantPublish({ variantId, draftId, shopId }, session);
       const precheck = await validateAssetVariantPublishPrecheck({ template, shopId, variantId, draftId }, session);
       await context.markStage?.("submit_precheck", {
         current: index + 1,
@@ -947,11 +1086,18 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
       }
 
       await context.throwIfCancelled?.();
-      await updateAssetVariantPublishState({ variantId, draftId, shopId, status: "submitting" });
-      const publishResult = await publishListingTemplateToOzon({ template, shop_ids: [shopId] }, session);
+      let publishResult;
+      if (previousRecord) {
+        const record = await retryListingPublishRecord(previousRecord.id, {}, session);
+        const accepted = ["submitted", "processing", "ozon_status_pending", "imported", "published", "success"].includes(String(record.status || ""));
+        publishResult = { results: [{ ...record, shop_id: shopId, record_id: previousRecord.id, ok: accepted }] };
+      } else {
+        publishResult = await publishListingTemplateToOzon({ template, shop_ids: [shopId], source_draft_id: draftId }, session);
+      }
+      await context.throwIfCancelled();
       const shopResult = (publishResult.results || []).find((row) => Number(row.shop_id) === shopId) || publishResult.results?.[0] || null;
-      const success = Boolean(shopResult?.ok);
-      const nextStatus = success ? statusFromOzonPublishResult(shopResult) : "failed";
+      const success = Boolean(shopResult?.ok) && !["failed", "ozon_status_error", "reconciliation_required"].includes(String(shopResult?.status || ""));
+      const nextStatus = statusFromOzonPublishResult(shopResult || {});
       await updateAssetVariantPublishState({
         variantId,
         draftId,
@@ -972,11 +1118,12 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
         precheck
       };
     } catch (error) {
+      rethrowAssetAccessError(error);
       await updateAssetVariantPublishState({
         variantId,
         draftId,
         shopId,
-        status: "failed",
+        status: "reconciliation_required",
         publishResult: { error: error.message || String(error) }
       }).catch(() => null);
       return {
@@ -985,7 +1132,7 @@ export async function publishAssetVariantsToOzon(body = {}, session = null, cont
         shopId,
         shopName: item.shopName || "",
         ok: false,
-        status: "failed",
+        status: "reconciliation_required",
         error: error.message || String(error)
       };
     }
@@ -1224,6 +1371,8 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
+  context = assetExecutionContext(session, context, { productId, shopIds: body.shopIds || body.shop_ids });
+  await context.throwIfCancelled();
   if (!productId) throw new Error("缺少选品 ID");
 
   await context.markStage?.("load_product", { productId });
@@ -1290,6 +1439,12 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
 
   const variantIds = (generateResult.variants || []).map((variant) => Number(variant.id || 0)).filter(Boolean);
   await context.throwIfCancelled?.();
+  if (context.jobId) {
+    await mysqlExecute(`UPDATE asset_variant_jobs SET batch_id = ?, result_json = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND tenant_id = ? AND created_by_person_id = ? AND status = 'running'`,
+    [generateResult.batchId || "", JSON.stringify({ batchId: generateResult.batchId, generated: variantIds.length,
+      results: variantIds.map(variantId => ({ variantId, ok: false, status: "prepared" })) }), Number(context.jobId), businessTaskTenantKey(session), personId(session)]);
+  }
   await context.markStage?.("publish_assets", { productId, variantCount: variantIds.length });
   const publishResult = await publishAssetVariantsToOzon({ variantIds }, session, context);
   await context.markStage?.("done", { productId, variantCount: variantIds.length, published: publishResult.published || 0 });
@@ -1304,13 +1459,14 @@ export async function publishSelectionProductToOzon(body = {}, session = null, c
 }
 
 export async function enqueuePublishSelectionProductToOzon(body = {}, session = null) {
-  session = await authorizeBusinessTaskSession(session);
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const productId = Number(body.productId || body.product_id || body.selectionId || body.selection_id || 0);
   if (!productId) throw new Error("Missing productId");
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
   if (!shopIds.length) throw new Error("请至少选择一个上架店铺");
+  await assertAssetExecutionAccess(session, { productId, shopIds });
   const requestBody = { ...body, shopIds, _tenantScope: { id: scope.id, slug: scope.slug } };
   const jobNo = `AVJ-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   const insertResult = await mysqlExecute(`
@@ -1338,7 +1494,7 @@ export async function enqueuePublishSelectionProductToOzon(body = {}, session = 
 }
 
 export async function enqueueGenerateAssetVariants(body = {}, session = null) {
-  session = await authorizeBusinessTaskSession(session);
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantExecutionScope(session);
   await ensureAssetVariantSchema();
   const shopIds = uniqueNumbers(body.shopIds || body.shop_ids);
@@ -1346,6 +1502,7 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
   const material = normalizeMaterialPayload(body.material || body);
   if (!material.title) throw new Error("请先填写标题");
   if (!material.mainImage) throw new Error("请先上传主图");
+  await assertAssetExecutionAccess(session, { shopIds, productId: material.sourceProductId || material.source_product_id || body.productId || body.product_id });
   const requestBody = {
     ...body,
     shopIds,
@@ -1380,6 +1537,7 @@ export async function enqueueGenerateAssetVariants(body = {}, session = null) {
 }
 
 export async function assetVariantJobs(query = {}, session = null) {
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
@@ -1387,7 +1545,8 @@ export async function assetVariantJobs(query = {}, session = null) {
   const where = ["j.tenant_id = ?"];
   const params = [scope.id, tenantId];
   const createdByPersonId = Number(query.createdByPersonId || query.created_by_person_id || 0) || 0;
-  const personScope = createdByPersonId || Number(personId(session) || 0) || 0;
+  const personScope = Number(personId(session) || 0) || 0;
+  if (createdByPersonId && createdByPersonId !== personScope) return [];
   const jobType = cleanText(query.jobType || query.job_type || "", 64);
   const workbenchId = cleanText(query.workbenchId || query.workbench_id || "", 128);
   const status = cleanText(query.status || "", 32);
@@ -1424,6 +1583,7 @@ export async function assetVariantJobs(query = {}, session = null) {
 }
 
 export async function assetVariantJobDetail(id, session = null) {
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
@@ -1433,19 +1593,19 @@ export async function assetVariantJobDetail(id, session = null) {
     SELECT j.*, p.name AS product_name, p.selection_id
     FROM asset_variant_jobs j
     LEFT JOIN products p ON p.id = j.product_id AND ${assetVariantTenantPredicate(scope, "p")}
-    WHERE j.id = ? AND j.tenant_id = ?
+    WHERE j.id = ? AND j.tenant_id = ? AND j.created_by_person_id = ?
     LIMIT 1
-  `, [scope.id, jobId, tenantId]);
+  `, [scope.id, jobId, tenantId, personId(session)]);
   return rows[0] ? normalizeAssetVariantJobRow(rows[0]) : null;
 }
 
 export async function cancelAssetVariantJob(id, session = null) {
-  session = await authorizeBusinessTaskSession(session);
+  session = await assertAssetExecutionAccess(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   const jobId = Number(id || 0);
   if (!jobId) throw new Error("Missing jobId");
-  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? LIMIT 1", [jobId, tenantId]);
+  const rows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? AND created_by_person_id = ? LIMIT 1", [jobId, tenantId, personId(session)]);
   const job = rows[0];
   if (!job) throw new Error("Asset variant job not found");
   if (!["queued", "running"].includes(String(job.status || ""))) {
@@ -1482,13 +1642,13 @@ export async function cancelAssetVariantJob(id, session = null) {
 }
 
 export async function retryAssetVariantJobFailures(id, session = null) {
-  session = await authorizeBusinessTaskSession(session);
+  session = await assertAssetExecutionAccess(session);
   const tenantId = businessTaskTenantKey(session);
   await ensureAssetVariantSchema();
   await ensureListingAutomationSchema();
   const jobId = Number(id || 0);
   if (!jobId) throw new Error("Missing jobId");
-  const jobRows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? LIMIT 1", [jobId, tenantId]);
+  const jobRows = await mysqlQuery("SELECT * FROM asset_variant_jobs WHERE id = ? AND tenant_id = ? AND created_by_person_id = ? LIMIT 1", [jobId, tenantId, personId(session)]);
   const job = jobRows[0];
   if (!job) throw new Error("Asset variant job not found");
   const result = parseJson(job.result_json, {});
@@ -1496,6 +1656,7 @@ export async function retryAssetVariantJobFailures(id, session = null) {
     .filter((item) => !item.ok)
     .map((item) => item.variantId || item.variant_id));
   if (!failedVariantIds.length) {
+    if (job.status === "reconciliation_required") throw Object.assign(new Error("该任务在执行中断后结果待核对，请先核对原 AI 或上架记录；不能自动重新付费生成或重复发布。"), { statusCode: 409, code: "MATRIX_RECONCILIATION_REQUIRED" });
     return { ok: true, retried: 0, note: "No failed asset variants to retry" };
   }
   const retryResult = await publishAssetVariantsToOzon({ variantIds: failedVariantIds }, session, {
@@ -1517,16 +1678,13 @@ function enqueueAssetVariantJob(job) {
 
 export async function recoverAssetVariantJobsOnStartup() {
   await ensureAssetVariantSchema();
-  await mysqlExecute(`
-    UPDATE asset_variant_jobs
-    SET status = 'queued',
-      current_stage = 'recovered',
-      progress_json = JSON_OBJECT('currentStage', 'recovered', 'recoveredAt', UTC_TIMESTAMP()),
-      started_at = NULL,
-      finished_at = NULL,
-      updated_at = CURRENT_TIMESTAMP
-    WHERE status = 'running' AND finished_at IS NULL
-  `);
+  // Both image generation and publishing can have a paid/external side effect.
+  // Interrupted attempts retain their original records for reconciliation;
+  // restarting a server must not silently buy another image or create offers.
+  await mysqlExecute(`UPDATE asset_variant_jobs SET status = 'reconciliation_required',
+    current_stage = 'reconciliation_required', error_json = ?, finished_at = CURRENT_TIMESTAMP,
+    updated_at = CURRENT_TIMESTAMP WHERE status = 'running' AND finished_at IS NULL`,
+  [JSON.stringify({ message: "任务在服务重启时中断；请核对原 AI 或上架记录，不会自动重新付费生成或重复发布。" })]);
   const rows = await mysqlQuery(`
     SELECT id, created_by_person_id
     FROM asset_variant_jobs
@@ -1559,12 +1717,13 @@ async function runAssetVariantJob(job) {
   if (!row || row.status !== "queued") return;
   const request = parseJson(row.request_json, {});
   const progress = createAssetVariantJobProgress(row.id);
-  await mysqlExecute(`
+  const claim = await mysqlExecute(`
     UPDATE asset_variant_jobs
     SET status = 'running', current_stage = 'starting', progress_json = ?,
       started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [JSON.stringify(progress.snapshot("starting")), row.id]);
+    WHERE id = ? AND tenant_id = ? AND created_by_person_id = ? AND status = 'queued'
+  `, [JSON.stringify(progress.snapshot("starting")), row.id, row.tenant_id, row.created_by_person_id]);
+  if (!claim.affectedRows) return;
   try {
     const session = await restoreBusinessTaskSession(row.tenant_id, row.created_by_person_id);
     assertBusinessTaskPermission(session, "operations");
@@ -1601,7 +1760,7 @@ async function runAssetVariantJob(job) {
             output_dir: variant?.localOutputDir || ""
           }, variant?.images || [], {
             throwIfCancelled: () => throwIfAssetVariantJobCancelled(row.id)
-          }).catch(() => null);
+          }).catch(error => { rethrowAssetAccessError(error); return null; });
           variantsWithVideo.push({
             ...variant,
             videos: generatedVideo ? [normalizeGeneratedVideoForResponse(generatedVideo)] : videos
@@ -1618,6 +1777,7 @@ async function runAssetVariantJob(job) {
     } else {
       throw new Error(`不支持的素材裂变任务类型：${row.job_type}`);
     }
+    await throwIfAssetVariantJobCancelled(row.id);
     const status = result?.ok ? "success" : "failed";
     const finalProgress = progress.finish(status);
     await mysqlExecute(`
@@ -1708,11 +1868,17 @@ async function updateAssetVariantJobStage(jobId, progress, stage, detail = {}) {
   `, [stage, JSON.stringify(snapshot), Number(jobId)]);
 }
 
-async function throwIfAssetVariantJobCancelled(jobId) {
-  const rows = await mysqlQuery("SELECT status, tenant_id, created_by_person_id FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
+async function throwIfAssetVariantJobCancelled(jobId, connection = null) {
+  const query = connection ? async (sql, params) => (await connection.execute(sql, params))[0] : mysqlQuery;
+  const rows = await query("SELECT status, tenant_id, created_by_person_id FROM asset_variant_jobs WHERE id = ? LIMIT 1", [Number(jobId)]);
   if (!rows[0]) throw new AssetVariantJobCancelledError();
-  if (String(rows[0]?.status || "") === "cancelled") throw new AssetVariantJobCancelledError();
-  assertBusinessTaskPermission(await restoreBusinessTaskSession(rows[0].tenant_id, rows[0].created_by_person_id), "operations");
+  if (!["queued", "running"].includes(String(rows[0]?.status || ""))) throw new AssetVariantJobCancelledError();
+  const current = currentAiTenantSession();
+  if (current && (businessTaskTenantKey(current) !== String(rows[0].tenant_id)
+    || Number(current.personId) !== Number(rows[0].created_by_person_id))) {
+    throw Object.assign(new Error("后台任务归属发生变化，已停止执行"), { statusCode: 403 });
+  }
+  assertBusinessTaskPermission(await restoreBusinessTaskSession(rows[0].tenant_id, rows[0].created_by_person_id, query), "operations");
 }
 
 function normalizeAssetVariantJobRow(row = {}) {
@@ -1777,7 +1943,7 @@ function buildAssetVariantJobErrorPayload(error) {
       at: new Date().toISOString()
     };
   }
-  if (lower.includes("http") && (lower.includes("image") || lower.includes("图片"))) {
+  if (error?.code === "REMOTE_IMAGE_UNAVAILABLE" || (lower.includes("http") && (lower.includes("image") || lower.includes("图片")))) {
     return {
       code: "remote_image_unavailable",
       message: "采集图片链接无法下载，无法生成上架素材",
@@ -1990,14 +2156,15 @@ export async function resolveAssetTailTemplateFile(id, session = null) {
 }
 
 export async function resolveAssetVariantFile(batchId, filename, session = null) {
+  session = await assertAssetExecutionAccess(session);
   const scope = assetVariantTenantScope(session);
   const safeBatch = sanitizeFilename(batchId);
   const cleanName = String(filename || "").replace(/\\/g, "/").split("/").filter(Boolean).map(sanitizeFilename).join("/");
   const filePath = path.resolve(VARIANT_ROOT, safeBatch, cleanName);
   const batchDir = path.resolve(VARIANT_ROOT, safeBatch);
   if (!filePath.startsWith(`${batchDir}${path.sep}`)) return null;
-  const owned = await mysqlQuery(`SELECT v.output_dir FROM asset_variants v
-    JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(scope, "s")}
+  const owned = await mysqlQuery(`SELECT v.output_dir, v.shop_id FROM asset_variants v
+    JOIN shops s ON s.id = v.shop_id AND s.status = 'active' AND ${assetVariantTenantPredicate(scope, "s")}
     WHERE v.batch_id = ?`, [scope.id, safeBatch]);
   if (!owned.some(row => {
     const output = path.resolve(ROOT_DIR, String(row.output_dir || ""));
@@ -2005,8 +2172,10 @@ export async function resolveAssetVariantFile(batchId, filename, session = null)
   })) return null;
   try {
     const buffer = await fs.readFile(filePath);
+    await assertAssetExecutionAccess(session, { shopIds: owned.map(row => row.shop_id) });
     return { buffer, mime: mimeForPath(filePath) };
-  } catch {
+  } catch (error) {
+    rethrowAssetAccessError(error);
     return null;
   }
 }
@@ -2371,8 +2540,8 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
       await throwIfCancelled?.();
       return imageResult(output, "detail", index + 1, { batchId, shopId, sourceTitle, variantTitle });
     } catch (error) {
-      console.warn(`skip unavailable detail image ${index + 1}:`, error?.message || error);
-      return null;
+      rethrowAssetAccessError(error);
+      throw Object.assign(new Error(`第 ${index + 1} 张详情图处理失败，请修复图片后重新生成，系统未保存不完整的图片包：${error?.message || error}`), { statusCode: 400 });
     }
     });
     images.push(...detailImages.filter(Boolean));
@@ -2393,6 +2562,7 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
         images.push(await imageResult(output, "tail", 1, { batchId, shopId, sourceTitle, variantTitle }));
       }
     } catch (error) {
+      rethrowAssetAccessError(error);
       const warning = tailImageSkipWarning(error, tailImageUrl);
       warnings.push(warning);
       console.warn(warning, error?.message || error);
@@ -2403,7 +2573,7 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
 
 function reusablePermanentMediaResult(source, type, sortOrder = 1) {
   const url = String(source?.publishUrl || source?.publish_url || source?.url || source || "").trim();
-  if (!isManagedOssObjectUrl(url)) return null;
+  if (!isManagedOssObjectUrl(url) || isManagedOssObjectUrl(url, { prefix: "ai-unused" })) return null;
   return {
     type,
     sortOrder,
@@ -2517,13 +2687,15 @@ async function generateTitleCandidates(material, shop) {
     const prompt = buildTitleGenerationPrompt(material, shop);
     const result = await cachedAiCall({
       kind: "asset_variant_title",
+      resources: { shopIds: [shop.id], productId: material.sourceProductId || material.source_product_id },
       cacheInput: { prompt },
       provider: "",
       request: { prompt, temperature: 0.35, maxTokens: 900 },
       maxAttempts: 2
     });
     return normalizeTitleCandidateObject(parseJsonFromText(result.content), material, shop);
-  } catch {
+  } catch (error) {
+    rethrowAssetAccessError(error);
     return Object.fromEntries(TITLE_STYLES.map((style) => [style, fallbackTitle(material, style, shop)]));
   }
 }
@@ -2532,6 +2704,7 @@ async function generateVariantCopyPack(material, shop, rule = {}) {
   const prompt = buildVariantCopyPackPrompt(material, shop, rule);
   const result = await cachedAiCall({
     kind: "asset_variant_copy_pack",
+    resources: { shopIds: [shop.id], productId: material.sourceProductId || material.source_product_id },
     cacheInput: { prompt },
     provider: "",
     request: { prompt, temperature: 0.35, maxTokens: 2500 },
@@ -2638,6 +2811,7 @@ function buildTitleGenerationPrompt(material, shop) {
 }
 async function insertGeneratedTitleCandidates(variantId, shopId, candidates) {
   for (const style of TITLE_STYLES) {
+    await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [shopId] });
     const title = typeof candidates[style] === "string" ? candidates[style] : candidates[style]?.ru || "";
     await mysqlExecute(`
       INSERT INTO generated_titles (asset_variant_id, shop_id, style, title, provider, status)
@@ -2698,7 +2872,8 @@ function buildListingProductFacts(material = {}, shop = {}) {
   };
 }
 
-async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", request = {}, maxAttempts = 2 } = {}) {
+async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", request = {}, maxAttempts = 2, resources = {} } = {}) {
+  await assertAssetExecutionAccess(currentAiTenantSession(), resources);
   const cacheKey = stableHash({ tenant: aiTenantId(), kind, provider, cacheInput });
   const rows = await mysqlQuery(`
     SELECT response_json
@@ -2712,7 +2887,9 @@ async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", 
   let lastError = null;
   for (let attempt = 1; attempt <= Math.max(1, Number(maxAttempts || 1)); attempt += 1) {
     try {
+      await assertAssetExecutionAccess(currentAiTenantSession(), resources);
       const result = await chatWithAiProvider(request);
+      await assertAssetExecutionAccess(currentAiTenantSession(), resources);
       await mysqlExecute(`
         INSERT INTO asset_variant_ai_cache (cache_key, kind, response_json, provider, status)
         VALUES (?, ?, ?, ?, 'ready')
@@ -2720,6 +2897,7 @@ async function cachedAiCall({ kind = "general", cacheInput = {}, provider = "", 
       `, [cacheKey, kind, JSON.stringify(result || {}), provider || request.provider || "default"]).catch(() => null);
       return result;
     } catch (error) {
+      rethrowAssetAccessError(error);
       lastError = error;
       if (attempt < maxAttempts) await sleep(400 * attempt);
     }
@@ -2905,6 +3083,8 @@ function withTimeout(promise, timeoutMs, message = "Operation timed out") {
 }
 
 async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {}, images = [], context = {}) {
+  const actor = currentAiTenantSession();
+  context = assetExecutionContext(actor, context, { shopIds: [variant.shop_id], productId: variant.source_product_id });
   await context.throwIfCancelled?.();
   const existingRows = await loadAssetVariantMediaRows(connection, variant);
   const existingVideos = assetVariantVideoItems(existingRows.filter(isReusableAssetVideoRow));
@@ -2925,6 +3105,8 @@ async function ensureAssetVariantVideoFromImagesUnsafe(connection, variant = {},
     await fs.mkdir(sourceDir, { recursive: true });
     sourcePath = path.join(sourceDir, "video-source.jpg");
     await fs.writeFile(sourcePath, await readImageBuffer(sourceUrl));
+  } else if (!context.sourceAlreadyAuthorized) {
+    await assertAssetLocalSourceTenant(sourcePath, sourceImage.url || sourceImage.outputPath || "");
   }
   await context.throwIfCancelled?.();
   const recipe = serverVideoRecipe();
@@ -3256,6 +3438,7 @@ async function assetVariantDescription(variant, tags = []) {
     };
     const result = await cachedAiCall({
       kind: "asset_variant_description",
+      resources: { shopIds: [variant.shop_id || variant.shopId], productId: variant.source_product_id },
       cacheInput: request,
       provider: "deepseek",
       request,
@@ -3266,6 +3449,7 @@ async function assetVariantDescription(variant, tags = []) {
       return text;
     }
   } catch (error) {
+    rethrowAssetAccessError(error);
     console.warn("asset variant description AI failed", error?.message || error);
   }
   return fallbackRussianDescription(variant, tags);
@@ -3423,7 +3607,7 @@ function assetVariantVariantRow(variant, images = [], videos = [], modelName = "
   };
 }
 
-async function ensureAssetVariantListingTemplateFromPackage(connection, variant, images = [], videos = [], session, descriptionCache = null) {
+async function prepareAssetVariantListingTemplate(variant, images = [], videos = [], descriptionCache = null) {
   const ozonCategoryId = cleanText(variant.ozon_category_id || "", 128) || "asset-variant";
   const ozonCategoryName = cleanText(variant.ozon_category_name || "", 500) || "asset variant";
   const descriptionCategoryId = Number(variant.ozon_description_category_id || 0) || 0;
@@ -3531,6 +3715,11 @@ async function ensureAssetVariantListingTemplateFromPackage(connection, variant,
     syncValues: false,
     diagnostics: true
   });
+  return { templatePayload, sourceRaw, editablePayload, attributes, images, ozonCategoryId, ozonCategoryName };
+}
+
+async function ensureAssetVariantListingTemplateFromPackage(connection, variant, prepared, session) {
+  const { templatePayload, sourceRaw, editablePayload, attributes, images, ozonCategoryId, ozonCategoryName } = prepared;
   const name = `缂備浇浜慨闈涱焽濡ゅ懎绀岄柛娑卞墰閻熸劙鏌?${variant.batch_id || "batch"}-${variant.shop_name || variant.shop_id || "shop"}-${variant.id}`;
   const [rows] = await connection.execute(`
     SELECT id
@@ -3624,11 +3813,7 @@ async function insertListingDraftFromPackage(connection, templateId, variant, im
   return Number(result.insertId);
 }
 
-async function insertListingShopCopyFromPackage(connection, draftId, variant, images, videos = [], session) {
-  const offerId = await generateUniqueListingOfferId({
-    shopId: Number(variant.shop_id),
-    sourceProductId: Number(variant.source_product_id || 0) || 0
-  });
+async function insertListingShopCopyFromPackage(connection, draftId, variant, images, videos = [], session, offerId) {
   const mappedImages = images.map((image, index) => ({
     url: assetMediaUrl(image),
     role: image.role || image.type || "",
@@ -3679,7 +3864,32 @@ function compactAssetVariantPersistencePayload(value) {
     .map(([key, item]) => [key, compactAssetVariantPersistencePayload(item)]));
 }
 
+async function claimAssetVariantPublish({ variantId, draftId, shopId }, session) {
+  const tenantId = businessTaskTenantKey(session);
+  return withMysqlTransaction(async connection => {
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR UPDATE", [Number(session.tenant.id)]);
+    const [variants] = await connection.execute(`SELECT v.id, v.status, v.source_product_id FROM asset_variants v
+      JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(assetVariantTenantScope(session), "s")}
+      WHERE v.id = ? AND v.shop_id = ? FOR UPDATE`, [Number(session.tenant.id), variantId, shopId]);
+    if (!variants.length) throw Object.assign(new Error("素材不存在或不属于当前企业"), { statusCode: 404 });
+    await assertAssetExecutionAccess(session, { shopIds: [shopId], productId: variants[0].source_product_id, connection });
+    const [copies] = await connection.execute(`SELECT id FROM listing_shop_copies
+      WHERE tenant_id = ? AND draft_id = ? AND shop_id = ? LIMIT 1`, [tenantId, draftId, shopId]);
+    if (!copies.length) throw Object.assign(new Error("草稿与原店铺的发布关联不存在"), { statusCode: 404 });
+    const [records] = await connection.execute(`SELECT id, status FROM listing_publish_records
+      WHERE tenant_id = ? AND draft_id = ? AND shop_id = ? ORDER BY id DESC LIMIT 1`,
+    [tenantId, draftId, shopId]);
+    if (records.length) return records[0];
+    if (["submitting", "submitted", "processing", "reconciliation_required", "published", "imported", "success"].includes(String(variants[0].status))) {
+      throw Object.assign(new Error("上次矩阵发布结果仍待核对，请先查看原上架记录，不要重复提交"), { statusCode: 409, code: "LISTING_PUBLISH_RECONCILIATION_REQUIRED" });
+    }
+    await connection.execute("UPDATE asset_variants SET status = 'submitting' WHERE id = ?", [variantId]);
+    return null;
+  });
+}
+
 async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shopId = 0, status = "", publishResult = null } = {}) {
+  await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [shopId] });
   const normalizedStatus = String(status || "").slice(0, 32);
   if (draftId && shopId) {
     await mysqlExecute(`
@@ -3697,11 +3907,17 @@ async function updateAssetVariantPublishState({ variantId = 0, draftId = 0, shop
     ], 3));
   }
   if (variantId) {
-    await mysqlExecute("UPDATE asset_variants SET status = ? WHERE id = ?", [normalizedStatus || "generated", Number(variantId)]);
+    const scope = assetVariantTenantScope(currentAiTenantSession());
+    await mysqlExecute(`UPDATE asset_variants v JOIN shops s ON s.id = v.shop_id AND ${assetVariantTenantPredicate(scope, "s")}
+      SET v.status = ? WHERE v.id = ? AND v.shop_id = ?`, [scope.id, normalizedStatus || "generated", Number(variantId), Number(shopId)]);
   }
 }
 
 function statusFromOzonPublishResult(result = {}) {
+  const status = String(result.status || "");
+  if (["imported", "published", "success", "submitted", "processing", "ozon_status_pending", "failed", "ozon_status_error"].includes(status)) return status;
+  if (status === "resubmitting") return "reconciliation_required";
+  if (result.ok === false) return "failed";
   const info = result.import_info || result.importInfo || {};
   const raw = JSON.stringify(info || result || {}).toLowerCase();
   if (raw.includes("fail") || raw.includes("error") || raw.includes("rejected")) return "failed";
@@ -3956,13 +4172,18 @@ async function mapWithConcurrency(items = [], concurrency = 2, worker) {
   const limit = Math.max(1, Math.min(Number(concurrency || 1), list.length || 1));
   const results = new Array(list.length);
   let cursor = 0;
+  let firstError = null;
   async function runWorker() {
-    while (cursor < list.length) {
+    while (!firstError && cursor < list.length) {
       const index = cursor++;
-      results[index] = await worker(list[index], index);
+      try { results[index] = await worker(list[index], index); }
+      catch (error) { firstError ||= error; }
     }
   }
-  await Promise.all(Array.from({ length: limit }, runWorker));
+  // Do not finish/fail the job while sibling provider/media operations are
+  // still running. Once one item fails, no worker may claim another item.
+  await Promise.allSettled(Array.from({ length: limit }, runWorker));
+  if (firstError) throw firstError;
   return results;
 }
 
@@ -3985,7 +4206,7 @@ function createConcurrencyLimiter(concurrency = 1) {
   };
 
   return (worker) => new Promise((resolve, reject) => {
-    queue.push({ worker, resolve, reject });
+    queue.push({ worker: AsyncResource.bind(worker), resolve, reject });
     runNext();
   });
 }
@@ -4253,7 +4474,10 @@ async function personNameForSession(session = null) {
 
 async function personNameById(id) {
   if (!id) return "";
-  const row = await mysqlQuery("SELECT name FROM people WHERE id = ? LIMIT 1", [id]).then((rows) => rows[0]).catch(() => null);
+  const session = currentAiTenantSession();
+  if (!session?.tenant) return "";
+  const row = await mysqlQuery(`SELECT p.name FROM people p JOIN tenant_members tm ON tm.person_id = p.id
+    AND tm.tenant_id = ? AND tm.active = 1 WHERE p.id = ? AND p.active = 1 LIMIT 1`, [Number(session.tenant.id), id]).then((rows) => rows[0]).catch(() => null);
   return String(row?.name || "").trim();
 }
 
@@ -4303,6 +4527,7 @@ function defaultShopWatermark(shop) {
 }
 
 async function readImageBuffer(source) {
+  await assertAssetExecutionAccess();
   let text = String(source || "").trim();
   if (/^https?:\/\//i.test(text)) {
     const parsed = new URL(text);
@@ -4337,12 +4562,10 @@ async function readImageBuffer(source) {
     return fs.readFile(localPath);
   }
   if (/^\/?api\//i.test(text)) {
-    return fetchImageBuffer(new URL(text.replace(/^\/?/, "/"), config.appBaseUrl).toString());
+    throw Object.assign(new Error("此私有图片地址不支持直接抓取，请重新上传当前企业素材"), { statusCode: 403 });
   }
   if (/^https?:\/\//i.test(text)) {
-    const response = await fetch(text);
-    if (!response.ok) throw new Error(`远程图片下载失败：${response.status}`);
-    return Buffer.from(await response.arrayBuffer());
+    return fetchImageBuffer(text);
   }
   const localPath = resolveLocalAssetPath(text);
   await assertAssetLocalSourceTenant(localPath, text);
@@ -4396,12 +4619,17 @@ async function assertAssetLocalSourceTenant(filePath, source = "") {
 }
 
 async function fetchImageBuffer(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`远程图片下载失败：${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  const image = await requestPublicImage(url, { maxBytes: 20 * 1024 * 1024,
+    signal: AbortSignal.timeout(20000), beforeRequest: () => assertAssetExecutionAccess() });
+  await assertAssetExecutionAccess();
+  if (!image?.buffer?.length) throw Object.assign(new Error("远程图片必须是可访问的公网图片且不超过 20MB"), {
+    code: "REMOTE_IMAGE_UNAVAILABLE", statusCode: 400, source: url
+  });
+  return image.buffer;
 }
 
 async function imageResult(filePath, type, sortOrder = 1, context = {}) {
+  await assertAssetExecutionAccess(currentAiTenantSession(), { shopIds: [context.shopId] });
   const relative = path.relative(ROOT_DIR, filePath).replace(/\\/g, "/");
   const parts = relative.split("/");
   const batchId = parts[2];

@@ -48,6 +48,7 @@ export const navigationMenus = [
       { key: "ai-variant-lab", label: "AI裂变", route: "/ai-variant-lab" },
       { key: "ai-variant-cases", label: "AI裂变案例库", route: "/ai-variant-cases" },
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
+      { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
       { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" }
     ]
@@ -124,8 +125,7 @@ export const navigationMenus = [
     icon: Setting,
     children: [
       { key: "tenant-shops", label: "店铺管理", route: "/tenant-shops" },
-      { key: "tenant-people", label: "企业人员", route: "/tenant-people" },
-      { key: "asset-variant-center", label: "店铺矩阵配置", route: "/asset-variant-center" }
+      { key: "tenant-people", label: "企业人员", route: "/tenant-people" }
     ]
   },
   {

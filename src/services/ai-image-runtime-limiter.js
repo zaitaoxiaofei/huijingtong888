@@ -1,4 +1,5 @@
 import { getMysqlPoolMetrics } from "../mysql-pool.js";
+import { assertCurrentAiTenantPermission } from "./ai-tenant-context.js";
 
 const GLOBAL_CONCURRENCY_CAP = Math.max(1, Number(process.env.AI_IMAGE_GLOBAL_CONCURRENCY_CAP || 12));
 const state = {
@@ -26,6 +27,7 @@ export function adaptiveAiImageConcurrency(requested = GLOBAL_CONCURRENCY_CAP) {
 export async function withAiImageRuntimeSlot(channel = {}, operation) {
   const release = await acquireAiImageRuntimeSlot(channel);
   try {
+    await assertCurrentAiTenantPermission();
     return await operation();
   } finally {
     release();

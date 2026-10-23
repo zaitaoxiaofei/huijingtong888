@@ -62,7 +62,7 @@ export function pagePermission(path = "") {
   if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
   if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";
   if (path === "/tenant-management" || path === "/platform-accounts" || path.startsWith("/settings")) return "platform.admin";
-  if (path.startsWith("/asset-variant-center") || path === "/tenant-shops" || path === "/tenant-people") return "enterprise.admin";
+  if (path === "/tenant-shops" || path === "/tenant-people") return "enterprise.admin";
   if (path.startsWith("/finance") || path.startsWith("/profit") || path === "/exceptions/profit") return "finance";
   if (path.startsWith("/team")) return "team";
   if (path === "/orders" || path.startsWith("/mobile")) return "orders.read";

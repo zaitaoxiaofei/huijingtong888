@@ -13,9 +13,20 @@ import {
   View,
   ZoomIn
 } from "@element-plus/icons-vue";
-import { apiClient } from "../../utils/api";
+import { apiClient as sharedApiClient, currentApiCacheScope } from "../../utils/api";
 import { uploadListingMedia, withImageToken } from "../../api/tools/imageCropper";
 import { useAuthStore } from "../../stores/auth.js";
+import { hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../../../../src/shared/permissions.js";
+
+// A kept-alive workbench must not start a new request under a switched identity.
+const mountedAuthScope = currentApiCacheScope();
+function assertWorkbenchScope() {
+  if (mountedAuthScope !== currentApiCacheScope()) throw new DOMException("企业或账号已切换，请重新打开矩阵工作区", "AbortError");
+}
+const apiClient = {
+  async get(...args) { assertWorkbenchScope(); const result = await sharedApiClient.get(...args); assertWorkbenchScope(); return result; },
+  async post(...args) { assertWorkbenchScope(); const result = await sharedApiClient.post(...args); assertWorkbenchScope(); return result; }
+};
 
 const VIDEO_DURATION = 8;
 const VIDEO_GENERATE_CONCURRENCY = 4;
@@ -47,7 +58,9 @@ const mediaAssetDeleting = ref(false);
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const tenantConfigOnly = computed(() => authStore.user?.tenant?.slug !== "default");
+const tenantConfigOnly = computed(() => !authStore.user?.tenant?.id || !hasPermission(authStore.user, "operations"));
+const canManageMatrix = computed(() => isEnterpriseAdmin(authStore.user));
+const canManagePlatform = computed(() => isPlatformAdmin(authStore.user));
 const detailDragIndex = ref(null);
 const detailDragOverIndex = ref(null);
 const detailReplaceIndex = ref(-1);
@@ -139,11 +152,12 @@ const enabledShopCount = computed(() => state.selectedShopIds.length);
 const detailStatusText = computed(() => `${material.detailImages.length} 张详情图`);
 const mainUploadStatus = computed(() => (material.mainImage?.url ? "已上传" : "待上传"));
 const configuredShops = computed(() => state.shops.filter((shop) => String(shop.status || "").toLowerCase() !== "deleted"));
-const currentUserId = computed(() => Number(authStore.user?.personId || authStore.user?.id || 0) || 0);
+const currentUserId = computed(() => Number(authStore.user?.personId || authStore.user?.person_id || authStore.user?.id || 0) || 0);
 const generateJobStorageKey = computed(() => {
   const scope = String(generateWorkbenchId.value || route.query.productId || route.query.baseSelectionId || "manual").trim() || "manual";
   const userId = currentUserId.value || "anonymous";
-  return `shop-asset-variant-active-job:${userId}:${scope}`;
+  const tenantId = authStore.user?.tenant?.id || "no-tenant";
+  return `shop-asset-variant-active-job:${tenantId}:${userId}:${scope}`;
 });
 const isGenerateJobActive = computed(() => ["queued", "running"].includes(String(generateJob.status || "")));
 const generateJobProgressText = computed(() => {
@@ -1156,7 +1170,7 @@ async function pollGenerateJob() {
     ElMessage.success("已恢复后台生成结果");
     return;
   }
-  const errorMessage = detail.error?.message || detail.error?.raw_message || "批量生成任务失败";
+  const errorMessage = detail.error?.message || detail.error?.raw_message || (detail.status === 'reconciliation_required' ? "任务中断，已暂停避免重复生成或发布，请先核对原任务结果" : "批量生成任务失败");
   const cancelled = detail.status === "cancelled";
   resetGenerateJobState({ clearPersisted: true });
   if (cancelled) {
@@ -1642,12 +1656,14 @@ function buildShopVideoName(variant) {
   return `${base}-${shop}-video.${ext}`;
 }
 async function saveRule(shop, { silent = false } = {}) {
+  if (!canManageMatrix.value) return;
   const result = await apiClient.post("/api/asset-variant-engine/rules", { shopId: shop.id, ...state.rules[shop.id] });
   if (result?.updated_at && state.rules[shop.id]) state.rules[shop.id].updated_at = result.updated_at;
   if (!silent) ElMessage.success(`${shop.name} 规则已保存`);
 }
 
 async function syncOzonCategories() {
+  if (!canManagePlatform.value) return;
   syncingCategories.value = true;
   try {
     const result = await apiClient.post("/api/asset-variant-engine/sync-ozon-categories", {});
@@ -1704,7 +1720,7 @@ async function goToListingAutomation() {
 }
 
 function openMaterialCenter() {
-  if (tenantConfigOnly.value) return;
+  if (tenantConfigOnly.value || !canManagePlatform.value) return;
   router.push({
     name: "settings-materials",
     query: {
@@ -2294,9 +2310,10 @@ function productDimensionText(variant = selectedVariant.value) {
 }
 
 function openTailTemplateDialog(row = null) {
+  if (!canManageMatrix.value) return;
   const rule = row ? state.rules[row.id] : null;
   tailTemplateDialog.visible = true;
-  tailTemplateDialog.shopId = row.id || "";
+  tailTemplateDialog.shopId = row?.id || "";
   tailTemplateDialog.category = rule?.tailCategory || state.tailCategories[0] || "通用汽车用品";
   tailTemplateDialog.vehicleModel = rule?.vehicleModel || state.vehicleModels[0] || "通用车型";
   tailTemplateDialog.name = row ? `${row.name}-${tailTemplateDialog.category}-${tailTemplateDialog.vehicleModel}-尾图` : "";
@@ -2311,6 +2328,7 @@ async function onTailTemplateImageChange(file) {
 }
 
 async function createTailTemplate() {
+  if (!canManageMatrix.value) return;
   if (!tailTemplateDialog.image) {
     ElMessage.warning("请先上传尾图模板图片");
     return;
@@ -2385,7 +2403,7 @@ onBeforeUnmount(() => {
         </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="loadBootstrap">刷新</el-button>
-        <el-button v-if="!tenantConfigOnly" :icon="View" @click="openMaterialCenter">查看素材</el-button>
+        <el-button v-if="!tenantConfigOnly && canManagePlatform" :icon="View" @click="openMaterialCenter">查看素材</el-button>
         <el-button v-if="!tenantConfigOnly" :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
         <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
         <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
@@ -2569,8 +2587,8 @@ onBeforeUnmount(() => {
               <p>这里主要负责每个店铺的水印、尾图和主图生成方案，价格和文案风格放到下方独立矩阵。</p>
             </div>
             <div class="step-actions">
-              <el-button v-if="!tenantConfigOnly" size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
-              <el-button size="small" @click="openTailTemplateDialog()">新增尾图模板</el-button>
+              <el-button v-if="canManagePlatform" size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
+              <el-button v-if="canManageMatrix" size="small" @click="openTailTemplateDialog()">新增尾图模板</el-button>
             </div>
           </div>
 
@@ -2616,9 +2634,9 @@ onBeforeUnmount(() => {
                 </el-select>
               </div>
               <div class="rule-actions" @click.stop>
-                <el-button link type="primary" @click="saveRule(shop)">保存规则</el-button>
+                <el-button v-if="canManageMatrix" link type="primary" @click="saveRule(shop)">保存规则</el-button>
                 <el-button v-if="!tenantConfigOnly" link type="primary" @click="previewGeneratedResult">预览</el-button>
-                <el-button link type="primary" @click="openTailTemplateDialog(shop)">加尾图</el-button>
+                <el-button v-if="canManageMatrix" link type="primary" @click="openTailTemplateDialog(shop)">加尾图</el-button>
               </div>
             </article>
           </div>
@@ -2629,7 +2647,7 @@ onBeforeUnmount(() => {
             <span class="step-index">{{ tenantConfigOnly ? 2 : 3 }}</span>
             <div>
               <h2>价格矩阵</h2>
-              <p>{{ priceMatrixSummary() }}。价格角色可以手动选择，会保存为店铺规则并应用到一键上架流程。</p>
+              <p>{{ priceMatrixSummary() }}。{{ canManageMatrix ? '价格角色可以手动选择，保存后作为店铺规则应用到一键上架。' : '价格角色可以手动选择，当前选择仅用于本次生成。' }}</p>
             </div>
             <el-button size="small" @click="applyDefaultMatrixRules">恢复默认矩阵</el-button>
           </div>
@@ -2653,7 +2671,7 @@ onBeforeUnmount(() => {
                   <el-option v-for="item in PRICE_ROLES" :key="item.value" :label="item.label" :value="item.value" />
                 </el-select>
                 <el-input-number v-model="state.rules[shop.id].priceIndex" :min="0.1" :max="9.9999" :step="0.001" :precision="4" controls-position="right" />
-                <el-button size="small" type="primary" link @click.stop="saveRule(shop)">保存策略</el-button>
+                <el-button v-if="canManageMatrix" size="small" type="primary" link @click.stop="saveRule(shop)">保存策略</el-button>
               </div>
             </article>
           </div>

@@ -4,14 +4,14 @@ import crypto from "node:crypto";
 import sharp from "sharp";
 import { config } from "../config.js";
 import { requestPublicImage, resolvePublicImageTarget } from "../http/public-image-request.js";
-import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { chatWithAiProvider, visionWithAiProvider } from "./ai-provider-settings.js";
-import { generateImages } from "../server/services/ai/aiWorkflowService.js";
+import { generateImages, getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
 import { aiImageRuntimePoolConfig } from "./ai-provider-settings.js";
-import { materializeListingMediaAssetUrl } from "./listing-automation.js";
+import { materializeListingMediaAssetUrl, listingDraftDetail } from "./listing-automation.js";
 import { putContentAddressedObject } from "./object-storage.js";
 import { adaptiveAiImageConcurrency, aiImageRuntimeMetrics } from "./ai-image-runtime-limiter.js";
-import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
+import { aiTenantId, assertCurrentAiTenantPermission, currentAiTenantSession, needsAiTenantSession, withAiTenantRequestGuard, withAiTenantSession } from "./ai-tenant-context.js";
 import { assertBusinessTaskPermission, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
 
@@ -1387,6 +1387,86 @@ async function findReusableVariantAnalysis({ sourceProductId = "", sourceImageUr
   };
 }
 
+function optimizerPrivateTaskId(value) {
+  let pathname = String(value || "");
+  if (/^https?:\/\//i.test(pathname)) {
+    const parsed = new URL(pathname);
+    const hosts = new Set(["erp.hjt888.xyz","localhost","127.0.0.1",new URL(config.appBaseUrl).hostname]);
+    if (!hosts.has(parsed.hostname.toLowerCase())) return "";
+    pathname = parsed.pathname;
+  }
+  const match = /^\/api\/ai\/(?:file|preview-file)\/([^/]+)\//i.exec(pathname);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+async function assertOptimizerResourceReferences(body = {}, { connection = null, lock = false, allowNewJob = false } = {}) {
+  const query = connection ? async (sql,params) => (await connection.execute(lock ? `${sql.trim()} FOR SHARE` : sql,params))[0] : mysqlQuery;
+  const key = aiTenantId();
+  for (const id of [body.sourceDraftId,body.source_draft_id,body.result?.result_draft_id,body.result_json?.result_draft_id].filter(Boolean)) {
+    const rows = await query("SELECT id FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted'",[id,key]);
+    if (!rows.length) throw statusError("优化来源或结果草稿不存在或不属于当前企业",404);
+  }
+  const job = cleanText(body.optimizerJobNo || body.optimizer_job_no || (!allowNewJob && (body.jobNo || body.job_no)) || "");
+  if (job && !(await query("SELECT id FROM ai_image_optimizer_jobs WHERE tenant_id = ? AND job_no = ? LIMIT 1",[key,job])).length) throw statusError("优化任务不存在或不属于当前企业",404);
+  const values = [body.imageUrl,body.image_url,body.sourceImageUrl,body.source_image_url,body.generatedImageUrl,body.generated_image_url,body.referenceImageUrl,body.reference_image_url,
+    ...arrayValue(body.candidates || body.candidatePool || body.candidate_pool).slice(0,100).map(item => item?.url),
+    ...arrayValue(body.finalImageSlots || body.final_image_slots).slice(0,100).map(item => item?.url),
+    ...arrayValue(body.result?.images || body.result_json?.images).slice(0,100).map(item => typeof item === "string" ? item : item?.url)];
+  for (const task of new Set(values.map(optimizerPrivateTaskId).filter(Boolean))) {
+    const rows = await query("SELECT tenant_id FROM ai_image_task_owners WHERE task_id = ? LIMIT 1",[task]);
+    if ((!rows.length && key !== "admin") || rows.length && rows[0].tenant_id !== key) throw statusError("优化图片不存在或不属于当前企业",404);
+  }
+}
+
+async function assertOptimizerReferences(body = {}, options = {}) {
+  await assertCurrentAiTenantPermission();
+  await assertOptimizerResourceReferences(body,options);
+  await assertCurrentAiTenantPermission();
+}
+
+function withOptimizerSession(session, body, operation, { allowNewJob = false } = {}) {
+  return withAiTenantSession(session, () => withAiTenantRequestGuard(options => assertOptimizerResourceReferences(body,{...options,allowNewJob}),operation));
+}
+
+async function withOptimizerWrite(body, jobNo, operation, { allowNewJob = false } = {}) {
+  return withMysqlTransaction(async connection => {
+    // Provider work is already finished. Hold only these short persistence
+    // locks, then re-read current authorization after every possible row wait.
+    await connection.execute("SELECT id FROM tenants WHERE id = ? FOR SHARE", [currentAiTenantSession().tenant.id]);
+    const [jobs] = await connection.execute("SELECT id FROM ai_image_optimizer_jobs WHERE tenant_id = ? AND job_no = ? FOR UPDATE", [aiTenantId(), jobNo]);
+    if (!allowNewJob && !jobs.length) throw statusError("优化任务不存在或不属于当前企业",404);
+    await assertOptimizerResourceReferences(body,{connection,lock:true,allowNewJob});
+    await assertCurrentAiTenantPermission({connection,lock:true});
+    return operation(async (sql,params) => (await connection.execute(sql,params))[0]);
+  });
+}
+
+async function resolveOptimizerImageUrl(body = {}, { requireData = false } = {}) {
+  await assertCurrentAiTenantPermission();
+  const value = String(body.imageUrl || body.sourceImageUrl || body.image_url || body.source_image_url || "").trim();
+  let pathname = value;
+  if (/^https?:\/\//i.test(value)) {
+    const parsed = new URL(value);
+    const appHosts = new Set(["erp.hjt888.xyz", "localhost", "127.0.0.1", new URL(config.appBaseUrl).hostname]);
+    pathname = appHosts.has(parsed.hostname.toLowerCase()) ? parsed.pathname : "";
+  }
+  const owned = /^\/api\/ai\/(?:file|preview-file)\/([^/]+)\/(?:(generated|cropped)\/)?(.+)$/i.exec(pathname);
+  let result;
+  if (owned) {
+    const file = await getAiTaskFile(decodeURIComponent(owned[1]), owned[2] || "generated", decodeURIComponent(owned[3]), currentAiTenantSession());
+    if (file.size > 20 * 1024 * 1024) throw statusError("优化图片超过 20 MB，请缩小后重试", 400);
+    await assertCurrentAiTenantPermission();
+    const bytes = await fs.promises.readFile(file.filePath);
+    result = `data:${file.contentType};base64,${bytes.toString("base64")}`;
+  } else result = await resolveImageUrl(body);
+  if (requireData && !result.startsWith("data:image/")) {
+    await assertCurrentAiTenantPermission();
+    result = await fetchImageAsDataUrl(result);
+  }
+  await assertCurrentAiTenantPermission();
+  return result;
+}
+
 async function findReusableOptimizerAnalysis({ sourceProductId = "", sourceImageUrl = "" } = {}) {
   const lookup = await latestAnalysisRow({
     table: "ai_image_optimizer_jobs",
@@ -1445,12 +1525,14 @@ async function latestAnalysisRow({ table, idColumn, sourceProductId = "", source
 }
 
 export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerAnalyze(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerAnalyze(body, session), {allowNewJob:true});
+  await assertOptimizerReferences(body,{allowNewJob:true});
   await ensureAiVariantLabSchema();
   const sourceProductId = cleanText(body.sourceProductId || body.source_product_id || "");
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || "");
   if (body.lookupOnly || body.lookup_only) {
     const reusable = await findReusableOptimizerAnalysis({ sourceProductId, sourceImageUrl });
+    await assertCurrentAiTenantPermission();
     return reusable || { ok: true, reusable: false };
   }
   const imageInputs = await resolveOptimizerImageInputs(body);
@@ -1458,7 +1540,7 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
   const reusable = shouldReuseAnalysis(body)
     ? await findReusableOptimizerAnalysis({ sourceProductId, sourceImageUrl: imageUrl })
     : null;
-  if (reusable) return reusable;
+  if (reusable) { await assertCurrentAiTenantPermission(); return reusable; }
   const result = await visionWithAiProvider({
     temperature: 0.12,
     maxTokens: 1500,
@@ -1476,7 +1558,8 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
   });
   const analysis = normalizeOptimizerAnalysis(parseJsonObject(result.content, { raw_text: result.content, parse_error: true }));
   const jobNo = body.jobNo || body.job_no || makeNo("OPTJOB");
-  await mysqlExecute(`
+  await assertCurrentAiTenantPermission();
+  await withOptimizerWrite(body, jobNo, execute => execute(`
     INSERT INTO ai_image_optimizer_jobs
     (tenant_id, job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, created_by_person_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1497,7 +1580,7 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
     JSON.stringify(result.usage || {}),
     JSON.stringify(analysis),
     personId(session)
-  ], 0));
+  ], 0)), {allowNewJob:true});
   return {
     ok: true,
     job_no: jobNo,
@@ -1510,31 +1593,37 @@ export async function aiImageOptimizerAnalyze(body = {}, session = {}) {
 }
 
 export async function aiImageOptimizerAnalysisLookup(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerAnalysisLookup(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerAnalysisLookup(body, session));
+  await assertOptimizerReferences(body);
   await ensureAiVariantLabSchema();
   const sourceProductId = cleanText(body.sourceProductId || body.source_product_id || "");
   const sourceImageUrl = cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || "");
-  return await findReusableOptimizerAnalysis({ sourceProductId, sourceImageUrl }) || { ok: true, reusable: false };
+  const reusable = await findReusableOptimizerAnalysis({ sourceProductId, sourceImageUrl });
+  await assertCurrentAiTenantPermission();
+  return reusable || { ok: true, reusable: false };
 }
 
 export async function aiImageOptimizerConfirmAnalysis(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerConfirmAnalysis(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerConfirmAnalysis(body, session));
+  await assertOptimizerReferences(body);
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   const analysis = normalizeOptimizerAnalysis(body.analysis || {});
   if (!jobNo) throw statusError("jobNo is required", 400);
-  const result = await mysqlExecute(`
+  await assertCurrentAiTenantPermission();
+  const result = await withOptimizerWrite(body, jobNo, execute => execute(`
     UPDATE ai_image_optimizer_jobs
     SET analysis_json = ?, plan_json = NULL, result_json = NULL, status = 'analysis_confirmed',
         created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
     WHERE tenant_id = ? AND job_no = ?
-  `, aiTenantParams([JSON.stringify(analysis), personId(session), jobNo], 2));
+  `, aiTenantParams([JSON.stringify(analysis), personId(session), jobNo], 2)));
   if (!Number(result?.affectedRows || 0)) throw statusError(`optimizer job not found: ${jobNo}`, 404);
   return { ok: true, job_no: jobNo, status: "analysis_confirmed", analysis };
 }
 
 export async function aiImageOptimizerConfirmPlan(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerConfirmPlan(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerConfirmPlan(body, session));
+  await assertOptimizerReferences(body);
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
@@ -1544,34 +1633,38 @@ export async function aiImageOptimizerConfirmPlan(body = {}, session = {}) {
     operator_edits: objectValue(suppliedPlan.operator_edits),
     confirmed_generation_modules: arrayValue(suppliedPlan.confirmed_generation_modules)
   };
-  const result = await mysqlExecute(`
+  await assertCurrentAiTenantPermission();
+  const result = await withOptimizerWrite(body, jobNo, execute => execute(`
     UPDATE ai_image_optimizer_jobs
     SET plan_json = ?, result_json = NULL, status = 'plan_confirmed',
         created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
     WHERE tenant_id = ? AND job_no = ? AND status IN ('analysis_confirmed', 'planned', 'plan_confirmed', 'generated', 'partial')
-  `, aiTenantParams([JSON.stringify(plan), personId(session), jobNo], 2));
+  `, aiTenantParams([JSON.stringify(plan), personId(session), jobNo], 2)));
   if (!Number(result?.affectedRows || 0)) throw statusError("请先确认并保存识别结果", 409);
   return { ok: true, job_no: jobNo, status: "plan_confirmed", plan };
 }
 
 export async function aiImageOptimizerSaveResult(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerSaveResult(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerSaveResult(body, session));
+  await assertOptimizerReferences(body);
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   if (!jobNo) throw statusError("jobNo is required", 400);
   const resultJson = nonEmptyObjectValue(body.result || body.result_json) || {};
   const status = body.partial === true ? "partial" : "generated";
-  const result = await mysqlExecute(`
+  await assertCurrentAiTenantPermission();
+  const result = await withOptimizerWrite(body, jobNo, execute => execute(`
     UPDATE ai_image_optimizer_jobs
     SET result_json = ?, status = ?, created_by_person_id = COALESCE(created_by_person_id, ?), updated_at = CURRENT_TIMESTAMP
     WHERE tenant_id = ? AND job_no = ? AND status IN ('plan_confirmed', 'generated', 'partial')
-  `, aiTenantParams([JSON.stringify(resultJson), status, personId(session), jobNo], 3));
+  `, aiTenantParams([JSON.stringify(resultJson), status, personId(session), jobNo], 3)));
   if (!Number(result?.affectedRows || 0)) throw statusError("请先确认并保存生成计划", 409);
   return { ok: true, job_no: jobNo, status, result: resultJson };
 }
 
 export async function aiImageOptimizerJobDetail(jobNo = "", session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerJobDetail(jobNo, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, {}, () => aiImageOptimizerJobDetail(jobNo, session));
+  await assertCurrentAiTenantPermission();
   await ensureAiVariantLabSchema();
   const key = cleanText(jobNo);
   const rows = await mysqlQuery(`
@@ -1581,6 +1674,7 @@ export async function aiImageOptimizerJobDetail(jobNo = "", session = {}) {
   `, aiTenantParams([key], 0));
   if (!rows.length) throw statusError(`optimizer job not found: ${key}`, 404);
   const row = rows[0];
+  await assertCurrentAiTenantPermission();
   return {
     ok: true,
     job_no: row.job_no,
@@ -1598,7 +1692,8 @@ export async function aiImageOptimizerJobDetail(jobNo = "", session = {}) {
 }
 
 export async function aiImageOptimizerPlan(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerPlan(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerPlan(body, session));
+  await assertOptimizerReferences(body);
   await ensureAiVariantLabSchema();
   const jobNo = cleanText(body.jobNo || body.job_no || "");
   const analysis = body.analysis || await resolveOptimizerAnalysis(jobNo);
@@ -1623,7 +1718,8 @@ export async function aiImageOptimizerPlan(body = {}, session = {}) {
   const result = await callOptimizerPlanWithRetry(planRequest);
   const plan = normalizeOptimizationPlan(parseJsonObject(result.content, { raw_text: result.content, parse_error: true }), analysis);
   const nextJobNo = jobNo || body.jobNo || body.job_no || makeNo("OPTJOB");
-  await mysqlExecute(`
+  await assertCurrentAiTenantPermission();
+  await withOptimizerWrite(body, nextJobNo, execute => execute(`
     INSERT INTO ai_image_optimizer_jobs
     (tenant_id, job_no, source_image_url, source_product_id, status, model, usage_json, analysis_json, plan_json, created_by_person_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1644,7 +1740,7 @@ export async function aiImageOptimizerPlan(body = {}, session = {}) {
     JSON.stringify(analysis || {}),
     JSON.stringify(plan),
     personId(session)
-  ], 0));
+  ], 0)), {allowNewJob:!jobNo});
   return {
     ok: true,
     job_no: nextJobNo,
@@ -1671,18 +1767,19 @@ async function callOptimizerPlanWithRetry(payload = {}) {
 }
 
 export async function aiImageOptimizerReviewImage(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerReviewImage(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerReviewImage(body, session));
+  await assertOptimizerReferences(body);
   const generatedImageUrl = cleanText(body.generatedImageUrl || body.generated_image_url || "");
   if (!generatedImageUrl) throw statusError("generatedImageUrl is required", 400);
   const referenceImageUrl = cleanText(body.referenceImageUrl || body.reference_image_url || "");
   const images = [];
   if (referenceImageUrl) images.push({
     type: "image_url",
-    image_url: { url: await resolveImageUrl({ imageUrl: referenceImageUrl }) }
+    image_url: { url: await resolveOptimizerImageUrl({ imageUrl: referenceImageUrl }) }
   });
   images.push({
     type: "image_url",
-    image_url: { url: await resolveImageUrl({ imageUrl: generatedImageUrl }) }
+    image_url: { url: await resolveOptimizerImageUrl({ imageUrl: generatedImageUrl }) }
   });
   const result = await visionWithAiProvider({
     temperature: 0.05,
@@ -1709,6 +1806,7 @@ export async function aiImageOptimizerReviewImage(body = {}, session = {}) {
       }
     ]
   });
+  await assertCurrentAiTenantPermission();
   const review = normalizeOptimizerImageReview(parseJsonObject(result.content, { raw_text: result.content, parse_error: true }));
   return {
     ok: true,
@@ -1721,14 +1819,15 @@ export async function aiImageOptimizerReviewImage(body = {}, session = {}) {
 }
 
 export async function aiImageOptimizerComposeText(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerComposeText(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerComposeText(body, session));
+  await assertOptimizerReferences(body);
   const imageUrl = cleanText(body.imageUrl || body.image_url || "");
   if (!imageUrl) throw statusError("imageUrl is required", 400);
   const title = optimizerOverlayText(body.title || body.text || body.overlayText || body.overlay_text || "");
   const subtitle = optimizerOverlayText(body.subtitle || body.compatibility || "");
   const bullets = toArray(body.bullets || body.benefits).map(optimizerOverlayText).filter(Boolean).slice(0, 3);
   if (!title && !subtitle && !bullets.length) return { ok: true, composed: false, url: imageUrl };
-  const dataUrl = await resolveImageUrl({ imageUrl });
+  const dataUrl = await resolveOptimizerImageUrl({ imageUrl }, { requireData: true });
   const sourceBuffer = dataUrlBuffer(dataUrl);
   const image = sharp(sourceBuffer).rotate();
   const metadata = await image.metadata();
@@ -1744,11 +1843,13 @@ export async function aiImageOptimizerComposeText(body = {}, session = {}) {
   });
   const filename = `ai-material-text-${Date.now()}-${crypto.randomBytes(5).toString("hex")}.png`;
   const composedBuffer = await image.composite([{ input: Buffer.from(overlay) }]).png().toBuffer();
+  await assertCurrentAiTenantPermission();
   const stored = await putContentAddressedObject(composedBuffer, {
     prefix: "listing-media",
     extension: ".png",
     contentType: "image/png"
   });
+  await assertCurrentAiTenantPermission();
   if (stored) {
     return { ok: true, composed: true, url: stored.url, text: title, subtitle, bullets };
   }
@@ -1756,13 +1857,17 @@ export async function aiImageOptimizerComposeText(body = {}, session = {}) {
     path.resolve(process.env.LISTING_MEDIA_ROOT || "public/uploads/listing-media"),
     path.resolve("public", "uploads", "listing-media")
   ])];
+  await assertCurrentAiTenantPermission();
   await Promise.all(outputRoots.map((root) => fs.promises.mkdir(root, { recursive: true })));
+  await assertCurrentAiTenantPermission();
   await Promise.all(outputRoots.map((root) => fs.promises.writeFile(path.join(root, filename), composedBuffer)));
+  await assertCurrentAiTenantPermission();
   return { ok: true, composed: true, url: `/uploads/listing-media/${filename}`, text: title, subtitle, bullets };
 }
 
 export async function aiImageOptimizerTestImage(body = {}, session = {}) {
-  if (needsAiTenantSession(session)) return withAiTenantSession(session, () => aiImageOptimizerTestImage(body, session));
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiImageOptimizerTestImage(body, session));
+  await assertOptimizerReferences(body);
   const plan = body.plan || await resolveOptimizerPlan(cleanText(body.jobNo || body.job_no || "")).catch(() => null);
   const prompt = cleanText(body.imagePrompt || body.image_prompt || plan?.image_optimization_prompt_en || "");
   if (!prompt) throw statusError("image optimization prompt is required", 400);
@@ -1781,15 +1886,15 @@ export async function aiImageOptimizerTestImage(body = {}, session = {}) {
 }
 
 export async function aiProductMaterialOptimizerPrepareTemplate(body = {}, session = {}) {
+  if (needsAiTenantSession(session)) return withOptimizerSession(session, body, () => aiProductMaterialOptimizerPrepareTemplate(body, session));
+  await assertOptimizerReferences(body);
   const candidates = normalizeMaterialCandidates(body.candidates || body.candidatePool || body.candidate_pool || []);
   let finalImageSlots = normalizeFinalImageSlots(body.finalImageSlots || body.final_image_slots || [], candidates);
   if (!finalImageSlots.length) throw statusError("请先选择最终图片位", 400);
   if (!finalImageSlots[0]?.url) throw statusError("主图位不能为空", 400);
-  if (finalImageSlots.some(slot => optimizerSlotRequiresMaterialization(slot.url)) && needsAiTenantSession(session)) {
-    return withAiTenantSession(session, () => aiProductMaterialOptimizerPrepareTemplate(body, session));
-  }
   const materializedUrls = new Map();
   finalImageSlots = await Promise.all(finalImageSlots.map(async (slot, index) => {
+    await assertCurrentAiTenantPermission();
     const sourceUrl = cleanText(slot.url);
     if (!optimizerSlotRequiresMaterialization(sourceUrl)) {
       materializedUrls.set(sourceUrl, sourceUrl);
@@ -1802,14 +1907,17 @@ export async function aiProductMaterialOptimizerPrepareTemplate(body = {}, sessi
         batch_id: cleanText(body.optimizerJobNo || body.optimizer_job_no || ""),
         role: index === 0 ? "optimizer_main" : `optimizer_detail_${index}`
       }, session);
+      await assertCurrentAiTenantPermission();
       const finalUrl = cleanText(persisted?.finalUrl || persisted?.publishUrl || persisted?.localUrl);
       if (!finalUrl) throw new Error("media library returned no usable URL");
       materializedUrls.set(sourceUrl, finalUrl);
       return { ...slot, url: finalUrl };
     } catch (error) {
+      if ([403, 404, 409].includes(Number(error.status || error.statusCode))) throw error;
       throw statusError(`Selected ${index === 0 ? "main image" : `detail image ${index}`} could not be materialized: ${error?.message || "retry this image"}`, 503);
     }
   }));
+  await assertCurrentAiTenantPermission();
   const durableCandidates = candidates.map((candidate) => ({ ...candidate, url: materializedUrls.get(candidate.url) || candidate.url }));
   const images = finalImageSlots.map((slot, index) => ({
     url: slot.url,
@@ -2570,7 +2678,7 @@ async function resolveOptimizerImageInputs(body = {}) {
       role: "main",
       label: "主图",
       sourceUrl: cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || ""),
-      url: await resolveImageUrl(body)
+      url: await resolveOptimizerImageUrl(body)
     });
   }
   for (const [index, candidate] of pickedCandidates.entries()) {
@@ -2579,14 +2687,14 @@ async function resolveOptimizerImageInputs(body = {}) {
       role: candidate.kind || (index === 0 ? "main" : "detail"),
       label: candidate.title || (index === 0 ? "主图" : `详情图 ${index}`),
       sourceUrl: candidate.url,
-      url: await resolveImageUrl({ imageUrl: candidate.url })
+      url: await resolveOptimizerImageUrl({ imageUrl: candidate.url })
     });
   }
   if (!inputs.length) inputs.push({
     role: "main",
     label: "主图",
     sourceUrl: cleanText(body.sourceImageUrl || body.imageUrl || body.image_url || body.imagePath || body.image_path || ""),
-    url: await resolveImageUrl(body)
+    url: await resolveOptimizerImageUrl(body)
   });
   return inputs.slice(0, 8);
 }

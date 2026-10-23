@@ -27,7 +27,12 @@ test("platform-only and enterprise-only identities receive separate navigation, 
   }
   const group = nav.navigationMenusForRole(enterprise).find((item) => item.key === "tenant-shops");
   assert.equal(group.label, "企业店铺");
-  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/tenant-people", "/asset-variant-center"]);
+  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/tenant-people"]);
+  const operator = { roles: ['operations'], tenant: { id: 42, slug: 'company-a', role: 'member' } };
+  assert.ok(routesFor(operator).includes('/asset-variant-center'));
+  assert.ok(!routesFor(operator).includes('/tenant-people'));
+  assert.ok(!routesFor(operator).includes('/tenant-shops'));
+  assert.ok(nav.navigationMenusForRole(operator).find(item => item.key === 'ai-skills').children.some(item => item.route === '/asset-variant-center'));
 });
 
 test("global settings expose only shared-rule tabs and platform roster is read-only", () => {
