@@ -56,6 +56,22 @@ export function oglFileCapabilities(info={}) {
   };
   return {container_labels:capability('container_labels',['get_label_containers']),barcode:capability('barcode',['get_barcode','get_label_barcode'])};
 }
+export function normalizeOglHandoverType(info={}) {
+  const mode=String(info?.first_mile_type||'').trim().toLowerCase().replaceAll('_','');
+  return mode==='pickup'?'courier':mode==='dropoff'?'self':null;
+}
+function assertHandoverSelection(body,info) {
+  if(body.handover_type===undefined) return;
+  if(!['courier','self'].includes(body.handover_type)) fail('交运方式仅支持上门取件或自行送货，请重新选择',400,'OGL_HANDOVER_TYPE_INVALID');
+  const actual=normalizeOglHandoverType(info);
+  if(!actual) fail('官方尚未返回可确定的交运方式（first_mile_type），不能证明已切换取件或自送；请在 Ozon 后台核对后重新获取可用方式',409,'OGL_HANDOVER_TYPE_UNKNOWN');
+  if(actual!==body.handover_type) fail('所选交运方式与官方配送方式不一致，请选择官方返回的取件或自送方式；本系统不会直接修改仓库的全局交运设置',409,'OGL_HANDOVER_TYPE_MISMATCH');
+}
+function officialConfirmationObserved(info={}) {
+  const state=String(info.status||'').toLowerCase();
+  return ['sended','received','closed'].includes(state)
+    ||state==='formed'&&oglFileCapabilities(info).container_labels.available===true;
+}
 function beijingDay(value, now) {
   const day=value==null||value===''?shanghaiDateKey(now()):String(value).trim();
   if(!/^\d{4}-\d{2}-\d{2}$/.test(day)||shanghaiDateKey(`${day}T00:00:00+08:00`)!==day) fail('请选择有效的北京日期（YYYY-MM-DD）');
@@ -167,7 +183,15 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     const official=parsed(result.official_result_json);
     return { batch: { ...result, official_result: official, file_capabilities:oglFileCapabilities(official.carriage||official.info),
       snapshot_at:oglOfficialCreatedAt(official.last_observed_at),last_checked_at:oglOfficialCreatedAt(official.last_observed_at),official_operation_token: undefined }, members: rows.map(({ raw_json, ...row }) => row), events,
-      summary: {...summarizeOglMembers(rows),container_count_mismatch:Boolean(official.container_count_mismatch),delivery_method_mismatch:Boolean(official.delivery_method_mismatch)} };
+      summary: {...summarizeOglMembers(rows),failed_postings:Array.isArray(official.failed_postings)?official.failed_postings:[],container_count_mismatch:Boolean(official.container_count_mismatch),delivery_method_mismatch:Boolean(official.delivery_method_mismatch)} };
+  }
+  function localManifestMembers(detail,creationShopId,numbers) {
+    const accepted=new Set(numbers);
+    return detail.members.map(row=>{
+      const own=Number(row.shop_id)===Number(creationShopId),official=own&&accepted.has(row.posting_number);
+      return {...row,official_member:Number(official),association_type:official?'official':own?'local_missing_official':'local_other_shop',
+        association_label:official?'官方已收录':own?'本店未被官方收录':'仅 ERP 关联（其他店铺）'};
+    });
   }
   async function previewRows(connection, current, orderIds, lock = false) {
     const selected = ids(orderIds);
@@ -413,15 +437,22 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       if(carriage.departure_date!==day)fail('申请快照不属于所选北京发运日期，请核对日期后重试',404);
       const own=detail.members.filter(row=>Number(row.shop_id)===Number(ctx.shop.id));
       const stored=Array.isArray(saved.official_posting_numbers)?saved.official_posting_numbers:Array.isArray(saved.posting_numbers)?saved.posting_numbers:null;
-      const numbers=stored?[...new Set(stored.map(value=>text(value,128)).filter(Boolean))]:own.filter(row=>row.official_member).map(row=>row.posting_number);
+      const failed_postings=Array.isArray(saved.failed_postings)?saved.failed_postings.map(row=>({posting_number:text(row.posting_number,128),status:text(row.status,64),seller_error:text(row.seller_error,500)})):[];
+      const failedNumbers=new Set(failed_postings.map(row=>row.posting_number));
+      const accepted=stored?[...new Set(stored.map(value=>text(value,128)).filter(value=>value&&!failedNumbers.has(value)))]:own.filter(row=>row.official_member&&!failedNumbers.has(row.posting_number)).map(row=>row.posting_number);
+      const numbers=[...new Set([...accepted,...failedNumbers])];
+      const local_members=localManifestMembers(detail,ctx.shop.id,accepted);
       const members=numbers.map(postingNumber=>{
         const local=own.find(row=>row.posting_number===postingNumber);
+        const official=(Array.isArray(saved.official_postings)?saved.official_postings:failed_postings).find(row=>row.posting_number===postingNumber);
         return {posting_number:postingNumber,order_id:local?Number(local.order_id):null,shop_id:Number(ctx.shop.id),shop_name:ctx.shop.name,matched_local:Boolean(local),
+          official_member:Number(accepted.includes(postingNumber)),official_status:text(official?.status,64),seller_error:text(official?.seller_error,500),
           ordered_at:local?.ordered_at||null,order_path:local?.order_path||null,platform_status:local?.platform_status||'',logistics_status:local?.logistics_status||'',tracking_stage:local?.tracking_stage||'',
           last_synced_at:local?.last_synced_at||null,online:Boolean(local?.online),delivered:Boolean(local?.delivered),cancelled:Boolean(local?.cancelled)};
       });
-      const count=carriage.postings_count??(stored?numbers.length:null),matched=members.filter(row=>row.matched_local).length;
-      return {carriage,members,summary:{official_members:count,matched_local:matched,unmatched_local:count==null?null:Math.max(0,count-matched),online:members.filter(row=>row.online).length},
+      const count=stored?accepted.length:carriage.postings_count??null,matched=members.filter(row=>row.matched_local&&row.official_member).length;
+      return {carriage,members,local_members,failed_postings,summary:{official_members:count,matched_local:matched,unmatched_local:count==null?null:Math.max(0,count-matched),online:members.filter(row=>row.official_member&&row.online).length,
+          failed_postings,local_members_count:local_members.length,local_only_count:local_members.filter(row=>!row.official_member).length},
         dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day,source:'snapshot',last_checked_at:carriage.snapshot_at,members_complete:Boolean(stored),
         notice:stored?'已保存的官方清单快照；本地订单轨迹单独显示当前记录':'旧快照只保存了已关联本地订单；完整官方清单需显式刷新后查看'};
     });
@@ -487,7 +518,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const [settings]=await connection.execute('SELECT default_shop_id FROM ogl_dispatch_settings WHERE tenant_id = ?',[current.id]);
       if(ctx.currentSettings&&Number(settings[0]?.default_shop_id)!==Number(ctx.shop.id)) fail('默认发运店铺已变更，请重新查询后台已有单',409,'OGL_SETTINGS_CHANGED');
       if(ctx.monitorSetting)await verifyMonitorSetting(connection,current,ctx.monitorSetting);
-      const numbers=[...new Set(data.numbers)]; const localOrders=[];
+      const numbers=[...new Set(data.list.map(row=>row.posting_number))]; const localOrders=[];
       // Match both shop and posting number. A number belonging to another shop
       // never becomes an authorized local member of this official manifest.
       for(let offset=0;offset<numbers.length;offset+=500) {
@@ -503,17 +534,22 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         const platformStatus=row?.platform_status||text(rawPosting?.status,64); const logisticsStatus=row?.logistics_status||text(rawPosting?.substatus,128);
         const progress=oglPlatformProgress({status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage});
         return {posting_number:postingNumber,order_id:row?Number(row.id):null,shop_id:Number(ctx.shop.id),shop_name:ctx.shop.name,matched_local:Boolean(row),
+          official_member:Number(!rawPosting?.seller_error),official_status:rawPosting?.status||'',seller_error:rawPosting?.seller_error||'',
           ordered_at:row?.ordered_at||null,order_path:row?`/orders?orderId=${Number(row.id)}&shopId=${Number(ctx.shop.id)}&searchType=order&searchQuery=${encodeURIComponent(postingNumber)}${row.ordered_at?`&dateFrom=${shanghaiDateKey(row.ordered_at)}&dateTo=${shanghaiDateKey(row.ordered_at)}`:''}`:null,
           platform_status:platformStatus,logistics_status:logisticsStatus,tracking_stage:row?.tracking_stage||'',last_synced_at:row?.last_synced_at||null,
           online:progress.online,delivered:progress.delivered,cancelled:progress.cancelled};
       });
       const [batches]=await connection.execute('SELECT id,batch_number FROM ogl_dispatch_batches WHERE tenant_id = ? AND default_shop_id = ? AND official_carriage_id = ?',[current.id,ctx.shop.id,carriageId]);
+      const localDetail=batches[0]?await getDetail(connection,current,batches[0].id):{members:[]};
+      const local_members=localManifestMembers(localDetail,ctx.shop.id,data.numbers);
       const status=text(data.info?.status||listed.status,64);
       const carriage={...officialCarriageRow(listed,data.info),dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},status,status_label:officialStatusLabel(status),postings_count:numbers.length,
         available_actions:Array.isArray(data.info?.available_actions)?data.info.available_actions.filter(value=>typeof value==='string'):listed.available_actions,
         first_mile_type:text(data.info?.first_mile_type,64),integration_type:text(data.info?.integration_type,64),
         official_only:!batches.length,local_batch_id:batches[0]?Number(batches[0].id):null,batch_id:batches[0]?Number(batches[0].id):null,local_batch_number:batches[0]?.batch_number||''};
-      return {carriage,members,summary:{official_members:members.length,matched_local:localOrders.length,unmatched_local:members.length-localOrders.length,online:members.filter(row=>row.online).length},
+      const accepted=members.filter(row=>row.official_member),matched=accepted.filter(row=>row.matched_local).length;
+      return {carriage,members,local_members,failed_postings:data.failed_postings,summary:{official_members:accepted.length,matched_local:matched,unmatched_local:accepted.length-matched,online:accepted.filter(row=>row.online).length,
+          failed_postings:data.failed_postings,local_members_count:local_members.length,local_only_count:local_members.filter(row=>!row.official_member).length},
         dispatch_shop:{id:Number(ctx.shop.id),name:ctx.shop.name},departure_date:day};
     });
   }
@@ -600,11 +636,12 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       let item=existing[0];
       if(item&&ctx.batch&&(Number(item.id)!==Number(ctx.batch.id)||(item.official_operation_token??null)!==ctx.operationToken))fail('官方操作已变化，请刷新批次',409);
       if(item&&['creating','confirming'].includes(item.official_status))fail('官方操作正在处理中，请稍后刷新',409);
-      const previous=parsed(item?.official_result_json),imported=!item||previous.source==='official_discovery';
+      const previous=parsed(item?.official_result_json),imported=!item||previous.source==='official_discovery'&&item.official_status==='observed';
       const cancelled=['cancelled','canceled'].includes(carriage.status);
       const metadata={...previous,...(imported?{source:'official_discovery'}:{}),official_status:carriage.status,carriage:{...carriage,local_batch_id:undefined,batch_id:undefined},
         discovered_at:previous.discovered_at||now().toISOString(),last_observed_at:now().toISOString(),
-        official_posting_numbers:detail.members.map(row=>row.posting_number),
+        official_posting_numbers:detail.members.filter(row=>row.official_member!==0&&!row.seller_error).map(row=>row.posting_number),
+        official_postings:detail.members.map(row=>({posting_number:row.posting_number,status:row.official_status||'',seller_error:row.seller_error||''})),failed_postings:detail.failed_postings||[],
         label_tracking:cancelled?null:tracking||previous.label_tracking||null};
       if(!item) {
         const [insert]=await connection.execute(`INSERT INTO ogl_dispatch_batches
@@ -616,15 +653,22 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         await event(connection,current,item.id,'official-discovered',{carriage_id:carriage.carriage_id,postings_count:detail.members.length,physical_dispatch:false});
       } else {
         // A local batch keeps its reviewed create/approve status and member set.
-        // Discovery only enriches metadata; it cannot confirm or dispatch it.
+        // Discovery cannot confirm or dispatch it. It still refreshes the
+        // authoritative membership proof so rejected postings cannot retain a
+        // stale success flag in order-list SQL.
         await connection.execute(`UPDATE ogl_dispatch_batches SET official_result_json = ?,
           containers_count = CASE WHEN ? = 1 AND ? IS NOT NULL THEN ? ELSE containers_count END,
           official_status=CASE WHEN ? = 1 AND ? = 0 THEN 'cancelled' ELSE official_status END,
           official_error = NULL WHERE tenant_id = ? AND id = ?`,[JSON.stringify(metadata),Number(imported),carriage.containers_count,carriage.containers_count,Number(cancelled),Number(imported),current.id,item.id]);
-        if(cancelled&&!imported)await connection.execute('UPDATE ogl_dispatch_members SET official_member=0 WHERE tenant_id=? AND batch_id=?',[current.id,item.id]);
+        if(!imported) {
+          const [existingMembers]=await connection.execute('SELECT id,shop_id,posting_number FROM ogl_dispatch_members WHERE tenant_id=? AND batch_id=? FOR UPDATE',[current.id,item.id]);
+          const accepted=new Set(metadata.official_posting_numbers);
+          for(const member of existingMembers)await connection.execute('UPDATE ogl_dispatch_members SET official_member=? WHERE tenant_id=? AND id=?',
+            [Number(!cancelled&&Number(member.shop_id)===Number(ctx.shop.id)&&accepted.has(member.posting_number)),current.id,member.id]);
+        }
       }
       if(imported) {
-        const wanted=cancelled?[]:detail.members.filter(row=>row.matched_local).map(row=>Number(row.order_id));
+        const wanted=cancelled?[]:detail.members.filter(row=>row.matched_local&&row.official_member!==0&&!row.seller_error).map(row=>Number(row.order_id));
         const [old]=await connection.execute('SELECT * FROM ogl_dispatch_members WHERE tenant_id = ? AND batch_id = ? FOR UPDATE',[current.id,item.id]);
         for(const member of old)if(!wanted.includes(Number(member.order_id))) {
           await connection.execute(`UPDATE ogl_dispatch_members SET official_member=0,
@@ -735,7 +779,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
               await verifyMonitorAuthority(session,setting,[Number(item.default_shop_id)]);
               const ctx=await context(session,item.id,true);ctx.monitorSetting=setting;
               if(['creating','confirming'].includes(ctx.batch.official_status)){skipped++;continue;}
-              if(parsed(ctx.batch.official_result_json).source==='official_discovery') {
+              if(ctx.batch.official_status==='observed'&&parsed(ctx.batch.official_result_json).source==='official_discovery') {
                 const raw=await readOfficial(ctx,ctx.batch.official_carriage_id);
                 const saved=parsed(ctx.batch.official_result_json).carriage;
                 if(!saved){skipped++;continue;}
@@ -776,6 +820,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(ctx.batch.official_status!=='observed'||saved.source!=='official_discovery'||!ctx.batch.official_carriage_id)fail('仅已发现的官方申请可进行本地接管，请刷新申请详情',409);
     const result=await readOfficial(ctx,ctx.batch.official_carriage_id);
     officialCarriageRow(saved.carriage,result.info);
+    if(result.failed_postings.length)fail('官方清单仍有未成功收录的货件，请先处理失败原因并同步，不能接管或登记整批实际交运',409,'OGL_POSTING_REJECTED');
     if(!['formed','sended','received','closed'].includes(String(result.info?.status||'').toLowerCase()))fail('官方申请尚未形成或已取消，不能登记实际交运，请在 Ozon 后台核对',409);
     const count=optionalCount(result.info?.containers_count);
     if(!count||count!==Number(ctx.batch.containers_count))fail('官方实际货位数未知或已变化，请刷新申请后核对实际装袋数量',409);
@@ -867,7 +912,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(!api?.deliveryMethods) fail('当前环境未配置 Ozon 发运 API',503);
     const ctx=await context(session,body.batch_id,true);
     const options=await externalDeliveryMethods(ctx,{});
-    return { options };
+    return { options:options.map(option=>({...option,handover_type:normalizeOglHandoverType(option)})) };
   }
   async function saveOfficial(session,batchId,token,values,actionName,details={}) {
     return transaction(async connection=>{
@@ -885,14 +930,18 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   async function readOfficial(ctx,carriageId) {
     const result=await externalRequest(ctx,'/v1/carriage/get',{carriage_id:Number(carriageId)});
     const postings=await externalRequest(ctx,'/v2/posting/fbs/act/get-postings',{id:Number(carriageId)});
-    const list=Array.isArray(postings?.result)?postings.result:Array.isArray(postings?.postings)?postings.postings:[];
+    const rows=Array.isArray(postings?.result)?postings.result:Array.isArray(postings?.postings)?postings.postings:[];
     // Missing/malformed membership data is not an empty verified official manifest.
     if(!Array.isArray(postings?.result)&&!Array.isArray(postings?.postings)) fail('Ozon 官方组成响应缺少货件列表，不能确认已核对清单',502);
-    if(list.length>2000)fail('官方申请超过 2000 个货件，暂不能完整关联，请拆分后联系管理员核对',409);
-    const numbers=list.map(row=>typeof row==='string'?row:row.posting_number).filter(Boolean);
+    if(rows.length>2000)fail('官方申请超过 2000 个货件，暂不能完整关联，请拆分后联系管理员核对',409);
+    const list=rows.map(row=>({posting_number:text(typeof row==='string'?row:row?.posting_number,128),
+      status:text(typeof row==='object'?row?.status:'',64),seller_error:text(typeof row==='object'?row?.seller_error:'',500)}));
+    if(list.some(row=>!row.posting_number))fail('Ozon 官方组成响应有缺少货件编号的记录，不能确认完整清单，请在后台核对后同步',502);
+    const failed_postings=list.filter(row=>row.seller_error);
+    const numbers=list.filter(row=>!row.seller_error).map(row=>row.posting_number);
     const info=result?.result||result;
     if(info?.carriage_id!=null&&String(info.carriage_id)!==String(carriageId)) fail('Ozon 返回的官方发运编号与查询编号不一致，请重新查询',502);
-    return { info,numbers,list };
+    return { info,numbers,list,failed_postings };
   }
   async function recordOfficial(session,ctx,carriageId,result,token=null) {
     return transaction(async connection=>{
@@ -908,22 +957,28 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const extra=result.numbers.filter(number=>!localSame.includes(number));
       const missing=localSame.filter(number=>!result.numbers.includes(number));
       const isCancelled=['cancelled','canceled'].includes(officialState);
-      const approved=['sended','received','closed'].includes(officialState);
-      const exact=!extra.length&&!missing.length;
+      // OGL can return formed after confirmation instead of the generic sended
+      // state. File capability is only one part of the proof: exact members,
+      // delivery method and a positive matching container count are checked below.
+      const approved=officialConfirmationObserved(result.info);
+      const failed=result.failed_postings||[];
+      const exact=!failed.length&&localSame.length===result.numbers.length&&!extra.length&&!missing.length;
       const countValue=result.info?.containers_count;
       const missingCount=countValue==null||countValue==='';
       const actualCount=missingCount?null:Number(countValue);
-      const countMismatch=approved&&(missingCount||!Number.isSafeInteger(actualCount)||actualCount!==Number(item.containers_count));
+      const countMismatch=approved&&(missingCount||!Number.isSafeInteger(actualCount)||actualCount<=0||actualCount!==Number(item.containers_count));
       const methodValue=result.info?.delivery_method_id;
       const missingMethod=methodValue==null||methodValue===''||!item.delivery_method_id;
       const methodMismatch=!isCancelled&&(missingMethod||String(methodValue)!==String(item.delivery_method_id));
       const proofMissing=(approved&&missingCount)||missingMethod;
       const nextStatus=isCancelled?'cancelled':proofMissing?'sync_required':!exact||countMismatch||methodMismatch?'mismatch':approved?'approved':item.official_status==='confirming'?'confirm_unknown':officialState==='new'?'created':'sync_required';
       const errors=[];
+      if(failed.length&&!isCancelled) errors.push(`官方返回 ${failed.length} 个未成功收录的货件，请先在 Ozon 后台处理明细中的失败原因，再同步核对；不能按整批成功下载或交运`);
       if(!exact&&!isCancelled) errors.push('官方组成与本店所选订单不一致，请在 Ozon 后台修正后重新同步');
       if(countMismatch&&!isCancelled) errors.push(missingCount?`Ozon 未返回官方货位数量（containers_count），本地为 ${item.containers_count} 个；请重新核对官方单，核实前不能下载标签或交运`:`官方货位数量为 ${countValue} 个，本地批次为 ${item.containers_count} 个；请在 Ozon 后台核实并修正后重新同步`);
       if(methodMismatch) errors.push(missingMethod?'官方配送方式（delivery_method_id）或批次配送方式快照缺失，无法证明属于本批次；请重新核对官方单':`官方配送方式为 ${methodValue}，批次配置为 ${item.delivery_method_id}；请核对是否填错官方发运编号`);
-      const summary={capabilities:parsed(item.official_result_json).capabilities,info:result.info,posting_numbers:result.numbers,extra,missing,last_observed_at:now().toISOString(),
+      const previous=parsed(item.official_result_json);
+      const summary={...(previous.source?{source:previous.source}:{}),capabilities:previous.capabilities,info:result.info,posting_numbers:result.numbers,official_postings:result.list,failed_postings:failed,extra,missing,last_observed_at:now().toISOString(),
         container_count_mismatch:countMismatch,container_count_expected:Number(item.containers_count),container_count_actual:actualCount,
         delivery_method_mismatch:methodMismatch,delivery_method_expected:item.delivery_method_id,delivery_method_actual:methodValue??null,
         cross_shop_local_only:membersNow.filter(row=>row.active&&Number(row.shop_id)!==Number(item.default_shop_id)).map(row=>row.posting_number)};
@@ -956,6 +1011,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     const options=await externalDeliveryMethods(ctx,{delivery_method_id:Number(method),departure_date:selectedDay});
     const capability=options.find(row=>String(row.delivery_method_id??row.id)===method&&shanghaiDateKey(row.departure_date)===selectedDay);
     if(!capability) fail('默认店铺当前没有该配送方式与所选日期的可用组合，请重新获取官方发运选项',409);
+    assertHandoverSelection(body,capability);
     // The create API requires date-time. Reuse the exact official slot value;
     // the date picker is only an operator selection, never an invented timestamp.
     const date=String(capability.departure_date);
@@ -973,7 +1029,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id)`,[current.id,item.default_shop_id,method,item.id,token]);
       const [locks]=await connection.execute('SELECT batch_id FROM ogl_dispatch_official_locks WHERE tenant_id = ? AND default_shop_id = ? AND delivery_method_id = ? FOR UPDATE',[current.id,item.default_shop_id,method]);
       if(Number(locks[0].batch_id)!==Number(item.id)) fail(`同一默认店铺及配送方式已有待核实官方发运（内部批次 ${locks[0].batch_id}），请先核实、确认或取消该官方发运后再建下一单`,409);
-      await connection.execute("UPDATE ogl_dispatch_batches SET official_status = 'creating',official_operation_token = ?,delivery_method_id = ?,departure_date = ?,official_result_json = ?,official_error = NULL WHERE tenant_id = ? AND id = ?",[token,method,date,JSON.stringify({capabilities:{has_entrusted_acceptance:true,delivery_method_id:method,departure_date:date,warehouse_id:capability.warehouse_id??null,first_mile_type:capability.first_mile_type??null}}),current.id,item.id]);
+      await connection.execute("UPDATE ogl_dispatch_batches SET official_status = 'creating',official_operation_token = ?,delivery_method_id = ?,departure_date = ?,official_result_json = ?,official_error = NULL WHERE tenant_id = ? AND id = ?",[token,method,date,JSON.stringify({capabilities:{has_entrusted_acceptance:true,delivery_method_id:method,departure_date:date,warehouse_id:capability.warehouse_id??null,first_mile_type:capability.first_mile_type??null,integration_type:capability.integration_type??null,handover_type:normalizeOglHandoverType(capability)}}),current.id,item.id]);
       await event(connection,current,item.id,'official-create-start',{delivery_method_id:method,departure_date:date});
     });
     ctx.operationToken=token;
@@ -1008,7 +1064,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(!carriageId||!/^\d+$/.test(carriageId)) fail('请填写待核实的 Ozon 官方发运编号（official_carriage_id），可在默认店铺后台查看');
     if(ctx.batch.official_carriage_id&&String(ctx.batch.official_carriage_id)!==carriageId) fail('历史批次不能更换官方发运编号',409);
     const saved=parsed(ctx.batch.official_result_json);
-    if(saved.source==='official_discovery') {
+    if(saved.source==='official_discovery'&&ctx.batch.official_status==='observed') {
       const found=await officialDetail(session,{id:carriageId,date:saved.carriage.departure_date},{ctx,listed:saved.carriage});
       await associateOfficial(session,ctx,found,await discoveryTracking(ctx,found.carriage));
       return detail(session,ctx.batch.id);
@@ -1018,43 +1074,72 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   async function officialConfirm(session,body) {
     const ctx=await context(session,body.batch_id,true);
     if(['closed','cancelled'].includes(ctx.batch.status)) fail('已结束的内部批次不能确认官方发运',409);
-    if(ctx.batch.official_status!=='created'||!ctx.batch.official_carriage_id) fail('请先创建官方发运，并确保官方组成核对一致；结果未知时先同步',409);
+    const saved=parsed(ctx.batch.official_result_json);
+    const observed=ctx.batch.official_status==='observed'&&saved.source==='official_discovery';
+    if((ctx.batch.official_status!=='created'&&!observed)||!ctx.batch.official_carriage_id) fail('请先创建官方发运，并确保官方组成核对一致；结果未知时先同步',409);
+    const count=containers(body.container_count===undefined?ctx.batch.containers_count:body.container_count);
+    if(ctx.members.some(row=>row.active&&Number(row.container_no)>count)) fail('已有订单分配的货位编号超过本次实际货位数量，请先核对并调整装袋分配，再确认官方单',409,'OGL_CONTAINER_ASSIGNMENT_CONFLICT');
     const verified=await readOfficial(ctx,ctx.batch.official_carriage_id);
+    assertHandoverSelection(body,verified.info);
     if(String(verified.info?.status||'').toLowerCase()!=='new') {
-      await recordOfficial(session,ctx,ctx.batch.official_carriage_id,verified);
+      if(observed)fail('此后台申请已不处于待确认 new 状态，请刷新已有申请并核对；不会重复确认或自动接管实际交运',409);
+      const current=await recordOfficial(session,ctx,ctx.batch.official_carriage_id,verified);
+      if(current.batch.official_status==='approved') return current;
       fail('官方发运已不处于可确认的初始 new 状态，请核对最新官方状态',409);
     }
-    if(parsed(ctx.batch.official_result_json).capabilities?.has_entrusted_acceptance!==true) fail('批次未保存按货位信任验收能力，不能确认货位数；请核对官方配置',409);
+    let capabilities=saved.capabilities;
+    if(observed) {
+      const method=text(verified.info?.delivery_method_id,64);
+      if(!method||method!==String(ctx.batch.delivery_method_id)) fail('后台待确认申请的官方配送方式与本地快照缺失或不一致，请按原店铺同步后核对',409,'OGL_PENDING_CONFIRMATION_UNVERIFIED');
+      const value=saved.carriage?.departure_date||ctx.batch.departure_date;
+      const day=/^\d{4}-\d{2}-\d{2}$/.test(String(value||''))?String(value):shanghaiDateKey(value);
+      if(!day)fail('后台待确认申请缺少可信发运日期，请按原店铺同步后核对',409,'OGL_PENDING_CONFIRMATION_UNVERIFIED');
+      const options=await externalDeliveryMethods(ctx,{delivery_method_id:id(method,'官方配送方式'),departure_date:day});
+      const option=options.find(row=>String(row.delivery_method_id??row.id)===method&&shanghaiDateKey(row.departure_date)===day);
+      if(!option||option.has_entrusted_acceptance!==true)fail('官方当前配送方式未确认支持按货位的信任验收（has_entrusted_acceptance），请在 Ozon 后台核对配置后重新同步；客户端选项不能代替官方证明',409,'OGL_PENDING_CONFIRMATION_UNVERIFIED');
+      assertHandoverSelection(body,option);
+      capabilities={has_entrusted_acceptance:true,delivery_method_id:method,departure_date:option.departure_date,
+        warehouse_id:option.warehouse_id??null,first_mile_type:option.first_mile_type??null,integration_type:option.integration_type??null,handover_type:normalizeOglHandoverType(option)};
+    }
+    if(capabilities?.has_entrusted_acceptance!==true) fail('批次未保存按货位信任验收能力，不能确认货位数；请核对官方配置',409);
     const same=ctx.members.filter(row=>row.active&&Number(row.shop_id)===Number(ctx.batch.default_shop_id)).map(row=>row.posting_number);
-    if(same.length!==verified.numbers.length||same.some(number=>!verified.numbers.includes(number))) {
-      await recordOfficial(session,ctx,ctx.batch.official_carriage_id,verified);
+    if(verified.failed_postings.length||!same.length||same.length!==verified.numbers.length||same.some(number=>!verified.numbers.includes(number))) {
+      if(!observed)await recordOfficial(session,ctx,ctx.batch.official_carriage_id,verified);
+      if(verified.failed_postings.length)fail(`官方返回 ${verified.failed_postings.length} 个未成功收录的货件，请查看失败货件及原因，在 Ozon 后台处理后重新同步，暂不能确认整批`,409,'OGL_POSTING_REJECTED');
       fail('官方组成已经变化，请核对本店订单清单后再确认',409);
     }
     const contact=body.courier_contact||{};
-    if(contact.phone||contact.wechat_nickname||contact.comment) {
-      if(verified.info?.first_mile_type!=='pickup'||verified.info?.integration_type!=='ozon_outsourced') fail('当前官方发运不是 Ozon 外包上门取件（pickup / ozon_outsourced），请清空取件联系人字段后按实际送货方式确认',409);
+    let contactPayload=null;
+    if(normalizeOglHandoverType(verified.info)==='courier'&&String(verified.info?.integration_type||'').trim().toLowerCase()==='ozon_outsourced') {
+      if(!text(contact.phone)) fail('此官方发运为 Ozon 外包上门取件，请在取件联系人区域填写联系电话（phone）后确认货位；自送申请无需填写',400,'OGL_COURIER_CONTACT_REQUIRED');
       const enteredPhone=text(contact.phone,128).replace(/[\s()-]/g,'');
       const phoneDigits=enteredPhone.startsWith('+86')?enteredPhone.slice(3):enteredPhone;
       if(!/^\d{11}$/.test(phoneDigits)) fail('请在联系人区域填写有效的 11 位中国取件联系电话（phone），可带 +86 国家区号');
       const phone=`+86(${phoneDigits.slice(0,3)})${phoneDigits.slice(3,7)}-${phoneDigits.slice(7)}`;
       const wechat=text(contact.wechat_nickname,128),comment=text(contact.comment,1000);
       if(wechat.length>50||comment.length>500) fail('取件微信号不得超过 50 字，备注不得超过 500 字，请在联系人区域修改');
-      await externalRequest(ctx,'/v1/carriage/courier-contact/set',{carriage_id:Number(ctx.batch.official_carriage_id),phone,...(wechat?{wechat_nickname:wechat}:{}),...(comment?{comment}:{})});
+      contactPayload={carriage_id:Number(ctx.batch.official_carriage_id),phone,...(wechat?{wechat_nickname:wechat}:{}),...(comment?{comment}:{})};
     }
+    // A previous pickup form may still contain hidden contact values after the
+    // operator opens a self-delivery application. They do not change its mode
+    // and must never be sent to the pickup-only contact endpoint.
     const token=randomUUID();
     await transaction(async connection=>{
       const current=await scope(connection,session,true); const item=await batch(connection,current,ctx.batch.id,true);
-      if(item.official_status!=='created') fail('另一请求已修改官方单，请刷新',409);
+      if(item.official_status!==ctx.batch.official_status||(item.official_operation_token??null)!==ctx.operationToken||observed&&parsed(item.official_result_json).source!=='official_discovery') fail('另一请求已修改官方单，请刷新',409);
       if(item.status!=='preparing') fail('内部批次已交运、取消或结束，不能确认官方发运',409);
       const currentMembers=await members(connection,current,item.id,true);
       const activeIds=list=>list.filter(row=>row.active).map(row=>Number(row.order_id)).sort((a,b)=>a-b).join(',');
       if(activeIds(currentMembers)!==activeIds(ctx.members)||currentMembers.some(row=>row.active&&(!row.awaiting_delivery||classifyOrderLogistics(row).logistics_carrier!=='ogl'))) fail('批次成员或平台物流已变化，请刷新后重新核对官方发运',409);
-      await connection.execute("UPDATE ogl_dispatch_batches SET official_status = 'confirming',official_operation_token = ? WHERE tenant_id = ? AND id = ?",[token,current.id,item.id]);
-      await event(connection,current,item.id,'official-confirm-start',{containers_count:item.containers_count});
+      if(currentMembers.some(row=>row.active&&Number(row.container_no)>count)) fail('已有订单分配的货位编号超过本次实际货位数量，请先核对并调整装袋分配，再确认官方单',409,'OGL_CONTAINER_ASSIGNMENT_CONFLICT');
+      const metadata={...parsed(item.official_result_json),capabilities};
+      await connection.execute("UPDATE ogl_dispatch_batches SET containers_count = ?,official_result_json = ?,official_status = 'confirming',official_operation_token = ? WHERE tenant_id = ? AND id = ?",[count,JSON.stringify(metadata),token,current.id,item.id]);
+      await event(connection,current,item.id,'official-confirm-start',{containers_count:count,previous_containers_count:Number(item.containers_count)});
     });
     ctx.operationToken=token;
     try {
-      const response=await externalRequest(ctx,'/v1/carriage/approve',{carriage_id:Number(ctx.batch.official_carriage_id),containers_count:Number(ctx.batch.containers_count)});
+      if(contactPayload) await externalRequest(ctx,'/v1/carriage/courier-contact/set',contactPayload);
+      const response=await externalRequest(ctx,'/v1/carriage/approve',{carriage_id:Number(ctx.batch.official_carriage_id),containers_count:count});
       if(response?.result===false||response?.error) throw new Error('Ozon 未确认发运，请检查官方返回结果');
       return recordOfficial(session,ctx,ctx.batch.official_carriage_id,await readOfficial(ctx,ctx.batch.official_carriage_id),token);
     } catch(error) {
@@ -1120,16 +1205,25 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(!ctx.batch.official_carriage_id)fail('官方申请号尚未取得，请先刷新申请详情',409);
     const observed=ctx.batch.official_status==='observed'&&parsed(ctx.batch.official_result_json).source==='official_discovery';
     if(!observed&&ctx.batch.official_status!=='approved')fail('官方发运尚未核实确认，暂不能下载有效标签',409);
-    const response=await externalRequest(ctx,'/v1/carriage/get',{carriage_id:Number(ctx.batch.official_carriage_id)});
-    const info=response?.result||response;
+    const response=observed?await externalRequest(ctx,'/v1/carriage/get',{carriage_id:Number(ctx.batch.official_carriage_id)}):null;
+    const result=observed?{info:response?.result||response}:await readOfficial(ctx,ctx.batch.official_carriage_id);
+    const info=result.info;
     if(info?.carriage_id!=null&&String(info.carriage_id)!==String(ctx.batch.official_carriage_id))fail('官方申请号核对失败，请重新查询',502);
+    if(!observed) {
+      const count=optionalCount(info?.containers_count);
+      const same=ctx.members.filter(row=>row.active&&Number(row.shop_id)===Number(ctx.batch.default_shop_id)).map(row=>row.posting_number);
+      if(result.failed_postings.length||!officialConfirmationObserved(info)||!count||count!==Number(ctx.batch.containers_count)
+        ||!info?.delivery_method_id||String(info.delivery_method_id)!==String(ctx.batch.delivery_method_id)
+        ||same.length!==result.numbers.length||same.some(number=>!result.numbers.includes(number)))
+        fail('官方组成、实际货位数量、配送方式或确认状态已变化，请先同步官方发运并核对后重新下载标签',409,'OGL_FILE_CONFIRMATION_CHANGED');
+    }
     const capability=oglFileCapabilities(info)[query.type==='container-labels'?'container_labels':'barcode'];
     if(capability.available!==true)fail(capability.reason,409,capability.available===false?'OGL_FILE_UNSUPPORTED':'OGL_FILE_CAPABILITY_UNKNOWN');
     ctx.requiredOfficialStatus=ctx.batch.official_status;
-    const result=await externalRequest(ctx,path,{id:Number(ctx.batch.official_carriage_id)},{binary:true});
-    if(!result?.buffer) fail('Ozon 尚未生成文件，请稍后重试',502);
-    const extension=result.contentType==='image/png'?'png':result.contentType==='image/jpeg'?'jpg':'pdf';
-    return {...result,filename:`${ctx.batch.batch_number}-${query.type}.${extension}`};
+    const fileResult=await externalRequest(ctx,path,{id:Number(ctx.batch.official_carriage_id)},{binary:true});
+    if(!fileResult?.buffer) fail('Ozon 尚未生成文件，请稍后重试',502);
+    const extension=fileResult.contentType==='image/png'?'png':fileResult.contentType==='image/jpeg'?'jpg':'pdf';
+    return {...fileResult,filename:`${ctx.batch.batch_number}-${query.type}.${extension}`};
   }
   return {bootstrap,saveSettings,preview,createBatch,listBatches,detail,listOfficial,officialDetail,officialTracking,discover,monitorRecent,action,file};
 }

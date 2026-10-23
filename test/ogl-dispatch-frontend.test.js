@@ -11,7 +11,7 @@ const panelSource = readFileSync(new URL("../frontend/orders/components/OglDispa
   .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]*\n/gm, "");
 
 const detail = (changes = {}) => ({ batch: { id: 71, batch_number: "OGL-TEST", containers_count: 3, official_status: "not_created", ...changes }, members: [], events: [], summary: {} });
-function fixture({ preview, action, bootstrap, props = {}, officialList, officialSnapshot, officialDetail, officialTracking, discoverOfficial, file, prompt } = {}) {
+function fixture({ preview, action, bootstrap, props = {}, officialList, officialSnapshot, officialDetail, officialTracking, discoverOfficial, file, prompt, confirm, readDetail } = {}) {
   const calls = [], emitted = [], mounts = [], notices = [], successes = [];
   let session = "A";
   const service = {
@@ -19,7 +19,7 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     preview: async (ids) => { calls.push(["preview", ids]); return preview || { eligible: [{ id: 11, shop_id: 8, shop_name: "A" }, { id: 22, shop_id: 9, shop_name: "B" }], rejected: [{ id: 33, reason: "尚未打印" }] }; },
     create: async (payload) => { calls.push(["create", payload]); return detail(); },
     action: async (...args) => { calls.push(["action", ...args]); return action ? action(...args) : detail(); },
-    detail: async (id) => { calls.push(["detail", id]); return detail({ official_status: "create_unknown" }); },
+    detail: async (id) => { calls.push(["detail", id]); return readDetail ? readDetail(id) : detail({ official_status: "create_unknown" }); },
     settings: async (id) => { calls.push(["settings", id]); return {}; },
     list: async (page, range) => { calls.push(["history", page, range]); return { rows: [], total: 0 }; },
     officialSnapshot: async (range) => { calls.push(["official-snapshot", range]); return officialSnapshot ? officialSnapshot(range) : { rows: [{ carriage_id: "88001", status: "formed", departure_date: range.date_to, created_at: "2026-10-21T20:40:00Z", snapshot_at: "2026-10-22T08:00:00Z", local_batch_id: 71, dispatch_stage: "applied", dispatch_shop: { id: 8, name: "Creation Shop" } }], total: 1, source: "snapshot", notice: "已保存快照", dispatch_shop: null }; },
@@ -38,7 +38,7 @@ function fixture({ preview, action, bootstrap, props = {}, officialList, officia
     computed: (getter) => ({ get value() { return getter(); } }),
     onMounted: (callback) => mounts.push(callback), onBeforeUnmount() {}, watch() {},
     ElMessage: { success: message => successes.push(message), info() {}, error: message => notices.push(message), warning: message => notices.push(message) },
-    ElMessageBox: { prompt: async () => ({ value: prompt ?? "核实缺货未交出" }), confirm: async () => true },
+    ElMessageBox: { prompt: async () => ({ value: prompt ?? "核实缺货未交出" }), confirm: async () => confirm ? confirm() : true },
     shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateText, orderStateKey, shanghaiDateTimeText: (value) => value || "-", crypto: { randomUUID: () => "stable-operation-id" }
   });
   vm.runInContext(serviceSource, context);
@@ -538,4 +538,215 @@ test("identical official IDs across owned shops retain original-shop detail, tra
   await transport.officialDetail("901", "2026-10-22", { source: "snapshot", shop_id: 9 });
   await transport.officialTracking("901", "2026-10-22", 9);
   assert.ok(paths.every(url => url.endsWith("shop_id=9")));
+});
+
+test("handover classification uses official enum fields instead of names and keeps first-mile truth authoritative", () => {
+  const f = fixture();
+  for (const first_mile_type of ["pickup", "pick_up", "PICK_UP"]) assert.equal(f.context.oglHandoverType({ first_mile_type }), "courier");
+  for (const first_mile_type of ["dropoff", "drop_off", "DROP_OFF"]) assert.equal(f.context.oglHandoverType({ first_mile_type }), "self");
+  assert.equal(f.context.oglHandoverType({ handover_type: "self" }), "self");
+  assert.equal(f.context.oglHandoverType({ first_mile_type: "PICK_UP", handover_type: "self" }), "courier");
+  assert.equal(f.context.oglHandoverType({ name: "pickup self Hefei", first_mile_type: "unknown" }), "");
+});
+
+test("courier stays the default while self requires an actual available official method", async () => {
+  const f = fixture({ action: async () => ({ options: [{ delivery_method_id: 91, departure_date: "2026-10-23T00:00:00Z", first_mile_type: "DROP_OFF", integration_type: "self" }] }) });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'not_created',containers_count:3},members:[]})");
+  await f.get("loadOfficialOptions()");
+  assert.equal(f.get("form.handover_type"), "courier");
+  assert.equal(f.get("form.delivery_method_id"), "");
+  assert.match(f.get("officialNotice.value"), /暂无上门取件.*Ozon 后台/);
+  assert.equal(f.calls.some(call => call[0] === "action" && call[2] === "official-create"), false);
+  f.get("chooseHandoverType('self')");
+  assert.equal(f.get("form.delivery_method_id"), 91);
+  assert.equal(f.get("form.departure_date"), "2026-10-23");
+  assert.match(f.get("officialNotice.value"), /自行送货.*官方可用方式/);
+});
+
+test("create submits selected real mode/method/day and never leftover self-delivery contacts", async () => {
+  const f = fixture({ action: async (_id, name) => name === "official-create" ? detail({ official_status: "created", official_carriage_id: "88004", official_result: { info: { first_mile_type: "DROP_OFF" } } }) : detail() });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'not_created',containers_count:3},members:[]}); options.value=[{id:91,departure_date:'2026-10-23T00:00:00Z',first_mile_type:'DROP_OFF'}]; courier.phone='13812345678'; courier.wechat_nickname='old'; chooseHandoverType('self')");
+  assert.equal(f.get("courier.phone"), "");
+  await f.get("officialAction('official-create')");
+  const call = f.calls.find(call => call[0] === "action" && call[2] === "official-create");
+  assert.equal(call[3].handover_type, "self");
+  assert.equal(call[3].delivery_method_id, 91);
+  assert.equal(call[3].departure_date, "2026-10-23");
+  assert.equal(Object.hasOwn(call[3], "courier_contact"), false);
+  assert.equal(f.get("officialFlowStep.value"), 1);
+  assert.equal(f.calls.some(call => call[0] === "action" && call[2] === "dispatch"), false);
+});
+
+test("unknown or mismatched official mode capabilities cannot create a pretend self carriage", async () => {
+  const f = fixture();
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'not_created',containers_count:3},members:[]}); options.value=[{id:91,departure_date:'2026-10-23T00:00:00Z'}]; form.handover_type='self'; form.delivery_method_id=91; form.departure_date='2026-10-23'");
+  await f.get("officialAction('official-create')");
+  assert.match(f.get("error.value"), /官方尚未返回所选自行送货/);
+  assert.equal(f.calls.some(call => call[0] === "action" && call[2] === "official-create"), false);
+});
+
+test("outsourced pickup requires phone and confirms the editable total container count", async () => {
+  const f = fixture({ action: async () => detail({ containers_count: 5, official_status: "approved", official_carriage_id: "88004", official_result: { info: { first_mile_type: "pickup", integration_type: "ozon_outsourced" } }, file_capabilities: { container_labels: { available: true } } }) });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'created',official_carriage_id:'88004',containers_count:3,official_result:{info:{first_mile_type:'pickup',integration_type:'ozon_outsourced'}}},members:[]}); form.container_count=5");
+  assert.equal(f.get("requiresCourierContact.value"), true);
+  await f.get("officialAction('official-confirm')");
+  assert.match(f.get("error.value"), /11 位取件手机号/);
+  assert.equal(f.calls.some(call => call[0] === "action"), false);
+  f.get("courier.phone='+86 138 1234 5678'; courier.wechat_nickname='pickup'; courier.comment='front door'");
+  await f.get("officialAction('official-confirm')");
+  const call = f.calls.find(call => call[0] === "action");
+  assert.equal(call[2], "official-confirm");
+  assert.equal(call[3].container_count, 5);
+  assert.equal(call[3].handover_type, "courier");
+  assert.equal(call[3].courier_contact.phone, "+86 138 1234 5678");
+  assert.equal(f.get("batch.value.containers_count"), 5);
+  assert.equal(f.get("officialFlowStep.value"), 2);
+  assert.equal(f.get("canDownloadOfficial.value"), true);
+});
+
+test("non-outsourced pickup and self delivery do not submit unsupported courier contacts", async () => {
+  for (const [first, integration, mode] of [["pickup", "seller", "courier"], ["drop_off", "ozon_outsourced", "self"]]) {
+    const f = fixture();
+    await f.mount();
+    f.context.info = { first_mile_type: first, integration_type: integration };
+    f.get("useDetail({batch:{id:71,official_status:'created',official_carriage_id:'88004',containers_count:3,official_result:{info}},members:[]}); courier.phone='old phone'");
+    assert.equal(f.get("showsCourierContact.value"), false);
+    await f.get("officialAction('official-confirm')");
+    const call = f.calls.find(call => call[0] === "action");
+    assert.equal(call[3].handover_type, mode);
+    assert.equal(Object.hasOwn(call[3], "courier_contact"), false);
+  }
+});
+
+test("actual official mode wins over a prior selection and changing batches clears contacts", () => {
+  const f = fixture();
+  f.get("form.handover_type='self'; useDetail({batch:{id:71,official_status:'created',official_carriage_id:'88004',containers_count:3,official_result:{info:{first_mile_type:'PICK_UP',integration_type:'ozon_outsourced'}}},members:[]})");
+  assert.equal(f.get("form.handover_type"), "courier");
+  f.get("courier.phone='13812345678'; useDetail({batch:{id:72,official_status:'created',official_carriage_id:'88005',containers_count:2,official_result:{info:{first_mile_type:'DROP_OFF'}}},members:[]})");
+  assert.equal(f.get("form.handover_type"), "self");
+  assert.equal(f.get("courier.phone"), "");
+});
+
+test("a pending existing official application continues into confirmation without creating another carriage", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialDetail: async () => ({ carriage: { carriage_id: "88004", status: "new", local_batch_id: 71 }, members: [], dispatch_shop: { id: 8 } }), readDetail: async () => detail({ source: "official_discovery", official_status: "observed", official_carriage_id: "88004", official_result: { carriage: { status: "new", first_mile_type: "dropoff" } } }) });
+  await f.mount();
+  await f.get("openOfficialCarriage({carriage_id:'88004',departure_date:'2026-10-23',dispatch_shop:{id:8}})");
+  assert.equal(f.get("canContinueOfficial.value"), true);
+  await f.get("openBatch(officialBatchId.value)");
+  assert.equal(f.get("pendingObserved.value"), true);
+  assert.equal(f.get("canConfirmOfficial.value"), true);
+  assert.equal(f.get("canCreateOfficial.value"), false);
+  assert.equal(f.calls.some(call => call[0] === "create" || call[0] === "action"), false);
+});
+
+test("confirmation mutual exclusion covers the confirmation dialog and rejects a rotated actor", async () => {
+  let finish;
+  const f = fixture({ confirm: () => new Promise(resolve => { finish = resolve; }) });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'created',official_carriage_id:'88004',containers_count:3,official_result:{info:{first_mile_type:'drop_off'}}},members:[]})");
+  const pending = f.get("officialAction('official-confirm')");
+  assert.equal(f.get("officialSubmitting.value"), true);
+  await f.get("officialAction('official-confirm')");
+  f.rotate();
+  finish(true);
+  await pending;
+  assert.equal(f.calls.some(call => call[0] === "action"), false);
+});
+
+test("failed confirmation preserves entered container count while authoritative saved state is refreshed", async () => {
+  const f = fixture({ action: async () => { throw new Error("已分配货位超出新总数"); }, readDetail: async () => detail({ official_status: "created", official_carriage_id: "88004", official_result: { info: { first_mile_type: "dropoff" } } }) });
+  await f.mount();
+  f.get("useDetail({batch:{id:71,official_status:'created',official_carriage_id:'88004',containers_count:3,official_result:{info:{first_mile_type:'dropoff'}}},members:[]}); form.container_count=2");
+  await f.get("officialAction('official-confirm')");
+  assert.match(f.get("error.value"), /已分配货位/);
+  assert.equal(f.get("form.container_count"), 2);
+  assert.equal(f.get("batch.value.containers_count"), 3);
+  assert.equal(f.get("officialSubmitting.value"), false);
+});
+
+test("late official method options cannot replace a different current batch or tenant", async () => {
+  for (const invalidate of [f => f.rotate(), f => f.get("useDetail({batch:{id:72,official_status:'not_created',containers_count:3},members:[]})")]) {
+    let finish;
+    const f = fixture({ action: () => new Promise(resolve => { finish = resolve; }) });
+    await f.mount();
+    f.get("useDetail({batch:{id:71,official_status:'not_created',containers_count:3},members:[]})");
+    const pending = f.get("loadOfficialOptions()");
+    invalidate(f);
+    finish({ options: [{ delivery_method_id: 77, first_mile_type: "pickup", departure_date: "2026-10-23" }] });
+    await pending;
+    assert.equal(f.get("options.value.length"), 0);
+  }
+});
+
+test("key creation, confirmation and download steps stay visible outside collapsed operational history", () => {
+  const source = readFileSync(new URL("../frontend/orders/components/OglDispatchPanel.vue", import.meta.url), "utf8");
+  const flow = source.slice(source.indexOf('<section class="ogl-dispatch-flow"'), source.indexOf('<div class="ogl-dispatch-actions ogl-dispatch-selection-actions">'));
+  assert.match(flow, /title="选择方式并创建"/);
+  assert.match(flow, /title="核对货位并确认"/);
+  assert.match(flow, /title="下载货位标签"/);
+  assert.match(flow, /v-model="form.container_count"/);
+  assert.match(flow, /v-if="showsCourierContact"/);
+  assert.match(flow, /officialAction\('official-confirm'\)/);
+  assert.doesNotMatch(flow, /<el-collapse/);
+  assert.match(source, />继续确认</);
+  assert.match(source, /:close-on-press-escape="!busy"/);
+});
+
+test("official detail keeps authorized mixed-shop ERP orders distinct from the default-shop official list", async () => {
+  const f = fixture({ props: { mode: "official", orderIds: [] }, officialDetail: async () => ({
+    carriage: { carriage_id: "88004", status: "formed", local_batch_id: 71 }, dispatch_shop: { id: 8 },
+    members: [{ posting_number: "OWN-1", order_id: 11, shop_id: 8, shop_name: "Creation Shop", official_member: 1 }],
+    local_members: [{ posting_number: "OWN-1", order_id: 11, shop_id: 8, shop_name: "Creation Shop", official_member: 1 }, { posting_number: "LOCAL-2", order_id: 22, shop_id: 9, shop_name: "Other Owned Shop", official_member: 0, association_label: "其他店铺 · 仅 ERP 混袋关联" }],
+    summary: { local_members_count: 2, local_only_count: 1 }
+  }) });
+  await f.mount();
+  await f.get("openOfficialCarriage({carriage_id:'88004',departure_date:'2026-10-23',dispatch_shop:{id:8}})");
+  assert.equal(f.get("officialMembers.value.length"), 1);
+  assert.equal(f.get("officialLocalMembers.value.length"), 2);
+  assert.equal(f.get("officialLocalMembers.value[1].shop_name"), "Other Owned Shop");
+  assert.equal(f.get("orderPath(officialLocalMembers.value[1])"), "/orders?orderId=22&shopId=9");
+  const source = readFileSync(new URL("../frontend/orders/components/OglDispatchPanel.vue", import.meta.url), "utf8");
+  assert.match(source, /aria-label="ERP混袋订单"/);
+  assert.match(source, /row\.association_label/);
+  assert.match(source, /label="真实来源店铺"/);
+});
+
+test("failed official postings block local confirmation/download and never produce an all-success message", async () => {
+  const failed = [{ posting_number: "OWN-1", status: "error", seller_error: "posting unavailable" }];
+  const f = fixture({ action: async () => detail({ official_carriage_id: "88004", official_status: "mismatch", official_result: { failed_postings: failed } }) });
+  await f.mount();
+  await f.get("action('official-sync', {}, 'all successful')");
+  assert.equal(f.get("batchFailedPostings.value.length"), 1);
+  assert.equal(f.get("canConfirmOfficial.value"), false);
+  assert.equal(f.get("canDownloadOfficial.value"), false);
+  assert.equal(f.successes.length, 0);
+  assert.match(f.notices[0], /1 个货件未成功收录/);
+  const calls = f.calls.length;
+  await f.get("officialAction('official-confirm')");
+  assert.equal(f.calls.length, calls);
+  assert.match(f.get("error.value"), /未成功收录/);
+  assert.equal(f.get("failureReason(batchFailedPostings.value[0])"), "posting unavailable");
+});
+
+test("an observed read-only application preserves explicitly available label access without claiming successful local confirmation", () => {
+  const f = fixture();
+  f.get("useDetail({batch:{id:71,source:'official_discovery',official_status:'observed',official_carriage_id:'88004',official_result:{carriage:{status:'formed'},failed_postings:[{posting_number:'OWN-1',seller_error:'pending'}]},file_capabilities:{container_labels:{available:true}}},members:[]})");
+  assert.equal(f.get("canDownloadOfficial.value"), true);
+  assert.equal(f.get("canConfirmOfficial.value"), false);
+  assert.equal(f.get("officialReady.value"), false);
+});
+
+test("a successfully confirmed discovered application retains the confirmed-container summary step", () => {
+  const f = fixture();
+  f.get("useDetail({batch:{id:71,source:'official_discovery',official_status:'approved',official_carriage_id:'88004',containers_count:4,official_result:{info:{status:'formed',first_mile_type:'pickup'}}},members:[]})");
+  assert.equal(f.get("observedBatch.value"), true);
+  assert.equal(f.get("officialReady.value"), true);
+  assert.equal(f.get("canEditOfficialConfirmation.value"), false);
+  assert.equal(f.get("form.container_count"), 4);
+  const source = readFileSync(new URL("../frontend/orders/components/OglDispatchPanel.vue", import.meta.url), "utf8");
+  assert.match(source, /v-if="!observedBatch \|\| pendingObserved \|\| batch\.can_confirm \|\| officialReady"/);
 });

@@ -1,5 +1,22 @@
 # OGL 发运实现与验证
 
+## 2026-10-23 创建、确认与标签流程核实
+
+本轮优先修复用户反馈的「创建后仍待确认、货位为 0、无法下载标签」。表结构简化和历史治理暂缓，记录见 `docs/architecture/erp-data-map/follow-up-record.json`。以下接口事实已从官方动态文档正文核实，测试与发布结果另行记录，不据此宣称真实发运已创建或确认。
+
+- `/v1/carriage/create` 只创建初始 `new` 发运；请求字段为 `delivery_method_id`、`departure_date` 及可选的 `all_blr_traceable`，没有快递员／自送切换字段。
+- `/v1/carriage/approve` 明确用于创建后的确认，请求只有 `carriage_id` 与适用于信任验收的 `containers_count`。官方说明确认后进入「Сформирована／已生成」，与实际观察的 `formed` 对应。`new` 与官方货位 0 不应被误认为已确认，标签未开放时应提示下一步而非持续等待。
+- `formed` 不等于实物交运。自建批次要经过原店、配送方式、精确货件组成、有效实际货位及官方标签能力核验；不得只靠状态名称绕过一致性检查。
+- `/v2/carriage/delivery/list` 与 `/v1/carriage/get` 返回 `first_mile_type`、`integration_type`。取件／自送选择必须对应真实官方可用方式，不能只改界面名称。仓库级 `/v1/warehouse/fbs/first-mile/update` 会修改仓库第一公里配置，要求仓库、时段、截止时间等字段，本轮不为切换一张发运单而调用它。
+- 取件联系接口 `/v1/carriage/courier-contact/set` 仅适用于 `pickup + ozon_outsourced`。电话必填，格式为 `+86(XXX)XXXX-XXXX`；微信昵称 1–50 字，备注最多 500 字。自送不提交隐藏的旧联系人输入，不把取件电话写入事件、日志或批次公共快照。
+- `/v1/carriage/courier-contact/get` 是已确认存在的官方读取接口，返回 `contact[]` 中的申请号、电话、微信、备注与更新时间；若后续增加回填，须按当前成员与原店授权读取，不能跨企业共享联系方式。
+- `/v2/posting/fbs/act/get-postings` 每项包含 `posting_number`、`status`、`seller_error`。HTTP 200 以及返回货件号都不足以证明实际收录成功；必须保留、展示错误项，不依据未知状态枚举猜测成功。
+- 同企业外店订单继续是明确的 ERP 混袋关联。官方清单与 ERP 全部混袋成员分别展示；不借默认店授权提交其他店货件，不改变原店订单、库存、财务归属。
+
+官方来源：[创建](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageCreate)、[确认](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageApprove)、[配送列表](https://docs.ozon.ru/api/seller/#operation/CarriageAPI_CarriageDeliveryListV2)、[详情](https://docs.ozon.ru/api/seller/#operation/CarriageGet)、[取件联系人](https://docs.ozon.ru/api/seller/#operation/CarriageCourierContactSet)、[读取联系人](https://docs.ozon.ru/api/seller/#operation/CarriageCourierContactGet)、[官方货件清单](https://docs.ozon.ru/api/seller/#operation/PostingAPI_ActPostingList)、[仓库第一公里](https://docs.ozon.ru/api/seller/#operation/UpdateWarehouseFBSFirstMile)。
+
+本轮验收：隔离且关闭 TCP 的本地 MySQL 上，18 个 OGL 相关测试文件共 202 项通过、零跳过；包含跨企业、原店铺、联系后撤权、失败清单、监控和下载回读。完整前端构建、编码及 SQL 参数检查通过。`8788` 的真实 Vue 面板配合纯内存 API 替身，实际点击验证取件／自送、缺电话阻断、总货位修改、创建后确认、已有申请续办、失败原因、PDF 下载和亮暗主题；未向真实 Ozon 创建、确认或取消申请。生产只做了限定申请号的只读 SQL 诊断，没有修改历史订单或库存。
+
 更新时间：2026-10-22（北京时间）。实现分支 `codex/ogl-dispatch-workflow` 从 `febcd38` 创建；`71e2692` 及其前置发运批次实现已与当前 release 的企业隔离、AI 修复和 OGL 交接状态修复一并审查合并。实际部署提交以 `/release.json` 为准；本轮验收不创建、确认或取消真实 Ozon 发运。
 
 ## release 合并与企业隔离补充

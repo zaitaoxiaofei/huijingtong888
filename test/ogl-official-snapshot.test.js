@@ -31,6 +31,7 @@ function fixture() {
   const api={deliveryMethods:async()=>assert.fail('Snapshot never requests official delivery pages'),request:async(shop,path,body)=>{
     network.push({shop:shop.id,path,body});if(state.apiHook)await state.apiHook(path);
     if(path==='/v1/carriage/get')return remote;
+    if(path==='/v2/posting/fbs/act/get-postings')return {result:[{posting_number:'OWN'}]};
     if(path.endsWith('get-container-labels'))return {buffer:Buffer.from('%PDF-fixture'),contentType:'application/pdf'};
     if(path.endsWith('get-barcode'))return {buffer:Buffer.from([137,80,78,71]),contentType:'image/png'};
     assert.fail(`Unexpected API ${path}`);
@@ -91,8 +92,8 @@ test('unsupported barcode is rejected before a binary call; a label remains a re
 });
 test('approved files also fresh-check official capability and suppress bytes after in-flight revocation',async()=>{
   const f=fixture();f.rows[0].official_status='approved';
-  f.setRemote({carriage_id:901,status:'received'});await assert.rejects(f.service.file(f.session,8,'barcode'),{code:'OGL_FILE_CAPABILITY_UNKNOWN'});assert.equal(f.network.length,1);
-  f.setRemote({carriage_id:901,status:'received',available_actions:['get_label_containers']});
+  f.setRemote({carriage_id:901,status:'received',delivery_method_id:77,containers_count:1});await assert.rejects(f.service.file(f.session,8,'barcode'),{code:'OGL_FILE_CAPABILITY_UNKNOWN'});assert.equal(f.network.length,2);
+  f.setRemote({carriage_id:901,status:'received',delivery_method_id:77,containers_count:1,available_actions:['get_label_containers']});
   f.state.apiHook=async path=>{if(path.endsWith('get-container-labels'))f.state.active=false;};
   await assert.rejects(f.service.file(f.session,8,'container-labels'),{statusCode:403});
 });
