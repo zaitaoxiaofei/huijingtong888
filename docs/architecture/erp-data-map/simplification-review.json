@@ -1,0 +1,2235 @@
+{
+  "version": 1,
+  "base_commit": "51f39f8a3cefc3669f7b1e5c89d2f9f8bb3fdb51",
+  "scope": "已保存的 219 表结构、同版本源码及本地旧快照计数；不访问生产，不读取客户业务行。",
+  "conclusion": "219 是业务实体、明细、历史、审计、缓存、配置及旧版表的合计，不能仅凭总数判断过度设计。建议先退旧流程、统一目录/口径/运行机制，再依据收益决定物理合表。",
+  "implemented": false,
+  "live_usage_observed": false,
+  "priority_groups": [
+    {
+      "priority": "第一批",
+      "title": "日期备份表移出运行库",
+      "tables": [
+        "inventory_name_consistency_backup_20260809",
+        "listing_drafts_backup_weight_20260806_2589_2688"
+      ],
+      "action": "归档核查候选",
+      "reason": "属于历史修复时保留的副本，不必长期混在正常业务模型里。",
+      "boundary": "保留完整原始内容、结构和恢复说明；先确认不是唯一回退依据及外部脚本依赖，不直接 DROP。"
+    },
+    {
+      "priority": "第一批",
+      "title": "旧版上架流程退役",
+      "tables": [
+        "publish_tasks",
+        "publish_task_items",
+        "shop_product_versions",
+        "generated_images"
+      ],
+      "action": "停用核查候选",
+      "reason": "现行上架读写集中在 listing_publish_tasks/items、listing_shop_copies、listing_publish_records；旧四表未在本次 src 静态扫描找到活跃消费者。",
+      "boundary": "三个旧表在保存快照中为空，但 generated_images 有 3 条记录。须核查外部工具、旧版本和恢复用途；既有图片文件不随表归档删除。"
+    },
+    {
+      "priority": "第二批",
+      "title": "统一车型目录",
+      "tables": [
+        "asset_vehicle_models",
+        "ai_vehicle_catalog"
+      ],
+      "action": "先映射迁移，再合并职责",
+      "reason": "两套目录都有实际消费者，容易造成不同页面车型不一致。适合统一一个公共＋企业补充目录服务。",
+      "boundary": "保留旧 ID、别名、俄文名称和年份等信息；先切换所有读取和初始化路径。历史定义不被最新公共项自动覆盖。"
+    },
+    {
+      "priority": "第二批",
+      "title": "统一库存余额口径",
+      "tables": [
+        "inventory_current",
+        "inventory_product_balance"
+      ],
+      "action": "先收口计算与读取，不直接合数值",
+      "reason": "存在两套余额投影和维护路径，但新投影还纳入需求、未交运扣减加回和 FBP 占用，二者不是同义副本。",
+      "boundary": "确认实物、可用、预留、在途等定义，逐消费者比对后再评估旧投影退役；inventory_movements 原始流水保留。"
+    },
+    {
+      "priority": "后续治理",
+      "title": "统一 AI 与发布任务的运行机制",
+      "tables": [
+        "ai_generation_tasks",
+        "ai_variant_lab_batch_jobs",
+        "ai_image_optimizer_jobs",
+        "asset_variant_jobs",
+        "ai_material_optimization_batches",
+        "listing_publish_tasks"
+      ],
+      "action": "统一运行基础设施，业务明细分开",
+      "reason": "可复用企业/人员上下文、状态、进度、重试、撤权和恢复机制，减少各套 worker 自己实现一遍。",
+      "boundary": "不是把所有业务压进一张 JSON 表。生成、保存草稿、发布回执、额度事件仍保留各自生命周期与幂等规则。"
+    },
+    {
+      "priority": "后续治理",
+      "title": "统一缓存、日志与大 JSON 的生命周期",
+      "tables": [
+        "order_logistics_summary_snapshots",
+        "inventory_alert_base_snapshots",
+        "analytics_cache",
+        "dashboard_snapshots",
+        "system_monitor_snapshots",
+        "listing_publish_records",
+        "ozon_orders_raw"
+      ],
+      "action": "先控制体积与刷新成本",
+      "reason": "适合统一企业缓存键、TTL、失效、增量刷新和冷热保留。它通常比单纯减少表数更有助于性能与容量。",
+      "boundary": "统计日表的粒度不同，不能随意合并；历史原文有回退用途。未完成或回执未知任务、人工编辑、历史成本不能当普通缓存清理。"
+    },
+    {
+      "priority": "后续治理",
+      "title": "统一配置归属和接口",
+      "tables": [
+        "settings",
+        "system_settings",
+        "system_setting_changes"
+      ],
+      "action": "统一 scope 与访问边界，暂不强求物理合表",
+      "reason": "当前平台、企业、个人、店铺配置存在多套入口与键语义。统一归属规则比合成一个大键值表更重要。",
+      "boundary": "审计记录与当前配置分开；不把所有 settings 变为平台共享。旧 tenant_activation_codes 仍有接口和写入，不能作为死表删除。"
+    }
+  ],
+  "archive_review_candidates": [
+    "inventory_name_consistency_backup_20260809",
+    "listing_drafts_backup_weight_20260806_2589_2688",
+    "publish_tasks",
+    "publish_task_items",
+    "shop_product_versions",
+    "generated_images"
+  ],
+  "saved_counts": {
+    "observed_at_beijing": "2026-10-23 13:42:11",
+    "realtime": false,
+    "source": ".verification/ecs-frozen-before-2026-10-23T05-42-11-115Z.full-proof.json",
+    "counts": {
+      "publish_tasks": 0,
+      "publish_task_items": 0,
+      "shop_product_versions": 0,
+      "ai_variant_case_runs": 0,
+      "generated_images": 3,
+      "generated_titles": 2611,
+      "ai_vehicle_brand_assets": 35
+    },
+    "meaning": "Historical count-only evidence, not current use/deletion permission. generated_images and ai_vehicle_brand_assets are nonempty despite no established active source consumer."
+  },
+  "candidate_reviews": [
+    {
+      "tables": [
+        "inventory_name_consistency_backup_20260809"
+      ],
+      "action": "先列入历史归档候选，确认恢复用途后移出在线业务库；本轮不删除",
+      "reason": "目录将其分类为 archive，保存的是一次历史产品完整结构，和现行 products 主表角色不同。可以减少在线库的历史维护负担，但备份命名和未搜到活动源码不足以证明可直接删除。",
+      "evidence": [
+        {
+          "path": "docs/architecture/erp-data-map/schema-catalog.json",
+          "line": 15141,
+          "reason": "快照中独立历史备份表，包含当时产品字段结构。"
+        }
+      ],
+      "confidence": "中：历史备份身份明确；能否移出在线库尚需恢复责任人、外部脚本与保留期限确认",
+      "preconditions": [
+        "检查仓库外的维护脚本、定时任务、报表和恢复手册，不以 src 静态零引用直接判死表。",
+        "确认是否仍是唯一的历史原值/回退证据；若是，保留独立归档、结构、校验值和恢复说明。",
+        "经过约定的兼容/观察期后，才讨论从在线库移除。"
+      ]
+    },
+    {
+      "tables": [
+        "inventory_alert_sku_daily_refresh",
+        "inventory_alert_tenant_daily_refresh",
+        "fbp_shortage_item_handlings"
+      ],
+      "action": "建立旧版停用清单，优先确认旧刷新标记和遗留处理标记是否可以退役",
+      "reason": "当前库存销量服务明确使用按企业+日期的刷新状态；旧全局按日期表在本次扫描只发现建表定义。旧 FBP 处理表在结构快照存在，但未发现实际 src 消费。两者是停用审核候选，不是已经证明可删。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 310,
+          "reason": "旧 inventory_alert_sku_daily_refresh 的建表定义仍保留。"
+        },
+        {
+          "path": "src/services/mysql-inventory-alert-snapshots.js",
+          "line": 32,
+          "reason": "当前 dirty 写入使用 inventory_alert_tenant_daily_refresh 的企业+日期键。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 4194,
+          "reason": "当前缺失日期检查读取按企业的刷新表。"
+        },
+        {
+          "path": "docs/architecture/erp-data-map/schema-catalog.json",
+          "line": 11842,
+          "reason": "FBP 旧处理标记表仅由保存的结构目录确认存在。"
+        }
+      ],
+      "confidence": "中低：新刷新路径有实际读写证据；未查生产访问日志和仓库外旧客户端",
+      "preconditions": [
+        "确认没有旧进程、旧插件、外部 SQL 或历史维护工具仍读写。",
+        "确认新企业刷新表能重建全部必要日期状态，已有 FBP 人工处理结论不会丢失。",
+        "先停止生成旧表并观察，再归档；不得在同一次升级里直接 DROP。"
+      ]
+    },
+    {
+      "tables": [
+        "order_logistics_summary_snapshots",
+        "inventory_alert_base_snapshots"
+      ],
+      "action": "可以统一缓存目录、企业键、TTL、失效和清理机制；是否合为一张缓存表需基准验证",
+      "reason": "两表都是 cache_key + JSON payload + refreshed_at 的持久缓存，分别有 10 分钟和 15 分钟有效期，原始事实保存在其他表。它们适合共享缓存基础设施，不能因为缓存可重建就删除而退回每次全表重算。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 30216,
+          "reason": "物流缓存键包含企业及查询条件，再散列成持久化键。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 30231,
+          "reason": "持久物流缓存命中要求 10 分钟内刷新。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 4575,
+          "reason": "库存告警基础快照命中要求 15 分钟内刷新。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 4781,
+          "reason": "库存告警将重算结果写回通用 JSON 形态缓存。"
+        }
+      ],
+      "confidence": "高：可重建缓存性质明确；物理合表的性能收益未测量",
+      "preconditions": [
+        "统一表必须显式保存 tenant、cache_type、版本和失效策略，不能只靠全局字符串键猜归属。",
+        "验证每企业独立失效、权限复查、索引选择与并发重建，避免缓存击穿。",
+        "对订单搜索和库存页面做切换前后耗时对比；没有收益时只统一代码和治理，不强行合表。"
+      ]
+    },
+    {
+      "tables": [
+        "inventory_current",
+        "inventory_product_balance"
+      ],
+      "action": "统一库存查询口径与投影维护入口，评估逐步退役旧投影；不能直接把字段数值合并",
+      "reason": "两张表都属于余额投影，但数学含义不同。inventory_current 由流水增量/重建维护，inventory_product_balance 还综合未交运扣减加回、全部订单需求、FBP 占用，区分实物库存与可用库存。真正应简化的是双口径和双维护路径，不是把 available_stock 同名列直接复制覆盖。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 17472,
+          "reason": "旧 current 投影随每次库存动作增量更新。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 17490,
+          "reason": "旧 current 也可以由 posted 流水重建。"
+        },
+        {
+          "path": "src/services/mysql-inventory-product-balance.js",
+          "line": 78,
+          "reason": "新余额投影纳入订单需求与实际组合组件。"
+        },
+        {
+          "path": "src/services/mysql-inventory-product-balance.js",
+          "line": 102,
+          "reason": "新余额投影识别未交运订单的已扣数量。"
+        },
+        {
+          "path": "src/services/mysql-inventory-product-balance.js",
+          "line": 157,
+          "reason": "新余额按企业+产品保存多个明确口径。"
+        },
+        {
+          "path": "src/services/team-tasks.js",
+          "line": 910,
+          "reason": "团队任务仍读取旧 inventory_current，不能直接移除。"
+        }
+      ],
+      "confidence": "中高：并行投影及语义差异由代码确认；能否退役须逐消费者验收",
+      "preconditions": [
+        "先确认实物、可用、预留、在途、损坏、FBP 和组合商品的统一业务定义。",
+        "将所有读取方逐个切换到明确类型的库存接口，验证负数/待核状态不会被归零。",
+        "对采购、订单、盘点、退回、FBP 发仓和团队页面做差异比较后，再停止旧写入。",
+        "inventory_movements 原始流水完整保留，不以余额表替代。"
+      ]
+    },
+    {
+      "tables": [
+        "analytics_shop_daily",
+        "analytics_product_profit_daily",
+        "analytics_sku_profit_daily",
+        "inventory_alert_sku_daily"
+      ],
+      "action": "统一事实来源、按企业的增量刷新和指标定义；现阶段保留不同粒度的物化结果",
+      "reason": "看起来都在统计订单，但粒度分别为店铺日、库存商品日、店铺 SKU 日和采购告警销量日。它们不是四份可随意互换的订单事实；库存告警还按运输证据及 FBP 规则处理。可以减少重复扫描和重复计算，不应仅为减少表数把全部查询退回订单明细或合成一个巨大稀疏表。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 20160,
+          "reason": "利润统计刷新过程还会调用库存销量刷新，存在统一调度/增量工作的优化空间。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 20164,
+          "reason": "现行按日期与店铺范围重建三种利润日聚合。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 20226,
+          "reason": "库存商品粒度的利润聚合独立写入。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 20257,
+          "reason": "SKU 粒度的利润聚合独立写入。"
+        },
+        {
+          "path": "src/services/mysql-inventory-alert-snapshots.js",
+          "line": 56,
+          "reason": "库存告警销量从订单和明细重建，包含自身的业务过滤。"
+        },
+        {
+          "path": "src/services/finance-center.js",
+          "line": 433,
+          "reason": "财务报表实际消费店铺日聚合，移除会改变现有性能和来源。"
+        }
+      ],
+      "confidence": "高：不同粒度和消费者已确认；共享增量刷新收益需要测量",
+      "preconditions": [
+        "建立每个指标的粒度、退款/取消/运输、币种及利润版本定义。",
+        "重用经验证的基础事实和脏日期通知，但不混用业务含义不同的销量。",
+        "验证组合商品、父订单费用分摊和跨店共享库存不会造成重复统计。"
+      ]
+    },
+    {
+      "tables": [
+        "orders",
+        "ozon_orders_raw",
+        "order_status_history"
+      ],
+      "action": "划分热当前状态、必要历史事件与大体积原始载荷的保存周期；可评估历史原始 JSON 归档",
+      "reason": "当前状态、接口原文、历史观察承担不同职责。接口原文和重复观察可以减少热存储或制定分层保留，但历史运输证据还被取消/库存逻辑消费，不能把历史表整体当作当前 Ozon 状态的重复副本清空。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 18802,
+          "reason": "历史写入已有业务指纹去重判断，适合减少重复写而非事后不加区分删除。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 18820,
+          "reason": "历史表保存观测时刻、原始状态及历史身份，不等同当前 orders 行。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 18003,
+          "reason": "取消库存处理读取历史的仓库与物流证据，存在活动业务依赖。"
+        }
+      ],
+      "confidence": "中高：三层职责有代码证据；本轮未读数据量，无法判断能节省多少空间",
+      "preconditions": [
+        "先确认哪些已确认历史状态/运输时刻是不可重建业务证据，建立保留规则。",
+        "归档后仍能按企业、店铺和订单检索；历史业务读取需要可验证的兼容路径。",
+        "未结算、争议、退货、库存待核和无法由上游补回的记录先保留。",
+        "不能用当前 Ozon 状态重写过去的人工收货、扣库或利润结算。"
+      ]
+    },
+    {
+      "tables": [
+        "order_items",
+        "order_profit_items",
+        "order_profit_calc_state",
+        "order_profit_calc_revisions",
+        "order_profit_detail_snapshots"
+      ],
+      "action": "收口利润写入与展示投影，减少多处维护；明确哪些表是事实版本、哪些只是当前指针或页面快照",
+      "reason": "利润数字分布在订单明细、利润明细和详情快照，容易形成多套口径，适合统一写入契约。计算 revisions 与 state 是审计历史和当前版本指针，详情 snapshots 是可再生成展示结果；不能因名称相近而合并删除历史版本或锁定事实。",
+      "evidence": [
+        {
+          "path": "src/services/order-profit-calculation-versions.js",
+          "line": 142,
+          "reason": "每次真正变更新增带输入/输出指纹、原因和父版本的 revision。"
+        },
+        {
+          "path": "src/services/order-profit-calculation-versions.js",
+          "line": 155,
+          "reason": "state 只更新当前层的 revision 指针，并执行同事务投影回调。"
+        },
+        {
+          "path": "src/services/mysql-order-profit-detail-snapshots.js",
+          "line": 54,
+          "reason": "页面详情快照由经企业授权的 orderDetail 再生成。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 20180,
+          "reason": "现行汇总仍在利润明细与订单保存数值之间选择，说明口径收口比表数更重要。"
+        }
+      ],
+      "confidence": "高：多层角色与投影回调明确；哪一个旧字段可停止写入仍需逐 writer 清单",
+      "preconditions": [
+        "先盘点同步、财务应用、人工更正、采购成本回填和重试等全部利润 writer。",
+        "冻结已发布 V1 算术；历史实际/锁定值和基线不得在整理时重算。",
+        "用版本化源事实生成热投影，并验证页面、导出及报表一致。",
+        "只有所有旧消费者迁出后，才讨论移除冗余字段或不再需要的投影表。"
+      ]
+    },
+    {
+      "tables": [
+        "asset_vehicle_models",
+        "ai_vehicle_catalog"
+      ],
+      "action": "migrate_and_consolidate_dictionary",
+      "reason": "Two vehicle dictionaries are actually consumed by current code. The asset-engine bootstrap seeds/lists asset_vehicle_models, while AI uses ai_vehicle_catalog with public builtin plus enterprise-private rows. A single catalog service and explicit legacy-to-canonical mapping would remove competing model lists and repeated normalization.",
+      "evidence": [
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 171,
+          "reason": "Bootstrap still seeds and reads the separate legacy model table."
+        },
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 2263,
+          "reason": "Active vehicle models are read from asset_vehicle_models."
+        },
+        {
+          "path": "src/services/ai-vehicle-catalog.js",
+          "line": 94,
+          "reason": "Canonical catalog predicate already distinguishes public builtins from enterprise supplements."
+        },
+        {
+          "path": "frontend/admin/views/listing/AiVariantCaseLibraryView.vue",
+          "line": 154,
+          "reason": "Current quick-fission case UI reads the AI vehicle catalog endpoint."
+        }
+      ],
+      "confidence": "high_for_duplicate_responsibility_medium_for_physical_merge",
+      "preconditions": [
+        "Preserve Russian names, aliases, years and popularity that exist in the legacy model schema; do not assume an equal display label is one identity.",
+        "Map each legacy ID to a reviewed canonical ID; keep original labels and provenance.",
+        "Keep builtin dictionaries separate from enterprise supplements and prevent private rows leaking through bootstrap.",
+        "Switch every active reader/seed path to the common service before retiring the old writer/table."
+      ]
+    },
+    {
+      "tables": [
+        "publish_tasks",
+        "publish_task_items",
+        "shop_product_versions",
+        "generated_images"
+      ],
+      "action": "archive_candidate_after_runtime_inventory",
+      "reason": "The persisted schema retains a parallel multi-shop publish design, but current confirmed publishing uses listing_publish_tasks/items, listing_shop_copies and listing_publish_records. Exact old names appear in a design document and the structural snapshot; this scan found no current src JS/TS runtime consumers for the old quartet. This makes them priority inventory/archive candidates, not proven disposable tables.",
+      "evidence": [
+        {
+          "path": "docs/multi-shop-publish/api-and-flow.md",
+          "line": 44,
+          "reason": "Historical API design describes a separate shop-version workflow."
+        },
+        {
+          "path": "docs/multi-shop-publish/api-and-flow.md",
+          "line": 129,
+          "reason": "Historical design names publish_tasks and publish_task_items."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 8231,
+          "reason": "Current runtime actually inserts listing_publish_tasks."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 8255,
+          "reason": "Current runtime actually inserts listing_publish_task_items."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 14406,
+          "reason": "Current draft shop fan-out persists listing_shop_copies."
+        },
+        {
+          "path": "docs/architecture/erp-data-map/schema-catalog.json",
+          "line": 43156,
+          "reason": "Snapshot confirms the legacy publish_task_items schema remains present."
+        }
+      ],
+      "confidence": "medium_archive_candidate_not_delete_approval",
+      "preconditions": [
+        "Inventory deployed entrypoints, dynamically constructed SQL, external tools, scheduled jobs and older releases that may still write these tables.",
+        "Measure row counts, newest timestamps and reads/writes over an agreed window; not performed in this analysis.",
+        "Identify missing master-product identity mapping before any backfill into listing_drafts/products.",
+        "Retain a complete immutable archive and recovery instructions; disable confirmed old writers before moving tables out of the operational schema.",
+        "Do not remove generated image files merely because a legacy SQL table is archived."
+      ]
+    },
+    {
+      "tables": [
+        "listing_drafts_backup_weight_20260806_2589_2688"
+      ],
+      "action": "historical_archive_candidate",
+      "reason": "The actual schema contains a dated weight-fix draft backup alongside the live listing_drafts table. It should not be part of the normal application data model if it is confirmed to be a one-off preservation copy. Moving a verified immutable archive out of the operational schema simplifies governance without changing business behavior.",
+      "evidence": [
+        {
+          "path": "docs/architecture/erp-data-map/schema-catalog.json",
+          "line": 18657,
+          "reason": "Saved structural catalog confirms the dated backup table and its draft-shaped fields."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 12366,
+          "reason": "Current live draft creation writes listing_drafts rather than the dated backup."
+        }
+      ],
+      "confidence": "high_archive_candidate_low_for_discard",
+      "preconditions": [
+        "Find the original maintenance purpose and verify whether the table is needed to explain past weight edits or restore overwritten fields.",
+        "Compare identifiers/fields with current records without overwriting current edits; keep historical values as historical.",
+        "Export and checksum the complete backup plus schema; preserve its association with the original repair/release.",
+        "Confirm no operational reader, report or recovery script depends on the old table name.",
+        "User agrees the retention location and duration; no immediate DROP."
+      ]
+    },
+    {
+      "tables": [
+        "ai_generation_tasks",
+        "ai_variant_lab_batch_jobs",
+        "ai_variant_lab_batch_items",
+        "ai_image_optimizer_jobs",
+        "ai_material_optimization_batches",
+        "ai_material_optimization_items",
+        "ai_variant_draft_save_batches",
+        "ai_variant_draft_save_items",
+        "asset_variant_jobs"
+      ],
+      "action": "unify_task_orchestration_first_then_optional_header_consolidation",
+      "reason": "Several task engines duplicate claiming, retries, progress, creator attribution and recovery. Standardize one tenant-aware task envelope/runner and typed handlers before considering whether selected job-header tables can merge. The external-publishing receipt state machine must remain distinct. A giant shared JSON table would reduce names while weakening validation.",
+      "evidence": [
+        {
+          "path": "src/services/ai-generation-tasks.js",
+          "line": 293,
+          "reason": "Generic generator owns queue scheduling/worker limits."
+        },
+        {
+          "path": "src/services/ai-generation-tasks.js",
+          "line": 363,
+          "reason": "Generic task recovery restores the saved tenant and actor."
+        },
+        {
+          "path": "src/services/ai-variant-draft-save-batches.js",
+          "line": 194,
+          "reason": "Draft-save engine independently restores tenant/actor and writes item progress/results."
+        },
+        {
+          "path": "src/services/ai-material-optimization-batches.js",
+          "line": 195,
+          "reason": "Legacy material worker reconstructs only personId and its actual tables lack tenant_id."
+        },
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 1317,
+          "reason": "Asset engine persists another queued job envelope."
+        }
+      ],
+      "confidence": "high_for_common_runtime_medium_for_table_consolidation",
+      "preconditions": [
+        "Define typed job_type, enterprise, actor, idempotency key, attempts, lease, provider receipt, cancellation and terminal-state rules.",
+        "Preserve per-attempt quota/cost events, persisted provider jobs and exact unknown-result handling.",
+        "Migrate legacy material tasks only after unambiguous enterprise assignment; do not infer ownership from creator alone.",
+        "Verify retry/restart/revocation/expired-subscription behavior for every handler.",
+        "Drain or explicitly transfer active tasks; retain business-specific child/result structures where their semantics differ.",
+        "Keep listing_publish_records and per-shop publish items durable even if a shared runner orchestrates them."
+      ]
+    },
+    {
+      "tables": [
+        "ai_variant_templates",
+        "ai_variant_template_cases",
+        "ai_variant_case_templates",
+        "ai_variant_case_runs"
+      ],
+      "action": "consolidate_case_representations_after_semantic_mapping",
+      "reason": "Reusable generation recipes, template-attached examples and user-visible successful fission cases currently have overlapping representation layers. Preserve a recipe/template concept and a successful-example concept, then map older template examples into the chosen case model if all provenance is representable. ai_variant_case_runs appears schema-only in this focused runtime scan and is separately an archive/inventory candidate.",
+      "evidence": [
+        {
+          "path": "src/services/ai-variant-lab.js",
+          "line": 1881,
+          "reason": "Saving a reusable recipe writes ai_variant_templates."
+        },
+        {
+          "path": "src/services/ai-variant-lab.js",
+          "line": 1907,
+          "reason": "The same operation can also write template-attached examples into ai_variant_template_cases."
+        },
+        {
+          "path": "src/services/ai-variant-lab.js",
+          "line": 1984,
+          "reason": "The visible case library writes a different ai_variant_case_templates structure."
+        },
+        {
+          "path": "src/services/ai-variant-lab.js",
+          "line": 2145,
+          "reason": "Quick-case history currently traces exact case/source and actual batch jobs rather than assuming all related model jobs belong to the case."
+        },
+        {
+          "path": "src/services/ai-variant-lab.js",
+          "line": 2372,
+          "reason": "ai_variant_case_runs is created with job/draft history fields; no active run writer was established."
+        }
+      ],
+      "confidence": "medium",
+      "preconditions": [
+        "Agree whether platform recipes/examples are public presets and tenant-created cases remain private; the confirmed vehicle-dictionary sharing decision does not automatically authorize case sharing.",
+        "Retain source draft, generated target image, exact original job/source pair, success criteria, prompts and case business number.",
+        "Inventory actual consumers and stored data before retiring ai_variant_case_runs.",
+        "Preserve already-fissioned/in-progress/failed target labels without generating false completed history.",
+        "Convert through explicit versioned mapping; avoid merging cases just because source model, title or image is similar."
+      ]
+    },
+    {
+      "tables": [
+        "material_assets",
+        "listing_media_assets",
+        "asset_variants",
+        "listing_ai_variant_assets"
+      ],
+      "action": "unify_asset_directory_and_typed_provenance_not_blind_table_merge",
+      "reason": "The same image can have a reusable material-library entry, a physical/publication asset record, generated shop-level variant output and field-level AI result attribution. A common asset directory/provenance service can stop repeated URL/file metadata and inconsistent image selection. Business material metadata and technical publishing readiness have different responsibilities, so preserve their distinction even if later storage is normalized.",
+      "evidence": [
+        {
+          "path": "src/services/material-assets.js",
+          "line": 239,
+          "reason": "Reusable material creation materializes the image through the listing media service."
+        },
+        {
+          "path": "src/services/material-assets.js",
+          "line": 258,
+          "reason": "Material metadata already saves listingMediaAssetId from that technical asset."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 5543,
+          "reason": "Listing media asset stores file hashes, paths, publish readiness and owner context."
+        },
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 440,
+          "reason": "Generated shop variants store separate business output with images_json."
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 12121,
+          "reason": "Field-level AI assets preserve prompt and row snapshots plus draft/template references."
+        }
+      ],
+      "confidence": "high_for_provenance_unification_medium_for_physical_normalization",
+      "preconditions": [
+        "Keep original private AI files separate from intentionally public Ozon publication assets.",
+        "Draft-owned effective_images order and explicit manual-empty image sets remain authoritative.",
+        "Do not deduplicate across enterprises solely by equal URL/hash if it grants access to private media.",
+        "Retain immutable source/result/provenance links, image roles, ordering and manually selected sets.",
+        "No physical-file deletion until all referencing drafts, published receipts, templates and recovery retention have been checked.",
+        "Introduce typed source identifiers; source_product_id/source_id currently have multiple meanings."
+      ]
+    },
+    {
+      "tables": [
+        "listing_draft_bindings",
+        "listing_draft_vehicle_links",
+        "listing_drafts"
+      ],
+      "action": "centralize_vehicle_binding_authority_keep_distinct_task_relation",
+      "reason": "Vehicle binding currently writes the primary catalog ID, the multi-vehicle bridge and copied brand/model/model_key fields in three places. Choose the bridge plus an explicit primary selection as the authority and treat labels as projections. listing_draft_bindings also owns an independent task link, so deleting/merging the whole table into vehicle rows would lose a different cardinality.",
+      "evidence": [
+        {
+          "path": "src/services/listing-draft-bindings.js",
+          "line": 280,
+          "reason": "Vehicle update writes draft label fields."
+        },
+        {
+          "path": "src/services/listing-draft-bindings.js",
+          "line": 283,
+          "reason": "The same operation writes the single primary vehicle in listing_draft_bindings."
+        },
+        {
+          "path": "src/services/listing-draft-bindings.js",
+          "line": 285,
+          "reason": "The same operation replaces the multi-vehicle bridge."
+        },
+        {
+          "path": "src/services/listing-draft-bindings.js",
+          "line": 289,
+          "reason": "The binding table separately stores task_id."
+        }
+      ],
+      "confidence": "high_for_reducing_duplicate_authority_not_table_drop",
+      "preconditions": [
+        "Agree how a primary model is selected when multiple models are linked.",
+        "Preserve existing task binding and same-enterprise ownership; task_id is independent of vehicle cardinality.",
+        "Backfill only when current ID/labels/bridge agree; classify conflicts for review.",
+        "Update readers/writers transactionally and preserve historical displayed labels when dictionaries are renamed."
+      ]
+    },
+    {
+      "id": "configuration-contract",
+      "tables": [
+        "settings",
+        "system_settings",
+        "system_setting_changes"
+      ],
+      "action": "先统一配置访问入口、键命名空间和归属注册；暂不物理合表，配置变更审计继续独立追加。",
+      "reason": "settings 是 (key,tenant_id) 企业配置，system_settings 是全局 key 且混有个人偏好和店铺活动配置。对调用方暴露一致的 typed owner/key 契约可减少重复处理；直接合表会把平台、企业、个人权限混在一起，减少两张表并不能自动简化业务。",
+      "evidence": [
+        {
+          "path": "src/services/seller-analytics.js",
+          "line": 816,
+          "reason": "settings 查询明确带字符串企业键。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 3241,
+          "reason": "个人偏好在 system_settings.key 中编码 personId。"
+        },
+        {
+          "path": "src/services/ozon-actions.js",
+          "line": 609,
+          "reason": "店铺活动配置也使用 system_settings，而非纯平台常量。"
+        },
+        {
+          "path": "src/services/ai-provider-settings.js",
+          "line": 946,
+          "reason": "AI 配置变更独立写审计，不能覆盖为最后值。"
+        }
+      ],
+      "confidence": "high_for_contract_consolidation_not_table_merge",
+      "preconditions": [
+        "每个 key 登记 owner_type/owner_id、读写权限、敏感级别、值版本及历史兼容。",
+        "密钥不得移入通用可见配置投影；审计保留原操作者和旧值保护。",
+        "先替换调用适配层并做 A/B 和个人偏好验收，之后才评估是否值得改物理结构。"
+      ],
+      "table_count_effect": "初期0；物理合表收益未证明。",
+      "schema_evidence": [
+        {
+          "table": "settings",
+          "columns": [
+            "key",
+            "tenant_id",
+            "value",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "key",
+                "tenant_id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "system_settings",
+          "columns": [
+            "key",
+            "value_json",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "system_setting_changes",
+          "columns": [
+            "id",
+            "setting_key",
+            "old_value_json",
+            "new_value_json",
+            "updated_by_person_id",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cache-lifecycle-contract",
+      "tables": [
+        "dashboard_snapshots",
+        "order_logistics_summary_snapshots",
+        "exception_workbench_snapshots",
+        "inventory_alert_base_snapshots"
+      ],
+      "action": "统一缓存 key、版本、企业维度、过期/失效接口和清理策略；仅对已证明可重建的投影评估共用缓存存储。",
+      "reason": "四表都承载带时间的 JSON 查询投影，三表的物理结构近似。更有价值的是避免四套失效逻辑和无限留存，而非马上把不同有效期、历史语义压成一个大 JSON 表。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 28570,
+          "reason": "Dashboard 快照键已编码企业和日期。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 28824,
+          "reason": "Dashboard 持久化查询快照，不是原始采购/库存账本。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 30231,
+          "reason": "订单物流摘要有明确新鲜度条件。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 8430,
+          "reason": "异常工作台已有按企业前缀清理。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 4781,
+          "reason": "库存告警基础快照亦为缓存键+JSON+刷新时间模式。"
+        }
+      ],
+      "confidence": "high_for_lifecycle_medium_for_physical_consolidation",
+      "preconditions": [
+        "逐投影确认来源、可重建性与所需历史窗口；不能把不可重建的当日经营证据当普通缓存。",
+        "保留 enterprise+query+permission+rule_version 命名空间，默认企业和A/B同查询键不互相命中。",
+        "评估合表后的热点和索引成本；先迁一类可重建缓存并可回退，避免全量缓存冷启动冲击生产。"
+      ],
+      "table_count_effect": "候选，不承诺立刻四合一；首先减少重复逻辑和无效旧缓存行。",
+      "schema_evidence": [
+        {
+          "table": "dashboard_snapshots",
+          "columns": [
+            "snapshot_key",
+            "date_key",
+            "payload_json",
+            "source_updated_at",
+            "refreshed_at",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "snapshot_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "order_logistics_summary_snapshots",
+          "columns": [
+            "cache_key",
+            "payload_json",
+            "refreshed_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "cache_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "exception_workbench_snapshots",
+          "columns": [
+            "cache_key",
+            "payload_json",
+            "refreshed_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "cache_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "inventory_alert_base_snapshots",
+          "columns": [
+            "cache_key",
+            "payload_json",
+            "refreshed_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "cache_key"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "unproven-cache-retirement",
+      "tables": [
+        "analytics_cache"
+      ],
+      "action": "列为废弃候选，先建立读写观察与完整调用清单，再决定冻结写入、归档或退役。",
+      "reason": "本地结构表存在，但在本轮 src/services 和 src/server 精确表名搜索未找到活跃 SQL 读写；已找到的是 canonical schema 建表。这个证据适合启动退役核查，不能直接证明生产没有外部脚本或旧版本在用。",
+      "evidence": [
+        {
+          "path": "scripts/init-mysql-schema.mjs",
+          "line": 1302,
+          "reason": "Schema 仍创建 cache_type/cache_key/payload/refreshed_at 缓存表。"
+        }
+      ],
+      "confidence": "medium_retirement_candidate_only",
+      "preconditions": [
+        "核对全部当前发布、旧进程、运维脚本、导入工具和未来接口依赖。",
+        "统计实际读写使用和最后写入时间；本轮未连接生产，尚无该证据。",
+        "确认可重建后才隔离备份并去掉建表/使用路径；最后删除需单独明确变更。"
+      ],
+      "table_count_effect": "最多1张候选；当前可安全删除数量仍是0。",
+      "schema_evidence": [
+        {
+          "table": "analytics_cache",
+          "columns": [
+            "cache_type",
+            "cache_key",
+            "payload",
+            "refreshed_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "cache_type",
+                "cache_key"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "scheduled-history-lifecycle",
+      "tables": [
+        "scheduled_jobs",
+        "scheduled_job_runs",
+        "scheduled_job_run_events",
+        "sync_logs"
+      ],
+      "action": "保留定义→运行→事件分层，统一展示、关联 run_id、日志摘要和冷热保留策略；不把运行事件塞回调度定义表。",
+      "reason": "这四表的数据粒度和生命周期不同，物理合并会制造重复调度定义及超大运行记录。现有代码已具备按状态/时间批量清理和大结果摘要工具，先确认配置和调用覆盖能降低容量与维护成本。",
+      "evidence": [
+        {
+          "path": "src/services/scheduled-jobs.js",
+          "line": 836,
+          "reason": "每次执行有独立运行记录，使用持久任务定义的 job_key。"
+        },
+        {
+          "path": "src/services/scheduled-jobs.js",
+          "line": 597,
+          "reason": "步骤事件持有 run_id，天然是一运行对多事件。"
+        },
+        {
+          "path": "src/services/scheduled-jobs.js",
+          "line": 395,
+          "reason": "已有分状态与时间窗口的历史清理，并按批次删除。"
+        },
+        {
+          "path": "scripts/trim-scheduled-job-run-results.mjs",
+          "line": 41,
+          "reason": "已有大结果摘要工具，不能将它当本轮已执行。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 19739,
+          "reason": "同步日志有明确企业，普通业务展示不能直接暴露平台多企业运行日志。"
+        }
+      ],
+      "confidence": "high",
+      "preconditions": [
+        "确认日志保留期和失败/未知结果的保留规则；长时间未完成任务与外部回执不能按普通成功日志删除。",
+        "保留必要失败摘要、操作人、企业、外部关联和排障证据；不把业务回执唯一副本当冗余日志。",
+        "现有 cleanup 的最终过期分支会删所有旧运行，应在决定保留策略后再审其状态条件。",
+        "不同企业读取必须通过企业投影；不要合并后丢掉 sync_logs.tenant_id。"
+      ],
+      "table_count_effect": "建议0；可减少历史行和大JSON重复，表分层仍合理。",
+      "schema_evidence": [
+        {
+          "table": "scheduled_jobs",
+          "columns": [
+            "id",
+            "job_key",
+            "job_name",
+            "category",
+            "priority",
+            "schedule_type",
+            "interval_minutes",
+            "daily_time",
+            "enabled",
+            "catchup_enabled",
+            "max_catchup_runs",
+            "last_success_at",
+            "last_attempt_at",
+            "next_run_at",
+            "locked_at",
+            "locked_by",
+            "fail_count",
+            "last_status",
+            "last_error",
+            "config_json",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uq_scheduled_jobs_key",
+              "columns": [
+                "job_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "scheduled_job_runs",
+          "columns": [
+            "id",
+            "job_key",
+            "planned_for",
+            "started_at",
+            "finished_at",
+            "status",
+            "mode",
+            "payload_json",
+            "result_json",
+            "error_message",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "scheduled_job_run_events",
+          "columns": [
+            "id",
+            "run_id",
+            "job_key",
+            "step_key",
+            "status",
+            "shop_id",
+            "shop_name",
+            "attempt",
+            "message",
+            "detail_json",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "sync_logs",
+          "columns": [
+            "id",
+            "tenant_id",
+            "job",
+            "status",
+            "message",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "monitoring-retention",
+      "tables": [
+        "system_monitor_snapshots"
+      ],
+      "action": "为运维时序快照设置明确采样、近期明细/远期汇总与保留期；先核实已有180天保留是否符合需要。",
+      "reason": "主机磁盘、进程内存和各目录字节数是平台时序指标，与订单/库存业务证据不同。单独一张时序表合理；简化点是生命周期，不是与任务事件或业务审计合表。",
+      "evidence": [
+        {
+          "path": "src/services/system-monitoring.js",
+          "line": 8,
+          "reason": "代码已有180天固定保留。"
+        },
+        {
+          "path": "src/services/system-monitoring.js",
+          "line": 137,
+          "reason": "记录磁盘/内存/目录大小及 topTables 摘要。"
+        },
+        {
+          "path": "src/services/system-monitoring.js",
+          "line": 148,
+          "reason": "每次采集已有按时间清理。"
+        }
+      ],
+      "confidence": "high",
+      "preconditions": [
+        "先量实际采样频率和表体积，不能从表数量推断该表是性能瓶颈。",
+        "保留事故期间必要证据；远期降采样应明确峰值/均值/最后值口径。",
+        "平台监控不向普通企业暴露路径、备份和其他企业运行细节。"
+      ],
+      "table_count_effect": "建议0；容量优化候选。",
+      "schema_evidence": [
+        {
+          "table": "system_monitor_snapshots",
+          "columns": [
+            "id",
+            "captured_at",
+            "disk_total_bytes",
+            "disk_used_bytes",
+            "disk_available_bytes",
+            "usage_percent",
+            "daily_growth_bytes",
+            "mysql_bytes",
+            "binlog_bytes",
+            "uploads_bytes",
+            "backups_bytes",
+            "releases_bytes",
+            "logs_bytes",
+            "app_rss_bytes",
+            "service_uptime_seconds",
+            "severity",
+            "details_json"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "canonical-vehicle-catalog",
+      "tables": [
+        "ai_vehicle_catalog",
+        "asset_vehicle_models"
+      ],
+      "action": "统一车型主数据读取契约，逐步选择一套规范实体，另一套通过显式ID映射/兼容视图退出；年份、别名和公共修订独立表达。",
+      "reason": "两套车型目录存在重复品牌/车型语义，但字段不同：AI目录有公共builtin与企业补充，矩阵目录有中俄标签与年份范围。与其维护两套独立目录，统一稳定实体和别名来源更能简化；不能按同名直接合并两套主键。",
+      "evidence": [
+        {
+          "path": "src/services/ai-vehicle-catalog.js",
+          "line": 100,
+          "reason": "AI目录已有公共+当前企业补充合并读取。"
+        },
+        {
+          "path": "src/services/ai-vehicle-catalog.js",
+          "line": 178,
+          "reason": "AI车型目录有独立写入路径和业务实体ID。"
+        },
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 2263,
+          "reason": "矩阵仍读取另一张全局车型表。"
+        },
+        {
+          "path": "src/services/asset-variant-engine.js",
+          "line": 2311,
+          "reason": "矩阵目录还有单独预置写入，不能仅替换一处下拉读取。"
+        }
+      ],
+      "confidence": "high_for_duplicate_concept_medium_for_physical_merge",
+      "preconditions": [
+        "已确认企业内共享库存采购且企业间隔离，公共品牌/车型/核心品名+企业补充；不得把企业业务素材公开。",
+        "已确认旧商品/单据保留原定义、新建用最新公共定义；规范实体需要版本或冻结快照。",
+        "先列出现有车型ID/文本引用、年份与别名冲突，显式映射并保留旧ID兼容。",
+        "品牌素材文件和核心品名编号序列不是同一实体，不能为少几张表塞入车型表。"
+      ],
+      "table_count_effect": "未来可能减少1套重复目录；当前不删表、不迁ID。",
+      "schema_evidence": [
+        {
+          "table": "ai_vehicle_catalog",
+          "columns": [
+            "id",
+            "tenant_id",
+            "brand_key",
+            "brand_name",
+            "model_key",
+            "model_name",
+            "tags_json",
+            "source",
+            "enabled",
+            "created_by_person_id",
+            "created_at",
+            "updated_at",
+            "aliases_json",
+            "supply_anchor",
+            "search_keywords_json",
+            "recommended_products_json",
+            "ozon_competition",
+            "user_priority",
+            "vehicle_reference_image_url"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uniq_ai_vehicle_catalog_tenant_brand_model",
+              "columns": [
+                "tenant_id",
+                "brand_key",
+                "model_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "asset_vehicle_models",
+          "columns": [
+            "id",
+            "brand",
+            "brand_ru",
+            "model",
+            "model_ru",
+            "label_zh",
+            "label_ru",
+            "year_from",
+            "year_to",
+            "aliases_json",
+            "popularity_rank",
+            "status",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uq_asset_vehicle_model",
+              "columns": [
+                "brand",
+                "model",
+                "year_from",
+                "year_to"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "legacy-activation-lifecycle",
+      "tables": [
+        "tenant_activation_codes",
+        "tenant_subscription_vouchers"
+      ],
+      "action": "优先简化产品入口与旧发码生命周期：如果业务决定停止旧企业绑定码，先停新增、保留原状态/审计，完成兼容观察后再归档；不直接合并两种凭证。",
+      "reason": "两表看起来都叫激活码，但旧码绑定企业，新会员码保存不可变套餐快照并在兑换时绑定使用企业，安全语义不同。当前旧码GET/POST/DELETE路由仍在，不能将其误判死表；入口收敛比凭证表强行复用安全。",
+      "evidence": [
+        {
+          "path": "src/server.js",
+          "line": 308,
+          "reason": "旧绑定码接口仍是已挂载路由，不能宣布无用。"
+        },
+        {
+          "path": "src/services/tenants.js",
+          "line": 189,
+          "reason": "后台新建企业仍生成并返回旧类型码。"
+        },
+        {
+          "path": "src/services/self-service-membership.js",
+          "line": 156,
+          "reason": "通用会员凭证发行保存套餐快照，并非旧企业绑定码。"
+        },
+        {
+          "path": "docs/self-service-membership.md",
+          "line": 19,
+          "reason": "文档明确通用会员码、旧绑定码与插件令牌不互相替代。"
+        }
+      ],
+      "confidence": "medium_business_deprecation_decision_required",
+      "preconditions": [
+        "先确认旧绑定码还有何使用场景、用户和外部客户端依赖，用户未授权取消这一能力。",
+        "会员时长、企业成员、插件访问分别校验；旧码不能自动升级为可兑换其他企业的会员凭证。",
+        "若废弃旧流程，现有码状态和审计仍保留，不迁移哈希为另一种授权能力。"
+      ],
+      "table_count_effect": "先0；只有确认停用旧功能并完成兼容后才可能归档1表。",
+      "schema_evidence": [
+        {
+          "table": "tenant_activation_codes",
+          "columns": [
+            "id",
+            "tenant_id",
+            "code_hash",
+            "code_hint",
+            "status",
+            "expires_at",
+            "created_by_person_id",
+            "created_at",
+            "revoked_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenant_activation_code_hash",
+              "columns": [
+                "code_hash"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_subscription_vouchers",
+          "columns": [
+            "id",
+            "code_hash",
+            "code_hint",
+            "status",
+            "plan_snapshot_json",
+            "redeemable_until",
+            "issued_by_person_id",
+            "used_by_person_id",
+            "used_by_tenant_id",
+            "created_at",
+            "used_at",
+            "revoked_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_subscription_voucher_hash",
+              "columns": [
+                "code_hash"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "must_keep": [
+    {
+      "tables": [
+        "products",
+        "online_products",
+        "sku_mappings",
+        "product_components",
+        "sku_inventory_recipes",
+        "sku_inventory_recipe_items"
+      ],
+      "reason": "本地物理库存、店铺在线商品、绑定关系、产品组成和店铺 SKU 配方属于不同身份与基数。同企业多店共库存需要这些连接层；一个外部 SKU 可能对应多个实物组件，不能强压到单一商品表。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-inventory-product-balance.js",
+          "line": 87,
+          "reason": "订单映射、店铺配方与物理组件分层决定实际库存需求。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "procurement_requests",
+        "purchase_orders",
+        "purchase_order_items",
+        "procurement_order_allocations",
+        "inbound_records",
+        "inventory_movements",
+        "outbound_records"
+      ],
+      "reason": "需求、实际采购、采购明细、订单分配、分批实收、库存流水和出库证据是不同事实。一次采购可覆盖多店多单，一条采购明细可分批实收，不能把申请/采购/收货合为一个状态字段。可以规范接口与原子事务，不应物理合并抹去基数。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 23791,
+          "reason": "独立 allocation 保存采购需求到销售明细的数量覆盖。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 24948,
+          "reason": "部分收货会产生保留原采购关联的剩余待收记录。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 21710,
+          "reason": "批准收货后单独登记库存流水，并使用明确 inbound source_ref。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "procurement_platform_orders",
+        "procurement_platform_order_links",
+        "procurement_payment_transactions",
+        "procurement_payment_matches",
+        "purchase_cost_versions",
+        "procurement_ledger_actions",
+        "procurement_history_sources",
+        "procurement_stock_cost_tasks",
+        "procurement_stock_cost_links"
+      ],
+      "reason": "供应商订单、平台支付、费用分摊、成本版本和历史对账不是重复采购单。多对多金额/数量分配、人工确认及未解成本需要独立证据；不能以减少表数丢掉成本来源和校正链。",
+      "evidence": [
+        {
+          "path": "src/services/procurement-reconciliation.js",
+          "line": 245,
+          "reason": "实际成本通过供应商订单、确认支付和申请分配共同解析。"
+        },
+        {
+          "path": "src/services/procurement-ledger.js",
+          "line": 503,
+          "reason": "对账保存操作原因和完整 before 快照。"
+        },
+        {
+          "path": "src/services/procurement-ledger.js",
+          "line": 600,
+          "reason": "未解成本任务通过明确采购明细和动作逐项补全。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "ogl_dispatch_batches",
+        "ogl_dispatch_members",
+        "ogl_dispatch_events",
+        "ogl_dispatch_official_locks",
+        "ogl_dispatch_settings"
+      ],
+      "reason": "本地批次、订单成员、人工/官方事件、外部调用并发锁和企业默认店铺承担不同责任。Ozon 申请成功、实际交运、进入平台运输不是一个状态，不能合为单表单字段，更不能删掉回执和未知结果证据。",
+      "evidence": [
+        {
+          "path": "src/services/ogl-dispatch.js",
+          "line": 144,
+          "reason": "批次成员按本地订单+店铺+posting 三元身份核对。"
+        },
+        {
+          "path": "src/services/ogl-dispatch.js",
+          "line": 616,
+          "reason": "发现官方申请记录显式保留 physical_dispatch=false，不伪造人工交运事实。"
+        },
+        {
+          "path": "src/services/ogl-dispatch.js",
+          "line": 1001,
+          "reason": "外部创建失败/未知结果单独持久化，避免盲目再次创建。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "fbp_replenishment_orders",
+        "fbp_replenishment_order_items",
+        "fbp_replenishment_item_adjustments",
+        "fbp_replenishment_print_records",
+        "fbp_replenishment_batches",
+        "fbp_replenishment_batch_members",
+        "fbp_replenishment_fill_executions",
+        "fbp_transfer_records"
+      ],
+      "reason": "补货申请、实物明细、数量修正、实际打印、汇总批次、供应商/插件执行回执和在途发仓记录基数不同。可以统一术语与操作入口，不能只因都叫批次就和 OGL 或销售订单强行合表。",
+      "evidence": [
+        {
+          "path": "src/services/fbp-warehouse.js",
+          "line": 72,
+          "reason": "打印事实按幂等 request_key 独立追加，不只是明细上的打印次数。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 6368,
+          "reason": "多源补货明细共享一批次 SKU 填写结果，必须防止重复分配。"
+        },
+        {
+          "path": "src/services/mysql-cutover.js",
+          "line": 6411,
+          "reason": "填仓执行逐批次和 SKU 保存成功/失败及数量回执。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "ozon_finance_items",
+        "finance_companies",
+        "finance_shop_company_assignments",
+        "finance_expenses",
+        "finance_vouchers",
+        "finance_periods",
+        "order_profit_calc_revisions"
+      ],
+      "reason": "官方结算行、记账主体、店铺主体生效期间、人工费用、凭证、结账期间和利润修订分别承担来源与审计责任；最新平台状态不能重建人工费用、附件或历史结账决定。",
+      "evidence": [
+        {
+          "path": "src/services/finance-center.js",
+          "line": 310,
+          "reason": "凭证官方费用来源还要求按 operation_date 检查店铺到主体的生效关联。"
+        },
+        {
+          "path": "src/services/finance-center.js",
+          "line": 475,
+          "reason": "公司月度结账是显式保存的业务决定。"
+        },
+        {
+          "path": "src/services/order-profit-calculation-versions.js",
+          "line": 142,
+          "reason": "利润版本保存输入、输出及更正来源，不能由当前值代替。"
+        }
+      ]
+    },
+    {
+      "tables": [
+        "listing_drafts",
+        "listing_category_templates",
+        "listing_shop_copies",
+        "listing_publish_task_items",
+        "listing_publish_records",
+        "listing_publish_variant_links"
+      ],
+      "reason": "Editable business draft, reusable category contract, shop-specific offer, queued per-shop attempt, durable Ozon receipt and variant identity are different lifecycle records. Collapsing them loses retries, attribution or edit history."
+    },
+    {
+      "tables": [
+        "ai_image_usage_events",
+        "tenant_ai_usage",
+        "tenant_ai_limits"
+      ],
+      "reason": "Per-attempt vendor evidence, month-level enterprise quota counters and configured limit are different grains. They must not be replaced by a mutable job success count."
+    },
+    {
+      "tables": [
+        "ai_image_task_owners",
+        "listing_media_assets",
+        "material_assets"
+      ],
+      "reason": "File access ownership, technical public-publishing readiness and reusable business material have distinct access and retention rules."
+    },
+    {
+      "tables": [
+        "ai_prompt_templates",
+        "ai_strategies",
+        "ai_strategy_layer_rules",
+        "ai_strategy_bundles",
+        "ai_strategy_category_nodes"
+      ],
+      "reason": "Prompts, reusable strategy atoms, goal/layer rules, bundles and category hierarchy have evidenced distinct composition roles. A shared admin screen/API can simplify management without merging them into one unvalidated JSON bag."
+    },
+    {
+      "tables": [
+        "listing_variant_lineage"
+      ],
+      "reason": "Projection can be rebuilt only from verified owned source records; retain its documented role and do not turn it into warehouse/financial authority."
+    },
+    {
+      "tables": [
+        "generated_titles"
+      ],
+      "reason": "The similarly named generated_titles is not the legacy generated_images table. Asset engine actively inserts title candidates at src/services/asset-variant-engine.js:2643; the saved snapshot contains 2611 title rows. Do not archive it with the old empty multi-shop-publish task tables."
+    },
+    {
+      "tables": [
+        "people",
+        "tenants",
+        "tenant_members",
+        "platform_grants"
+      ],
+      "reason": "全局登录身份、企业空间、人在该企业的角色/岗位、平台特权是四个独立维度。合为people.tenant_id或一个role字段会破坏多企业成员、平台专用账号和撤权边界。",
+      "evidence": [
+        {
+          "path": "src/services/mysql-auth-session.js",
+          "line": 71,
+          "reason": "会话业务身份通过同一个人和当前企业的有效成员关系恢复。"
+        },
+        {
+          "path": "src/services/platform-grants.js",
+          "line": 27,
+          "reason": "平台权限来自显式有效授权，不是业务岗位。"
+        }
+      ],
+      "schema_evidence": [
+        {
+          "table": "people",
+          "columns": [
+            "id",
+            "name",
+            "username",
+            "role",
+            "avatar_url",
+            "active",
+            "password_hash",
+            "created_at",
+            "updated_at",
+            "roles_json",
+            "account_kind"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_people_name",
+              "columns": [
+                "name"
+              ]
+            },
+            {
+              "name": "uk_people_username",
+              "columns": [
+                "username"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenants",
+          "columns": [
+            "id",
+            "slug",
+            "name",
+            "status",
+            "created_at",
+            "updated_at",
+            "plan_code",
+            "subscription_status",
+            "subscription_expires_at",
+            "feature_flags_json",
+            "member_limit",
+            "shop_limit"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenants_slug",
+              "columns": [
+                "slug"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_members",
+          "columns": [
+            "tenant_id",
+            "person_id",
+            "role",
+            "active",
+            "created_at",
+            "updated_at",
+            "business_roles_json"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "tenant_id",
+                "person_id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "platform_grants",
+          "columns": [
+            "person_id",
+            "role",
+            "active",
+            "granted_by_person_id",
+            "reason",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "person_id"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tables": [
+        "sessions",
+        "tenant_plugin_tokens",
+        "tenant_subscription_vouchers",
+        "tenant_activation_codes"
+      ],
+      "reason": "会话、插件机器凭据、一次性会员权益和旧绑定码的授权范围、撤销、有效期和重放规则不同。可以统一安全基础库，不能共用一条凭据记录或允许跨类型兑换。",
+      "evidence": [
+        {
+          "path": "docs/self-service-membership.md",
+          "line": 19,
+          "reason": "明确三类码边界，会员兑换不产生跨企业成员关系。"
+        }
+      ],
+      "schema_evidence": [
+        {
+          "table": "sessions",
+          "columns": [
+            "token",
+            "person_id",
+            "name",
+            "role",
+            "username",
+            "created_at",
+            "expires_at",
+            "active_tenant_id"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "token"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_plugin_tokens",
+          "columns": [
+            "id",
+            "tenant_id",
+            "token_hash",
+            "label",
+            "created_by_person_id",
+            "created_at",
+            "revoked_at",
+            "token_ciphertext"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenant_plugin_token_hash",
+              "columns": [
+                "token_hash"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_subscription_vouchers",
+          "columns": [
+            "id",
+            "code_hash",
+            "code_hint",
+            "status",
+            "plan_snapshot_json",
+            "redeemable_until",
+            "issued_by_person_id",
+            "used_by_person_id",
+            "used_by_tenant_id",
+            "created_at",
+            "used_at",
+            "revoked_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_subscription_voucher_hash",
+              "columns": [
+                "code_hash"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_activation_codes",
+          "columns": [
+            "id",
+            "tenant_id",
+            "code_hash",
+            "code_hint",
+            "status",
+            "expires_at",
+            "created_by_person_id",
+            "created_at",
+            "revoked_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenant_activation_code_hash",
+              "columns": [
+                "code_hash"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tables": [
+        "tenant_plans",
+        "tenants",
+        "tenant_subscription_vouchers"
+      ],
+      "reason": "套餐目录可编辑，企业保存当前订阅及额度，已发行凭证保存不可变快照。只保留一个可编辑套餐引用会改变已经卖出的权益。",
+      "evidence": [
+        {
+          "path": "src/services/self-service-membership.js",
+          "line": 53,
+          "reason": "会员凭证读写保存快照，而非动态依赖后来编辑的套餐。"
+        }
+      ],
+      "schema_evidence": [
+        {
+          "table": "tenant_plans",
+          "columns": [
+            "id",
+            "code",
+            "name",
+            "duration_days",
+            "subscription_status",
+            "account_limit",
+            "shop_limit",
+            "active",
+            "is_builtin",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenant_plans_code",
+              "columns": [
+                "code"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenants",
+          "columns": [
+            "id",
+            "slug",
+            "name",
+            "status",
+            "created_at",
+            "updated_at",
+            "plan_code",
+            "subscription_status",
+            "subscription_expires_at",
+            "feature_flags_json",
+            "member_limit",
+            "shop_limit"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_tenants_slug",
+              "columns": [
+                "slug"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_subscription_vouchers",
+          "columns": [
+            "id",
+            "code_hash",
+            "code_hint",
+            "status",
+            "plan_snapshot_json",
+            "redeemable_until",
+            "issued_by_person_id",
+            "used_by_person_id",
+            "used_by_tenant_id",
+            "created_at",
+            "used_at",
+            "revoked_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_subscription_voucher_hash",
+              "columns": [
+                "code_hash"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tables": [
+        "tenant_ai_limits",
+        "tenant_ai_usage",
+        "ai_image_task_owners",
+        "tenant_private_files"
+      ],
+      "reason": "限额配置、月用量账本、图片任务归属与私有文件资源是不同粒度；字段少不等于无用。元数据统一访问可以，不能以合表取消文件鉴权或并发计量。",
+      "evidence": [
+        {
+          "path": "src/services/ai-tenant-context.js",
+          "line": 54,
+          "reason": "限额和月用量事务计量独立。"
+        },
+        {
+          "path": "src/services/ai-image-task-ownership.js",
+          "line": 13,
+          "reason": "任务归属在文件创建前登记。"
+        }
+      ],
+      "schema_evidence": [
+        {
+          "table": "tenant_ai_limits",
+          "columns": [
+            "tenant_id",
+            "monthly_request_limit"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "tenant_id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_ai_usage",
+          "columns": [
+            "tenant_id",
+            "period_key",
+            "request_count",
+            "text_count",
+            "image_count",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "tenant_id",
+                "period_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "ai_image_task_owners",
+          "columns": [
+            "task_id",
+            "tenant_id",
+            "created_by_person_id",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "task_id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "tenant_private_files",
+          "columns": [
+            "id",
+            "tenant_id",
+            "storage_name",
+            "original_name",
+            "purpose",
+            "content_type",
+            "byte_size",
+            "uploaded_by",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uk_private_file_storage",
+              "columns": [
+                "storage_name"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "tables": [
+        "platform_identity_migration_log",
+        "system_setting_changes",
+        "scheduled_jobs",
+        "scheduled_job_runs",
+        "scheduled_job_run_events"
+      ],
+      "reason": "身份变更审计、配置变更审计、调度定义、单次运行和多条事件粒度不同；保留可审阅的前后值与运行证据，比减少表数重要。",
+      "evidence": [
+        {
+          "path": "scripts/lib/platform-enterprise-identity-migration.mjs",
+          "line": 160,
+          "reason": "审阅身份迁移保留之前授权/成员及目标完整快照。"
+        }
+      ],
+      "schema_evidence": [
+        {
+          "table": "platform_identity_migration_log",
+          "columns": [
+            "id",
+            "person_id",
+            "reviewed_by_person_id",
+            "reason",
+            "previous_grant_json",
+            "previous_memberships_json",
+            "desired_identity_json",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "system_setting_changes",
+          "columns": [
+            "id",
+            "setting_key",
+            "old_value_json",
+            "new_value_json",
+            "updated_by_person_id",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "scheduled_jobs",
+          "columns": [
+            "id",
+            "job_key",
+            "job_name",
+            "category",
+            "priority",
+            "schedule_type",
+            "interval_minutes",
+            "daily_time",
+            "enabled",
+            "catchup_enabled",
+            "max_catchup_runs",
+            "last_success_at",
+            "last_attempt_at",
+            "next_run_at",
+            "locked_at",
+            "locked_by",
+            "fail_count",
+            "last_status",
+            "last_error",
+            "config_json",
+            "created_at",
+            "updated_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            },
+            {
+              "name": "uq_scheduled_jobs_key",
+              "columns": [
+                "job_key"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "scheduled_job_runs",
+          "columns": [
+            "id",
+            "job_key",
+            "planned_for",
+            "started_at",
+            "finished_at",
+            "status",
+            "mode",
+            "payload_json",
+            "result_json",
+            "error_message",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        },
+        {
+          "table": "scheduled_job_run_events",
+          "columns": [
+            "id",
+            "run_id",
+            "job_key",
+            "step_key",
+            "status",
+            "shop_id",
+            "shop_name",
+            "attempt",
+            "message",
+            "detail_json",
+            "created_at"
+          ],
+          "keys": [
+            {
+              "name": "PRIMARY",
+              "columns": [
+                "id"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "performance_notes": [
+    {
+      "text": "草稿列表的成本要看企业筛选、COUNT、排序分页、关联计数和传输内容，少掉几张不参与查询的旧表不会直接缩短这条查询链。现代码已有轻量分页，仍需按实际慢查询进一步测量。",
+      "evidence": [
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 11530,
+          "reason": "轻量列表统计总数与分页ID并行执行，随后再加载当前页。"
+        },
+        {
+          "path": "src/services/listing-automation.js",
+          "line": 11584,
+          "reason": "页面行包含店铺副本与发布记录的关联计数。"
+        }
+      ]
+    },
+    {
+      "text": "已有发布历史压缩/清理代码，但本轮没有运行。任何保留策略调整均应保护未完成任务、未知回执和人工事实，不能直接套用统一删除天数。",
+      "evidence": [
+        {
+          "path": "src/services/listing-publish-history-cleanup.js",
+          "line": 14,
+          "reason": "已有任务/记录保留配置及分批清理入口。"
+        },
+        {
+          "path": "src/services/listing-publish-history-cleanup.js",
+          "line": 44,
+          "reason": "记录压缩与任务删除是不同处理，依赖状态和保留摘要。"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "本轮没有生产读写热度、实际空间、索引使用、外部工具和旧版本运行情况的观察。",
+    "旧快照为空或静态无引用均不是删除许可；旧数据仍需确认归档和恢复用途。",
+    "未承诺减到某个表数、节省空间或提速比例；六张第一批表只是归档/停用核查候选。",
+    "全部为讨论材料；未改业务代码、企业权限、数据库、文件资产或服务。"
+  ]
+}

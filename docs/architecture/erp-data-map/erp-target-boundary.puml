@@ -1,0 +1,52 @@
+@startuml
+title 企业隔离目标 · 讨论稿（不是当前表结构或已完成验收的声明）
+skinparam defaultFontName Microsoft YaHei
+skinparam shadowing false
+skinparam packageStyle rectangle
+rectangle "全局登录身份\npeople / 会话" as identity
+rectangle "平台授权\nplatform_grants" as platform
+rectangle "平台公共字典\n品牌 / 车型 / 核心品名" as publicdict
+identity --> platform : 独立平台授权
+package "企业 A：严格数据边界" as tenantA {
+  rectangle "企业成员 / 角色 / 业务职责" as memberA
+  rectangle "本企业店铺 1、2…" as shopA
+  rectangle "共用库存 / 采购 / 收货 / 台账" as stockA
+  rectangle "订单 / 草稿 / 上架 / 财务" as businessA
+  rectangle "本企业私有字典补充" as dictA
+  rectangle "任务 / 文件 / 缓存 / 导出" as asyncA
+}
+identity --> memberA : 有效企业成员关系
+memberA --> shopA : 默认可见本企业全部店铺；操作按岗位授权
+shopA --> stockA : 同企业共享
+shopA --> businessA
+businessA --> asyncA : 提交、重试、恢复均带企业身份
+publicdict --> dictA : 读公共项 + 本企业补充
+dictA --> businessA
+package "企业 B：严格数据边界" as tenantB {
+  rectangle "企业成员 / 角色 / 业务职责" as memberB
+  rectangle "本企业店铺 1、2…" as shopB
+  rectangle "共用库存 / 采购 / 收货 / 台账" as stockB
+  rectangle "订单 / 草稿 / 上架 / 财务" as businessB
+  rectangle "本企业私有字典补充" as dictB
+  rectangle "任务 / 文件 / 缓存 / 导出" as asyncB
+}
+identity --> memberB : 有效企业成员关系
+memberB --> shopB : 默认可见本企业全部店铺；操作按岗位授权
+shopB --> stockB : 同企业共享
+shopB --> businessB
+businessB --> asyncB : 提交、重试、恢复均带企业身份
+publicdict --> dictB : 读公共项 + 本企业补充
+dictB --> businessB
+note bottom of publicdict
+已确认：公共品牌、车型、核心品名字典 + 企业补充。
+历史商品和单据保留原定义；新建时使用最新公共定义。
+不因字典更新自动重写历史业务记录。
+AI 案例、提示词、素材是否允许发布为公共内容，尚需另议。
+公共字典不携带客户草稿、图片、库存或成本。
+end note
+note bottom of identity
+平台管理员身份不自动授予企业成员资格。
+企业 A 与 B 的业务数据之间不建立共享引用。
+共享身份、公共字典不等于共享业务记录。
+end note
+@enduml

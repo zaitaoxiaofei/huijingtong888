@@ -1,0 +1,3960 @@
+@startuml
+title 爆单 ERP · 全部 219 张表 / 3140 列
+hide methods
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam defaultFontName Microsoft YaHei
+skinparam classAttributeIconSize 0
+skinparam nodesep 45
+skinparam ranksep 55
+caption 结构基线：2026/10/23 13:42:11（北京时间） / commit 51f39f8。只含结构与源码证据，不代表数据已核平。
+package "身份、企业与会员" as d_identity {
+  class "people" as t_people {
+    id : bigint unsigned [PK]
+    name : varchar(255) [UQ:uk_people_name]
+    username : varchar(255) [UQ:uk_people_username | ?]
+    role : varchar(64)
+    avatar_url : text [?]
+    active : tinyint(1)
+    password_hash : text [?]
+    created_at : datetime
+    updated_at : datetime
+    roles_json : json [?]
+    account_kind : varchar(16)
+  }
+  class "platform_grants" as t_platform_grants {
+    person_id : bigint unsigned [PK]
+    role : varchar(32)
+    active : tinyint(1)
+    granted_by_person_id : bigint unsigned [?]
+    reason : varchar(500)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "platform_identity_migration_log" as t_platform_identity_migration_log {
+    id : bigint unsigned [PK]
+    person_id : bigint unsigned
+    reviewed_by_person_id : bigint unsigned
+    reason : varchar(500)
+    previous_grant_json : json [?]
+    previous_memberships_json : json
+    desired_identity_json : json
+    created_at : datetime
+  }
+  class "sessions" as t_sessions {
+    token : varchar(191) [PK]
+    person_id : bigint unsigned
+    name : varchar(255)
+    role : varchar(64)
+    username : varchar(255) [?]
+    created_at : datetime
+    expires_at : datetime
+    active_tenant_id : bigint unsigned [?]
+  }
+  class "tenant_activation_codes" as t_tenant_activation_codes {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned
+    code_hash : char(64) [UQ:uk_tenant_activation_code_hash]
+    code_hint : varchar(12)
+    status : varchar(16)
+    expires_at : datetime [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    revoked_at : datetime [?]
+  }
+  class "tenant_members" as t_tenant_members {
+    tenant_id : bigint unsigned [PK]
+    person_id : bigint unsigned [PK]
+    role : varchar(32)
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+    business_roles_json : json [?]
+  }
+  class "tenant_plans" as t_tenant_plans {
+    id : bigint unsigned [PK]
+    code : varchar(32) [UQ:uk_tenant_plans_code]
+    name : varchar(80)
+    duration_days : int unsigned
+    subscription_status : varchar(16)
+    account_limit : int unsigned [?]
+    shop_limit : int unsigned [?]
+    active : tinyint(1)
+    is_builtin : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "tenant_plugin_tokens" as t_tenant_plugin_tokens {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned
+    token_hash : char(64) [UQ:uk_tenant_plugin_token_hash]
+    label : varchar(100)
+    created_by_person_id : bigint unsigned
+    created_at : datetime
+    revoked_at : datetime [?]
+    token_ciphertext : varchar(255) [?]
+  }
+  class "tenant_subscription_vouchers" as t_tenant_subscription_vouchers {
+    id : bigint unsigned [PK]
+    code_hash : char(64) [UQ:uk_subscription_voucher_hash]
+    code_hint : varchar(12)
+    status : varchar(16)
+    plan_snapshot_json : json
+    redeemable_until : datetime
+    issued_by_person_id : bigint unsigned
+    used_by_person_id : bigint unsigned [?]
+    used_by_tenant_id : bigint unsigned [?]
+    created_at : datetime
+    used_at : datetime [?]
+    revoked_at : datetime [?]
+  }
+  class "tenants" as t_tenants {
+    id : bigint unsigned [PK]
+    slug : varchar(80) [UQ:uk_tenants_slug]
+    name : varchar(255)
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+    plan_code : varchar(32)
+    subscription_status : varchar(32)
+    subscription_expires_at : datetime [?]
+    feature_flags_json : json [?]
+    member_limit : int unsigned [?]
+    shop_limit : int unsigned [?]
+  }
+}
+package "配置、定时任务与运行审计" as d_platform {
+  class "onboarding_article_versions" as t_onboarding_article_versions {
+    id : bigint unsigned [PK]
+    article_id : bigint unsigned [UQ:uniq_onboarding_article_version]
+    version : int [UQ:uniq_onboarding_article_version]
+    title : varchar(200)
+    category : varchar(80)
+    audience : varchar(120)
+    summary : varchar(500)
+    content : mediumtext
+    source_url : varchar(1000)
+    source_checked_at : date [?]
+    status : enum('draft','published')
+    changed_by_person_id : bigint [?]
+    changed_at : datetime(3)
+  }
+  class "onboarding_articles" as t_onboarding_articles {
+    id : bigint unsigned [PK]
+    slug : varchar(120) [UQ:slug]
+    title : varchar(200)
+    category : varchar(80)
+    audience : varchar(120)
+    summary : varchar(500)
+    content : mediumtext
+    source_url : varchar(1000)
+    source_checked_at : date [?]
+    status : enum('draft','published')
+    sort_order : int
+    version : int
+    created_by_person_id : bigint [?]
+    updated_by_person_id : bigint [?]
+    created_at : datetime(3)
+    updated_at : datetime(3)
+  }
+  class "scheduled_job_run_events" as t_scheduled_job_run_events {
+    id : bigint unsigned [PK]
+    run_id : bigint unsigned
+    job_key : varchar(128)
+    step_key : varchar(64)
+    status : varchar(32)
+    shop_id : bigint [?]
+    shop_name : varchar(255) [?]
+    attempt : int
+    message : text [?]
+    detail_json : longtext [?]
+    created_at : datetime
+  }
+  class "scheduled_job_runs" as t_scheduled_job_runs {
+    id : bigint unsigned [PK]
+    job_key : varchar(128)
+    planned_for : datetime [?]
+    started_at : datetime
+    finished_at : datetime [?]
+    status : varchar(32)
+    mode : varchar(32)
+    payload_json : longtext [?]
+    result_json : longtext [?]
+    error_message : text [?]
+    created_at : datetime
+  }
+  class "scheduled_jobs" as t_scheduled_jobs {
+    id : bigint unsigned [PK]
+    job_key : varchar(128) [UQ:uq_scheduled_jobs_key]
+    job_name : varchar(255)
+    category : varchar(64)
+    priority : varchar(32)
+    schedule_type : varchar(32)
+    interval_minutes : int
+    daily_time : varchar(8) [?]
+    enabled : tinyint(1)
+    catchup_enabled : tinyint(1)
+    max_catchup_runs : int
+    last_success_at : datetime [?]
+    last_attempt_at : datetime [?]
+    next_run_at : datetime [?]
+    locked_at : datetime [?]
+    locked_by : varchar(128) [?]
+    fail_count : int
+    last_status : varchar(32)
+    last_error : text [?]
+    config_json : longtext [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "settings" as t_settings {
+    key : varchar(255) [PK]
+    tenant_id : varchar(80) [PK]
+    value : longtext [?]
+    updated_at : datetime
+  }
+  class "system_monitor_snapshots" as t_system_monitor_snapshots {
+    id : bigint unsigned [PK]
+    captured_at : datetime(3)
+    disk_total_bytes : bigint unsigned
+    disk_used_bytes : bigint unsigned
+    disk_available_bytes : bigint unsigned
+    usage_percent : decimal(6,2)
+    daily_growth_bytes : bigint
+    mysql_bytes : bigint unsigned
+    binlog_bytes : bigint unsigned
+    uploads_bytes : bigint unsigned
+    backups_bytes : bigint unsigned
+    releases_bytes : bigint unsigned
+    logs_bytes : bigint unsigned
+    app_rss_bytes : bigint unsigned
+    service_uptime_seconds : bigint unsigned
+    severity : varchar(16)
+    details_json : json [?]
+  }
+  class "system_notifications" as t_system_notifications {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    recipient_person_id : bigint unsigned
+    notification_type : varchar(64)
+    title : varchar(255)
+    content : text [?]
+    severity : varchar(20)
+    route : varchar(500)
+    entity_type : varchar(64)
+    entity_id : varchar(128) [?]
+    dedupe_key : varchar(255) [UQ:uk_system_notifications_dedupe]
+    status : varchar(20)
+    created_at : datetime
+    read_at : datetime [?]
+    resolved_at : datetime [?]
+  }
+  class "system_setting_changes" as t_system_setting_changes {
+    id : bigint unsigned [PK]
+    setting_key : varchar(191)
+    old_value_json : longtext [?]
+    new_value_json : longtext
+    updated_by_person_id : bigint unsigned [?]
+    created_at : datetime
+  }
+  class "system_settings" as t_system_settings {
+    key : varchar(191) [PK]
+    value_json : longtext
+    updated_at : datetime
+  }
+}
+package "店铺、在线商品与平台同步" as d_shop {
+  class "online_product_actions" as t_online_product_actions {
+    id : bigint unsigned [PK]
+    online_product_id : bigint unsigned [?]
+    shop_id : bigint unsigned [?]
+    action_type : varchar(64)
+    status : varchar(32)
+    request_json : longtext [?]
+    response_json : longtext [?]
+    error_message : text [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    tenant_id : varchar(80) [?]
+  }
+  class "online_products" as t_online_products {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_online_products_shop_sku]
+    ozon_sku : varchar(128) [UQ:uk_online_products_shop_sku]
+    offer_id : varchar(255) [?]
+    ozon_product_id : varchar(128) [?]
+    name : varchar(255)
+    image_url : text [?]
+    primary_image : text [?]
+    sale_price : decimal(18,4)
+    currency_code : varchar(16) [?]
+    marketing_price : decimal(18,4)
+    old_price : decimal(18,4)
+    status : varchar(64)
+    visibility : varchar(64) [?]
+    archived : tinyint(1)
+    is_discounted : tinyint(1)
+    images_json : longtext [?]
+    barcodes_json : longtext [?]
+    stocks_json : longtext [?]
+    commissions_json : longtext [?]
+    attributes_json : longtext [?]
+    raw_json : longtext [?]
+    ozon_updated_at : datetime [?]
+    product_id : bigint unsigned [?]
+    synced_at : datetime
+    updated_at : datetime
+    published_at : datetime [?]
+  }
+  class "ozon_finance_items" as t_ozon_finance_items {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_finance_shop_operation_service]
+    operation_id : varchar(128) [UQ:uk_finance_shop_operation_service]
+    posting_number : varchar(128) [?]
+    order_number : varchar(128) [?]
+    operation_type : varchar(128) [?]
+    operation_type_name : varchar(255) [?]
+    operation_date : datetime [?]
+    service_type : varchar(191) [UQ:uk_finance_shop_operation_service]
+    service_name : varchar(255) [?]
+    amount : decimal(18,4)
+    accruals_for_sale : decimal(18,4)
+    sale_commission : decimal(18,4)
+    delivery_charge : decimal(18,4)
+    return_delivery_charge : decimal(18,4)
+    currency_code : varchar(16) [?]
+    raw_json : longtext [?]
+    synced_at : datetime
+    amount_cny : decimal(18,4)
+    accruals_for_sale_cny : decimal(18,4)
+    sale_commission_cny : decimal(18,4)
+    delivery_charge_cny : decimal(18,4)
+    return_delivery_charge_cny : decimal(18,4)
+    exchange_rate : decimal(18,4)
+  }
+  class "ozon_orders_raw" as t_ozon_orders_raw {
+    id : bigint unsigned [PK]
+    store_id : bigint unsigned [UQ:uk_ozon_orders_raw_store_posting]
+    posting_number : varchar(128) [UQ:uk_ozon_orders_raw_store_posting]
+    order_id : varchar(128) [?]
+    status : varchar(64) [?]
+    substatus : varchar(128) [?]
+    raw_json : longtext
+    fetched_at : datetime
+    query_stock_location : varchar(8) [?]
+  }
+  class "ozon_stock_snapshots" as t_ozon_stock_snapshots {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_stock_snapshot_scope]
+    online_product_id : bigint unsigned [?]
+    product_id : bigint unsigned [?]
+    ozon_product_id : varchar(128) [?]
+    ozon_sku : varchar(128) [UQ:uk_stock_snapshot_scope]
+    offer_id : varchar(255) [?]
+    warehouse_id : varchar(128) [UQ:uk_stock_snapshot_scope | ?]
+    warehouse_name : varchar(255) [?]
+    stock_type : varchar(64) [UQ:uk_stock_snapshot_scope]
+    present : int
+    reserved : int
+    available : int
+    free_stock_count : decimal(18,4)
+    paid_stock_count : decimal(18,4)
+    expiring_stock_count : decimal(18,4)
+    waitingdocs_stock_count : decimal(18,4)
+    paid_storage_start_at : date [?]
+    stock_days : decimal(18,4) [?]
+    average_daily_sales : decimal(18,4) [?]
+    stock_level : varchar(64)
+    raw_json : longtext [?]
+    synced_at : datetime
+  }
+  class "ozon_webhook_events" as t_ozon_webhook_events {
+    id : bigint [PK]
+    event_key : char(64) [UQ:uniq_ozon_webhook_event]
+    event_type : varchar(64)
+    seller_id : varchar(128)
+    shop_id : int [?]
+    posting_number : varchar(128)
+    event_at : datetime [?]
+    payload_json : longtext
+    status : varchar(32)
+    attempts : int
+    next_attempt_at : datetime
+    last_error : text [?]
+    received_at : timestamp
+    processed_at : datetime [?]
+    processing_started_at : datetime [?]
+  }
+  class "shop_product_versions" as t_shop_product_versions {
+    id : bigint [PK]
+    master_product_id : bigint [UQ:uq_shop_product_versions]
+    shop_id : bigint [UQ:uq_shop_product_versions]
+    offer_id : varchar(128) [UQ:uq_shop_product_versions]
+    title : varchar(500)
+    price : decimal(12,2)
+    stock_quantity : int
+    description : longtext [?]
+    watermark_template_id : varchar(128) [?]
+    image_plan : varchar(64)
+    generated_images_json : longtext [?]
+    validation_json : longtext [?]
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "shop_variant_rules" as t_shop_variant_rules {
+    id : bigint [PK]
+    shop_id : bigint [UQ:uq_shop_variant_rules_shop]
+    title_style : varchar(32)
+    watermark_template_id : varchar(128)
+    tail_image_url : text [?]
+    tail_category : varchar(128)
+    vehicle_model : varchar(128)
+    tail_template_id : bigint [?]
+    main_image_plan : varchar(32)
+    updated_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    tag_style : varchar(32)
+    price_index : decimal(10,4)
+    price_role : varchar(32)
+  }
+  class "shops" as t_shops {
+    id : bigint unsigned [PK]
+    name : varchar(255)
+    legal_entity : varchar(255) [?]
+    user_id : bigint unsigned [?]
+    ozon_client_id : varchar(128) [?]
+    api_key_hint : varchar(255) [?]
+    performance_client_id : varchar(128) [?]
+    performance_client_secret : text [?]
+    performance_client_secret_hint : varchar(255) [?]
+    watermark_path : text [?]
+    watermark_name : varchar(255) [?]
+    watermark_position : varchar(32)
+    watermark_x_percent : decimal(8,4)
+    watermark_y_percent : decimal(8,4)
+    watermark_scale_percent : decimal(8,4)
+    watermark_opacity_percent : decimal(8,4)
+    status : varchar(32)
+    payout_rate : decimal(8,4)
+    created_at : datetime
+    ozon_api_key : text [?]
+    ozon_seller_id : varchar(128) [?]
+    tenant_id : bigint unsigned [?]
+  }
+  class "sync_logs" as t_sync_logs {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    job : varchar(128)
+    status : varchar(32)
+    message : text [?]
+    created_at : datetime
+  }
+}
+package "基础字典与 Ozon 类目" as d_dictionary {
+  class "ai_vehicle_brand_assets" as t_ai_vehicle_brand_assets {
+    id : bigint unsigned [PK]
+    brand_key : varchar(128) [UQ:uniq_ai_vehicle_brand_assets_brand]
+    brand_name : varchar(128)
+    logo_type : varchar(24)
+    asset_url : varchar(1024)
+    source_url : varchar(1024)
+    source_note : varchar(500)
+    status : varchar(24)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_vehicle_catalog" as t_ai_vehicle_catalog {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_vehicle_catalog_tenant_brand_model]
+    brand_key : varchar(128) [UQ:uniq_ai_vehicle_catalog_tenant_brand_model]
+    brand_name : varchar(128)
+    model_key : varchar(191) [UQ:uniq_ai_vehicle_catalog_tenant_brand_model]
+    model_name : varchar(191)
+    tags_json : json [?]
+    source : varchar(32)
+    enabled : tinyint(1)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    aliases_json : json [?]
+    supply_anchor : varchar(500)
+    search_keywords_json : json [?]
+    recommended_products_json : json [?]
+    ozon_competition : varchar(128)
+    user_priority : varchar(128)
+    vehicle_reference_image_url : varchar(2000)
+  }
+  class "asset_vehicle_models" as t_asset_vehicle_models {
+    id : bigint [PK]
+    brand : varchar(128) [UQ:uq_asset_vehicle_model]
+    brand_ru : varchar(128)
+    model : varchar(128) [UQ:uq_asset_vehicle_model]
+    model_ru : varchar(128)
+    label_zh : varchar(255)
+    label_ru : varchar(255)
+    year_from : int [UQ:uq_asset_vehicle_model | ?]
+    year_to : int [UQ:uq_asset_vehicle_model | ?]
+    aliases_json : longtext [?]
+    popularity_rank : int
+    status : varchar(32)
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "inventory_number_categories" as t_inventory_number_categories {
+    id : bigint unsigned [PK]
+    core_name : varchar(255) [UQ:core_name]
+    last_sequence : bigint unsigned
+  }
+  class "inventory_product_naming_option_scopes" as t_inventory_product_naming_option_scopes {
+    id : bigint unsigned [PK]
+    option_id : bigint unsigned [UQ:uk_inventory_naming_scope]
+    scope_type : varchar(32) [UQ:uk_inventory_naming_scope]
+    scope_value : varchar(255) [UQ:uk_inventory_naming_scope]
+    created_at : datetime
+  }
+  class "inventory_product_naming_options" as t_inventory_product_naming_options {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_inventory_product_naming_option | ?]
+    option_type : varchar(32) [UQ:uk_inventory_naming_type_value | UQ:uk_inventory_product_naming_option]
+    value : varchar(255) [UQ:uk_inventory_naming_type_value | UQ:uk_inventory_product_naming_option]
+    label : varchar(255)
+    status : varchar(16)
+    usage_count : int
+    created_by_person_id : bigint unsigned [?]
+    reviewed_by_person_id : bigint unsigned [?]
+    reviewed_at : datetime [?]
+    review_note : varchar(500)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "ozon_attribute_values" as t_ozon_attribute_values {
+    id : bigint [PK]
+    description_category_id : bigint [UQ:uq_ozon_attribute_value]
+    type_id : bigint [UQ:uq_ozon_attribute_value]
+    attribute_id : bigint [UQ:uq_ozon_attribute_value]
+    dictionary_value_id : bigint [UQ:uq_ozon_attribute_value]
+    value : varchar(1000)
+    display_value_zh : varchar(1000)
+    info : text [?]
+    source_shop_id : bigint [?]
+    raw_json : longtext [?]
+    status : varchar(32)
+    synced_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ozon_category_attributes" as t_ozon_category_attributes {
+    id : bigint [PK]
+    description_category_id : bigint [UQ:uq_ozon_category_attribute]
+    type_id : bigint [UQ:uq_ozon_category_attribute]
+    attribute_id : bigint [UQ:uq_ozon_category_attribute]
+    name : varchar(500)
+    name_zh : varchar(500)
+    description : text [?]
+    is_required : tinyint(1)
+    attribute_type : varchar(128)
+    dictionary_id : bigint
+    is_collection : tinyint(1)
+    group_name : varchar(255)
+    sort_order : int
+    source_shop_id : bigint [?]
+    raw_json : longtext [?]
+    status : varchar(32)
+    synced_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ozon_category_mappings" as t_ozon_category_mappings {
+    id : bigint [PK]
+    description_category_id : bigint [UQ:uq_ozon_category_mapping]
+    type_id : bigint [UQ:uq_ozon_category_mapping]
+    name_ru : varchar(500)
+    name_zh : varchar(500)
+    path_ru : text [?]
+    path_zh : text [?]
+    parent_description_category_id : bigint
+    is_auto : tinyint(1)
+    source_shop_id : bigint [?]
+    source : varchar(64)
+    raw_json : longtext [?]
+    status : varchar(32)
+    synced_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ozon_category_sync_jobs" as t_ozon_category_sync_jobs {
+    id : bigint [PK]
+    job_type : varchar(64)
+    shop_id : bigint [?]
+    status : varchar(32)
+    payload_json : longtext [?]
+    result_json : longtext [?]
+    warning_json : longtext [?]
+    error_message : text [?]
+    started_at : timestamp
+    finished_at : timestamp [?]
+    created_by_person_id : bigint [?]
+  }
+  class "ozon_category_usage" as t_ozon_category_usage {
+    id : bigint [PK]
+    source_module : varchar(64) [UQ:uq_ozon_category_usage]
+    source_id : varchar(128) [UQ:uq_ozon_category_usage]
+    description_category_id : bigint [UQ:uq_ozon_category_usage]
+    type_id : bigint [UQ:uq_ozon_category_usage]
+    category_name : varchar(500)
+    usage_count : int
+    last_used_at : timestamp
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [?]
+  }
+}
+package "产品、库存与物理台账" as d_inventory {
+  class "inventory_current" as t_inventory_current {
+    real_product_id : bigint unsigned [PK]
+    available_stock : int
+    reserved_stock : int
+    damaged_stock : int
+    in_transit_stock : int
+    last_updated_at : datetime
+  }
+  class "inventory_movements" as t_inventory_movements {
+    id : bigint unsigned [PK]
+    product_id : bigint unsigned
+    shop_id : bigint unsigned [?]
+    sku_mapping_id : bigint unsigned [?]
+    owner_person_id : bigint unsigned [?]
+    source_type : varchar(64)
+    source_ref : varchar(255) [?]
+    quantity_delta : int
+    stock_location : varchar(32)
+    stock_location_source : varchar(64)
+    unit_cost : decimal(18,4)
+    amount : decimal(18,4)
+    movement_type : varchar(64) [?]
+    related_posting_number : varchar(128) [?]
+    related_order_item_id : bigint unsigned [?]
+    operator : varchar(255) [?]
+    status : varchar(32)
+    note : text [?]
+    created_at : datetime
+    tenant_id : bigint unsigned [?]
+  }
+  class "inventory_order_priorities" as t_inventory_order_priorities {
+    product_id : bigint unsigned [PK]
+    order_item_id : bigint unsigned [PK]
+    priority : int
+    action_id : bigint unsigned
+  }
+  class "inventory_product_balance" as t_inventory_product_balance {
+    tenant_id : bigint unsigned [PK]
+    product_id : bigint unsigned [PK]
+    ledger_qty : decimal(18,4)
+    open_deducted_qty : decimal(18,4)
+    open_order_demand_qty : decimal(18,4)
+    fbp_reserved_qty : decimal(18,4)
+    physical_stock : decimal(18,4)
+    available_stock : decimal(18,4)
+    inventory_needs_review : tinyint(1)
+    refreshed_at : datetime
+  }
+  class "inventory_product_requests" as t_inventory_product_requests {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_inventory_request_key | ?]
+    request_key : varchar(64) [UQ:uk_inventory_request_key]
+    applicant_id : bigint [UQ:uk_inventory_request_key]
+    applicant_name : varchar(255)
+    status : varchar(16)
+    payload_json : longtext
+    new_options_json : json
+    review_note : varchar(1000)
+    reviewer_id : bigint [?]
+    product_id : bigint [?]
+    binding_status : varchar(16)
+    binding_error : varchar(1000)
+    revision : int
+    created_at : datetime
+    updated_at : datetime
+    reviewed_at : datetime [?]
+  }
+  class "outbound_records" as t_outbound_records {
+    id : bigint unsigned [PK]
+    product_id : bigint unsigned
+    shop_id : bigint unsigned [?]
+    online_product_id : bigint unsigned [?]
+    order_ref : varchar(128) [?]
+    order_item_id : bigint unsigned [?]
+    ozon_sku : varchar(128) [?]
+    person_id : bigint unsigned [?]
+    quantity : int
+    stock_location : varchar(32)
+    stock_location_source : varchar(64)
+    reason : varchar(64)
+    status : varchar(32)
+    note : text [?]
+    created_at : datetime
+  }
+  class "product_barcode_label_cache" as t_product_barcode_label_cache {
+    online_product_id : bigint unsigned [PK]
+    shop_id : bigint unsigned
+    ozon_product_id : varchar(128)
+    barcode_value : varchar(128)
+    layout_type : varchar(32)
+    product_name : varchar(255)
+    label_pdf : longblob
+    label_size : int
+    fetched_at : datetime
+    fetch_source : varchar(32)
+  }
+  class "product_components" as t_product_components {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    product_id : bigint unsigned [UQ:uk_product_component_product]
+    component_product_id : bigint unsigned [UQ:uk_product_component_product]
+    quantity : decimal(18,4)
+    component_role : varchar(16)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "product_merge_history" as t_product_merge_history {
+    id : bigint unsigned [PK]
+    target_product_id : bigint unsigned
+    target_product_name : varchar(255)
+    source_product_ids_json : json
+    source_product_names_json : json
+    selected_field_sources_json : json
+    before_target_json : json
+    before_sources_json : json
+    affected_counts_json : json
+    status : varchar(32)
+    created_at : datetime
+    undone_at : datetime [?]
+  }
+  class "product_merge_history_refs" as t_product_merge_history_refs {
+    id : bigint unsigned [PK]
+    merge_history_id : bigint unsigned
+    table_key : varchar(64)
+    ref_key_json : json
+    source_product_id : bigint unsigned
+    created_at : datetime
+  }
+  class "product_name_aliases" as t_product_name_aliases {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    product_id : bigint unsigned [UQ:uk_product_name_alias]
+    alias_name : varchar(500) [UQ:uk_product_name_alias]
+    alias_type : varchar(32)
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "products" as t_products {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    selection_id : varchar(128) [UQ:uk_products_selection_id | ?]
+    code : varchar(128) [UQ:uk_products_code | ?]
+    name : varchar(255)
+    image_url : longtext [?]
+    detail_image_urls : longtext [?]
+    material : varchar(255) [?]
+    color : varchar(255) [?]
+    selling_points : text [?]
+    listing_title_ru : text [?]
+    listing_tags_ru : text [?]
+    listing_description_ru : text [?]
+    listing_title_prompt : text [?]
+    listing_tags_prompt : text [?]
+    listing_description_prompt : text [?]
+    purchase_url : text [?]
+    supplier_note : text [?]
+    source_platform : varchar(64)
+    shipping_method : varchar(64)
+    recommended_shipping_method : varchar(64)
+    purchase_cost : decimal(18,4)
+    domestic_shipping : decimal(18,4)
+    handling_fee : decimal(18,4)
+    purchase_quantity : int
+    package_weight_g : decimal(18,4)
+    length_cm : decimal(18,4)
+    width_cm : decimal(18,4)
+    height_cm : decimal(18,4)
+    listing_price_rub : decimal(18,4)
+    air_sale_price_rmb : decimal(18,4)
+    exchange_rate : decimal(18,4)
+    target_margin : decimal(8,4)
+    desired_profit_mode : varchar(32)
+    desired_profit_value : decimal(18,4)
+    return_rate : decimal(8,4)
+    payment_fee_rate : decimal(8,4)
+    withdrawal_fee_rate : decimal(8,4)
+    owner_person_id : bigint unsigned [?]
+    created_by_person_id : bigint unsigned [?]
+    product_type : varchar(32)
+    parent_product_id : bigint unsigned [?]
+    accessory_note : text [?]
+    selection_status : varchar(32)
+    alert_stock : int
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+    supplier_id : bigint unsigned [?]
+    vehicle_brand : varchar(255) [?]
+    vehicle_model : varchar(255) [?]
+    development_type : varchar(32)
+    vehicle_model_key : varchar(255)
+    ozon_category_id : varchar(128)
+    ozon_description_category_id : bigint
+    ozon_type_id : bigint
+    ozon_category_name : varchar(500)
+    source_selection_id : bigint [?]
+    variant_task_id : varchar(128)
+    variant_result_id : varchar(128)
+    variant_type : varchar(64)
+    is_variant_generated : tinyint(1)
+    material_asset_status : varchar(64)
+    advertising_rate : decimal(10,4)
+    logistics_rule_id : bigint unsigned [?]
+    stock_unit : varchar(32)
+    is_accessory : tinyint(1)
+    inventory_category : varchar(255)
+    fitment_type : varchar(16)
+    accessory_name : varchar(255)
+    package_mode : varchar(16)
+    package_contents : varchar(500)
+    included_accessories : varchar(500)
+    gift_contents : varchar(500)
+    product_quantity : int
+    selection_has_main_image : tinyint(1) [?]
+    selection_has_detail_images : tinyint(1) [?]
+    selection_has_selling_points : tinyint(1) [?]
+    surface_process : varchar(255)
+    vehicle_models_json : json [?]
+    inventory_number : varchar(64) [UQ:uk_products_inventory_number | ?]
+    inventory_number_category : bigint unsigned [?]
+    inventory_number_sequence : bigint unsigned [?]
+    production_lead_days : int [?]
+    warehouse_logistics_days : int
+  }
+  class "sku_inventory_recipe_items" as t_sku_inventory_recipe_items {
+    id : bigint unsigned [PK]
+    recipe_id : bigint unsigned [UQ:uk_sku_inventory_recipe_item_product]
+    product_id : bigint unsigned [UQ:uk_sku_inventory_recipe_item_product]
+    quantity : decimal(18,4)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "sku_inventory_recipes" as t_sku_inventory_recipes {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_sku_inventory_recipe_shop_sku]
+    online_product_id : bigint unsigned [?]
+    sku_mapping_id : bigint unsigned [?]
+    ozon_sku : varchar(128) [UQ:uk_sku_inventory_recipe_shop_sku]
+    mode : varchar(32)
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "sku_mappings" as t_sku_mappings {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    shop_id : bigint unsigned [UQ:uk_sku_mappings_shop_sku]
+    product_id : bigint unsigned
+    person_id : bigint unsigned [?]
+    online_product_id : bigint unsigned [?]
+    ozon_sku : varchar(128) [UQ:uk_sku_mappings_shop_sku]
+    offer_id : varchar(255) [?]
+    display_name : varchar(255) [?]
+    commission_low : decimal(8,4)
+    commission_high : decimal(8,4)
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "stock_warehouse_rules" as t_stock_warehouse_rules {
+    id : bigint unsigned [PK]
+    pattern : varchar(191) [UQ:uk_stock_warehouse_rules_pattern]
+    stock_type : varchar(64)
+    priority : int
+    enabled : tinyint(1)
+    note : text [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+}
+package "订单、履约与利润" as d_order {
+  class "historical_profit_reviews" as t_historical_profit_reviews {
+    order_item_id : bigint unsigned [PK]
+    review_status : varchar(32)
+    note : text [?]
+    updated_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "logistics_fee_rules" as t_logistics_fee_rules {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    name : varchar(255)
+    carrier : varchar(64)
+    channel : varchar(64)
+    mode : varchar(64)
+    min_weight_g : decimal(18,4)
+    max_weight_g : decimal(18,4)
+    min_price_rub : decimal(18,4)
+    max_price_rub : decimal(18,4)
+    base_fee_cny : decimal(18,4)
+    per_gram_cny : decimal(18,6)
+    per_ticket_cny : decimal(18,4)
+    enabled : tinyint(1)
+    filter_keywords : text [?]
+    note : text [?]
+    created_at : datetime
+    updated_at : datetime
+    usage_count : int
+    last_used_at : datetime [?]
+    version_group_id : bigint unsigned [?]
+    effective_from : datetime [?]
+    effective_to : datetime [?]
+  }
+  class "order_cancellation_rules" as t_order_cancellation_rules {
+    id : bigint unsigned [PK]
+    name : varchar(255)
+    match_text : text
+    match_mode : varchar(64)
+    initiator_label : varchar(255)
+    reason_label : varchar(255)
+    reason_code : varchar(128)
+    reason_group_label : varchar(255)
+    accounting_hint : text
+    priority : int
+    enabled : tinyint(1)
+    note : text [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_exceptions" as t_order_exceptions {
+    id : bigint unsigned [PK]
+    store_id : bigint unsigned [UQ:uk_order_exceptions_scope | ?]
+    order_item_id : bigint unsigned [?]
+    posting_number : varchar(128) [UQ:uk_order_exceptions_scope | ?]
+    ozon_sku : varchar(128) [UQ:uk_order_exceptions_scope | ?]
+    exception_type : varchar(128) [UQ:uk_order_exceptions_scope]
+    message : text
+    status : varchar(32)
+    created_at : datetime
+    resolved_at : datetime [?]
+  }
+  class "order_history_dedupe_daily_metrics" as t_order_history_dedupe_daily_metrics {
+    metric_date : date [PK]
+    snapshot_source : varchar(32) [PK]
+    candidate_count : bigint unsigned
+    comparison_count : bigint unsigned
+    duplicate_count : bigint unsigned
+    changed_count : bigint unsigned
+    skipped_count : bigint unsigned
+    comparison_error_count : bigint unsigned
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_item_procurement_marks" as t_order_item_procurement_marks {
+    id : bigint unsigned [PK]
+    order_item_id : bigint unsigned [UQ:uk_order_item_procurement_marks_item]
+    order_id : bigint unsigned
+    product_id : bigint unsigned [?]
+    status : varchar(32)
+    handling_type : varchar(32)
+    note : text [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_items" as t_order_items {
+    id : bigint unsigned [PK]
+    order_id : bigint unsigned
+    sku_mapping_id : bigint unsigned [?]
+    ozon_sku : varchar(128)
+    ozon_name : varchar(255) [?]
+    ozon_image_url : text [?]
+    ozon_product_id : varchar(128) [?]
+    quantity : int
+    sale_price : decimal(18,4)
+    frozen_purchase_cost : decimal(18,4)
+    frozen_domestic_shipping : decimal(18,4)
+    frozen_international_shipping : decimal(18,4)
+    frozen_handling_fee : decimal(18,4)
+    estimated_commission : decimal(18,4)
+    platform_fee_actual : decimal(18,4)
+    aftersale_loss : decimal(18,4)
+    estimated_profit : decimal(18,4)
+    actual_profit : decimal(18,4)
+    settlement_state : varchar(32)
+    frozen_logistics_rule_id : bigint unsigned [?]
+  }
+  class "order_label_prints" as t_order_label_prints {
+    order_id : bigint unsigned [PK]
+    printed_at : datetime
+    print_batch_id : varchar(64) [?]
+    print_sequence : int [?]
+    printed_by_person_id : bigint unsigned [?]
+  }
+  class "order_logistics_filter_rules" as t_order_logistics_filter_rules {
+    id : bigint unsigned [PK]
+    value : varchar(128) [UQ:uk_order_logistics_filter_rules_value]
+    label : varchar(255)
+    warehouse_patterns : text
+    sort_order : int
+    enabled : tinyint(1)
+    note : text [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_logistics_summary_snapshots" as t_order_logistics_summary_snapshots {
+    cache_key : char(40) [PK]
+    payload_json : longtext
+    refreshed_at : timestamp
+  }
+  class "order_marks" as t_order_marks {
+    order_id : bigint unsigned [PK]
+    mark_type : varchar(64)
+    note : text [?]
+    updated_by_person_id : bigint unsigned [?]
+    updated_at : datetime
+  }
+  class "order_package_label_cache" as t_order_package_label_cache {
+    order_id : bigint unsigned [PK]
+    shop_id : bigint unsigned
+    posting_number : varchar(128)
+    label_pdf : longblob
+    label_size : int
+    fetched_at : datetime
+    fetch_source : varchar(32)
+  }
+  class "order_profit_calc_revisions" as t_order_profit_calc_revisions {
+    id : bigint unsigned [PK]
+    tenant_key : varchar(128) [UQ:uk_profit_calc_revision_key | UQ:uk_profit_calc_revision_no]
+    order_item_id : bigint unsigned [UQ:uk_profit_calc_revision_key | UQ:uk_profit_calc_revision_no]
+    order_id : bigint unsigned
+    revision_no : int unsigned [UQ:uk_profit_calc_revision_no]
+    layer : varchar(16) [UQ:uk_profit_calc_revision_key]
+    formula_version : varchar(32)
+    legacy_baseline : tinyint(1)
+    input_completeness : varchar(32)
+    input_hash : char(64)
+    output_hash : char(64)
+    idempotency_key : char(64) [UQ:uk_profit_calc_revision_key]
+    rate_version_json : longtext [?]
+    cost_version_json : longtext [?]
+    inputs_json : longtext
+    outputs_json : longtext
+    parent_revision_id : bigint unsigned [?]
+    source : varchar(64)
+    reason : varchar(1000)
+    actor_id : bigint unsigned [?]
+    command_id : varchar(128) [?]
+    created_at : datetime
+  }
+  class "order_profit_calc_state" as t_order_profit_calc_state {
+    tenant_key : varchar(128) [PK]
+    order_item_id : bigint unsigned [PK]
+    order_id : bigint unsigned
+    formula_version : varchar(32)
+    legacy_baseline : tinyint(1)
+    current_estimate_revision_id : bigint unsigned [?]
+    current_actual_revision_id : bigint unsigned [?]
+    revision_count : int unsigned
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_profit_detail_snapshots" as t_order_profit_detail_snapshots {
+    order_id : bigint unsigned [PK]
+    shop_id : bigint unsigned
+    posting_number : varchar(128)
+    order_status : varchar(64) [?]
+    outcome_type : varchar(64) [?]
+    sale_amount_cny : decimal(18,4)
+    estimated_profit_cny : decimal(18,4)
+    estimated_cost_total_cny : decimal(18,4)
+    actual_profit_cny : decimal(18,4) [?]
+    actual_profit_rate : decimal(18,6) [?]
+    actual_cost_total_cny : decimal(18,4) [?]
+    finance_match_status : varchar(32)
+    finance_rows : int
+    actual_profit_ready : tinyint(1)
+    summary_json : longtext
+    detail_rows_json : longtext
+    finance_totals_json : longtext
+    refreshed_at : datetime
+    source_updated_at : datetime [?]
+  }
+  class "order_profit_items" as t_order_profit_items {
+    id : bigint unsigned [PK]
+    order_item_id : bigint unsigned [UQ:uk_order_profit_items_order_item]
+    sale_amount_cny : decimal(18,4)
+    purchase_cost_cny : decimal(18,4)
+    domestic_shipping_cny : decimal(18,4)
+    international_shipping_cny : decimal(18,4)
+    packaging_cost_cny : decimal(18,4)
+    commission_rate : decimal(8,4)
+    commission_fee_cny : decimal(18,4)
+    ozon_service_fee_cny : decimal(18,4)
+    return_loss_cny : decimal(18,4)
+    advertising_cost_cny : decimal(18,4)
+    other_fee_cny : decimal(18,4)
+    gross_profit_cny : decimal(18,4)
+    net_profit_cny : decimal(18,4)
+    profit_status : varchar(32)
+    is_locked : tinyint(1)
+    locked_at : datetime [?]
+    lock_reason : varchar(255) [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_quality_rules" as t_order_quality_rules {
+    id : bigint unsigned [PK]
+    prefix : varchar(128) [UQ:uk_order_quality_rules_prefix]
+    label : varchar(255)
+    note : text [?]
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "order_status_history" as t_order_status_history {
+    id : bigint unsigned [PK]
+    order_id : bigint unsigned [UQ:uk_order_status_history_hour_state]
+    shop_id : bigint unsigned
+    posting_number : varchar(128)
+    order_number : varchar(128) [?]
+    status : varchar(64) [UQ:uk_order_status_history_hour_state]
+    substatus : varchar(128) [?]
+    logistics_status : varchar(64) [UQ:uk_order_status_history_hour_state]
+    tracking_stage : varchar(64) [UQ:uk_order_status_history_hour_state]
+    sync_state : varchar(32) [UQ:uk_order_status_history_hour_state]
+    ordered_at : datetime [?]
+    delivered_at : datetime [?]
+    last_status_changed_at : datetime [?]
+    customer_id : varchar(128) [?]
+    customer_name : varchar(255) [?]
+    buyer_city : varchar(255) [?]
+    buyer_region : varchar(255) [?]
+    buyer_country : varchar(255) [?]
+    buyer_district : varchar(255) [?]
+    buyer_zip_code : varchar(64) [?]
+    buyer_address_tail : varchar(512) [?]
+    delivery_type : varchar(128) [?]
+    delivery_city : varchar(255) [?]
+    delivery_region : varchar(255) [?]
+    delivery_date_begin : datetime [?]
+    delivery_date_end : datetime [?]
+    warehouse_name : varchar(255) [?]
+    tpl_provider : varchar(255) [?]
+    cluster_to : varchar(255) [?]
+    snapshot_source : varchar(32)
+    observed_at : datetime
+    observed_hour : datetime [UQ:uk_order_status_history_hour_state]
+    raw_status_json : longtext [?]
+    created_at : datetime
+  }
+  class "order_vehicle_title_tags" as t_order_vehicle_title_tags {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    title_hash : char(64) [UQ:uk_order_vehicle_title_tags_hash]
+    title_text : text
+    brand : varchar(128)
+    model : varchar(128)
+    product_key : varchar(128)
+    product_label : varchar(128)
+    years_json : json [?]
+    confidence : decimal(5,4)
+    source : varchar(32)
+    status : varchar(32)
+    sample_ozon_sku : varchar(128)
+    sample_offer_id : varchar(255)
+    raw_response_json : longtext [?]
+    reviewed_by_person_id : bigint [?]
+    reviewed_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "orders" as t_orders {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned
+    posting_number : varchar(128) [UQ:uk_orders_posting_number]
+    order_number : varchar(128) [?]
+    status : varchar(64)
+    logistics_status : varchar(64)
+    tracking_stage : varchar(64)
+    ordered_at : datetime
+    delivered_at : datetime [?]
+    accrued_at : datetime [?]
+    buyer_region : varchar(255) [?]
+    tracking_number : varchar(255) [?]
+    external_tracking_url : text [?]
+    cancel_reason_id : bigint [?]
+    cancel_reason : text [?]
+    cancel_initiator : varchar(255) [?]
+    cancel_type : varchar(255) [?]
+    cancelled_after_ship : tinyint(1)
+    cancel_loss_applies : tinyint(1)
+    sync_state : varchar(32) [?]
+    finalized_at : datetime [?]
+    last_synced_at : datetime [?]
+    last_status_changed_at : datetime [?]
+    sync_note : text [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "sku_order_trackers" as t_sku_order_trackers {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_sku_order_tracker]
+    ozon_sku : varchar(128) [UQ:uk_sku_order_tracker]
+    owner_person_id : bigint unsigned [?]
+    decline_weeks : tinyint unsigned
+    decline_percent : decimal(6,2)
+    active : tinyint(1)
+    last_notified_at : datetime [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+}
+package "采购、收货与成本" as d_procurement {
+  class "inbound_records" as t_inbound_records {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    product_id : bigint unsigned
+    person_id : bigint unsigned [?]
+    quantity : int
+    amount : decimal(18,4)
+    unit_cost : decimal(18,4)
+    shipping_amount : decimal(18,4)
+    purchase_url : text [?]
+    status : varchar(32)
+    note : text [?]
+    purchase_order_id : bigint unsigned [?]
+    purchase_order_item_id : bigint unsigned [?]
+    qc_status : varchar(32) [?]
+    created_at : datetime
+    updated_at : datetime
+    approved_at : datetime [?]
+    approved_by_person_id : bigint unsigned [?]
+    procurement_request_id : bigint unsigned [?]
+    courier_company : varchar(128) [?]
+    tracking_number : varchar(128) [?]
+    receipt_images_json : json [?]
+    received_at : datetime [?]
+  }
+  class "procurement_history_sources" as t_procurement_history_sources {
+    id : bigint unsigned [PK]
+    action_id : bigint unsigned [UQ:uk_history_source]
+    order_item_id : bigint unsigned [UQ:uk_history_source]
+    product_id : bigint unsigned [UQ:uk_history_source]
+    quantity : int
+    inbound_record_id : bigint unsigned [?]
+  }
+  class "procurement_ledger_actions" as t_procurement_ledger_actions {
+    id : bigint unsigned [PK]
+    request_key : varchar(80) [UQ:uk_ledger_request]
+    product_id : bigint unsigned
+    action_type : varchar(40)
+    person_id : bigint unsigned
+    reason : text
+    before_json : json
+    result_json : json [?]
+    created_at : datetime
+  }
+  class "procurement_order_allocations" as t_procurement_order_allocations {
+    id : bigint unsigned [PK]
+    procurement_request_id : bigint unsigned [UQ:uk_procurement_order_allocation]
+    order_item_id : bigint unsigned [UQ:uk_procurement_order_allocation]
+    order_id : bigint unsigned
+    product_id : bigint unsigned
+    allocated_quantity : decimal(18,4)
+    status : varchar(32)
+    allocated_at : datetime
+    released_at : datetime [?]
+    release_reason : varchar(255) [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "procurement_payment_matches" as t_procurement_payment_matches {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_procurement_payment_match_order]
+    platform_order_id : bigint unsigned [UQ:uk_procurement_payment_match_order]
+    payment_transaction_id : bigint unsigned
+    match_status : varchar(32)
+    confidence : int
+    amount_difference : decimal(18,4)
+    time_difference_seconds : bigint [?]
+    match_reason : varchar(255) [?]
+    confirmed_by_person_id : bigint unsigned [?]
+    confirmed_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "procurement_payment_transactions" as t_procurement_payment_transactions {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_procurement_payment_transaction]
+    provider : varchar(32) [UQ:uk_procurement_payment_transaction]
+    external_no : varchar(160) [UQ:uk_procurement_payment_transaction]
+    transaction_time : datetime [?]
+    direction : varchar(32)
+    amount : decimal(18,4)
+    counterparty : varchar(255) [?]
+    item_description : text [?]
+    payment_method : varchar(255) [?]
+    transaction_status : varchar(64) [?]
+    merchant_order_no : varchar(180) [?]
+    raw_json : json [?]
+    imported_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "procurement_platform_order_links" as t_procurement_platform_order_links {
+    id : bigint unsigned [PK]
+    platform_order_id : bigint unsigned [UQ:uk_procurement_platform_order_link]
+    procurement_request_id : bigint unsigned [UQ:uk_procurement_platform_order_link]
+    allocated_quantity : int
+    allocated_amount : decimal(18,4)
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+  }
+  class "procurement_platform_orders" as t_procurement_platform_orders {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_procurement_platform_order]
+    platform : varchar(32) [UQ:uk_procurement_platform_order]
+    platform_order_no : varchar(128) [UQ:uk_procurement_platform_order]
+    order_time : datetime [?]
+    shop_name : varchar(255) [?]
+    platform_status : varchar(64) [?]
+    product_name : text [?]
+    raw_spec : text [?]
+    quantity : int
+    paid_amount : decimal(18,4)
+    payment_type : varchar(128) [?]
+    goods_ids : text [?]
+    sku_ids : text [?]
+    purchase_urls : text [?]
+    raw_json : json [?]
+    binding_status : varchar(32)
+    imported_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "procurement_purchase_group_items" as t_procurement_purchase_group_items {
+    id : bigint unsigned [PK]
+    group_id : bigint unsigned [UQ:uk_procurement_purchase_group_item]
+    product_id : bigint unsigned [UQ:uk_procurement_purchase_group_item]
+    created_at : datetime
+  }
+  class "procurement_purchase_groups" as t_procurement_purchase_groups {
+    id : bigint unsigned [PK]
+    name : varchar(255)
+    source_type : varchar(64)
+    supplier_id : bigint unsigned [?]
+    active : tinyint
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "procurement_requests" as t_procurement_requests {
+    id : bigint unsigned [PK]
+    request_group_no : varchar(64) [?]
+    product_id : bigint unsigned [?]
+    raw_name : varchar(255) [?]
+    raw_spec : varchar(255) [?]
+    binding_status : varchar(32)
+    person_id : bigint unsigned [?]
+    created_by_person_id : bigint unsigned [?]
+    quantity : int
+    amount : decimal(18,4)
+    shipping_amount : decimal(18,4)
+    purchase_url : text [?]
+    source_type : varchar(64)
+    supplier_id : bigint unsigned [?]
+    approval_status : varchar(32)
+    automation_exception_code : varchar(64) [?]
+    automation_exception_message : varchar(500) [?]
+    price_exception_reason : varchar(64) [?]
+    price_exception_note : text [?]
+    price_reference_unit_cost : decimal(18,4) [?]
+    price_actual_unit_cost : decimal(18,4) [?]
+    price_exception_confirmed_by_person_id : bigint unsigned [?]
+    price_exception_confirmed_at : datetime [?]
+    auto_completed_at : datetime [?]
+    status : varchar(32)
+    needed_by : varchar(64) [?]
+    note : text [?]
+    purchase_order_id : bigint unsigned [?]
+    source_order_id : bigint unsigned [?]
+    source_order_item_id : bigint unsigned [?]
+    source_ozon_sku : varchar(128) [?]
+    demand_type : varchar(32)
+    purchase_mode : varchar(32)
+    request_reason_code : varchar(64) [?]
+    request_reason_note : text [?]
+    merged_at : datetime [?]
+    purchased_at : datetime [?]
+    cancelled_at : datetime [?]
+    urgency : varchar(32) [?]
+    created_at : datetime
+    updated_at : datetime
+    tenant_id : bigint unsigned [?]
+    warning_episode_closed_at : datetime [?]
+  }
+  class "procurement_stock_cost_links" as t_procurement_stock_cost_links {
+    id : bigint unsigned [PK]
+    task_id : bigint unsigned
+    purchase_order_item_id : bigint unsigned
+    quantity : int
+    action_id : bigint unsigned [UQ:uk_stock_cost_link_action]
+  }
+  class "procurement_stock_cost_tasks" as t_procurement_stock_cost_tasks {
+    id : bigint unsigned [PK]
+    product_id : bigint unsigned
+    stocktake_action_id : bigint unsigned [UQ:uk_stock_cost_action]
+    quantity : int
+    resolved_quantity : int
+    person_id : bigint unsigned
+    reason : text
+    created_at : datetime
+  }
+  class "purchase_cost_versions" as t_purchase_cost_versions {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    product_id : bigint unsigned [UQ:uk_purchase_cost_product_version]
+    version_no : int [UQ:uk_purchase_cost_product_version]
+    source_key : varchar(160)
+    stage : varchar(32)
+    status : varchar(32)
+    source_type : varchar(32)
+    supplier_id : bigint unsigned [?]
+    supplier_name_snapshot : varchar(255) [?]
+    purchase_url : text [?]
+    purchase_order_id : bigint unsigned [?]
+    purchase_order_item_id : bigint unsigned [?]
+    inbound_record_id : bigint unsigned [?]
+    procurement_request_id : bigint unsigned [?]
+    quantity : decimal(18,4)
+    amount : decimal(18,4)
+    shipping_amount : decimal(18,4)
+    goods_unit_cost : decimal(18,4)
+    landed_unit_cost : decimal(18,4)
+    previous_unit_cost : decimal(18,4) [?]
+    change_ratio : decimal(18,6) [?]
+    anomaly_level : varchar(32)
+    anomaly_reason : text [?]
+    review_status : varchar(32)
+    reviewed_by_person_id : bigint unsigned [?]
+    reviewed_at : datetime [?]
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    revised_at : datetime [?]
+  }
+  class "purchase_order_items" as t_purchase_order_items {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    purchase_order_id : bigint unsigned
+    product_id : bigint unsigned
+    requested_quantity : int
+    actual_quantity : int
+    unit_cost : decimal(18,4)
+    amount : decimal(18,4)
+    shipping_amount : decimal(18,4)
+    purchase_url : text [?]
+    inbound_quantity : int
+    purchase_mode : varchar(32)
+    status : varchar(32)
+    note : text [?]
+  }
+  class "purchase_order_shipments" as t_purchase_order_shipments {
+    id : bigint unsigned [PK]
+    purchase_order_id : bigint unsigned [UQ:uk_purchase_order_shipment]
+    platform_order_no : varchar(128) [?]
+    tracking_number : varchar(64) [UQ:uk_purchase_order_shipment]
+    carrier_code : varchar(64) [?]
+    carrier_name : varchar(128) [?]
+    logistics_status : varchar(64)
+    logistics_status_text : varchar(255) [?]
+    latest_trace : text [?]
+    latest_trace_at : datetime [?]
+    queried_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "purchase_orders" as t_purchase_orders {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    order_no : varchar(128) [UQ:uk_purchase_orders_order_no]
+    created_by_person_id : bigint unsigned [?]
+    status : varchar(32)
+    total_quantity : int
+    total_amount : decimal(18,4)
+    note : text [?]
+    created_at : datetime
+    purchased_at : datetime [?]
+    cancelled_at : datetime [?]
+  }
+  class "suppliers" as t_suppliers {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [?]
+    name : varchar(255)
+    contact_person : varchar(255) [?]
+    contact_phone : varchar(255) [?]
+    wechat_id : varchar(255) [?]
+    business_note : text [?]
+    status : varchar(32)
+    created_at : datetime
+  }
+}
+package "OGL 发运" as d_ogl {
+  class "ogl_dispatch_batches" as t_ogl_dispatch_batches {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_ogl_batch_number | UQ:uk_ogl_batch_request | UQ:uk_ogl_official]
+    batch_number : varchar(64) [UQ:uk_ogl_batch_number]
+    client_request_id : varchar(128) [UQ:uk_ogl_batch_request]
+    default_shop_id : bigint unsigned [UQ:uk_ogl_official]
+    containers_count : int unsigned
+    status : varchar(32)
+    note : varchar(1000)
+    delivery_method_id : varchar(64) [?]
+    departure_date : varchar(64) [?]
+    official_carriage_id : varchar(64) [UQ:uk_ogl_official | ?]
+    official_status : varchar(32)
+    official_result_json : json [?]
+    official_operation_token : varchar(64) [?]
+    official_error : varchar(2000) [?]
+    last_refreshed_at : datetime [?]
+    created_by : bigint unsigned
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "ogl_dispatch_events" as t_ogl_dispatch_events {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned
+    batch_id : bigint unsigned
+    member_id : bigint unsigned [?]
+    action : varchar(64)
+    reason : varchar(1000)
+    detail_json : json [?]
+    person_id : bigint unsigned
+    created_at : datetime
+  }
+  class "ogl_dispatch_members" as t_ogl_dispatch_members {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_ogl_active_order | UQ:uk_ogl_batch_order]
+    batch_id : bigint unsigned [UQ:uk_ogl_batch_order]
+    order_id : bigint unsigned [UQ:uk_ogl_batch_order]
+    active_order_id : bigint unsigned [UQ:uk_ogl_active_order | ?]
+    shop_id : bigint unsigned
+    posting_number : varchar(128)
+    container_no : int unsigned [?]
+    dispatched_at : datetime [?]
+    dispatched_by : bigint unsigned [?]
+    withdrawn_at : datetime [?]
+    withdrawn_by : bigint unsigned [?]
+    exception_code : varchar(64) [?]
+    exception_note : varchar(1000) [?]
+    official_member : tinyint(1)
+    last_synced_at : datetime [?]
+    last_refresh_attempt_at : datetime [?]
+    sync_error : varchar(2000) [?]
+    created_at : datetime
+  }
+  class "ogl_dispatch_official_locks" as t_ogl_dispatch_official_locks {
+    tenant_id : bigint unsigned [PK]
+    default_shop_id : bigint unsigned [PK]
+    delivery_method_id : varchar(64) [PK]
+    batch_id : bigint unsigned
+    operation_token : varchar(64)
+    created_at : datetime
+  }
+  class "ogl_dispatch_settings" as t_ogl_dispatch_settings {
+    tenant_id : bigint unsigned [PK]
+    default_shop_id : bigint unsigned
+    updated_by : bigint unsigned
+    updated_at : datetime
+  }
+}
+package "FBP 补货与调拨" as d_fbp {
+  class "fbp_replenishment_batch_members" as t_fbp_replenishment_batch_members {
+    batch_id : bigint unsigned [PK]
+    order_id : bigint unsigned [PK | UQ:uk_fbp_batch_member_order]
+    created_at : datetime
+  }
+  class "fbp_replenishment_batches" as t_fbp_replenishment_batches {
+    id : bigint unsigned [PK]
+    batch_no : varchar(64) [UQ:uk_fbp_batch_no]
+    shop_id : bigint unsigned
+    created_by : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "fbp_replenishment_fill_executions" as t_fbp_replenishment_fill_executions {
+    id : bigint unsigned [PK]
+    batch_id : bigint unsigned
+    shop_id : bigint unsigned
+    ozon_sku : varchar(128)
+    quantity : int
+    status : varchar(16)
+    message : varchar(500)
+    created_by : bigint unsigned [?]
+    created_at : datetime
+  }
+  class "fbp_replenishment_ignores" as t_fbp_replenishment_ignores {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_fbp_ignore_shop_sku]
+    ozon_sku : varchar(128) [UQ:uk_fbp_ignore_shop_sku]
+    product_id : bigint unsigned [?]
+    mapping_id : bigint unsigned [?]
+    reason : varchar(255)
+    active : tinyint(1)
+    person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+    restored_at : datetime [?]
+  }
+  class "fbp_replenishment_item_adjustments" as t_fbp_replenishment_item_adjustments {
+    id : bigint unsigned [PK]
+    order_id : bigint unsigned
+    item_id : bigint unsigned
+    adjustment_qty : int
+    reason : varchar(500)
+    reason_code : varchar(64) [?]
+    reason_note : varchar(500) [?]
+    procurement_request_id : bigint unsigned [?]
+    created_by : bigint unsigned [?]
+    created_at : datetime
+  }
+  class "fbp_replenishment_order_items" as t_fbp_replenishment_order_items {
+    id : bigint unsigned [PK]
+    order_id : bigint unsigned
+    shop_id : bigint unsigned
+    product_id : bigint unsigned [?]
+    mapping_id : bigint unsigned [?]
+    ozon_sku : varchar(128)
+    offer_id : varchar(255)
+    product_name : varchar(1024)
+    image_url : text [?]
+    inventory_id : varchar(128)
+    week1_qty : int
+    week2_qty : int
+    week3_qty : int
+    recent_7d_qty : int
+    recent_30d_qty : int
+    fbp_available : int
+    fbp_transfer_in_transit_qty : int
+    fbp_effective_available : int
+    fbs_available : int
+    local_stock : int
+    pending_procurement_qty : int
+    daily_sales : decimal(18,4) [?]
+    coverage_days : decimal(18,4) [?]
+    target_days : int
+    target_stock : int
+    suggested_qty : int
+    suggested_transfer_qty : int
+    suggested_purchase_qty : int
+    suggested_action : varchar(32)
+    suggested_action_text : varchar(64)
+    requested_qty : int
+    approved_qty : int
+    requested_by : bigint unsigned [?]
+    reason : text [?]
+    note : text [?]
+    barcode_printed_qty : int
+    barcode_printed_at : datetime [?]
+    barcode_printed_by : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "fbp_replenishment_orders" as t_fbp_replenishment_orders {
+    id : bigint unsigned [PK]
+    order_no : varchar(64) [UQ:uk_fbp_replenishment_order_no]
+    shop_id : bigint unsigned
+    order_date : date [?]
+    status : varchar(32)
+    note : text [?]
+    created_by : bigint unsigned [?]
+    reviewed_by : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+    submitted_at : datetime [?]
+    reviewed_at : datetime [?]
+    closed_at : datetime [?]
+  }
+  class "fbp_replenishment_print_records" as t_fbp_replenishment_print_records {
+    id : bigint unsigned [PK]
+    request_key : varchar(96) [UQ:uq_fbp_print_request]
+    order_id : bigint unsigned
+    item_id : bigint unsigned
+    shop_id : bigint unsigned [?]
+    ozon_sku : varchar(128)
+    quantity : int
+    preparation_quantity : int
+    print_kind : varchar(20)
+    created_by : bigint unsigned [?]
+    created_at : datetime
+  }
+  class "fbp_shortage_item_handlings" as t_fbp_shortage_item_handlings {
+    request_group_no : varchar(100) [PK]
+    handled_by_person_id : bigint unsigned [?]
+    handled_at : datetime
+    created_at : datetime
+  }
+  class "fbp_transfer_records" as t_fbp_transfer_records {
+    id : bigint unsigned [PK]
+    product_id : bigint unsigned
+    mapping_id : bigint unsigned [?]
+    shop_id : bigint unsigned [?]
+    ozon_sku : varchar(128)
+    quantity : int
+    listed_quantity : int
+    status : varchar(32)
+    tracking_no : varchar(128)
+    box_no : varchar(128)
+    source_type : varchar(32)
+    source_ref : varchar(128)
+    warehouse_name : varchar(255)
+    note : text [?]
+    person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+    shipped_at : datetime [?]
+    expected_arrival_at : datetime [?]
+    closed_at : datetime [?]
+  }
+}
+package "采集、草稿与上架" as d_listing {
+  class "listing_ai_variant_assets" as t_listing_ai_variant_assets {
+    id : bigint [PK]
+    source_module : varchar(64)
+    workbench_id : varchar(128)
+    source_batch_id : varchar(128)
+    result_id : varchar(128) [UQ:uq_listing_ai_variant_asset_tenant_result_field_owner]
+    source_product_id : varchar(128)
+    product_name : varchar(255)
+    variant_target : varchar(255)
+    listing_draft_id : bigint [?]
+    listing_template_id : bigint [?]
+    field_key : varchar(64) [UQ:uq_listing_ai_variant_asset_tenant_result_field_owner]
+    field_status : varchar(32)
+    asset_json : longtext [?]
+    prompt_snapshot_json : longtext [?]
+    row_snapshot_json : longtext [?]
+    error_message : text [?]
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    owner_scope : bigint [UQ:uq_listing_ai_variant_asset_tenant_result_field_owner | ?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [UQ:uq_listing_ai_variant_asset_tenant_result_field_owner | ?]
+  }
+  class "listing_category_templates" as t_listing_category_templates {
+    id : bigint [PK]
+    ozon_category_id : varchar(128)
+    category_name : varchar(255)
+    template_name : varchar(255)
+    required_attributes_json : longtext
+    ai_rules_json : longtext
+    title_prompt : text
+    description_prompt : text
+    image_rules_json : longtext
+    source_type : varchar(64)
+    source_ozon_sku : varchar(128)
+    source_shop_id : bigint [?]
+    source_raw_json : longtext [?]
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    editable_payload_json : longtext [?]
+    title : varchar(500)
+    description : longtext [?]
+    attributes_json : longtext [?]
+    images_json : longtext [?]
+    category_attributes_json : longtext [?]
+    tenant_id : varchar(80) [?]
+  }
+  class "listing_collected_product_details" as t_listing_collected_product_details {
+    id : varchar(160) [PK]
+    tenant_id : varchar(80) [PK]
+    platform : varchar(32)
+    sku : varchar(128)
+    title : varchar(500)
+    template_id : bigint [?]
+    payload_json : longtext
+    status : varchar(64)
+    error_message : text [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "listing_draft_bindings" as t_listing_draft_bindings {
+    tenant_id : varchar(80) [PK]
+    draft_id : bigint unsigned [PK]
+    vehicle_catalog_id : bigint unsigned [?]
+    task_id : bigint unsigned [?]
+    updated_at : timestamp
+  }
+  class "listing_draft_vehicle_links" as t_listing_draft_vehicle_links {
+    tenant_id : varchar(80) [PK]
+    draft_id : bigint unsigned [PK]
+    vehicle_catalog_id : bigint unsigned [PK]
+    created_at : timestamp
+  }
+  class "listing_drafts" as t_listing_drafts {
+    id : bigint [PK]
+    template_id : bigint [?]
+    product_name : varchar(255)
+    internal_code : varchar(128)
+    source_urls_json : longtext
+    source_images_json : longtext
+    cost_price : decimal(12,2)
+    sale_price : decimal(12,2)
+    length_cm : decimal(10,2)
+    width_cm : decimal(10,2)
+    height_cm : decimal(10,2)
+    weight_g : decimal(10,2)
+    color : varchar(128)
+    spec : varchar(255)
+    quantity : int
+    template_payload_json : longtext [?]
+    list_image_url : varchar(2048) [?]
+    list_price : varchar(64) [?]
+    manual_facts_json : longtext
+    ai_payload_json : longtext
+    status : varchar(32)
+    development_type : varchar(32)
+    vehicle_brand : varchar(128)
+    vehicle_model : varchar(128)
+    vehicle_model_key : varchar(255)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    source_product_id : bigint [?]
+    parent_draft_id : bigint [?]
+    creation_method : varchar(32)
+    tenant_id : varchar(80) [?]
+    ai_variant_source_key : varchar(128) [?]
+  }
+  class "listing_ozon_copy_jobs" as t_listing_ozon_copy_jobs {
+    id : bigint [PK]
+    tenant_id : varchar(64)
+    shop_id : bigint
+    ozon_sku : varchar(128)
+    offer_id : varchar(128)
+    task_id : varchar(128)
+    template_id : bigint [?]
+    status : varchar(64)
+    request_json : longtext
+    response_json : longtext
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    product_id : varchar(128)
+    product_detail_json : longtext [?]
+  }
+  class "listing_ozon_seller_media_upload_jobs" as t_listing_ozon_seller_media_upload_jobs {
+    id : bigint [PK]
+    job_id : varchar(128)
+    media_job_id : varchar(128) [UQ:uq_listing_seller_media_tenant_job]
+    source_module : varchar(64)
+    source_id : varchar(128)
+    source_url : text
+    source_hash : varchar(128)
+    kind : varchar(32)
+    mime_type : varchar(128)
+    file_name : varchar(255)
+    status : varchar(32)
+    uploaded_url : text [?]
+    runner_id : varchar(128)
+    lease_until : timestamp [?]
+    attempts : int
+    error_message : text [?]
+    message : text [?]
+    metadata_json : longtext [?]
+    response_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [UQ:uq_listing_seller_media_tenant_job]
+  }
+  class "listing_publish_records" as t_listing_publish_records {
+    id : bigint [PK]
+    draft_id : bigint
+    shop_copy_id : bigint [?]
+    shop_id : bigint
+    offer_id : varchar(128)
+    ozon_product_id : varchar(128)
+    ozon_sku : varchar(128)
+    product_url : text [?]
+    status : varchar(64)
+    request_json : longtext [?]
+    template_snapshot_json : longtext [?]
+    response_json : longtext [?]
+    error_json : longtext [?]
+    publish_task_item_id : bigint [UQ:uq_listing_publish_record_task_item | ?]
+    created_by_person_id : bigint [?]
+    published_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+    task_id : varchar(128)
+    quality_score : decimal(5,2)
+    quality_source : varchar(64)
+    quality_json : longtext [?]
+    quality_checked_at : timestamp [?]
+    source_product_id : bigint [?]
+    offer_source : varchar(64)
+    source_collector_sku : varchar(160)
+    publish_task_id : bigint [?]
+    list_summary_json : longtext [?]
+    binding_status : varchar(32)
+    binding_attempt_count : int
+    binding_error : text [?]
+    binding_checked_at : timestamp [?]
+    binding_completed_at : timestamp [?]
+    binding_source : varchar(32)
+    tenant_id : varchar(80) [?]
+    sku_sync_checked_at : timestamp [?]
+    sku_sync_attempt_count : int
+  }
+  class "listing_publish_task_items" as t_listing_publish_task_items {
+    id : bigint [PK]
+    publish_task_id : bigint [UQ:uniq_listing_publish_task_item]
+    draft_id : bigint [UQ:uniq_listing_publish_task_item]
+    shop_id : bigint [UQ:uniq_listing_publish_task_item]
+    record_id : bigint [?]
+    status : varchar(64)
+    draft_name : varchar(500)
+    shop_name : varchar(255)
+    error_json : longtext [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [?]
+  }
+  class "listing_publish_tasks" as t_listing_publish_tasks {
+    id : bigint [PK]
+    task_no : varchar(80) [UQ:uniq_listing_publish_tasks_no]
+    request_id : varchar(128) [UQ:uq_listing_publish_tasks_request | UQ:uq_listing_publish_tasks_tenant_request | ?]
+    source_type : varchar(64)
+    status : varchar(64)
+    draft_count : int
+    shop_count : int
+    total_count : int
+    queued_count : int
+    success_count : int
+    failed_count : int
+    processing_count : int
+    interrupted_count : int
+    request_json : longtext [?]
+    created_by_person_id : bigint [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [UQ:uq_listing_publish_tasks_tenant_request | ?]
+  }
+  class "listing_publish_variant_links" as t_listing_publish_variant_links {
+    id : bigint [PK]
+    tenant_id : varchar(80)
+    draft_id : bigint
+    variant_id : varchar(128)
+    record_id : bigint [UQ:uq_listing_variant_record_offer]
+    item_index : int [UQ:uq_listing_variant_record_offer]
+    shop_id : bigint
+    offer_id : varchar(128) [UQ:uq_listing_variant_record_offer]
+    ozon_product_id : varchar(128)
+    ozon_sku : varchar(128)
+    ozon_status : varchar(64)
+    price : decimal(18,2) [?]
+    currency_code : varchar(12)
+    quality_score : decimal(5,2) [?]
+    quality_checked_at : timestamp [?]
+    source_product_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "listing_shop_copies" as t_listing_shop_copies {
+    id : bigint [PK]
+    draft_id : bigint [UQ:uq_listing_shop_copy]
+    shop_id : bigint [UQ:uq_listing_shop_copy]
+    offer_id : varchar(128)
+    title : varchar(500)
+    price : decimal(12,2)
+    stock_quantity : int
+    watermark_path : text [?]
+    images_json : longtext
+    validation_json : longtext
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    ozon_product_id : varchar(128)
+    ozon_sku : varchar(128)
+    product_url : text [?]
+    publish_response_json : longtext [?]
+    published_at : timestamp [?]
+    source_product_id : bigint [?]
+    tenant_id : varchar(80) [?]
+  }
+  class "listing_variant_lineage" as t_listing_variant_lineage {
+    id : bigint [PK]
+    tenant_id : varchar(80) [UQ:uq_listing_variant_lineage_sku]
+    draft_id : bigint [UQ:uq_listing_variant_lineage_sku]
+    template_id : bigint [?]
+    variant_id : varchar(128) [UQ:uq_listing_variant_lineage_sku]
+    record_id : bigint [?]
+    publish_task_id : bigint [?]
+    publish_task_item_id : bigint [?]
+    ozon_task_id : varchar(128)
+    inventory_id : bigint [?]
+    development_task_id : bigint [?]
+    development_task_title : varchar(255)
+    shop_id : bigint [UQ:uq_listing_variant_lineage_sku]
+    shop_name : varchar(255)
+    offer_id : varchar(128) [UQ:uq_listing_variant_lineage_sku]
+    ozon_product_id : varchar(128)
+    ozon_sku : varchar(128)
+    ozon_status : varchar(64)
+    price : decimal(18,2) [?]
+    currency_code : varchar(12)
+    quality_score : decimal(5,2) [?]
+    quality_checked_at : timestamp [?]
+    created_by_person_id : bigint [?]
+    draft_title : varchar(500)
+    first_seen_at : timestamp
+    updated_at : timestamp
+  }
+  class "listing_variant_workbench_drafts" as t_listing_variant_workbench_drafts {
+    id : bigint [PK]
+    source_module : varchar(64)
+    workbench_id : varchar(128) [UQ:uq_listing_variant_workbench_tenant_owner]
+    route_name : varchar(128) [UQ:uq_listing_variant_workbench_tenant_owner]
+    task_id : varchar(128)
+    draft_scope : varchar(64)
+    source_batch_id : varchar(128)
+    source_product_id : varchar(128)
+    product_name : varchar(255)
+    snapshot_version : int
+    snapshot_json : longtext
+    status : varchar(32)
+    created_by_person_id : bigint [UQ:uq_listing_variant_workbench_tenant_owner | ?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [UQ:uq_listing_variant_workbench_tenant_owner | ?]
+  }
+  class "ozon_plugin_collected_products" as t_ozon_plugin_collected_products {
+    tenant_id : varchar(80) [PK]
+    sku : varchar(128) [PK]
+    product_id : varchar(128)
+    title : varchar(500)
+    product_url : text [?]
+    image_url : text [?]
+    category_name : varchar(500)
+    price : decimal(14,2) [?]
+    currency : varchar(16)
+    sold_count : decimal(14,4) [?]
+    view_count : decimal(14,4) [?]
+    click_rate : decimal(14,6) [?]
+    conversion_rate : decimal(14,6) [?]
+    stock_count : decimal(14,4) [?]
+    commission_rate : decimal(14,6) [?]
+    collect_date : date
+    collected_at : varchar(64)
+    length_cm : decimal(10,2) [?]
+    width_cm : decimal(10,2) [?]
+    height_cm : decimal(10,2) [?]
+    weight_g : decimal(12,2) [?]
+    payload_json : longtext
+    status : varchar(64)
+    selection_product_id : bigint [?]
+    listing_template_id : bigint [?]
+    quality_status : varchar(32)
+    quality_issues_json : longtext [?]
+    facts_status : varchar(32)
+    created_by_person_id : bigint [?]
+    development_type : varchar(32)
+    vehicle_brand : varchar(128)
+    vehicle_model : varchar(128)
+    vehicle_model_key : varchar(255)
+    edit_payload_json : longtext [?]
+    edited_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "publish_task_items" as t_publish_task_items {
+    id : bigint [PK]
+    task_id : bigint
+    shop_product_version_id : bigint [?]
+    shop_id : bigint
+    offer_id : varchar(128)
+    status : varchar(32)
+    retry_count : int
+    ozon_task_id : varchar(128)
+    ozon_product_id : varchar(128)
+    ozon_sku : varchar(128)
+    product_url : text [?]
+    request_json : longtext [?]
+    response_json : longtext [?]
+    error_message : text [?]
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "publish_tasks" as t_publish_tasks {
+    id : bigint [PK]
+    task_no : varchar(64) [UQ:uq_publish_tasks_no]
+    master_product_id : bigint
+    total_count : int
+    pending_count : int
+    processing_count : int
+    success_count : int
+    failed_count : int
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    updated_at : timestamp
+  }
+}
+package "AI 策略、裂变与生成" as d_ai {
+  class "ai_generation_tasks" as t_ai_generation_tasks {
+    id : bigint [PK]
+    tenant_id : varchar(64) [UQ:uq_ai_generation_task_no]
+    task_no : varchar(64) [UQ:uq_ai_generation_task_no]
+    source_module : varchar(64)
+    workflow_id : varchar(128)
+    result_id : varchar(128)
+    source_batch_id : varchar(128)
+    source_product_id : varchar(128)
+    field_key : varchar(64)
+    status : varchar(32)
+    priority : int
+    input_json : longtext [?]
+    output_json : longtext [?]
+    error_json : longtext [?]
+    provider_job_json : longtext [?]
+    depends_on_task_ids : varchar(500)
+    attempts : int
+    max_attempts : int
+    created_by_person_id : bigint [?]
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_image_optimizer_jobs" as t_ai_image_optimizer_jobs {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_image_optimizer_jobs_no]
+    job_no : varchar(64) [UQ:uniq_ai_image_optimizer_jobs_no]
+    source_image_url : text [?]
+    source_product_id : varchar(128)
+    status : varchar(32)
+    model : varchar(128)
+    usage_json : longtext [?]
+    analysis_json : longtext [?]
+    plan_json : longtext [?]
+    result_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_image_task_owners" as t_ai_image_task_owners {
+    task_id : varchar(80) [PK]
+    tenant_id : varchar(64)
+    created_by_person_id : bigint
+    created_at : timestamp
+  }
+  class "ai_image_usage_events" as t_ai_image_usage_events {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_image_usage_request]
+    request_key : varchar(255) [UQ:uniq_ai_image_usage_request]
+    job_no : varchar(64)
+    item_no : varchar(64)
+    person_id : bigint unsigned [?]
+    channel_id : varchar(128)
+    channel_name : varchar(255)
+    provider : varchar(128)
+    model : varchar(255)
+    operation : varchar(32)
+    status : varchar(32)
+    requested_count : int
+    provider_cost : decimal(18,6) [?]
+    provider_request_id : varchar(255)
+    error_message : text [?]
+    started_at : timestamp
+    completed_at : timestamp [?]
+  }
+  class "ai_material_optimization_batches" as t_ai_material_optimization_batches {
+    id : bigint [PK]
+    batch_no : varchar(64) [UQ:uq_ai_material_batch_no]
+    optimization_scope : varchar(32)
+    status : varchar(32)
+    total_count : int
+    success_count : int
+    failed_count : int
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_material_optimization_items" as t_ai_material_optimization_items {
+    id : bigint [PK]
+    item_no : varchar(64) [UQ:uq_ai_material_item_no]
+    batch_no : varchar(64)
+    source_draft_id : bigint
+    result_draft_id : bigint [?]
+    optimizer_job_no : varchar(64)
+    optimization_scope : varchar(32)
+    status : varchar(32)
+    stage : varchar(64)
+    progress_percent : int
+    source_title : varchar(500)
+    operator_facts_json : longtext [?]
+    error_message : text [?]
+    attempts : int
+    created_by_person_id : bigint [?]
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_prompt_templates" as t_ai_prompt_templates {
+    id : bigint [PK]
+    name : varchar(191)
+    scene : varchar(64)
+    mode : varchar(64)
+    keywords : text [?]
+    description : text [?]
+    positive_prompt : longtext [?]
+    negative_prompt : longtext [?]
+    variables_json : longtext [?]
+    prompt_payload_json : longtext [?]
+    main_image_prompt : longtext [?]
+    detail_image_prompt_json : longtext [?]
+    title_prompt : longtext [?]
+    tags_prompt : longtext [?]
+    description_prompt : longtext [?]
+    default_ratio : varchar(16)
+    default_count : int
+    is_default : tinyint
+    enabled : tinyint
+    sort_order : int
+    created_by : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_strategies" as t_ai_strategies {
+    id : bigint [PK]
+    strategy_key : varchar(128) [UQ:strategy_key]
+    title : varchar(191)
+    business_modes_json : longtext [?]
+    applicable_goals_json : longtext [?]
+    applicable_assets_json : longtext [?]
+    aliases_json : longtext [?]
+    positive_modules_json : longtext [?]
+    negative_modules_json : longtext [?]
+    conflict_strategy_keys_json : longtext [?]
+    priority : int
+    enabled : tinyint
+    version : int
+    metadata_json : longtext [?]
+    created_by : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_strategy_bundles" as t_ai_strategy_bundles {
+    id : bigint [PK]
+    bundle_key : varchar(128) [UQ:bundle_key]
+    title : varchar(191)
+    description : text [?]
+    category_node_id : bigint [?]
+    match_keywords_json : longtext [?]
+    exclude_keywords_json : longtext [?]
+    strategy_map_json : longtext [?]
+    priority : int
+    enabled : tinyint
+    metadata_json : longtext [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_strategy_category_nodes" as t_ai_strategy_category_nodes {
+    id : bigint [PK]
+    parent_id : bigint [?]
+    category_key : varchar(128) [UQ:category_key]
+    title : varchar(191)
+    aliases_json : longtext [?]
+    match_keywords_json : longtext [?]
+    sort_order : int
+    enabled : tinyint
+    metadata_json : longtext [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_strategy_layer_rules" as t_ai_strategy_layer_rules {
+    id : bigint [PK]
+    scope : varchar(32)
+    rule_key : varchar(128) [UQ:rule_key]
+    title : varchar(191)
+    aliases_json : longtext [?]
+    goal_strategy_map_json : longtext [?]
+    sort_order : int
+    enabled : tinyint
+    metadata_json : longtext [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_case_runs" as t_ai_variant_case_runs {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_case_runs_no]
+    run_no : varchar(64) [UQ:uniq_ai_variant_case_runs_no]
+    case_no : varchar(64)
+    target_values_json : longtext [?]
+    result_job_no : varchar(64)
+    generated_draft_ids_json : longtext [?]
+    status : varchar(32)
+    result_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_case_templates" as t_ai_variant_case_templates {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_case_templates_no]
+    case_no : varchar(64) [UQ:uniq_ai_variant_case_templates_no]
+    case_name : varchar(255)
+    product_subject_key : varchar(128)
+    product_subject_name : varchar(255)
+    variant_type : varchar(64)
+    variable_slot : varchar(64)
+    source_value : varchar(128)
+    success_target_value : varchar(128)
+    status : varchar(32)
+    usage_count : int
+    success_score : decimal(5,2) [?]
+    case_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_draft_save_batches" as t_ai_variant_draft_save_batches {
+    id : bigint [PK]
+    tenant_id : varchar(64)
+    batch_no : varchar(64) [UQ:uq_ai_variant_draft_save_batch_no]
+    status : varchar(32)
+    total_count : int
+    success_count : int
+    failed_count : int
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_draft_save_items" as t_ai_variant_draft_save_items {
+    id : bigint [PK]
+    tenant_id : varchar(64)
+    item_no : varchar(96) [UQ:uq_ai_variant_draft_save_item_no]
+    batch_no : varchar(64)
+    status : varchar(32)
+    stage : varchar(64)
+    progress_percent : int
+    payload_json : longtext
+    result_draft_id : bigint [?]
+    shop_copy_count : int
+    error_message : text [?]
+    attempts : int
+    created_by_person_id : bigint [?]
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_lab_analyses" as t_ai_variant_lab_analyses {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_lab_analyses_no]
+    analysis_no : varchar(64) [UQ:uniq_ai_variant_lab_analyses_no]
+    source_image_url : text [?]
+    source_product_id : varchar(128)
+    business_mode : varchar(64)
+    model : varchar(128)
+    usage_json : longtext [?]
+    analysis_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_lab_batch_items" as t_ai_variant_lab_batch_items {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_lab_batch_items_no]
+    item_no : varchar(64) [UQ:uniq_ai_variant_lab_batch_items_no]
+    job_no : varchar(64)
+    target_variant_value : varchar(128)
+    status : varchar(32)
+    plan_no : varchar(64)
+    item_json : longtext [?]
+    image_result_json : longtext [?]
+    provider_job_json : longtext [?]
+    error_message : text [?]
+    sort_order : int
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_lab_batch_jobs" as t_ai_variant_lab_batch_jobs {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_lab_batch_jobs_no]
+    job_no : varchar(64) [UQ:uniq_ai_variant_lab_batch_jobs_no]
+    job_type : varchar(64)
+    analysis_no : varchar(64)
+    source_product_id : varchar(128)
+    source_variant_value : varchar(128)
+    target_count : int
+    status : varchar(32)
+    budget_cny : decimal(10,4) [?]
+    image_concurrency : int
+    request_json : longtext [?]
+    result_json : longtext [?]
+    usage_json : longtext [?]
+    cost_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_lab_plans" as t_ai_variant_lab_plans {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_lab_plans_no]
+    plan_no : varchar(64) [UQ:uniq_ai_variant_lab_plans_no]
+    analysis_no : varchar(64)
+    source_variant_value : varchar(128)
+    target_variant_value : varchar(128)
+    template_key : varchar(128)
+    model : varchar(128)
+    usage_json : longtext [?]
+    plan_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_template_cases" as t_ai_variant_template_cases {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_template_cases_key]
+    case_key : varchar(128) [UQ:uniq_ai_variant_template_cases_key]
+    template_key : varchar(128)
+    case_name : varchar(255)
+    source_model : varchar(128)
+    fingerprint_json : longtext [?]
+    prompt_set_json : longtext [?]
+    quality_checks_json : longtext [?]
+    result_score : decimal(5,2) [?]
+    success_count : int
+    failure_count : int
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "ai_variant_templates" as t_ai_variant_templates {
+    id : bigint unsigned [PK]
+    tenant_id : varchar(64) [UQ:uniq_ai_variant_templates_key]
+    template_key : varchar(128) [UQ:uniq_ai_variant_templates_key]
+    template_name : varchar(255)
+    category_key : varchar(128)
+    user_note : text [?]
+    template_json : longtext [?]
+    status : varchar(32)
+    auto_apply : tinyint(1)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "tenant_ai_limits" as t_tenant_ai_limits {
+    tenant_id : bigint unsigned [PK]
+    monthly_request_limit : int unsigned [?]
+  }
+  class "tenant_ai_usage" as t_tenant_ai_usage {
+    tenant_id : bigint unsigned [PK]
+    period_key : char(7) [PK]
+    request_count : bigint unsigned
+    text_count : bigint unsigned
+    image_count : bigint unsigned
+    updated_at : timestamp
+  }
+}
+package "素材、媒体与资产" as d_asset {
+  class "asset_tail_templates" as t_asset_tail_templates {
+    id : bigint [PK]
+    tenant_id : bigint unsigned [?]
+    shop_id : bigint [?]
+    category : varchar(128)
+    vehicle_model : varchar(128)
+    name : varchar(255)
+    image_path : text
+    purpose : varchar(64)
+    is_default : tinyint(1)
+    sort_order : int
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "asset_variant_ai_cache" as t_asset_variant_ai_cache {
+    id : bigint [PK]
+    cache_key : varchar(128) [UQ:uq_asset_variant_ai_cache_key]
+    kind : varchar(64)
+    response_json : longtext [?]
+    provider : varchar(64)
+    status : varchar(32)
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "asset_variant_jobs" as t_asset_variant_jobs {
+    id : bigint [PK]
+    tenant_id : varchar(64)
+    job_no : varchar(64) [UQ:uq_asset_variant_jobs_no]
+    job_type : varchar(64)
+    status : varchar(32)
+    product_id : bigint [?]
+    batch_id : varchar(128)
+    total_count : int
+    success_count : int
+    failed_count : int
+    request_json : longtext [?]
+    result_json : longtext [?]
+    error_json : longtext [?]
+    current_stage : varchar(64)
+    progress_json : longtext [?]
+    created_by_person_id : bigint [?]
+    started_at : timestamp [?]
+    finished_at : timestamp [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "asset_variant_video_cache" as t_asset_variant_video_cache {
+    id : bigint [PK]
+    source_hash : varchar(128) [UQ:uq_asset_variant_video_cache]
+    recipe_version : varchar(64) [UQ:uq_asset_variant_video_cache]
+    publish_url : text
+    preview_url : text [?]
+    original_name : varchar(255)
+    metadata_json : longtext [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "asset_variants" as t_asset_variants {
+    id : bigint [PK]
+    batch_id : varchar(128)
+    shop_id : bigint
+    source_title : varchar(500)
+    variant_title : varchar(500)
+    variant_title_zh : varchar(500)
+    title_style : varchar(32)
+    tags_json : longtext [?]
+    description_text : longtext [?]
+    source_product_id : bigint [?]
+    ozon_category_id : varchar(128)
+    ozon_description_category_id : bigint
+    ozon_type_id : bigint
+    ozon_category_name : varchar(500)
+    length_cm : decimal(10,2)
+    width_cm : decimal(10,2)
+    height_cm : decimal(10,2)
+    weight_g : decimal(10,2)
+    color : varchar(128)
+    vehicle_brand : varchar(128)
+    material_text : varchar(128)
+    quantity_text : varchar(64)
+    images_json : longtext [?]
+    output_dir : text [?]
+    status : varchar(32)
+    imported_to_listing : tinyint(1)
+    imported_at : timestamp [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    tag_style : varchar(32)
+    price_index : decimal(10,4)
+    internal_price : decimal(10,2)
+    ozon_price : decimal(10,2)
+    ozon_old_price : decimal(10,2)
+  }
+  class "generated_images" as t_generated_images {
+    id : bigint [PK]
+    product_id : bigint
+    shop_id : bigint
+    image_type : varchar(32)
+    source_image : text
+    watermark_template_id : varchar(128) [?]
+    output_path : text [?]
+    preview_url : text [?]
+    status : varchar(32)
+    created_at : timestamp
+  }
+  class "generated_titles" as t_generated_titles {
+    id : bigint [PK]
+    asset_variant_id : bigint [?]
+    shop_id : bigint
+    style : varchar(32)
+    title : varchar(500)
+    provider : varchar(64)
+    status : varchar(32)
+    created_at : timestamp
+  }
+  class "listing_media_assets" as t_listing_media_assets {
+    id : bigint [PK]
+    source_module : varchar(64)
+    source_id : varchar(128)
+    batch_id : varchar(128)
+    shop_id : bigint [?]
+    template_id : bigint [?]
+    variant_id : bigint [?]
+    media_type : varchar(32)
+    role : varchar(64)
+    local_path : text [?]
+    source_path : text [?]
+    preview_url : text [?]
+    publish_url : text [?]
+    original_name : varchar(255)
+    storage_name : varchar(255)
+    mime_type : varchar(128)
+    file_size : bigint
+    width : int
+    height : int
+    hash_sha256 : varchar(128)
+    sort_order : int
+    status : varchar(32)
+    metadata_json : longtext [?]
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    tenant_id : varchar(80) [?]
+  }
+  class "material_assets" as t_material_assets {
+    id : bigint [PK]
+    tenant_id : bigint unsigned [?]
+    asset_type : varchar(32)
+    role : varchar(64)
+    title : varchar(191)
+    url : longtext [?]
+    thumbnail_url : longtext [?]
+    content_text : longtext [?]
+    local_url : longtext [?]
+    publish_url : longtext [?]
+    source_type : varchar(64)
+    source_id : varchar(128)
+    source_selection_id : bigint [?]
+    source_package_id : varchar(128)
+    variant_task_id : varchar(128)
+    variant_result_id : varchar(128)
+    target_brand : varchar(128)
+    target_model : varchar(128)
+    product_name : varchar(255)
+    style : varchar(128)
+    ratio : varchar(16)
+    prompt_template_id : bigint [?]
+    final_prompt : longtext [?]
+    negative_prompt : longtext [?]
+    provider : varchar(64)
+    model : varchar(128)
+    status : varchar(64)
+    usage_count : int
+    metadata_json : longtext [?]
+    created_by : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "media_migration_map" as t_media_migration_map {
+    id : bigint unsigned [PK]
+    source_fingerprint : char(64) [UQ:uk_media_migration_source]
+    source_url : text
+    source_module : varchar(64)
+    source_table : varchar(128)
+    source_record_id : varchar(128)
+    source_field : varchar(128)
+    media_kind : varchar(16)
+    content_hash_sha256 : char(64) [?]
+    byte_size : bigint unsigned [?]
+    oss_bucket : varchar(255) [?]
+    oss_object_key : varchar(1024) [?]
+    oss_url : text [?]
+    status : varchar(32)
+    verification_error : varchar(1000) [?]
+    verified_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "shop_watermark_templates" as t_shop_watermark_templates {
+    id : bigint [PK]
+    name : varchar(128)
+    logo_url : text
+    logo_path : text [?]
+    position : varchar(32)
+    opacity : decimal(4,2)
+    size_percent : decimal(5,2)
+    margin_px : int
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "tenant_private_files" as t_tenant_private_files {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned
+    storage_name : varchar(255) [UQ:uk_private_file_storage]
+    original_name : varchar(255)
+    purpose : varchar(24)
+    content_type : varchar(128)
+    byte_size : bigint unsigned
+    uploaded_by : bigint unsigned [?]
+    created_at : datetime
+  }
+}
+package "财务与薪资" as d_finance {
+  class "exchange_rates" as t_exchange_rates {
+    id : bigint unsigned [PK]
+    currency_from : varchar(16)
+    currency_to : varchar(16)
+    rate : decimal(18,4)
+    source : varchar(64)
+    effective_date : varchar(32)
+    note : text [?]
+    created_at : datetime
+  }
+  class "finance_companies" as t_finance_companies {
+    id : bigint unsigned [PK]
+    name : varchar(255) [UQ:uk_finance_company_tenant_name]
+    tax_number : varchar(64) [?]
+    taxpayer_type : varchar(32)
+    bank_name : varchar(255) [?]
+    bank_account : varchar(128) [?]
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+    tenant_id : bigint unsigned [UQ:uk_finance_company_tenant_name | ?]
+  }
+  class "finance_expenses" as t_finance_expenses {
+    id : bigint unsigned [PK]
+    company_id : bigint unsigned
+    shop_id : bigint unsigned [?]
+    expense_date : date
+    category : varchar(64)
+    counterparty : varchar(255) [?]
+    description : varchar(500) [?]
+    currency_code : varchar(16)
+    original_amount : decimal(18,4)
+    exchange_rate : decimal(18,8)
+    amount_cny : decimal(18,4)
+    paid_by : varchar(255) [?]
+    advanced_by : varchar(255) [?]
+    is_advance_payment : tinyint(1)
+    payment_reference : varchar(255) [?]
+    voucher_status : varchar(32)
+    source_type : varchar(64) [UQ:uk_finance_expense_source | ?]
+    source_id : bigint unsigned [UQ:uk_finance_expense_source | ?]
+    created_by : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+    tenant_id : bigint unsigned [?]
+  }
+  class "finance_periods" as t_finance_periods {
+    id : bigint unsigned [PK]
+    company_id : bigint unsigned [UQ:uk_finance_period]
+    month_key : char(7) [UQ:uk_finance_period]
+    status : varchar(32)
+    close_note : varchar(500) [?]
+    closed_by : bigint unsigned [?]
+    closed_at : datetime [?]
+    updated_at : datetime
+    tenant_id : bigint unsigned [?]
+  }
+  class "finance_shop_company_assignments" as t_finance_shop_company_assignments {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_finance_shop_company_period]
+    company_id : bigint unsigned
+    effective_from : date [UQ:uk_finance_shop_company_period]
+    effective_to : date [?]
+    created_at : datetime
+    tenant_id : bigint unsigned [?]
+  }
+  class "finance_vouchers" as t_finance_vouchers {
+    id : bigint unsigned [PK]
+    company_id : bigint unsigned
+    expense_id : bigint unsigned [?]
+    finance_item_id : bigint unsigned [?]
+    voucher_type : varchar(64)
+    voucher_number : varchar(128) [?]
+    issue_date : date [?]
+    seller_name : varchar(255) [?]
+    buyer_name : varchar(255) [?]
+    seller_tax_number : varchar(64) [?]
+    buyer_tax_number : varchar(64) [?]
+    currency_code : varchar(16)
+    total_amount : decimal(18,4)
+    tax_amount : decimal(18,4)
+    attachment_url : text [?]
+    deduction_candidate : varchar(32)
+    review_status : varchar(32)
+    review_note : varchar(500) [?]
+    created_by : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+    tenant_id : bigint unsigned [?]
+  }
+  class "payroll_contribution_schemes" as t_payroll_contribution_schemes {
+    id : bigint unsigned [PK]
+    name : varchar(255)
+    city_code : varchar(32) [UQ:uk_payroll_scheme_city_period]
+    city_name : varchar(64)
+    social_base_min : decimal(18,4)
+    housing_base_min : decimal(18,4)
+    employer_rates_json : json
+    employee_rates_json : json
+    effective_from : date [UQ:uk_payroll_scheme_city_period]
+    effective_to : date [?]
+    source_note : varchar(500) [?]
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "payroll_periods" as t_payroll_periods {
+    id : bigint unsigned [PK]
+    company_id : bigint unsigned [UQ:uk_payroll_period_company_month]
+    month_key : char(7) [UQ:uk_payroll_period_company_month]
+    status : varchar(32)
+    calculated_by : bigint unsigned [?]
+    calculated_at : datetime [?]
+    approved_by : bigint unsigned [?]
+    approved_at : datetime [?]
+    locked_by : bigint unsigned [?]
+    locked_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "payroll_policies" as t_payroll_policies {
+    id : bigint unsigned [PK]
+    name : varchar(255) [UQ:uk_payroll_policy_name_version]
+    version_no : int [UQ:uk_payroll_policy_name_version]
+    components_json : json
+    effective_from : date
+    effective_to : date [?]
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "payroll_profiles" as t_payroll_profiles {
+    id : bigint unsigned [PK]
+    person_id : bigint unsigned [UQ:uk_payroll_profile_person_period]
+    company_id : bigint unsigned
+    department : varchar(128) [?]
+    employment_city_code : varchar(32)
+    contribution_scheme_id : bigint unsigned
+    policy_id : bigint unsigned
+    base_salary : decimal(18,4)
+    effective_from : date [UQ:uk_payroll_profile_person_period]
+    effective_to : date [?]
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "payroll_statements" as t_payroll_statements {
+    id : bigint unsigned [PK]
+    period_id : bigint unsigned [UQ:uk_payroll_statement_period_person]
+    person_id : bigint unsigned [UQ:uk_payroll_statement_period_person]
+    profile_id : bigint unsigned
+    policy_id : bigint unsigned
+    contribution_scheme_id : bigint unsigned
+    base_salary : decimal(18,4)
+    fixed_earnings : decimal(18,4)
+    variable_earnings : decimal(18,4)
+    gross_salary : decimal(18,4)
+    employee_contribution : decimal(18,4)
+    employer_contribution : decimal(18,4)
+    income_tax : decimal(18,4)
+    other_deductions : decimal(18,4)
+    net_salary : decimal(18,4)
+    employer_total_cost : decimal(18,4)
+    calculation_json : json
+    status : varchar(32)
+    created_at : datetime
+    updated_at : datetime
+  }
+}
+package "团队任务与产品开发" as d_team {
+  class "product_development_candidates" as t_product_development_candidates {
+    tenant_id : varchar(64)
+    id : bigint unsigned [PK]
+    product_id : bigint unsigned [?]
+    project_id : bigint unsigned [?]
+    title : varchar(255)
+    category : varchar(128)
+    brand : varchar(128)
+    vehicle_model : varchar(255)
+    owner_person_id : bigint unsigned [?]
+    status : varchar(32)
+    priority : varchar(32)
+    image_url : text [?]
+    source_url : text [?]
+    source_kind : varchar(32)
+    source_id : varchar(128)
+    supplier_url : text [?]
+    expected_price : decimal(18,2)
+    expected_cost : decimal(18,2)
+    expected_margin_rate : decimal(8,2)
+    ip_risk : varchar(32)
+    planned_listing_at : date [?]
+    note : text [?]
+    decision_note : text [?]
+    created_by_person_id : bigint unsigned [?]
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "product_development_heatmap_orders" as t_product_development_heatmap_orders {
+    tenant_id : varchar(64) [PK]
+    period_key : varchar(64) [PK]
+    dimension : varchar(16) [PK]
+    coordinate_hash : char(64) [PK]
+    coordinate_json : text
+    sequence_number : int unsigned [?]
+    is_marked : tinyint(1)
+    updated_by_person_id : bigint unsigned [?]
+    updated_at : datetime
+  }
+  class "product_development_idea_drafts" as t_product_development_idea_drafts {
+    tenant_id : varchar(64) [PK]
+    idea_id : bigint unsigned [PK]
+    draft_id : bigint unsigned [PK]
+    created_at : datetime
+  }
+  class "product_development_idea_products" as t_product_development_idea_products {
+    tenant_id : varchar(64) [PK]
+    idea_id : bigint unsigned [PK]
+    product_id : bigint unsigned [PK]
+    created_at : datetime
+  }
+  class "product_development_ideas" as t_product_development_ideas {
+    tenant_id : varchar(64)
+    id : bigint unsigned [PK]
+    title : varchar(255)
+    image_url : text [?]
+    source_url : text [?]
+    note : text [?]
+    urgency : tinyint unsigned
+    importance : tinyint unsigned
+    created_by_person_id : bigint unsigned [?]
+    assignee_person_id : bigint unsigned [?]
+    target_product_count : int
+    development_due_at : date [?]
+    development_started_at : datetime [?]
+    claimed_at : datetime [?]
+    product_id : bigint unsigned [?]
+    candidate_id : bigint unsigned [?]
+    status : varchar(32)
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+    development_brand : varchar(255)
+    development_category : varchar(255)
+    development_matrix_enabled : tinyint(1)
+  }
+  class "product_development_projects" as t_product_development_projects {
+    tenant_id : varchar(64)
+    id : bigint unsigned [PK]
+    name : varchar(255)
+    code : varchar(64)
+    category : varchar(128)
+    owner_person_id : bigint unsigned [?]
+    participant_person_ids_json : longtext [?]
+    market : varchar(128)
+    status : varchar(32)
+    priority : varchar(32)
+    start_at : date [?]
+    due_at : date [?]
+    target_development_count : int
+    target_listing_count : int
+    target_success_count : int
+    target_revenue : decimal(18,2)
+    description : text [?]
+    risk_note : text [?]
+    created_by_person_id : bigint unsigned [?]
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "product_development_task_links" as t_product_development_task_links {
+    tenant_id : varchar(64) [PK]
+    task_id : bigint unsigned [PK]
+    project_id : bigint unsigned [?]
+    candidate_id : bigint unsigned [?]
+    stage : varchar(32)
+    deliverable : text [?]
+    reviewer_person_id : bigint unsigned [?]
+    updated_at : datetime
+  }
+  class "team_operational_owners" as t_team_operational_owners {
+    tenant_id : varchar(64) [PK]
+    work_type : varchar(64) [PK]
+    owner_person_id : bigint unsigned [?]
+    updated_at : datetime
+    term_until : date [?]
+  }
+  class "team_tasks" as t_team_tasks {
+    tenant_id : varchar(64) [UQ:uk_team_tasks_automation_key]
+    id : bigint unsigned [PK]
+    title : varchar(255)
+    work_type : varchar(64)
+    owner_person_id : bigint unsigned [?]
+    collaborator_person_ids_json : longtext [?]
+    period : varchar(32)
+    status : varchar(32)
+    priority : varchar(32)
+    target_count : decimal(18,4)
+    done_count : decimal(18,4)
+    unit : varchar(32)
+    start_at : date [?]
+    due_at : date [?]
+    related_object : text [?]
+    result_note : text [?]
+    quality_score : decimal(8,2)
+    created_by_person_id : bigint unsigned [?]
+    completed_at : datetime [?]
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+    automation_key : varchar(128) [UQ:uk_team_tasks_automation_key | ?]
+    owner_manually_assigned : tinyint(1)
+  }
+}
+package "私信、客户消息与评论" as d_communication {
+  class "customer_chat_messages" as t_customer_chat_messages {
+    id : bigint [PK]
+    shop_id : int [UQ:uniq_customer_chat_message]
+    chat_id : varchar(128) [UQ:uniq_customer_chat_message]
+    message_id : varchar(128) [UQ:uniq_customer_chat_message]
+    direction : varchar(32)
+    sender_name : varchar(128)
+    message_text : text [?]
+    message_at : datetime [?]
+    raw_json : longtext [?]
+    created_at : timestamp
+  }
+  class "customer_chat_threads" as t_customer_chat_threads {
+    id : bigint [PK]
+    shop_id : int [UQ:uniq_customer_chat_thread]
+    chat_id : varchar(128) [UQ:uniq_customer_chat_thread]
+    customer_unique_id : varchar(128)
+    posting_number : varchar(128)
+    order_id : bigint
+    title : varchar(255)
+    last_message_text : text [?]
+    last_message_at : datetime [?]
+    unread_count : int
+    chat_status : varchar(64)
+    raw_json : longtext [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "customer_message_logs" as t_customer_message_logs {
+    id : int [PK]
+    order_id : int
+    shop_id : int
+    posting_number : varchar(128)
+    scenario : varchar(64)
+    message_text : text
+    status : varchar(32)
+    send_mode : varchar(32)
+    reason : text [?]
+    created_at : datetime
+    sent_at : datetime [?]
+    source_key : varchar(191) [UQ:uk_customer_message_source]
+  }
+  class "customer_message_manual_tests" as t_customer_message_manual_tests {
+    id : bigint [PK]
+    candidate_key : varchar(160) [UQ:uniq_customer_message_manual_candidate]
+    order_id : bigint
+    posting_number : varchar(128)
+    shop_id : int
+    scenario : varchar(64)
+    reminder_step : int
+    status : varchar(32)
+    chat_id : varchar(128)
+    message_text : text [?]
+    last_error : text [?]
+    sent_at : datetime [?]
+    created_at : timestamp
+    updated_at : timestamp
+  }
+  class "customer_message_records" as t_customer_message_records {
+    id : bigint [PK]
+    order_id : bigint
+    posting_number : varchar(128)
+    shop_id : int
+    scenario : varchar(64)
+    status : varchar(32)
+    message_text : text [?]
+    created_at : timestamp
+    read_state : varchar(32)
+    read_at : datetime [?]
+  }
+  class "customer_message_shop_settings" as t_customer_message_shop_settings {
+    shop_id : int [PK]
+    chat_enabled : tinyint
+    send_mode : varchar(32)
+    enabled_scenarios : text [?]
+    stall_hours : int
+    delay_hours_before_due : int
+    review_delay_hours : int
+    note : text [?]
+    updated_at : datetime
+    chat_capability : varchar(32)
+    chat_capability_checked_at : datetime [?]
+    chat_capability_error : text [?]
+    pickup_delay_hours : int
+    automation_defaults_version : int
+    webhook_last_received_at : datetime [?]
+    webhook_last_event_type : varchar(64)
+    pickup_automation_enabled_at : datetime [?]
+    review_automation_enabled_at : datetime [?]
+    passport_automation_enabled_at : datetime [?]
+    automation_person_id : bigint unsigned [?]
+  }
+  class "customer_message_tasks" as t_customer_message_tasks {
+    id : bigint [PK]
+    order_id : bigint [UQ:uniq_customer_message_task]
+    posting_number : varchar(128)
+    shop_id : int [UQ:uniq_customer_message_task]
+    scenario : varchar(64) [UQ:uniq_customer_message_task]
+    status : varchar(32)
+    scheduled_at : datetime
+    next_attempt_at : datetime
+    sent_at : datetime [?]
+    cancelled_at : datetime [?]
+    attempts : int
+    chat_id : varchar(128)
+    message_text : text [?]
+    last_error : text [?]
+    cancel_reason : varchar(255)
+    created_at : timestamp
+    updated_at : timestamp
+    reminder_step : int [UQ:uniq_customer_message_task]
+    person_id : bigint unsigned [?]
+  }
+  class "customer_message_templates" as t_customer_message_templates {
+    id : int [UQ:uk_customer_message_template_legacy_id]
+    scenario : varchar(64) [PK]
+    name : varchar(128)
+    template_text : text
+    enabled : tinyint
+    shop_id : int
+    updated_at : datetime
+    template_translation : text [?]
+    label : varchar(64)
+    deleted : tinyint(1)
+    enabled_defaults_version : int
+    trigger_condition : varchar(64)
+    delay_hours : int
+    rule_defaults_version : int
+    tenant_id : bigint unsigned [PK]
+  }
+  class "enterprise_direct_messages" as t_enterprise_direct_messages {
+    id : bigint unsigned [PK]
+    tenant_id : bigint unsigned [UQ:uk_enterprise_message_retry]
+    sender_id : bigint unsigned [UQ:uk_enterprise_message_retry]
+    recipient_id : bigint unsigned
+    client_message_id : varchar(64) [UQ:uk_enterprise_message_retry]
+    text : text
+    reference_type : varchar(20) [?]
+    reference_id : bigint unsigned [?]
+    created_at : datetime(3)
+    read_at : datetime(3) [?]
+  }
+  class "ozon_review_replies" as t_ozon_review_replies {
+    id : bigint unsigned [PK]
+    review_local_id : bigint unsigned
+    shop_id : bigint unsigned
+    review_id : varchar(191)
+    comment_id : varchar(191) [?]
+    reply_text : text
+    source : varchar(32)
+    status : varchar(32)
+    created_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    raw_json : longtext [?]
+  }
+  class "ozon_review_reply_templates" as t_ozon_review_reply_templates {
+    id : bigint unsigned [PK]
+    title : varchar(255)
+    template_text : text
+    min_rating : int [?]
+    max_rating : int [?]
+    active : tinyint(1)
+    created_at : datetime
+  }
+  class "ozon_reviews" as t_ozon_reviews {
+    id : bigint unsigned [PK]
+    shop_id : bigint unsigned [UQ:uk_ozon_reviews_shop_review]
+    review_id : varchar(191) [UQ:uk_ozon_reviews_shop_review]
+    ozon_sku : varchar(128) [?]
+    offer_id : varchar(255) [?]
+    ozon_product_id : varchar(128) [?]
+    product_name : varchar(512) [?]
+    product_image : text [?]
+    rating : int
+    status : varchar(64)
+    review_text : text [?]
+    advantages : text [?]
+    disadvantages : text [?]
+    has_reply : tinyint(1)
+    reply_status : varchar(32)
+    reply_text : text [?]
+    replied_at : datetime [?]
+    published_at : datetime [?]
+    ozon_updated_at : datetime [?]
+    synced_at : datetime
+    raw_json : longtext [?]
+  }
+}
+package "分析、广告、看板与预警" as d_analytics {
+  class "analytics_cache" as t_analytics_cache {
+    cache_type : varchar(128) [PK]
+    cache_key : varchar(191) [PK]
+    payload : longtext
+    refreshed_at : datetime
+  }
+  class "analytics_product_profit_daily" as t_analytics_product_profit_daily {
+    date_key : varchar(32) [PK]
+    product_id : bigint unsigned [PK]
+    shop_id : bigint unsigned [PK]
+    order_count : int
+    item_quantity : int
+    revenue : decimal(18,4)
+    estimated_profit : decimal(18,4)
+    confirmed_profit : decimal(18,4)
+    current_profit : decimal(18,4)
+    refreshed_at : datetime
+  }
+  class "analytics_shop_daily" as t_analytics_shop_daily {
+    date_key : varchar(32) [PK]
+    shop_id : bigint unsigned [PK]
+    order_count : int
+    effective_orders : int
+    item_quantity : int
+    total_revenue : decimal(18,4)
+    revenue : decimal(18,4)
+    estimated_profit : decimal(18,4)
+    confirmed_profit : decimal(18,4)
+    current_profit : decimal(18,4)
+    accrued_profit : decimal(18,4)
+    accrued_order_count : int
+    pending_profit : decimal(18,4)
+    pending_order_count : int
+    cancelled_orders : int
+    cancelled_quantity : int
+    cancelled_revenue : decimal(18,4)
+    return_orders : int
+    return_quantity : int
+    return_revenue : decimal(18,4)
+    return_loss : decimal(18,4)
+    refreshed_at : datetime
+  }
+  class "analytics_sku_profit_daily" as t_analytics_sku_profit_daily {
+    date_key : varchar(32) [PK]
+    shop_id : bigint unsigned [PK]
+    ozon_sku : varchar(128) [PK]
+    product_id : bigint unsigned [?]
+    order_count : int
+    item_quantity : int
+    revenue : decimal(18,4)
+    estimated_profit : decimal(18,4)
+    confirmed_profit : decimal(18,4)
+    current_profit : decimal(18,4)
+    cancelled_orders : int
+    cancelled_quantity : int
+    cancelled_revenue : decimal(18,4)
+    return_orders : int
+    return_quantity : int
+    return_revenue : decimal(18,4)
+    refreshed_at : datetime
+  }
+  class "dashboard_snapshots" as t_dashboard_snapshots {
+    snapshot_key : varchar(64) [PK]
+    date_key : date
+    payload_json : json
+    source_updated_at : datetime [?]
+    refreshed_at : datetime
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "exception_task_states" as t_exception_task_states {
+    task_id : varchar(191) [PK]
+    status : varchar(32)
+    note : text [?]
+    updated_by_person_id : bigint unsigned [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "exception_workbench_snapshots" as t_exception_workbench_snapshots {
+    cache_key : char(40) [PK]
+    payload_json : longtext
+    refreshed_at : timestamp
+  }
+  class "inventory_alert_base_snapshots" as t_inventory_alert_base_snapshots {
+    cache_key : varchar(64) [PK]
+    payload_json : longtext
+    refreshed_at : timestamp
+  }
+  class "inventory_alert_sku_daily" as t_inventory_alert_sku_daily {
+    date_key : date [PK]
+    shop_id : bigint [PK]
+    ozon_sku : varchar(128) [PK]
+    item_quantity : decimal(18,4)
+    fbs_item_quantity : decimal(18,4) [?]
+    refreshed_at : timestamp
+  }
+  class "inventory_alert_sku_daily_refresh" as t_inventory_alert_sku_daily_refresh {
+    date_key : date [PK]
+    dirty : tinyint(1)
+    refreshed_at : datetime [?]
+  }
+  class "inventory_alert_tenant_daily_refresh" as t_inventory_alert_tenant_daily_refresh {
+    tenant_id : bigint unsigned [PK]
+    date_key : date [PK]
+    dirty : tinyint
+    refreshed_at : datetime [?]
+  }
+  class "ozon_ad_campaign_catalog" as t_ozon_ad_campaign_catalog {
+    shop_id : bigint unsigned [PK]
+    campaign_id : varchar(128) [PK]
+    campaign_name : varchar(255) [?]
+    campaign_state : varchar(64) [?]
+    adv_object_type : varchar(64) [?]
+    first_seen_at : datetime
+    last_seen_at : datetime
+    source : varchar(64)
+  }
+  class "ozon_ad_forbidden_campaigns" as t_ozon_ad_forbidden_campaigns {
+    shop_id : bigint unsigned [PK]
+    campaign_id : varchar(128) [PK]
+    reason : varchar(255)
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "ozon_ad_history_reconciliation" as t_ozon_ad_history_reconciliation {
+    shop_id : bigint unsigned [PK]
+    campaign_id : varchar(128) [PK]
+    month_key : varchar(7) [PK]
+    status : varchar(32)
+    attempts : int
+    message : varchar(500) [?]
+    checked_at : datetime
+    updated_at : datetime
+  }
+  class "ozon_ad_sku_daily" as t_ozon_ad_sku_daily {
+    date_key : varchar(32) [PK]
+    shop_id : bigint unsigned [PK]
+    ozon_sku : varchar(128) [PK]
+    campaign_id : varchar(128) [PK]
+    campaign_name : varchar(255) [?]
+    campaign_state : varchar(64) [?]
+    campaign_budget_rub : decimal(18,4)
+    campaign_strategy : varchar(128) [?]
+    campaign_payment_type : varchar(64) [?]
+    campaign_placement : varchar(255) [?]
+    campaign_bid_rub : decimal(18,4)
+    campaign_target_cir : decimal(10,4)
+    ad_type : varchar(64) [PK]
+    product_id : bigint unsigned [?]
+    offer_id : varchar(255) [?]
+    product_name : varchar(255) [?]
+    spend_rub : decimal(18,4)
+    spend_cny : decimal(18,4)
+    impressions : int
+    clicks : int
+    add_to_cart : int
+    add_to_cart_available : tinyint(1)
+    orders : int
+    units : int
+    revenue_rub : decimal(18,4)
+    revenue_cny : decimal(18,4)
+    source : varchar(64)
+    raw_json : longtext [?]
+    synced_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_collect_requests" as t_seller_analytics_collect_requests {
+    id : varchar(80) [PK]
+    run_id : varchar(80)
+    tenant_id : varchar(80)
+    store_id : varchar(80) [?]
+    status : varchar(32)
+    source_key : varchar(80) [?]
+    source_label : varchar(120) [?]
+    endpoint_type : varchar(80) [?]
+    page_index : int
+    request_url : text [?]
+    request_method : varchar(16) [?]
+    request_headers_json : text [?]
+    request_body_json : longtext [?]
+    attempts : int
+    claimed_at : datetime [?]
+    finished_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_collect_runs" as t_seller_analytics_collect_runs {
+    id : varchar(80) [PK]
+    tenant_id : varchar(80)
+    store_id : varchar(80) [?]
+    status : varchar(32)
+    period_key : varchar(120) [?]
+    current_period_json : text [?]
+    previous_period_json : text [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_operation_todos" as t_seller_analytics_operation_todos {
+    id : varchar(96) [PK]
+    tenant_id : varchar(80)
+    shop_id : varchar(80) [?]
+    biz_date : date [?]
+    period_key : varchar(120) [?]
+    product_id : varchar(128) [?]
+    sku : varchar(128) [?]
+    offer_id : varchar(255) [?]
+    product_name : varchar(512) [?]
+    image_url : text [?]
+    segment : varchar(80) [?]
+    priority : varchar(32) [?]
+    score : decimal(18,4) [?]
+    problem_type : varchar(255) [?]
+    recommended_action : text [?]
+    evidence_json : longtext [?]
+    status : varchar(32)
+    owner : varchar(120) [?]
+    action_taken : text [?]
+    resolved_at : datetime [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_product_diagnosis" as t_seller_analytics_product_diagnosis {
+    id : varchar(96) [PK]
+    tenant_id : varchar(80)
+    shop_id : varchar(80) [?]
+    biz_date : date [?]
+    period_key : varchar(120) [?]
+    product_id : varchar(128) [?]
+    sku : varchar(128) [?]
+    offer_id : varchar(255) [?]
+    product_name : varchar(512) [?]
+    image_url : text [?]
+    segment : varchar(80) [?]
+    priority : varchar(32) [?]
+    score : decimal(18,4) [?]
+    main_problem : varchar(255) [?]
+    recommended_action : text [?]
+    metrics_json : longtext [?]
+    evidence_json : longtext [?]
+    diagnosed_at : datetime
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_product_metrics" as t_seller_analytics_product_metrics {
+    id : varchar(80) [PK]
+    tenant_id : varchar(80)
+    store_id : varchar(80) [?]
+    snapshot_id : varchar(80)
+    tab_key : varchar(80) [?]
+    period_key : varchar(120) [?]
+    product_id : varchar(128) [?]
+    offer_id : varchar(255) [?]
+    sku : varchar(128) [?]
+    product_name : varchar(512) [?]
+    image_url : text [?]
+    order_amount : decimal(18,4) [?]
+    order_count : decimal(18,4) [?]
+    impressions : decimal(18,4) [?]
+    card_views : decimal(18,4) [?]
+    search_position : decimal(18,4) [?]
+    add_to_cart : decimal(18,4) [?]
+    conversion_rate : decimal(18,4) [?]
+    abc_revenue : varchar(8) [?]
+    abc_quantity : varchar(8) [?]
+    suggestion : text [?]
+    raw_data : longtext [?]
+    captured_at : datetime
+    created_at : datetime
+    updated_at : datetime
+  }
+  class "seller_analytics_snapshots" as t_seller_analytics_snapshots {
+    id : varchar(80) [PK]
+    tenant_id : varchar(80)
+    store_id : varchar(80) [?]
+    source : varchar(120) [?]
+    source_button_label : varchar(120) [?]
+    source_button_key : varchar(80) [?]
+    source_context : longtext [?]
+    tab_key : varchar(80) [?]
+    page_url : text [?]
+    request_url : text [?]
+    request_method : varchar(16) [?]
+    request_headers : longtext [?]
+    request_body : longtext [?]
+    response_status : int [?]
+    response_headers : longtext [?]
+    response_body : longtext [?]
+    period_key : varchar(120) [?]
+    captured_at : datetime
+    raw_data : longtext [?]
+    created_at : datetime
+    updated_at : datetime
+  }
+}
+package "历史备份表" as d_archive {
+  class "inventory_name_consistency_backup_20260809" as t_inventory_name_consistency_backup_20260809 {
+    id : bigint unsigned
+    selection_id : varchar(128) [?]
+    code : varchar(128) [?]
+    name : varchar(255)
+    image_url : longtext [?]
+    detail_image_urls : longtext [?]
+    material : varchar(255) [?]
+    color : varchar(255) [?]
+    selling_points : text [?]
+    listing_title_ru : text [?]
+    listing_tags_ru : text [?]
+    listing_description_ru : text [?]
+    listing_title_prompt : text [?]
+    listing_tags_prompt : text [?]
+    listing_description_prompt : text [?]
+    purchase_url : text [?]
+    supplier_note : text [?]
+    source_platform : varchar(64)
+    shipping_method : varchar(64)
+    recommended_shipping_method : varchar(64)
+    purchase_cost : decimal(18,4)
+    domestic_shipping : decimal(18,4)
+    handling_fee : decimal(18,4)
+    purchase_quantity : int
+    package_weight_g : decimal(18,4)
+    length_cm : decimal(18,4)
+    width_cm : decimal(18,4)
+    height_cm : decimal(18,4)
+    listing_price_rub : decimal(18,4)
+    air_sale_price_rmb : decimal(18,4)
+    exchange_rate : decimal(18,4)
+    target_margin : decimal(8,4)
+    desired_profit_mode : varchar(32)
+    desired_profit_value : decimal(18,4)
+    return_rate : decimal(8,4)
+    payment_fee_rate : decimal(8,4)
+    withdrawal_fee_rate : decimal(8,4)
+    owner_person_id : bigint unsigned [?]
+    created_by_person_id : bigint unsigned [?]
+    product_type : varchar(32)
+    parent_product_id : bigint unsigned [?]
+    accessory_note : text [?]
+    selection_status : varchar(32)
+    alert_stock : int
+    active : tinyint(1)
+    created_at : datetime
+    updated_at : datetime
+    supplier_id : bigint unsigned [?]
+    vehicle_brand : varchar(255) [?]
+    vehicle_model : varchar(255) [?]
+    development_type : varchar(32)
+    vehicle_model_key : varchar(255)
+    ozon_category_id : varchar(128)
+    ozon_description_category_id : bigint
+    ozon_type_id : bigint
+    ozon_category_name : varchar(500)
+    source_selection_id : bigint [?]
+    variant_task_id : varchar(128)
+    variant_result_id : varchar(128)
+    variant_type : varchar(64)
+    is_variant_generated : tinyint(1)
+    material_asset_status : varchar(64)
+    advertising_rate : decimal(10,4)
+    logistics_rule_id : bigint unsigned [?]
+    stock_unit : varchar(32)
+    is_accessory : tinyint(1)
+    inventory_category : varchar(255)
+    fitment_type : varchar(16)
+    accessory_name : varchar(255)
+    package_mode : varchar(16)
+    package_contents : varchar(500)
+    included_accessories : varchar(500)
+    gift_contents : varchar(500)
+    product_quantity : int
+    selection_has_main_image : tinyint(1) [?]
+    selection_has_detail_images : tinyint(1) [?]
+    selection_has_selling_points : tinyint(1) [?]
+    surface_process : varchar(255)
+    vehicle_models_json : json [?]
+  }
+  class "listing_drafts_backup_weight_20260806_2589_2688" as t_listing_drafts_backup_weight_20260806_2589_2688 {
+    id : bigint [PK]
+    template_id : bigint [?]
+    product_name : varchar(255)
+    internal_code : varchar(128)
+    source_urls_json : longtext
+    source_images_json : longtext
+    cost_price : decimal(12,2)
+    sale_price : decimal(12,2)
+    length_cm : decimal(10,2)
+    width_cm : decimal(10,2)
+    height_cm : decimal(10,2)
+    weight_g : decimal(10,2)
+    color : varchar(128)
+    spec : varchar(255)
+    quantity : int
+    manual_facts_json : longtext
+    ai_payload_json : longtext
+    status : varchar(32)
+    created_by_person_id : bigint [?]
+    created_at : timestamp
+    updated_at : timestamp
+    template_payload_json : longtext [?]
+    development_type : varchar(32)
+    vehicle_brand : varchar(128)
+    vehicle_model : varchar(128)
+    vehicle_model_key : varchar(255)
+    list_image_url : varchar(2048) [?]
+    list_price : varchar(64) [?]
+  }
+}
+t_inventory_product_naming_option_scopes -[#2563EB]-> t_inventory_product_naming_options : option_id → id
+t_product_name_aliases -[#2563EB]-> t_products : product_id → id
+t_orders -[#15803D,dashed]-> t_shops : shop_id → id
+t_order_items -[#15803D,dashed]-> t_orders : order_id → id
+t_order_items -[#B45309,dashed]-> t_sku_mappings : sku_mapping_id → id [条件]
+t_order_items -[#B45309,dashed]-> t_online_products : ozon_sku → ozon_sku [条件]
+t_online_products -[#15803D,dashed]-> t_shops : shop_id → id
+t_online_products -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_sku_mappings -[#15803D,dashed]-> t_shops : shop_id → id
+t_sku_mappings -[#B45309,dashed]-> t_products : product_id → id
+t_sku_mappings -[#B45309,dashed]-> t_online_products : online_product_id → id [条件]
+t_sku_mappings -[#B45309,dashed]-> t_online_products : shop_id+ozon_sku → shop_id+ozon_sku [条件]
+t_products -[#B45309,dashed]-> t_suppliers : supplier_id → id [条件]
+t_product_components -[#15803D,dashed]-> t_products : product_id → id
+t_product_components -[#B45309,dashed]-> t_products : component_product_id → id
+t_sku_inventory_recipes -[#15803D,dashed]-> t_shops : shop_id → id
+t_sku_inventory_recipes -[#B45309,dashed]-> t_online_products : online_product_id → id [条件]
+t_sku_inventory_recipes -[#B45309,dashed]-> t_sku_mappings : sku_mapping_id → id [条件]
+t_sku_inventory_recipe_items -[#15803D,dashed]-> t_sku_inventory_recipes : recipe_id → id
+t_sku_inventory_recipe_items -[#15803D,dashed]-> t_products : product_id → id
+t_inventory_movements -[#B45309,dashed]-> t_products : product_id → id
+t_inventory_movements -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_inventory_movements -[#B45309,dashed]-> t_sku_mappings : sku_mapping_id → id [条件]
+t_inventory_movements -[#B45309,dashed]-> t_order_items : related_order_item_id → id [条件]
+t_inventory_movements -[#B45309,dashed]-> t_inbound_records : source_ref → id [条件]
+t_inventory_movements -[#B45309,dashed]-> t_procurement_ledger_actions : source_ref → id [条件]
+t_inventory_current -[#B45309,dashed]-> t_products : real_product_id → id
+t_inventory_product_balance -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_outbound_records -[#15803D,dashed]-> t_products : product_id → id
+t_outbound_records -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_outbound_records -[#B45309,dashed]-> t_online_products : online_product_id → id [条件]
+t_outbound_records -[#B45309,dashed]-> t_order_items : order_item_id → id [条件]
+t_outbound_records -[#B45309,dashed]-> t_orders : shop_id+order_ref → shop_id+posting_number [条件]
+t_order_status_history -[#B45309,dashed]-> t_orders : order_id → id
+t_order_status_history -[#15803D,dashed]-> t_shops : shop_id → id
+t_ozon_orders_raw -[#B45309,dashed]-> t_orders : store_id+posting_number → shop_id+posting_number
+t_order_label_prints -[#15803D,dashed]-> t_orders : order_id → id
+t_order_marks -[#15803D,dashed]-> t_orders : order_id → id
+t_order_package_label_cache -[#15803D,dashed]-> t_orders : order_id → id
+t_order_exceptions -[#B45309,dashed]-> t_order_items : order_item_id → id [条件]
+t_purchase_order_items -[#15803D,dashed]-> t_purchase_orders : purchase_order_id → id
+t_purchase_order_items -[#B45309,dashed]-> t_products : product_id → id
+t_purchase_order_shipments -[#15803D,dashed]-> t_purchase_orders : purchase_order_id → id
+t_procurement_requests -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_procurement_requests -[#B45309,dashed]-> t_purchase_orders : purchase_order_id → id [条件]
+t_procurement_requests -[#15803D,dashed]-> t_suppliers : supplier_id → id
+t_procurement_requests -[#B45309,dashed]-> t_orders : source_order_id → id [条件]
+t_procurement_requests -[#B45309,dashed]-> t_order_items : source_order_item_id → id [条件]
+t_procurement_requests -[#B45309,dashed]-> t_fbp_replenishment_orders : source_order_id → id [条件]
+t_procurement_requests -[#B45309,dashed]-> t_fbp_replenishment_order_items : source_order_item_id → id [条件]
+t_procurement_order_allocations -[#15803D,dashed]-> t_procurement_requests : procurement_request_id → id
+t_procurement_order_allocations -[#15803D,dashed]-> t_order_items : order_item_id → id
+t_procurement_order_allocations -[#B45309,dashed]-> t_orders : order_id → id
+t_procurement_order_allocations -[#15803D,dashed]-> t_products : product_id → id
+t_inbound_records -[#15803D,dashed]-> t_products : product_id → id
+t_inbound_records -[#15803D,dashed]-> t_purchase_orders : purchase_order_id → id
+t_inbound_records -[#B45309,dashed]-> t_purchase_order_items : purchase_order_item_id → id
+t_inbound_records -[#15803D,dashed]-> t_procurement_requests : procurement_request_id → id
+t_procurement_ledger_actions -[#15803D,dashed]-> t_products : product_id → id
+t_procurement_history_sources -[#15803D,dashed]-> t_procurement_ledger_actions : action_id → id
+t_procurement_history_sources -[#B45309,dashed]-> t_order_items : order_item_id → id
+t_procurement_history_sources -[#15803D,dashed]-> t_products : product_id → id
+t_procurement_history_sources -[#B45309,dashed]-> t_inbound_records : inbound_record_id → id [条件]
+t_inventory_order_priorities -[#15803D,dashed]-> t_products : product_id → id
+t_inventory_order_priorities -[#15803D,dashed]-> t_order_items : order_item_id → id
+t_inventory_order_priorities -[#15803D,dashed]-> t_procurement_ledger_actions : action_id → id
+t_procurement_stock_cost_tasks -[#15803D,dashed]-> t_products : product_id → id
+t_procurement_stock_cost_tasks -[#15803D,dashed]-> t_procurement_ledger_actions : stocktake_action_id → id
+t_procurement_stock_cost_links -[#15803D,dashed]-> t_procurement_stock_cost_tasks : task_id → id
+t_procurement_stock_cost_links -[#15803D,dashed]-> t_purchase_order_items : purchase_order_item_id → id
+t_procurement_stock_cost_links -[#15803D,dashed]-> t_procurement_ledger_actions : action_id → id
+t_purchase_cost_versions -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_purchase_cost_versions -[#B45309,dashed]-> t_purchase_orders : purchase_order_id → id [条件]
+t_purchase_cost_versions -[#B45309,dashed]-> t_purchase_order_items : purchase_order_item_id → id [条件]
+t_purchase_cost_versions -[#B45309,dashed]-> t_inbound_records : inbound_record_id → id [条件]
+t_purchase_cost_versions -[#B45309,dashed]-> t_procurement_requests : procurement_request_id → id [条件]
+t_purchase_cost_versions -[#B45309,dashed]-> t_suppliers : supplier_id → id [条件]
+t_procurement_platform_order_links -[#15803D,dashed]-> t_procurement_platform_orders : platform_order_id → id
+t_procurement_platform_order_links -[#B45309,dashed]-> t_procurement_requests : procurement_request_id → id
+t_procurement_payment_matches -[#15803D,dashed]-> t_procurement_platform_orders : platform_order_id → id
+t_procurement_payment_matches -[#B45309,dashed]-> t_procurement_payment_transactions : payment_transaction_id → id
+t_order_profit_items -[#B45309,dashed]-> t_order_items : order_item_id → id
+t_order_profit_calc_state -[#B45309,dashed]-> t_order_items : order_item_id → id [条件]
+t_order_profit_calc_state -[#15803D,dashed]-> t_orders : order_id → id
+t_order_profit_calc_state -[#B45309,dashed]-> t_order_profit_calc_revisions : current_estimate_revision_id → id [条件]
+t_order_profit_calc_state -[#B45309,dashed]-> t_order_profit_calc_revisions : current_actual_revision_id → id [条件]
+t_order_profit_calc_revisions -[#15803D,dashed]-> t_order_items : order_item_id → id
+t_order_profit_calc_revisions -[#B45309,dashed]-> t_order_profit_calc_revisions : parent_revision_id → id [条件]
+t_ozon_finance_items -[#B45309,dashed]-> t_orders : shop_id+posting_number → shop_id+posting_number [条件]
+t_ozon_finance_items -[#B45309,dashed]-> t_orders : shop_id+posting_number → shop_id+order_number [条件]
+t_finance_shop_company_assignments -[#15803D,dashed]-> t_shops : shop_id → id
+t_finance_shop_company_assignments -[#B45309,dashed]-> t_finance_companies : company_id → id
+t_finance_expenses -[#15803D,dashed]-> t_finance_companies : company_id → id
+t_finance_expenses -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_finance_vouchers -[#15803D,dashed]-> t_finance_companies : company_id → id
+t_finance_vouchers -[#B45309,dashed]-> t_finance_expenses : expense_id → id [条件]
+t_finance_vouchers -[#B45309,dashed]-> t_ozon_finance_items : finance_item_id → id [条件]
+t_finance_vouchers -[#B45309,dashed]-> t_tenant_private_files : attachment_url → storage_name [条件]
+t_finance_periods -[#15803D,dashed]-> t_finance_companies : company_id → id
+t_historical_profit_reviews -[#15803D,dashed]-> t_order_items : order_item_id → id
+t_order_profit_detail_snapshots -[#B45309,dashed]-> t_orders : order_id → id
+t_order_exceptions -[#15803D,dashed]-> t_shops : store_id → id
+t_fbp_replenishment_orders -[#15803D,dashed]-> t_shops : shop_id → id
+t_fbp_replenishment_order_items -[#15803D,dashed]-> t_fbp_replenishment_orders : order_id → id
+t_fbp_replenishment_order_items -[#15803D,dashed]-> t_products : product_id → id
+t_fbp_replenishment_order_items -[#15803D,dashed]-> t_sku_mappings : mapping_id → id
+t_fbp_replenishment_item_adjustments -[#15803D,dashed]-> t_fbp_replenishment_order_items : item_id → id
+t_fbp_replenishment_item_adjustments -[#15803D,dashed]-> t_fbp_replenishment_orders : order_id → id
+t_fbp_transfer_records -[#15803D,dashed]-> t_products : product_id → id
+t_fbp_transfer_records -[#15803D,dashed]-> t_shops : shop_id → id
+t_fbp_transfer_records -[#B45309,dashed]-> t_sku_mappings : mapping_id → id [条件]
+t_ogl_dispatch_settings -[#15803D,dashed]-> t_shops : default_shop_id → id
+t_ogl_dispatch_batches -[#B45309,dashed]-> t_shops : default_shop_id → id
+t_ogl_dispatch_members -[#15803D,dashed]-> t_ogl_dispatch_batches : batch_id → id
+t_ogl_dispatch_members -[#B45309,dashed]-> t_orders : order_id+shop_id+posting_number → id+shop_id+posting_number
+t_ogl_dispatch_members -[#B45309,dashed]-> t_orders : active_order_id → id [条件]
+t_ogl_dispatch_events -[#15803D,dashed]-> t_ogl_dispatch_batches : batch_id → id
+t_ogl_dispatch_events -[#B45309,dashed]-> t_ogl_dispatch_members : member_id → id [条件]
+t_ogl_dispatch_official_locks -[#B45309,dashed]-> t_ogl_dispatch_batches : batch_id → id [条件]
+t_ogl_dispatch_official_locks -[#15803D,dashed]-> t_shops : default_shop_id → id
+t_listing_drafts -[#B45309,dashed]-> t_listing_category_templates : tenant_id+template_id → tenant_id+id [条件]
+t_listing_drafts -[#B45309,dashed]-> t_products : source_product_id → id [条件]
+t_listing_drafts -[#B45309,dashed]-> t_listing_drafts : parent_draft_id → id [条件]
+t_listing_shop_copies -[#B45309,dashed]-> t_listing_drafts : tenant_id+draft_id → tenant_id+id [条件]
+t_listing_shop_copies -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_listing_collected_product_details -[#B45309,dashed]-> t_listing_category_templates : template_id → id [条件]
+t_listing_ozon_copy_jobs -[#B45309,dashed]-> t_listing_category_templates : template_id → id [条件]
+t_listing_ozon_copy_jobs -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_listing_publish_task_items -[#B45309,dashed]-> t_listing_publish_tasks : tenant_id+publish_task_id → tenant_id+id [条件]
+t_listing_publish_task_items -[#B45309,dashed]-> t_listing_publish_records : tenant_id+record_id → tenant_id+id [条件]
+t_listing_publish_task_items -[#B45309,dashed]-> t_listing_drafts : draft_id → id [条件]
+t_listing_publish_task_items -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_listing_publish_records -[#B45309,dashed]-> t_listing_publish_tasks : publish_task_id → id [条件]
+t_listing_publish_records -[#B45309,dashed]-> t_listing_publish_task_items : publish_task_item_id → id [条件]
+t_listing_publish_records -[#B45309,dashed]-> t_listing_drafts : draft_id → id [条件]
+t_listing_publish_records -[#B45309,dashed]-> t_products : source_product_id → id [条件]
+t_listing_publish_variant_links -[#B45309,dashed]-> t_listing_publish_records : tenant_id+record_id → tenant_id+id [条件]
+t_listing_publish_variant_links -[#B45309,dashed]-> t_listing_drafts : tenant_id+draft_id → tenant_id+id [条件]
+t_listing_publish_variant_links -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_listing_publish_variant_links -[#B45309,dashed]-> t_online_products : shop_id+ozon_sku → shop_id+ozon_sku [条件]
+t_listing_publish_variant_links -[#B45309,dashed]-> t_sku_mappings : shop_id+ozon_sku → shop_id+ozon_sku [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_listing_publish_records : record_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_listing_drafts : draft_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_listing_category_templates : template_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_products : inventory_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_team_tasks : development_task_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_listing_publish_tasks : publish_task_id → id [条件]
+t_listing_variant_lineage -[#B45309,dashed]-> t_listing_publish_task_items : publish_task_item_id → id [条件]
+t_listing_media_assets -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_listing_media_assets -[#B45309,dashed]-> t_listing_category_templates : tenant_id+template_id → tenant_id+id [条件]
+t_listing_media_assets -[#B45309,dashed]-> t_asset_variants : batch_id+shop_id → batch_id+shop_id [条件]
+t_listing_ai_variant_assets -[#B45309,dashed]-> t_listing_drafts : listing_draft_id → id [条件]
+t_listing_ai_variant_assets -[#B45309,dashed]-> t_listing_category_templates : listing_template_id → id [条件]
+t_listing_draft_bindings -[#B45309,dashed]-> t_listing_drafts : tenant_id+draft_id → tenant_id+id [条件]
+t_listing_draft_bindings -[#B45309,dashed]-> t_ai_vehicle_catalog : vehicle_catalog_id → id [条件]
+t_listing_draft_bindings -[#B45309,dashed]-> t_team_tasks : tenant_id+task_id → tenant_id+id [条件]
+t_listing_draft_vehicle_links -[#B45309,dashed]-> t_listing_drafts : tenant_id+draft_id → tenant_id+id [条件]
+t_listing_draft_vehicle_links -[#B45309,dashed]-> t_ai_vehicle_catalog : vehicle_catalog_id → id [条件]
+t_team_tasks -[#B45309,dashed]-> t_listing_drafts : related_object → id [条件]
+t_team_tasks -[#B45309,dashed]-> t_product_development_ideas : related_object → id [条件]
+t_team_tasks -[#B45309,dashed]-> t_ai_vehicle_catalog : related_object → id [条件]
+t_product_development_task_links -[#B45309,dashed]-> t_team_tasks : tenant_id+task_id → tenant_id+id [条件]
+t_product_development_task_links -[#B45309,dashed]-> t_product_development_projects : tenant_id+project_id → tenant_id+id [条件]
+t_product_development_task_links -[#B45309,dashed]-> t_product_development_candidates : tenant_id+candidate_id → tenant_id+id [条件]
+t_product_development_task_links -[#B45309,dashed]-> t_people : reviewer_person_id → id [条件]
+t_product_development_candidates -[#B45309,dashed]-> t_product_development_projects : tenant_id+project_id → tenant_id+id [条件]
+t_product_development_projects -[#B45309,dashed]-> t_people : owner_person_id → id [条件]
+t_product_development_ideas -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_product_development_ideas -[#B45309,dashed]-> t_people : assignee_person_id → id [条件]
+t_product_development_ideas -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_product_development_idea_products -[#B45309,dashed]-> t_product_development_ideas : tenant_id+idea_id → tenant_id+id [条件]
+t_product_development_idea_products -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_product_development_idea_drafts -[#B45309,dashed]-> t_product_development_ideas : tenant_id+idea_id → tenant_id+id [条件]
+t_product_development_idea_drafts -[#B45309,dashed]-> t_listing_drafts : draft_id → id [条件]
+t_team_tasks -[#B45309,dashed]-> t_people : owner_person_id → id [条件]
+t_team_tasks -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_team_operational_owners -[#B45309,dashed]-> t_people : owner_person_id → id [条件]
+t_ai_variant_lab_plans -[#B45309,dashed]-> t_ai_variant_lab_analyses : tenant_id+analysis_no → tenant_id+analysis_no [条件]
+t_ai_variant_lab_plans -[#B45309,dashed]-> t_ai_variant_templates : tenant_id+template_key → tenant_id+template_key [条件]
+t_ai_variant_lab_batch_jobs -[#B45309,dashed]-> t_ai_variant_lab_analyses : tenant_id+analysis_no → tenant_id+analysis_no [条件]
+t_ai_variant_lab_batch_items -[#B45309,dashed]-> t_ai_variant_lab_batch_jobs : tenant_id+job_no → tenant_id+job_no [条件]
+t_ai_variant_template_cases -[#B45309,dashed]-> t_ai_variant_templates : tenant_id+template_key → tenant_id+template_key [条件]
+t_ai_variant_lab_batch_jobs -[#B45309,dashed]-> t_ai_variant_case_templates : tenant_id+source_product_id → tenant_id+case_no [条件]
+t_listing_drafts -[#B45309,dashed]-> t_ai_variant_lab_batch_jobs : manual_facts_json+ai_payload_json → job_no [条件]
+t_ai_variant_draft_save_items -[#B45309,dashed]-> t_ai_variant_draft_save_batches : tenant_id+batch_no → tenant_id+batch_no [条件]
+t_ai_variant_draft_save_items -[#B45309,dashed]-> t_listing_drafts : result_draft_id → id [条件]
+t_ai_material_optimization_items -[#B45309,dashed]-> t_ai_material_optimization_batches : batch_no → batch_no [条件]
+t_ai_material_optimization_items -[#B45309,dashed]-> t_listing_drafts : source_draft_id → id [条件]
+t_ai_material_optimization_items -[#B45309,dashed]-> t_listing_drafts : result_draft_id → id [条件]
+t_ai_material_optimization_items -[#B45309,dashed]-> t_ai_image_optimizer_jobs : optimizer_job_no → job_no [条件]
+t_ai_variant_lab_batch_jobs -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_people : sender_id → id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_people : recipient_id → id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_tenant_members : tenant_id+sender_id → tenant_id+person_id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_tenant_members : tenant_id+recipient_id → tenant_id+person_id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_orders : reference_id → id [条件]
+t_enterprise_direct_messages -[#B45309,dashed]-> t_procurement_requests : reference_id → id [条件]
+t_customer_chat_messages -[#B45309,dashed]-> t_customer_chat_threads : shop_id+chat_id → shop_id+chat_id [条件]
+t_customer_chat_threads -[#B45309,dashed]-> t_orders : order_id+shop_id → id+shop_id [条件]
+t_customer_chat_threads -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_customer_message_tasks -[#B45309,dashed]-> t_orders : order_id+shop_id → id+shop_id [条件]
+t_customer_message_records -[#B45309,dashed]-> t_orders : order_id+shop_id → id+shop_id [条件]
+t_customer_message_manual_tests -[#B45309,dashed]-> t_orders : order_id+shop_id → id+shop_id [条件]
+t_customer_message_shop_settings -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_customer_message_tasks -[#B45309,dashed]-> t_customer_message_templates : scenario → scenario [条件]
+t_asset_variant_jobs -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_asset_variants -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_generated_titles -[#B45309,dashed]-> t_asset_variants : asset_variant_id → id [条件]
+t_generated_titles -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_material_assets -[#B45309,dashed]-> t_products : source_selection_id → id [条件]
+t_material_assets -[#B45309,dashed]-> t_listing_media_assets : metadata_json → id [条件]
+t_seller_analytics_collect_requests -[#B45309,dashed]-> t_seller_analytics_collect_runs : tenant_id+run_id → tenant_id+id [条件]
+t_seller_analytics_product_metrics -[#B45309,dashed]-> t_seller_analytics_snapshots : tenant_id+snapshot_id → tenant_id+id [条件]
+t_seller_analytics_product_metrics -[#B45309,dashed]-> t_online_products : store_id+sku → shop_id+ozon_sku [条件]
+t_seller_analytics_product_metrics -[#B45309,dashed]-> t_online_products : store_id+product_id → shop_id+ozon_product_id [条件]
+t_analytics_product_profit_daily -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_analytics_product_profit_daily -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_analytics_sku_profit_daily -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_analytics_sku_profit_daily -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_analytics_shop_daily -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_ai_strategy_bundles -[#B45309,dashed]-> t_ai_strategy_category_nodes : category_node_id → id [条件]
+t_ai_strategy_category_nodes -[#B45309,dashed]-> t_ai_strategy_category_nodes : parent_id → id [条件]
+t_tenant_members -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_tenant_members -[#15803D,dashed]-> t_people : person_id → id
+t_platform_grants -[#15803D,dashed]-> t_people : person_id → id
+t_sessions -[#15803D,dashed]-> t_people : person_id → id
+t_sessions -[#B45309,dashed]-> t_tenant_members : active_tenant_id+person_id → tenant_id+person_id [条件]
+t_tenants -[#15803D,dashed]-> t_tenant_plans : plan_code → code
+t_tenant_subscription_vouchers -[#B45309,dashed]-> t_tenants : used_by_tenant_id → id [条件]
+t_tenant_subscription_vouchers -[#B45309,dashed]-> t_people : used_by_person_id → id [条件]
+t_tenant_plugin_tokens -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_tenant_private_files -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_tenant_ai_limits -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_tenant_ai_usage -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_ai_image_task_owners -[#15803D,dashed]-> t_people : created_by_person_id → id
+t_system_notifications -[#15803D,dashed]-> t_tenant_members : tenant_id+recipient_person_id → tenant_id+person_id
+t_scheduled_job_run_events -[#15803D,dashed]-> t_scheduled_job_runs : run_id → id
+t_shop_variant_rules -[#15803D,dashed]-> t_shops : shop_id → id
+t_asset_tail_templates -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_products -[#B45309,dashed]-> t_inventory_number_categories : inventory_category → core_name [条件]
+t_fbp_replenishment_batch_members -[#15803D,dashed]-> t_fbp_replenishment_batches : batch_id → id
+t_fbp_replenishment_batch_members -[#B45309,dashed]-> t_fbp_replenishment_orders : order_id → id [条件]
+t_fbp_replenishment_batches -[#15803D,dashed]-> t_shops : shop_id → id
+t_fbp_replenishment_fill_executions -[#15803D,dashed]-> t_fbp_replenishment_batches : batch_id → id
+t_fbp_replenishment_fill_executions -[#15803D,dashed]-> t_shops : shop_id → id
+t_fbp_replenishment_fill_executions -[#B45309,dashed]-> t_fbp_replenishment_order_items : ozon_sku → ozon_sku [条件]
+t_fbp_replenishment_ignores -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_fbp_replenishment_ignores -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_fbp_replenishment_ignores -[#B45309,dashed]-> t_sku_mappings : mapping_id → id [条件]
+t_fbp_replenishment_ignores -[#B45309,dashed]-> t_sku_mappings : shop_id+ozon_sku → shop_id+ozon_sku [条件]
+t_fbp_replenishment_print_records -[#15803D,dashed]-> t_fbp_replenishment_order_items : item_id → id
+t_fbp_replenishment_print_records -[#15803D,dashed]-> t_fbp_replenishment_orders : order_id → id
+t_fbp_replenishment_print_records -[#15803D,dashed]-> t_shops : shop_id → id
+t_inventory_product_requests -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_inventory_product_requests -[#B45309,dashed]-> t_online_products : payload_json → id [条件]
+t_inventory_product_requests -[#15803D,dashed]-> t_people : applicant_id → id
+t_inventory_product_requests -[#B45309,dashed]-> t_people : reviewer_id → id [条件]
+t_order_item_procurement_marks -[#15803D,dashed]-> t_order_items : order_item_id → id
+t_order_item_procurement_marks -[#B45309,dashed]-> t_orders : order_id → id [条件]
+t_order_item_procurement_marks -[#B45309,dashed]-> t_products : product_id → id [条件]
+t_procurement_purchase_group_items -[#15803D,dashed]-> t_procurement_purchase_groups : group_id → id
+t_procurement_purchase_group_items -[#B45309,dashed]-> t_products : product_id → id
+t_procurement_purchase_groups -[#B45309,dashed]-> t_suppliers : supplier_id → id [条件]
+t_product_merge_history -[#B45309,dashed]-> t_products : target_product_id → id
+t_product_merge_history -[#B45309,dashed]-> t_products : source_product_ids_json → id [条件]
+t_product_merge_history_refs -[#15803D,dashed]-> t_product_merge_history : merge_history_id → id
+t_product_merge_history_refs -[#B45309,dashed]-> t_products : source_product_id → id [条件]
+t_sku_order_trackers -[#15803D,dashed]-> t_shops : shop_id → id
+t_sku_order_trackers -[#B45309,dashed]-> t_online_products : shop_id+ozon_sku → shop_id+ozon_sku [条件]
+t_sku_order_trackers -[#B45309,dashed]-> t_people : owner_person_id → id [条件]
+t_product_barcode_label_cache -[#B45309,dashed]-> t_online_products : online_product_id → id
+t_product_barcode_label_cache -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_payroll_profiles -[#15803D,dashed]-> t_people : person_id → id
+t_payroll_profiles -[#15803D,dashed]-> t_finance_companies : company_id → id
+t_payroll_profiles -[#15803D,dashed]-> t_payroll_contribution_schemes : contribution_scheme_id → id
+t_payroll_profiles -[#15803D,dashed]-> t_payroll_policies : policy_id → id
+t_payroll_statements -[#15803D,dashed]-> t_people : person_id → id
+t_payroll_statements -[#15803D,dashed]-> t_payroll_profiles : profile_id → id
+t_payroll_statements -[#15803D,dashed]-> t_payroll_contribution_schemes : contribution_scheme_id → id
+t_payroll_statements -[#15803D,dashed]-> t_payroll_policies : policy_id → id
+t_payroll_statements -[#15803D,dashed]-> t_payroll_periods : period_id → id
+t_payroll_periods -[#B45309,dashed]-> t_finance_companies : company_id → id [条件]
+t_payroll_periods -[#B45309,dashed]-> t_people : calculated_by → id [条件]
+t_payroll_periods -[#15803D,dashed]-> t_people : approved_by → id
+t_payroll_periods -[#15803D,dashed]-> t_people : locked_by → id
+t_finance_expenses -[#B45309,dashed]-> t_payroll_periods : source_id → id [条件]
+t_tenant_activation_codes -[#15803D,dashed]-> t_tenants : tenant_id → id
+t_tenant_activation_codes -[#15803D,dashed]-> t_people : created_by_person_id → id
+t_platform_identity_migration_log -[#15803D,dashed]-> t_people : person_id → id
+t_platform_identity_migration_log -[#15803D,dashed]-> t_people : reviewed_by_person_id → id
+t_onboarding_articles -[#15803D,dashed]-> t_people : created_by_person_id → id
+t_onboarding_articles -[#15803D,dashed]-> t_people : updated_by_person_id → id
+t_onboarding_article_versions -[#15803D,dashed]-> t_onboarding_articles : article_id → id
+t_onboarding_article_versions -[#15803D,dashed]-> t_people : changed_by_person_id → id
+t_scheduled_job_runs -[#15803D,dashed]-> t_scheduled_jobs : job_key → job_key
+t_system_setting_changes -[#15803D,dashed]-> t_people : updated_by_person_id → id
+t_system_setting_changes -[#B45309,dashed]-> t_system_settings : setting_key → key [条件]
+t_shop_variant_rules -[#B45309,dashed]-> t_shop_watermark_templates : watermark_template_id → id [条件]
+t_shop_variant_rules -[#B45309,dashed]-> t_shops : watermark_template_id → id [条件]
+t_products -[#15803D,dashed]-> t_logistics_fee_rules : logistics_rule_id → id
+t_order_items -[#15803D,dashed]-> t_logistics_fee_rules : frozen_logistics_rule_id → id
+t_logistics_fee_rules -[#B45309,dashed]-> t_logistics_fee_rules : version_group_id → id [条件]
+t_ai_generation_tasks -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_ai_image_usage_events -[#B45309,dashed]-> t_people : person_id → id [条件]
+t_ai_image_usage_events -[#B45309,dashed]-> t_ai_variant_lab_batch_jobs : tenant_id+job_no → tenant_id+job_no [条件]
+t_ai_image_usage_events -[#B45309,dashed]-> t_ai_variant_lab_batch_items : tenant_id+item_no → tenant_id+item_no [条件]
+t_ai_strategy_bundles -[#B45309,dashed]-> t_ai_strategies : strategy_map_json → strategy_key [条件]
+t_ai_strategy_layer_rules -[#B45309,dashed]-> t_ai_strategies : goal_strategy_map_json → strategy_key [条件]
+t_ai_strategies -[#B45309,dashed]-> t_ai_strategies : conflict_strategy_keys_json → strategy_key [条件]
+t_listing_ozon_seller_media_upload_jobs -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_listing_variant_workbench_drafts -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_online_product_actions -[#B45309,dashed]-> t_online_products : online_product_id → id [条件]
+t_online_product_actions -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_online_product_actions -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_ozon_category_attributes -[#B45309,dashed]-> t_shops : source_shop_id → id [条件]
+t_ozon_attribute_values -[#B45309,dashed]-> t_shops : source_shop_id → id [条件]
+t_ozon_attribute_values -[#B45309,dashed]-> t_ozon_category_attributes : description_category_id+type_id+attribute_id → description_category_id+type_id+attribute_id [条件]
+t_ozon_category_mappings -[#B45309,dashed]-> t_shops : source_shop_id → id [条件]
+t_ozon_category_sync_jobs -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_ozon_category_sync_jobs -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+t_ozon_plugin_collected_products -[#B45309,dashed]-> t_products : selection_product_id → id [条件]
+t_ozon_plugin_collected_products -[#B45309,dashed]-> t_listing_category_templates : listing_template_id → id [条件]
+t_ozon_reviews -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_ozon_review_replies -[#B45309,dashed]-> t_ozon_reviews : review_local_id → id [条件]
+t_ozon_review_replies -[#B45309,dashed]-> t_shops : shop_id → id [条件]
+t_ozon_review_replies -[#B45309,dashed]-> t_people : created_by_person_id → id [条件]
+legend left
+蓝色实线：数据库声明的外键；绿色虚线：已核查的代码关系。
+关系箭头从引用方指向被引用方；代码关系不等于数据库强制约束。
+棕色虚线：JSON / 多态 / 兼容转换等条件关系，须阅读 condition。
+PK 为主键；UQ 标注索引名，组合唯一键不代表单列唯一；? 表示可空。
+未确认的关系留在 relationship-catalog.json 的 unresolved，未画成外键。
+tenant_id / shop_id 的存在不是隔离验收结论；目标边界另见 erp-target-boundary.puml。
+174 张表有已核查引用；其余为独立或待确认，不代表可删除或已隔离。
+endlegend
+@enduml
