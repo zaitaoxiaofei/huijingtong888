@@ -38,11 +38,12 @@ test("async image provider jobs survive timeout and server restart without resub
   assert.match(aiGenerationTaskSource, /providerJobState = parseJson\(row\.provider_job_json, null\)/);
 });
 
-test("provider image URLs stream to disk and OSS without arrayBuffer duplication", () => {
+test("provider image URLs stream to private task files without arrayBuffer duplication", () => {
   assert.match(imageGenerationSource, /return \{ remoteUrl: String\(imageUrl\) \}/);
   assert.match(imageGenerationSource, /pipeline\(Readable\.fromWeb\(response\.body\)/);
   assert.doesNotMatch(imageGenerationSource, /return Buffer\.from\(await imageResponse\.arrayBuffer\(\)\)/);
-  assert.match(workflowSource, /putContentAddressedFile\(filePath/);
+  assert.match(workflowSource, /const storedGeneratedImages = generatedImages/);
+  assert.doesNotMatch(workflowSource, /putContentAddressedFile\(filePath/);
   assert.doesNotMatch(workflowSource, /const buffer = await fs\.readFile\(filePath\)/);
 });
 

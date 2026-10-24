@@ -1,4 +1,5 @@
 import { withAiTenantSession } from "../../services/ai-tenant-context.js";
+import { withAiCreditOperation } from "../../services/ai-credit-runtime.js";
 import {
   createAiTaskZip,
   generateCommerceCopy,
@@ -22,12 +23,12 @@ export async function optimizePromptAction(req, readJson) {
 
 export async function generateImagesAction(req, readJson) {
   const body = await readJson(req);
-  return withAiTenantSession(req._session, () => generateImages(body));
+  return withAiTenantSession(req._session, () => withAiCreditOperation(req.headers?.["idempotency-key"] || body.idempotencyKey, () => generateImages(body)));
 }
 
 export async function generateWorkflowAction(req, readJson) {
   const body = await readJson(req);
-  return withAiTenantSession(req._session, () => generateWorkflow(body));
+  return withAiTenantSession(req._session, () => withAiCreditOperation(req.headers?.["idempotency-key"] || body.idempotencyKey, () => generateWorkflow(body)));
 }
 
 export async function generateCommerceCopyAction(req, readJson) {

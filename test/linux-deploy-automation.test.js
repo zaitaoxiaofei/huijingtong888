@@ -81,7 +81,7 @@ async function withWindowsDeployFixture(run) {
       fs.appendFileSync(process.env.OZON_DEPLOY_TEST_TRACE, JSON.stringify({ step: "guard", cwd: process.cwd() }) + "\\n");
       process.exit(Number(process.env.OZON_DEPLOY_TEST_GUARD_EXIT || 0));
     `, "utf8");
-    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false } = {}) => {
+    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
       await fsPromises.writeFile(tracePath, "", "utf8");
       return execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
         $ErrorActionPreference = 'Stop'
@@ -116,6 +116,7 @@ async function withWindowsDeployFixture(run) {
         if ($env:OZON_DEPLOY_TEST_SKIP_BUILD -eq '1') { $options.SkipBuild = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_INIT -eq '1') { $options.SkipDatabaseInit = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_MAINTENANCE -eq '1') { $options.SkipDatabaseMaintenance = $true }
+        if ($env:OZON_DEPLOY_TEST_ALLOW_INTERRUPTION -eq '1') { $options.AllowServiceInterruption = $true }
         if ($env:OZON_DEPLOY_TEST_MANIFEST) { $options.ReviewedIdentityManifest = $env:OZON_DEPLOY_TEST_MANIFEST }
         if ($env:OZON_DEPLOY_TEST_MATERIAL) { $options.ReviewedAiMaterialManifest = $env:OZON_DEPLOY_TEST_MATERIAL }
         if ($env:OZON_DEPLOY_TEST_DRY_RUN -eq '1') { $options.DryRun = $true }
@@ -131,6 +132,7 @@ async function withWindowsDeployFixture(run) {
           OZON_DEPLOY_TEST_SKIP_BUILD: skipBuild ? "1" : "0",
           OZON_DEPLOY_TEST_SKIP_INIT: skipInit ? "1" : "0",
           OZON_DEPLOY_TEST_SKIP_MAINTENANCE: skipMaintenance ? "1" : "0",
+          OZON_DEPLOY_TEST_ALLOW_INTERRUPTION: allowInterruption ? "1" : "0",
           OZON_DEPLOY_TEST_MANIFEST: manifest ? manifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL: material ? materialManifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT: String(materialUploadExit),
@@ -154,7 +156,7 @@ test("Windows database skip switches preserve defaults and forward all remote re
       const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
       assert.equal(sshArguments.at(-2), "test@deployment.test.invalid");
       assert.ok(sshArguments.at(-1).endsWith(
-        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}' '' ''`
+        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}' '' '' '0'`
       ), `incorrect remote flags for SkipDatabaseInit=${skipInit}, SkipDatabaseMaintenance=${skipMaintenance}`);
     }
   });
@@ -169,6 +171,16 @@ test("Windows release validation runs before packaging and records branch and co
     assert.equal(steps[1].branch, "release/deploy-test");
     assert.equal(steps[1].commit, "0123456789abcdef0123456789abcdef01234567");
     assert.equal(steps[1].version, "test-release");
+  });
+});
+
+test("Windows service interruption is opt-in and forwarded independently of database skip switches", { skip: process.platform !== "win32" }, async () => {
+  await withWindowsDeployFixture(async ({ execute, capturePath }) => {
+    for (const allowInterruption of [false, true]) {
+      await execute({ allowInterruption, skipInit: true, skipMaintenance: true });
+      const argumentsList = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
+      assert.ok(argumentsList.at(-1).endsWith(`'0' '0' '' '' '${allowInterruption ? "1" : "0"}'`));
+    }
   });
 });
 
@@ -197,7 +209,7 @@ test("Windows deployment uploads a reviewed manifest with spaces and forwards it
     const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
     const command = sshArguments.at(-1);
     assert.match(command, /chmod 600 '\/tmp\/ozon-erp-identity-test-release\.json'/);
-    assert.ok(command.endsWith("bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '0' '0' '/tmp/ozon-erp-identity-test-release.json' ''"));
+    assert.ok(command.endsWith("bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '0' '0' '/tmp/ozon-erp-identity-test-release.json' '' '0'"));
   });
 });
 
@@ -222,7 +234,7 @@ test("Windows material manifest is private before upload, stays sixth, and is cl
       const activation = steps.find(step => step.step === "ssh" && step.arguments.at(-1).includes("&& bash "));
       assert.ok(preparation >= 0 && upload > preparation);
       assert.match(steps[preparation].arguments.at(-1), /set -Ce; umask 077; : > '.*'; chmod 600/);
-      assert.match(activation.arguments.at(-1), new RegExp(`'0' '0' '${identity ? "/tmp/ozon-erp-identity-test-release.json" : ""}' '/tmp/ozon-erp-ai-material-test-release-[a-f0-9]{32}\\.json'$`));
+      assert.match(activation.arguments.at(-1), new RegExp(`'0' '0' '${identity ? "/tmp/ozon-erp-identity-test-release.json" : ""}' '/tmp/ozon-erp-ai-material-test-release-[a-f0-9]{32}\\.json' '0'$`));
       assert.match(steps.at(-1).arguments.at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
     }
     for (const failure of [{ materialUploadExit: 41 }, { activationExit: 42 }]) {
@@ -265,7 +277,12 @@ test("Windows release guard runs after DryRun and before any build or upload", (
 });
 
 test("ECS release verifies a private complete database backup before initialization or ownership migrations", () => {
-  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \|\| -n "\$reviewed_identity_manifest" \|\| -f "\$staging_dir\/scripts\/migrate-order-profit-calculation-versions\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ai-variant-draft-history-index\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-ogl-dispatch-schema\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-enterprise-messages\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-subscription-vouchers\.mjs" \|\| -f "\$staging_dir\/scripts\/migrate-tenant-ai-material-optimization\.mjs" \]\]; then\s+backup_database/);
+  const backupCondition = remote.match(/if \[\[ "\$run_db_maintenance" == "1" \|\|[^\n]+\]\]; then\s+backup_database/);
+  assert.ok(backupCondition, "maintenance and mandatory schemas gate the backup");
+  assert.ok(backupCondition[0].includes('-n "'+ '$' +'reviewed_identity_manifest"'));
+  for (const script of ["migrate-order-profit-calculation-versions.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-enterprise-messages.mjs", "migrate-subscription-vouchers.mjs", "migrate-tenant-ai-material-optimization.mjs"]) {
+    assert.ok(backupCondition[0].includes('-f "'+ '$' +'staging_dir/scripts/' + script + '"'), script + " requires backup");
+  }
   const backup = remote.indexOf("\n  backup_database\n");
   assert.ok(backup >= 0);
   assert.ok(backup < remote.indexOf("npm run db:init:mysql"));
@@ -316,12 +333,16 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
       assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
       const calls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
       const activation = calls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash "));
-      assert.match(activation.at(-1), new RegExp(`'1' '1' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json'$`));
+      assert.match(activation.at(-1), new RegExp(`'1' '1' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json' '0'$`));
       const prepare = calls.findIndex(call => call[0] === "ssh" && call.at(-1).includes("umask 077"));
       const upload = calls.findIndex(call => call[0] === "scp" && call.at(-1).includes("ozon-erp-ai-material-"));
       assert.ok(prepare >= 0 && upload > prepare);
       assert.match(calls.at(-1).at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
     }
+    await fsPromises.writeFile(trace, "");
+    await execute(["--allow-service-interruption", "--skip-database-maintenance"]);
+    const maintenanceCalls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
+    assert.match(maintenanceCalls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash ")).at(-1), /'1' '0' '' '[^']+\.json' '1'$/);
     await fsPromises.writeFile(trace, "");
     await assert.rejects(execute([], { OZON_DEPLOY_BASH_UPLOAD_EXIT: "41" }));
     const failedCalls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
@@ -355,15 +376,15 @@ printf 'removed'
   }
 });
 
-test("material short-stop candidate uses a bounded deadline and timeout restores the previous primary", { skip: missingGitBash }, async () => {
+test("candidate uses a bounded cold-start deadline and a rejected release leaves the primary running", { skip: missingGitBash }, async () => {
   const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-warmup-"));
   try {
     const start = remote.match(/^start_candidate\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=\r?\ninstall -d)/m)?.[0];
     const rollback = remote.match(/^rollback\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=trap rollback ERR)/m)?.[0];
-    assert.ok(start && rollback);
-    assert.match(remote, /material_candidate_warmup_seconds=0/);
-    assert.match(remote, /systemctl stop ozon-erp\s+material_candidate_warmup_seconds=45/);
-    assert.match(start, /for _ in \{1\.\.180\}/);
+    const wait = remote.match(/^wait_for_release\(\) \{\r?\n[\s\S]*?^\}\r?\n/m)?.[0];
+    assert.ok(start && rollback && wait);
+    assert.match(remote, /candidate_warmup_seconds=360/);
+    assert.match(start, /wait_for_release "\$candidate_port" "\$release_version" "\$candidate_warmup_seconds"/);
     await fsPromises.mkdir(path.join(fixture,"previous")); await fsPromises.writeFile(path.join(fixture,"env"),"DB_NAME=fixture_only\n");
     const beginning = Date.now();
     await assert.rejects(execFileAsync(bashExecutable,["--noprofile","--norc","-c",`
@@ -375,22 +396,25 @@ env_file="$PWD/env"
 candidate_log="$PWD/candidate.log"
 candidate_pid_file="$PWD/candidate.pid"
 candidate_pid=""
+candidate_ready=0
+primary_changed=0
 candidate_port=8788
 release_version=fixture
-material_candidate_warmup_seconds=1
+candidate_warmup_seconds=1
 stop_existing_candidate() { :; }
 runuser() { printf '424242' > "$candidate_pid_file"; }
 kill() { if [[ "$1" != -0 ]]; then printf 'candidate-stop\\n' >> "$PWD/trace"; fi; }
 curl() { printf '503'; }
 systemctl() { printf '%s\\n' "$*" >> "$PWD/trace"; }
 ${rollback.replaceAll("\r\n","\n")}
+${wait.replaceAll("\r\n","\n")}
 ${start.replaceAll("\r\n","\n")}
 trap rollback ERR
 start_candidate
 printf 'unexpected acceptance' > "$PWD/accepted"
 `],{cwd:fixture,env:{...process.env,BASH_ENV:""}}),error=> /Candidate process did not become ready/.test(error.stderr));
-    assert.ok(Date.now()-beginning < 7000,"short-stop deadline must not run the ordinary 180 warmup attempts");
-    assert.match(await fsPromises.readFile(path.join(fixture,"trace"),"utf8"),/restart ozon-erp/);
+    assert.ok(Date.now()-beginning < 7000,"candidate deadline must bound the complete warmup");
+    assert.doesNotMatch(await fsPromises.readFile(path.join(fixture,"trace"),"utf8"),/restart ozon-erp/);
     await assert.rejects(fsPromises.access(path.join(fixture,"accepted")),{code:"ENOENT"});
   } finally {await fsPromises.rm(fixture,{recursive:true,force:true});}
 });
@@ -432,7 +456,8 @@ test("material migration is backed up, rechecks after a short stop, skips no-op 
     const hookStart = remote.indexOf('# Material jobs must have reviewed ownership');
     const hook = remote.slice(hookStart, remote.indexOf('\n# This additive schema', hookStart));
     const rollback = remote.match(/^rollback\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=trap rollback ERR)/m)?.[0];
-    assert.ok(gate && early && hook && rollback);
+    const policy = remote.match(/^assert_release_interruption_policy\(\) \{\r?\n[\s\S]*?^\}\r?\n/m)?.[0];
+    assert.ok(gate && early && hook && rollback && policy);
     assert.ok(remote.indexOf("\n  backup_database\n") < hookStart && hookStart < remote.indexOf("\nstart_candidate\n"));
     await fsPromises.mkdir(path.join(fixture, "scripts")); await fsPromises.mkdir(path.join(fixture, "previous"));
     await fsPromises.writeFile(path.join(fixture, "scripts", "migrate-tenant-ai-material-optimization.mjs"), "fixture");
@@ -446,6 +471,12 @@ env_file="$PWD/env"
 current_link="$PWD/current"
 previous_target="$PWD/previous"
 candidate_pid=""
+candidate_ready=0
+candidate_pid_file="$PWD/candidate.pid"
+primary_changed=0
+previous_version=fixture
+rollback_warmup_seconds=1
+allow_service_interruption=1
 run_db_maintenance=0
 reviewed_identity_manifest=""
 reviewed_ai_material_manifest="/tmp/ozon-erp-ai-material-fixture.json"
@@ -460,7 +491,9 @@ backup_database() { printf 'backup\\n' >> "$PWD/trace"; }
 stop_existing_candidate() { printf 'stop-candidate\\n' >> "$PWD/trace"; }
 systemctl() { printf 'service %s\\n' "$*" >> "$PWD/trace"; }
 node() { printf 'apply %s\\n' "$*" >> "$PWD/trace"; return ${scenario === "apply-failure" ? 42 : 0}; }
+wait_for_release() { return 0; }
 ${rollback.replaceAll("\r\n", "\n")}
+${policy.replaceAll("\r\n", "\n")}
 trap rollback ERR
 ${early}
 ${gate}
@@ -551,6 +584,7 @@ for (const succeeds of [true, false]) {
       const script = `
         set -Eeuo pipefail
         shared_root="$PWD/shared"
+        staging_dir="$PWD/staging"
         env_file="$PWD/mock.env"
         release_version="test-release"
         ${process.platform === "win32" ? `
@@ -630,7 +664,7 @@ test("ECS deployment preserves server secrets and shared uploads", () => {
 
 test("ECS deployment validates the service before accepting the release", () => {
   assert.match(remote, /systemctl restart ozon-erp/);
-  assert.match(remote, /http:\/\/127\.0\.0\.1:3000\//);
+  assert.match(remote, /wait_for_release 3000 "\$release_version"/);
   assert.match(remote, /status" == "200"/);
 });
 
@@ -662,8 +696,8 @@ test("first-time setup stores only a local key path and verifies passwordless SS
 
 test("ECS release installs inventory triggers as administrator and checks the served release version", () => {
   assert.ok(remote.indexOf("node scripts/init-inventory-numbering.mjs") < remote.indexOf("\nstart_candidate\n"));
-  assert.match(remote, /candidate_version" == "\$release_version"/);
-  assert.match(remote, /primary_version" == "\$release_version"/);
+  assert.match(remote, /wait_for_release "\$candidate_port" "\$release_version"/);
+  assert.match(remote, /wait_for_release 3000 "\$release_version"/);
 });
 
 test("ECS release migrates tenant ownership dependencies before starting order sync", () => {

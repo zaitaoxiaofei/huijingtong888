@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Search } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { apiClient } from "../../utils/api";
+import { orderSearchMatchForInput } from "../../../../src/shared/order-search.js";
 import {
   MOBILE_STATUS_OPTIONS,
   defaultOrderDateRange,
@@ -54,6 +55,7 @@ function buildParams(nextPage = 1) {
     dateTo: filters.dateTo,
     searchType: filters.searchType,
     searchQuery: filters.searchQuery.trim(),
+    searchMatch: orderSearchMatchForInput(filters.searchType, filters.searchQuery),
     markFilter: "all",
     printView: "all",
     printFilter: "all",

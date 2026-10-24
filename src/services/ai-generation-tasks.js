@@ -8,6 +8,7 @@ import { aiImageRuntimePoolConfig } from "./ai-provider-settings.js";
 import { adaptiveAiImageConcurrency } from "./ai-image-runtime-limiter.js";
 import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
 import { restoreBusinessTaskSession } from "./business-task-tenant.js";
+import { withAiCreditOperation } from "./ai-credit-provider-context.js";
 
 const SUPPORTED_FIELDS = new Set(["mainImage", "detailImages", "title", "tags", "description", "richText", "video", "commerceCopy"]);
 const MAX_TASK_INPUT_JSON_BYTES = 220_000;
@@ -374,7 +375,7 @@ async function executeAuthorizedAiGenerationTask(row) {
   try {
     const input = parseJson(row.input_json, {});
     let providerJobState = parseJson(row.provider_job_json, null);
-    const output = await runTaskHandler(row.field_key, {
+    const output = await withAiCreditOperation(`generation:${row.task_no}`, () => runTaskHandler(row.field_key, {
       ...input,
       providerJob: providerJobState,
       onProviderJob: async (providerJob, index = 0) => {
@@ -386,7 +387,7 @@ async function executeAuthorizedAiGenerationTask(row) {
           [JSON.stringify(providerJobState), row.id]
         );
       }
-    });
+    }));
     await mysqlExecute(`
       UPDATE ai_generation_tasks
       SET status = 'done', output_json = ?, error_json = NULL, finished_at = CURRENT_TIMESTAMP
@@ -394,7 +395,7 @@ async function executeAuthorizedAiGenerationTask(row) {
     `, [JSON.stringify(output || {}), row.id]);
     broadcastTaskStatus(row, "done", { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   } catch (error) {
-    const providerPending = error?.code === "provider_pending";
+    const providerPending = ["provider_pending", "AI_CREDIT_RESULT_PENDING"].includes(error?.code);
     const failed = !providerPending && Number(row.attempts || 0) + 1 >= Number(row.max_attempts || 0);
     await mysqlExecute(`
       UPDATE ai_generation_tasks

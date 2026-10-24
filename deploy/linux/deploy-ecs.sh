@@ -18,6 +18,7 @@ Options:
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
   --skip-database-maintenance  Do not run schema migrations or database maintenance
+  --allow-service-interruption  Explicit maintenance window for reviewed legacy writer changes
   --dry-run                   Validate local inputs only; never build or connect
   -h, --help                  Show this help
 
@@ -78,6 +79,7 @@ skip_database_init=0
 skip_database_maintenance=0
 dry_run=0
 allow_dirty=0
+allow_service_interruption=0
 
 while (($#)); do
   case "$1" in
@@ -98,6 +100,7 @@ while (($#)); do
     --allow-dirty) allow_dirty=1; shift ;;
     --skip-database-init) skip_database_init=1; shift ;;
     --skip-database-maintenance) skip_database_maintenance=1; shift ;;
+    --allow-service-interruption) allow_service_interruption=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
@@ -146,7 +149,7 @@ db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
 db_maintenance_flag=1
 ((skip_database_maintenance)) && db_maintenance_flag=0
-activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest'"
+activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest' '$allow_service_interruption'"
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'

@@ -11,6 +11,7 @@ import { shanghaiDateKey } from "../src/shanghai-time.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey, restoreBusinessTaskSession } from "../src/services/business-task-tenant.js";
 import { migrateTenantAiBackground } from "../scripts/migrate-tenant-ai-background.mjs";
 import { AI_IMAGE_TASK_OWNERS_SCHEMA, TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "../src/services/ai-tenant-schema.js";
+import { checkAiCreditProviderBoundary, withAiCreditOperation } from "../src/services/ai-credit-provider-context.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const session = id => ({ personId: 7, tenant: { id, slug: id === 1 ? "default" : `enterprise-${id}` } });
@@ -30,11 +31,12 @@ test("AI business data and quota remain isolated for A/B/default in real MySQL",
     const query = async (sql, params = []) => (await pool.query(sql, params))[0];
     const execute = async (sql, params = []) => (await pool.execute(sql, params))[0];
     for (const sql of [
-      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
+      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL, feature_flags_json JSON NULL)",
       "CREATE TABLE people (id BIGINT PRIMARY KEY, name VARCHAR(80), active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'operations', roles_json JSON NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON NULL, PRIMARY KEY(tenant_id, person_id))"
     ]) await query(sql);
     await query("INSERT INTO tenants (id, slug) VALUES (1, 'default'), (2, 'enterprise-2'), (3, 'enterprise-3')");
+    await query("UPDATE tenants SET feature_flags_json=JSON_OBJECT('ai_internal_mode_reviewed',JSON_EXTRACT('true','$')) WHERE id IN (2,3)");
     await query("INSERT INTO people (id, name) VALUES (7, 'Operator')");
     await query("INSERT INTO tenant_members (tenant_id, person_id, business_roles_json) VALUES (1, 7, JSON_ARRAY('operations')), (2, 7, JSON_ARRAY('operations')), (3, 7, JSON_ARRAY('operations'))");
     const context = vm.createContext({
@@ -43,7 +45,7 @@ test("AI business data and quota remain isolated for A/B/default in real MySQL",
       AsyncLocalStorage, shanghaiDateKey, TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA,
       config: { appBaseUrl: "http://localhost:8788" }, sharp: () => { throw new Error("Unexpected image processing"); },
       setTimeout: () => ({ unref() {} }), clearTimeout() {},
-      mysqlQuery: query, mysqlExecute: execute,
+      mysqlQuery: query, mysqlExecute: execute, checkAiCreditProviderBoundary, withAiCreditOperation,
       withMysqlTransaction: async action => {
         const connection = await pool.getConnection();
         await connection.beginTransaction();
@@ -200,7 +202,8 @@ test("AI business data and quota remain isolated for A/B/default in real MySQL",
         AbortSignal, FormData, Blob, fs: fs.promises, fsSync: fs,
         reserveTenantAiRequest: kind => context.reserveTenantAiRequest(kind),
         assertCurrentAiTenantPermission: () => context.assertCurrentAiTenantPermission(),
-        withAiImageRuntimeSlot: async (_config, operation) => operation(),
+        withUnbilledAiImageRuntimeSlot: async (_config, operation) => operation(),
+        assertAiCreditProviderBoundary: async kind => checkAiCreditProviderBoundary(await context.assertCurrentAiTenantPermission(), kind, query),
         setTimeout: callback => { queueMicrotask(callback); return { unref() {} }; },
         fetch: async (_url, options) => {
           const owner = context.currentAiTenantSession();

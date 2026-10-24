@@ -10,6 +10,7 @@ import { listingTenantLookup } from "../src/services/listing-tenant-scope.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey, restoreBusinessTaskSession } from "../src/services/business-task-tenant.js";
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "../src/services/ai-tenant-schema.js";
 import { shanghaiDateKey } from "../src/shanghai-time.js";
+import { checkAiCreditProviderBoundary } from "../src/services/ai-credit-provider-context.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 function functions(file, names) {
@@ -41,7 +42,7 @@ test("legacy retry uses real owned SQL, fresh attempt guards and durable receipt
     pool = mysql.createPool({ socketPath, user: "root", database, connectionLimit: 6 });
     const query = async (sql, params = []) => (await pool.execute(sql, params))[0];
     for (const sql of [
-      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
+      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL, feature_flags_json JSON NULL)",
       "CREATE TABLE people (id BIGINT PRIMARY KEY, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'operations', roles_json JSON NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON NULL, PRIMARY KEY(tenant_id, person_id))",
       "CREATE TABLE shops (id BIGINT PRIMARY KEY, tenant_id BIGINT NULL, name VARCHAR(80), status VARCHAR(32) DEFAULT 'active', ozon_client_id VARCHAR(80), ozon_api_key VARCHAR(80), api_key_hint VARCHAR(80), watermark_path TEXT, watermark_name TEXT, watermark_position TEXT, watermark_x_percent INT, watermark_y_percent INT, watermark_scale_percent INT, watermark_opacity_percent INT)",
@@ -49,6 +50,7 @@ test("legacy retry uses real owned SQL, fresh attempt guards and durable receipt
       "CREATE TABLE listing_publish_variant_links (id BIGINT PRIMARY KEY AUTO_INCREMENT, tenant_id VARCHAR(80), record_id BIGINT, ozon_status VARCHAR(64))"
     ]) await query(sql);
     await query("INSERT INTO tenants (id,slug) VALUES (1,'default'),(2,'enterprise-2'),(3,'enterprise-3')");
+    await query("UPDATE tenants SET feature_flags_json=JSON_OBJECT('ai_internal_mode_reviewed',JSON_EXTRACT('true','$')) WHERE id IN (2,3)");
     await query("INSERT INTO people (id) VALUES (7)");
     await query("INSERT INTO tenant_members (tenant_id,person_id,business_roles_json) VALUES (1,7,JSON_ARRAY('operations')),(2,7,JSON_ARRAY('operations')),(3,7,JSON_ARRAY('operations'))");
     await query("INSERT INTO shops (id,tenant_id,name,ozon_client_id,ozon_api_key) VALUES (10,NULL,'Legacy','client-10','key-10'),(20,2,'A','client-20','key-20'),(30,3,'B','client-30','key-30')");
@@ -378,7 +380,7 @@ test("legacy retry uses real owned SQL, fresh attempt guards and durable receipt
       let requests = 0;
       const vision = vm.createContext({ AsyncLocalStorage, AbortController, setTimeout, clearTimeout, shanghaiDateKey,
         businessTaskTenantKey, assertBusinessTaskPermission, TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA,
-        authorizeBusinessTaskSession: value => authorizeBusinessTaskSession(value, query), mysqlExecute: query,
+        authorizeBusinessTaskSession: value => authorizeBusinessTaskSession(value, query), mysqlExecute: query, mysqlQuery: query, checkAiCreditProviderBoundary,
         withMysqlTransaction: async operation => {
           const connection = await pool.getConnection();
           try { await connection.beginTransaction(); const value = await operation(connection); await connection.commit(); return value; }
@@ -399,6 +401,7 @@ test("legacy retry uses real owned SQL, fresh attempt guards and durable receipt
       });
       vm.runInContext("const context = new AsyncLocalStorage(); let usageSchema;\n" + functions("../src/services/ai-tenant-context.js",
         ["currentAiTenantSession", "withAiTenantSession", "assertCurrentAiTenantPermission", "reserveTenantAiRequest"]), vision);
+      vision.assertAiCreditProviderBoundary = async kind => checkAiCreditProviderBoundary(await vision.assertCurrentAiTenantPermission(), kind, query);
       vm.runInContext(functions("../src/services/ai-provider-settings.js", ["visionWithAiProvider", "visionProviderError", "callOpenAiCompatibleChat",
         "finiteNumber", "statusError", "extractAiTextContent", "normalizeAiContentValue"]), vision);
       const request = vision.withAiTenantSession(session(2), () => vision.visionWithAiProvider({ tenant_id: 3, personId: 999,

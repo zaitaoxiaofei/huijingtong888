@@ -5,8 +5,9 @@ import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { clampImageCount } from "./promptService.js";
 import { aiImageRuntimeConfig } from "../../../services/ai-provider-settings.js";
-import { withAiImageRuntimeSlot } from "../../../services/ai-image-runtime-limiter.js";
+import { withAiImageRuntimeSlot as withUnbilledAiImageRuntimeSlot } from "../../../services/ai-image-runtime-limiter.js";
 import { assertCurrentAiTenantPermission, reserveTenantAiRequest } from "../../../services/ai-tenant-context.js";
+import { assertAiCreditProviderBoundary } from "../../../services/ai-credit-runtime.js";
 
 export const ROOT_DIR = process.cwd();
 export const GENERATED_ROOT = path.resolve(ROOT_DIR, process.env.AI_IMAGE_OUTPUT_DIR || "uploads/ai-generated");
@@ -19,6 +20,12 @@ const SIZE_BY_RATIO = {
 };
 const AI_IMAGE_GENERATION_WAIT_MS = Math.max(15000, Number(process.env.AI_IMAGE_GENERATION_WAIT_MS || 300000));
 const AI_IMAGE_TRANSPORT_GRACE_MS = Math.max(0, Number(process.env.AI_IMAGE_TRANSPORT_GRACE_MS || 60000));
+function withAiImageRuntimeSlot(runtimeConfig, operation) {
+  return withUnbilledAiImageRuntimeSlot(runtimeConfig, async () => {
+    await assertAiCreditProviderBoundary("image");
+    return operation();
+  });
+}
 const AI_IMAGE_PROVIDER_TIMEOUT_MS = AI_IMAGE_GENERATION_WAIT_MS + AI_IMAGE_TRANSPORT_GRACE_MS;
 const AI_IMAGE_DOWNLOAD_TIMEOUT_MS = Math.max(10000, Number(process.env.AI_IMAGE_DOWNLOAD_TIMEOUT_MS || 60000));
 const AI_IMAGE_DOWNLOAD_ATTEMPTS = Math.max(1, Number(process.env.AI_IMAGE_DOWNLOAD_ATTEMPTS || 3));
@@ -110,6 +117,7 @@ export async function testOpenAiImageProvider({ runtimeConfig, mode = "generate"
 }
 
 async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob = null, onProviderJob = null }) {
+  await assertAiCreditProviderBoundary("image");
   if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
     return request65535TaskImage({ runtimeConfig, prompt, size, providerJob, onProviderJob });
@@ -145,6 +153,7 @@ async function requestCompatibleImage({ runtimeConfig, prompt, size, providerJob
 }
 
 async function requestCompatibleImageEdit({ runtimeConfig, imageBuffer, imageFilePath = "", filename, contentType, prompt, size, providerJob = null, onProviderJob = null }) {
+  await assertAiCreditProviderBoundary("image");
   if (!providerJob?.jobId) await reserveTenantAiRequest("image");
   if (uses65535TasksImage(runtimeConfig)) {
     const resolvedImageBuffer = providerJob?.jobId
@@ -410,7 +419,7 @@ async function pollAsync65535ImageJob({ runtimeConfig, endpoint, job }) {
   let lastPayload = null;
   while (Date.now() - started < AI_IMAGE_GENERATION_WAIT_MS) {
     await delay(2000);
-    await assertCurrentAiTenantPermission();
+    await assertAiCreditProviderBoundary("image");
     let response;
     try {
       response = await fetch(statusUrl, {

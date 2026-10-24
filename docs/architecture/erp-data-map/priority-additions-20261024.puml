@@ -1,0 +1,149 @@
+@startuml
+allowmixing
+title 2026-10-24 优先实施增量 · 源码新增，尚未生产启用
+left to right direction
+skinparam defaultFontName Microsoft YaHei
+skinparam shadowing false
+skinparam packageStyle rectangle
+hide methods
+
+legend top left
+  这是本轮源码增量，不是线上 219 张表快照的更新。
+  虚线均表示应用逻辑引用／工作流，不表示数据库外键。
+  新表安装、功能开通与客户业务验收是独立步骤。
+endlegend
+
+package "已有上下文（仅列边界）" {
+  entity tenants {
+    id : BIGINT
+    feature_flags_json
+  }
+  entity people {
+    id : BIGINT
+  }
+  entity tenant_members {
+    tenant_id + person_id
+    active / business_roles_json
+  }
+  entity platform_grants {
+    person_id / role / active
+  }
+  entity listing_category_templates as templates {
+    id / tenant_id
+    企业可编辑母版
+  }
+  entity listing_drafts as drafts {
+    id / tenant_id / template_id
+    template_payload_json
+    manual_facts_json / ai_payload_json
+  }
+  entity ai_image_task_owners as owners {
+    task_id / tenant_id
+    created_by_person_id
+  }
+  entity listing_media_assets as media {
+    id / tenant_id
+    preview_url / publish_url
+    hash_sha256
+  }
+  entity ozon_category_attributes as official {
+    description_category_id + type_id
+    官方属性定义缓存
+  }
+}
+
+package "本轮新增：5 张积分表" #EAF3FF {
+  entity ai_credit_accounts as accounts {
+    tenant_id : PK
+    account_key : UNIQUE
+    available_points / frozen_points
+    status
+  }
+  entity ai_credit_prices as prices {
+    id : PK
+    price_key + version : UNIQUE
+    points_per_result
+    created_by_person_id
+  }
+  entity ai_credit_tasks as tasks {
+    id : PK
+    tenant_id + idempotency_key : UNIQUE
+    created_by_person_id / input_sha256
+    price_id / price_version / points_per_result
+    reserved_points / charged_points / status
+    result_reference / result_sha256
+  }
+  entity ai_credit_attempts as attempts {
+    id : PK
+    task_id + attempt_key : UNIQUE
+    task_id + attempt_number : UNIQUE
+    provider / model / provider_receipt
+    status / supplier_cost_micros
+  }
+  entity ai_credit_entries as entries {
+    id : PK
+    tenant_id + entry_key : UNIQUE
+    task_id : nullable
+    available_delta / frozen_delta
+    available_after / frozen_after
+    created_by_person_id / reason
+  }
+}
+
+package "本轮新增：冻结内容库" #EAF3FF {
+  entity listing_frozen_content as frozen {
+    tenant_id + content_kind + content_hash : PK
+    payload_json / created_at
+    --
+    public + category_definition : 官方白名单定义
+    admin或企业ID + product_master : 企业私有版本
+  }
+}
+
+package "数据库之外的结果／媒体" {
+  artifact "私有积分结果 JSON\n绑定 task / tenant / input 摘要" as result
+  artifact "已鉴权 AI 图片文件\n按 task 读取，校验内容摘要" as images
+  cloud "上架媒体存储\nOSS／已登记发布 URL" as oss
+}
+
+people ..> tenant_members : 登录身份
+tenants ..> tenant_members : 企业成员关系
+people ..> platform_grants : 独立平台授权
+tenant_members ..> tasks : 当前企业＋运营职责；提交／重试重新校验
+platform_grants ..> accounts : 平台管理员开户
+platform_grants ..> prices : 平台管理员追加价格版本
+platform_grants ..> entries : 充值／人工核对留依据
+tenants ..> accounts : 一企业一个账户；显式开通
+accounts ..> tasks : 企业范围内预占／结算
+prices ..> tasks : 引用价格版本，同时冻结报价
+tasks ..> attempts : 同任务的供应商尝试／回执
+accounts ..> entries : 余额与分录同事务
+tasks ..> entries : 预占／结算／释放；充值可无任务
+tasks ..> result : result_reference＋摘要
+tasks ..> owners : 单图积分任务复用同一 task_id
+owners ..> images : 企业归属鉴权
+result ..> images : 结果内的已鉴权 URL＋内容摘要
+images ..> media : 保存草稿前校验归属并登记素材
+media ..> oss : 存储字节／发布 URL
+drafts ..> media : 当前选中图片 URL；不复制媒体字节
+drafts ..> templates : template_id 是企业母版 ID，不是草稿 ID
+official ..> frozen : 只冻结官方字段；不含企业文案或图片
+templates ..> frozen : 冻结企业私有母版内容
+drafts ..> frozen : marker 中的 master_hash／category_hash＋单层差异
+frozen ..> frozen : 私有 product_master 的 category_hash 指向公共定义版本
+
+note bottom of frozen
+  writer 默认关闭；先安装兼容 reader 和新增结构，再审阅开通。
+  公共定义不含企业填充值、图片、成本或草稿资料。
+  冻结版本不随可编辑母版更新／删除；当前无版本 GC。
+  本轮仅改 template_payload_json 的可选保存格式；
+  manual_facts_json、ai_payload_json 及历史记录保持兼容。
+end note
+
+note bottom of tasks
+  积分／成员使用数值 tenant_id；草稿／媒体旧存储键可能为 admin。
+  应用显式转换企业身份；public 仅属于官方定义命名空间。
+  没有“积分任务直接外键到草稿”的假设：结果经媒体校验后保存。
+  预付费当前只接单图；未接入的付费能力不能绕到内部调用。
+end note
+@enduml

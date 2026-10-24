@@ -1,5 +1,7 @@
 # Ozon Product Status Notes
 
+Confirmed by a live read on 2026-10-24: the `id` returned by `/v3/product/info/list` is a product identity distinct from `sku` and `sources[].sku`. Do not repair an existing product ID by copying a SKU from legacy order/source data. Review the current official response for the specific shop/SKU; retaining a newer row with a different product ID can be correct. The reviewed business disposition and exact old rows belong in a separate cleanup manifest, not an automatic global rewrite.
+
 Confirmed from the live Ozon seller API on 2026-07-14:
 
 - `/v3/product/list` with `filter.visibility = "ARCHIVED"` can return products that must be treated as archived locally.

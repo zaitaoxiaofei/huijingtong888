@@ -1681,6 +1681,89 @@ Update a scheduled background task runtime configuration.
 - Responses:
   - `200` `application/json` -> `ScheduledJob`
 
+### AI credits
+
+#### `GET /api/ai-credits/wallet`
+
+Read only the current enterprise's AI points account. Current membership and subscription are checked again; no tenant selector is accepted. No-store. Missing schema returns 503 without creating tables.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `503` `application/json` -> `ErrorResponse`
+
+#### `GET /api/ai-credits/entries`
+
+Cursor-page immutable credit entries for the current enterprise, newest first. limit 1-100 (default 30), before is an entry ID. No-store; no cross-enterprise selector.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `GET /api/ai-credits/audit`
+
+Compare current enterprise balances with immutable ledger sums under a wallet lock. Does not repair data.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/ai-credits/tasks/{id}`
+
+Read current-enterprise credit task and immutable quoted price. Requires current membership; no request prompts or provider keys are returned.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/platform/ai-credits/accounts`
+
+Current platform super admin explicitly opens/disables one enterprise AI account. No balance mutation, account auto-enrolment, subscription or membership changes.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/platform/ai-credits/prices`
+
+Current platform super admin adds an immutable capability price version. Positive integer points per successful result; no default prices or RMB conversions. Existing tasks retain their quote.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/platform/ai-credits/recharges`
+
+Current platform super admin manually credits confirmed payment. reference is unique per enterprise; replay with changed amount/reason is rejected. Balance and entry commit atomically.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/platform/ai-credits/reconcile`
+
+Current platform super admin settles an unknown/interrupted task only after supplier evidence review. Successful results charge the original price; zero releases the hold. Reason required; success also requires resultReference/resultSha256. Never automatically refunds and resubmits.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 ### Membership
 
 #### `POST /api/auth/register`
@@ -2281,6 +2364,14 @@ Return the full order list or paged order list depending on the paged query flag
 - Responses:
   - `200` `application/json` -> `array<OrderListItem>`: Returned when paged is not set.
   - `200` `application/json` -> `OrdersPagedResponse`: Returned when paged=1 or paged=true.
+
+#### `GET /api/orders/status-history/summary`
+
+Return current-enterprise order-history diagnostics and versioned business summaries. Stored observation rows are not an order count. Version 2 prevents duplicate observations from weighting coverage, state counts or delivery averages; it does not delete history or enable writer deduplication.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `GET /api/orders/:id`
 

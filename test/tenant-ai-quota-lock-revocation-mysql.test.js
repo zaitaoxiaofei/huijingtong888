@@ -25,6 +25,7 @@ test('AI quota mutex rechecks revocation after an actual MySQL lock wait, before
   const request = () => withAiTenantSession(session, () => provider.chatWithAiProvider({ prompt: 'fixture' }));
   try {
     await fixture.query("INSERT INTO tenants(id,slug,name) VALUES(2,'customer-a','A')");
+    await fixture.query("UPDATE tenants SET feature_flags_json=JSON_OBJECT('ai_internal_mode_reviewed',JSON_EXTRACT('true','$')) WHERE id=2");
     await fixture.query("INSERT INTO people(id,name,role) VALUES(7,'Operator','operations')");
     await fixture.query("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json) VALUES(2,7,'member',JSON_ARRAY('operations'))");
     await fixture.query('INSERT INTO tenant_ai_limits(tenant_id,monthly_request_limit) VALUES(2,20)');

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 import { listingTenantLookup } from "../src/services/listing-tenant-scope.js";
+import { createListingFrozenReadScope } from "../src/services/listing-frozen-content.js";
 
 const service = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const draftsSource = service.slice(service.indexOf("export async function listingDrafts("), service.indexOf("export async function listingDevelopmentReview("));
@@ -12,6 +13,7 @@ function draftListReader() {
   const calls = [];
   const context = vm.createContext({
     listingTenantLookup,
+    createListingFrozenReadScope,
     ensureListingListReadSchema: async () => {},
     mysqlQuery: async (sql, params) => {
       assert.equal(params.length, (sql.match(/\?/g) || []).length, "every SQL placeholder must have exactly one binding");
@@ -51,9 +53,11 @@ for (const status of ["all", "editing", "waiting"]) {
         assert.deepEqual(list.params, [...expected, 20, 0]);
         assert.match(list.sql, /LIMIT \? OFFSET \?/);
         for (const { sql } of calls) {
-          assert.match(sql, /COALESCE\(d\.tenant_id, 'admin'\)[^=]*= CONVERT\(\? USING utf8mb4\)/);
-          assert.match(sql, /COALESCE\(t\.tenant_id, 'admin'\)[^=]*= CONVERT\(COALESCE\(d\.tenant_id, 'admin'\)/);
-          if (status !== "all") assert.match(sql, /COALESCE\(c_project\.tenant_id, 'admin'\)[^=]*= CONVERT\(COALESCE\(d\.tenant_id, 'admin'\)/);
+          assert.match(sql, /d\.tenant_id = \?/);
+          if (lightweight === "0") assert.match(sql, /t\.tenant_id = d\.tenant_id COLLATE utf8mb4_unicode_ci/);
+          else assert.doesNotMatch(sql, /JOIN listing_category_templates/);
+          if (filter.query.keyword) assert.match(sql, /t_filter\.tenant_id = d\.tenant_id COLLATE utf8mb4_unicode_ci/);
+          if (status !== "all") assert.match(sql, /c_project\.tenant_id = d\.tenant_id COLLATE utf8mb4_unicode_ci/);
           if (status === "editing") assert.match(sql, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project WHERE c_project\.draft_id = d\.id/);
           if (status === "waiting") assert.match(sql, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project WHERE c_project\.draft_id = d\.id[\s\S]*c_project\.status = 'prepared'/);
           if (filter.query.shopId) assert.match(sql, /c_shop\.shop_id = \?/);

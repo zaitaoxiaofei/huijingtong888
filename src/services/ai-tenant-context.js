@@ -1,8 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { mysqlExecute, withMysqlTransaction } from "../mysql-pool.js";
+import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { shanghaiDateKey } from "../shanghai-time.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey } from "./business-task-tenant.js";
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "./ai-tenant-schema.js";
+import { checkAiCreditProviderBoundary } from "./ai-credit-provider-context.js";
 
 const context = new AsyncLocalStorage();
 let usageSchema;
@@ -60,6 +61,10 @@ export async function assertCurrentAiTenantPermission({ connection = null, lock 
 export async function reserveTenantAiRequest(kind = "text", count = 1) {
   const session = await assertCurrentAiTenantPermission();
   if (!session) return null;
+  const billing = await checkAiCreditProviderBoundary(session, kind, mysqlQuery);
+  // Prepaid attempts are accounted by the durable wallet executor. Do not also
+  // block a funded customer with the legacy monthly-request default of zero.
+  if (billing.mode === "credits") return { tenant_id: Number(session.tenant.id), mode: "credits" };
   if (!usageSchema) usageSchema = (async () => {
     await mysqlExecute(TENANT_AI_LIMITS_SCHEMA);
     await mysqlExecute(TENANT_AI_USAGE_SCHEMA);

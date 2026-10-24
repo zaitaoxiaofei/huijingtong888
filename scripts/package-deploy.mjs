@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createDeployCopyFilter } from "./lib/deploy-copy-filter.mjs";
 
 const rootDir = process.cwd();
 const finalOutputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
@@ -12,6 +13,7 @@ const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEA
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "production";
 const includeUploads = process.env.OZON_DEPLOY_INCLUDE_UPLOADS === "1";
 const includeEnv = process.env.OZON_DEPLOY_INCLUDE_ENV === "1";
+const deployCopyFilter = createDeployCopyFilter(rootDir, { includeUploads, privateResultRoot: process.env.AI_CREDIT_RESULT_ROOT || "" });
 
 const filesToCopy = [
   ".env.example",
@@ -131,12 +133,7 @@ async function copyEntry(relativePath) {
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.cp(source, target, {
     recursive: true,
-    filter: relativePath === "public" && !includeUploads
-      ? (sourcePath) => {
-          const relativeSource = path.relative(source, sourcePath);
-          return relativeSource !== "uploads" && !relativeSource.startsWith(`uploads${path.sep}`);
-        }
-      : undefined
+    filter: deployCopyFilter
   });
 }
 

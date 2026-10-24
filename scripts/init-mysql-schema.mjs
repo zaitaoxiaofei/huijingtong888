@@ -1035,6 +1035,7 @@ CREATE TABLE IF NOT EXISTS orders (
   KEY idx_orders_sync_state_ordered_at (sync_state, ordered_at),
   KEY idx_orders_shop_status_ordered_at (shop_id, status, ordered_at),
   KEY idx_orders_shop_ordered_id (shop_id, ordered_at, id),
+  KEY idx_orders_shop_order_number_id (shop_id, order_number, id),
   KEY idx_orders_ordered_at (ordered_at, id),
   KEY idx_orders_stage_ordered_at (tracking_stage, ordered_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
