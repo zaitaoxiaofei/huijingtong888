@@ -86,7 +86,7 @@
 
 生产恢复归档 8,559,653 字节，SHA-256：`6c7b91b52b8ad3ad1bf165ba789076056107054dd872fb382eb3854283068f93`。位于 ECS 本轮私有维护目录及本机持久归档 `ozon-erp-archives/reviewed-online-20261024/f5ddbe097728`；传输逐文件校验，原生行和凭据均不进入 Git。完整旧在线表、引用前后镜像和日志继续保留，不自动清理。
 
-恢复后：`event_scheduler=ON`、`read_only=0`、`super_read_only=0`、UNIQUE/外键检查为 1；主备应用运行，两个 timer 恢复 active/enabled，原先 inactive 的 oneshot 未额外执行。生产仍为 `a1ef0f7`；本轮只是已合入 release 的管理员工具执行与数据维护，不是新的业务版本部署。
+恢复后：`event_scheduler=ON`、`read_only=0`、`super_read_only=0`、UNIQUE/外键检查为 1；主备应用运行，两个 timer 恢复 active/enabled。未手工额外启动 oneshot；恢复后的 timer 可按原计划触发，监控任务在释放发布锁后继续运行。生产仍为 `a1ef0f7`；本轮只是已合入 release 的管理员工具执行与数据维护，不是新的业务版本部署。
 
 既有健康检查账号在备用、主服务和公网三条路径分别读取草稿、订单、订单统计和 OGL 本地快照，全部返回 200；公网草稿 20 行、订单 20 行、OGL 5 条。未调用外部 Ozon、未创建真实客户订单或发运。本证据不能替代未来第二家企业及付费 AI 的完整交付验收。
 
