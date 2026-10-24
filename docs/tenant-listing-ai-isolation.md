@@ -96,3 +96,9 @@
 - `tenant-reviews-actions-mysql.test.js`：实际服务和网络 spy 验证评价/活动店铺边界及持久清理身份。
 
 这些测试验证企业数据边界和外部调用归属；没有向真实 Ozon、AI 供应商或 OSS 发送验收请求。生产冒烟与实际发布结果需在正式发布流程中单独验证。中央接口放行清单由统一的企业隔离入口维护，不应仅凭模块名前缀整体开放。
+
+### 2026-10-24 草稿轻量列表响应
+
+仅 `GET /api/listing/drafts?paged=1&lightweight=1`（含 `compact=1` 别名）的概览行省略重复存储字段 `source_urls_json`、`source_images_json`、`template_payload_json`、`manual_facts_json`、`ai_payload_json`、`shop_copies_json`。对应的 `source_urls`、`source_images`、`template_payload`、`manual_facts`、`ai_payload`、`shop_copies` 继续返回；`effective_images`、人工清空意图、价格、发布统计、车型和任务字段不变。详情及非轻量读取保留原字段，不修改存储或发布内容。
+
+此前 mysql2 原生 JSON 对象被当成字符串解析，导致概览的当前图片投影被丢弃。恢复正确解析会增加返回内容，不能通过再次丢弃当前图片来提速。本次只移除同一内容的原始 JSON 副本，仍需单独区分数据库查询、媒体映射及浏览器加载耗时；不据响应缩小承诺页面提速比例。
