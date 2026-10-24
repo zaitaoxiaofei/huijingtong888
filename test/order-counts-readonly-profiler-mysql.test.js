@@ -47,7 +47,8 @@ test("read-only count profiler executes the real isolated coverage and aggregati
     await f.query("INSERT INTO inventory_order_priorities(product_id,order_item_id,priority) VALUES(4,1001,5)");
     const cli = fileURLToPath(new URL("../scripts/profile-order-counts-readonly.mjs", import.meta.url));
     const baseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-read-v1.js", import.meta.url));
-    const run = async (tenant = "admin") => JSON.parse((await promisify(execFile)(process.execPath, [cli, `--database=${f.database}`, `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`, `--tenant-id=${tenant}`, "--date-from=2026-07-26", "--date-to=2026-10-24", `--compare-coverage-source=${baseline}`, "--explain"], { windowsHide: true, timeout: 30000 })).stdout);
+    const algorithmBaseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-calculate-v1.js", import.meta.url));
+    const run = async (tenant = "admin") => JSON.parse((await promisify(execFile)(process.execPath, [cli, `--database=${f.database}`, `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`, `--tenant-id=${tenant}`, "--date-from=2026-07-26", "--date-to=2026-10-24", `--compare-coverage-source=${baseline}`, `--compare-algorithm-source=${algorithmBaseline}`, "--explain"], { windowsHide: true, timeout: 30000 })).stdout);
     const before = await f.query("SELECT COUNT(*) n FROM inventory_movements");
     const report = await run();
     assert.equal(report.mode, "read-only"); assert.equal(report.initialization_performed, false);
@@ -58,6 +59,8 @@ test("read-only count profiler executes the real isolated coverage and aggregati
     assert.equal(report.consistent_read_only_snapshot, true);
     assert.equal(report.comparison.equal_coverage, true, JSON.stringify(report.comparison));
     assert.equal(report.comparison.equal_counts, true);
+    assert.ok(report.assembly.every(row => row.algorithm_ms >= 0 && row.input_rows.demands > 0));
+    assert.notEqual(report.comparison.baseline_algorithm_sha256, report.comparison.candidate_algorithm_sha256);
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE-POSTING|OTHER-POSTING|Private inventory|Other private/);
     assert.deepEqual(await f.query("SELECT COUNT(*) n FROM inventory_movements"), before);
     const customer = await run("2");
