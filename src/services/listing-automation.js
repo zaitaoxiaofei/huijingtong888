@@ -11665,12 +11665,12 @@ export async function listingDrafts(query = {}, session) {
     const statsByDraft = new Map(publishStats.map((item) => [Number(item.draft_id), item]));
     const normalizedPageRows = pageRows.map((item) => {
       const stats = statsByDraft.get(Number(item.id));
-      return normalizeDraftRow({ ...item, ...(stats ? {
+      return normalizeDraftOverviewResponse(normalizeDraftRow({ ...item, ...(stats ? {
         publish_status: stats.publish_status,
         publish_record_count: Number(stats.publish_record_count || 0),
         publish_success_count: Number(stats.publish_success_count || 0),
         publish_failed_count: Number(stats.publish_failed_count || 0)
-      } : {}) });
+      } : {}) }));
     });
     if (requestedIds.length && includeReviewSkus) await attachDevelopmentReviewSkus(normalizedPageRows, requestedIds, tenantId);
     return {
@@ -22396,6 +22396,14 @@ function normalizeDraftRow(row) {
     vehicle_model: developmentMeta.vehicle_model,
     vehicle_model_key: developmentMeta.vehicle_model_key
   };
+}
+
+function normalizeDraftOverviewResponse(row) {
+  // Overview consumers use the parsed fields. Do not transmit each media set
+  // again in its storage JSON alias; detail/edit responses retain the aliases.
+  const { source_urls_json, source_images_json, template_payload_json,
+    manual_facts_json, ai_payload_json, shop_copies_json, ...overview } = row;
+  return overview;
 }
 
 function normalizeDraftProjectCandidateRow(row) {

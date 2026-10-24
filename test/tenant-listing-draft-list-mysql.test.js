@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createTenantMysqlFixture } from "./helpers/tenant-mysql-fixture.js";
 import { migrateListingDraftListIndexes } from "../src/services/listing-draft-list-schema.js";
 import { auditListingDraftStorage } from "../src/services/listing-draft-storage-audit.js";
+import { normalizeImportCandidate } from "../frontend/admin/utils/ai-product-import.js";
 
 test("draft overview preserves ownership, filters, media and publish statistics with bounded page aggregation", {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && "Requires isolated TENANT_TEST_MYSQL_SOCKET"
@@ -67,6 +68,30 @@ test("draft overview preserves ownership, filters, media and publish statistics 
     await t.test("explicitly empty manual image sets never fall back to collected or template images", async () => {
       assert.deepEqual((await read(2, { ids: "200" })).rows[0].effective_images, []);
       assert.deepEqual((await read(2, { ids: "201" })).rows[0].effective_images, ["https://example.invalid/2/1.jpg"]);
+    });
+    await t.test("lightweight responses omit duplicate storage JSON while import, shop and detail consumers retain their content", async () => {
+      const omitted = ["source_urls_json", "source_images_json", "template_payload_json", "manual_facts_json", "ai_payload_json", "shop_copies_json"];
+      const page = await read(2, { ids: "200,201", includeShopDetails: "1" });
+      for (const draft of page.rows) {
+        for (const field of omitted) assert.equal(Object.hasOwn(draft, field), false, field);
+        const candidate = normalizeImportCandidate(draft, "draft");
+        assert.equal(candidate.sourceDraftId, String(draft.id));
+        assert.equal(candidate.title, draft.product_name);
+        assert.equal(candidate.templateId, String(draft.template_id));
+        assert.equal(candidate.imageUrl, draft.effective_images[0] || "");
+        assert.deepEqual(candidate.detailImages, draft.effective_images.slice(1));
+        assert.deepEqual(candidate.templatePayload, draft.template_payload);
+      }
+      assert.equal(page.rows.find((draft) => Number(draft.id) === 201).shop_copies[0].shop_name, "Shop 2");
+      assert.deepEqual(page.rows.find((draft) => Number(draft.id) === 200).effective_images, []);
+      const detail = await listing.listingDraftDetail(201, session(2));
+      assert.deepEqual(detail.effective_images, ["https://example.invalid/2/1.jpg"]);
+      for (const field of ["source_urls_json", "source_images_json", "template_payload_json", "manual_facts_json", "ai_payload_json"]) {
+        assert.equal(Object.hasOwn(detail, field), true, `detail retains ${field}`);
+      }
+      const fullPage = await listing.listingDrafts({ paged: "1", ids: "201" }, session(2));
+      assert.equal(Object.hasOwn(fullPage.rows[0], "template_payload_json"), true);
+      assert.deepEqual(fullPage.rows[0].template_payload, detail.template_payload);
     });
     await t.test("storage audit is bounded and private, reports exact repetitions and tolerates invalid legacy JSON", async () => {
       const attributes = [{ attribute_id: 7, value: "private filled value" }];
