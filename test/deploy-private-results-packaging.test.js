@@ -51,6 +51,41 @@ test("public-upload opt-in cannot include private results; configured private ro
   await missing(path.join(noUploads, "public", "uploads"));
 }));
 
+test("real fs.cp excludes public aliases to a private directory or its ancestor", () => fixture(async ({ root, output }) => {
+  const secret=path.join(root,"data","ai-credit-results","2");
+  await fs.mkdir(secret,{recursive:true});await fs.writeFile(path.join(secret,"private.json"),"private");
+  await fs.mkdir(path.join(root,"public"));
+  for(const [name,target] of [["alias",secret],["data-alias",path.join(root,"data")]]){
+    await fs.symlink(target,path.join(root,"public",name),process.platform==="win32"?"junction":"dir");
+  }
+  const filter=createDeployCopyFilter(root,{includeUploads:true});
+  await fs.cp(root,output,{recursive:true,filter});
+  await missing(path.join(output,"public","alias"));await missing(path.join(output,"public","data-alias"));
+  assert.equal(await fs.readFile(path.join(output,"data","public-seed.json"),"utf8"),"{}");
+  assert.equal(await fs.readFile(path.join(secret,"private.json"),"utf8"),"private");
+  // Unrelated links are not globally forbidden. Added after the first copy to
+  // also exercise the bounded lstat fallback for a cached-directory miss.
+  const ordinary=path.join(root,"public","ordinary-alias");
+  await fs.mkdir(path.join(root,"static"));
+  await fs.symlink(path.join(root,"static"),ordinary,process.platform==="win32"?"junction":"dir");
+  assert.equal(await filter(ordinary),true);
+}));
+
+test("real fs.cp excludes aliases to the real target of a configured private-root junction", () => fixture(async ({ directory,root,output }) => {
+  const external=path.join(directory,"external-private"),configured=path.join(root,"data","custom-private");
+  await fs.mkdir(path.join(external,"2"),{recursive:true});await fs.writeFile(path.join(external,"2","private.json"),"private");
+  await fs.symlink(external,configured,process.platform==="win32"?"junction":"dir");
+  await fs.mkdir(path.join(root,"public"));
+  const filter=createDeployCopyFilter(root,{includeUploads:true,privateResultRoot:"data/custom-private"});
+  await fs.writeFile(path.join(root,"public","seed.json"),"{}");
+  await filter(path.join(root,"public","seed.json")); // Cache before a new alias appears.
+  await fs.symlink(path.join(external,"2"),path.join(root,"public","late-alias"),process.platform==="win32"?"junction":"dir");
+  await fs.cp(root,output,{recursive:true,filter});
+  await missing(path.join(output,"public","late-alias"));await missing(path.join(output,"data","custom-private"));
+  assert.equal(await fs.readFile(path.join(output,"data","public-seed.json"),"utf8"),"{}");
+  assert.equal(await fs.readFile(path.join(external,"2","private.json"),"utf8"),"private");
+}));
+
 test("production packaging uses the guarded filter for every copied entry", async () => {
   const source = await fs.readFile(new URL("../scripts/package-deploy.mjs", import.meta.url), "utf8");
   assert.match(source, /import \{ createDeployCopyFilter \} from "\.\/lib\/deploy-copy-filter\.mjs"/);
