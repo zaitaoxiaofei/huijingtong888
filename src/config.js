@@ -9,7 +9,7 @@ if (fs.existsSync(envPath)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
     const [key, ...rest] = trimmed.split("=");
-    if (!process.env[key]) process.env[key] = rest.join("=");
+    if (process.env[key] === undefined) process.env[key] = rest.join("=");
   }
 }
 
