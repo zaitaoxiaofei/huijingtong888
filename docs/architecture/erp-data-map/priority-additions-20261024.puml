@@ -1,6 +1,6 @@
 @startuml
 allowmixing
-title 2026-10-24 优先实施增量 · 源码新增，尚未生产启用
+title 2026-10-24 优先实施增量 · 空表已安装，收费与新写入未开通
 left to right direction
 skinparam defaultFontName Microsoft YaHei
 skinparam shadowing false
@@ -11,6 +11,7 @@ legend top left
   这是本轮源码增量，不是线上 219 张表快照的更新。
   虚线均表示应用逻辑引用／工作流，不表示数据库外键。
   新表安装、功能开通与客户业务验收是独立步骤。
+  首批 ECS e6ba613 已安装本图六张空表；旧草稿未迁移。
 endlegend
 
 package "已有上下文（仅列边界）" {
