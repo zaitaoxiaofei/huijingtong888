@@ -7,6 +7,7 @@ import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../.
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
 import { summarizeOrderSyncResult } from "../utils/order-sync-result.js";
 import { orderStateKey } from "../constants/orders-ui.js";
+import { orderSearchMatchForInput } from "../../../src/shared/order-search.js";
 import {
   bulkPrepareOrders,
   bulkPrintOrders,
@@ -308,6 +309,7 @@ export function useOrdersPage() {
       dateTo: filters.dateTo || "",
       searchType: filters.searchType || "order",
       searchQuery: filters.searchQuery || "",
+      searchMatch: filters.searchMatch || orderSearchMatchForInput(filters.searchType, filters.searchQuery),
       markFilter: filters.markFilter || "all",
       fulfillmentType: filters.fulfillmentType || "all",
       printView: filters.printView || "all",

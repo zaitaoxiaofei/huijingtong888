@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { assertAiCreditProviderBoundary } from "./ai-credit-runtime.js";
 import { currentAiTenantSession, needsAiTenantSession, reserveTenantAiRequest, withAiTenantSession } from "./ai-tenant-context.js";
 import { config } from "../config.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
@@ -658,6 +659,7 @@ async function resolveRuntimeConfig(override = {}, options = {}) {
 }
 
 async function callOpenAiCompatibleChat(runtimeConfig, options = {}) {
+  await assertAiCreditProviderBoundary("text");
   if (runtimeConfig.apiMode === "responses") {
     return callOpenAiResponses(runtimeConfig, options);
   }
@@ -698,6 +700,7 @@ async function callOpenAiCompatibleChat(runtimeConfig, options = {}) {
 }
 
 async function streamOpenAiCompatibleChat(runtimeConfig, options = {}, handlers = {}) {
+  await assertAiCreditProviderBoundary("text");
   const responsesMode = runtimeConfig.apiMode === "responses";
   const endpoint = responsesMode
     ? responsesEndpoint(runtimeConfig.baseUrl)

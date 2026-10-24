@@ -26,6 +26,7 @@ test("matrix execution preserves enterprise, original actor, resources and publi
     const actual = await import(sourceUrl.href);
     const listing = await import("../src/services/listing-automation.js");
     await query("INSERT INTO tenants (id,slug,name,status,subscription_status) VALUES (1,'default','Default','active','active'),(2,'enterprise-2','A','active','active'),(3,'enterprise-3','B','active','active')");
+    await query("UPDATE tenants SET feature_flags_json=JSON_OBJECT('ai_internal_mode_reviewed',JSON_EXTRACT('true','$')) WHERE id IN (2,3)");
     await query("INSERT INTO people (id,name,role) VALUES (7,'Operator','operations'),(8,'Other operator','operations'),(9,'Packer','packing')");
     await query("INSERT INTO tenant_members (tenant_id,person_id,role,business_roles_json) VALUES (1,7,'member',JSON_ARRAY('operations')),(2,7,'member',JSON_ARRAY('operations')),(3,7,'member',JSON_ARRAY('operations')),(2,8,'member',JSON_ARRAY('operations')),(2,9,'member',JSON_ARRAY('packing'))");
     await query("ALTER TABLE shops ADD ozon_api_key TEXT NULL");

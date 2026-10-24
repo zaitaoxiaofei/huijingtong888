@@ -9,9 +9,11 @@ import { config } from "../../../config.js";
 import { requestPublicImage } from "../../../http/public-image-request.js";
 import { mysqlQuery } from "../../../mysql-pool.js";
 import { aiTenantId, assertCurrentAiTenantPermission, currentAiTenantSession } from "../../../services/ai-tenant-context.js";
+import { assembleListingDraftStoredRow } from "../../../services/listing-frozen-content.js";
 import { assertAiImageTaskOwner, registerAiImageTaskOwner } from "../../../services/ai-image-task-ownership.js";
 import { buildZip, runPythonCropper } from "../tools/imageCropperService.js";
-import { aiProviderConfig, chatWithAiProvider } from "../../../services/ai-provider-settings.js";
+import { aiProviderConfig, aiImageRuntimePoolConfig, chatWithAiProvider } from "../../../services/ai-provider-settings.js";
+import { tryGenerateCreditedImage } from "../../../services/ai-credit-image-adapter.js";
 import { buildFallbackPrompt, clampImageCount, optimizeImagePrompt } from "../openai/promptService.js";
 import { buildCopyBundlePrompt, buildCopyFactsContract } from "./copyFactsContract.js";
 import { parseCopyBundleResponse, validateCopyBundle } from "./copyQualityValidator.js";
@@ -49,6 +51,7 @@ export async function optimizePrompt(payload = {}) {
   try {
     return await optimizeImagePrompt(payload);
   } catch (error) {
+    if (String(error?.code || "").startsWith("AI_CREDIT_")) throw error;
     if (error.status === 503) throw error;
     console.error("AI prompt optimization failed", error);
     const publicError = new Error("提示词优化失败，请稍后重试");
@@ -57,9 +60,51 @@ export async function optimizePrompt(payload = {}) {
   }
 }
 
-export async function generateImages(payload = {}) {
-  const taskId = crypto.randomUUID();
-  await registerAiImageTaskOwner(taskId);
+export async function generateImages(payload = {}, { creditRuntime } = {}) {
+  const finalPrompt = String(payload.finalPrompt || payload.prompt || buildImagePromptFallback(payload)).trim();
+  if (!finalPrompt) throw Object.assign(new Error("finalPrompt 不能为空"), { status: 400 });
+  const credited = await tryGenerateCreditedImage({ ...payload, finalPrompt }, {
+    run: input => generateImagesInternal(input, input.taskId), getFile: getAiTaskFile, resolveRuntimes: aiImageRuntimePoolConfig,
+    validateInput: validateCreditedImageInput, runtime: creditRuntime
+  });
+  if (credited.handled) return credited.result;
+  return generateImagesInternal(payload);
+}
+
+async function validateCreditedImageInput(payload) {
+  const sources = [...(Array.isArray(payload.sourceImageUrls) ? payload.sourceImageUrls : []),
+    payload.sourceImageUrl, payload.referenceImageUrl, payload.sourceImage, payload.fallbackSourceImageUrl, payload.fallbackReferenceImageUrl];
+  for (const item of sources) {
+    const source = String(item || "").trim();
+    if (!source) continue;
+    if (source.startsWith("data:")) {
+      const match = /^data:image\/(?:png|jpeg|jpg|webp);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(source);
+      if (!match || match[1].length > 28 * 1024 * 1024) throw Object.assign(new Error("参考图 data URL 格式或大小无效，请重新上传 PNG/JPG/WEBP 图片"), { status: 400 });
+      const bytes = Buffer.from(match[1], "base64");
+      if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw Object.assign(new Error("参考图超过 20 MB，请压缩后重试"), { status: 400 });
+      try { await sharp(bytes, { limitInputPixels: 40_000_000, failOn: "warning" }).stats(); }
+      catch { throw Object.assign(new Error("参考图内容无法解码，请重新上传完整 PNG/JPG/WEBP 图片"), { status: 400 }); }
+      continue;
+    }
+    let url;
+    try { url = new URL(source, source.startsWith("/") ? localAppOrigin() : undefined); }
+    catch { throw Object.assign(new Error("参考图地址格式无效，请重新选择图片或填写完整 HTTP(S) 地址"), { status: 400 }); }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw Object.assign(new Error("参考图仅支持 HTTP(S) 地址或本企业图片"), { status: 400 });
+    // This is a local ownership/file check only, never a supplier request.
+    await readLocalAiTaskSourceImage(source);
+  }
+}
+
+async function generateImagesInternal(payload = {}, taskId = null) {
+  const recovering = Boolean(taskId);
+  taskId ||= crypto.randomUUID();
+  if (recovering) {
+    try { await registerAiImageTaskOwner(taskId); }
+    catch (error) {
+      if (error.code !== "ER_DUP_ENTRY") throw error;
+      await assertAiImageTaskOwner(taskId);
+    }
+  } else await registerAiImageTaskOwner(taskId);
   const ratio = normalizeRatio(payload.ratio);
   const imageCount = clampImageCount(payload.imageCount ?? payload.count);
   const imageRuntimeConfig = payload.imageRuntimeConfig || payload.runtimeConfig || null;
@@ -463,6 +508,7 @@ function extensionForContentType(contentType) {
 
 export async function generateWorkflow(payload = {}) {
   const promptResult = await optimizePrompt(payload).catch((error) => {
+    if (String(error?.code || "").startsWith("AI_CREDIT_")) throw error;
     if (error.status === 503) throw error;
     console.error("Workflow prompt optimization failed, using fallback prompt", error);
     return buildFallbackPrompt(payload);
@@ -679,8 +725,10 @@ export async function testCopyGeneration(payload = {}) {
 async function loadListingDraftForCopyTest(draftId = 0) {
   const id = Number(draftId || 0);
   if (!id) return null;
-  const rows = await mysqlQuery("SELECT * FROM listing_drafts WHERE id = ? LIMIT 1", [id]);
-  return rows[0] || null;
+  await assertCurrentAiTenantPermission();
+  const tenantId = aiTenantId();
+  const rows = await mysqlQuery("SELECT * FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND status <> 'deleted' LIMIT 1", [id,tenantId]);
+  return assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: rows[0] || null });
 }
 
 export async function cropGeneratedImages({ taskId, generatedImages = [], cropMode = "auto" }) {

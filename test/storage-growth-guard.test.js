@@ -43,7 +43,12 @@ test("template and draft persistence strips duplicated source raw payloads", () 
   assert.match(listingSource, /function compactListingSourceProvenance/);
   assert.match(listingSource, /function compactListingPersistencePayload/);
   assert.match(listingSource, /JSON\.stringify\(compactListingSourceProvenance\(payload\.source_raw\)\)/);
-  assert.match(listingSource, /JSON\.stringify\(compactListingPersistencePayload\(templatePayload \|\| \{\}\)\)/);
+  const serializer=listingSource.match(/async function serializeListingDraftTemplate[\s\S]*?\n\}/)?.[0] || "";
+  assert.match(serializer, /const compact = compactListingPersistencePayload\(payload \|\| \{\}\)/);
+  assert.match(serializer, /return JSON\.stringify\(compact\)/);
+  assert.match(serializer, /encodeFrozenListingDraftPayload\(query, \{ tenantId, masterHash[^\n]*payload: compact/);
+  assert.match(serializer, /compactListingPersistencePayload\(normalizeTemplatePayload\(masterPayload \|\| payload\)\)/);
+  assert.match(listingSource, /const serializedTemplate = await serializeListingDraftTemplate\(templatePayload, tenantId/);
   assert.match(listingSource, /JSON\.stringify\(compactListingPersistencePayload\(aiPayload\)\)/);
 });
 
@@ -211,7 +216,6 @@ test("order history exposes an exact business fingerprint before any dedupe is e
   assert.match(mysqlCutoverSource, /CREATE TABLE IF NOT EXISTS order_history_dedupe_daily_metrics/);
   assert.match(mysqlCutoverSource, /recordOrderHistoryDedupeMetricMysql/);
   assert.match(mysqlCutoverSource, /DATE\(UTC_TIMESTAMP\(\) \+ INTERVAL 8 HOUR\)/);
-  assert.match(mysqlCutoverSource, /daily: dedupeDaily/);
   assert.match(mysqlCutoverSource, /history_source: "incremental"/);
   assert.match(serverSource, /history_source: "cancelled_reconciliation"/);
   assert.match(serverSource, /history_source: "posting_detail_reconciliation"/);
@@ -220,7 +224,10 @@ test("order history exposes an exact business fingerprint before any dedupe is e
   assert.match(mysqlCutoverSource, /function orderHistoryStateMayBeUnchangedMysql/);
   assert.match(mysqlCutoverSource, /orderHistoryStateMayBeUnchangedMysql\(previousOrder, payload\)/);
   assert.match(mysqlCutoverSource, /recordOrderStatusHistoryMysql\(shop, posting, orderId, lifecycle, historySource, exists\)/);
-  assert.match(mysqlCutoverSource, /dedupe: \{[\s\S]{0,160}orderHistoryDedupeMetricsMysql/);
+  const enterpriseSummary = mysqlCutoverSource.match(/export async function orderStatusHistorySummaryMysql\([^]*?^}/m)?.[0];
+  assert.ok(enterpriseSummary);
+  assert.match(enterpriseSummary, /dedupe: \{\s*mode: String\(config\.orderHistoryDedupeMode \|\| "off"\)\s*}/);
+  assert.doesNotMatch(enterpriseSummary, /orderHistoryDedupeMetricsMysql|order_history_dedupe_daily_metrics|dedupeDaily/);
 });
 
 test("product merge undo history stores only fields consumed by the existing undo workflow", () => {

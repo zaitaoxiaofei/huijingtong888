@@ -9,6 +9,7 @@ import { invalidateInventoryProductBalance } from './mysql-inventory-product-bal
 import { normalizeShanghaiDateInput, shanghaiDateKey } from '../shanghai-time.js';
 import { restoreBusinessTaskSession } from './business-task-tenant.js';
 import { oglOfficialDateRange, oglOfficialCreatedAt } from './ogl-official-range.js';
+import { unchangedOglObservation } from './ogl-refresh-events.js';
 export { OGL_DISPATCH_SCHEMA_SQL, ensureOglDispatchSchema, ensureSchema } from './ogl-dispatch-schema.js';
 
 function fail(message, statusCode = 400, code = 'OGL_DISPATCH_INVALID') {
@@ -174,6 +175,14 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     });
   }
   async function event(connection, current, batchId, action, details = {}, memberId = null, why = '') {
+    if (['refresh','official-sync'].includes(action)) {
+      // Callers already hold this enterprise's batch FOR UPDATE, so concurrent
+      // observers cannot both append the same unchanged result. Checks and
+      // fresh timestamps are persisted by the caller even when no event is new.
+      const [previous] = await connection.execute(`SELECT detail_json FROM ogl_dispatch_events
+        WHERE tenant_id = ? AND batch_id = ? AND action = ? ORDER BY id DESC LIMIT 1`, [current.id,batchId,action]);
+      if (unchangedOglObservation(action,previous[0]?.detail_json,details)) return;
+    }
     await connection.execute(`INSERT INTO ogl_dispatch_events (tenant_id,batch_id,member_id,action,reason,detail_json,person_id,created_at)
       VALUES (?,?,?,?,?,?,?,?)`, [current.id,batchId,memberId,action,text(why),JSON.stringify(details),current.personId,timestamp()]);
   }
@@ -988,7 +997,9 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       if(isCancelled||nextStatus==='approved') await connection.execute('DELETE FROM ogl_dispatch_official_locks WHERE tenant_id = ? AND batch_id = ?',[current.id,item.id]);
       else if(item.delivery_method_id) await connection.execute(`INSERT INTO ogl_dispatch_official_locks (tenant_id,default_shop_id,delivery_method_id,batch_id,operation_token)
         VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id)`,[current.id,item.default_shop_id,item.delivery_method_id,item.id,token||randomUUID()]);
-      await event(connection,current,item.id,'official-sync',{carriage_id:String(carriageId),status:nextStatus,extra,missing});
+      await event(connection,current,item.id,'official-sync',{carriage_id:String(carriageId),status:nextStatus,extra,missing,
+        official_state:officialState,containers_count:actualCount,delivery_method_id:methodValue??null,
+        posting_numbers:result.numbers,failed_postings:failed,official_error:errors.join('；')||null});
       return getDetail(connection,current,item.id);
     });
   }

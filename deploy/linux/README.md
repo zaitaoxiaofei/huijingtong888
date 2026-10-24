@@ -59,11 +59,11 @@ sudo systemctl reload nginx
 需要随发布执行身份迁移时，先按 [平台身份与企业成员迁移](../../docs/platform-enterprise-identity-migration.md) 核对清单。每个人必须明确指定平台授权和迁移后保留的全部企业成员关系；部署脚本不会推断人员授权。清单单独上传，不进入发布包。
 
 ```powershell
-npm run deploy:ecs -- -Version 2026.10.21-identity -ReviewedIdentityManifest "C:\安全目录\reviewed-identities.json"
+npm run deploy:ecs -- -Version 2026.10.21-identity -ReviewedIdentityManifest "C:\安全目录\reviewed-identities.json" -AllowServiceInterruption
 ```
 
 ```bash
-npm run deploy:ecs:unix -- --version 2026.10.21-identity --reviewed-identity-manifest /secure/reviewed-identities.json
+npm run deploy:ecs:unix -- --version 2026.10.21-identity --reviewed-identity-manifest /secure/reviewed-identities.json --allow-service-interruption
 ```
 
 执行数据库维护、提供身份清单，或发布包包含始终执行的利润版本 schema 脚本时，远端先使用本机 MySQL root socket 对应用 `DB_NAME` 全库执行 `mysqldump --single-transaction`，包括触发器、事件和存储过程，压缩并校验后才允许数据库初始化或迁移。即使跳过常规数据库维护，利润版本 schema 的准备也必须先完成备份。备份位于 `/opt/ozon-erp/shared/backups/identity-releases/pre-release-<version>-<UTC时间>-<PID>.sql.gz`，新建子目录权限为 `0700`，备份文件为 `0600`；不修改已有备份父目录权限，也不输出数据库密码。
@@ -77,15 +77,43 @@ npm run deploy:ecs:unix -- --version 2026.10.21-identity --reviewed-identity-man
 素材批次的历史归属清单与人员身份清单分别传递，不进入发布包，也不打印清单内容：
 
 ```powershell
-npm run deploy:ecs -- -Version 2026.10.23-reviewed-material -ReviewedAiMaterialManifest "C:\安全目录\reviewed-material.json"
+npm run deploy:ecs -- -Version 2026.10.23-reviewed-material -ReviewedAiMaterialManifest "C:\安全目录\reviewed-material.json" -AllowServiceInterruption
 ```
 
 ```bash
-npm run deploy:ecs:unix -- --version 2026.10.23-reviewed-material --reviewed-ai-material-manifest /secure/reviewed-material.json
+npm run deploy:ecs:unix -- --version 2026.10.23-reviewed-material --reviewed-ai-material-manifest /secure/reviewed-material.json --allow-service-interruption
 ```
 
 清单由素材迁移脚本严格核对批次、全部明细、原操作人、来源和结果草稿、优化任务以及原行摘要。远端第 5 个参数仍为人员身份清单，第 6 个参数为素材清单；没有身份清单时保留空占位。素材清单以随机临时文件名上传，创建时即限制为 `0600`，客户端和远端在成功、失败退出时均尝试删除，日志只记录执行结果。
 
 正式发布先只读检查素材结构和历史归属。未被清单完整覆盖的异常历史会拒绝发布，不能在日常发布中静默隐藏到待核对区；空库可以创建新结构。只有确需素材结构或归属变更时，才要求批次及明细均无等待、运行任务；有任务时直接拒绝本次发布，不取消任务、不自动等待。
 
-需要变更时，已校验的完整备份完成后，脚本短暂停止旧主服务和旧候选进程，再次复核任务和清单后执行素材迁移，然后验证新候选并切换。此步骤防止旧代码在检查后继续写入或调用付费 AI。该次候选的就绪等待限为 45 秒，超时、复查或迁移失败会恢复旧主服务；结构及归属均无需变更时不增加这段停机，保留普通发布的候选预热轮数。代码回滚不等于数据库回滚，原记录继续保留在归属审阅元数据中。已完成历史的原员工后来停用，不会改变仍有完整证据的企业归属；未完成任务仍要求有效操作人。
+普通发布若检查出素材结构／归属需要变更，或提供了人员身份迁移清单，会在备份、数据库变更和停服前拒绝，并保留原服务。只有明确安排维护窗口并传入 `-AllowServiceInterruption`／`--allow-service-interruption` 时，才执行原有停写流程：完整备份校验后停止旧主服务和旧候选，再次复核任务和清单，应用迁移、预热候选后切换。该开关允许维护窗口内中断服务，不是绕过清单、活跃任务检查或迁移鉴权。没有覆盖所有旧写入路径的业务写门禁时，不能让旧进程继续写入来伪装无停机迁移。代码回滚不等于数据库回滚，原记录继续保留在归属审阅元数据中。已完成历史的原员工后来停用，不会改变仍有完整证据的企业归属；未完成任务仍要求有效操作人。
+
+## 候选预热与失败回退
+
+普通兼容发布在主服务运行期间预热候选，完整的就绪和版本检查预算为 360 秒；不再使用上次首次素材迁移的 45 秒冷启动限制。安装、只读预检或候选预热失败时，只清理本次候选，不改 `current` 链接、不重启仍在服务的主进程。候选必须同时通过 `/api/ready` 与发布版本检查，之后才能切换链接和重启主进程。
+
+如果切换之后主进程启动失败，回退旧链接并等待旧版本实际就绪，同时保留已经验证的新候选承接 Nginx 故障转移。即使旧主已就绪，也保留该候选作热备，由下次发布安全替换，避免 Nginx 尚在故障等待期时失去备用进程。旧主未恢复时明确报告回退未就绪并保留候选，不能只凭 `systemctl restart` 返回成功就报告恢复。显式维护仍可能有冷启动停机，360 秒是单个就绪阶段预算，不是停机时长承诺。
+
+2026-10-24 的定向测试执行实际 Bash 发布函数、模拟服务控制与 HTTP 回应，覆盖超过 45 秒的冷启动、预切换失败不重启主服务、切换后旧主恢复、旧主恢复失败保留候选、错误版本和意外退出拒绝，以及默认禁止迁移停写。没有访问 ECS 或对生产执行部署、迁移、重启；生产交付前仍须按正式流程验证。
+
+## 性能索引、冻结内容读取与积分准备
+
+发布会在校验数据库备份后、候选启动前，依次只读检查并应用订单搜索索引、草稿列表索引、冻结内容表及积分五表的增量迁移。即使跳过常规维护，这四项准备也会执行；遇到同名不兼容结构直接拒绝，不自动改写账务或历史业务行。迁移不创建积分账户、不充值、不设置价格，也不自动启用冻结草稿写入。普通发布继续保持 `LISTING_FROZEN_DRAFT_TENANTS` 为空，先让当前及可回滚版本都具备读取能力，后续再按企业试开新 writer。
+
+四个增量 CLI 的独立数据库会话均设 `lock_wait_timeout=5`。订单和草稿索引使用 `ALGORITHM=INPLACE, LOCK=NONE`，不支持时拒绝，不降级为拷表；冻结内容和积分迁移只创建缺少的空表。长事务阻塞元数据锁时约五秒失败并保留原服务，待阻塞解除再重试；该设置不是整个迁移的运行时限，也不能保证在线索引创建完全没有短时锁。
+
+积分结果元数据保存在 `shared/private-ai-results`，发布目录的 `data/ai-credit-results` 只链接这个共享私有目录；也可通过 `AI_CREDIT_RESULT_ROOT` 指定其他受保护的持久目录。不得指向 public/uploads，不把结果数据装入代码包。数据库备份完成后，同批保存 `.ai-results.jsonl.gz` 文件，逐条校验内容及总清单摘要。SQL 与结果文件需要配对保留，不能只恢复钱包数字却丢掉成功结果。
+
+配置的私有结果目录缺失或链接异常时直接拒绝本轮发布，不会静默跳过配对备份。备份/恢复会检查祖先目录链接，恢复先写私有临时文件、同步后原子安装最终文件，避免暴露半写入结果；发生冲突时不覆盖原文件。
+
+定向恢复默认只检查，不写入；显式 `--apply` 也只补缺失文件，相同内容可重放，冲突文件拒绝覆盖。先恢复到独立私有目录并验证，再按数据库恢复点匹配，不能把恢复脚本直接当作线上回滚命令：
+
+```bash
+node scripts/backup-private-ai-results.mjs --inspect --input=/secure/pre-release.ai-results.jsonl.gz
+node scripts/backup-private-ai-results.mjs --restore --input=/secure/pre-release.ai-results.jsonl.gz --root=/secure/ai-results-restore
+node scripts/backup-private-ai-results.mjs --restore --apply --input=/secure/pre-release.ai-results.jsonl.gz --root=/secure/ai-results-restore
+```
+
+文件恢复验证包括损坏/截断、路径穿越、符号链接、重复及超大条目、已有文件冲突和部分写入撤回。此验证覆盖积分结果元数据，不代替整套人工资料与 OSS 媒体恢复验收。

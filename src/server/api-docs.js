@@ -1101,6 +1101,42 @@ const endpoints = [
       responses: [response(200, "application/json", ref("ScheduledJob"))]
     })
   ]),
+  section("AI credits", [
+    endpoint("GET", "/api/ai-credits/wallet", "Read only the current enterprise's AI points account. Current membership and subscription are checked again; no tenant selector is accepted. No-store. Missing schema returns 503 without creating tables.", {
+      auth: "authenticated", responses: [response(200, "application/json", objectOf("Integer point balances.", [
+        field("tenant_id", scalar("integer"), true), field("account_key", scalar("string", "Stable AI account UUID; not an access credential.")),
+        field("status", scalar("string", "active or disabled"), true), field("available_points", scalar("integer"), true), field("frozen_points", scalar("integer"), true)
+      ])), response(403, "application/json", ref("ErrorResponse")), response(503, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/ai-credits/entries", "Cursor-page immutable credit entries for the current enterprise, newest first. limit 1-100 (default 30), before is an entry ID. No-store; no cross-enterprise selector.", {
+      auth: "authenticated", responses: [response(200, "application/json", arrayOf(objectOf("Credit entry.", [
+        field("id", scalar("integer"), true), field("kind", scalar("string"), true), field("available_delta", scalar("integer"), true), field("frozen_delta", scalar("integer"), true),
+        field("available_after", scalar("integer"), true), field("frozen_after", scalar("integer"), true), field("reason", scalar("string"), true)
+      ])))]
+    }),
+    endpoint("GET", "/api/ai-credits/audit", "Compare current enterprise balances with immutable ledger sums under a wallet lock. Does not repair data.", {
+      auth: "authenticated", responses: [response(200, "application/json", objectOf("Reconciliation.", [field("consistent", scalar("boolean"), true)]))]
+    }),
+    endpoint("GET", "/api/ai-credits/tasks/{id}", "Read current-enterprise credit task and immutable quoted price. Requires current membership; no request prompts or provider keys are returned.", {
+      auth: "authenticated", responses: [response(200, "application/json", objectOf("Credit task.", [field("id", scalar("string"), true), field("status", scalar("string"), true), field("charged_points", scalar("integer"), true)])), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/platform/ai-credits/accounts", "Current platform super admin explicitly opens/disables one enterprise AI account. No balance mutation, account auto-enrolment, subscription or membership changes.", {
+      auth: "authenticated", requestBody: body(objectOf("Account state.", [field("tenantId", scalar("integer"), true), field("status", scalar("string", "active or disabled"), true)])),
+      responses: [response(200, "application/json", objectOf("Account state.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/platform/ai-credits/prices", "Current platform super admin adds an immutable capability price version. Positive integer points per successful result; no default prices or RMB conversions. Existing tasks retain their quote.", {
+      auth: "authenticated", requestBody: body(objectOf("Price version.", [field("priceKey", scalar("string"), true), field("version", scalar("integer"), true), field("pointsPerResult", scalar("integer"), true)])),
+      responses: [response(200, "application/json", objectOf("Price version.")), response(403, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/platform/ai-credits/recharges", "Current platform super admin manually credits confirmed payment. reference is unique per enterprise; replay with changed amount/reason is rejected. Balance and entry commit atomically.", {
+      auth: "authenticated", requestBody: body(objectOf("Manual recharge.", [field("tenantId", scalar("integer"), true), field("reference", scalar("string"), true), field("points", scalar("integer"), true), field("reason", scalar("string"), true)])),
+      responses: [response(200, "application/json", objectOf("Account state.")), response(403, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/platform/ai-credits/reconcile", "Current platform super admin settles an unknown/interrupted task only after supplier evidence review. Successful results charge the original price; zero releases the hold. Reason required; success also requires resultReference/resultSha256. Never automatically refunds and resubmits.", {
+      auth: "authenticated", requestBody: body(objectOf("Reviewed result.", [field("tenantId", scalar("integer"), true), field("taskId", scalar("string"), true), field("successfulResults", scalar("integer"), true), field("reason", scalar("string"), true), field("resultReference", scalar("string")), field("resultSha256", scalar("string"))])),
+      responses: [response(200, "application/json", objectOf("Settled task.")), response(403, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
   section("Membership", [
     endpoint("POST", "/api/auth/register", "Register with a password and create one isolated enterprise/owner membership in unactivated state; never joins the default enterprise or grants platform authority. Five attempts per IP per authentication window. Existing site access protection remains in force.", {
       auth: "public", requestBody: body(ref("SelfRegistrationRequest")),
@@ -1359,6 +1395,40 @@ const endpoints = [
         response(200, "application/json", arrayOf(ref("OrderListItem"), "Full order list."), "Returned when paged is not set."),
         response(200, "application/json", ref("OrdersPagedResponse"), "Returned when paged=1 or paged=true.")
       ]
+    }),
+    endpoint("GET", "/api/orders/status-history/summary", "Return current-enterprise order-history diagnostics and versioned business summaries. Stored observation rows are not an order count. Version 2 prevents duplicate observations from weighting coverage, state counts or delivery averages; it does not delete history or enable writer deduplication.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", objectOf("Tenant-scoped history summary. Database COUNT/AVG values inside row arrays may retain the database driver's numeric string representation.", [
+        field("total_history_rows", scalar("number", "Raw count of stored order_status_history observations, including identical snapshots. Never interpret as order count or state-entry count."), true),
+        field("summary_basis", objectOf("Explicit versioned statistical semantics.", [
+          field("version", scalar("number", "Current summary contract version.", { enum: [2] }), true),
+          field("total_history_rows", scalar("string", "Stored observation count.", { enum: ["stored_observations"] }), true),
+          field("customer_coverage", scalar("string", "Each order's latest stored fact contributes once.", { enum: ["latest_order_fact"] }), true),
+          field("by_status", scalar("string", "Distinct orders ever observed in a state/stage, not repeated snapshots or entry events.", { enum: ["distinct_orders_ever_in_state"] }), true),
+          field("slow_regions", scalar("string", "Each order's latest eligible delivery fact contributes once.", { enum: ["latest_eligible_delivery_fact_per_order"] }), true),
+          field("latest_observed_at", scalar("string", "Last stored observation is not proof of latest upstream synchronization.", { enum: ["last_stored_observation_not_sync_freshness"] }), true)
+        ]), true),
+        field("open_orders", scalar("number", "Current enterprise orders whose sync_state is not final."), true),
+        field("customer_coverage", objectOf("Latest stored fact per order; orders without any stored fact are absent.", [
+          field("total", scalar("number", "Orders with a stored fact."), true),
+          field("customer_name_count", scalar("number", "Orders with a customer name in their latest fact."), true),
+          field("region_count", scalar("number", "Orders with a region or city in their latest fact."), true),
+          field("delivery_window_count", scalar("number", "Orders with either delivery-window endpoint in their latest fact."), true)
+        ]), true),
+        field("by_status", arrayOf(objectOf("At most 20 state/stage groups, descending by distinct order count. One order can contribute to several different groups.", [
+          field("status", scalar("string|null", "Observed status.")), field("tracking_stage", scalar("string|null", "Observed stage.")),
+          field("count", scalar("number|string", "Distinct order IDs ever observed in this group."), true),
+          field("latest_observed_at", scalar("string|null", "Last stored observation in this group; not latest sync freshness."))
+        ]), "Distinct orders ever observed in each state/stage."), true),
+        field("slow_regions", arrayOf(objectOf("At most 20 regions, descending by average delivery hours, using each order's latest stored fact with order/delivery times and region or city.", [
+          field("buyer_region", scalar("string|null", "Buyer region.")), field("buyer_city", scalar("string|null", "Buyer city.")),
+          field("order_count", scalar("number|string", "Distinct eligible orders in the region."), true),
+          field("avg_delivery_hours", scalar("number|string|null", "Mean TIMESTAMPDIFF(HOUR) from ordering to delivery, weighted once per order."))
+        ]), "Delivery facts with valid timestamps and region/city; not weighted by observation frequency."), true),
+        field("dedupe", objectOf("Writer configuration only. Global candidates/comparisons/duplicates/skipped/comparisonErrors and daily monitoring are intentionally omitted, not returned as zero or null, because they have no enterprise ownership. Enterprise business counts above remain available.", [
+          field("mode", scalar("string", "Configured writer mode; this read does not change it.", { enum: ["off", "shadow", "enabled"] }), true)
+        ], { additionalProperties: false }), true)
+      ]))]
     }),
     endpoint("GET", "/api/orders/:id", "Return detailed information for a single order.", {
       auth: "authenticated",

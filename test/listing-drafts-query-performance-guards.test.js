@@ -28,13 +28,25 @@ test("draft inbox can explicitly sort by creation time without changing other ca
 });
 
 test("listing drafts avoid unnecessary joins for paged lightweight queries", () => {
-  assert.match(listingDraftsSource, /const fromSqlJoins = \[\s*`LEFT JOIN listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
+  assert.match(listingDraftsSource, /const fromSqlJoins = !paged \|\| !lightweight/);
+  assert.match(listingDraftsSource, /FROM listing_category_templates t_filter\s+WHERE t_filter\.id = d\.template_id AND \$\{relatedTenantScope\("t_filter"\)\} LIMIT 1/);
+  assert.match(listingDraftsSource, /\? \[`LEFT JOIN listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(listingDraftsSource, /if \(!paged \|\| !lightweight\) \{\s*fromSqlJoins\.push\(`LEFT JOIN tenant_members creator_members/);
   assert.match(listingDraftsSource, /fromSqlJoins\.push\("LEFT JOIN people p ON p\.id = d\.created_by_person_id AND creator_members\.person_id = p\.id"\)/);
   assert.doesNotMatch(listingDraftsSource, /GROUP BY draft_id/);
   assert.match(listingDraftsSource, /if \(projectOnly && !includePublished && \(!status \|\| status === "all"\)\)/);
   assert.match(listingDraftsSource, /NOT EXISTS \(SELECT 1 FROM listing_shop_copies c_project_any WHERE c_project_any\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_any"\)\}/);
   assert.match(listingDraftsSource, /EXISTS \(SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible\.draft_id = d\.id AND \$\{relatedTenantScope\("c_project_visible"\)\} AND c_project_visible\.status IN \('prepared', 'blocked'\)\)/);
+});
+
+test("draft page publication counts are aggregated once and ownership predicates retain indexable columns", () => {
+  assert.match(listingDraftsSource, /const tenantScope = tenantId === "admin" \? "\(d\.tenant_id = \? OR d\.tenant_id IS NULL\)" : "d\.tenant_id = \?"/);
+  assert.doesNotMatch(listingDraftsSource, /CONVERT\(COALESCE\(d\.tenant_id/);
+  assert.match(listingDraftsSource, /const publishStats = await all\(`/);
+  assert.match(listingDraftsSource, /WHERE r\.draft_id IN \(\$\{placeholders\}\) AND \$\{relatedTenantScope\("r"\)\} AND r\.status <> 'deleted'/);
+  assert.match(listingDraftsSource, /GROUP BY r\.draft_id/);
+  assert.match(source, /INDEX idx_listing_drafts_tenant_created \(tenant_id, created_at, id\)/);
+  assert.match(source, /INDEX idx_listing_drafts_tenant_creator_created \(tenant_id, created_by_person_id, created_at, id\)/);
 });
 
 test("listing drafts keep status predicates index friendly", () => {

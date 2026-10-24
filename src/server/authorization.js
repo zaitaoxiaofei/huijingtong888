@@ -2,6 +2,7 @@ import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
+import { isAiCreditReadRoute } from "./ai-credit-paths.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -24,6 +25,7 @@ export function authorizeApiRequest(req, parts = []) {
   const method = String(req.method || "GET").toUpperCase();
   const read = ["GET", "HEAD"].includes(method);
   const resource = parts[1];
+  if (resource === "ai-credits") return session.tenant?.id && isAiCreditReadRoute(parts, method) ? { allowed: true } : deny();
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
 

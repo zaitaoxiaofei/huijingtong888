@@ -29953,10 +29953,8 @@ async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["o
 }
 
 async function orderTenantCoverageMysql(scope) {
-  const products = await mysqlQuery(`SELECT id FROM products WHERE ${orderTenantPredicateMysql("products", scope)}`);
-  if (!products.length) return new Map();
   return orderProcurementCoverageMysql({
-    productIds: products.map((row) => Number(row.id)), tenantId: scope.id,
+    tenantId: scope.id,
     includeLegacyTenantNull: scope.defaultTenant, fresh: true
   });
 }
@@ -30678,9 +30676,14 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const logisticsServiceClass = normalizeLogisticsServiceClass(query.logisticsServiceClass || query.logistics_service_class || "all");
   const reuseLogisticsSummary = includeLogisticsOptions || logisticsMethod !== "all" || logisticsCarrier !== "all" || logisticsServiceClass !== "all";
   const carrierOnly = !includeLogisticsOptions && logisticsMethod === "all" && logisticsServiceClass === "all" && logisticsCarrier !== "all";
+  // Row-only searches must not classify every order in the date range before
+  // looking up one posting. The separate counts/options calls retain their
+  // existing range-wide meanings; the normal classifier remains authoritative.
+  const logisticsBase = !includeCounts && !includeLogisticsOptions && String(query.searchQuery || query.search_query || "").trim()
+    ? orderSearchBaseSqlMysql(rawBase, query, tenantScope) : rawBase;
   const logisticsSummaryRows = carrierOnly
-    ? await loadOrderLogisticsCarrierSummaryForBaseMysql(rawBase, tenantId, logisticsCarrier)
-    : reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(rawBase, tenantId) : null;
+    ? await loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
+    : reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null;
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
   const serviceClassIds = filterOrderIdsByLogisticsServiceClassMysql(logisticsSummaryRows || [], logisticsServiceClass);
@@ -30760,12 +30763,54 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   };
 }
 
+function orderSearchBaseSqlMysql(base, query, tenantScope) {
+  const where = [base.where], params = [...base.params];
+  addOrderSearchSqlMysql(where, params, query, tenantScope);
+  return { where: where.join(" AND "), params };
+}
+
 function addOrderSearchSqlMysql(where, params, query, tenantScope = null) {
   const text = String(query.searchQuery || query.search_query || "").trim();
   if (!text) return;
   const like = `%${text.toLowerCase()}%`;
   const type = String(query.searchType || query.search_type || "order");
+  const match = String(query.searchMatch || query.search_match || "contains");
+  if (!["contains", "exact", "prefix"].includes(match)) {
+    throw Object.assign(new Error("订单匹配方式无效，请选择完整单号、前缀或包含匹配"), { statusCode: 400 });
+  }
   if (type === "order") {
+    if (match !== "contains" && tenantScope) {
+      const operator = match === "exact" ? "=" : "LIKE";
+      // Literal prefix matching must not turn user '%'/'_' into wildcards.
+      const value = match === "exact" ? text : `${text.replace(/[!%_]/g, "!$&")}%`;
+      const escape = match === "prefix" ? " ESCAPE '!'" : "";
+      // UNION is deliberately inside a derived table. Each branch can seek its
+      // shop-prefixed key once, instead of an OR forcing a date-range scan.
+      where.push(`o.id IN (SELECT order_search_match.id FROM (
+        SELECT search_order.id FROM shops search_shop
+        STRAIGHT_JOIN orders search_order ON search_order.shop_id = search_shop.id
+        WHERE ${orderTenantPredicateMysql("search_shop", tenantScope)}
+          AND search_order.posting_number ${operator} ?${escape}
+        UNION
+        SELECT parent_order.id FROM shops parent_shop
+        STRAIGHT_JOIN orders parent_order ON parent_order.shop_id = parent_shop.id
+        WHERE ${orderTenantPredicateMysql("parent_shop", tenantScope)}
+          AND parent_order.order_number ${operator} ?${escape}
+      ) order_search_match)`);
+      params.push(value, value);
+      return;
+    }
+    if (match === "exact") {
+      where.push("(o.posting_number = ? OR o.order_number = ?)");
+      params.push(text, text);
+      return;
+    }
+    if (match === "prefix") {
+      const value = `${text.replace(/[!%_]/g, "!$&")}%`;
+      where.push("(o.posting_number LIKE ? ESCAPE '!' OR o.order_number LIKE ? ESCAPE '!')");
+      params.push(value, value);
+      return;
+    }
     where.push("(LOWER(o.posting_number) LIKE ? OR LOWER(COALESCE(o.order_number, '')) LIKE ?)");
     params.push(like, like);
     return;
@@ -33940,6 +33985,11 @@ export async function orderStatusHistorySummaryMysql(tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await orderOwnershipTenantScopeMysql(tenantId);
   const historyScope = `SELECT h.* FROM order_status_history h JOIN orders owned_order ON owned_order.id = h.order_id JOIN shops owned_shop ON owned_shop.id = owned_order.shop_id WHERE ${orderTenantPredicateMysql("owned_shop", scope)}`;
+  // Snapshot frequency is a diagnostic, not an order count or a weight in
+  // delivery averages. These business facts remain equal if identical hourly
+  // observations stop being stored. No existing historical rows are changed.
+  const latestHistoryScope = orderLatestHistoryFactsSqlMysql(scope);
+  const deliveredHistoryScope = orderLatestHistoryFactsSqlMysql(scope, true);
   const total = await mysqlQueryOne(`SELECT COUNT(*) AS count FROM (${historyScope}) scoped_history`);
   const openOrders = await mysqlQueryOne(`SELECT COUNT(*) AS count FROM orders o JOIN shops s ON s.id = o.shop_id WHERE COALESCE(o.sync_state, 'open') != 'final' AND ${orderTenantPredicateMysql("s", scope)}`);
   const customerCoverage = await mysqlQueryOne(`
@@ -33948,10 +33998,10 @@ export async function orderStatusHistorySummaryMysql(tenantId = "admin") {
       SUM(CASE WHEN COALESCE(customer_name, '') != '' THEN 1 ELSE 0 END) AS customer_name_count,
       SUM(CASE WHEN COALESCE(buyer_region, '') != '' OR COALESCE(buyer_city, '') != '' THEN 1 ELSE 0 END) AS region_count,
       SUM(CASE WHEN delivery_date_begin IS NOT NULL OR delivery_date_end IS NOT NULL THEN 1 ELSE 0 END) AS delivery_window_count
-    FROM (${historyScope}) scoped_history
+    FROM (${latestHistoryScope}) scoped_history
   `);
   const byStatus = await mysqlQuery(`
-    SELECT status, tracking_stage, COUNT(*) AS count, MAX(observed_at) AS latest_observed_at
+    SELECT status, tracking_stage, COUNT(DISTINCT order_id) AS count, MAX(observed_at) AS latest_observed_at
     FROM (${historyScope}) scoped_history
     GROUP BY status, tracking_stage
     ORDER BY count DESC
@@ -33960,7 +34010,7 @@ export async function orderStatusHistorySummaryMysql(tenantId = "admin") {
   const slowRegions = await mysqlQuery(`
     SELECT buyer_region, buyer_city, COUNT(DISTINCT order_id) AS order_count,
       AVG(TIMESTAMPDIFF(HOUR, ordered_at, delivered_at)) AS avg_delivery_hours
-    FROM (${historyScope}) scoped_history
+    FROM (${deliveredHistoryScope}) scoped_history
     WHERE ordered_at IS NOT NULL AND delivered_at IS NOT NULL
       AND (COALESCE(buyer_region, '') != '' OR COALESCE(buyer_city, '') != '')
     GROUP BY buyer_region, buyer_city
@@ -33968,10 +34018,18 @@ export async function orderStatusHistorySummaryMysql(tenantId = "admin") {
     ORDER BY avg_delivery_hours DESC
     LIMIT 20
   `);
-  // Daily dedupe metrics have no enterprise ownership; expose them only via platform monitoring.
-  const dedupeDaily = [];
+  // Process-wide dedupe counters and daily metrics have no enterprise ownership.
+  // The enterprise response reports configuration only, never global activity.
   return {
     total_history_rows: Number(total?.count || 0),
+    summary_basis: {
+      version: 2,
+      total_history_rows: "stored_observations",
+      customer_coverage: "latest_order_fact",
+      by_status: "distinct_orders_ever_in_state",
+      slow_regions: "latest_eligible_delivery_fact_per_order",
+      latest_observed_at: "last_stored_observation_not_sync_freshness"
+    },
     open_orders: Number(openOrders?.count || 0),
     customer_coverage: {
       total: Number(customerCoverage?.total || 0),
@@ -33982,11 +34040,23 @@ export async function orderStatusHistorySummaryMysql(tenantId = "admin") {
     by_status: byStatus,
     slow_regions: slowRegions,
     dedupe: {
-      mode: String(config.orderHistoryDedupeMode || "off"),
-      ...orderHistoryDedupeMetricsMysql,
-      daily: dedupeDaily
+      mode: String(config.orderHistoryDedupeMode || "off")
     }
   };
+}
+
+function orderLatestHistoryFactsSqlMysql(scope, deliveredOnly = false) {
+  const eligible = deliveredOnly
+    ? "AND latest_history.ordered_at IS NOT NULL AND latest_history.delivered_at IS NOT NULL AND (COALESCE(latest_history.buyer_region, '') != '' OR COALESCE(latest_history.buyer_city, '') != '')"
+    : "";
+  return `SELECT h.* FROM orders owned_order
+    JOIN shops owned_shop ON owned_shop.id = owned_order.shop_id
+    JOIN order_status_history h ON h.id = (
+      SELECT latest_history.id FROM order_status_history latest_history
+      WHERE latest_history.order_id = owned_order.id ${eligible}
+      ORDER BY latest_history.observed_at DESC, latest_history.id DESC LIMIT 1
+    )
+    WHERE ${orderTenantPredicateMysql("owned_shop", scope)}`;
 }
 
 export async function updateSkuMappingMysql(id, body = {}, tenantId = "admin") {

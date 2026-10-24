@@ -1,0 +1,90 @@
+{
+  "date": "2026-10-24",
+  "status": "implemented_locally_default_off_pending_release_review",
+  "production_changes": false,
+  "ui_changes": false,
+  "incremental_uml": "priority-additions-20261024.puml",
+  "scope": [
+    "Indexable enterprise filters, scoped template-PK lookups for label filtering, full template joins only after overview pagination, publication statistics aggregated once per overview page.",
+    "Two additive indexes for creation-time ordering and operator-filtered creation-time ordering; no business-row changes.",
+    "Native MySQL JSON objects and historical LONGTEXT JSON both parse correctly, preserving manual empty image selections and shop-copy details.",
+    "Optional frozen template payloads with an official category-definition version, private enterprise master version, one-level patch and inline list projections."
+  ],
+  "rollout": {
+    "write_setting": "LISTING_FROZEN_DRAFT_TENANTS",
+    "default": "empty: all writers retain legacy template payloads",
+    "opt_in_format": "comma-separated enterprise storage IDs, for example admin,2",
+    "public_definition_source": "Only whitelisted fields from ozon_category_attributes; not product payloads or caller-provided text.",
+    "private_storage_key": ["tenant_id", "content_kind", "content_hash"],
+    "new_table_migration": "node scripts/migrate-listing-frozen-content.mjs --database=<explicit> --mysql-admin-socket=<explicit>; read-only unless --apply",
+    "list_index_migration": "node scripts/migrate-listing-draft-list-indexes.mjs --database=<explicit> --mysql-admin-socket=<explicit>; read-only unless --apply",
+    "ordering": [
+      "Install and validate the additive schemas.",
+      "Deploy compatible readers to all active primary/candidate instances while the write setting stays empty.",
+      "Verify normal workflows and rollback-reader compatibility, then opt in the internal enterprise explicitly.",
+      "Expand to customer enterprises only after their own workflow acceptance."
+    ],
+    "rollback_constraint": "Turning the write setting off stops creating new references; it does not unfold references already saved. A rollback build must retain compatible readers, or an explicitly reviewed CAS-protected expansion of the affected rows must run before reverting to an older reader.",
+    "readiness": "An invalid enterprise opt-in list, missing required table, non-InnoDB engine, mismatched non-null columns/hash collation, incorrect scoped primary key or any unexpected additional unique key prevents /api/ready from accepting the candidate. Ordinary nonunique indexes remain allowed. Default-off legacy reads permit an absent new table.",
+    "no_gc": "There is no delete/GC operation for frozen versions. Deleting a mutable template or one draft never deletes its immutable version."
+  },
+  "compatibility_boundary": {
+    "changed_field": "listing_drafts.template_payload_json",
+    "unchanged_fields": ["manual_facts_json", "ai_payload_json", "source_images_json"],
+    "inline_projections": [
+      "template/editable/variant images, primary/cover/main image aliases",
+      "images_manually_edited and image_edit_intent for variant image authority",
+      "template/editable/variant price aliases",
+      "variant array length and stable variant identity",
+      "Frozen category name, local template name and category ID for display/search even after the live template changes or is deleted"
+    ],
+    "envelope_format": "The reserved _listing_frozen_content_v1 marker is serialized as the first key in the LONGTEXT envelope. List metadata SQL checks that fixed 30-character prefix, avoiding JSON parsing of large legacy snapshots before choosing the label source.",
+    "full_assembly": [
+      "Draft detail and full development-review rows",
+      "Source draft ownership/snapshot checks and AI fission inheritance",
+      "Publish payload construction, immutable submit snapshots and variant-link CAS",
+      "Template-dependent repair and scoped media/color maintenance",
+      "Enterprise-scoped AI copy-test source loader"
+    ],
+    "legacy_policy": "Unmarked legacy payloads are returned without reading the new table. Missing, foreign, damaged or projection-inconsistent marked versions fail explicitly; they never fall back to mutable templates or historical images.",
+    "remaining_duplication": "This slice does not shrink manual_facts_json or ai_payload_json. Their direct SQL readers and history projections retain the old representation. It does not migrate or clear historical payloads."
+  },
+  "direct_json_consumers": [
+    {"file": "src/services/listing-automation.js", "semantics": "Overview images/prices, source locks, full edit/fission/publish assembly, variant-ID CAS and repair tools."},
+    {"file": "src/services/ai-variant-draft-history-schema.js", "semantics": "Generated ai_variant_source_key from manual/AI source-product paths; unchanged manual/AI fields preserve it."},
+    {"file": "src/services/ai-variant-lab.js", "semantics": "JSON_TABLE of source/job/workflow/image status/target; these determine actual generated-model history, not just planned targets."},
+    {"file": "src/services/asset-variant-engine.js", "semantics": "asset_variant_id import idempotence and matrix draft writers; legacy writes remain readable."},
+    {"file": "src/services/listing-draft-bindings.js", "semantics": "Variant array length for SKU counts; inline arrays preserve this query."},
+    {"file": "src/services/team-tasks.js", "semantics": "Template/editable/manual variant array lengths for task coverage; inline arrays and unchanged manual fields preserve this query."},
+    {"file": "src/server/services/ai/copyFactsContract.js", "semantics": "Full title, description, attributes and template source facts; aiWorkflowService source loader now scopes ownership and assembles frozen rows first."}
+  ],
+  "measurement": {
+    "source": "isolated synthetic MySQL; no production access or real Ozon/AI calls",
+    "draft_count": 6000,
+    "publish_record_count": 36000,
+    "template_payload_bytes_per_seed": 23878,
+    "method": "One warm-up and three measured runs for both old and new SQL; compare medians, IDs, totals and publication statistics. Normalization/media mapping are substitutes, not HTTP/browser latency.",
+    "customer_all_created_ms": {"before": 52.25, "query_only": 43.29, "with_indexes": 27.59},
+    "customer_operator_created_ms": {"before": 48.37, "query_only": 39.60, "with_indexes": 25.64},
+    "customer_category_contains_ms": {"before": 39.25, "query_only": 57.08, "with_indexes": 40.72},
+    "default_all_created_ms": {"before": 39.99, "query_only": 39.01, "with_indexes": 40.09},
+    "default_operator_created_ms": {"before": 40.25, "query_only": 39.20, "with_indexes": 34.72},
+    "limits": "Default-enterprise all-draft queries and category-contains queries did not materially improve; category queries without the new indexes regressed in this fixture. Ship the query/index changes together. These numbers cover local SQL only, not page loading or production/multi-user capacity, and local timings vary.",
+    "frozen_payload_example": {"synthetic_assembled_template_bytes": 1454305, "stored_template_reference_bytes": 685, "excludes": "Private master storage, manual/AI facts, indexes, real production data and media bytes."}
+  },
+  "validation": {
+    "tests": [
+      "test/tenant-listing-draft-list-mysql.test.js",
+      "test/listing-frozen-content-mysql.test.js",
+      "test/tenant-ai-lightweight-save-mysql.test.js",
+      "test/tenant-listing-crud-mysql.test.js",
+      "test/tenant-listing-batch-publish-mysql.test.js",
+      "test/tenant-listing-publish-mysql.test.js",
+      "test/tenant-listing-retry-boundary-mysql.test.js",
+      "test/listing-drafts-query-bindings.test.js",
+      "test/listing-drafts-query-performance-guards.test.js",
+      "Protected listing editor, template-health, media authority and draft-save tests"
+    ],
+    "not_claimed": ["Real Ozon publication", "Paid AI execution", "Production migrations", "Production payload-space savings", "10-30 concurrent users", "Full historical storage conversion"]
+  }
+}

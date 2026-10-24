@@ -10,6 +10,7 @@ param(
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
+  [switch]$AllowServiceInterruption,
   [switch]$DryRun
 )
 
@@ -65,7 +66,8 @@ if ($IdentityFile) {
 }
 $dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
 $dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
-$activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest'"
+$interruptionFlag = if ($AllowServiceInterruption) { "1" } else { "0" }
+$activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest' '$interruptionFlag'"
 
 if ($DryRun) {
   Write-Host "Dry run only."

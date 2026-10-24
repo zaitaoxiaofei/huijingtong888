@@ -36,6 +36,10 @@ import {
 import { normalizeCollectedListingDraft } from "./listing-collected-normalizer.js";
 import { deriveCollectedAttributesFromFacts } from "./listing-collected-attribute-deriver.js";
 import { listingTenantLookup } from "./listing-tenant-scope.js";
+import {
+  LISTING_FROZEN_CONTENT_SCHEMA, assembleListingDraftStoredRow, createListingFrozenReadScope,
+  freezeListingCategoryDefinition, freezeEnterpriseListingMaster, encodeFrozenListingDraftPayload, listingFrozenDraftWriteTenants
+} from "./listing-frozen-content.js";
 import { vehicleCatalogTenantPredicate } from "./ai-vehicle-catalog.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { currentAiTenantSession, needsAiTenantSession, withAiTenantRequestGuard, withAiTenantSession } from "./ai-tenant-context.js";
@@ -5972,6 +5976,34 @@ function compactListingPersistencePayload(value) {
   return compactListingPublishSnapshot(value);
 }
 
+function listingFrozenDraftWritesEnabled(tenantId) {
+  // Opt in only after the reader-compatible release and explicit additive
+  // migration are installed. No UI or duty/enterprise gate changes here.
+  return listingFrozenDraftWriteTenants().includes(String(tenantId));
+}
+
+async function serializeListingDraftTemplate(payload, tenantId, { masterPayload = payload, masterHash = "", query = mysqlQuery } = {}) {
+  const compact = compactListingPersistencePayload(payload || {});
+  if (!listingFrozenDraftWritesEnabled(tenantId)) return JSON.stringify(compact);
+  // The template normalizer supplies empty display labels for omitted fields.
+  // Resolve those once from the owned source, then freeze them with the draft.
+  for (const key of ["category_name", "template_name", "ozon_category_id"]) {
+    if (!String(compact[key] || "").trim() && Object.hasOwn(masterPayload || {}, key)) compact[key] = masterPayload[key];
+  }
+  if (masterHash) return JSON.stringify(await encodeFrozenListingDraftPayload(query, { tenantId, masterHash, payload: compact }));
+  const editable = objectValue(compact.editable_payload || {});
+  const [categoryFromKey,typeFromKey] = String(compact.ozon_category_id || editable.ozon_category_id || editable.category_id || "").split(":").map(Number);
+  const category = await freezeListingCategoryDefinition(query, {
+    descriptionCategoryId: Number(compact.description_category_id || editable.description_category_id || categoryFromKey),
+    typeId: Number(compact.type_id || editable.type_id || typeFromKey)
+  });
+  // Freeze template content, not a SELECT * database row with duplicate *_json
+  // strings, row IDs, timestamps or raw collector provenance.
+  const master = await freezeEnterpriseListingMaster(query, { tenantId, categoryHash: category.hash,
+    payload: compactListingPersistencePayload(normalizeTemplatePayload(masterPayload || payload)) });
+  return JSON.stringify(await encodeFrozenListingDraftPayload(query, { tenantId, masterHash: master.hash, payload: compact }));
+}
+
 function findNonPublishableMediaUrls(urls = []) {
   return uniqueStringValues(normalizeArray(urls)
     .map((item) => String(item || "").trim())
@@ -9508,8 +9540,9 @@ async function preparePublishRecordForSubmit({
 
 async function savePublishVariantLinks({ recordId, draftId, tenantId, shopId, shopPayload, sourceProductId, legacy = false }) {
   if (!Number(draftId)) return;
-  const draft = await row("SELECT template_payload_json, manual_facts_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(draftId), tenantId]);
-  if (!draft) throw new Error(`草稿 ${draftId} 不存在，无法保存变体与线上 SKU 的关联`);
+  const storedDraft = await row("SELECT template_payload_json, manual_facts_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(draftId), tenantId]);
+  if (!storedDraft) throw new Error(`草稿 ${draftId} 不存在，无法保存变体与线上 SKU 的关联`);
+  const draft = await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: storedDraft });
   const templatePayload = parseJson(draft.template_payload_json, {});
   const manualFacts = parseJson(draft.manual_facts_json, {});
   const originalTemplate = JSON.stringify(templatePayload);
@@ -9527,12 +9560,12 @@ async function savePublishVariantLinks({ recordId, draftId, tenantId, shopId, sh
   if (JSON.stringify(templatePayload) !== originalTemplate || JSON.stringify(manualFacts) !== originalFacts) {
     const updated = await run(`UPDATE listing_drafts SET template_payload_json = ?, manual_facts_json = ?
       WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND template_payload_json <=> ? AND manual_facts_json <=> ?`, [
-      JSON.stringify(compactListingPersistencePayload(templatePayload)),
+      await serializeListingDraftTemplate(templatePayload, tenantId, { masterHash: draft.frozen_content_version?.master_hash }),
       JSON.stringify(compactListingPersistencePayload(manualFacts)), Number(draftId), tenantId,
-      draft.template_payload_json, draft.manual_facts_json
+      storedDraft.template_payload_json, storedDraft.manual_facts_json
     ]);
     if (!Number(updated?.affectedRows || 0)) {
-      const latest = await row("SELECT template_payload_json, manual_facts_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(draftId), tenantId]);
+      const latest = await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: await row("SELECT template_payload_json, manual_facts_json FROM listing_drafts WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(draftId), tenantId]) });
       const latestTemplate = parseJson(latest?.template_payload_json, {});
       const latestFacts = parseJson(latest?.manual_facts_json, {});
       ensurePersistedDraftVariantIds(latestTemplate, latestFacts, Number(draftId));
@@ -11387,8 +11420,21 @@ export async function listingDrafts(query = {}, session) {
   const status = String(query.status || "").trim().toLowerCase();
   const tenantId = listingTenantId(session);
   const tenantMemberId = Number(session?.tenant?.id || 0);
-  const tenantScope = "CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(? USING utf8mb4) COLLATE utf8mb4_unicode_ci";
-  const relatedTenantScope = (alias) => `CONVERT(COALESCE(${alias}.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci = CONVERT(COALESCE(d.tenant_id, 'admin') USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+  // Keep ownership on the indexed column. NULL is an explicit legacy default
+  // enterprise case, never a fallback for a customer enterprise.
+  const tenantScope = tenantId === "admin" ? "(d.tenant_id = ? OR d.tenant_id IS NULL)" : "d.tenant_id = ?";
+  const relatedTenantScope = (alias) => tenantId === "admin"
+    ? `(${alias}.tenant_id = 'admin' OR ${alias}.tenant_id IS NULL)`
+    : `${alias}.tenant_id = d.tenant_id COLLATE utf8mb4_unicode_ci`;
+  const draftLabel = (column, fallback = `t.${column}`) => `CASE WHEN LEFT(d.template_payload_json, 30) = '{"_listing_frozen_content_v1":'
+    THEN COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(d.template_payload_json, '$.${column}')), 'null'), '') ELSE ${fallback} END`;
+  const categoryLabel = draftLabel("category_name"), templateLabel = draftLabel("template_name");
+  const draftLabelsSelect = `${categoryLabel} AS category_name, ${templateLabel} AS template_name, ${draftLabel("ozon_category_id")} AS ozon_category_id`;
+  // A dependent PK lookup keeps the page-ID scan in draft order. Joining all
+  // mutable templates here can force a hash join/filesort of large old rows.
+  const filterLabel = (column) => draftLabel(column, `(SELECT t_filter.${column} FROM listing_category_templates t_filter
+    WHERE t_filter.id = d.template_id AND ${relatedTenantScope("t_filter")} LIMIT 1)`);
+  const filterCategoryLabel = filterLabel("category_name"), filterTemplateLabel = filterLabel("template_name");
   const where = ["COALESCE(d.status, '') <> 'deleted'"];
   where.push(tenantScope);
   const params = [tenantId];
@@ -11417,8 +11463,8 @@ export async function listingDrafts(query = {}, session) {
       LOWER(COALESCE(d.vehicle_brand, '')) LIKE ? OR
       LOWER(COALESCE(d.vehicle_model, '')) LIKE ? OR
       CAST(d.id AS CHAR) LIKE ? OR
-      LOWER(COALESCE(t.category_name, '')) LIKE ? OR
-      LOWER(COALESCE(t.template_name, '')) LIKE ?
+      LOWER(COALESCE(${filterCategoryLabel}, '')) LIKE ? OR
+      LOWER(COALESCE(${filterTemplateLabel}, '')) LIKE ?
     )`);
     params.push(...Array(7).fill(`%${keyword}%`));
     countParams.push(...Array(7).fill(`%${keyword}%`));
@@ -11453,12 +11499,12 @@ export async function listingDrafts(query = {}, session) {
     countParams.push(developmentType);
   }
   if (category) {
-    where.push("LOWER(COALESCE(t.category_name, '')) LIKE ?");
+    where.push(`LOWER(COALESCE(${filterCategoryLabel}, '')) LIKE ?`);
     params.push(`%${category}%`);
     countParams.push(`%${category}%`);
   }
   if (categoryPath) {
-    where.push("(t.category_name = ? OR t.category_name LIKE ?)");
+    where.push(`(${filterCategoryLabel} = ? OR ${filterCategoryLabel} LIKE ?)`);
     params.push(categoryPath, `${categoryPath} / %`);
     countParams.push(categoryPath, `${categoryPath} / %`);
   }
@@ -11517,9 +11563,11 @@ export async function listingDrafts(query = {}, session) {
       EXISTS (SELECT 1 FROM listing_shop_copies c_project_visible WHERE c_project_visible.draft_id = d.id AND ${relatedTenantScope("c_project_visible")} AND c_project_visible.status IN ('prepared', 'blocked'))
     )`);
   }
-  const fromSqlJoins = [
-    `LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}`
-  ];
+  // Overview rows join the template after pagination; label filters use scoped
+  // PK lookups instead of changing the page scan's join/sort strategy.
+  const fromSqlJoins = !paged || !lightweight
+    ? [`LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}`]
+    : [];
   if (!paged || !lightweight) {
     fromSqlJoins.push(`LEFT JOIN tenant_members creator_members
       ON creator_members.person_id = d.created_by_person_id
@@ -11587,12 +11635,10 @@ export async function listingDrafts(query = {}, session) {
           ),
           'images', JSON_EXTRACT(d.template_payload_json, '$.images')
         ) AS template_payload_json,
-        t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
+        ${draftLabelsSelect}, p.name AS created_by_name,
         (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")} AND c.status = 'prepared') AS shop_copy_count,
-        (SELECT r.status FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status <> 'deleted' ORDER BY r.updated_at DESC, r.id DESC LIMIT 1) AS publish_status,
-        (SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status <> 'deleted') AS publish_record_count,
-        (SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status IN ('imported', 'published', 'success')) AS publish_success_count,
-        (SELECT COUNT(*) FROM listing_publish_records r WHERE r.draft_id = d.id AND ${relatedTenantScope("r")} AND r.status IN ('failed', 'ozon_status_error')) AS publish_failed_count
+        NULL AS publish_status, 0 AS publish_record_count,
+        0 AS publish_success_count, 0 AS publish_failed_count
       FROM listing_drafts d
       LEFT JOIN listing_category_templates t ON t.id = d.template_id AND ${relatedTenantScope("t")}
       LEFT JOIN tenant_members creator_members
@@ -11603,7 +11649,29 @@ export async function listingDrafts(query = {}, session) {
       WHERE d.id IN (${placeholders}) AND ${tenantScope}
       ORDER BY FIELD(d.id, ${placeholders})
     `, [tenantMemberId, ...pageIds, tenantId, ...pageIds]);
-    const normalizedPageRows = pageRows.map((item) => normalizeDraftRow(item));
+    // Aggregate only this page once instead of revisiting every draft's history
+    // four times. Joining the page drafts retains the exact legacy NULL scope.
+    const publishStats = await all(`
+      SELECT r.draft_id,
+        SUBSTRING_INDEX(GROUP_CONCAT(r.status ORDER BY r.updated_at DESC, r.id DESC), ',', 1) AS publish_status,
+        COUNT(*) AS publish_record_count,
+        SUM(r.status IN ('imported', 'published', 'success')) AS publish_success_count,
+        SUM(r.status IN ('failed', 'ozon_status_error')) AS publish_failed_count
+      FROM listing_publish_records r
+      JOIN listing_drafts d ON d.id = r.draft_id AND ${tenantScope}
+      WHERE r.draft_id IN (${placeholders}) AND ${relatedTenantScope("r")} AND r.status <> 'deleted'
+      GROUP BY r.draft_id
+    `, [tenantId, ...pageIds]);
+    const statsByDraft = new Map(publishStats.map((item) => [Number(item.draft_id), item]));
+    const normalizedPageRows = pageRows.map((item) => {
+      const stats = statsByDraft.get(Number(item.id));
+      return normalizeDraftRow({ ...item, ...(stats ? {
+        publish_status: stats.publish_status,
+        publish_record_count: Number(stats.publish_record_count || 0),
+        publish_success_count: Number(stats.publish_success_count || 0),
+        publish_failed_count: Number(stats.publish_failed_count || 0)
+      } : {}) });
+    });
     if (requestedIds.length && includeReviewSkus) await attachDevelopmentReviewSkus(normalizedPageRows, requestedIds, tenantId);
     return {
       rows: await resolveMappedMediaInValue(normalizedPageRows),
@@ -11659,7 +11727,7 @@ export async function listingDrafts(query = {}, session) {
         JSON_ARRAY() AS draft_template_images_json,
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         NULL AS template_payload_json,
-        t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
+        ${draftLabelsSelect}, p.name AS created_by_name,
         (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count,
         ${requestedIds.length ? "d.source_product_id" : "NULL"} AS source_product_id,
         ${requestedIds.length ? `GREATEST(1, COALESCE(
@@ -11698,7 +11766,7 @@ export async function listingDrafts(query = {}, session) {
         JSON_EXTRACT(d.template_payload_json, '$.editable_payload.images') AS draft_template_images_json,
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         d.template_payload_json,
-        t.category_name, t.template_name, t.ozon_category_id, p.name AS created_by_name,
+        ${draftLabelsSelect}, p.name AS created_by_name,
         (SELECT COUNT(*) FROM listing_shop_copies c WHERE c.draft_id = d.id AND ${relatedTenantScope("c")}) AS shop_copy_count,
         ${requestedIds.length ? "d.source_product_id" : "NULL"} AS source_product_id,
         ${requestedIds.length ? `GREATEST(1, COALESCE(
@@ -11713,7 +11781,10 @@ export async function listingDrafts(query = {}, session) {
       LIMIT ? OFFSET ?
     `;
   const rows = await all(rowsSql, [...fromParams, paged ? pageSize : 100, paged ? offset : 0]);
-  const normalizedRows = await Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item))));
+  const frozenRead = createListingFrozenReadScope(mysqlQuery);
+  const normalizedRows = await Promise.all(rows.map(async (item) => resolveMappedMediaInValue(normalizeDraftRow(
+    await assembleListingDraftStoredRow(frozenRead, { tenantId, row: item })
+  ))));
   if (requestedIds.length && (!lightweight || includeReviewSkus)) await attachDevelopmentReviewSkus(normalizedRows, requestedIds, tenantId);
   if (!paged) return normalizedRows;
   const totalRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams);
@@ -12367,6 +12438,7 @@ export async function createListingDraft(body, session) {
       ai_payload: aiPayload
     }, normalizedTemplate, session);
   ensurePersistedDraftVariantIds(templatePayload, manualFacts);
+  const serializedTemplate = await serializeListingDraftTemplate(templatePayload, tenantId, { masterPayload: normalizedTemplate });
 
   stageStarted = Date.now();
   const id = await insert(`
@@ -12392,7 +12464,7 @@ export async function createListingDraft(body, session) {
     payload.color,
     payload.spec,
     payload.quantity,
-    JSON.stringify(compactListingPersistencePayload(templatePayload || {})),
+    serializedTemplate,
     JSON.stringify(compactListingPersistencePayload(manualFacts)),
     JSON.stringify(compactListingPersistencePayload(aiPayload)),
     personId(session),
@@ -12430,8 +12502,15 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
   if (!payload.product_name) throw new Error("Product name is required");
   const tenantId = listingTenantId(session);
   const template = await row("SELECT * FROM listing_category_templates WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?", [payload.template_id, tenantId]);
-  if (!template) throw new Error("Template not found");
-  const normalizedTemplate = normalizeTemplateRow(template);
+  let frozenFallback = false;
+  if (!template && existing.frozen_content_version && Number(payload.template_id) === Number(existing.template_id)) {
+    const original = await row("SELECT COALESCE(tenant_id, 'admin') AS tenant_id FROM listing_category_templates WHERE id = ?", [payload.template_id]);
+    frozenFallback = !original || original.tenant_id === tenantId;
+  }
+  if (!template && !frozenFallback) throw new Error("Template not found");
+  const normalizedTemplate = existing.frozen_content_version && Number(payload.template_id) === Number(existing.template_id)
+    ? existing.template_payload
+    : template ? normalizeTemplateRow(template) : existing.template_payload;
   const draftEditable = objectValue(payload.template_payload?.editable_payload);
   const manualFacts = sanitizeDraftManualFactsMedia({
     ...(normalizedTemplate.editable_payload || {}),
@@ -12457,6 +12536,8 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
       ai_payload: aiPayload
     }, normalizedTemplate, session);
   ensurePersistedDraftVariantIds(templatePayload, manualFacts, draftId, existing.template_payload?.editable_payload?.variants);
+  const serializedTemplate = await serializeListingDraftTemplate(templatePayload, tenantId, { masterPayload: normalizedTemplate,
+    masterHash: Number(payload.template_id) === Number(existing.template_id) ? existing.frozen_content_version?.master_hash : "" });
   const developmentMeta = resolveDevelopmentMeta({
     ...existing,
     ...payload
@@ -12474,6 +12555,7 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
     existing,
     payload,
     templatePayload,
+    serializedTemplate,
     manualFacts,
     aiPayload,
     developmentMeta,
@@ -12484,7 +12566,7 @@ async function prepareListingDraftUpdate(id, body = {}, session = null) {
 }
 
 async function writeListingDraftUpdate(prepared, execute = mysqlExecute) {
-  const { draftId, tenantId, payload, templatePayload, manualFacts, aiPayload, developmentMeta, sourceProductId, parentDraftId, creationMethod } = prepared;
+  const { draftId, tenantId, payload, serializedTemplate, manualFacts, aiPayload, developmentMeta, sourceProductId, parentDraftId, creationMethod } = prepared;
   await execute(`
     UPDATE listing_drafts
     SET template_id = ?, product_name = ?, internal_code = ?, source_urls_json = ?, source_images_json = ?,
@@ -12508,7 +12590,7 @@ async function writeListingDraftUpdate(prepared, execute = mysqlExecute) {
     payload.color,
     payload.spec,
     payload.quantity,
-    JSON.stringify(compactListingPersistencePayload(templatePayload || {})),
+    serializedTemplate,
     JSON.stringify(compactListingPersistencePayload(manualFacts)),
     JSON.stringify(compactListingPersistencePayload(aiPayload)),
     developmentMeta.development_type,
@@ -12916,7 +12998,8 @@ async function assertAiVariantLightweightReferences(body,session,{connection = n
     if (rows[0].template_id) {
       const savedTemplateId = Number(rows[0].template_id);
       templateIds.push(savedTemplateId);
-      if (normalizeAiVariantSourceTemplateSnapshot({template_payload:parseJson(rows[0].template_payload_json,{})},savedTemplateId)) ownedSourceSnapshots.add(savedTemplateId);
+      const assembled = await assembleListingDraftStoredRow(query, { tenantId, row: rows[0] });
+      if (normalizeAiVariantSourceTemplateSnapshot({template_payload:parseJson(assembled.template_payload_json,{})},savedTemplateId)) ownedSourceSnapshots.add(savedTemplateId);
     }
     if (rows[0].source_product_id) productIds.push(Number(rows[0].source_product_id));
   }
@@ -12991,7 +13074,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
   const cloneSourceDraft = body.clone_source_draft === true || body.cloneSourceDraft === true;
   const tenantId = listingTenantId(session);
   const sourceDraftMediaRow = sourceDraftId
-    ? await row("SELECT * FROM listing_drafts WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?", [sourceDraftId, tenantId])
+    ? await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: await row("SELECT * FROM listing_drafts WHERE id = ? AND status <> 'deleted' AND COALESCE(tenant_id, 'admin') = ?", [sourceDraftId, tenantId]) })
     : null;
   const sourceDraftRow = cloneSourceDraft ? sourceDraftMediaRow : null;
   const useCurrentSourceSnapshot = String(body.ai_optimization?.source || body.aiOptimization?.source || "") === "ai_variant_lab"
@@ -13161,7 +13244,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
       additionalDraftIds:[existing?.id || 0],additionalTemplateIds:[existing?.template_id || 0]});
     if (await listingOfferIdExistsInTenant(offerId,{excludeDraftId:existing?.id || 0,session,connection})) throw aiVariantLightweightSaveError("货号 offer_id 已存在，请重新生成后保存",409);
     stageStarted = Date.now();
-    draftTemplateId = await upsertAiVariantListingDraftTemplate({
+    draftTemplateId = listingFrozenDraftWritesEnabled(tenantId) && templateRow?.id ? Number(templateRow.id) : await upsertAiVariantListingDraftTemplate({
       connection,
       existingTemplateId: existing?.template_id,
       baseTemplate: template,
@@ -13212,6 +13295,10 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
     const parentDraftId = sourceDraftId || Number(sourceDraftMediaRow?.parent_draft_id || 0);
     await assertAiVariantLightweightReferences(body,session,{connection,payload,lock:true,additionalDraftIds:[parentDraftId],additionalProductIds:[sourceProductId]});
     const creationMethod = "ai_fission";
+    const serializedTemplate = await serializeListingDraftTemplate(templatePayload, tenantId, {
+      masterPayload: template, masterHash: sourceDraftMediaRow?.frozen_content_version?.master_hash,
+      query: async (sql,params=[]) => (await connection.query(sql,params))[0]
+    });
     const params = [
       tenantId,
       payload.template_id,
@@ -13228,7 +13315,7 @@ async function createAuthorizedAiVariantListingDraftLightweight(body = {}, sessi
       payload.color,
       payload.spec,
       payload.quantity,
-      JSON.stringify(compactListingPersistencePayload(templatePayload || {})),
+      serializedTemplate,
       JSON.stringify(compactListingPersistencePayload(manualFacts)),
       JSON.stringify(compactListingPersistencePayload(aiPayload)),
       personId(session),
@@ -14157,7 +14244,8 @@ export async function repairAiOptimizationListingMedia(body = {}, session = null
     templates.push({ id: Number(rowItem.id), changed });
   }
   const drafts = [];
-  for (const rowItem of draftRows) {
+  for (const storedRow of draftRows) {
+    const rowItem = await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: storedRow });
     const before = `${rowItem.source_images_json || ""}${rowItem.manual_facts_json || ""}${rowItem.ai_payload_json || ""}${rowItem.template_payload_json || ""}`;
     let payload = await materializeAiOptimizationDraftMedia({
       source_images: parseJson(rowItem.source_images_json, []),
@@ -14431,7 +14519,9 @@ export async function repairListingColorFieldPollution(body = {}, session = null
     LIMIT ?
   `, [...templateParams, limit]);
 
-  const drafts = draftRows.map(buildListingColorPollutionDraftPlan);
+  const drafts = await Promise.all(draftRows.map(async (rowItem) => buildListingColorPollutionDraftPlan(
+    await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: rowItem })
+  )));
   const templates = templateRows.map(buildListingColorPollutionTemplatePlan);
   const changedDrafts = drafts.filter((item) => item.changed);
   const changedTemplates = templates.filter((item) => item.changed);
@@ -14792,13 +14882,16 @@ async function assertDraftAccess(draftId, session, allowTemplateRepair = true) {
     WHERE d.id = ? AND d.status <> 'deleted' AND COALESCE(d.tenant_id, 'admin') = ?
   `, [tenantMemberId, Number(draftId), tenantId]);
   if (!draft) throw new Error("Listing draft not found");
-  const normalized = normalizeDraftRow(draft);
+  const normalized = normalizeDraftRow(await assembleListingDraftStoredRow(mysqlQuery, { tenantId, row: draft }));
   const repaired = allowTemplateRepair && await repairAiVariantDraftTemplateReference(normalized, session);
   if (repaired) return assertDraftAccess(draftId, session, false);
   return normalized;
 }
 
 async function repairAiVariantDraftTemplateReference(draft = {}, session = null) {
+  // Frozen drafts retain their own complete template content even when the
+  // mutable source template is edited or removed; no per-child clone is needed.
+  if (draft.frozen_content_version) return false;
   const source = String(draft.ai_payload?.source || draft.manual_facts?.source || "").toLowerCase();
   if (!source.includes("ai_optimization_v2_lightweight")) return false;
   const templateSourceType = String(draft.template_source_type || "").toLowerCase();
@@ -14947,6 +15040,7 @@ function validateShopCopy(draft, shop, images, tailSummary = null) {
 async function initializeListingAutomationSchema() {
   if (config.dbClient !== "mysql") throw new Error("Listing automation only supports MySQL mode");
   if (mysqlSchemaReady) return;
+    await mysqlExecute(LISTING_FROZEN_CONTENT_SCHEMA);
     await mysqlExecute(`
       CREATE TABLE IF NOT EXISTS listing_category_templates (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -15160,6 +15254,8 @@ async function initializeListingAutomationSchema() {
         INDEX idx_listing_drafts_owner_status (created_by_person_id, status, updated_at),
         INDEX idx_listing_drafts_tenant_status_updated (tenant_id, status, updated_at, id),
         INDEX idx_listing_drafts_tenant_template (tenant_id, template_id, status, updated_at),
+        INDEX idx_listing_drafts_tenant_created (tenant_id, created_at, id),
+        INDEX idx_listing_drafts_tenant_creator_created (tenant_id, created_by_person_id, created_at, id),
         ${AI_VARIANT_SOURCE_INDEX_SQL}
       ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     `);
@@ -22714,6 +22810,9 @@ function objectValue(value) {
 }
 
 function parseJson(value, fallback) {
+  // mysql2 decodes native JSON expressions (JSON_OBJECT/JSON_ARRAYAGG) before
+  // returning them, while historical LONGTEXT JSON arrives as a string.
+  if (value && typeof value === "object" && !ArrayBuffer.isView(value)) return value;
   try {
     return value ? JSON.parse(value) : fallback;
   } catch {

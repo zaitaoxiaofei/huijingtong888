@@ -14,6 +14,7 @@ import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTas
 import { TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA } from "../src/services/ai-tenant-schema.js";
 import { AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA, AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA, verifyAiMaterialOptimizationSchema } from "../src/services/ai-material-optimization-schema.js";
 import { migrateTenantAiMaterialOptimization } from "../scripts/migrate-tenant-ai-material-optimization.mjs";
+import { checkAiCreditProviderBoundary } from "../src/services/ai-credit-provider-context.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const source = file => fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -45,7 +46,7 @@ test("material optimization is enterprise scoped through real SQL, workers and m
       finally { connection.release(); }
     };
     for (const sql of [
-      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL)",
+      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL, feature_flags_json JSON NULL)",
       "CREATE TABLE people (id BIGINT PRIMARY KEY, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'operations', roles_json JSON NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON NULL, PRIMARY KEY(tenant_id, person_id))",
       "CREATE TABLE listing_drafts (id BIGINT PRIMARY KEY AUTO_INCREMENT, tenant_id VARCHAR(64), product_name VARCHAR(80), status VARCHAR(32) DEFAULT 'draft', template_id BIGINT DEFAULT 1, images_json JSON)",
@@ -57,13 +58,14 @@ test("material optimization is enterprise scoped through real SQL, workers and m
       "INSERT INTO ai_image_task_owners VALUES ('private','2',7)",
       "INSERT INTO tenant_ai_limits (tenant_id,monthly_request_limit) VALUES (2,NULL),(3,NULL)"
     ]) await query(sql);
+    await query("UPDATE tenants SET feature_flags_json=JSON_OBJECT('ai_internal_mode_reviewed',JSON_EXTRACT('true','$')) WHERE id IN (2,3)");
     const charges = [], outputs = [];
     let imageHook = null, providerHook = null, fileReads = 0, materializations = 0;
     const context = vm.createContext({ console, process, Buffer, URL, AbortSignal, Date, Number, String, Object, Array, Map, Set, JSON, Math, Promise,
       fs, path, crypto, randomUUID, AsyncLocalStorage, shanghaiDateKey, TENANT_AI_LIMITS_SCHEMA, TENANT_AI_USAGE_SCHEMA,
       AI_MATERIAL_OPTIMIZATION_BATCH_SCHEMA, AI_MATERIAL_OPTIMIZATION_ITEM_SCHEMA, verifyAiMaterialOptimizationSchema,
       config: { appBaseUrl: "http://localhost:8788" }, setTimeout: () => ({ unref() {} }), clearTimeout() {},
-      mysqlQuery: query, mysqlExecute: execute, withMysqlTransaction: transaction,
+      mysqlQuery: query, mysqlExecute: execute, withMysqlTransaction: transaction, checkAiCreditProviderBoundary,
       getMysqlPoolMetrics: () => ({ activeConnections: 0, connectionLimit: 8 }),
       authorizeBusinessTaskSession: (value, customQuery) => authorizeBusinessTaskSession(value, customQuery || query),
       restoreBusinessTaskSession: (tenant, person) => restoreBusinessTaskSession(tenant, person, query),
