@@ -18,6 +18,16 @@ export function planPartialReceipt(record, quantity, expectedQuantity, allowOver
 // This is an operational projection. It never repairs the inventory ledger or
 // creates purchases from a shipping status. All quantities use physical product units.
 export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [], includeTrace = false }) {
+  // All caches live for this calculation only. They do not alter the source
+  // rows, FIFO ordering, batch identity or freshness of another request.
+  const receivedTimes = new WeakMap(), boughtTimes = new WeakMap(), transportTimes = new WeakMap();
+  const timestamp = (cache, row, value) => {
+    if (!cache.has(row)) cache.set(row, new Date(value || 0).getTime());
+    return cache.get(row);
+  };
+  const receivedAt = row => timestamp(receivedTimes, row, row.purchased_at || row.created_at || row.approved_at);
+  const boughtAt = row => timestamp(boughtTimes, row, row.purchased_at || row.created_at);
+  const transportAt = row => timestamp(transportTimes, row, row.transport_at || row.ordered_at);
   const traces = new Map();
   const trace = (detail, batch, quantity, basis, purpose) => {
     if (!includeTrace || quantity <= 0) return;
@@ -32,13 +42,20 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   const pools = new Map(stocks.map(row => [Number(row.product_id), positive(Number(row.ledger || 0) + Number(row.open_deducted || 0) - positive(row.fbp_reserved))]));
   const requestById = new Map(requests.map(row => [Number(row.id), row]));
   const batches = [...inbounds, ...stockSources.map(row => ({ ...row, id: -Number(row.id), status: 'approved', stock_source: true }))].filter(row => ['pending_arrival', 'approved'].includes(row.status)).map(row => ({ ...row, remaining: positive(row.quantity) }));
-  batches.sort((a, b) => new Date(a.purchased_at || a.created_at || a.approved_at || 0) - new Date(b.purchased_at || b.created_at || b.approved_at || 0) || Number(a.id) - Number(b.id));
+  batches.sort((a, b) => receivedAt(a) - receivedAt(b) || Number(a.id) - Number(b.id));
   const batchesByProduct = new Map();
+  const batchByIdentity = new Map(), pendingBatchesByProduct = new Map(), approvedBatchesByProduct = new Map();
+  const batchKey = (id, product) => Number.isNaN(Number(id)) || Number.isNaN(Number(product)) ? null : `${Number(id)}:${Number(product)}`;
   const pendingIncomingByProduct = new Map();
   for (const batch of batches) {
     const id = Number(batch.product_id);
     if (!batchesByProduct.has(id)) batchesByProduct.set(id, []);
     batchesByProduct.get(id).push(batch);
+    const key = batchKey(batch.id, batch.product_id);
+    if (key !== null && !batchByIdentity.has(key)) batchByIdentity.set(key, batch);
+    const byStatus = batch.status === 'approved' ? approvedBatchesByProduct : pendingBatchesByProduct;
+    if (!byStatus.has(id)) byStatus.set(id, []);
+    byStatus.get(id).push(batch);
     if (batch.status === 'pending_arrival') {
       pendingIncomingByProduct.set(id, positive((pendingIncomingByProduct.get(id) || 0) + batch.remaining));
     }
@@ -50,7 +67,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     quantity_needs_review: false, documented_quantity: 0, current_recorded_supply: 0, receipt_claims: [], incoming_sources: [], batches: [] })).sort((a, b) =>
       Number(!!a.needs_fulfillment) - Number(!!b.needs_fulfillment)
       || Number(!!b.needs_fulfillment && b.allocation_priority > 0) - Number(!!a.needs_fulfillment && a.allocation_priority > 0)
-      || (a.entered_transport && b.entered_transport ? new Date(a.transport_at || a.ordered_at || 0) - new Date(b.transport_at || b.ordered_at || 0) : a.sort_time - b.sort_time)
+      || (a.entered_transport && b.entered_transport ? transportAt(a) - transportAt(b) : a.sort_time - b.sort_time)
       || Number(a.order_item_id) - Number(b.order_item_id));
   const byItem = new Map();
   for (const detail of details) {
@@ -61,7 +78,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
   for (const source of sources) {
     const detail = byItem.get(`${source.order_item_id}:${source.product_id}`);
     if (!detail || (!Number(detail.entered_transport) && !Number(detail.needs_fulfillment)) || detail.stock_location === 'FBP') continue;
-    const batch = batches.find(row => Number(row.id) === Number(source.inbound_record_id) && Number(row.product_id) === Number(source.product_id));
+    const batch = batchByIdentity.get(batchKey(source.inbound_record_id, source.product_id));
     if (source.inbound_record_id && (!batch || batch.status !== 'approved')) continue;
     const quantity = Math.min(positive(source.quantity), positive(detail.quantity - detail.documented_quantity), batch ? batch.remaining : Infinity);
     detail.documented_quantity += quantity;
@@ -166,8 +183,8 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       pools.set(productId, positive((pools.get(productId) || 0) - stockQuantity));
       detail.stock_quantity = recordedSupply + stockQuantity;
       needed -= stockQuantity;
-      for (const batch of batchesByProduct.get(productId) || []) {
-        if (batch.status !== 'pending_arrival' || Number(batch.product_id) !== productId || !needed) continue;
+      for (const batch of pendingBatchesByProduct.get(productId) || []) {
+        if (Number(batch.product_id) !== productId || !needed) continue;
         const take = Math.min(needed, batch.remaining);
         if (!take) continue;
         batch.remaining -= take;
@@ -183,13 +200,13 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       let missing = sourceMark?.handling_type === 'no_procurement_needed' ? 0 : positive(detail.quantity - detail.received_quantity - detail.documented_quantity);
       // Older receipts can predate order-allocation records. Allocate their
       // remaining confirmed quantity FIFO as historical source evidence only.
-      for (const batch of batchesByProduct.get(productId) || []) {
-        if (batch.status !== 'approved' || Number(batch.product_id) !== productId || !missing) continue;
+      for (const batch of approvedBatchesByProduct.get(productId) || []) {
+        if (Number(batch.product_id) !== productId || !missing) continue;
         // A later unrelated purchase must not silently erase old source debt.
         // Receipt registration can be late. FIFO is an accounting assignment,
         // not proof of the physical picking batch; explicit links remain first.
-        const receiptTime = new Date(batch.purchased_at || batch.created_at || batch.approved_at || 0).getTime();
-        const cutoff = new Date(detail.transport_at || detail.ordered_at || 0).getTime();
+        const receiptTime = receivedAt(batch);
+        const cutoff = transportAt(detail);
         if (receiptTime && cutoff && receiptTime > cutoff) continue;
         const take = Math.min(missing, batch.remaining);
         batch.remaining -= take;
@@ -199,10 +216,11 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
       }
       detail.missing_record_quantity = missing;
       let receiptGap = positive(missing - detail.incoming_quantity);
-      for (const batch of batchesByProduct.get(productId) || []) {
-        const bought = new Date(batch.purchased_at || batch.created_at || 0).getTime();
-        const cutoff = new Date(detail.transport_at || detail.ordered_at || 0).getTime();
-        if (batch.status !== 'pending_arrival' || !bought || !cutoff || bought > cutoff || !receiptGap) continue;
+      for (const batch of pendingBatchesByProduct.get(productId) || []) {
+        if (!receiptGap) continue;
+        const bought = boughtAt(batch);
+        const cutoff = transportAt(detail);
+        if (!bought || !cutoff || bought > cutoff) continue;
         const take = Math.min(receiptGap, batch.remaining);
         if (!take) continue;
         batch.remaining -= take;

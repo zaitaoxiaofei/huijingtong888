@@ -12,12 +12,12 @@ import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPh
 // Only exact SELECT/EXPLAIN queries pass the execution boundary; no credentials,
 // business rows, names, addresses or raw payloads are emitted in this report.
 const args = process.argv.slice(2), value = name => args.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
-if (args.some(arg => arg !== "--explain" && !/^(?:--database|--mysql-admin-socket|--tenant-id|--date-from|--date-to|--compare-coverage-source)=.+$/.test(arg))) throw Error("Unknown read-only profile argument");
+if (args.some(arg => arg !== "--explain" && !/^(?:--database|--mysql-admin-socket|--tenant-id|--date-from|--date-to|--compare-coverage-source|--compare-algorithm-source)=.+$/.test(arg))) throw Error("Unknown read-only profile argument");
 if (new Set(args.map(arg => arg.split("=")[0])).size !== args.length) throw Error("Duplicate read-only profile argument");
 const database = value("--database"), socketPath = value("--mysql-admin-socket"), tenantId = value("--tenant-id");
 if (!database || !/^[A-Za-z0-9_]+$/.test(database) || !socketPath || !tenantId) throw Error("Explicit database, administrative socket and tenant ID required");
 const pool = mysql.createPool({ database, socketPath, user: "root", connectionLimit: 4, dateStrings: true, timezone: "Z" });
-const report = { mode: "read-only", initialization_performed: false, connection_limit: 4, max_select_ms: 10000, measurements: [] };
+const report = { mode: "read-only", initialization_performed: false, connection_limit: 4, max_select_ms: 10000, measurements: [], assembly: [] };
 const plans = [];
 let snapshot, serial = Promise.resolve(), variant = "baseline";
 const digest = sql => createHash("sha256").update(sql).digest("hex");
@@ -50,17 +50,46 @@ async function executeRead(sql, params, fixedConnection) {
 }
 function coverageHash(coverage) {
   function stable(value) {
-    if (value instanceof Map) return [...value].map(([key, item]) => [key, stable(item)]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    if (Object.prototype.toString.call(value) === "[object Map]") return [...value].map(([key, item]) => [key, stable(item)]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    if (Object.prototype.toString.call(value) === "[object Date]") return value.toJSON();
     if (Array.isArray(value)) return value.map(stable).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
     return value;
   }
   return digest(JSON.stringify({ orders: stable(coverage), properties: stable({ ...coverage }) }));
 }
-function coverageReader(source) {
-  const context = vm.createContext({ calculateOrderProcurementCoverage, transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
+function algorithmReader(source) {
+  if (/^import\s/m.test(source)) throw Error("Pure allocation profile source must not import runtime services");
+  const context = vm.createContext({ Date });
+  vm.runInContext(source.replace(/^export /gm, ""), context);
+  if (typeof context.calculateOrderProcurementCoverage !== "function") throw Error("Pure allocation function missing from profile source");
+  return context.calculateOrderProcurementCoverage;
+}
+function coverageReader(source, algorithm = calculateOrderProcurementCoverage) {
+  let started, inputsReady, prepared, algorithmMs = 0, inputRows;
+  const profileMark = name => { if (name === "inputs") inputsReady = performance.now(); else prepared = performance.now(); };
+  const calculate = input => {
+    inputRows = Object.fromEntries(Object.entries(input).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, value.length]));
+    const before = performance.now();
+    try { return algorithm(input); }
+    finally { algorithmMs += performance.now() - before; }
+  };
+  const context = vm.createContext({ calculateOrderProcurementCoverage: calculate, transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
+    __profileCoveragePhase: profileMark,
     loadFbpReservations: () => { throw Error("Unexpected global FBP access refused by read-only profiler"); } });
-  vm.runInContext(source.replace(/^import[^\n]*\r?\n/gm, "").replace(/^export /gm, ""), context);
+  const code = source.replace(/^import[^\n]*\r?\n/gm, "").replace(/^export /gm, "")
+    .replace("const liveItems =", "__profileCoveragePhase('inputs'); const liveItems =")
+    .replace("const value = calculateOrderProcurementCoverage(", "__profileCoveragePhase('prepared'); const value = calculateOrderProcurementCoverage(");
+  vm.runInContext(code, context);
+  const original = context.loadOrderProcurementCoverage;
+  context.loadOrderProcurementCoverage = async (...args) => {
+    started = performance.now();
+    const result = await original(...args), finished = performance.now();
+    report.assembly.push({ variant, input_rows: inputRows, inputs_ms: +((inputsReady || finished) - started).toFixed(2),
+      prepare_ms: +((prepared || finished) - (inputsReady || finished)).toFixed(2), algorithm_ms: +algorithmMs.toFixed(2),
+      finalize_ms: +(finished - (prepared || finished) - algorithmMs).toFixed(2) });
+    return result;
+  };
   return context;
 }
 function planTables(plan) {
@@ -80,7 +109,8 @@ function boundary(value, next = false) {
   return date.toISOString().slice(0, 19).replace("T", " ");
 }
 try {
-  if (value("--compare-coverage-source")) {
+  const comparing = Boolean(value("--compare-coverage-source") || value("--compare-algorithm-source"));
+  if (comparing) {
     snapshot = await pool.getConnection();
     await snapshot.query("SET SESSION max_execution_time = 10000");
     await snapshot.query("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY");
@@ -90,7 +120,8 @@ try {
   const ownerScope = { id: scope.id, defaultTenant: scope.isDefault };
   const source = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
   const coverageSource = await readFile(new URL("../src/services/mysql-order-procurement-coverage.js", import.meta.url), "utf8");
-  const coverageContext = coverageReader(coverageSource);
+  const algorithmSource = value("--compare-algorithm-source") ? await readFile(new URL("../src/services/order-procurement-coverage.js", import.meta.url), "utf8") : null;
+  const coverageContext = coverageReader(coverageSource, algorithmSource ? algorithmReader(algorithmSource) : calculateOrderProcurementCoverage);
   const names = ["orderTenantPredicateMysql", "orderStatusSqlMysql", "orderPagedOglEvidenceJoinMysql", "orderPagedSqlCountsMysql"];
   const definitions = names.map(name => {
     const match = source.match(new RegExp(`^(?:export )?(?:async )?function ${name}\\([^]*?^}`, "m"));
@@ -110,15 +141,18 @@ try {
   const counted = performance.now(); report.counts = await context.orderPagedSqlCountsMysql(base, coverage, ownerScope);
   report.count_sql_ms = +(performance.now() - counted).toFixed(2);
   report.total_ms = +(performance.now() - started).toFixed(2);
-  if (value("--compare-coverage-source")) {
+  if (comparing) {
     variant = "candidate";
-    const candidate = coverageReader(await readFile(value("--compare-coverage-source"), "utf8"));
+    const candidateSource = value("--compare-coverage-source") ? await readFile(value("--compare-coverage-source"), "utf8") : coverageSource;
+    const candidateAlgorithmSource = value("--compare-algorithm-source") ? await readFile(value("--compare-algorithm-source"), "utf8") : null;
+    const candidate = coverageReader(candidateSource, candidateAlgorithmSource ? algorithmReader(candidateAlgorithmSource) : calculateOrderProcurementCoverage);
     const newer = performance.now(), candidateCoverage = await candidate.loadOrderProcurementCoverage(query, "", { tenantId: scope.id, fresh: true });
     const coverageMs = +(performance.now() - newer).toFixed(2), hash = coverageHash(candidateCoverage);
     const countStart = performance.now(), counts = await context.orderPagedSqlCountsMysql(base, candidateCoverage, ownerScope);
     report.comparison = { baseline_sha256: report.coverage_sha256, candidate_sha256: hash, equal_coverage: hash === report.coverage_sha256,
       candidate_orders: candidateCoverage.size, candidate_coverage_ms: coverageMs, candidate_counts_ms: +(performance.now() - countStart).toFixed(2),
-      equal_counts: JSON.stringify(counts) === JSON.stringify(report.counts) };
+      equal_counts: JSON.stringify(counts) === JSON.stringify(report.counts),
+      ...(algorithmSource ? { baseline_algorithm_sha256: digest(algorithmSource), candidate_algorithm_sha256: digest(candidateAlgorithmSource) } : {}) };
   }
   report.explains = [];
   for (const { sql, params, variant: plannedVariant } of [...plans]) {
