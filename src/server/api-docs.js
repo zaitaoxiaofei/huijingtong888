@@ -1313,6 +1313,36 @@ const endpoints = [
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ExchangeRate"), "Recent exchange-rate rows."))]
     }),
+    endpoint("GET", "/api/exchange-rates/daily-archive", "Platform super administrator audit of immutable public CBR daily reference archives. Database reads only: never fetches external rates, writes archives, changes the legacy exchange-rate table or recalculates orders.", {
+      auth: "platform super administrator",
+      query: [
+        param("from", scalar("string", "Inclusive Beijing business day YYYY-MM-DD; not the CBR source effective day.", { format: "date" }), false),
+        param("to", scalar("string", "Inclusive Beijing business day YYYY-MM-DD; must not precede from.", { format: "date" }), false),
+        param("page", scalar("integer", "Positive page number, default 1."), false),
+        param("pageSize", scalar("integer", "Rows per page, 1-100, default 30."), false)
+      ],
+      responses: [response(200, "application/json", objectOf("Descending Beijing business-day page. Public reference values contain no enterprise orders or profits.", [
+        field("rows", arrayOf(objectOf("Immutable first accepted daily quote.", [
+          field("id", scalar("string", "Archive ID; stable decimal string."), true),
+          field("business_date", scalar("string", "Requested Beijing business day YYYY-MM-DD."), true),
+          field("source_date", scalar("string", "Actual CBR effective day YYYY-MM-DD, never later than business_date."), true),
+          field("currency_from", scalar("string", "CNY."), true), field("currency_to", scalar("string", "RUB."), true),
+          field("rate", scalar("string", "RUB per one CNY, decimal string with 12 fractional places."), true),
+          field("source", scalar("string", "cbr."), true),
+          field("source_nominal", scalar("string", "Source nominal decimal, original precision preserved."), true),
+          field("source_value", scalar("string", "Source RUB quote decimal, original precision preserved."), true),
+          field("source_url", scalar("string", "Official dated XML request URL."), true),
+          field("source_sha256", scalar("string", "SHA-256 of fetched XML text."), true),
+          field("fetched_at", scalar("string", "UTC ISO fetch timestamp; display in Beijing time."), true),
+          field("created_at", scalar("string", "UTC ISO first archive timestamp; display in Beijing time."), true)
+        ]), "Daily quote rows."), true),
+        field("total", scalar("integer", "Matching archive count."), true), field("page", scalar("integer", "Current page."), true),
+        field("pageSize", scalar("integer", "Requested bounded page size."), true),
+        field("from", scalar("string|null", "Inclusive filter or null."), true), field("to", scalar("string|null", "Inclusive filter or null."), true),
+        field("timezone", scalar("string", "Asia/Shanghai."), true), field("currency_from", scalar("string", "CNY."), true),
+        field("currency_to", scalar("string", "RUB."), true), field("source", scalar("string", "cbr."), true)
+      ])), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(503, "application/json", ref("ErrorResponse"), "Daily archive schema missing or incompatible; no fallback or implicit DDL.")]
+    }),
     endpoint("POST", "/api/exchange-rate", "Create a new manual exchange-rate record.", {
       auth: "authenticated",
       requestBody: body(ref("ExchangeRateUpdateRequest")),

@@ -224,7 +224,7 @@ test("profit-save components are deducted once for pre-fulfillment cancellation 
 
 test("profit-save rejects unsupported formulas before touching the profit projection", async () => {
   const fixture = profitSaveFixture();
-  await assert.rejects(fixture.save({ estimated: { formulaVersion: "V2" } }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
+  await assert.rejects(fixture.save({ estimated: { formulaVersion: "V3" } }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
   assert.equal(fixture.queries(), 0);
   assert.deepEqual(fixture.writes, []);
 });

@@ -344,7 +344,7 @@ fi
 # Additive performance/reader/credit schemas are installed before candidate
 # readiness even when broad maintenance is skipped. These scripts do not enrol
 # an enterprise, set a price, opt in a writer or repair/delete legacy rows.
-for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs; do
+for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs; do
   if [[ ! -f "$staging_dir/scripts/$additive_migration" ]]; then continue; fi
   set -a
   source "$env_file"

@@ -2193,6 +2193,22 @@ Return recent exchange-rate history.
 - Responses:
   - `200` `application/json` -> `array<ExchangeRate>`
 
+#### `GET /api/exchange-rates/daily-archive`
+
+Platform super administrator audit of immutable public CBR daily reference archives. Database reads only: never fetches external rates, writes archives, changes the legacy exchange-rate table or recalculates orders.
+
+- Auth: `platform super administrator`
+- Query parameters:
+  - `from` (`string`, optional): Inclusive Beijing business day YYYY-MM-DD; not the CBR source effective day.
+  - `to` (`string`, optional): Inclusive Beijing business day YYYY-MM-DD; must not precede from.
+  - `page` (`integer`, optional): Positive page number, default 1.
+  - `pageSize` (`integer`, optional): Rows per page, 1-100, default 30.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `503` `application/json` -> `ErrorResponse`: Daily archive schema missing or incompatible; no fallback or implicit DDL.
+
 #### `POST /api/exchange-rate`
 
 Create a new manual exchange-rate record.

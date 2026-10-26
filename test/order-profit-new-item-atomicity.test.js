@@ -11,7 +11,7 @@ assert.ok(start > 0 && end > start);
 const createItem = vm.runInNewContext(`(async (deps) => {
   const {retryProfitCalculationTransaction,withMysqlTransaction,profitCalculationDatabase,withVersionedOrderProfitWrite,
     profitEstimateInputs,saveProfitItemMysql,syncOrderItemProfitFromBreakdownMysql,orderId,mapping,item,normalizedItem,
-    product,estimated,settlement,returnLossEstimate,estimatedProfit,posting}=deps;
+    product,estimated,settlement,returnLossEstimate,estimatedProfit,posting,profitFxState,getOrderProfitFxPolicy,readOrderProfitFxState,shop}=deps;
   ${source.slice(start, end)}
   return orderItemId;
 })`);
@@ -28,7 +28,11 @@ function scenario(failures = []) {
       committed = connection.working;
       return result;
     },
-    profitCalculationDatabase: (connection) => ({ execute: async (sql, params) => {
+    profitCalculationDatabase: (connection) => ({ queryOne: async sql => {
+      assert.match(sql, /SELECT id FROM order_items.*FOR UPDATE/);return null;
+    }, query: async sql => {
+      assert.match(sql, /SELECT id FROM orders.*FOR UPDATE/);return [{ id: 10 }];
+    }, execute: async (sql, params) => {
       assert.match(sql, /INSERT INTO order_items/);
       connection.working.items.push({ id: 33, order_id: params[0] });
       return { insertId: 33 };
@@ -45,7 +49,8 @@ function scenario(failures = []) {
     syncOrderItemProfitFromBreakdownMysql: async (id, settlement, connection) => { connection.working.synchronized = true; },
     orderId: 10, mapping: { id: 5 }, item: { ozon_sku: "fixture", quantity: 1, sale_price: 38 },
     normalizedItem: {}, product: { purchase_cost: 10 }, estimated: { commission: 3, freight: 5 },
-    settlement: "pending", returnLossEstimate: 0, estimatedProfit: 20, posting: {}
+    settlement: "pending", returnLossEstimate: 0, estimatedProfit: 20, posting: {}, profitFxState: null,
+    getOrderProfitFxPolicy: async () => null, shop: { tenant_id: 7 }
   };
   return { deps, state: () => committed, attempts: () => attempts };
 }

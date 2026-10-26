@@ -49,10 +49,20 @@ export async function refreshOrderProfitDetailSnapshotsMysqlService(deps, body =
   `, [...params, limit]);
 
   let refreshed = 0;
+  let skipped = 0;
   for (const orderRow of orders) {
     const detail = await deps.orderDetail(Number(orderRow.id));
     if (!detail?.order) continue;
-    const payload = deps.buildPayload(detail.order, detail.items, detail.finance);
+    const dailyFx = String(detail.order.profit_formula_versions || "").split(",").map(value => value.trim()).includes("V2");
+    const payload = dailyFx ? detail.profit_detail_snapshot : deps.buildPayload(detail.order, detail.items, detail.finance);
+    if (!payload) throw new Error("Daily FX profit snapshot requires the verified order detail projection");
+    if (dailyFx && ["sale_amount_cny", "estimated_profit_cny", "estimated_cost_total_cny"].some(key => payload[key] === null
+      || payload[key] === undefined || payload[key] === "" || !Number.isFinite(Number(payload[key])))) {
+      // The live detail keeps unknown estimates explicit. Legacy cache scalar
+      // columns are NOT NULL; do not turn an unknown V2 total into numeric zero.
+      skipped += 1;
+      continue;
+    }
     await deps.execute(`
       INSERT INTO order_profit_detail_snapshots (
         order_id, shop_id, posting_number, order_status, outcome_type, sale_amount_cny,
@@ -107,6 +117,7 @@ export async function refreshOrderProfitDetailSnapshotsMysqlService(deps, body =
     ok: true,
     matched: orders.length,
     refreshed,
+    ...(skipped ? { skipped } : {}),
     from,
     to,
     final_only: Number(body.final_only ?? 1) !== 0,

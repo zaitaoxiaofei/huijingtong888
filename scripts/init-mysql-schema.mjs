@@ -1,5 +1,7 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-calculation-schema.js";
+import { ORDER_PROFIT_DAILY_FX_SCHEMA } from "../src/services/order-profit-daily-fx-schema.js";
+import { ORDER_PROFIT_FX_STATE_SCHEMA } from "../src/services/order-profit-fx-policy.js";
 import { OGL_DISPATCH_SCHEMA_SQL } from "../src/services/ogl-dispatch-schema.js";
 import { TENANT_PRIVATE_FILES_SCHEMA } from "../src/services/tenant-private-files-schema.js";
 import { TENANT_INVENTORY_SALES_REFRESH_SCHEMA } from "../src/services/mysql-inventory-alert-snapshots.js";
@@ -14,6 +16,8 @@ import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-vouche
 
 const mysqlSchemaSql = `
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
+${ORDER_PROFIT_DAILY_FX_SCHEMA};
+${ORDER_PROFIT_FX_STATE_SCHEMA};
 ${OGL_DISPATCH_SCHEMA_SQL.join(";\n")};
 ${TENANT_PRIVATE_FILES_SCHEMA};
 ${TENANT_INVENTORY_SALES_REFRESH_SCHEMA};

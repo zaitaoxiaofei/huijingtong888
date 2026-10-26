@@ -86,10 +86,14 @@ function memoryDatabase() {
 const identity = { tenantId: 7, orderId: 11, orderItemId: 101 };
 const calculation = { ...identity, layer: "estimate", formulaVersion: "V1", inputs: { quantity: 1, sale_price: 100 }, outputs: { net_profit_cny: 30 } };
 
-test("only the defined V1 formula is dispatchable, including finance and aftersale guards", () => {
+test("V1 and daily FX V2 dispatch explicitly while legacy repair refuses V2", () => {
   assert.equal(getProfitFormula("V1").version, "V1");
   assert.equal(assertProfitFormulaSupported("V1", { operation: "finance" }), "V1");
-  for (const version of ["V2", "V3", "latest", "", null]) {
+  assert.equal(getProfitFormula("V2").version, "V2");
+  assert.equal(assertProfitFormulaSupported("V2", { operation: "finance" }), "V2");
+  assert.equal(assertProfitFormulaSupported("V2", { operation: "aftersale" }), "V2");
+  assert.throws(() => assertProfitFormulaSupported("V2", { operation: "historical_repair" }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
+  for (const version of ["V3", "latest", "", null]) {
     assert.throws(() => getProfitFormula(version), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
     assert.throws(() => assertProfitFormulaSupported(version, { operation: "aftersale" }));
   }
@@ -203,7 +207,8 @@ test("baseline saves exact existing monetary and lock values without inventing h
 
 test("unsupported pinned versions fail before projection, and a projection failure rolls back revision and pointer", async () => {
   const db = memoryDatabase();
-  await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V2", project: () => assert.fail("must not project") })), /Unsupported profit formula/);
+  await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V3", project: () => assert.fail("must not project") })), /Unsupported profit formula/);
+  await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V2", project: () => assert.fail("must not upgrade") })), /explicit supported version migration/);
   assert.equal(db.revisions().length, 0);
   await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, project: async ({ connection }) => {
     assert.equal(connection, db.connection); throw new Error("projection rejected");
@@ -218,7 +223,7 @@ test("lookup requires ownership and never falls back from a corrupt existing pin
   await assert.rejects(getPinnedProfitFormulaVersion({ query }, 101), /ownership/);
   assert.equal(await getPinnedProfitFormulaVersion({ query, tenantId: 7 }, 101), "V1");
   await db.transaction((connection) => recordOrderProfitCalculation(connection, calculation));
-  db.states().get("7:101").formula_version = "V2";
+  db.states().get("7:101").formula_version = "V3";
   await assert.rejects(getPinnedProfitFormulaVersion({ query, tenantId: 7 }, 101), /Unsupported profit formula/);
   assert.equal(await getPinnedProfitFormulaVersion({ query, tenantId: 8 }, 101), "V1");
   assert.equal(profitCalculationTenantKey(null), "admin");

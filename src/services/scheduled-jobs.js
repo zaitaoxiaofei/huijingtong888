@@ -875,7 +875,8 @@ async function finishRunSuccess(job, runId, resultPayload = {}) {
 
 async function finishRunFailure(job, runId, error) {
   const now = new Date();
-  const retryMinutes = Math.min(60, Math.max(5, Number(job.interval_minutes || 60) / 4));
+  const retryMinutes = job.job_key === "order_profit_daily_fx_archive"
+    ? 15 : Math.min(60, Math.max(5, Number(job.interval_minutes || 60) / 4));
   const errorMessage = compactError(error);
   await withMysqlTransaction(async (connection) => {
     await connection.execute(`
