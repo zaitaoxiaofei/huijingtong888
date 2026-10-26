@@ -26,6 +26,7 @@ import {
 import { apiClient } from "../utils/api";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { shanghaiDateKey } from "../utils/shanghai-date.js";
+import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -1283,6 +1284,7 @@ onBeforeUnmount(() => {
               </div>
             </article>
           </el-tooltip>
+          <DailyExchangeRateCard />
         </div>
 
         <div class="hero-core-grid month-core-grid compact-month-grid">
@@ -2140,7 +2142,7 @@ button {
 }
 
 .today-core-grid {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
 }
 
 .today-core-grid .ai-usage-card strong { color: var(--dashboard-theme-primary, #7c3aed) !important; }

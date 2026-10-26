@@ -11,6 +11,7 @@ import { resolveUploadSubdirRoots } from "./runtime-uploads.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
 import { listOrderProfitDailyFx } from "./services/order-profit-daily-fx.js";
+import { createExchangeRateToolRoutes } from "./server/routes/exchangeRateTool.js";
 import { ORDER_PROFIT_DAILY_FX_JOB, runOrderProfitDailyFxArchive } from "./services/order-profit-daily-fx-job.js";
 import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
@@ -390,6 +391,7 @@ const routes = {
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
   "GET /api/exchange-rates/daily-archive": (req) => listOrderProfitDailyFx(orderProfitDailyFxDb, req.query || {}),
+  ...createExchangeRateToolRoutes({ db: orderProfitDailyFxDb }),
   "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),

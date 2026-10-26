@@ -19,6 +19,7 @@ const TENANT_SCOPED_SAFE_PATHS = new Set([
 ]);
 
 const SHARED_PRICING_READ_PATHS = new Set([
+  "exchange-rates/tool", "exchange-rates/tool/today",
   "tools/pricing/reference-rate",
   "tools/pricing/rfbs-marketplace",
   "tools/pricing/logistics-rules",

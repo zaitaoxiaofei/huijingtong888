@@ -44,7 +44,7 @@ function fixture(t, user = { id: 10, roles: ["operator"], tenant: { id: 1, slug:
   const context = vm.createContext({
     window, AbortController, DOMException,
     CustomEvent: class { constructor(type) { this.type = type; } },
-    ref, computed, watch, authStore, canAccessPage,
+    ref, computed, watch, authStore, canAccessPage, activationDialogVisible: ref(false),
     onMounted: callback => hooks.mounted.push(callback),
     onBeforeUnmount: callback => hooks.beforeUnmount.push(callback),
     syncMobileViewport: noop, handleGlobalPointerDown: noop, handleWindowBlur: noop,
@@ -112,6 +112,21 @@ test("changing the active enterprise closes and unmounts tools without waiting f
   assert.notEqual(f.tools.quickToolScope.value, key);
   f.tools.openQuickTool("profit");
   assert.equal(f.tools.quickToolsVisible.value, true);
+});
+
+test("the shared exchange tool opens without a new tab and clears synchronously on enterprise or token switch", t => {
+  const f = fixture(t);
+  f.mount();
+  f.tools.openQuickTool("exchange");
+  assert.equal(f.tools.quickToolsVisible.value, true);
+  assert.equal(f.tools.quickToolsMounted.value, true);
+  f.api.setAuthToken("exchange-new-token");
+  assertClosed(f.tools);
+  f.tools.openQuickTool("exchange");
+  f.authStore.user.tenant = { id: 20, slug: "customer-b", role: "member" };
+  assertClosed(f.tools);
+  f.tools.openQuickTool("not-a-tool");
+  assertClosed(f.tools);
 });
 
 test("removing tool permissions closes mounted tools and prevents either opener", t => {

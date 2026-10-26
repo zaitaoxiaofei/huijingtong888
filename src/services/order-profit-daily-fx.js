@@ -53,12 +53,27 @@ function sourceUrl(day) {
   const [year, month, date] = checkedDay(day).split("-");
   return `${ORDER_PROFIT_DAILY_FX_SOURCE_URL}?date_req=${date}/${month}/${year}`;
 }
+function officialSourceUrl(value, businessDate, sourceDate) {
+  if (value === sourceUrl(businessDate)) return true;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname !== "www.cbr.ru" || url.port || url.username || url.password || url.hash
+      || url.pathname !== "/scripts/XML_dynamic.asp" || url.searchParams.size !== 3
+      || url.searchParams.get("VAL_NM_RQ") !== "R01375") return false;
+    const parse = key => {
+      const match = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(url.searchParams.get(key) || "");
+      return match ? checkedDay(`${match[3]}-${match[2]}-${match[1]}`) : null;
+    };
+    const from = parse("date_req1"), to = parse("date_req2");
+    return Boolean(from && to && from <= sourceDate && sourceDate <= businessDate && businessDate <= to);
+  } catch { return false; }
+}
 function validateQuote(value) {
   const businessDate = checkedDay(String(value.business_date || "")), sourceDate = checkedDay(String(value.source_date || ""));
   const nominal = decimal(value.source_nominal), quoted = decimal(value.source_value), rate = divided(quoted, nominal);
   const fetchedAt = utcIso(value.fetched_at);
   if (value.currency_from !== "CNY" || value.currency_to !== "RUB" || value.source !== ORDER_PROFIT_DAILY_FX_SOURCE
-    || sourceDate > businessDate || orderProfitFxBusinessDate(new Date(fetchedAt)) < businessDate || value.source_url !== sourceUrl(businessDate)
+    || sourceDate > businessDate || orderProfitFxBusinessDate(new Date(fetchedAt)) < businessDate || !officialSourceUrl(value.source_url, businessDate, sourceDate)
     || !/^[a-f0-9]{64}$/.test(String(value.source_sha256 || "")) || decimal(value.rate).scaled !== decimal(rate).scaled) {
     throw fail("ORDER_PROFIT_DAILY_FX_VALUE_INVALID", "每日汇率的币种、来源、生效日期或原始数值不一致");
   }

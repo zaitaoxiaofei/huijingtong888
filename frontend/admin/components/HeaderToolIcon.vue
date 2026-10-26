@@ -7,6 +7,9 @@ defineProps({ name: { type: String, required: true } });
     <g v-if="name === 'calculator'">
       <rect x="4" y="2" width="16" height="20" rx="3" /><path d="M7 6h10v4H7zM8 14h1m6 0h1m-8 4h1m6 0h1" />
     </g>
+    <g v-else-if="name === 'exchange'">
+      <path d="M3 7h17l-4-4M21 17H4l4 4M7 11l3 3 3-3m-3 3v4m-3-2h6" />
+    </g>
     <g v-else-if="name === 'profit'">
       <path d="M3 20V5m0 15h18M7 15l5-5 4 3 5-7m-5 0h5v5" />
     </g>

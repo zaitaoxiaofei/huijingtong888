@@ -37,6 +37,7 @@ export function authorizeApiRequest(req, parts = []) {
 
   if (read && ["system/info", "system/update-status"].includes(path)) return { allowed: true };
   if (method === "GET" && path === "system/events" && session.tenant?.id && session.tenant?.slug) return { allowed: true };
+  if (method === "GET" && ["exchange-rates/tool", "exchange-rates/tool/today"].includes(path)) return { allowed: true };
   if (method === "GET" && ['settings/packaging-fee-rule', 'exchange-rate/current', 'exchange-rates', 'stock-warehouse-rules', 'order-cancellation-rules'].includes(path)) return require('inventory.read');
   if (method === "GET" && resource === "logistics-rules" && parts.length === 2 && session.tenant?.id && session.tenant?.slug) return { allowed: true };
   const businessAiConsumption = ["ai-provider/chat", "ai-provider/stream"].includes(path);
