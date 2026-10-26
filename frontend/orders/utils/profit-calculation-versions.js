@@ -63,3 +63,61 @@ export function calculationSnapshotRows(snapshot = {}, formatTime = (value) => v
   visit(snapshot);
   return rows;
 }
+
+export function dailyFxEvidenceRows(fx, formatDate = (value) => value) {
+  if (!fx) return [];
+  const reference = snapshot => snapshot
+    ? `1 CNY = ${snapshot.rate} RUB · ${snapshot.source === "cbr" ? "俄罗斯央行（CBR）" : snapshot.source || "来源未记录"} · 存档 #${snapshot.id}` : "等待补取，未使用固定汇率";
+  return [
+    { label: "下单业务日（北京）", value: fx.ordered_business_date ? formatDate(fx.ordered_business_date) : "未记录" },
+    { label: "下单日预估汇率", value: reference(fx.orderFx) },
+    { label: "下单汇率来源生效日", value: fx.orderFx?.source_date ? formatDate(fx.orderFx.source_date) : "待补取" },
+    { label: "签收业务日（北京）", value: fx.signed_business_date ? formatDate(fx.signed_business_date) : "尚未签收" },
+    { label: "签收日冻结汇率", value: fx.signedFx ? reference(fx.signedFx) : fx.signed_business_date ? "等待补取，尚未冻结" : "签收后冻结" },
+    { label: "签收汇率来源生效日", value: fx.signedFx?.source_date ? formatDate(fx.signedFx.source_date) : "尚未冻结" }
+  ];
+}
+
+export function dailyFxPendingText(fx) {
+  if (!fx) return "";
+  const errorLabels = {
+    ORDER_PROFIT_ORDER_FX_PENDING: "等待补取下单日汇率，预估利润尚未完成。",
+    ORDER_PROFIT_SIGNED_FX_PENDING: "等待补取签收日汇率，真实利润尚未结算。",
+    ORDER_PROFIT_FINANCE_PENDING: "等待完整结算账单，真实利润尚未结算。",
+    ORDER_PROFIT_FINAL_BILL_INCOMPLETE: "采购成本或完整结算费用尚未齐全，真实利润尚未结算。",
+    ORDER_PROFIT_INITIAL_ESTIMATE_PENDING: "原始预估利润尚未完成，暂不生成汇差比较。",
+    ORDER_PROFIT_TERMINAL_STATUS_PENDING: "订单尚未签收或结束，当前仍采用预估利润。",
+    FX_FINANCE_CURRENCY_UNKNOWN: "账单币种尚未明确，请管理员核对原始账单；真实利润尚未结算。",
+    FX_FINANCE_CURRENCY_CONFLICT: "账单币种记录不一致，请管理员核对原始账单；真实利润尚未结算。",
+    FX_FINANCE_CURRENCY_UNSUPPORTED: "账单币种尚不支持当前汇率规则，请管理员核对；真实利润尚未结算。",
+    FX_FINANCE_AMOUNT_INVALID: "账单原币金额无效，请管理员核对原始账单；真实利润尚未结算。",
+    FX_FINANCE_NORMALIZATION_PENDING: "Ozon 新账单存在未识别费用或金额尚未对齐，请管理员核对原始账单；真实利润暂不结算。",
+    FX_FINANCE_PARENT_WEIGHT_UNKNOWN: "拆单分摊依据尚未齐全，请管理员核对原订单售价及币种。"
+  };
+  if (errorLabels[fx.last_error_code]) return errorLabels[fx.last_error_code];
+  if (fx.state === "ready" && !fx.last_error_code) return "";
+  const labels = {
+    awaiting_order_rate: "等待补取下单日汇率，预估利润尚未完成。",
+    awaiting_signed_rate: "等待补取签收日汇率，真实利润尚未结算。",
+    awaiting_sale_currency: "等待核对订单售价及原币币种，预估利润尚未完成。",
+    awaiting_finance: "等待完整结算账单，真实利润尚未结算。",
+    awaiting_finance_currency: "等待核对账单原币币种，真实利润尚未结算。"
+  };
+  return labels[fx.state] || `等待核对每日汇率计算状态（${fx.last_error_code || fx.state || "未记录"}）。`;
+}
+
+export function fxAttributionRows(revision = {}) {
+  if (revision.layer !== "actual" || ![revision.outputs?.profit_status, revision.outputs?.settlement_state].includes("accrued")) return [];
+  const values = revision.inputs?.fx_attribution;
+  if (!values || typeof values !== "object") return [];
+  return [
+    ["initial_estimated_profit_cny", "原始预估利润"],
+    ["actual_profit_at_order_rate_cny", "实际业务按下单汇率折算利润"],
+    ["actual_profit_at_signed_rate_cny", "签收汇率真实利润"],
+    ["fx_gain_loss_cny", "汇率波动损益"],
+    ["business_variance_cny", "业务变化差额"],
+    ["rounding_difference_cny", "舍入差额"],
+    ["total_variance_cny", "真实与原始预估总差额"]
+  ].filter(([key]) => values[key] !== null && values[key] !== undefined && values[key] !== "" && Number.isFinite(Number(values[key])))
+    .map(([key, label]) => ({ label, value: `CNY ${Number(values[key]).toFixed(2)}` }));
+}

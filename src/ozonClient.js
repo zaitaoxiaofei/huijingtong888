@@ -1,3 +1,7 @@
+import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
+import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
+import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
+
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const OZON_REQUEST_TIMEOUT_MS = 45000;
@@ -1044,6 +1048,12 @@ export async function fetchOzonFinanceTransactions(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) {
     return { operations: [], fetched: 0, requests: 0 };
   }
+  if (options.source === "daily_accrual") {
+    const result = await fetchOzonDailyAccruals(shop, { from: options.from, to: options.to,
+      signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
+      request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions) });
+    return { ...result, operations: result.accruals };
+  }
   const from = normalizeIsoStart(options.from, 30);
   const to = normalizeIsoEnd(options.to, new Date());
   const pageSize = Math.min(Math.max(Number(options.pageSize || 1000), 1), 1000);
@@ -1061,7 +1071,7 @@ export async function fetchOzonFinanceTransactions(shop, options = {}) {
       },
       page,
       page_size: pageSize
-    }, { signal: options.signal });
+    }, { signal: options.signal, beforeRequest: options.beforeRequest });
     requests += 1;
     const result = data.result || {};
     const batch = result.operations || result.items || [];
@@ -1347,7 +1357,7 @@ async function ozonRequest(shop, path, payload, options = {}) {
     } catch (error) {
       if (options.signal?.aborted) throwIfAborted(options.signal);
       lastError = error;
-      if ((path === FBS_LIST_PATH || path === FBP_LIST_PATH) && isOzonRateLimitError(error)) break;
+      if ((path === FBS_LIST_PATH || path === FBP_LIST_PATH || path.startsWith("/v1/finance/accrual/")) && isOzonRateLimitError(error)) break;
       if (!isRetryableOzonError(error) || attempt >= OZON_REQUEST_RETRIES) break;
       await sleep(Math.max(400 * (attempt + 1), Number(error.retryAfterMs || 0)));
     }
@@ -1858,7 +1868,8 @@ function normalizeOzonPosting(item) {
     logistics_status: status,
     tracking_stage: item.substatus || status,
     ordered_at: item.in_process_at || item.created_at || item.shipment_date || new Date().toISOString(),
-    delivered_at: item.delivered_at || null,
+    delivered_at: item.delivered_at || item.fact_delivery_date || null,
+    ordered_at_verified: Boolean(item.in_process_at || item.created_at),
     buyer_region: item.analytics_data?.region || item.analytics_data?.city || "",
     tracking_number: item.tracking_number || "",
     external_tracking_url: item.external_tracking_url || "",
@@ -1870,6 +1881,9 @@ function normalizeOzonPosting(item) {
     raw: item,
     items: products.map((product, index) => {
       const financialProduct = financialProducts[index] || {};
+      const sellerPriceSource = product.price ? product : product.financial_data?.price ? product.financial_data
+        : product.price === 0 ? product : product.financial_data?.price === 0 ? product.financial_data : null;
+      const sellerMoney = resolveOzonSellerMoney(sellerPriceSource, sellerPriceSource === product ? "posting.products" : "posting.products.financial_data");
       const images = productImages(product);
       const primaryImage = imageUrl(
         product.image_url
@@ -1888,6 +1902,9 @@ function normalizeOzonPosting(item) {
         name: product.name || product.product_name || "",
         quantity: Number(product.quantity || 1),
         sale_price: numberFromOzon(product.price || product.financial_data?.price || 0),
+        sale_price_verified: sellerMoney.verified,
+        sale_currency: sellerMoney.currency,
+        sale_currency_source: sellerMoney.source,
         image_url: primaryImage
       };
     })
@@ -1904,7 +1921,8 @@ function normalizeOzonFbpPosting(item = {}) {
     delivery_method: { ...deliveryMethod, name: methodName ? (/\bfbp\b/i.test(methodName) ? methodName : `${methodName} FBP`) : "FBP" }
   };
   const posting = normalizeOzonPosting(raw);
-  return { ...posting, fulfillment_schema: "FBP", ordered_at: item.in_process_at || item.order_date || posting.ordered_at };
+  return { ...posting, fulfillment_schema: "FBP", ordered_at: item.in_process_at || item.order_date || posting.ordered_at,
+    ordered_at_verified: Boolean(item.in_process_at || item.order_date || item.created_at) };
 }
 
 function nullableNumber(value) {

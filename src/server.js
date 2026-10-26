@@ -10,6 +10,8 @@ import { config } from "./config.js";
 import { resolveUploadSubdirRoots } from "./runtime-uploads.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
+import { listOrderProfitDailyFx } from "./services/order-profit-daily-fx.js";
+import { ORDER_PROFIT_DAILY_FX_JOB, runOrderProfitDailyFxArchive } from "./services/order-profit-daily-fx-job.js";
 import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
@@ -113,6 +115,7 @@ import { archiveTenantMysql, createTenantMysql, createTenantPlanMysql, issueTena
 const services = { ...mysqlRuntimeServices, ...systemNotificationServices,
   enterprisePeople: listEnterprisePeopleMysql, createEnterprisePerson: createEnterprisePersonMysql,
   updateEnterprisePerson: updateEnterprisePersonMysql, platformAccounts: listPlatformAccountsMysql, tenantMembers: tenantMembersMysql };
+const orderProfitDailyFxDb = { query: mysqlQuery };
 const oglDispatch = createOglDispatchService({
   transaction: withMysqlTransaction,
   api: oglCarriageClient,
@@ -386,6 +389,7 @@ const routes = {
   "POST /api/scheduled-jobs/config": async (req) => updateScheduledJobConfig(await readJson(req)),
   "GET /api/exchange-rate/current": () => services.currentExchangeRate(),
   "GET /api/exchange-rates": () => services.exchangeRates(),
+  "GET /api/exchange-rates/daily-archive": (req) => listOrderProfitDailyFx(orderProfitDailyFxDb, req.query || {}),
   "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),
@@ -594,6 +598,7 @@ setInterval(() => {
 const BACKGROUND_TASK_FOREGROUND_IDLE_MS = Math.max(0, Number(config.backgroundTaskForegroundIdleSeconds || 20)) * 1000;
 const BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS = Math.max(0, Number(config.backgroundCriticalJobMaxDeferralSeconds || 300)) * 1000;
 const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
+  "order_profit_daily_fx_archive",
   "ogl_official_monitor",
   "customer_message_dispatch",
   "order_status_sync",
@@ -606,6 +611,7 @@ const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
   "historical_finance_profit_repair"
 ]);
 let oglMonitorFirstDueAt = 0;
+let dailyFxArchiveFirstDueAt = 0;
 
 function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
   if (!FOREGROUND_DEFERRAL_BOUNDED_JOBS.has(String(jobKey || ""))) return false;
@@ -631,6 +637,10 @@ function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
     // this monitor's first due time until it actually obtains its own lane.
     if (!oglMonitorFirstDueAt) oglMonitorFirstDueAt = plannedFor.getTime();
     return Date.now() - oglMonitorFirstDueAt >= maxDeferralMs;
+  }
+  if (jobKey === "order_profit_daily_fx_archive") {
+    if (!dailyFxArchiveFirstDueAt) dailyFxArchiveFirstDueAt = plannedFor.getTime();
+    return Date.now() - dailyFxArchiveFirstDueAt >= maxDeferralMs;
   }
   return Date.now() - plannedFor.getTime() >= maxDeferralMs;
 }
@@ -669,6 +679,7 @@ const BACKGROUND_OZON_STOCK_SYNC_INITIAL_DELAY_MS = Math.max(0, Number(config.ba
 const OZON_ACTION_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 const scheduledJobDefinitions = [
+  ORDER_PROFIT_DAILY_FX_JOB,
   {
     key: "operational_notifications",
     name: "业务通知生成",
@@ -1003,6 +1014,10 @@ const scheduledJobDefinitions = [
 ];
 
 const scheduledJobHandlers = {
+  order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
+    dailyFxArchiveFirstDueAt = 0;
+    return runOrderProfitDailyFxArchive(orderProfitDailyFxDb);
+  }),
   operational_notifications: withForegroundApiDeferral("operational_notifications", () => runTenantScheduledWork(tenantId => services.generateOperationalNotifications(tenantId))),
   order_status_sync: withForegroundApiDeferral("order_status_sync", runBackgroundOrderStatusSync),
   customer_message_dispatch: withForegroundApiDeferral("customer_message_dispatch", runBackgroundCustomerMessageDispatch),

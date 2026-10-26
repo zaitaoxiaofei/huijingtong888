@@ -30,6 +30,11 @@ import { actualItemProfit } from "../profit.js";
 import { estimatePinnedOrderItemProfit, orderProfitFormulaLabels, profitCalculationDatabase, profitEstimateInputs, withVersionedOrderProfitBatchWrite, withVersionedOrderProfitWrite } from "./mysql-order-profit-version-write.js";
 import { readOrderProfitCalculationVersions, retryProfitCalculationTransaction } from "./order-profit-calculation-versions.js";
 import { getProfitFormula } from "./profit-formulas/registry.js";
+import { readOrderFxFinanceRows } from "./order-profit-fx-finance.js";
+import { fxSettlementInputFingerprint, planOrderFxSettlement } from "./order-profit-fx-settlement.js";
+import { getOrderProfitFxPolicy, orderFxSalePrice, pendingOrderFxEstimate, prepareOrderProfitFx, readOrderProfitFxState } from "./order-profit-fx-policy.js";
+import { ensureOrderProfitDailyFx, orderProfitFxBusinessDate } from "./order-profit-daily-fx.js";
+import { writeOrderFinanceAccrual } from "./order-finance-accrual-write.js";
 import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
@@ -37,6 +42,7 @@ import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction }
 import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
 import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
+import { buildOrderProfitFxDetailSnapshotPayload, orderProfitFxDetailFinalRate } from "./order-profit-fx-detail.js";
 import { calculateSelectionPricing } from "../celRates.js";
 import { DEFAULT_ORDER_LOGISTICS_FILTER_RULES, resolveOrderLogisticsRuleValue } from "./order-logistics-filter-rules.js";
 import { classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsEvidence, orderLogisticsServiceClassOptions } from "./order-logistics-classification.js";
@@ -2487,6 +2493,8 @@ function scaleFinanceRowMysql(row = {}, share = 1) {
 }
 
 function ozonFinanceCategoryMysql(row = {}) {
+  const dailyCategory = /^accrual:(income|commission|collecting_fee|platform_delivery|international_transport|aftersale_loss|other):[a-f0-9]+$/.exec(String(row.service_type || ""));
+  if (dailyCategory) return dailyCategory[1];
   const raw = [row.service_type, row.service_name, row.operation_type, row.operation_type_name].map((value) => String(value || "").trim()).filter(Boolean).join(" ");
   const normalized = raw.toLowerCase();
   if (normalized.includes("sale_commission") || normalized.includes("commission")) return "commission";
@@ -3395,6 +3403,7 @@ function resolveProfitStageMysql(row = {}) {
 }
 
 async function estimateOrderItemReturnLossMysql({ order, item, product, estimated, quantity, salePrice }) {
+  if (estimated?.formulaVersion === "V2") salePrice = estimated.salePriceCny;
   const formula = getProfitFormula(estimated?.formulaVersion || "V1");
   const orderContext = {
     ...order,
@@ -9539,7 +9548,15 @@ async function refreshPendingListingStockSnapshotsMysql(shopId, productIds = [],
   await mapWithConcurrencyMysql(stockRows || [], 2, (row) => upsertStockSnapshotMysql(shopId, row, { beforeWrite }));
 }
 
-async function upsertFinanceOperationMysql(shopId, operation) {
+async function upsertFinanceOperationMysql(shopId, operation, options = {}) {
+  if (operation.source_endpoint === "/v1/finance/accrual/by-day") {
+    if (!options.shop || Number(options.shop.id) !== Number(shopId)) throw new Error("新账单写入缺少已验证的企业店铺");
+    await options.assertAuthorized?.();
+    const fx = await ensureOrderProfitDailyFx({ query: mysqlQuery }, orderProfitFxBusinessDate(operation.operation_date));
+    const written = await writeOrderFinanceAccrual({ transaction: callback => retryProfitCalculationTransaction(withMysqlTransaction, callback),
+      shop: options.shop, operation, fx, assertAuthorized: options.assertAuthorized });
+    return Number(written.rows || 0);
+  }
   const rows = financeRowsForOperationMysql(operation);
   const rateRow = await exchangeRateForDateMysql(operation.operation_date);
   const rate = Number(rateRow?.rate || 11.32);
@@ -9709,6 +9726,7 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   if (targetShopId && !activeShops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const from = normalizeFinanceBackfillDateMysql(body.from) || dateKeyDaysAgoMysql(30);
   const to = normalizeFinanceBackfillDateMysql(body.to) || todayDateKeyMysql();
+  const dailyFinanceEnabled = Boolean(await getOrderProfitFxPolicy({ query: mysqlQuery }));
   let fetched = 0;
   let upserted = 0;
   let requests = 0;
@@ -9717,9 +9735,20 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   for (const cachedShop of activeShops) {
     const shop = await activeShopForTenantMysql(cachedShop.id, tenantScope.id);
     await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
-    const shopResult = { shop_id: shop.id, shop_name: shop.name, fetched: 0, upserted: 0, requests: 0 };
+    const shopResult = { shop_id: shop.id, shop_name: shop.name, fetched: 0, upserted: 0, requests: 0, normalization_pending: 0 };
     try {
-      const result = await fetchOzonFinanceTransactions(shop, { from, to, signal: options.signal });
+      let sourceFrom = from;
+      if (dailyFinanceEnabled) {
+        // Old and new APIs have different operation identities. Do not import
+        // a second representation of a day already held by the legacy API.
+        const legacy = await mysqlQueryOne("SELECT MAX(operation_date) last_legacy_date FROM ozon_finance_items WHERE shop_id = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'", [shop.id]);
+        const legacyDay = legacy?.last_legacy_date ? normalizeFinanceBackfillDateMysql(legacy.last_legacy_date) : "";
+        if (legacyDay && legacyDay >= sourceFrom) sourceFrom = addDateKeyDaysMysql(legacyDay, 1);
+      }
+      const result = sourceFrom > to ? { operations: [], fetched: 0, requests: 0 }
+        : await fetchOzonFinanceTransactions(shop, { from: sourceFrom, to, signal: options.signal,
+          source: dailyFinanceEnabled ? "daily_accrual" : "legacy",
+          beforeRequest: async () => { await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);return activeShopForTenantMysql(shop.id, tenantScope.id); } });
       shopResult.fetched = Number(result.fetched || 0);
       shopResult.requests = Number(result.requests || 0);
       fetched += shopResult.fetched;
@@ -9727,8 +9756,19 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
       await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
       for (const operation of result.operations || []) {
         await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
-        shopResult.upserted += await upsertFinanceOperationMysql(shop.id, operation);
+        const write = () => upsertFinanceOperationMysql(shop.id, operation, { shop,
+          assertAuthorized: () => assertOrderTaskAccessMysql(tenantScope, options, ["finance"]) });
+        if (operation.source_endpoint === "/v1/finance/accrual/by-day") {
+          try { shopResult.upserted += await write(); }
+          catch (error) {
+            await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+            errors.push(`${shop.name}: 计提 ${operation.operation_id} 导入待重试 [${error.code || "ACCRUAL_WRITE_FAILED"}]`);
+            continue;
+          }
+          if (!operation.reconciliation?.ok) shopResult.normalization_pending += 1;
+        } else shopResult.upserted += await write();
       }
+      if (shopResult.normalization_pending) errors.push(`${shop.name}: ${shopResult.normalization_pending} 笔新账单需核对费用类型或金额；已保留原始记录，未作为真实利润结算`);
       upserted += shopResult.upserted;
     } catch (error) {
       shopResult.error = error.message;
@@ -9758,6 +9798,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       MAX(o.shop_id) AS shop_id,
       MAX(o.posting_number) AS posting_number,
       MAX(o.order_number) AS order_number,
+      MAX(o.ordered_at) AS ordered_at,
       MAX(o.status) AS order_status,
       MAX(o.tracking_stage) AS tracking_stage,
       MAX(o.logistics_status) AS logistics_status,
@@ -9798,15 +9839,112 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
 
   let updated = 0;
   const appliedOrderIds = new Set();
+  const fxPending = [];
   for (const row of rows) {
     await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
     const items = await mysqlQuery(`
       SELECT oi.*, opi.sale_amount_cny, opi.purchase_cost_cny, opi.domestic_shipping_cny, opi.international_shipping_cny,
-        opi.packaging_cost_cny, opi.return_loss_cny, opi.advertising_cost_cny, opi.other_fee_cny
+        opi.packaging_cost_cny, opi.return_loss_cny, opi.advertising_cost_cny, opi.other_fee_cny,
+        calc_state.formula_version, calc_state.current_actual_revision_id,
+        CASE WHEN owned_shop.tenant_id > 0 THEN CAST(owned_shop.tenant_id AS CHAR) ELSE 'admin' END AS profit_tenant_key
       FROM order_items oi
+      JOIN orders owned_order ON owned_order.id = oi.order_id
+      JOIN shops owned_shop ON owned_shop.id = owned_order.shop_id
       LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+      LEFT JOIN order_profit_calc_state calc_state ON calc_state.order_item_id = oi.id AND calc_state.order_id = oi.order_id
+        AND calc_state.tenant_key = (CASE WHEN owned_shop.tenant_id > 0 THEN CAST(owned_shop.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
       WHERE oi.order_id = ?
     `, [row.order_id]);
+    const itemVersions = [...new Set(items.map(item => item.formula_version || "V1"))];
+    if (itemVersions.includes("V2")) {
+      if (itemVersions.length !== 1) throw Object.assign(new Error("同一订单的利润公式版本不一致，停止财务入账并等待核查"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
+      const profitTenantKey = items[0].profit_tenant_key;
+      const fxState = await readOrderProfitFxState({ query: mysqlQuery }, profitTenantKey, row.order_id);
+      const accounting = getProfitFormula("V2").outcome.classifyOrderAccounting({ ...row, status: row.order_status }, { qualityPrefixes: await orderQualityPrefixesMysql() });
+      const finalRate = fxState?.signedFx || (!["delivered_signed", "after_delivery_return"].includes(accounting.outcome_type) ? fxState?.orderFx : null);
+      const finance = finalRate && fxState?.orderFx ? await readOrderFxFinanceRows({ query: mysqlQuery,
+        order: row, items: (fxState.prices || []).map(price => ({ ozon_sku: price.ozon_sku, sale_price: price.amount, sale_currency_code: price.currency })),
+        rateRubPerCny: finalRate.rate, allocationRateRubPerCny: fxState.orderFx.rate, classifyCategory: ozonFinanceCategoryMysql }) : null;
+      const firstEstimates = new Map();
+      const revisions = await mysqlQuery(`SELECT order_item_id, inputs_json, outputs_json
+        FROM order_profit_calc_revisions WHERE tenant_key = ? AND order_id = ? AND layer = 'estimate' AND formula_version = 'V2'
+        ORDER BY order_item_id, revision_no`, [profitTenantKey, row.order_id]);
+      for (const revision of revisions) {
+        if (firstEstimates.has(Number(revision.order_item_id))) continue;
+        const inputs = parseJsonOrNull(revision.inputs_json), output = parseJsonOrNull(revision.outputs_json);
+        if (inputs?.estimate?.fxPending || output?.estimated_profit === undefined || output?.estimated_profit === null || String(output.estimated_profit).trim() === "") continue;
+        if (Number.isFinite(Number(output.estimated_profit))) firstEstimates.set(Number(revision.order_item_id), Number(output.estimated_profit));
+      }
+      const planned = await planOrderFxSettlement({ order: row, items, fxState, finance, initialEstimates: firstEstimates,
+        classifyCategory: ozonFinanceCategoryMysql, packagingFeeForSaleAmount: packagingFeeForSaleAmountMysql, accounting });
+      if (!planned.ok) {
+        fxPending.push({ order_id: Number(row.order_id), code: planned.code });
+        if (fxState) await mysqlExecute(`UPDATE order_profit_fx_state SET last_error_code = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE tenant_key = ? AND order_id = ?`, [planned.code, profitTenantKey, row.order_id]);
+        continue;
+      }
+      for (const projection of planned.items) {
+        const { item, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost, commissionFeeCny,
+          commissionRate, actualServiceFeeCny, returnLoss, advertisingCost, otherFee, actualProfit, grossProfit, totalFinanceFeeCny } = projection;
+        await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
+        await withVersionedOrderProfitWrite(item.id, { layer: "actual", source: "ozon_finance_daily_fx", reason: "按冻结业务日汇率及完整官方账单计算实际利润",
+          rateVersion: { order_fx: planned.orderFx, signed_fx: planned.finalFx, settlement_basis: planned.settlementBasis, parent_allocation: finance.allocation },
+          inputs: { outcome: accounting.outcome_type, loss_profile: accounting.loss_profile_code, share: projection.share,
+            category_totals: planned.categoryTotals, uses_estimated_collecting: false,
+            fx_attribution: projection.attribution, original_net_amounts: projection.actualNetAmounts,
+            purchase_cost_cny: purchaseCost, domestic_shipping_cny: domesticShipping, packaging_cost_cny: packagingCost, advertising_cost_cny: advertisingCost,
+            finance_rows: finance.source_rows, parent_allocation: finance.allocation }
+        }, async ({ connection, db, formulaVersion }) => {
+          if (formulaVersion !== "V2") throw Object.assign(new Error("订单利润版本在财务提交前发生变化，停止写入"), { code: "ORDER_PROFIT_FORMULA_MISMATCH" });
+          // Candidate planning occurs before the transaction. Re-lock and
+          // compare every amount/status/quantity that can affect this item,
+          // including sibling weights and a concurrent actual revision.
+          const freshItems = await db.query(`SELECT oi.*, opi.purchase_cost_cny, opi.domestic_shipping_cny, opi.advertising_cost_cny,
+            o.status AS order_status, o.id AS order_id, o.shop_id, o.posting_number, o.ordered_at, o.delivered_at, o.accrued_at,
+            o.tracking_stage, o.logistics_status, o.cancel_reason, o.cancel_reason_id, o.cancel_initiator, o.cancel_type, o.cancelled_after_ship,
+            current_calc.formula_version, current_calc.current_actual_revision_id
+            FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id
+            LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
+            LEFT JOIN order_profit_calc_state current_calc ON current_calc.order_item_id = oi.id AND current_calc.order_id = o.id
+              AND current_calc.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
+            WHERE o.id = ? AND o.shop_id = ?
+              AND (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) = ?
+            ORDER BY oi.id FOR UPDATE`, [row.order_id, row.shop_id, profitTenantKey]);
+          const freshFx = await readOrderProfitFxState(db, profitTenantKey, row.order_id);
+          const freshFinance = await readOrderFxFinanceRows({ query: db.query, order: row,
+            items: (freshFx?.prices || []).map(price => ({ ozon_sku: price.ozon_sku, sale_price: price.amount, sale_currency_code: price.currency })),
+            rateRubPerCny: planned.finalFx.rate, allocationRateRubPerCny: planned.orderFx.rate, classifyCategory: ozonFinanceCategoryMysql, lockForSettlement: true });
+          const expectedFingerprint = fxSettlementInputFingerprint({ order: row, items, targetItemId: item.id, fxState, finance });
+          const freshFingerprint = freshItems[0] && fxSettlementInputFingerprint({ order: freshItems[0], items: freshItems,
+            targetItemId: item.id, fxState: freshFx, finance: freshFinance });
+          if (!freshFinance.ok || freshFingerprint !== expectedFingerprint) throw Object.assign(new Error("订单数量、库存成本、状态或官方账单已更新，本次实际利润未写入，等待下一轮重新计算"),
+            { code: "ORDER_PROFIT_FX_INPUT_CHANGED", statusCode: 409, retryable: true });
+          await db.execute("UPDATE order_items SET platform_fee_actual = ?, actual_profit = ?, settlement_state = 'accrued' WHERE id = ?", [totalFinanceFeeCny, actualProfit, item.id]);
+          await db.execute(`INSERT INTO order_profit_items (
+            order_item_id, sale_amount_cny, purchase_cost_cny, domestic_shipping_cny, international_shipping_cny,
+            packaging_cost_cny, commission_fee_cny, commission_rate, ozon_service_fee_cny, return_loss_cny,
+            advertising_cost_cny, other_fee_cny, gross_profit_cny, net_profit_cny, profit_status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accrued', CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE sale_amount_cny = VALUES(sale_amount_cny), purchase_cost_cny = VALUES(purchase_cost_cny),
+              domestic_shipping_cny = VALUES(domestic_shipping_cny), international_shipping_cny = VALUES(international_shipping_cny),
+              packaging_cost_cny = VALUES(packaging_cost_cny), commission_fee_cny = VALUES(commission_fee_cny), commission_rate = VALUES(commission_rate),
+              ozon_service_fee_cny = VALUES(ozon_service_fee_cny), return_loss_cny = VALUES(return_loss_cny), advertising_cost_cny = VALUES(advertising_cost_cny),
+              other_fee_cny = VALUES(other_fee_cny), gross_profit_cny = VALUES(gross_profit_cny), net_profit_cny = VALUES(net_profit_cny),
+              profit_status = 'accrued', updated_at = CURRENT_TIMESTAMP`,
+          [item.id, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost, commissionFeeCny, commissionRate,
+            actualServiceFeeCny, returnLoss, advertisingCost, otherFee, grossProfit, actualProfit]);
+          await lockProfitItemMysql(item.id, planned.settlementBasis === "signed_day" ? "finance_accrued_signed_day_fx" : "finance_accrued_no_delivery_order_day_fx", connection);
+        });
+        updated += 1;
+        appliedOrderIds.add(Number(row.order_id));
+      }
+      await mysqlExecute(`UPDATE order_profit_fx_state SET last_error_code = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE tenant_key = ? AND order_id = ?`, [profitTenantKey, row.order_id]);
+      continue;
+    }
+    const newSource = await mysqlQueryOne(`SELECT id FROM ozon_finance_items WHERE shop_id = ?
+      AND posting_number IN (?, ?) AND LEFT(operation_id, 15) = 'accrual_by_day:' LIMIT 1`, [row.shop_id, row.posting_number, parentOrderNumberMysql(row)]);
+    if (newSource) continue; // Restoring new bills must not recalculate historical V1 orders.
     const financeRows = await orderFinanceRowsWithParentAllocationMysql(row, items, { from, to });
     let categoryTotals = financeCategoryTotalsMysql(financeRows);
     const localTotalSale = items.reduce((sum, item) => sum + Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1))), 0);
@@ -9958,7 +10096,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
   if (appliedOrderIds.size) {
     await refreshOrderProfitDetailSnapshotsMysql({ order_ids: [...appliedOrderIds], final_only: 0 }, tenantId);
   }
-  return { orders: rows.length, items: updated };
+  return { orders: rows.length, items: updated, fx_pending: fxPending };
 }
 
 export async function syncOzonFinanceMysql(body = {}, options = {}) {
@@ -17737,6 +17875,8 @@ async function upsertOrderOutboundRecordMysql(row = {}, outboundStockLocation = 
 }
 
 async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null, connection = null }) {
+  if (estimated?.fxPending) return;
+  if (estimated?.formulaVersion === "V2") salePrice = estimated.salePriceCny;
   const formula = getProfitFormula(estimated?.formulaVersion || "V1");
   const { classifyOrderOutcome, classifyOrderAccounting, resolveReturnLossCostPolicy } = formula.outcome;
   const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
@@ -18350,7 +18490,7 @@ async function upsertOnlineProductFromOrderItemMysql(shop, item) {
   const result = await mysqlExecute(`
     INSERT INTO online_products
     (shop_id, ozon_sku, offer_id, ozon_product_id, name, image_url, primary_image, sale_price, currency_code, status, visibility, raw_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RUB', 'historical', 'order_snapshot', ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'historical', 'order_snapshot', ?)
   `, [
     shop.id,
     item.ozon_sku,
@@ -18360,6 +18500,7 @@ async function upsertOnlineProductFromOrderItemMysql(shop, item) {
     storedImageUrl,
     storedImageUrl,
     Number(item.sale_price || 0),
+    ["RUB", "CNY"].includes(item.sale_currency) ? item.sale_currency : "RUB",
     storageItem.raw_json
   ]);
   return { id: Number(result.insertId), shop_id: shop.id, ozon_sku: item.ozon_sku, image_url: storedImageUrl, primary_image: storedImageUrl };
@@ -18888,6 +19029,8 @@ async function orderCancelLossAppliesMysql(posting) {
 }
 
 function estimatedProfitValueMysql({ order = null, item, product, estimated, returnLossEstimate }) {
+  if (estimated?.fxPending) return 0;
+  if (estimated?.formulaVersion === "V2") item = { ...item, sale_price: estimated.salePriceCny };
   return getProfitFormula(estimated?.formulaVersion || "V1").estimatedProfitValue({ order, item, product, estimated, returnLossEstimate });
 }
 
@@ -18900,6 +19043,8 @@ async function persistRecalculatedItemMysql({ itemId, mapping, product, estimate
     layer: "estimate", source: "order_recalculation",
     inputs: profitEstimateInputs({ product, mapping, estimated, quantity, salePrice, order, item })
   }, async ({ connection, db }) => {
+  if (estimated?.fxPending) return;
+  if (estimated?.formulaVersion === "V2") await db.execute("UPDATE order_items SET sale_price = ? WHERE id = ?", [estimated.salePriceCny, itemId]);
   const existingStageRow = await db.queryOne(`
     SELECT oi.settlement_state,
       oi.actual_profit,
@@ -19031,7 +19176,7 @@ async function actualOrderLogisticsRuleMysql(posting, orderedAt, product) {
     ? await readableLogisticsTenantScopeMysql(product?.tenant_id || "admin", "candidate")
     : (() => { throw Object.assign(new Error("物流规则租户字段尚未迁移"), { statusCode: 503 }); })();
   if (descriptor.carrier === "OGL" && !descriptor.serviceClass) {
-    const rate = await cbrCnyRateForDate(orderedAt);
+    const rate = posting?.profitFxState?.orderFx || await cbrCnyRateForDate(orderedAt);
     const parcelValueRub = await oglOrderParcelValueRubMysql(posting, rate.rate);
     if (!(parcelValueRub > 0)) return null;
     const candidates = await mysqlQuery(`
@@ -19096,6 +19241,11 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
     WHERE p.id = ? AND p.active = 1
   `, [Number(productId)]);
   if (product && orderedAt) product.pricing_effective_at = orderedAt;
+  if (product && posting?.order_id && !posting.profitFxState && await getOrderProfitFxPolicy({ query: mysqlQuery })) {
+    const fxState = await readOrderProfitFxState({ query: mysqlQuery }, product.tenant_id || "admin", posting.order_id);
+    if (fxState) posting = { ...posting, profitFxState: fxState };
+  }
+  if (posting?.profitFxState && !posting.profitFxState.orderFx) return product;
   if (product && orderedAt && posting) {
     const actualRule = await actualOrderLogisticsRuleMysql(posting, orderedAt, product);
     if (actualRule) return productWithOglOrderRateMysql(productWithLogisticsRuleMysql(product, actualRule, "ozon_delivery_method"), orderedAt, posting);
@@ -19121,7 +19271,7 @@ async function productForProfitEstimateMysql(productId, orderedAt = null, postin
 
 async function productWithOglOrderRateMysql(product, orderedAt, posting = null) {
   if (!product || !orderedAt || String(product.logistics_rule_carrier || "").toUpperCase() !== "OGL") return product;
-  const rate = await cbrCnyRateForDate(orderedAt);
+  const rate = posting?.profitFxState?.orderFx || await cbrCnyRateForDate(orderedAt);
   return { ...product, exchange_rate: rate.rate, ogl_exchange_rate_source_date: rate.source_date,
     ogl_parcel_value_rub: await oglOrderParcelValueRubMysql(posting, rate.rate) };
 }
@@ -19199,7 +19349,7 @@ async function accrueDeliveredItemsMysql(orderId, tenantId = "admin") {
   const pendingItems = await mysqlQuery("SELECT id FROM order_items WHERE order_id = ? AND COALESCE(settlement_state, '') != 'accrued' ORDER BY id", [orderId]);
   const pendingItemIds = pendingItems.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0).join(",") || "NULL";
   await withVersionedOrderProfitBatchWrite(pendingItems.map((row) => row.id), {
-    source: "delivered_pending_normalization", inputs: { order_id: Number(orderId) }, reason: "已送达但未完成财务结算的状态同步"
+    source: "delivered_pending_normalization", operation: "aftersale", inputs: { order_id: Number(orderId) }, reason: "已送达但未完成财务结算的状态同步"
   }, async ({ db }) => {
   const mysqlExecute = db.execute;
   await mysqlExecute(`
@@ -19413,12 +19563,23 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     updated = 1;
   }
   await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, historySource, exists);
+  const profitFxState = await prepareOrderProfitFx({ query: mysqlQuery,
+    transaction: callback => retryProfitCalculationTransaction(withMysqlTransaction, connection => callback(profitCalculationDatabase(connection)))
+  }, { tenantId: shop.tenant_id || "admin", orderId, orderedAt: exists?.ordered_at || posting.ordered_at,
+    verifiedOrderedAt: posting.ordered_at_verified === true,
+    deliveredAt: posting.delivered_at || exists?.delivered_at, items: posting.items || [] });
+  if (profitFxState) {
+    posting = { ...posting, profitFxState, items: (posting.items || []).map(item => ({ ...item,
+      sale_price: orderFxSalePrice(profitFxState, item.ozon_sku) ?? 0 })) };
+  }
   const outboundStockLocation = resolveOrderStockLocationMysql(posting);
 
   let insertedItems = 0;
   for (const item of posting.items || []) {
     await assertOrderTaskAccessMysql(tenantScope, options);
-    const onlineSnapshot = await upsertOnlineProductFromOrderItemMysql(shop, item);
+    const originalFxPrice = profitFxState?.prices?.find(price => String(price.ozon_sku) === String(item.ozon_sku));
+    const onlineSnapshot = await upsertOnlineProductFromOrderItemMysql(shop, originalFxPrice
+      ? { ...item, sale_price: originalFxPrice.amount ?? 0, sale_currency: originalFxPrice.currency } : item);
     const normalizedItem = { ...item, image_url: onlineSnapshot?.image_url || "" };
     const mapping = await mysqlQueryOne(`
       SELECT sm.*, op.commissions_json AS commissions_json
@@ -19426,13 +19587,13 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       LEFT JOIN online_products op ON op.id = sm.online_product_id AND op.shop_id = sm.shop_id
       WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = sm.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)})
     `, [shop.id, item.ozon_sku]);
-    const product = mapping ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, { ...posting, order_id: orderId }) : null;
+    const product = mapping && (!profitFxState || profitFxState.orderFx) ? await productForProfitEstimateMysql(mapping.product_id, posting.ordered_at, { ...posting, order_id: orderId }) : mapping ? await productForProfitEstimateMysql(mapping.product_id) : null;
     const existingItem = await mysqlQueryOne("SELECT id, quantity FROM order_items WHERE order_id = ? AND ozon_sku = ?", [orderId, item.ozon_sku]);
     if (existingItem) {
       const previousQuantity = Number(existingItem.quantity || 0);
       const nextQuantity = Number(item.quantity || 1);
       // Validate the pinned formula before metadata or inventory adjustments.
-      const estimated = product && mapping ? await estimatePinnedOrderItemProfit(existingItem.id, { salePrice: item.sale_price, quantity: nextQuantity, product, mapping }) : null;
+      const estimated = product && mapping ? await estimatePinnedOrderItemProfit(existingItem.id, { salePrice: item.sale_price, quantity: nextQuantity, product, mapping, fxState: profitFxState }) : null;
       await mysqlExecute(`
         UPDATE order_items
         SET sku_mapping_id = COALESCE(?, sku_mapping_id),
@@ -19487,13 +19648,21 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
       }
       continue;
     }
-    const estimated = product && mapping ? await estimatePinnedOrderItemProfit(null, { salePrice: item.sale_price, quantity: item.quantity, product, mapping }) : { commission: 0, profit: 0 };
-    const settlement = resolveProfitSettlementStatusMysql(posting);
+    const estimated = product && mapping ? await estimatePinnedOrderItemProfit(null, { salePrice: item.sale_price, quantity: item.quantity, product, mapping, fxState: profitFxState, ozonSku: item.ozon_sku }) : profitFxState ? pendingOrderFxEstimate(profitFxState) : { commission: 0, profit: 0 };
+    const settlement = profitFxState ? "pending" : resolveProfitSettlementStatusMysql(posting);
     const returnLossEstimate = product && mapping
       ? await estimateOrderItemReturnLossMysql({ order: posting, item, product, estimated, quantity: item.quantity, salePrice: item.sale_price })
       : 0;
     const estimatedProfit = product && mapping ? estimatedProfitValueMysql({ order: posting, item, product, estimated, returnLossEstimate }) : 0;
     const orderItemId = await retryProfitCalculationTransaction(withMysqlTransaction, async (connection) => {
+    const itemDb = profitCalculationDatabase(connection);
+    await itemDb.query("SELECT id FROM orders WHERE id = ? FOR UPDATE", [Number(orderId)]);
+    const concurrentItem = await itemDb.queryOne("SELECT id FROM order_items WHERE order_id = ? AND ozon_sku = ? FOR UPDATE", [Number(orderId), item.ozon_sku]);
+    if (concurrentItem) throw Object.assign(new Error("订单商品已由另一次同步保存，请重新同步本订单"), { code: "ORDER_ITEM_RETRY_REQUIRED", statusCode: 409 });
+    if (!profitFxState && await getOrderProfitFxPolicy(itemDb)) {
+      const concurrentFx = await readOrderProfitFxState(itemDb, shop.tenant_id || "admin", orderId);
+      if (concurrentFx) throw Object.assign(new Error("订单汇率已由并发同步冻结，请重新同步本订单"), { code: "ORDER_PROFIT_FX_RETRY_REQUIRED" });
+    }
     const itemResult = await profitCalculationDatabase(connection).execute(`
       INSERT INTO order_items
       (order_id, sku_mapping_id, ozon_sku, ozon_name, ozon_image_url, ozon_product_id, quantity, sale_price, frozen_purchase_cost, frozen_domestic_shipping,
@@ -19524,6 +19693,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     const orderItemId = Number(itemResult.insertId);
     await withVersionedOrderProfitWrite(orderItemId, {
       connection, layer: "estimate", legacy: false, source: "order_created",
+      initialFormulaVersion: profitFxState ? "V2" : "V1",
       inputs: profitEstimateInputs({ product, mapping, estimated, quantity: item.quantity, salePrice: item.sale_price, order: posting, item })
     }, async () => {
       if (!product || !mapping) return;
@@ -31051,7 +31221,7 @@ async function orderDetailFinanceMysql(order, items = []) {
       COUNT(*) AS row_count,
       MAX(operation_date) AS operation_date
     FROM ozon_finance_items
-    WHERE shop_id = ? AND posting_number = ?
+    WHERE shop_id = ? AND posting_number = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'
     GROUP BY service_type, service_name
   `, [order.shop_id, order.posting_number]);
 
@@ -31074,6 +31244,7 @@ async function orderDetailFinanceMysql(order, items = []) {
       FROM ozon_finance_items
       WHERE shop_id = ?
         AND posting_number = ?
+        AND LEFT(operation_id, 15) <> 'accrual_by_day:'
         AND LOWER(COALESCE(service_name, '')) LIKE '%marketplaceredistributionofacquiringoperation%'
       GROUP BY operation_type, operation_type_name, service_type, service_name
     `, [order.shop_id, parentPosting])
@@ -31227,7 +31398,6 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   order.billing_logistics_rule_channel = billingRuleChannels.join(" / ");
   Object.assign(order, classifyOrderLogistics(order));
 
-  const finance = await orderDetailFinanceMysql(order, items);
   const accounting = await classifyOrderAccountingMysql(order);
   const cancellation = cancellationDisplay({
     ...order,
@@ -31249,15 +31419,30 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   order.loss_profile_code = cancellation.loss_profile_code;
   order.loss_profile_label = cancellation.loss_profile_label;
   order.loss_formula_text = cancellation.loss_formula_text;
-  const profitDetailSnapshot = buildOrderProfitDetailSnapshotPayload(order, items, finance);
   const [ownership] = await mysqlQuery("SELECT tenant_id FROM shops WHERE id = ?", [Number(order.shop_id)]);
   const calculationVersions = await readOrderProfitCalculationVersions({ query: mysqlQuery }, {
     tenantId: ownership?.tenant_id || "admin", orderId: Number(id)
   });
   const formulaVersions = [...new Set(calculationVersions.items.map((entry) => entry.formula_version))];
+  let profitFx = formulaVersions.includes("V2")
+    ? await readOrderProfitFxState({ query: mysqlQuery }, ownership?.tenant_id || "admin", Number(id)) : null;
+  let finance;
+  let financeErrorCode = null;
+  if (formulaVersions.includes("V2")) {
+    const finalRate = orderProfitFxDetailFinalRate(order, profitFx);
+    const converted = finalRate && profitFx?.orderFx ? await readOrderFxFinanceRows({ query: mysqlQuery, order,
+      items: (profitFx.prices || []).map(price => ({ ozon_sku: price.ozon_sku, sale_price: price.amount, sale_currency_code: price.currency })),
+      rateRubPerCny: finalRate.rate, allocationRateRubPerCny: profitFx.orderFx.rate, classifyCategory: ozonFinanceCategoryMysql }) : null;
+    finance = converted?.ok ? converted.rows : [];
+    financeErrorCode = converted?.ok ? null : converted?.code || (profitFx?.orderFx ? "ORDER_PROFIT_SIGNED_FX_PENDING" : "ORDER_PROFIT_ORDER_FX_PENDING");
+    if (profitFx && financeErrorCode) profitFx = { ...profitFx, last_error_code: financeErrorCode };
+  } else finance = await orderDetailFinanceMysql(order, items);
+  const profitDetailSnapshot = formulaVersions.includes("V2")
+    ? buildOrderProfitFxDetailSnapshotPayload(order, items, finance, profitFx, { financeErrorCode, calculationVersions })
+    : buildOrderProfitDetailSnapshotPayload(order, items, finance);
   order.profit_formula_versions = formulaVersions.join(",");
   order.profit_calculation_legacy = calculationVersions.items.some((entry) => entry.legacy_baseline) ? 1 : 0;
-  return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot, profit_calculation_versions: calculationVersions };
+  return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot, profit_calculation_versions: calculationVersions, profit_fx: profitFx };
 }
 
 const CUSTOMER_MESSAGE_TYPES = new Set(["order_created", "passport_reminder", "order_update", "shipment_delay", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"]);

@@ -3042,6 +3042,7 @@ onBeforeUnmount(() => {
             <ProfitCalculationVersions
               v-if="profitVersionsExpanded"
               :payload="detailDialog.data?.profit_calculation_versions || { available: false, items: [] }"
+              :fx="detailDialog.data?.profit_fx || null"
               :items="detailItems"
             />
           </details>

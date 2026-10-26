@@ -79,6 +79,8 @@ function optionsLoader(apiClient) {
     const logisticsOptionsPromise = { value: null }, logisticsOptionsAbort = { value: null }, logisticsOptionsRequestKey = { value: '' };
     const LOGISTICS_OPTIONS_CACHE_TTL_MS = 600000, ORDERS_LIST_CACHE_MAX_ENTRIES = 30;
     const DEFAULT_LOGISTICS_SERVICE_CLASS_OPTIONS = [{ value: 'all', label: '全部渠道' }];
+    const currentOrdersCacheScope = () => 'test-enterprise';
+    const ensureOrdersViewScope = currentOrdersCacheScope;
     ${source}; return loadLogisticsOptions;
   `)(apiClient, vm, (payload) => Object.assign(vm, payload), (filters, extra) => new URLSearchParams({ ...filters, ...extra }));
   return { vm, load };

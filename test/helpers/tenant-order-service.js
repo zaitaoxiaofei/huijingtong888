@@ -11,6 +11,7 @@ import { authorizeBusinessTaskSession } from '../../src/services/business-task-t
 import { hasPermission, primaryRole, getRoles } from '../../src/shared/permissions.js';
 import { isDemoPackageLabelBufferMysql, normalizePackageLabelBufferMysql, orderPackageLabelFailureMysql } from '../../src/services/mysql-order-label-utils.js';
 import * as profitVersioning from '../../src/services/order-profit-calculation-versions.js';
+import { getOrderProfitFxPolicy, prepareOrderProfitFx, readOrderProfitFxState, orderFxSalePrice, pendingOrderFxEstimate } from '../../src/services/order-profit-fx-policy.js';
 import {getProfitFormula,assertProfitFormulaSupported} from '../../src/services/profit-formulas/registry.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord, assertInventoryReferences } from '../../src/services/inventory-tenant-scope.js';
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from '../../src/services/order-transport-evidence.js';
@@ -96,6 +97,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
   ];
   const noop=async()=>{};
   const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+    getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
     mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,
