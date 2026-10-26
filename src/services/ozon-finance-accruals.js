@@ -110,12 +110,14 @@ export function normalizeOzonFinanceAccrual(accrual, { types, sourceEndpoint = O
       const amount = readMoney(commission.sale_amount, `${path}.sale_amount`);
       if (amount && total && amount.currency === total.currency) gross += amount.scaled;
     }
-    const commissionFields = ["sale_commission", "commission"].filter(field => own(commission, field) && commission[field] !== null);
+    // Official responses can contain different commission and sale_commission.
+    // Prefer the former, retain the latter as evidence, and still require the
+    // complete operation to reconcile with its official signed net below.
+    const commissionFields = ["commission", "sale_commission"].filter(field => own(commission, field) && commission[field] !== null);
     const parsed = commissionFields.map(field => ({ field, value: readMoney(commission[field], `${path}.${field}`) }));
-    const first = parsed[0]?.value;
-    if (first && parsed.some(item => !item.value || item.value.currency !== first.currency || item.value.scaled !== first.scaled)) {
-      issues.push({ code: "COMMISSION_ALIASES_CONFLICT", path });
-    } else if (first) addComponent(first, "commission", `posting_commission:${sku}`, { name: "SaleCommission", source_group: "posting_commission", sku, paths: parsed.map(item => `${path}.${item.field}`) });
+    const selected = parsed[0];
+    if (selected?.value) addComponent(selected.value, "commission", `posting_commission:${sku}`, { name: "SaleCommission", source_group: "posting_commission", sku, paths: [`${path}.${selected.field}`] });
+    for (const reference of parsed.slice(1)) references.push({ path: `${path}.${reference.field}`, monetary: commission[reference.field] });
     // These describe prices/funding, not additional income on top of sale_amount.
     for (const field of ["seller_price", "sale_price", "coinvestment", "bonus"]) if (own(commission, field) && commission[field] !== null) {
       consumed.add(`${path}.${field}`);

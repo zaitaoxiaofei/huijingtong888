@@ -14,6 +14,7 @@ import { readOrderFxFinanceRows } from "../src/services/order-profit-fx-finance.
 import { planOrderFxSettlement } from "../src/services/order-profit-fx-settlement.js";
 import { createOrderProfitCalculationTables } from "../src/services/order-profit-calculation-schema.js";
 import { recordOrderProfitCalculation } from "../src/services/order-profit-calculation-versions.js";
+import { profitCalculationBaselineAudit } from "../src/services/order-profit-calculation-baseline.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET, options = { skip: !socketPath };
 const source = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
@@ -176,4 +177,13 @@ test("real pipeline profit projection failure rolls back the revision and projec
   assert.deepEqual(await query("SELECT * FROM order_profit_calc_revisions WHERE order_item_id=1011 ORDER BY id"), before);
   assert.equal((await query("SELECT actual_profit FROM order_items WHERE id=1011"))[0].actual_profit, "39.0000");
   assert.equal((await query("SELECT net_profit_cny FROM order_profit_items WHERE order_item_id=1011"))[0].net_profit_cny, "39.0000");
+}));
+
+test("release audit accepts registered V1 and V2 while still detecting an unknown formula", options, () => fixture(async ({ query }) => {
+  const connection = { query };
+  const supported = await profitCalculationBaselineAudit(connection);
+  assert.equal(Number(supported.state_count), 3);
+  assert.equal(Number(supported.unsupported_count), 0);
+  await query("UPDATE order_profit_calc_state SET formula_version='UNREGISTERED' WHERE order_item_id=1011");
+  assert.equal(Number((await profitCalculationBaselineAudit(connection)).unsupported_count), 1);
 }));

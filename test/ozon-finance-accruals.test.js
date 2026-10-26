@@ -36,7 +36,9 @@ test("posting gross plus one commission equals official net; buyer price and fun
   assert.equal(operation.rows.filter(row => row.accruals_for_sale !== 0).length, 1);
   assert.equal(operation.rows[0].amount, 303);
   assert.equal(operation.rows[0].normalized_category, "income");
-  assert.equal(operation.monetary_references.length, 4);
+  assert.equal(operation.monetary_references.length, 5);
+  assert.deepEqual(operation.rows.find(row => row.normalized_category === "commission").source_paths, ["posting.products[0].commission.commission"]);
+  assert.deepEqual(operation.monetary_references.find(row => row.path.endsWith(".sale_commission")).monetary, money("-36.36"));
   assert.equal(JSON.stringify(original), before);
   const envelope = JSON.parse(operation.raw_json);
   assert.deepEqual(envelope.raw, original);
@@ -98,7 +100,7 @@ test("stable row identities survive response ordering and amount corrections and
   assert.equal(changed.reconciliation.ok, true);
 });
 
-test("unknown type, residual, unfamiliar money and contradictory commission preserve all raw facts and block finalization", () => {
+test("unknown type, residual and unfamiliar money preserve all raw facts and block finalization", () => {
   const unknown = parse(fee({ item_fees: null, non_item_fee: { type_id: 999, accrued: money("-21.53") } }));
   assert.equal(unknown.reconciliation.ok, false);
   assert.ok(unknown.reconciliation.issues.some(issue => issue.code === "FEE_TYPE_UNKNOWN"));
@@ -112,8 +114,71 @@ test("unknown type, residual, unfamiliar money and contradictory commission pres
   assert.equal(unfamiliar.reconciliation.ok, false);
   assert.equal(unfamiliar.unrecognized_money[0].path, "additional_future_amount");
   assert.deepEqual(JSON.parse(unfamiliar.raw_json).raw.additional_future_amount, money("1.23"));
-  const conflicting = sale();conflicting.posting.products[0].commission.commission = money("-40");
-  assert.ok(parse(conflicting).reconciliation.issues.some(issue => issue.code === "COMMISSION_ALIASES_CONFLICT"));
+});
+
+test("de-identified official differing commission samples reconcile using commission exactly once", () => {
+  const samples = [
+    ["115.14", "-13.94", "-13.8", "101.2"],
+    ["414.96", "-59.44", "-48.48", "355.52"],
+    ["203.01", "-24.37", "-24.36", "178.64"],
+    ["1095.12", "-144.6", "-117.48", "950.52"],
+    ["1104", "-158.82", "-116.82", "945.18"]
+  ];
+  for (const [gross, commission, reference, net] of samples) {
+    const raw = sale({ total_amount: money(net) });
+    raw.posting.products[0].commission = { sale_amount: money(gross), commission: money(commission), sale_commission: money(reference) };
+    const operation = parse(raw);
+    assert.equal(operation.reconciliation.ok, true);
+    assert.equal(operation.reconciliation.residual, 0);
+    assert.equal(totalRows(operation), Number(net));
+    const fees = operation.rows.filter(row => row.normalized_category === "commission");
+    assert.equal(fees.length, 1);
+    assert.equal(fees[0].amount, Number(commission));
+    assert.deepEqual(fees[0].source_paths, ["posting.products[0].commission.commission"]);
+    assert.deepEqual(operation.monetary_references.find(row => row.path.endsWith(".sale_commission")).monetary, money(reference));
+    assert.deepEqual(JSON.parse(operation.raw_json).raw, raw);
+  }
+});
+
+test("sale_commission is used only when commission is absent or null, never when explicit zero", () => {
+  for (const missing of [undefined, null]) {
+    const raw = sale();
+    if (missing === undefined) delete raw.posting.products[0].commission.commission;
+    else raw.posting.products[0].commission.commission = null;
+    const operation = parse(raw);
+    assert.equal(operation.reconciliation.ok, true);
+    assert.equal(operation.sale_commission, -36.36);
+    assert.deepEqual(operation.rows.find(row => row.normalized_category === "commission").source_paths, ["posting.products[0].commission.sale_commission"]);
+  }
+  const zero = sale({ total_amount: money("303") });
+  zero.posting.products[0].commission.commission = money("0");
+  assert.equal(parse(zero).reconciliation.ok, true);
+  assert.equal(parse(zero).sale_commission, 0);
+});
+
+test("a net mismatch never switches to sale_commission or becomes finalized through a residual", () => {
+  const raw = sale();
+  raw.posting.products[0].commission.commission = money("-40");
+  const operation = parse(raw);
+  assert.equal(operation.sale_commission, -40);
+  assert.equal(operation.reconciliation.ok, false);
+  assert.equal(operation.reconciliation.residual, 3.64);
+  assert.ok(operation.reconciliation.issues.some(issue => issue.code === "NET_COMPONENTS_UNRECONCILED"));
+  assert.equal(totalRows(operation), 266.64);
+  assert.equal(operation.rows.at(-1).requires_review, true);
+});
+
+test("invalid or conflicting money in either commission candidate stays pending despite a matching selected net", () => {
+  for (const field of ["commission", "sale_commission"]) {
+    for (const invalid of [money("-36.36", "CNY"), { amount: "-36.36" }, money("invalid")]) {
+      const raw = sale();
+      raw.posting.products[0].commission[field] = invalid;
+      const operation = parse(raw);
+      assert.equal(operation.reconciliation.ok, false);
+      assert.ok(operation.reconciliation.issues.some(issue => ["COMPONENT_CURRENCY_CONFLICT", "COMPONENT_MONEY_INVALID"].includes(issue.code)));
+      assert.deepEqual(JSON.parse(operation.raw_json).raw.posting.products[0].commission[field], invalid);
+    }
+  }
 });
 
 test("mixed currencies stay explicit and never receive an implicit conversion or legacy RUB default", () => {

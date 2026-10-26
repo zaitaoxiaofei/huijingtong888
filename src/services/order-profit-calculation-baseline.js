@@ -1,4 +1,5 @@
 import { ensureOrderProfitCalculationState, profitCalculationTenantKey } from "./order-profit-calculation-versions.js";
+import { registeredProfitFormulaVersions } from "./profit-formulas/registry.js";
 
 const rows = (result) => Array.isArray(result?.[0]) ? result[0] : result;
 
@@ -10,12 +11,13 @@ export async function profitCalculationBaselineAudit(connection, { tablesAvailab
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id`));
   if (!tablesAvailable) return { ...projection, state_count: 0, revision_count: 0, missing_count: Number(projection.item_count), unsupported_count: 0 };
+  const supportedVersions = registeredProfitFormulaVersions();
   const [coverage] = rows(await connection.query(`SELECT COUNT(state.order_item_id) AS state_count,
     COALESCE(SUM(CASE WHEN state.order_item_id IS NULL THEN 1 ELSE 0 END), 0) AS missing_count,
-    COALESCE(SUM(CASE WHEN state.formula_version != 'V1' THEN 1 ELSE 0 END), 0) AS unsupported_count
+    COALESCE(SUM(CASE WHEN state.formula_version NOT IN (${supportedVersions.map(() => "?").join(",")}) THEN 1 ELSE 0 END), 0) AS unsupported_count
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_profit_calc_state state ON state.order_item_id = oi.id
-      AND state.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci`));
+      AND state.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci`, supportedVersions));
   const [revision] = rows(await connection.query("SELECT COUNT(*) AS revision_count FROM order_profit_calc_revisions"));
   return { ...projection, ...coverage, ...revision };
 }
