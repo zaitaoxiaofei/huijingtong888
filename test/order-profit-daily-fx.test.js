@@ -50,6 +50,19 @@ test("network/HTTP failures stay unavailable; no latest-date request or hardcode
   }
 });
 
+test("historical CNY archives retain an exact official batch source and reject foreign or inconsistent URLs", async () => {
+  const quote = await fetchOrderProfitDailyFx("2026-10-26", { now, fetchImpl: response(xml()) });
+  const url = "https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1=24/10/2025&date_req2=26/10/2026&VAL_NM_RQ=R01375";
+  const read = source_url => getOrderProfitDailyFx({ query: async () => [{ ...quote, id: "3", source_url, created_at: new Date(now).toISOString() }] }, "2026-10-26");
+  assert.equal((await read(url)).source_url, url);
+  for (const invalid of [
+    url.replace("https:", "http:"), url.replace("www.cbr.ru", "www.cbr.ru.example.com"),
+    url.replace("www.cbr.ru", "user:password@www.cbr.ru"), url.replace("R01375", "R01235"),
+    url.replace("24/10/2025", "25/10/2026"), url.replace("26/10/2026", "25/10/2026"),
+    url + "&extra=1", url + "#fragment", url.replace("24/10/2025", "31/02/2025")
+  ]) await assert.rejects(read(invalid), { code: "ORDER_PROFIT_DAILY_FX_VALUE_INVALID" });
+});
+
 test("read path is DB-only, missing archives remain missing, transaction network preparation refuses", async () => {
   let calls = 0;
   const db = { query: async statement => { calls++;assert.match(statement, /^SELECT /);return []; } };

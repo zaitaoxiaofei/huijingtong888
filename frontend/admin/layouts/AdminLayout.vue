@@ -18,6 +18,7 @@ import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
 import { consumeMembershipDialogRequest, membershipDialogRequest } from "../utils/membership-dialog.js";
+import { consumeExchangeRateDialogRequest, exchangeRateDialogRequest } from "../utils/exchange-rate-dialog.js";
 
 const MembershipView = defineAsyncComponent(() => import("../views/MembershipView.vue"));
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
@@ -85,7 +86,8 @@ function resetQuickToolsForScope() {
 }
 function openQuickTool(tool) {
   if (!canUseQuickTools.value) return;
-  if (tool !== "calculator" && (tool === "profit" ? !canUseProfitCalculator.value : !canUsePricingTool.value)) return;
+  if (!["calculator", "exchange", "profit", "pricing"].includes(tool)) return;
+  if ((tool === "profit" && !canUseProfitCalculator.value) || (tool === "pricing" && !canUsePricingTool.value)) return;
   quickToolAuthScope.value = currentApiCacheScope();
   quickTool.value = tool;
   quickToolsMounted.value = true;
@@ -244,6 +246,10 @@ function handleAccountCommand(command) {
 
 watch(membershipDialogRequest, () => {
   if (consumeMembershipDialogRequest()) openActivationDialog();
+}, { immediate: true, flush: "sync" });
+
+watch(exchangeRateDialogRequest, () => {
+  if (consumeExchangeRateDialogRequest()) openQuickTool("exchange");
 }, { immediate: true, flush: "sync" });
 
 async function loadNotifications({ quiet = false } = {}) {
@@ -843,6 +849,11 @@ onBeforeUnmount(() => {
             <el-tooltip content="简易计算器" placement="bottom">
               <el-button circle class="erp-header-icon" aria-label="打开简易计算器" @click="openQuickTool('calculator')">
                 <el-icon><HeaderToolIcon name="calculator" /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="汇率工具" placement="bottom">
+              <el-button circle class="erp-header-icon" aria-label="打开汇率工具" @click="openQuickTool('exchange')">
+                <el-icon><HeaderToolIcon name="exchange" /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip v-if="canUseProfitCalculator" content="利润计算器" placement="bottom">

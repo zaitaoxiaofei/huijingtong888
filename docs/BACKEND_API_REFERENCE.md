@@ -2193,6 +2193,26 @@ Return recent exchange-rate history.
 - Responses:
   - `200` `application/json` -> `array<ExchangeRate>`
 
+#### `GET /api/exchange-rates/tool`
+
+Read shared CNY/RUB daily archives with a rolling year, quarter or month curve. Only a freshly authorized enterprise finance member receives their own enterprise's current-month realized FX and unsettled sales-income revaluation. Confirmed RUB prices and CNY reference receipts (original CNY price multiplied by pinned order-day reference rate) remain distinguishable; this estimate excludes fees and is not original-currency evidence or final net profit. Database reads only; no external fetching, order recalculation or archive writes.
+
+- Auth: `authenticated; enterprise finance permission for private impact`
+- Query parameters:
+  - `range` (`string`, optional): year (default), quarter or month; rolling Beijing-calendar interval.
+  - `from` (`string`, optional): Optional inclusive Beijing business date YYYY-MM-DD.
+  - `to` (`string`, optional): Optional inclusive end date; not future and at most 400 days.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/exchange-rates/tool/today`
+
+Read today's archived public CNY/RUB reference rate using one database query. Missing today remains unavailable; older rates are labelled latest separately. No enterprise financial data or network fetching.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/exchange-rates/daily-archive`
 
 Platform super administrator audit of immutable public CBR daily reference archives. Database reads only: never fetches external rates, writes archives, changes the legacy exchange-rate table or recalculates orders.
