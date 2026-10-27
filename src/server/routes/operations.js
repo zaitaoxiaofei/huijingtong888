@@ -4,6 +4,9 @@ import { currentPricingReferenceRate } from "../../services/pricing-reference-ra
 import { latestRfbsTariff, latestRfbsMarketplace, searchRfbsCategories, rfbsCategory } from "../../services/ozon-rfbs-tariff.js";
 import { businessLogisticsRules, sharedPricingLogisticsRules } from "../../services/pricing-logistics-rules.js";
 import { runCustomerMessageTenantOperation } from "../../services/customer-message-tenant-scope.js";
+import { unclassifiedCancellationReasons, saveCancellationReasonClassification } from "../../services/order-cancellation-review.js";
+async function queryCancellationReviewMysql(sql, params) { const { mysqlQuery } = await import("../../mysql-pool.js"); return mysqlQuery(sql, params); }
+async function cancellationReviewMysqlTransaction(operation) { const { withMysqlTransaction } = await import("../../mysql-pool.js"); return withMysqlTransaction(operation); }
 
 function platformLogisticsScope(req, body = null, url = null) {
   if (!isPlatformAdmin(req?._session)) {
@@ -22,7 +25,9 @@ function platformLogisticsRule(row) {
   return rule;
 }
 
-export function createOperationsRoutes({ services, readJson, readBusinessLogisticsRules = businessLogisticsRules }) {
+export function createOperationsRoutes({ services, readJson, readBusinessLogisticsRules = businessLogisticsRules,
+  readUnclassifiedCancellationReasons = unclassifiedCancellationReasons, saveCancellationClassification = saveCancellationReasonClassification,
+  queryCancellationReview = queryCancellationReviewMysql, cancellationReviewTransaction = cancellationReviewMysqlTransaction }) {
   const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
@@ -38,6 +43,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       return readBusinessLogisticsRules();
     },
     "GET /api/order-cancellation-rules": () => services.orderCancellationRules(),
+    "GET /api/order-cancellation-rules/unclassified": (req) => readUnclassifiedCancellationReasons(queryCancellationReview, req.query || {}, req._session),
+    "POST /api/order-cancellation-rules/classifications": async (req) => saveCancellationClassification(cancellationReviewTransaction, await readJson(req), req._session),
     "GET /api/inbound-records": (req, url) => services.inboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/outbound-records": (req, url) => services.outboundRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/fbp-transfer-records": (req, url) => services.fbpTransferRecords(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

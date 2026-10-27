@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
+import { authorizeApiRequest } from "../src/server/authorization.js";
 
 const service = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 
-test("reviewed listing reads and batch publication open while advanced task retry stays closed", () => {
+test("reviewed listing reads, publication, and task retry open only for exact business routes", () => {
   const session = { tenant: { id: 42, slug: "company-a" } };
   for (const [method, parts] of [
-    ["POST", ["api", "listing", "publish-tasks", "12", "retry"]],
     ["POST", ["api", "listing", "drafts", "batch-update"]],
     ["GET", ["api", "listing", "drafts", "batch-publish"]],
     ["POST", ["api", "listing", "drafts", "batch-publish", "extra"]]
@@ -16,7 +16,18 @@ test("reviewed listing reads and batch publication open while advanced task retr
   for (const tenant of [{ id: 1, slug: "default" }, { id: 42, slug: "company-a" }, { id: 43, slug: "company-b" }]) {
     assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "drafts", "batch-publish"], "POST").allowed, true);
     assert.equal(tenantIsolationDecision({ tenant }, ["api", "listing", "media", "watermark"], "POST").allowed, true);
+    const parts = ["api", "listing", "publish-tasks", "12", "retry"];
+    assert.equal(tenantIsolationDecision({ tenant }, parts, "POST").allowed, true);
+    assert.equal(authorizeApiRequest({ method: "POST", _session: { tenant, roles: ["operations"] } }, parts).allowed, true);
+    assert.equal(authorizeApiRequest({ method: "POST", _session: { tenant, roles: ["packing"] } }, parts).allowed, false);
   }
+  for (const [method, parts] of [
+    ["GET", ["api", "listing", "publish-tasks", "12", "retry"]],
+    ["POST", ["api", "listing", "publish-tasks", "not-numeric", "retry"]],
+    ["POST", ["api", "listing", "publish-tasks", "12", "retry", "extra"]],
+    ["POST", ["api", "listing", "publish-tasks", "12", "unknown"]]
+  ]) assert.equal(tenantIsolationDecision(session, parts, method).allowed, false);
+  assert.equal(tenantIsolationDecision({}, ["api", "listing", "publish-tasks", "12", "retry"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision({}, ["api", "listing", "drafts", "batch-publish"], "POST").allowed, false);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-tasks"], "GET").allowed, true);
   assert.equal(tenantIsolationDecision(session, ["api", "listing", "publish-tasks", "12"], "GET").allowed, true);

@@ -8,6 +8,7 @@ run_db_maintenance="${4:-1}"
 reviewed_identity_manifest="${5:-}"
 reviewed_ai_material_manifest="${6:-}"
 allow_service_interruption="${7:-0}"
+reviewed_ai_media_retention_manifest="${8:-}"
 material_change_required="ready"
 candidate_warmup_seconds=360
 rollback_warmup_seconds=360
@@ -25,6 +26,9 @@ candidate_pid_file="/tmp/ozon-erp-candidate.pid"
 release_lock_file="/var/lock/ozon-erp-release.lock"
 
 cleanup_material_manifest() {
+  if [[ "${reviewed_ai_media_retention_manifest:-}" =~ ^/tmp/ozon-erp-ai-media-retention-[0-9A-Za-z._-]+\.json$ ]]; then
+    rm -f -- "$reviewed_ai_media_retention_manifest"
+  fi
   if [[ "$reviewed_ai_material_manifest" =~ ^/tmp/ozon-erp-ai-material-[0-9A-Za-z._-]+\.json$ ]]; then
     rm -f -- "$reviewed_ai_material_manifest"
   fi
@@ -32,8 +36,16 @@ cleanup_material_manifest() {
 trap cleanup_material_manifest EXIT
 
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
-  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0]" >&2
+  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0] [reviewed-ai-media-retention-manifest]" >&2
   exit 2
+fi
+
+if [[ -n "$reviewed_ai_media_retention_manifest" ]]; then
+  if [[ "$allow_service_interruption" != "1" || ! "$reviewed_ai_media_retention_manifest" =~ ^/tmp/ozon-erp-ai-media-retention-[0-9A-Za-z._-]+\.json$ || -L "$reviewed_ai_media_retention_manifest" || ! -s "$reviewed_ai_media_retention_manifest" ]]; then
+    echo "AI media retention requires a private reviewed manifest and explicit offline maintenance." >&2
+    exit 2
+  fi
+  chmod 600 "$reviewed_ai_media_retention_manifest"
 fi
 if [[ ! -f "$archive_path" ]]; then
   echo "Release archive not found: $archive_path" >&2
@@ -123,7 +135,7 @@ rollback() {
 trap rollback ERR
 
 assert_release_interruption_policy() {
-  if [[ "$allow_service_interruption" != "1" && ("$material_change_required" == "change" || -n "$reviewed_identity_manifest") ]]; then
+  if [[ "$allow_service_interruption" != "1" && ("$material_change_required" == "change" || -n "$reviewed_identity_manifest" || -n "${reviewed_ai_media_retention_manifest:-}") ]]; then
     echo "Release requires stopping legacy writers for reviewed ownership/identity changes. Existing services were left running. Schedule explicit maintenance with --allow-service-interruption; a normal release cannot perform this stop." >&2
     return 1
   fi
@@ -337,7 +349,7 @@ elif [[ -n "$reviewed_ai_material_manifest" ]]; then
 fi
 assert_release_interruption_policy
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" || -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" || -f "$staging_dir/scripts/migrate-ai-credits.mjs" || -f "$staging_dir/scripts/migrate-listing-frozen-content.mjs" || -f "$staging_dir/scripts/migrate-listing-draft-list-indexes.mjs" || -f "$staging_dir/scripts/migrate-order-search-indexes.mjs" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" || -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" || -f "$staging_dir/scripts/migrate-ai-credits.mjs" || -f "$staging_dir/scripts/migrate-listing-frozen-content.mjs" || -f "$staging_dir/scripts/migrate-listing-draft-list-indexes.mjs" || -f "$staging_dir/scripts/migrate-order-search-indexes.mjs" ]]; then
   backup_database
 fi
 
@@ -513,6 +525,12 @@ if [[ -e "$staging_dir/data/ai-credit-results" || -L "$staging_dir/data/ai-credi
   exit 3
 fi
 ln -s "$shared_root/private-ai-results" "$staging_dir/data/ai-credit-results"
+install -d -m 700 -o ozon-erp -g ozon-erp "$shared_root/ai-media-retention"
+if [[ -e "$staging_dir/data/ai-media-retention" || -L "$staging_dir/data/ai-media-retention" ]]; then
+  echo "Deploy archives must not contain private AI retention manifests." >&2
+  exit 3
+fi
+ln -s "$shared_root/ai-media-retention" "$staging_dir/data/ai-media-retention"
 
 if [[ -e "$release_dir" ]]; then
   echo "Release already exists: $release_dir" >&2
@@ -532,6 +550,18 @@ if [[ -n "$reviewed_identity_manifest" ]]; then
   set +a
   (cd "$release_dir" && node scripts/migrate-platform-enterprise-identities.mjs --manifest="$reviewed_identity_manifest")
   (cd "$release_dir" && node scripts/migrate-platform-enterprise-identities.mjs --apply --manifest="$reviewed_identity_manifest" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
+if [[ -n "${reviewed_ai_media_retention_manifest:-}" ]]; then
+  stop_existing_candidate
+  primary_changed=1
+  systemctl stop ozon-erp
+  set -a
+  source "$env_file"
+  set +a
+  retention_audit_dir="$shared_root/maintenance/ai-media-retention"
+  install -d -m 700 "$retention_audit_dir"
+  install -m 600 "$reviewed_ai_media_retention_manifest" "$retention_audit_dir/$release_version.manifest.json"
+  (umask 077; cd "$release_dir" && node scripts/cleanup-ai-media-retention.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock --manifest="$retention_audit_dir/$release_version.manifest.json" --apply --offline-maintenance | tee "$retention_audit_dir/$release_version.result.json")
 fi
 start_candidate
 ln -sfn "$release_dir" "$current_link"

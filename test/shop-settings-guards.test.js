@@ -3,14 +3,16 @@ import fs from "node:fs";
 import test from "node:test";
 
 const settingsViewSource = fs.readFileSync(new URL("../frontend/admin/views/settings/SettingsView.vue", import.meta.url), "utf8");
+const tenantShopsSource = fs.readFileSync(new URL("../frontend/admin/views/settings/TenantShopsView.vue", import.meta.url), "utf8");
 const mysqlCutoverSource = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const apiClientSource = fs.readFileSync(new URL("../frontend/admin/utils/api.js", import.meta.url), "utf8");
 const shopDictionarySource = fs.readFileSync(new URL("../frontend/admin/utils/shop-dictionary.js", import.meta.url), "utf8");
 const ordersPageSource = fs.readFileSync(new URL("../frontend/orders/composables/useOrdersPage.js", import.meta.url), "utf8");
 
-test("shop settings force refresh bypasses cached shop list after mutations", () => {
-  assert.match(settingsViewSource, /loadShopDictionary\(\{ force \}\)/);
-  assert.match(settingsViewSource, /state\.shops = state\.shops\.filter\(\(item\) => Number\(item\.id\) !== Number\(row\.id\)\)/);
+test("enterprise shops force a fresh dictionary after mutations and shared rules have no duplicate shop editor", () => {
+  assert.match(tenantShopsSource, /apiClient\.get\("\/api\/shops", \{ noCache: true \}\)/);
+  assert.match(tenantShopsSource, /await load\(\)/);
+  assert.doesNotMatch(settingsViewSource, /shopDialog|\/api\/shops/);
 });
 
 test("shop dictionary invalidates and broadcasts after shop mutations", () => {
@@ -27,18 +29,18 @@ test("orders page uses shared shop dictionary instead of a local shop cache", ()
 });
 
 test("shop create and update reject duplicate active shop names", () => {
-  assert.match(mysqlCutoverSource, /async function assertUniqueShopNameMysql\(name, exceptId = 0\)/);
+  assert.match(mysqlCutoverSource, /async function assertUniqueShopNameMysql\(name, tenantId, exceptId = 0\)/);
   assert.match(mysqlCutoverSource, /LOWER\(TRIM\(name\)\) = LOWER\(TRIM\(\?\)\)/);
-  assert.match(mysqlCutoverSource, /const shopName = await assertUniqueShopNameMysql\(body\.name\);/);
-  assert.match(mysqlCutoverSource, /const shopName = await assertUniqueShopNameMysql\(body\.name, Number\(id\)\);/);
+  assert.match(mysqlCutoverSource, /const shopName = await assertUniqueShopNameMysql\(body\.name, normalizedTenantId\);/);
+  assert.match(mysqlCutoverSource, /const shopName = await assertUniqueShopNameMysql\(body\.name, normalizedTenantId, Number\(id\)\);/);
   assert.match(mysqlCutoverSource, /请编辑已有店铺，不要重复新增/);
 });
 
 test("shop settings binds each shop to a person user id", () => {
-  assert.match(settingsViewSource, /<el-select v-model="shopDialog\.form\.user_id" filterable placeholder="请选择店长"/);
-  assert.match(settingsViewSource, /user_id: \[\{ required: true, message: "请选择店长"/);
-  assert.match(settingsViewSource, /apiClient\.get\("\/api\/people"\)/);
+  assert.match(tenantShopsSource, /<el-select v-model="form\.user_id" filterable placeholder="请选择本企业成员"/);
+  assert.match(tenantShopsSource, /if \(!form\.user_id\) return ElMessage\.warning/);
+  assert.match(tenantShopsSource, /apiClient\.get\("\/api\/enterprise\/people", \{ noCache: true \}\)/);
   assert.match(mysqlCutoverSource, /ALTER TABLE shops ADD COLUMN user_id BIGINT UNSIGNED NULL/);
   assert.match(mysqlCutoverSource, /LEFT JOIN people p ON p\.id = s\.user_id/);
-  assert.match(mysqlCutoverSource, /const userId = await requireShopUserIdMysql\(body\.user_id\)/);
+  assert.match(mysqlCutoverSource, /const userId = await requireShopUserIdMysql\(body\.user_id, normalizedTenantId\)/);
 });

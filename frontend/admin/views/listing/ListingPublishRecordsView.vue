@@ -655,7 +655,7 @@ async function retryPublishTask(row) {
     const draftById = new Map(drafts.map((draft, index) => [draftIds[index], draft]));
     const mediaJobs = candidates.map((item) => {
       const draft = draftById.get(Number(item.draft_id));
-      const images = [...new Set(draftListImages(draft).filter(Boolean))];
+      const images = [...new Set(draftPublishImages(draft).filter(Boolean))];
       if (!images.length) throw new Error(`草稿 ${item.draft_id} 没有可处理的商品图片`);
       return { productId: `retry-${item.id}`, images, shops: [shopById.get(Number(item.shop_id))] };
     });
@@ -1072,6 +1072,11 @@ function normalizeDraftProjectFallback(row = {}) {
     ...normalized,
     primary_image: normalized.primary_image || normalized.preview_candidates[0] || ""
   };
+}
+
+function draftPublishImages(row = {}) {
+  if (Array.isArray(row.publish_images)) return row.publish_images.map((item) => String(item || "").trim()).filter(Boolean);
+  return draftListImages(row);
 }
 
 function draftListImages(row = {}) {
@@ -1758,7 +1763,7 @@ async function publishBatchListingDrafts() {
     if (selectedShops.length !== selectedShopIds.size) throw new Error("部分目标店铺的浏览器素材配置加载失败");
     batchListing.browserStage = "materials";
     const mediaJobs = rows.map((row) => {
-      const images = [...new Set(draftListImages(row).filter(Boolean))];
+      const images = [...new Set(draftPublishImages(row).filter(Boolean))];
       if (!images.length) throw new Error(`草稿 ${row.id} 没有可处理的商品图片`);
       return { productId: `draft-${row.id}`, images, shops: selectedShops };
     });

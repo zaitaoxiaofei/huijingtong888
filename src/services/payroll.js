@@ -132,8 +132,45 @@ export async function ensurePayrollSchema() {
   schemaReady = true;
 }
 
-export async function payrollSetup() {
+async function payrollTenantReadScope(tenantId) {
+  if (tenantId == null) return null; // Explicit platform-maintenance callers retain the existing global view.
+  const legacy = String(tenantId) === "admin";
+  const id = Number(tenantId);
+  if (!legacy && (!Number.isSafeInteger(id) || id <= 0)) throw Object.assign(new Error("当前企业标识无效，无法读取工资资料"), { statusCode: 403 });
+  const rows = await mysqlQuery(`SELECT id, slug FROM tenants WHERE ${legacy ? "slug='default'" : "id=?"} AND status='active' LIMIT 1`, legacy ? [] : [id]);
+  if (!rows[0]) throw Object.assign(new Error("当前企业不存在或已停用"), { statusCode: 403 });
+  return {
+    id: Number(rows[0].id),
+    company: legacy || rows[0].slug === "default" ? "(fc.tenant_id=? OR fc.tenant_id IS NULL OR fc.tenant_id=0)" : "fc.tenant_id=?",
+    companyParams: [Number(rows[0].id)]
+  };
+}
+
+export async function payrollSetup(tenantId = null) {
   await ensurePayrollSchema();
+  const scope = await payrollTenantReadScope(tenantId);
+  if (scope) {
+    const profiles = await mysqlQuery(`SELECT pr.*, pe.name AS person_name, fc.name AS company_name, ps.name AS scheme_name, pp.name AS policy_name
+      FROM payroll_profiles pr JOIN people pe ON pe.id=pr.person_id JOIN finance_companies fc ON fc.id=pr.company_id
+      JOIN payroll_contribution_schemes ps ON ps.id=pr.contribution_scheme_id JOIN payroll_policies pp ON pp.id=pr.policy_id
+      WHERE pr.status != 'deleted' AND fc.status != 'deleted' AND ${scope.company}
+        AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=? AND tm.person_id=pr.person_id)
+      ORDER BY pe.name, pr.effective_from DESC`, [...scope.companyParams, scope.id]);
+    const schemeIds = [...new Set(profiles.map(row => Number(row.contribution_scheme_id)))];
+    const policyIds = [...new Set(profiles.map(row => Number(row.policy_id)))];
+    const [people, companies, schemes, policies] = await Promise.all([
+      mysqlQuery(`SELECT pe.id, pe.name, pe.username, pe.role, pe.active FROM people pe
+        WHERE EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=? AND tm.person_id=pe.id)
+          AND EXISTS (SELECT 1 FROM payroll_profiles pr JOIN finance_companies fc ON fc.id=pr.company_id
+            WHERE pr.person_id=pe.id AND pr.status != 'deleted' AND fc.status != 'deleted' AND ${scope.company}) ORDER BY pe.id`, [scope.id, ...scope.companyParams]),
+      mysqlQuery(`SELECT fc.id, fc.name, fc.status FROM finance_companies fc WHERE fc.status != 'deleted' AND ${scope.company} ORDER BY fc.id`, scope.companyParams),
+      schemeIds.length ? mysqlQuery(`SELECT * FROM payroll_contribution_schemes WHERE id IN (${schemeIds.map(() => "?").join(",")}) ORDER BY effective_from DESC, id DESC`, schemeIds) : [],
+      policyIds.length ? mysqlQuery(`SELECT * FROM payroll_policies WHERE id IN (${policyIds.map(() => "?").join(",")}) ORDER BY effective_from DESC, id DESC`, policyIds) : []
+    ]);
+    return { people, companies, profiles,
+      schemes: schemes.map(row => ({ ...row, employer_rates: jsonObject(row.employer_rates_json), employee_rates: jsonObject(row.employee_rates_json) })),
+      policies: policies.map(row => ({ ...row, components: jsonObject(row.components_json) })) };
+  }
   const [people, companies, schemes, policies, profiles] = await Promise.all([
     mysqlQuery("SELECT id, name, username, role, active FROM people WHERE active != 0 ORDER BY id"),
     mysqlQuery("SELECT id, name, status FROM finance_companies WHERE status != 'deleted' ORDER BY id"),
@@ -280,16 +317,25 @@ export async function calculatePayrollPeriod(body = {}, personId = null) {
   });
 }
 
-export async function payrollPeriod(query = {}) {
+export async function payrollPeriod(query = {}, tenantId = null) {
   await ensurePayrollSchema();
   const companyId = requiredId(query.company_id, "公司");
   const month = monthKey(query.month);
-  const periods = await mysqlQuery("SELECT * FROM payroll_periods WHERE company_id=? AND month_key=? LIMIT 1", [companyId, month]);
+  const scope = await payrollTenantReadScope(tenantId);
+  if (scope) {
+    const owned = await mysqlQuery(`SELECT fc.id FROM finance_companies fc WHERE fc.id=? AND fc.status != 'deleted' AND ${scope.company} LIMIT 1`, [companyId, ...scope.companyParams]);
+    if (!owned[0]) throw Object.assign(new Error("公司档案不存在或不属于当前企业"), { statusCode: 404 });
+  }
+  const periods = scope
+    ? await mysqlQuery(`SELECT period.* FROM payroll_periods period JOIN finance_companies fc ON fc.id=period.company_id
+        WHERE period.company_id=? AND period.month_key=? AND fc.status != 'deleted' AND ${scope.company} LIMIT 1`, [companyId, month, ...scope.companyParams])
+    : await mysqlQuery("SELECT * FROM payroll_periods WHERE company_id=? AND month_key=? LIMIT 1", [companyId, month]);
   if (!periods[0]) return { period: null, rows: [], summary: { gross_salary: 0, net_salary: 0, employer_total_cost: 0 } };
   const rows = await mysqlQuery(`SELECT st.*, pe.name AS person_name, pr.department, fc.name AS company_name, ps.name AS scheme_name, ps.city_name, pp.name AS policy_name
     FROM payroll_statements st JOIN people pe ON pe.id=st.person_id JOIN payroll_profiles pr ON pr.id=st.profile_id
     JOIN finance_companies fc ON fc.id=pr.company_id JOIN payroll_contribution_schemes ps ON ps.id=st.contribution_scheme_id
-    JOIN payroll_policies pp ON pp.id=st.policy_id WHERE st.period_id=? ORDER BY pe.name`, [periods[0].id]);
+    JOIN payroll_policies pp ON pp.id=st.policy_id WHERE st.period_id=?${scope ? ` AND pr.company_id=? AND fc.status != 'deleted' AND ${scope.company}
+      AND st.person_id=pr.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=? AND tm.person_id=st.person_id)` : ""} ORDER BY pe.name`, [periods[0].id, ...(scope ? [companyId, ...scope.companyParams, scope.id] : [])]);
   const summary = rows.reduce((acc, row) => {
     acc.gross_salary = money(acc.gross_salary + Number(row.gross_salary || 0));
     acc.net_salary = money(acc.net_salary + Number(row.net_salary || 0));

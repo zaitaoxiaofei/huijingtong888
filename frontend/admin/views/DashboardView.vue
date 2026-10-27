@@ -31,7 +31,7 @@ import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const isAdmin = computed(() => hasPermission(authStore.user, "admin"));
+const isAdmin = computed(() => hasPermission(authStore.user, "finance"));
 const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);
@@ -43,7 +43,7 @@ const selectedDate = ref(/^\d{4}-\d{2}-\d{2}$/.test(String(route.query.date || "
 let dashboardSnapshotRefreshTimer = null;
 let dashboardSnapshotRefreshAttempts = 0;
 let dashboardRequestSeq = 0;
-const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:";
+const DASHBOARD_SESSION_CACHE_PREFIX = "erp:dashboard:last-success:v2:";
 
 const dashboard = ref({
   summary: {},
@@ -112,7 +112,7 @@ function clearDashboardSnapshotReload() {
 
 function readDashboardSessionCache(dateKey) {
   try {
-    const cached = JSON.parse(window.sessionStorage?.getItem(`${DASHBOARD_SESSION_CACHE_PREFIX}${dateKey}`) || "null");
+    const cached = JSON.parse(window.sessionStorage?.getItem(dashboardSessionCacheKey(dateKey)) || "null");
     return cached && typeof cached === "object" ? cached : null;
   } catch {
     return null;
@@ -121,10 +121,16 @@ function readDashboardSessionCache(dateKey) {
 
 function writeDashboardSessionCache(dateKey, payload) {
   try {
-    window.sessionStorage?.setItem(`${DASHBOARD_SESSION_CACHE_PREFIX}${dateKey}`, JSON.stringify(payload));
+    window.sessionStorage?.setItem(dashboardSessionCacheKey(dateKey), JSON.stringify(payload));
   } catch {
     // Storage may be unavailable in privacy mode; live requests still work.
   }
+}
+
+function dashboardSessionCacheKey(dateKey) {
+  const user = authStore.user;
+  const authority = [user?.id || user?.person_id, user?.tenant?.id, user?.tenant?.role, user?.platform_role, user?.roles ?? user?.role, user?.tenant?.access_allowed];
+  return `${DASHBOARD_SESSION_CACHE_PREFIX}${encodeURIComponent(JSON.stringify(authority))}:${dateKey}`;
 }
 
 function waitForDashboardRetry(delay) {

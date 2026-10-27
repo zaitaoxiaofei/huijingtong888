@@ -14,24 +14,24 @@ export function exchangeRateText(value, digits = 4) {
   return number !== null && number > 0 ? number.toFixed(digits) : "—";
 }
 
-export function exchangeImpactMoney(value) {
+export function preciseExchangeRateText(value) {
   const number = exchangeRateNumber(value);
-  if (number === null) return "待核对";
-  return `${number > 0 ? "+" : number < 0 ? "−" : ""}¥${Math.abs(number).toFixed(2)}`;
+  return number !== null && number > 0 ? number.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 12 }) : "—";
 }
 
-export function exchangeImpactTone(value) {
-  const number = exchangeRateNumber(value);
-  return number === null || number === 0 ? "neutral" : number > 0 ? "positive" : "negative";
+export function nearestExchangeChartPoint(chart, x) {
+  if (!chart?.points?.length || !Number.isFinite(x)) return null;
+  return chart.points.reduce((nearest, point) => Math.abs(point.x - x) < Math.abs(nearest.x - x) ? point : nearest);
 }
 
-export function exchangeForecastAmount(open) {
-  if (!open || typeof open !== "object") return null;
-  // An explicit null means the combined forecast is unknown, even when one part is known.
-  const value = Object.hasOwn(open, "estimated_sales_income_fx_cny")
-    ? open.estimated_sales_income_fx_cny
-    : open.known_rub_revenue_impact_cny;
-  return exchangeRateNumber(value);
+export function exchangeChartKeyboardPoint(chart, selectedDay, key) {
+  const points = chart?.points || [];
+  if (!points.length || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return null;
+  if (key === "Home") return points[0];
+  if (key === "End") return points.at(-1);
+  const index = points.findIndex(point => point.business_date === selectedDay);
+  if (index < 0) return key === "ArrowLeft" ? points.at(-1) : points[0];
+  return points[Math.max(0, Math.min(points.length - 1, index + (key === "ArrowLeft" ? -1 : 1)))];
 }
 
 function dayTime(day) {
@@ -51,38 +51,6 @@ export function exchangeRateQuery(preset = "year", dates = null) {
     query.set("to", to);
   }
   return `/api/exchange-rates/tool?${query}`;
-}
-
-export function exchangeRateReasonText(reason) {
-  const labels = {
-    TODAY_ARCHIVE_MISSING: "今日汇率尚未存档",
-    ARCHIVE_INVALID: "汇率存档需要核对",
-    ARCHIVE_CONFLICT: "汇率存档存在冲突，待核对",
-    LEGACY_FX_BASELINE_UNAVAILABLE: "旧规则订单缺少可追溯的汇差依据",
-    FX_STATE_MISSING: "部分订单的汇率依据待补齐",
-    ORDER_FX_ARCHIVE_INVALID: "部分订单的下单汇率待核对",
-    SIGNED_FX_ARCHIVE_INVALID: "部分订单的签收汇率待核对",
-    ACTUAL_SETTLEMENT_PENDING: "部分订单的完整结算账单尚未齐全",
-    ACTUAL_FX_ATTRIBUTION_MISSING: "部分订单的真实汇差依据待补齐",
-    ACTUAL_FX_ATTRIBUTION_CONFLICT: "部分订单的真实汇差依据存在冲突",
-    FIRST_VALID_ESTIMATE_MISSING: "部分订单尚缺最初的有效预估依据",
-    ESTIMATE_FX_PIN_MISMATCH: "部分订单的预估汇率依据待核对",
-    ORIGINAL_SALE_CURRENCY_UNKNOWN: "部分订单的原币销售收入待核对",
-    SETTLEMENT_RUB_EXPOSURE_UNKNOWN: "人民币标价订单的卢布结算金额尚未确认，暂不计入预计汇差",
-    ESTIMATE_QUANTITY_UNKNOWN: "部分订单的预估数量待核对",
-    TERMINAL_UNSIGNED_EXCLUDED: "未签收即终止的订单未纳入预计收入汇差",
-    FX_DAILY_RATE_MISSING: "当天汇率尚未存档",
-    ORDER_FX_ARCHIVE_MISSING: "部分订单的汇率依据待补齐",
-    ORDER_FX_NOT_READY: "部分订单的汇率依据待补齐",
-    FX_FINANCE_SOURCE_INCOMPLETE: "部分订单的结算账单尚未齐全",
-    ORDER_PROFIT_FINAL_BILL_INCOMPLETE: "部分订单的结算账单尚未齐全",
-    FX_FINANCE_CURRENCY_UNKNOWN: "部分原始账单币种待核对",
-    FX_FINANCE_SOURCE_UNRECONCILED: "部分原始账单尚未核平",
-    FX_ORDER_RATE_MISSING: "部分订单的下单汇率待补齐",
-    FX_TODAY_RATE_MISSING: "今日汇率尚未存档",
-    FX_ACTUAL_ATTRIBUTION_MISSING: "部分订单的真实汇差依据待补齐"
-  };
-  return labels[String(reason || "")] || "部分数据待核对";
 }
 
 // One point represents one Beijing-calendar day. Missing days break the line.

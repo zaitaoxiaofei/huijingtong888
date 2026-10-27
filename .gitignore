@@ -28,6 +28,8 @@ src/data/*.sqlite-shm
 src/data/*.sqlite-wal
 
 # Generated data backups
+data/ai-credit-results/
+data/ai-media-retention/
 backups/
 backups-test/
 .restore-temp-*/

@@ -56,6 +56,7 @@ const ProcurementReconciliationView = () => import("../views/procurement/Procure
 const PurchaseHistoryView = () => import("../views/procurement/PurchaseHistoryView.vue");
 const PurchaseCostCenterView = () => import("../views/procurement/PurchaseCostCenterView.vue");
 const SettingsView = () => import("../views/settings/SettingsView.vue");
+const PackagingFeeRuleView = () => import("../views/tools/PackagingFeeRuleView.vue");
 const AiProviderSettingsView = () => import("../views/settings/AiProviderSettingsView.vue");
 const MaterialCenterView = () => import("../views/settings/MaterialCenterView.vue");
 const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.vue");
@@ -201,17 +202,22 @@ export const router = createRouter({
         { path: "purchase-history", name: "purchase-history", component: PurchaseHistoryView, meta: { title: "入库记录", breadcrumb: ["采购入库", "入库记录"] } },
         { path: "purchase-cost-center", name: "purchase-cost-center", component: PurchaseCostCenterView, meta: { title: "成本与异常", breadcrumb: ["采购入库", "成本与异常"] } },
         { path: "inbound", redirect: "/purchase-list" },
-        { path: "settings", name: "settings", component: SettingsView, meta: { title: "基础资料", breadcrumb: ["系统管理", "基础资料"] } },
+        { path: "settings", name: "settings", redirect: to => ({ path: ({ profit: "/tools/packaging-fee-rule", logistics: "/logistics-settings", cancel: "/order-cancellation-rules", rates: "/dashboard" })[to.query.section || to.query.tab] || "/dashboard" }) },
+        { path: "tools/packaging-fee-rule", name: "tools-packaging-fee-rule", component: PackagingFeeRuleView, meta: { title: "包装费规则", breadcrumb: ["实用工具", "包装费规则"] } },
+        { path: "logistics-settings", name: "logistics-settings", component: SettingsView, props: { section: "logistics" }, meta: { title: "物流设置", breadcrumb: ["企业店铺", "物流设置"] } },
+        { path: "order-cancellation-rules", name: "order-cancellation-rules", component: SettingsView, props: { section: "cancel" }, meta: { title: "取消规则", breadcrumb: ["平台管理", "取消规则"] } },
         { path: "settings/scheduled-jobs", name: "settings-scheduled-jobs", component: ScheduledJobsView, meta: { title: "自动任务", breadcrumb: ["系统管理", "自动任务"] } },
         { path: "settings/system-monitoring", name: "settings-system-monitoring", component: SystemMonitoringView, meta: { title: "系统监控", breadcrumb: ["系统管理", "系统监控"] } },
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
-        { path: "settings/materials", name: "settings-materials", component: MaterialCenterView, meta: { title: "素材库", breadcrumb: ["系统管理", "素材库"] } },
+        { path: "settings/materials", name: "settings-materials", redirect: "/ai-materials" },
+        { path: "ai-materials", name: "ai-materials", component: MaterialCenterView, meta: { title: "AI素材", breadcrumb: ["AI技能库", "AI素材"] } },
         { path: "tenant-management", name: "tenant-management", component: TenantSubscriptionView, meta: { title: "企业与授权", breadcrumb: ["企业与授权"] } },
         { path: "tenant-shops", name: "tenant-shops", component: TenantShopsView, meta: { title: "企业店铺", breadcrumb: ["企业管理", "店铺管理"] } },
         { path: "tenant-people", name: "tenant-people", component: EnterprisePersonnelPanel, meta: { title: "企业人员", breadcrumb: ["企业管理", "企业人员"] } },
         { path: "platform-accounts", name: "platform-accounts", component: PlatformAccountsView, meta: { title: "平台人员", breadcrumb: ["平台管理", "平台人员"] } },
         { path: "settings/tenants", name: "settings-tenants", redirect: (to) => ({ path: "/tenant-management", query: to.query }) },
-        { path: "settings/prompts", name: "settings-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["系统管理", "AI提示词库"] } },
+        { path: "settings/prompts", name: "settings-prompts", redirect: "/ai-prompts" },
+        { path: "ai-prompts", name: "ai-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["AI技能库", "AI提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },
         { path: "tools/pricing", name: "tools-pricing", component: PricingToolView, meta: { title: "定价工具", breadcrumb: ["实用工具", "定价工具"] } },
         { path: "tools/profit-calculator", name: "tools-profit-calculator", component: ProfitCalculatorView, meta: { title: "利润计算器", breadcrumb: ["实用工具", "利润计算器"] } },

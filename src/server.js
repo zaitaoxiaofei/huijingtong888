@@ -48,6 +48,8 @@ import { createListingAutomationRoutes, handleListingAutomationRestRoute, handle
 import { createAssetVariantEngineRoutes, handleAssetVariantEngineRestRoute } from "./server/routes/assetVariantEngine.js";
 import { createAiGenerationTaskRoutes, handleAiGenerationTaskRestRoute } from "./server/routes/aiGenerationTasks.js";
 import { cleanupAiGenerationTaskHistory } from "./services/ai-generation-tasks.js";
+import { createAiMediaRetentionSweep } from "./services/ai-media-retention.js";
+import { ossStorageConfig } from "./services/object-storage.js";
 import { cleanupTransportedOrderLabelCache } from "./services/order-label-cache-cleanup.js";
 import { cleanupListingPublishHistory } from "./services/listing-publish-history-cleanup.js";
 import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
@@ -971,6 +973,17 @@ const scheduledJobDefinitions = [
     config: { retentionDays: 30, batchSize: 1000 }
   },
   {
+    key: "ai_media_retention_cleanup",
+    name: "AI素材七日留存清理",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "04:20",
+    catchupEnabled: false,
+    maxCatchupRuns: 0,
+    config: { retentionDays: 7, batchSize: 200 }
+  },
+  {
     key: "listing_publish_history_cleanup",
     name: "上架任务和发布状态清理",
     category: "maintenance",
@@ -1015,6 +1028,31 @@ const scheduledJobDefinitions = [
   }
 ];
 
+const aiRetentionDirectory = path.resolve("data/ai-media-retention");
+const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
+  query: mysqlQuery,
+  storage: ossStorageConfig(),
+  transaction: callback => withMysqlTransaction(connection => callback({
+    query: async (sql, params = []) => (await connection.query(sql, params))[0],
+    execute: async (sql, params = []) => (await connection.execute(sql, params))[0]
+  })),
+  saveManifest: async manifest => {
+    await fs.mkdir(aiRetentionDirectory, { recursive: true, mode: 0o700 });
+    const file = path.join(aiRetentionDirectory, `${Date.now()}-${manifest.manifest_sha256}.json`);
+    await fs.writeFile(file, JSON.stringify(manifest) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    return file;
+  },
+  loadCursor: async () => {
+    try { return JSON.parse(await fs.readFile(path.join(aiRetentionDirectory, "cursor.json"), "utf8")); }
+    catch (error) { if (error.code === "ENOENT") return {}; throw error; }
+  },
+  saveCursor: async cursor => {
+    const temporary = path.join(aiRetentionDirectory, "cursor.json.new");
+    await fs.writeFile(temporary, JSON.stringify(cursor) + "\n", { encoding: "utf8", mode: 0o600 });
+    await fs.rename(temporary, path.join(aiRetentionDirectory, "cursor.json"));
+  }
+});
+
 const scheduledJobHandlers = {
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
     dailyFxArchiveFirstDueAt = 0;
@@ -1056,6 +1094,7 @@ const scheduledJobHandlers = {
   ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
+  ai_media_retention_cleanup: withForegroundApiDeferral("ai_media_retention_cleanup", runAiMediaRetentionCleanup),
   transported_order_label_cleanup: withForegroundApiDeferral("transported_order_label_cleanup", (job) => cleanupTransportedOrderLabelCache(job?.config || {})),
   listing_publish_history_cleanup: withForegroundApiDeferral("listing_publish_history_cleanup", (job) => cleanupListingPublishHistory(job?.config || {})),
   listing_publish_storage_compaction: withForegroundApiDeferral("listing_publish_storage_compaction", (job) => services.compactListingPublishRecordStorage(job?.config || {})),

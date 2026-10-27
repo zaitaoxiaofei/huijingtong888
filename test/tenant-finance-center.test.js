@@ -78,5 +78,5 @@ test("tenant finance routes include authenticated enterprise-private voucher att
   assert.equal(tenantIsolationDecision(tenant, ["api", "finance-center", "expenses", "all"], "DELETE").allowed, false);
   assert.equal(canAccessPage({ roles: ["operator"], tenant: { ...tenant.tenant, role: "owner" } }, "/finance-center"), true);
   assert.equal(canAccessPage({ roles: ["operator"], tenant: { ...tenant.tenant, role: "operator" } }, "/finance-center"), false);
-  assert.equal(canAccessPage({ roles: ["operator"], tenant: { id: 42, slug: "company-a", role: "owner" } }, "/finance/payroll"), false);
+  assert.equal(canAccessPage({ roles: ["operator"], tenant: { id: 42, slug: "company-a", role: "owner" } }, "/finance/payroll"), true);
 });

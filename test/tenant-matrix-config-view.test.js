@@ -23,7 +23,7 @@ test("matrix mount restores generation for permitted operators and keeps unautho
 });
 
 test("tenant matrix entry points refuse source, media, jobs, generation and import before reading their dependencies", async () => {
-  for (const name of ["loadMediaAssets", "loadRouteSource", "restoreGenerateJob", "generateVariants", "startGenerateAllShopsJob", "goToListingAutomation", "openMaterialCenter"]) {
+  for (const name of ["loadRouteSource", "restoreGenerateJob", "generateVariants", "startGenerateAllShopsJob", "goToListingAutomation"]) {
     const fn = source.match(new RegExp(`(?:async )?function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`))?.[0];
     assert.ok(fn, name);
     const context = vm.createContext({ tenantConfigOnly: { value: true }, state: { selectedShopIds: [42] } });
@@ -67,5 +67,6 @@ test('a cached matrix workbench cannot send or accept requests after its account
   assert.equal(requests, 1);
   assert.match(source, /shop-asset-variant-active-job:\$\{tenantId\}:\$\{userId\}:\$\{scope\}/);
   const layout = readFileSync(new URL('../frontend/admin/layouts/AdminLayout.vue', import.meta.url), 'utf8');
-  assert.match(layout, /\['asset-variant-center', 'ai-product-material-optimizer', 'ai-material-optimization-records'\]\.includes\(currentRoute\.name\) \? `:\$\{quickToolScope\}`/);
+  assert.match(layout, /\['asset-variant-center', 'ai-product-material-optimizer', 'ai-material-optimization-records', 'dashboard'\]\.includes\(currentRoute\.name\)/);
+  assert.match(layout, /currentRoute\.path\.startsWith\('\/finance'\) \|\| currentRoute\.path\.startsWith\('\/profit'\) \|\| currentRoute\.path === '\/ai-materials'\) \? `:\$\{quickToolScope\}`/);
 });

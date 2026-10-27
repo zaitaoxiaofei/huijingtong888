@@ -10,7 +10,6 @@ import {
   Switch,
   UploadFilled,
   VideoCamera,
-  View,
   ZoomIn
 } from "@element-plus/icons-vue";
 import { apiClient as sharedApiClient, currentApiCacheScope } from "../../utils/api";
@@ -53,8 +52,8 @@ const generating = ref(false);
 const videoGenerating = ref(false);
 const importing = ref(false);
 const syncingCategories = ref(false);
-const mediaAssetLoading = ref(false);
-const mediaAssetDeleting = ref(false);
+
+
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
@@ -117,7 +116,7 @@ const state = reactive({
   outputDir: "",
   localOutputDir: "",
   importedSets: [],
-  mediaAssets: [],
+
   sourceProduct: null
 });
 
@@ -332,18 +331,6 @@ async function loadBootstrap() {
     ElMessage.error(error.message || "素材裂变配置加载失败");
   } finally {
     loading.value = false;
-  }
-}
-
-async function loadMediaAssets() {
-  if (tenantConfigOnly.value) return;
-  mediaAssetLoading.value = true;
-  try {
-    state.mediaAssets = await apiClient.get("/api/listing/media/assets?limit=500", { noCache: true });
-  } catch (error) {
-    console.warn("listing media assets load failed", error);
-  } finally {
-    mediaAssetLoading.value = false;
   }
 }
 
@@ -1132,7 +1119,6 @@ async function hydrateGenerateJobResult(result = {}) {
   generateJob.hydrating = true;
   try {
     const nextVariants = applyGenerateResult(result);
-    await loadMediaAssets();
     if (nextVariants.length) scrollToResults();
   } finally {
     generateJob.hydrating = false;
@@ -1236,7 +1222,6 @@ async function generateVariants(shopIds = state.selectedShopIds) {
     const nextVariants = applyGenerateResult(result);
     const variantsMissingVideo = nextVariants.filter((variant) => !Array.isArray(variant.videos) || !variant.videos.length);
     const videoResult = variantsMissingVideo.length ? await generateVideosForVariants(variantsMissingVideo, { silent: true }) : { done: 0, failures: [] };
-    await loadMediaAssets();
     if (videoResult?.failures?.length) {
       ElMessage.warning(`已生成 ${nextVariants.length} 个店铺素材包，自动补视频成功 ${videoResult.done || 0} 个，失败 ${videoResult.failures.length} 个：${videoResult.failures[0]}`);
     } else {
@@ -1492,7 +1477,6 @@ async function generateVideoForVariant(variant) {
       size: uploaded.size || blob.size,
       contentType: uploaded.contentType || blob.type || "video/webm"
     };
-    await loadMediaAssets();
   } catch (error) {
     variant.videoError = `视频已生成本地预览，但上传素材库失败：${error.message || error}`;
   }
@@ -1691,7 +1675,6 @@ async function importToListingAutomation() {
     const variantsMissingVideo = state.variants.filter((variant) => !Array.isArray(variant.videos) || !variant.videos.length);
     if (variantsMissingVideo.length) {
       const videoResult = await generateVideosForVariants(variantsMissingVideo, { silent: true });
-      await loadMediaAssets();
       if (videoResult?.failures?.length) {
         ElMessage.warning(`导入前已补生成 ${videoResult.done || 0} 个视频，仍有 ${videoResult.failures.length} 个失败：${videoResult.failures[0]}`);
       }
@@ -1717,18 +1700,6 @@ async function goToListingAutomation() {
       }
     });
   }
-}
-
-function openMaterialCenter() {
-  if (tenantConfigOnly.value || !canManagePlatform.value) return;
-  router.push({
-    name: "settings-materials",
-    query: {
-      source: "shop-matrix",
-      returnTo: router.currentRoute.value.fullPath,
-      returnLabel: "店铺矩阵裂变"
-    }
-  });
 }
 
 function previewGeneratedResult() {
@@ -2010,261 +1981,6 @@ function imageTypeLabel(type) {
   return "详情图";
 }
 
-function mediaAssetStatusType(asset) {
-  if (asset.publishUrl || asset.publish_url) return "success";
-  if (asset.status === "local_only") return "warning";
-  return "info";
-}
-
-function mediaAssetStatusText(asset) {
-  if (asset.publishUrl || asset.publish_url) return "Ozon 可抓取";
-  if (asset.status === "local_only") return "仅本地预览";
-  return asset.status || "未知";
-}
-
-function mediaAssetPreview(asset) {
-  return asset.previewUrl || asset.preview_url || asset.publishUrl || asset.publish_url || "";
-}
-
-function mediaAssetPublishUrl(asset) {
-  return asset.publishUrl || asset.publish_url || "";
-}
-
-function mediaAssetType(asset) {
-  return String(asset.mediaType || asset.media_type || "").toLowerCase();
-}
-
-function mediaAssetPreviewUrl(asset) {
-  return previewUrlWithToken(mediaAssetPreview(asset));
-}
-
-function previewUrlWithToken(url) {
-  const text = String(url || "").trim();
-  if (!text || /^blob:/i.test(text) || /^data:/i.test(text)) return text;
-  return withImageToken(text);
-}
-
-function openMediaAssetPreview(asset) {
-  const url = mediaAssetPreviewUrl(asset);
-  const title = asset.originalName || asset.original_name || asset.storageName || asset.storage_name || "素材预览";
-  if (mediaAssetType(asset) === "video") openVideo(url, title);
-  else openImage(url, title);
-}
-
-const assetProductGroups = computed(() => {
-  if (state.variants.length) {
-    const productName = material.title || state.sourceProduct?.name || "当前商品素材包";
-    return [{
-      key: state.batchId || "current",
-      batchId: state.batchId,
-      productName,
-      sourceLabel: "自动生成",
-      batchLabel: formatAssetTime(state.currentBatchCreatedAt || new Date()),
-      createdAt: state.currentBatchCreatedAt,
-      rows: state.variants.map((variant) => ({
-        key: variant.id || `${variant.batchId}-${variant.shopId}`,
-        variantId: variant.id,
-        batchId: variant.batchId || state.batchId,
-        shopId: variant.shopId,
-        shopName: variant.shopName || shopNameById(variant.shopId),
-        title: variant.titleRu || variant.title || "",
-        titleZh: variant.titleZh || "",
-        tags: variant.tags || [],
-        tagStyle: variant.tagStyle || "",
-        priceIndex: Number(variant.priceIndex || 0),
-        internalPrice: Number(variant.internalPrice || 0),
-        ozonPrice: Number(variant.ozonPrice || 0),
-        ozonOldPrice: Number(variant.ozonOldPrice || 0),
-        categoryName: variant.productInfo?.category || material.ozonCategoryName || "",
-        categoryId: material.ozonCategoryId || "",
-        color: variant.productInfo?.color || material.color || "",
-        materialText: variant.productInfo?.material || material.material || "",
-        quantityText: variant.productInfo?.quantity || material.quantity || "",
-        main: imagesByType(variant, "main"),
-        details: imagesByType(variant, "detail"),
-        tail: imagesByType(variant, "tail"),
-        videos: variant.videos || [],
-        localOutputDir: variant.localOutputDir || variant.outputDir || ""
-      }))
-    }];
-  }
-
-  const byBatch = new Map();
-  for (const asset of state.mediaAssets) {
-    const batchKey = asset.batchId || asset.batch_id || asset.sourceId || asset.source_id || "manual";
-    if (!byBatch.has(batchKey)) {
-      const createdAt = asset.assetVariantCreatedAt || asset.created_at || asset.updated_at || "";
-      byBatch.set(batchKey, {
-        key: batchKey,
-        batchId: asset.batchId || asset.batch_id || "",
-        assetIds: [],
-        variantId: asset.variantId || asset.variant_id || null,
-        productName: assetProductNameFromAsset(asset, batchKey),
-        sourceLabel: sourceModuleLabel(asset.sourceModule || asset.source_module),
-        batchLabel: formatAssetTime(createdAt),
-        createdAt,
-        rowsByShop: new Map()
-      });
-    }
-    const group = byBatch.get(batchKey);
-    if (asset.id) group.assetIds.push(Number(asset.id));
-    const shopKey = asset.shopId || asset.shop_id || 0;
-    if (!group.rowsByShop.has(shopKey)) {
-      group.rowsByShop.set(shopKey, {
-        key: `${batchKey}-${shopKey}`,
-        batchId: asset.batchId || asset.batch_id || "",
-        assetIds: [],
-        shopId: shopKey,
-        shopName: shopNameById(shopKey) || (shopKey ? `店铺 ${shopKey}` : "未绑定店铺"),
-        title: asset.assetVariantTitle || "",
-        titleZh: asset.assetVariantTitleZh || "",
-        tags: [],
-        tagStyle: "",
-        priceIndex: 0,
-        internalPrice: 0,
-        ozonPrice: 0,
-        ozonOldPrice: 0,
-        categoryName: "",
-        categoryId: "",
-        color: "",
-        materialText: "",
-        quantityText: "",
-        main: [],
-        details: [],
-        tail: [],
-        videos: [],
-        localOutputDir: ""
-      });
-    }
-    const row = group.rowsByShop.get(shopKey);
-    if (asset.id) row.assetIds.push(Number(asset.id));
-    row.variantId = row.variantId || asset.variantId || asset.variant_id || null;
-    row.title = row.title || asset.assetVariantTitle || "";
-    row.titleZh = row.titleZh || asset.assetVariantTitleZh || "";
-    row.localOutputDir = row.localOutputDir || asset.assetVariantOutputDir || "";
-    mergeAssetVariantFacts(row, asset);
-    const role = String(asset.role || "").toLowerCase();
-    if (mediaAssetType(asset) === "video" || role === "video") row.videos.push(asset);
-    else if (role === "main") row.main.push(asset);
-    else if (role === "tail") row.tail.push(asset);
-    else row.details.push(asset);
-  }
-  return Array.from(byBatch.values()).map((group) => ({
-    ...group,
-    rows: Array.from(group.rowsByShop.values())
-}));
-});
-
-function mergeAssetVariantFacts(row, asset) {
-  row.tags = row.tags?.length ? row.tags : (asset.assetVariantTags || []);
-  row.tagStyle = row.tagStyle || asset.assetVariantTagStyle || "";
-  row.priceIndex = row.priceIndex || Number(asset.assetVariantPriceIndex || 0);
-  row.internalPrice = row.internalPrice || Number(asset.assetVariantInternalPrice || 0);
-  row.ozonPrice = row.ozonPrice || Number(asset.assetVariantOzonPrice || 0);
-  row.ozonOldPrice = row.ozonOldPrice || Number(asset.assetVariantOzonOldPrice || 0);
-  row.categoryName = row.categoryName || asset.assetVariantOzonCategoryName || "";
-  row.categoryId = row.categoryId || asset.assetVariantOzonCategoryId || "";
-  row.color = row.color || asset.assetVariantColor || "";
-  row.materialText = row.materialText || asset.assetVariantMaterial || "";
-  row.quantityText = row.quantityText || asset.assetVariantQuantity || "";
-}
-
-function formatMoney(value) {
-  const number = Number(value || 0);
-  return Number.isFinite(number) && number ? number.toFixed(2) : "-";
-}
-
-function compactTags(tags = []) {
-  return (Array.isArray(tags) ? tags : String(tags || "").split(/\s+/)).filter(Boolean).slice(0, 8);
-}
-
-function shopNameById(shopId) {
-  return state.shops.find((shop) => Number(shop.id) === Number(shopId))?.name || "";
-}
-
-function sourceModuleLabel(value) {
-  const key = String(value || "").toLowerCase();
-  if (key === "asset_variant") return "自动生成";
-  if (key === "listing_upload") return "手动上传";
-  return "手动上传";
-}
-
-function assetProductNameFromAsset(asset, fallback) {
-  const metadata = asset.metadata || {};
-  const name = asset.assetVariantSourceTitle || metadata.productTitle || metadata.sourceTitle || "";
-  if (name) return name;
-  const filename = asset.originalName || asset.original_name || asset.storageName || asset.storage_name || "";
-  return String(filename || fallback || "素材包").replace(/\.(jpg|jpeg|png|webp|mp4|mov|webm)$/i, "");
-}
-
-function formatAssetTime(value) {
-  const date = value instanceof Date ? value : new Date(String(value || ""));
-  if (Number.isNaN(date.getTime())) return "-";
-  const pad = (number) => String(number).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-async function deleteAssetGroup(group) {
-  if (!group?.batchId && !group?.assetIds?.length) {
-    ElMessage.warning("这个素材组缺少文件记录，不能自动定位本地文件");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确定要彻底删除「${group.productName}」这一批素材吗？本地生成文件和素材库记录都会删除。`,
-      "彻底删除素材批次",
-      { type: "warning", confirmButtonText: "彻底删除", cancelButtonText: "取消" }
-    );
-  } catch {
-    return;
-  }
-  await deleteAssetMediaGroup(group.batchId ? { batchId: group.batchId } : { assetIds: group.assetIds });
-}
-
-async function deleteAssetShopRow(row) {
-  if (!row?.batchId && !row?.assetIds?.length) {
-    ElMessage.warning("这个店铺素材缺少文件记录，不能自动定位本地文件");
-    return;
-  }
-  try {
-    await ElMessageBox.confirm(
-      `确定要彻底删除「${row.shopName}」这一行素材吗？对应本地文件也会删除。`,
-      "彻底删除店铺素材",
-      { type: "warning", confirmButtonText: "彻底删除", cancelButtonText: "取消" }
-    );
-  } catch {
-    return;
-  }
-  await deleteAssetMediaGroup(row.batchId ? { batchId: row.batchId, shopId: row.shopId } : { assetIds: row.assetIds });
-}
-
-async function deleteAssetMediaGroup(payload) {
-  mediaAssetDeleting.value = true;
-  try {
-    const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", payload);
-    if (!payload.shopId && payload.batchId === state.batchId) {
-      state.variants = [];
-      state.batchId = "";
-      state.currentBatchCreatedAt = "";
-      state.outputDir = "";
-      state.localOutputDir = "";
-    } else if (payload.shopId) {
-      state.variants = state.variants.filter((variant) => Number(variant.shopId) !== Number(payload.shopId));
-    }
-    await loadMediaAssets();
-    ElMessage.success(`已删除 ${result.deletedMediaAssets || 0} 个素材文件记录`);
-  } finally {
-    mediaAssetDeleting.value = false;
-  }
-}
-
-function openAssetLikePreview(asset, title = "素材预览") {
-  const type = String(asset.mediaType || asset.media_type || asset.contentType || "").toLowerCase();
-  const url = asset.previewUrl || asset.preview_url || asset.url || asset.localUrl || asset.publishUrl || asset.publish_url || "";
-  if (type.includes("video") || /\.(webm|mp4|mov)(\?|$)/i.test(url)) openVideo(previewUrlWithToken(url), title);
-  else openImage(previewUrlWithToken(url), title);
-}
-
 function packageStructureRows(variant = selectedVariant.value) {
   const shop = state.shops.find((item) => Number(item.id) === Number(variant.shopId)) || selectedShop.value;
   const rule = shop ? state.rules[shop.id] || {} : selectedRule.value || {};
@@ -2403,7 +2119,6 @@ onBeforeUnmount(() => {
         </div>
       <div class="header-actions">
         <el-button :icon="Refresh" @click="loadBootstrap">刷新</el-button>
-        <el-button v-if="!tenantConfigOnly && canManagePlatform" :icon="View" @click="openMaterialCenter">查看素材</el-button>
         <el-button v-if="!tenantConfigOnly" :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
         <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
         <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
@@ -2773,102 +2488,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section v-if="false" class="step-panel media-assets-panel">
-          <div class="step-heading">
-            <span class="step-index">4</span>
-            <div>
-              <h2>统一素材资产</h2>
-              <p>按产品素材包汇总展示，每个店铺一行查看主图、详情图、尾图和视频。</p>
-            </div>
-            <el-button size="small" :loading="mediaAssetLoading" @click="loadMediaAssets">刷新素材资产</el-button>
-          </div>
 
-          <div v-if="assetProductGroups.length" class="asset-package-list">
-            <article v-for="group in assetProductGroups" :key="group.key" class="asset-package-card">
-              <header class="asset-package-header">
-                <div>
-                  <span>商品名称</span>
-                  <strong>{{ group.productName }}</strong>
-                </div>
-                <div>
-                  <span>来源</span>
-                  <strong>{{ group.sourceLabel }}</strong>
-                </div>
-                <div>
-                  <span>批次</span>
-                  <strong>{{ group.batchLabel }}</strong>
-                </div>
-                <div class="asset-package-actions">
-                  <el-button size="small" type="danger" :icon="Delete" :loading="mediaAssetDeleting" @click="deleteAssetGroup(group)">彻底删除</el-button>
-                </div>
-              </header>
-              <div class="asset-shop-list">
-                <section v-for="row in group.rows" :key="row.key" class="asset-shop-row">
-                  <div class="asset-shop-name">
-                    <span>店铺</span>
-                    <strong>{{ row.shopName }}</strong>
-                  </div>
-                  <div class="asset-row-title">
-                    <span>标题</span>
-                    <strong>{{ row.title || "未生成标题" }}</strong>
-                    <em v-if="row.titleZh">{{ row.titleZh }}</em>
-                  </div>
-                  <div class="asset-row-meta">
-                    <span>上架价格</span>
-                    <strong>{{ formatMoney(row.ozonPrice) }} / {{ formatMoney(row.ozonOldPrice) }} CNY</strong>
-                    <em>内部 {{ formatMoney(row.internalPrice) }} × {{ row.priceIndex || "-" }}</em>
-                  </div>
-                  <div class="asset-row-tags">
-                    <span>产品标签 {{ compactTags(row.tags).length }}</span>
-                    <div>
-                      <el-tag v-for="tag in compactTags(row.tags)" :key="tag" size="small" effect="plain">{{ tag }}</el-tag>
-                    </div>
-                  </div>
-                  <div class="asset-row-meta compact">
-                    <span>类目 / 属性</span>
-                    <strong>{{ row.categoryName || row.categoryId || "未绑定类目" }}</strong>
-                    <em>{{ [row.color, row.materialText, row.quantityText].filter(Boolean).join(" / ") || "-" }}</em>
-                  </div>
-                  <div class="asset-media-strip">
-                    <div class="asset-media-group main">
-                      <span>主图 {{ row.main.length }}</span>
-                      <button v-for="(asset, index) in row.main.slice(0, 2)" :key="asset.outputPath || asset.id || index" type="button" class="asset-thumb-button" @click="openAssetLikePreview(asset, `主图 ${index + 1}`)">
-                        <img class="asset-thumb" :src="previewUrlWithToken(asset.previewUrl || asset.preview_url || asset.url)" alt="主图">
-                      </button>
-                    </div>
-                    <div class="asset-media-group details">
-                      <span>详情图 {{ row.details.length }}</span>
-                      <button v-for="(asset, index) in row.details.slice(0, 5)" :key="asset.outputPath || asset.id || index" type="button" class="asset-thumb-button" @click="openAssetLikePreview(asset, `详情图 ${index + 1}`)">
-                        <img class="asset-thumb" :src="previewUrlWithToken(asset.previewUrl || asset.preview_url || asset.url)" alt="详情图">
-                      </button>
-                    </div>
-                    <div class="asset-media-group tail">
-                      <span>尾图 {{ row.tail.length }}</span>
-                      <button v-for="(asset, index) in row.tail.slice(0, 1)" :key="asset.outputPath || asset.id || index" type="button" class="asset-thumb-button" @click="openAssetLikePreview(asset, `尾图 ${index + 1}`)">
-                        <img class="asset-thumb" :src="previewUrlWithToken(asset.previewUrl || asset.preview_url || asset.url)" alt="尾图">
-                      </button>
-                    </div>
-                    <div class="asset-media-group video">
-                      <span>视频 {{ row.videos.length }}</span>
-                      <button v-for="(asset, index) in row.videos.slice(0, 1)" :key="asset.id || asset.url || index" type="button" class="asset-thumb-button" @click="openAssetLikePreview(asset, `视频 ${index + 1}`)">
-                        <span class="asset-video-thumb"><el-icon><VideoCamera /></el-icon><em>Video</em></span>
-                      </button>
-                      <em v-if="!row.videos.length" class="asset-video-state-inline">自动生成后显示</em>
-                    </div>
-                  </div>
-                  <div class="asset-row-actions">
-                    <el-button size="small" type="danger" link :icon="Delete" :loading="mediaAssetDeleting" @click="deleteAssetShopRow(row)">删除</el-button>
-                  </div>
-                </section>
-              </div>
-            </article>
-          </div>
-          <div v-else class="empty-results compact">
-            <el-icon><Picture /></el-icon>
-            <strong>还没有统一素材资产</strong>
-            <span>生成素材裂变包后，这里会按商品和店铺汇总展示。</span>
-          </div>
-        </section>
       </main>
     </div>
 
@@ -3184,44 +2804,6 @@ onBeforeUnmount(() => {
 .package-actions :deep(.el-button) { margin-left: 0; }
 .empty-results { min-height: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--erp-detail-text-secondary, #7b8798); border: 1px dashed var(--erp-detail-border-light, #dce5f2); border-radius: 8px; background: var(--erp-detail-surface-alt, #fbfcfe); }
 .empty-results .el-icon { font-size: 28px; color: var(--erp-detail-primary, #1677ff); }
-.media-assets-panel { overflow: hidden; }
-.asset-package-list { display: flex; flex-direction: column; gap: 14px; }
-.asset-package-card { border: 1px solid var(--erp-detail-border-light, #e5eaf3); border-radius: 8px; background: var(--erp-detail-surface, #fff); overflow: hidden; }
-.asset-package-header { display: grid; grid-template-columns: minmax(260px, 1fr) 120px minmax(160px, .7fr) 110px; gap: 12px; padding: 12px 14px; background: var(--erp-detail-surface-alt, #f8fafc); border-bottom: 1px solid var(--erp-detail-border-light, #edf1f7); }
-.asset-package-header div,
-.asset-shop-name,
-.asset-row-title,
-.asset-row-meta,
-.asset-row-tags,
-.asset-bucket { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.asset-package-actions { align-items: flex-end; justify-content: center; }
-.asset-package-header span,
-.asset-shop-row span { color: var(--erp-detail-text-secondary, #697386); font-size: 12px; }
-.asset-package-header strong,
-.asset-shop-row strong { overflow-wrap: anywhere; }
-.asset-shop-list { display: flex; flex-direction: column; }
-.asset-shop-row { display: grid; grid-template-columns: 100px minmax(260px, 1fr) 138px minmax(180px, .75fr) minmax(160px, .7fr) minmax(420px, 1.35fr) 52px; gap: 12px; align-items: start; padding: 12px 14px; border-bottom: 1px solid var(--erp-detail-border-light, #edf1f7); overflow-x: auto; }
-.asset-shop-row:last-child { border-bottom: 0; }
-.asset-row-title strong { font-size: 13px; line-height: 1.45; color: var(--erp-detail-text-regular, #334155); }
-.asset-row-title em { margin-top: 4px; display: block; font-style: normal; color: var(--erp-detail-text-secondary, #697386); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.asset-row-meta strong { font-size: 13px; line-height: 1.4; color: var(--erp-detail-text-main, #0f172a); }
-.asset-row-meta em { font-style: normal; color: var(--erp-detail-text-secondary, #697386); font-size: 12px; overflow-wrap: anywhere; }
-.asset-row-tags > div { display: flex; gap: 5px; flex-wrap: wrap; align-content: flex-start; max-height: 74px; overflow: hidden; }
-.asset-row-actions { display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-end; gap: 6px; min-width: 0; }
-.asset-bucket > div { display: flex; gap: 6px; flex-wrap: wrap; min-height: 70px; align-content: flex-start; }
-.asset-media-strip { min-width: 0; display: grid; grid-template-columns: auto minmax(160px, 1fr) auto auto; gap: 8px; align-items: start; padding: 6px; border: 1px solid var(--erp-detail-border-light, #edf1f7); border-radius: 7px; background: var(--erp-detail-surface-alt, #fbfcfe); }
-.asset-media-group { min-width: 0; display: flex; align-items: flex-start; gap: 5px; }
-.asset-media-group > span { flex: 0 0 auto; width: 42px; line-height: 1.25; padding-top: 2px; }
-.asset-media-group.details { overflow: hidden; }
-.asset-media-group.video { min-width: 76px; }
-.asset-thumb-button { flex: 0 0 auto; width: 44px; aspect-ratio: 3 / 4; border: 1px solid var(--erp-detail-border-light, #d7e3f4); border-radius: 6px; padding: 0; background: var(--erp-detail-surface-alt, #f8fafc); overflow: hidden; cursor: zoom-in; display: inline-grid; place-items: stretch; }
-.asset-thumb-button:hover { border-color: var(--erp-detail-primary-border, #1677ff); box-shadow: 0 0 0 2px var(--erp-detail-primary-soft, rgba(22, 119, 255, .12)); }
-.asset-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
-.asset-video-thumb { width: 100%; height: 100%; display: grid; place-items: center; align-content: center; gap: 4px; background: #0f172a; color: #fff; }
-.asset-video-thumb :deep(.el-icon) { font-size: 18px; }
-.asset-video-thumb em { font-style: normal; font-size: 10px; opacity: .86; }
-.asset-video-state-inline { align-self: center; max-width: 70px; color: var(--erp-detail-text-secondary, #8a94a6); font-style: normal; font-size: 11px; line-height: 1.25; }
-.empty-results.compact { min-height: 120px; padding: 24px; }
 .preview-panel { position: sticky; top: 16px; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
 .preview-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
 .preview-header div { display: flex; flex-direction: column; gap: 4px; }
@@ -3304,8 +2886,6 @@ onBeforeUnmount(() => {
   .upload-layout { grid-template-columns: 320px minmax(0, 1fr); }
   .product-info-card { grid-column: 1 / -1; }
   .rule-row { grid-template-columns: 34px 150px repeat(2, minmax(160px, 1fr)); }
-  .asset-package-header,
-  .asset-shop-row { grid-template-columns: 1fr; }
 }
 @media (max-width: 900px) {
   .workspace-header, .step-heading { flex-direction: column; }

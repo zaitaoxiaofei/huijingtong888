@@ -55,7 +55,9 @@ test("enterprise administration does not gain platform grant from legacy jobs, t
   for (const slug of ["default", "company-a"]) {
     const enterprise = { ...owner, tenant: { ...owner.tenant, slug } };
     assert.equal(canAccessPage(enterprise, "/finance-center"), true);
-    assert.equal(canAccessPage(enterprise, "/finance/payroll"), false);
-    assert.equal(canAccessPage(enterprise, "/profit/monthly-billing"), false);
+    assert.equal(canAccessPage(enterprise, "/finance/payroll"), true);
+    assert.equal(canAccessPage(enterprise, "/profit/monthly-billing"), true);
+    assert.equal(allowed(enterprise, "POST", "payroll/calculate"), false);
+    assert.equal(allowed(enterprise, "POST", "profits/recalculate-historical"), false);
   }
 });

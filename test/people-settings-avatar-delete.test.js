@@ -3,18 +3,16 @@ import fs from "node:fs";
 import test from "node:test";
 
 const settingsViewSource = fs.readFileSync(new URL("../frontend/admin/views/settings/SettingsView.vue", import.meta.url), "utf8");
+const enterprisePeopleSource = fs.readFileSync(new URL("../frontend/admin/views/settings/EnterprisePersonnelPanel.vue", import.meta.url), "utf8");
 const operationsRouteSource = fs.readFileSync(new URL("../src/server/routes/operations.js", import.meta.url), "utf8");
 const adminLayoutSource = fs.readFileSync(new URL("../frontend/admin/layouts/AdminLayout.vue", import.meta.url), "utf8");
 const sessionSource = fs.readFileSync(new URL("../src/server/session.js", import.meta.url), "utf8");
 const authSessionSource = fs.readFileSync(new URL("../src/services/mysql-auth-session.js", import.meta.url), "utf8");
 
-test("people settings uploads and displays square avatars", () => {
-  assert.match(settingsViewSource, /uploadListingMedia\(squareFile,\s*\{\s*source_module: "person_avatar"/s);
-  assert.match(settingsViewSource, /Math\.min\(image\.naturalWidth, image\.naturalHeight\)/);
-  assert.match(settingsViewSource, /canvas\.getContext\("2d"\)\.drawImage/);
-  assert.match(settingsViewSource, /canvas\.toBlob\(resolve, "image\/webp", 0\.9\)/);
-  assert.match(settingsViewSource, /<el-avatar :src="row\.avatar_url"/);
-  assert.match(settingsViewSource, /personDialog\.form\.avatar_url = result\.publishUrl \|\| result\.url \|\| result\.previewUrl/);
+test("shared rules no longer duplicate global personnel administration and enterprise profiles retain avatars", () => {
+  assert.doesNotMatch(settingsViewSource, /personDialog|person_avatar|\/api\/people/);
+  assert.match(enterprisePeopleSource, /avatar_url: form\.avatar_url\.trim\(\)/);
+  assert.match(enterprisePeopleSource, /apiClient\.put\(`\/api\/enterprise\/people\/\$\{form\.id\}`/);
 });
 
 test("current user avatar is returned and displayed in the admin header", () => {
@@ -31,11 +29,10 @@ test("current user avatar is returned and displayed in the admin header", () => 
 });
 
 test("editing a person omits an unchanged password", () => {
-  assert.match(settingsViewSource, /personDialog\.mode === "edit" && !String\(payload\.password \|\| ""\)\.trim\(\)\) delete payload\.password/);
+  assert.match(enterprisePeopleSource, /if \(!editing\.value \|\| form\.password\.trim\(\)\) payload\.password = form\.password/);
 });
 
-test("people settings uses the hard-delete endpoint instead of deactivation", () => {
-  assert.match(settingsViewSource, /apiClient\.delete\(`\/api\/people\/\$\{row\.id\}\?hard=1`\)/);
-  assert.match(settingsViewSource, />删除<\/el-button>/);
+test("shared settings cannot hard-delete an account while the legacy maintenance endpoint remains separate", () => {
+  assert.doesNotMatch(settingsViewSource, /hard=1|hardDeletePerson|personDialog/);
   assert.match(operationsRouteSource, /url\.searchParams\.get\("hard"\) === "1"\) await services\.hardDeletePerson/);
 });

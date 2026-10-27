@@ -66,6 +66,10 @@ function normalize(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+export function cancellationReasonTypes() {
+  return [...REASON_CODE_LABELS].filter(([code]) => !/^\d+$/.test(code)).map(([value, label]) => ({ value, label }));
+}
+
 function translatedByText(value) {
   const text = normalize(value);
   if (!text) return "";

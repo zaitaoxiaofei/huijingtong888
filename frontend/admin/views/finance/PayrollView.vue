@@ -1,8 +1,15 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Check, Lock, Plus, Refresh } from "@element-plus/icons-vue";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { useAuthStore } from "../../stores/auth";
+import { canAccessPage, isPlatformAdmin } from "../../../../src/shared/permissions.js";
+
+const authStore = useAuthStore();
+const canManage = computed(() => isPlatformAdmin(authStore.user));
+const canRead = computed(() => canAccessPage(authStore.user, "/finance/payroll"));
+let readSequence = 0, readController = null, viewActive = false;
 
 const loading = ref(false);
 const saving = ref(false);
@@ -40,28 +47,50 @@ function replace(target, source) {
   Object.assign(target, source);
 }
 
+function beginRead() {
+  const scope = currentApiCacheScope();
+  readController?.abort();
+  readController = new AbortController();
+  return { id: ++readSequence, scope, signal: readController.signal };
+}
+
+function currentRead(read) {
+  return read.id === readSequence && !read.signal.aborted && read.scope === currentApiCacheScope() && canRead.value;
+}
+
+async function readPeriod(read) {
+  if (!companyId.value || !month.value) return;
+  const payload = await apiClient.get(`/api/payroll/period?company_id=${companyId.value}&month=${month.value}`, { noCache: true, signal: read.signal });
+  if (currentRead(read)) Object.assign(payroll, payload || { period: null, rows: [], summary: {} });
+}
+
 async function loadSetup() {
+  if (!canRead.value) return;
+  const read = beginRead();
   loading.value = true;
   try {
-    const payload = await apiClient.get("/api/payroll/setup", { noCache: true });
+    const payload = await apiClient.get("/api/payroll/setup", { noCache: true, signal: read.signal });
+    if (!currentRead(read)) return;
     Object.assign(setup, payload || {});
-    if (!companyId.value && setup.companies.length) companyId.value = String(setup.companies[0].id);
-    await loadPeriod();
+    if (!setup.companies.some(company => String(company.id) === companyId.value)) companyId.value = setup.companies.length ? String(setup.companies[0].id) : "";
+    await readPeriod(read);
   } catch (error) {
-    ElMessage.error(error.message || "工资模块数据加载失败");
+    if (currentRead(read) && error?.name !== "AbortError") ElMessage.error(error.message || "工资模块数据加载失败");
   } finally {
-    loading.value = false;
+    if (read.id === readSequence) loading.value = false;
   }
 }
 
 async function loadPeriod() {
-  if (!companyId.value || !month.value) return;
+  if (!canRead.value || !companyId.value || !month.value) return;
+  const read = beginRead();
+  Object.assign(payroll, { period: null, rows: [], summary: {} });
+  loading.value = true;
   try {
-    const payload = await apiClient.get(`/api/payroll/period?company_id=${companyId.value}&month=${month.value}`, { noCache: true });
-    Object.assign(payroll, payload || { period: null, rows: [], summary: {} });
+    await readPeriod(read);
   } catch (error) {
-    ElMessage.error(error.message || "工资单加载失败");
-  }
+    if (currentRead(read) && error?.name !== "AbortError") ElMessage.error(error.message || "工资单加载失败");
+  } finally { if (read.id === readSequence) loading.value = false; }
 }
 
 function openScheme(row = null) {
@@ -125,6 +154,7 @@ function closeSavedDialog(url) {
 }
 
 async function save(url, form) {
+  if (!canManage.value) return;
   saving.value = true;
   try {
     await apiClient.post(url, form);
@@ -139,6 +169,7 @@ async function save(url, form) {
 }
 
 async function calculate() {
+  if (!canManage.value) return;
   if (!companyId.value) return ElMessage.warning("请选择公司");
   try {
     await ElMessageBox.confirm(`确认重新试算 ${selectedCompany.value?.name || "当前公司"} ${month.value} 工资？`, "工资试算", { type: "warning" });
@@ -152,6 +183,7 @@ async function calculate() {
 }
 
 async function changeStatus(action) {
+  if (!canManage.value) return;
   const label = action === "approve" ? "审核" : "锁定";
   try {
     await ElMessageBox.confirm(`确认${label}本月工资？${action === "lock" ? "锁定后不能重新试算。" : ""}`, `${label}工资`, { type: "warning" });
@@ -163,7 +195,20 @@ async function changeStatus(action) {
   }
 }
 
-onMounted(loadSetup);
+function stopReads() { readSequence++; readController?.abort(); loading.value = false; }
+function resetScope() {
+  stopReads();
+  Object.assign(setup, { people: [], companies: [], schemes: [], policies: [], profiles: [] });
+  Object.assign(payroll, { period: null, rows: [], summary: {} });
+  companyId.value = "";
+  profileDialog.value = policyDialog.value = schemeDialog.value = false;
+  if (viewActive && canRead.value) loadSetup();
+}
+watch(() => [authStore.user?.id, authStore.user?.tenant?.id, authStore.user?.tenant?.role, authStore.user?.platform_role], resetScope, { flush: "sync" });
+onMounted(() => { viewActive = true; window.addEventListener("erp:auth-scope-changed", resetScope); loadSetup(); });
+onActivated(() => { viewActive = true; if (!loading.value && !setup.companies.length) loadSetup(); });
+onDeactivated(() => { viewActive = false; stopReads(); });
+onBeforeUnmount(() => { viewActive = false; stopReads(); window.removeEventListener("erp:auth-scope-changed", resetScope); });
 </script>
 
 <template>
@@ -185,7 +230,7 @@ onMounted(loadSetup);
           <article><span>实发工资</span><strong>{{ money(payroll.summary.net_salary) }}</strong></article>
           <article><span>公司用工成本</span><strong>{{ money(payroll.summary.employer_total_cost) }}</strong></article>
         </div>
-        <div class="toolbar"><div><h2>{{ month }} 工资单</h2><p>状态：{{ statusText(payroll.period?.status) }}</p></div><div class="toolbar-actions"><el-button type="primary" @click="calculate">生成试算</el-button><el-button :icon="Check" :disabled="!canApprove" @click="changeStatus('approve')">审核</el-button><el-button :icon="Lock" :disabled="!canLock" @click="changeStatus('lock')">锁定</el-button></div></div>
+        <div class="toolbar"><div><h2>{{ month }} 工资单</h2><p>状态：{{ statusText(payroll.period?.status) }}</p></div><div v-if="canManage" class="toolbar-actions"><el-button type="primary" @click="calculate">生成试算</el-button><el-button :icon="Check" :disabled="!canApprove" @click="changeStatus('approve')">审核</el-button><el-button :icon="Lock" :disabled="!canLock" @click="changeStatus('lock')">锁定</el-button></div></div>
         <el-alert v-if="!setup.schemes.length" title="请先配置城市最低缴费方案" description="没有上海或合肥有效最低基数时，系统不会按 0 元社保生成工资。" type="warning" show-icon :closable="false" />
         <el-table :data="payroll.rows" class="data-table" empty-text="本月尚未生成工资单">
           <el-table-column prop="person_name" label="员工" min-width="110" fixed />
@@ -203,26 +248,26 @@ onMounted(loadSetup);
       </el-tab-pane>
 
       <el-tab-pane label="员工薪酬档案" name="profiles">
-        <div class="toolbar"><div><h2>员工薪酬档案</h2><p>用工公司决定参保城市；负责店铺只影响提成和费用分摊。</p></div><el-button type="primary" :icon="Plus" @click="openProfile()">新增档案</el-button></div>
-        <el-table :data="setup.profiles" class="data-table"><el-table-column prop="person_name" label="员工" /><el-table-column prop="company_name" label="用工公司" min-width="210" /><el-table-column prop="department" label="部门/岗位" /><el-table-column prop="employment_city_code" label="参保城市"><template #default="{ row }">{{ row.employment_city_code === 'shanghai' ? '上海' : row.employment_city_code === 'hefei' ? '合肥' : row.employment_city_code }}</template></el-table-column><el-table-column prop="scheme_name" label="五险一金方案" min-width="160" /><el-table-column prop="policy_name" label="工资策略" min-width="140" /><el-table-column prop="base_salary" label="底薪"><template #default="{ row }">{{ money(row.base_salary) }}</template></el-table-column><el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openProfile(row)">编辑</el-button></template></el-table-column></el-table>
+        <div class="toolbar"><div><h2>员工薪酬档案</h2><p>用工公司决定参保城市；负责店铺只影响提成和费用分摊。</p></div><el-button v-if="canManage" type="primary" :icon="Plus" @click="openProfile()">新增档案</el-button></div>
+        <el-table :data="setup.profiles" class="data-table"><el-table-column prop="person_name" label="员工" /><el-table-column prop="company_name" label="用工公司" min-width="210" /><el-table-column prop="department" label="部门/岗位" /><el-table-column prop="employment_city_code" label="参保城市"><template #default="{ row }">{{ row.employment_city_code === 'shanghai' ? '上海' : row.employment_city_code === 'hefei' ? '合肥' : row.employment_city_code }}</template></el-table-column><el-table-column prop="scheme_name" label="五险一金方案" min-width="160" /><el-table-column prop="policy_name" label="工资策略" min-width="140" /><el-table-column prop="base_salary" label="底薪"><template #default="{ row }">{{ money(row.base_salary) }}</template></el-table-column><el-table-column v-if="canManage" label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openProfile(row)">编辑</el-button></template></el-table-column></el-table>
       </el-tab-pane>
 
       <el-tab-pane label="工资策略" name="policies">
-        <div class="toolbar"><div><h2>DIY 工资策略</h2><p>底薪在员工档案维护；策略负责津贴、满勤、提成、绩效和奖金。</p></div><div class="toolbar-actions"><el-button type="primary" plain @click="openStoreOperatorPreset">快速创建店铺运营策略</el-button><el-button type="primary" :icon="Plus" @click="openPolicy()">自定义策略</el-button></div></div>
-        <el-table :data="setup.policies" class="data-table"><el-table-column prop="name" label="策略名称" /><el-table-column prop="version_no" label="版本" width="80" /><el-table-column prop="effective_from" label="生效日期" width="120" /><el-table-column label="营业额提成" width="120"><template #default="{ row }">{{ percent(row.components?.revenue_commission_rate) }}</template></el-table-column><el-table-column label="利润提成" width="120"><template #default="{ row }">{{ percent(row.components?.profit_commission_rate) }}</template></el-table-column><el-table-column label="满勤奖" width="110"><template #default="{ row }">{{ money(row.components?.attendance_bonus) }}</template></el-table-column><el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openPolicy(row)">编辑</el-button></template></el-table-column></el-table>
+        <div class="toolbar"><div><h2>DIY 工资策略</h2><p>底薪在员工档案维护；策略负责津贴、满勤、提成、绩效和奖金。</p></div><div v-if="canManage" class="toolbar-actions"><el-button type="primary" plain @click="openStoreOperatorPreset">快速创建店铺运营策略</el-button><el-button type="primary" :icon="Plus" @click="openPolicy()">自定义策略</el-button></div></div>
+        <el-table :data="setup.policies" class="data-table"><el-table-column prop="name" label="策略名称" /><el-table-column prop="version_no" label="版本" width="80" /><el-table-column prop="effective_from" label="生效日期" width="120" /><el-table-column label="营业额提成" width="120"><template #default="{ row }">{{ percent(row.components?.revenue_commission_rate) }}</template></el-table-column><el-table-column label="利润提成" width="120"><template #default="{ row }">{{ percent(row.components?.profit_commission_rate) }}</template></el-table-column><el-table-column label="满勤奖" width="110"><template #default="{ row }">{{ money(row.components?.attendance_bonus) }}</template></el-table-column><el-table-column v-if="canManage" label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openPolicy(row)">编辑</el-button></template></el-table-column></el-table>
       </el-tab-pane>
 
       <el-tab-pane label="五险一金方案" name="schemes">
-        <div class="toolbar"><div><h2>城市最低缴费方案</h2><p>最低基数和比例按生效日期版本化，政策调整不能覆盖历史方案。</p></div><div class="toolbar-actions"><el-button type="primary" plain @click="openShanghaiSchemePreset">一键填写上海方案</el-button><el-button type="primary" :icon="Plus" @click="openScheme()">自定义方案</el-button></div></div>
-        <el-table :data="setup.schemes" class="data-table"><el-table-column prop="name" label="方案名称" min-width="160" /><el-table-column prop="city_name" label="城市" width="90" /><el-table-column prop="social_base_min" label="社保最低基数"><template #default="{ row }">{{ money(row.social_base_min) }}</template></el-table-column><el-table-column prop="housing_base_min" label="公积金最低基数"><template #default="{ row }">{{ money(row.housing_base_min) }}</template></el-table-column><el-table-column prop="effective_from" label="生效日期" width="120" /><el-table-column prop="source_note" label="政策来源/备注" min-width="220" show-overflow-tooltip /><el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openScheme(row)">编辑</el-button></template></el-table-column></el-table>
+        <div class="toolbar"><div><h2>城市最低缴费方案</h2><p>最低基数和比例按生效日期版本化，政策调整不能覆盖历史方案。</p></div><div v-if="canManage" class="toolbar-actions"><el-button type="primary" plain @click="openShanghaiSchemePreset">一键填写上海方案</el-button><el-button type="primary" :icon="Plus" @click="openScheme()">自定义方案</el-button></div></div>
+        <el-table :data="setup.schemes" class="data-table"><el-table-column prop="name" label="方案名称" min-width="160" /><el-table-column prop="city_name" label="城市" width="90" /><el-table-column prop="social_base_min" label="社保最低基数"><template #default="{ row }">{{ money(row.social_base_min) }}</template></el-table-column><el-table-column prop="housing_base_min" label="公积金最低基数"><template #default="{ row }">{{ money(row.housing_base_min) }}</template></el-table-column><el-table-column prop="effective_from" label="生效日期" width="120" /><el-table-column prop="source_note" label="政策来源/备注" min-width="220" show-overflow-tooltip /><el-table-column v-if="canManage" label="操作" width="90"><template #default="{ row }"><el-button link type="primary" @click="openScheme(row)">编辑</el-button></template></el-table-column></el-table>
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="profileDialog" :title="profileForm.id ? '编辑员工薪酬档案' : '新增员工薪酬档案'" width="680px"><el-form label-position="top"><div class="form-grid"><el-form-item label="员工" required><el-select v-model="profileForm.person_id" filterable><el-option v-for="item in setup.people" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="用工/发薪公司" required><el-select v-model="profileForm.company_id"><el-option v-for="item in setup.companies" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="部门/岗位"><el-input v-model="profileForm.department" /></el-form-item><el-form-item label="参保城市" required><el-select v-model="profileForm.employment_city_code"><el-option label="上海" value="shanghai" /><el-option label="合肥" value="hefei" /></el-select></el-form-item><el-form-item label="五险一金方案" required><el-select v-model="profileForm.contribution_scheme_id"><el-option v-for="item in setup.schemes.filter(s => s.city_code === profileForm.employment_city_code)" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="工资策略" required><el-select v-model="profileForm.policy_id"><el-option v-for="item in setup.policies" :key="item.id" :label="`${item.name} v${item.version_no}`" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="月度底薪"><el-input-number v-model="profileForm.base_salary" :min="0" :precision="2" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="profileForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item></div></el-form><template #footer><el-button @click="profileDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/profiles', profileForm, profileDialog)">保存</el-button></template></el-dialog>
+    <el-dialog v-if="canManage" v-model="profileDialog" :title="profileForm.id ? '编辑员工薪酬档案' : '新增员工薪酬档案'" width="680px"><el-form label-position="top"><div class="form-grid"><el-form-item label="员工" required><el-select v-model="profileForm.person_id" filterable><el-option v-for="item in setup.people" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="用工/发薪公司" required><el-select v-model="profileForm.company_id"><el-option v-for="item in setup.companies" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="部门/岗位"><el-input v-model="profileForm.department" /></el-form-item><el-form-item label="参保城市" required><el-select v-model="profileForm.employment_city_code"><el-option label="上海" value="shanghai" /><el-option label="合肥" value="hefei" /></el-select></el-form-item><el-form-item label="五险一金方案" required><el-select v-model="profileForm.contribution_scheme_id"><el-option v-for="item in setup.schemes.filter(s => s.city_code === profileForm.employment_city_code)" :key="item.id" :label="item.name" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="工资策略" required><el-select v-model="profileForm.policy_id"><el-option v-for="item in setup.policies" :key="item.id" :label="`${item.name} v${item.version_no}`" :value="String(item.id)" /></el-select></el-form-item><el-form-item label="月度底薪"><el-input-number v-model="profileForm.base_salary" :min="0" :precision="2" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="profileForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item></div></el-form><template #footer><el-button @click="profileDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/profiles', profileForm, profileDialog)">保存</el-button></template></el-dialog>
 
-    <el-dialog v-model="policyDialog" :title="policyForm.id ? '编辑工资策略' : '新增工资策略'" width="760px"><el-form label-position="top"><div class="form-grid"><el-form-item label="策略名称" required><el-input v-model="policyForm.name" placeholder="例如：店铺运营策略" /></el-form-item><el-form-item label="版本"><el-input-number v-model="policyForm.version_no" :min="1" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="policyForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item><el-form-item label="岗位津贴"><el-input-number v-model="policyForm.components.position_allowance" :min="0" :precision="2" /></el-form-item><el-form-item label="固定补贴"><el-input-number v-model="policyForm.components.fixed_allowance" :min="0" :precision="2" /></el-form-item><el-form-item label="满勤奖"><el-input-number v-model="policyForm.components.attendance_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="绩效奖金"><el-input-number v-model="policyForm.components.performance_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="营业额提成比例"><el-input-number v-model="policyForm.components.revenue_commission_rate" :min="0" :max="1" :step="0.001" :precision="4" /></el-form-item><el-form-item label="利润提成门槛"><el-input-number v-model="policyForm.components.profit_threshold" :min="0" :precision="2" /></el-form-item><el-form-item label="利润提成比例"><el-input-number v-model="policyForm.components.profit_commission_rate" :min="0" :max="1" :step="0.01" :precision="4" /></el-form-item><el-form-item label="季度奖"><el-input-number v-model="policyForm.components.quarterly_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="年终奖"><el-input-number v-model="policyForm.components.annual_bonus" :min="0" :precision="2" /></el-form-item></div><el-alert title="利润提成按扣工资前可分配利润计算，利润为负时提成为 0。" type="info" :closable="false" /></el-form><template #footer><el-button @click="policyDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/policies', policyForm, policyDialog)">保存</el-button></template></el-dialog>
+    <el-dialog v-if="canManage" v-model="policyDialog" :title="policyForm.id ? '编辑工资策略' : '新增工资策略'" width="760px"><el-form label-position="top"><div class="form-grid"><el-form-item label="策略名称" required><el-input v-model="policyForm.name" placeholder="例如：店铺运营策略" /></el-form-item><el-form-item label="版本"><el-input-number v-model="policyForm.version_no" :min="1" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="policyForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item><el-form-item label="岗位津贴"><el-input-number v-model="policyForm.components.position_allowance" :min="0" :precision="2" /></el-form-item><el-form-item label="固定补贴"><el-input-number v-model="policyForm.components.fixed_allowance" :min="0" :precision="2" /></el-form-item><el-form-item label="满勤奖"><el-input-number v-model="policyForm.components.attendance_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="绩效奖金"><el-input-number v-model="policyForm.components.performance_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="营业额提成比例"><el-input-number v-model="policyForm.components.revenue_commission_rate" :min="0" :max="1" :step="0.001" :precision="4" /></el-form-item><el-form-item label="利润提成门槛"><el-input-number v-model="policyForm.components.profit_threshold" :min="0" :precision="2" /></el-form-item><el-form-item label="利润提成比例"><el-input-number v-model="policyForm.components.profit_commission_rate" :min="0" :max="1" :step="0.01" :precision="4" /></el-form-item><el-form-item label="季度奖"><el-input-number v-model="policyForm.components.quarterly_bonus" :min="0" :precision="2" /></el-form-item><el-form-item label="年终奖"><el-input-number v-model="policyForm.components.annual_bonus" :min="0" :precision="2" /></el-form-item></div><el-alert title="利润提成按扣工资前可分配利润计算，利润为负时提成为 0。" type="info" :closable="false" /></el-form><template #footer><el-button @click="policyDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/policies', policyForm, policyDialog)">保存</el-button></template></el-dialog>
 
-    <el-dialog v-model="schemeDialog" :title="schemeForm.id ? '编辑五险一金方案' : '新增五险一金方案'" width="920px"><el-form label-position="top"><div class="form-grid"><el-form-item label="方案名称" required><el-input v-model="schemeForm.name" placeholder="例如：上海最低基数 2026" /></el-form-item><el-form-item label="城市" required><el-select v-model="schemeForm.city_code" @change="schemeForm.city_name = schemeForm.city_code === 'shanghai' ? '上海' : '合肥'"><el-option label="上海" value="shanghai" /><el-option label="合肥" value="hefei" /></el-select></el-form-item><el-form-item label="社保最低缴费基数" required><el-input-number v-model="schemeForm.social_base_min" :min="0" :precision="2" /></el-form-item><el-form-item label="公积金最低缴费基数" required><el-input-number v-model="schemeForm.housing_base_min" :min="0" :precision="2" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="schemeForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item><el-form-item label="政策来源/核验说明"><el-input v-model="schemeForm.source_note" /></el-form-item></div><h3 class="rate-title">缴费比例（填写小数，例如 16% 填 0.16）</h3><div class="rate-grid"><div class="rate-head">险种</div><div class="rate-head">单位比例</div><div class="rate-head">个人比例</div><template v-for="item in [['pension','养老'],['medical','医疗'],['supplementary_medical','附加医疗'],['unemployment','失业'],['injury','工伤'],['maternity','生育'],['housing_fund','公积金']]" :key="item[0]"><span>{{ item[1] }}</span><el-input-number v-model="schemeForm.employer_rates[item[0]]" :min="0" :max="1" :step="0.001" :precision="4" /><el-input-number v-model="schemeForm.employee_rates[item[0]]" :min="0" :max="1" :step="0.001" :precision="4" /></template></div></el-form><template #footer><el-button @click="schemeDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/contribution-schemes', schemeForm, schemeDialog)">保存</el-button></template></el-dialog>
+    <el-dialog v-if="canManage" v-model="schemeDialog" :title="schemeForm.id ? '编辑五险一金方案' : '新增五险一金方案'" width="920px"><el-form label-position="top"><div class="form-grid"><el-form-item label="方案名称" required><el-input v-model="schemeForm.name" placeholder="例如：上海最低基数 2026" /></el-form-item><el-form-item label="城市" required><el-select v-model="schemeForm.city_code" @change="schemeForm.city_name = schemeForm.city_code === 'shanghai' ? '上海' : '合肥'"><el-option label="上海" value="shanghai" /><el-option label="合肥" value="hefei" /></el-select></el-form-item><el-form-item label="社保最低缴费基数" required><el-input-number v-model="schemeForm.social_base_min" :min="0" :precision="2" /></el-form-item><el-form-item label="公积金最低缴费基数" required><el-input-number v-model="schemeForm.housing_base_min" :min="0" :precision="2" /></el-form-item><el-form-item label="生效日期" required><el-date-picker v-model="schemeForm.effective_from" value-format="YYYY-MM-DD" /></el-form-item><el-form-item label="政策来源/核验说明"><el-input v-model="schemeForm.source_note" /></el-form-item></div><h3 class="rate-title">缴费比例（填写小数，例如 16% 填 0.16）</h3><div class="rate-grid"><div class="rate-head">险种</div><div class="rate-head">单位比例</div><div class="rate-head">个人比例</div><template v-for="item in [['pension','养老'],['medical','医疗'],['supplementary_medical','附加医疗'],['unemployment','失业'],['injury','工伤'],['maternity','生育'],['housing_fund','公积金']]" :key="item[0]"><span>{{ item[1] }}</span><el-input-number v-model="schemeForm.employer_rates[item[0]]" :min="0" :max="1" :step="0.001" :precision="4" /><el-input-number v-model="schemeForm.employee_rates[item[0]]" :min="0" :max="1" :step="0.001" :precision="4" /></template></div></el-form><template #footer><el-button @click="schemeDialog=false">取消</el-button><el-button type="primary" :loading="saving" @click="save('/api/payroll/contribution-schemes', schemeForm, schemeDialog)">保存</el-button></template></el-dialog>
   </section>
 </template>
 
