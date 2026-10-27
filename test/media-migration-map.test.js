@@ -64,7 +64,8 @@ test("deep resolver preserves database dates while resolving draft images", asyn
 
 test("listing drafts resolve verified OSS mappings after effective image selection", () => {
   const source = fs.readFileSync(path.resolve("src/services/listing-automation.js"), "utf8");
-  assert.match(source, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
+  assert.match(source, /resolveMappedMediaInValue\(rows\.map\(\(item\) => normalizeDraftRow\(item\)\)\)/);
+  assert.match(source, /const normalizedRows = await resolveMappedMediaInValue\(assembledRows\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
   assert.match(source, /if \(!draft\?\.template_payload\) return resolveMappedMediaInValue\(draft\)/);
   assert.match(source, /return resolveMappedMediaInValue\(\{[\s\S]*?template_payload: templatePayload[\s\S]*?\}\)/);

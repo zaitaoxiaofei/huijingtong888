@@ -136,12 +136,16 @@ export async function resolvePreferredMediaUrls(values = []) {
   if (!sources.length) return [];
   await ensureMediaMigrationMapTable();
   const fingerprints = sources.map(mediaSourceFingerprint);
-  const placeholders = fingerprints.map(() => "?").join(", ");
-  const rows = await mysqlQuery(`
-    SELECT source_fingerprint, status, oss_url
-    FROM media_migration_map
-    WHERE source_fingerprint IN (${placeholders})
-  `, fingerprints);
+  const rows = [];
+  for (let index = 0; index < fingerprints.length; index += 500) {
+    const batch = fingerprints.slice(index, index + 500);
+    const placeholders = batch.map(() => "?").join(", ");
+    rows.push(...await mysqlQuery(`
+      SELECT source_fingerprint, status, oss_url
+      FROM media_migration_map
+      WHERE source_fingerprint IN (${placeholders})
+    `, batch));
+  }
   const mappings = new Map(rows.map((row) => [row.source_fingerprint, row]));
   return sources.map((source) => preferredMediaUrl(source, mappings.get(mediaSourceFingerprint(source))));
 }

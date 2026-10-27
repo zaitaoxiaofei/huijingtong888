@@ -10164,7 +10164,7 @@ async function listingDraftProjectCandidates(query = {}, limit = 100, session = 
     `, [...params, ...ids, ...ids])
     : [];
   return {
-    rows: await Promise.all(rows.map((item) => resolveMappedMediaInValue(normalizeDraftRow(item)))),
+    rows: await resolveMappedMediaInValue(rows.map((item) => normalizeDraftRow(item))),
     total: Number(countRow?.total || 0)
   };
 }
@@ -11810,9 +11810,15 @@ export async function listingDrafts(query = {}, session) {
     `;
   const rows = await all(rowsSql, [...fromParams, paged ? pageSize : 100, paged ? offset : 0]);
   const frozenRead = createListingFrozenReadScope(mysqlQuery);
-  const normalizedRows = await Promise.all(rows.map(async (item) => resolveMappedMediaInValue(normalizeDraftRow(
-    await assembleListingDraftStoredRow(frozenRead, { tenantId, row: item })
-  ))));
+  // Full legacy/review pages may contain 100 independent frozen masters. Keep
+  // their reads bounded, then resolve all media in one page-level lookup.
+  const assembledRows = [];
+  for (let index = 0; index < rows.length; index += 4) {
+    assembledRows.push(...await Promise.all(rows.slice(index, index + 4).map(async (item) => normalizeDraftRow(
+      await assembleListingDraftStoredRow(frozenRead, { tenantId, row: item })
+    ))));
+  }
+  const normalizedRows = await resolveMappedMediaInValue(assembledRows);
   if (requestedIds.length && (!lightweight || includeReviewSkus)) await attachDevelopmentReviewSkus(normalizedRows, requestedIds, tenantId);
   if (!paged) return normalizedRows;
   const totalRow = await row(`SELECT COUNT(*) AS total ${fromSql}`, fromCountParams);
