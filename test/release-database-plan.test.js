@@ -24,6 +24,9 @@ const cases = [
   ["migrate-ogl-dispatch-schema.mjs",
     { ok: true, mode: "dry-run", before: { ready: true, missing_tables: [], invalid: [] } },
     { ok: true, mode: "dry-run", before: { ready: false, missing_tables: ["ogl_dispatch_events"], invalid: [] } }],
+  ["migrate-tenant-sku-order-trackers.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, requires_apply: false, before: { exists: true, ready: true, tracker_count: 1, orphan_shop_count: 0, unknown_shop_tenant_count: 0, ownership_mismatch_count: 0, duplicate_count: 0, invalid_named_indexes: [] } },
+    { ok: true, mode: "dry-run", changes_database: false, requires_apply: true, before: { exists: true, ready: false, tracker_count: 1, orphan_shop_count: 0, unknown_shop_tenant_count: 0, ownership_mismatch_count: 0, duplicate_count: 0, invalid_named_indexes: [] } }],
   ["migrate-enterprise-messages.mjs",
     { mode: "dry-run", exists: true, ready: true, problems: [], account_kind: { exists: true, ready: true } },
     { mode: "dry-run", exists: true, ready: false, problems: [], account_kind: { exists: false, ready: false } }],
@@ -40,7 +43,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 11);
+  assert.equal(SCHEMA_MIGRATIONS.length, 12);
 });
 
 for (const [filename, ready, pending] of cases) {
@@ -104,7 +107,7 @@ test("truthy strings, false confirmations, duplicate items and activation are re
     ["migrate-listing-frozen-content.mjs", { mode: "dry-run", table_exists: "true" }],
     ["migrate-ai-credits.mjs", { ok: "true", mode: "dry-run", create_tables: [], incompatible_tables: [] }],
     ["migrate-listing-draft-list-indexes.mjs", { mode: "dry-run", missing_indexes: ["idx_duplicate", "idx_duplicate"] }],
-    ["migrate-order-profit-fx-policy.mjs", { ...cases[5][1], activated_now: true }],
+    ["migrate-order-profit-fx-policy.mjs", { ...cases.find(([name]) => name === "migrate-order-profit-fx-policy.mjs")[1], activated_now: true }],
     ["migrate-listing-frozen-content.mjs", { mode: "dry-run", changes_database: true, table_exists: true }]
   ];
   for (const [filename, report] of inputs) assert.throws(() => migrationNeedsApply(filename, report), { code: "RELEASE_DATABASE_PLAN_INVALID" });

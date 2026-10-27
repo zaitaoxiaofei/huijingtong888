@@ -1,40 +1,24 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { broadcastGlobalEvent } from "../server/notifications.js";
+import { SKU_ORDER_TRACKERS_SCHEMA, skuOrderTrackerSchemaState } from "./sku-order-tracking-schema.js";
 
 let schemaReady = false;
+let schemaPromise;
 
 async function ensureSchema() {
   if (schemaReady) return;
-  await mysqlExecute(`
-    CREATE TABLE IF NOT EXISTS sku_order_trackers (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-      tenant_id BIGINT UNSIGNED NOT NULL,
-      shop_id BIGINT UNSIGNED NOT NULL,
-      ozon_sku VARCHAR(128) NOT NULL,
-      owner_person_id BIGINT UNSIGNED NULL,
-      decline_weeks TINYINT UNSIGNED NOT NULL DEFAULT 2,
-      decline_percent DECIMAL(6,2) NOT NULL DEFAULT 20,
-      active TINYINT(1) NOT NULL DEFAULT 1,
-      last_notified_at DATETIME NULL,
-      created_by_person_id BIGINT UNSIGNED NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (id),
-      UNIQUE KEY uk_sku_order_tracker_tenant_shop_sku (tenant_id, shop_id, ozon_sku),
-      KEY idx_sku_order_tracker_owner (owner_person_id, active),
-      KEY idx_sku_order_tracker_tenant_active_shop (tenant_id, active, shop_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  `);
-  const columns = await mysqlQuery("SHOW COLUMNS FROM sku_order_trackers");
-  if (!columns.some((column) => column.Field === "tenant_id")) {
-    throw new Error("SKU 订单追踪租户隔离迁移尚未执行，请先运行 scripts/migrate-tenant-sku-order-trackers.mjs --apply");
-  }
-  const indexes = await mysqlQuery("SHOW INDEX FROM sku_order_trackers");
-  const indexNames = new Set(indexes.map((index) => index.Key_name));
-  if (!indexNames.has("uk_sku_order_tracker_tenant_shop_sku") || !indexNames.has("idx_sku_order_tracker_tenant_active_shop")) {
-    throw new Error("SKU 订单追踪租户索引迁移未完成，请重新运行 scripts/migrate-tenant-sku-order-trackers.mjs --apply");
-  }
-  schemaReady = true;
+  if (!schemaPromise) schemaPromise = (async () => {
+    await mysqlExecute(SKU_ORDER_TRACKERS_SCHEMA);
+    const columns = await mysqlQuery("SHOW COLUMNS FROM sku_order_trackers");
+    const indexes = await mysqlQuery("SHOW INDEX FROM sku_order_trackers");
+    if (!skuOrderTrackerSchemaState(columns, indexes).ready) {
+      throw Object.assign(new Error("单量追踪的数据升级尚未完成，暂时无法使用。请联系管理员完成升级，已有追踪记录会完整保留。"), {
+        status: 503, statusCode: 503, code: "TENANT_SKU_TRACKER_MIGRATION_REQUIRED"
+      });
+    }
+    schemaReady = true;
+  })().finally(() => { schemaPromise = undefined; });
+  return schemaPromise;
 }
 
 async function resolveTenantContext(tenantId = "admin") {

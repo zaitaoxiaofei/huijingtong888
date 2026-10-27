@@ -203,6 +203,40 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.ok(!requests.some(row => /products\/deactivate$/.test(row.endpoint)), "Boosting cannot use the voucher-only v2 deactivate method");
     });
 
+    await t.test("a confirmed terminal empty cursor permits an overstated v2 total while recording its warning", async () => {
+      await reset();
+      let exited = false;
+      let terminalEmptyReads = 0;
+      respond = async request => {
+        if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
+        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
+        if (request.endpoint === "/v2/actions/products") {
+          if (!request.body.last_id) {
+            terminalEmptyReads = 0;
+            return { products: exited ? [{ id: 502, add_mode: "SELLER" }] : [automaticProduct(501), { id: 502, add_mode: "SELLER" }], total: exited ? 2 : 3, last_id: "terminal-cursor" };
+          }
+          assert.equal(request.body.last_id, "terminal-cursor");
+          terminalEmptyReads += 1;
+          return { products: [], total: exited ? 2 : 3, last_id: "terminal-cursor" };
+        }
+        if (request.endpoint === "/v1/actions/products/update") {
+          assert.ok(terminalEmptyReads >= 2, "the same empty terminal page must be confirmed before any price write");
+          assert.deepEqual(request.body.products, [{ product_id: 501, action_price: money("50.01") }]);
+          exited = true;
+          return { deactivated_product_ids: ["501"], active_product_ids: [], rejected: [] };
+        }
+        throw new Error(`Unexpected promotion request ${request.endpoint}`);
+      };
+      const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+      assert.equal(result.success, true);
+      assert.equal(result.immediateRun.count, 1);
+      assert.ok(terminalEmptyReads >= 2, "post-write verification must also confirm the terminal empty cursor");
+      const summary = result.config.lastResult.actionSummaries.find(row => row.actionId === 123);
+      assert.equal(summary.verified, true);
+      assert.ok(summary.totalMismatch, "the platform total discrepancy must remain visible in the execution record");
+      assert.ok(summary.paginationWarning, "a confirmed discrepancy must not silently disappear from the scan result");
+    });
+
     await t.test("future auto-add cleanup scans every offset page and deletes only explicit automatic rows for the supplied date", async () => {
       await reset();
       const autoAddDate = new Date(Date.now() + 86400000).toISOString();
@@ -281,6 +315,38 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.equal(blocked.detectedCount, 1);
       assert.equal(blocked.blockedCount, 1);
       assert.match(blocked.error, /手动/);
+    });
+
+    await t.test("a mixed automatic batch exits safe products while retaining products manually enrolled elsewhere", async () => {
+      await reset();
+      let exitedSafe = false;
+      respond = async request => {
+        if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }, { id: 124, action_type: "STOCK_DISCOUNT" }] };
+        if (request.endpoint === "/v1/actions/products") return unifiedPriceRefusal();
+        if (request.endpoint === "/v2/actions/products") {
+          const products = request.body.action_id === 123
+            ? [...(exitedSafe ? [] : [automaticProduct(501)]), automaticProduct(503)]
+            : [{ id: 503, add_mode: "SELLER" }];
+          return { products, total: products.length, last_id: "" };
+        }
+        if (request.endpoint === "/v1/actions/products/update") {
+          assert.equal(request.body.action_id, 123);
+          assert.deepEqual(request.body.products, [{ product_id: 501, action_price: money("50.01") }], "one protected product must not block the other safe products or be updated with them");
+          exitedSafe = true;
+          return { deactivated_product_ids: ["501"], active_product_ids: [], rejected: [] };
+        }
+        throw new Error(`Unexpected promotion request ${request.endpoint}`);
+      };
+      const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+      assert.equal(result.success, false, "the protected remainder must not be reported as complete success");
+      assert.equal(result.immediateRun.count, 1, "the safe confirmed exit must still be counted");
+      const summary = result.config.lastResult.actionSummaries.find(row => row.actionId === 123);
+      assert.equal(summary.detectedCount, 2);
+      assert.equal(summary.removedCount, 1);
+      assert.equal(summary.remainingCount, 1);
+      assert.equal(summary.blockedCount, 1);
+      assert.match(summary.error, /手动/);
+      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products/update").length, 1);
     });
 
     await t.test("a later automatic promotion cannot lower the attempted shared price after an unknown earlier receipt", async () => {

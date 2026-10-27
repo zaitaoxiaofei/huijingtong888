@@ -54,7 +54,8 @@ test("Mac/Linux release can skip all database maintenance when no schema change 
   assert.match(unixClient, /--skip-database-maintenance/);
   assert.match(unixClient, /\(\(skip_database_maintenance\)\) && db_maintenance_flag=0/);
   assert.match(remote, /run_db_maintenance="\$\{4:-0\}"/);
-  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \]\]; then\s+for tenant_migration/);
+  assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \]\]; then\s+if migration_pending migrate-tenant-sku-order-trackers\.mjs; then/);
+  assert.match(remote, /if migration_pending migrate-tenant-sku-order-trackers\.mjs; then[\s\S]*?\nfi\s+for tenant_migration/);
   assert.ok(remote.indexOf("init-order-query-facts.mjs") < remote.indexOf("\nfi\n\nrm -rf \"$staging_dir/public/uploads\""));
 });
 

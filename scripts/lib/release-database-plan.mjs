@@ -6,6 +6,7 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-order-profit-daily-fx.mjs",
   "migrate-order-profit-fx-policy.mjs",
   "migrate-ogl-dispatch-schema.mjs",
+  "migrate-tenant-sku-order-trackers.mjs",
   "migrate-enterprise-messages.mjs",
   "migrate-subscription-vouchers.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
@@ -92,6 +93,22 @@ export function migrationNeedsApply(filename, report) {
       if (exists && list(report.problems, "problems").length) invalid("enterprise messages schema is incompatible");
       if (ready !== (exists && accountReady)) invalid("inconsistent enterprise messages readiness");
       return !exists || !accountExists;
+    }
+    case "migrate-tenant-sku-order-trackers.mjs": {
+      if (!boolean(report.ok, "ok")) invalid("SKU tracker inspection refused the schema");
+      const before = object(report.before, "before");
+      const exists = boolean(before.exists, "before.exists"), ready = boolean(before.ready, "before.ready");
+      const pending = boolean(report.requires_apply, "requires_apply");
+      if ((!exists && ready) || pending === ready) invalid("inconsistent SKU tracker readiness");
+      if (!Number.isSafeInteger(before.tracker_count) || before.tracker_count < 0) invalid("tracker count is invalid");
+      if (!exists && before.tracker_count !== 0) invalid("absent tracker table has rows");
+      if (exists) {
+        for (const name of ["orphan_shop_count", "unknown_shop_tenant_count", "ownership_mismatch_count", "duplicate_count"]) {
+          if (before[name] !== 0) invalid(`SKU tracker ${name} requires review`);
+        }
+        if (list(before.invalid_named_indexes, "before.invalid_named_indexes").length) invalid("SKU tracker indexes are incompatible");
+      }
+      return pending;
     }
     case "migrate-subscription-vouchers.mjs": {
       const exists = boolean(report.exists, "exists"), ready = boolean(report.ready, "ready");

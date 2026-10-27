@@ -17,10 +17,12 @@ test("SKU tracking routes derive tenant scope from the authenticated session", a
 
 test("SKU tracker records and owner assignments are tenant-bound", () => {
   const service = read("../src/services/sku-order-tracking.js");
-  assert.match(service, /tenant_id BIGINT UNSIGNED NOT NULL/);
+  assert.match(read("../src/services/sku-order-tracking-schema.js"), /tenant_id BIGINT UNSIGNED NOT NULL/);
   assert.match(service, /SHOW COLUMNS FROM sku_order_trackers/);
   assert.match(service, /SHOW INDEX FROM sku_order_trackers/);
-  assert.match(service, /idx_sku_order_tracker_tenant_active_shop/);
+  assert.match(service, /skuOrderTrackerSchemaState\(columns, indexes\)\.ready/);
+  assert.match(service, /TENANT_SKU_TRACKER_MIGRATION_REQUIRED/);
+  assert.match(service, /status: 503/);
   assert.doesNotMatch(service, /ALTER TABLE sku_order_trackers/);
   assert.match(service, /tracker\.tenant_id = \$\{trackerTenantExpr\}/);
   assert.match(service, /order_shop\.tenant_id = \?/);
@@ -39,12 +41,23 @@ test("SKU tracker records and owner assignments are tenant-bound", () => {
 
 test("SKU tracker migration is explicit, dry-run by default, and attributes rows from shops", () => {
   const migration = read("../scripts/migrate-tenant-sku-order-trackers.mjs");
-  assert.match(migration, /const APPLY = process\.argv\.includes\("--apply"\)/);
-  assert.match(migration, /Apply mode requires --mysql-admin-socket/);
-  assert.match(migration, /COALESCE\(s\.tenant_id, tenant_default\.id\)/);
-  assert.match(migration, /orphan_shop_count/);
-  assert.match(migration, /GET_LOCK\('tenant_sku_order_trackers_v1'/);
-  assert.match(migration, /uk_sku_order_tracker_tenant_shop_sku/);
-  assert.match(migration, /idx_sku_order_tracker_tenant_active_shop/);
+  const logic = read("../scripts/lib/tenant-sku-order-trackers-migration.mjs");
+  assert.match(migration, /const apply = args\.has\('apply'\)/);
+  assert.match(migration, /Explicit --database and --mysql-admin-socket are required/);
+  assert.match(logic, /COALESCE\(s\.tenant_id, tenant_default\.id\)/);
+  assert.match(logic, /orphan_shop_count/);
+  assert.match(migration, /tenant_sku_order_trackers_v1:/);
+  assert.match(migration, /GET_LOCK\(\?, 10\)/);
+  assert.match(logic, /uk_sku_order_tracker_tenant_shop_sku/);
+  assert.match(logic, /idx_sku_order_tracker_tenant_active_shop/);
   assert.match(migration, /changes_database: false/);
+  assert.doesNotMatch(migration, /src\/config|src\/mysql-pool/);
+});
+
+test("SKU tracker deployment preflight refuses unreviewed ownership changes and keeps normal ready deploys read-only", () => {
+  const release = read("../deploy/linux/remote-release.sh");
+  assert.match(release, /migration_pending migrate-tenant-sku-order-trackers\.mjs && \[\[ "\$run_db_maintenance" != "1" \]\]/);
+  const guarded = release.slice(release.indexOf('if [[ "$run_db_maintenance" == "1" ]]; then\nif migration_pending migrate-tenant-sku-order-trackers.mjs; then'));
+  assert.ok(guarded.startsWith('if [['));
+  assert.match(guarded, /migrate-tenant-sku-order-trackers\.mjs --apply --database="\$DB_NAME" --mysql-admin-socket=/);
 });
