@@ -1,10 +1,8 @@
 import fs from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { config } from "../config.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { collectStorageUsage, storageMetricValue } from "./system-monitor-storage.js";
 
-const execFileAsync = promisify(execFile);
 const SNAPSHOT_RETENTION_DAYS = 180;
 const WARNING_USAGE_PERCENT = 65;
 const CRITICAL_USAGE_PERCENT = 80;
@@ -12,13 +10,6 @@ const WARNING_AVAILABLE_BYTES = 10 * 1024 ** 3;
 const CRITICAL_AVAILABLE_BYTES = 5 * 1024 ** 3;
 const WARNING_DAILY_GROWTH_BYTES = 512 * 1024 ** 2;
 const CRITICAL_DAILY_GROWTH_BYTES = 1024 ** 3;
-const MONITORED_PATHS = Object.freeze({
-  mysql: "/var/lib/mysql",
-  uploads: "/opt/ozon-erp/shared/uploads",
-  backups: "/opt/ozon-erp/shared/backups",
-  releases: "/opt/ozon-erp/releases",
-  logs: "/var/log"
-});
 
 let schemaReadyPromise;
 
@@ -59,29 +50,6 @@ function numberValue(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-async function directoryBytes(targetPath) {
-  try {
-    const { stdout } = await execFileAsync("du", ["-sk", "--", targetPath], {
-      timeout: 30_000,
-      maxBuffer: 1024 * 1024
-    });
-    return Math.max(0, numberValue(String(stdout).trim().split(/\s+/)[0]) * 1024);
-  } catch {
-    return 0;
-  }
-}
-
-async function binaryLogBytes() {
-  try {
-    const entries = await fs.readdir(MONITORED_PATHS.mysql, { withFileTypes: true });
-    const files = entries.filter((entry) => entry.isFile() && /^binlog\.\d+$/.test(entry.name));
-    const stats = await Promise.all(files.map((entry) => fs.stat(`${MONITORED_PATHS.mysql}/${entry.name}`)));
-    return stats.reduce((sum, stat) => sum + numberValue(stat.size), 0);
-  } catch {
-    return 0;
-  }
-}
-
 async function topDatabaseTables(limit = 12) {
   const safeLimit = Math.max(1, Math.min(30, Number(limit) || 12));
   const rows = await mysqlQuery(`
@@ -111,17 +79,16 @@ function severityFor(usagePercent, availableBytes, dailyGrowthBytes) {
 }
 
 export async function captureSystemMonitorSnapshot() {
-  await ensureSchema();
-  const [disk, mysqlBytes, uploadsBytes, backupsBytes, releasesBytes, logsBytes, binlogBytes, tables, previousRows] = await Promise.all([
-    fs.statfs("/"),
-    directoryBytes(MONITORED_PATHS.mysql),
-    directoryBytes(MONITORED_PATHS.uploads),
-    directoryBytes(MONITORED_PATHS.backups),
-    directoryBytes(MONITORED_PATHS.releases),
-    directoryBytes(MONITORED_PATHS.logs),
-    binaryLogBytes(),
-    topDatabaseTables(),
-    mysqlQuery("SELECT disk_used_bytes FROM system_monitor_snapshots ORDER BY captured_at DESC LIMIT 1")
+  return captureSystemMonitorSnapshotWith();
+}
+
+export async function captureSystemMonitorSnapshotWith({ prepare = ensureSchema,
+  readDisk = () => fs.statfs("/"), readStorage = collectStorageUsage, readTables = topDatabaseTables,
+  query = mysqlQuery, execute = mysqlExecute, now = () => new Date(), warn = console.warn } = {}) {
+  await prepare();
+  const [disk, storage, tables, previousRows] = await Promise.all([
+    readDisk(), readStorage(), readTables(),
+    query("SELECT disk_used_bytes FROM system_monitor_snapshots ORDER BY captured_at DESC LIMIT 1")
   ]);
   const totalBytes = numberValue(disk.blocks) * numberValue(disk.bsize);
   const availableBytes = numberValue(disk.bavail) * numberValue(disk.bsize);
@@ -129,11 +96,15 @@ export async function captureSystemMonitorSnapshot() {
   const usagePercent = totalBytes > 0 ? Math.round((usedBytes / totalBytes) * 10000) / 100 : 0;
   const previousUsedBytes = previousRows[0] ? numberValue(previousRows[0].disk_used_bytes) : usedBytes;
   const dailyGrowthBytes = usedBytes - previousUsedBytes;
-  const severity = severityFor(usagePercent, availableBytes, dailyGrowthBytes);
+  let severity = severityFor(usagePercent, availableBytes, dailyGrowthBytes);
+  if (storage.collection.status === "incomplete") {
+    if (severity === "normal") severity = "warning";
+    warn("[system-monitor] storage collection incomplete", storage.collection.errors);
+  }
   const memory = process.memoryUsage();
-  const capturedAt = new Date();
+  const capturedAt = now();
 
-  const result = await mysqlExecute(`
+  const result = await execute(`
     INSERT INTO system_monitor_snapshots (
       captured_at, disk_total_bytes, disk_used_bytes, disk_available_bytes, usage_percent,
       daily_growth_bytes, mysql_bytes, binlog_bytes, uploads_bytes, backups_bytes,
@@ -141,22 +112,26 @@ export async function captureSystemMonitorSnapshot() {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     capturedAt, totalBytes, usedBytes, availableBytes, usagePercent, dailyGrowthBytes,
-    mysqlBytes, binlogBytes, uploadsBytes, backupsBytes, releasesBytes, logsBytes,
-    memory.rss, Math.floor(process.uptime()), severity, JSON.stringify({ topTables: tables })
+    // Existing NOT NULL columns keep a compatibility placeholder; errors in details distinguish unknown from zero.
+    ...["mysql", "binlog", "uploads", "backups", "releases", "logs"].map(key => storage.metrics[key] ?? 0),
+    memory.rss, Math.floor(process.uptime()), severity,
+    JSON.stringify({ topTables: tables, storageCollection: storage.collection })
   ]);
-  await mysqlExecute(
+  await execute(
     "DELETE FROM system_monitor_snapshots WHERE captured_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)",
     [SNAPSHOT_RETENTION_DAYS]
   );
-  return { id: Number(result.insertId), capturedAt: capturedAt.toISOString(), usagePercent, dailyGrowthBytes, severity };
+  return { id: Number(result.insertId), capturedAt: capturedAt.toISOString(), usagePercent, dailyGrowthBytes, severity,
+    status: storage.collection.status === "incomplete" ? "partial" : "success", storageCollection: storage.collection };
 }
 
-function normalizeSnapshot(row) {
+export function normalizeSystemMonitorSnapshot(row) {
   if (!row) return null;
   let details = row.details_json || {};
   if (typeof details === "string") {
     try { details = JSON.parse(details); } catch { details = {}; }
   }
+  const collection = details.storageCollection || null;
   return {
     id: Number(row.id),
     capturedAt: row.captured_at,
@@ -165,16 +140,17 @@ function normalizeSnapshot(row) {
     diskAvailableBytes: numberValue(row.disk_available_bytes),
     usagePercent: numberValue(row.usage_percent),
     dailyGrowthBytes: numberValue(row.daily_growth_bytes),
-    mysqlBytes: numberValue(row.mysql_bytes),
-    binlogBytes: numberValue(row.binlog_bytes),
-    uploadsBytes: numberValue(row.uploads_bytes),
-    backupsBytes: numberValue(row.backups_bytes),
-    releasesBytes: numberValue(row.releases_bytes),
-    logsBytes: numberValue(row.logs_bytes),
+    mysqlBytes: storageMetricValue(row, "mysql_bytes", "mysql", collection),
+    binlogBytes: storageMetricValue(row, "binlog_bytes", "binlog", collection),
+    uploadsBytes: storageMetricValue(row, "uploads_bytes", "uploads", collection),
+    backupsBytes: storageMetricValue(row, "backups_bytes", "backups", collection),
+    releasesBytes: storageMetricValue(row, "releases_bytes", "releases", collection),
+    logsBytes: storageMetricValue(row, "logs_bytes", "logs", collection),
     appRssBytes: numberValue(row.app_rss_bytes),
     serviceUptimeSeconds: numberValue(row.service_uptime_seconds),
     severity: row.severity || "normal",
-    topTables: Array.isArray(details.topTables) ? details.topTables : []
+    topTables: Array.isArray(details.topTables) ? details.topTables : [],
+    storageCollection: collection
   };
 }
 
@@ -186,7 +162,7 @@ export async function systemMonitoringOverview(query = {}) {
     WHERE captured_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)
     ORDER BY captured_at DESC
   `, [days]);
-  const snapshots = rows.map(normalizeSnapshot);
+  const snapshots = rows.map(normalizeSystemMonitorSnapshot);
   return {
     latest: snapshots[0] || null,
     history: snapshots,

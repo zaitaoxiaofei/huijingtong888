@@ -1,11 +1,8 @@
 import mysql from "mysql2/promise";
-import { config } from "../src/config.js";
-import { closeMysqlPool, mysqlQuery } from "../src/mysql-pool.js";
+import { pathToFileURL } from "node:url";
 import { ENTERPRISE_MESSAGES_SCHEMA_SQL } from "../src/services/enterprise-messages.js";
 import { inspectPeopleAccountKind, preparePeopleAccountKind } from "../src/services/people-account-kind.js";
 
-const apply = process.argv.includes("--apply");
-const socketPath = process.argv.find(arg => arg.startsWith("--mysql-admin-socket="))?.split("=").slice(1).join("=");
 async function inspect(query) {
   const exists = (await query("SHOW TABLES LIKE 'enterprise_direct_messages'")).length > 0;
   if (!exists) return { exists: false, ready: false };
@@ -33,26 +30,47 @@ async function inspect(query) {
   }
   return { exists, ready: problems.length === 0, problems };
 }
-async function run() {
-  if (!apply) {
-    const messages = await inspect(mysqlQuery), accountKind = await inspectPeopleAccountKind(mysqlQuery);
-    return console.log(JSON.stringify({ mode: "dry-run", changes_database: false, ...messages, ready: messages.ready && accountKind.ready, account_kind: accountKind }));
+export async function runEnterpriseMessagesMigration({ apply = false, socketPath, database,
+  createConnection = mysql.createConnection } = {}) {
+  if (apply && !socketPath) throw new Error("Apply requires an explicit local --mysql-admin-socket");
+  let applicationPool;
+  if (!database || !socketPath) {
+    const { config } = await import("../src/config.js");
+    database ||= config.dbName;
+    if (!socketPath) {
+      if (database !== config.dbName) throw new Error("Read-only application connection must match configured DB_NAME");
+      applicationPool = await import("../src/mysql-pool.js");
+    }
   }
-  if (!socketPath) throw new Error("Apply requires an explicit local --mysql-admin-socket");
-  const connection = await mysql.createConnection({ socketPath, user: "root", database: config.dbName });
-  const query = async (sql, params = []) => (await connection.query(sql, params))[0];
+  if (!/^[A-Za-z0-9_]{1,64}$/.test(database || "")) throw new Error("A valid database is required");
+  const connection = socketPath ? await createConnection({ socketPath, user: "root", database }) : null;
+  const query = connection ? async (sql, params = []) => (await connection.query(sql, params))[0] : applicationPool.mysqlQuery;
   try {
-    const [lock] = await query("SELECT GET_LOCK('enterprise_messages_schema_v1', 60) AS acquired");
-    if (Number(lock.acquired) !== 1) throw new Error("Private messages schema migration lock unavailable");
-    const before = await inspect(query);
-    if (before.exists && !before.ready) throw new Error("Existing private messages schema is incompatible; manual review required");
-    await preparePeopleAccountKind(query);
-    for (const sql of ENTERPRISE_MESSAGES_SCHEMA_SQL) await query(sql);
-    const after = await inspect(query);
-    if (!after.ready) throw new Error("Private messages schema verification failed");
-    console.log(JSON.stringify({ mode: "apply", ...after, account_kind: await inspectPeopleAccountKind(query) }));
+    if (!apply) {
+      const messages = await inspect(query), accountKind = await inspectPeopleAccountKind(query);
+      return { mode: "dry-run", changes_database: false, ...messages, ready: messages.ready && accountKind.ready, account_kind: accountKind };
+    }
+    try {
+      const [lock] = await query("SELECT GET_LOCK('enterprise_messages_schema_v1', 60) AS acquired");
+      if (Number(lock.acquired) !== 1) throw new Error("Private messages schema migration lock unavailable");
+      const before = await inspect(query);
+      if (before.exists && !before.ready) throw new Error("Existing private messages schema is incompatible; manual review required");
+      await preparePeopleAccountKind(query);
+      for (const sql of ENTERPRISE_MESSAGES_SCHEMA_SQL) await query(sql);
+      const after = await inspect(query);
+      if (!after.ready) throw new Error("Private messages schema verification failed");
+      return { mode: "apply", ...after, account_kind: await inspectPeopleAccountKind(query) };
+    } finally {
+      await query("SELECT RELEASE_LOCK('enterprise_messages_schema_v1')");
+    }
   } finally {
-    try { await query("SELECT RELEASE_LOCK('enterprise_messages_schema_v1')"); } finally { await connection.end(); }
+    if (connection) await connection.end();
+    else await applicationPool.closeMysqlPool();
   }
 }
-try { await run(); } finally { await closeMysqlPool(); }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const value = name => process.argv.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
+  console.log(JSON.stringify(await runEnterpriseMessagesMigration({ apply: process.argv.includes("--apply"),
+    socketPath: value("--mysql-admin-socket"), database: value("--database") })));
+}

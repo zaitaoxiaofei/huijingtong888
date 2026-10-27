@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Ozon ERP storage usage every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=ozon-erp-storage-collector.service
+
+[Install]
+WantedBy=timers.target

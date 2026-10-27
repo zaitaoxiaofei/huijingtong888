@@ -53,7 +53,7 @@ test("Mac/Linux activation passes the archive before the version as required by 
 test("Mac/Linux release can skip all database maintenance when no schema change is needed", () => {
   assert.match(unixClient, /--skip-database-maintenance/);
   assert.match(unixClient, /\(\(skip_database_maintenance\)\) && db_maintenance_flag=0/);
-  assert.match(remote, /run_db_maintenance="\$\{4:-1\}"/);
+  assert.match(remote, /run_db_maintenance="\$\{4:-0\}"/);
   assert.match(remote, /if \[\[ "\$run_db_maintenance" == "1" \]\]; then\s+for tenant_migration/);
   assert.ok(remote.indexOf("init-order-query-facts.mjs") < remote.indexOf("\nfi\n\nrm -rf \"$staging_dir/public/uploads\""));
 });
@@ -81,7 +81,7 @@ async function withWindowsDeployFixture(run) {
       fs.appendFileSync(process.env.OZON_DEPLOY_TEST_TRACE, JSON.stringify({ step: "guard", cwd: process.cwd() }) + "\\n");
       process.exit(Number(process.env.OZON_DEPLOY_TEST_GUARD_EXIT || 0));
     `, "utf8");
-    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, retention = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
+    const execute = async ({ skipInit = false, skipMaintenance = false, runMaintenance = false, skipBuild = true, manifest = false, material = false, retention = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
       await fsPromises.writeFile(tracePath, "", "utf8");
       return execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
         $ErrorActionPreference = 'Stop'
@@ -116,6 +116,7 @@ async function withWindowsDeployFixture(run) {
         if ($env:OZON_DEPLOY_TEST_SKIP_BUILD -eq '1') { $options.SkipBuild = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_INIT -eq '1') { $options.SkipDatabaseInit = $true }
         if ($env:OZON_DEPLOY_TEST_SKIP_MAINTENANCE -eq '1') { $options.SkipDatabaseMaintenance = $true }
+        if ($env:OZON_DEPLOY_TEST_RUN_MAINTENANCE -eq '1') { $options.RunDatabaseMaintenance = $true }
         if ($env:OZON_DEPLOY_TEST_ALLOW_INTERRUPTION -eq '1') { $options.AllowServiceInterruption = $true }
         if ($env:OZON_DEPLOY_TEST_MANIFEST) { $options.ReviewedIdentityManifest = $env:OZON_DEPLOY_TEST_MANIFEST }
         if ($env:OZON_DEPLOY_TEST_MATERIAL) { $options.ReviewedAiMaterialManifest = $env:OZON_DEPLOY_TEST_MATERIAL }
@@ -133,6 +134,7 @@ async function withWindowsDeployFixture(run) {
           OZON_DEPLOY_TEST_SKIP_BUILD: skipBuild ? "1" : "0",
           OZON_DEPLOY_TEST_SKIP_INIT: skipInit ? "1" : "0",
           OZON_DEPLOY_TEST_SKIP_MAINTENANCE: skipMaintenance ? "1" : "0",
+          OZON_DEPLOY_TEST_RUN_MAINTENANCE: runMaintenance ? "1" : "0",
           OZON_DEPLOY_TEST_ALLOW_INTERRUPTION: allowInterruption ? "1" : "0",
           OZON_DEPLOY_TEST_MANIFEST: manifest ? manifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL: material ? materialManifestPath : "",
@@ -158,7 +160,7 @@ test("AI media retention requires maintenance before upload and passes a private
     await execute({ retention:true, allowInterruption:true });
     const steps=await trace();
     const activation=steps.find(step=>step.step==='ssh' && step.arguments.at(-1).includes("bash '/tmp/ozon-erp-remote-release.sh'"));
-    assert.match(activation.arguments.at(-1), /'test-release' '1' '1' '' '' '1' '\/tmp\/ozon-erp-ai-media-retention-test-release-[a-f0-9]+\.json'$/);
+    assert.match(activation.arguments.at(-1), /'test-release' '1' '0' '' '' '1' '\/tmp\/ozon-erp-ai-media-retention-test-release-[a-f0-9]+\.json'$/);
     assert.ok(steps.some(step=>step.step==='ssh' && step.arguments.at(-1).includes('umask 077') && step.arguments.at(-1).includes('ai-media-retention')));
     assert.ok(steps.some(step=>step.step==='ssh' && step.arguments.at(-1).startsWith('rm -f -- ') && step.arguments.at(-1).includes('ai-media-retention')));
   });
@@ -169,16 +171,17 @@ test("AI media retention requires maintenance before upload and passes a private
   assert.match(freeze,/install -m 600/);
 });
 
-test("Windows database skip switches preserve defaults and forward all remote release arguments", { skip: process.platform !== "win32" }, async () => {
+test("Windows ordinary release skips broad maintenance and explicit maintenance remains available", { skip: process.platform !== "win32" }, async () => {
   await withWindowsDeployFixture(async ({ capturePath, execute }) => {
-    for (const [skipInit, skipMaintenance] of [[false, false], [true, false], [false, true], [true, true]]) {
-      await execute({ skipInit, skipMaintenance });
+    for (const [skipInit, skipMaintenance, runMaintenance] of [[false, false, false], [true, false, false], [false, true, false], [true, true, false], [false, false, true]]) {
+      await execute({ skipInit, skipMaintenance, runMaintenance });
       const sshArguments = JSON.parse(await fsPromises.readFile(capturePath, "utf8"));
       assert.equal(sshArguments.at(-2), "test@deployment.test.invalid");
       assert.ok(sshArguments.at(-1).endsWith(
-        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${skipMaintenance ? "0" : "1"}' '' '' '0'`
+        `bash '/tmp/ozon-erp-remote-release.sh' '/tmp/ozon-erp-test-release.zip' 'test-release' '${skipInit ? "0" : "1"}' '${runMaintenance ? "1" : "0"}' '' '' '0'`
       ), `incorrect remote flags for SkipDatabaseInit=${skipInit}, SkipDatabaseMaintenance=${skipMaintenance}`);
     }
+    await assert.rejects(execute({ runMaintenance: true, skipMaintenance: true }), /Choose either/);
   });
 });
 
@@ -265,7 +268,7 @@ test("Windows material manifest is private before upload, stays sixth, and is cl
     }
     const { stdout } = await execute({ dryRun: true, material: true });
     assert.deepEqual(await trace(), []);
-    assert.match(stdout, /'1' '1' '' '\/tmp\/ozon-erp-ai-material-test-release-[a-f0-9]{32}\.json'/);
+    assert.match(stdout, /'1' '0' '' '\/tmp\/ozon-erp-ai-material-test-release-[a-f0-9]{32}\.json'/);
     assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
     await fsPromises.writeFile(materialManifestPath,"MATERIAL_CONTENT_MUST_NOT_BE_PRINTED invalid JSON");
     await assert.rejects(execute({dryRun:true,material:true}),error => /not valid JSON/.test(error.stderr) && !/MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/.test(error.stderr));
@@ -300,9 +303,9 @@ test("ECS release verifies a private complete database backup before initializat
   const backupCondition = remote.match(/if \[\[ "\$run_db_maintenance" == "1" \|\|[^\n]+\]\]; then\s+backup_database/);
   assert.ok(backupCondition, "maintenance and mandatory schemas gate the backup");
   assert.ok(backupCondition[0].includes('-n "'+ '$' +'reviewed_identity_manifest"'));
-  for (const script of ["migrate-order-profit-calculation-versions.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-enterprise-messages.mjs", "migrate-subscription-vouchers.mjs", "migrate-tenant-ai-material-optimization.mjs"]) {
-    assert.ok(backupCondition[0].includes('-f "'+ '$' +'staging_dir/scripts/' + script + '"'), script + " requires backup");
-  }
+  assert.ok(backupCondition[0].includes('$pending_schema_migrations'));
+  assert.ok(backupCondition[0].includes('$material_change_required'));
+  assert.doesNotMatch(backupCondition[0], /-f /, "packaging migration scripts is not a database change");
   const backup = remote.indexOf("\n  backup_database\n");
   assert.ok(backup >= 0);
   assert.ok(backup < remote.indexOf("npm run db:init:mysql"));
@@ -353,7 +356,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
       assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
       const calls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
       const activation = calls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash "));
-      assert.match(activation.at(-1), new RegExp(`'1' '1' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json' '0'$`));
+      assert.match(activation.at(-1), new RegExp(`'1' '0' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json' '0'$`));
       const prepare = calls.findIndex(call => call[0] === "ssh" && call.at(-1).includes("umask 077"));
       const upload = calls.findIndex(call => call[0] === "scp" && call.at(-1).includes("ozon-erp-ai-material-"));
       assert.ok(prepare >= 0 && upload > prepare);
@@ -371,7 +374,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
     await fsPromises.writeFile(trace, "");
     const { stdout } = await execute(["--dry-run"]);
     assert.equal(await fsPromises.readFile(trace, "utf8"), "");
-    assert.match(stdout, /'1' '1' '' '\/tmp\/ozon-erp-ai-material-fixture-[a-f0-9]{32}\.json'/);
+    assert.match(stdout, /'1' '0' '' '\/tmp\/ozon-erp-ai-material-fixture-[a-f0-9]{32}\.json'/);
     assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
     await fsPromises.writeFile(material,"MATERIAL_CONTENT_MUST_NOT_BE_PRINTED invalid JSON");
     await assert.rejects(execute(["--dry-run"]),error => /not valid JSON/.test(error.stderr) && !/MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/.test(error.stderr));
@@ -501,6 +504,9 @@ run_db_maintenance=0
 reviewed_identity_manifest=""
 reviewed_ai_material_manifest="/tmp/ozon-erp-ai-material-fixture.json"
 material_change_required=ready
+pending_schema_migrations=""
+plan_database_changes() { :; }
+install_storage_collector() { :; }
 material_optimization_preflight() {
   printf 'preflight\\n' >> "$PWD/trace"
   local count; count="$(wc -l < "$PWD/trace")"
@@ -555,13 +561,17 @@ test("membership schemas require a verified backup and run before the candidate 
         env_file="$PWD/env"
         run_db_maintenance=0
         reviewed_identity_manifest=""
+        reviewed_ai_material_manifest=""
+        pending_schema_migrations="${schema}"
+        material_change_required=ready
+        migration_pending() { [[ "$1" == "${schema}" ]]; }
         backup_database() { printf 'backup-required\\n'; }
         node() { printf '%s\\n' "$*"; }
         ${gate}
         ${hook}
       `], { cwd: fixtureDir, env: { ...process.env, BASH_ENV: "" } });
       const lines = stdout.trim().split(/\r?\n/);
-      assert.deepEqual(lines, ["backup-required", `scripts/${schema} --mysql-admin-socket=/var/run/mysqld/mysqld.sock`, `scripts/${schema} --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock`]);
+      assert.deepEqual(lines, ["backup-required", `scripts/${schema} --database=isolated_schema_fixture --mysql-admin-socket=/var/run/mysqld/mysqld.sock`, `scripts/${schema} --apply --database=isolated_schema_fixture --mysql-admin-socket=/var/run/mysqld/mysqld.sock`]);
       await fsPromises.rm(file);
     }
   } finally {
@@ -569,13 +579,13 @@ test("membership schemas require a verified backup and run before the candidate 
   }
 });
 
-test("profit schema preparation still requires a backup when ordinary maintenance is skipped", { skip: missingGitBash }, async () => {
+test("actual pending schemas and explicit maintenance require backup; packaged no-op schemas do not", { skip: missingGitBash }, async () => {
   const fixtureDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-backup-gate-"));
   try {
     const gate = remote.match(/^if \[\[ "\$run_db_maintenance" == "1"[^\r\n]*\r?\n  backup_database\r?\nfi/m)?.[0];
     assert.ok(gate, "execute the release's actual backup gate");
     await fsPromises.mkdir(path.join(fixtureDir, "scripts"));
-    for (const [maintenance, manifest, profitSchema, expected] of [["0", "", true, true], ["0", "", false, false], ["1", "", false, true], ["0", "reviewed.json", false, true]]) {
+    for (const [maintenance, manifest, profitSchema, pending, expected] of [["0", "", true, true, true], ["0", "", true, false, false], ["0", "", false, false, false], ["1", "", false, false, true], ["0", "reviewed.json", false, false, true]]) {
       const schema = path.join(fixtureDir, "scripts", "migrate-order-profit-calculation-versions.mjs");
       if (profitSchema) await fsPromises.writeFile(schema, "fixture", "utf8");
       else await fsPromises.rm(schema, { force: true });
@@ -584,6 +594,9 @@ test("profit schema preparation still requires a backup when ordinary maintenanc
         staging_dir="$PWD"
         run_db_maintenance="${maintenance}"
         reviewed_identity_manifest="${manifest}"
+        reviewed_ai_material_manifest=""
+        pending_schema_migrations="${pending ? "migrate-order-profit-calculation-versions.mjs" : ""}"
+        material_change_required=ready
         backup_database() { printf 'backup-required'; }
         ${gate}
       `], { cwd: fixtureDir, env: { ...process.env, BASH_ENV: "" } });

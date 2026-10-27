@@ -66,7 +66,11 @@ npm run deploy:ecs -- -Version 2026.10.21-identity -ReviewedIdentityManifest "C:
 npm run deploy:ecs:unix -- --version 2026.10.21-identity --reviewed-identity-manifest /secure/reviewed-identities.json --allow-service-interruption
 ```
 
-执行数据库维护、提供身份清单，或发布包包含始终执行的利润版本 schema 脚本时，远端先使用本机 MySQL root socket 对应用 `DB_NAME` 全库执行 `mysqldump --single-transaction`，包括触发器、事件和存储过程，压缩并校验后才允许数据库初始化或迁移。即使跳过常规数据库维护，利润版本 schema 的准备也必须先完成备份。备份位于 `/opt/ozon-erp/shared/backups/identity-releases/pre-release-<version>-<UTC时间>-<PID>.sql.gz`，新建子目录权限为 `0700`，备份文件为 `0600`；不修改已有备份父目录权限，也不输出数据库密码。
+日常发布默认不执行广泛数据库维护。需要维护时显式使用 `-RunDatabaseMaintenance` 或 `--run-database-maintenance`；原跳过开关继续兼容，不能与执行开关同时使用。每次先以管理员 socket 只读检查所需增量结构，已就绪的迁移不再次 apply。仅有实际待执行结构变更、已审阅身份／素材清单或显式维护时，才在任何数据库写入前执行并校验整库备份。发布包中存在迁移文件本身不再触发备份；预检失败或现有结构不兼容时，保留原服务并拒绝发布。
+
+需要备份时，使用本机 MySQL root socket 对应用 `DB_NAME` 执行 `mysqldump --single-transaction`，包括触发器、事件和存储过程。备份位于 `/opt/ozon-erp/shared/backups/identity-releases/pre-release-<version>-<UTC时间>-<PID>.sql.gz`，目录权限 `0700`、文件 `0600`，与同名 `.ai-results.jsonl.gz` 配对。压缩和配套结果校验不等于已完成整库恢复演练。
+
+仅在新主服务和候选都通过就绪检查后，在同一发布锁内运行 `scripts/prune-release-backups.mjs --apply --lock-fd=9`。保留最新两对完整备份及全部受保护恢复点；未配对、半写入、被进程使用或校验异常的文件不删除。维护前备份在数据写入前建立 `.sql.gz.pin.json`；已有 `shared/maintenance/ai-media-retention/<release>.manifest.json` 对应恢复点也自动保护。维护清单与其他修复归档不在轮换范围。清理失败记录告警，不回滚已经健康的新服务。独立运行该 CLI 默认只审计，并自行获取发布锁；取消保护需要另行核验恢复依赖。
 
 常规迁移包含 `asset_tail_templates` 企业归属列和索引；既有 NULL 归属保持原值。提供身份清单时，在常规 schema 准备后、候选启动前停止记录的旧候选进程和主服务，依次运行官方身份脚本的只读盘点与应用，再继续原有候选、切换和健康检查。未提供清单时不执行身份迁移，也不增加这个停服步骤。
 
@@ -100,7 +104,7 @@ npm run deploy:ecs:unix -- --version 2026.10.23-reviewed-material --reviewed-ai-
 
 ## 性能索引、冻结内容读取与积分准备
 
-发布会在校验数据库备份后、候选启动前，依次只读检查并应用订单搜索索引、草稿列表索引、冻结内容表及积分五表的增量迁移。即使跳过常规维护，这四项准备也会执行；遇到同名不兼容结构直接拒绝，不自动改写账务或历史业务行。迁移不创建积分账户、不充值、不设置价格，也不自动启用冻结草稿写入。普通发布继续保持 `LISTING_FROZEN_DRAFT_TENANTS` 为空，先让当前及可回滚版本都具备读取能力，后续再按企业试开新 writer。
+候选启动前只读检查订单搜索索引、草稿列表索引、冻结内容、积分、每日汇率、冻结汇率伴表、OGL、企业消息、订阅券、草稿历史索引及利润版本表。只在发现缺失结构且完成备份后应用对应迁移；现有结构不兼容则拒绝，不自动改写账务或历史业务行。迁移不创建积分账户、不充值、不设置价格，也不自动启用冻结草稿写入。普通发布继续保持 `LISTING_FROZEN_DRAFT_TENANTS` 为空，先让当前及可回滚版本都具备读取能力，后续再按企业试开新 writer。
 
 四个增量 CLI 的独立数据库会话均设 `lock_wait_timeout=5`。订单和草稿索引使用 `ALGORITHM=INPLACE, LOCK=NONE`，不支持时拒绝，不降级为拷表；冻结内容和积分迁移只创建缺少的空表。长事务阻塞元数据锁时约五秒失败并保留原服务，待阻塞解除再重试；该设置不是整个迁移的运行时限，也不能保证在线索引创建完全没有短时锁。
 
