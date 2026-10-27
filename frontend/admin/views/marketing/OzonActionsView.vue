@@ -1,13 +1,9 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Plus, Refresh, Search } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
-import { useAuthStore } from "../../stores/auth";
-import { isPlatformAdmin } from "../../../../src/shared/permissions.js";
-
-const authStore = useAuthStore();
-const canRunGlobalCleanup = computed(() => isPlatformAdmin(authStore.user));
+import { shanghaiDateTimeText } from "../../utils/shanghai-date";
 
 const MODE_ITEMS = [
   { key: "official", label: "Ozon 官方活动" },
@@ -26,6 +22,8 @@ const SELLER_STATUS_OPTIONS = [
 const PRODUCT_PAGE_SIZE = 100;
 const AUTO_CLEANUP_ACTION_IDS = [];
 const AUTO_CLEANUP_INTERVAL_MINUTES = 5;
+let cleanupPollTimer = null;
+let cleanupPollGeneration = 0;
 
 const SELLER_STATUS_META = {
   ACTIVE: { label: "进行中", type: "success" },
@@ -204,12 +202,15 @@ function createEmptyCleanupConfig(storeId = "") {
     storeId: String(storeId || ""),
     storeName: "",
     enabled: false,
+    authorizationReady: false,
+    authorizationError: "",
     actionIds: AUTO_CLEANUP_ACTION_IDS.slice(),
     knownActions: [],
     intervalMinutes: AUTO_CLEANUP_INTERVAL_MINUTES,
     lastSyncedActions: [],
     lastActionListSyncedAt: "",
     lastActionListChangedAt: "",
+    lastAttemptAt: "",
     lastRunAt: "",
     lastError: "",
     lastResult: null,
@@ -229,12 +230,15 @@ function normalizeCleanupConfig(payload, storeId = "") {
     storeId: String(raw.storeId || base.storeId || ""),
     storeName: String(raw.storeName || ""),
     enabled: raw.enabled === true,
+    authorizationReady: raw.authorizationReady === true,
+    authorizationError: String(raw.authorizationError || ""),
     actionIds: actionIds.length ? actionIds : base.actionIds,
     knownActions: Array.isArray(raw.knownActions) ? raw.knownActions : [],
     intervalMinutes: Number(raw.intervalMinutes) > 0 ? Number(raw.intervalMinutes) : base.intervalMinutes,
     lastSyncedActions: Array.isArray(raw.lastSyncedActions) ? raw.lastSyncedActions : [],
     lastActionListSyncedAt: String(raw.lastActionListSyncedAt || ""),
     lastActionListChangedAt: String(raw.lastActionListChangedAt || ""),
+    lastAttemptAt: String(raw.lastAttemptAt || ""),
     lastRunAt: String(raw.lastRunAt || ""),
     lastError: String(raw.lastError || ""),
     lastResult: raw.lastResult && typeof raw.lastResult === "object" ? raw.lastResult : null,
@@ -244,19 +248,11 @@ function normalizeCleanupConfig(payload, storeId = "") {
 }
 
 function formatDate(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  const pad = (num) => (num < 10 ? `0${num}` : String(num));
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return shanghaiDateTimeText(value);
 }
 
 function formatDateTime(value) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  const pad = (num) => (num < 10 ? `0${num}` : String(num));
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return shanghaiDateTimeText(value);
 }
 
 function shortDate(value) {
@@ -514,6 +510,49 @@ async function loadAllCleanupConfigs() {
   }
 }
 
+function cleanupReadableError(error) {
+  const message = String(error?.message || error || "");
+  if (/未保存企业归属|未保存.*操作人|缺少.*执行人|缺少.*授权|未保存.*身份/.test(message)) {
+    return "自动退出尚未授权，请点击「立即扫描」保存当前企业与执行人后重试。";
+  }
+  if (Number(error?.status) === 404) return "自动退出服务暂不可用，请刷新页面后重试。";
+  if (Number(error?.status) === 403) return "当前账号无法执行自动退出，请确认仍属于该企业并具有运营权限。";
+  if (/[\u3400-\u9fff]/.test(message)) return message;
+  return "自动退出未完成，请展开最近扫描明细查看原因后重试。";
+}
+
+function cleanupConfigErrorText(config) {
+  if (config?.enabled && !config?.authorizationReady) {
+    return cleanupReadableError(config.authorizationError || "缺少执行人授权");
+  }
+  return config?.lastError ? cleanupReadableError(config.lastError) : "";
+}
+
+function applyCleanupConfig(storeId, payload) {
+  if (!payload?.config || typeof payload.config !== "object") throw new Error("未收到店铺自动退出状态，请刷新后重试。");
+  const next = normalizeCleanupConfig(payload.config, storeId);
+  state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [String(storeId)]: next };
+  if (String(state.storeId) === String(storeId)) state.cleanupConfig = next;
+  return next;
+}
+
+function notifyCleanupResult(payload, successText) {
+  const result = payload?.immediateRun;
+  if (result?.skippedDisabled) {
+    ElMessage.info("自动退出已关闭，本次未执行扫描。");
+    return;
+  }
+  if (payload?.success !== true || result?.success === false || (payload.config?.enabled && !payload.config?.authorizationReady)) {
+    const error = cleanupConfigErrorText(payload?.config) || result?.error || payload?.error;
+    const message = cleanupReadableError(error);
+    const removed = Number(result?.count || 0);
+    if (removed > 0) ElMessage.warning(`已移除 ${removed} 个商品，但仍有活动未完成：${message}`);
+    else ElMessage.error(message);
+    return;
+  }
+  ElMessage.success(successText);
+}
+
 async function saveCleanupEnabled(enabled) {
   if (!state.storeId) {
     ElMessage.warning("请先选择店铺");
@@ -528,12 +567,11 @@ async function saveCleanupEnabled(enabled) {
   state.cleanupSaving = true;
   try {
     const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId: state.storeId, enabled });
-    state.cleanupConfig = normalizeCleanupConfig(payload?.config, state.storeId);
-    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [String(state.storeId)]: state.cleanupConfig };
-    ElMessage.success(enabled ? "已开启当前店铺自动清理配置" : "已关闭当前店铺自动清理配置");
+    applyCleanupConfig(state.storeId, payload);
+    notifyCleanupResult(payload, enabled ? "已开启当前店铺自动退出并完成扫描" : "已关闭当前店铺自动退出");
   } catch (error) {
     state.cleanupConfig = previous;
-    ElMessage.error(`保存自动清理配置失败：${error.message || "unknown"}`);
+    ElMessage.error(`保存自动退出配置失败：${cleanupReadableError(error)}`);
   } finally {
     state.cleanupSaving = false;
   }
@@ -551,14 +589,12 @@ async function saveCleanupEnabledForStore(storeId, enabled) {
   state.cleanupSavingStoreId = normalizedStoreId;
   try {
     const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId: normalizedStoreId, enabled });
-    const next = normalizeCleanupConfig(payload?.config, normalizedStoreId);
-    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [normalizedStoreId]: next };
-    if (String(state.storeId) === normalizedStoreId) state.cleanupConfig = next;
-    ElMessage.success(enabled ? "已开启店铺自动删活动" : "已关闭店铺自动删活动");
+    applyCleanupConfig(normalizedStoreId, payload);
+    notifyCleanupResult(payload, enabled ? "已开启店铺自动退出并完成扫描" : "已关闭店铺自动退出");
   } catch (error) {
     state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [normalizedStoreId]: previous };
     if (String(state.storeId) === normalizedStoreId) state.cleanupConfig = previous;
-    ElMessage.error(`保存自动删活动配置失败：${error.message || "unknown"}`);
+    ElMessage.error(`保存自动退出配置失败：${cleanupReadableError(error)}`);
   } finally {
     state.cleanupSavingStoreId = "";
   }
@@ -576,35 +612,77 @@ async function runCleanupForStore(shop, config) {
   state.cleanupRunningStoreId = storeId;
   try {
     const payload = await apiClient.post("/api/ozon/actions/cleanup-config", { storeId, enabled: true });
-    const next = normalizeCleanupConfig(payload?.config, storeId);
-    state.cleanupConfigsByStore = { ...state.cleanupConfigsByStore, [storeId]: next };
-    if (String(state.storeId) === storeId) state.cleanupConfig = next;
-    ElMessage.success("店铺自动删活动扫描完成");
+    applyCleanupConfig(storeId, payload);
+    notifyCleanupResult(payload, "店铺自动退出扫描完成");
   } catch (error) {
-    ElMessage.error(`执行店铺自动删活动失败：${error.message || "unknown"}`);
+    ElMessage.error(`执行店铺自动退出失败：${cleanupReadableError(error)}`);
   } finally {
     state.cleanupRunningStoreId = "";
   }
 }
 
 async function runAllCleanupNow() {
-  if (!canRunGlobalCleanup.value) return;
-  await ElMessageBox.confirm("确认立即扫描所有已启用店铺并删除 Ozon 自动加入活动的商品吗？手动加入的活动商品不会删除。", "立即执行自动删活动", {
+  await ElMessageBox.confirm("确认以当前账号授权并扫描本企业所有已开启自动退出的店铺吗？仅移除 Ozon 自动加入官方活动的商品。", "立即执行自动退出", {
     type: "warning",
     confirmButtonText: "立即扫描并删除",
     cancelButtonText: "取消",
     confirmButtonClass: "el-button--danger"
   });
   state.cleanupRunAllLoading = true;
+  const previousConfigs = state.cleanupConfigsByStore;
   try {
-    await apiClient.post("/api/scheduled-jobs/run", { job_key: "ozon_action_cleanup" });
-    ElMessage.success("已执行全店自动删活动任务");
-    await Promise.all([loadAllCleanupConfigs(), loadCleanupConfig()]);
+    const payload = await apiClient.post("/api/ozon/actions/cleanup-run-all", {});
+    if (!Array.isArray(payload?.configs) || !Array.isArray(payload?.results)) throw new Error("未收到完整扫描结果，请刷新店铺状态后重试。");
+    for (const config of payload.configs) applyCleanupConfig(config.storeId, { config });
+    if (payload.status === "running") {
+      startCleanupPolling(payload.configs.filter((config) => config.enabled).map((config) => ({
+        storeId: String(config.storeId),
+        lastAttemptAt: String(previousConfigs?.[String(config.storeId)]?.lastAttemptAt || ""),
+        lastRunAt: String(previousConfigs?.[String(config.storeId)]?.lastRunAt || "")
+      })));
+      ElMessage.info("已保存授权并开始扫描，请查看各店铺结果。");
+      return;
+    }
+    const failed = Math.max(Number(payload.failed || 0), payload.results.filter((item) => item?.success === false).length);
+    const removed = Number(payload.count || 0);
+    if (failed > 0) ElMessage.warning(`已处理 ${payload.results.length} 家店铺，其中 ${failed} 家未完成，已移除 ${removed} 个商品；请展开明细查看原因。`);
+    else if (payload.success !== true) ElMessage.error(cleanupReadableError(payload.error));
+    else if (!payload.results.length) ElMessage.info("本企业没有已开启自动退出的店铺。");
+    else ElMessage.success(`本企业 ${payload.results.length} 家店铺扫描完成，已移除 ${removed} 个自动添加商品`);
   } catch (error) {
-    ElMessage.error(`执行全店自动删活动失败：${error.message || "unknown"}`);
+    ElMessage.error(`执行全店自动退出失败：${cleanupReadableError(error)}`);
   } finally {
     state.cleanupRunAllLoading = false;
   }
+}
+
+function stopCleanupPolling() {
+  cleanupPollGeneration += 1;
+  if (cleanupPollTimer !== null) window.clearTimeout(cleanupPollTimer);
+  cleanupPollTimer = null;
+}
+
+function startCleanupPolling(targets) {
+  stopCleanupPolling();
+  if (!targets.length) return;
+  const generation = cleanupPollGeneration;
+  const deadline = Date.now() + 2 * 60 * 1000;
+  const refresh = async () => {
+    if (generation !== cleanupPollGeneration) return;
+    cleanupPollTimer = null;
+    await loadAllCleanupConfigs();
+    if (generation !== cleanupPollGeneration) return;
+    const complete = targets.every((target) => {
+      const config = state.cleanupConfigsByStore[target.storeId];
+      const attempted = config?.lastAttemptAt && config.lastAttemptAt !== target.lastAttemptAt;
+      const finished = config?.lastRunAt && config.lastRunAt !== target.lastRunAt;
+      return config && !config.taskRunning && (attempted || finished);
+    });
+    if (complete) return;
+    if (Date.now() < deadline) cleanupPollTimer = window.setTimeout(refresh, 5000);
+    else ElMessage.info("扫描仍在后台运行，可点击「刷新全部店铺」查看最新结果。");
+  };
+  cleanupPollTimer = window.setTimeout(refresh, 5000);
 }
 
 async function loadActions() {
@@ -888,7 +966,8 @@ async function archiveSellerAction(row) {
 }
 
 function cleanupResultSummary(config) {
-  if (config?.lastError) return `最近失败：${config.lastError}`;
+  const error = cleanupConfigErrorText(config);
+  if (error) return error;
   const total = Number(config?.lastResult?.removedCount || 0);
   const summaries = Array.isArray(config?.lastResult?.actionSummaries) ? config.lastResult.actionSummaries : [];
   if (!summaries.length) return total > 0 ? `最近移除 ${total} 个自动添加商品` : "最近执行未发现需要移除的自动添加商品";
@@ -898,14 +977,18 @@ function cleanupResultSummary(config) {
 
 function cleanupStatusLabel(config) {
   if (config?.taskRunning) return "执行中";
+  if (!config?.enabled) return "未启用";
+  if (!config?.authorizationReady) return "待授权";
+  if (!config?.taskEnabled) return "调度暂停";
   if (config?.lastError) return "最近失败";
   if (cleanupIsDelayed(config)) return "扫描延迟";
-  if (config?.enabled) return config?.lastRunAt ? "运行正常" : "已启用";
-  return "未启用";
+  return config?.lastRunAt ? "最近正常" : "等待首扫";
 }
 
 function cleanupStatusType(config) {
   if (config?.taskRunning) return "warning";
+  if (!config?.enabled) return "info";
+  if (!config?.authorizationReady || !config?.taskEnabled) return "warning";
   if (config?.lastError) return "danger";
   if (cleanupIsDelayed(config)) return "warning";
   if (config?.enabled) return "success";
@@ -913,9 +996,10 @@ function cleanupStatusType(config) {
 }
 
 function cleanupIsDelayed(config) {
-  if (!config?.enabled || !config?.lastRunAt) return false;
+  if (!config?.enabled || !config?.authorizationReady || !config?.taskEnabled || !config?.lastRunAt) return false;
   const time = new Date(config.lastRunAt).getTime();
-  return Number.isFinite(time) && Date.now() - time > 12 * 60 * 1000;
+  const thresholdMinutes = Math.max(12, Number(config.intervalMinutes || AUTO_CLEANUP_INTERVAL_MINUTES) * 2);
+  return Number.isFinite(time) && Date.now() - time > thresholdMinutes * 60 * 1000;
 }
 
 function cleanupRemovedCount(config) {
@@ -958,7 +1042,7 @@ function cleanupTooltipText(shop, config) {
   const catalogLines = syncedActions.slice(0, 8).map((item) => `活动 ${item.actionId}：${item.title || "-"}${item.isParticipating ? "（参与中）" : ""}`);
   return [
     `店铺：${shop?.name || config?.storeName || config?.storeId || "-"}`,
-    `后台任务：${config?.enabled ? "已启用" : "未启用"}`,
+    `后台任务：${cleanupStatusLabel(config)}`,
     `最近执行：${formatDateTime(config?.lastRunAt)}`,
     `活动列表同步：${formatDateTime(config?.lastActionListSyncedAt || actionListSync.syncedAt)}`,
     `活动列表变化：${actionListSync.changed ? "本次有变化" : "本次无变化"}`,
@@ -978,6 +1062,7 @@ watch(() => state.storeId, async () => {
 });
 
 watch(() => state.mode, async () => {
+  if (state.mode !== "cleanup") stopCleanupPolling();
   state.selectedActionId = "";
   state.actions = [];
   state.actionView = "available";
@@ -995,6 +1080,12 @@ watch(() => state.sellerStatus, async () => {
 
 onMounted(async () => {
   await loadShops();
+});
+
+onUnmounted(stopCleanupPolling);
+onDeactivated(stopCleanupPolling);
+onActivated(() => {
+  if (state.mode === "cleanup") void loadAllCleanupConfigs();
 });
 </script>
 
@@ -1029,12 +1120,12 @@ onMounted(async () => {
       <div class="cleanup-summary-bar">
         <div class="cleanup-summary-main">
           <strong>自动删活动商品</strong>
-          <span>每 {{ AUTO_CLEANUP_INTERVAL_MINUTES }} 分钟扫描一次，仅移除 Ozon 自动添加的官方活动商品。</span>
+          <span>后台调度启用后定期扫描，仅移除 Ozon 自动添加的官方活动商品；待授权店铺请点击「立即扫描」。</span>
           <small>{{ cleanupActivityScopeText }}</small>
         </div>
         <div class="cleanup-actions">
           <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="state.allCleanupLoading" @click="loadAllCleanupConfigs">刷新全部店铺</el-button>
-          <el-button v-if="canRunGlobalCleanup" class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
+          <el-button class="erp-btn erp-btn-danger" type="danger" :loading="state.cleanupRunAllLoading" @click="runAllCleanupNow">立即扫描全部店铺</el-button>
         </div>
       </div>
 
@@ -1070,7 +1161,7 @@ onMounted(async () => {
               <div class="cleanup-expand-head">
                 <span>活动范围：{{ cleanupActionIdText(row.config) }}</span>
                 <span>活动列表同步：{{ formatDateTime(row.config.lastActionListSyncedAt || row.config.lastResult?.actionListSync?.syncedAt) }}</span>
-                <span v-if="row.config.lastError">错误：{{ row.config.lastError }}</span>
+                <span v-if="row.config.authorizationError || row.config.lastError">原始错误：{{ row.config.authorizationError || row.config.lastError }}</span>
               </div>
               <el-table :data="cleanupDetailRows(row.config)" size="small" border empty-text="暂无最近扫描明细">
                 <el-table-column prop="actionId" label="活动 ID" width="130" />
@@ -1133,7 +1224,7 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="最近错误" min-width="110">
           <template #default="{ row }">
-            <span class="cleanup-error-text">{{ row.config.lastError || "-" }}</span>
+            <span class="cleanup-error-text">{{ cleanupConfigErrorText(row.config) || "-" }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="105" fixed="right">
@@ -1183,8 +1274,7 @@ onMounted(async () => {
           </div>
           <div class="action-card-side">
             <div class="action-badges">
-              <el-tag v-if="state.mode !== 'seller'" type="warning" effect="dark">A 已自动添加</el-tag>
-              <el-tag v-else :type="statusMeta(row).type" effect="dark">{{ statusMeta(row).label }}</el-tag>
+              <el-tag v-if="state.mode === 'seller'" :type="statusMeta(row).type" effect="dark">{{ statusMeta(row).label }}</el-tag>
               <el-tag v-if="getKnownProductsTotal(row, 'joined') > 0" type="success" effect="dark">我正在参与</el-tag>
             </div>
             <span class="action-card-count">可以添加 <b>{{ numberText(row?.potential_products_count) }}</b> 商品</span>

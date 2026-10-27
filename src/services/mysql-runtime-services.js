@@ -541,6 +541,7 @@ import {
   listOzonActionsMysql,
   removeOzonActionProductsMysql,
   runEnabledOzonActionCleanupMysql,
+  runOzonActionCleanupForTenantMysql,
   saveOzonActionCleanupConfigMysql,
   toggleOzonSellerActionMysql
 } from "./ozon-actions.js";
@@ -957,6 +958,7 @@ export const mysqlRuntimeServices = {
   removeProductFromInventory: removeProductFromInventoryMysql,
   removeOzonActionProducts: removeOzonActionProductsMysql,
   runEnabledOzonActionCleanup: runEnabledOzonActionCleanupMysql,
+  runOzonActionCleanupForTenant: runOzonActionCleanupForTenantMysql,
   importAssetVariantToListingAutomation,
   resolveAssetVariantFile,
   resolveAssetTailTemplateFile,
