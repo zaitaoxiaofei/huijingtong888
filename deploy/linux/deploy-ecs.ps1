@@ -11,6 +11,7 @@ param(
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
+  [switch]$RunDatabaseMaintenance,
   [switch]$AllowServiceInterruption,
   [switch]$DryRun
 )
@@ -76,7 +77,8 @@ if ($IdentityFile) {
   $scpOptions += @("-i", $resolvedIdentity)
 }
 $dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
-$dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
+if ($SkipDatabaseMaintenance -and $RunDatabaseMaintenance) { throw "Choose either RunDatabaseMaintenance or SkipDatabaseMaintenance." }
+$dbMaintenanceFlag = if ($RunDatabaseMaintenance) { "1" } else { "0" }
 $interruptionFlag = if ($AllowServiceInterruption) { "1" } else { "0" }
 $activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest' '$interruptionFlag'"
 if ($remoteAiMediaRetentionManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }

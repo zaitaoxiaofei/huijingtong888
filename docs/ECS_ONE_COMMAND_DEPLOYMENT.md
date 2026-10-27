@@ -75,25 +75,25 @@ npm run deploy:ecs -- -DryRun
 npm run deploy:ecs -- -Version 2026.08.01-001
 ```
 
-跳过兼容性数据库初始化（其他数据库迁移和维护仍按默认流程执行）：
+跳过兼容性数据库初始化（仅显式开启广泛维护时才会运行初始化）：
 
 ```powershell
 npm run deploy:ecs -- -SkipDatabaseInit
 ```
 
-本次发布无需执行数据库迁移和维护时，可跳过发布脚本中的全部数据库维护步骤（也包括兼容性数据库初始化）：
+日常发布默认跳过广泛数据库维护，以下旧开关仍可兼容使用：
 
 ```powershell
 npm run deploy:ecs -- -SkipDatabaseMaintenance
 ```
 
-确认本次发布没有数据库结构或维护变更，需要跳过全部数据库初始化、迁移和维护时，同时使用两个开关：
+无需广泛维护及兼容性初始化时，也可显式使用两个旧开关；候选必需结构仍会只读预检：
 
 ```powershell
 npm run deploy:ecs -- -SkipDatabaseInit -SkipDatabaseMaintenance
 ```
 
-默认执行数据库维护；`-SkipDatabaseInit` 只跳过初始化，`-SkipDatabaseMaintenance` 跳过包含初始化在内的全部发布维护。构建、上传、服务切换、重启和健康检查仍会执行。应用原有启动时的幂等 schema warmup 不受这些发布开关控制。
+默认不执行广泛维护。确需维护时使用 `-RunDatabaseMaintenance`（Bash 为 `--run-database-maintenance`）；不能与跳过维护开关同时传入。候选必需结构先只读检查，有实际迁移需求才校验备份并应用，发布包带迁移脚本不代表需要备份。构建、上传、服务切换、重启和健康检查仍会执行。应用原有启动时的幂等 schema warmup 不受这些发布开关控制。
 
 构建产物保存在 `.deploy-artifacts`，该目录已被 Git 忽略。服务器真实配置始终保留在 `/etc/ozon-erp/ozon-erp.env`，不会跟随发布包上传。
 
