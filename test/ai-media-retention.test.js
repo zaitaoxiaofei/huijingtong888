@@ -24,7 +24,7 @@ function fixture(extra = {}, { nonUniqueIdTables = [] } = {}) {
       const columns = new Set(["id", "tenant_id", "status", "created_at", "updated_at", "payload_json", ...rows.flatMap(row => Object.keys(row))]);
       return [...columns].map(column_name => ({ table_name: table, column_name, data_type: column_name.endsWith("json") ? "longtext" : "varchar", is_nullable: column_name === "id" ? "NO" : "YES" }));
     });
-    if (sql.includes("information_schema.statistics")) return Object.keys(tables).map(table => ({ table_name: table, index_name: "PRIMARY", column_names: nonUniqueIdTables.includes(table) ? "tenant_id,id" : "id", has_prefix: 0 }));
+    if (sql.includes("information_schema.statistics")) return Object.keys(tables).map(table => ({ table_name: table, index_name: "PRIMARY", column_names: nonUniqueIdTables.includes(table) ? "tenant_id,id" : "id", column_count: nonUniqueIdTables.includes(table) ? 2 : 1, has_prefix: 0 }));
     const table = /FROM\s+`?([a-z_]+)`?/i.exec(sql)?.[1];
     if (!Object.hasOwn(tables, table)) throw new Error(`Unexpected fixture SQL ${sql}`);
     if (sql.includes("FOR UPDATE")) return structuredClone(tables[table].filter(row => String(row.id) === String(params[0])));
@@ -130,6 +130,71 @@ test("missing roots, malformed JSON or bounded incomplete scans retain everythin
   assert.equal((await auditAiMediaRetention(missing.dependencies)).scan.complete, false);
   const bounded = fixture({ products: [{ id: 81, image_url: url("other") }] });
   await assert.rejects(auditAiMediaRetention({ ...bounded.dependencies, maxScanRows: 1 }), { code: "AI_MEDIA_RETENTION_SCAN_INCOMPLETE" });
+  const huge = fixture({ products: [{ id: 99, __retention_oversized: 1, __retention_row_bytes: 33 * 1024 * 1024 }] });
+  const retained = await auditAiMediaRetention(huge.dependencies);
+  assert.equal(retained.scan.complete, false);
+  assert.equal(retained.rows.length, 0);
+  assert.equal(retained.scan.large_rows[0].read, false);
+  assert.ok(huge.referenceQueries.every(call => !call.sql.includes("ai_retention_single_reference")), "an over-32MiB row never gets fetched as a full record");
+});
+
+test("only documented legacy tag and progress scalars use lexical URL and asset-id extraction", async () => {
+  const f = fixture({ asset_variants: [{ id: 80, status: "draft", imported_to_listing: 1, tags_json: "蓝色,黑色" }],
+    asset_variant_jobs: [{ id: 81, tenant_id: "9", status: "running", progress_json: "处理到第 2 张" }] });
+  const manifest = await auditAiMediaRetention(f.dependencies);
+  assert.equal(manifest.scan.complete, true); assert.equal(manifest.rows.length, 1);
+  f.tables.asset_variants[0].tags_json = `颜色标签 ${url("1")}`;
+  assert.equal((await auditAiMediaRetention(f.dependencies)).rows.length, 0);
+  f.tables.asset_variants[0].tags_json = "蓝色"; f.tables.asset_variant_jobs[0].progress_json = "待处理 material_asset_id=1";
+  assert.equal((await auditAiMediaRetention(f.dependencies)).rows.length, 0);
+  f.tables.asset_variant_jobs[0].progress_json = '{"broken":';
+  assert.equal((await auditAiMediaRetention(f.dependencies)).scan.complete, false, "malformed structured data is still unknown");
+});
+
+test("blocked enterprise summaries identify the task without retaining provider receipts or private input", async () => {
+  const f = fixture({ ai_material_optimization_items: [{ id: 44, tenant_id: "admin", status: "failed", updated_at: old,
+    checkpoint_json: JSON.stringify({ draft_state: "submitting", private_prompt: "do-not-copy" }) }] });
+  const manifest = await auditAiMediaRetention(f.dependencies);
+  assert.equal(manifest.scan.blockers.count, 1);
+  assert.deepEqual(manifest.scan.blockers.sources, [{ table: "ai_material_optimization_items", id: "44", tenant_id: "admin", status: "failed", updated_at: old, reason: "unknown_provider_result" }]);
+  assert.equal(manifest.scan.blockers.groups["ai_material_optimization_items:admin:failed:unknown_provider_result"], 1);
+  assert.ok(!JSON.stringify(manifest).includes("do-not-copy"));
+});
+
+test("submitted Ozon publishing records preserve their actual references without blocking unrelated enterprise AI media", async () => {
+  const f = fixture({ listing_publish_task_items: [{ id: 33, tenant_id: "admin", status: "submitted", updated_at: old }] });
+  const manifest = await auditAiMediaRetention(f.dependencies);
+  assert.equal(manifest.rows.length, 1); assert.equal(manifest.objects.length, 1);
+  assert.equal(manifest.scan.blockers.count, 1);
+  assert.equal(f.tables.listing_publish_task_items.length, 1);
+});
+
+test("unknown AI tasks preserve only the matching enterprise and proven source lineage", async () => {
+  const media = (id, source_module, batch_id, tenant_id = "admin", source_id = "item") => ({ id, tenant_id, source_module, batch_id, source_id,
+    role: "main", status: "public_ready", publish_url: url(String(id)), created_at: old, updated_at: old });
+  for (const [table, task, module] of [
+    ["ai_variant_lab_batch_items", { job_no: "same-batch", item_no: "unknown-item" }, "ai_variant_lab"],
+    ["asset_variant_jobs", { batch_id: "same-batch" }, "asset_variant"],
+    ["ai_material_optimization_items", { optimizer_job_no: "same-batch" }, "ai_product_material_optimizer"]
+  ]) {
+    const f = fixture({ material_assets: [], listing_media_assets: [media(1, module, "same-batch"), media(2, module, "other-batch"), media(3, module, "same-batch", "9"), media(4, "ai_ecommerce_suite_workbench", "same-batch"), media(5, module, "", "admin", "")],
+      [table]: [{ id: 40, tenant_id: "admin", status: "failed", updated_at: old, provider_job_json: '{"request":"private-receipt"}', checkpoint_json: '{"draft_state":"submitting"}', ...task }] });
+    const manifest = await auditAiMediaRetention(f.dependencies);
+    assert.deepEqual(manifest.rows.map(item => item.id), ["2", "3", "4", "5"], table);
+    assert.ok(manifest.kept[0].reasons.some(reason => reason.startsWith("unresolved_task_lineage:")), table);
+    assert.ok(!JSON.stringify(manifest).includes("private-receipt"));
+  }
+});
+
+test("generation lineage uses batch plus source or complete workflow/result rather than a product id alone", async () => {
+  const media = (id, batch, source, workflowId = "", resultId = "") => ({ id, tenant_id: "admin", source_module: "ai_product_material_optimizer", batch_id: batch, source_id: source,
+    metadata_json: JSON.stringify({ workflowId, resultId }), role: "main", status: "public_ready", publish_url: url(String(id)), created_at: old, updated_at: old });
+  const f = fixture({ material_assets: [], listing_media_assets: [media(1,"B","P"),media(2,"other","P"),media(3,"B","other"),media(4,"","","W","R"),media(5,"","","W","other")],
+    ai_generation_tasks: [{ id: 40, tenant_id: "admin", source_module: "ai_generation", status: "unknown", source_batch_id: "B", source_product_id: "P", workflow_id: "W", result_id: "R", task_no: "T", updated_at: old }] });
+  const manifest = await auditAiMediaRetention(f.dependencies);
+  assert.deepEqual(manifest.rows.map(item => item.id), ["2","3","5"]);
+  assert.ok(manifest.rows.every(item => !Object.hasOwn(item.row, "metadata_json")));
+  assert.ok(manifest.rows.every(item => item.row.lineage && Array.isArray(item.row.lineage.workflows)));
 });
 
 test("offline object GC needs unchanged rows, current references and unchanged OSS head fingerprints", async () => {
@@ -187,6 +252,23 @@ test("saved online manifests retain AI provenance for later offline GC after wor
   const foreign = { ...saved[0], database: { ...saved[0].database, server_uuid: "other" } };
   const { manifest_sha256, ...body } = foreign; foreign.manifest_sha256 = aiMediaRetentionFingerprint(body);
   await assert.rejects(auditAiMediaRetention({ ...f.dependencies, priorManifests: [foreign] }), /another database/);
+});
+
+test("saved lineage still protects a physical object after its work index was removed", async () => {
+  const f = fixture({ material_assets: [], listing_media_assets: [{ id: 2, tenant_id: "admin", source_module: "asset_variant", batch_id: "B", source_id: "B:9:main:1",
+    role: "main", status: "public_ready", publish_url: url("2"), created_at: old, updated_at: old }] });
+  const saved = await auditAiMediaRetention({ ...f.dependencies, headObject: null });
+  await applyAiMediaRetention({ ...f.dependencies, manifest: saved });
+  const plan = await auditAiMediaRetention({ ...f.dependencies, priorManifests: [saved] });
+  assert.equal(plan.objects.length, 1);
+  f.tables.asset_variant_jobs = [{ id: 99, tenant_id: "admin", status: "unknown", batch_id: "B", updated_at: old }];
+  const result = await applyAiMediaRetention({ ...f.dependencies, manifest: plan, deleteObjects: true });
+  assert.equal(result.objects_deleted, 0);
+  assert.ok(result.objects[0].reasons.some(reason => reason.startsWith("unresolved_task_lineage:")));
+  const retained = await auditAiMediaRetention({ ...f.dependencies, priorManifests: [saved] });
+  assert.equal(retained.objects.length, 0);
+  f.tables.asset_variant_jobs[0].tenant_id = "9";
+  assert.equal((await auditAiMediaRetention({ ...f.dependencies, priorManifests: [saved] })).objects.length, 1);
 });
 
 test("scheduled cursor advances past adopted old rows instead of starving later unused work", async () => {
