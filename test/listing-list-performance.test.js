@@ -58,7 +58,11 @@ test("development review can fetch linked drafts with authoritative image and pu
   assert.match(drafts, /AS source_product_id/);
   assert.match(drafts, /AS sku_count/);
   assert.match(drafts, /AS publish_success_count/);
-  assert.match(drafts, /const tenantScope = "CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci"/);
+  const tenantScopeExpression = drafts.match(/const tenantScope = ([^\n]+);/)?.[1];
+  assert.ok(tenantScopeExpression, "draft queries must bind the session tenant before reading rows");
+  const tenantScope = new Function("tenantId", `return ${tenantScopeExpression};`);
+  assert.equal(tenantScope("admin"), "(d.tenant_id = ? OR d.tenant_id IS NULL)");
+  for (const customer of ["2", "3"]) assert.equal(tenantScope(customer), "d.tenant_id = ?", "customer enterprises must never include legacy NULL-owned drafts");
   assert.match(drafts, /listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
   assert.match(drafts, /resolveMappedMediaInValue\(assembledRows\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
@@ -101,7 +105,14 @@ test("development review loads effective draft images, people, and variant detai
   assert.match(review, /lightweight: includeVariants \? "0" : "1"/);
   assert.match(review, /draft\.variants = normalizeArray/);
   assert.match(lightweightDrafts, /JSON_EXTRACT\(d\.template_payload_json, '\$\.editable_payload\.variants\[0\]\.images'\)/);
-  assert.match(lightweightDrafts, /pageRows\.map\(\(item\) => normalizeDraftRow\(item\)\)/);
+  assert.match(lightweightDrafts, /const normalizedPageRows = pageRows\.map\(\(item\) => \{/);
+  assert.match(lightweightDrafts, /const stats = statsByDraft\.get\(Number\(item\.id\)\)/);
+  assert.match(lightweightDrafts, /normalizeDraftOverviewResponse\(normalizeDraftRow\(\{ \.\.\.item/);
+  assert.match(lightweightDrafts, /publish_status: stats\.publish_status/);
+  for (const field of ["publish_record_count", "publish_success_count", "publish_failed_count"]) {
+    assert.ok(lightweightDrafts.includes(`${field}: Number(stats.${field} || 0)`), `${field} is merged into its own draft before summary normalization`);
+  }
+  assert.match(lightweightDrafts, /rows: await resolveMappedMediaInValue\(normalizedPageRows\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
   assert.match(developmentReviewViewSource, /loadReviewCatalogs/);
   assert.match(developmentReviewViewSource, /<el-table-column type="expand"/);
