@@ -798,7 +798,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
       catch (error) {
         if (!isUnifiedPriceError(error)) throw error;
         shop.promotionApiMode = "unified";
-        response = await ozonRequest("/v2/actions/products", { payload, shop, signal });
+        return fetchAllJoinedActionProductIds(shop, actionId, signal);
       }
     }
     const result = shop.promotionApiMode === "unified" ? response : response?.result;
@@ -820,10 +820,17 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     }
     const nextCursor = String(result.last_id ?? "").trim();
     if ((!rows.length || !nextCursor) && Number(result.total) > scannedCount) {
+      if (shop.promotionApiMode !== "unified") {
+        // Legacy reads can remain available after legacy removals are blocked.
+        // Restart v2 from page one; its cursor and product evidence cannot be
+        // mixed with anything collected from the legacy traversal.
+        shop.promotionApiMode = "unified";
+        return fetchAllJoinedActionProductIds(shop, actionId, signal);
+      }
       // Ozon v2 can report a larger total than its cursor can enumerate. Only
       // accept an explicit, stable terminal cursor after re-reading that exact
       // empty page. A missing cursor or a first empty page is still incomplete.
-      if (shop.promotionApiMode !== "unified" || rows.length || !lastId || !scannedCount || nextCursor !== lastId) {
+      if (rows.length || !lastId || !scannedCount || nextCursor !== lastId) {
         throw statusError(`活动 ${actionId} 商品分页提前结束，已停止以避免漏删`, 502);
       }
       const terminal = await ozonRequest("/v2/actions/products", { payload, shop, signal });

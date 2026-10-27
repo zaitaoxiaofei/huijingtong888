@@ -203,6 +203,114 @@ test("promotion cleanup recovers current-enterprise authorization and preserves 
       assert.ok(!requests.some(row => /products\/deactivate$/.test(row.endpoint)), "Boosting cannot use the voucher-only v2 deactivate method");
     });
 
+    await t.test("an incomplete first legacy page restarts v2 without a legacy cursor or target", async () => {
+      await reset();
+      let exited = false;
+      respond = async request => {
+        if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
+        if (request.endpoint === "/v1/actions/products") return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "" } };
+        if (request.endpoint === "/v2/actions/products") {
+          assert.equal(request.body.last_id, undefined);
+          return { products: exited ? [] : [automaticProduct(501)], total: exited ? 0 : 1, last_id: "" };
+        }
+        if (request.endpoint === "/v1/actions/products/update") {
+          assert.deepEqual(request.body.products.map(row => row.product_id), [501]);
+          exited = true;
+          return { deactivated_product_ids: ["501"], active_product_ids: [], rejected: [] };
+        }
+        throw new Error(`Unexpected incomplete-legacy fallback request ${request.endpoint}`);
+      };
+      const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+      assert.equal(result.success, true);
+      assert.equal(result.immediateRun.count, 1);
+      const v2 = requests.filter(row => row.endpoint === "/v2/actions/products");
+      assert.ok(v2.length >= 2);
+      assert.equal(v2[0].body.last_id, undefined);
+      assert.equal(requests.filter(row => row.endpoint === "/v1/actions/products").length, 1);
+    });
+
+    await t.test("a legacy terminal empty page discards every legacy-only AUTO target before a fresh v2 scan", async () => {
+      await reset();
+      respond = async request => {
+        if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
+        if (request.endpoint === "/v1/actions/products") {
+          if (!request.body.last_id) return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "legacy-tail" } };
+          assert.equal(request.body.last_id, "legacy-tail");
+          return { result: { products: [], total: 2, last_id: "legacy-tail" } };
+        }
+        if (request.endpoint === "/v2/actions/products") {
+          assert.equal(request.body.last_id, undefined);
+          return { products: [{ id: 501, add_mode: "SELLER" }], total: 1, last_id: "" };
+        }
+        throw new Error(`Legacy-only targets must never cause ${request.endpoint}`);
+      };
+      const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+      assert.equal(result.success, true);
+      assert.equal(result.immediateRun.count, 0);
+      assert.equal(result.config.lastResult.actionSummaries[0].detectedCount, 0);
+      assert.ok(!requests.some(row => /products\/(?:deactivate|update|delete)$/.test(row.endpoint)));
+      assert.deepEqual(requests.filter(row => row.endpoint === "/v1/actions/products").map(row => row.body.last_id), [undefined, "legacy-tail"]);
+      assert.ok(requests.some(row => row.endpoint === "/v2/actions/products"));
+    });
+
+    await t.test("a unified-price refusal on a later legacy page restarts independent v2 pagination and targets", async () => {
+      await reset();
+      let exited = false;
+      respond = async request => {
+        if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
+        if (request.endpoint === "/v1/actions/products") {
+          if (!request.body.last_id) return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "legacy-tail" } };
+          assert.equal(request.body.last_id, "legacy-tail");
+          return unifiedPriceRefusal();
+        }
+        if (request.endpoint === "/v2/actions/products") {
+          assert.notEqual(request.body.last_id, "legacy-tail");
+          if (exited) return { products: [{ id: 502, add_mode: "SELLER" }], total: 1, last_id: "" };
+          if (!request.body.last_id) return { products: [automaticProduct(501)], total: 2, last_id: "v2-tail" };
+          assert.equal(request.body.last_id, "v2-tail");
+          return { products: [{ id: 502, add_mode: "SELLER" }], total: 2, last_id: "" };
+        }
+        if (request.endpoint === "/v1/actions/products/update") {
+          assert.deepEqual(request.body.products.map(row => row.product_id), [501]);
+          exited = true;
+          return { deactivated_product_ids: ["501"], active_product_ids: [], rejected: [] };
+        }
+        throw new Error(`Unexpected mid-pagination fallback request ${request.endpoint}`);
+      };
+      const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+      assert.equal(result.success, true);
+      assert.equal(result.immediateRun.count, 1);
+      const v2 = requests.filter(row => row.endpoint === "/v2/actions/products");
+      assert.equal(v2[0].body.last_id, undefined);
+      assert.ok(v2.some(row => row.body.last_id === "v2-tail"));
+      assert.ok(!v2.some(row => row.body.last_id === "legacy-tail"));
+    });
+
+    await t.test("fallback does not bypass invalid v2 cursors or an inconsistent terminal confirmation", async () => {
+      for (const failure of ["missing_cursor", "repeated_cursor", "changed_terminal_total"]) {
+        await reset();
+        let terminalReads = 0;
+        respond = async request => {
+          if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
+          if (request.endpoint === "/v1/actions/products") return { result: { products: [{ id: 901, add_mode: "AUTO" }], total: 2, last_id: "" } };
+          if (request.endpoint === "/v2/actions/products") {
+            if (failure === "missing_cursor") return { products: [automaticProduct(501)], total: 2, last_id: "" };
+            if (!request.body.last_id) return { products: [automaticProduct(501)], total: 2, last_id: "v2-tail" };
+            assert.equal(request.body.last_id, "v2-tail");
+            if (failure === "repeated_cursor") return { products: [automaticProduct(503)], total: 2, last_id: "v2-tail" };
+            terminalReads += 1;
+            return { products: [], total: terminalReads === 1 ? 2 : 3, last_id: "v2-tail" };
+          }
+          throw new Error(`An unverified v2 traversal must not cause ${request.endpoint}`);
+        };
+        const result = await actions.saveOzonActionCleanupConfigMysql({ storeId: 20, enabled: true }, session(2));
+        assert.equal(result.success, false, failure);
+        assert.equal(result.immediateRun.count, 0, failure);
+        assert.ok(result.config.lastError, failure);
+        assert.ok(!requests.some(row => /products\/(?:deactivate|update|delete)$/.test(row.endpoint)), failure);
+      }
+    });
+
     await t.test("a confirmed terminal empty cursor permits an overstated v2 total while recording its warning", async () => {
       await reset();
       let exited = false;
