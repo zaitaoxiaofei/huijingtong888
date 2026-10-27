@@ -15,10 +15,18 @@ test("official Ozon activities can fill a fixed price for only selected products
   assert.match(source, />批量填活动价<\/el-button>/);
 });
 
-test("ordinary enterprise users keep activity work but cannot invoke the global scheduler action", async () => {
+test("enterprise activity work uses the scoped cleanup API instead of the platform scheduler", async () => {
   const fn = source.match(/async function runAllCleanupNow\(\) \{[\s\S]*?\n\}/)[0];
-  const context = vm.createContext({ canRunGlobalCleanup: { value: false } });
+  const calls = [];
+  const context = vm.createContext({
+    state: {},
+    ElMessageBox: { confirm: async () => {} },
+    ElMessage: { info: () => {}, success: () => {}, error: () => {} },
+    apiClient: { post: async (url, body) => { calls.push({ url, body }); return { success: true, configs: [], results: [], failed: 0, count: 0 }; } }
+  });
   vm.runInContext(fn, context);
   await context.runAllCleanupNow();
-  assert.match(source, /<el-button v-if="canRunGlobalCleanup"[^>]+@click="runAllCleanupNow"/);
+  assert.equal(calls[0].url, "/api/ozon/actions/cleanup-run-all");
+  assert.deepEqual(Object.keys(calls[0].body), []);
+  assert.doesNotMatch(fn, /scheduled-jobs|canRunGlobalCleanup/);
 });

@@ -71,7 +71,7 @@ const routes = new Set([
   'POST ozon/actions/list', 'POST ozon/actions/candidates', 'POST ozon/actions/products',
   'POST ozon/actions/products/add', 'POST ozon/actions/products/remove',
   'POST ozon/actions/activity/toggle', 'POST ozon/actions/activity/archive',
-  'GET ozon/actions/cleanup-config', 'POST ozon/actions/cleanup-config',
+  'GET ozon/actions/cleanup-config', 'POST ozon/actions/cleanup-config', 'POST ozon/actions/cleanup-run-all',
   'POST listing/templates/publish-to-ozon', 'POST listing/media/repair',
   'POST listing/drafts/batch-publish', 'POST listing/media/watermark',
   'POST listing/drafts/ai-variant-lightweight',

@@ -8,6 +8,7 @@ export function createOzonActionRoutes({ services, readJson }) {
     "POST /api/ozon/actions/activity/toggle": async (req) => services.toggleOzonSellerAction(await readJson(req), { signal: req._abortSignal, session: req._session }),
     "POST /api/ozon/actions/activity/archive": async (req) => services.archiveOzonSellerAction(await readJson(req), { signal: req._abortSignal, session: req._session }),
     "GET /api/ozon/actions/cleanup-config": (req, url) => services.getOzonActionCleanupConfig(Object.fromEntries(url.searchParams.entries()), req._session),
-    "POST /api/ozon/actions/cleanup-config": async (req) => services.saveOzonActionCleanupConfig(await readJson(req), req._session)
+    "POST /api/ozon/actions/cleanup-config": async (req) => services.saveOzonActionCleanupConfig(await readJson(req), req._session),
+    "POST /api/ozon/actions/cleanup-run-all": async (req) => services.runOzonActionCleanupForTenant(await readJson(req), req._session)
   };
 }
