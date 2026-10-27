@@ -85,7 +85,6 @@ const {
   bulkPrepare,
   openQualityRules,
   saveQualityRules,
-  resetRecentDates,
   handleMoreAction,
   fetchOrderDetail,
   prepareSingleOrder,
@@ -1688,6 +1687,7 @@ async function syncAllOrdersAction() {
 async function openPrintDialog(orderIds = []) {
   const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
   if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
+  if (ids.length > 80) return ElMessage.warning("单次最多打印 80 单，请将每页数量调为 50 条，或分批勾选打印");
   try {
     const result = await previewOrderLabels(ids);
     if (result?.printed) {
@@ -1709,6 +1709,15 @@ function bulkPrintSelected() {
   const ids = selectedActionOrderIds("print");
   if (!ids.length) return ElMessage.warning("已选订单里没有可打印面单的订单");
   const skipped = selectedOrderIds.value.size - ids.length;
+  if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
+  return openPrintDialog(ids);
+}
+
+function bulkPrintPage() {
+  const rows = tableRows.value;
+  const ids = rows.filter((row) => row.availableActions?.print !== false).map((row) => Number(row.id)).filter(Boolean);
+  if (!ids.length) return ElMessage.warning("当前页没有可打印面单的订单");
+  const skipped = rows.length - ids.length;
   if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
   return openPrintDialog(ids);
 }
@@ -2599,14 +2608,16 @@ onBeforeUnmount(() => {
       :last-sync-text="vm.lastSyncText"
       :more-actions="vm.moreActions"
       :selected-count="selectedCount"
+      :page-row-count="tableRows.length"
       @update:filters="vm.filters = $event"
       @submit="submitFilters"
       @sync-incremental="syncRecentOrdersAction"
       @sync-full="syncAllOrdersAction"
       @cancel-sync="cancelSync"
       @more-action="handleToolbarMoreAction"
+      @print-selected="bulkPrintSelected"
+      @print-page="bulkPrintPage"
       @open-quality-rules="showQualityRules"
-      @reset-dates="resetRecentDates"
       @load-logistics-options="loadLogisticsOptions"
     >
       <OrdersStatusTabs

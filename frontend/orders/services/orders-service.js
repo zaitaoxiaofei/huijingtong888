@@ -59,10 +59,6 @@ export async function saveQualityRules(payload = {}) {
   return apiClient.put("/api/order-quality-rules", payload);
 }
 
-export async function resetRecentDates() {
-  return "reset";
-}
-
 function writePrintLoadingPage(printWindow, count) {
   const title = count > 1 ? "正在加载批量面单" : "正在加载面单";
   const detail = count > 1 ? `正在生成 ${count} 个订单的标签 PDF，请稍等...` : "正在生成标签 PDF，请稍等...";
