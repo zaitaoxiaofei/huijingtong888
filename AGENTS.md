@@ -63,6 +63,11 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Protected Ports and Local Verification
 
+### ECS release approval (user instruction, 2026-10-27)
+
+- After finding a new issue, prepare the concrete repair plan and local validation first. Obtain the user's explicit approval before an ECS deployment, production service restart, or production configuration change.
+- Earlier blanket authorization does not approve a later rollout. Keep additional fixes in the task worktree until the user reviews the plan and approves deployment.
+
 **Use `8788` for Codex local work and ECS for production.**
 
 - Codex may use `8788` for local editing, debugging, temporary deployment, service restart, and verification. This is the dedicated local testing environment.

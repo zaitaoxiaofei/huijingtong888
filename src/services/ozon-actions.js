@@ -684,6 +684,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
   const seenCursors = new Set();
   let pageCount = 0;
   let scannedCount = 0;
+  let totalMismatch = false;
   const products = new Map();
   const manualProductIds = new Set();
   const seenProductIds = new Set();
@@ -721,7 +722,18 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     }
     const nextCursor = String(result.last_id ?? "").trim();
     if ((!rows.length || !nextCursor) && Number(result.total) > scannedCount) {
-      throw statusError(`活动 ${actionId} 商品分页提前结束，已停止以避免漏删`, 502);
+      // Ozon v2 can report a larger total than its cursor can enumerate. Only
+      // accept an explicit, stable terminal cursor after re-reading that exact
+      // empty page. A missing cursor or a first empty page is still incomplete.
+      if (shop.promotionApiMode !== "unified" || rows.length || !lastId || !scannedCount || nextCursor !== lastId) {
+        throw statusError(`活动 ${actionId} 商品分页提前结束，已停止以避免漏删`, 502);
+      }
+      const terminal = await ozonRequest("/v2/actions/products", { payload, shop, signal });
+      pageCount += 1;
+      if (!Array.isArray(terminal.products) || terminal.products.length || String(terminal.last_id ?? "").trim() !== lastId || Number(terminal.total) !== Number(result.total)) {
+        throw statusError(`活动 ${actionId} 商品分页终点未能复核，已停止以避免漏删`, 502);
+      }
+      totalMismatch = true;
     }
     if (!rows.length || !nextCursor) {
       return {
@@ -730,6 +742,9 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
         scannedCount,
         products: [...products.values()],
         manualProductIds: [...manualProductIds],
+        reportedTotal: Number(result.total),
+        totalMismatch,
+        paginationWarning: totalMismatch ? `Ozon 统计 ${Number(result.total)} 件、游标实际返回 ${scannedCount} 件；已再次读取同一空页确认分页终点` : "",
         apiVersion: shop.promotionApiMode === "unified" ? "v2" : "v1"
       };
     }
@@ -800,6 +815,7 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
   let pageCount = 0;
   let scannedCount = 0;
   let lateDetectedCount = 0;
+  const blockedIds = new Set();
   let currentProducts = new Map((scan?.products || []).map(row => [Number(row.product_id ?? row.id), row]));
   for (const verifyDelayMs of ACTION_DELETE_VERIFY_DELAYS_MS) {
     for (let index = 0; index < remainingIds.length; index += ACTION_DELETE_BATCH_LIMIT) {
@@ -826,7 +842,9 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
         batch = batch.filter(id => currentProducts.has(id));
         if (!batch.length) continue;
         const blocked = batch.filter(id => manualProductIds.has(id));
-        if (blocked.length) throw Object.assign(statusError(`${blocked.length} 个自动活动商品同时参加其他手动活动；统一限价会影响手动报名，已保留并停止调价退出`, 409), { blockedCount: blocked.length });
+        for (const id of blocked) blockedIds.add(id);
+        batch = batch.filter(id => !manualProductIds.has(id));
+        if (!batch.length) continue;
         const products = batch.map(product_id => {
           const row = currentProducts.get(product_id);
           if (!row || String(row.add_mode).toUpperCase() !== "AUTO") throw statusError("未能核实商品仍为自动加入，已停止调价退出", 409);
@@ -843,6 +861,7 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
       submittedCount += batch.length;
       await sleep(180);
     }
+    if (remainingIds.length && remainingIds.every(id => blockedIds.has(id))) break;
     await sleep(verifyDelayMs);
     const scan = await fetchAllJoinedActionProductIds(shop, actionId, signal);
     currentProducts = new Map(scan.products.map(row => [Number(row.product_id ?? row.id), row]));
@@ -852,7 +871,7 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
     lateDetectedCount += newlyDetectedIds.length;
     newlyDetectedIds.forEach((productId) => targetIds.add(productId));
     remainingIds = scan.productIds;
-    if (!remainingIds.length) break;
+    if (!remainingIds.length || remainingIds.every(id => blockedIds.has(id))) break;
   }
   return {
     submittedCount,
@@ -860,7 +879,8 @@ async function deleteOfficialActionProducts(shop, actionId, productIds, signal, 
     remainingIds,
     pageCount,
     scannedCount,
-    lateDetectedCount
+    lateDetectedCount,
+    blockedCount: blockedIds.size
   };
 }
 
@@ -1079,7 +1099,7 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
         const productIds = scan.productIds;
         current.knownActions = recordKnownActionCheck(current.knownActions || [], actionId, { unavailable: false }, { now });
         if (!productIds.length) {
-          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedManualOnly: true, pageCount: scan.pageCount, scannedCount: scan.scannedCount });
+          actionSummaries.push({ actionId, detectedCount: 0, removedCount: 0, skippedManualOnly: true, pageCount: scan.pageCount, scannedCount: scan.scannedCount, ...(scan.totalMismatch ? { reportedTotal: scan.reportedTotal, totalMismatch: true, paginationWarning: scan.paginationWarning } : {}) });
           continue;
         }
         const action = currentActions.find(item => item.actionId === actionId) || current.knownActions.find(item => item.actionId === actionId) || {};
@@ -1089,13 +1109,17 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
         const deletion = await deleteOfficialActionProducts(shop, actionId, productIds, options.signal, { action, scan, manualProductIds, refreshBeforePriceWrite, writtenPrices });
         removedCount += deletion.removedCount;
         if (deletion.remainingIds.length) {
-          const message = `删除后复查仍有 ${deletion.remainingIds.length} 个自动加入商品留在活动中`;
+          const message = deletion.blockedCount
+            ? `${deletion.blockedCount} 个商品同时参加其他手动活动，已保留；复查仍有 ${deletion.remainingIds.length} 个自动加入商品未退出`
+            : `删除后复查仍有 ${deletion.remainingIds.length} 个自动加入商品留在活动中`;
           errors.push(`活动 ${actionId}: ${message}`);
           actionSummaries.push({
             actionId,
             detectedCount: productIds.length,
             removedCount: deletion.removedCount,
             remainingCount: deletion.remainingIds.length,
+            blockedCount: deletion.blockedCount,
+            ...(scan.totalMismatch ? { reportedTotal: scan.reportedTotal, totalMismatch: true, paginationWarning: scan.paginationWarning } : {}),
             pageCount: scan.pageCount + deletion.pageCount,
             scannedCount: scan.scannedCount + deletion.scannedCount,
             lateDetectedCount: deletion.lateDetectedCount,
@@ -1111,7 +1135,8 @@ export async function runOzonActionCleanupForStoreMysql(storeId, config = null, 
           pageCount: scan.pageCount + deletion.pageCount,
           scannedCount: scan.scannedCount + deletion.scannedCount,
           lateDetectedCount: deletion.lateDetectedCount,
-          verified: true
+          verified: true,
+          ...(scan.totalMismatch ? { reportedTotal: scan.reportedTotal, totalMismatch: true, paginationWarning: scan.paginationWarning } : {})
         });
       } catch (error) {
         const message = error?.message || "unknown";

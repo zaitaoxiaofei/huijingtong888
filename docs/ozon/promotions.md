@@ -29,3 +29,11 @@ The user's 2026-10-27 request authorized repairing automatic exits for all enabl
 ## Validation
 
 `test/ozon-action-cleanup-execution.test.js` exercises the real service using an isolated MySQL instance with TCP disabled and mocked Ozon responses. It covers enterprise A/B boundaries, authorization recovery, revocation, queued execution, concurrent disabling, v2 schema/pagination, scheduled enrollment, shared-price safety and read-back verification. Frontend handler/state checks are in `test/ozon-actions-cleanup-view.test.js`.
+
+## Follow-up awaiting deployment approval
+
+The first repair was deployed as `84b00c8`. Production verification then confirmed a v2 discrepancy: one activity reported 1007 products while cursor traversal enumerated 990 distinct products, followed by repeated empty responses at the unchanged final cursor. Initial cleanup refused that mismatch. This later follow-up remains local until the user approves another ECS rollout:
+
+- Accept this specific cursor termination only after a nonempty traversal and an additional read of the exact terminal request returns the same empty page, unchanged cursor and unchanged reported total. Preserve `reportedTotal`, actual scanned count and `paginationWarning`. Initial empty pages, missing cursors, changing terminal evidence, duplicate products and invalid schemas still fail closed.
+- For a batch mixing automatic-only and manually protected products, remove only the safe subset. Keep the protected subset, record `blockedCount` and report the remaining items as a partial result. One protected product must not prevent safe products in the same batch from being processed.
+- Do not deploy, restart production, or change production configuration for this follow-up without fresh explicit user approval.

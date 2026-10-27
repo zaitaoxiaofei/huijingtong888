@@ -1180,6 +1180,7 @@ onActivated(() => {
                     <el-tag v-else-if="Number(detail.removedCount || 0) > 0" type="warning" size="small">已删除</el-tag>
                     <el-tag v-else type="success" size="small">正常</el-tag>
                     <span v-if="detail.error" class="cleanup-error-text">{{ detail.error }}</span>
+                    <div v-if="detail.paginationWarning">{{ detail.paginationWarning }}</div>
                   </template>
                 </el-table-column>
               </el-table>
