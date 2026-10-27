@@ -13,9 +13,11 @@ test("AI skills navigation uses the requested labels and ordering", () => {
   const aiSkills = navigation.match(/key: "ai-skills"[\s\S]*?\n  \},/)?.[0] || "";
   const expected = [
     'label: "AI裂变"',
-    'label: "裂变案例"',
+    'label: "AI裂变案例库"',
     'label: "AI优化"',
-    'label: "素材优化记录"'
+    'label: "素材优化记录"',
+    'label: "AI素材"',
+    'label: "AI提示词库"'
   ];
   let previous = -1;
   for (const label of expected) {
@@ -25,6 +27,7 @@ test("AI skills navigation uses the requested labels and ordering", () => {
   }
   assert.doesNotMatch(navigation, /AI商品3 内容优化/);
   assert.doesNotMatch(navigation.match(/key: "products"[\s\S]*?\n  \},/)?.[0] || "", /ai-material-optimization-records/);
+  assert.doesNotMatch(navigation.match(/key: "settings"[\s\S]*?\n  \}/)?.[0] || "", /settings-materials|settings-prompts/);
 });
 
 test("removed AI content optimization route is no longer registered", () => {
@@ -39,7 +42,7 @@ test("operational page buttons use the new AI names and valid destinations", () 
     assert.doesNotMatch(page, /name: "ai-optimization-workbench-v2"/);
     assert.doesNotMatch(page, /AI裂变实验室/);
   }
-  assert.match(selection, />AI裂变<\/el-button>/);
-  assert.match(selection, /批量AI裂变/);
+  assert.match(selection, /批量AI优化/);
+  assert.match(selection, /@click="startBatchVariant"[\s\S]{0,80}批量AI优化/);
   assert.doesNotMatch(selection, /AI裂变实验室/);
 });

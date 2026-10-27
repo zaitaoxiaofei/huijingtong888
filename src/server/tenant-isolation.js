@@ -201,6 +201,9 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantFinanceExpenseDelete = parts[1] === "finance-center" && parts[2] === "expenses"
     && parts.length === 4 && /^\d+$/.test(String(parts[3] || "")) && verb === "DELETE";
   if (tenantFinanceRead || tenantFinanceWrite || tenantFinanceExpenseDelete) return { allowed: true };
+  const tenantPayrollRead = parts[1] === "payroll" && parts.length === 3
+    && ["setup", "period"].includes(parts[2]) && ["GET", "HEAD"].includes(verb);
+  if (tenantPayrollRead) return { allowed: true };
   const tenantInventoryMovementCreate = parts[1] === "inventory" && parts[2] === "movements"
     && parts.length === 3 && verb === "POST";
   if (tenantInventoryMovementCreate) return { allowed: true };

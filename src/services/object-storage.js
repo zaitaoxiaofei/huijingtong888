@@ -128,6 +128,67 @@ export async function readManagedOssObject(url, {
   };
 }
 
+// Administrative retention tools accept only these two reviewed media namespaces.
+// Product, collector, private, backup and arbitrary OSS keys cannot be deleted.
+function retentionObjectKey(value) {
+  const key = String(value || "");
+  if (!/^(?:ai-unused|listing-media)\/[A-Za-z0-9_./-]+$/.test(key)
+    || key.split("/").some(part => !part || part === "." || part === "..")) throw new Error("Unreviewed media retention key");
+  return key;
+}
+
+export async function headManagedOssRetentionObject(objectKey, { env = process.env, client = null } = {}) {
+  const storage = ossStorageConfig(env);
+  if (!storage.enabled) throw new Error("OSS retention requires configured storage");
+  const key = retentionObjectKey(objectKey);
+  try {
+    const result = await createOssClient(storage, 15000, client).head(key);
+    const headers = result?.res?.headers || {};
+    const head = { object_key: key, bucket: storage.bucket, size: Number(headers["content-length"]),
+      etag: String(headers.etag || ""), last_modified: String(headers["last-modified"] || ""),
+      version_id: String(headers["x-oss-version-id"] || "") };
+    if (!Number.isSafeInteger(head.size) || head.size < 0 || !head.etag || !Number.isFinite(Date.parse(head.last_modified))) throw new Error("Incomplete OSS retention fingerprint");
+    return { ...head, fingerprint: crypto.createHash("sha256").update(JSON.stringify(head)).digest("hex") };
+  } catch (error) {
+    if (isMissingOssObject(error)) return { object_key: key, bucket: storage.bucket, missing: true };
+    throw error;
+  }
+}
+
+export async function deleteManagedOssRetentionObject(objectKey, expectedFingerprint, { env = process.env, client = null } = {}) {
+  if (!/^[a-f0-9]{64}$/.test(String(expectedFingerprint || ""))) throw new Error("Reviewed OSS fingerprint required");
+  const storage = ossStorageConfig(env), key = retentionObjectKey(objectKey);
+  const current = await headManagedOssRetentionObject(key, { env, client });
+  if (current.missing) return { object_key: key, already_missing: true };
+  if (current.fingerprint !== expectedFingerprint) throw new Error("OSS object changed since retention review");
+  if (current.version_id) throw new Error("Versioned OSS objects require a separate reviewed version-retention policy");
+  // DeleteObject has no reviewed atomic ETag precondition contract here.
+  // The caller must hold the separately verified, offline writer freeze.
+  await createOssClient(storage, 15000, client).delete(key);
+  return { object_key: key, deleted: true, bytes: current.size };
+}
+
+export async function listManagedOssRetentionObjects({ prefix = "ai-unused", limit = 100000, env = process.env, client = null } = {}) {
+  if (!["ai-unused", "listing-media"].includes(prefix)) throw new Error("Unreviewed OSS inventory prefix");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100000) throw new Error("Invalid OSS inventory limit");
+  const storage = ossStorageConfig(env);
+  if (!storage.enabled) throw new Error("OSS inventory requires configured storage");
+  const oss = createOssClient(storage, 15000, client), objects = [], seen = new Set();
+  let continuationToken;
+  for (;;) {
+    const result = await oss.listV2({ prefix: `${prefix}/`, "max-keys": 1000, ...(continuationToken ? { "continuation-token": continuationToken } : {}) });
+    for (const item of result.objects || []) {
+      if (String(item.name || "").endsWith("/")) continue;
+      objects.push({ object_key: retentionObjectKey(item.name), size: Number(item.size), last_modified: item.lastModified });
+      if (objects.length > limit) throw new Error("OSS inventory incomplete: limit exceeded");
+    }
+    if (!result.isTruncated) return objects;
+    const next = result.nextContinuationToken;
+    if (!next || seen.has(next)) throw new Error("OSS inventory cursor did not advance");
+    seen.add(next); continuationToken = next;
+  }
+}
+
 export function mediaObjectPrefixForRetention({
   sourceModule = "",
   role = "",

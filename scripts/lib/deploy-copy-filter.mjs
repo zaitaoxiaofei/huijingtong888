@@ -10,7 +10,7 @@ const within = (root, target) => {
 // then resolve only links; ordinary files need no additional per-file lstat.
 export function createDeployCopyFilter(rootDir, { includeUploads = false, privateResultRoot = "" } = {}) {
   const root = path.resolve(rootDir);
-  const privateRoots = [path.join(root, "data", "ai-credit-results")];
+  const privateRoots = [path.join(root, "data", "ai-credit-results"), path.join(root, "data", "ai-media-retention")];
   if (privateResultRoot) privateRoots.push(path.resolve(root, privateResultRoot));
   const uploads = path.join(root, "public", "uploads");
   const excludedRoots = includeUploads ? privateRoots : [...privateRoots, uploads];

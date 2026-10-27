@@ -19,9 +19,9 @@ test("exchange entries preserve the dashboard grid and the existing shared dialo
   assert.ok(layout.indexOf('aria-label="打开汇率工具"') > layout.indexOf('aria-label="打开简易计算器"'));
   assert.match(dialog, /exchange:\s*defineAsyncComponent\(\(\) => import\("\.\.\/views\/tools\/ExchangeRateToolView\.vue"\)\)/);
   assert.match(dialog, /exchange: "汇率工具"/);
-  assert.match(view, /eligible_items === 0 \? '暂无新规则结算'/);
-  assert.match(view, /eligible_items === 0 \? '暂无适用订单'/);
-  assert.doesNotMatch(view, /本月另有/);
+  assert.match(view, /@pointermove="selectPointer"/);
+  assert.match(view, /@keydown="selectKeyboard"/);
+  assert.doesNotMatch(view, /month_impact|每日记录|每日归档，可追溯|el-table/);
 });
 
 test("actual header and daily card open one lazy exchange dialog without routing or leaking a prior tenant response", { skip: process.env.RUN_TASK_BROWSER_TESTS !== "1", timeout: 180000 }, async () => {
@@ -87,7 +87,8 @@ test("actual header and daily card open one lazy exchange dialog without routing
           latest: missingToday ? { ...point, business_date: "2026-10-25", rate: 99.9999 } : point
         } } });
         if (url.pathname === "/api/exchange-rates/tool") {
-          const response = { timezone: "Asia/Shanghai", as_of: "2026-10-26T09:30:00Z", public: publicMarket, month_impact: activeUser.id === userA.id ? privateImpact : null };
+          const currentMarket = activeUser.id === userA.id ? publicMarket : { ...publicMarket, today: { ...point, available: true, rate: 13, rate_rub_per_cny: 13 }, points: [{ ...point, rate: 13, rate_rub_per_cny: 13 }] };
+          const response = { timezone: "Asia/Shanghai", as_of: "2026-10-26T09:30:00Z", public: currentMarket, month_impact: activeUser.id === userA.id ? privateImpact : null };
           if (holdTool) {
             holdTool = false;
             await new Promise(resolve => { releaseHeld = async () => { try { await route.fulfill({ json: response }); } finally { resolve(); } }; heldStarted(); });
@@ -119,8 +120,7 @@ test("actual header and daily card open one lazy exchange dialog without routing
     await exchange.click();
     const dialog = page.getByRole("dialog", { name: "汇率工具", exact: true });
     await dialog.locator(".exchange-rate-tool").waitFor();
-    await dialog.getByText("−¥1234.56", { exact: true }).waitFor();
-    await dialog.getByText("暂无适用订单", { exact: true }).waitFor();
+    await dialog.getByText("1 元 = 12.5000 卢布", { exact: true }).waitFor();
     assert.equal(calls.find(call => call.path === "/api/exchange-rates/tool").query, "?range=year");
     assert.equal(await dialog.locator("h2").count(), 0);
     assert.equal(page.url(), originalUrl);
@@ -129,7 +129,7 @@ test("actual header and daily card open one lazy exchange dialog without routing
     await dialog.getByRole("button", { name: "Close this dialog", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
     await card.click();
-    await dialog.getByText("−¥1234.56", { exact: true }).waitFor();
+    await dialog.getByText("1 元 = 12.5000 卢布", { exact: true }).waitFor();
     assert.equal(await page.getByRole("dialog", { name: "汇率工具", exact: true }).count(), 1);
     assert.equal(calls.filter(call => call.path === "/api/exchange-rates/tool").length, 1, "card reuses the same scoped tool rather than creating a route or second instance");
     assert.equal(page.url(), originalUrl);
@@ -145,10 +145,11 @@ test("actual header and daily card open one lazy exchange dialog without routing
     assert.equal(await card.getByText("99.9999", { exact: true }).count(), 0, "missing today never substitutes yesterday's quote");
     assert.equal(await card.getByText("2026-10-26", { exact: true }).count(), 1);
     await exchange.click();
-    await dialog.getByText("当前账号可查看公共参考汇率。企业汇差涉及财务数据，仅向有财务权限的成员开放。", { exact: true }).waitFor();
+    await dialog.getByText("1 元 = 13.0000 卢布", { exact: true }).waitFor();
     await releaseHeld();
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     assert.equal(await dialog.getByText("−¥1234.56", { exact: true }).count(), 0, "late enterprise A response cannot expose private data in B's dialog");
+    assert.equal(await dialog.getByText("1 元 = 12.5000 卢布", { exact: true }).count(), 0, "late earlier request cannot replace the current quote");
     assert.equal(await dialog.locator(".exchange-rate-tool__impact-card").count(), 0);
     assert.equal(page.url(), originalUrl);
     assert.equal(await page.locator(".erp-workspace-tab").count(), initialTabs);

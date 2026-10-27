@@ -1,6 +1,7 @@
 // Only verified service entry points are admitted. New routes do not inherit
 // access from a business prefix; their full ownership chain must be reviewed.
 const routes = new Set([
+  'GET monthly-billing-details', 'GET monthly-billing-orders',
   'GET dashboard', 'GET orders', 'GET orders/status-history/summary', 'GET order-quality-rules',
   'POST orders/package-label', 'POST orders/package-label-printed', 'POST orders/package-label-print-failed',
   'POST orders/ship', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
@@ -132,6 +133,7 @@ const recordRoutes = [
   ['PUT', /^listing\/collector-box\/[^/]+\/(?:edit|development-meta)$/],
   ['POST', /^listing\/collector-box\/[^/]+\/(?:create-listing-template|create-selection)$/],
   ['POST', /^listing\/publish-records\/\d+\/(?:retry|refresh)$/],
+  ['POST', /^listing\/publish-tasks\/\d+\/retry$/],
   ['DELETE', /^customer-message-settings\/template\/[^/]+$/],
   ['GET', /^reviews\/\d+\/comments$/], ['POST', /^reviews\/\d+\/reply$/]
 ];

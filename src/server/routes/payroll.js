@@ -7,11 +7,15 @@ import {
   savePayrollProfile,
   updatePayrollPeriodStatus
 } from "../../services/payroll.js";
+import { isPlatformAdmin } from "../../shared/permissions.js";
+import { tenantIdFromRequest } from "../tenant-context.js";
+
+const payrollReadScope = req => isPlatformAdmin(req?._session) ? null : tenantIdFromRequest(req);
 
 export function createPayrollRoutes({ readJson }) {
   return {
-    "GET /api/payroll/setup": () => payrollSetup(),
-    "GET /api/payroll/period": (req, url) => payrollPeriod(Object.fromEntries(url.searchParams.entries())),
+    "GET /api/payroll/setup": (req) => payrollSetup(payrollReadScope(req)),
+    "GET /api/payroll/period": (req, url) => payrollPeriod(Object.fromEntries(url.searchParams.entries()), payrollReadScope(req)),
     "POST /api/payroll/contribution-schemes": async (req) => saveContributionScheme(await readJson(req)),
     "POST /api/payroll/policies": async (req) => savePayrollPolicy(await readJson(req)),
     "POST /api/payroll/profiles": async (req) => savePayrollProfile(await readJson(req)),

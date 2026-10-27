@@ -7,6 +7,7 @@ param(
   [string]$Version = (Get-Date -Format "yyyy.MM.dd-HHmmss"),
   [string]$ReviewedIdentityManifest,
   [string]$ReviewedAiMaterialManifest,
+  [string]$ReviewedAiMediaRetentionManifest,
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
@@ -35,6 +36,8 @@ $remoteIdentityManifest = ""
 $resolvedReviewedManifest = ""
 $remoteAiMaterialManifest = ""
 $resolvedAiMaterialManifest = ""
+$remoteAiMediaRetentionManifest = ""
+$resolvedAiMediaRetentionManifest = ""
 if ($ReviewedIdentityManifest) {
   $resolvedReviewedManifest = (Resolve-Path -LiteralPath $ReviewedIdentityManifest).Path
   if (-not (Test-Path -LiteralPath $resolvedReviewedManifest -PathType Leaf)) { throw "Reviewed identity manifest must be a file." }
@@ -47,6 +50,14 @@ if ($ReviewedAiMaterialManifest) {
   try { $null = Get-Content -LiteralPath $resolvedAiMaterialManifest -Raw -Encoding UTF8 | ConvertFrom-Json }
   catch { throw "Reviewed AI material manifest is not valid JSON." }
   $remoteAiMaterialManifest = "/tmp/ozon-erp-ai-material-$Version-$([guid]::NewGuid().ToString('N')).json"
+}
+if ($ReviewedAiMediaRetentionManifest) {
+  if (-not $AllowServiceInterruption) { throw "AI media retention requires an explicit offline maintenance window." }
+  $resolvedAiMediaRetentionManifest = (Resolve-Path -LiteralPath $ReviewedAiMediaRetentionManifest).Path
+  if (-not (Test-Path -LiteralPath $resolvedAiMediaRetentionManifest -PathType Leaf)) { throw "AI media retention manifest must be a file." }
+  try { $null = Get-Content -LiteralPath $resolvedAiMediaRetentionManifest -Raw -Encoding UTF8 | ConvertFrom-Json }
+  catch { throw "AI media retention manifest is not valid JSON." }
+  $remoteAiMediaRetentionManifest = "/tmp/ozon-erp-ai-media-retention-$Version-$([guid]::NewGuid().ToString('N')).json"
 }
 
 foreach ($command in @("ssh", "scp", "tar.exe")) {
@@ -68,6 +79,7 @@ $dbInitFlag = if ($SkipDatabaseInit) { "0" } else { "1" }
 $dbMaintenanceFlag = if ($SkipDatabaseMaintenance) { "0" } else { "1" }
 $interruptionFlag = if ($AllowServiceInterruption) { "1" } else { "0" }
 $activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest' '$interruptionFlag'"
+if ($remoteAiMediaRetentionManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }
 
 if ($DryRun) {
   Write-Host "Dry run only."
@@ -131,6 +143,12 @@ if ($resolvedAiMaterialManifest) {
   & scp @scpOptions $resolvedAiMaterialManifest "${remoteTarget}:$remoteAiMaterialManifest"
   if ($LASTEXITCODE -ne 0) { throw "Reviewed AI material manifest upload failed with exit code $LASTEXITCODE." }
 }
+if ($resolvedAiMediaRetentionManifest) {
+  & ssh @sshOptions $remoteTarget "set -Ce; umask 077; : > '$remoteAiMediaRetentionManifest'; chmod 600 '$remoteAiMediaRetentionManifest'"
+  if ($LASTEXITCODE -ne 0) { throw "Private AI media retention manifest preparation failed." }
+  & scp @scpOptions $resolvedAiMediaRetentionManifest "${remoteTarget}:$remoteAiMediaRetentionManifest"
+  if ($LASTEXITCODE -ne 0) { throw "AI media retention manifest upload failed." }
+}
 
 $remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && $activationCommand"
 if ($remoteIdentityManifest) {
@@ -139,6 +157,10 @@ if ($remoteIdentityManifest) {
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 } finally {
+  if ($remoteAiMediaRetentionManifest) {
+    try { & ssh @sshOptions $remoteTarget "rm -f -- '$remoteAiMediaRetentionManifest'" 2>$null | Out-Null }
+    catch { Write-Warning "AI media retention manifest cleanup could not be confirmed." }
+  }
   if ($remoteAiMaterialManifest) {
     try {
       & ssh @sshOptions $remoteTarget "rm -f -- '$remoteAiMaterialManifest'" 2>$null | Out-Null

@@ -2054,6 +2054,16 @@ const endpoints = [
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("OrderCancellationRule"), "Cancellation-rule rows."))]
     }),
+    endpoint("GET", "/api/order-cancellation-rules/unclassified", "Platform-only review of recently seen unknown raw cancellation reasons; does not change orders or historical profit.", {
+      auth: "authenticated",
+      queryParams: [param("from", scalar("string", "First Beijing calendar day; defaults to 90 days ago.")), param("to", scalar("string", "Last Beijing calendar day, inclusive. Maximum range 366 days."))],
+      responses: [response(200, "application/json", scalar("object", "from/to, pending and classified raw reason groups with count and last_seen_at, available canonical types, and truncated flag when more than 1000 groups exist."))]
+    }),
+    endpoint("POST", "/api/order-cancellation-rules/classifications", "Platform-only exact manual classification into an existing canonical reason type. Preserves raw Ozon reasons and historical profit.", {
+      auth: "authenticated",
+      requestBody: body(objectOf("Reviewed shared cancellation reason.", [field("original", scalar("string", "Unmodified raw reason text, at most 2000 characters; provide this or reason_id.")), field("reason_id", scalar("string", "Positive official reason ID when raw text is absent; stored as an exact code classification.")), field("reason_code", scalar("string", "Existing canonical code returned by the review endpoint."), true), field("note", scalar("string", "Optional review note, at most 300 characters."))], { additionalProperties: false })),
+      responses: [response(200, "application/json", scalar("object", "Saved rule id, canonical reason_code, optional reused=true, and historical_profit_changed=false."))]
+    }),
     endpoint("POST", "/api/order-cancellation-rules", "Create a cancellation classification rule.", {
       auth: "authenticated",
       requestBody: body(ref("OrderCancellationRuleMutationRequest")),

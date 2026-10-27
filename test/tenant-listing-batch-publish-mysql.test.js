@@ -313,8 +313,61 @@ test("batch publishing persists and restores enterprise operations authority in 
       assert.equal(queue.length, 0);
     });
 
-    await scenario("unreviewed task retry remains closed for ordinary A/default operations", async () => {
-      for (const id of [1, 2]) assert.equal(tenantIsolationDecision(session(id), ["api", "listing", "publish-tasks", "1", "retry"], "POST").allowed, false);
+    const failedTask = async id => {
+      const created = await service.publishListingDraftsToOzon(body(id), session(id));
+      queue.length = 0;
+      await query("UPDATE listing_publish_task_items SET status='failed',error_json=JSON_OBJECT('message','Fixture preparation failure') WHERE publish_task_id=?", [created.task.id]);
+      return created.task.id;
+    };
+
+    await scenario("ordinary A/B/default operations can retry their own failed task and publish once", async () => {
+      for (const id of [1, 2, 3]) {
+        const taskId = await failedTask(id);
+        assert.equal(tenantIsolationDecision(session(id), ["api", "listing", "publish-tasks", String(taskId), "retry"], "POST").allowed, true);
+        const result = await service.retryListingPublishTask(taskId, { tenant_id: "foreign", created_by_person_id: 8 }, session(id));
+        assert.equal(result.summary.queued, 1, JSON.stringify(result));
+        const concurrent = await service.retryListingPublishTask(taskId, {}, session(id));
+        assert.equal(concurrent.summary.queued, 0);
+        await drain("record");
+      }
+      assert.deepEqual(calls.filter(row => row.name === "import").map(row => [row.tenant, row.person, row.shop]), [[1, 7, 10], [2, 7, 20], [3, 7, 30]]);
+      assert.ok((await records()).every(row => row.created_by_person_id === 7 && row.status === "imported"));
+    });
+
+    await scenario("task retry rejects foreign task IDs and non-operations actors without writes", async () => {
+      const bTask = await failedTask(3);
+      const before = await snapshotB();
+      for (const id of [1, 2]) await assert.rejects(service.retryListingPublishTask(bTask, { tenant_id: "3" }, session(id)), { status: 404 });
+      await assert.rejects(service.retryListingPublishTask(bTask, {}, session(2, 9)), error => error.status === 403 || error.statusCode === 403);
+      assert.equal(await snapshotB(), before);
+      assert.equal(calls.length, 0);
+      assert.equal(queue.length, 0);
+    });
+
+    for (const [name, sql] of revocations.slice(0, 3)) for (const boundary of ["limit", "build", "repair", "seller-media"]) {
+      await scenario(`task retry starts no next provider after ${name} revocation during ${boundary}`, async () => {
+        const taskId = await failedTask(2);
+        let revoked = false;
+        hook = async stageName => { if (!revoked && stageName === boundary) { revoked = true; await query(sql); } };
+        const result = await service.retryListingPublishTask(taskId, {}, session(2));
+        assert.equal(revoked, true, JSON.stringify(calls));
+        assert.equal(result.summary.queued, 0, JSON.stringify(result));
+        assert.equal(calls.slice(calls.findIndex(row => row.name === boundary) + 1).length, 0, JSON.stringify(calls));
+        assert.equal(queue.length, 0);
+        assert.equal((await records()).length, 0);
+      });
+    }
+
+    await scenario("task retry worker rechecks membership revoked after preparation", async () => {
+      const taskId = await failedTask(2);
+      const result = await service.retryListingPublishTask(taskId, {}, session(2));
+      assert.equal(result.summary.queued, 1);
+      const before = calls.length;
+      await query(revocations[1][1]);
+      try { await drain("record"); } catch (error) { assert.ok(error.status === 403 || error.statusCode === 403); }
+      assert.equal(calls.length, before);
+      assert.equal(calls.filter(row => row.name === "import").length, 0);
+      assert.ok((await records()).every(row => !row.task_id));
     });
   } finally {
     globalThis.fetch = originalFetch;

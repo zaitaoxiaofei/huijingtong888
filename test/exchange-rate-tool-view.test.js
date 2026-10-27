@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parse, compileScript, compileStyle, compileTemplate } from "@vue/compiler-sfc";
-import { buildDailyExchangeChart, exchangeForecastAmount, exchangeImpactMoney, exchangeImpactTone, exchangeRateNumber, exchangeRateQuery, exchangeRateReasonText, exchangeRateText } from "../frontend/admin/utils/exchange-rate-tool.js";
+import { buildDailyExchangeChart, exchangeChartKeyboardPoint, exchangeRateNumber, exchangeRateQuery, exchangeRateText, nearestExchangeChartPoint, preciseExchangeRateText } from "../frontend/admin/utils/exchange-rate-tool.js";
 
 test("exchange tool query defaults to one year and uses Beijing calendar dates without enterprise selectors", () => {
   assert.equal(exchangeRateQuery(), "/api/exchange-rates/tool?range=year");
@@ -13,31 +13,28 @@ test("exchange tool query defaults to one year and uses Beijing calendar dates w
   assert.doesNotThrow(() => exchangeRateQuery("year", ["2025-01-01", "2026-02-04"]));
 });
 
-test("money display distinguishes missing, true zero, income gains and losses", () => {
+test("rate display preserves missing values and hover retains archived precision", () => {
   for (const missing of [null, undefined, "", "  ", false, Infinity, NaN]) {
     assert.equal(exchangeRateNumber(missing), null);
-    assert.equal(exchangeImpactMoney(missing), "待核对");
-    assert.equal(exchangeImpactTone(missing), "neutral");
   }
-  assert.equal(exchangeImpactMoney(0), "¥0.00");
-  assert.equal(exchangeImpactMoney(-16), "−¥16.00");
-  assert.equal(exchangeImpactMoney("5.125"), "+¥5.13");
-  assert.equal(exchangeImpactTone(-16), "negative");
-  assert.equal(exchangeImpactTone(5), "positive");
   assert.equal(exchangeRateText(null), "—");
   assert.equal(exchangeRateText(0), "—");
   assert.equal(exchangeRateText(12.5), "12.5000");
   assert.equal(exchangeRateText(0.08, 6), "0.080000");
+  assert.equal(preciseExchangeRateText(12.123456789012), "12.123456789012");
+  assert.equal(preciseExchangeRateText(null), "—");
 });
 
-test("combined reference forecast wins over the confirmed RUB subset and never hides an unknown total", () => {
-  const combined = { estimated_sales_income_fx_cny: -25, reference_cny_impact_cny: -20, known_rub_revenue_impact_cny: -5, reference_cny_items: 2, confirmed_rub_items: 1 };
-  assert.equal(exchangeForecastAmount(combined), -25);
-  assert.equal(exchangeForecastAmount({ ...combined, estimated_sales_income_fx_cny: 0 }), 0);
-  assert.equal(exchangeForecastAmount({ ...combined, estimated_sales_income_fx_cny: null }), null);
-  assert.equal(exchangeForecastAmount({ ...combined, estimated_sales_income_fx_cny: undefined }), null);
-  assert.equal(exchangeForecastAmount({ known_rub_revenue_impact_cny: -5 }), -5, "only an absent new field accepts the older explicit RUB contract");
-  assert.equal(exchangeForecastAmount(null), null);
+test("pointer and keyboard navigation select only real daily nodes, including across a missing date", () => {
+  const chart = buildDailyExchangeChart([{ business_date: "2026-10-24", rate: 10 }, { business_date: "2026-10-25", rate: null }, { business_date: "2026-10-26", rate: 12.5 }]);
+  assert.equal(nearestExchangeChartPoint(chart, chart.points[0].x + 4), chart.points[0]);
+  assert.equal(nearestExchangeChartPoint(chart, 2000), chart.points[1]);
+  assert.equal(exchangeChartKeyboardPoint(chart, "2026-10-24", "ArrowRight"), chart.points[1]);
+  assert.equal(exchangeChartKeyboardPoint(chart, "2026-10-26", "ArrowLeft"), chart.points[0]);
+  assert.equal(exchangeChartKeyboardPoint(chart, null, "Home"), chart.points[0]);
+  assert.equal(exchangeChartKeyboardPoint(chart, null, "End"), chart.points[1]);
+  assert.equal(exchangeChartKeyboardPoint(chart, null, "Escape"), null);
+  assert.equal(nearestExchangeChartPoint({ points: [] }, 10), null);
 });
 
 test("daily curve uses actual daily rates, explicit inverse direction, and gaps without interpolation", () => {
@@ -69,14 +66,6 @@ test("one year is represented by at most 366 genuine daily points", () => {
   assert.equal(chart.yTicks.length, 4);
 });
 
-test("pending reason codes are translated into business impact without claiming missing money is zero", () => {
-  assert.match(exchangeRateReasonText("TODAY_ARCHIVE_MISSING"), /今日汇率/);
-  assert.match(exchangeRateReasonText("ACTUAL_SETTLEMENT_PENDING"), /结算账单/);
-  assert.match(exchangeRateReasonText("ORIGINAL_SALE_CURRENCY_UNKNOWN"), /原币销售收入/);
-  assert.equal(exchangeRateReasonText("SETTLEMENT_RUB_EXPOSURE_UNKNOWN"), "人民币标价订单的卢布结算金额尚未确认，暂不计入预计汇差");
-  assert.equal(exchangeRateReasonText("new_reason"), "部分数据待核对");
-});
-
 test("standalone exchange tool compiles and preserves API, privacy and embedded boundaries", () => {
   const filename = "frontend/admin/views/tools/ExchangeRateToolView.vue";
   const source = readFileSync(filename, "utf8");
@@ -90,15 +79,12 @@ test("standalone exchange tool compiles and preserves API, privacy and embedded 
   assert.match(source, /signal\.aborted.*scope !== currentApiCacheScope/);
   assert.match(source, /onDeactivated\(stopRequest\)/);
   assert.match(source, /erp:auth-scope-changed/);
-  assert.match(source, /shanghaiDateTimeText/);
-  assert.match(source, /当前账号可查看公共参考汇率/);
-  assert.match(source, /待签收预计销售收入汇差（参考估算）/);
-  assert.match(source, /人民币标价按下单日汇率估算卢布参考收入，再按今日汇率比较；不含费用，不是官方结算金额/);
-  assert.match(source, /reference_cny_items/);
-  assert.match(source, /confirmed_rub_items/);
+  assert.match(source, /shanghaiDateText/);
+  assert.match(source, /@pointermove="selectPointer"/);
+  assert.match(source, /@keydown="selectKeyboard"/);
+  assert.match(source, /近一个月/);
   assert.match(source, /曲线上升表示每人民币可兑更多卢布；等额卢布收入折回人民币会减少/);
-  assert.match(source, /包含跨月存量/);
-  assert.match(source, /不合并为总损益/);
+  assert.doesNotMatch(source, /month_impact|每日记录|每日归档，可追溯|exchange-rate-tool__impact|el-table/);
   assert.doesNotMatch(source, /router|localStorage|sessionStorage|apiClient\.(post|put|patch|delete)|net_impact_cny|known_amount_cny/);
   assert.doesNotMatch(descriptor.styles.map(style => style.content).join(""), /#[0-9a-f]{3,8}\b/i);
 });

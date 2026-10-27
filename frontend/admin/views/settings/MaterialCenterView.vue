@@ -1,11 +1,12 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Delete, MagicStick, Refresh, Search, View } from "@element-plus/icons-vue";
+import { ArrowLeft, Delete, Refresh, Search, View } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { archiveMaterialAsset, deleteMaterialAsset, listMaterialAssets } from "../../api/materialAssets";
+import { archiveMaterialAsset, deleteMaterialAsset } from "../../api/materialAssets";
 import { withImageToken } from "../../api/tools/imageCropper";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
+import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 
@@ -14,16 +15,18 @@ const router = useRouter();
 const loading = ref(false);
 const archiving = ref(false);
 const deleting = ref(false);
-const activeTab = ref(route.query.source === "main-image" ? "main" : "shop");
-const shopAssets = ref([]);
+
+
 const materialAssets = ref([]);
-const shops = ref([]);
+
 const aiMainImageAssets = ref([]);
 const selectedMaterialRows = ref([]);
-const selectedShopRows = ref([]);
-const previewDialog = reactive({ visible: false, title: "素材预览", url: "", type: "image" });
+
+const previewDialog = reactive({ visible: false, title: "素材预览", url: "", type: "image", text: "" });
 let aiMainImageRequestSeq = 0;
 let materialLoadSeq = 0;
+let requestController = null, viewActive = false;
+let viewScope = currentApiCacheScope();
 const filters = reactive({
   keyword: "",
   role: "",
@@ -31,7 +34,7 @@ const filters = reactive({
   mediaType: ""
 });
 const pager = reactive({
-  shop: { page: 1, pageSize: 20, total: 0 },
+
   main: { page: 1, pageSize: 20, total: 0 }
 });
 
@@ -41,7 +44,7 @@ const roleOptions = [
   { label: "尾图", value: "tail" },
   { label: "视频", value: "video" },
   { label: "AI 主图", value: "main_image" },
-  { label: "店铺矩阵", value: "shop_matrix_asset" }
+
 ];
 
 const statusOptions = [
@@ -52,108 +55,64 @@ const statusOptions = [
   { label: "已归档", value: "archived" }
 ];
 
-const filteredShopAssets = computed(() => shopAssets.value);
 const filteredMaterialAssets = computed(() => materialAssets.value);
 
 const summary = computed(() => ({
-  shop: pager.shop.total,
-  main: pager.main.total,
-  video: filteredShopAssets.value.filter((item) => mediaType(item) === "video").length,
-  archived: filteredMaterialAssets.value.filter((item) => statusValue(item) === "archived").length
+  main: materialAssets.value.length,
+  image: materialAssets.value.filter(item => mediaType(item) === "image").length,
+  video: materialAssets.value.filter(item => mediaType(item) === "video").length,
+  text: materialAssets.value.filter(item => mediaType(item) === "text").length
 }));
 const returnTo = computed(() => String(route.query.returnTo || ""));
 const returnLabel = computed(() => String(route.query.returnLabel || "返回上一页"));
 
-watch(
-  () => route.query.source,
-  (source) => {
-    activeTab.value = source === "main-image" ? "main" : "shop";
-  }
-);
-
-watch(activeTab, (tab) => {
-  const source = tab === "main" ? "main-image" : "shop-matrix";
-  if (route.query.source !== source) {
-    router.replace({ name: "settings-materials", query: { ...route.query, source } });
-  }
-  loadAssets();
-});
-
+function requestCurrent(seq, context) {
+  return seq === materialLoadSeq && context.scope === currentApiCacheScope() && !context.signal.aborted;
+}
 async function loadAssets() {
+  viewScope = currentApiCacheScope();
+  requestController?.abort();
+  requestController = new AbortController();
+  const context = { scope: viewScope, signal: requestController.signal };
   const seq = ++materialLoadSeq;
+  selectedMaterialRows.value = [];
   loading.value = true;
   try {
-    const common = {
-      paged: "1",
-      keyword: filters.keyword.trim(),
-      role: filters.role,
-      status: filters.status
-    };
-    if (activeTab.value === "main") {
-      await loadMainAssets(common, seq);
-    } else {
-      await loadShopAssets(common, seq);
-    }
+    await loadMainAssets({ paged: "1", source_type: "ai_generated", recent_days: "7", keyword: filters.keyword.trim(), role: filters.role, status: filters.status }, seq, context);
   } catch (error) {
-    ElMessage.error(error.message || "素材中心加载失败");
-  } finally {
-    loading.value = false;
-  }
+    if (requestCurrent(seq, context) && error?.name !== "AbortError") ElMessage.error(error.message || "AI 素材加载失败");
+  } finally { if (requestCurrent(seq, context)) loading.value = false; }
 }
-
-async function loadMainAssets(common = {}, seq = materialLoadSeq) {
-  const materialRows = await listMaterialAssets({
-    ...common,
-    asset_type: filters.mediaType || "image",
-    page: pager.main.page,
-    pageSize: pager.main.pageSize
-  });
-  if (seq !== materialLoadSeq) return;
+async function loadMainAssets(common = {}, seq = materialLoadSeq, context) {
+  const params = new URLSearchParams({ ...common, asset_type: filters.mediaType || "", page: String(pager.main.page), pageSize: String(pager.main.pageSize) });
+  const materialRows = await apiClient.get(`/api/material-assets?${params}`, { noCache: true, signal: context.signal });
+  if (!requestCurrent(seq, context)) return;
   const baseRows = Array.isArray(materialRows?.rows) ? materialRows.rows : [];
-  materialAssets.value = mergeMaterialRows(baseRows, aiMainImageAssets.value);
-  pager.main.total = Number(materialRows?.total || 0) + aiMainImageAssets.value.length;
+  aiMainImageAssets.value = [];
+  materialAssets.value = mergeMaterialRows(baseRows, []);
+  pager.main.total = Number(materialRows?.total || 0);
   pager.main.page = Number(materialRows?.page || pager.main.page);
   pager.main.pageSize = Number(materialRows?.pageSize || pager.main.pageSize);
-  void refreshAiMainImageAssets(common);
+  void refreshAiMainImageAssets(common, seq, context);
 }
-
-async function loadShopAssets(common = {}, seq = materialLoadSeq) {
-  const shopRows = await apiClient.get(`/api/listing/media/assets?${new URLSearchParams({ ...common, mediaType: filters.mediaType, page: String(pager.shop.page), pageSize: String(pager.shop.pageSize) }).toString()}`, { noCache: true }).catch(() => ({ rows: [], total: 0 }));
-  if (seq !== materialLoadSeq) return;
-  shopAssets.value = Array.isArray(shopRows?.rows) ? shopRows.rows : [];
-  pager.shop.total = Number(shopRows?.total || 0);
-  pager.shop.page = Number(shopRows?.page || pager.shop.page);
-  pager.shop.pageSize = Number(shopRows?.pageSize || pager.shop.pageSize);
-  void loadShopNames();
-}
-
-async function loadShopNames() {
-  if (shops.value.length) return;
-  const bootstrap = await apiClient.get("/api/asset-variant-engine/bootstrap", { noCache: true }).catch(() => ({ shops: [] }));
-  shops.value = Array.isArray(bootstrap?.shops) ? bootstrap.shops : [];
-}
-
-async function refreshAiMainImageAssets(common = {}) {
+async function refreshAiMainImageAssets(common = {}, materialSeq, context) {
   const seq = ++aiMainImageRequestSeq;
-  const rows = await loadAiMainImageAssets(common);
-  if (seq !== aiMainImageRequestSeq) return;
-  aiMainImageAssets.value = rows;
-  materialAssets.value = mergeMaterialRows(materialAssets.value.filter((row) => !isAiVariantAssetRow(row)), rows);
-  pager.main.total = Math.max(Number(pager.main.total || 0), materialAssets.value.length);
+  try {
+    const rows = await loadAiMainImageAssets(common, context);
+    if (seq !== aiMainImageRequestSeq || !requestCurrent(materialSeq, context)) return;
+    aiMainImageAssets.value = rows;
+    materialAssets.value = mergeMaterialRows(materialAssets.value.filter(row => !isAiVariantAssetRow(row)), rows);
+    pager.main.total += rows.length;
+  } catch (error) {
+    if (error?.name !== "AbortError" && requestCurrent(materialSeq, context)) console.warn("AI 素材补充记录暂不可用", error.message);
+  }
 }
-
-async function loadAiMainImageAssets(common = {}) {
-  if (filters.mediaType && filters.mediaType !== "image") return [];
-  if (filters.role && filters.role !== "main_image") return [];
-  const params = new URLSearchParams({
-    field_key: "main_image",
-    repair_temp_ai: "1",
-    compact: "1",
-    limit: String(Math.min(Math.max(Number(pager.main.pageSize || 20), 1), 50))
-  });
+async function loadAiMainImageAssets(common = {}, context) {
+  if (pager.main.page !== 1 || (filters.mediaType && filters.mediaType !== "image") || (filters.role && filters.role !== "main_image")) return [];
+  const params = new URLSearchParams({ field_key: "main_image", repair_temp_ai: "1", recent_days: "7", compact: "1", limit: String(Math.min(Math.max(Number(pager.main.pageSize || 20), 1), 50)) });
   const keyword = String(common.keyword || "").trim();
   if (keyword) params.set("sourceProductId", keyword);
-  const rows = await apiClient.get(`/api/listing/ai-variant-assets?${params.toString()}`, { noCache: true }).catch(() => []);
+  const rows = await apiClient.get(`/api/listing/ai-variant-assets?${params.toString()}`, { noCache: true, signal: context.signal });
   return normalizeAiMainImageAssetRows(Array.isArray(rows) ? rows : []);
 }
 
@@ -238,7 +197,6 @@ function clearFilters() {
 }
 
 function resetMaterialPages() {
-  pager.shop.page = 1;
   pager.main.page = 1;
 }
 
@@ -259,8 +217,7 @@ function handleMaterialPageSizeChange(kind, size) {
 }
 
 function handleSelectionChange(kind, rows = []) {
-  if (kind === "main") selectedMaterialRows.value = rows;
-  else selectedShopRows.value = rows;
+  selectedMaterialRows.value = rows;
 }
 
 function goBackToSource() {
@@ -323,6 +280,10 @@ function normalizeLocalPreviewUrl(url) {
 
 function openPreview(item) {
   const url = previewUrl(item);
+  if (mediaType(item) === "text") {
+    previewDialog.text = String(item.content_text || item.contentText || item.text || "暂无文本内容");
+    previewDialog.type = "text"; previewDialog.title = item.title || "AI 文本预览"; previewDialog.visible = true; return;
+  }
   if (!url) {
     ElMessage.warning("这条素材没有可预览地址");
     return;
@@ -350,38 +311,12 @@ function assetTitle(item = {}) {
   return item.assetVariantTitle || item.assetVariantTitleZh || item.title || item.originalName || item.original_name || item.storageName || item.storage_name || "-";
 }
 
-function shopName(item = {}) {
-  const id = Number(item.shopId || item.shop_id || 0);
-  return shops.value.find((shop) => Number(shop.id) === id)?.name || (id ? `店铺 ${id}` : "-");
-}
-
-function shopAssetType(item = {}) {
-  const role = roleValue(item);
-  if (mediaType(item) === "video" || role === "video") return "视频";
-  if (role === "main") return "主图";
-  if (role === "detail") return "详情图";
-  if (role === "tail") return "尾图";
-  return role || mediaType(item);
-}
-
-function formatTime(value) {
-  const text = String(value || "").trim();
-  if (!text) return "-";
-  const date = new Date(text);
-  if (Number.isNaN(date.getTime())) return text;
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function fileSize(value) {
-  const size = Number(value || 0);
-  if (!Number.isFinite(size) || size <= 0) return "-";
-  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
-  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${size} B`;
-}
+function formatTime(value) { return shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }); }
 
 async function archiveAsset(row) {
+  const scope = currentApiCacheScope();
   await ElMessageBox.confirm(`确定归档「${row.title || row.product_name || row.id}」吗？`, "归档素材", { type: "warning" });
+  if (scope !== currentApiCacheScope()) return;
   archiving.value = true;
   try {
     await archiveMaterialAsset(row.id);
@@ -393,6 +328,7 @@ async function archiveAsset(row) {
 }
 
 async function deleteAsset(row) {
+  const scope = currentApiCacheScope();
   if (!row?.id) return;
   if (isAiVariantAssetRow(row)) {
     await deleteAiVariantAssetRows([row]);
@@ -403,6 +339,7 @@ async function deleteAsset(row) {
     confirmButtonText: "删除",
     cancelButtonText: "取消"
   });
+  if (scope !== currentApiCacheScope()) return;
   deleting.value = true;
   try {
     await deleteMaterialAsset(row.id);
@@ -414,6 +351,7 @@ async function deleteAsset(row) {
 }
 
 async function deleteAiVariantAssetRows(rows = []) {
+  const scope = currentApiCacheScope();
   const ids = rows.map((row) => Number(row.sourceAiAssetId || 0)).filter(Boolean);
   if (!ids.length) return;
   await ElMessageBox.confirm(`确定删除 ${ids.length} 个 AI 素材记录吗？已注册的底层图片文件会保留。`, "删除 AI 素材记录", {
@@ -421,6 +359,7 @@ async function deleteAiVariantAssetRows(rows = []) {
     confirmButtonText: "删除",
     cancelButtonText: "取消"
   });
+  if (scope !== currentApiCacheScope()) return;
   deleting.value = true;
   try {
     const result = await apiClient.post("/api/listing/ai-variant-assets/batch-delete", { ids });
@@ -433,24 +372,8 @@ async function deleteAiVariantAssetRows(rows = []) {
   }
 }
 
-async function deleteShopAsset(row) {
-  if (!row?.id) return;
-  await ElMessageBox.confirm(`确定删除「${assetTitle(row)}」吗？本地文件和素材记录都会删除。`, "删除素材", {
-    type: "warning",
-    confirmButtonText: "删除",
-    cancelButtonText: "取消"
-  });
-  deleting.value = true;
-  try {
-    const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", { assetIds: [row.id] });
-    ElMessage.success(`已删除 ${result.deletedMediaAssets || 1} 个素材`);
-    await loadAssets();
-  } finally {
-    deleting.value = false;
-  }
-}
-
 async function deleteSelectedMaterialAssets() {
+  const scope = currentApiCacheScope();
   const rows = selectedMaterialRows.value;
   if (!rows.length) return;
   const aiRows = rows.filter(isAiVariantAssetRow);
@@ -460,6 +383,7 @@ async function deleteSelectedMaterialAssets() {
     confirmButtonText: "删除",
     cancelButtonText: "取消"
   });
+  if (scope !== currentApiCacheScope()) return;
   deleting.value = true;
   try {
     let deleted = 0;
@@ -469,6 +393,7 @@ async function deleteSelectedMaterialAssets() {
       deleted += Number(result.deleted || aiIds.length);
     }
     for (const row of materialRows) {
+      if (scope !== currentApiCacheScope()) return;
       await deleteMaterialAsset(row.id);
       deleted += 1;
     }
@@ -480,44 +405,27 @@ async function deleteSelectedMaterialAssets() {
   }
 }
 
-async function deleteSelectedShopAssets() {
-  const rows = selectedShopRows.value;
-  if (!rows.length) return;
-  await ElMessageBox.confirm(`确定删除选中的 ${rows.length} 个店铺矩阵素材吗？本地文件和素材记录都会删除。`, "批量删除店铺素材", {
-    type: "warning",
-    confirmButtonText: "删除",
-    cancelButtonText: "取消"
-  });
-  deleting.value = true;
-  try {
-    const result = await apiClient.post("/api/asset-variant-engine/delete-media-group", { assetIds: rows.map((row) => row.id).filter(Boolean) });
-    ElMessage.success(`已删除 ${result.deletedMediaAssets || rows.length} 个素材`);
-    selectedShopRows.value = [];
-    await loadAssets();
-  } finally {
-    deleting.value = false;
-  }
+function stopReads() { materialLoadSeq++; aiMainImageRequestSeq++; requestController?.abort(); loading.value = false; }
+function resetScope() {
+  stopReads(); viewScope = currentApiCacheScope();
+  Object.assign(filters, { keyword: "", role: "", status: "", mediaType: "" });
+  materialAssets.value = []; aiMainImageAssets.value = []; selectedMaterialRows.value = [];
+  previewDialog.visible = false; previewDialog.url = ""; previewDialog.text = "";
+  pager.main.page = 1; pager.main.total = 0;
+  if (viewActive) loadAssets();
 }
-
-function regenerateShopAsset(row) {
-  router.push({
-    name: "asset-variant-center",
-    query: {
-      batchId: row.batchId || row.batch_id || undefined,
-      shopId: row.shopId || row.shop_id || undefined
-    }
-  });
-}
-
-onMounted(loadAssets);
+onMounted(() => { viewActive = true; window.addEventListener("erp:auth-scope-changed", resetScope); loadAssets(); });
+onActivated(() => { viewActive = true; if (!loading.value && !materialAssets.value.length) loadAssets(); });
+onDeactivated(() => { viewActive = false; stopReads(); });
+onBeforeUnmount(() => { viewActive = false; stopReads(); window.removeEventListener("erp:auth-scope-changed", resetScope); });
 </script>
 
 <template>
   <div v-loading="loading" class="material-center-page erp-paged-page">
     <header class="material-center-header">
       <div>
-        <h1>素材中心</h1>
-        <p>统一查看主图裂变和店铺矩阵沉淀的素材资产，按数据库表方式检索、预览和管理。</p>
+        <h1>AI素材</h1>
+        <p>仅展示近 7 天创建的 AI 图片、视频与文本。已采用素材可继续在草稿和案例中使用。</p>
       </div>
       <div class="header-actions">
         <el-button class="erp-btn erp-btn-secondary" v-if="returnTo" :icon="ArrowLeft" @click="goBackToSource">{{ returnLabel }}</el-button>
@@ -526,10 +434,10 @@ onMounted(loadAssets);
     </header>
 
     <section class="summary-strip">
-      <div><span>店铺素材</span><strong>{{ summary.shop }}</strong></div>
-      <div><span>主图素材</span><strong>{{ summary.main }}</strong></div>
+      <div><span>本页素材</span><strong>{{ summary.main }}</strong></div>
+      <div><span>图片</span><strong>{{ summary.image }}</strong></div>
       <div><span>视频</span><strong>{{ summary.video }}</strong></div>
-      <div><span>已归档</span><strong>{{ summary.archived }}</strong></div>
+      <div><span>文本</span><strong>{{ summary.text }}</strong></div>
     </section>
 
     <section class="filter-bar">
@@ -549,71 +457,7 @@ onMounted(loadAssets);
       <el-button class="erp-btn erp-btn-secondary" @click="clearFilters">清空</el-button>
     </section>
 
-    <el-tabs v-model="activeTab" class="material-tabs">
-      <el-tab-pane label="店铺矩阵素材" name="shop">
-        <div class="material-tab-panel">
-          <div class="material-batch-bar">
-            <span>已选 {{ selectedShopRows.length }} 个</span>
-            <el-button class="erp-btn erp-btn-danger" :icon="Delete" :disabled="!selectedShopRows.length" :loading="deleting" @click="deleteSelectedShopAssets">删除选中</el-button>
-          </div>
-          <div class="material-table-wrap erp-table-scroll">
-            <el-table :data="filteredShopAssets" border stripe class="material-table erp-data-table" @selection-change="handleSelectionChange('shop', $event)">
-              <el-table-column type="selection" width="44" fixed="left" />
-              <el-table-column label="预览" width="92" align="center">
-                <template #default="{ row }">
-                  <button type="button" class="thumb-button portrait-thumb" @click="openPreview(row)">
-                    <video
-                      v-if="mediaType(row) === 'video' && previewUrl(row)"
-                      :src="previewUrl(row)"
-                      muted
-                      preload="metadata"
-                      playsinline
-                    />
-                    <ProductImagePreview v-else-if="previewUrl(row)" :src="previewUrl(row)" alt="asset preview" size="compact" :preview="false" :lazy="false" />
-                    <span v-else class="empty-thumb">-</span>
-                  </button>
-                </template>
-              </el-table-column>
-              <el-table-column label="商品 / 素材" min-width="320">
-                <template #default="{ row }">
-                  <div class="title-cell">
-                    <strong>{{ productName(row) }}</strong>
-                    <span>{{ assetTitle(row) }}</span>
-                  </div>
-                </template>
-              </el-table-column>
-              <el-table-column prop="batchId" label="批次" min-width="150" />
-              <el-table-column label="店铺" min-width="150">
-                <template #default="{ row }">{{ shopName(row) }}</template>
-              </el-table-column>
-              <el-table-column label="类型" width="110">
-                <template #default="{ row }"><el-tag effect="plain">{{ shopAssetType(row) }}</el-tag></template>
-              </el-table-column>
-              <el-table-column label="文件大小" width="120">
-                <template #default="{ row }">{{ fileSize(row.fileSize || row.file_size) }}</template>
-              </el-table-column>
-              <el-table-column label="更新时间" width="180">
-                <template #default="{ row }">{{ formatTime(row.updated_at || row.updatedAt) }}</template>
-              </el-table-column>
-              <el-table-column label="操作" width="210" fixed="right">
-                <template #default="{ row }">
-                  <el-button class="erp-btn-link" size="small" link type="warning" :icon="MagicStick" @click="regenerateShopAsset(row)">重新生成</el-button>
-                  <el-button class="erp-btn-link-danger" size="small" link type="danger" :icon="Delete" :loading="deleting" @click="deleteShopAsset(row)">删除</el-button>
-                </template>
-              </el-table-column>
-            </el-table>
-          </div>
-          <PageFooterPagination
-            :total="pager.shop.total"
-            :page="pager.shop.page"
-            :page-size="pager.shop.pageSize"
-            @update:page="handleMaterialPageChange('shop', $event)"
-            @update:pageSize="handleMaterialPageSizeChange('shop', $event)"
-          />
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="主图 / AI 素材" name="main">
+    <section class="material-tabs">
         <div class="material-tab-panel">
           <div class="material-batch-bar">
             <span>已选 {{ selectedMaterialRows.length }} 个</span>
@@ -622,10 +466,11 @@ onMounted(loadAssets);
           <div class="material-table-wrap erp-table-scroll">
         <el-table :data="filteredMaterialAssets" border stripe class="material-table erp-data-table" @selection-change="handleSelectionChange('main', $event)">
           <el-table-column type="selection" width="44" fixed="left" />
-          <el-table-column label="预览" width="86" align="center">
+          <el-table-column label="预览" width="92" align="center">
             <template #default="{ row }">
               <button type="button" class="thumb-button" @click="openPreview(row)">
-                <ProductImagePreview v-if="previewUrl(row)" :src="previewUrl(row)" alt="asset preview" size="compact" :preview="false" :lazy="false" />
+                <video v-if="mediaType(row) === 'video' && previewUrl(row)" :src="previewUrl(row)" muted preload="metadata" playsinline /><span v-else-if="mediaType(row) === 'text'" class="empty-thumb">文本</span>
+                <ProductImagePreview v-else-if="previewUrl(row)" :src="previewUrl(row)" alt="asset preview" size="compact" :preview="false" :lazy="false" />
                 <span v-else class="empty-thumb">-</span>
               </button>
             </template>
@@ -673,11 +518,11 @@ onMounted(loadAssets);
             @update:pageSize="handleMaterialPageSizeChange('main', $event)"
           />
         </div>
-      </el-tab-pane>
-    </el-tabs>
+    </section>
 
-    <el-dialog v-model="previewDialog.visible" :title="previewDialog.title" width="880px">
+    <el-dialog v-if="previewDialog.visible" v-model="previewDialog.visible" :title="previewDialog.title" width="880px">
       <video v-if="previewDialog.type === 'video'" class="dialog-video" :src="previewDialog.url" controls autoplay playsinline />
+      <pre v-else-if="previewDialog.type === 'text'" class="dialog-text">{{ previewDialog.text }}</pre>
       <img v-else class="dialog-image" :src="previewDialog.url" alt="素材预览">
     </el-dialog>
   </div>
@@ -687,6 +532,8 @@ onMounted(loadAssets);
 .material-center-page {
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
   gap: 14px;
   padding: 16px;
   color: var(--erp-detail-text-main, #172033);
@@ -770,6 +617,7 @@ onMounted(loadAssets);
 }
 
 .material-tabs {
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -779,13 +627,8 @@ onMounted(loadAssets);
   background: var(--erp-detail-surface, #ffffff);
 }
 
-.material-tabs :deep(.el-tabs__content),
-.material-tabs :deep(.el-tab-pane) {
-  height: 100%;
-  min-height: 0;
-}
-
 .material-tab-panel {
+  min-width: 0;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -804,6 +647,8 @@ onMounted(loadAssets);
 }
 
 .material-table-wrap {
+  min-width: 0;
+  overflow: auto;
   flex: 1 1 auto;
 }
 
@@ -813,8 +658,8 @@ onMounted(loadAssets);
 }
 
 .thumb-button {
-  width: 48px;
-  height: 64px;
+  width: 64px;
+  height: 84px;
   display: inline-grid;
   place-items: center;
   padding: 0;
@@ -864,6 +709,8 @@ onMounted(loadAssets);
   color: var(--erp-text-regular, #64748b);
   font-size: 12px;
 }
+
+.dialog-text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 72vh; overflow-y: auto; color: var(--erp-text-main); font: inherit; line-height: 1.8; }
 
 .dialog-image,
 .dialog-video {

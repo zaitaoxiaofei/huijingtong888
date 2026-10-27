@@ -6651,7 +6651,7 @@ function clampNumberValue(value, minimum, maximum) {
   return Math.min(maximum, Math.max(minimum, value));
 }
 
-export async function validateListingTemplatePublish(body = {}, session = null) {
+export async function validateListingTemplatePublish(body = {}, session = null, { generateMissingOfferIds = false } = {}) {
   const template = body.template || body;
   const editable = normalizeEditablePayload(template.editable_payload || template.editablePayload || {});
   const attributes = mergeListingPublishAttributes(template.attributes, editable.attributes);
@@ -6718,7 +6718,7 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   if (!images.length && !variants.some((item) => normalizeImages(item.images || []).length)) errors.push("缺少商品图片");
   const missingOfferIds = variants.filter((item) => !String(item.offer_id || item.offerId || item.sku || "").trim());
   if (!variants.length) errors.push("缺少变体 / SKU");
-  if (missingOfferIds.length) errors.push(`${missingOfferIds.length} 个变体缺少 offer_id`);
+  if (missingOfferIds.length && !generateMissingOfferIds) errors.push(`${missingOfferIds.length} 个变体缺少 offer_id`);
   const missingRequired = attributes.filter((item) => item.required && !hasRequiredAttributeValueForPublish(item, facts));
   for (const item of missingRequired.slice(0, 20)) errors.push(missingRequiredAttributeMessage(item));
   const localMedia = [
@@ -6730,6 +6730,13 @@ export async function validateListingTemplatePublish(body = {}, session = null) 
   if (localMedia.length) warnings.push("存在本地素材 URL，正式提交 Ozon 前需要转换为公网可访问地址或上传到 Ozon 支持的素材地址");
 
   const payload = buildOzonImportPreviewPayload(facts, template);
+  if (generateMissingOfferIds) {
+    // Batch publication assigns missing IDs inside the owned target shop's
+    // existing unique-ID preparer. Never submit the preview's NEW-OFFER label.
+    payload.items.forEach((item, index) => {
+      if (!String(variants[index]?.offer_id || variants[index]?.offerId || variants[index]?.sku || "").trim()) item.offer_id = "";
+    });
+  }
   const includeCategoryHealth = shouldIncludeCategoryPublishDiagnostics(body, template);
   const categoryHealth = includeCategoryHealth
     ? await buildListingCategoryPublishDiagnostics(template, { facts, payload, session }).catch((error) => ({
@@ -6993,10 +7000,10 @@ async function buildListingCategoryPublishDiagnostics(template = {}, context = {
   };
 }
 
-export async function validateListingTemplatePublishForShop(body = {}, shopId = 0, session = null, executionShop = null) {
+export async function validateListingTemplatePublishForShop(body = {}, shopId = 0, session = null, executionShop = null, { generateMissingOfferIds = false } = {}) {
   session = await authorizeBusinessTaskSession(session);
   const tenantId = listingTenantId(session);
-  const validation = await validateListingTemplatePublish(body, session);
+  const validation = await validateListingTemplatePublish(body, session, { generateMissingOfferIds });
   const targetShopId = Number(shopId || 0);
   if (!targetShopId || !normalizeArray(validation.payload?.items).length) return validation;
   const shop = await row(
@@ -8534,6 +8541,7 @@ async function claimListingPublishTaskItemForSubmit(itemId = 0, tenantId = "admi
 export async function retryListingPublishTask(id, body = {}, session = null) {
   if (needsAiTenantSession(session)) return withAiTenantSession(session, () => retryListingPublishTask(id, body, session));
   session = await authorizeBusinessTaskSession(session);
+  assertBusinessTaskPermission(session, "operations");
   await ensureListingAutomationSchema();
   const tenantId = listingTenantId(session);
   const task = await listingPublishTaskDetail(Number(id), session);
@@ -8557,6 +8565,16 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
     `${LISTING_PUBLISH_SHOP_SELECT} WHERE id IN (${shopIds.map(() => "?").join(",")}) AND status <> 'deleted' AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`,
     [...shopIds, Number(session.tenant.id)]
   );
+  for (const shop of shops) {
+    listingPublishExecutionGuards.set(shop, async () => {
+      const fresh = await authorizeBusinessTaskSession(session);
+      assertBusinessTaskPermission(fresh, "operations");
+      const owned = await row(`SELECT id FROM shops WHERE id = ? AND status <> 'deleted'
+        AND (tenant_id = ?${tenantId === "admin" ? " OR tenant_id IS NULL" : ""})`, [Number(shop.id), Number(fresh.tenant.id)]);
+      if (!owned) throw Object.assign(new Error("目标店铺不存在或不属于当前企业"), { status: 404 });
+      return shop;
+    });
+  }
   const shopById = new Map(shops.map((shop) => [Number(shop.id), shop]));
   const textVariantPolicySource = task.request?.text_variant_policy || body.text_variant_policy || body.textVariantPolicy || {};
   const preparedMediaByDraftShop = body.prepared_media_by_draft_shop || body.preparedMediaByDraftShop || {};
@@ -8570,6 +8588,7 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
     let draft = null;
     try {
       if (!shop) throw new Error("目标店铺不存在或已删除");
+      await assertListingPublishExecution(shop);
       const claimedItem = await claimListingPublishTaskItemForRetry(item.id, tenantId);
       if (!claimedItem) return;
       item.record_id = claimedItem.record_id;
@@ -8577,7 +8596,8 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
       draft = await listingDraft(draftId, session);
       const template = await buildPublishTemplateFromListingDraft(draft, session);
       template.include_category_health = true;
-      const validation = await validateListingTemplatePublishForShop(template, shop.id, session);
+      const validation = await validateListingTemplatePublishForShop(template, shop.id, session, shop, { generateMissingOfferIds: true });
+      await assertListingPublishExecution(shop);
       const blockingErrors = normalizeArray(validation.errors);
       if (blockingErrors.length) {
         const error = new Error(localizePublishMessage(validation.errors[0]) || "发布前校验未通过");
@@ -8588,7 +8608,7 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
       validation.errors = blockingErrors;
       validation.ok = true;
       const preparedMedia = preparedMediaByDraftShop[`${draftId}:${Number(shop.id)}`] || [];
-      const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.effective_images);
+      const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.publish_images || draft.effective_images);
       const sourceProductId = await resolveListingSourceProductId(template, validation.payload);
       const textVariantPolicy = normalizeShopTextVariantPolicy(textVariantPolicySource, [shop]);
       const {
@@ -8614,6 +8634,7 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
         sourceModule: "listing_draft_retry_ozon_media",
         sourceId: String(sourceProductId || draftId || "")
       });
+      await assertListingPublishExecution(shop);
       const shopPayload = ozonSellerMedia.payload;
       recordId = await preparePublishRecordForSubmit({
         sourceRecordId: Number(item.record_id || 0),
@@ -8741,7 +8762,7 @@ async function processAuthorizedListingDraftBatchPublishTask({ draftIds = [], sh
       const template = await buildPublishTemplateFromListingDraft(draft, session);
       template.include_category_health = true;
       const validationShop = await listingPublishTaskShop(publishTask, shops[0].id);
-      const validation = await validateListingTemplatePublishForShop(template, validationShop.id, session, validationShop);
+      const validation = await validateListingTemplatePublishForShop(template, validationShop.id, session, validationShop, { generateMissingOfferIds: true });
       await assertListingPublishExecution(validationShop);
       const blockingErrors = normalizeArray(validation.errors);
       if (blockingErrors.length) {
@@ -8785,7 +8806,7 @@ async function processAuthorizedListingDraftBatchPublishTask({ draftIds = [], sh
             throw Object.assign(new Error("发布任务明细归属不一致"), { status: 404 });
           }
           const preparedMedia = preparedMediaByDraftShop[`${Number(draftId)}:${Number(shop.id)}`] || [];
-          const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.effective_images);
+          const preparedPayload = applyPreparedDraftShopMedia(validation.payload, preparedMedia, draft.publish_images || draft.effective_images);
           const {
             textVariantPayload,
             watermarkedPayload,
@@ -9270,7 +9291,8 @@ async function buildPublishTemplateFromListingDraft(draft = {}, session = null) 
     )
   ), session);
   if (draft.template_payload) {
-    const editable = objectValue(draft.template_payload.editable_payload || {});
+    const editable = { ...objectValue(draft.template_payload.editable_payload || draft.template_payload.editablePayload || {}) };
+    if (!editable.variants && draft.template_payload.variants) editable.variants = draft.template_payload.variants;
     const price = objectValue(editable.price || {});
     const dimensions = objectValue(editable.dimensions || {});
     const draftSalePrice = Number(draft.sale_price || 0);
@@ -11623,15 +11645,21 @@ export async function listingDrafts(query = {}, session) {
         NULL AS draft_variant_primary_image,
         JSON_ARRAY() AS draft_variant_images_json,
         JSON_ARRAY() AS draft_template_images_json,
+        COALESCE(
+          JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[*].images'),
+          JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[*].images'),
+          JSON_EXTRACT(d.template_payload_json, '$.variants[*].images'),
+          JSON_ARRAY()
+        ) AS draft_publish_variant_images_json,
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         JSON_OBJECT(
           'editable_payload', JSON_OBJECT(
             'variants', JSON_ARRAY(JSON_OBJECT(
-              'images', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images'),
-              'images_manually_edited', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images_manually_edited'),
-              'image_edit_intent', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].image_edit_intent')
+              'images', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[0].images'), JSON_EXTRACT(d.template_payload_json, '$.variants[0].images')),
+              'images_manually_edited', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images_manually_edited'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[0].images_manually_edited'), JSON_EXTRACT(d.template_payload_json, '$.variants[0].images_manually_edited')),
+              'image_edit_intent', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].image_edit_intent'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[0].image_edit_intent'), JSON_EXTRACT(d.template_payload_json, '$.variants[0].image_edit_intent'))
             )),
-            'images', JSON_EXTRACT(d.template_payload_json, '$.editable_payload.images')
+            'images', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.images'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.images'))
           ),
           'images', JSON_EXTRACT(d.template_payload_json, '$.images')
         ) AS template_payload_json,
@@ -12014,6 +12042,15 @@ export async function listingAiVariantAssets(query = {}, session = null) {
   const tenantScope = tenantId === "admin" ? "(tenant_id = ? OR tenant_id IS NULL)" : "tenant_id = ?";
   const where = ["status <> 'deleted'", tenantScope];
   const params = [tenantId];
+  if (query.recent_days != null) {
+    if (!["number", "string"].includes(typeof query.recent_days) || !/^[1-7]$/.test(String(query.recent_days).trim())) {
+      const error = new Error("素材展示天数（recent_days）需为 1 至 7 的整数，请刷新素材库后重试");
+      error.status = 400;
+      throw error;
+    }
+    where.push("created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)");
+    params.push(Number(query.recent_days));
+  }
   const draftId = Number(query.draftId || query.draft_id || 0);
   const templateId = Number(query.templateId || query.template_id || 0);
   const resultId = cleanText(query.resultId || query.result_id || "", 128);
@@ -13805,6 +13842,20 @@ function resolveDraftEffectiveImages(templatePayload = {}, sourceImages = []) {
   const templateImages = cleanListingImageUrls(template.images);
   if (templateImages.length) return { images: templateImages, source: "draft_template" };
   return { images: cleanListingImageUrls(sourceImages), source: "draft_source_fallback" };
+}
+
+function resolveDraftPublishImages(templatePayload = {}, effectiveImages = [], projectedVariantImages = null) {
+  const effective = cleanListingImageUrls(effectiveImages);
+  if (projectedVariantImages !== null) {
+    return uniqueStringValues([...effective, ...cleanListingImageUrls(normalizeArray(projectedVariantImages).flat())]);
+  }
+  const editable = objectValue(templatePayload.editable_payload || templatePayload.editablePayload);
+  const variants = normalizeArray(editable.variants || templatePayload.variants);
+  if (!variants.length) return effective;
+  return uniqueStringValues(variants.flatMap((variant) => {
+    const images = cleanListingImageUrls(variant?.images);
+    return images.length ? images : effective;
+  }));
 }
 
 function assertAiVariantDraftHasNoTemporaryImages(payload = {}) {
@@ -17250,7 +17301,7 @@ function buildOzonImportPreviewPayload(facts = {}, template = {}) {
       const itemAttributes = mergeOzonAttributes(attrs, normalizeVariantAttributesForOzon(variant));
       const variantTags = splitTagValue(variant.tags || variant.main_tags || variant.hashtags);
       return {
-        offer_id: String(variant.offer_id || variant.sku || `NEW-OFFER-${index + 1}`).trim(),
+        offer_id: String(variant.offer_id || variant.offerId || variant.sku || `NEW-OFFER-${index + 1}`).trim(),
         name: String(variant.name || variant.title || facts.title || "").trim(),
         price: String(numberFromOzonValue(variant.price || variant.price_value || variant.priceValue || facts.price.value || facts.price.price || 0)),
         old_price: String(numberFromOzonValue(variant.old_price || facts.price.old_price || facts.price.value || 0)),
@@ -17826,9 +17877,20 @@ async function prepareSafeShopOfferIds(payload = {}, { shop = {}, sourceRecordId
   if (!next.items.length) return next;
   const shopId = Number(shop.id || shop.shop_id || 0);
   let preservedOfferId = "";
+  let preservedOffers = null;
   if (updateExisting && sourceRecordId) {
-    const current = await row("SELECT offer_id FROM listing_publish_records WHERE id = ? AND status <> 'deleted'", [Number(sourceRecordId)]);
+    const current = await row("SELECT offer_id, request_json FROM listing_publish_records WHERE id = ? AND shop_id = ? AND status <> 'deleted'", [Number(sourceRecordId), shopId]);
+    if (!current) throw Object.assign(new Error("原上架记录不存在或不属于目标店铺"), { status: 404 });
     preservedOfferId = String(current?.offer_id || "").trim();
+    const storedItems = normalizeArray(parseJson(current.request_json, {}).items);
+    if (storedItems.length > 1 || next.items.length > 1) {
+      preservedOffers = new Set(storedItems.map(item => String(item?.offer_id || "").trim()).filter(Boolean));
+      const incomingOffers = next.items.map(item => String(item?.offer_id || "").trim());
+      if (storedItems.length !== next.items.length || preservedOffers.size !== storedItems.length
+        || new Set(incomingOffers).size !== next.items.length || incomingOffers.some(offer => !preservedOffers.has(offer))) {
+        throw Object.assign(new Error("多 SKU 上架记录的货号已变化，请在原上架记录中核对每个 SKU 后重试"), { status: 409, code: "LISTING_UPDATE_SKU_IDENTITY_CHANGED" });
+      }
+    }
   }
   const usedInPayload = new Set();
   const existingConflicts = await preloadListingOfferIdConflicts(
@@ -17838,9 +17900,10 @@ async function prepareSafeShopOfferIds(payload = {}, { shop = {}, sourceRecordId
   );
   for (let index = 0; index < next.items.length; index += 1) {
     const item = next.items[index];
-    if (preservedOfferId) {
-      item.offer_id = preservedOfferId;
-      usedInPayload.add(preservedOfferId);
+    if (preservedOfferId || preservedOffers) {
+      const preserved = preservedOffers ? String(item.offer_id).trim() : preservedOfferId;
+      item.offer_id = preserved;
+      usedInPayload.add(preserved);
       continue;
     }
     const rawOfferId = String(item.offer_id || "").trim();
@@ -22381,11 +22444,13 @@ function normalizeDraftRow(row) {
     }
   }
   const effectiveMedia = resolveDraftEffectiveImages(templatePayload || {}, sourceImages);
+  const projectedVariantImages = row.draft_publish_variant_images_json === undefined ? null : parseJson(row.draft_publish_variant_images_json, []);
   return {
     ...row,
     source_urls: parseJson(row.source_urls_json, []),
     source_images: sourceImages,
     effective_images: effectiveMedia.images,
+    publish_images: resolveDraftPublishImages(templatePayload || {}, effectiveMedia.images, projectedVariantImages),
     effective_image_source: effectiveMedia.source,
     template_payload: templatePayload && Object.keys(templatePayload).length ? templatePayload : null,
     manual_facts: manualFacts,
@@ -22402,7 +22467,7 @@ function normalizeDraftOverviewResponse(row) {
   // Overview consumers use the parsed fields. Do not transmit each media set
   // again in its storage JSON alias; detail/edit responses retain the aliases.
   const { source_urls_json, source_images_json, template_payload_json,
-    manual_facts_json, ai_payload_json, shop_copies_json, ...overview } = row;
+    manual_facts_json, ai_payload_json, shop_copies_json, draft_publish_variant_images_json, ...overview } = row;
   return overview;
 }
 

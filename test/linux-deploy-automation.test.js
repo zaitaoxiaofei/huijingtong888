@@ -81,7 +81,7 @@ async function withWindowsDeployFixture(run) {
       fs.appendFileSync(process.env.OZON_DEPLOY_TEST_TRACE, JSON.stringify({ step: "guard", cwd: process.cwd() }) + "\\n");
       process.exit(Number(process.env.OZON_DEPLOY_TEST_GUARD_EXIT || 0));
     `, "utf8");
-    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
+    const execute = async ({ skipInit = false, skipMaintenance = false, skipBuild = true, manifest = false, material = false, retention = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
       await fsPromises.writeFile(tracePath, "", "utf8");
       return execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
         $ErrorActionPreference = 'Stop'
@@ -119,6 +119,7 @@ async function withWindowsDeployFixture(run) {
         if ($env:OZON_DEPLOY_TEST_ALLOW_INTERRUPTION -eq '1') { $options.AllowServiceInterruption = $true }
         if ($env:OZON_DEPLOY_TEST_MANIFEST) { $options.ReviewedIdentityManifest = $env:OZON_DEPLOY_TEST_MANIFEST }
         if ($env:OZON_DEPLOY_TEST_MATERIAL) { $options.ReviewedAiMaterialManifest = $env:OZON_DEPLOY_TEST_MATERIAL }
+        if ($env:OZON_DEPLOY_TEST_RETENTION) { $options.ReviewedAiMediaRetentionManifest = $env:OZON_DEPLOY_TEST_RETENTION }
         if ($env:OZON_DEPLOY_TEST_DRY_RUN -eq '1') { $options.DryRun = $true }
         & $env:OZON_DEPLOY_TEST_SCRIPT @options
       `], {
@@ -135,6 +136,7 @@ async function withWindowsDeployFixture(run) {
           OZON_DEPLOY_TEST_ALLOW_INTERRUPTION: allowInterruption ? "1" : "0",
           OZON_DEPLOY_TEST_MANIFEST: manifest ? manifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL: material ? materialManifestPath : "",
+          OZON_DEPLOY_TEST_RETENTION: retention ? materialManifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT: String(materialUploadExit),
           OZON_DEPLOY_TEST_ACTIVATION_EXIT: String(activationExit),
           OZON_DEPLOY_TEST_GUARD_EXIT: String(guardExit),
@@ -148,6 +150,24 @@ async function withWindowsDeployFixture(run) {
     await fsPromises.rm(fixtureDir, { recursive: true, force: true });
   }
 }
+
+test("AI media retention requires maintenance before upload and passes a private eighth manifest argument", { skip: process.platform !== "win32" }, async () => {
+  await withWindowsDeployFixture(async ({ execute, trace }) => {
+    await assert.rejects(execute({ retention:true }), /AI media retention requires an explicit offline maintenance window/);
+    assert.deepEqual(await trace(), []);
+    await execute({ retention:true, allowInterruption:true });
+    const steps=await trace();
+    const activation=steps.find(step=>step.step==='ssh' && step.arguments.at(-1).includes("bash '/tmp/ozon-erp-remote-release.sh'"));
+    assert.match(activation.arguments.at(-1), /'test-release' '1' '1' '' '' '1' '\/tmp\/ozon-erp-ai-media-retention-test-release-[a-f0-9]+\.json'$/);
+    assert.ok(steps.some(step=>step.step==='ssh' && step.arguments.at(-1).includes('umask 077') && step.arguments.at(-1).includes('ai-media-retention')));
+    assert.ok(steps.some(step=>step.step==='ssh' && step.arguments.at(-1).startsWith('rm -f -- ') && step.arguments.at(-1).includes('ai-media-retention')));
+  });
+  const apply=remote.lastIndexOf('node scripts/cleanup-ai-media-retention.mjs');
+  assert.ok(remote.indexOf('  backup_database')<apply);
+  const freeze=remote.slice(remote.lastIndexOf('if [[ -n "${reviewed_ai_media_retention_manifest:-}" ]]'),remote.indexOf('\nstart_candidate\n'));
+  assert.match(freeze,/stop_existing_candidate[\s\S]*systemctl stop ozon-erp[\s\S]*--apply --offline-maintenance/);
+  assert.match(freeze,/install -m 600/);
+});
 
 test("Windows database skip switches preserve defaults and forward all remote release arguments", { skip: process.platform !== "win32" }, async () => {
   await withWindowsDeployFixture(async ({ capturePath, execute }) => {

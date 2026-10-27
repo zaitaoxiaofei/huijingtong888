@@ -17,6 +17,11 @@ export async function materialAssets(query = {}, session) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || query.limit || 20), 1), 100);
   const clauses = [inventoryTenantSql(scope, "ma")];
   const params = [];
+  if (query.recent_days != null) {
+    if (!["number", "string"].includes(typeof query.recent_days) || !/^[1-7]$/.test(String(query.recent_days).trim())) throw statusError("素材展示天数（recent_days）需为 1 至 7 的整数，请刷新素材库后重试", 400);
+    clauses.push("ma.created_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? DAY)");
+    params.push(Number(query.recent_days));
+  }
   const status = String(query.status || "").trim();
   if (status && status !== "deleted") {
     clauses.push("status = ?");

@@ -7,7 +7,7 @@ import { build } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { chromium } from "playwright-core";
 
-test("exchange tool is lazy, read-only, theme-aware and does not retain another account's impact", { skip: process.env.RUN_TASK_BROWSER_TESTS !== "1" }, async () => {
+test("simplified exchange tool supports daily hover, keyboard, touch, themes and scoped read-only requests", { skip: process.env.RUN_TASK_BROWSER_TESTS !== "1" }, async () => {
   const output = await fs.mkdtemp(path.join(os.tmpdir(), "exchange-rate-tool-"));
   const entry = `import {createApp,h,ref,defineAsyncComponent} from 'vue';
     import ElementPlus,{ElDialog} from 'element-plus'; import 'element-plus/dist/index.css';
@@ -23,7 +23,7 @@ test("exchange tool is lazy, read-only, theme-aware and does not retain another 
   const point = (business_date, rate, archive_id) => ({ business_date, rate, rate_rub_per_cny: rate, rate_cny_per_rub: rate ? 1 / rate : null, source_date: rate ? business_date : null, archive_id });
   const payload = { timezone: "Asia/Shanghai", as_of: "2026-10-26T09:30:00Z", public: {
     range: { preset: "year", from: "2026-10-24", to: "2026-10-26" }, currency_from: "CNY", currency_to: "RUB", source: "cbr",
-    points: [point("2026-10-24", 10, 11), point("2026-10-25", null, null), point("2026-10-26", 12.5, 12)],
+    points: [point("2026-10-24", 10.123456789012, 11), point("2026-10-25", null, null), point("2026-10-26", 12.5, 12)],
     today: { ...point("2026-10-26", 12.5, 12), available: true }, latest: point("2026-10-26", 12.5, 12),
     coverage: { expected_days: 3, available_days: 2, missing_days: 1, complete: false }
   }, month_impact: {
@@ -40,7 +40,7 @@ test("exchange tool is lazy, read-only, theme-aware and does not retain another 
     const css = (await fs.readdir(path.join(output, "assets"))).find(name => name.endsWith(".css"));
     const chrome = process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     browser = await chromium.launch({ executablePath: chrome, headless: true });
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, hasTouch: true });
     page.setDefaultTimeout(15000);
     page.on("pageerror", error => errors.push(error.message));
     await page.route("http://localhost:8788/**", async route => {
@@ -52,15 +52,14 @@ test("exchange tool is lazy, read-only, theme-aware and does not retain another 
         requests.push(url.search);
         assert.equal(url.searchParams.has("tenant_id"), false);
         if (responseMode === "error") return route.fulfill({ status: 503, json: { error: "测试：汇率暂不可用，请稍后刷新" } });
+        if (responseMode === "year") {
+          const days = Array.from({ length: 365 }, (_, index) => point(new Date(Date.UTC(2025, 9, 27 + index)).toISOString().slice(0, 10), Number((10 + index / 364 * 2.5 + Math.sin(index / 364 * Math.PI * 2) * 0.12).toFixed(12)), index + 100));
+          return route.fulfill({ json: { ...payload, public: { ...payload.public, points: days, range: { preset: "year", from: "2025-10-27", to: "2026-10-26" }, coverage: { expected_days: 365, available_days: 365, missing_days: 0, complete: true } } } });
+        }
         if (responseMode === "missing") return route.fulfill({ json: { ...payload, public: { ...payload.public,
           points: [point("2026-10-26", null, null)], today: { ...point("2026-10-26", null, null), available: false, reason: "TODAY_ARCHIVE_MISSING" }, latest: null,
           coverage: { expected_days: 1, available_days: 0, missing_days: 1, complete: false }
         }, month_impact: { ...payload.month_impact, realized: { ...payload.month_impact.realized, amount_cny: null, pending_items: 1, coverage_complete: false, reasons: [{ code: "ACTUAL_SETTLEMENT_PENDING", count: 1 }] }, open: { ...payload.month_impact.open, known_rub_revenue_impact_cny: null, reasons: [{ code: "TODAY_ARCHIVE_MISSING", count: 2 }] } } } });
-        if (responseMode.startsWith("reference")) return route.fulfill({ json: { ...payload, month_impact: { ...payload.month_impact, open: {
-          ...payload.month_impact.open, estimated_sales_income_fx_cny: responseMode === "reference-unknown" ? null : -25,
-          known_rub_revenue_impact_cny: -5, reference_cny_impact_cny: -20, reference_rub_revenue: 1000,
-          reference_cny_items: 1, confirmed_rub_items: 1, eligible_items: 2, included_items: 2, pending_items: 0, coverage_complete: true, reasons: []
-        } } } });
         return route.fulfill({ json: { ...payload, month_impact: publicOnly ? null : payload.month_impact } });
       }
       const assetPath = path.resolve(output, `.${url.pathname}`);
@@ -79,57 +78,60 @@ test("exchange tool is lazy, read-only, theme-aware and does not retain another 
     assert.equal(await tool.locator("h2").count(), 0);
     assert.equal(await tool.locator(".exchange-rate-tool__line").count(), 2, "missing date breaks daily line");
     assert.equal(await tool.locator(".exchange-rate-tool__point").count(), 2);
-    assert.equal(await tool.locator(".is-negative").innerText(), "−¥16.00");
-    assert.equal(await tool.locator(".is-positive").innerText(), "+¥5.00");
-    await tool.getByText("部分订单的原币销售收入待核对", { exact: true }).waitFor();
-    await tool.locator(".el-radio-button").filter({ hasText: "近一月" }).click();
+    assert.equal(await tool.locator(".exchange-rate-tool__impact-card,.el-table").count(), 0);
+    const svg=tool.locator("svg[tabindex]");
+    await tool.locator(".exchange-rate-tool__point").first().hover();
+    await tool.getByRole("status").getByText("1 元 = 10.123456789012 卢布", {exact:true}).waitFor();
+    await svg.focus(); await svg.press("End");
+    await tool.getByRole("status").getByText("1 元 = 12.5 卢布", {exact:true}).waitFor();
+    await svg.press("Home");
+    await tool.getByRole("status").getByText("2026-10-24", {exact:true}).waitFor();
+    await svg.press("ArrowRight");
+    await tool.getByRole("status").getByText("2026-10-26", {exact:true}).waitFor();
+    await svg.press("Escape");
+    await tool.locator(".el-radio-button").filter({ hasText: "近一个月" }).click();
     await page.waitForFunction(() => document.querySelector('.exchange-rate-tool input[value="month"]')?.checked);
     await tool.getByText("1 元 = 12.5000 卢布", { exact: true }).waitFor();
     assert.equal(requests.at(-1), "?range=month");
     assert.equal(page.url(), originalUrl);
+    responseMode = "year";
+    await tool.locator(".el-radio-button").filter({ hasText: "近一年" }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".exchange-rate-tool__point").length === 365);
     for (const mode of ["light", "dark"]) {
       await page.evaluate(mode => window.applyExchangeTheme(mode), mode);
-      const color = await tool.locator(".exchange-rate-tool__impact-card > strong.is-negative").evaluate(el => ({ text: getComputedStyle(el).color, expected: getComputedStyle(el).getPropertyValue("--erp-danger-text").trim() }));
-      assert.ok(color.expected);
-      const rgbExpected = await page.evaluate(color => { const node = document.createElement('i'); node.style.color = color; document.body.append(node); const rgb = getComputedStyle(node).color; node.remove(); return rgb; }, color.expected);
-      assert.equal(color.text, rgbExpected);
+      const color = await tool.locator(".exchange-rate-tool__line").first().evaluate(el => ({text:getComputedStyle(el).stroke,expected:getComputedStyle(el).getPropertyValue("--erp-primary").trim()}));
+      const rgbExpected=await page.evaluate(color=>{const el=document.createElement('i');el.style.color=color;document.body.append(el);const value=getComputedStyle(el).color;el.remove();return value},color.expected);
+      assert.equal(color.text,rgbExpected);
       if (process.env.EXCHANGE_TOOL_SCREENSHOT_DIR) {
         await fs.mkdir(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, { recursive: true });
         await page.locator(".el-dialog__body").evaluate(el => { el.scrollTop = 0; });
         await page.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, `exchange-${mode}.png`), animations: "disabled", fullPage: true });
-        await tool.locator(".exchange-rate-tool__impact-grid").screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, `exchange-impact-${mode}.png`), animations: "disabled" });
+        await svg.focus();
+        await svg.press("End");
+        await page.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, `exchange-hover-${mode}.png`), animations: "disabled", fullPage: true });
+        await svg.press("Escape");
       }
     }
-    responseMode = "reference";
+    responseMode = "normal";
     await tool.getByRole("button", { name: "刷新", exact: true }).click();
-    const forecast = tool.locator(".exchange-rate-tool__impact-card").nth(1);
-    await forecast.getByRole("heading", { name: "待签收预计销售收入汇差（参考估算）", exact: true }).waitFor();
-    await forecast.getByText("−¥25.00", { exact: true }).waitFor();
-    await forecast.getByText("人民币参考估算 1 项 · 已确认卢布收入 1 项", { exact: true }).waitFor();
-    assert.equal(await forecast.getByText("−¥5.00", { exact: true }).count(), 0, "headline uses combined forecast, not only the confirmed RUB subset");
-    await forecast.getByText("人民币标价按下单日汇率估算卢布参考收入，再按今日汇率比较；不含费用，不是官方结算金额。", { exact: true }).waitFor();
-    if (process.env.EXCHANGE_TOOL_SCREENSHOT_DIR) await forecast.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, "exchange-reference-cny.png"), animations: "disabled" });
-    responseMode = "reference-unknown";
-    await tool.getByRole("button", { name: "刷新", exact: true }).click();
-    await forecast.locator(":scope > strong").getByText("待核对", { exact: true }).waitFor();
-    assert.equal(await forecast.getByText("−¥5.00", { exact: true }).count(), 0, "explicit unknown combined total must not fall back to a known subset");
-    responseMode = "reference";
-    await tool.getByRole("button", { name: "刷新", exact: true }).click();
-    await forecast.getByText("−¥25.00", { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelectorAll(".exchange-rate-tool__point").length === 2);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForFunction(() => document.querySelector(".exchange-rate-tool__overview").getBoundingClientRect().width < 390);
+    await page.waitForFunction(() => document.querySelector(".exchange-rate-tool__toolbar").getBoundingClientRect().width < 390);
+    await tool.locator(".exchange-rate-tool__point").first().tap();
+    await tool.getByRole("status").getByText("2026-10-24",{exact:true}).waitFor();
     assert.ok(await tool.evaluate(el => el.scrollWidth <= el.clientWidth), "mobile tool has no overall horizontal overflow");
     if (process.env.EXCHANGE_TOOL_SCREENSHOT_DIR) {
       await page.locator(".el-dialog__body").evaluate(el => { el.scrollTop = 0; });
       await page.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, "exchange-mobile.png"), animations: "disabled", fullPage: true });
     }
     await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
     await page.getByRole("dialog", { name: "汇率与汇差", exact: true }).waitFor({ state: "hidden" });
     await page.locator("#switch").click();
     publicOnly = true;
     responseMode = "normal";
     await page.locator("#open").click();
-    await tool.getByText("当前账号可查看公共参考汇率。企业汇差涉及财务数据，仅向有财务权限的成员开放。", { exact: true }).waitFor();
+    await tool.getByText("1 元 = 12.5000 卢布", { exact: true }).waitFor();
     assert.equal(await tool.locator(".exchange-rate-tool__impact-card").count(), 0);
     assert.equal(await tool.getByText("−¥16.00", { exact: true }).count(), 0);
     responseMode = "error";
@@ -139,9 +141,9 @@ test("exchange tool is lazy, read-only, theme-aware and does not retain another 
     if (process.env.EXCHANGE_TOOL_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, "exchange-error.png"), animations: "disabled", fullPage: true });
     responseMode = "missing";
     await tool.getByRole("button", { name: "刷新", exact: true }).click();
-    await tool.getByText("今日尚未存档", { exact: true }).waitFor();
+    await tool.getByText("今日汇率待更新", { exact: true }).waitFor();
     await tool.getByText("所选日期暂无可用汇率存档", { exact: true }).waitFor();
-    assert.equal(await tool.locator(".exchange-rate-tool__impact-card > strong").filter({ hasText: "待核对" }).count(), 2);
+    assert.equal(await tool.locator(".exchange-rate-tool__impact-card").count(), 0);
     assert.equal(await tool.locator(".exchange-rate-tool__point").count(), 0);
     if (process.env.EXCHANGE_TOOL_SCREENSHOT_DIR) await page.screenshot({ path: path.join(process.env.EXCHANGE_TOOL_SCREENSHOT_DIR, "exchange-missing.png"), animations: "disabled", fullPage: true });
     assert.equal(page.url(), originalUrl);

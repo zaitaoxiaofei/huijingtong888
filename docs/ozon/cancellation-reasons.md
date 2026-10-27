@@ -1,6 +1,6 @@
 # Ozon cancellation and return reasons
 
-Last updated: 2026-07-30
+Last updated: 2026-10-26
 
 ## Local handling rule
 
@@ -37,4 +37,12 @@ For an unknown reason:
 3. Add a reviewed dictionary entry when the business meaning is confirmed.
 
 AI translation may be added as a persisted review workflow, but list rendering must not call AI repeatedly or silently use an unreviewed translation to choose a loss formula.
+
+## Manual classification review
+
+The platform-only cancellation-rule page groups unknown original reasons seen within a Beijing-calendar date range (90 days by default, at most 366 days). It returns at most the latest 1000 reason groups and marks a truncated result so the reviewer can narrow the range. Ordinary enterprise owners and employees cannot access this cross-enterprise review aggregate.
+
+A reviewer selects an existing canonical reason type and saves an exact text classification in `order_cancellation_rules`. The raw Ozon reason, reason ID, order status and all order-profit records remain unchanged. Repeating the same review reuses its rule; a conflicting classification must be edited explicitly in the existing rule list. The page lists both pending and classified reasons. The rule test and review use the same raw-field matcher.
+
+This workflow records shared classification evidence only. It does not run historical profit recalculation, replace a frozen V1 formula, or silently reclassify existing order-profit outcomes. Applying new classifications to future financial formulas is a separate versioned policy decision.
 

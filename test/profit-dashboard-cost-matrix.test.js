@@ -5,8 +5,8 @@ import test from "node:test";
 const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const monthlyBillingViewSource = readFileSync(new URL("../frontend/admin/views/profit/MonthlyBillingDetailsView.vue", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const returnLossFormulaSource = serviceSource.match(/function returnLossTotalSqlMysql\(\) \{[\s\S]*?\n\}/)?.[0] || "";
-const profitRankingSource = serviceSource.match(/export async function profitRankingMysql\(query = \{\}\) \{[\s\S]*?\n\}\n\nfunction monthRangeMysql/)?.[0] || "";
-const monthlyBillingPendingSource = serviceSource.match(/async function monthlyBillingPendingByShopMysql\(from = "", to = "", shopId = ""\) \{[\s\S]*?\n\}\n\nfunction monthlyBillingOrderSettlementMysql/)?.[0] || "";
+const profitRankingSource = serviceSource.match(/export async function profitRankingMysql\(query = \{\}, tenantId = "admin"\) \{[\s\S]*?\n\}\n\nfunction monthRangeMysql/)?.[0] || "";
+const monthlyBillingPendingSource = serviceSource.match(/async function monthlyBillingPendingByShopMysql\(from = "", to = "", shopId = "", scope\) \{[\s\S]*?\n\}\n\nfunction monthlyBillingOrderSettlementMysql/)?.[0] || "";
 
 test("profit summary exposes cost and rate fields used by consolidated billing", () => {
   for (const field of [
@@ -87,7 +87,7 @@ test("monthly billing loads order details through paged endpoint", () => {
   assert.match(serviceSource, /export async function monthlyBillingOrderDetailsMysql/);
   assert.match(serviceSource, /pageSize = Math\.min\(Math\.max\(Number\(query\.pageSize \|\| query\.page_size \|\| 50\), 1\), 200\)/);
   assert.match(serviceSource, /includeOrders = \(query\.includeOrders === "1" \|\| query\.include_orders === "1"\)/);
-  assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId\)/);
+  assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId, \{ tenantScope \}\)/);
   assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId, options\)/);
 });
 

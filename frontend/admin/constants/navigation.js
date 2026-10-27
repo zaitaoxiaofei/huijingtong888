@@ -50,7 +50,9 @@ export const navigationMenus = [
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
       { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
-      { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" }
+      { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" },
+      { key: "ai-materials", label: "AI素材", route: "/ai-materials" },
+      { key: "ai-prompts", label: "AI提示词库", route: "/ai-prompts" }
     ]
   },
   {
@@ -114,6 +116,7 @@ export const navigationMenus = [
     children: [
       { key: "tools-profit-calculator", label: "利润计算器", route: "/tools/profit-calculator" },
       { key: "tools-pricing", label: "定价工具", route: "/tools/pricing" },
+      { key: "tools-packaging-fee-rule", label: "包装费规则", route: "/tools/packaging-fee-rule" },
       { key: "tools-17track", label: "17TRACK 全球物流查询", route: "https://www.17track.net/zh-cn" },
       { key: "tools-image-cropper", label: "套图拆分", route: "/tools/ecommerce-image-splitter" },
       { key: "tools-product-video-generator", label: "商品视频", route: "/tools/product-video-generator" }
@@ -125,7 +128,8 @@ export const navigationMenus = [
     icon: Setting,
     children: [
       { key: "tenant-shops", label: "店铺管理", route: "/tenant-shops" },
-      { key: "tenant-people", label: "企业人员", route: "/tenant-people" }
+      { key: "tenant-people", label: "企业人员", route: "/tenant-people" },
+      { key: "logistics-settings", label: "物流设置", route: "/logistics-settings" }
     ]
   },
   {
@@ -136,12 +140,10 @@ export const navigationMenus = [
     children: [
       { key: "platform-accounts", label: "平台人员", route: "/platform-accounts" },
       { key: "tenant-management", label: "企业与授权", route: "/tenant-management" },
-      { key: "settings", label: "基础资料", route: "/settings" },
+      { key: "order-cancellation-rules", label: "取消规则设置", route: "/order-cancellation-rules" },
       { key: "settings-scheduled-jobs", label: "自动任务", route: "/settings/scheduled-jobs" },
       { key: "settings-system-monitoring", label: "系统监控", route: "/settings/system-monitoring" },
-      { key: "settings-ai", label: "AI 设置", route: "/settings/ai" },
-      { key: "settings-prompts", label: "AI提示词库", route: "/settings/prompts" },
-      { key: "settings-materials", label: "素材库", route: "/settings/materials" }
+      { key: "settings-ai", label: "AI 设置", route: "/settings/ai" }
     ]
   }
 ];

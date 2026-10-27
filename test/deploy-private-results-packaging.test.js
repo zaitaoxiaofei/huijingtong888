@@ -16,6 +16,16 @@ async function fixture(action) {
 }
 const missing = async file => assert.equal(await fs.lstat(file).then(() => false, error => error.code === "ENOENT"), true, `${file} must not exist, even as a symlink`);
 
+test("private retention manifests and their public aliases never enter deployment archives", () => fixture(async ({ root, output }) => {
+  const privateDirectory=path.join(root,'data','ai-media-retention');
+  await fs.mkdir(privateDirectory);await fs.writeFile(path.join(privateDirectory,'plan.json'),'{"private_business_urls":true}');
+  await fs.mkdir(path.join(root,'public'));
+  await fs.symlink(privateDirectory,path.join(root,'public','retention-alias'),process.platform==='win32'?'junction':'dir');
+  await fs.cp(root,output,{recursive:true,filter:createDeployCopyFilter(root,{includeUploads:true})});
+  await missing(path.join(output,'data','ai-media-retention'));await missing(path.join(output,'public','retention-alias'));
+  assert.equal(await fs.readFile(path.join(privateDirectory,'plan.json'),'utf8'),'{"private_business_urls":true}');
+}));
+
 test("real fs.cp excludes private result directories but preserves release seed data", () => fixture(async ({ root, output }) => {
   await fs.mkdir(path.join(root, "data", "ai-credit-results", "2"), { recursive: true });
   await fs.writeFile(path.join(root, "data", "ai-credit-results", "2", "private.json"), "private");

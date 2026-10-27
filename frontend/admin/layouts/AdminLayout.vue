@@ -76,7 +76,7 @@ const canUsePricingTool = computed(() => canAccessPage(authStore.user, "/tools/p
 const canUseEnterpriseMessages = computed(() => Boolean(authStore.user?.tenant?.id && authStore.user.tenant.access_allowed !== false));
 const quickToolScope = computed(() => {
   const user = authStore.user;
-  return user ? `${user.id || user.person_id || ""}:${user.tenant?.id || ""}:${quickToolAuthScope.value}` : "signed-out";
+  return user ? `${user.id || user.person_id || ""}:${user.tenant?.id || ""}:${quickToolAuthScope.value}:${JSON.stringify([user.tenant?.role, user.platform_role, user.roles ?? user.role, user.tenant?.access_allowed])}` : "signed-out";
 });
 function resetQuickToolsForScope() {
   activationDialogVisible.value = false;
@@ -992,7 +992,7 @@ onBeforeUnmount(() => {
               <RouterView v-slot="{ Component, route: currentRoute }">
                 <!-- Closing a tab can change activeKey before its route navigation finishes. -->
                 <KeepAlive :max="6">
-                  <component :is="Component" :key="`${tabsStore.tabKeyForRoute(currentRoute)}:${tabsStore.refreshToken}${['asset-variant-center', 'ai-product-material-optimizer', 'ai-material-optimization-records'].includes(currentRoute.name) ? `:${quickToolScope}` : ''}`" />
+                  <component :is="Component" :key="`${tabsStore.tabKeyForRoute(currentRoute)}:${tabsStore.refreshToken}${(['asset-variant-center', 'ai-product-material-optimizer', 'ai-material-optimization-records', 'dashboard'].includes(currentRoute.name) || currentRoute.path.startsWith('/finance') || currentRoute.path.startsWith('/profit') || currentRoute.path === '/ai-materials') ? `:${quickToolScope}` : ''}`" />
                 </KeepAlive>
               </RouterView>
             </div>

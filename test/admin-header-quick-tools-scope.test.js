@@ -94,7 +94,7 @@ test("token-only auth scope changes synchronously close and unmount tools with t
   assert.equal(f.authStore.user, user);
   assertClosed(f.tools);
   assert.notEqual(f.tools.quickToolScope.value, key);
-  assert.equal(f.tools.quickToolScope.value, `10:1:${f.api.currentApiCacheScope()}`);
+  assert.equal(f.tools.quickToolScope.value, `10:1:${f.api.currentApiCacheScope()}:["member",null,["operator"],null]`);
   f.tools.openQuickTool("pricing");
   assert.equal(f.tools.quickToolsVisible.value, true);
   assert.equal(f.tools.quickToolsMounted.value, true);
@@ -112,6 +112,16 @@ test("changing the active enterprise closes and unmounts tools without waiting f
   assert.notEqual(f.tools.quickToolScope.value, key);
   f.tools.openQuickTool("profit");
   assert.equal(f.tools.quickToolsVisible.value, true);
+});
+
+test("changing enterprise authority with the same person, token and enterprise drops private tool instances", t => {
+  const f = fixture(t, { id: 10, roles: ["operations"], tenant: { id: 1, slug: "default", role: "owner" } });
+  f.mount();
+  f.tools.openQuickTool("exchange");
+  const key = f.tools.quickToolScope.value;
+  f.authStore.user.tenant.role = "member";
+  assert.notEqual(f.tools.quickToolScope.value, key);
+  assertClosed(f.tools);
 });
 
 test("the shared exchange tool opens without a new tab and clears synchronously on enterprise or token switch", t => {

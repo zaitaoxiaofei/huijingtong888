@@ -3560,6 +3560,24 @@ Return cancellation and return classification rules.
 - Responses:
   - `200` `application/json` -> `array<OrderCancellationRule>`
 
+#### `GET /api/order-cancellation-rules/unclassified`
+
+Platform-only review of recently seen unknown raw cancellation reasons; does not change orders or historical profit.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/order-cancellation-rules/classifications`
+
+Platform-only exact manual classification into an existing canonical reason type. Preserves raw Ozon reasons and historical profit.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `POST /api/order-cancellation-rules`
 
 Create a cancellation classification rule.

@@ -15,7 +15,7 @@ test("platform-only and enterprise-only identities receive separate navigation, 
   const platform = { platform_role: "super_admin", roles: ["admin"], tenant: null };
   const enterprise = { roles: ["admin"], tenant: { id: 42, slug: "company-a", role: "owner" } };
   const dual = { ...enterprise, platform_role: "super_admin" };
-  for (const route of ["/platform-accounts", "/tenant-management", "/settings", "/settings/scheduled-jobs", "/settings/system-monitoring", "/settings/ai", "/settings/prompts"]) {
+  for (const route of ["/platform-accounts", "/tenant-management", "/order-cancellation-rules", "/settings/scheduled-jobs", "/settings/system-monitoring", "/settings/ai", "/ai-prompts"]) {
     assert.ok(routesFor(platform).includes(route), route);
     assert.ok(!routesFor(enterprise).includes(route), route);
     assert.ok(routesFor(dual).includes(route), route);
@@ -27,23 +27,33 @@ test("platform-only and enterprise-only identities receive separate navigation, 
   }
   const group = nav.navigationMenusForRole(enterprise).find((item) => item.key === "tenant-shops");
   assert.equal(group.label, "企业店铺");
-  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/tenant-people"]);
+  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/tenant-people", "/logistics-settings"]);
   const operator = { roles: ['operations'], tenant: { id: 42, slug: 'company-a', role: 'member' } };
   assert.ok(routesFor(operator).includes('/asset-variant-center'));
   assert.ok(!routesFor(operator).includes('/tenant-people'));
   assert.ok(!routesFor(operator).includes('/tenant-shops'));
   assert.ok(nav.navigationMenusForRole(operator).find(item => item.key === 'ai-skills').children.some(item => item.route === '/asset-variant-center'));
+  assert.ok(routesFor(operator).includes('/ai-materials'));
+  assert.ok(!routesFor(operator).includes('/ai-prompts'));
+  assert.ok(routesFor(operator).includes('/tools/packaging-fee-rule'));
 });
 
-test("global settings expose only shared-rule tabs and platform roster is read-only", () => {
+test("shared settings use focused pages and legacy exchange settings no longer expose a CRUD view", () => {
   const source = read("../frontend/admin/views/settings/SettingsView.vue");
-  const tabs = vm.runInNewContext(source.match(/const sectionOptions = (\[[\s\S]*?\n\]);/)[1]);
-  assert.deepEqual([...tabs.map((item) => item.key)], ["rates", "profit", "logistics", "cancel"]);
-  assert.match(source, /const activeSection = ref\("rates"\)/);
+  assert.doesNotMatch(source, /汇率设置|最近变更|recalculate-historical|rateForm/);
+  const packaging = read("../frontend/admin/views/tools/PackagingFeeRuleView.vue");
+  assert.match(packaging, /包装费规则/);
+  assert.doesNotMatch(packaging, /最近变更|recalculate-historical/);
   const roster = read("../frontend/admin/views/settings/PlatformAccountsView.vue");
   assert.match(roster, /apiClient\.get\("\/api\/platform\/accounts"/);
   assert.doesNotMatch(roster, /apiClient\.(post|put|delete)|["'`]\/api\/people/);
   const router = read("../frontend/admin/router/index.js");
   assert.match(router, /path: "tenant-people".*component: EnterprisePersonnelPanel/);
   assert.match(router, /path: "platform-accounts".*component: PlatformAccountsView/);
+  assert.match(router, /path: "ai-materials".*component: MaterialCenterView/);
+  assert.match(router, /path: "ai-prompts".*component: AiPromptLibraryView/);
+  assert.match(router, /rates: "\/dashboard"/);
+  assert.match(router, /path: "tools\/packaging-fee-rule".*component: PackagingFeeRuleView/);
+  assert.match(router, /path: "logistics-settings".*section: "logistics"/);
+  assert.match(router, /path: "order-cancellation-rules".*section: "cancel"/);
 });

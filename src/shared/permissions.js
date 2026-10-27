@@ -11,6 +11,9 @@ export const ROLE_DEFINITIONS = [
 const validRoles = new Set(ROLE_DEFINITIONS.map(role => role.value));
 const business = ["orders.read", "orders.manage", "packing", "procurement", "procurement.request.submit", "inventory.read", "inventory.write", "operations", "analytics", "team"];
 const enterpriseAdministration = [...business, "inventory.review", "onboarding.edit", "finance"];
+const enterpriseFinancePages = new Set([
+  "/finance-center", "/finance/payroll", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
+]);
 const rolePermissions = {
   admin: enterpriseAdministration, manager: [...business, "inventory.review", "onboarding.edit"], operator: business,
   packing: ["orders.read", "packing", "procurement.request.submit", "inventory.read", "team"],
@@ -59,6 +62,8 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
+  if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";
+  if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path)) return "inventory.read";
   if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
   if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";
   if (path === "/tenant-management" || path === "/platform-accounts" || path.startsWith("/settings")) return "platform.admin";
@@ -83,12 +88,13 @@ export function needsMembershipActivation(subject) {
 export function canAccessPage(subject, path) {
   const permission = pagePermission(path);
   if (permission === "platform.admin") return isPlatformAdmin(subject);
+  if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path) && isPlatformAdmin(subject)) return true;
   if (path === "/login") return true;
   if (path === "/membership") return Boolean(subject?.tenant?.id) || isPlatformAdmin(subject);
   if (subject && typeof subject === "object" && !Array.isArray(subject) && !subject.tenant?.id) return false;
   if (needsMembershipActivation(subject) && !["/tools/pricing", "/tools/profit-calculator"].includes(path)) return false;
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
-  if (permission === "finance") return isPlatformAdmin(subject) || (path === "/finance-center" && isEnterpriseAdmin(subject));
+  if (permission === "finance") return isPlatformAdmin(subject) || (enterpriseFinancePages.has(path) && isEnterpriseAdmin(subject));
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;
   return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
 }

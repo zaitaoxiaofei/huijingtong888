@@ -8,12 +8,12 @@ const source = fs.readFileSync(
   "utf8"
 );
 
-test("basic settings sections use the shared system page structure", () => {
-  assert.match(source, /class="page-card settings-nav-card"/);
-  assert.match(source, /class="settings-tabs"/);
-  assert.equal((source.match(/class="page-card settings-list-card"/g) || []).length, 6);
-  assert.equal((source.match(/class="filter-panel"/g) || []).length, 5);
-  assert.equal((source.match(/class="erp-data-table/g) || []).length >= 6, true);
+test("separate rule pages retain shared page cards without the old multi-section settings tabs", () => {
+  assert.match(source, /class="page-stack settings-page"/);
+  assert.doesNotMatch(source, /settings-nav-card|settings-tabs/);
+  assert.equal((source.match(/class="page-card settings-list-card"/g) || []).length, 2);
+  assert.equal((source.match(/class="filter-panel"/g) || []).length, 2);
+  assert.equal((source.match(/class="erp-data-table/g) || []).length >= 2, true);
 });
 
 test("basic settings no longer renders its former bespoke workbench layout", () => {

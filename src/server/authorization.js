@@ -90,6 +90,11 @@ export function authorizeApiRequest(req, parts = []) {
     const expenseDelete = route.length === 2 && route[0] === "expenses" && /^\d+$/.test(String(route[1] || "")) && method === "DELETE";
     if (companyRead || reportRead || exportRead || collectionWrite || expenseDelete) return { allowed: true };
   }
+  if (isEnterpriseAdmin(session) && read && (
+    (parts.length === 2 && ["monthly-billing-details", "monthly-billing-orders"].includes(resource))
+    || (resource === "payroll" && parts.length === 3 && ["setup", "period"].includes(parts[2]))
+    || (resource === "profit-aftersales" && (parts.length === 2 || (parts.length === 3 && parts[2] === "details")))
+  )) return { allowed: true };
   if (resource === "shops" && session.tenant?.slug !== "default") return deny("仅企业负责人或企业管理员可以管理店铺与店铺密钥");
   if (resource === "people" && session.tenant?.slug !== "default") return deny("企业人员管理尚未完成隔离，请使用企业与授权中的成员管理");
   if (resource === "online-products") {

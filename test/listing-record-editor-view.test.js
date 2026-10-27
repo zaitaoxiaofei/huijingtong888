@@ -781,46 +781,19 @@ test("AI variant lightweight drafts sync generated main image into SKU images", 
   assert.match(listingAutomationServiceSource, /let nextEditable = syncAiVariantDraftPrimaryImages\(\{/);
 });
 
-test("material center shows AI variant generated main images", () => {
-  assert.match(materialCenterSource, /api\/listing\/ai-variant-assets\?\$\{params\.toString\(\)\}/);
+test("AI material page retains generated main-image recovery without the removed shop library", () => {
   assert.match(materialCenterSource, /field_key:\s*"main_image"/);
   assert.match(materialCenterSource, /repair_temp_ai:\s*"1"/);
-  assert.match(materialCenterSource, /const aiMainImageAssets = ref\(\[\]\)/);
-  assert.match(materialCenterSource, /const selectedMaterialRows = ref\(\[\]\)/);
-  assert.match(materialCenterSource, /const selectedShopRows = ref\(\[\]\)/);
-  assert.match(materialCenterSource, /let materialLoadSeq = 0/);
-  assert.match(materialCenterSource, /if \(activeTab\.value === "main"\) \{[\s\S]*await loadMainAssets\(common, seq\)/);
-  assert.match(materialCenterSource, /else \{[\s\S]*await loadShopAssets\(common, seq\)/);
-  assert.match(materialCenterSource, /async function loadMainAssets\(common = \{\}, seq = materialLoadSeq\)/);
-  assert.match(materialCenterSource, /async function loadShopAssets\(common = \{\}, seq = materialLoadSeq\)/);
-  assert.match(materialCenterSource, /if \(seq !== materialLoadSeq\) return/);
-  assert.doesNotMatch(materialCenterSource, /const \[materialRows, shopRows, bootstrap\] = await Promise\.all/);
-  assert.match(materialCenterSource, /void refreshAiMainImageAssets\(common\)/);
-  assert.doesNotMatch(materialCenterSource, /const aiRows = await loadAiMainImageAssets\(common\)/);
-  assert.match(materialCenterSource, /let aiMainImageRequestSeq = 0/);
-  assert.match(materialCenterSource, /if \(seq !== aiMainImageRequestSeq\) return/);
-  assert.match(materialCenterSource, /limit: String\(Math\.min\(Math\.max\(Number\(pager\.main\.pageSize \|\| 20\), 1\), 50\)\)/);
-  assert.match(materialCenterSource, /function normalizeAiMainImageAssetRows\(rows = \[\]\)/);
-  assert.match(materialCenterSource, /const url = firstDisplayableAiAssetUrl\(asset\)/);
-  assert.match(materialCenterSource, /function firstDisplayableAiAssetUrl\(asset = \{\}\)/);
-  assert.match(materialCenterSource, /function displayableAiAssetUrl\(value = ""\)/);
-  assert.match(materialCenterSource, /\/\^\\\/api\\\/ai\\\/file\\\//);
+  assert.match(materialCenterSource, /source_type: "ai_generated"/);
+  assert.match(materialCenterSource, /function normalizeAiMainImageAssetRows/);
+  assert.match(materialCenterSource, /function firstDisplayableAiAssetUrl/);
   assert.match(materialCenterSource, /sourceAiAssetId: row\.id/);
-  assert.match(materialCenterSource, /function mergeMaterialRows\(baseRows = \[\], aiRows = \[\]\)/);
-  assert.match(materialCenterSource, /materialAssets\.value = mergeMaterialRows\(baseRows, aiMainImageAssets\.value\)/);
-  assert.match(materialCenterSource, /materialAssets\.value = mergeMaterialRows\(materialAssets\.value\.filter\(\(row\) => !isAiVariantAssetRow\(row\)\), rows\)/);
-  assert.match(materialCenterSource, /function isAiVariantAssetRow\(item = \{\}\)/);
-  assert.match(materialCenterSource, /v-if="!isAiVariantAssetRow\(row\)"/);
-  assert.match(materialCenterSource, /function handleSelectionChange\(kind, rows = \[\]\)/);
-  assert.match(materialCenterSource, /@selection-change="handleSelectionChange\('shop', \$event\)"/);
-  assert.match(materialCenterSource, /@selection-change="handleSelectionChange\('main', \$event\)"/);
-  assert.match(materialCenterSource, /function deleteAiVariantAssetRows\(rows = \[\]\)/);
+  assert.match(materialCenterSource, /function mergeMaterialRows/);
+  assert.match(materialCenterSource, /requestCurrent\(materialSeq, context\)/);
+  assert.match(materialCenterSource, /signal: context\.signal/);
+  assert.match(materialCenterSource, /deleteSelectedMaterialAssets/);
   assert.match(materialCenterSource, /apiClient\.post\("\/api\/listing\/ai-variant-assets\/batch-delete", \{ ids \}\)/);
-  assert.match(materialCenterSource, /function deleteSelectedMaterialAssets\(\)/);
-  assert.match(materialCenterSource, /function deleteSelectedShopAssets\(\)/);
-  assert.match(materialCenterSource, /class="material-batch-bar"/);
-  assert.match(materialCenterSource, /\.material-batch-bar/);
-  assert.match(listingAutomationRouteSource, /POST \/api\/listing\/ai-variant-assets\/batch-delete/);
+  assert.doesNotMatch(materialCenterSource, /selectedShopRows|loadShopAssets|deleteSelectedShopAssets|delete-media-group|店铺矩阵素材/);
   assert.match(listingAutomationServiceSource, /export async function deleteListingAiVariantAssets/);
 });
 

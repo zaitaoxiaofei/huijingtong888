@@ -240,3 +240,14 @@ test("disabled global owner accounts cannot justify removing the last usable own
   await assert.rejects(f.services.updateEnterprisePersonMysql(10, { member_active: 0 }, ownerSession), { statusCode: 409 });
   assert.equal(f.calls.some(call => call.sql.startsWith("UPDATE")), false);
 });
+
+test("explicitly assigning enterprise ownership is not overridden by a packing duty and never creates platform authority", async () => {
+  const f = fixture(legacyDefaultFixture);
+  const changed = await f.services.updateEnterprisePersonMysql(20, { tenant_role: "owner", business_roles: ["packing"] }, { ...ownerSession, tenant: { ...ownerSession.tenant, slug: "default" } });
+  assert.equal(changed.tenant_role, "owner");
+  assert.deepEqual(Array.from(changed.business_roles), ["packing"]);
+  assert.equal(f.state.members[1].role, "owner");
+  assert.deepEqual(JSON.parse(f.state.members[1].business_roles_json), ["packing"]);
+  assert.equal(f.state.people[1].role, "packing");
+  assert.equal(f.state.grants.length, 0);
+});
