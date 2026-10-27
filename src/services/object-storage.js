@@ -155,17 +155,26 @@ export async function headManagedOssRetentionObject(objectKey, { env = process.e
   }
 }
 
-export async function deleteManagedOssRetentionObject(objectKey, expectedFingerprint, { env = process.env, client = null } = {}) {
+export async function deleteManagedOssRetentionObject(objectKey, expectedFingerprint, { env = process.env, client = null, reviewedVersionId = null } = {}) {
   if (!/^[a-f0-9]{64}$/.test(String(expectedFingerprint || ""))) throw new Error("Reviewed OSS fingerprint required");
   const storage = ossStorageConfig(env), key = retentionObjectKey(objectKey);
   const current = await headManagedOssRetentionObject(key, { env, client });
   if (current.missing) return { object_key: key, already_missing: true };
   if (current.fingerprint !== expectedFingerprint) throw new Error("OSS object changed since retention review");
-  if (current.version_id) throw new Error("Versioned OSS objects require a separate reviewed version-retention policy");
+  if (current.version_id && (typeof reviewedVersionId !== "string" || reviewedVersionId !== current.version_id)) throw new Error("Versioned OSS objects require a separate reviewed version-retention policy");
+  if (reviewedVersionId && reviewedVersionId !== current.version_id) throw new Error("Reviewed OSS version changed since retention review");
   // DeleteObject has no reviewed atomic ETag precondition contract here.
   // The caller must hold the separately verified, offline writer freeze.
-  await createOssClient(storage, 15000, client).delete(key);
-  return { object_key: key, deleted: true, bytes: current.size };
+  try {
+    await createOssClient(storage, 15000, client).delete(key, ...(current.version_id ? [{ versionId: reviewedVersionId }] : []));
+  } catch (error) {
+    if (current.version_id && (Number(error.status || error.statusCode) === 403 || error.code === "AccessDenied")) return {
+      object_key: key, retained: true, error_code: String(error.code || "AccessDenied"), error_status: 403,
+      reviewed_version_id: reviewedVersionId, older_versions_unenumerated: true, bytes: 0
+    };
+    throw error;
+  }
+  return { object_key: key, deleted: true, bytes: current.size, ...(current.version_id ? { reviewed_version_id: reviewedVersionId, older_versions_unenumerated: true } : {}) };
 }
 
 export async function listManagedOssRetentionObjects({ prefix = "ai-unused", limit = 100000, env = process.env, client = null } = {}) {
