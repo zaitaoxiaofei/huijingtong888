@@ -37,3 +37,11 @@ The first repair was deployed as `84b00c8`. Production verification then confirm
 - Accept this specific cursor termination only after a nonempty traversal and an additional read of the exact terminal request returns the same empty page, unchanged cursor and unchanged reported total. Preserve `reportedTotal`, actual scanned count and `paginationWarning`. Initial empty pages, missing cursors, changing terminal evidence, duplicate products and invalid schemas still fail closed.
 - For a batch mixing automatic-only and manually protected products, remove only the safe subset. Keep the protected subset, record `blockedCount` and report the remaining items as a partial result. One protected product must not prevent safe products in the same batch from being processed.
 - Do not deploy, restart production, or change production configuration for this follow-up without fresh explicit user approval.
+
+## Explicit manual removal
+
+Manual removal is a separate operator intent from automatic cleanup: an operator may explicitly select seller-added products. Resolve the current shop, activity and joined product IDs from Ozon before writing; client-supplied prices, currency, activity type and unrelated IDs are not authority. Report missing IDs separately without submitting them.
+
+When legacy reads are accepted but a legacy mutation returns the explicit unified-price refusal, refresh products through v2 before selecting the new mutation. Voucher promotions use v2 deactivate; Boosting/stock promotions use the verified Money exit limit and require `confirmSharedPrice=true` after the UI explains the possible effect on the same product's other official promotions. Do not change retail price. Automatic cleanup's cross-promotion manual protection still applies only to unattended cleanup; it must not silently defeat an explicit confirmed manual request.
+
+Return per-product confirmed and failed IDs. Only count products with an unambiguous deactivation receipt that are absent from a subsequent complete joined-list read. Active-only receipts, rejected products, unverifiable responses and failed read-back stay failed or pending; an HTTP 200 is not proof that all selected products exited. Seller-created promotion removal retains its existing separate API workflow.

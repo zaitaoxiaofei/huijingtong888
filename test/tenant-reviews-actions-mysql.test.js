@@ -10,6 +10,8 @@ test("reviews and Ozon actions authorize enterprise shops before network calls a
   const fixture = await createTenantMysqlFixture("reviews_actions");
   const originalFetch = globalThis.fetch;
   const requests = [];
+  const removedActionProducts = new Set();
+  let includeAction = false;
   let closeMysqlPool;
   try {
     fixture.useEnvironment();
@@ -28,11 +30,17 @@ test("reviews and Ozon actions authorize enterprise shops before network calls a
       const client = options.headers?.["Client-Id"];
       requests.push({ endpoint, client, body: options.body ? JSON.parse(options.body) : null });
       let response = { result: {} };
-      if (endpoint === "/v1/actions") response = { result: [] };
+      if (endpoint === "/v1/actions") response = { result: includeAction ? [{ id: 123, action_type: "STOCK_DISCOUNT" }] : [] };
+      if (endpoint === "/v1/actions/products") response = { result: { products: removedActionProducts.has(client) ? [] : [{ id: 123, add_mode: "MANUAL", action_price: 1, price: 2 }], total: removedActionProducts.has(client) ? 0 : 1, last_id: "" } };
+      if (endpoint === "/v1/actions/products/deactivate") {
+        removedActionProducts.add(client);
+        response = { result: { product_ids: [123], rejected: [] } };
+      }
+      if (endpoint === "/v3/product/info/list") response = { items: [] };
       if (endpoint === "/v1/review/list") response = { result: { reviews: [{ id: `sync-${client}`, text: `Private ${client}`, rating: 5 }], has_next: false, total: 1 } };
       if (endpoint === "/v1/review/comment/list") response = { result: { comments: [{ id: "comment", text: `Comment ${client}` }] } };
       if (endpoint === "/v1/review/comment/create") response = { result: { comment_id: "created" } };
-      if (!endpoint.startsWith("/v1/review/") && !endpoint.startsWith("/v1/actions") && !endpoint.startsWith("/v1/seller-actions")) throw new Error(`Unexpected network request: ${endpoint}`);
+      if (!endpoint.startsWith("/v1/review/") && !endpoint.startsWith("/v1/actions") && !endpoint.startsWith("/v1/seller-actions") && endpoint !== "/v3/product/info/list") throw new Error(`Unexpected network request: ${endpoint}`);
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(response), json: async () => response };
     };
     ({ closeMysqlPool } = await import("../src/mysql-pool.js"));
@@ -67,12 +75,18 @@ test("reviews and Ozon actions authorize enterprise shops before network calls a
       const before = requests.length;
       for(const id of [1,2]) for(const action of actionFunctions) await assert.rejects(action({...payload,storeId:30},{session:session(id)}),/店铺不存在/);
       assert.equal(requests.length,before);
-      for(const [id,shop]of [[1,10],[2,20],[3,30]]) {
-        const start=requests.length;
-        for(const action of actionFunctions) await action({...payload,storeId:shop},{session:session(id)});
-        assert.equal(requests.length-start,7);
-        assert.ok(requests.slice(start).every(row=>row.client===`client-${shop}`));
-      }
+      includeAction=true;
+      try {
+        for(const [id,shop]of [[1,10],[2,20],[3,30]]) {
+          const start=requests.length;
+          for(const action of actionFunctions) {
+            const beforeAction=requests.length;
+            await action({...payload,storeId:shop},{session:session(id)});
+            assert.ok(requests.length>beforeAction,"an authorized action must reach its own shop's official API");
+          }
+          assert.ok(requests.slice(start).every(row=>row.client===`client-${shop}`));
+        }
+      } finally { includeAction=false; }
     });
 
     await t.test("cleanup configuration cannot be forged or read across enterprise shops",async()=>{

@@ -306,11 +306,107 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
   }
   const productIds = uniqueProductIds(products);
   if (!productIds.length) throw statusError("No valid product_ids");
-  return ozonRequest("/v1/actions/products/deactivate", {
-    payload: { action_id: Number(body.actionId), product_ids: productIds },
-    shop,
-    signal: options.signal
+  if (products.length > ACTION_DELETE_BATCH_LIMIT || products.some(row => !Number.isSafeInteger(Number(row?.product_id ?? row?.id)) || Number(row?.product_id ?? row?.id) <= 0)) throw statusError("每次最多移除 1000 个有效商品，请检查商品编号或减少选择后重试");
+  const actionId = Number(body.actionId);
+  const catalog = await fetchCurrentOfficialActionSummaries(shop, options.signal);
+  const action = catalog.find(item => item.actionId === actionId);
+  if (!action) throw statusError("该活动已不在本店可操作活动列表，请刷新活动后重试", 404);
+  let scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+  let byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
+  const reasons = new Map();
+  let selected = productIds.filter(id => {
+    if (byId.has(id)) return true;
+    reasons.set(id, "商品已不在本店当前活动中，请刷新列表核对");
+    return false;
   });
+  const warnings = [];
+  let receipt;
+  let receiptKind = "legacy";
+  if (selected.length && shop.promotionApiMode !== "unified") {
+    try {
+      receipt = await ozonRequest("/v1/actions/products/deactivate", { payload: { action_id: actionId, product_ids: selected }, shop, signal: options.signal });
+    } catch (error) {
+      if (!isUnifiedPriceError(error)) throw error;
+      shop.promotionApiMode = "unified";
+      // Some shops still allow legacy reads but reject legacy mutations. Refresh
+      // the official Money values instead of trusting old UI prices/metadata.
+      scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+      byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
+      selected = selected.filter(id => {
+        if (byId.has(id)) return true;
+        reasons.set(id, "商品参与状态已变化，请刷新活动后核对");
+        return false;
+      });
+    }
+  }
+  if (selected.length && shop.promotionApiMode === "unified") {
+    if (action.isVoucher) {
+      receiptKind = "voucher";
+      receipt = await ozonRequest("/v2/actions/products/deactivate", { payload: { action_id: actionId, product_ids: selected.map(String) }, shop, signal: options.signal });
+    } else {
+      if (!["ELASTIC_BOOSTING", "STOCK_DISCOUNT"].includes(action.actionType)) throw statusError("该活动类型暂不支持新版移除，请在 Ozon 后台核对", 409);
+      if (body.confirmSharedPrice !== true) throw Object.assign(statusError("该活动需调整统一活动限价才能退出，可能影响同商品的其他活动。请刷新页面并确认移除提示后重试。", 409), { code: "PROMOTION_SHARED_PRICE_CONFIRMATION_REQUIRED" });
+      receiptKind = "price";
+      const updates = [];
+      for (const product_id of selected) {
+        try { updates.push({ product_id, action_price: unifiedExitPrice(byId.get(product_id)) }); }
+        catch (error) { reasons.set(product_id, error.message); }
+      }
+      selected = updates.map(row => row.product_id);
+      if (updates.length) {
+        receipt = await ozonRequest("/v1/actions/products/update", { payload: { action_id: actionId, products: updates }, shop, signal: options.signal });
+        warnings.push("本次使用统一活动限价退出方式；同商品的其他官方活动可能受影响，商品零售价未修改。");
+      }
+    }
+  }
+  const response = receiptKind === "legacy" ? receipt?.result : receipt;
+  const ackValues = receiptKind === "price" ? response?.deactivated_product_ids : response?.product_ids;
+  const active = new Set((Array.isArray(response?.active_product_ids) ? response.active_product_ids : []).map(Number));
+  const rejected = Array.isArray(response?.rejected) ? response.rejected : [];
+  for (const row of rejected) {
+    const id = Number(row.product_id ?? row.id);
+    if (selected.includes(id)) reasons.set(id, String(row.reason || "Ozon 拒绝退出该商品"));
+  }
+  for (const row of Array.isArray(response?.warnings) ? response.warnings : []) warnings.push(`商品 ${row.product_id || ""}：${row.reason || "Ozon 返回操作提示"}`);
+  const acknowledged = new Set((Array.isArray(ackValues) ? ackValues : []).map(Number));
+  const confirmed = new Set();
+  const pending = selected.filter(id => {
+    if (reasons.has(id)) return false;
+    if (!acknowledged.has(id) || active.has(id)) {
+      reasons.set(id, "Ozon 未返回明确的退出确认，请刷新列表核对");
+      return false;
+    }
+    return true;
+  });
+  let remaining = pending;
+  for (const delay of ACTION_DELETE_VERIFY_DELAYS_MS) {
+    if (!remaining.length) break;
+    await sleep(delay);
+    try {
+      const verification = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+      const present = new Set(verification.joinedProducts.map(row => Number(row.product_id ?? row.id)));
+      for (const id of remaining) if (!present.has(id)) confirmed.add(id);
+      remaining = remaining.filter(id => present.has(id));
+      if (verification.paginationWarning) warnings.push(verification.paginationWarning);
+    } catch (error) {
+      for (const id of remaining) reasons.set(id, `已收到退出回执，但复查未完成：${error.message}`);
+      break;
+    }
+  }
+  for (const id of remaining) if (!reasons.has(id)) reasons.set(id, "退出后复查仍在活动中，请稍后刷新核对");
+  const removedProductIds = productIds.filter(id => confirmed.has(id));
+  const failedProductIds = productIds.filter(id => !confirmed.has(id));
+  const failures = failedProductIds.map(product_id => ({ product_id, reason: reasons.get(product_id) || "未确认退出，请刷新列表核对" }));
+  return {
+    success: failures.length === 0,
+    count: removedProductIds.length,
+    removedProductIds,
+    failedProductIds,
+    warnings: [...new Set(warnings)],
+    apiVersion: shop.promotionApiMode === "unified" ? "v2" : "v1",
+    ...(failures.length ? { error: failures.map(row => `商品 ${row.product_id}：${row.reason}`).join("；") } : {}),
+    result: { product_ids: removedProductIds, rejected: failures }
+  };
 }
 
 export async function toggleOzonSellerActionMysql(body = {}, options = {}) {
@@ -686,6 +782,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
   let scannedCount = 0;
   let totalMismatch = false;
   const products = new Map();
+  const joinedProducts = [];
   const manualProductIds = new Set();
   const seenProductIds = new Set();
   while (pageCount < ACTION_PRODUCTS_MAX_PAGES) {
@@ -708,7 +805,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
     if (shop.promotionApiMode === "unified" && (result?.total === undefined || result.total === null || result.total === "" || !Number.isSafeInteger(Number(result.total)) || Number(result.total) < 0)) {
       throw statusError(`活动 ${actionId} 商品分页数量异常，已停止以避免漏删`, 502);
     }
-    if (!Array.isArray(result.products)) throw statusError(`活动 ${actionId} 商品响应缺少有效商品列表，已停止以避免误报清理成功`, 502);
+    if (!Array.isArray(result?.products)) throw statusError(`活动 ${actionId} 商品响应缺少有效商品列表，已停止以避免误报清理成功`, 502);
     const rows = result.products;
     pageCount += 1;
     scannedCount += rows.length;
@@ -717,6 +814,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
       const id = Number(row.product_id ?? row.id);
       if (!Number.isSafeInteger(id) || id <= 0 || seenProductIds.has(id)) throw statusError(`活动 ${actionId} 商品标识或分页重复异常，已停止以避免误退出`, 502);
       seenProductIds.add(id);
+      joinedProducts.push(row);
       if (String(row.add_mode || "").toUpperCase() === "AUTO") products.set(id, row);
       else manualProductIds.add(id);
     }
@@ -741,6 +839,7 @@ async function fetchAllJoinedActionProductIds(shop, actionId, signal) {
         pageCount,
         scannedCount,
         products: [...products.values()],
+        joinedProducts,
         manualProductIds: [...manualProductIds],
         reportedTotal: Number(result.total),
         totalMismatch,

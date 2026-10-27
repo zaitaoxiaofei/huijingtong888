@@ -105,6 +105,7 @@ const state = reactive({
   productsModalOpen: false,
   productScope: "candidates",
   selectedRowKeys: [],
+  removalResult: null,
   editValues: {},
   productPagers: {
     candidates: createEmptyProductPager(),
@@ -341,7 +342,7 @@ function getProductImage(row) {
 function getOfficialActionAddMode(row) {
   const key = String(row?.add_mode || "").trim().toUpperCase();
   if (key === "AUTO") return { label: "自动添加", type: "warning" };
-  if (key === "MANUAL") return { label: "手动添加", type: "primary" };
+  if (key === "MANUAL" || key === "SELLER") return { label: "手动添加", type: "primary" };
   return { label: key || "未知", type: "info" };
 }
 
@@ -413,6 +414,7 @@ function actionJoinText(row) {
 }
 
 function getPagerDisplayTotal(pager, totalHint) {
+  if (Number.isSafeInteger(pager?.total) && pager.total >= 0) return pager.total;
   const knownTotal = Number(totalHint);
   if (Number.isFinite(knownTotal) && knownTotal >= 0) return knownTotal;
   const pageNumbers = Object.keys(pager?.pages || {}).map(Number).filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
@@ -453,6 +455,7 @@ function resetProducts() {
   };
   state.productScope = "candidates";
   state.selectedRowKeys = [];
+  state.removalResult = null;
   state.editValues = {};
 }
 
@@ -716,6 +719,7 @@ async function fetchProductPage(scope, targetPage, basePager) {
   const nextPager = {
     current: basePager.current || 1,
     pageSize: basePager.pageSize || PRODUCT_PAGE_SIZE,
+    total: basePager.total,
     pages: { ...(basePager.pages || {}) },
     cursors: { 1: null, ...(basePager.cursors || {}) },
     pageHasNext: { ...(basePager.pageHasNext || {}) }
@@ -734,6 +738,9 @@ async function fetchProductPage(scope, targetPage, basePager) {
         : { lastId: pageNo > 1 ? nextPager.cursors[pageNo] : undefined })
     };
     const payload = await apiClient.post(scope === "joined" ? "/api/ozon/actions/products" : "/api/ozon/actions/candidates", body);
+    const rawTotal = payload?.result?.total ?? payload?.total;
+    const total = rawTotal === null || rawTotal === undefined || rawTotal === "" ? NaN : Number(rawTotal);
+    if (Number.isSafeInteger(total) && total >= 0) nextPager.total = total;
     const rows = normalizeProducts(payload);
     const nextCursor = getProductsCursor(payload);
     nextPager.pages[pageNo] = rows;
@@ -748,7 +755,7 @@ async function fetchProductPage(scope, targetPage, basePager) {
   return { pager: nextPager, fetchedRows };
 }
 
-async function loadProducts({ scope = "candidates", page = 1, loadBoth = false } = {}) {
+async function loadProducts({ scope = "candidates", page = 1, loadBoth = false, requireJoined = false } = {}) {
   if (!state.storeId || !state.selectedActionId) {
     ElMessage.warning("请先选择店铺和活动");
     return;
@@ -758,7 +765,10 @@ async function loadProducts({ scope = "candidates", page = 1, loadBoth = false }
     if (loadBoth) {
       const [candidateResult, joinedResult] = await Promise.all([
         fetchProductPage("candidates", 1, createEmptyProductPager()),
-        fetchProductPage("joined", 1, createEmptyProductPager()).catch(() => ({ pager: createEmptyProductPager(), fetchedRows: [] }))
+        fetchProductPage("joined", 1, createEmptyProductPager()).catch((error) => {
+          if (requireJoined) throw error;
+          return { pager: createEmptyProductPager(), fetchedRows: [] };
+        })
       ]);
       state.productPagers = {
         candidates: candidateResult.pager,
@@ -781,6 +791,7 @@ async function loadProducts({ scope = "candidates", page = 1, loadBoth = false }
     state.selectedRowKeys = [];
   } catch (error) {
     ElMessage.error(`拉取活动商品失败：${error.message || "unknown"}`);
+    if (requireJoined) throw error;
     if (loadBoth) resetProducts();
   } finally {
     state.productsLoading = false;
@@ -788,6 +799,7 @@ async function loadProducts({ scope = "candidates", page = 1, loadBoth = false }
 }
 
 function openProducts(row) {
+  state.removalResult = null;
   state.selectedActionId = String(getActionId(row));
   state.productsModalOpen = true;
   void loadProducts({ loadBoth: true });
@@ -909,28 +921,75 @@ async function submitSingleProduct(row) {
   }
 }
 
+function buildManualRemovalResult(payload, rows) {
+  const requestedIds = [...new Set(rows.map((row) => Number(getProductId(row))))];
+  const removedIds = Array.isArray(payload?.removedProductIds) ? [...new Set(payload.removedProductIds.map(Number))] : [];
+  const reportedFailedIds = Array.isArray(payload?.failedProductIds) ? payload.failedProductIds.map(Number) : [];
+  const count = Number(payload?.count);
+  const consistent = Number.isSafeInteger(count) && count >= 0 && count === removedIds.length
+    && removedIds.every((id) => requestedIds.includes(id) && !reportedFailedIds.includes(id));
+  const confirmedIds = consistent ? removedIds : [];
+  const failedIds = requestedIds.filter((id) => !confirmedIds.includes(id));
+  const warnings = Array.isArray(payload?.warnings) ? payload.warnings.map(String).filter(Boolean) : [];
+  if (!consistent) warnings.push("退出结果不完整，请以重新拉取的官方列表为准核对所选商品。");
+  const rejected = Array.isArray(payload?.result?.rejected)
+    ? payload.result.rejected.filter((item) => requestedIds.includes(Number(item?.product_id))).map((item) => ({ productId: Number(item.product_id), reason: String(item.reason || "尚未确认退出") }))
+    : [];
+  const type = failedIds.length ? (confirmedIds.length ? "warning" : "error") : (payload?.success === true && !warnings.length ? "success" : "warning");
+  return {
+    confirmedCount: confirmedIds.length,
+    failedCount: failedIds.length,
+    failedProductIds: failedIds,
+    error: String(payload?.error || ""),
+    warnings,
+    rejected,
+    type,
+    summary: `已确认退出 ${confirmedIds.length} 个商品，${failedIds.length} 个尚未确认退出`,
+    refreshError: ""
+  };
+}
+
 async function removeSelected() {
   const rows = visibleProducts.value.filter((row) => state.selectedRowKeys.includes(getProductKey(row)));
   if (!rows.length) {
     ElMessage.warning("请先选择商品");
     return;
   }
-  await ElMessageBox.confirm(`即将从活动「${localizeActionTitle(selectedAction.value)}」中移除 ${rows.length} 个商品，确认继续吗？`, "确认移除商品", {
+  const official = state.mode !== "seller";
+  if (official && rows.some((row) => !Number.isSafeInteger(Number(getProductId(row))) || Number(getProductId(row)) <= 0)) {
+    ElMessage.warning("所选活动商品缺少有效商品 ID，请重新拉取列表后选择。");
+    return;
+  }
+  const impact = official ? "新版统一活动限价可能影响同一商品参加的其他官方活动。本次可能调整活动限价，不修改商品零售价。" : "";
+  await ElMessageBox.confirm(`即将从活动「${localizeActionTitle(selectedAction.value)}」中移除 ${rows.length} 个商品。${impact}确认继续吗？`, "确认移除商品", {
     type: "warning",
     confirmButtonText: "移除",
     cancelButtonText: "取消",
     confirmButtonClass: "el-button--danger"
   });
   state.submitting = true;
+  state.removalResult = null;
+  let shouldRefresh = official;
   try {
     const products = rows.map((row) => ({ product_id: getProductId(row), sku: getFirstSku(row) }));
-    await apiClient.post("/api/ozon/actions/products/remove", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products });
-    ElMessage.success(`已移除 ${rows.length} 个商品`);
-    await loadProducts({ loadBoth: true });
+    const payload = await apiClient.post("/api/ozon/actions/products/remove", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products, ...(official ? { confirmSharedPrice: true } : {}) });
+    shouldRefresh = true;
+    if (official) {
+      state.removalResult = buildManualRemovalResult(payload, rows);
+      ElMessage[state.removalResult.type](state.removalResult.summary);
+    } else ElMessage.success(`已移除 ${rows.length} 个商品`);
   } catch (error) {
+    if (official) state.removalResult = buildManualRemovalResult({ success: false, count: 0, removedProductIds: [], error: error.message }, rows);
     ElMessage.error(`移除商品失败：${error.message || "unknown"}`);
   } finally {
-    state.submitting = false;
+    try {
+      if (shouldRefresh) await loadProducts({ loadBoth: true, requireJoined: official });
+    } catch (error) {
+      if (state.removalResult) state.removalResult.refreshError = `官方列表刷新失败，当前列表尚未更新：${error.message || "请稍后重新拉取"}`;
+    } finally {
+      if (official) state.productScope = "joined";
+      state.submitting = false;
+    }
   }
 }
 
@@ -1329,6 +1388,17 @@ onActivated(() => {
         </div>
 
         <p v-if="state.mode === 'official'" class="product-hint">官方活动支持单条提交，改完一行后可直接点“单条加入”或“单条更新”。</p>
+
+        <el-alert v-if="state.removalResult" :type="state.removalResult.type" :title="state.removalResult.summary" :closable="false" show-icon>
+          <p v-if="state.removalResult.refreshError">{{ state.removalResult.refreshError }}</p>
+          <details v-if="state.removalResult.failedCount || state.removalResult.error || state.removalResult.warnings.length">
+            <summary>查看未退出商品与提示</summary>
+            <p v-if="state.removalResult.failedProductIds.length">未确认退出的商品 ID：{{ state.removalResult.failedProductIds.join('、') }}</p>
+            <p v-if="state.removalResult.error">原始原因：{{ state.removalResult.error }}</p>
+            <p v-for="item in state.removalResult.rejected" :key="item.productId">商品 {{ item.productId }}：{{ item.reason }}</p>
+            <p v-for="(warning, index) in state.removalResult.warnings" :key="index">{{ warning }}</p>
+          </details>
+        </el-alert>
 
         <el-table
           v-loading="state.productsLoading"

@@ -13,6 +13,7 @@ import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from "../src/services/customer-mess
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "../src/services/customer-message-core-schema.js";
 import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-schema.js";
 import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-voucher-schema.js";
+import { SKU_ORDER_TRACKERS_SCHEMA } from "../src/services/sku-order-tracking-schema.js";
 
 const mysqlSchemaSql = `
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
@@ -32,6 +33,7 @@ ${CUSTOMER_MESSAGE_SHOP_SCHEMA};
 ${CUSTOMER_MESSAGE_TASKS_SCHEMA};
 ${AI_VEHICLE_CATALOG_SCHEMA};
 ${SUBSCRIPTION_VOUCHER_SCHEMA};
+${SKU_ORDER_TRACKERS_SCHEMA};
 CREATE TABLE IF NOT EXISTS media_migration_map (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   source_fingerprint CHAR(64) NOT NULL,

@@ -376,6 +376,10 @@ elif [[ -n "$reviewed_ai_material_manifest" ]]; then
 fi
 assert_release_interruption_policy
 plan_database_changes
+if migration_pending migrate-tenant-sku-order-trackers.mjs && [[ "$run_db_maintenance" != "1" ]]; then
+  echo "SKU order tracking requires reviewed ownership maintenance before this release can switch. Existing services were left running." >&2
+  exit 1
+fi
 install_storage_collector
 
 if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "$reviewed_ai_material_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || "$material_change_required" == "change" || -n "$pending_schema_migrations" ]]; then
@@ -433,6 +437,10 @@ done
 # IF NOT EXISTS cannot add ownership columns to legacy tables.
 install -d -o ozon-erp -g ozon-erp "$staging_dir/public"
 if [[ "$run_db_maintenance" == "1" ]]; then
+if migration_pending migrate-tenant-sku-order-trackers.mjs; then
+  (cd "$staging_dir" && node scripts/migrate-tenant-sku-order-trackers.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node scripts/migrate-tenant-sku-order-trackers.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+fi
 for tenant_migration in \
   migrate-tenant-products-ownership.mjs \
   migrate-tenant-suppliers.mjs \

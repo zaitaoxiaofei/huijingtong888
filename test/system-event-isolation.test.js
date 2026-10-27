@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { authorizeApiRequest } from "../src/server/authorization.js";
 import { tenantIsolationDecision } from "../src/server/tenant-isolation.js";
+import { SKU_ORDER_TRACKERS_SCHEMA, skuOrderTrackerSchemaState } from "../src/services/sku-order-tracking-schema.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const moduleBody = source => source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
@@ -147,10 +148,14 @@ test("both SKU producers deliver only to the matching person in their resolved e
     const broadcasts = [];
     const deliveries = [];
     const context = vm.createContext({
+      SKU_ORDER_TRACKERS_SCHEMA, skuOrderTrackerSchemaState,
       mysqlExecute: async () => ({}),
       mysqlQuery: async sql => {
-        if (sql === "SHOW COLUMNS FROM sku_order_trackers") return [{ Field: "tenant_id" }];
-        if (sql === "SHOW INDEX FROM sku_order_trackers") return ["uk_sku_order_tracker_tenant_shop_sku", "idx_sku_order_tracker_tenant_active_shop"].map(Key_name => ({ Key_name }));
+        if (sql === "SHOW COLUMNS FROM sku_order_trackers") return [{ Field: "tenant_id", Type: "bigint unsigned", Null: "NO" }];
+        if (sql === "SHOW INDEX FROM sku_order_trackers") return [
+          ["uk_sku_order_tracker_tenant_shop_sku", ["tenant_id", "shop_id", "ozon_sku"], 0],
+          ["idx_sku_order_tracker_tenant_active_shop", ["tenant_id", "active", "shop_id"], 1]
+        ].flatMap(([Key_name, columns, Non_unique]) => columns.map((Column_name, index) => ({ Key_name, Column_name, Non_unique, Seq_in_index: index + 1, Sub_part: null })));
         if (sql.startsWith("SELECT id, slug FROM tenants")) return [{ id: 42, slug: "company-a" }];
         if (sql.startsWith("SELECT id FROM shops")) return [{ id: 12 }];
         if (sql.startsWith("SELECT person_id FROM tenant_members")) return [{ person_id: 7 }];
