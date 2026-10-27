@@ -45,3 +45,11 @@ Manual removal is a separate operator intent from automatic cleanup: an operator
 When legacy reads are accepted but a legacy mutation returns the explicit unified-price refusal, refresh products through v2 before selecting the new mutation. Voucher promotions use v2 deactivate; Boosting/stock promotions use the verified Money exit limit and require `confirmSharedPrice=true` after the UI explains the possible effect on the same product's other official promotions. Do not change retail price. Automatic cleanup's cross-promotion manual protection still applies only to unattended cleanup; it must not silently defeat an explicit confirmed manual request.
 
 Return per-product confirmed and failed IDs. Only count products with an unambiguous deactivation receipt that are absent from a subsequent complete joined-list read. Active-only receipts, rejected products, unverifiable responses and failed read-back stay failed or pending; an HTTP 200 is not proof that all selected products exited. Seller-created promotion removal retains its existing separate API workflow.
+
+## Legacy listing compatibility follow-up awaiting approval
+
+Release `092abea` and the reviewed tracker-table migration were deployed after explicit user approval. Subsequent read-only production traversal showed that legacy product listing can still return HTTP 200 even when legacy removal is blocked. In two shops its reported total exceeded the rows actually exposed by its stable cursor. The v2 traversal exposed the same discrepancy, but supplied the stable empty terminal cursor that the v2 confirmation logic can verify. Legacy listing availability must not be treated as proof that legacy removal remains usable.
+
+The additional local-only fix restarts the entire v2 traversal when a legacy list ends before its declared total. A mid-traversal explicit unified-price refusal must also restart from v2 page one: no legacy cursor, product IDs, manual attribution or counters may be mixed into v2 evidence. Mode changes prevent more than one restart. V2 schema, completeness, repeated-ID and terminal-confirmation checks remain mandatory; permission errors, throttling, timeouts and server errors do not trigger a generic fallback.
+
+This follow-up is not included in deployed `092abea`. Another ECS deployment still requires fresh user approval.
