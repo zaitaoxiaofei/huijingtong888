@@ -18,7 +18,8 @@ Options:
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
-  --skip-database-maintenance  Do not run schema migrations or database maintenance
+  --skip-database-maintenance  Skip broad database maintenance (the default)
+  --run-database-maintenance   Explicitly run broad database maintenance
   --allow-service-interruption  Explicit maintenance window for reviewed legacy writer changes
   --dry-run                   Validate local inputs only; never build or connect
   -h, --help                  Show this help
@@ -79,6 +80,7 @@ reviewed_ai_media_retention_manifest=""
 skip_build=0
 skip_database_init=0
 skip_database_maintenance=0
+run_database_maintenance=0
 dry_run=0
 allow_dirty=0
 allow_service_interruption=0
@@ -103,6 +105,7 @@ while (($#)); do
     --allow-dirty) allow_dirty=1; shift ;;
     --skip-database-init) skip_database_init=1; shift ;;
     --skip-database-maintenance) skip_database_maintenance=1; shift ;;
+    --run-database-maintenance) run_database_maintenance=1; shift ;;
     --allow-service-interruption) allow_service_interruption=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -159,7 +162,9 @@ if [[ -n "$reviewed_ai_media_retention_manifest" ]]; then
 fi
 db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
-db_maintenance_flag=1
+if ((skip_database_maintenance && run_database_maintenance)); then fail "choose either run or skip database maintenance"; fi
+db_maintenance_flag=0
+((run_database_maintenance)) && db_maintenance_flag=1
 ((skip_database_maintenance)) && db_maintenance_flag=0
 activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest' '$allow_service_interruption'"
 if [[ -n "$remote_ai_media_retention_manifest" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi

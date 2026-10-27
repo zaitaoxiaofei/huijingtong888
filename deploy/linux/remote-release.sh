@@ -4,7 +4,7 @@ set -Eeuo pipefail
 archive_path="${1:-}"
 release_version="${2:-}"
 run_db_init="${3:-1}"
-run_db_maintenance="${4:-1}"
+run_db_maintenance="${4:-0}"
 reviewed_identity_manifest="${5:-}"
 reviewed_ai_material_manifest="${6:-}"
 allow_service_interruption="${7:-0}"
@@ -14,6 +14,8 @@ candidate_warmup_seconds=360
 rollback_warmup_seconds=360
 candidate_ready=0
 primary_changed=0
+pending_schema_migrations=""
+release_backup_path=""
 app_root="/opt/ozon-erp"
 releases_root="$app_root/releases"
 shared_root="$app_root/shared"
@@ -271,6 +273,27 @@ NODE
   )
 }
 
+install_storage_collector() {
+  install -d -m 755 -o root -g root /usr/local/libexec
+  install -m 755 -o root -g root "$staging_dir/deploy/linux/collect-storage-usage.py" /usr/local/libexec/ozon-erp-storage-collector.py
+  install -m 644 -o root -g root "$staging_dir/deploy/linux/ozon-erp-storage-collector.service" /etc/systemd/system/ozon-erp-storage-collector.service
+  install -m 644 -o root -g root "$staging_dir/deploy/linux/ozon-erp-storage-collector.timer" /etc/systemd/system/ozon-erp-storage-collector.timer
+  systemctl daemon-reload
+  systemctl start ozon-erp-storage-collector.service
+  systemctl enable --now ozon-erp-storage-collector.timer
+}
+
+plan_database_changes() {
+  set -a
+  source "$env_file"
+  set +a
+  pending_schema_migrations="$(cd "$staging_dir" && node scripts/plan-release-database.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock --pending-only)"
+}
+
+migration_pending() {
+  [[ $'\n'"$pending_schema_migrations"$'\n' == *$'\n'"$1"$'\n'* ]]
+}
+
 backup_database() {
   local backup_dir="$shared_root/backups/identity-releases"
   local backup_path="$backup_dir/pre-release-${release_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$$.sql.gz"
@@ -297,6 +320,10 @@ backup_database() {
       return 1
     fi
     (cd "$staging_dir" && node scripts/backup-private-ai-results.mjs --root="$private_results_root" --output="${backup_path%.sql.gz}.ai-results.jsonl.gz")
+  fi
+  release_backup_path="$backup_path"
+  if [[ "${run_db_maintenance:-0}" == "1" || -n "${reviewed_identity_manifest:-}" || -n "${reviewed_ai_material_manifest:-}" || -n "${reviewed_ai_media_retention_manifest:-}" || "${material_change_required:-ready}" == "change" ]]; then
+    (cd "$staging_dir" && node scripts/prune-release-backups.mjs --apply --pin-backup="$backup_path" --reason="reviewed-database-maintenance" --lock-fd=9)
   fi
 }
 
@@ -348,16 +375,21 @@ elif [[ -n "$reviewed_ai_material_manifest" ]]; then
   exit 1
 fi
 assert_release_interruption_policy
+plan_database_changes
+install_storage_collector
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" || -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" || -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" || -f "$staging_dir/scripts/migrate-enterprise-messages.mjs" || -f "$staging_dir/scripts/migrate-subscription-vouchers.mjs" || -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" || -f "$staging_dir/scripts/migrate-ai-credits.mjs" || -f "$staging_dir/scripts/migrate-listing-frozen-content.mjs" || -f "$staging_dir/scripts/migrate-listing-draft-list-indexes.mjs" || -f "$staging_dir/scripts/migrate-order-search-indexes.mjs" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "$reviewed_ai_material_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || "$material_change_required" == "change" || -n "$pending_schema_migrations" ]]; then
   backup_database
+fi
+if [[ -z "$release_backup_path" ]]; then
+  echo "Database preflight found no changes; skipping pre-release full backup."
 fi
 
 # Additive performance/reader/credit schemas are installed before candidate
 # readiness even when broad maintenance is skipped. These scripts do not enrol
 # an enterprise, set a price, opt in a writer or repair/delete legacy rows.
 for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs; do
-  if [[ ! -f "$staging_dir/scripts/$additive_migration" ]]; then continue; fi
+  if ! migration_pending "$additive_migration"; then continue; fi
   set -a
   source "$env_file"
   set +a
@@ -367,7 +399,7 @@ done
 
 # Order, procurement and inventory SQL depend on the new OGL evidence tables.
 # Create and verify them before any maintenance readers, even with skip enabled.
-if [[ -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" ]]; then
+if migration_pending migrate-ogl-dispatch-schema.mjs; then
   set -a
   source "$env_file"
   set +a
@@ -386,14 +418,14 @@ fi
 # These additive schemas are required by the candidate's membership and people
 # APIs, even when ordinary maintenance is skipped. Never classify people here.
 for membership_schema in migrate-enterprise-messages.mjs migrate-subscription-vouchers.mjs; do
-  if [[ ! -f "$staging_dir/scripts/$membership_schema" ]]; then
+  if ! migration_pending "$membership_schema"; then
     continue
   fi
   set -a
   source "$env_file"
   set +a
-  (cd "$staging_dir" && node "scripts/$membership_schema" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
-  (cd "$staging_dir" && node "scripts/$membership_schema" --apply --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node "scripts/$membership_schema" --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
+  (cd "$staging_dir" && node "scripts/$membership_schema" --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock)
 done
 
 # Tenant-aware order sync and inventory binding require these ownership columns.
@@ -471,9 +503,9 @@ else
 fi
 
 # Case target history requires this additive index before candidate readiness,
-# including releases that skip broad database maintenance. The backup above is
-# mandatory whenever this migration is packaged.
-if [[ -f "$staging_dir/scripts/migrate-ai-variant-draft-history-index.mjs" ]]; then
+# including releases that skip broad database maintenance. Only apply a change
+# identified by the read-only plan after the verified backup above.
+if migration_pending migrate-ai-variant-draft-history-index.mjs; then
   set -a
   source "$env_file"
   set +a
@@ -509,7 +541,7 @@ fi
 
 # This additive schema is required even when broad maintenance is disabled.
 # Baseline copying is a separate, explicit operation after the new writer is live.
-if [[ -f "$staging_dir/scripts/migrate-order-profit-calculation-versions.mjs" ]]; then
+if migration_pending migrate-order-profit-calculation-versions.mjs; then
   set -a
   source "$env_file"
   set +a
@@ -584,6 +616,11 @@ fi
 candidate_pid=""
 
 trap - ERR
+# A failed release never ages out its preceding restore points. Run retention
+# only after the new primary and candidate have both passed readiness checks.
+if ! (cd "$release_dir" && node scripts/prune-release-backups.mjs --apply --lock-fd=9); then
+  echo "Release is healthy, but backup retention refused cleanup; inspect retained backups." >&2
+fi
 release_retention_minutes=$((7 * 24 * 60))
 while IFS= read -r -d '' old_release; do
   [[ "$old_release" != "$release_dir" && "$old_release" != "$previous_target" ]] || continue

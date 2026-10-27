@@ -170,11 +170,12 @@ test("additive pilot schemas require a verified backup and execute before readin
   assert.ok(loop > source.indexOf("\n  backup_database\n"));
   assert.ok(loop < source.indexOf("\nstart_candidate\n"));
   for (const script of migrations) {
-    assert.ok(source.slice(source.indexOf("if [[ \"$run_db_maintenance\""), loop).includes(`-f \"$staging_dir/scripts/${script}\"`));
     assert.ok(source.slice(loop, source.indexOf("\ndone", loop)).includes(script));
   }
   assert.ok(loop < source.indexOf('if [[ "$run_db_maintenance" == "1" ]]; then'));
   const body = source.slice(loop, source.indexOf("\ndone", loop));
+  assert.match(body, /if ! migration_pending "\$additive_migration"; then continue; fi/);
+  assert.ok(source.indexOf("\nplan_database_changes\n") < source.indexOf("\n  backup_database\n"));
   assert.ok(body.indexOf('--database="$DB_NAME"') < body.indexOf('--apply --database="$DB_NAME"'));
   assert.match(body, /--mysql-admin-socket=\/var\/run\/mysqld\/mysqld\.sock/);
   assert.doesNotMatch(body, /recharge|configureAccount|LISTING_FROZEN_DRAFT_TENANTS|DELETE FROM/i);

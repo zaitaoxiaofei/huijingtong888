@@ -5,6 +5,8 @@ import { Refresh } from "@element-plus/icons-vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import { monitorNumber, monitorBytesText as bytesText, monitorGrowthText as growthText,
+  monitorDiskShareText as diskShareText } from "../../utils/system-monitor-values";
 
 const loading = ref(false);
 const state = reactive({ latest: null, history: [], thresholds: {} });
@@ -24,7 +26,7 @@ const storageRows = computed(() => {
     ["发布版本", item.releasesBytes],
     ["备份目录", item.backupsBytes],
     ["系统日志", item.logsBytes]
-  ].map(([name, bytes]) => ({ name, bytes: Number(bytes || 0) }));
+  ].map(([name, bytes]) => ({ name, bytes: monitorNumber(bytes) }));
 });
 
 async function loadOverview() {
@@ -37,26 +39,6 @@ async function loadOverview() {
   } finally {
     loading.value = false;
   }
-}
-
-function bytesText(value) {
-  const bytes = Number(value || 0);
-  const absolute = Math.abs(bytes);
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let index = 0;
-  let amount = absolute;
-  while (amount >= 1024 && index < units.length - 1) {
-    amount /= 1024;
-    index += 1;
-  }
-  const prefix = bytes < 0 ? "-" : "";
-  return `${prefix}${amount.toFixed(index >= 3 ? 2 : 1)} ${units[index]}`;
-}
-
-function growthText(value) {
-  const bytes = Number(value || 0);
-  if (!bytes) return "无明显增长";
-  return `${bytes > 0 ? "+" : ""}${bytesText(bytes)}`;
 }
 
 onMounted(loadOverview);
@@ -106,7 +88,7 @@ onMounted(loadOverview);
           <el-table :data="storageRows" size="small">
             <el-table-column prop="name" label="目录 / 类型" min-width="150" />
             <el-table-column label="占用" width="130"><template #default="scope">{{ bytesText(scope.row.bytes) }}</template></el-table-column>
-            <el-table-column label="占根磁盘" width="120"><template #default="scope">{{ state.latest.diskTotalBytes ? (scope.row.bytes / state.latest.diskTotalBytes * 100).toFixed(1) : "0.0" }}%</template></el-table-column>
+            <el-table-column label="占根磁盘" width="120"><template #default="scope">{{ diskShareText(scope.row.bytes, state.latest.diskTotalBytes) }}</template></el-table-column>
           </el-table>
         </el-card>
 
