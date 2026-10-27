@@ -4957,6 +4957,12 @@
   overflow-wrap: anywhere;
 }
 
+@media (max-width: 1600px) {
+  .orders-toolbar-main {
+    flex-wrap: wrap;
+  }
+}
+
 @media (max-width: 1200px) {
   .vue-orders-shell {
     height: auto;

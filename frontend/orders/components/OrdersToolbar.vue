@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from "vue";
-import { ArrowDown, Calendar, Refresh, Search } from "@element-plus/icons-vue";
+import { ArrowDown, Printer, Refresh, Search } from "@element-plus/icons-vue";
 
 const props = defineProps({
   filters: { type: Object, default: () => ({}) },
@@ -13,7 +13,8 @@ const props = defineProps({
   syncRunning: { type: Boolean, default: false },
   lastSyncText: { type: String, default: "暂无同步记录" },
   moreActions: { type: Array, default: () => [] },
-  selectedCount: { type: Number, default: 0 }
+  selectedCount: { type: Number, default: 0 },
+  pageRowCount: { type: Number, default: 0 }
 });
 
 const emit = defineEmits([
@@ -23,8 +24,9 @@ const emit = defineEmits([
   "sync-full",
   "cancel-sync",
   "more-action",
+  "print-selected",
+  "print-page",
   "open-quality-rules",
-  "reset-dates",
   "load-logistics-options"
 ]);
 
@@ -68,6 +70,10 @@ function changeLogisticsCarrier(value) {
 
 function handleCommand(command) {
   emit("more-action", command);
+}
+
+function handlePrintCommand(command) {
+  if (command === "print-selected" || command === "print-page") emit(command);
 }
 </script>
 
@@ -148,7 +154,23 @@ function handleCommand(command) {
 
           <div class="orders-toolbar-actions-main">
             <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
-            <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="Calendar" :disabled="syncRunning" @click="emit('reset-dates')">近 90 天</el-button>
+            <el-dropdown
+              class="orders-toolbar-print"
+              split-button
+              trigger="click"
+              :button-props="{ class: 'orders-toolbar-btn orders-toolbar-btn-secondary' }"
+              :disabled="syncRunning || !pageRowCount"
+              @click="emit('print-selected')"
+              @command="handlePrintCommand"
+            >
+              <el-icon class="el-icon--left"><Printer /></el-icon>批量打印
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="print-selected" :disabled="!selectedCount">打印所选</el-dropdown-item>
+                  <el-dropdown-item command="print-page" :disabled="!pageRowCount">打印整页</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
 
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
               <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">

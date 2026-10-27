@@ -30,7 +30,6 @@ import {
   prepareSplitOrder,
   prevOrderPage,
   recalculateOrderProfit,
-  resetRecentDates,
   saveOrderMark,
   saveQualityRules,
   submitOrderFilters,
@@ -137,7 +136,6 @@ const FULFILLMENT_TYPE_OPTIONS = [
 ];
 
 const MORE_ACTIONS = [
-  { value: "print-selected", label: "批量打印", requiresSelection: true },
   { value: "prepare-selected", label: "批量备货", requiresSelection: true },
   { value: "shipped-receipts", label: "批量登记实收", requiresSelection: true },
   { value: "recalculate-profit", label: "重算利润" },
@@ -1050,7 +1048,6 @@ export function useOrdersPage() {
     bulkPrepare: (orderIds = []) => runPrepareOrders(orderIds),
     openQualityRules: () => openQualityRules(),
     saveQualityRules: (payload) => saveQualityRules(payload),
-    resetRecentDates: () => resetRecentDates(),
     handleMoreAction: async (action) => {
       if (action === "recalculate-profit") return apiClient.post("/api/orders/recalculate-profits", {});
       if (action === "print-selected") return runPrintOrders(selectedIdsInCurrentRowOrder());

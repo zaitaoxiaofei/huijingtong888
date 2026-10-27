@@ -56,8 +56,8 @@ test("loading the original eight-tab preference migrates the displayed order wit
   assert.deepEqual(stored, ["all", "awaiting_packaging", "awaiting_deliver", "delivering", "delivered", "cancelled", "dispute", "unbound"]);
 });
 test("More actions keeps batch receipt preview in the requested order and leaves OGL separate", () => {
-  assert.deepEqual(array(state.MORE_ACTIONS.map(row => row.label)), ["批量打印", "批量备货", "批量登记实收", "重算利润", "质检规则"]);
-  assert.ok(state.MORE_ACTIONS.slice(0, 3).every(row => row.requiresSelection));
+  assert.deepEqual(array(state.MORE_ACTIONS.map(row => row.label)), ["批量备货", "批量登记实收", "重算利润", "质检规则"]);
+  assert.ok(state.MORE_ACTIONS.slice(0, 2).every(row => row.requiresSelection));
   const page = readFileSync(new URL("../frontend/orders/OrdersPage.vue", import.meta.url), "utf8");
   const handler = page.match(/function handleToolbarMoreAction\([^]*?\n}/)[0];
   let previews = 0;
