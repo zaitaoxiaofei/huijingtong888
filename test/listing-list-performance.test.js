@@ -60,7 +60,7 @@ test("development review can fetch linked drafts with authoritative image and pu
   assert.match(drafts, /AS publish_success_count/);
   assert.match(drafts, /const tenantScope = "CONVERT\(COALESCE\(d\.tenant_id, 'admin'\) USING utf8mb4\) COLLATE utf8mb4_unicode_ci = CONVERT\(\? USING utf8mb4\) COLLATE utf8mb4_unicode_ci"/);
   assert.match(drafts, /listing_category_templates t ON t\.id = d\.template_id AND \$\{relatedTenantScope\("t"\)\}/);
-  assert.match(drafts, /resolveMappedMediaInValue\(normalizeDraftRow\(item\)\)/);
+  assert.match(drafts, /resolveMappedMediaInValue\(assembledRows\)/);
   assert.match(source, /effective_images: effectiveMedia\.images/);
 });
 

@@ -14,6 +14,7 @@ function draftListReader() {
   const context = vm.createContext({
     listingTenantLookup,
     createListingFrozenReadScope,
+    resolveMappedMediaInValue: async values => values,
     ensureListingListReadSchema: async () => {},
     mysqlQuery: async (sql, params) => {
       assert.equal(params.length, (sql.match(/\?/g) || []).length, "every SQL placeholder must have exactly one binding");
