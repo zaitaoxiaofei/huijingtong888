@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { aiMediaRetentionFingerprint, auditAiMediaRetention, applyAiMediaRetention, createAiMediaRetentionSweep } from "../src/services/ai-media-retention.js";
+import { aiMediaRetentionFingerprint, auditAiMediaRetention, applyAiMediaRetention, createAiMediaRetentionSweep, reviewAiMediaRetentionCurrentVersions } from "../src/services/ai-media-retention.js";
 import { headManagedOssRetentionObject, deleteManagedOssRetentionObject, listManagedOssRetentionObjects } from "../src/services/object-storage.js";
-import { verifyAiMediaRetentionMaintenance } from "../scripts/cleanup-ai-media-retention.mjs";
+import { verifyAiMediaRetentionMaintenance, runAiMediaRetentionCli } from "../scripts/cleanup-ai-media-retention.mjs";
 
 const now = new Date("2026-10-26T12:00:00Z"), old = "2026-10-01T00:00:00.000Z";
 const storage = { bucket: "fixture", region: "oss-cn-test", publicBaseUrl: "https://media.fixture.invalid" };
@@ -325,6 +325,68 @@ test("composite tenant ids use complete fallback pages and never skip another en
 });
 
 const ossEnv = { OSS_ENABLED: "true", OSS_REGION: "oss-cn-test", OSS_BUCKET: "fixture", OSS_ACCESS_KEY_ID: "test", OSS_ACCESS_KEY_SECRET: "test" };
+test("version review enriches a complete plan without changing its original checksum or rescanning business tables", async () => {
+  for (const version of ["actual-version-one", "null"]) {
+    const f = fixture(), head = await f.dependencies.headObject(key("1"));
+    const { fingerprint, ...value } = head;
+    value.version_id = version; f.heads.set(key("1"), { ...value, fingerprint: aiMediaRetentionFingerprint(value) });
+    const original = await auditAiMediaRetention(f.dependencies), before = JSON.stringify(original);
+    assert.equal(original.objects.length, 0);
+    const count = f.referenceQueries.length;
+    const reviewed = await reviewAiMediaRetentionCurrentVersions({ ...f.dependencies, manifest: original });
+    assert.equal(f.referenceQueries.length, count);
+    assert.equal(JSON.stringify(original), before);
+    assert.equal(reviewed.objects[0].reviewed_version_id, version);
+    assert.equal(reviewed.objects[0].version_review_fingerprint, reviewed.objects[0].head.fingerprint);
+    assert.equal(reviewed.version_review.source_manifest_sha256, original.manifest_sha256);
+    assert.notEqual(reviewed.manifest_sha256, original.manifest_sha256);
+    const direct = await auditAiMediaRetention({ ...f.dependencies, reviewCurrentVersions: true });
+    assert.equal(direct.objects[0].reviewed_version_id, version);
+    await assert.rejects(reviewAiMediaRetentionCurrentVersions({ ...f.dependencies, manifest: { ...original, cutoff: now.toISOString() } }), /checksummed/);
+  }
+});
+
+test("an explicitly reviewed version is deleted precisely and older versions remain outside the reclaim claim", async () => {
+  const calls = [];
+  const client = { head: async () => ({ res: { headers: { "content-length": "123", etag: '"etag-1"', "last-modified": "Thu, 01 Oct 2026 00:00:00 GMT", "x-oss-version-id": "actual-version-one" } } }),
+    delete: async (...args) => calls.push(args) };
+  const head = await headManagedOssRetentionObject(key("1"), { env: ossEnv, client });
+  await assert.rejects(deleteManagedOssRetentionObject(key("1"), head.fingerprint, { env: ossEnv, client }), /Versioned/);
+  const result = await deleteManagedOssRetentionObject(key("1"), head.fingerprint, { env: ossEnv, client, reviewedVersionId: "actual-version-one" });
+  assert.deepEqual(calls, [[key("1"), { versionId: "actual-version-one" }]]);
+  assert.equal(result.bytes, 123); assert.equal(result.older_versions_unenumerated, true);
+  assert.equal(result.reviewed_version_id, "actual-version-one");
+});
+
+test("DeleteObjectVersion denial retains the object, records the error, and never counts reclaimed bytes", async () => {
+  const client = { head: async () => ({ res: { headers: { "content-length": "123", etag: '"etag-1"', "last-modified": "Thu, 01 Oct 2026 00:00:00 GMT", "x-oss-version-id": "actual-version-one" } } }),
+    delete: async () => { throw Object.assign(new Error("private OSS response"), { status: 403, code: "AccessDenied" }); } };
+  const f = fixture();
+  const dependencies = { ...f.dependencies, headObject: objectKey => headManagedOssRetentionObject(objectKey, { env: ossEnv, client }),
+    deleteObject: (objectKey, fingerprint, review) => deleteManagedOssRetentionObject(objectKey, fingerprint, { env: ossEnv, client, ...review }) };
+  const manifest = await auditAiMediaRetention({ ...dependencies, reviewCurrentVersions: true });
+  const result = await applyAiMediaRetention({ ...dependencies, manifest, deleteObjects: true });
+  assert.equal(result.objects_deleted, 0); assert.equal(result.reclaimed_bytes, 0);
+  assert.equal(result.objects[0].retained, true); assert.equal(result.objects[0].error_code, "AccessDenied");
+  assert.equal(result.objects[0].older_versions_unenumerated, true);
+  assert.ok(!JSON.stringify(result).includes("private OSS response"));
+  const replay = await applyAiMediaRetention({ ...dependencies, manifest, deleteObjects: true });
+  assert.equal(replay.objects_deleted, 0); assert.equal(replay.reclaimed_bytes, 0);
+});
+
+test("a changed reviewed version is retained and version-review CLI flags cannot authorize apply", async () => {
+  const f = fixture(), head = await f.dependencies.headObject(key("1"));
+  const { fingerprint, ...first } = head; first.version_id = "version-one";
+  f.heads.set(key("1"), { ...first, fingerprint: aiMediaRetentionFingerprint(first) });
+  const manifest = await auditAiMediaRetention({ ...f.dependencies, reviewCurrentVersions: true });
+  const second = { ...first, version_id: "version-two" };
+  f.heads.set(key("1"), { ...second, fingerprint: aiMediaRetentionFingerprint(second) });
+  const result = await applyAiMediaRetention({ ...f.dependencies, manifest, deleteObjects: true });
+  assert.equal(result.objects_deleted, 0); assert.equal(f.removed.length, 0);
+  assert.deepEqual(result.objects[0].reasons, ["oss_object_changed"]);
+  await assert.rejects(runAiMediaRetentionCli(["--database=fixture_only", "--mysql-admin-socket=/tmp/test-only.sock", "--manifest=/tmp/plan.json", "--apply", "--review-current-versions"]), /preview-only/);
+});
+
 test("OSS delete helpers reject forbidden namespaces and changed objects, preserving version and ETag evidence", async () => {
   const calls = [];
   const client = { head: async () => ({ res: { headers: { "content-length": "123", etag: '"etag-1"', "last-modified": "Thu, 01 Oct 2026 00:00:00 GMT", "x-oss-version-id": "version-one" } } }),

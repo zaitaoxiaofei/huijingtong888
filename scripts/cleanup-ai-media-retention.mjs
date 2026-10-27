@@ -11,21 +11,22 @@ const execFileAsync = promisify(execFile);
 function optionsFromArgs(args) {
   const options = new Map();
   for (const argument of args) {
-    const match = /^--(database|mysql-admin-socket|output|manifest|prior-manifest-dir|limit|max-scan-rows|apply|offline-maintenance)(?:=(.*))?$/.exec(argument);
-    if (!match || options.has(match[1]) || (["apply", "offline-maintenance"].includes(match[1]) ? match[2] !== undefined : !match[2])) throw new Error("Unknown, duplicate or incomplete retention option");
+    const match = /^--(database|mysql-admin-socket|output|manifest|prior-manifest-dir|limit|max-scan-rows|apply|offline-maintenance|review-current-versions)(?:=(.*))?$/.exec(argument);
+    if (!match || options.has(match[1]) || (["apply", "offline-maintenance", "review-current-versions"].includes(match[1]) ? match[2] !== undefined : !match[2])) throw new Error("Unknown, duplicate or incomplete retention option");
     options.set(match[1], match[2] ?? true);
   }
   const database = options.get("database"), socketPath = options.get("mysql-admin-socket");
   if (!/^[A-Za-z0-9_]{1,64}$/.test(database || "") || typeof socketPath !== "string"
     || !(socketPath.startsWith("/") || socketPath.startsWith("\\\\.\\pipe\\"))) throw new Error("Explicit database and local administrator MySQL socket required");
   const apply = options.has("apply"), offline = options.has("offline-maintenance");
+  if (apply && options.has("review-current-versions")) throw new Error("Current-version review is preview-only; apply consumes the checksummed review in the manifest");
   const file = options.get(apply ? "manifest" : "output");
   if (!path.isAbsolute(file || "") || options.has(apply ? "output" : "manifest") || offline && !apply) throw new Error("An absolute output path for preview or manifest path for apply is required");
   const limit = Number(options.get("limit") || 200), maxScanRows = Number(options.get("max-scan-rows") || 2000000);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25000 || !Number.isSafeInteger(maxScanRows) || maxScanRows < 1 || maxScanRows > 2000000) throw new Error("Invalid retention scan bounds");
   const priorDir = options.get("prior-manifest-dir");
   if (priorDir && !path.isAbsolute(priorDir)) throw new Error("Prior retention queue directory must be absolute");
-  return { database, socketPath, file, apply, offline, limit, maxScanRows, priorDir };
+  return { database, socketPath, file, apply, offline, limit, maxScanRows, priorDir, reviewCurrentVersions: options.has("review-current-versions") };
 }
 async function privateWrite(file, value) {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -84,7 +85,7 @@ export async function runAiMediaRetentionCli(args) {
       }
       const objects = storage.enabled ? await listManagedOssRetentionObjects({ prefix: "ai-unused" }) : [];
       const manifest = await auditAiMediaRetention({ query, storage, objects, priorManifests,
-        headObject: storage.enabled ? headManagedOssRetentionObject : null, limit: options.limit, maxScanRows: options.maxScanRows });
+        headObject: storage.enabled ? headManagedOssRetentionObject : null, limit: options.limit, maxScanRows: options.maxScanRows, reviewCurrentVersions: options.reviewCurrentVersions });
       await privateWrite(options.file, manifest);
       return { mode: "read_only_preview", manifest: options.file, manifest_sha256: manifest.manifest_sha256, complete: manifest.scan.complete,
         candidate_rows: manifest.rows.length, candidate_objects: manifest.objects.length, candidate_bytes: manifest.objects.reduce((sum, item) => sum + item.head.size, 0),
@@ -106,7 +107,7 @@ export async function runAiMediaRetentionCli(args) {
     await privateWrite(resultFile, result);
     return { mode: options.offline ? "offline_physical_gc" : "database_indexes_only", rows_deleted: result.rows_deleted, objects_deleted: result.objects_deleted,
       reclaimed_bytes: result.reclaimed_bytes, retained_rows: result.rows.filter(item => item.retained || item.status === "row_changed").length,
-      retained_objects: result.objects.filter(item => item.retained).length, evidence_file: evidenceFile, result_file: resultFile };
+      retained_objects: result.objects.filter(item => item.retained).length, older_versions_unenumerated: result.objects.some(item => item.older_versions_unenumerated), evidence_file: evidenceFile, result_file: resultFile };
   } finally { await connection.end(); }
 }
 

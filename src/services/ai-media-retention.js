@@ -386,7 +386,7 @@ function rowReasons(item, scan, storage, defaultId) {
   return [...new Set(reasons)];
 }
 
-export async function auditAiMediaRetention({ query, storage = {}, headObject = null, objects = [], priorManifests = [], afterIds = {}, now = new Date(), limit = 200, maxScanRows = 500000 } = {}) {
+export async function auditAiMediaRetention({ query, storage = {}, headObject = null, objects = [], priorManifests = [], afterIds = {}, now = new Date(), limit = 200, maxScanRows = 500000, reviewCurrentVersions = false } = {}) {
   if (typeof query !== "function") throw fail("Explicit database query required");
   const options = dateOptions({ now, limit, maxScanRows }), database = await identity(query), { tables, uniqueIdTables, primaryKeys } = await schema(query);
   const { rows: candidates, cursors } = await loadCandidates(query, tables, { ...options, afterIds });
@@ -449,17 +449,48 @@ export async function auditAiMediaRetention({ query, storage = {}, headObject = 
     if (!headObject) { keptObjects.push({ ...object, reasons: ["physical_gc_not_requested"] }); continue; }
     const head = await headObject(object.object_key);
     if (head?.missing) { keptObjects.push({ ...object, reasons: ["object_already_missing"] }); continue; }
-    if (head?.version_id) { keptObjects.push({ ...object, reasons: ["versioned_object_not_reviewed"] }); continue; }
+    if (head?.version_id && reviewCurrentVersions !== true) { keptObjects.push({ ...object, reasons: ["versioned_object_not_reviewed"] }); continue; }
     if (!head?.fingerprint || !/^[a-f0-9]{64}$/.test(head.fingerprint) || timestamp(head.last_modified) >= options.cutoff || !Number.isFinite(timestamp(head.last_modified))) {
       keptObjects.push({ ...object, reasons: ["object_recent_or_head_unverified"] }); continue;
     }
-    objectRows.push({ ...object, head: clone(head) });
+    objectRows.push({ ...object, head: clone(head), ...(head.version_id ? { reviewed_version_id: head.version_id, version_review_fingerprint: head.fingerprint, older_versions_unenumerated: true } : {}) });
   } }));
   objectRows.sort((a, b) => a.object_key.localeCompare(b.object_key));
   const manifest = { format: AI_MEDIA_RETENTION_FORMAT, database, created_at: new Date(options.now).toISOString(), cutoff: new Date(options.cutoff).toISOString(), retention_days: AI_MEDIA_RETENTION_DAYS,
     max_scan_rows: maxScanRows, next_after_ids: cursors, storage: { bucket: storage.bucket || "", region: storage.region || "", publicBaseUrl: storage.publicBaseUrl || "" }, rows, objects: objectRows,
     scan: { complete: scan.complete, scanned_rows: scan.scanned, warnings: scan.warnings.slice(0, 50), missing_roots: scan.missing, blockers: scan.blockers, large_rows: scan.largeRows }, kept, kept_objects: keptObjects };
   return { ...manifest, manifest_sha256: aiMediaRetentionFingerprint(manifest) };
+}
+
+// Enrich a previously completed read-only plan without repeating its full scan.
+// Applying the new plan still repeats all live reference checks under freeze.
+export async function reviewAiMediaRetentionCurrentVersions({ query, manifest, storage = {}, headObject, now = new Date() } = {}) {
+  const { manifest_sha256, ...body } = manifest || {};
+  if (typeof query !== "function" || typeof headObject !== "function" || body.format !== AI_MEDIA_RETENTION_FORMAT || !body.scan?.complete
+    || aiMediaRetentionFingerprint(body) !== manifest_sha256 || body.retention_days !== AI_MEDIA_RETENTION_DAYS) throw fail("A complete checksummed retention plan is required for version review");
+  if (timestamp(now) < timestamp(body.created_at) || timestamp(now) - timestamp(body.created_at) > 24 * 3600000) throw fail("Retention manifest is stale");
+  const actual = await identity(query);
+  if (aiMediaRetentionFingerprint(actual) !== aiMediaRetentionFingerprint(body.database) || body.storage?.bucket !== (storage.bucket || "")
+    || body.storage?.region !== (storage.region || "") || body.storage?.publicBaseUrl !== (storage.publicBaseUrl || "")) throw fail("Version review database or storage does not match the original plan");
+  const cutoff = timestamp(body.cutoff);
+  if (!Number.isFinite(cutoff) || cutoff > timestamp(body.created_at) - AI_MEDIA_RETENTION_DAYS * 86400000) throw fail("Retention cutoff is not seven days old");
+  const next = clone(body), kept = [], promoted = [], seen = new Set((next.objects || []).map(item => item.object_key));
+  for (const item of next.kept_objects || []) {
+    if (item.reasons?.length !== 1 || item.reasons[0] !== "versioned_object_not_reviewed") { kept.push(item); continue; }
+    if (!deletableKey(item.object_key) || !["reviewed_ai_index", "temporary_ai_namespace"].includes(item.origin) || seen.has(item.object_key)) throw fail("Unreviewed or duplicated version object provenance");
+    const head = await headObject(item.object_key);
+    if (!head?.version_id || typeof head.version_id !== "string" || !/^[a-f0-9]{64}$/.test(head.fingerprint || "")
+      || !Number.isSafeInteger(head.size) || head.size < 0 || !Number.isFinite(timestamp(head.last_modified)) || timestamp(head.last_modified) >= cutoff) {
+      kept.push({ ...item, reasons: ["current_version_recent_or_unverified"] }); continue;
+    }
+    const { reasons, ...object } = item;
+    promoted.push({ ...object, head: clone(head), reviewed_version_id: head.version_id, version_review_fingerprint: head.fingerprint, older_versions_unenumerated: true });
+    seen.add(item.object_key);
+  }
+  next.objects.push(...promoted); next.objects.sort((a, b) => a.object_key.localeCompare(b.object_key));
+  next.kept_objects = kept;
+  next.version_review = { policy: "exact_current_version_only", source_manifest_sha256: manifest_sha256, reviewed_at: new Date(timestamp(now)).toISOString(), older_versions_unenumerated: true };
+  return { ...next, manifest_sha256: aiMediaRetentionFingerprint(next) };
 }
 
 export async function applyAiMediaRetention({ query, transaction, manifest, headObject = null, deleteObject = null, maintenance = null, deleteObjects = false, now = new Date() } = {}) {
@@ -480,7 +511,8 @@ export async function applyAiMediaRetention({ query, transaction, manifest, head
   const targets = scanTargets(manifest.rows, manifest.objects, manifest.storage);
   const scan = await scanReferences(query, tables, { excludeRows: selected, targets, uniqueIdTables, primaryKeys, cutoff, maxScanRows: manifest.max_scan_rows, storage: manifest.storage, defaultId: actual.default_tenant_id, ignoreExpiredWorkIndexes: true });
   if (!scan.complete) throw fail("Current reference scan is incomplete");
-  const result = { format: AI_MEDIA_RETENTION_FORMAT, manifest_sha256, rows_deleted: 0, objects_deleted: 0, reclaimed_bytes: 0, rows: [], objects: [], physical_gc: deleteObjects ? "offline" : "not_requested" };
+  const result = { format: AI_MEDIA_RETENTION_FORMAT, manifest_sha256, rows_deleted: 0, objects_deleted: 0, reclaimed_bytes: 0, rows: [], objects: [],
+    older_versions_unenumerated: manifest.objects.some(object => Boolean(object.reviewed_version_id)), physical_gc: deleteObjects ? "offline" : "not_requested" };
   for (const item of manifest.rows) {
     if (!Object.hasOwn(AI_MEDIA_RETENTION_SOURCES, item.table) || !/^[1-9][0-9]*$/.test(item.id) || !candidate(item.row, item.table, cutoff)
       || !/^[a-f0-9]{64}$/.test(item.row_sha256) || aiMediaRetentionFingerprint(item.row) !== (item.projection_sha256 || item.row_sha256)) throw fail("Unreviewed candidate row");
@@ -518,7 +550,10 @@ export async function applyAiMediaRetention({ query, transaction, manifest, head
       const head = await headObject(object.object_key);
       if (head.missing) { result.objects.push({ object_key: object.object_key, already_missing: true }); continue; }
       if (head.fingerprint !== object.head.fingerprint || timestamp(head.last_modified) >= cutoff) { result.objects.push({ object_key: object.object_key, retained: true, reasons: ["oss_object_changed"] }); continue; }
-      const removed = await deleteObject(object.object_key, object.head.fingerprint);
+      if (head.version_id && (object.reviewed_version_id !== head.version_id || object.version_review_fingerprint !== head.fingerprint)) {
+        result.objects.push({ object_key: object.object_key, retained: true, reasons: ["versioned_object_not_reviewed"] }); continue;
+      }
+      const removed = await deleteObject(object.object_key, object.head.fingerprint, { reviewedVersionId: object.reviewed_version_id || null });
       if (removed.deleted) { result.objects_deleted++; result.reclaimed_bytes += Number(removed.bytes || head.size || 0); }
       result.objects.push(removed);
       } catch (error) { failure ||= error; }

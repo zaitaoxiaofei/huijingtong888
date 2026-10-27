@@ -53,7 +53,15 @@ node scripts/cleanup-ai-media-retention.mjs \
 
 CLI 只允许本机 Linux 维护环境，检查其他 Node/tsx 应用与 ERP Python worker 进程、目标数据库其他连接，产生绑定该清单的私有维护证据。PM2 的空闲守护进程可以存在。每个删除操作前再次检查；写入冻结无法证明就停止，不用“已停止某一个端口”代替全部 writer 停写。
 
-数据库索引处理完后，再做一次不排除剩余索引的全企业引用扫描，逐对象复核 key、bucket、长度、ETag、最后修改时间和版本信息。对象变新或有引用则保留；任意非空版本号（包括版本暂停桶中的字符串 `null`）都需要另外审阅版本保留策略，本工具不删除。DeleteObject 不依赖未经官方确认的 If-Match 原子比较语义；安全边界是全部 writer 已停写和删除前再次 HEAD 核验。删除并发上限 6，head 并发上限 8。只允许 `ai-unused/` 与来源已确认的 `listing-media/`；`product-media/collector-media/video-source/database-archives` 和任意其他前缀均不能物理删除。
+数据库索引处理完后，再做一次不排除剩余索引的全企业引用扫描，逐对象复核 key、bucket、长度、ETag、最后修改时间和版本信息。对象变新或有引用则保留；默认保留任意非空版本号（包括版本暂停桶中的字符串 `null`）。DeleteObject 不依赖未经官方确认的 If-Match 原子比较语义；安全边界是全部 writer 已停写和删除前再次 HEAD 核验。删除并发上限 6，head 并发上限 8。只允许 `ai-unused/` 与来源已确认的 `listing-media/`；`product-media/collector-media/video-source/database-archives` 和任意其他前缀均不能物理删除。
+
+已明确批准回收当前版本时，预览可添加 `--review-current-versions`。仅对无业务引用、HEAD 指纹完整且最后修改超过七天的对象，清单记录 `reviewed_version_id` 与 `version_review_fingerprint`；apply 只能从该已校验清单读取授权，不接受命令行临时放宽。删除时再次核对 HEAD 指纹及确切版本 ID，调用 `delete(key, { versionId: reviewedId })`，只删除这一版。版本变更或没有显式审阅时保留。
+
+完整旧清单也可交给 `reviewAiMediaRetentionCurrentVersions({ query, manifest, storage, headObject })` 生成新清单：原文件和原 SHA 不变，新清单验证同库、同 OSS、24 小时有效期，仅补审原先唯一因版本策略保留的对象；apply 仍重新完整核查引用。新清单包含来源 SHA 和重新读取的 HEAD 证据，不能省略维护停写。
+
+成功的精确版本删除仅累计该版的已核实字节量，并标记 `older_versions_unenumerated=true`。未枚举的旧版本继续保留，可能成为当前版本，因此不能声称整个 key、全部历史版本或整桶已清空。`DeleteObjectVersion` 返回 403 时记录 `retained/error_code`、回收字节计零，保留可重放清单，继续服务部署；此时旧工作索引可能已按清单删除，不能把索引删除数量当作 OSS 回收成功。其他结构或读写异常仍中止执行。
+
+依据：[阿里云 DeleteObject 官方契约](https://www.alibabacloud.com/help/en/oss/developer-reference/deleteobject)与 [Node.js SDK 精确版本删除](https://www.alibabacloud.com/help/en/oss/developer-reference/delete-objects-15)。未指定版本会产生删除标记；指定版本才永久删除该版本。工具不修改 Bucket 版本设置。
 
 ## 自动任务契约
 
