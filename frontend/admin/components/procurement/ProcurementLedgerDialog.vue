@@ -9,6 +9,11 @@ import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../.
 const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
 const emit = defineEmits(['update:modelValue', 'saved']);
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
+const directStocktake = computed(() => props.initialAction === 'stocktake' && props.stocktakeEnabled);
+const stockFormVisible = computed({
+  get: () => directStocktake.value ? visible.value : formVisible.value,
+  set: value => { if (directStocktake.value) visible.value = value; else formVisible.value = value; }
+});
 const ledgerBase = computed(() => props.inventoryMode ? '/api/inventory/ledger' : '/api/procurement/ledger');
 const loading = ref(false), saving = ref(false), searching = ref(false);
 const productId = ref(0), products = ref([]), targetProducts = ref([]), data = ref(null), target = ref(null);
@@ -84,14 +89,17 @@ const purchaseRows = computed(() => [...(data.value?.purchases || [])]
   .map(row => purchaseUsage.value.get(Number(row.id)) || row)
   .filter(row => purchaseFilter.value !== 'incoming' || Number(row.pending_quantity) > 0)
   .sort((a, b) => String(b.purchased_at || '').localeCompare(String(a.purchased_at || '')) || Number(b.id) - Number(a.id)));
+const negativeBookStock = computed(() => Number(data.value?.physical_estimate || 0) < 0);
 const stocktakeTargetPhysical = computed(() => {
   if (form.stocktake_type === 'physical' && form.counted_quantity != null) return Number(form.counted_quantity);
-  if (form.stocktake_type !== 'available' || form.available_quantity == null) return null;
+  if (form.stocktake_type !== 'available' || form.available_quantity == null || negativeBookStock.value) return null;
   const occupied = Number(data.value?.open_order_demand || 0) + Number(data.value?.fbp_reserved || 0);
   return Number(form.available_quantity) === 0
     ? Math.min(Number(data.value?.physical_estimate || 0), occupied)
     : occupied + Number(form.available_quantity);
 });
+const stocktakeTargetAvailable = computed(() => stocktakeTargetPhysical.value == null ? null : Math.max(0,
+  stocktakeTargetPhysical.value - Number(data.value?.open_order_demand || 0) - Number(data.value?.fbp_reserved || 0)));
 const countDelta = computed(() => stocktakeTargetPhysical.value == null ? null : stocktakeTargetPhysical.value - Number(data.value?.physical_estimate || 0));
 const countReasons = computed(() => inventoryAdjustmentReasons.filter(reason => reason.direction === 'any'
   || (reason.direction === 'decrease' && countDelta.value < 0)
@@ -192,13 +200,13 @@ async function load(id = productId.value) {
   preview.value = null;
   formVisible.value = false;
   loadError.value = '';
-  if (!id) { loading.value = false; return; }
+  if (!id) { loading.value = false; if (directStocktake.value) loadError.value = '未找到库存商品，请先绑定实际库存商品后再更新库存。'; return; }
   loading.value = true;
   try {
     const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}`, { noCache: true });
     if (version === loadVersion) {
       data.value = result;
-      if (pendingInitialAction === 'stocktake' && props.modelValue && props.inventoryMode && props.stocktakeEnabled) {
+      if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
         pendingInitialAction = '';
         edit('stocktake');
       }
@@ -209,6 +217,10 @@ async function load(id = productId.value) {
 async function discardForm() {
   if (saving.value) return false;
   if (!formVisible.value) return true;
+  if (form.action_type === 'stocktake' && form.counted_quantity == null && form.available_quantity == null && !form.reason_code && !form.reason_note) {
+    formVisible.value = false;
+    return true;
+  }
   try { await ElMessageBox.confirm('当前填写内容尚未保存，确定放弃吗？', '未保存的修改', { confirmButtonText: '放弃修改', cancelButtonText: '继续填写', type: 'warning' }); }
   catch { return false; }
   formVisible.value = false;
@@ -220,7 +232,8 @@ async function changeProduct(id) {
   await load(id);
 }
 async function closeDetail(done) { if (await discardForm()) { pendingInitialAction = ''; ++loadVersion; done(); } }
-async function closeForm(done) { if (await discardForm()) done(); }
+async function closeForm(done) { if (await discardForm()) { if (directStocktake.value) visible.value = false; done(); } }
+async function cancelForm() { if (await discardForm() && directStocktake.value) visible.value = false; }
 function moreAction(command) {
   if (command === 'management') managementVisible.value = !managementVisible.value;
   else edit(command);
@@ -246,12 +259,13 @@ function editCost(type, row) {
   Object.assign(form, { cost_task_id: Number(row.id), quantity: Number(row.quantity) - Number(row.resolved_quantity) });
 }
 function edit(type, row = null) {
+  if (type === 'stocktake' && !props.stocktakeEnabled) return;
   if (props.inventoryMode && (type !== 'stocktake' || !props.stocktakeEnabled)) return;
   Object.keys(form).forEach(key => delete form[key]);
   Object.assign(form, { action_type: type, quantity: (type === 'receive' ? row?.missing_receipt_quantity : row?.missing_purchase_quantity) || row?.missing_record_quantity || row?.shortage_quantity || 1,
     order_item_id: row?.order_item_id || null, reason: '', reason_code: '', reason_note: '', amount: 0, shipping_amount: 0, purchased_at: `${shanghaiDateKey()}T00:00:00+08:00`,
     inventory_effect: 'already_accounted', target_product_id: null, target_quantity: 1,
-    stocktake_type: '', counted_quantity: undefined, available_quantity: undefined, correct_received: false,
+    stocktake_type: type === 'stocktake' ? 'physical' : '', counted_quantity: undefined, available_quantity: undefined, correct_received: false,
     extra_sources: [], priority: row?.allocation_priority ? 0 : 1 });
   if (type === 'revise_purchase') Object.assign(form, { purchase_item_id: row.id, quantity: Number(row.actual_quantity), amount: Number(row.amount), shipping_amount: Number(row.shipping_amount) });
   preview.value = null; submission.value = null; target.value = null; formVisible.value = true;
@@ -260,6 +274,7 @@ watch(form, () => { preview.value = null; submission.value = null; });
 async function makePreview() {
   if (props.inventoryMode && form.action_type !== 'stocktake') return;
   if (form.action_type === 'stocktake') {
+    if (form.stocktake_type === 'available' && negativeBookStock.value) return ElMessage.warning('账面有历史差异，请选择更新仓库实物数，填写现在实际在仓的总数。');
     if (!form.stocktake_type) return ElMessage.warning('请先选择更新实物数还是剩余可用数');
     if (form.stocktake_type === 'physical' && form.counted_quantity == null) return ElMessage.warning('请输入仓库实物数量；没有实物请填 0');
     if (form.stocktake_type === 'available' && form.available_quantity == null) return ElMessage.warning('请输入剩余可用数量；没有可用库存请填 0');
@@ -294,16 +309,17 @@ async function save() {
     await apiClient.post(ledgerBase.value, submission.value);
     ElMessage.success('已保存对账记录，库存和历史缺口已重新计算');
     formVisible.value = false;
+    if (directStocktake.value) { visible.value = false; emit('saved'); return; }
     await load();
     emit('saved');
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !props.inventoryMode) search(''); } else { pendingInitialAction = ''; ++loadVersion; } }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !props.inventoryMode && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; } }, { immediate: true });
 </script>
 
 <template>
-  <el-dialog v-model="visible" :title="inventoryMode ? '库存明细' : '库存明细与历史核对'" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
+  <el-dialog v-if="!directStocktake" v-model="visible" :title="inventoryMode ? '库存明细' : '库存明细与历史核对'" width="min(1400px, 96vw)" top="4vh" append-to-body destroy-on-close :before-close="closeDetail" :close-on-click-modal="false" class="unified-inventory-dialog">
     <template #header="{ titleId, titleClass }">
       <div class="ledger-dialog-header">
         <div class="ledger-dialog-heading">
@@ -311,7 +327,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <small v-if="orderOverview && orderLabel" class="ledger-order-context" :title="orderLabel">{{ orderLabel }}</small>
         </div>
         <div class="ledger-top-actions">
-          <el-button v-if="!inventoryMode || stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
+          <el-button v-if="stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
           <el-button v-if="!inventoryMode" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
           <el-dropdown v-if="!inventoryMode" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
             <el-dropdown-item v-if="$slots.management" command="management">绑定管理</el-dropdown-item>
@@ -525,7 +541,11 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       <el-alert type="warning" :closable="false" title="已扣除当前现货保留来源。晚补记录可以人工关联，但请核实这些订单确实使用了这批货；不能拿真实的后续采购填旧账。" />
       <template #footer><el-button :disabled="saving" @click="historyLinkVisible = false">取消</el-button><el-button type="primary" :loading="saving" :disabled="!historySelection.length || !selectedHistoryBatch || selectedHistoryQuantity > selectedHistoryBatch.available_history_quantity" @click="saveHistoryLink">确认关联所选订单</el-button></template>
     </el-dialog>
-    <el-dialog v-if="formVisible" v-model="formVisible" :title="labels[form.action_type]" width="720px" append-to-body :close-on-click-modal="false" :before-close="closeForm">
+  </el-dialog>
+  <el-dialog v-if="formVisible || (directStocktake && visible)" v-model="stockFormVisible" :title="directStocktake ? labels.stocktake : labels[form.action_type]" width="min(720px, 94vw)" append-to-body :close-on-click-modal="false" :before-close="closeForm" class="stocktake-form-dialog">
+      <div v-if="loading" v-loading="loading" class="stocktake-loading">正在读取库存与待发订单数量…</div>
+      <el-alert v-else-if="loadError" type="error" :closable="false" title="库存信息读取失败" :description="loadError" />
+      <template v-else-if="data">
       <el-form label-width="150px" :disabled="saving">
         <el-form-item v-if="historyAction" label="关联订单">{{ selectedOrder?.posting_number }} · 待核／待覆盖 {{ selectedOrder?.entered_transport ? selectedOrder?.missing_record_quantity : selectedOrder?.shortage_quantity }} 件</el-form-item>
         <el-form-item v-if="form.order_item_ids" label="所选历史订单">{{ form.order_item_ids.length }} 单，仅补齐所选订单，不增加实物库存</el-form-item>
@@ -550,17 +570,24 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         <template v-if="needsTarget"><el-form-item :label="form.action_type === 'substitute' ? '实际使用来源商品' : '转换目标商品'"><el-select v-model="form.target_product_id" filterable remote :remote-method="value => search(value, true)" @change="selectTarget" style="width:100%"><el-option v-for="p in targetProducts" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || ''}`" /></el-select></el-form-item><el-form-item :label="form.action_type === 'substitute' ? '来源实际消耗数量' : '目标入库数量'"><el-input-number v-model="form.target_quantity" :min="1" :precision="0" /><span v-if="target">该商品本地库存 {{ target.local_stock }}</span></el-form-item></template>
         <template v-if="form.action_type === 'stocktake'">
           <p><strong>{{ data.product.name }}</strong> · 库存 ID：{{ data.product.inventory_number || '—' }}</p>
-          <el-alert type="info" :closable="false" title="先选择要校准的数量" description="仓库实物包含未出单及待备货、待发货但仍在仓库的货；上网进入运输后才离库。剩余可用＝实物－全部待发本地订单需求－FBP 占用。两种更新都会生成可追溯的盘点流水并重算订单分配，采购在途不计入。" />
-          <el-form-item label="更新类型"><el-radio-group v-model="form.stocktake_type"><el-radio value="physical">更新仓库实物数</el-radio><el-radio value="available">更新剩余可用数</el-radio></el-radio-group></el-form-item>
-          <el-form-item label="当前实物／可用">{{ data.physical_estimate }} 件／{{ data.available_estimate }} 件</el-form-item>
+          <el-alert type="info" :closable="false" title="家里或仓库现在实际有多少件，就填多少件" description="例如实际还有 20 件，就填 20。包含已经分给待发订单但还没寄出的货；路上未到货的采购不算。" />
+          <el-alert v-if="negativeBookStock" type="warning" :closable="false" class="stocktake-book-warning"
+            :title="`账面推算为 ${data.physical_estimate} 件，这是历史出入库待核差异，不代表实物是负数`"
+            description="直接填写现在实际清点的在仓总数，系统会记录盘点差额，不需要先把账面补到 0。当前请使用“更新仓库实物数”。" />
+          <el-form-item label="你要填写的数量"><el-radio-group v-model="form.stocktake_type"><el-radio value="physical">更新仓库实物数（推荐）</el-radio><el-radio value="available" :disabled="negativeBookStock">更新剩余可用数</el-radio></el-radio-group></el-form-item>
+          <el-form-item label="当前账面／可用">{{ data.physical_estimate }} 件（{{ negativeBookStock ? '历史差异待核对' : '账面推算' }}）／{{ data.available_estimate }} 件</el-form-item>
           <el-form-item label="待发订单／FBP">{{ data.open_order_demand }} 件／{{ data.fbp_reserved }} 件</el-form-item>
-          <el-form-item v-if="form.stocktake_type === 'physical'" label="仓库实物数"><el-input-number v-model="form.counted_quantity" placeholder="实际在仓数量，无实物填 0" :min="0" :precision="0" /></el-form-item>
-          <el-form-item v-if="form.stocktake_type === 'available'" label="剩余可用数"><el-input-number v-model="form.available_quantity" placeholder="扣除待发订单后可用数量" :min="0" :precision="0" /></el-form-item>
-          <p v-if="form.stocktake_type === 'available'">输入正数时会先覆盖全部待发订单及 FBP 占用，再保留你填写的可用数量。输入 0 且已有订单缺口时，不会凭空增加实物；如需核对实际在仓数量，请选择“更新仓库实物数”。</p>
-          <el-form-item v-if="countDelta != null" label="本次变动">{{ countDelta === 0 ? '数量一致' : `${countDelta > 0 ? '增加' : '减少'} ${Math.abs(countDelta)} 件` }}</el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'physical'" label="实际在仓总数"><el-input-number v-model="form.counted_quantity" aria-label="实际在仓总数" placeholder="实物还有 20 件，就填 20" :min="0" :precision="0" /></el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'available'" label="扣除占用后剩余"><el-input-number v-model="form.available_quantity" aria-label="扣除占用后剩余" placeholder="已扣除待发订单与 FBP 的数量" :min="0" :precision="0" /></el-form-item>
+          <p v-if="form.stocktake_type === 'available'" class="stocktake-help">只有已经扣除了待发订单和 FBP 占用，才填写这里。输入正数时，系统会加回这些占用，换算成实物总数；输入 0 时会保留已有订单缺口，不补库存。</p>
+          <div v-if="stocktakeTargetPhysical != null" class="stocktake-outcome">
+            <strong>保存后：仓库实物 {{ stocktakeTargetPhysical }} 件，剩余可用 {{ stocktakeTargetAvailable }} 件</strong>
+            <span>系统会自动扣除待发订单 {{ data.open_order_demand }} 件和 FBP 占用 {{ data.fbp_reserved }} 件。</span>
+            <span v-if="countDelta != null">账面校准差额 {{ countDelta >= 0 ? '+' : '' }}{{ countDelta }} 件{{ negativeBookStock ? '，包含历史账面差异，并不代表这次新到货的数量。' : '，会写入库存流水。' }}</span>
+          </div>
           <el-form-item label="调整原因"><el-radio-group v-model="form.reason_code"><el-radio v-for="reason in countReasons" :key="reason.code" :value="reason.code">{{ reason.label }}</el-radio></el-radio-group></el-form-item>
           <el-form-item :label="form.reason_code === 'other' ? '说明（必填）' : '补充说明（选填）'"><el-input v-model="form.reason_note" type="textarea" :rows="2" maxlength="900" placeholder="可填写领用人、凭证或补充情况" /></el-form-item>
-          <div v-if="!inventoryMode" class="ledger-toolbar"><span>如果是以下情况，请使用对应流程：</span><el-button @click="startConversion">库存转换</el-button><el-button @click="formVisible = false; showPurchases('incoming')">已到货，核对采购记录</el-button></div>
+          <div v-if="!inventoryMode && !directStocktake" class="ledger-toolbar"><span>如果是以下情况，请使用对应流程：</span><el-button @click="startConversion">库存转换</el-button><el-button @click="formVisible = false; showPurchases('incoming')">已到货，核对采购记录</el-button></div>
           <p>转换、实收、退货及已发货漏扣请按关联单据处理，避免重复记账。</p>
         </template>
         <template v-if="form.action_type === 'convert'">
@@ -583,11 +610,17 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       <el-alert v-if="preview?.cost_task_quantity > 0" type="info" :closable="false" :title="`将生成 ${preview.cost_task_quantity} 件现货成本核对任务，交由采购关联已有采购或补录成本；不是要求再采购这些货物。`" />
       <el-alert v-if="preview && form.action_type === 'convert'" :type="preview.conversion_cost_amount == null ? 'warning' : 'info'" :closable="false" :title="preview.conversion_cost_amount == null ? '部分来源库存缺少成本，本次转换成本暂不能确定；不生成虚假的零元采购。请核对来源商品采购成本。' : `转换成本合计 ${preview.conversion_cost_amount} 元，转入目标成品成本记录，不新增采购或在途。`" />
       <el-table v-if="preview?.extra_changes?.length" :data="preview.extra_changes"><el-table-column prop="product_name" label="配件" /><el-table-column prop="quantity" label="消耗" /><el-table-column prop="available_before" label="未占用现货（前）" /><el-table-column prop="available_after" label="未占用现货（后）" /></el-table>
-      <template #footer><el-button :disabled="saving" @click="discardForm">取消</el-button><template v-if="form.action_type === 'stocktake'"><el-button :loading="saving" @click="makePreview">预览变动</el-button><el-button type="primary" :loading="saving" @click="confirmStock">确认更新</el-button></template><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template>
-    </el-dialog>
+      </template>
+      <template #footer><el-button :disabled="saving" @click="cancelForm">取消</el-button><el-button v-if="loadError" @click="load()">重新读取</el-button><template v-if="data && !loading && !loadError"><template v-if="form.action_type === 'stocktake'"><el-button :loading="saving" @click="makePreview">预览变动</el-button><el-button type="primary" :loading="saving" @click="confirmStock">确认更新</el-button></template><template v-else><el-button :loading="saving" @click="makePreview">预览影响</el-button><el-button type="primary" :disabled="!preview" :loading="saving" @click="save">确认保存纠正记录</el-button></template></template></template>
   </el-dialog>
 </template>
 <style scoped>
+.stocktake-loading { min-height:150px;display:flex;align-items:center;justify-content:center;color:var(--el-text-color-secondary); }
+.stocktake-book-warning { margin:12px 0; }
+.stocktake-help { color:var(--el-text-color-secondary);line-height:1.7; }
+.stocktake-outcome { display:flex;flex-direction:column;gap:6px;padding:12px;margin:8px 0 16px;border-radius:6px;background:var(--el-fill-color-light);line-height:1.6; }
+.stocktake-outcome span { font-size:13px;color:var(--el-text-color-secondary); }
+
 .ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap; }
 .ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--erp-detail-surface-alt, #f5f7fa); }
 .ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:8px 0; }
@@ -619,6 +652,9 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 .ledger-history-toolbar { position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 0;background:var(--erp-detail-surface, #fff);border-bottom:1px solid var(--erp-detail-border-light, #ebeef5); }
 .ledger-history-toolbar .el-pagination { width:100%; }
 :deep(.current-fbp-sku) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
+:global(.stocktake-form-dialog) { display:flex;flex-direction:column;max-height:90vh;margin-top:5vh;margin-bottom:5vh;overflow:hidden; }
+:global(.stocktake-form-dialog > .el-dialog__header),:global(.stocktake-form-dialog > .el-dialog__footer) { flex:none; }
+:global(.stocktake-form-dialog > .el-dialog__body) { min-height:0;overflow:auto; }
 :global(.unified-inventory-dialog) { display:flex;flex-direction:column;max-height:92vh;margin-bottom:4vh;overflow:hidden; }
 :global(.unified-inventory-dialog > .el-dialog__header) { flex:none;margin-right:0;padding-right:48px;padding-bottom:12px;border-bottom:1px solid var(--el-border-color-lighter); }
 :global(.unified-inventory-dialog > .el-dialog__body) { min-height:0;max-height:none;overflow:auto;padding-top:12px; }

@@ -9,6 +9,7 @@ import InventoryIdentity from './InventoryIdentity.vue';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
 const props = defineProps({
+  canUpdateInventory: { type: Boolean, default: false },
   rows: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
   selectedIds: { type: Object, default: () => new Set() },
@@ -44,6 +45,13 @@ const emit = defineEmits([
 ]);
 
 const selectedInventoryRow = ref(null);
+const ledgerInitialAction = ref("");
+const stocktakeProductId = ref(0);
+function openInventoryLedger(row, action = "", productId = 0) {
+  ledgerInitialAction.value = action;
+  stocktakeProductId.value = Number(productId || 0);
+  selectedInventoryRow.value = row;
+}
 const inventoryRow = computed(() => props.rows.find(row => row.id === selectedInventoryRow.value?.id) || selectedInventoryRow.value);
 const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row)])));
 const detailVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) selectedInventoryRow.value = null; } });
@@ -606,7 +614,12 @@ function procurementTimeText(row) {
             </template>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button link type="primary" size="small" :icon="Tickets" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button v-if="canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
+              <el-dropdown v-else-if="canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
+                <el-button link type="primary" size="small">更新本地库存</el-button>
+                <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+              </el-dropdown>
               <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
                 <el-button
                   v-if="product.sku"
@@ -781,7 +794,7 @@ function procurementTimeText(row) {
       </template>
     </Teleport>
 
-    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="selectedOverview.items[0]?.product_id || 0" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved')">
+    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved')">
       <template #management>
         <template v-for="row in [inventoryRow]" :key="row.id">
           <p>账面参考与子产品绑定管理（不计入本单需求）</p>

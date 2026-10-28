@@ -125,6 +125,8 @@ const compositionDialogProduct = ref(null);
 const compositionDialogRefreshKey = ref(0);
 const selectedRows = ref([]);
 const ledgerVisible = ref(false);
+const ledgerInitialAction = ref("");
+function openInventoryLedger(row, action = "") { ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
 const ledgerProductId = ref(0);
 const manualOutboundVisible = ref(false);
 const manualOutboundSubmitting = ref(false);
@@ -2143,7 +2145,8 @@ onActivated(() => {
               <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
               <el-button v-if="canManageProductComponents" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
               <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
-              <el-button v-if="canProcure" class="erp-btn-link" link @click="ledgerProductId = Number(row.id); ledgerVisible = true">采购库存对账</el-button>
+              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
+              <el-button v-if="canProcure" class="erp-btn-link" link @click="openInventoryLedger(row)">采购库存对账</el-button>
               <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
               <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
               <el-button v-if="canWriteInventory" class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
@@ -2455,7 +2458,7 @@ onActivated(() => {
 
     <InventoryProductRequestsDialog v-if="productRequestsVisible" :people="state.people" :suppliers="state.suppliers" :logistics-rules="state.logisticsRules" @close="productRequestsVisible = false" @changed="refreshAfterProductRequest" />
 
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canWriteInventory" @saved="loadPageData" />
     <ProductCreateEditDialog
       ref="productCreateDialogRef"
       v-model:visible="dialogVisible"

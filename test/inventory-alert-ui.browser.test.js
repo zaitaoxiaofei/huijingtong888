@@ -65,7 +65,7 @@ test('inventory alert detail uses scoped ledger routes and only exposes stocktak
 
     await page.getByRole('button', { name: '更新本地库存' }).click();
     const dialog = page.getByRole('dialog', { name: '更新本地库存' });
-    await dialog.getByText('更新仓库实物数', { exact: true }).click();
+    await dialog.getByText('更新仓库实物数（推荐）', { exact: true }).click();
     await dialog.getByRole('spinbutton').fill('8');
     await dialog.getByText('历史库存记错', { exact: true }).click();
     assert.equal(await dialog.getByRole('button', { name: '确认更新' }).isEnabled(), true);

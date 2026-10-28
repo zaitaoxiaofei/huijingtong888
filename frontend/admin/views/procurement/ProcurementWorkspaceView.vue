@@ -8,6 +8,7 @@ const router = useRouter();
 import { apiClient, currentApiCacheScope } from "../../utils/api.js";
 import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth.js";
 import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
@@ -21,6 +22,7 @@ import { buildShortInventoryName } from "../../utils/inventory-similarity.js";
 import { openEnterpriseMessage } from "../../utils/enterprise-messages.js";
 
 const authStore = useAuthStore();
+const canUpdateInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const loading = ref(false);
 const demandRefreshing = ref(false);
 let rowsController;
@@ -78,9 +80,10 @@ const confirmingGroupKey = ref("");
 const uploadingReceipt = ref(false);
 const imageSearchingId = ref(0);
 const ledgerVisible = ref(false);
+const ledgerInitialAction = ref("");
 const ledgerProductId = ref(0);
 const ledgerInitialTab = ref('current');
-function openLedger(row = {}, tab = 'current') { ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
+function openLedger(row = {}, tab = 'current', action = '') { ledgerInitialAction.value = action; ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
 const costTasksVisible = ref(false);
 const costTasksLoading = ref(false);
 const costTasks = reactive({ rows: [], total: 0, page: 1, query: '' });
@@ -1567,7 +1570,7 @@ onMounted(async () => {
       </div>
       <template #footer><el-button @click="messageRequestVisible = false">关闭</el-button></template>
     </el-dialog>
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
       <template #actions>
         <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
@@ -1699,7 +1702,7 @@ onMounted(async () => {
               <div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div>
             </div>
             <small>现货以盘点为准；采购在途未计入现货</small>
-            <div class="row-actions"><el-button size="small" type="primary" plain @click="openLedger(row)">库存明细／盘点</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div>
+            <div class="row-actions"><el-button v-if="canUpdateInventory" size="small" type="primary" plain @click="openLedger(row, 'current', 'stocktake')">更新本地库存</el-button><el-button size="small" plain @click="openLedger(row)">库存明细</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div>
           </template>
         </el-table-column>
         <el-table-column label="历史订单" min-width="220" align="center">

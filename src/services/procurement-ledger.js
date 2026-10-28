@@ -86,7 +86,7 @@ function stocktakeCount(snapshot, body) {
   }
   const available = integer(body.available_quantity, '剩余可用数量（available_quantity）', 0);
   const physicalBefore = Number(snapshot.physical_estimate ?? snapshot.local_stock ?? 0);
-  if (physicalBefore < 0) throw new Error('当前仓库实物推算为负数，请先按实物数盘点核对库存流水');
+  if (physicalBefore < 0) throw new Error(`当前账面实物推算为 ${physicalBefore} 件（历史出入库待核差异）。请改选“更新仓库实物数”，填写现在实际在仓的总数；例如家里还有 20 件就填 20，包含尚未寄出的待发订单，不包含采购在途。`);
   const occupied = Number(snapshot.open_order_demand || 0) + Number(snapshot.fbp_reserved || 0);
   // Zero availability cannot reveal how many of the outstanding orders have
   // physical goods. Preserve an existing shortage instead of inventing stock.

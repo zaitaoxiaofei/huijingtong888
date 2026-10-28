@@ -1,5 +1,7 @@
 ﻿<script setup>
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useAuthStore } from "../admin/stores/auth.js";
+import { hasPermission } from "../../src/shared/permissions.js";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
@@ -36,6 +38,8 @@ import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
 
 const route = useRoute();
+const inventoryAuth = useAuthStore();
+const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
@@ -2703,6 +2707,7 @@ onBeforeUnmount(() => {
     </el-dialog>
     <div class="orders-table-section">
       <OrdersTable
+        :can-update-inventory="canUpdateInventory"
         :rows="tableRows"
         :mark-options="vm.markOptions"
         :selected-ids="selectedOrderIds"

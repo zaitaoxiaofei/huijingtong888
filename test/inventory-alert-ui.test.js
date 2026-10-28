@@ -56,5 +56,5 @@ test('alert details load shared ledger only on demand and preserve complete SKU 
   assert.match(page, /<template #inventory-relations>[\s\S]*?:data="linkedSkus\(selectedInventory\)"/);
   assert.match(ledger, /props\.inventoryMode \? '\/api\/inventory\/ledger' : '\/api\/procurement\/ledger'/);
   assert.match(ledger, /props\.inventoryMode && \(type !== 'stocktake' \|\| !props\.stocktakeEnabled\)/);
-  assert.match(ledger, /pendingInitialAction === 'stocktake' && props\.modelValue && props\.inventoryMode && props\.stocktakeEnabled/);
+  assert.match(ledger, /\(pendingInitialAction === 'stocktake' \|\| directStocktake\.value\) && props\.modelValue && props\.stocktakeEnabled/);
 });
