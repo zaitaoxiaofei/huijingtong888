@@ -1,5 +1,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
+import { useAuthStore } from "../../stores/auth.js";
+import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
@@ -15,7 +17,11 @@ import InventoryStructuredSearch from "../../components/inventory/InventoryStruc
 import { uploadTeamAttachment } from "../../api/tools/imageCropper.js";
 
 const route = useRoute();
+const inventoryAuth = useAuthStore();
+const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
 const ledgerVisible = ref(false);
+const ledgerInitialAction = ref("");
+function openInventoryLedger(row, action = "") { ledgerProductId.value = Number(row.product_id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
 const ledgerProductId = ref(0);
 const router = useRouter();
 const listRequestGate = createLatestRequestGate();
@@ -652,7 +658,7 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" @saved="loadPageData" />
     <ErpPageHeader title="待入库清单" description="查看待入库、已入库与全部采购批次，并按对应时间查看最新记录。" />
 
     <el-alert
@@ -877,7 +883,8 @@ onMounted(async () => {
           <el-table-column label="操作" width="280" fixed="right" align="center">
             <template #default="{ row }">
               <div class="row-actions erp-inline-actions">
-                <el-button class="erp-btn-link" link @click="ledgerProductId = Number(row.product_id); ledgerVisible = true">数量纠正／对账</el-button>
+                <el-button v-if="canUpdateInventory" class="erp-btn-link" link type="primary" :disabled="!row.product_id" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
+                <el-button class="erp-btn-link" link @click="openInventoryLedger(row)">数量纠正／对账</el-button>
                 <el-button class="erp-btn-link" link type="primary" :disabled="actionDisabled(row, 'edit')" @click="handleEditAction(row)">编辑</el-button>
                 <el-button class="erp-btn-link" link type="success" :disabled="actionDisabled(row, 'inbound')" :loading="inboundSubmitting" @click="handleInboundAction(row)">登记到货</el-button>
                 <el-button class="erp-btn-link" link type="danger" :disabled="actionDisabled(row, 'cancel')" :loading="cancelSubmitting" @click="handleCancelAction(row)">取消</el-button>

@@ -63,6 +63,12 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## 5. Protected Ports and Local Verification
 
+### Release baseline and merge policy (user instruction, 2026-10-28)
+
+- Fetch the remote before development and branch from the latest verified release head. The current release branch is `release/2026.10.21-task-brand`; verify it each time.
+- Commit and validate task changes on a dedicated branch, then merge them into the remote release branch before deployment. Reconcile existing production hotfixes into release first.
+- Build deployment artifacts from the exact merged release commit. Never deploy uncommitted overlays or packages assembled from production files. Recheck the remote head, preserve concurrent/user work, and report the merged SHA and deployed version.
+
 ### ECS release approval (user instruction, 2026-10-27)
 
 - After finding a new issue, prepare the concrete repair plan and local validation first. Obtain the user's explicit approval before an ECS deployment, production service restart, or production configuration change.
