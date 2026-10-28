@@ -9,7 +9,8 @@ import path from "node:path";
 import sharp from "sharp";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { shanghaiDateKey } from "../shanghai-time.js";
-import { requestPublicImage, requestPublicMedia } from "../http/public-image-request.js";
+import { requestPublicMedia } from "../http/public-image-request.js";
+import { downloadListingSourceImage } from "./listing-image-download.js";
 import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
@@ -3714,9 +3715,27 @@ async function processListingMediaWatermark(body = {}, session = null) {
   };
   const watermarkPath = await resolveListingShopWatermarkPath(shop);
   const options = listingShopWatermarkOptions(shop);
+  const watermarkSignature = crypto.createHash("sha256")
+    .update(await fs.readFile(watermarkPath)).update(JSON.stringify(options)).digest("hex");
   const results = [];
   for (const [index, image] of images.entries()) {
     await assertAccess();
+    const reusableSource = isManagedOssObjectUrl(image.url, { prefix: "listing-media" })
+      && /\/[a-f0-9]{64}\.[a-z0-9]+(?:$|\?)/i.test(image.url);
+    const cached = reusableSource ? await row(`
+      SELECT *
+      FROM listing_media_assets
+      WHERE tenant_id = ? AND shop_id = ? AND source_path = ? AND status = 'public_ready'
+        AND updated_at >= DATE_SUB(NOW(), INTERVAL 1 DAY)
+        AND JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(metadata_json), metadata_json, '{}'), '$.watermark_signature')) = ?
+      ORDER BY updated_at DESC, id DESC LIMIT 1
+    `, [listingTenantId(session), shopId, image.url, watermarkSignature]) : null;
+    if (cached && isManagedOssObjectUrl(cached.publish_url, { prefix: "listing-media" })) {
+      await assertAccess();
+      results.push({ url: cached.publish_url, publishUrl: cached.publish_url, previewUrl: cached.preview_url || cached.publish_url,
+        localUrl: cached.preview_url || cached.publish_url, name: cached.original_name, assetId: cached.id, asset: cached, reused: true });
+      continue;
+    }
     const source = await readListingImageBuffer(image.url, session, assertAccess);
     await assertAccess();
     const output = await applyListingWatermark(source.buffer, watermarkPath, options);
@@ -3755,6 +3774,7 @@ async function processListingMediaWatermark(body = {}, session = null) {
       status: publishUrl ? "public_ready" : "local_only",
       metadata: {
         watermark: true,
+        watermark_signature: watermarkSignature,
         sourceUrl: image.url,
         shopId,
         shopName: shop.name || "",
@@ -5653,7 +5673,8 @@ async function resolveListingShopWatermarkPath(shop = {}) {
     const stat = await fs.stat(candidate).catch(() => null);
     if (stat?.isFile()) return candidate;
   }
-  const error = new Error("璇ュ簵閾鸿繕娌℃湁閰嶇疆鍙敤姘村嵃");
+  const error = new Error(`${shop.name || "目标店铺"}的店铺水印文件不可用（watermark_path），请在店铺设置中重新上传水印。`);
+  error.code = "LISTING_SHOP_WATERMARK_UNAVAILABLE";
   error.status = 400;
   throw error;
 }
@@ -5686,9 +5707,7 @@ async function readListingImageBuffer(url = "", session = null, beforeRequest) {
     return { buffer, source: privateFile.filePath };
   }
   if (/^https?:\/\//i.test(value)) {
-    const response = await requestPublicImage(value, { maxBytes: 30 * 1024 * 1024, signal: AbortSignal.timeout(20000), beforeRequest });
-    if (!response?.buffer?.length) throw new Error("Watermark image must be a nonempty public image under 30MB");
-    return { buffer: response.buffer, source: value };
+    return downloadListingSourceImage(value, { beforeRequest });
   }
   throw new Error("浠呮敮鎸?listing-media 鏈湴鍥剧墖鎴栧叕缃戝浘鐗?URL");
 }
@@ -7263,7 +7282,8 @@ async function buildShopPublishPayloadForOzon({
   session = null,
   sourceRecordId = 0,
   updateExisting = false,
-  sourceProductId = 0
+  sourceProductId = 0,
+  preparedMediaPolicy = null
 } = {}) {
   const guard = listingPublishExecutionGuards.get(shop);
   if (guard && session) listingPublishExecutionGuards.set(session, guard);
@@ -7272,14 +7292,18 @@ async function buildShopPublishPayloadForOzon({
   await assertListingPublishExecution(shop);
   const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
   await assertListingPublishExecution(shop);
-  const reusePreparedMedia = shouldReusePreparedShopWatermarkMedia(body, shop);
+  const reusePreparedMedia = preparedMediaPolicy
+    ? Boolean(preparedMediaPolicy.reuse)
+    : shouldReusePreparedShopWatermarkMedia(body, shop);
   const watermarkedPayload = reusePreparedMedia
     ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
     : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
   await assertListingPublishExecution(shop);
   // Asset-variant payloads already contain the generated per-shop tail image.
   // Re-appending the configured template can duplicate it and can reintroduce a stale URL.
-  const skipConfiguredTail = reusePreparedMedia && !body.skip_publish_watermark && !body.skipPublishWatermark;
+  const skipConfiguredTail = preparedMediaPolicy
+    ? Boolean(preparedMediaPolicy.skipTail)
+    : reusePreparedMedia && !body.skip_publish_watermark && !body.skipPublishWatermark;
   const tailImageUrl = skipConfiguredTail ? "" : await resolveShopTailImageUrl(shop, session);
   await assertListingPublishExecution(shop);
   const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
@@ -7769,7 +7793,12 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
   if (prewarm.total) {
     if (validation) validation.media_prewarm_summary = prewarm;
   }
-  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls, mediaOptions);
+  // Two complete public downloads already prove image reachability. A later
+  // one-shot HEAD must not turn that verified image into a spurious failure.
+  const verifiedImages = new Set(normalizeArray(prewarm.image_results).filter((item) => item.ok).map((item) => item.url));
+  const unreachableRemoteMedia = await unreachablePublishMediaUrls(
+    mediaUrls.filter((url) => !verifiedImages.has(String(url || "").trim())), mediaOptions
+  );
   const unavailableRemoteMedia = uniqueStringValues([
     ...normalizeArray(prewarm.failed_urls),
     ...unreachableRemoteMedia
@@ -7822,39 +7851,26 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
     throw error;
   }
 
-  const missingTailShops = [];
-  for (const shop of shops) {
-    const tailImageUrl = await resolveShopTailImageUrl(shop, session);
-    if (!tailImageUrl) missingTailShops.push(shop.name || `搴楅摵${shop.id}`);
-  }
-  if (missingTailShops.length) {
-    validation.warnings.push(`The following shops have no tail image configured, publishing will skip tail image append: ${missingTailShops.join(", ")}`);
-  }
-
   const updateExisting = Boolean(sourceRecordId && shops.length === 1);
   const sourceProductId = await resolveListingSourceProductId(body.template || body, validation.payload);
   const textVariantPolicy = normalizeShopTextVariantPolicy(body.text_variant_policy || body.textVariantPolicy || {}, shops);
   const results = await mapWithConcurrency(shops, LISTING_PUBLISH_SHOP_CONCURRENCY, async (shop) => {
     let recordId = null;
     try {
-      const {
-        textVariantPayload,
-        watermarkedPayload,
-        tailImageUrl,
-        tailApplied,
-        shopPayload: repairedShopPayload,
-        mediaRepair
-      } = await buildShopPublishPayloadForOzon({
-        basePayload: validation.payload,
-        shop,
-        textVariantPolicy,
-        body,
-        session,
-        sourceRecordId,
-        updateExisting,
-        sourceProductId
+      // Persist the validated input before any network-heavy media preparation.
+      // Startup recovery reloads this marker, so a restart cannot skip watermarks.
+      const reuse = shouldReusePreparedShopWatermarkMedia(body, shop);
+      const shopPayload = await prepareSafeShopOfferIds(validation.payload, {
+        shop, sourceRecordId, updateExisting, sourceProductId
       });
-      const shopPayload = repairedShopPayload;
+      shopPayload._listing_preparation = {
+        textVariantPolicy,
+        sourceProductId,
+        preparedMediaPolicy: {
+          reuse,
+          skipTail: reuse && !body.skip_publish_watermark && !body.skipPublishWatermark
+        }
+      };
       recordId = await preparePublishRecordForSubmit({
         sourceRecordId,
         shop,
@@ -7879,13 +7895,10 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
         queued: true,
         status: "processing",
         task_id: "",
-        text_variant_summary: textVariantPayload.text_variant_summary || null,
-        watermark_summary: watermarkedPayload.watermark_summary || null,
-        tail_summary: {
-          configured: Boolean(tailImageUrl),
-          appended: Number(tailApplied.appended || 0)
-        },
-        media_repair_summary: mediaRepair,
+        text_variant_summary: null,
+        watermark_summary: null,
+        tail_summary: null,
+        media_repair_summary: { deferred: true },
         ozon_seller_media_summary: {
           replacements: 0,
           jobs: 0,
@@ -9096,6 +9109,7 @@ async function submitPreparedListingPublishRecord({
   let submissionClaimed = false;
   let submissionAttempted = false;
   let receiptSaved = false;
+  let preparationRequestJson = null;
   {
     const loadStartedAt = Date.now();
     const preparedRows = await all(`
@@ -9152,6 +9166,39 @@ async function submitPreparedListingPublishRecord({
   return withAiTenantSession(session, async () => {
   try {
     await assertAccess();
+    const preparation = shopPayload._listing_preparation;
+    if (preparation) {
+      const preparationStartedAt = Date.now();
+      preparationRequestJson = JSON.stringify(shopPayload);
+      const basePayload = { ...shopPayload };
+      delete basePayload._listing_preparation;
+      const prepared = await buildShopPublishPayloadForOzon({
+        basePayload,
+        shop,
+        session,
+        textVariantPolicy: preparation.textVariantPolicy,
+        sourceProductId: preparation.sourceProductId,
+        sourceRecordId: Number(recordId),
+        updateExisting: true,
+        preparedMediaPolicy: preparation.preparedMediaPolicy
+      });
+      await assertAccess();
+      const saved = await run(`UPDATE listing_publish_records
+        SET request_json = ?, list_summary_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+          AND status = 'processing' AND COALESCE(task_id, '') = '' AND response_json IS NULL
+          AND request_json = ?`,
+      [JSON.stringify(prepared.shopPayload), JSON.stringify(buildPublishRecordListSummary(prepared.shopPayload)),
+        Number(recordId), tenantId, preparationRequestJson]);
+      if (!Number(saved?.affectedRows || 0)) return { ok: true, reused: true, record_id: Number(recordId) };
+      preparationRequestJson = null;
+      shopPayload = prepared.shopPayload;
+      textVariantSummary = prepared.textVariantPayload.text_variant_summary || null;
+      watermarkSummary = prepared.watermarkedPayload.watermark_summary || null;
+      tailSummary = { configured: Boolean(prepared.tailImageUrl), appended: Number(prepared.tailApplied.appended || 0) };
+      mediaRepairSummary = prepared.mediaRepair;
+      timings.payload_preparation_ms = Date.now() - preparationStartedAt;
+    }
     const mediaRepairStartedAt = Date.now();
     const mediaRepair = await repairOzonPublishPayloadMedia(shopPayload, {
       session,
@@ -9274,10 +9321,11 @@ async function submitPreparedListingPublishRecord({
           error_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?
         AND (response_json <=> ? OR (? <> '' AND task_id = ?))
+        AND (? IS NULL OR request_json = ?)
     `, [Boolean(submissionAttempted || submitResponse), Boolean(submissionAttempted || submitResponse),
       JSON.stringify(errorPayload), Number(recordId), tenantId, Number(session.personId), Number(shop.id),
       receiptSaved && !persistedTaskId ? receiptJson() : pendingReceipt || null,
-      String(persistedTaskId), String(persistedTaskId)]).catch(() => null);
+      String(persistedTaskId), String(persistedTaskId), preparationRequestJson, preparationRequestJson]).catch(() => null);
     return { ok: false, record_id: recordId, task_id: persistedTaskId, error: errorPayload.message, fix_tip: errorPayload.fix_tip || "" };
   }
   });
@@ -10653,7 +10701,9 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
       authorizedTenants.set(listingTenantId(session), session);
       const request = parseJson(record.request_json, {});
       const offerId = String(record.offer_id || firstOfferId(request) || "").trim();
-      const existing = offerId
+      // A preparation marker proves this snapshot has not been sent to Ozon.
+      // Existing offers may belong to an earlier version of an edited record.
+      const existing = offerId && !request._listing_preparation
         ? await fetchOzonProductInfoAttributes(record, { offerIds: [offerId], limit: 1 }).catch(() => [])
         : [];
       const detail = normalizeArray(existing)[0] || null;
@@ -11044,6 +11094,23 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
     throw Object.assign(new Error("上次上架结果仍待核对；请先刷新状态并核对原店铺的商品编号，确认未上架后由管理员处理，勿重复提交。"), {
       status: 409, statusCode: 409, code: "LISTING_PUBLISH_RECONCILIATION_REQUIRED"
     });
+  }
+  // Resume source preparation or public-media verification in the background.
+  // A slow network must not turn retrying a media failure into another HTTP 504.
+  const storedRequest = parseJson(record.request_json, {});
+  const retryStoredMedia = !previousTaskId && !body.payload && !body.request
+    && /Public media is not fully downloadable|LISTING_SOURCE_IMAGE_DOWNLOAD_FAILED|source_image_download/.test(String(record.error_json || ""));
+  if (storedRequest._listing_preparation || retryStoredMedia) {
+    const claimed = await run(`UPDATE listing_publish_records
+      SET status = 'processing', error_json = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ?
+        AND status = 'failed' AND COALESCE(task_id, '') = '' AND response_json IS NULL
+        AND request_json = ?`, [Number(id), tenantId, originalShopId, record.request_json]);
+    if (!Number(claimed?.affectedRows || 0)) throw Object.assign(new Error("发布记录已被其他任务处理，请刷新后重试"), { status: 409 });
+    runBackgroundListingPublish(`retry preparation record ${Number(id)}`, async () => {
+      await submitPreparedListingPublishRecord({ recordId: Number(id) });
+    });
+    return normalizePublishRecordRow(await loadRecord());
   }
   const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
   if (!normalizeArray(payload.items).length) throw new Error("Publish record has no retryable Ozon payload");
@@ -17209,10 +17276,10 @@ async function prewarmPublishMediaUrls(urls = [], options = {}) {
   const imageUrls = remoteUrls.filter((url) => imageUrlSet.has(url) || isLikelyRemoteImageUrl(url));
   const otherUrls = remoteUrls.filter((url) => !imageUrlSet.has(url) && !isLikelyRemoteImageUrl(url));
   const imageReadiness = await verifyRemoteImagesReadyForOzon(imageUrls, {
-    attempts: 3,
+    attempts: 5,
     requiredConsecutiveSuccesses: 2,
-    retryDelayMs: 750,
-    timeoutMs: 30000,
+    retryDelayMs: 1000,
+    timeoutMs: 45000,
     concurrency: Math.min(2, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY),
     fetchImpl: async (url, request = {}) => {
       const response = await requestPublicMedia(url, { ...request, maxBytes: 30 * 1024 * 1024, beforeRequest: options.beforeRequest });
@@ -20982,6 +21049,15 @@ export async function bindListingRecordToInventory(body = {}, session = null) {
 
 function buildOzonPublishErrorPayload(error, context = {}) {
   const rawMessage = rawOzonPublishErrorMessage(error);
+  if (error?.code === "LISTING_SHOP_WATERMARK_UNAVAILABLE") return {
+    message: error.message, fix_tip: "请在店铺设置中重新上传该店铺水印后重试原上架记录。",
+    code: "shop_watermark", raw_message: rawMessage, source: "listing_media_preparation", at: new Date().toISOString()
+  };
+  if (error?.code === "LISTING_SOURCE_IMAGE_DOWNLOAD_FAILED") return {
+    message: `${context.shop?.name || "目标店铺"}：${error.message}`,
+    fix_tip: `失败发生在商品原图读取阶段，已尝试 ${Number(error.attempts || 1)} 次。店铺水印不需要重新上传；请检查提示的草稿图片，网络恢复后重试原记录。`,
+    code: "source_image_download", raw_message: rawMessage, source: "listing_media_preparation", at: new Date().toISOString()
+  };
   const classified = classifyOzonPublishError(rawMessage, context);
   return {
     message: localizePublishMessage(classified.message),

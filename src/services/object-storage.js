@@ -33,7 +33,7 @@ function managedOssObjectKeyFromUrl(url, storage) {
   }
 }
 
-function createOssClient(storage, timeoutMs, client = null) {
+function createOssClient(storage, timeoutMs, client = null, { internal = false } = {}) {
   return client || new OSS({
     region: storage.region,
     bucket: storage.bucket,
@@ -41,6 +41,7 @@ function createOssClient(storage, timeoutMs, client = null) {
     accessKeySecret: storage.accessKeySecret,
     stsToken: storage.stsToken || undefined,
     secure: true,
+    internal,
     timeout: Math.max(1000, Number(timeoutMs) || DEFAULT_OSS_REQUEST_TIMEOUT_MS)
   });
 }
@@ -103,6 +104,7 @@ export function isManagedOssObjectUrl(url, {
 export async function readManagedOssObject(url, {
   maxBytes = 20 * 1024 * 1024,
   timeoutMs = 10000,
+  internal = false,
   env = process.env,
   client = null
 } = {}) {
@@ -111,7 +113,7 @@ export async function readManagedOssObject(url, {
   const objectKey = managedOssObjectKeyFromUrl(url, storage);
   if (!objectKey) return null;
   const byteLimit = Math.max(1, Number(maxBytes) || 20 * 1024 * 1024);
-  const ossClient = createOssClient(storage, timeoutMs, client);
+  const ossClient = createOssClient(storage, timeoutMs, client, { internal });
   const head = await ossClient.head(objectKey);
   const headHeaders = head?.res?.headers || {};
   const declaredBytes = Number(headHeaders["content-length"] || 0);
@@ -121,6 +123,8 @@ export async function readManagedOssObject(url, {
   if (!buffer.length) throw new Error("OSS object is empty");
   if (buffer.length > byteLimit) throw new Error(`OSS object exceeds ${byteLimit} bytes`);
   const headers = result?.res?.headers || headHeaders;
+  const expectedBytes = Number(headers["content-length"] || declaredBytes || 0);
+  if (expectedBytes && expectedBytes !== buffer.length) throw new Error("OSS image download has an incomplete body");
   return {
     buffer,
     contentType: String(headers["content-type"] || "application/octet-stream").split(";")[0].trim().toLowerCase(),

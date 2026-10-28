@@ -72,7 +72,7 @@ test("listing watermarking rechecks real enterprise authority and shop ownership
       optimizeListingImageForPublish: async buffer => { await stage("optimize"); return { buffer, extension: ".png", contentType: "image/png" }; },
       fs: {
         stat: async () => ({ isFile: () => true, size: fileBytes.length }),
-        readFile: async file => { await stage("read", { file }); return fileBytes; }
+        readFile: async file => { await stage(String(file).startsWith("shop-watermarks/") ? "read-watermark" : "read", { file }); return fileBytes; }
       },
       fsSync: { existsSync: () => true },
       writeListingMediaFile: async (name, bytes) => {
@@ -83,9 +83,8 @@ test("listing watermarking rechecks real enterprise authority and shop ownership
         await stage("register", { tenant: current.tenant.id, person: current.personId, shop: body.shop_id }); return { id: calls.length };
       },
       buildListingMediaPublishUrl: value => value,
-      requestPublicImage: async (url, options) => {
-        assert.equal(options.maxBytes, 30 * 1024 * 1024);
-        assert.equal(options.signal instanceof AbortSignal, true);
+      isManagedOssObjectUrl: () => false,
+      downloadListingSourceImage: async (url, options) => {
         assert.equal(typeof options.beforeRequest, "function");
         await stage("before-public-request", { url });
         await options.beforeRequest();
