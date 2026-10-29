@@ -36,7 +36,8 @@ export function summarizeFbpInventory(mappings, snapshots) {
       available_inventory_quantity: stock ? Number(stock.available) * Number(mapping.per_set_quantity) : null
     }));
   });
-  return { rows, present: rows.length ? rows.reduce((sum, row) => sum + (row.inventory_quantity || 0), 0) : null,
+  const times = rows.map(row => row.synced_at).filter(Boolean).sort((a, b) => new Date(a) - new Date(b));
+  return { rows, synced_at: times[0] || null, missing_skus: rows.filter(row => row.present === null).length, present: rows.length ? rows.reduce((sum, row) => sum + (row.inventory_quantity || 0), 0) : null,
     available: rows.length ? rows.reduce((sum, row) => sum + (row.available_inventory_quantity || 0), 0) : null,
     incomplete: !rows.length || rows.some(row => row.present === null) };
 }

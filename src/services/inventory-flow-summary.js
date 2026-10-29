@@ -2,7 +2,7 @@ import { mysqlQuery } from '../mysql-pool.js';
 import { validateFlowSettings } from './inventory-flow-rules.js';
 import { inventoryTenantSql, resolveInventoryTenantScope, assertInventoryRecord } from './inventory-tenant-scope.js';
 
-import { buildInventoryFlowSummary, calculateLocalInventorySafety } from './inventory-flow-summary-model.js';
+import { buildInventoryFlowSummary, calculateLocalInventorySafety, requestedFbpQuantity } from './inventory-flow-summary-model.js';
 export { buildInventoryFlowSummary } from './inventory-flow-summary-model.js';
 
 export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
@@ -32,7 +32,7 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
       if (localOnly) return { ...buildInventoryFlowSummary(ledger, projection, orders), applications_pending: true, requested: null };
     }
     const bindings = [...new Map((ledger.fbp_inventory?.rows || []).map(row => [`${row.shop_id}:${row.ozon_sku}`, row])).values()];
-    const applications = await query(`SELECT o.id AS order_id, o.order_no, o.status, o.created_at,
+    const applications = await query(`SELECT o.id AS order_id, o.order_no, o.status, o.created_at, o.submitted_at, o.reviewed_at, o.closed_at, o.updated_at,
       i.id AS item_id, i.shop_id, s.name AS shop_name, i.ozon_sku, i.product_id,
       i.requested_qty, GREATEST(0, i.approved_qty + COALESCE((SELECT SUM(a.adjustment_qty)
         FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id), 0)) AS final_qty,
@@ -46,7 +46,7 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
         (SELECT 1 FROM tenant_members m WHERE m.tenant_id = ${scope.id} AND m.person_id = reviewer.id AND m.active = 1)
       WHERE (i.mapping_id IS NULL OR EXISTS (SELECT 1 FROM sku_mappings m
         WHERE m.id = i.mapping_id AND m.shop_id = i.shop_id AND m.product_id = i.product_id AND ${inventoryTenantSql(scope, 'm')}))
-        AND o.status IN ('draft','pending_review','approved','ozon_created') AND
+        AND o.status IN ('draft','pending_review','approved','ozon_created','sent','completed','rejected','cancelled') AND
         (i.product_id = ?${bindings.length ? ` OR ${bindings.map(() => '(i.shop_id = ? AND i.ozon_sku = ?)').join(' OR ')}` : ''})
       ORDER BY o.created_at DESC, o.id DESC, i.id`, [productId, ...bindings.flatMap(row => [row.shop_id, row.ozon_sku])]);
     for (const row of applications) {
@@ -56,7 +56,7 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
       row.locked_quantity = ['approved', 'ozon_created'].includes(row.status) ? Number(row.final_qty) * perSet : 0;
       row.per_set_quantity = perSet;
     }
-    if (fbpOnly) return { applications, requested: applications.reduce((sum, row) => sum + row.requested_quantity, 0) };
+    if (fbpOnly) return { applications, requested: requestedFbpQuantity(applications) };
     return buildInventoryFlowSummary(ledger, projection, orders, applications);
   };
 }

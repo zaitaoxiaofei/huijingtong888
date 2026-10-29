@@ -2893,9 +2893,19 @@ Read the authenticated enterprise's retained inventory-flow compatibility servic
 - Responses:
   - `200` `application/json` -> `object`
 
+#### `GET /api/inventory-flow/sync-status`
+
+Poll the current enterprise/product FBP synchronization task. Requires inventory.write. Task results are isolated by enterprise and product; missing or restarted tasks do not imply zero stock.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Positive inventory product ID.
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `POST /api/inventory-flow/settings`
 
-Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2905,7 +2915,7 @@ Retained compatibility workflow writes; the retired independent tab has no navig
 
 #### `POST /api/inventory-flow/tasks`
 
-Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2915,7 +2925,7 @@ Retained compatibility workflow writes; the retired independent tab has no navig
 
 #### `POST /api/inventory-flow/task-action`
 
-Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2925,7 +2935,7 @@ Retained compatibility workflow writes; the retired independent tab has no navig
 
 #### `POST /api/inventory-flow/sync`
 
-Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
