@@ -76,6 +76,9 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       assertBusinessTaskPermission(session,'inventory.read');
       const ids=[...new Set(String(url.searchParams.get('product_ids') || url.searchParams.get('product_id') || '').split(',').map(Number))];
       if(!ids.length || ids.length>20 || ids.some(id=>!Number.isSafeInteger(id)||id<=0)) throw Object.assign(new Error('请选择1至20个库存商品'),{statusCode:400});
+      if(url.searchParams.get('view')==='local')return {rows:await workflow.localQuantities(ids,session.tenant.id)};
+      if(url.searchParams.get('view')==='sku'){if(ids.length!==1)throw Object.assign(new Error('请选择一个库存商品查看SKU组成'),{statusCode:400});return workflow.skuDetails(ids[0],url.searchParams.get('shop_id'),url.searchParams.get('ozon_sku'),session.tenant.id);}
+      if(url.searchParams.get('view')==='requests')return {rows:await Promise.all(ids.map(id=>workflow.requests(id,session.tenant.id)))};
       if(url.searchParams.get('view')==='status')return {rows:await workflow.batch(ids,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'})};
       const rows=[];
       for(let i=0;i<ids.length;i+=2) rows.push(...await Promise.all(ids.slice(i,i+2).map(id=>workflow.read(id,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'}))));

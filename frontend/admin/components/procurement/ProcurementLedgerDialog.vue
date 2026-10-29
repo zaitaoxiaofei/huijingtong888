@@ -9,6 +9,7 @@ import { apiClient, currentApiCacheScope } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 import LedgerBatchTrace from './LedgerBatchTrace.vue';
 import InventoryFlowDiagram from './InventoryFlowDiagram.vue';
+import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
 const props = defineProps({ modelValue: Boolean, fullPage: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
@@ -452,16 +453,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
             <template v-if="data.fbp_inventory">
             <p>直接读取 Ozon 同步库存，不重复扣订单。汇总已按每套组成折算为当前库存的实物单位；不同店铺、SKU 库存独立，不能互相抵扣。</p>
             <el-alert v-if="data.fbp_inventory.incomplete" type="warning" :closable="false" :title="`存在未同步或未绑定的 SKU，汇总不完整；已同步部分 ${data.fbp_inventory.present ?? 0}，请到 FBP 库存页面同步并核对绑定。`" />
-            <el-table :data="positiveFbpRows" max-height="360" empty-text="暂无有库存的 FBP SKU；零库存不展示，未同步项请先核对" :row-class-name="({ row }) => orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku)) ? 'current-fbp-sku' : ''">
-              <el-table-column prop="shop_name" label="店铺" min-width="130" />
-              <el-table-column label="Ozon SKU" min-width="150"><template #default="{ row }">{{ row.ozon_sku }}<el-tag v-if="orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku))" size="small">本单 SKU</el-tag></template></el-table-column>
-              <el-table-column prop="product_name" label="商品规格" min-width="190" />
-              <el-table-column prop="warehouse_name" label="FBP 仓库" min-width="130" />
-              <el-table-column label="库存／可售（套）" width="140"><template #default="{ row }">{{ row.present ?? '待同步' }} / {{ row.available ?? '待同步' }}</template></el-table-column>
-              <el-table-column label="每套含当前库存" width="130"><template #default="{ row }">{{ row.per_set_quantity }}</template></el-table-column>
-              <el-table-column label="折算实物库存" width="125"><template #default="{ row }">{{ row.inventory_quantity ?? '待同步' }}</template></el-table-column>
-              <el-table-column label="同步时间（北京）" min-width="180"><template #default="{ row }">{{ row.synced_at ? time(row.synced_at) : '待同步' }}</template></el-table-column>
-            </el-table>
+            <InventoryFbpSkuTable :rows="positiveFbpRows" :product-id="productId" :order-overview="orderOverview" :max-height="420" />
             </template>
             <el-empty v-else-if="!fbpLoading && !fbpSyncing" description="尚无可展示的 FBP 快照，请读取或手动同步" />
           </el-tab-pane>

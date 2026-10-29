@@ -2,8 +2,6 @@
 import { computed, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { useInventoryWorkflows } from '../../admin/utils/use-inventory-workflows.js';
-import InventoryWorkflowStatus from '../../admin/components/inventory/InventoryWorkflowStatus.vue';
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
@@ -24,8 +22,6 @@ const props = defineProps({
   tableHeight: { type: [String, Number], default: "100%" }
 });
 
-const workflowStates=useInventoryWorkflows(()=>props.rows,row=>inventoryOverview(row).items.map(i=>i.product_id));
-function productWorkflow(row,parent){return workflowStates.forIds(parentInventoryItems(parent).map(i=>i.product_id));}
 const emit = defineEmits([
   "toggle-all",
   "toggle-row",
@@ -617,7 +613,7 @@ function procurementTimeText(row) {
           <div class="inventory-compact">
             <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
               <template #actions="{ parent }">
-                <InventoryWorkflowStatus :state="productWorkflow(row,parent)" :order-covered="row.procurement_coverage?.needs_fulfillment && row.procurement_coverage?.stock_location!=='FBP' && row.procurement_coverage?.shortage_quantity===0 ? true : null" />
+
                 <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
                   <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
                   <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>

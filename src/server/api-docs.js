@@ -19,14 +19,14 @@ const response = (status, mediaType, schema, description = "") => ({ status, med
 const schemas = {
   InventoryWorkflowDemand: objectOf("Shared physical-unit procurement demand, in priority order real_order, local_safety, fbp_stock. Requests are reminders, never additional physical allocation.", [
     field("key", scalar("string", "real_order | local_safety | fbp_stock"), true), field("label", scalar("string", "Business purpose"), true),
-    field("priority", scalar("number", "1 through 3"), true), field("status", scalar("string", "danger | warning | success | opportunity | unknown"), true),
+    field("priority", scalar("number", "1 through 3"), true), field("process_status",scalar("string","Optional request_submitted, pending_review or draft; separate from supply colour")),field("advisory_status",scalar("string","Optional FBP opportunity/warning advisory, never changes sufficient stock colour")), field("status", scalar("string", "danger | warning | success | opportunity | unknown"), true),
     field("physical_gap", scalar("number", "Dispatchable physical shortage; null when unknown", {nullable:true})),
     field("purchase_quantity", scalar("number", "Net additional purchase requirement after scoped inbound allocation; null when unknown", {nullable:true})),
     field("submitted_quantity", scalar("number", "Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand")),
     field("requests", arrayOf(scalar("object", "Current-enterprise outstanding request metadata"), "Source requests"))
   ]),
   InventoryWorkflow: objectOf("Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations; pending_review applications do, approved stock is already reserved.", [
-    field("product_id", scalar("number", "Owned inventory product ID"), true), field("overall",scalar("string","Worst demand status"),true),
+    field("product_id", scalar("number", "Owned inventory product ID"), true), field("overall",scalar("string","Worst demand/advisory status"),true),field("stock_status",scalar("string","Supply sufficiency only; pending approvals never make surplus stock yellow")),
     field("demands",arrayOf(ref("InventoryWorkflowDemand"),"Three priority demands"),true),
     ...["physical","order_demand","safety","locked","free","purchase_quantity"].map(name=>field(name,scalar("number","Physical units, nullable when unknown",{nullable:true}))),
     ...["requested","incoming","local_days","fbp_days"].map(name=>field(name,scalar("number","Named physical quantity or coverage days"))),
@@ -1574,9 +1574,9 @@ const endpoints = [
     })
   ]),
   section("Catalog", [
-    endpoint("GET", "/api/products", "Return active product master data with inventory and profit metrics.", {
-      auth: "authenticated",
-      responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows."))]
+    endpoint("GET", "/api/products", "Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.", {
+      auth: "authenticated",queryParams:[param("view",scalar("string","inventory for lean inventory list; omitted preserves other product consumers"),false),param("includeStock",scalar("string","0 returns list metadata immediately; quantities are nullable and loaded separately by view=local"),false)],
+      responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows; paged=1 returns rows/total/page/pageSize."))]
     }),
     endpoint("GET", "/api/products/selection", "Return selection-facing product records.", {
       auth: "authenticated",
@@ -1822,8 +1822,8 @@ const endpoints = [
       responses: [response(200, "application/json", arrayOf(ref("ProcurementRequestRecord"), "Procurement request rows."))]
     }),
     endpoint("GET", "/api/inventory-workflow", "Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.", {
-      auth:"authenticated", queryParams:[param("product_ids",scalar("string","1–20 comma-separated owned product IDs; alternatively product_id"),false),param("product_id",scalar("number","Single owned product ID"),false),param("view",scalar("string","status for batched lightweight demand, omitted for full details"),false),param("fresh",scalar("string","1 bypasses the short-lived tenant/product cache"),false)],
-      responses:[response(200,"application/json",objectOf("Workflow result",[field("rows",arrayOf(ref("InventoryWorkflow"),"Requested products"),true)])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+      auth:"authenticated", queryParams:[param("product_ids",scalar("string","1–20 comma-separated owned product IDs; alternatively product_id"),false),param("product_id",scalar("number","Single owned product ID"),false),param("view",scalar("string","local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details"),false),param("shop_id",scalar("number","Current-enterprise shop for view=sku"),false),param("ozon_sku",scalar("string","Bound SKU for view=sku"),false),param("fresh",scalar("string","1 bypasses the short-lived tenant/product cache"),false)],
+      responses:[response(200,"application/json",objectOf("Workflow result",[field("rows",arrayOf(ref("InventoryWorkflow"),"Requested products or requests-only metadata; omitted for view=sku")),field("source",scalar("string","view=sku: direct | bundle | recipe")),field("root",scalar("object","Owned root inventory identity")),field("components",arrayOf(scalar("object","Owned inventory product_id, name, inventory_number, quantity, stock_unit, image_url and current marker"),"view=sku: every component of the current effective binding"))])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
     }),
     endpoint("GET", "/api/inventory-workflow/alerts", "Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.", {
       auth:"authenticated", queryParams:[...['query','alertType','sortBy','refresh'].map(name=>param(name,scalar("string","Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1"),false)),...['page','pageSize'].map(name=>param(name,scalar("number","Page index or page size, maximum100"),false))],

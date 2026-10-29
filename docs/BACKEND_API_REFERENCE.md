@@ -37,6 +37,8 @@ Shared physical-unit procurement demand, in priority order real_order, local_saf
 | `key` | `string` | Yes | real_order | local_safety | fbp_stock |
 | `label` | `string` | Yes | Business purpose |
 | `priority` | `number` | Yes | 1 through 3 |
+| `process_status` | `string` | No | Optional request_submitted, pending_review or draft; separate from supply colour |
+| `advisory_status` | `string` | No | Optional FBP opportunity/warning advisory, never changes sufficient stock colour |
 | `status` | `string` | Yes | danger | warning | success | opportunity | unknown |
 | `physical_gap` | `number` | No | Dispatchable physical shortage; null when unknown |
 | `purchase_quantity` | `number` | No | Net additional purchase requirement after scoped inbound allocation; null when unknown |
@@ -50,7 +52,8 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `product_id` | `number` | Yes | Owned inventory product ID |
-| `overall` | `string` | Yes | Worst demand status |
+| `overall` | `string` | Yes | Worst demand/advisory status |
+| `stock_status` | `string` | No | Supply sufficiency only; pending approvals never make surplus stock yellow |
 | `demands` | `array<InventoryWorkflowDemand>` | Yes | Three priority demands |
 | `physical` | `number` | No | Physical units, nullable when unknown |
 | `order_demand` | `number` | No | Physical units, nullable when unknown |
@@ -2657,7 +2660,7 @@ Replace order quality-check prefix rules in bulk.
 
 #### `GET /api/products`
 
-Return active product master data with inventory and profit metrics.
+Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.
 
 - Auth: `authenticated`
 - Responses:

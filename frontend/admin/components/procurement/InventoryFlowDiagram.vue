@@ -1,4 +1,5 @@
 <script setup>
+import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import { inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import { useRouter } from 'vue-router';
@@ -31,24 +32,24 @@ const workflowState=computed(()=>props.workflow||inventoryWorkflow(props.ledger)
 function nodeStatus(key) {
   const type=({orders:'real_order',safety:'local_safety',application:'fbp_stock'})[key];
   if(type)return workflowState.value.demands.find(d=>d.key===type)?.status;
-  if(key==='free')return workflowState.value.overall;
+  if(key==='free')return workflowState.value.stock_status;
   return '';
 }
 const nodes = computed(() => [
-  {key:'requests',label:'采购需求／申请',value:workflowState.value.purchase_quantity,hint:'推荐需确认；实际采购后才进入在途',area:'2 / 1',plan:true},
-  { key: 'incoming', label: '采购在途', value: props.ledger.incoming_quantity, hint: '收货验收后入库', area: '2 / 1', tab: 'purchases' },
-  { key: 'assigned', label: '订单在途覆盖', value: props.ledger.current_incoming, hint: '尚未到货，不能发出', area: '1 / 2', tab: 'current', plan: true },
-  { key: 'physical', label: '本地实物', value: props.ledger.physical_estimate, hint: props.ledger.last_stocktake_at ? `核实 ${time(props.ledger.last_stocktake_at)}` : '尚无盘点时间', area: '2 / 2', tab: 'movements', primary: true },
-  { key: 'incoming-free', label: '在途未分配给订单', value: props.ledger.incoming_quantity == null || props.ledger.current_incoming == null ? null : Math.max(0, props.ledger.incoming_quantity - props.ledger.current_incoming), hint: '非 FBP 已锁定现货', area: '4 / 2', tab: 'purchases', plan: true },
-  { key: 'orders', label: '① FBS 订单占用', value: props.ledger.open_order_demand, hint: `${currentOrders.value.length} 条商品需求 · 优先保障`, area: '1 / 3', tab: 'current' },
-  { key: 'safety', label: '② 本地安全保障', value: facts.value.safety, hint: facts.value.local_days == null ? '等待预测数据' : `保障 ${facts.value.local_days} 天 · 不含已出单`, area: '2 / 3', plan: true },
-  { key: 'application', label: '③ FBP 申请', value: summary.value.requested, hint: props.fbpLoading ? 'FBP 明细加载中' : '申请不重复扣实物', area: '3 / 3', plan: true },
-  { key: 'locked', label: '已确认 FBP 占用', value: props.ledger.fbp_reserved, hint: '实际发出才扣实物', area: '3 / 4', primary: true },
-  { key: 'fbp-physical', label: 'FBP 实物', display: props.fbpLoading ? '正在拉取中' : props.fbpError ? '同步未完成' : official.value?.incomplete ? '部分未同步' : '', value: official.value?.incomplete ? null : official.value?.present,
-    hint: props.fbpLoading ? '正在核对各店铺 SKU，本地库存可先查看' : props.fbpError ? '保留上次快照，点击查看明细及失败原因' : official.value?.synced_at ? `核实 ${time(official.value.synced_at)}` : '尚无同步时间', area: '3 / 2', primary: true },
-  { key: 'dispatch', label: 'FBP 发仓记录', display: `${new Set(dispatches.value.map(row => row.order_id)).size} 单`, hint: '已发出、已入仓 · 点击查看状态', area: '4 / 4' },
-  { key: 'free', label: '可用库存', value: facts.value.free, hint: facts.value.protection_gap > 0 ? `保障缺口 ${quantity(facts.value.protection_gap)}` : '扣除占用与保障后', area: '2 / 5', primary: true }
-].map(node=>node.key==='requests'?node:{...node,area:node.area.replace(/(\d+)$/,n=>String(Number(n)+1))}));
+ {key:'receiving',label:'验货收货',value:props.ledger.incoming_quantity,hint:'验收合格后登记入库',area:'1 / 1'},
+ {key:'orders',label:'① FBS订单保障',value:props.ledger.open_order_demand,hint:`现货占用 · 优先保障${gapText('real_order')}`,area:'1 / 2',tab:'current'},
+ {key:'safety',label:'② 本地安全保障',value:facts.value.safety,hint:`保障 ${facts.value.local_days??'待核'} 天${gapText('local_safety')}`,area:'2 / 2',plan:true},
+ {key:'physical',label:'本地实物',value:props.ledger.physical_estimate,hint:'双击更新实物，点击查看流水',area:'3 / 1',tab:'movements',primary:true},
+ {key:'free',label:'可用库存',value:facts.value.free,hint:'扣订单、安全保障及已确认FBP占用',area:'4 / 2',primary:true},
+ {key:'application',label:'③ FBP备货申请',value:workflowState.value.requested,hint:workflowState.value.demands.find(d=>d.key==='fbp_stock')?.process_status==='draft'?'另有备货草稿，尚未提交':`未确认不锁库存${gapText('fbp_stock')}`,area:'4 / 3',plan:true},
+ {key:'locked',label:'仓库确认与锁定',value:props.ledger.fbp_reserved,hint:'只锁定，实际发运才扣实物',area:'3 / 4',primary:true},
+ {key:'dispatch',label:'发往FBP',display:`${new Set(dispatches.value.map(row=>row.order_id)).size} 单`,hint:'已发出／入仓记录',area:'3 / 5'},
+ {key:'fbp-physical',label:'FBP官方库存核对',display:props.fbpLoading?'正在拉取中':props.fbpError?'同步未完成':official.value?.incomplete?'部分未同步':'',value:official.value?.incomplete?null:official.value?.present,hint:'各店铺SKU汇总 · 点击看图片与组成',area:'4 / 6',primary:true},
+ {key:'requests',label:'需求与采购申请',value:workflowState.value.purchase_quantity,hint:'三类缺口按优先级汇总',area:'1 / 4',plan:true},
+ {key:'purchase-confirm',label:'确认采购',display:'登记已下单',hint:'以实际下单件数为准',area:'1 / 5'},
+ {key:'incoming',label:'采购在途',value:props.ledger.incoming_quantity,hint:'在途不是可发实物',area:'1 / 6',tab:'purchases'}
+]);
+function gapText(type){const demand=workflowState.value.demands.find(d=>d.key===type);return demand?.purchase_quantity>0?` · 需采购 ${demand.purchase_quantity} 件`:demand?.physical_gap>0?' · 等待到货':'';}
 const activeNode = computed(() => selected.value === 'fbp-history' ? { key: 'fbp-history', label: '全部 FBP 单据', display: `${new Set(applications.value.map(row => row.order_id)).size} 单` } : nodes.value.find(node => node.key === selected.value));
 function rowsFor(key) {
   if(key==='requests')return workflowState.value.requests||[];
@@ -58,7 +59,7 @@ function rowsFor(key) {
   if (key === 'fbp-physical') return positiveFbpRows.value;
   if (key === 'dispatch') return dispatches.value;
   if (key === 'safety') return facts.value.safety_rows || [];
-  if (['incoming', 'incoming-free'].includes(key)) return purchases.value;
+  if (['incoming', 'incoming-free','receiving','purchase-confirm'].includes(key)) return purchases.value;
   return [];
 }
 function navigateOrder(row) { emit('navigate'); router.push({ path: '/orders', query: { orderId: row.order_id } }); }
@@ -89,32 +90,25 @@ function brief(node) {
   if (node.key === 'incoming-free') return ['只减本地订单已分配的在途；其他用途及历史关联仍需查看采购明细，不能直接视为可发 FBP。'];
   return [];
 }
-const edges = [['requests','incoming',true], ['incoming', 'assigned', true], ['incoming', 'physical', false], ['incoming', 'incoming-free', true], ['physical', 'orders', false], ['physical', 'safety', true], ['physical', 'application', true], ['application', 'locked', false], ['locked', 'free', false], ['physical', 'free', true], ['locked', 'dispatch', true]];
-function draw() {
-  if (!canvas.value) return;
-  const box = canvas.value.getBoundingClientRect();
-  const narrow = box.width < 760;
-  paths.value = edges.map(([from, to, planned]) => {
-    const a = canvas.value.querySelector(`[data-node="${from}"]`)?.getBoundingClientRect();
-    const b = canvas.value.querySelector(`[data-node="${to}"]`)?.getBoundingClientRect();
-    if (!a || !b) return null;
-    if (narrow) {
-      const x1 = a.left - box.left + a.width / 2, y1 = a.bottom - box.top;
-      const x2 = b.left - box.left + b.width / 2, y2 = b.top - box.top;
-      const lane = box.width - 5;
-      return { key: `${from}-${to}`, planned, d: `M${x1},${y1} V${y1 + 10} H${lane} V${y2 - 10} H${x2} V${y2}` };
-    }
-    if (from === 'locked' && to === 'dispatch') {
-      const x = a.left - box.left + a.width / 2;
-      return { key: `${from}-${to}`, planned, d: `M${x},${a.bottom - box.top} V${b.top - box.top}` };
-    }
-    const x1 = a.right - box.left, y1 = a.top - box.top + a.height / 2;
-    const x2 = b.left - box.left, y2 = b.top - box.top + b.height / 2;
-    const mid = (x1 + x2) / 2;
-    return { key: `${from}-${to}`, planned, d: from === 'physical' && to === 'free'
-      ? `M${x1},${y1} H${x1 + 12} V${y1 + 72} H${x2 - 12} V${y2} H${x2}`
-      : `M${x1},${y1} H${mid} V${y2} H${x2}` };
-  }).filter(Boolean);
+const edges = [
+ ['physical','orders',false,''],['physical','safety',false,''],['physical','free',false,''],
+ ['orders','requests',true,'订单缺口'],['safety','requests',true,'保障缺口'],['application','requests',true,'本地供货不足'],
+ ['requests','purchase-confirm',false,''],['purchase-confirm','incoming',false,''],['incoming','receiving',false,'验货收货'],['receiving','physical',false,'登记入库'],
+ ['free','application',false,''],['application','locked',false,'确认'],['locked','dispatch',false,''],['dispatch','fbp-physical',false,'到仓核对'],['fbp-physical','application',true,'预测缺口']
+];
+function draw(){
+ if(!canvas.value)return;
+ const box=canvas.value.getBoundingClientRect(),narrow=box.width<760;
+ paths.value=edges.map(([from,to,planned,label])=>{
+  const a=canvas.value.querySelector(`[data-node="${from}"]`)?.getBoundingClientRect(),b=canvas.value.querySelector(`[data-node="${to}"]`)?.getBoundingClientRect();if(!a||!b)return null;
+  let x1=a.right-box.left,y1=a.top-box.top+a.height/2,x2=b.left-box.left,y2=b.top-box.top+b.height/2,d,lx=(x1+x2)/2,ly=(y1+y2)/2-8;
+  if(narrow){const lane=box.width-4;x1=a.left-box.left+a.width/2;x2=b.left-box.left+b.width/2;y1=a.bottom-box.top;y2=b.top-box.top;d=`M${x1},${y1} V${y1+8} H${lane} V${y2-8} H${x2} V${y2}`;label='';}
+  else if(from==='incoming'&&to==='receiving'){x1=a.left-box.left+a.width/2;x2=b.left-box.left+b.width/2;y1=a.top-box.top;y2=b.top-box.top;d=`M${x1},${y1} V8 H${x2} V${y2}`;lx=(x1+x2)/2;ly=8;}
+  else if(from==='fbp-physical'&&to==='application'){x1=a.left-box.left+a.width/2;x2=b.left-box.left+b.width/2;y1=a.bottom-box.top;y2=b.bottom-box.top;const lane=box.height-10;d=`M${x1},${y1} V${lane} H${x2} V${y2}`;lx=(x1+x2)/2;ly=lane;}
+  else if(from==='receiving'){x1=a.left-box.left+a.width/2;x2=b.left-box.left+b.width/2;y1=a.bottom-box.top;y2=b.top-box.top;d=`M${x1},${y1} V${y2}`;lx=x1;ly=(y1+y2)/2;}
+  else {const mid=x1+Math.max(14,(x2-x1)/2);d=`M${x1},${y1} H${mid} V${y2} H${x2}`;lx=mid;ly=(y1+y2)/2;}
+  return{key:`${from}-${to}`,planned,d,label,lx,ly};
+ }).filter(Boolean);
 }
 watch(() => props.ledger, async (value, previous) => { if (value.product?.id !== previous?.product?.id) selected.value = ''; await nextTick(); draw(); });
 onMounted(() => { observer = new ResizeObserver(draw); observer.observe(canvas.value); draw(); });
@@ -126,7 +120,7 @@ onBeforeUnmount(() => observer?.disconnect());
     <div class="flow-heading"><h3>库存流转与占用</h3><span>悬浮看摘要 · 点击查看对应单据</span></div>
     <el-alert v-if="summary.unavailable" :title="summary.message" type="warning" :closable="false" />
     <div ref="canvas" class="flow-canvas">
-      <svg class="flow-connectors" aria-hidden="true"><defs><marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-head" /></marker></defs><path v-for="path in paths" :key="path.key" :d="path.d" :marker-end="`url(#${arrowId})`" :class="{ 'is-planned': path.planned }" /></svg>
+      <svg class="flow-connectors" aria-hidden="true"><defs><marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-head" /></marker></defs><path v-for="path in paths" :key="path.key" :data-edge="path.key" :d="path.d" :marker-end="`url(#${arrowId})`" :class="{ 'is-planned': path.planned }" /><g v-for="path in paths.filter(p=>p.label)" :key="`label-${path.key}`" class="flow-edge-label" :transform="`translate(${path.lx},${path.ly})`"><rect x="-48" y="-11" width="96" height="22" rx="11" /><text text-anchor="middle" dominant-baseline="central">{{path.label}}</text></g></svg>
       <el-popover v-for="node in nodes" :key="node.key" placement="top" :width="420" trigger="hover" :show-after="180" popper-class="inventory-flow-popover">
         <template #reference><button type="button" class="flow-node" :data-node="node.key" :style="{ gridArea: node.area }" :class="{ 'is-primary': node.primary, 'is-planned': node.plan, 'is-selected': selected === node.key, [`is-${nodeStatus(node.key)}`]: !!nodeStatus(node.key) }" :aria-expanded="selected === node.key" :aria-controls="detailId" @click="selectNode(node)" @dblclick="node.key==='physical' && canSyncFbp && emit('stocktake')"><span>{{ node.label }}</span><strong>{{ node.display || quantity(node.value) }}</strong><small>{{ node.hint }}</small></button></template>
         <h4>{{ node.label }} · {{ node.display || quantity(node.value) }}</h4>
@@ -149,8 +143,8 @@ onBeforeUnmount(() => observer?.disconnect());
       <div class="flow-heading"><h4>{{ activeNode.label }} · {{ activeNode.display || quantity(activeNode.value) }}</h4><el-button text @click="selected = ''">收起</el-button></div>
       <div class="flow-action-buttons">
         <el-button v-if="['requests','orders','safety','application','free'].includes(selected)" type="primary" plain @click="emit('workflow-action','request',({orders:'real_order',safety:'local_safety',application:'fbp_stock'})[selected]||'')">提交采购申请</el-button>
-        <el-button v-if="['requests','incoming'].includes(selected)" @click="emit('workflow-action','purchase')">登记实际采购</el-button>
-        <el-button v-if="selected==='incoming'" @click="emit('workflow-action','receive')">登记入库</el-button>
+        <el-button v-if="['requests','incoming','purchase-confirm'].includes(selected)" @click="emit('workflow-action','purchase')">登记实际采购</el-button>
+        <el-button v-if="['incoming','receiving'].includes(selected)" @click="emit('workflow-action','receive')">登记入库</el-button>
         <el-button v-if="selected==='physical' && canSyncFbp" @click="emit('stocktake')">更新本地库存</el-button>
         <el-button v-if="['application','fbp-physical','free'].includes(selected)" @click="emit('workflow-action','fbp')">创建FBP备货申请</el-button>
       </div>
@@ -162,17 +156,15 @@ onBeforeUnmount(() => observer?.disconnect());
       <el-table v-else-if="['application', 'locked', 'dispatch', 'fbp-history'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无关联申请；现有占用请到库存流水核对">
         <el-table-column prop="order_no" label="FBP 申请单" min-width="170" /><el-table-column prop="shop_name" label="店铺" min-width="110" /><el-table-column prop="applicant_name" label="申请人" width="100" /><el-table-column prop="ozon_sku" label="SKU" min-width="130" /><el-table-column prop="requested_quantity" label="申请实物数" width="110" /><el-table-column prop="locked_quantity" label="确认占用" width="100" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusText(row.status) }}</template></el-table-column><el-table-column label="提交／审核／结束（北京）" min-width="210"><template #default="{ row }"><div>提交 {{ time(row.submitted_at) }}</div><div>审核 {{ time(row.reviewed_at) }}</div><div v-if="row.closed_at">结束 {{ time(row.closed_at) }}</div></template></el-table-column><el-table-column label="操作" width="110"><template #default="{ row }"><el-button link type="primary" @click="navigateApplication(row)">打开申请单</el-button></template></el-table-column>
       </el-table>
-      <el-table v-else-if="selected === 'fbp-physical'" :data="positiveFbpRows" max-height="340" empty-text="暂无有库存的 FBP SKU；未同步项请先核对">
-        <el-table-column prop="shop_name" label="店铺" min-width="120" /><el-table-column prop="ozon_sku" label="Ozon SKU" min-width="140" /><el-table-column prop="warehouse_name" label="FBP 仓库" min-width="120" /><el-table-column prop="present" label="实物（套）" width="100" /><el-table-column prop="available" label="可售（套）" width="100" /><el-table-column prop="reserved" label="已占用（套）" width="110" /><el-table-column prop="per_set_quantity" label="每套含实物" width="110" /><el-table-column prop="inventory_quantity" label="折算实物（件）" width="130" /><el-table-column label="核实时间（北京）" min-width="180"><template #default="{ row }">{{ time(row.synced_at) }}</template></el-table-column>
-      </el-table>
+      <InventoryFbpSkuTable v-else-if="selected === 'fbp-physical'" :rows="positiveFbpRows" :product-id="Number(ledger.product.id)" />
       <el-table v-else-if="selected === 'safety' && rowsFor(selected).length" :data="rowsFor(selected)" max-height="340" empty-text="尚无可核对的 SKU 预测数据">
         <el-table-column prop="shop_name" label="店铺" min-width="120" /><el-table-column prop="ozon_sku" label="SKU" min-width="140" /><el-table-column label="本地日均" width="110"><template #default="{ row }">{{ Number(row.local_daily_sales || 0).toFixed(2) }}</template></el-table-column><el-table-column label="每套含实物" width="110" prop="per_set_quantity" /><el-table-column prop="status" label="供货判断" min-width="150" /><el-table-column label="官方同步（北京）" min-width="180"><template #default="{ row }">{{ time(row.synced_at) }}</template></el-table-column>
       </el-table>
-      <template v-else-if="['incoming', 'incoming-free'].includes(selected)">
+      <template v-else-if="['incoming', 'incoming-free','receiving','purchase-confirm'].includes(selected)">
         <el-table :data="purchases" max-height="340" empty-text="暂无采购在途"><el-table-column prop="order_no" label="采购单" min-width="180" /><el-table-column prop="person_name" label="采购人" min-width="100" /><el-table-column prop="pending_quantity" label="在途件数" width="110" /><el-table-column label="采购时间（北京）" min-width="180"><template #default="{ row }">{{ time(row.purchased_at) }}</template></el-table-column></el-table>
 
       </template>
-      <el-button v-if="activeNode.tab && !(inventoryMode && activeNode.tab === 'purchases')" link type="primary" @click="emit('select-tab', ['incoming', 'incoming-free'].includes(selected) ? 'incoming-purchases' : activeNode.tab)">查看原有{{ { movements: '库存流水', purchases: '采购与成本', current: '订单分配' }[activeNode.tab] }}明细</el-button>
+      <el-button v-if="activeNode.tab && !(inventoryMode && activeNode.tab === 'purchases')" link type="primary" @click="emit('select-tab', ['incoming', 'incoming-free','receiving','purchase-confirm'].includes(selected) ? 'incoming-purchases' : activeNode.tab)">查看原有{{ { movements: '库存流水', purchases: '采购与成本', current: '订单分配' }[activeNode.tab] }}明细</el-button>
     </section>
     <p v-if="ledger.physical_estimate < 0" class="flow-warning">实物推算为负，请先核对盘点和历史出库；当前不能确认可发数量。</p>
     <p class="flow-footnote">保障为预测目标，不生成出库流水；在途到货前不可发；FBP 官方库存以同步结果为准。</p>
@@ -184,11 +176,11 @@ onBeforeUnmount(() => observer?.disconnect());
 .flow-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .flow-heading h3, .flow-heading h4 { margin: 0; }
 .flow-heading > span, .flow-footnote, .flow-legend { font-size: 12px; color: var(--el-text-color-secondary); }
-.flow-canvas { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(4, 106px); gap: 34px 38px; padding: 26px 0 12px; background-image: radial-gradient(var(--el-border-color-lighter) .7px, transparent .7px); background-size: 18px 18px; }
+.flow-canvas { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(4, 108px); gap: 42px 28px; padding: 38px 0 45px; background-image: radial-gradient(var(--el-border-color-lighter) .7px, transparent .7px); background-size: 18px 18px; }
 .flow-connectors { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .flow-connectors path { stroke: var(--el-color-primary-light-3); stroke-width: 1.5; fill: none; }
 .flow-connectors .flow-arrow-head { fill: var(--el-color-primary-light-3); stroke: none; }
-.flow-connectors path.is-planned { stroke-dasharray: 5 4; }
+.flow-edge-label rect{fill:var(--el-bg-color-overlay);stroke:var(--el-border-color-lighter)}.flow-edge-label text{fill:var(--el-text-color-secondary);font-size:11px}.flow-connectors path.is-planned { stroke-dasharray: 5 4; }
 .flow-node { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 7px; min-width: 0; padding: 10px 8px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color-overlay); color: var(--el-text-color-primary); font: inherit; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
 .flow-node strong { font-size: clamp(16px, 1.2vw, 23px); font-weight: 600; font-variant-numeric: tabular-nums; }
 .flow-node small { font-size: 11px; color: var(--el-text-color-secondary); overflow-wrap: anywhere; }

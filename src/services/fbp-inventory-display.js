@@ -42,9 +42,11 @@ export function summarizeFbpInventory(mappings, snapshots) {
     incomplete: !rows.length || rows.some(row => row.present === null) };
 }
 
-export async function loadProductFbpStocks(query, productId, scope = null) {
+function productFbpMappingsQuery(productId,scope){
   const tenant = alias => scope ? ` AND ${inventoryTenantSql(scope, alias)}` : '';
-  const mappings = await query(`SELECT candidates.shop_id, candidates.ozon_sku, shop.name AS shop_name, MIN(sm.id) AS mapping_id,
+  return {sql:`SELECT candidates.shop_id, candidates.ozon_sku, shop.name AS shop_name, MIN(sm.id) AS mapping_id,
+      sm.product_id AS root_product_id,
+      MAX(CASE WHEN op.primary_image LIKE 'http%' OR op.primary_image LIKE '/%' THEN op.primary_image WHEN op.image_url LIKE 'http%' OR op.image_url LIKE '/%' THEN op.image_url ELSE '' END) AS image_url,
       MAX(op.name) AS product_name, COALESCE(NULLIF(MAX(op.offer_id), ''), MAX(sm.offer_id)) AS offer_id,
       CASE WHEN recipe.id IS NULL AND sm.product_id = ? THEN 1
         ELSE SUM(COALESCE(ri.quantity, pc.quantity, 1)) END AS per_set_quantity
@@ -63,7 +65,22 @@ export async function loadProductFbpStocks(query, productId, scope = null) {
     LEFT JOIN product_components pc ON pc.product_id = sm.product_id AND recipe.id IS NULL${tenant('pc')}
     LEFT JOIN online_products op ON op.shop_id = candidates.shop_id AND op.ozon_sku = candidates.ozon_sku
     WHERE (recipe.id IS NULL AND sm.product_id = ?) OR COALESCE(ri.product_id, pc.component_product_id, sm.product_id) = ?
-    GROUP BY candidates.shop_id, candidates.ozon_sku, shop.name, recipe.id, sm.product_id`, Array(6).fill(productId));
+    GROUP BY candidates.shop_id, candidates.ozon_sku, shop.name, recipe.id, sm.product_id`,args:Array(6).fill(productId)};
+}
+
+export async function loadProductsFbpStockTotals(query,productIds,scope){
+  const ids=[...new Set(productIds.map(Number))];if(!ids.length)return new Map();
+  if(ids.some(id=>!Number.isSafeInteger(id)||id<=0))throw new Error('Invalid inventory product IDs');
+  const statements=ids.map(id=>({id,...productFbpMappingsQuery(id,scope)}));
+  const mappings=await query(statements.map(item=>`SELECT ? AS inventory_product_id,mapped.* FROM (${item.sql}) mapped`).join(' UNION ALL '),statements.flatMap(item=>[item.id,...item.args]));
+  const pairs=[...new Map(mappings.map(row=>[`${row.shop_id}:${row.ozon_sku}`,row])).values()];
+  const stocks=pairs.length?await query(`SELECT shop_id,ozon_sku,warehouse_id,warehouse_name,present,available,reserved,synced_at FROM ozon_stock_snapshots WHERE stock_type='fbp_real' AND (${pairs.map(()=>'(shop_id=? AND ozon_sku=?)').join(' OR ')})`,pairs.flatMap(row=>[row.shop_id,row.ozon_sku])):[];
+  return new Map(ids.map(id=>{const bound=mappings.filter(row=>Number(row.inventory_product_id)===id);const value=summarizeFbpInventory(bound,stocks);return[id,{present:bound.length?(value.incomplete?null:value.present):0,incomplete:value.incomplete&&bound.length>0}];}));
+}
+
+export async function loadProductFbpStocks(query, productId, scope = null) {
+  const statement=productFbpMappingsQuery(productId,scope);
+  const mappings=await query(statement.sql,statement.args);
   if (!mappings.length) return summarizeFbpInventory([], []);
   const snapshots = await query(`SELECT shop_id, ozon_sku, warehouse_id, warehouse_name, present, available, reserved, synced_at
     FROM ozon_stock_snapshots WHERE stock_type = 'fbp_real' AND (${mappings.map(() => '(shop_id = ? AND ozon_sku = ?)').join(' OR ')})

@@ -37,12 +37,15 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
     submitted_quantity: Math.max(0,...requests.filter(r => procurementDemandType(r) === type.key && ['submitted','pending'].includes(r.status)).map(r=>qty(r.quantity)))
   });
   const demands = [make(INVENTORY_DEMAND_TYPES[0], orderGap, orderBuy), make(INVENTORY_DEMAND_TYPES[1], safetyGap, safetyBuy), make(INVENTORY_DEMAND_TYPES[2], fbpGap, fbpBuy, complete && applicationKnown)];
-  for(const demand of demands)if(demand.status==='success'&&demand.submitted_quantity>0)demand.status='warning';
-  if (demands[2].status === 'success' && (submitted.length || (applications || []).some(r => r.status === 'draft'))) demands[2].status = 'warning';
+  // Supply colour describes quantities; application progress is a separate signal.
+  for(const demand of demands)if(demand.submitted_quantity>0)demand.process_status='request_submitted';
+  if(submitted.length)demands[2].process_status='pending_review';
+  else if((applications||[]).some(r=>r.status==='draft'))demands[2].process_status='draft';
+  const stock_status=['danger','warning','unknown','success'].find(status=>demands.some(d=>d.status===status));
   const opportunities = (forecast?.skus || []).filter(row => qty(row.suggested_qty) > 0);
-  if (!requested && !submitted.length && opportunities.length && demands[2].status === 'success') demands[2].status = opportunities.some(row => Number(row.available) > 0) ? 'warning' : 'opportunity';
+  if (!requested && !submitted.length && opportunities.length && demands[2].status === 'success') demands[2].advisory_status = opportunities.some(row => Number(row.available) > 0) ? 'warning' : 'opportunity';
   const overall = ['danger','warning','unknown','opportunity','success'].find(status => demands.some(d => d.status === status));
-  return { demands, overall, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
+  return { demands, overall, stock_status, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
     purchase_quantity: complete && applicationKnown ? orderBuy + safetyBuy + fbpBuy : null,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',
