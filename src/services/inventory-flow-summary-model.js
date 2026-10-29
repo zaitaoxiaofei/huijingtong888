@@ -1,3 +1,6 @@
+import { flowLeadDays } from './inventory-flow-rules.js';
+import { shanghaiDateKey } from '../shanghai-time.js';
+
 const number = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 
 // Shared read model. Forecasts never post movements or change the ledger revision.
@@ -12,6 +15,10 @@ export function buildInventoryFlowSummary(ledger, forecast, orders = [], applica
     protection_gap: free === null ? null : Math.max(0, demand + locked + safety - physical),
     incoming: number(ledger.incoming_quantity), incoming_assigned: number(ledger.current_incoming),
     order_shortage: number(ledger.current_shortage),
+    consumed_7d: forecast?.consumed_7d ?? null, daily_consumption: forecast?.daily_consumption ?? null,
+    estimated_dates: forecast?.estimated_dates ?? 0, consumption_from: forecast?.consumption_from,
+    consumption_to: forecast?.consumption_to, production_days: forecast?.production_days,
+    local_shipping_days: forecast?.local_shipping_days,
     local_days: forecast?.local_days ?? null, fbp_days: forecast?.fbp_days ?? null,
     safety_status: safety === null ? '待核对 SKU 绑定、官方库存及销量数据' : '预测保障，不含实际订单需求',
     safety_rows: (forecast?.skus || []).map(row => ({ shop_id: row.shop_id, shop_name: row.shop_name,
@@ -28,3 +35,30 @@ export function buildInventoryFlowSummary(ledger, forecast, orders = [], applica
   };
 }
 
+// Physical consumption is already expanded to this inventory product by the ledger.
+export function calculateLocalInventorySafety(ledger, settings = {}, now = new Date()) {
+  const today = shanghaiDateKey(now);
+  const end = Date.parse(`${today}T00:00:00+08:00`), start = end - 7 * 86400000;
+  let consumed = 0, estimatedDates = 0;
+  const seen = new Set();
+  for (const row of ledger.orders || []) {
+    if (!row.entered_transport || ['FBP', 'OGR'].includes(row.stock_location)) continue;
+    const key = `${row.order_id}:${row.order_item_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const value = row.transport_at || row.ordered_at;
+    const normalized = typeof value === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:/.test(value) ? value.replace(' ', 'T') + 'Z' : value;
+    const at = new Date(normalized || NaN).getTime();
+    if (!Number.isFinite(at) || at < start || at >= end) continue;
+    consumed += Math.max(0, Number(row.quantity) || 0);
+    if (!row.transport_at) estimatedDates++;
+  }
+  const production = settings.production_days ?? Number(ledger.product.production_lead_days ?? 7);
+  const shipping = settings.local_days ?? Number(ledger.product.warehouse_logistics_days ?? 2);
+  const days = flowLeadDays(production + shipping, 7, settings.holidays || [], today);
+  return { safety_qty: Math.ceil(consumed / 7 * days), local_days: days,
+    fbp_days: flowLeadDays(production + shipping + (settings.fbp_days ?? 7), 15, settings.holidays || [], today),
+    consumed_7d: consumed, daily_consumption: consumed / 7, estimated_dates: estimatedDates,
+    consumption_from: new Date(start).toISOString(), consumption_to: new Date(end).toISOString(),
+    production_days: production, local_shipping_days: shipping, stock_incomplete: false, skus: [] };
+}

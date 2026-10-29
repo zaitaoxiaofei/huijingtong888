@@ -3,8 +3,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } fro
 import { useRouter } from 'vue-router';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 
-const props = defineProps({ ledger: { type: Object, required: true }, inventoryMode: Boolean });
-const emit = defineEmits(['select-tab', 'navigate']);
+const props = defineProps({ ledger: { type: Object, required: true }, inventoryMode: Boolean, fbpLoading: Boolean, fbpError: { type: String, default: '' } });
+const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp']);
 const router = useRouter();
 const canvas = ref(null), selected = ref(''), paths = ref([]);
 const arrowId = `inventory-flow-arrow-${useId()}`;
@@ -24,7 +24,7 @@ const nodes = computed(() => [
   { key: 'incoming-free', label: '在途未分配给订单', value: props.ledger.incoming_quantity == null || props.ledger.current_incoming == null ? null : Math.max(0, props.ledger.incoming_quantity - props.ledger.current_incoming), hint: '非 FBP 已锁定现货', area: '4 / 2', tab: 'purchases', plan: true },
   { key: 'orders', label: '① 订单占用', value: props.ledger.open_order_demand, hint: `${currentOrders.value.length} 条商品需求 · 优先保障`, area: '1 / 3', tab: 'current' },
   { key: 'safety', label: '② 本地安全保障', value: facts.value.safety, hint: facts.value.local_days == null ? '等待预测数据' : `保障 ${facts.value.local_days} 天 · 不含已出单`, area: '2 / 3', plan: true },
-  { key: 'application', label: '③ FBP 申请', value: facts.value.requested, hint: '申请不重复扣实物', area: '3 / 3', plan: true },
+  { key: 'application', label: '③ FBP 申请', value: facts.value.requested, hint: props.fbpLoading ? 'FBP 明细加载中' : '申请不重复扣实物', area: '3 / 3', plan: true },
   { key: 'locked', label: '已确认 FBP 占用', value: props.ledger.fbp_reserved, hint: '实际发出才扣实物', area: '3 / 4', primary: true },
   { key: 'free', label: '可用库存', value: facts.value.free, hint: facts.value.protection_gap > 0 ? `保障缺口 ${quantity(facts.value.protection_gap)}` : '扣除占用与保障后', area: '2 / 5', primary: true }
 ]);
@@ -47,6 +47,7 @@ function selectNode(node) {
 function brief(node) {
   if (node.key === 'physical') return ['实物包含已打包但尚未实际发出的货。', `最近核实：${time(props.ledger.last_stocktake_at)}`];
   if (node.key === 'free') return [facts.value.free == null ? '保障数据不完整，不能把未占用余量全部视为可发 FBP。' : `${props.ledger.physical_estimate} − ${props.ledger.open_order_demand} − ${facts.value.safety} − ${props.ledger.fbp_reserved} = ${facts.value.free}`, `现行未占用余量：${quantity(props.ledger.available_estimate)}；尚未扣未来保障。`];
+  if (node.key === 'safety' && facts.value.daily_consumption != null) return [`近7个完整自然日消耗 ${facts.value.consumed_7d} 件，日均 ${Number(facts.value.daily_consumption).toFixed(2)} 件 × ${facts.value.local_days} 天，向上取整。`, `生产 ${facts.value.production_days} 天＋到本地 ${facts.value.local_shipping_days} 天，至少保障7天；节假日影响已计入。`, facts.value.estimated_dates ? `${facts.value.estimated_dates} 条缺发运时间，按下单时间估计；不含待发订单及FBP/OGR消耗。` : '不含待发订单及FBP/OGR消耗；历史缺发运时间时按履约记录中的签收/下单日期估计，FBP未同步不减少本地保障。'];
   if (node.key === 'safety') return [facts.value.safety_status || '预测数据暂不可用', `本地保障 ${facts.value.local_days ?? '待核'} 天；FBP 保障 ${facts.value.fbp_days ?? '待核'} 天。`];
   if (node.key === 'assigned') return ['已分配在途只表示未来覆盖，不能计入可立即发出的实物。'];
   if (node.key === 'incoming-free') return ['只减本地订单已分配的在途；其他用途及历史关联仍需查看采购明细，不能直接视为可发 FBP。'];
@@ -75,7 +76,7 @@ function draw() {
       : `M${x1},${y1} H${mid} V${y2} H${x2}` };
   }).filter(Boolean);
 }
-watch(() => props.ledger, async () => { selected.value = ''; await nextTick(); draw(); });
+watch(() => props.ledger, async (value, previous) => { if (value.product?.id !== previous?.product?.id) selected.value = ''; await nextTick(); draw(); });
 onMounted(() => { observer = new ResizeObserver(draw); observer.observe(canvas.value); draw(); });
 onBeforeUnmount(() => observer?.disconnect());
 </script>
@@ -100,7 +101,8 @@ onBeforeUnmount(() => observer?.disconnect());
         <p v-if="!rowsFor(node.key).length && !brief(node).length">暂无关联明细；占用不为零时请刷新并核对库存流水。</p>
       </el-popover>
     </div>
-    <div class="flow-legend"><span>实线：实物与确认占用</span><span>虚线：计划与保障关系</span><el-button link type="primary" @click="emit('select-tab', 'fbp')">FBP 官方库存 {{ props.ledger.fbp_inventory?.incomplete ? '待核对' : quantity(props.ledger.fbp_inventory?.present) }} · 查看 SKU</el-button></div>
+    <div class="flow-legend"><span>实线：实物与确认占用</span><span>虚线：计划与保障关系</span><el-button link type="primary" @click="emit('select-tab', 'fbp')">FBP 官方库存 {{ fbpLoading ? '加载中' : props.ledger.fbp_inventory?.incomplete || !props.ledger.fbp_inventory ? '待核对' : quantity(props.ledger.fbp_inventory?.present) }} · 查看 SKU</el-button></div>
+    <div v-if="fbpError" class="flow-fbp-error"><span>FBP 数据：{{ fbpError }}</span><el-button link type="primary" :disabled="fbpLoading" @click="emit('retry-fbp')">重新读取</el-button></div>
     <section v-if="activeNode" class="flow-node-detail" aria-live="polite">
       <div class="flow-heading"><h4>{{ activeNode.label }} · {{ quantity(activeNode.value) }}</h4><el-button text @click="selected = ''">收起</el-button></div>
       <p v-for="line in brief(activeNode)" :key="line">{{ line }}</p>
@@ -110,7 +112,7 @@ onBeforeUnmount(() => observer?.disconnect());
       <el-table v-else-if="['application', 'locked'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无关联申请；现有占用请到库存流水核对">
         <el-table-column prop="order_no" label="FBP 申请单" min-width="170" /><el-table-column prop="shop_name" label="店铺" min-width="110" /><el-table-column prop="applicant_name" label="申请人" width="100" /><el-table-column prop="ozon_sku" label="SKU" min-width="130" /><el-table-column prop="requested_quantity" label="申请实物数" width="110" /><el-table-column prop="locked_quantity" label="确认占用" width="100" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusText(row.status) }}</template></el-table-column><el-table-column label="操作" width="110"><template #default="{ row }"><el-button link type="primary" @click="navigateApplication(row)">打开申请单</el-button></template></el-table-column>
       </el-table>
-      <el-table v-else-if="selected === 'safety'" :data="rowsFor(selected)" max-height="340" empty-text="尚无可核对的 SKU 预测数据">
+      <el-table v-else-if="selected === 'safety' && rowsFor(selected).length" :data="rowsFor(selected)" max-height="340" empty-text="尚无可核对的 SKU 预测数据">
         <el-table-column prop="shop_name" label="店铺" min-width="120" /><el-table-column prop="ozon_sku" label="SKU" min-width="140" /><el-table-column label="本地日均" width="110"><template #default="{ row }">{{ Number(row.local_daily_sales || 0).toFixed(2) }}</template></el-table-column><el-table-column label="每套含实物" width="110" prop="per_set_quantity" /><el-table-column prop="status" label="供货判断" min-width="150" /><el-table-column label="官方同步（北京）" min-width="180"><template #default="{ row }">{{ time(row.synced_at) }}</template></el-table-column>
       </el-table>
       <template v-else-if="['incoming', 'incoming-free'].includes(selected)">

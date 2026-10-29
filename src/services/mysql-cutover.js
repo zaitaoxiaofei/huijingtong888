@@ -7750,9 +7750,10 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
   const productId = Number(body.product_id);
   await assertInventoryRecord(scope, 'product', productId);
   await ensureOzonStockStorageSchemaMysql();
-  const mappings = await mysqlQuery(`SELECT DISTINCT m.shop_id, m.ozon_sku, m.offer_id FROM sku_mappings m
-    JOIN shops s ON s.id = m.shop_id AND ${inventoryTenantSql(scope, 's')}
-    WHERE m.product_id = ? AND m.active = 1 AND ${inventoryTenantSql(scope, 'm')}`, [productId]);
+  const bound = await loadProductFbpStocks(mysqlQuery, productId, scope);
+  const mappings = [...new Map(bound.rows.map(row => [`${row.shop_id}:${row.ozon_sku}`, {
+    shop_id: Number(row.shop_id), ozon_sku: row.ozon_sku, offer_id: row.offer_id
+  }])).values()];
   if (!mappings.length) throw Object.assign(new Error('该库存尚未绑定店铺SKU，请先在SKU绑定中配置后同步'), { statusCode: 400 });
   const shops = await shopsMysql(String(scope.id));
   const results = [];
@@ -34418,9 +34419,18 @@ const procurementLedgerService = createProcurementLedgerService({
   }
 });
 async function readLedgerWithFlow(query, tenantId) {
-  const ledger = await procurementLedgerService.read(query, tenantId);
-  if (String(query.include_flow || '') === '1') {
-    try { ledger.flow_summary = await readInventoryFlowSummary(ledger, tenantId); }
+  if (query.view === 'fbp') {
+    const scope = await resolveInventoryTenantScope(tenantId);
+    const id = Number(query.product_id);
+    await assertInventoryRecord(scope, 'product', id);
+    const fbp_inventory = await loadProductFbpStocks(mysqlQuery, id, scope);
+    const details = await readInventoryFlowSummary({ product: { id }, fbp_inventory }, tenantId, { fbpOnly: true });
+    return { product_id: id, fbp_inventory, ...details };
+  }
+  const localOnly = String(query.include_flow || '') === 'local';
+  const ledger = await procurementLedgerService.read(localOnly ? { ...query, include_fbp: false } : query, tenantId);
+  if (localOnly || String(query.include_flow || '') === '1') {
+    try { ledger.flow_summary = await readInventoryFlowSummary(ledger, tenantId, { localOnly }); }
     catch (error) {
       if ([403, 404].includes(error.statusCode)) throw error;
       ledger.flow_summary = { unavailable: true, message: '库存流转预测暂不可用，请刷新重试；现有库存明细仍可查看' };
@@ -34435,6 +34445,7 @@ export const applyProcurementLedgerMysql = (body, personId, tenantId = "admin") 
 export const previewProcurementLedgerMysql = (body, tenantId = "admin") => procurementLedgerService.preview(body, tenantId);
 export const inventoryLedgerMysql = async (query, tenantId = "admin") => {
   let ledger = await readLedgerWithFlow(query, tenantId);
+  if (query.view === 'fbp') return ledger;
   if (ledger.fbp_inventory) {
     const scope = await resolveInventoryTenantScope(tenantId);
     const ownedShops = await mysqlQuery(`SELECT id FROM shops WHERE ${scope.predicate().sql}`, [scope.id]);

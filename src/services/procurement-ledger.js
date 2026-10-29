@@ -415,7 +415,7 @@ export function createProcurementLedgerService(hooks) {
       ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
       : query;
     const value = await snapshot(id, run, tenantId);
-    const fbp = hooks.fbpStocks && body.include_fbp !== false ? await hooks.fbpStocks(id, tenantId) : null;
+    const fbp = hooks.fbpStocks && body.include_fbp !== false && String(body.include_fbp) !== '0' ? await hooks.fbpStocks(id, tenantId) : null;
     if (fbp) value.fbp_inventory = fbp;
     value.source_inference = inferProcurementSources(value);
     return value;
