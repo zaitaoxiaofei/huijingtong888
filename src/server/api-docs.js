@@ -1093,6 +1093,22 @@ const changePolicy = {
 };
 
 const endpoints = [
+  section("Collector editor and cache", [
+    endpoint("POST", "/api/listing/collector-box/{sku}/create-listing-template", "Prepare a current-enterprise collected product. previewOnly returns an ephemeral editor response without archiving media or writing a template; normal calls still archive all media before persistence.", {
+      auth: "authenticated", pathParams: [param("sku", scalar("string", "Current-enterprise collected SKU"))],
+      requestBody: body(objectOf("Collector editor options", [field("previewOnly",scalar("boolean","Optional; default false. Preview has no persistent template ID.")),field("openMode",scalar("string","listing_editor permits manual completion of missing fields.")),field("allowIncomplete",scalar("boolean","Allows manual editing; does not relax media persistence."))])),
+      responses: [response(200,"application/json",objectOf("Prepared editor",[field("ok",scalar("boolean"),true),field("preview",scalar("boolean","True only for a nonpersistent preview")),field("template",scalar("object","Template data; preview returns id=null and preview_only=true"),true)])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    ...["POST","PUT"].map(method=>endpoint(method,method==="POST"?"/api/listing/templates":"/api/listing/templates/{id}","Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.",{
+      auth:"authenticated",...(method==="PUT"?{pathParams:[param("id",scalar("number","Owned template ID"))]}:{}),
+      requestBody:body(objectOf("Template with editable payload",[field("archive_collector_media",scalar("boolean","Archive selected collector media to managed OSS before writing; default false for existing callers."))])),
+      responses:[response(200,"application/json",scalar("object","Saved template")),response(403,"application/json",ref("ErrorResponse")),response(502,"application/json",ref("ErrorResponse"))]
+    })),
+    endpoint("POST","/api/local-plugin/collected-products/lookup-batch","Look up current-enterprise collected product previews. Optional summary mode avoids reading raw JSON; missing summary preserves older plugin behavior.",{
+      auth:"local-plugin",requestBody:body(objectOf("Batch lookup",[field("skus",arrayOf(scalar("string"),"At most 120 SKUs"),true),field("summary",scalar("boolean","When true product contains summary_only=true and omits raw attributes/variants/media arrays."))])),
+      responses:[response(200,"application/json",scalar("object","Ordered per-SKU lookup results"))]
+    })
+  ]),
   section("Docs", [
     endpoint("GET", "/api/docs", "Return the machine-readable API catalog.", {
       auth: "authenticated",

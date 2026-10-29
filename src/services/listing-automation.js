@@ -723,6 +723,7 @@ export async function createListingCategoryTemplate(body, session) {
   logAiVariantSavePerf(traceId, "backend.template.ensure_schema", stageStarted);
   stageStarted = Date.now();
   let payload = normalizeTemplatePayload(body);
+  if (body.archive_collector_media === true) payload = await archiveCollectedProductMedia(payload, session);
   logAiVariantSavePerf(traceId, "backend.template.normalize", stageStarted, {
     imageCount: normalizeArray(payload.images).length,
     variantCount: normalizeArray(payload.editable_payload?.variants).length
@@ -2008,12 +2009,14 @@ export async function syncCollectedProductsFromPlugin(products = [], tenantId = 
   };
 }
 
-export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin") {
-  await ensureListingAutomationSchema();
+export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin", options = {}) {
+  await ensureCollectorBoxReadSchema();
   const normalizedSku = String(sku || "").trim();
   if (!normalizedSku) return { found: false, needsRefresh: true, error: "SKU_REQUIRED" };
   const detail = await row(`
-    SELECT *
+    SELECT ${options.summary ? `tenant_id, sku, product_id, title, product_url, image_url, category_name,
+      price, currency, sold_count, view_count, click_rate, conversion_rate, stock_count,
+      commission_rate, collect_date, collected_at, status, selection_product_id, listing_template_id` : '*'}
     FROM ozon_plugin_collected_products
     WHERE tenant_id = ? AND sku = ? AND status <> 'deleted'
     ORDER BY collected_at DESC, updated_at DESC
@@ -2029,7 +2032,7 @@ export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin") 
     status: detail.status || "collected",
     selectionProductId: detail.selection_product_id || null,
     listingTemplateId: detail.listing_template_id || null,
-    product: buildPluginCollectedProductPayload(detail)
+    product: { ...buildPluginCollectedProductPayload(detail), ...(options.summary ? { summary_only: true } : {}) }
   };
 }
 
@@ -2331,6 +2334,8 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
       return normalizeAttributes([...factAttributes, ...editAttributes]);
     },
     mergeAttributeDefinitions: (items, descriptionCategoryId, typeId) => mergeCachedCategoryAttributeDefinitions(items, descriptionCategoryId, typeId, {
+      autoSync: body.previewOnly !== true,
+      syncValues: body.previewOnly !== true,
       disableInference: true,
       disableRequiredDefaults: true,
       disableNameMatch: true
@@ -2385,6 +2390,14 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
     title: editPayload.title || normalized.templatePayload?.title || normalized.payload?.title,
     category_name: editPayload.category_name || normalized.templatePayload?.category_name || normalized.payload?.category_name
   });
+  if (body.previewOnly === true) {
+    // An editor preview is a read response, never a durable template/draft.
+    // The normal template and draft writers still archive and validate all media.
+    const preview = buildTemplatePayloadFromCollectedProduct(normalized.templatePayload);
+    preview.source_raw = compactListingSourceProvenance(preview.source_raw);
+    preview.editable_payload = { ...preview.editable_payload, source_raw: compactListingSourceProvenance(preview.editable_payload?.source_raw) };
+    return { ok: true, preview: true, template: { ...preview, id: null, preview_only: true } };
+  }
   // Collector links are commonly signed or protected by the source CDN. Do not
   // let one reach an editable listing template: archive every image first so
   // the operator always works with a stable managed-media URL.
@@ -11383,7 +11396,8 @@ export async function updateListingCategoryTemplate(id, body, session) {
   }
   if (!current) throw new Error("Listing category template not found");
 
-  const payload = normalizeTemplateUpdatePayload(body, current);
+  let payload = normalizeTemplateUpdatePayload(body, current);
+  if (body.archive_collector_media === true) payload = await archiveCollectedProductMedia(payload, session);
   await mysqlExecute(`
     UPDATE listing_category_templates
     SET ozon_category_id = ?, category_name = ?, template_name = ?, required_attributes_json = ?,

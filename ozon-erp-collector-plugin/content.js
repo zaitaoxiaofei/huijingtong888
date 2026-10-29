@@ -439,6 +439,7 @@
 
   function canReuseCollectedDetail(detail) {
     if (!(detail?.savedCollectionId || detail?.collectionId)) return false;
+    if (detail?.cachedProductLookup?.product?.summary_only || detail?.summary_only) return false;
     const source = String(detail?.cachedProductLookup?.product?.data_source || detail?.data_source || '').trim();
     if (source === 'ozon_plugin_fast_add_to_box') return false;
     if (detail?.cachedProductLookup?.needsRefresh === false) return true;
@@ -956,23 +957,25 @@
       const sellerResultBySku = {};
       const sellerPatchBySku = {};
       const maxVariantSellerFetch = 30;
-      for (const sku of candidateSkus.slice(0, maxVariantSellerFetch)) {
-        try {
-          const currentSellerResult = await collector.fetchSellerFallbackData(sku);
-          if (currentSellerResult?.fields && Object.keys(currentSellerResult.fields).length > 0) {
-            sellerResultBySku[sku] = currentSellerResult;
-            sellerPatchBySku[sku] = buildSellerCategoryPatch(currentSellerResult);
-            if (!sellerResult) {
-              sellerResult = currentSellerResult;
-              requestedSku = sku;
-            }
-            continue;
+      const skus = candidateSkus.slice(0, maxVariantSellerFetch);
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(3, skus.length) }, async () => {
+        while (cursor < skus.length) {
+          const sku = skus[cursor++];
+          try {
+            const currentSellerResult = await collector.fetchSellerFallbackData(sku);
+            if (currentSellerResult?.fields && Object.keys(currentSellerResult.fields).length > 0) {
+              sellerResultBySku[sku] = currentSellerResult;
+              sellerPatchBySku[sku] = buildSellerCategoryPatch(currentSellerResult);
+            } else errors.push(`${sku}: seller 未返回可用字段`);
+          } catch (error) {
+            errors.push(`${sku}: ${error?.message || String(error)}`);
           }
-          errors.push(`${sku}: seller 未返回可用字段`);
-        } catch (error) {
-          errors.push(`${sku}: ${error?.message || String(error)}`);
         }
-      }
+      }));
+      // Completion order must never choose another variant as the root product.
+      requestedSku = skus.find(sku => sellerResultBySku[sku]) || '';
+      sellerResult = sellerResultBySku[requestedSku] || null;
       if (!sellerResult?.fields || Object.keys(sellerResult.fields).length === 0) {
         throw new Error(errors[0] || 'seller 兜底未返回可用商品数据');
       }

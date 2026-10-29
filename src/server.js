@@ -53,6 +53,7 @@ import { cleanupAiGenerationTaskHistory } from "./services/ai-generation-tasks.j
 import { createAiMediaRetentionSweep } from "./services/ai-media-retention.js";
 import { ossStorageConfig } from "./services/object-storage.js";
 import { cleanupTransportedOrderLabelCache } from "./services/order-label-cache-cleanup.js";
+import { cleanupCollectorHistory } from "./services/collector-history-retention.js";
 import { cleanupListingPublishHistory } from "./services/listing-publish-history-cleanup.js";
 import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
@@ -987,6 +988,17 @@ const scheduledJobDefinitions = [
     config: { retentionDays: 7, batchSize: 200 }
   },
   {
+    key: "collector_history_cleanup",
+    name: "采集箱三十日留存清理",
+    category: "maintenance",
+    priority: "low",
+    scheduleType: "daily",
+    dailyTime: "04:15",
+    catchupEnabled: true,
+    maxCatchupRuns: 1,
+    config: { batchSize: 500, maxBatches: 20 }
+  },
+  {
     key: "listing_publish_history_cleanup",
     name: "上架任务和发布状态清理",
     category: "maintenance",
@@ -1099,6 +1111,7 @@ const scheduledJobHandlers = {
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
   ai_media_retention_cleanup: withForegroundApiDeferral("ai_media_retention_cleanup", runAiMediaRetentionCleanup),
   transported_order_label_cleanup: withForegroundApiDeferral("transported_order_label_cleanup", (job) => cleanupTransportedOrderLabelCache(job?.config || {})),
+  collector_history_cleanup: withForegroundApiDeferral("collector_history_cleanup", (job) => cleanupCollectorHistory({ ...job?.config, apply: true })),
   listing_publish_history_cleanup: withForegroundApiDeferral("listing_publish_history_cleanup", (job) => cleanupListingPublishHistory(job?.config || {})),
   listing_publish_storage_compaction: withForegroundApiDeferral("listing_publish_storage_compaction", (job) => services.compactListingPublishRecordStorage(job?.config || {})),
   system_monitor_snapshot: withForegroundApiDeferral("system_monitor_snapshot", captureSystemMonitorSnapshot)
@@ -1696,7 +1709,7 @@ async function handleLocalPluginRoute(req, res, parts) {
         const index = cursor++;
         const sku = skus[index];
         try {
-          results[index] = { sku, success: true, data: await services.lookupCollectedProductFromPlugin(sku, tenantId) };
+          results[index] = { sku, success: true, data: await services.lookupCollectedProductFromPlugin(sku, tenantId, { summary: body.summary === true }) };
         } catch (error) {
           results[index] = { sku, success: false, error: error?.message || String(error) };
         }

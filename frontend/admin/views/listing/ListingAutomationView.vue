@@ -506,10 +506,16 @@ async function loadAll() {
     const draftId = Number(route.query.draftId || 0);
     const recordId = Number(route.query.recordId || 0);
     const hasRecordDraft = Boolean(String(route.query.recordDraft || "").trim());
-    const needsOnlyRouteRecord = Boolean(templateId || draftId || recordId || hasRecordDraft);
+    const collectorPreviewSku = !templateId && !draftId && !recordId && !hasRecordDraft && route.query.collectorPreview === "1"
+      ? collectorSourceSku.value : "";
+    const needsOnlyRouteRecord = Boolean(templateId || draftId || recordId || hasRecordDraft || collectorPreviewSku);
     const routeTemplateRequest = templateId
       ? apiClient.get(`/api/listing/templates/${templateId}?mode=editor`, { noCache: true }).catch(handleListingApiMissing)
-      : Promise.resolve(null);
+      : collectorPreviewSku
+        ? apiClient.post(`/api/listing/collector-box/${encodeURIComponent(collectorPreviewSku)}/create-listing-template`, {
+          previewOnly: true, openMode: "listing_editor", allowIncomplete: true
+        }).then(result => result.template)
+        : Promise.resolve(null);
     const routeDraftRequest = draftId
       ? Promise.all(routeDraftIds.value.map((id) => (
         apiClient.get(`/api/listing/drafts/${id}`, { noCache: true }).catch(handleListingApiMissing)
@@ -562,12 +568,13 @@ async function loadAll() {
 async function applyTemplateFromRoute(routeTemplate = null, options = {}) {
   if (collectorTemplateApplied.value) return;
   const templateId = Number(route.query.templateId || 0);
-  if (!templateId || templateEditor.id) return;
-  const template = routeTemplate?.id ? routeTemplate : state.templates.find((item) => Number(item.id) === templateId);
+  const preview = route.query.collectorPreview === "1" && Boolean(routeTemplate?.preview_only || routeTemplate?.id);
+  if ((!templateId && !preview) || templateEditor.id) return;
+  const template = routeTemplate?.id || preview ? routeTemplate : state.templates.find((item) => Number(item.id) === templateId);
   if (!template) return;
   collectorTemplateApplied.value = true;
   fillTemplateEditor(template, options);
-  draftForm.template_id = template.id;
+  draftForm.template_id = template.id || null;
   state.step = "edit";
   await hydrateLoadedCategorySchema();
   ElMessage.success("已载入采集箱数据，请在商品上架页继续编辑");
@@ -5188,6 +5195,7 @@ function buildTemplatePayload() {
     }));
   const firstVariantDimensions = firstVariantPackageValues(variants);
   const payload = {
+    archive_collector_media: Boolean(collectorSourceSku.value),
     ozon_category_id: templateEditor.ozon_category_id,
     category_name: templateEditor.category_name,
     updated_at: templateEditor.updated_at || "",

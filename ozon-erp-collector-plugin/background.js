@@ -555,7 +555,7 @@ async function lookupCollectedProductCaches(skus, syncContext = null) {
   );
   const batch = await fetchLocalPluginJson('/collected-products/lookup-batch', {
     method: 'POST',
-    body: { skus: normalizedSkus, syncContext },
+    body: { skus: normalizedSkus, syncContext, summary: true },
     timeoutMs: 30000
   }).catch(() => null);
   if (batch?.success && Array.isArray(batch.results)) {
