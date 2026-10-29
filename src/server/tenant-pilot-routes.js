@@ -51,7 +51,7 @@ const routes = new Set([
   'POST listing/drafts/from-inventory-product', 'GET listing/ozon-categories', 'GET listing/draft-bindings',
   'POST listing/generate-offer-id',
   'POST listing/templates/validate-publish',
-  'GET procurement/summary', 'GET procurement/requests', 'POST procurement/requests', 'POST procurement/warehouse-requests',
+  'GET procurement/summary', 'GET procurement/requests', 'POST procurement/requests', 'POST procurement/warehouse-requests', 'POST procurement/stock-topups',
   'POST procurement/purchases', 'POST procurement/requests/direct-inbound',
   'GET procurement/purchase-orders', 'POST procurement/purchase-orders', 'GET procurement/pending-inbound',
   'GET procurement/ledger', 'POST procurement/ledger/preview', 'POST procurement/ledger',

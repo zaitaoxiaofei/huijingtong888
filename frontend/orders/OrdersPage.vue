@@ -40,6 +40,7 @@ import "../admin/styles/erp-theme.css";
 const route = useRoute();
 const inventoryAuth = useAuthStore();
 const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
+const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
@@ -2708,6 +2709,7 @@ onBeforeUnmount(() => {
     <div class="orders-table-section">
       <OrdersTable
         :can-update-inventory="canUpdateInventory"
+        :can-remind-procurement="canRemindProcurement"
         :rows="tableRows"
         :mark-options="vm.markOptions"
         :selected-ids="selectedOrderIds"

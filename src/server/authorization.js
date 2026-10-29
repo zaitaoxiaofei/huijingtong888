@@ -136,6 +136,7 @@ export function authorizeApiRequest(req, parts = []) {
     if (parts[3] === "procurement-requests") return require("procurement");
     return require("orders.manage");
   }
+  if (method === "POST" && path === "procurement/stock-topups") return require("packing", "inventory.write");
   if (resource === "procurement" && method === "POST" && parts[2] === "warehouse-requests") return require("procurement.request.submit");
   if (resource === "print" || resource === "outbound-records") return require("packing");
   if (["procurement", "inbound-records"].includes(resource)) return require("procurement");

@@ -3125,6 +3125,20 @@ Return procurement request rows.
 - Responses:
   - `200` `application/json` -> `array<ProcurementRequestRecord>`
 
+#### `POST /api/procurement/stock-topups`
+
+Warehouse inventory topup reminder: atomically create a submitted warehouse request and unread notifications for active current-enterprise owners/admins and procurement staff. Requires current packing or inventory.write duty. Does not change stock or duplicate real-order demand. No tenant/actor selector is accepted.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/procurement/requests`
 
 Create a procurement request.

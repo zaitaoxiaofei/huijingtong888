@@ -317,11 +317,11 @@ async function resolveNotification(item) {
 }
 
 function notificationTypeLabel(type) {
-  return ({ daily_procurement: "采购", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
+  return ({ daily_procurement: "采购", stock_topup: "库存补足", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
 }
 
 function notificationActionLabel(item = {}) {
-  const label = ({ daily_procurement: "去采购", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
+  const label = ({ daily_procurement: "去采购", stock_topup: "处理库存补足", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
   if (label) return label;
   if (String(item.route || "").startsWith("/inventory/fbp-shortages")) return "查看缺货明细";
   if (String(item.route || "").startsWith("/procurement/workspace")) return "去采购";

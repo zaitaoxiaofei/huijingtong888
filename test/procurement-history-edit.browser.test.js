@@ -39,7 +39,7 @@ test('workspace purchase correction previews formal-item changes, preserves save
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
     });
     await page.goto('http://localhost:8788/admin.html');
-    await page.getByRole('button', { name: '查看采购记录', exact: true }).click();
+    await page.getByRole('button', { name: '查看采购明细', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '测试采购商品 · 采购记录', exact: true });
     const quantity = dialog.getByRole('spinbutton', { name: '采购数量', exact: true });
     await quantity.waitFor();
