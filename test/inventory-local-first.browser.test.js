@@ -37,7 +37,7 @@ test('local facts render before a slow FBP response; late product responses, fai
         if(id===1&&!coreRoute){coreRoute=route;return;}
         return route.fulfill({json:local(id)});
       }
-      if(url.pathname==='/api/inventory-flow/sync'){syncCalls.push(route.request().postDataJSON());return route.fulfill({json:{ok:true,results:[{ok:true}]}});}
+      if(url.pathname==='/api/inventory-flow/sync'){holdFbp=false;syncCalls.push(route.request().postDataJSON());return route.fulfill({json:{task_id:'fixture-task',running:false,result:{ok:true,results:[{ok:true}]}}});}
       if(url.pathname.includes('/image'))return route.fulfill({status:404,body:''});
       const asset=url.pathname==='/style.css'?path.join('assets',(await fs.readdir(path.join(output,'assets'))).find(n=>n.endsWith('.css'))):url.pathname.slice(1);
       return route.fulfill({contentType:asset.endsWith('.css')?'text/css':'text/javascript',body:await fs.readFile(path.join(output,asset))});
@@ -58,6 +58,7 @@ test('local facts render before a slow FBP response; late product responses, fai
     await page.getByRole('tab',{name:'FBP 库存',exact:true}).click();
     await page.getByText('SKU-2',{exact:true}).waitFor();
     assert.equal(await page.getByText('SKU-1',{exact:true}).count(),0);
+    while(!(await page.getByRole('button',{name:'从 Ozon 同步 FBP 库存',exact:true}).isEnabled())) await new Promise(resolve=>setTimeout(resolve,10));
     holdFbp=false;failFbp=true;
     await page.getByRole('button',{name:'重新读取已保存库存',exact:true}).click();
     await page.locator('.flow-fbp-error').getByText(/FBP单独读取失败/).waitFor();
@@ -65,7 +66,7 @@ test('local facts render before a slow FBP response; late product responses, fai
     failFbp=false;
     await page.getByRole('button',{name:'从 Ozon 同步 FBP 库存',exact:true}).click();
     await page.getByText('FBP 库存已从 Ozon 同步',{exact:true}).waitFor();
-    assert.deepEqual(syncCalls,[{product_id:2}]);
+    assert.deepEqual(syncCalls,[{product_id:2,background:true},{product_id:2,background:true}]);
     assert.equal(await page.getByRole('button',{name:'刷新对账',exact:true}).isEnabled(),true);
     assert.deepEqual(errors,[]);
   }finally{await browser?.close();await fs.rm(output,{recursive:true,force:true});}

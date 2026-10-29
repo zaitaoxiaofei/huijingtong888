@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { loadOrderFbpStocks, loadProductFbpStocks } from '../src/services/fbp-inventory-display.js';
+import { loadOrderFbpStocks, loadProductFbpStocks, summarizeFbpInventory } from '../src/services/fbp-inventory-display.js';
 import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
 
 test('FBP demand cannot consume local availability; FBS and approved FBP reservations do', () => {
@@ -46,6 +46,8 @@ test('FBP inventory uses shop/SKU/warehouse and converts each package before sum
     const data = await loadProductFbpStocks(f.query, 10);
     assert.equal(data.present, 20); // A single 5+2, A double 3*2, B single 7
     assert.equal(data.available, 18);
+    assert.equal(data.synced_at, '2026-09-28 01:00:00');
+    assert.equal(data.missing_skus, 1);
     assert.equal(data.incomplete, true);
     assert.equal(data.rows.length, 5, 'duplicate mappings do not duplicate snapshots');
     assert.equal(data.rows.find(row => row.ozon_sku === 'MISSING').present, null);
@@ -79,4 +81,17 @@ test('order stock is fetched in one page-scoped read, distinguishes missing from
     assert.equal((await loadOrderFbpStocks(f.query, [])).size, 0);
     assert.equal(f.calls.length, 1);
   } finally { f.db.close(); }
+});
+
+
+test('FBP total freshness is the oldest snapshot; missing and known zero remain distinct', () => {
+  const mappings = ['ZERO','RESERVED','UNKNOWN'].map(ozon_sku => ({ shop_id: 1, ozon_sku, per_set_quantity: 2 }));
+  const stock = (ozon_sku, present, available, reserved, synced_at) => ({ shop_id: 1, ozon_sku, present, available, reserved, synced_at });
+  const data = summarizeFbpInventory(mappings, [stock('ZERO',0,0,0,'2026-10-29 01:00:00'), stock('RESERVED',3,0,3,'2026-10-28 01:00:00')]);
+  assert.equal(data.present, 6);
+  assert.equal(data.available, 0);
+  assert.equal(data.synced_at, '2026-10-28 01:00:00');
+  assert.equal(data.incomplete, true);
+  assert.equal(data.rows.find(row => row.ozon_sku === 'UNKNOWN').present, null);
+  assert.equal(data.rows.find(row => row.ozon_sku === 'ZERO').present, 0);
 });

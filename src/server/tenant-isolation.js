@@ -145,7 +145,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
     && parts[2] === "inventory-availability" && verb === "GET";
   if (tenantOrderInventoryRead) return { allowed: true };
   const flowPath = parts.slice(1).join('/');
-  if ((verb === 'GET' && ['inventory-flow', 'inventory-flow/detail', 'inventory-flow/settings', 'inventory-flow/tasks', 'inventory-flow/events'].includes(flowPath))
+  if ((verb === 'GET' && ['inventory-flow', 'inventory-flow/detail', 'inventory-flow/settings', 'inventory-flow/tasks', 'inventory-flow/events', 'inventory-flow/sync-status'].includes(flowPath))
     || (verb === 'POST' && ['inventory-flow/settings', 'inventory-flow/tasks', 'inventory-flow/task-action', 'inventory-flow/sync'].includes(flowPath))) return { allowed: true };
   const tenantOrderDetailRead = parts[1] === "orders" && parts.length === 3
     && /^\d+$/.test(String(parts[2] || "")) && verb === "GET";

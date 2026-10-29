@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
@@ -18,6 +18,11 @@ const stockFormVisible = computed({
 const ledgerBase = computed(() => props.inventoryMode ? '/api/inventory/ledger' : '/api/procurement/ledger');
 const fbpLoading = ref(false), fbpSyncing = ref(false), fbpError = ref('');
 let fbpVersion = 0;
+let pollTimer, finishPoll;
+function stopFbpPoll() { clearTimeout(pollTimer); finishPoll?.(); finishPoll = null; }
+function waitFbpPoll() { return new Promise(resolve => { finishPoll = resolve; pollTimer = setTimeout(() => { finishPoll = null; resolve(); }, 1200); }); }
+onBeforeUnmount(() => { ++loadVersion; ++fbpVersion; stopFbpPoll(); });
+const positiveFbpRows = computed(() => (data.value?.fbp_inventory?.rows || []).filter(row => [row.present, row.available, row.reserved].some(value => Number(value) > 0)));
 const loading = ref(false), saving = ref(false), searching = ref(false);
 const productId = ref(0), products = ref([]), targetProducts = ref([]), data = ref(null), target = ref(null);
 const preview = ref(null), submission = ref(null), formVisible = ref(false);
@@ -200,6 +205,7 @@ async function search(text, isTarget = false) {
 }
 async function load(id = productId.value) {
   const version = ++loadVersion;
+  stopFbpPoll();
   ++fbpVersion; fbpLoading.value = false; fbpSyncing.value = false; fbpError.value = '';
   if (Number(id) !== productId.value || !id) data.value = null;
   productId.value = Number(id);
@@ -212,7 +218,9 @@ async function load(id = productId.value) {
     const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}&include_flow=${directStocktake.value ? '0' : 'local'}`, { noCache: true });
     if (version === loadVersion) {
       data.value = result;
-      if (!directStocktake.value) void loadFbp(id, version);
+      if (!directStocktake.value) void loadFbp(id, version).then(() => {
+        if (version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
+      });
       if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
         pendingInitialAction = '';
         edit('stocktake');
@@ -233,19 +241,33 @@ async function loadFbp(id = productId.value, version = loadVersion) {
     if (token === fbpVersion && version === loadVersion && id === productId.value) fbpError.value = error.message || 'FBP 库存加载失败，可单独重试';
   } finally { if (token === fbpVersion && version === loadVersion) fbpLoading.value = false; }
 }
-async function syncFbp() {
+async function syncFbp(automatic = false) {
+  // Element Plus passes the click event; only a literal true denotes an automatic refresh.
+  automatic = automatic === true;
   if (fbpSyncing.value || !props.stocktakeEnabled || !productId.value) return;
   const id = productId.value, version = loadVersion;
-  ++fbpVersion; fbpLoading.value = false; fbpSyncing.value = true; fbpError.value = '';
+  const current = () => id === productId.value && version === loadVersion && props.modelValue;
+  fbpSyncing.value = true; fbpError.value = '';
   try {
-    const result = await apiClient.post('/api/inventory-flow/sync', { product_id: id });
-    if (id !== productId.value || version !== loadVersion || !props.modelValue) return;
+    let task = await apiClient.post('/api/inventory-flow/sync', { product_id: id, background: true });
+    const taskId = task.task_id;
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (current() && task.running) {
+      if (Date.now() >= deadline) throw new Error('FBP 仍在后台同步，原库存保留；稍后可点击同步查看结果');
+      await waitFbpPoll();
+      if (!current()) return;
+      task = await apiClient.get(`/api/inventory-flow/sync-status?product_id=${id}`, { noCache: true });
+      if (!task.task_id || task.task_id !== taskId) throw new Error('FBP 同步任务已变更或服务已重启，原快照保留，请重试');
+    }
+    if (!current()) return;
+    const result = task.result;
     await loadFbp(id, version);
-    if (id !== productId.value || version !== loadVersion) return;
-    if (result.ok) ElMessage.success('FBP 库存已从 Ozon 同步');
-    else fbpError.value = (result.results || []).filter(row => !row.ok).map(row => `${row.shop_name || '店铺'}：${row.message}`).join('；') || '部分店铺同步失败，原快照保留';
-  } catch (error) { if (id === productId.value && version === loadVersion) fbpError.value = error.message; }
-  finally { if (id === productId.value && version === loadVersion) fbpSyncing.value = false; }
+    if (!current()) return;
+    if (task.error) fbpError.value = task.error;
+    else if (result?.ok) { if (!automatic) ElMessage.success('FBP 库存已从 Ozon 同步'); }
+    else fbpError.value = (result?.results || []).filter(row => !row.ok).map(row => `${row.shop_name || '店铺'}：${row.message}`).join('；') || '部分店铺同步失败，原快照保留';
+  } catch (error) { if (current()) fbpError.value = error.message || 'FBP 同步失败，原快照保留，请重试'; }
+  finally { if (current()) fbpSyncing.value = false; }
 }
 async function discardForm() {
   if (saving.value) return false;
@@ -348,7 +370,7 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !props.inventoryMode && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !props.inventoryMode ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !props.inventoryMode && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; stopFbpPoll(); fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
 </script>
 
 <template>
@@ -397,7 +419,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
     <div v-loading="loading" class="ledger-detail-body" :class="{ 'is-loading': loading }" element-loading-text="正在读取本地库存与订单占用…">
       <template v-if="data">
         <div v-if="!orderOverview" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <InventoryFlowDiagram :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" @retry-fbp="loadFbp()" :inventory-mode="inventoryMode" @select-tab="selectFlowTab" @navigate="visible = false" />
+        <InventoryFlowDiagram :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryMode" @select-tab="selectFlowTab" @navigate="visible = false" />
         <p class="ledger-current-shortage">全部待履约订单待采购：{{ data.current_shortage }} 件（历史缺记录不计入此数）。</p>
         <section v-if="inventoryMode && $slots['inventory-relations']" class="ledger-management"><slot name="inventory-relations" /></section>
         <div v-if="!inventoryMode && (pendingCosts.length || data.current_shortage > 0)" class="ledger-toolbar">
@@ -416,7 +438,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
             <template v-if="data.fbp_inventory">
             <p>直接读取 Ozon 同步库存，不重复扣订单。汇总已按每套组成折算为当前库存的实物单位；不同店铺、SKU 库存独立，不能互相抵扣。</p>
             <el-alert v-if="data.fbp_inventory.incomplete" type="warning" :closable="false" :title="`存在未同步或未绑定的 SKU，汇总不完整；已同步部分 ${data.fbp_inventory.present ?? 0}，请到 FBP 库存页面同步并核对绑定。`" />
-            <el-table :data="data.fbp_inventory.rows" max-height="360" empty-text="暂无已绑定的 FBP SKU" :row-class-name="({ row }) => orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku)) ? 'current-fbp-sku' : ''">
+            <el-table :data="positiveFbpRows" max-height="360" empty-text="暂无有库存的 FBP SKU；零库存不展示，未同步项请先核对" :row-class-name="({ row }) => orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku)) ? 'current-fbp-sku' : ''">
               <el-table-column prop="shop_name" label="店铺" min-width="130" />
               <el-table-column label="Ozon SKU" min-width="150"><template #default="{ row }">{{ row.ozon_sku }}<el-tag v-if="orderOverview?.shopId === Number(row.shop_id) && orderOverview?.skus.includes(String(row.ozon_sku))" size="small">本单 SKU</el-tag></template></el-table-column>
               <el-table-column prop="product_name" label="商品规格" min-width="190" />

@@ -60,7 +60,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
       await page.locator('.inventory-flow-popover:visible').first().waitFor({ state: 'hidden' });
       await page.locator('.flow-canvas').screenshot({ path: `.verification/inventory-flow-${width}-${dark ? 'dark' : 'light'}.png`, animations: 'disabled' });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}`);
-      assert.equal(await page.locator('.flow-node').count(), 9);
+      assert.equal(await page.locator('.flow-node').count(), 11);
       if (width >= 1366) {
         const centers = await page.locator('[data-node="incoming"], [data-node="physical"], [data-node="free"]').evaluateAll(nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return r.top + r.height / 2; }));
         assert.ok(Math.max(...centers) - Math.min(...centers) < 1, 'purchase, physical and available stock share one horizontal line');

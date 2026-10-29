@@ -3,6 +3,9 @@ import { shanghaiDateKey } from '../shanghai-time.js';
 
 const number = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
 
+export const activeFbpApplications = rows => rows.filter(row => ['draft', 'pending_review', 'approved', 'ozon_created'].includes(row.status));
+export const requestedFbpQuantity = rows => activeFbpApplications(rows).reduce((sum, row) => sum + Number(row.requested_quantity || 0), 0);
+
 // Shared read model. Forecasts never post movements or change the ledger revision.
 export function buildInventoryFlowSummary(ledger, forecast, orders = [], applications = []) {
   const physical = number(ledger.physical_estimate), demand = number(ledger.open_order_demand), locked = number(ledger.fbp_reserved);
@@ -30,7 +33,7 @@ export function buildInventoryFlowSummary(ledger, forecast, orders = [], applica
       id: row.id, order_no: row.order_no, person_name: row.person_name,
       purchased_at: row.purchased_at, pending_quantity: row.pending_quantity
     })),
-    requested: applications.reduce((sum, row) => sum + Number(row.requested_quantity || 0), 0),
+    requested: requestedFbpQuantity(applications),
     calculated_at: new Date().toISOString()
   };
 }

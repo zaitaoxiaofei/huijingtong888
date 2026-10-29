@@ -7747,6 +7747,14 @@ export async function prepareInventoryFlowMysql() {
 
 export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
   const scope = await resolveInventoryTenantScope(options.tenantId);
+  const checkAccess = async () => {
+    options.signal?.throwIfAborted();
+    if (!options.session) return;
+    const current = await authorizeBusinessTaskSession(options.session);
+    if (Number(current.tenant.id) !== scope.id) throw Object.assign(new Error('FBP 企业上下文不一致'), { statusCode: 403 });
+    assertBusinessTaskPermission(current, 'inventory.write');
+  };
+  await checkAccess();
   const productId = Number(body.product_id);
   await assertInventoryRecord(scope, 'product', productId);
   await ensureOzonStockStorageSchemaMysql();
@@ -7758,6 +7766,7 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
   const shops = await shopsMysql(String(scope.id));
   const results = [];
   for (const shopId of [...new Set(mappings.map(row => Number(row.shop_id)))]) {
+    await checkAccess();
     const shop = shops.find(row => Number(row.id) === shopId);
     const targets = mappings.filter(row => Number(row.shop_id) === shopId);
     const key = String(shop?.ozon_api_key || shop?.api_key || shop?.api_key_hint || '').trim();
@@ -7769,11 +7778,16 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
       if (targets.some(target => !remote.some(row => String(row.ozon_sku) === String(target.ozon_sku)))) throw new Error('Ozon响应未覆盖全部绑定SKU，保留原快照，请核对绑定及接口响应');
       const rules = await stockWarehouseRulesEnabledMysql();
       await withMysqlTransaction(async connection => {
+        await checkAccess();
         const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
         await assertInventoryRecord(scope, 'shop', shopId, run);
         for (const target of targets) {
           const current = await currentFbpSkuBindingMysql(run, shopId, target.ozon_sku, scope.id, scope.isDefault, true);
-          if (Number(current?.product_id) !== productId) throw new Error('SKU绑定发生变化，请刷新后重试');
+          // Components and explicit recipes may bind this SKU to a different parent product.
+          // Re-read the scoped composition, rather than requiring a direct parent ID match.
+          const fresh = await loadProductFbpStocks(run, productId, scope);
+          const binding = fresh.rows.find(row => Number(row.shop_id) === shopId && String(row.ozon_sku) === String(target.ozon_sku));
+          if (!binding || String(binding.offer_id || '') !== String(target.offer_id || '')) throw new Error('SKU绑定发生变化，请刷新后重试');
           const matched = remote.filter(row => String(row.ozon_sku) === String(target.ozon_sku));
           if (matched.some(row => resolveStockTypeMysql({ ...row, rules }) === 'unknown')) throw new Error('仓库分类未明确，请先核对Ozon库存仓库类型');
           let fbp = matched.filter(row => resolveStockTypeMysql({ ...row, rules }) === 'fbp_real');
@@ -7784,7 +7798,7 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
           for (const row of fbp) await connection.execute(`INSERT INTO ozon_stock_snapshots
             (shop_id, product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type, present, reserved, available, synced_at)
             VALUES (?,?,?,?,?,?,'fbp_real',?,?,?,UTC_TIMESTAMP())`,
-          [shopId, productId, target.ozon_sku, target.offer_id, String(row.warehouse_id || row.warehouse_name || 'FBP'), String(row.warehouse_name || 'FBP'),
+          [shopId, current?.product_id || productId, target.ozon_sku, target.offer_id, String(row.warehouse_id || row.warehouse_name || 'FBP'), String(row.warehouse_name || 'FBP'),
             snapshotStockNumberMysql(row.present), snapshotStockNumberMysql(row.reserved), snapshotStockNumberMysql(row.available ?? row.present)]);
         }
       });

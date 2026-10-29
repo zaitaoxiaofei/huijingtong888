@@ -11,7 +11,8 @@ const nodes=parse(script,{ecmaVersion:'latest',sourceType:'module'}).body;
 function fixture(get){
  const calls=[], events=[];
  const ref=value=>({value});
- const context=vm.createContext({Number,Object,Math,
+ const context=vm.createContext({Number,Object,Math,clearTimeout,
+  fbpLoading:ref(false),fbpSyncing:ref(false),fbpError:ref(''),
   props:{modelValue:true,initialAction:'stocktake',inventoryMode:true,stocktakeEnabled:true},directStocktake:ref(true),visible:ref(true),
   loading:ref(false),saving:ref(false),data:ref(null),productId:ref(10),preview:ref(null),submission:ref(null),
   formVisible:ref(false),form:{},target:ref(null),managementVisible:ref(false),loadError:ref(''),ledgerBase:ref('/api/inventory/ledger'),
@@ -20,8 +21,8 @@ function fixture(get){
     post:async(url,body)=>{calls.push(['post',url,body]);return {ok:true}}},
   emit:(...args)=>events.push(args),ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>calls.push(['confirm'])}
  });
- vm.runInContext("let loadVersion=0;let pendingInitialAction='stocktake';",context);
- for(const name of ['load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
+ vm.runInContext("let fbpVersion=0,pollTimer,finishPoll;let loadVersion=0;let pendingInitialAction='stocktake';",context);
+ for(const name of ['stopFbpPoll','load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
  return {context,calls,events};
 }
 test('direct update loads only its inventory then defaults to the actual physical count',async()=>{

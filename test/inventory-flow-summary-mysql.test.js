@@ -23,6 +23,8 @@ test('inventory and order dialogs use one nonfinancial scoped flow summary; deep
     await q("INSERT INTO ozon_stock_snapshots(shop_id,product_id,ozon_sku,stock_type,warehouse_id,present,available) VALUES(20,200,'20001','fbp_real','1',0,0)");
     await q("INSERT INTO fbp_replenishment_orders(id,order_no,shop_id,order_date,status,created_by,reviewed_by) VALUES(20,'A-FBP',20,'2026-10-29','approved',1,2),(30,'B-PRIVATE-FBP',30,'2026-10-29','approved',3,3)");
     await q("INSERT INTO fbp_replenishment_order_items(id,order_id,shop_id,product_id,mapping_id,ozon_sku,requested_qty,approved_qty,requested_by) VALUES(20,20,20,200,200,'20001',150,90,1),(30,30,30,300,300,'30001',900,900,3)");
+    await q("INSERT INTO fbp_replenishment_orders(id,order_no,shop_id,order_date,status,created_by,reviewed_by,submitted_at,reviewed_at,closed_at) VALUES(21,'A-SENT',20,'2026-10-28','sent',1,2,UTC_TIMESTAMP(),UTC_TIMESTAMP(),NULL),(22,'A-COMPLETED',20,'2026-10-27','completed',1,2,UTC_TIMESTAMP(),UTC_TIMESTAMP(),UTC_TIMESTAMP()),(31,'B-PRIVATE-SENT',30,'2026-10-28','sent',3,3,NULL,NULL,NULL)");
+    await q("INSERT INTO fbp_replenishment_order_items(id,order_id,shop_id,product_id,mapping_id,ozon_sku,requested_qty,approved_qty,requested_by) VALUES(21,21,20,200,200,'20001',45,40,1),(22,22,20,200,200,'20001',30,25,1),(31,31,30,300,300,'30001',999,999,3)");
     const before = await q('SELECT id,quantity_delta,status FROM inventory_movements ORDER BY id');
     const legacy = await service.procurementLedgerMysql({ product_id: 200 }, 2);
     assert.equal(legacy.flow_summary, undefined);
@@ -32,7 +34,7 @@ test('inventory and order dialogs use one nonfinancial scoped flow summary; deep
       assert.equal(result.flow_summary.unavailable, undefined);
       assert.equal(result.flow_summary.physical, 200);
       assert.equal(result.flow_summary.locked, 90);
-      assert.equal(result.flow_summary.applications.length, 1);
+      assert.equal(result.flow_summary.applications.length, 3);
       assert.equal(result.flow_summary.applications[0].applicant_name, 'A operator');
       assert.equal(result.flow_summary.applications[0].reviewer_name, 'A warehouse');
       assert.equal(result.flow_summary.requested, 150);
@@ -58,8 +60,12 @@ test('inventory and order dialogs use one nonfinancial scoped flow summary; deep
     assert.equal(withoutSnapshots.flow_summary.free, 110);
     const fbp = await service.inventoryLedgerMysql({ product_id: 200, view: 'fbp' }, 2);
     assert.equal(fbp.fbp_inventory.incomplete, true);
-    assert.equal(fbp.applications.length, 1);
+    assert.equal(fbp.applications.length, 3);
     assert.equal(fbp.physical_estimate, undefined);
+    assert.equal(fbp.requested, 150);
+    assert.equal(fbp.applications.find(row => row.status === 'sent').locked_quantity, 0);
+    assert.equal(fbp.applications.find(row => row.status === 'completed').locked_quantity, 0);
+    assert.ok(fbp.applications.find(row => row.status === 'completed').closed_at);
     await assert.rejects(service.inventoryLedgerMysql({ product_id: 300, view: 'fbp' }, 2));
     assert.deepEqual(await q('SELECT id,quantity_delta,status FROM inventory_movements ORDER BY id'), before);
     await q("INSERT INTO inventory_flow_settings(tenant_id,product_id,settings_json) VALUES(2,200,JSON_OBJECT('production_days',-1))");

@@ -62,3 +62,13 @@ test('local protection has a 7-day minimum, fractional daily demand rounds to si
   const p = calculateLocalInventorySafety(input, { holidays: [{ from: '2026-10-29', to: '2026-10-30' }, { from: '2026-10-30', to: '2026-10-30' }] }, new Date('2026-10-29T03:00:00Z'));
   assert.equal(p.local_days, 9); assert.equal(p.safety_qty, 4); assert.equal(p.estimated_dates, 1);
 });
+
+
+test('sent and completed application history never inflates current requests or local availability', () => {
+  const rows = ['draft','pending_review','approved','ozon_created','sent','completed','rejected','cancelled'].map(status => ({ status, requested_quantity: 5 }));
+  const summary = buildInventoryFlowSummary(ledger, forecast, [], rows);
+  assert.equal(summary.requested, 20);
+  assert.equal(summary.applications.length, 8);
+  assert.equal(summary.free, 0);
+  assert.equal(summary.locked, 90);
+});
