@@ -102,6 +102,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     if (!grouped.has(productId)) {
       grouped.set(productId, {
         product_id: productId,
+        workflow: row.workflow, workflow_candidate: row.workflow_candidate,
         product_name: row.product_name || "",
         product_code: row.product_code || "",
         product_image_url: row.product_image_url || row.image_url || "",
@@ -356,6 +357,20 @@ function addProcurementDecisionMysql(row, query = {}) {
   row.procurement_required = realOrderOnlyView
     ? realOrderShortage > 0
     : Boolean(row.automation_exceptions?.length) || !onlyRealOrderRequests || realOrderShortage > 0;
+  if(row.workflow) {
+    const requestedType=String(query.demandType||query.demand_type||'all');
+    const relevant=row.workflow.demands.filter(d=>!['real_order','local_safety','fbp_stock'].includes(requestedType)||d.key===requestedType);
+    row.suggestion_reasons=relevant.filter(d=>Number(d.purchase_quantity)>0||Number(d.submitted_quantity)>0).map(d=>({type:d.key,label:d.label,quantity:Math.max(Number(d.purchase_quantity)||0,Number(d.submitted_quantity)||0),text:`${d.label}：当前建议 ${d.purchase_quantity??'待核对'} 件；已提交 ${d.submitted_quantity} 件`}));
+    row.primary_suggestion_reason=row.suggestion_reasons[0]||null;
+    row.suggested_purchase_qty=row.suggestion_reasons.reduce((sum,r)=>sum+r.quantity,0);
+    row.primary_suggested_purchase_qty=row.suggested_purchase_qty;
+    row.total_quantity=row.suggested_purchase_qty;
+    row.safety_stock_shortage=row.workflow.demands.find(d=>d.key==='local_safety').purchase_quantity;
+    row.target_days=row.workflow.local_days;
+    row.procurement_required=Boolean(row.automation_exceptions?.length)||row.suggestion_reasons.length>0||!!row.workflow_candidate;
+    row.demand_reason=row.suggestion_reasons.map(r=>r.text).join('；')||'当前供货充足，历史差异单独核对';
+    return row;
+  }
   if (row.automation_exceptions?.length) {
     row.demand_reason = `采购异常：${row.automation_exceptions.join("；")}`;
     return row;

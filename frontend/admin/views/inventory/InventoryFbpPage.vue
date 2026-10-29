@@ -30,7 +30,7 @@ const state = reactive({
     shopId: "all",
     dateFrom: "",
     dateTo: "",
-    alertType: "all",
+    alertType: "in_stock",
     sortKey: "fbp_available",
     sortDir: "asc",
     page: 1,
@@ -43,7 +43,7 @@ const filterDefaults = {
   shopId: "all",
   dateFrom: "",
   dateTo: "",
-  alertType: "all",
+  alertType: "in_stock",
   sortKey: "fbp_available",
   sortDir: "asc",
   page: 1,
@@ -304,6 +304,7 @@ onMounted(async () => {
       @search="handleSearch"
       @reset="handleReset"
     >
+      <el-form-item label="库存状态"><el-select v-model="state.filters.alertType" style="width:140px" @change="handleSearch"><el-option value="in_stock" label="有库存" /><el-option value="out_of_stock" label="已断货" /><el-option value="all" label="全部" /></el-select></el-form-item>
       <template #actions>
         <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
       </template>

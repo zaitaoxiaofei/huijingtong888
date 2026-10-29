@@ -28,6 +28,51 @@ Enforcement:
 
 ## Schemas
 
+### InventoryWorkflowDemand
+
+Shared physical-unit procurement demand, in priority order real_order, local_safety, fbp_stock. Requests are reminders, never additional physical allocation.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `key` | `string` | Yes | real_order | local_safety | fbp_stock |
+| `label` | `string` | Yes | Business purpose |
+| `priority` | `number` | Yes | 1 through 3 |
+| `status` | `string` | Yes | danger | warning | success | opportunity | unknown |
+| `physical_gap` | `number` | No | Dispatchable physical shortage; null when unknown |
+| `purchase_quantity` | `number` | No | Net additional purchase requirement after scoped inbound allocation; null when unknown |
+| `submitted_quantity` | `number` | No | Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand |
+| `requests` | `array<object>` | No | Source requests |
+
+### InventoryWorkflow
+
+Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations; pending_review applications do, approved stock is already reserved.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `product_id` | `number` | Yes | Owned inventory product ID |
+| `overall` | `string` | Yes | Worst demand status |
+| `demands` | `array<InventoryWorkflowDemand>` | Yes | Three priority demands |
+| `physical` | `number` | No | Physical units, nullable when unknown |
+| `order_demand` | `number` | No | Physical units, nullable when unknown |
+| `safety` | `number` | No | Physical units, nullable when unknown |
+| `locked` | `number` | No | Physical units, nullable when unknown |
+| `free` | `number` | No | Physical units, nullable when unknown |
+| `purchase_quantity` | `number` | No | Physical units, nullable when unknown |
+| `requested` | `number` | No | Named physical quantity or coverage days |
+| `incoming` | `number` | No | Named physical quantity or coverage days |
+| `local_days` | `number` | No | Named physical quantity or coverage days |
+| `fbp_days` | `number` | No | Named physical quantity or coverage days |
+| `incoming_note` | `string` | No | Inbound arrival/dispatch warning |
+| `calculated_at` | `string` | No | Calculation time |
+| `requests` | `array<object>` | No | Available for full detail; light status may omit |
+| `applications` | `array<object>` | No | Available for full detail; light status may omit |
+| `purchases` | `array<object>` | No | Available for full detail; light status may omit |
+| `batches` | `array<object>` | No | Available for full detail; light status may omit |
+| `skus` | `array<object>` | No | Available for full detail; light status may omit |
+| `opportunities` | `array<object>` | No | Available for full detail; light status may omit |
+| `settings` | `object` | No | Current effective replenishment settings |
+| `forecast_error` | `string` | No | Advisory forecast unavailable; core ledger remains usable |
+
 ### InventoryFlowSummary
 
 Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.
@@ -3124,6 +3169,69 @@ Return procurement request rows.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `array<ProcurementRequestRecord>`
+
+#### `GET /api/inventory-workflow`
+
+Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/alerts`
+
+Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-workflow/requests`
+
+Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires a submitted replenishment application; FBS requires a matching unfulfilled local order.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/receipts`
+
+Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-workflow/receipts`
+
+Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound requires current physical count and uses the canonical receipt-and-count transaction.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/fbp`
+
+Create or update the existing FBP replenishment draft for owned bound shop SKUs; optionally submit in the same canonical transaction. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
 
 #### `POST /api/procurement/stock-topups`
 

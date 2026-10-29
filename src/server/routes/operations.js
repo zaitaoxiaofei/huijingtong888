@@ -1,3 +1,5 @@
+import { createInventoryWorkflowService } from '../../services/inventory-workflow.js';
+import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from '../../services/business-task-tenant.js';
 import { createWarehouseStockTopup } from '../../services/warehouse-stock-topup.js';
 import { hasPermission, isPlatformAdmin, isEnterpriseAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
@@ -30,6 +32,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
   readUnclassifiedCancellationReasons = unclassifiedCancellationReasons, saveCancellationClassification = saveCancellationReasonClassification,
   queryCancellationReview = queryCancellationReviewMysql, cancellationReviewTransaction = cancellationReviewMysqlTransaction }) {
   const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
+  const workflow = createInventoryWorkflowService({ ledger: services.procurementLedger, receiveRecords: services.batchUpdateInboundRecords, previewReceipts: services.previewInboundReceiptImpact });
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
     "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
@@ -53,6 +56,51 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/procurement/summary": (req) => services.procurementSummary({}, tenantIdFromRequest(req)),
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
+    "GET /api/inventory-workflow/alerts": async (req,url)=>{
+      const session=await authorizeBusinessTaskSession(req._session);assertBusinessTaskPermission(session,'inventory.read');
+      const params=Object.fromEntries(url.searchParams);
+      const base=await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
+      const raw=Array.isArray(base)?base:base.rows||[];
+      const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
+      const states=ids.length?await workflow.batch(ids,session.tenant.id,{fresh:params.refresh==='1'}):[];
+      const byId=new Map(states.map(state=>[state.product_id,state]));
+      const all=raw.map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
+      const status=params.alertType||'all',rows=all.filter(row=>status==='all'||row.workflow?.overall===status);
+      const sortKey=['recent_7d_qty','recent_15d_qty','recent_30d_qty'].includes(params.sortBy)?params.sortBy:'recent_30d_qty';
+      const rank={danger:0,warning:1,unknown:2,opportunity:3,success:4};rows.sort((a,b)=>(rank[a.workflow?.overall]??2)-(rank[b.workflow?.overall]??2)||Number(b[sortKey])-Number(a[sortKey]));
+      const page=Math.max(1,Number(params.page)||1),pageSize=Math.min(100,Math.max(1,Number(params.pageSize)||20));
+      return{rows:rows.slice((page-1)*pageSize,page*pageSize),total:rows.length,page,pageSize,meta:Object.fromEntries(['danger','warning','unknown','opportunity','success'].map(status=>[status,all.filter(row=>row.workflow?.overall===status).length]))};
+    },
+    "GET /api/inventory-workflow": async (req, url) => {
+      const session=await authorizeBusinessTaskSession(req._session);
+      assertBusinessTaskPermission(session,'inventory.read');
+      const ids=[...new Set(String(url.searchParams.get('product_ids') || url.searchParams.get('product_id') || '').split(',').map(Number))];
+      if(!ids.length || ids.length>20 || ids.some(id=>!Number.isSafeInteger(id)||id<=0)) throw Object.assign(new Error('请选择1至20个库存商品'),{statusCode:400});
+      if(url.searchParams.get('view')==='status')return {rows:await workflow.batch(ids,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'})};
+      const rows=[];
+      for(let i=0;i<ids.length;i+=2) rows.push(...await Promise.all(ids.slice(i,i+2).map(id=>workflow.read(id,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'}))));
+      return { rows };
+    },
+    "GET /api/inventory-workflow/receipts": async (req,url)=>({rows:await workflow.receipts(url.searchParams.get('product_id'),req._session)}),
+    "POST /api/inventory-workflow/receipts": async req=>workflow.receive(await readJson(req),req._session),
+    "POST /api/inventory-workflow/fbp": async req => {
+      const session=await authorizeBusinessTaskSession(req._session);
+      assertBusinessTaskPermission(session,'inventory.write');
+      const body=await readJson(req);
+      const productId=Number(body.product_id);
+      const state=await workflow.read(productId,session.tenant.id,{fresh:true});
+      const selected=Array.isArray(body.rows)?body.rows:[];
+      if(!selected.length || selected.length>100) throw Object.assign(new Error('请选择1至100个已绑定的SKU'),{statusCode:400});
+      const seen=new Set();
+      const rows=selected.map(row=>{
+        const key=`${Number(row.shop_id)}:${String(row.ozon_sku)}`;
+        const sku=state.skus.find(s=>s.shop_id===Number(row.shop_id)&&s.ozon_sku===String(row.ozon_sku));
+        if(!sku?.mapping_id || seen.has(key) || !Number.isSafeInteger(Number(row.quantity)) || Number(row.quantity)<1 || Number(row.quantity)>1000000) throw Object.assign(new Error('SKU绑定或件数无效，请先核对绑定；一个SKU只能提交一次'),{statusCode:400});
+        seen.add(key); return {...sku,requested_qty:Number(row.quantity)};
+      });
+      return services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true});
+    },
+    "POST /api/inventory-workflow/requests": async req => workflow.submit(await readJson(req),req._session),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

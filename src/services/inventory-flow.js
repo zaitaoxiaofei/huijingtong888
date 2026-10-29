@@ -38,7 +38,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     for (const row of official.rows) {
       const key = `${row.shop_id}:${row.ozon_sku}`;
       if (!groups.has(key)) groups.set(key, { shop_id: Number(row.shop_id), shop_name: row.shop_name, ozon_sku: row.ozon_sku,
-        offer_id: row.offer_id || "", per_set_quantity: Number(row.per_set_quantity), present: row.present == null ? null : 0,
+        offer_id: row.offer_id || "", mapping_id: row.mapping_id || null, per_set_quantity: Number(row.per_set_quantity), present: row.present == null ? null : 0,
         available: row.available == null ? null : 0, synced_at: row.synced_at, in_transit: 0, sales: {} });
       const sku = groups.get(key);
       if (row.present != null) { sku.present += Number(row.present); sku.available += Number(row.available); }
@@ -48,7 +48,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     if (skus.length) {
       const mappings = await q(`SELECT m.id, m.shop_id, m.ozon_sku, m.product_id FROM sku_mappings m
         WHERE m.active = 1 AND ${inventoryTenantSql(scope, "m")} AND m.product_id = ?`, [id]);
-      for (const sku of skus) sku.mapping_id = mappings.find(row => Number(row.shop_id) === sku.shop_id && row.ozon_sku === sku.ozon_sku)?.id || null;
+      for (const sku of skus) sku.mapping_id = mappings.find(row => Number(row.shop_id) === sku.shop_id && row.ozon_sku === sku.ozon_sku)?.id || sku.mapping_id || null;
       const bindings = skus.map(() => "(o.shop_id = ? AND oi.ozon_sku = ?)").join(" OR ");
       const sales = await q(`SELECT o.shop_id, oi.ozon_sku,
         SUM(CASE WHEN o.ordered_at >= ? THEN oi.quantity ELSE 0 END) AS w1,

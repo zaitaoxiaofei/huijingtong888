@@ -10,7 +10,7 @@ import { chromium } from 'playwright-core';
 test('warehouse reminder retries safely; compact workbench keeps shared inventory flow and purchase actions', { skip: process.env.RUN_TASK_BROWSER_TESTS !== '1' }, async () => {
   const output = await fs.mkdtemp(path.join(os.tmpdir(), 'stock-topup-ui-'));
   let browser;
-  const errors = [], posted = [], queries = [];
+  const errors = [], posted = [], queries = [], purchases=[];
   const order = { id: 1, posting_number: 'ORDER-1', shop_name: '测试店铺', statusLabel: '等待发货', productDisplayRows: [], logisticsSummary: {}, profitSummary: {}, availableActions: {}, unboundItems: [], procurementState: {},
     procurement_coverage: { stock_location: 'LOCAL', needs_fulfillment: true, items: [
       { product_id: 11, product_name: '主体', quantity: 1, stock_quantity: 1, shortage_quantity: 0 },
@@ -19,7 +19,7 @@ test('warehouse reminder retries safely; compact workbench keeps shared inventor
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'stock-topup-fixture', resolveId(id) { if (id === 'virtual:topup') return '\0topup'; },
-      load(id) { if (id === '\0topup') return `import {createApp,h} from 'vue'; import {createPinia} from 'pinia'; import {createRouter,createMemoryHistory} from 'vue-router'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Table from '/frontend/orders/components/OrdersTable.vue'; import Page from '/frontend/admin/views/procurement/ProcurementWorkspaceView.vue'; const router=createRouter({history:createMemoryHistory(),routes:[{path:'/',component:Page}]}); const component=location.search.includes('orders')?{render:()=>h(Table,{rows:[${JSON.stringify(order)}],canRemindProcurement:true,tableHeight:800})}:Page; createApp(component).use(createPinia()).use(router).use(ElementPlus).mount('#app');`; }
+      load(id) { if (id === '\0topup') return `import {createApp,h} from 'vue'; import {createPinia} from 'pinia';import {useAuthStore} from '/frontend/admin/stores/auth.js'; import {createRouter,createMemoryHistory} from 'vue-router'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Table from '/frontend/orders/components/OrdersTable.vue'; import Page from '/frontend/admin/views/procurement/ProcurementWorkspaceView.vue'; const router=createRouter({history:createMemoryHistory(),routes:[{path:'/',component:Page}]}); const component=location.search.includes('orders')?{render:()=>h(Table,{rows:[${JSON.stringify(order)}],canRemindProcurement:true,tableHeight:800})}:Page; const pinia=createPinia();const app=createApp(component).use(pinia).use(router).use(ElementPlus);useAuthStore(pinia).user={id:2,roles:['procurement'],tenant:{id:2,slug:'a',role:'member'}};app.mount('#app');`; }
     }], build: { outDir: output, cssCodeSplit: false, rollupOptions: { input: 'virtual:topup', output: { entryFileNames: 'entry.js' } } } });
     browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
     const page = await browser.newPage({ viewport: { width: 1920, height: 1000 } });
@@ -27,10 +27,14 @@ test('warehouse reminder retries safely; compact workbench keeps shared inventor
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<link rel="stylesheet" href="/style.css"><div id="app"></div><script type="module" src="/entry.js"></script>' });
-      if (url.pathname === '/api/procurement/stock-topups') {
+      if (url.pathname === '/api/inventory-workflow/requests') {
         posted.push(route.request().postDataJSON());
         return route.fulfill(posted.length === 1 ? { status: 503, json: { error: '测试网络失败，请重试' } } : { json: { ok: true, id: 101, notified: 2 } });
       }
+      if(url.pathname==='/api/procurement/purchase-orders/confirm-from-requests'){purchases.push(route.request().postDataJSON());return route.fulfill({json:{ok:true}});}
+      if(url.pathname==='/api/inventory-workflow')return route.fulfill({json:{rows:[{product_id:11,overall:'warning',demands:[{key:'local_safety',label:'本地安全保障需求',priority:2,status:'warning',purchase_quantity:3,submitted_quantity:3}],requests:[{id:101,quantity:3}],skus:[]}]}});
+      if(url.pathname==='/api/people')return route.fulfill({json:[{id:2,name:'采购乙',active:1}]});
+      if(url.pathname==='/api/products/11')return route.fulfill({json:{id:11,name:'测试主体',purchase_cost:4,domestic_shipping:0}});
       if (url.pathname === '/api/procurement/requests') {
         queries.push(url.searchParams.get('demandType'));
         return route.fulfill({ json: { rows: [{ product_id: 11, product_name: '测试主体', suggested_purchase_qty: 3, primary_suggested_purchase_qty: 3, total_quantity: 3, recent_30d_qty: 30, week3_qty: 3, week2_qty: 4, week1_qty: 5, requests: [{ id: 101, quantity: 3, demand_type: 'warehouse_request', request_reason_code: 'inventory_stock_topup', person_name: '仓库甲' }] }], total: 1 } });
@@ -42,19 +46,20 @@ test('warehouse reminder retries safely; compact workbench keeps shared inventor
     });
     await page.goto('http://localhost:8788/admin.html?orders');
     await page.getByRole('button', { name: '提醒采购', exact: true }).click();
-    const dialog = page.getByRole('dialog', { name: '提醒采购 · 库存补足', exact: true });
+    const dialog = page.getByRole('dialog', { name: '提交采购申请', exact: true });
     await dialog.waitFor();
     await dialog.locator('.el-select__wrapper').click();
-    await page.getByRole('option').filter({ hasText: '配件' }).click();
+    await page.getByRole('option').filter({ hasText: '本地安全保障需求' }).click();
     await dialog.getByRole('spinbutton').fill('3');
     await dialog.getByRole('textbox').fill('实物盘点缺少配件');
-    await dialog.getByRole('button', { name: '提交并提醒' }).click();
+    await dialog.getByRole('button', { name: '提交并提醒采购' }).click();
     await page.getByText('测试网络失败，请重试', { exact: true }).waitFor();
-    await dialog.getByRole('button', { name: '提交并提醒' }).click();
+    await dialog.getByRole('button', { name: '提交并提醒采购' }).click();
     await dialog.waitFor({ state: 'hidden' });
     assert.equal(posted.length, 2); assert.deepEqual(posted[0], posted[1]);
-    assert.equal(posted[0].product_id, 12); assert.equal(posted[0].quantity, 3);
+    assert.equal(posted[0].product_id, 11); assert.equal(posted[0].quantity, 3);
     assert.equal(posted[0].tenant_id, undefined);
+    await page.getByRole('dialog',{name:'库存明细与历史核对',exact:true}).locator('.el-dialog__headerbtn').click();
     await page.getByRole('button', { name: '提醒采购', exact: true }).click();
     await dialog.waitFor();
     await page.evaluate(() => window.dispatchEvent(new Event('erp:auth-scope-changed')));
@@ -72,6 +77,14 @@ test('warehouse reminder retries safely; compact workbench keeps shared inventor
     await ledger.getByText('库存流转与占用', { exact: true }).waitFor();
     await ledger.getByText('可用库存', { exact: true }).waitFor();
     await page.screenshot({ path: '/tmp/stock-topup-shared-ledger.png', animations: 'disabled' });
+    await ledger.getByRole('button',{name:'登记实际采购',exact:true}).click();
+    const purchaseDialog=page.getByRole('dialog',{name:'登记已下单采购',exact:true});
+    await purchaseDialog.locator('.el-form-item').filter({hasText:'采购数量'}).getByRole('spinbutton').fill('6');
+    await purchaseDialog.locator('.el-form-item').filter({hasText:'货款总额'}).getByRole('spinbutton').fill('24');
+    await purchaseDialog.getByRole('button',{name:'确认已下单并进入在途',exact:true}).click();
+    await purchaseDialog.waitFor({state:'hidden'});
+    assert.equal(purchases.length,1);assert.deepEqual(purchases[0].request_ids,[101]);assert.equal(purchases[0].items[0].actual_quantity,6);assert.equal(purchases[0].items[0].product_id,11);
+
     await ledger.getByRole('button', { name: 'Close this dialog' }).click();
     await ledger.waitFor({state:'hidden'});
     for (const width of [1920,1366]) {

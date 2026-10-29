@@ -12,6 +12,7 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import InventoryWorkflowStatus from "../../components/inventory/InventoryWorkflowStatus.vue";
 import WarehouseProcurementRequestDialog from "../../components/procurement/WarehouseProcurementRequestDialog.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
@@ -72,13 +73,10 @@ const filterDefaults = {
 const pagedRows = computed(() => state.rows);
 const inventoryView = computed(() => state.filters.view !== "sku");
 const canEditInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
-const canSubmitRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
+const canSubmitRequest = computed(() => Boolean(authStore.user?.tenant?.id));
 const inventoryAlertFilters = [
-  { value: "all", label: "全部" },
-  { value: "out_of_stock", label: "断货" },
-  { value: "low_stock", label: "缺货" },
-  { value: "in_transit", label: "采购在途" },
-  { value: "healthy", label: "库存健康" }
+ {value:"all",label:"全部"},{value:"danger",label:"供货不足"},{value:"warning",label:"待处理"},
+ {value:"success",label:"供货充足"},{value:"opportunity",label:"备货机会"},{value:"unknown",label:"待核对"}
 ];
 const inventorySortOptions = [
   { value: "recent_30d_qty", label: "近 30 天消耗" },
@@ -143,7 +141,7 @@ function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
-    if (state.filters.alertType === "lead_time_missing") state.filters.alertType = "all";
+    if (!inventoryAlertFilters.some(option=>option.value===state.filters.alertType)) state.filters.alertType="all";
     if (!inventorySortOptions.some((option) => option.value === state.filters.sortBy)) state.filters.sortBy = "recent_30d_qty";
     if (!fbpFocusOptions.some((option) => option.value === state.filters.fbpFocus)) state.filters.fbpFocus = "replenishment";
   } finally {
@@ -267,14 +265,7 @@ async function saveLeadTimes(row) {
 }
 
 function openWarehouseRequest(row) {
-  requestProducts.value = [{
-    id: row.product_id,
-    name: row.product_name,
-    inventory_number: row.inventory_number || row.inventory_id,
-    image_url: row.image_url,
-    suggested_purchase_qty: Math.max(1, Number(row.suggested_purchase_qty || 0))
-  }];
-  requestDialogVisible.value = true;
+  openInventoryDetails(row, 'procurement');
 }
 
 function changeAlertType(value) {
@@ -391,7 +382,7 @@ async function loadPageData({ refresh = false } = {}) {
     }
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), inventoryView.value ? Promise.resolve(state.shops) : loadShopDictionary()];
+    const requests = [apiClient.get(`${inventoryView.value?"/api/inventory-workflow/alerts":"/api/stock-alerts"}?${params.toString()}`), inventoryView.value ? Promise.resolve(state.shops) : loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
@@ -484,17 +475,14 @@ onMounted(async () => {
         <el-table-column label="库存分析" min-width="460">
           <template #default="{ row }">
             <div class="alert-analysis">
-              <div class="alert-analysis-status">
-                <el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag>
-                <span :class="{ 'danger-text': row.alert_type === 'out_of_stock' && !Number(row.incoming_stock) }">预警缺口 <strong class="alert-metric-value">{{ integer(inventoryAlertGap(row)) }} 件</strong></span>
-              </div>
+              <div class="alert-analysis-status"><InventoryWorkflowStatus :state="row.workflow" /></div>
               <div class="alert-analysis-grid">
-                <div><span>剩余可用</span><strong class="alert-metric-value">{{ integer(row.available_stock) }} 件</strong></div>
-                <div><span>本地实物</span><strong class="alert-metric-value">{{ integer(row.physical_stock) }} 件</strong></div>
-                <div><span>订单待履约占用</span><strong class="alert-metric-value">{{ integer(row.open_order_demand_qty) }} 件</strong></div>
-                <div><span>预警线</span><strong class="alert-metric-value">{{ integer(row.alert_quantity) }} 件</strong></div>
-                <div><span>采购在途</span><strong class="alert-metric-value">{{ integer(row.incoming_stock) }} 件</strong></div>
-                <div><span>仍需采购</span><strong class="alert-metric-value">{{ integer(row.suggested_purchase_qty) }} 件</strong></div>
+                <div><span>可用库存</span><strong>{{ sharedStockText(row.workflow?.free) }}</strong></div>
+                <div><span>本地实物</span><strong>{{ sharedStockText(row.workflow?.physical) }}</strong></div>
+                <div><span>订单占用</span><strong>{{ sharedStockText(row.workflow?.order_demand) }}</strong></div>
+                <div><span>安全保障</span><strong>{{ sharedStockText(row.workflow?.safety) }}</strong></div>
+                <div><span>采购在途</span><strong>{{ sharedStockText(row.workflow?.incoming) }}</strong></div>
+                <div><span>仍需采购</span><strong>{{ sharedStockText(row.workflow?.purchase_quantity) }}</strong></div>
               </div>
             </div>
           </template>
@@ -514,7 +502,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <div class="cell-stack alert-row-actions">
               <el-button v-if="canEditInventory" size="small" type="primary" plain @click="openInventoryDetails(row, 'stocktake')">更新本地库存</el-button>
-              <el-button v-if="canSubmitRequest" size="small" type="warning" plain :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button>
+              <el-button v-if="canSubmitRequest" size="small" type="warning" plain @click="openWarehouseRequest(row)">提交采购需求</el-button>
               <el-button size="small" @click="openInventoryDetails(row)">查看明细</el-button>
             </div>
           </template>

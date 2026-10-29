@@ -1,3 +1,4 @@
+import { createInventoryWorkflowService } from './inventory-workflow.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
 import { readInventoryFlowSummary } from './inventory-flow-summary.js';
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "./customer-message-core-schema.js";
@@ -5576,22 +5577,23 @@ function assertFbpSkuBindingMysql(row, binding, ozonSku, requireBound = false) {
   }
 }
 
-async function requireCurrentProcurementActorMysql(scope, userId, connection = null) {
+async function requireCurrentProcurementActorMysql(scope, userId, connection = null, permission = "procurement") {
   const query = connection
     ? (sql, params) => mysqlConnectionQuery(connection, `${sql} FOR SHARE`, params)
     : mysqlQuery;
   const current = await restoreBusinessTaskSession(scope.isDefault ? "admin" : scope.id, userId, query);
-  assertBusinessTaskPermission(current, "procurement");
+  assertBusinessTaskPermission(current, permission);
   return current;
 }
 
-export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin") {
+export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
+  const permission = options.workflow ? "inventory.write" : "procurement";
   ensureMysqlCutoverEnabled();
   await ensureFbpReplenishmentSchemaMysql();
   const tenantPk = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(tenantPk);
   const scope = await resolveInventoryTenantScope(tenantPk);
-  await requireCurrentProcurementActorMysql(scope, userId);
+  await requireCurrentProcurementActorMysql(scope, userId, null, permission);
   await assertInventoryMember(scope, userId);
   const sourceRows = Array.isArray(body.rows) ? body.rows : (Array.isArray(body.items) ? body.items : []);
   if (!sourceRows.length) throw new Error("请先选择要加入备货单的 FBP SKU。");
@@ -5624,12 +5626,12 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
     }
   }
 
-  await requireCurrentProcurementActorMysql(scope, userId);
+  await requireCurrentProcurementActorMysql(scope, userId, null, permission);
   await backfillFbpReplenishmentOrderDatesMysql(scope);
-  return withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
   const mysqlQueryOne = (sql, params) => mysqlConnectionQueryOne(connection, sql, params);
   const mysqlExecute = async (sql, params) => {
-    await requireCurrentProcurementActorMysql(scope, userId, connection);
+    await requireCurrentProcurementActorMysql(scope, userId, connection, permission);
     return (await connection.execute(sql, params))[0];
   };
   for (const [shopId, rows] of grouped) {
@@ -5779,11 +5781,14 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
       insertedCount += 1;
     }
     await mysqlExecute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
+    if (options.workflow && options.submit) await mysqlExecute("UPDATE fbp_replenishment_orders SET status='pending_review', submitted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='draft'", [orderId]);
     created.push({ id: orderId, order_no: orderNo, shop_id: shopId, order_date: orderDate, item_count: rows.length, inserted_count: insertedCount, updated_count: updatedCount });
   }
-  await requireCurrentProcurementActorMysql(scope, userId, connection);
+  await requireCurrentProcurementActorMysql(scope, userId, connection, permission);
   return { ok: true, rows: created };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function updateFbpReplenishmentOrderItemsMysql(body = {}, tenantId = "admin") {
@@ -16919,7 +16924,7 @@ export async function refreshProcurementDemandMysql(tenantId = "admin", options 
   const fresh = await authorizeBusinessTaskSession(current);
   if (!hasPermission(fresh, 'procurement')) throw Object.assign(new Error('采购岗位权限已撤销'), {statusCode:403});
   options.signal?.throwIfAborted();
-  await ensureInventoryWarningProcurementRequestsMysql(scope.id);
+  // Safety and FBP recommendations require a person to submit an application.
   invalidateOrderProcurementCoverage();
   return { ok: true, orders, inventory: { ok: true } };
 }
@@ -17128,7 +17133,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
       pr.created_at, pr.updated_at`
     : "pr.*";
   const realOrderView = String(query.grouped || "") === "1"
-    && ["all", "real_order"].includes(String(query.demandType || query.demand_type || "all"));
+    && ["all", "real_order", "fbp_stock"].includes(String(query.demandType || query.demand_type || "all"));
   // Share the order queue projection (and its invalidation/cache) before paging.
   // A shortage is already net of assigned stock and receipts; never subtract
   // product-wide incoming stock from that shortage a second time.
@@ -17165,7 +17170,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     ? Array.from({ length: 11 }, () => groupedPage.productIds).flat()
     : [];
   const rows = await mysqlQuery(`
-    SELECT ${requestColumns}, ${queueCoverage ? 'p.id' : 'pr.product_id'} AS product_id,
+    SELECT ${requestColumns}, ${workflowFbpCandidateMysql(scope)} AS workflow_candidate, ${queueCoverage ? 'p.id' : 'pr.product_id'} AS product_id,
       COALESCE(NULLIF(p.inventory_number, ''),
         CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END
       ) AS product_code,
@@ -17423,6 +17428,11 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     row.incoming_stock = Math.max(0, Number(row.incoming_stock || 0) - (historicalIncomingByProduct.get(Number(row.product_id)) || 0));
   }
   // SQL already selected this page. Do not apply its offset a second time.
+  const workflows=await createInventoryWorkflowService().batch(groupedPage.productIds,scope.id,{coverage});
+  for(const row of rows) {
+    row.workflow=workflows.find(w=>w.product_id===Number(row.product_id));
+    if(!row.status && row.workflow_candidate) {row.status='pending';row.quantity=0;row.demand_type='warehouse_request';row.request_reason_code='flow_fbp_stock';}
+  }
   const projectedRows = queueCoverage ? supplementLiveProcurementRows(rows, coverage) : rows;
   const grouped = groupProcurementRequestsMysql(projectedRows, { ...query, page: 1, pageSize: groupedPage.pageSize });
   Object.assign(grouped, { page: groupedPage.page, total: groupedPage.total });
@@ -17496,6 +17506,13 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   };
 }
 
+function workflowFbpCandidateMysql(scope) {
+  return `EXISTS (SELECT 1 FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
+    JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
+    WHERE wo.status='pending_review' AND (wi.product_id=p.id OR EXISTS (SELECT 1 FROM product_components wc WHERE wc.product_id=wi.product_id AND wc.component_product_id=p.id AND ${inventoryTenantSql(scope,'wc')})
+      OR EXISTS (SELECT 1 FROM sku_inventory_recipes wr JOIN sku_inventory_recipe_items wri ON wri.recipe_id=wr.id WHERE wr.shop_id=wi.shop_id AND wr.ozon_sku=wi.ozon_sku AND wr.active=1 AND wri.product_id=p.id)))`;
+}
+
 async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = null, tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
@@ -17522,8 +17539,13 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   if (shortageProductIds !== null) {
     const shortageSql = shortageProductIds.length ? `p.id IN (${shortageProductIds.map(() => '?').join(',')})` : '1 = 0';
     const pendingSql = where.splice(0).join(' AND ');
-    where.push(demandType === 'real_order' ? shortageSql : `((${pendingSql}) OR ${shortageSql})`);
+    where.push(demandType === 'real_order' ? `(${shortageSql} OR ((${pendingSql}) AND pr.request_reason_code='flow_real_order'))` : `((${pendingSql}) OR ${shortageSql})`);
     params.push(...shortageProductIds);
+  }
+  if(['all','fbp_stock'].includes(demandType)) {
+    const pending=where.splice(0).join(' AND ');
+    const manualFbp="(pr.request_reason_code IN ('flow_fbp_stock','fbp_stock_shortage') OR pr.source_type='fbp')";
+    where.push(demandType==='fbp_stock' ? `(${workflowFbpCandidateMysql(scope)} OR ((${pending}) AND ${manualFbp}))` : `((${pending}) OR ${workflowFbpCandidateMysql(scope)})`);
   }
   where.push(inventoryTenantSql(scope, 'p'), `(pr.id IS NULL OR ${inventoryTenantSql(scope, 'pr')})`);
   if (searchText) {
@@ -17605,13 +17627,17 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     where.push("pr.demand_type = 'real_order'");
   } else if (["advance_stock", "inventory_warning"].includes(demandType)) {
     where.push("pr.demand_type = 'advance_stock'");
+  } else if (demandType === 'local_safety') {
+    where.push("(COALESCE(pr.request_reason_code,'') NOT IN ('flow_real_order','flow_fbp_stock','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' AND pr.demand_type IN ('advance_stock','warehouse_request'))");
   } else if (demandType === "warehouse_request") {
     where.push("pr.demand_type = 'warehouse_request'");
   }
   const warningJoins = "";
   const groupedSql = `
     SELECT p.id AS product_id, COALESCE(MAX(pr.created_at), p.created_at) AS latest_created_at,
-      ${shortageProductIds?.length ? `CASE WHEN p.id IN (${shortageProductIds.filter(Number.isSafeInteger).join(',')}) THEN 1 ELSE 0 END` : "0"} AS real_order_priority
+      ${shortageProductIds?.length ? `CASE WHEN p.id IN (${shortageProductIds.filter(Number.isSafeInteger).join(',')}) THEN 1 ELSE 0 END` : "0"} AS real_order_priority,
+      MIN(CASE WHEN pr.status IN ('pending','suggested','submitted') AND pr.request_reason_code='flow_real_order' THEN 1
+        WHEN pr.status IN ('pending','submitted') AND COALESCE(pr.request_reason_code,'') NOT IN ('flow_fbp_stock','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' THEN 2 ELSE 3 END) AS demand_priority
     FROM products p
     LEFT JOIN procurement_requests pr ON p.id = pr.product_id AND ${inventoryTenantSql(scope, 'pr')}
     LEFT JOIN people pe ON pe.id = pr.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
@@ -17624,7 +17650,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   `;
   const [idRows, countRows] = await Promise.all([
     mysqlQuery(
-      `${groupedSql} ORDER BY real_order_priority DESC, latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`,
+      `${groupedSql} ORDER BY real_order_priority DESC, demand_priority ASC, latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`,
       [...params, pageSize, (page - 1) * pageSize]
     ),
     mysqlQuery(
@@ -25650,13 +25676,13 @@ export async function confirmShippedProcurementReceiptsMysql(body = {}, sessionP
 export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId = null, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
-  const guard = async () => { if (options.session) await assertProcurementTaskAccessMysql(options.session, scope, options.signal); };
+  const guard = async connection => { if (options.beforeWrite) await options.beforeWrite(connection); if (options.session) await assertProcurementTaskAccessMysql(options.session, scope, options.signal); };
   await guard();
   await assertInventoryMember(scope, sessionPersonId);
   await ensureInboundRecordTimestampSchemaMysql();
   await ensurePurchaseCostVersionSchemaMysql();
   if (body.historical_receipt_groups !== undefined) {
-    return procurementLedgerService.receiveAndCount({ groups: body.historical_receipt_groups, request_key: body.request_key }, sessionPersonId, scope.id);
+    return procurementLedgerService.receiveAndCount({ groups: body.historical_receipt_groups, request_key: body.request_key }, sessionPersonId, scope.id, {beforeWrite:guard,receipt:options.receipt===true});
   }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
@@ -25664,7 +25690,7 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
     const changedPurchaseOrderIds = new Set();
     const ids = [];
     for (const record of records) {
-      await guard();
+      await guard(connection);
       const inboundId = Number(record.id ?? record.inbound_record_id);
       if (!inboundId) continue;
       await assertInventoryRecord(scope, 'inbound', inboundId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
@@ -25686,7 +25712,7 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
     for (const orderId of changedPurchaseOrderIds) {
       await refreshPurchaseOrderStatusMysql(connection, orderId);
     }
-    await guard();
+    await guard(connection);
     return { ok: true, count: ids.length, ids };
   });
   invalidateOrderProcurementCoverage();

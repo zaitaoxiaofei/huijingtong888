@@ -1,3 +1,4 @@
+import { hasPermission } from '../shared/permissions.js';
 import { createHash } from 'node:crypto';
 import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
 import { inferProcurementSources } from './procurement-source-inference.js';
@@ -447,6 +448,11 @@ export function createProcurementLedgerService(hooks) {
       await (hooks.assertActor || assertInventoryMember)(scope, actor, run);
       await (hooks.assertReferences || assertInventoryReferences)(scope, body, run);
       const checkActor = async (lock = false) => {
+        if(access === 'receipt' && body.action_type === 'receive_and_count') {
+          const current=await restoreBusinessTaskSession(scope.isDefault?'admin':scope.id,actor,(sql,params)=>run(lock?`${sql} FOR SHARE`:sql,params));
+          if(!hasPermission(current,'packing')&&!hasPermission(current,'procurement'))throw Object.assign(new Error('登记入库需要本企业仓库打包或采购权限'),{statusCode:403});
+          return;
+        }
         const permissions = access === 'inventory' ? ['inventory.write'] : ['procurement'];
         if (['convert', 'substitute', 'damage', 'loss', 'stocktake', 'set_priority', 'receive_and_count'].includes(body.action_type)) permissions.push('inventory.write');
         if (hooks.assertCurrentActor) return hooks.assertCurrentActor(scope, actor, run, permissions, lock);
@@ -624,13 +630,14 @@ export function createProcurementLedgerService(hooks) {
     if (!existingConnection) hooks.invalidate();
     return result;
   }
-  async function receiveAndCount(body, personId, tenantId = 'admin') {
+  async function receiveAndCount(body, personId, tenantId = 'admin', options = {}) {
     await prepare();
     if (!Array.isArray(body.groups) || !body.groups.length || body.groups.length > 100) throw new Error('请选择 1 至 100 个库存商品并填写当前实物数量');
     const groups = [...body.groups].sort((a, b) => Number(a.product_id) - Number(b.product_id));
     if (new Set(groups.map(row => Number(row.product_id))).size !== groups.length) throw new Error('同一库存只填写一次当前实物总数');
     if (!/^[a-zA-Z0-9-]{16,50}$/.test(String(body.request_key || ''))) throw new Error('补登记操作标识缺失，请重新打开弹窗');
     const results = await transaction(async connection => {
+      await options.beforeWrite?.(connection);
       for (const group of groups) {
         if (hooks.assertProductAccess) await hooks.assertProductAccess(integer(group.product_id, '库存商品 ID'), tenantId, (sql, params = []) => connection.query(sql, params).then(([rows]) => rows));
         await connection.query('SELECT id FROM products WHERE id = ? FOR UPDATE', [integer(group.product_id, '库存商品 ID')]);
@@ -639,7 +646,7 @@ export function createProcurementLedgerService(hooks) {
       for (const group of groups) results.push(await apply({ product_id: group.product_id, revision: group.revision,
         counted_quantity: group.counted_quantity, receipts: group.receipts, action_type: 'receive_and_count',
         reason: '历史到货漏登记；按当前仓库实物校准，保留原出库记录，历史来源待核对',
-        request_key: `${body.request_key}-${group.product_id}` }, personId, connection, tenantId));
+        request_key: `${body.request_key}-${group.product_id}` }, personId, connection, tenantId, options.receipt?'receipt':'procurement'));
       return results;
     });
     hooks.invalidate();

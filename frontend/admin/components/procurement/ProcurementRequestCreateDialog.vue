@@ -9,7 +9,8 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialProductId: { type: [Number, String, null], default: null },
   lockProduct: { type: Boolean, default: false },
-  sourceOrderContext: { type: Object, default: () => ({}) }
+  sourceOrderContext: { type: Object, default: () => ({}) },
+  sourceRequestIds: { type: Array, default: () => [] }
 });
 
 const emit = defineEmits(["update:modelValue", "created"]);
@@ -171,7 +172,9 @@ async function submit() {
   }
   submitting.value = true;
   try {
-    await apiClient.post("/api/procurement/purchases", {
+    const requestIds=[...new Set(props.sourceRequestIds.map(Number).filter(id=>id>0))];
+    await apiClient.post(requestIds.length?"/api/procurement/purchase-orders/confirm-from-requests":"/api/procurement/purchases", {
+      ...(requestIds.length?{request_ids:requestIds}:{}),
       person_id: Number(form.person_id || 0) || null,
       source_type: form.source_type,
       supplier_id: form.supplier_id || null,
@@ -179,6 +182,7 @@ async function submit() {
       items: [{
         ...form,
         quantity: Number(form.quantity || 1),
+        actual_quantity: Number(form.quantity || 1),
         amount: Number(form.amount || 0),
         shipping_amount: Number(form.shipping_amount || 0),
         person_id: Number(form.person_id || 0) || null,
@@ -204,7 +208,7 @@ watch(() => props.modelValue, async (visible) => {
     resetForm();
     await ensureOptionsLoaded();
   }
-});
+}, { immediate:true });
 
 watch(() => props.initialProductId, async () => {
   if (props.modelValue) {

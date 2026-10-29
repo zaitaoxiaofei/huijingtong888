@@ -10,6 +10,7 @@ import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth.js";
+import InventoryWorkflowStatus from '../../components/inventory/InventoryWorkflowStatus.vue';
 import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import DailyPurchaseExport from "../../components/procurement/DailyPurchaseExport.vue";
@@ -98,8 +99,9 @@ async function loadCostTasks(page = 1) {
   finally { if (version === costTasksVersion) costTasksLoading.value = false; }
 }
 function openCostTasks() { costTasksVisible.value = true; loadCostTasks(); }
-const warehouseReasonLabels = { inventory_stock_topup: "库存补足", accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
+const warehouseReasonLabels = { flow_real_order: "FBS真实订单需求", flow_local_safety: "本地安全保障需求", flow_fbp_stock: "FBP备货缺口需求", inventory_stock_topup: "库存补足", accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
 function purchaseTypeLabel(row) {
+  if(row.workflow)return row.primary_suggestion_reason?.label || '供货已满足／申请待核对';
   if (row.primary_suggestion_reason?.type === 'real_order' || Number(row.real_order_shortage) > 0) return '真实订单需求';
   if (row.requests?.some(request => request.request_reason_code === 'inventory_stock_topup')) return '库存补足';
   return row.primary_suggestion_reason?.label || ({ real_order: '真实订单需求', warehouse_request: '仓库采购申请', advance_stock: '提前采购' })[row.demand_types?.[0]] || '采购需求';
@@ -179,11 +181,11 @@ const state = reactive({
   people: [],
   suppliers: [],
   suggestions: [],
-  filters: { query: "", demandType: ["all", "real_order", "advance_stock", "warehouse_request"].includes(route.query.demandType) ? route.query.demandType : "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
+  filters: { query: "", demandType: ["all", "real_order", "local_safety", "fbp_stock", "advance_stock", "warehouse_request"].includes(route.query.demandType) ? route.query.demandType : "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
 });
 
 watch(() => route.query.demandType, value => {
-  if (["all", "real_order", "advance_stock", "warehouse_request"].includes(value) && value !== state.filters.demandType) {
+  if (["all", "real_order", "local_safety", "fbp_stock", "advance_stock", "warehouse_request"].includes(value) && value !== state.filters.demandType) {
     state.filters.demandType = value;
     handleSearch();
   }
@@ -1598,9 +1600,9 @@ onMounted(async () => {
           <el-form-item label="需求类型">
             <el-select v-model="state.filters.demandType" filterable style="width: 150px" @change="handleSearch">
               <el-option label="全部待采购" value="all" />
-              <el-option label="真实订单采购" value="real_order" />
-              <el-option label="提前采购" value="advance_stock" />
-              <el-option label="仓库申请 / 库存补足" value="warehouse_request" />
+              <el-option label="FBS真实订单需求" value="real_order" />
+              <el-option label="本地安全保障需求" value="local_safety" />
+              <el-option label="FBP备货缺口需求" value="fbp_stock" />
             </el-select>
           </el-form-item>
           <el-form-item label="关键词">
@@ -1652,7 +1654,7 @@ onMounted(async () => {
         <el-table-column label="采购需求" min-width="230">
           <template #default="{ row }">
             <div class="purchase-suggestion">
-              <div class="purchase-demand-heading"><strong>{{ purchaseTypeLabel(row) }}</strong><span>{{ Number(row.primary_suggested_purchase_qty || row.suggested_purchase_qty || row.total_quantity || 0) }}<small> 件</small></span></div>
+              <div class="purchase-demand-heading"><InventoryWorkflowStatus v-if="row.workflow" :state="row.workflow" /><strong>{{ purchaseTypeLabel(row) }}</strong><span>{{ Number(row.primary_suggested_purchase_qty || row.suggested_purchase_qty || row.total_quantity || 0) }}<small> 件</small></span></div>
               <el-popover v-if="warehouseRequestDetails(row).length" placement="right-start" :width="420" trigger="click">
                 <template #reference><el-button link type="primary">查看仓库申请（{{ warehouseRequestDetails(row).length }}）</el-button></template>
                 <div v-for="detail in warehouseRequestDetails(row)" :key="detail.id" class="warehouse-request-detail"><span>{{ detail.text }} · {{ detail.request.quantity }} 件</span><el-button link type="danger" @click="rejectWarehouseRequest(detail.request)">拒绝申请</el-button></div>

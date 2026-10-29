@@ -72,13 +72,9 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
-      { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
-      { key: "inventory-fbp", label: "FBP库存", route: "/inventory/fbp" },
-      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
-      { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
-      { key: "inventory-fbp-replenishment", label: "FBP备货单", route: "/inventory/fbp-replenishment" },
-      { key: "inventory-mappings", label: "SKU绑定", route: "/inventory/mappings" },
-      { key: "inventory-hidden", label: "已删除商品", route: "/inventory/hidden" }
+      { key: "purchase-list", label: "收货入库", route: "/purchase-list" },
+      { key: "inventory-fbp", label: "FBP", route: "/inventory/fbp" },
+      { key: "inventory-mappings", label: "库存管理", route: "/inventory/mappings" }
     ]
   },
   {
@@ -87,10 +83,8 @@ export const navigationMenus = [
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
-      { key: "purchase-history", label: "入库记录", route: "/purchase-history" },
-      { key: "purchase-cost-center", label: "成本预警", route: "/purchase-cost-center" },
-      { key: "procurement-reconciliation", label: "采购对账", route: "/procurement/reconciliation" },
-      { key: "procurement-platform-orders", label: "平台订单", route: "/procurement/platform-orders" },
+      { key: "purchase-cost-center", label: "成本管理", route: "/purchase-cost-center" },
+      { key: "procurement-reconciliation", label: "采购核对", route: "/procurement/platform-orders" },
       { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },

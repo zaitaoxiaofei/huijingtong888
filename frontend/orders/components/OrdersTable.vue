@@ -1,8 +1,9 @@
 ﻿<script setup>
-import { computed, onMounted, onBeforeUnmount, reactive, ref } from "vue";
+import { computed, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { apiClient, currentApiCacheScope } from "../../admin/utils/api.js";
+import { useInventoryWorkflows } from '../../admin/utils/use-inventory-workflows.js';
+import InventoryWorkflowStatus from '../../admin/components/inventory/InventoryWorkflowStatus.vue';
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
 import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
@@ -23,6 +24,8 @@ const props = defineProps({
   tableHeight: { type: [String, Number], default: "100%" }
 });
 
+const workflowStates=useInventoryWorkflows(()=>props.rows,row=>inventoryOverview(row).items.map(i=>i.product_id));
+function productWorkflow(row,parent){return workflowStates.forIds(parentInventoryItems(parent).map(i=>i.product_id));}
 const emit = defineEmits([
   "toggle-all",
   "toggle-row",
@@ -46,31 +49,10 @@ const emit = defineEmits([
   "confirm-procurement-inbound"
 ]);
 
-const stockTopup = reactive({ visible: false, busy: false, order: null, items: [], productId: null, quantity: 1, note: '', requestKey: '' });
-function clearStockTopup() {
-  Object.assign(stockTopup, { visible: false, order: null, items: [], productId: null, note: '', requestKey: '' });
-}
-onMounted(() => window.addEventListener('erp:auth-scope-changed', clearStockTopup));
-onBeforeUnmount(() => window.removeEventListener('erp:auth-scope-changed', clearStockTopup));
 function openStockTopup(row) {
-  currentApiCacheScope();
-  const items = inventoryOverview(row).items.filter(item => Number(item.product_id) > 0);
-  if (!items.length) return ElMessage.warning('请先绑定订单对应的实际库存商品，再提醒采购');
-  Object.assign(stockTopup, { visible: true, busy: false, order: row, items, productId: items[0].product_id,
-    quantity: Math.max(1, Number(items[0].shortage_quantity || items[0].quantity || 1)), note: '', requestKey: crypto.randomUUID() });
-}
-async function submitStockTopup() {
-  if (stockTopup.busy) return;
-  if (!Number.isInteger(stockTopup.quantity) || stockTopup.quantity <= 0 || stockTopup.quantity > 1000000) return ElMessage.warning('提醒采购数量须为1至1000000的整数件');
-  const scope = currentApiCacheScope();
-  stockTopup.busy = true;
-  try {
-    const result = await apiClient.post('/api/procurement/stock-topups', { order_id: Number(stockTopup.order.id), product_id: Number(stockTopup.productId), quantity: stockTopup.quantity, note: stockTopup.note, request_key: stockTopup.requestKey });
-    if (scope !== currentApiCacheScope()) return;
-    ElMessage.success(result.duplicate ? '此提醒已提交，请勿重复创建' : `已创建库存补足申请，提醒采购 ${stockTopup.quantity} 件，并通知本企业管理员和采购人员`);
-    stockTopup.visible = false;
-  } catch (error) { if (scope === currentApiCacheScope() && error.name !== 'AbortError') ElMessage.error(error.message); }
-  finally { stockTopup.busy = false; }
+  const items=inventoryOverview(row).items;
+  if(!items.length)return ElMessage.warning('请先绑定对应的实物库存商品');
+  openInventoryLedger(row,'procurement',items[0].product_id);
 }
 function parentInventoryItems(parent) {
   return parent.virtual ? parent.children.filter(item => Number(item.product_id) > 0) : [{ product_id: parent.productId, product_name: parent.name, inventory_number: parent.inventoryNumber }].filter(item => item.product_id > 0);
@@ -355,16 +337,6 @@ function procurementTimeText(row) {
 </script>
 
 <template>
-  <el-dialog v-if="stockTopup.visible" v-model="stockTopup.visible" title="提醒采购 · 库存补足" width="min(560px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!stockTopup.busy">
-    <el-alert title="提交后创建库存补足采购申请，并通知本企业管理员和采购人员；不会修改实物库存。" type="info" :closable="false" />
-    <el-form label-width="100px" class="stock-topup-form" :disabled="stockTopup.busy">
-      <el-form-item label="关联订单">{{ stockTopup.order.postingNumber || stockTopup.order.posting_number }}</el-form-item>
-      <el-form-item label="库存商品"><el-select v-model="stockTopup.productId" style="width:100%"><el-option v-for="item in stockTopup.items" :key="item.product_id" :value="item.product_id" :label="item.product_name || `库存 #${item.product_id}`" /></el-select></el-form-item>
-      <el-form-item label="提醒采购量"><el-input-number v-model="stockTopup.quantity" :min="1" :max="1000000" :precision="0" /><span style="margin-left:8px">件</span></el-form-item>
-      <el-form-item label="提醒说明"><el-input v-model="stockTopup.note" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：仓库清点发现实物不足，需要补足" /></el-form-item>
-    </el-form>
-    <template #footer><el-button :disabled="stockTopup.busy" @click="stockTopup.visible = false">取消</el-button><el-button type="primary" :loading="stockTopup.busy" @click="submitStockTopup">提交并提醒</el-button></template>
-  </el-dialog>
 
   <el-card shadow="never" class="orders-table-card">
     <div class="mobile-landscape-hint">订单信息较多，横屏查看更完整；表格可左右滑动。</div>
@@ -645,6 +617,7 @@ function procurementTimeText(row) {
           <div class="inventory-compact">
             <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
               <template #actions="{ parent }">
+                <InventoryWorkflowStatus :state="productWorkflow(row,parent)" :order-covered="row.procurement_coverage?.needs_fulfillment && row.procurement_coverage?.stock_location!=='FBP' && row.procurement_coverage?.shortage_quantity===0 ? true : null" />
                 <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
                   <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
                   <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
@@ -726,7 +699,7 @@ function procurementTimeText(row) {
               :disabled="Number(confirmingInboundRecordId || 0) > 0"
               @click="emit('confirm-procurement-inbound', row)"
             >
-              {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
+              {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}
             </el-button>
           </div>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
@@ -766,7 +739,7 @@ function procurementTimeText(row) {
               size="small"
               class="orders-inline-accent-button"
               :class="procurementActionClass(row)"
-              @click="emit('open-order-procurement', row.id)"
+              @click="openStockTopup(row)"
             >
               {{ procurementActionLabel(row) }}
             </el-button>

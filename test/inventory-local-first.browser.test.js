@@ -37,6 +37,7 @@ test('local facts render before a slow FBP response; late product responses, fai
         if(id===1&&!coreRoute){coreRoute=route;return;}
         return route.fulfill({json:local(id)});
       }
+      if(url.pathname==='/api/inventory-workflow')return route.fulfill({json:{rows:[]}});
       if(url.pathname==='/api/inventory-flow/sync'){holdFbp=false;syncCalls.push(route.request().postDataJSON());return route.fulfill({json:{task_id:'fixture-task',running:false,result:{ok:true,results:[{ok:true}]}}});}
       if(url.pathname.includes('/image'))return route.fulfill({status:404,body:''});
       const asset=url.pathname==='/style.css'?path.join('assets',(await fs.readdir(path.join(output,'assets'))).find(n=>n.endsWith('.css'))):url.pathname.slice(1);

@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
@@ -19,6 +19,8 @@ import InventoryProductRequestsDialog from "../../components/inventory/Inventory
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
+import InventoryWorkflowStatus from "../../components/inventory/InventoryWorkflowStatus.vue";
+import { useInventoryWorkflows } from "../../utils/use-inventory-workflows.js";
 import WarehouseProcurementRequestDialog from "../../components/procurement/WarehouseProcurementRequestDialog.vue";
 import {
   applyFilterQuery,
@@ -45,7 +47,7 @@ const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && auth
 const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canManageProductComponents = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
-const canSubmitProcurementRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
+const canSubmitProcurementRequest = computed(() => Boolean(authStore.user?.tenant?.id));
 const canOutbound = computed(() => hasPermission(authStore.user, "packing") || hasPermission(authStore.user, "inventory.write"));
 const route = useRoute();
 const router = useRouter();
@@ -303,6 +305,7 @@ function movementStockLocationText(value) {
 }
 
 const pagedRows = computed(() => state.products);
+const inventoryWorkflows=useInventoryWorkflows(()=>state.products,row=>[row.id]);
 const inventoryTotalPages = computed(() => Math.max(1, Math.ceil(Number(state.total || 0) / Math.max(1, Number(state.filters.pageSize || 1)))));
 const inventoryFooterSummary = computed(() => `第 ${Number(state.filters.page || 1)} / ${inventoryTotalPages.value} 页，共 ${integer(state.total)} 条记录`);
 const canMergeProducts = computed(() => selectedRows.value.length >= 2);
@@ -1989,6 +1992,7 @@ onActivated(() => {
         <el-table-column label="库存" prop="stock" width="180" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="inventory-stock-cell">
+              <InventoryWorkflowStatus :state="inventoryWorkflows.forIds([row.id])" />
               <div class="stock-total-line">
                 <span>总库存</span>
                 <strong>{{ integer(totalProductStock(row)) }} {{ productUnit(row) }}</strong>
@@ -2146,7 +2150,7 @@ onActivated(() => {
               <el-button v-if="canManageProductComponents" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
               <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
               <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
-              <el-button v-if="canProcure" class="erp-btn-link" link @click="openInventoryLedger(row)">采购库存对账</el-button>
+              <el-button class="erp-btn-link" link @click="openInventoryLedger(row)">库存明细</el-button><el-button v-if="canSubmitProcurementRequest" class="erp-btn-link" link @click="openInventoryLedger(row, 'procurement')">提交采购申请</el-button>
               <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
               <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
               <el-button v-if="canWriteInventory" class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
