@@ -48,6 +48,8 @@ export function inventoryOverview(row) {
     shopId: Number(row.shop_id), skus: (row.fbp_inventory || []).map(stock => String(stock.ozon_sku)),
     parents: (row.inventorySummaries || []).map(summary => ({
       id: summary.inventoryKey || `${summary.productId}-${summary.sku || ''}`,
+      productId: Number(summary.productId || 0),
+      skus: [...new Set(summary.skus || [summary.sku])].filter(Boolean),
       name: summary.productName, inventoryNumber: summary.inventoryNumber,
       quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
       localAvailable: localSets(summary, products, 'local_available'),
