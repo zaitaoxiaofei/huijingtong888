@@ -98,7 +98,8 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await page.getByRole('tab', { name: '采购与成本' }).click();
     const purchaseTable = page.locator('.el-table').filter({ hasText: 'CG-1' });
     assert.match(await purchaseTable.locator('tbody tr').first().innerText(), /CG-1/);
-    await page.getByRole('button', { name: '100', exact: true }).click();
+    await page.locator('[data-node="incoming"]').click();
+    await page.getByRole('button', { name: '查看原有采购与成本明细', exact: true }).click();
     assert.equal(await page.getByText('CG-OLD', { exact: true }).count(), 0);
     await page.getByText('全部采购', { exact: true }).click();
     await page.getByText('CG-OLD', { exact: true }).waitFor();
@@ -139,7 +140,7 @@ test('ledger UI distinguishes historical debt, previews zero-stock purchase corr
     await countDialog.getByRole('textbox').fill('历史采购已补齐，仓库实盘确认为 0，保留采购在途');
     await page.screenshot({ path: '/tmp/inventory-update-reasons.png', animations: 'disabled' });
     await countDialog.getByRole('button', { name: '确认更新', exact: true }).click();
-    await page.getByRole('dialog', { name: '确认更新本地库存', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
+    await page.getByRole('dialog', { name: '再次确认库存更新', exact: true }).getByRole('button', { name: '确认更新', exact: true }).click();
     assert.equal(requests.at(-1).body.action_type, 'stocktake');
     assert.equal(requests.at(-1).body.counted_quantity, 0);
     assert.equal(requests.at(-1).body.reason_code, 'history_error');

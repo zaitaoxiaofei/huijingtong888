@@ -99,7 +99,8 @@ test('企业库存明细的 FBP 店铺关系仅展示当前企业店铺', async 
       { shop_id: 2, ozon_sku: 'B', present: 5, inventory_quantity: 5, available_inventory_quantity: 5 }
     ] } };
   const context = vm.createContext({
-    procurementLedgerService: { read: async () => ledger },
+    readLedgerWithFlow: async () => ledger,
+    resolveInventoryTenantScope: async () => ({ id: 7, predicate: () => ({ sql: 'tenant_id = ?' }) }),
     resolveShopTenantIdMysql: async () => 7,
     mysqlQuery: async (sql, params) => { assert.match(sql, /shops WHERE tenant_id = \?/); assert.equal(params[0], 7); return [{ id: 1 }]; },
     inventoryLedgerView

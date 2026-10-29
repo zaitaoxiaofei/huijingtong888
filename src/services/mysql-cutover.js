@@ -1,3 +1,4 @@
+import { readInventoryFlowSummary } from './inventory-flow-summary.js';
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "./customer-message-core-schema.js";
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord, assertInventoryReferences, assertInventoryMember } from "./inventory-tenant-scope.js";
@@ -5401,11 +5402,16 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
   const status = String(query.status || "all");
   const shopId = String(query.shopId || query.shop_id || "all");
   const batchId = Number(query.batchId || query.batch_id || 0);
+  const focusedOrderId = Number(query.orderId || 0);
+  if (query.orderId && (!Number.isSafeInteger(focusedOrderId) || focusedOrderId <= 0)) {
+    throw Object.assign(new Error("FBP 备货单编号（orderId）无效，请从库存明细重新打开申请单"), { statusCode: 400 });
+  }
   const text = String(query.query || query.search || "").trim();
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || 20)));
   const where = [shopScope];
   const params = [normalizedTenantId];
+  if (focusedOrderId) { where.push("o.id = ?"); params.push(focusedOrderId); }
   if (status === "applying") {
     where.push("o.status IN ('draft', 'pending_review')");
   } else if (status === "replenishment") {
@@ -34393,13 +34399,24 @@ const procurementLedgerService = createProcurementLedgerService({
     await ensurePurchaseCostVersionSchemaMysql();
   }
 });
-export const procurementLedgerMysql = (query, tenantId = "admin") => procurementLedgerService.read(query, tenantId);
+async function readLedgerWithFlow(query, tenantId) {
+  const ledger = await procurementLedgerService.read(query, tenantId);
+  if (String(query.include_flow || '') === '1') {
+    try { ledger.flow_summary = await readInventoryFlowSummary(ledger, tenantId); }
+    catch (error) {
+      if ([403, 404].includes(error.statusCode)) throw error;
+      ledger.flow_summary = { unavailable: true, message: '库存流转预测暂不可用，请刷新重试；现有库存明细仍可查看' };
+    }
+  }
+  return ledger;
+}
+export const procurementLedgerMysql = (query, tenantId = "admin") => readLedgerWithFlow(query, tenantId);
 export const procurementStockCostTasksMysql = (query, tenantId = "admin") => procurementLedgerService.costTasks(query, tenantId);
 export const applyProcurementLedgerMysql = (body, personId, tenantId = "admin") => procurementLedgerService.apply(body, personId, null, tenantId);
 
 export const previewProcurementLedgerMysql = (body, tenantId = "admin") => procurementLedgerService.preview(body, tenantId);
 export const inventoryLedgerMysql = async (query, tenantId = "admin") => {
-  let ledger = await procurementLedgerService.read(query, tenantId);
+  let ledger = await readLedgerWithFlow(query, tenantId);
   if (ledger.fbp_inventory) {
     const scope = await resolveInventoryTenantScope(tenantId);
     const ownedShops = await mysqlQuery(`SELECT id FROM shops WHERE ${scope.predicate().sql}`, [scope.id]);

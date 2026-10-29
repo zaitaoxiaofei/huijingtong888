@@ -26,14 +26,14 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     const override = parse(rows.find(row => Number(row.product_id) === productId)?.settings_json || {});
     return { ...validateFlowSettings({ ...defaults, ...override, holidays: defaults.holidays || [] }), revision: Number(rows.find(row => Number(row.product_id) === productId)?.revision || 0) };
   }
-  async function product(scope, id, balance, q = query) {
+  async function product(scope, id, balance, q = query, officialStocks = null) {
     const [p] = await q(`SELECT p.id, p.name, p.code, p.inventory_number,
       CASE WHEN p.image_url LIKE 'data:image/%' THEN CONCAT('/api/products/',p.id,'/image?thumb=1') ELSE p.image_url END AS image_url, p.production_lead_days,
       p.warehouse_logistics_days, DATEDIFF(UTC_TIMESTAMP(), p.created_at) AS created_days
       FROM products p WHERE p.id = ? AND p.active = 1 AND ${inventoryTenantSql(scope, "p")}`, [id]);
     if (!p) throw flowError("库存产品不存在或不属于当前企业", 404);
     const cfg = await settings(scope, id, q);
-    const official = await loadProductFbpStocks(q, id, scope);
+    const official = officialStocks || await loadProductFbpStocks(q, id, scope);
     const groups = new Map();
     for (const row of official.rows) {
       const key = `${row.shop_id}:${row.ozon_sku}`;
@@ -109,10 +109,10 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     for (let i = 0; i < products.length; i += 3) rows.push(...await Promise.all(products.slice(i, i + 3).map(row => product(scope, Number(row.id), balance.get(Number(row.id))))));
     return { rows, total: Number(count.total), page, pageSize, settings: await settings(scope), calculated_at: new Date().toISOString() };
   }
-  async function detail(id, tenantId) {
+  async function detail(id, tenantId, { balance, official } = {}) {
     const scope = await resolveInventoryTenantScope(tenantId, query);
     await assertInventoryRecord(scope, "product", id, query);
-    return product(scope, Number(id), (await balances(scope, [Number(id)])).get(Number(id)));
+    return product(scope, Number(id), balance || (await balances(scope, [Number(id)])).get(Number(id)), query, official);
   }
   async function saveSettings(body, tenantId, personId) {
     const scope = await resolveInventoryTenantScope(tenantId, query), id = whole(body.product_id || 0, "库存编号");

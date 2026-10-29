@@ -28,6 +28,42 @@ Enforcement:
 
 ## Schemas
 
+### InventoryFlowSummary
+
+Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `physical` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `order_demand` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `locked` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `safety` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `free` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `unoccupied` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `protection_gap` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `incoming` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `incoming_assigned` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `order_shortage` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `requested` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `local_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `fbp_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `unavailable` | `boolean` | No | Optional summary could not be loaded. |
+| `message` | `string` | No | Non-sensitive recovery guidance when unavailable. |
+| `safety_status` | `string` | No | Forecast completeness and interpretation. |
+| `orders` | `array<object>` | No | Current open orders, without finance fields. |
+| `applications` | `array<object>` | No | Active FBP requests and reservations; request quantity is not deducted again. |
+| `purchases` | `array<object>` | No | Nonfinancial pending-purchase summary. |
+| `safety_rows` | `array<object>` | No | Per-SKU forecast basis. |
+| `calculated_at` | `string` | No | UTC calculation time; UI formats Beijing time. |
+
+### InventoryLedgerFlowResponse
+
+Existing ledger fields plus an optional shared flow summary. Inventory-only ledger retains its financial-field allowlist; procurement ledger retains its existing duty requirements.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `flow_summary` | `InventoryFlowSummary` | No | Present only for include_flow=1. |
+
 ### EnterpriseMessagePeer
 
 Active person in the authenticated enterprise. No global account roster.
@@ -2770,9 +2806,42 @@ Fetch a remote image through the backend with response validation.
 
 ### Inventory
 
+#### `GET /api/inventory/ledger`
+
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
+  - `include_flow` (`string`, optional): Set to 1 to include shared flow_summary; omitted requests do not run forecasts.
+- Responses:
+  - `200` `application/json` -> `InventoryLedgerFlowResponse`
+
+#### `GET /api/procurement/ledger`
+
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
+  - `include_flow` (`string`, optional): Set to 1 to include shared flow_summary; omitted requests do not run forecasts.
+- Responses:
+  - `200` `application/json` -> `InventoryLedgerFlowResponse`
+
+#### `GET /api/fbp-replenishment-orders`
+
+Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `orderId` (`number`, optional): Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page.
+  - `status` (`string`, optional): Existing workflow status filter; all for a deep link.
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/inventory-flow`
 
-Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
 
 - Auth: `authenticated`
 - Responses:
@@ -2780,7 +2849,7 @@ Read the authenticated enterprise's independent inventory flow center. Detail re
 
 #### `GET /api/inventory-flow/detail`
 
-Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
 
 - Auth: `authenticated`
 - Responses:
@@ -2788,7 +2857,7 @@ Read the authenticated enterprise's independent inventory flow center. Detail re
 
 #### `GET /api/inventory-flow/settings`
 
-Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
 
 - Auth: `authenticated`
 - Responses:
@@ -2796,7 +2865,7 @@ Read the authenticated enterprise's independent inventory flow center. Detail re
 
 #### `GET /api/inventory-flow/tasks`
 
-Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
 
 - Auth: `authenticated`
 - Responses:
@@ -2804,7 +2873,7 @@ Read the authenticated enterprise's independent inventory flow center. Detail re
 
 #### `GET /api/inventory-flow/events`
 
-Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
 
 - Auth: `authenticated`
 - Responses:
@@ -2812,7 +2881,7 @@ Read the authenticated enterprise's independent inventory flow center. Detail re
 
 #### `POST /api/inventory-flow/settings`
 
-Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2822,7 +2891,7 @@ Write only the new flow center workflow. Settings use product_id/revision/settin
 
 #### `POST /api/inventory-flow/tasks`
 
-Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2832,7 +2901,7 @@ Write only the new flow center workflow. Settings use product_id/revision/settin
 
 #### `POST /api/inventory-flow/task-action`
 
-Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
@@ -2842,7 +2911,7 @@ Write only the new flow center workflow. Settings use product_id/revision/settin
 
 #### `POST /api/inventory-flow/sync`
 
-Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
 
 - Auth: `authenticated`
 - Request body: required
