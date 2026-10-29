@@ -1,4 +1,5 @@
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
+import { INVENTORY_FLOW_SCHEMA } from "../src/services/inventory-flow-schema.js";
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-calculation-schema.js";
 import { ORDER_PROFIT_DAILY_FX_SCHEMA } from "../src/services/order-profit-daily-fx-schema.js";
 import { ORDER_PROFIT_FX_STATE_SCHEMA } from "../src/services/order-profit-fx-policy.js";
@@ -16,6 +17,7 @@ import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-vouche
 import { SKU_ORDER_TRACKERS_SCHEMA } from "../src/services/sku-order-tracking-schema.js";
 
 const mysqlSchemaSql = `
+${INVENTORY_FLOW_SCHEMA.join(";\n")};
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};
 ${ORDER_PROFIT_DAILY_FX_SCHEMA};
 ${ORDER_PROFIT_FX_STATE_SCHEMA};

@@ -2770,6 +2770,86 @@ Fetch a remote image through the backend with response validation.
 
 ### Inventory
 
+#### `GET /api/inventory-flow`
+
+Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/detail`
+
+Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/settings`
+
+Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/tasks`
+
+Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/events`
+
+Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/settings`
+
+Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/tasks`
+
+Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/task-action`
+
+Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/sync`
+
+Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/inventory`
 
 Return inventory overview rows.

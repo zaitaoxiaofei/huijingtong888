@@ -1650,6 +1650,13 @@ const endpoints = [
     })
   ]),
   section("Inventory", [
+    ...["", "/detail", "/settings", "/tasks", "/events"].map(suffix => endpoint("GET", `/api/inventory-flow${suffix}`, "Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.", {
+      auth: "authenticated", responses: [response(200, "application/json", scalar("object", "Enterprise-scoped flow center data; unknown official stock remains null."))]
+    })),
+    ...["settings", "tasks", "task-action", "sync"].map(action => endpoint("POST", `/api/inventory-flow/${action}`, "Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.", {
+      auth: "authenticated", requestBody: body(scalar("object", "See docs/inventory-flow-center.md. Action is edit, lock, ship, receive or correct; receipt/correction require transfer_id and quantity. Corrections require a verified reason.")),
+      responses: [response(200, "application/json", scalar("object", "Operation result. Sync reports per-shop success and failure."))]
+    })),
     endpoint("GET", "/api/inventory", "Return inventory overview rows.", {
       auth: "authenticated",
       responses: [response(200, "application/json", ref("InventorySnapshot"))]

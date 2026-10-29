@@ -24,6 +24,7 @@ const InventoryHiddenPage = () => import("../views/inventory/InventoryHiddenPage
 const InventoryMappingsPage = () => import("../views/inventory/InventoryMappingsPage.vue");
 const InventorySuppliersPage = () => import("../views/inventory/InventorySuppliersPage.vue");
 const InventoryAlertsPage = () => import("../views/inventory/InventoryAlertsPage.vue");
+const InventoryFlowCenterPage = () => import("../views/inventory/InventoryFlowCenterPage.vue");
 const OnlineProductsView = () => import("../views/inventory/OnlineProductsView.vue");
 const ListingAutomationView = () => import("../views/listing/ListingAutomationView.vue");
 const ListingPublishRecordsView = () => import("../views/listing/ListingPublishRecordsView.vue");
@@ -138,6 +139,7 @@ export const router = createRouter({
           children: [
             { path: "", redirect: "/inventory/alerts" },
             { path: "products", name: "inventory-products", component: InventoryProductsPage, meta: { title: "商品库存", breadcrumb: ["库存中心", "商品库存"] } },
+            { path: "flow-center", name: "inventory-flow-center", component: InventoryFlowCenterPage, meta: { title: "库存流转中心", breadcrumb: ["库存中心", "库存流转中心"] } },
             { path: "fbp", name: "inventory-fbp", component: InventoryFbpPage, meta: { title: "FBP 库存", breadcrumb: ["库存中心", "FBP 库存"] } },
             { path: "fbp-opportunities", name: "inventory-fbp-opportunities", component: InventoryFbpOpportunitiesPage, meta: { title: "备货建议", breadcrumb: ["库存中心", "备货建议"] } },
             { path: "fbp-replenishment", name: "inventory-fbp-replenishment", component: InventoryFbpReplenishmentPage, meta: { title: "FBP备货单", breadcrumb: ["库存中心", "FBP备货单"] } },

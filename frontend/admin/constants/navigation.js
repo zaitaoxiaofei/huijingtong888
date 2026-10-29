@@ -72,6 +72,7 @@ export const navigationMenus = [
     icon: Goods,
     children: [
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
+      { key: "inventory-flow-center", label: "库存流转中心", route: "/inventory/flow-center" },
       { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
       { key: "inventory-fbp", label: "FBP库存", route: "/inventory/fbp" },
       { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },

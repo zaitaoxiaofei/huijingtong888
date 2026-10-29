@@ -25,6 +25,8 @@ import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
 import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
+import { createInventoryFlowRoutes } from "./server/routes/inventoryFlow.js";
+import { syncInventoryFlowStocksMysql, prepareInventoryFlowMysql } from "./services/mysql-cutover.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
 import { createOglDispatchRoutes, handleOglDispatchFileRoute } from "./server/routes/ogl-dispatch.js";
 import { createOglDispatchService } from "./services/ogl-dispatch.js";
@@ -395,6 +397,7 @@ const routes = {
   "GET /api/exchange-rates/daily-archive": (req) => listOrderProfitDailyFx(orderProfitDailyFxDb, req.query || {}),
   ...createExchangeRateToolRoutes({ db: orderProfitDailyFxDb }),
   "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
+  ...createInventoryFlowRoutes({ readJson, syncStocks: syncInventoryFlowStocksMysql, prepare: prepareInventoryFlowMysql }),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}, tenantIdFromRequest(req), { session: req._session }),

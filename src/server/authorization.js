@@ -118,6 +118,11 @@ export function authorizeApiRequest(req, parts = []) {
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");
+  if (resource === "inventory-flow") {
+    if (read) return require("inventory.read");
+    if (parts[2] === "task-action") return require("inventory.write", "packing");
+    return require("inventory.write");
+  }
   if (["finance-center", "payroll", "profits", "monthly-billing-details", "monthly-billing-orders", "ozon-finance", "profit-reconciliation", "profit-snapshots", "pending-settlement-costs", "settings", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules"].includes(resource)) return deny("仅管理员可以访问财务、人员授权或修改基础配置");
   if (["ai-provider/chat", "ai-provider/stream"].includes(path)) return require("operations", "technical");
   if (["ai-provider", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events", "system-monitoring", "system", "docs"].includes(resource)) return require("technical");
