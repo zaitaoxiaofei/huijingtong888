@@ -14,6 +14,7 @@ const today = shanghaiDateKey();
 const dateRange = ref([today, today]);
 const busy = ref(false);
 const visible = ref(false);
+const rangeVisible = ref(false);
 const summary = ref("");
 
 function reportQuery() {
@@ -69,6 +70,7 @@ async function exportDaily() {
       return;
     }
     summary.value = dailyPurchaseSummary(dateLabel, result.rows);
+    rangeVisible.value = false;
     visible.value = true;
     const { workbook, missingImages } = await buildDailyPurchaseWorkbook(dateLabel, result.rows, loadImage);
     const buffer = await workbook.xlsx.writeBuffer();
@@ -95,8 +97,14 @@ async function copySummary() {
 
 <template>
   <div class="daily-purchase-export">
-    <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" :disabled="busy" aria-label="采购清单时间范围" class="daily-purchase-export__range" />
-    <el-button :loading="busy" :disabled="!dateRange?.length" @click="exportDaily">导出当前筛选</el-button>
+    <el-button :loading="busy" @click="rangeVisible = true">导出采购记录</el-button>
+    <el-dialog v-if="rangeVisible" v-model="rangeVisible" title="导出采购记录" width="min(560px, 94vw)" append-to-body :close-on-click-modal="false" :show-close="!busy" :close-on-press-escape="!busy">
+      <p>选择已确认采购记录的采购时间（北京时间）。此时间仅用于导出，不改变工作台查询条件；导出同时沿用工作台当前筛选。</p>
+      <el-form label-position="top"><el-form-item label="采购时间范围">
+        <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" :clearable="false" :disabled="busy" aria-label="采购清单时间范围" class="daily-purchase-export__range" />
+      </el-form-item></el-form>
+      <template #footer><el-button :disabled="busy" @click="rangeVisible = false">取消</el-button><el-button type="primary" :loading="busy" :disabled="!dateRange?.length" @click="exportDaily">确认导出</el-button></template>
+    </el-dialog>
     <el-dialog v-if="visible" v-model="visible" title="微信采购总结" width="680px" append-to-body>
       <p>按所选北京时间范围和工作台当前联合筛选统计全部正式采购记录，不受当前分页影响。货款与运费分别列示。</p>
       <el-input v-model="summary" type="textarea" :rows="14" readonly aria-label="微信采购总结" />

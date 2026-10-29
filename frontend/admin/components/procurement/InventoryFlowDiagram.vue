@@ -17,6 +17,10 @@ const statusText = status => ({ draft: '草稿', pending_review: '待审核', ap
 const currentOrders = computed(() => facts.value.orders || (props.ledger.orders || []).filter(row => row.needs_fulfillment));
 const applications = computed(() => summary.value.applications || []);
 const official = computed(() => props.ledger.fbp_inventory);
+const fbpCoverage = computed(() => {
+  const rows = official.value?.rows || [];
+  return `${new Set(rows.map(row => row.shop_id)).size} 家店铺 · ${new Set(rows.map(row => `${row.shop_id}:${row.ozon_sku}`)).size} 个 SKU`;
+});
 const positiveFbpRows = computed(() => (official.value?.rows || []).filter(row => [row.present, row.available, row.reserved].some(value => Number(value) > 0)));
 const dispatches = computed(() => applications.value.filter(row => ['sent', 'completed'].includes(row.status)));
 const purchases = computed(() => (facts.value.purchases || props.ledger.purchases || []).filter(row => Number(row.pending_quantity) > 0));
@@ -29,8 +33,8 @@ const nodes = computed(() => [
   { key: 'safety', label: '② 本地安全保障', value: facts.value.safety, hint: facts.value.local_days == null ? '等待预测数据' : `保障 ${facts.value.local_days} 天 · 不含已出单`, area: '2 / 3', plan: true },
   { key: 'application', label: '③ FBP 申请', value: summary.value.requested, hint: props.fbpLoading ? 'FBP 明细加载中' : '申请不重复扣实物', area: '3 / 3', plan: true },
   { key: 'locked', label: '已确认 FBP 占用', value: props.ledger.fbp_reserved, hint: '实际发出才扣实物', area: '3 / 4', primary: true },
-  { key: 'fbp-physical', label: 'FBP 实物', value: official.value?.incomplete ? null : official.value?.present,
-    hint: official.value?.synced_at ? `核实 ${time(official.value.synced_at)}` : props.fbpLoading ? '正在读取上次库存' : '尚无同步时间', area: '3 / 2', primary: true },
+  { key: 'fbp-physical', label: 'FBP 实物', display: props.fbpLoading ? '正在拉取中' : props.fbpError ? '同步未完成' : official.value?.incomplete ? '部分未同步' : '', value: official.value?.incomplete ? null : official.value?.present,
+    hint: props.fbpLoading ? '正在核对各店铺 SKU，本地库存可先查看' : props.fbpError ? '保留上次快照，点击查看明细及失败原因' : official.value?.synced_at ? `核实 ${time(official.value.synced_at)}` : '尚无同步时间', area: '3 / 2', primary: true },
   { key: 'dispatch', label: 'FBP 发仓记录', display: `${new Set(dispatches.value.map(row => row.order_id)).size} 单`, hint: '已发出、已入仓 · 点击查看状态', area: '4 / 4' },
   { key: 'free', label: '可用库存', value: facts.value.free, hint: facts.value.protection_gap > 0 ? `保障缺口 ${quantity(facts.value.protection_gap)}` : '扣除占用与保障后', area: '2 / 5', primary: true }
 ]);
@@ -54,7 +58,7 @@ function selectNode(node) {
   selected.value = node.key;
 }
 function brief(node) {
-  if (node.key === 'fbp-physical') return ['Ozon 官方 FBP 仓实物，按每套组成折算为当前库存的件数；独立于本地库存，不增加本地可用，也不重复扣订单。',
+  if (node.key === 'fbp-physical') return [`${fbpCoverage.value}；${props.fbpLoading ? '正在拉取中，当前明细为上次快照' : props.fbpError ? '本次同步未完成，不能视为全部店铺核实成功' : '按绑定的全部 SKU 汇总'}。`, 'Ozon 官方 FBP 仓实物，按每套组成折算为当前库存的件数；独立于本地库存，不增加本地可用，也不重复扣订单。',
     official.value?.incomplete ? `汇总不完整，已同步部分 ${quantity(official.value?.present)}；未同步 SKU 保持待核对，不按零库存处理。` : '仅展开有库存的店铺 SKU；已占用但仍有实物的 SKU 也会展示。',
     `最早核实时间：${time(official.value?.synced_at)}（北京）；部分店铺失败时保留各自上次快照。`];
   if (node.key === 'dispatch') return ['这里是已发出、已完成入仓的申请记录，不再计入本地申请或确认占用。', '发仓记录不代表官方当前库存；官方实物以独立同步结果为准。'];

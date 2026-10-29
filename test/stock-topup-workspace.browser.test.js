@@ -62,8 +62,8 @@ test('warehouse reminder retries safely; compact workbench keeps shared inventor
     await page.goto('http://localhost:8788/admin.html');
     await page.locator('.purchase-demand-heading').getByText('库存补足', { exact: true }).waitFor();
     assert.equal(queries[0], 'all');
-    assert.deepEqual(await page.locator('.erp-filter-bar .el-form-item__label').allTextContents(), ['需求类型', '关键词', '供应商', '采购负责人', '采购平台', '采购时间']);
-    assert.deepEqual(await page.locator('.erp-filter-bar__actions button').allTextContents(), ['查询', '重置', '采购选中（0）', '＋ 自由采购']);
+    assert.deepEqual(await page.locator('.erp-filter-bar .el-form-item__label').allTextContents(), ['需求类型', '关键词', '供应商', '采购负责人', '采购平台']);
+    assert.deepEqual(await page.locator('.erp-filter-bar__actions button').allTextContents(), ['查询', '重置', '导出采购记录', '采购选中（0）', '＋ 自由采购']);
     assert.equal(await page.getByRole('columnheader', { name: '需求原因', exact: true }).count(), 0);
     await page.getByText('30天 30', { exact: true }).waitFor();
     await page.getByText('三周 3 → 4 → 5', { exact: true }).waitFor();

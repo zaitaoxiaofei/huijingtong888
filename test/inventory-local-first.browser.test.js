@@ -48,6 +48,7 @@ test('local facts render before a slow FBP response; late product responses, fai
     await coreRoute.fulfill({json:local(1)});
     await page.locator('[data-node="physical"]').getByText('170 件',{exact:true}).waitFor();
     await page.locator('[data-node="free"]').getByText('151 件',{exact:true}).waitFor();
+    await page.locator('[data-node="fbp-physical"]').getByText('正在拉取中',{exact:true}).waitFor();
     await page.getByRole('button',{name:'刷新对账',exact:true}).waitFor();
     assert.equal(await page.getByRole('button',{name:'刷新对账',exact:true}).isEnabled(),true);
     await page.getByRole('button',{name:'商品2',exact:true}).click();
@@ -62,6 +63,7 @@ test('local facts render before a slow FBP response; late product responses, fai
     holdFbp=false;failFbp=true;
     await page.getByRole('button',{name:'重新读取已保存库存',exact:true}).click();
     await page.locator('.flow-fbp-error').getByText(/FBP单独读取失败/).waitFor();
+    await page.locator('[data-node="fbp-physical"]').getByText('同步未完成',{exact:true}).waitFor();
     await page.locator('[data-node="free"]').getByText('48 件',{exact:true}).waitFor();
     failFbp=false;
     await page.getByRole('button',{name:'从 Ozon 同步 FBP 库存',exact:true}).click();
