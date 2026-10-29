@@ -7,6 +7,8 @@ const props = defineProps({ ledger: { type: Object, required: true }, inventoryM
 const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp', 'sync-fbp']);
 const router = useRouter();
 const canvas = ref(null), selected = ref(''), paths = ref([]);
+const detail = ref(null);
+const detailId = `inventory-flow-detail-${useId()}`;
 const arrowId = `inventory-flow-arrow-${useId()}`;
 let observer;
 const summary = computed(() => props.ledger.flow_summary || {});
@@ -51,11 +53,17 @@ function rowsFor(key) {
 }
 function navigateOrder(row) { emit('navigate'); router.push({ path: '/orders', query: { orderId: row.order_id } }); }
 function navigateApplication(row) { emit('navigate'); router.push({ path: '/inventory/fbp-replenishment', query: { orderId: row.order_id } }); }
+async function openDetails(key) {
+  selected.value = key;
+  await nextTick();
+  detail.value?.focus({ preventScroll: true });
+  detail.value?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+}
 function selectNode(node) {
   const rows = rowsFor(node.key);
   if (node.key === 'orders' && rows.length === 1 && rows[0].order_id) return navigateOrder(rows[0]);
   if (['application', 'locked'].includes(node.key) && rows.length && new Set(rows.map(row => row.order_id)).size === 1) return navigateApplication(rows[0]);
-  selected.value = node.key;
+  void openDetails(node.key);
 }
 function brief(node) {
   if (node.key === 'fbp-physical') return [`${fbpCoverage.value}；${props.fbpLoading ? '正在拉取中，当前明细为上次快照' : props.fbpError ? '本次同步未完成，不能视为全部店铺核实成功' : '按绑定的全部 SKU 汇总'}。`, 'Ozon 官方 FBP 仓实物，按每套组成折算为当前库存的件数；独立于本地库存，不增加本地可用，也不重复扣订单。',
@@ -110,7 +118,7 @@ onBeforeUnmount(() => observer?.disconnect());
     <div ref="canvas" class="flow-canvas">
       <svg class="flow-connectors" aria-hidden="true"><defs><marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-head" /></marker></defs><path v-for="path in paths" :key="path.key" :d="path.d" :marker-end="`url(#${arrowId})`" :class="{ 'is-planned': path.planned }" /></svg>
       <el-popover v-for="node in nodes" :key="node.key" placement="top" :width="420" trigger="hover" :show-after="180" popper-class="inventory-flow-popover">
-        <template #reference><button type="button" class="flow-node" :data-node="node.key" :style="{ gridArea: node.area }" :class="{ 'is-primary': node.primary, 'is-planned': node.plan, 'is-selected': selected === node.key }" :aria-expanded="selected === node.key" @click="selectNode(node)"><span>{{ node.label }}</span><strong>{{ node.display || quantity(node.value) }}</strong><small>{{ node.hint }}</small></button></template>
+        <template #reference><button type="button" class="flow-node" :data-node="node.key" :style="{ gridArea: node.area }" :class="{ 'is-primary': node.primary, 'is-planned': node.plan, 'is-selected': selected === node.key }" :aria-expanded="selected === node.key" :aria-controls="detailId" @click="selectNode(node)"><span>{{ node.label }}</span><strong>{{ node.display || quantity(node.value) }}</strong><small>{{ node.hint }}</small></button></template>
         <h4>{{ node.label }} · {{ node.display || quantity(node.value) }}</h4>
         <p v-for="line in brief(node)" :key="line">{{ line }}</p>
         <div v-for="(row, index) in rowsFor(node.key).slice(0, 4)" :key="row.order_item_id || row.item_id || row.id || index" class="flow-hover-row">
@@ -125,9 +133,9 @@ onBeforeUnmount(() => observer?.disconnect());
       </el-popover>
     </div>
     <div class="flow-legend"><span>本地线：采购 → 本地实物 → FBS 占用／安全保障／可用</span><span>FBP 线：申请 → 确认占用 → 发仓；官方实物单独核实</span></div>
-    <div class="flow-fbp-toolbar"><span>{{ fbpSyncing ? 'FBP 正在后台同步，本地库存可正常查看' : fbpLoading ? '正在读取 FBP 已保存库存' : canSyncFbp ? '每次打开明细后自动同步一次 FBP，零库存 SKU 不展开' : '只读查看已保存的 FBP 库存，零库存 SKU 不展开' }}</span><el-button v-if="canSyncFbp" size="small" type="primary" :loading="fbpSyncing" :disabled="fbpLoading" @click="emit('sync-fbp')">{{ fbpError ? '重试同步 FBP' : '同步 FBP 库存' }}</el-button><el-button link type="primary" @click="selected = 'fbp-physical'">查看有库存 SKU</el-button><el-button link type="primary" @click="selected = 'fbp-history'">全部 FBP 单据</el-button></div>
+    <div class="flow-fbp-toolbar"><span>{{ fbpSyncing ? 'FBP 正在后台同步，本地库存可正常查看' : fbpLoading ? '正在读取 FBP 已保存库存' : canSyncFbp ? '每次打开明细后自动同步一次 FBP，零库存 SKU 不展开' : '只读查看已保存的 FBP 库存，零库存 SKU 不展开' }}</span><el-button v-if="canSyncFbp" size="small" type="primary" :loading="fbpSyncing" :disabled="fbpLoading" @click="emit('sync-fbp')">{{ fbpError ? '重试同步 FBP' : '同步 FBP 库存' }}</el-button><el-button link type="primary" @click="openDetails('fbp-physical')">查看有库存 SKU</el-button><el-button link type="primary" @click="openDetails('fbp-history')">全部 FBP 单据</el-button></div>
     <div v-if="fbpError" class="flow-fbp-error"><span>FBP 数据：{{ fbpError }}；本地库存与上次 FBP 快照保留</span><el-button link type="primary" :disabled="fbpLoading" @click="emit('retry-fbp')">重新读取</el-button></div>
-    <section v-if="activeNode" class="flow-node-detail" aria-live="polite">
+    <section v-if="activeNode" ref="detail" :id="detailId" class="flow-node-detail" role="region" :aria-label="`${activeNode.label}明细`" tabindex="-1" aria-live="polite">
       <div class="flow-heading"><h4>{{ activeNode.label }} · {{ activeNode.display || quantity(activeNode.value) }}</h4><el-button text @click="selected = ''">收起</el-button></div>
       <p v-for="line in brief(activeNode)" :key="line">{{ line }}</p>
       <el-table v-if="['orders', 'assigned'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无待发订单">
