@@ -116,6 +116,33 @@ test("real collector-to-template-to-draft CRUD and publish records isolate A/B/d
       await listing.deleteCollectorBoxProducts({skus:["same"],tenant_id:"3"},session(2));
       assert.equal((await query("SELECT COUNT(*) AS n FROM ozon_plugin_collected_products WHERE sku='same' AND status<>'deleted'"))[0].n,2);
     });
+    await t.test("single collected leaf ID resolves cached category, required attributes and a tenant-owned draft",async()=>{
+      await query("INSERT INTO ozon_category_mappings(description_category_id,type_id,name_zh,path_zh,status) VALUES(300,400,'测试类目','汽车用品 / 测试类目','active')");
+      await query("INSERT INTO ozon_category_attributes(description_category_id,type_id,attribute_id,name,name_zh,is_required,attribute_type,status) VALUES(300,400,85,'Brand','品牌',1,'String','active')");
+      await listing.syncCollectedProductsFromPlugin([{sku:'leaf-fixture',title:'Leaf category test',type_id:400,attributes:[{attribute_id:85,name:'Brand',value:'Fixture brand'}]}],'2');
+      const detail=await listing.collectorBoxProductDetail('leaf-fixture',session(2));
+      assert.equal(String(detail.rawPayload.description_category_id),'300');
+      assert.equal(String(detail.rawPayload.type_id),'400');
+      assert.match(detail.category_name,/测试类目/);
+      const created=await collectorContext.createListingTemplateFromCollectorBox('leaf-fixture',{allow_incomplete:true},session(2));
+      const template=await listing.listingCategoryTemplateDetail(created.template.id,session(2));
+      assert.equal(template.ozon_category_id,'300:400');
+      assert.ok(template.attributes.some(attr=>Number(attr.attribute_id)===85),JSON.stringify(template.attributes));
+      const draft=await listing.createListingDraft({template_id:template.id,product_name:'Leaf draft',template_payload:{...template,editable_payload:template.editable_payload}},session(2));
+      assert.equal(draft.template_id,template.id);
+      const persisted=(await query('SELECT tenant_id,template_payload_json FROM listing_drafts WHERE id=?',[draft.id]))[0];
+      assert.equal(persisted.tenant_id,'2');
+      assert.equal(JSON.parse(persisted.template_payload_json).ozon_category_id,'300:400');
+      await assert.rejects(listing.listingCategoryTemplateDetail(template.id,session(3)),/not found/);
+    });
+    await t.test("SKU fallback selects its own enterprise's matching shop rather than the newest configured shop",async()=>{
+      await query("UPDATE shops SET ozon_client_id='fixture-client',api_key_hint='fixture-key' WHERE id IN (20,30)");
+      await query("INSERT INTO shops(id,tenant_id,name,ozon_client_id,api_key_hint) VALUES(21,2,'Newer A shop','fixture-client','fixture-key')");
+      await query("INSERT INTO online_products(shop_id,ozon_sku,ozon_product_id,offer_id,name,attributes_json) VALUES(20,'OWN-SKU','','OWN-OFFER','Own product',JSON_OBJECT('description_category_id',300,'type_id',400)),(30,'PRIVATE-SKU','','PRIVATE-OFFER','Foreign product',JSON_OBJECT('description_category_id',300,'type_id',400))");
+      const resolved=await listing.resolveOzonCategoryFromSku({sku:'OWN-SKU'},session(2));
+      assert.equal(resolved.shopId,20);assert.equal(resolved.category.ozon_category_id,'300:400');
+      await assert.rejects(listing.resolveOzonCategoryFromSku({sku:'PRIVATE-SKU'},session(2)),/Local online product cache/);
+    });
   }finally{
     globalThis.fetch=originalFetch;
     if(closeMysqlPool)await closeMysqlPool();

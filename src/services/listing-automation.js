@@ -918,39 +918,55 @@ function isCollectorMediaSource(value = "") {
   return /^(?:https?:\/\/|data:(?:image|video)\/|\/?uploads\/|\/?public\/uploads\/|\/?api\/)/i.test(String(value || "").trim());
 }
 
-async function archiveCollectorMediaValue(value, metadata, session, urlMap) {
+function createCollectorMediaArchiveQueue(limit = 3) {
+  let active = 0;
+  const waiting = [];
+  return async work => {
+    if (active >= limit) await new Promise(resolve => waiting.push(resolve));
+    else active++;
+    try { return await work(); }
+    finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
+async function archiveCollectorMediaValue(value, metadata, session, urlMap, archive) {
   if (typeof value === "string") {
     if (!isCollectorMediaSource(value)) return value;
-    return materializeListingMediaUrl(value, {
+    if (!archive.pending.has(value)) archive.pending.set(value, archive.run(() => materializeListingMediaUrl(value, {
       ...metadata,
       force_archive_remote: true,
       require_managed_oss: true,
       storage_prefix: "collector-media"
-    }, session, urlMap);
+    }, session, urlMap)));
+    return archive.pending.get(value);
   }
   if (Array.isArray(value)) {
-    return mapWithConcurrency(value, 3, (item) => archiveCollectorMediaValue(item, metadata, session, urlMap));
+    return mapWithConcurrency(value, 3, (item) => archiveCollectorMediaValue(item, metadata, session, urlMap, archive));
   }
   if (!value || typeof value !== "object") return value;
   const entries = await mapWithConcurrency(Object.entries(value), 3, async ([key, child]) => {
     const shouldArchive = /^(?:url|src|source_url|sourceUrl|path)$/i.test(key) || isCollectorMediaField(key);
     const nextValue = shouldArchive
-      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap)
-      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap);
+      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap, archive)
+      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap, archive);
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
 }
 
-async function archiveCollectedProductMediaValue(value, metadata, session, urlMap) {
+async function archiveCollectedProductMediaValue(value, metadata, session, urlMap, archive) {
   if (Array.isArray(value)) {
-    return mapWithConcurrency(value, 3, (item) => archiveCollectedProductMediaValue(item, metadata, session, urlMap));
+    return mapWithConcurrency(value, 3, (item) => archiveCollectedProductMediaValue(item, metadata, session, urlMap, archive));
   }
   if (!value || typeof value !== "object") return value;
   const entries = await mapWithConcurrency(Object.entries(value), 3, async ([key, child]) => {
     const nextValue = isCollectorMediaField(key)
-      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap)
-      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap);
+      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap, archive)
+      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap, archive);
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
@@ -969,7 +985,7 @@ async function archiveCollectedProductMedia(product = {}, session = null) {
     source_module: "collector_box",
     source_id: sourceId,
     role: "collector_image"
-  }, session, new Map());
+  }, session, new Map(), { pending: new Map(), run: createCollectorMediaArchiveQueue() });
 }
 
 function collectedNumber(value) {
@@ -1108,6 +1124,10 @@ function buildCollectorBoxQualitySummary(source = {}) {
   if (!title || (sku && title === `Ozon ${sku}`)) issues.push("标题未采集");
   if (!images.length) issues.push("图片未采集");
   if (!categoryName || categoryId.startsWith("frontend:") || categoryName.includes("frontend:")) issues.push("Ozon 类目未识别");
+  const resolution = objectValue(source.category_resolution);
+  if (['missing', 'ambiguous', 'uncached'].includes(resolution.status) && resolution.message) issues.push(resolution.message);
+  const sellerWarning = normalizeArray(source.collection_stages).findLast(stage => stage?.name === 'seller_fallback' && stage.status === 'warning');
+  if (!hasRealCategory && sellerWarning) issues.push('类目后台补采失败，请检查 Ozon 卖家后台登录状态后重新采集，或在商品上架页手动选择类目');
   const normalizedIssues = normalizeCollectorQualityIssues(issues);
   const qualityIssues = hasRealCategory
     ? normalizedIssues.filter((item) => !item.includes("Ozon"))
@@ -1141,25 +1161,19 @@ export function collectedCategoryPairFromIds(source = {}) {
 }
 
 async function enrichCollectedProductCategoryFromIds(product = {}) {
-  const pair = collectedCategoryPairFromIds(product);
-  if (!pair) return product;
-  const cached = await row(`
-    SELECT *
-    FROM ozon_category_mappings
-    WHERE description_category_id = ? AND type_id = ? AND status = 'active'
-    LIMIT 1
-  `, [pair.descriptionCategoryId, pair.typeId]).catch(() => null);
-  if (!cached) return product;
-  const category = normalizeOzonCategoryRow(cached);
-  const categoryName = String(category.path_zh || category.name_zh || category.path_ru || category.name_ru || "").trim();
+  const match = await resolveCollectedCategoryFromCache(product);
+  if (!match.category) return { ...product, category_resolution: { status: match.status, message: match.message || '' } };
+  const category = match.category;
+  const categoryName = String(category.path_zh || category.name_zh || category.path_ru || category.name_ru || '').trim();
   return {
     ...product,
-    category: categoryName || product.category || product.category_name || "",
-    categoryName: categoryName || product.categoryName || "",
-    category_name: categoryName || product.category_name || "",
-    description_category_id: String(pair.descriptionCategoryId),
-    type_id: String(pair.typeId),
-    category_resolved_from: "category_ids_tail"
+    category: categoryName || product.category || product.category_name || '',
+    categoryName: categoryName || product.categoryName || '',
+    category_name: categoryName || product.category_name || '',
+    description_category_id: String(category.description_category_id),
+    type_id: String(category.type_id),
+    category_resolved_from: match.source,
+    category_resolution: { status: 'resolved', message: '' }
   };
 }
 
@@ -1729,26 +1743,39 @@ export function collectedCategoryCandidates(raw = {}, detail = {}, body = {}, fa
   const push = (descriptionCategoryId, typeId, source = "unknown") => {
     const descriptionId = Number(descriptionCategoryId || 0);
     const productTypeId = Number(typeId || 0);
-    if (!descriptionId || !productTypeId) return;
+    if (!Number.isSafeInteger(descriptionId) || descriptionId <= 0 || !Number.isSafeInteger(productTypeId) || productTypeId <= 0) return;
     if (candidates.some((item) => item.descriptionCategoryId === descriptionId && item.typeId === productTypeId)) return;
     candidates.push({ descriptionCategoryId: descriptionId, typeId: productTypeId, source });
   };
   const pushTypeOnly = (typeId, source = "unknown") => {
     const productTypeId = Number(typeId || 0);
-    if (!productTypeId || typeOnlyCandidates.some((item) => item.typeId === productTypeId)) return;
+    if (!Number.isSafeInteger(productTypeId) || productTypeId <= 0 || typeOnlyCandidates.some((item) => item.typeId === productTypeId)) return;
     typeOnlyCandidates.push({ typeId: productTypeId, source });
   };
 
-  push(body.description_category_id || body.descriptionCategoryId, body.type_id || body.typeId, "request");
+  const pushKey = (value, source) => {
+    const pair = String(value || '').match(/^(\d+):(\d+)$/);
+    if (pair) push(pair[1], pair[2], source);
+  };
+  push(body.ozon_description_category_id || body.description_category_id || body.descriptionCategoryId, body.ozon_type_id || body.type_id || body.typeId, "request");
+  pushKey(body.ozon_category_id || body.category_id, 'request');
 
   const factHints = facts && typeof facts === "object" ? objectValue(facts.categoryHints || {}) : {};
   const rawPair = collectedCategoryPairFromIds(raw);
   const factPair = collectedCategoryPairFromIds({ category_ids: factHints.category_ids });
-  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, "category2_3");
+  push(factHints.description_category_id || factHints.descriptionCategoryId, factHints.type_id || factHints.typeId, 'facts_direct');
+  push(raw.ozon_description_category_id || raw.description_category_id || raw.descriptionCategoryId, raw.ozon_type_id || raw.description_type_dict_value || raw.type_id || raw.typeId, 'raw_direct');
+  pushKey(raw.ozon_category_id || raw.category_id, 'raw_direct');
   if (factPair) push(factPair.descriptionCategoryId, factPair.typeId, "facts_category_ids_tail");
   if (rawPair) push(rawPair.descriptionCategoryId, rawPair.typeId, "category_ids_tail");
-  push(factHints.description_category_id || factHints.descriptionCategoryId, factHints.type_id || factHints.typeId, "facts_direct");
-  push(raw.description_category_id || raw.descriptionCategoryId, raw.type_id || raw.typeId, "raw_direct");
+  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, 'category2_3');
+  pushTypeOnly(body.ozon_type_id || body.type_id || body.typeId, 'request_type');
+  pushTypeOnly(factHints.type_id || factHints.typeId, 'facts_type');
+  pushTypeOnly(raw.description_type_dict_value || raw.type_id || raw.typeId, 'raw_type');
+  for (const [ids, source] of [[factHints.category_ids, 'facts_leaf_id'], [raw.category_ids || raw.categoryIds, 'raw_leaf_id']]) {
+    const values = normalizeArray(ids);
+    if (values.length) pushTypeOnly(values[values.length - 1], source);
+  }
 
   const factProductType = normalizeArray(facts?.attributes)
     .find((item) => Number(item?.attribute_id || item?.id || 0) === 8229);
@@ -1778,60 +1805,51 @@ function collectedProductTypeDictionaryValueId(raw = {}) {
   return Number(firstValue.dictionary_value_id || firstValue.id || firstValue.value_id || 0);
 }
 
-async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts = null) {
+export async function resolveCollectedCategoryFromCache(raw = {}, detail = {}, body = {}, facts = null, read = all) {
+  const { candidates, typeOnlyCandidates } = collectedCategoryCandidates(raw, detail, body, facts);
+  const officialPairs = candidates.filter(candidate => candidate.source !== 'category2_3');
+  for (const candidate of officialPairs.length ? officialPairs : candidates) {
+    const rows = await read(`SELECT * FROM ozon_category_mappings
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active' LIMIT 1`, [candidate.descriptionCategoryId, candidate.typeId]);
+    if (rows[0]) return { status: 'resolved', category: normalizeOzonCategoryRow(rows[0]), source: candidate.source };
+    if (candidate.source === 'request') return { status: 'uncached', candidate, message: '所选类目尚无本地映射，请同步类目后核对属性模板' };
+  }
+  const fullPair = candidates.find(item => item.source !== 'category2_3');
+  if (fullPair) return { status: 'uncached', candidate: fullPair, message: '已采集完整类目 ID，但本地映射未命中，请同步类目后核对属性模板' };
+  for (const candidate of typeOnlyCandidates) {
+    const rows = await read(`SELECT * FROM ozon_category_mappings
+      WHERE type_id = ? AND status = 'active' LIMIT 2`, [candidate.typeId]);
+    if (rows.length === 1) return { status: 'resolved', category: normalizeOzonCategoryRow(rows[0]), source: candidate.source };
+    if (rows.length > 1) return { status: 'ambiguous', message: '末级类目 ID 对应多个上级类目，请在商品上架页选择完整 Ozon 类目后再保存草稿' };
+  }
+  return { status: 'missing', message: '尚未采集到有效 Ozon 类目 ID，请保持卖家后台登录并重新采集；也可在商品上架页手动选择类目' };
+}
+
+async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts = null, session = null) {
   const raw = detail.rawPayload || {};
-  const { candidates, typeOnlyCandidates, categoryText, leafName } = collectedCategoryCandidates(raw, detail, body, facts);
-  for (const candidate of candidates) {
-    const cached = await row(`
-      SELECT *
-      FROM ozon_category_mappings
-      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
-      LIMIT 1
-    `, [candidate.descriptionCategoryId, candidate.typeId]);
-    return cached ? normalizeOzonCategoryRow(cached) : {
-      description_category_id: String(candidate.descriptionCategoryId),
-      type_id: String(candidate.typeId),
+  const { categoryText, leafName } = collectedCategoryCandidates(raw, detail, body, facts);
+  const match = await resolveCollectedCategoryFromCache(raw, detail, body, facts);
+  if (match.category) return match.category;
+  if (match.status === 'ambiguous') return { resolution_error: match.message };
+  if (match.candidate) {
+    const candidate = match.candidate;
+    return {
+      description_category_id: String(candidate.descriptionCategoryId), type_id: String(candidate.typeId),
       ozon_category_id: `${candidate.descriptionCategoryId}:${candidate.typeId}`,
-      category_name: categoryText || leafName || detail.category_name || "已采集 Ozon 类目",
+      category_name: categoryText || leafName || detail.category_name || '已采集 Ozon 类目',
       source: `collector_fallback:${candidate.source}`
     };
   }
 
-  for (const candidate of typeOnlyCandidates) {
-    const cached = await row(`
-      SELECT *
-      FROM ozon_category_mappings
-      WHERE type_id = ? AND status = 'active'
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `, [candidate.typeId]);
-    if (cached) return { ...normalizeOzonCategoryRow(cached), source: candidate.source };
-  }
-
   if (categoryText || leafName) {
-    const like = `%${leafName || categoryText.split("/").pop().trim()}%`;
-    const cached = await row(`
-      SELECT *
-      FROM ozon_category_mappings
-      WHERE status = 'active'
-        AND (
-          name_zh = ? OR path_zh = ? OR name_ru = ? OR path_ru = ?
-          OR name_zh LIKE ? OR path_zh LIKE ? OR name_ru LIKE ? OR path_ru LIKE ?
-        )
-      ORDER BY
-        CASE
-          WHEN name_zh = ? THEN 1
-          WHEN name_ru = ? THEN 2
-          WHEN path_zh = ? THEN 3
-          WHEN path_ru = ? THEN 4
-          WHEN path_zh LIKE ? THEN 5
-          WHEN path_ru LIKE ? THEN 6
-          ELSE 9
-        END,
-        updated_at DESC
-      LIMIT 1
-    `, [leafName, categoryText, leafName, categoryText, like, like, like, like, leafName, leafName, categoryText, categoryText, like, like]);
-    if (cached) return normalizeOzonCategoryRow(cached);
+    const paths = categoryText ? await all(`SELECT * FROM ozon_category_mappings
+      WHERE status = 'active' AND (path_zh = ? OR path_ru = ?) LIMIT 2`, [categoryText, categoryText]) : [];
+    if (paths.length === 1) return normalizeOzonCategoryRow(paths[0]);
+    const name = leafName || categoryText.split('/').pop().trim();
+    const names = await all(`SELECT * FROM ozon_category_mappings
+      WHERE status = 'active' AND (name_zh = ? OR name_ru = ?) LIMIT 2`, [name, name]);
+    if (names.length === 1) return normalizeOzonCategoryRow(names[0]);
+    if (paths.length > 1 || names.length > 1) return { resolution_error: '类目名称对应多个分类，请在商品上架页选择完整 Ozon 类目后保存草稿' };
   }
 
   const sku = String(detail.sku || raw.sku || "").trim();
@@ -1839,7 +1857,7 @@ async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts 
   const resolved = await resolveOzonCategoryFromSku({
     sku,
     shop_id: body.shop_id || body.shopId
-  }, null).catch(() => null);
+  }, session).catch(() => null);
   if (resolved?.category) return resolved.category;
   return null;
 }
@@ -1895,7 +1913,8 @@ export async function syncCollectedProductsFromPlugin(products = [], tenantId = 
     };
     const categoryEnrichedProduct = await enrichCollectedProductCategoryFromIds(referencedProduct);
     const initialItem = normalizePluginCollectedProduct(categoryEnrichedProduct, normalizedTenantId);
-    const enrichedProduct = await enrichCollectedProductCategoryFromHistory(categoryEnrichedProduct, initialItem, normalizedTenantId);
+    const historicalProduct = await enrichCollectedProductCategoryFromHistory(categoryEnrichedProduct, initialItem, normalizedTenantId);
+    const enrichedProduct = historicalProduct === categoryEnrichedProduct ? historicalProduct : await enrichCollectedProductCategoryFromIds(historicalProduct);
     const item = normalizePluginCollectedProduct(enrichedProduct, normalizedTenantId);
     if (!item.sku) {
       results.push({ success: false, error: "SKU_REQUIRED", product });
@@ -2305,7 +2324,7 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
   const normalized = await normalizeCollectedListingDraft({ detail, body }, {
     sourceType: "collector_box",
     normalizeEditPayload: normalizeCollectorBoxEditPayload,
-    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts).catch(() => null),
+    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts, session).catch(error => ({ resolution_error: error.message || '类目识别失败，请重新采集或手动选择完整类目' })),
     buildAttributes: (currentEditPayload, currentRaw, currentFacts) => {
       const factAttributes = buildCollectorBoxFactAttributes(currentFacts, currentEditPayload, currentRaw);
       const editAttributes = buildCollectorBoxEditAttributes(currentEditPayload, currentRaw);
@@ -2454,7 +2473,7 @@ async function repairCollectorBoxTemplateCategoryDisplay(template = null, detail
     return listingCategoryTemplate(template.id, session);
   }
   const resolved = unresolvedCategory
-    ? await resolveCollectorBoxListingCategory(detail, {}, null).catch(() => null)
+    ? await resolveCollectorBoxListingCategory(detail, {}, null, session).catch(() => null)
     : null;
   const resolvedDescriptionCategoryId = String(resolved?.description_category_id || resolved?.descriptionCategoryId || "").trim();
   const resolvedTypeId = String(resolved?.type_id || resolved?.typeId || "").trim();
@@ -2510,7 +2529,7 @@ export async function collectorBoxMappingDiagnostics(sku, body = {}, session = n
   const normalized = await normalizeCollectedListingDraft({ detail, body }, {
     sourceType: "collector_box",
     normalizeEditPayload: normalizeCollectorBoxEditPayload,
-    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts).catch(() => null),
+    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts, session).catch(error => ({ resolution_error: error.message || '类目识别失败，请重新采集或手动选择完整类目' })),
     buildAttributes: (currentEditPayload, currentRaw, currentFacts) => {
       const factAttributes = buildCollectorBoxFactAttributes(currentFacts, currentEditPayload, currentRaw);
       const editAttributes = buildCollectorBoxEditAttributes(currentEditPayload, currentRaw);
@@ -4969,7 +4988,16 @@ export async function resolveOzonCategoryFromSku(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const sku = String(body.sku || body.ozon_sku || body.ozonSku || body.offer_id || body.offerId || "").trim();
   if (!sku) throw new Error("璇疯緭鍏?Ozon SKU 鎴?offer_id");
-  const shop = await resolveOzonApiShop(body.shop_id || body.shopId, session);
+  let matchedShopId = body.shop_id || body.shopId;
+  if (!matchedShopId) {
+    const tenantId = listingTenantId(session);
+    const scope = tenantId === 'admin' ? "(s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1) OR s.tenant_id IS NULL)" : 's.tenant_id = ?';
+    const matched = await row(`SELECT op.shop_id FROM online_products op JOIN shops s ON s.id = op.shop_id
+      WHERE ${scope} AND s.status <> 'deleted' AND (op.ozon_sku = ? OR op.ozon_product_id = ? OR op.offer_id = ?)
+      ORDER BY op.synced_at DESC, op.updated_at DESC LIMIT 1`, [...(tenantId === 'admin' ? [] : [tenantId]), sku, sku, sku]);
+    matchedShopId = matched?.shop_id;
+  }
+  const shop = await resolveOzonApiShop(matchedShopId, session);
   const localProduct = await row(`
     SELECT *
     FROM online_products

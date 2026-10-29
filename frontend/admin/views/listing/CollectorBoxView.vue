@@ -1138,7 +1138,7 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBrowserPub
               <span v-if="detailDiagnostics?.category?.description_category_id">
                 Ozon 类目 {{ detailDiagnostics.category.description_category_id }}:{{ detailDiagnostics.category.type_id }}
               </span>
-              <span v-else>未确认 Ozon 后台类目</span>
+              <span v-else>{{ detailDiagnostics?.category?.message || "未确认 Ozon 后台类目，请重新采集或手动选择完整类目" }}</span>
             </div>
             <div v-if="detailDiagnostics?.issues?.length" class="diagnostics-issues">
               <el-tag

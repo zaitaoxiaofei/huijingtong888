@@ -1336,6 +1336,7 @@
   async function persistCollectedResultUpdate(result, requestContext = null) {
     if (!result || typeof result !== 'object') return null;
     const sourcePayload = buildCollectedProductListPayload(result);
+    if (result.collectorBoxDataSource) sourcePayload.data_source = result.collectorBoxDataSource;
     const normalizedCollectionId = String(result.savedCollectionId || result.collectionId || sourcePayload.collectionId || '').trim();
     if (normalizedCollectionId) sourcePayload.collectionId = normalizedCollectionId;
     const saved = await syncCollectedProductToCollectorBox(sourcePayload, requestContext || await resolveLocalPluginRequestContext());
@@ -1348,15 +1349,18 @@
   function scheduleSellerFallbackBackfill(result, options = {}) {
     if (!result || typeof result !== 'object') return Promise.resolve(null);
     const shouldPersist = options.persist !== false;
-    const backgroundTask = enrichDetailWithSellerFallback(result)
+    const enrichment = result.sellerFallbackBackfillTask || enrichDetailWithSellerFallback(result);
+    const backgroundTask = enrichment
       .then(async (enriched) => {
         if (!shouldPersist) return enriched;
         try {
-          await persistCollectedResultUpdate(enriched);
+          await persistCollectedResultUpdate(enriched, options.requestContext);
+          delete enriched.sellerFallbackPersistError;
         } catch (error) {
           const stages = Array.isArray(enriched?.stages) ? enriched.stages : [];
           stages.push({ name: 'seller_fallback_persist', status: 'warning', detail: error?.message || String(error), at: new Date().toISOString() });
           enriched.stages = stages;
+          enriched.sellerFallbackPersistError = true;
         }
         return enriched;
       })
@@ -1765,6 +1769,8 @@
       description_category_id: descriptionCategoryId,
       new_description_category_id: pickValue(['new_description_category_id', 'newDescriptionCategoryId']),
       type_id: typeId,
+      collection_stages: Array.isArray(result?.stages) ? result.stages.map(stage => ({ name: stage.name, status: stage.status, detail: String(stage.detail || '').slice(0, 300), at: stage.at })) : [],
+      plugin_version: typeof chrome !== 'undefined' ? chrome.runtime?.getManifest?.().version || '' : '',
       sellerEnrichment: result?.sellerEnrichment || result?.normalized?.sellerEnrichment || null,
       sellerFallback: result?.sellerFallback || result?.normalized?.sellerFallback || null,
       sellerVariantBySku: result?.sellerVariantBySku || result?.normalized?.sellerVariantBySku || null,
@@ -2014,6 +2020,8 @@
       'hashtags',
       'attributes',
       'sellerFallback',
+      'collection_stages',
+      'plugin_version',
       'sellerVariantBySku',
       'variantSellerFallbacks',
       'variants',
@@ -2056,6 +2064,7 @@
       throw new Error(`Collected SKU mismatch: expected ${normalizedExpectedSku}, got ${payload.sku}`);
     }
     payload.data_source = 'ozon_plugin_detail_add_to_box';
+    result.collectorBoxDataSource = payload.data_source;
     return { result, payload };
   }
 
@@ -3932,9 +3941,22 @@
       const cacheData = refreshCollectorBoxCacheAfterSync(sku, payload, 'full_detail_collect');
       result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || sku;
       result.collectionId = result.savedCollectionId;
+      // Reuse the in-flight seller request, but attach persistence only after the
+      // initial record exists. Keep the original enterprise context for the write.
+      scheduleSellerFallbackBackfill(result, { persist: true, requestContext }).then(enriched => {
+        if (!enriched || pageSku() !== sku) return;
+        const updated = buildCollectedProductListPayload(enriched);
+        const nextCache = enriched.sellerFallbackPersistError ? state.lookupCacheBySku.get(sku)?.data : refreshCollectorBoxCacheAfterSync(sku, updated, 'seller_category_backfill');
+        const category = deriveCollectedCategoryMeta(enriched);
+        const hasPair = Boolean(category.description_category_id && category.type_id);
+        const status = enriched.sellerFallbackPersistError
+          ? '详情已保存，但类目回写失败，请重新采集'
+          : hasPair ? '类目补采已回传，请到采集箱核对后处理草稿' : '详情已保存，类目未补齐；请确认卖家后台登录后重采，或在上架页选择类目';
+        renderDetailProductPanel(buildDetailDisplayRow(sku, status, enriched, nextCache));
+      });
       const variantCount = payload.editorVariants?.length || payload.variants?.length || 1;
       const imageCount = Array.isArray(payload.images) ? payload.images.length : 0;
-      renderDetailProductPanel(buildDetailDisplayRow(sku, `采集完成：${variantCount} 个变体、${imageCount} 张图片`, result, cacheData));
+      renderDetailProductPanel(buildDetailDisplayRow(sku, `采集完成：${variantCount} 个变体、${imageCount} 张图片；类目后台核实中`, result, cacheData));
       if (options.openCollectorBox !== false) {
         await openCollectorBox(sku);
       }

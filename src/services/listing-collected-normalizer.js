@@ -219,7 +219,7 @@ function categoryNameFromResolved(resolvedCategory = {}, editPayload = {}, detai
   return candidates.find((item) => !item.includes("frontend:")) || candidates[0] || "";
 }
 
-function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, categorySource = "", attributes = [], variants = [], images = [], draft = {} } = {}) {
+function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, categorySource = "", categoryMessage = "", attributes = [], variants = [], images = [], draft = {} } = {}) {
   const missingRequiredAttributes = normalizeArray(attributes)
     .filter((item) => Boolean(item.required || item.is_required) && (item.value === undefined || item.value === null || item.value === "" || (Array.isArray(item.value) && !item.value.length)))
     .map((item) => ({
@@ -238,6 +238,7 @@ function buildDiagnostics({ descriptionCategoryId, typeId, categoryName, categor
       type_id: typeId || "",
       name: categoryName || "",
       source: categorySource || "",
+      message: categoryMessage || "",
       confidence: String(categorySource || "").startsWith("collector_fallback:")
         ? "manual_confirmation_required"
         : (descriptionCategoryId && typeId ? "resolved" : "manual_needed")
@@ -358,6 +359,7 @@ export async function normalizeCollectedListingDraft(input = {}, options = {}) {
     typeId,
     categoryName,
     categorySource: resolvedCategory?.source || "",
+    categoryMessage: resolvedCategory?.resolution_error || ((!descriptionCategoryId || !typeId) ? raw.category_resolution?.message : "") || "",
     attributes: draft.attributes || attributes,
     variants: finalVariants,
     images,
