@@ -86,7 +86,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
   const purchaseableRows = rows.filter((item) => {
     const rowStatus = String(item.status || "");
     const orderStatus = String(item.purchase_order_status || "");
-    const realOrderRequest = Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0);
+    const realOrderRequest = item.demand_type !== 'warehouse_request' && (Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0));
     const missingRealOrderSource = String(item.demand_type || "") === "real_order" && !realOrderRequest;
     return ["pending", "suggested", "submitted"].includes(rowStatus)
       && !["purchased", "partial_inbound", "inbound_done"].includes(orderStatus)
@@ -170,7 +170,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     if (row.all_order_demand_quantity != null) {
       target.all_order_demand_quantity = Math.max(Number(target.all_order_demand_quantity || 0), Number(row.all_order_demand_quantity || 0));
     }
-    if (Number(row.source_order_id || 0) || Number(row.source_order_item_id || 0)) {
+    if (row.demand_type !== 'warehouse_request' && (Number(row.source_order_id || 0) || Number(row.source_order_item_id || 0))) {
       target.order_request_count += 1;
       target.order_demand_quantity += Number(row.quantity || 0);
     }
@@ -214,7 +214,8 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
       ].some((item) => String(item || "").toLowerCase().includes(searchText));
     })
     .sort((a, b) => (
-      procurementTimeValueMysql(b.latest_created_at) - procurementTimeValueMysql(a.latest_created_at)
+      Number(Number(b.real_order_shortage || 0) > 0) - Number(Number(a.real_order_shortage || 0) > 0)
+      || procurementTimeValueMysql(b.latest_created_at) - procurementTimeValueMysql(a.latest_created_at)
       || Number(b.product_id || 0) - Number(a.product_id || 0)
     ));
 

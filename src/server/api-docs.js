@@ -1788,6 +1788,21 @@ const endpoints = [
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ProcurementRequestRecord"), "Procurement request rows."))]
     }),
+    endpoint("POST", "/api/procurement/stock-topups", "Warehouse inventory topup reminder: atomically create a submitted warehouse request and unread notifications for active current-enterprise owners/admins and procurement staff. Requires current packing or inventory.write duty. Does not change stock or duplicate real-order demand. No tenant/actor selector is accepted.", {
+      auth: "authenticated",
+      requestBody: body(objectOf("Order-linked warehouse reminder", [
+        field("order_id", scalar("number", "Current-enterprise local-fulfillment order ID."), true),
+        field("product_id", scalar("number", "Physical inventory product bound to that order."), true),
+        field("quantity", scalar("number", "Integer physical units, 1 through 1000000."), true),
+        field("request_key", scalar("string", "UUID retained across network retries; changed payload with the same key returns 409."), true),
+        field("note", scalar("string", "Optional warehouse explanation, at most 500 characters."))
+      ])),
+      responses: [response(200, "application/json", objectOf("Persisted application and recipient notification outcome", [
+        field("ok", scalar("boolean", "Committed successfully.")), field("id", scalar("number", "Procurement request ID.")),
+        field("duplicate", scalar("boolean", "Already committed; no duplicate request or notification.")),
+        field("notified", scalar("number", "Notifications created in this attempt; zero on retry."))
+      ])), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("POST", "/api/procurement/requests", "Create a procurement request.", {
       auth: "authenticated",
       requestBody: body(ref("ProcurementRequestMutationRequest")),

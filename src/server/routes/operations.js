@@ -1,3 +1,4 @@
+import { createWarehouseStockTopup } from '../../services/warehouse-stock-topup.js';
 import { hasPermission, isPlatformAdmin, isEnterpriseAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
@@ -99,6 +100,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
+    "POST /api/procurement/stock-topups": async req => createWarehouseStockTopup(await readJson(req), req._session),
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req), tenantIdFromRequest(req)),

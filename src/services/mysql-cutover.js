@@ -17119,7 +17119,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   const requestColumns = compact
     ? `pr.id, pr.request_group_no, pr.product_id, pr.raw_name, pr.raw_spec, pr.binding_status,
       pr.person_id, pr.created_by_person_id, pr.supplier_id, pr.purchase_order_id,
-      pr.source_order_id, pr.source_order_item_id, pr.source_ozon_sku, pr.demand_type,
+      pr.source_order_id, pr.source_order_item_id, pr.source_ozon_sku, pr.demand_type, pr.request_reason_code, pr.request_reason_note,
       pr.quantity, pr.amount, pr.shipping_amount, pr.status, pr.purchase_url,
       pr.source_type, pr.automation_exception_code, pr.automation_exception_message,
       pr.price_exception_reason, pr.price_exception_note, pr.price_reference_unit_cost,
@@ -17609,7 +17609,8 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   }
   const warningJoins = "";
   const groupedSql = `
-    SELECT p.id AS product_id, COALESCE(MAX(pr.created_at), p.created_at) AS latest_created_at
+    SELECT p.id AS product_id, COALESCE(MAX(pr.created_at), p.created_at) AS latest_created_at,
+      ${shortageProductIds?.length ? `CASE WHEN p.id IN (${shortageProductIds.filter(Number.isSafeInteger).join(',')}) THEN 1 ELSE 0 END` : "0"} AS real_order_priority
     FROM products p
     LEFT JOIN procurement_requests pr ON p.id = pr.product_id AND ${inventoryTenantSql(scope, 'pr')}
     LEFT JOIN people pe ON pe.id = pr.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
@@ -17622,7 +17623,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
   `;
   const [idRows, countRows] = await Promise.all([
     mysqlQuery(
-      `${groupedSql} ORDER BY latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`,
+      `${groupedSql} ORDER BY real_order_priority DESC, latest_created_at DESC, product_id DESC LIMIT ? OFFSET ?`,
       [...params, pageSize, (page - 1) * pageSize]
     ),
     mysqlQuery(
