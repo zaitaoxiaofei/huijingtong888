@@ -14,6 +14,8 @@ import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { membershipDisplay } from "../utils/account-membership.js";
 import { canAccessPage, needsMembershipActivation } from "../../../src/shared/permissions.js";
+import InventoryModuleTabs from '../components/InventoryModuleTabs.vue';
+import { inventoryModule } from '../constants/inventory-modules.js';
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
@@ -56,7 +58,7 @@ const membershipExpiryText = computed(() => membership.value.expiresAt
   : membership.value.active ? "当前会员未设置到期时间" : "激活后即可使用已开放的企业功能");
 const membershipActionLabel = computed(() => !canActivateMembership.value ? "查看会员" : membership.value.active ? "激活 / 续期" : "激活会员");
 
-const activeMenu = computed(() => route.path);
+const activeMenu = computed(() => inventoryModule(route.path)?.tabs[0].path || route.path);
 const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
@@ -988,6 +990,7 @@ onBeforeUnmount(() => {
               <span></span>
               <strong>正在切换页面</strong>
             </div>
+            <InventoryModuleTabs />
             <div class="erp-workspace-panel">
               <RouterView v-slot="{ Component, route: currentRoute }">
                 <!-- Closing a tab can change activeKey before its route navigation finishes. -->

@@ -195,6 +195,7 @@ function flattenFbpRows(rows) {
 
 function matchesFbpAlertType(row = {}, alertType = "all") {
   if (!alertType || alertType === "all") return true;
+  if (alertType === "in_stock") return Number(row.fbp_present ?? row.fbp_available ?? 0) > 0;
   if (alertType === "out_of_stock") return row.alert_type === "out_of_stock";
   if (alertType === "within_7_days") return row.alert_type === "within_7_days";
   if (alertType === "within_15_days") return row.alert_type === "within_15_days";

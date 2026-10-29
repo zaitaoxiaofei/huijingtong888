@@ -1,3 +1,4 @@
+import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { calculateOrderProcurementCoverage } from './order-procurement-coverage.js';
 import { transportStatusesSql } from './order-query-facts.js';
 import { oglPhysicalDispatchSql } from './ogl-dispatch-state.js';
@@ -30,7 +31,7 @@ let pending;
 let generation = 0;
 const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
-export function invalidateOrderProcurementCoverage() { generation += 1; cached = null; pending = null; }
+export function invalidateOrderProcurementCoverage() { invalidateInventoryWorkflow(); generation += 1; cached = null; pending = null; }
 
 export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false } = {}) {
   if (includeTrace) fresh = true;

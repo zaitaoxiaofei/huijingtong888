@@ -17,6 +17,23 @@ const param = (name, schema, required = true) => ({ name, required, ...schema })
 const response = (status, mediaType, schema, description = "") => ({ status, mediaType, schema, description });
 
 const schemas = {
+  InventoryWorkflowDemand: objectOf("Shared physical-unit procurement demand, in priority order real_order, local_safety, fbp_stock. Requests are reminders, never additional physical allocation.", [
+    field("key", scalar("string", "real_order | local_safety | fbp_stock"), true), field("label", scalar("string", "Business purpose"), true),
+    field("priority", scalar("number", "1 through 3"), true), field("status", scalar("string", "danger | warning | success | opportunity | unknown"), true),
+    field("physical_gap", scalar("number", "Dispatchable physical shortage; null when unknown", {nullable:true})),
+    field("purchase_quantity", scalar("number", "Net additional purchase requirement after scoped inbound allocation; null when unknown", {nullable:true})),
+    field("submitted_quantity", scalar("number", "Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand")),
+    field("requests", arrayOf(scalar("object", "Current-enterprise outstanding request metadata"), "Source requests"))
+  ]),
+  InventoryWorkflow: objectOf("Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations; pending_review applications do, approved stock is already reserved.", [
+    field("product_id", scalar("number", "Owned inventory product ID"), true), field("overall",scalar("string","Worst demand status"),true),
+    field("demands",arrayOf(ref("InventoryWorkflowDemand"),"Three priority demands"),true),
+    ...["physical","order_demand","safety","locked","free","purchase_quantity"].map(name=>field(name,scalar("number","Physical units, nullable when unknown",{nullable:true}))),
+    ...["requested","incoming","local_days","fbp_days"].map(name=>field(name,scalar("number","Named physical quantity or coverage days"))),
+    field("incoming_note",scalar("string","Inbound arrival/dispatch warning")), field("calculated_at",scalar("string","Calculation time")),
+    ...["requests","applications","purchases","batches","skus","opportunities"].map(name=>field(name,arrayOf(scalar("object","Scoped nonfinancial metadata"),"Available for full detail; light status may omit"))),
+    field("settings",scalar("object","Current effective replenishment settings")),field("forecast_error",scalar("string","Advisory forecast unavailable; core ledger remains usable"))
+  ]),
   InventoryFlowSummary: objectOf("Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.", [
     ...["physical", "order_demand", "locked", "safety", "free", "unoccupied", "protection_gap", "incoming", "incoming_assigned", "order_shortage", "requested", "local_days", "fbp_days", "consumed_7d", "daily_consumption", "estimated_dates", "production_days", "local_shipping_days"].map(name => field(name, scalar("number", "Physical units or named coverage days; nullable when unknown.", { nullable: true }))),
     field("applications_pending", scalar("boolean", "Local-first response has not loaded FBP applications yet; requested is null, not zero.")),
@@ -1787,6 +1804,28 @@ const endpoints = [
     endpoint("GET", "/api/procurement/requests", "Return procurement request rows.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ProcurementRequestRecord"), "Procurement request rows."))]
+    }),
+    endpoint("GET", "/api/inventory-workflow", "Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.", {
+      auth:"authenticated", queryParams:[param("product_ids",scalar("string","1–20 comma-separated owned product IDs; alternatively product_id"),false),param("product_id",scalar("number","Single owned product ID"),false),param("view",scalar("string","status for batched lightweight demand, omitted for full details"),false),param("fresh",scalar("string","1 bypasses the short-lived tenant/product cache"),false)],
+      responses:[response(200,"application/json",objectOf("Workflow result",[field("rows",arrayOf(ref("InventoryWorkflow"),"Requested products"),true)])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/alerts", "Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.", {
+      auth:"authenticated", queryParams:[...['query','alertType','sortBy','refresh'].map(name=>param(name,scalar("string","Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1"),false)),...['page','pageSize'].map(name=>param(name,scalar("number","Page index or page size, maximum100"),false))],
+      responses:[response(200,"application/json",objectOf("Paged shared warnings",[field("rows",arrayOf(scalar("object","Product row with workflow InventoryWorkflow"),"Filtered products")),field("total",scalar("number","Filtered count")),field("meta",scalar("object","Counts by shared status"))]))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/requests", "Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires a submitted replenishment application; FBS requires a matching unfulfilled local order.", {
+      auth:"authenticated",requestBody:body(objectOf("Typed procurement reminder",[
+        field("product_id",scalar("number","Owned physical product"),true),field("demand_type",scalar("string","real_order | local_safety | fbp_stock"),true),field("quantity",scalar("number","Integer physical units 1..1000000"),true),field("request_key",scalar("string","UUID retained across retries, modified payload returns409"),true),field("order_id",scalar("number","Optional owned unfulfilled order for real_order")),field("note",scalar("string","Explanation, maximum500 characters"))
+      ])),responses:[response(200,"application/json",objectOf("Committed reminder",[field("ok",scalar("boolean","Committed")),field("id",scalar("number","Request ID")),field("duplicate",scalar("boolean","Previously committed")),field("notified",scalar("number","Notifications written this attempt"))])),response(400,"application/json",ref("ErrorResponse")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/receipts", "Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.", {
+      auth:"authenticated",queryParams:[param("product_id",scalar("number","Owned product"))],responses:[response(200,"application/json",objectOf("Pending batches",[field("rows",arrayOf(objectOf("Arrival batch",[field("id",scalar("number","Inbound record ID")),field("quantity",scalar("number","Pending units")),field("updated_at",scalar("string","Optimistic revision")),field("order_no",scalar("string","Purchase number"))]),"Batches"))]))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/receipts", "Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound requires current physical count and uses the canonical receipt-and-count transaction.", {
+      auth:"authenticated",requestBody:body(objectOf("Scoped receipt",[field("product_id",scalar("number","Owned product"),true),field("request_key",scalar("string","Stable receipt/count request UUID"),true),field("counted_quantity",scalar("number","Current total physical units including this arrival; required when historical impact detected")),field("records",arrayOf(objectOf("Actual receipt",[field("id",scalar("number","Pending batch ID"),true),field("quantity",scalar("number","QC-passed positive integer units"),true),field("expected_quantity",scalar("number","Observed pending quantity; stale value rejects"),true),field("reason",scalar("string","Required for partial receipt")),field("note",scalar("string","Optional explanation"))]),"1–100 unique batches"),true)])),responses:[response(200,"application/json",scalar("object","Canonical receipt result")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/fbp", "Create or update the existing FBP replenishment draft for owned bound shop SKUs; optionally submit in the same canonical transaction. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.", {
+      auth:"authenticated",requestBody:body(objectOf("FBP application",[field("product_id",scalar("number","Owned physical product"),true),field("submit",scalar("boolean","true submits; false saves draft")),field("note",scalar("string","Up to500 characters")),field("rows",arrayOf(objectOf("Bound SKU",[field("shop_id",scalar("number","Owned shop"),true),field("ozon_sku",scalar("string","Current bound SKU"),true),field("quantity",scalar("number","Integer SKU sets 1..1000000; converted to physical pieces by recipe"),true)]),"1–100 unique shop/SKU rows"),true)])),responses:[response(200,"application/json",scalar("object","Canonical FBP create/update result")),response(400,"application/json",ref("ErrorResponse")),response(403,"application/json",ref("ErrorResponse"))]
     }),
     endpoint("POST", "/api/procurement/stock-topups", "Warehouse inventory topup reminder: atomically create a submitted warehouse request and unread notifications for active current-enterprise owners/admins and procurement staff. Requires current packing or inventory.write duty. Does not change stock or duplicate real-order demand. No tenant/actor selector is accepted.", {
       auth: "authenticated",

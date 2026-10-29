@@ -1,10 +1,11 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
+import { inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import { useRouter } from 'vue-router';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 
-const props = defineProps({ ledger: { type: Object, required: true }, inventoryMode: Boolean, fbpLoading: Boolean, fbpSyncing: Boolean, canSyncFbp: Boolean, fbpError: { type: String, default: '' } });
-const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp', 'sync-fbp']);
+const props = defineProps({ ledger: { type: Object, required: true }, workflow: Object, inventoryMode: Boolean, fbpLoading: Boolean, fbpSyncing: Boolean, canSyncFbp: Boolean, fbpError: { type: String, default: '' } });
+const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp', 'sync-fbp','workflow-action','stocktake']);
 const router = useRouter();
 const canvas = ref(null), selected = ref(''), paths = ref([]);
 const detail = ref(null);
@@ -26,7 +27,15 @@ const fbpCoverage = computed(() => {
 const positiveFbpRows = computed(() => (official.value?.rows || []).filter(row => [row.present, row.available, row.reserved].some(value => Number(value) > 0)));
 const dispatches = computed(() => applications.value.filter(row => ['sent', 'completed'].includes(row.status)));
 const purchases = computed(() => (facts.value.purchases || props.ledger.purchases || []).filter(row => Number(row.pending_quantity) > 0));
+const workflowState=computed(()=>props.workflow||inventoryWorkflow(props.ledger));
+function nodeStatus(key) {
+  const type=({orders:'real_order',safety:'local_safety',application:'fbp_stock'})[key];
+  if(type)return workflowState.value.demands.find(d=>d.key===type)?.status;
+  if(key==='free')return workflowState.value.overall;
+  return '';
+}
 const nodes = computed(() => [
+  {key:'requests',label:'采购需求／申请',value:workflowState.value.purchase_quantity,hint:'推荐需确认；实际采购后才进入在途',area:'2 / 1',plan:true},
   { key: 'incoming', label: '采购在途', value: props.ledger.incoming_quantity, hint: '收货验收后入库', area: '2 / 1', tab: 'purchases' },
   { key: 'assigned', label: '订单在途覆盖', value: props.ledger.current_incoming, hint: '尚未到货，不能发出', area: '1 / 2', tab: 'current', plan: true },
   { key: 'physical', label: '本地实物', value: props.ledger.physical_estimate, hint: props.ledger.last_stocktake_at ? `核实 ${time(props.ledger.last_stocktake_at)}` : '尚无盘点时间', area: '2 / 2', tab: 'movements', primary: true },
@@ -39,9 +48,10 @@ const nodes = computed(() => [
     hint: props.fbpLoading ? '正在核对各店铺 SKU，本地库存可先查看' : props.fbpError ? '保留上次快照，点击查看明细及失败原因' : official.value?.synced_at ? `核实 ${time(official.value.synced_at)}` : '尚无同步时间', area: '3 / 2', primary: true },
   { key: 'dispatch', label: 'FBP 发仓记录', display: `${new Set(dispatches.value.map(row => row.order_id)).size} 单`, hint: '已发出、已入仓 · 点击查看状态', area: '4 / 4' },
   { key: 'free', label: '可用库存', value: facts.value.free, hint: facts.value.protection_gap > 0 ? `保障缺口 ${quantity(facts.value.protection_gap)}` : '扣除占用与保障后', area: '2 / 5', primary: true }
-]);
+].map(node=>node.key==='requests'?node:{...node,area:node.area.replace(/(\d+)$/,n=>String(Number(n)+1))}));
 const activeNode = computed(() => selected.value === 'fbp-history' ? { key: 'fbp-history', label: '全部 FBP 单据', display: `${new Set(applications.value.map(row => row.order_id)).size} 单` } : nodes.value.find(node => node.key === selected.value));
 function rowsFor(key) {
+  if(key==='requests')return workflowState.value.requests||[];
   if (['orders', 'assigned'].includes(key)) return currentOrders.value;
   if (['application', 'locked'].includes(key)) return applications.value.filter(row => key === 'locked' ? Number(row.locked_quantity) > 0 : !['sent', 'completed', 'cancelled', 'rejected'].includes(row.status));
   if (key === 'fbp-history') return applications.value;
@@ -79,7 +89,7 @@ function brief(node) {
   if (node.key === 'incoming-free') return ['只减本地订单已分配的在途；其他用途及历史关联仍需查看采购明细，不能直接视为可发 FBP。'];
   return [];
 }
-const edges = [['incoming', 'assigned', true], ['incoming', 'physical', false], ['incoming', 'incoming-free', true], ['physical', 'orders', false], ['physical', 'safety', true], ['physical', 'application', true], ['application', 'locked', false], ['locked', 'free', false], ['physical', 'free', true], ['locked', 'dispatch', true]];
+const edges = [['requests','incoming',true], ['incoming', 'assigned', true], ['incoming', 'physical', false], ['incoming', 'incoming-free', true], ['physical', 'orders', false], ['physical', 'safety', true], ['physical', 'application', true], ['application', 'locked', false], ['locked', 'free', false], ['physical', 'free', true], ['locked', 'dispatch', true]];
 function draw() {
   if (!canvas.value) return;
   const box = canvas.value.getBoundingClientRect();
@@ -118,7 +128,7 @@ onBeforeUnmount(() => observer?.disconnect());
     <div ref="canvas" class="flow-canvas">
       <svg class="flow-connectors" aria-hidden="true"><defs><marker :id="arrowId" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="flow-arrow-head" /></marker></defs><path v-for="path in paths" :key="path.key" :d="path.d" :marker-end="`url(#${arrowId})`" :class="{ 'is-planned': path.planned }" /></svg>
       <el-popover v-for="node in nodes" :key="node.key" placement="top" :width="420" trigger="hover" :show-after="180" popper-class="inventory-flow-popover">
-        <template #reference><button type="button" class="flow-node" :data-node="node.key" :style="{ gridArea: node.area }" :class="{ 'is-primary': node.primary, 'is-planned': node.plan, 'is-selected': selected === node.key }" :aria-expanded="selected === node.key" :aria-controls="detailId" @click="selectNode(node)"><span>{{ node.label }}</span><strong>{{ node.display || quantity(node.value) }}</strong><small>{{ node.hint }}</small></button></template>
+        <template #reference><button type="button" class="flow-node" :data-node="node.key" :style="{ gridArea: node.area }" :class="{ 'is-primary': node.primary, 'is-planned': node.plan, 'is-selected': selected === node.key, [`is-${nodeStatus(node.key)}`]: !!nodeStatus(node.key) }" :aria-expanded="selected === node.key" :aria-controls="detailId" @click="selectNode(node)" @dblclick="node.key==='physical' && canSyncFbp && emit('stocktake')"><span>{{ node.label }}</span><strong>{{ node.display || quantity(node.value) }}</strong><small>{{ node.hint }}</small></button></template>
         <h4>{{ node.label }} · {{ node.display || quantity(node.value) }}</h4>
         <p v-for="line in brief(node)" :key="line">{{ line }}</p>
         <div v-for="(row, index) in rowsFor(node.key).slice(0, 4)" :key="row.order_item_id || row.item_id || row.id || index" class="flow-hover-row">
@@ -137,6 +147,14 @@ onBeforeUnmount(() => observer?.disconnect());
     <div v-if="fbpError" class="flow-fbp-error"><span>FBP 数据：{{ fbpError }}；本地库存与上次 FBP 快照保留</span><el-button link type="primary" :disabled="fbpLoading" @click="emit('retry-fbp')">重新读取</el-button></div>
     <section v-if="activeNode" ref="detail" :id="detailId" class="flow-node-detail" role="region" :aria-label="`${activeNode.label}明细`" tabindex="-1" aria-live="polite">
       <div class="flow-heading"><h4>{{ activeNode.label }} · {{ activeNode.display || quantity(activeNode.value) }}</h4><el-button text @click="selected = ''">收起</el-button></div>
+      <div class="flow-action-buttons">
+        <el-button v-if="['requests','orders','safety','application','free'].includes(selected)" type="primary" plain @click="emit('workflow-action','request',({orders:'real_order',safety:'local_safety',application:'fbp_stock'})[selected]||'')">提交采购申请</el-button>
+        <el-button v-if="['requests','incoming'].includes(selected)" @click="emit('workflow-action','purchase')">登记实际采购</el-button>
+        <el-button v-if="selected==='incoming'" @click="emit('workflow-action','receive')">登记入库</el-button>
+        <el-button v-if="selected==='physical' && canSyncFbp" @click="emit('stocktake')">更新本地库存</el-button>
+        <el-button v-if="['application','fbp-physical','free'].includes(selected)" @click="emit('workflow-action','fbp')">创建FBP备货申请</el-button>
+      </div>
+      <el-table v-if="selected==='requests'" :data="rowsFor(selected)" empty-text="暂无申请；系统推荐需由人员确认提交"><el-table-column prop="id" label="申请编号" width="110"/><el-table-column prop="applicant_name" label="提出人"/><el-table-column prop="quantity" label="申请件数"/><el-table-column prop="status" label="状态"/><el-table-column prop="request_reason_note" label="说明"/></el-table>
       <p v-for="line in brief(activeNode)" :key="line">{{ line }}</p>
       <el-table v-if="['orders', 'assigned'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无待发订单">
         <el-table-column prop="shop_name" label="店铺" min-width="120" /><el-table-column prop="posting_number" label="订单号" min-width="190" /><el-table-column prop="quantity" label="需求" width="80" /><el-table-column prop="stock_quantity" label="现货覆盖" width="100" /><el-table-column prop="incoming_quantity" label="在途覆盖" width="100" /><el-table-column label="操作" width="100"><template #default="{ row }"><el-button link type="primary" @click="navigateOrder(row)">打开订单</el-button></template></el-table-column>
@@ -166,13 +184,13 @@ onBeforeUnmount(() => observer?.disconnect());
 .flow-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
 .flow-heading h3, .flow-heading h4 { margin: 0; }
 .flow-heading > span, .flow-footnote, .flow-legend { font-size: 12px; color: var(--el-text-color-secondary); }
-.flow-canvas { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: repeat(4, 106px); gap: 34px 38px; padding: 26px 0 12px; background-image: radial-gradient(var(--el-border-color-lighter) .7px, transparent .7px); background-size: 18px 18px; }
+.flow-canvas { position: relative; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); grid-template-rows: repeat(4, 106px); gap: 34px 38px; padding: 26px 0 12px; background-image: radial-gradient(var(--el-border-color-lighter) .7px, transparent .7px); background-size: 18px 18px; }
 .flow-connectors { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .flow-connectors path { stroke: var(--el-color-primary-light-3); stroke-width: 1.5; fill: none; }
 .flow-connectors .flow-arrow-head { fill: var(--el-color-primary-light-3); stroke: none; }
 .flow-connectors path.is-planned { stroke-dasharray: 5 4; }
 .flow-node { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 7px; min-width: 0; padding: 10px 8px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-bg-color-overlay); color: var(--el-text-color-primary); font: inherit; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
-.flow-node strong { font-size: 23px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.flow-node strong { font-size: clamp(16px, 1.2vw, 23px); font-weight: 600; font-variant-numeric: tabular-nums; }
 .flow-node small { font-size: 11px; color: var(--el-text-color-secondary); overflow-wrap: anywhere; }
 .flow-node.is-primary { background: var(--el-color-primary-light-9); border-color: var(--el-color-primary-light-5); }
 .flow-node.is-planned { border-style: dashed; }
@@ -189,4 +207,8 @@ onBeforeUnmount(() => observer?.disconnect());
 @container inventory-flow (max-width: 759px) { .flow-canvas { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: none; gap: 28px 26px; padding-right: 16px; }.flow-node { grid-area: auto !important; min-height: 100px; } }
 .inventory-flow-diagram { container-type: inline-size; container-name: inventory-flow; }
 @media (prefers-reduced-motion: reduce) { .flow-node { transition: none; } }
+</style>
+
+<style scoped>
+.flow-node.is-danger{border-color:var(--el-color-danger);box-shadow:inset 0 3px var(--el-color-danger)}.flow-node.is-warning{border-color:var(--el-color-warning);box-shadow:inset 0 3px var(--el-color-warning)}.flow-node.is-success{border-color:var(--el-color-success)}.flow-node.is-opportunity{border-color:var(--el-color-primary)}.flow-action-buttons{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
 </style>
