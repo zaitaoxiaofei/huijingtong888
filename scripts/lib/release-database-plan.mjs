@@ -9,6 +9,7 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-tenant-sku-order-trackers.mjs",
   "migrate-enterprise-messages.mjs",
   "migrate-subscription-vouchers.mjs",
+  "migrate-inventory-flow-center.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
   "migrate-order-profit-calculation-versions.mjs"
 ]);
@@ -115,6 +116,14 @@ export function migrationNeedsApply(filename, report) {
       const problems = list(report.problems, "problems");
       if ((exists && (!ready || problems.length)) || (!exists && ready)) invalid("subscription voucher schema is incompatible");
       return !exists;
+    }
+    case "migrate-inventory-flow-center.mjs": {
+      const ready = boolean(report.ready, 'ready');
+      const missing = list(report.missing_tables, 'missing_tables');
+      const problems = list(report.problems, 'problems');
+      if (problems.length || missing.some(name => !['inventory_flow_settings','inventory_flow_tasks','inventory_flow_events'].includes(name))) invalid('inventory flow schema is incompatible');
+      if (ready !== (missing.length === 0)) invalid('inconsistent inventory flow readiness');
+      return !ready;
     }
     case "migrate-ai-variant-draft-history-index.mjs": {
       const before = object(report.before, "before");

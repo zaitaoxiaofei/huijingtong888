@@ -33,6 +33,9 @@ const cases = [
   ["migrate-subscription-vouchers.mjs",
     { mode: "dry-run", changes_database: false, exists: true, ready: true, problems: [] },
     { mode: "dry-run", changes_database: false, exists: false, ready: false, problems: ["table:tenant_subscription_vouchers"] }],
+  ["migrate-inventory-flow-center.mjs",
+    { mode: "dry-run", changes_database: false, ready: true, missing_tables: [], problems: [] },
+    { mode: "dry-run", changes_database: false, ready: false, missing_tables: ["inventory_flow_tasks"], problems: [] }],
   ["migrate-ai-variant-draft-history-index.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, ready: true, missing_column: false, missing_index: false } },
     { ok: true, mode: "dry-run", before: { exists: true, ready: false, missing_column: false, missing_index: true } }],
@@ -43,7 +46,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 12);
+  assert.equal(SCHEMA_MIGRATIONS.length, 13);
 });
 
 for (const [filename, ready, pending] of cases) {
