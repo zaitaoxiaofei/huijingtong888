@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { Delete, MagicStick, Refresh, Search } from "@element-plus/icons-vue";
+import { Delete, MagicStick, Refresh } from "@element-plus/icons-vue";
 import { collectorCategoryPending, createCollectorRefresh } from "../../utils/collector-refresh.js";
 import { apiClient } from "../../utils/api";
 import { prepareBrowserWatermarkBatch } from "../../utils/browser-watermark-batch";
@@ -954,7 +954,7 @@ onBeforeUnmount(() => {
           <el-select v-model="state.filters.status" class="collector-status-filter" @change="search">
             <el-option v-for="option in statusOptions" :key="option.value" :label="option.label" :value="option.value" />
           </el-select>
-          <el-button type="primary" :icon="Search" :loading="loading" @click="search">搜索</el-button>
+          <el-button type="primary" :icon="Refresh" :loading="loading" @click="search">刷新</el-button>
           <el-button :icon="Refresh" @click="resetFilters">重置</el-button>
         </div>
         <div class="collector-toolbar-actions">
