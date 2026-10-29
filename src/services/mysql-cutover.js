@@ -1645,6 +1645,7 @@ function compactProductListRowMysql(row) {
   const imageUrl = String(row.image_url || "");
   return {
     id: row.id,
+    ...(Object.hasOwn(row,'workflow_free')?{workflow_free:row.workflow_free,physical_stock:row.physical_stock,fbp_stock_known:row.fbp_stock_known}:{}),
     selection_id: row.selection_id,
     code: row.code,
     inventory_id: row.inventory_id,
@@ -7769,6 +7770,14 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
   }])).values()];
   if (!mappings.length) throw Object.assign(new Error('该库存尚未绑定店铺SKU，请先在SKU绑定中配置后同步'), { statusCode: 400 });
   const shops = await shopsMysql(String(scope.id));
+  // Concurrent shops share composition rows. Retry only a rolled-back snapshot
+  // transaction after a deadlock; the read-only Ozon response is fetched once.
+  const commitSnapshot=async write=>{
+    for(let attempt=0;;attempt++){
+      try{return await withMysqlTransaction(write);}
+      catch(error){if(error.code!=='ER_LOCK_DEADLOCK'||attempt>=2)throw error;}
+    }
+  };
   const results = [];
   await mapWithConcurrencyMysql([...new Set(mappings.map(row => Number(row.shop_id)))], 2, async shopId => {
     await checkAccess();
@@ -7782,7 +7791,7 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
       const remote = await fetchOzonProductStocks(shop, { offerIds: offers, signal: options.signal });
       if (targets.some(target => !remote.some(row => String(row.ozon_sku) === String(target.ozon_sku)))) throw new Error('Ozon响应未覆盖全部绑定SKU，保留原快照，请核对绑定及接口响应');
       const rules = await stockWarehouseRulesEnabledMysql();
-      await withMysqlTransaction(async connection => {
+      await commitSnapshot(async connection => {
         await checkAccess();
         const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
         await assertInventoryRecord(scope, 'shop', shopId, run);
@@ -12060,6 +12069,7 @@ async function structuredInventoryProductSearchIdsMysql(terms = []) {
 async function tenantProductsMysql(query = {}, tenantId) {
   const scope = await resolveInventoryTenantScope(tenantId);
   const tenantPk = scope.id;
+  const inventoryView=String(query.view||'')==='inventory';
   if (!Number.isSafeInteger(tenantPk) || tenantPk <= 0) {
     throw Object.assign(new Error("当前企业上下文无效，无法读取库存产品。"), { statusCode: 403 });
   }
@@ -12267,12 +12277,12 @@ async function tenantProductsMysql(query = {}, tenantId) {
         CASE WHEN SUM(quantity) > 0 THEN SUM(amount + COALESCE(shipping_amount, 0)) / SUM(quantity) END AS avg_unit_cost,
         SUM(CASE WHEN status IN ('submitted', 'merged') THEN quantity ELSE 0 END) AS submitted_quantity
       FROM procurement_requests WHERE ${scope.predicate().sql} AND status != 'cancelled' AND product_id IN (${placeholders}) GROUP BY product_id`, [tenantPk, ...productIds]),
-    mysqlQuery(`SELECT ir.product_id, SUM(ir.quantity) AS incoming_stock
+    inventoryView?Promise.resolve([]):mysqlQuery(`SELECT ir.product_id, SUM(ir.quantity) AS incoming_stock
       FROM inbound_records ir LEFT JOIN procurement_requests pr ON pr.id = ir.procurement_request_id
       WHERE ir.status = 'pending_arrival' AND ir.product_id IN (${placeholders})
         AND ${scope.predicate('ir').sql} AND (ir.procurement_request_id IS NULL OR ${scope.predicate('pr').sql})
       GROUP BY ir.product_id`, [...productIds, tenantPk, tenantPk]),
-    mysqlQuery(`SELECT ftr.product_id, SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
+    inventoryView?Promise.resolve([]):mysqlQuery(`SELECT ftr.product_id, SUM(GREATEST(ftr.quantity - COALESCE(ftr.listed_quantity, 0), 0)) AS fbp_transfer_in_transit_qty
       FROM fbp_transfer_records ftr LEFT JOIN shops transfer_shop ON transfer_shop.id = ftr.shop_id
       WHERE ${fbpTransferInTransitWhereMysql("ftr")} AND ftr.product_id IN (${placeholders})
         AND (ftr.shop_id IS NULL OR ${scope.predicate('transfer_shop').sql})
@@ -12282,8 +12292,8 @@ async function tenantProductsMysql(query = {}, tenantId) {
     mysqlQuery(`SELECT obr.product_id,
         SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(oi.sale_price, 0) * obr.quantity ELSE 0 END) AS total_sales_amount,
         SUM(CASE WHEN obr.status = 'deducted' THEN obr.quantity ELSE 0 END) AS total_sales_quantity,
-        SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END) AS estimated_profit_total,
-        SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(NULLIF(oi.actual_profit, 0), 0) ELSE 0 END) AS actual_profit_total,
+        ${inventoryView?'NULL':"SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(oi.estimated_profit, 0) ELSE 0 END)"} AS estimated_profit_total,
+        ${inventoryView?'NULL':"SUM(CASE WHEN obr.status = 'deducted' THEN COALESCE(NULLIF(oi.actual_profit, 0), 0) ELSE 0 END)"} AS actual_profit_total,
         COUNT(DISTINCT CASE WHEN obr.status = 'deducted' THEN obr.order_ref END) AS order_count
       FROM outbound_records obr
       JOIN shops sales_shop ON sales_shop.id = obr.shop_id AND ${scope.predicate('sales_shop').sql}
@@ -12293,6 +12303,8 @@ async function tenantProductsMysql(query = {}, tenantId) {
     productMappingSummariesMysql(productIds, String(tenantPk)),
     productCompositionSummariesMysql(productIds, String(tenantPk))
   ]);
+  const stockStates=new Map();
+  if(inventoryView&&String(query.includeStock)!=='0')for(const value of await createInventoryWorkflowService().localQuantities(productIds,scope.id))stockStates.set(value.product_id,value);
   const byProduct = (items) => new Map(items.map((item) => [Number(item.product_id), item]));
   const movementByProduct = byProduct(movementRows);
   const procurementByProduct = byProduct(procurementRows);
@@ -12309,6 +12321,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
     const avgUnitCost = Number(procurement.avg_unit_cost || movement.avg_unit_cost || row.purchase_cost || 0);
     return compactProductListRowMysql({
       ...row,
+      ...(inventoryView?{fbp_stock_known:stockStates.get(id)?.fbp_stock_known??null,workflow_free:stockStates.get(id)?.workflow_free??null,physical_stock:stockStates.get(id)?.physical_stock??null}:{}),
       supplier_id: row.supplier_id,
       stock,
       total_stock: stock,

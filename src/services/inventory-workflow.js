@@ -5,7 +5,7 @@ import { resolveInventoryTenantScope, assertInventoryRecord, inventoryTenantSql 
 import { authorizeBusinessTaskSession } from './business-task-tenant.js';
 import { stockTopupRecipients } from './warehouse-stock-topup.js';
 import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage } from './mysql-order-procurement-coverage.js';
-import { loadProductFbpStocks } from './fbp-inventory-display.js';
+import { loadProductsFbpStockTotals, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { createInventoryFlowSummaryReader } from './inventory-flow-summary.js';
 import { broadcastGlobalEvent } from '../server/notifications.js';
 import { workflowCache, workflowRevision } from './inventory-workflow-cache.js';
@@ -15,22 +15,23 @@ import { validateFlowSettings } from './inventory-flow-rules.js';
 
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 export function createInventoryWorkflowService({ledger,receiveRecords,previewReceipts,query=mysqlQuery,transaction=withMysqlTransaction,forecast=inventoryFlow.detail,broadcast=broadcastGlobalEvent}={}){
-  async function batch(ids,tenantId,{fresh=false,coverage:providedCoverage}={}){
+  async function batch(ids,tenantId,{fresh=false,coverage:providedCoverage,localOnly=false}={}){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
     const products=await query(`SELECT id,name,production_lead_days,warehouse_logistics_days FROM products WHERE id IN (${marks}) AND ${inventoryTenantSql(scope)}`,ids);
     if(products.length!==ids.length)throw fail('部分库存商品不存在或不属于当前企业，请刷新列表',404);
-    const epoch=workflowRevision(),values=new Map(ids.map(id=>[id,workflowCache.get(`light:${scope.id}:${id}`)?.value]));
-    const missing=ids.filter(id=>fresh||!(workflowCache.get(`light:${scope.id}:${id}`)?.expires>Date.now()));
+    const prefix=localOnly?'local:':'light:';
+    const epoch=workflowRevision(),values=new Map(ids.map(id=>[id,workflowCache.get(`${prefix}${scope.id}:${id}`)?.value]));
+    const missing=ids.filter(id=>fresh||!(workflowCache.get(`${prefix}${scope.id}:${id}`)?.expires>Date.now()));
     if(missing.length){
       const placeholders=missing.map(()=>'?').join(',');
       const [coverage,settingsRows,incoming,requests,applicationRows]=await Promise.all([
-        providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault}),
+        providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault,localStateOnly:localOnly}),
         query(`SELECT product_id,settings_json FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,${placeholders})`,[scope.id,...missing]),
-        query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
+        localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
           JOIN inbound_records ir ON ir.purchase_order_item_id=poi.id AND ir.product_id=poi.product_id AND ${inventoryTenantSql(scope,'ir')}
           WHERE poi.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'poi')} AND ir.status='pending_arrival' AND po.status NOT IN ('cancelled','pending_purchase') GROUP BY poi.product_id`,missing),
-        query(`SELECT id,product_id,quantity,status,demand_type,source_type,request_reason_code,source_order_item_id FROM procurement_requests WHERE product_id IN (${placeholders}) AND ${inventoryTenantSql(scope)} AND status IN ('submitted','pending','suggested')`,missing),
-        query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,
+        localOnly?Promise.resolve([]):query(`SELECT id,product_id,quantity,status,demand_type,source_type,request_reason_code,source_order_item_id FROM procurement_requests WHERE product_id IN (${placeholders}) AND ${inventoryTenantSql(scope)} AND status IN ('submitted','pending','suggested')`,missing),
+        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,
           wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
           FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
           JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
@@ -46,20 +47,46 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       ]);
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
       const defaults=parse(settingsRows.find(row=>!Number(row.product_id)));
+      const group=rows=>{const values=new Map();for(const row of rows){const id=Number(row.product_id);if(!values.has(id))values.set(id,[]);values.get(id).push(row);}return values;};
+      const byProduct=new Map(products.map(row=>[Number(row.id),row]));
+      const stocks=new Map((coverage.inventory_stocks||[]).map(row=>[Number(row.product_id),row]));
+      const settingsByProduct=new Map(settingsRows.map(row=>[Number(row.product_id),row]));
+      const incomingByProduct=new Map(incoming.map(row=>[Number(row.product_id),row]));
+      const requestsByProduct=group(requests),applicationsByProduct=group(applicationRows),ordersByProduct=new Map();
+      // Index once: global warning pages must not scan the entire order history for every product.
+      for(const order of coverage.values())if(order.stock_location!=='FBP')for(const item of order.items||[]){
+        const id=Number(item.product_id);if(!ordersByProduct.has(id))ordersByProduct.set(id,[]);
+        ordersByProduct.get(id).push({...item,order_id:order.order_id,ordered_at:order.ordered_at,transport_at:order.transport_at,entered_transport:order.entered_transport,needs_fulfillment:order.needs_fulfillment,stock_location:order.stock_location});
+      }
+
       for(let offset=0;offset<missing.length;offset+=2)await Promise.all(missing.slice(offset,offset+2).map(async id=>{
-        const product=products.find(p=>Number(p.id)===id),stock=coverage.inventory_stocks?.find(s=>Number(s.product_id)===id);
-        const orders=[...coverage.values()].filter(o=>o.stock_location!=='FBP').flatMap(o=>o.items.filter(i=>Number(i.product_id)===id).map(i=>({...i,order_id:o.order_id,ordered_at:o.ordered_at,transport_at:o.transport_at,entered_transport:o.entered_transport,needs_fulfillment:o.needs_fulfillment,stock_location:o.stock_location})));
+        const product=byProduct.get(id),stock=stocks.get(id);
+        const orders=ordersByProduct.get(id)||[];
         const open=orders.filter(o=>o.needs_fulfillment),sum=key=>open.reduce((s,o)=>s+Number(o[key]||0),0);
-        const local={product,physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incoming.find(r=>Number(r.product_id)===id)?.quantity||0),orders};
-        const settings=validateFlowSettings({...defaults,...parse(settingsRows.find(r=>Number(r.product_id)===id)),holidays:defaults.holidays||[]});
-        const applications=applicationRows.filter(row=>Number(row.product_id)===id);
+        const local={product,physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incomingByProduct.get(id)?.quantity||0),orders};
+        const settings=validateFlowSettings({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]});
+        const applications=applicationsByProduct.get(id)||[];
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
-        const result={...inventoryWorkflow(local,{applications,requests:requests.filter(r=>Number(r.product_id)===id)}),product_id:id};
+        const policy=inventoryWorkflow(local,{applications,requests:requestsByProduct.get(id)||[]});
+        // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
+        const result=localOnly?{product_id:id,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);
-        if(epoch===workflowRevision())workflowCache.set(`light:${scope.id}:${id}`,{expires:Date.now()+20000,value:result});
+        if(epoch===workflowRevision())workflowCache.set(`${prefix}${scope.id}:${id}`,{expires:Date.now()+20000,value:result});
       }));
     }
     return ids.map(id=>values.get(id));
+  }
+  async function localQuantities(ids,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
+    const parts=await query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c WHERE c.product_id IN (${marks}) AND ${inventoryTenantSql(scope,'c')}`,ids);
+    const all=[...new Set([...ids,...parts.map(row=>Number(row.component_product_id))])];
+    const values=await batch(all,scope.id,{localOnly:true}),byId=new Map(values.map(row=>[row.product_id,row]));
+    const official=await loadProductsFbpStockTotals(query,ids,scope);
+    return ids.map(id=>{
+      const children=parts.filter(row=>Number(row.product_id)===id),value=byId.get(id);
+      const count=key=>{if(!children.length)return value?.[key]??null;const quantities=children.map(row=>{const v=byId.get(Number(row.component_product_id))?.[key],units=Number(row.quantity);return v!=null&&units>0?Math.floor(v/units):null;});return quantities.every(v=>v!==null)?Math.min(...quantities):null;};
+      return {product_id:id,workflow_free:count('free'),physical_stock:count('physical'),fbp_stock_known:official.get(id)?.present??null};
+    });
   }
   async function receiptSession(session,connection){
     const current=await authorizeBusinessTaskSession(session,connection?async(sql,args)=>(await connection.query(sql+' FOR SHARE',args))[0]:undefined);
@@ -97,6 +124,38 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     }else payload={receipt_impact_confirmed:true,records:checked.map(r=>({id:r.id,payload:{...r,status:'approved',qc_status:'approved',receipt_context:'统一库存详情登记入库'}}))};
     return receiveRecords(payload,current.personId,current.tenant.id,{receipt:true,beforeWrite:connection=>receiptSession(session,connection)});
   }
+  async function skuDetails(productId,shopId,ozonSku,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId),shop=Number(shopId),sku=String(ozonSku||'');
+    await assertInventoryRecord(scope,'product',id,query);
+    await assertInventoryRecord(scope,'shop',shop,query);
+    const stock=await loadProductFbpStocks(query,id,scope);
+    const binding=stock.rows.find(row=>Number(row.shop_id)===shop&&String(row.ozon_sku)===sku);
+    if(!binding)throw fail('此SKU未通过当前有效绑定或组成关联此库存，请刷新核对',404);
+    const root=binding.root_product_id?await assertInventoryRecord(scope,'product',Number(binding.root_product_id),query):null;
+    const recipes=await query('SELECT id,mode FROM sku_inventory_recipes WHERE shop_id=? AND ozon_sku=? AND active=1',[shop,sku]);
+    if(recipes.length>1)throw fail('此SKU存在多条有效配方，请先在SKU绑定中核对',409);
+    let source='direct',components=[];
+    if(recipes.length){
+      source='recipe';components=await query(`SELECT i.product_id,p.inventory_number,p.name,p.stock_unit,i.quantity FROM sku_inventory_recipe_items i LEFT JOIN products p ON p.id=i.product_id AND ${inventoryTenantSql(scope,'p')} WHERE i.recipe_id=?`,[recipes[0].id]);
+    }else if(root){
+      components=await query(`SELECT c.component_product_id AS product_id,p.inventory_number,p.name,p.stock_unit,c.quantity FROM product_components c LEFT JOIN products p ON p.id=c.component_product_id AND ${inventoryTenantSql(scope,'p')} WHERE c.product_id=? AND ${inventoryTenantSql(scope,'c')}`,[root.id]);
+      if(components.length)source='bundle';else components=[{product_id:root.id,inventory_number:root.inventory_number,name:root.name,stock_unit:root.stock_unit,quantity:1}];
+    }
+    if(components.some(row=>!row.name))throw fail('SKU组成包含不可访问或缺失的库存资料，请管理员核对绑定',409);
+    return {product_id:id,shop_id:shop,ozon_sku:sku,source,root:root?{id:root.id,inventory_number:root.inventory_number,name:root.name}:null,
+      components:components.map(row=>({...row,quantity:Number(row.quantity),current:Number(row.product_id)===id,image_url:`/api/products/${Number(row.product_id)}/image?thumb=1`}))};
+  }
+  async function readRequestRows(id,scope){
+    return query(`SELECT pr.id,pr.quantity,pr.status,pr.demand_type,pr.request_reason_code,pr.request_reason_note,pr.source_type,pr.source_order_id,pr.source_order_item_id,pr.created_at,
+          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=p.id AND tm.tenant_id=? AND tm.active=1) THEN p.name ELSE NULL END AS applicant_name
+          FROM procurement_requests pr LEFT JOIN people p ON p.id=pr.created_by_person_id
+          WHERE pr.product_id=? AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('pending','submitted','suggested') ORDER BY pr.created_at DESC`,[scope.id,id]);
+  }
+  async function requests(productId,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId);
+    await assertInventoryRecord(scope,'product',id,query);
+    return {product_id:id,requests:(await readRequestRows(id,scope)).map(row=>({...row,type:procurementDemandType(row)}))};
+  }
   async function read(productId,tenantId,{fresh=false}={}){
     const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId);
     await assertInventoryRecord(scope,'product',id,query);
@@ -105,10 +164,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const promise=(async()=>{
       const [local,fbp,requests]=await Promise.all([
         ledger({product_id:id,include_flow:'local'},scope.id),ledger({product_id:id,view:'fbp'},scope.id),
-        query(`SELECT pr.id,pr.quantity,pr.status,pr.demand_type,pr.request_reason_code,pr.request_reason_note,pr.source_type,pr.source_order_id,pr.source_order_item_id,pr.created_at,
-          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=p.id AND tm.tenant_id=? AND tm.active=1) THEN p.name ELSE NULL END AS applicant_name
-          FROM procurement_requests pr LEFT JOIN people p ON p.id=pr.created_by_person_id
-          WHERE pr.product_id=? AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('pending','submitted','suggested') ORDER BY pr.created_at DESC`,[scope.id,id])
+        readRequestRows(id,scope)
       ]);
       let prediction,forecastError='';
       try{prediction=await forecast(id,scope.id,{official:fbp.fbp_inventory,balance:{physical_stock:local.physical_estimate,open_order_demand_qty:local.open_order_demand,fbp_reserved_qty:local.fbp_reserved}});}
@@ -167,5 +223,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,batch,submit,receipts,receive};
+  return{read,requests,skuDetails,localQuantities,batch,submit,receipts,receive};
 }

@@ -53,7 +53,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     assert.equal(await page.evaluate(() => window.lastFlowNavigation), '/inventory/fbp-replenishment?orderId=31');
     await page.emulateMedia({reducedMotion:'reduce'});
     await page.locator('[data-node="fbp-physical"]').click();
-    const fbpDetail=page.getByRole('region',{name:'FBP 实物明细',exact:true});
+    const fbpDetail=page.getByRole('region',{name:'FBP官方库存核对明细',exact:true});
     await fbpDetail.waitFor();
     assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'click focuses the expanded detail');
     assert.ok((await fbpDetail.boundingBox()).y>=0,'expanded detail is positioned in view');
@@ -72,8 +72,10 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}`);
       assert.equal(await page.locator('.flow-node').count(), 12);
       if (width >= 1366) {
-        const centers = await page.locator('[data-node="incoming"], [data-node="physical"], [data-node="free"]').evaluateAll(nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return r.top + r.height / 2; }));
-        assert.ok(Math.max(...centers) - Math.min(...centers) < 1, 'purchase, physical and available stock share one horizontal line');
+        const positions=await page.locator('[data-node="physical"], [data-node="free"], [data-node="incoming"]').evaluateAll(nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.node,{x:node.getBoundingClientRect().x,y:node.getBoundingClientRect().y}])));
+        assert.ok(positions.physical.x<positions.free.x&&positions.free.x<positions.incoming.x,'local supply, allocation and procurement form separate stages');
+        await page.locator('[data-edge="incoming-receiving"]').waitFor({state:'attached'});
+        await page.locator('[data-edge="fbp-physical-application"]').waitFor({state:'attached'});
         await page.locator('[data-node="free"]').getByText('可用库存', { exact: true }).waitFor();
       }
       const fits = await page.locator('.flow-node').evaluateAll(nodes => nodes.every(n => n.scrollWidth <= n.clientWidth + 1));

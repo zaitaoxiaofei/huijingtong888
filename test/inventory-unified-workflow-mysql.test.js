@@ -34,6 +34,16 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   assert.equal(full.physical,200);assert.equal(full.order_demand,10);assert.equal(full.free,190);
   await assert.rejects(service.batch([300],2),{statusCode:404});await assert.rejects(service.read(300,2),{statusCode:404});
  });
+ await t.test('lightweight metadata never reads ledgers or forecasts, and local quantities match full detail without allocation queries',async()=>{
+  const metadata=await createInventoryWorkflowService({...opts,ledger:()=>{throw Error('Unexpected ledger');},forecast:()=>{throw Error('Unexpected forecast');}}).requests(200,2);
+  assert.equal(metadata.product_id,200);assert.ok(Array.isArray(metadata.requests));assert.equal(metadata.amount,undefined);
+  const sql=[];const query=async(statement,args=[])=>{sql.push(statement);return q(statement,args);};
+  const local=(await createInventoryWorkflowService({...opts,query}).batch([200],2,{fresh:true,localOnly:true}))[0];
+  const full=await service.read(200,2,{fresh:true});for(const key of ['physical','order_demand','safety','locked','free'])assert.equal(local[key],full[key],key);
+  assert.ok(!sql.some(statement=>statement.includes('FROM procurement_order_allocations')));
+  assert.ok(!sql.some(statement=>statement.includes('FROM procurement_history_sources')));
+  await assert.rejects(service.requests(300,2),{statusCode:404});
+ });
  await t.test('any active member may propose, retry creates one request and scoped notifications, no physical change',async()=>{
   const input=body();const results=await Promise.all([service.submit(input,session),service.submit(input,session)]);
   assert.equal(results[0].id,results[1].id);assert.equal(results.filter(r=>r.duplicate).length,1);
@@ -93,6 +103,28 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const sent=await legacy.createFbpReplenishmentOrdersMysql({rows},7,2,{workflow:true,submit:true});
   assert.equal((await q('SELECT status FROM fbp_replenishment_orders WHERE id=?',[sent.rows[0].id]))[0].status,'pending_review');
   const state=(await service.batch([200],2,{fresh:true}))[0];assert.equal(state.locked,0);assert.equal(state.physical,200);
+ });
+ await t.test('bundle SKU detail explains child inventory and lean list availability uses the same physical-unit policy',async()=>{
+  await q("INSERT INTO products(id,tenant_id,name,inventory_number) VALUES(202,2,'Bundle of two stocks','2-202')");
+  await q("INSERT INTO product_components(tenant_id,product_id,component_product_id,quantity) VALUES(2,202,200,2)");
+  await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,active) VALUES(202,2,202,20,'BUNDLE-202',1)");
+  invalidateOrderProcurementCoverage();
+  const detail=await service.skuDetails(200,20,'BUNDLE-202',2);assert.equal(detail.source,'bundle');assert.equal(detail.root.id,202);assert.equal(detail.components[0].product_id,200);assert.equal(detail.components[0].quantity,2);assert.equal(detail.components[0].current,true);
+  const direct=await service.skuDetails(200,20,'20001',2);assert.equal(direct.source,'direct');
+  await assert.rejects(service.skuDetails(200,30,'30001',2),{statusCode:404});
+  const view=await legacy.productsMysql({view:'inventory',paged:'1',pageSize:20},2);
+  const state=await service.read(200,2,{fresh:true});assert.equal(view.rows.find(row=>Number(row.id)===200).workflow_free,state.free);
+  assert.equal(view.rows.find(row=>Number(row.id)===202).workflow_free,Math.floor(state.free/2));
+ });
+ await t.test('lean local safety keeps frozen historic components and the seven complete Beijing days',async()=>{
+  await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at,delivered_at) VALUES(2040,20,'HIST-RECENT','delivered',DATE_SUB(UTC_TIMESTAMP(),INTERVAL 3 DAY),DATE_SUB(UTC_TIMESTAMP(),INTERVAL 2 DAY)),(2041,20,'HIST-OLD','delivered',DATE_SUB(UTC_TIMESTAMP(),INTERVAL 25 DAY),DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 DAY))");
+  await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(2040,2040,'BUNDLE-202',202,7),(2041,2041,'20001',200,50)");
+  await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,status,stock_location,related_order_item_id) VALUES(2,200,'order_outbound',-14,'posted','LOCAL',2040),(2,200,'order_outbound',-50,'posted','LOCAL',2041)");
+  await q('UPDATE product_components SET quantity=3 WHERE product_id=202 AND component_product_id=200');invalidateOrderProcurementCoverage();
+  const full=await service.read(200,2,{fresh:true}),local=(await service.batch([200],2,{fresh:true,localOnly:true}))[0];
+  for(const key of ['physical','order_demand','safety','locked','free'])assert.equal(local[key],full[key],key);
+  assert.equal(full.safety,18,'14 actually shipped physical units /7 *9 days, older history excluded');
+  assert.equal(local.purchase_quantity,undefined,'quantity-only reading cannot be used as a purchase decision');
  });
  await t.test('notification persistence failure rolls back the request',async()=>{
   const before=Number((await q('SELECT COUNT(*) n FROM procurement_requests'))[0].n);
