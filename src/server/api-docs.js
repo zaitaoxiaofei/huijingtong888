@@ -17,6 +17,20 @@ const param = (name, schema, required = true) => ({ name, required, ...schema })
 const response = (status, mediaType, schema, description = "") => ({ status, mediaType, schema, description });
 
 const schemas = {
+  InventoryFlowSummary: objectOf("Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.", [
+    ...["physical", "order_demand", "locked", "safety", "free", "unoccupied", "protection_gap", "incoming", "incoming_assigned", "order_shortage", "requested", "local_days", "fbp_days"].map(name => field(name, scalar("number", "Physical units or named coverage days; nullable when unknown.", { nullable: true }))),
+    field("unavailable", scalar("boolean", "Optional summary could not be loaded.")),
+    field("message", scalar("string", "Non-sensitive recovery guidance when unavailable.")),
+    field("safety_status", scalar("string", "Forecast completeness and interpretation.")),
+    field("orders", arrayOf(scalar("object", "Current-enterprise order_id/order_item_id, shop_id/shop_name, posting_number, status, ordered_at and physical-unit quantity/stock_quantity/incoming_quantity/shortage_quantity."), "Current open orders, without finance fields.")),
+    field("applications", arrayOf(scalar("object", "Current-enterprise order_id/order_no/status/created_at, item_id/shop_id/shop_name/ozon_sku/product_id, applicant_name/reviewer_name, requested_qty/final_qty in SKU units, per_set_quantity and requested_quantity/locked_quantity in physical units."), "Active FBP requests and reservations; request quantity is not deducted again.")),
+    field("purchases", arrayOf(scalar("object", "Only id, order_no, person_name, purchased_at and pending_quantity; no prices, costs, supplier or purchase URL."), "Nonfinancial pending-purchase summary.")),
+    field("safety_rows", arrayOf(scalar("object", "shop_id/shop_name/ozon_sku, per_set_quantity, daily_sales/local_daily_sales/coverage_days, official available/synced_at and status."), "Per-SKU forecast basis.")),
+    field("calculated_at", scalar("string", "UTC calculation time; UI formats Beijing time."))
+  ]),
+  InventoryLedgerFlowResponse: objectOf("Existing ledger fields plus an optional shared flow summary. Inventory-only ledger retains its financial-field allowlist; procurement ledger retains its existing duty requirements.", [
+    field("flow_summary", ref("InventoryFlowSummary", "Present only for include_flow=1."))
+  ], { additionalProperties: true }),
   EnterpriseMessagePeer: objectOf("Active person in the authenticated enterprise. No global account roster.", [
     field("id", scalar("number", "Person ID."), true), field("name", scalar("string", "Display name."), true),
     field("username", scalar("string", "Login name.")), field("avatar_url", scalar("string", "Avatar URL."))
@@ -1650,10 +1664,20 @@ const endpoints = [
     })
   ]),
   section("Inventory", [
-    ...["", "/detail", "/settings", "/tasks", "/events"].map(suffix => endpoint("GET", `/api/inventory-flow${suffix}`, "Read the authenticated enterprise's independent inventory flow center. Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.", {
+    ...["/api/inventory/ledger", "/api/procurement/ledger"].map(path => endpoint("GET", path, "Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.", {
+      auth: "authenticated",
+      query: [param("product_id", scalar("number", "Current-enterprise physical inventory product ID.")), param("include_flow", scalar("string", "Set to 1 to include shared flow_summary; omitted requests do not run forecasts."), false)],
+      responses: [response(200, "application/json", ref("InventoryLedgerFlowResponse"))]
+    })),
+    endpoint("GET", "/api/fbp-replenishment-orders", "Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.", {
+      auth: "authenticated",
+      query: [param("orderId", scalar("number", "Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page."), false), param("status", scalar("string", "Existing workflow status filter; all for a deep link."), false)],
+      responses: [response(200, "application/json", scalar("object", "Existing paged rows/total/page/pageSize response."))]
+    }),
+    ...["", "/detail", "/settings", "/tasks", "/events"].map(suffix => endpoint("GET", `/api/inventory-flow${suffix}`, "Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.", {
       auth: "authenticated", responses: [response(200, "application/json", scalar("object", "Enterprise-scoped flow center data; unknown official stock remains null."))]
     })),
-    ...["settings", "tasks", "task-action", "sync"].map(action => endpoint("POST", `/api/inventory-flow/${action}`, "Write only the new flow center workflow. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.", {
+    ...["settings", "tasks", "task-action", "sync"].map(action => endpoint("POST", `/api/inventory-flow/${action}`, "Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. Warehouse actions require packing permission.", {
       auth: "authenticated", requestBody: body(scalar("object", "See docs/inventory-flow-center.md. Action is edit, lock, ship, receive or correct; receipt/correction require transfer_id and quantity. Corrections require a verified reason.")),
       responses: [response(200, "application/json", scalar("object", "Operation result. Sync reports per-shop success and failure."))]
     })),

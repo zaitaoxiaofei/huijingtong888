@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { shanghaiDateKey, shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 import LedgerBatchTrace from './LedgerBatchTrace.vue';
+import InventoryFlowDiagram from './InventoryFlowDiagram.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
 const props = defineProps({ modelValue: Boolean, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
@@ -20,6 +21,7 @@ const productId = ref(0), products = ref([]), targetProducts = ref([]), data = r
 const preview = ref(null), submission = ref(null), formVisible = ref(false);
 const form = reactive({});
 const activeTab = ref('current');
+function selectFlowTab(tab) { if (tab === 'incoming-purchases') showPurchases('incoming'); else activeTab.value = tab; }
 const traceBatchId = ref(null), historyFilter = ref('gap'), historyPage = ref(1);
 const historyPageSize = ref(20), historySelection = ref([]), historyLinkVisible = ref(false), historyBatchId = ref(null);
 const purchaseUsage = computed(() => buildPurchaseUsage(data.value || {}));
@@ -203,7 +205,7 @@ async function load(id = productId.value) {
   if (!id) { loading.value = false; if (directStocktake.value) loadError.value = '未找到库存商品，请先绑定实际库存商品后再更新库存。'; return; }
   loading.value = true;
   try {
-    const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}`, { noCache: true });
+    const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}&include_flow=${directStocktake.value ? '0' : '1'}`, { noCache: true });
     if (version === loadVersion) {
       data.value = result;
       if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
@@ -363,18 +365,8 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
     <div v-loading="loading">
       <template v-if="data">
         <div v-if="!orderOverview" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <div class="ledger-metric-groups"><section class="ledger-warehouse-summary"><h3>仓库汇总</h3>
-        <div class="ledger-metrics">
-          <div><span>仓库实物总数</span><strong>{{ Math.max(0, data.physical_estimate) }}</strong><small>{{ data.last_stocktake_at ? `最近核实：${time(data.last_stocktake_at)}` : data.stocktake_id ? '已盘点，时间待核' : '未盘点' }}</small></div>
-          <div><span>待发订单需求</span><strong>{{ data.open_order_demand }}</strong><small>其中现货已分配 {{ data.current_stock_reserved }}</small></div>
-          <div><span>剩余可用</span><strong>{{ data.available_estimate }}</strong><small>实物扣除全部待发订单需求及 FBP 占用</small></div>
-          <div><span>其他占用（FBP）</span><strong>{{ data.fbp_reserved ?? '待核' }}</strong><small>审核通过占用，调减释放</small></div>
-          <div v-if="data.fbp_inventory"><span>FBP 库存</span><strong>{{ data.fbp_inventory.incomplete ? '待核对' : data.fbp_inventory.present }} <small>{{ data.product.stock_unit || '库存单位' }}</small></strong><el-button link type="primary" size="small" @click="activeTab = 'fbp'">查看各店铺 SKU 库存</el-button></div>
-        </div></section><section><h3>采购与缺口</h3><div class="ledger-metrics">
-          <div><span>采购在途</span><strong v-if="inventoryMode">{{ data.incoming_quantity }}</strong><el-button v-else link type="primary" @click="showPurchases('incoming')"><strong>{{ data.incoming_quantity }}</strong></el-button><small>{{ inventoryMode ? '待收货数量' : '点击查看待收采购' }}</small></div>
-          <div><span>在途已分配</span><strong>{{ data.current_incoming }}</strong></div>
-          <div :class="{ 'ledger-shortage': data.current_shortage > 0 }"><span>全部待履约订单待采购</span><strong>{{ data.current_shortage }}</strong><small>历史缺记录不计入此数</small></div>
-        </div></section></div>
+        <InventoryFlowDiagram :ledger="data" :inventory-mode="inventoryMode" @select-tab="selectFlowTab" @navigate="visible = false" />
+        <p class="ledger-current-shortage">全部待履约订单待采购：{{ data.current_shortage }} 件（历史缺记录不计入此数）。</p>
         <section v-if="inventoryMode && $slots['inventory-relations']" class="ledger-management"><slot name="inventory-relations" /></section>
         <div v-if="!inventoryMode && (pendingCosts.length || data.current_shortage > 0)" class="ledger-toolbar">
           <el-button v-if="pendingCosts.length" type="warning" plain @click="showPurchases()">补采购记录（{{ pendingCosts.length }} 项待核）</el-button>
@@ -623,9 +615,6 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 
 .ledger-toolbar,.ledger-product { display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap; }
 .ledger-image { width:64px;height:84px;flex:none;display:flex;align-items:center;justify-content:center;background:var(--erp-detail-surface-alt, #f5f7fa); }
-.ledger-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;margin:8px 0; }
-.ledger-metrics > div { display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px;background:var(--el-fill-color-light);border-radius:6px; }
-.ledger-metrics span { color:var(--erp-detail-text-secondary, #606266);font-size:12px; }.ledger-metrics strong { font-size:20px;line-height:1.3; }.ledger-warning strong { color:var(--erp-detail-warning-text, #b45309); }
 .ledger-shortage { color:var(--el-color-danger); }
 .ledger-dialog-header { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
 .ledger-dialog-heading { display:flex;flex-direction:column;gap:2px;min-width:0; }
@@ -642,12 +631,6 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 .ledger-order-summary :deep(.selected-inventory-row) { --el-table-tr-bg-color:var(--el-color-primary-light-9); }
 .ledger-top-actions { display:flex;gap:8px;flex-wrap:wrap;margin-left:auto; }
 .ledger-top-actions .el-button { margin-left:0; }
-.ledger-metric-groups { display:grid;grid-template-columns:5fr 3fr;gap:16px; }
-.ledger-metric-groups h3 { margin:0 0 8px;font-size:14px; }
-.ledger-metric-groups .ledger-metrics { margin:0 0 12px; }
-.ledger-metric-groups .ledger-warehouse-summary .ledger-metrics { grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); }
-.ledger-metric-groups section:last-child .ledger-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }
-.ledger-metrics small { color:var(--erp-detail-text-secondary, #606266);font-size:12px;line-height:1.5; }
 .ledger-management { border:1px solid var(--erp-detail-border, #dcdfe6);padding:16px;margin-bottom:16px;border-radius:8px; }
 .ledger-history-toolbar { position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 0;background:var(--erp-detail-surface, #fff);border-bottom:1px solid var(--erp-detail-border-light, #ebeef5); }
 .ledger-history-toolbar .el-pagination { width:100%; }
@@ -658,6 +641,5 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 :global(.unified-inventory-dialog) { display:flex;flex-direction:column;max-height:92vh;margin-bottom:4vh;overflow:hidden; }
 :global(.unified-inventory-dialog > .el-dialog__header) { flex:none;margin-right:0;padding-right:48px;padding-bottom:12px;border-bottom:1px solid var(--el-border-color-lighter); }
 :global(.unified-inventory-dialog > .el-dialog__body) { min-height:0;max-height:none;overflow:auto;padding-top:12px; }
-@media(max-width:1100px) { .ledger-metric-groups { grid-template-columns:1fr;gap:0; } }
-@media(max-width:900px) { .ledger-dialog-heading { width:100%; }.ledger-order-context { max-width:100%; }.ledger-top-actions { margin-left:0; }.ledger-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:900px) { .ledger-dialog-heading { width:100%; }.ledger-order-context { max-width:100%; }.ledger-top-actions { margin-left:0; }}
 </style>

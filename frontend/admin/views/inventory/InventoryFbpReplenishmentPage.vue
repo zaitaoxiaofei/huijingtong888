@@ -1,5 +1,6 @@
 <script setup>
 import { computed, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
@@ -14,6 +15,9 @@ import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import { dateText, integer } from "./inventory-utils.js";
 
 const authStore = useAuthStore();
+const route = useRoute();
+const router = useRouter();
+const focusedOrderId = computed(() => Number(route.query.orderId || 0));
 const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", ref("applying"));
 const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
@@ -113,6 +117,7 @@ const state = reactive({
   }
 });
 const viewMode = ref("operations");
+if (focusedOrderId.value) { sharedReplenishmentStatus.value = "all"; state.filters.status = "all"; }
 
 const currentUserId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
 function aggregateBatchOrder(orders) {
@@ -773,6 +778,7 @@ function buildParams() {
     status: String(state.filters.status || "all")
   });
   if (viewMode.value === "inventory") params.set("inventory", "1");
+  if (focusedOrderId.value) { params.set("orderId", String(focusedOrderId.value)); params.set("status", "all"); params.set("shopId", "all"); params.delete("query"); return params; }
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
   return params;
@@ -1211,12 +1217,17 @@ watch(sharedReplenishmentStatus, (status) => {
   loadPageData();
 });
 
+watch(() => route.query.orderId, () => { state.filters.page = 1; loadPageData(); });
 onMounted(loadPageData);
 onActivated(() => void loadPageData());
 </script>
 
 <template>
   <div class="inventory-page-shell inventory-card">
+    <el-alert v-if="focusedOrderId" type="info" :closable="false" class="focused-replenishment-notice">
+      <template #title>当前仅查看库存明细关联的 FBP 备货单 #{{ focusedOrderId }}</template>
+      <el-button link type="primary" @click="router.replace({ query: { ...route.query, orderId: undefined } })">返回全部备货单</el-button>
+    </el-alert>
     <div class="replenishment-command-bar">
       <div class="replenishment-filter-row">
         <div class="replenishment-filter-heading">
