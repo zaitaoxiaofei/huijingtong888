@@ -421,7 +421,7 @@ fi
 
 # These additive schemas are required by the candidate's membership and people
 # APIs, even when ordinary maintenance is skipped. Never classify people here.
-for membership_schema in migrate-enterprise-messages.mjs migrate-subscription-vouchers.mjs; do
+for membership_schema in migrate-enterprise-messages.mjs migrate-subscription-vouchers.mjs migrate-inventory-flow-center.mjs; do
   if ! migration_pending "$membership_schema"; then
     continue
   fi
