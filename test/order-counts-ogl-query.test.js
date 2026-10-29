@@ -110,7 +110,7 @@ test('live count aggregation preserves every tab across OGL/application, physica
           const newSql = calls.at(-1).sql;
           const [explained] = await query(`EXPLAIN FORMAT=JSON ${newSql}`, base.params);
           const plan = explained.EXPLAIN;
-          assert.equal((plan.match(/"materialized_from_subquery"/g) || []).length, 1);
+          assert.equal((plan.match(/"materialized_from_subquery"/g) || []).length, 2);
           assert.equal((plan.match(/"table_name": "ogl_count_member"/g) || []).length, 1);
           t.diagnostic(`Fixture ${orderId} orders: baseline=${oldMs.toFixed(1)}ms optimized=${newMs.toFixed(1)}ms; one OGL materialization, no timing threshold`);
         }

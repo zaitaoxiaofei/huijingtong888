@@ -1,3 +1,4 @@
+import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
 import { readInventoryFlowSummary } from './inventory-flow-summary.js';
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "./customer-message-core-schema.js";
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
@@ -3923,7 +3924,8 @@ function matchOrderLogisticsRuleFromTextMysql(text, methods = []) {
   return null;
 }
 
-function orderLogisticsMatchCacheKeyMysql(row = {}, methods = []) {
+function orderLogisticsMatchCacheKeyMysql(row = {}, methods = [], methodPrefix = null) {
+  if (methodPrefix) return methodPrefix.copy().update(`${row.tracking_number || ""} ${orderLogisticsEvidence(row).text}`).digest("hex");
   const methodSignature = methods
     .map((method) => `${method.value || ""}:${method.label || ""}:${(method.warehousePatterns || []).join("|")}`)
     .join(";");
@@ -3935,8 +3937,8 @@ function orderLogisticsMatchCacheKeyMysql(row = {}, methods = []) {
     .digest("hex");
 }
 
-function cachedOrderLogisticsRuleFromRowMysql(row = {}, methods = []) {
-  const key = orderLogisticsMatchCacheKeyMysql(row, methods);
+function cachedOrderLogisticsRuleFromRowMysql(row = {}, methods = [], methodPrefix = null) {
+  const key = orderLogisticsMatchCacheKeyMysql(row, methods, methodPrefix);
   const cached = orderLogisticsRuleMatchCacheMysql.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
   const value = normalizeResolvedLogisticsRuleMysql(
@@ -27193,7 +27195,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     total = offset + rows.length + (hasMore ? 1 : 0);
   } else {
     const [totalRow, resultRows] = await Promise.all([
-      mysqlQueryOne(`${outcomeCteSql} SELECT COUNT(*) AS total FROM (${baseSql}) ranking_rows`, params),
+      mysqlQueryOne(profitRankingGroupCountSql({ groupFields, joinSql, orderScope, dateWhereSql: dateFilter.whereSql, whereSql }), [...dateFilter.params, ...whereParams]),
       mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
     ]);
     total = Number(totalRow?.total || 0);
@@ -30470,19 +30472,16 @@ async function loadOrderLogisticsSummaryForBaseMysql(base, tenantId = "admin") {
     if (Array.isArray(persisted)) return persisted;
     const methods = await activeOrderLogisticsFilterMethodsMysql(tenantId);
     const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "summary_rule");
-    const rows = await mysqlQuery(`
-      SELECT o.id, o.posting_number, o.tracking_number, raw.raw_json,
-        GROUP_CONCAT(DISTINCT summary_rule.name ORDER BY summary_rule.name SEPARATOR ' / ') AS billing_logistics_rule_name
-      FROM orders o
-      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-      LEFT JOIN order_items summary_item ON summary_item.order_id = o.id
-      LEFT JOIN logistics_fee_rules summary_rule ON summary_rule.id = summary_item.frozen_logistics_rule_id AND ${billingScope.sql}
-      WHERE ${base.where}
-      GROUP BY o.id
-    `, [...billingScope.params, ...base.params]);
+    const rows = await mysqlQuery(orderLogisticsSummarySql(base.where, billingScope.sql), [...base.params, ...billingScope.params]);
+    // Reuse the unchanged rule-prefix hash for this batch. Rebuilding and
+    // hashing the same method list for every historical order multiplies work
+    // by the number of rules; hash.copy() preserves the exact existing cache key.
+    const methodPrefix = createHash("sha1").update(methods
+      .map(method => `${method.value || ""}:${method.label || ""}:${(method.warehousePatterns || []).join("|")}`)
+      .join(";")).update("\n");
     const resolvedRows = [];
     for (const row of rows) {
-      const rule = cachedOrderLogisticsRuleFromRowMysql(row, methods);
+      const rule = cachedOrderLogisticsRuleFromRowMysql(row, methods, methodPrefix);
       resolvedRows.push({
         id: Number(row.id),
         resolved_logistics_rule_name: rule?.label || "",
@@ -30855,9 +30854,26 @@ function orderPagedOglEvidenceJoinMysql(tenantScope) {
   ) ogl_count_evidence ON ogl_count_evidence.order_id = o.id`;
 }
 
+function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
+  if (!tenantScope) return "";
+  return `LEFT JOIN (
+    SELECT DISTINCT unbound_item.order_id
+    FROM order_items unbound_item
+    JOIN orders unbound_order ON unbound_order.id = unbound_item.order_id
+    JOIN shops unbound_shop ON unbound_shop.id = unbound_order.shop_id AND ${orderTenantPredicateMysql("unbound_shop", tenantScope)}
+    LEFT JOIN sku_mappings direct_binding ON direct_binding.id = unbound_item.sku_mapping_id AND direct_binding.active = 1 AND ${orderTenantPredicateMysql("direct_binding", tenantScope)}
+    LEFT JOIN products direct_product ON direct_product.id = direct_binding.product_id AND direct_product.active = 1 AND ${orderTenantPredicateMysql("direct_product", tenantScope)}
+    LEFT JOIN sku_mappings fallback_binding ON fallback_binding.shop_id = unbound_order.shop_id AND fallback_binding.ozon_sku = unbound_item.ozon_sku AND fallback_binding.active = 1 AND ${orderTenantPredicateMysql("fallback_binding", tenantScope)}
+    LEFT JOIN products fallback_product ON fallback_product.id = fallback_binding.product_id AND fallback_product.active = 1 AND ${orderTenantPredicateMysql("fallback_product", tenantScope)}
+    WHERE direct_product.id IS NULL AND fallback_product.id IS NULL
+  ) unbound_count_evidence ON unbound_count_evidence.order_id = o.id`;
+}
+
 async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
   const evidenceAlias = tenantScope ? "ogl_count_evidence" : null;
-  const statusSql = status => orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias);
+  const statusSql = status => status === "unbound" && tenantScope
+    ? "unbound_count_evidence.order_id IS NOT NULL"
+    : orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias);
   const row = await mysqlQueryOne(`
     SELECT
       COUNT(*) AS all_count,
@@ -30874,6 +30890,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
       SUM(CASE WHEN ${statusSql("purchase_records_missing")} THEN 1 ELSE 0 END) AS purchase_records_missing
     FROM orders o
     ${orderPagedOglEvidenceJoinMysql(tenantScope)}
+    ${orderPagedUnboundEvidenceJoinMysql(tenantScope)}
     WHERE ${base.where}
   `, base.params);
   return {
@@ -30923,9 +30940,15 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   // existing range-wide meanings; the normal classifier remains authoritative.
   const logisticsBase = !includeCounts && !includeLogisticsOptions && String(query.searchQuery || query.search_query || "").trim()
     ? orderSearchBaseSqlMysql(rawBase, query, tenantScope) : rawBase;
-  const logisticsSummaryRows = carrierOnly
-    ? await loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
-    : reuseLogisticsSummary ? await loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null;
+  const requestedCoverageFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
+    .includes(String(query.status || "all"));
+  const needsCoverageForFilter = requestedCoverageFilter;
+  // Independent reads may run together; coverage stays fresh and tenant-scoped.
+  const [logisticsSummaryRows, coverage] = await Promise.all([
+    carrierOnly ? loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
+      : reuseLogisticsSummary ? loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null,
+    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope) : null
+  ]);
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
   const serviceClassIds = filterOrderIdsByLogisticsServiceClassMysql(logisticsSummaryRows || [], logisticsServiceClass);
@@ -30935,11 +30958,6 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const logisticsMethodOptionsPromise = includeLogisticsOptions && optionsBase
     ? orderLogisticsMethodOptionsMysql(optionsBase, serviceClassOptionRows, tenantId, logisticsCarrier)
     : Promise.resolve([]);
-  const requestedCoverageFilter = ["pending_purchase", "purchase_in_transit", "purchase_records_missing"]
-    .includes(String(query.status || "all"));
-  // Never reuse the all-enterprise procurement cache, including for default.
-  const needsCoverageForFilter = requestedCoverageFilter;
-  const coverage = includeCounts || needsCoverageForFilter ? await orderTenantCoverageMysql(tenantScope) : null;
   const countsPromise = includeCounts ? orderPagedSqlCountsMysql(base, coverage, tenantScope) : Promise.resolve({});
   const filtered = await orderFilteredSqlMysql(query, base, coverage, tenantScope);
   const sortMode = String(query.sortMode || query.sort_mode || "ordered");

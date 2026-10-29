@@ -122,7 +122,7 @@ try {
   const coverageSource = await readFile(new URL("../src/services/mysql-order-procurement-coverage.js", import.meta.url), "utf8");
   const algorithmSource = value("--compare-algorithm-source") ? await readFile(new URL("../src/services/order-procurement-coverage.js", import.meta.url), "utf8") : null;
   const coverageContext = coverageReader(coverageSource, algorithmSource ? algorithmReader(algorithmSource) : calculateOrderProcurementCoverage);
-  const names = ["orderTenantPredicateMysql", "orderStatusSqlMysql", "orderPagedOglEvidenceJoinMysql", "orderPagedSqlCountsMysql"];
+  const names = ["orderTenantPredicateMysql", "orderStatusSqlMysql", "orderPagedOglEvidenceJoinMysql", "orderPagedUnboundEvidenceJoinMysql", "orderPagedSqlCountsMysql"];
   const definitions = names.map(name => {
     const match = source.match(new RegExp(`^(?:export )?(?:async )?function ${name}\\([^]*?^}`, "m"));
     if (!match) throw Error("Checked-in order count function is missing");

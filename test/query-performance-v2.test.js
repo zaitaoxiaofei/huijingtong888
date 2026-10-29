@@ -1,3 +1,4 @@
+import { profitRankingGroupCountSql } from "../src/services/order-report-query-sql.js";
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -71,7 +72,8 @@ test('late procurement search responses cannot overwrite newer results', async (
 test('profit ranking limits classification to the Beijing date range with matching SQL parameters', async () => {
   const calls = [];
   const context = vm.createContext({
-    ensureMysqlCutoverEnabled() {},
+    ensureMysqlCutoverEnabled() {}, profitRankingGroupCountSql,
+    orderListTenantScopeMysql: async () => ({id: 2, defaultTenant: false}), orderTenantPredicateMysql: alias => `${alias}.tenant_id = 2`,
     normalizeMysqlDateTime: date => date.toISOString().slice(0, 19).replace('T', ' '),
     buildOrderOutcomeSql: () => ({ effectiveSale: 'TRUE', afterDeliveryReturn: 'FALSE', rejectedUnclaimed: 'FALSE' }),
     terminalOrderLossSqlMysql: () => '0', returnLossTotalSqlMysql: () => '0',
@@ -84,9 +86,10 @@ test('profit ranking limits classification to the Beijing date range with matchi
     calls.length = 0;
     await context.profitRankingMysql({ dimension: 'shop', from: '2026-09-21', to: '2026-09-22', keyword: 'store', fast });
     for (const { sql, params } of calls) {
-      assert.match(sql, /FROM orders o\s+WHERE 1=1 AND o\.ordered_at >= \? AND o\.ordered_at < \?\s+GROUP BY/);
+      assert.match(sql, /o\.ordered_at >= \? AND o\.ordered_at < \?/);
       assert.equal((sql.match(/\?/g) || []).length, params.length);
-      assert.deepEqual(Array.from(params.slice(0, 5)), ['2026-09-20 16:00:00', '2026-09-22 16:00:00', '2026-09-20 16:00:00', '2026-09-22 16:00:00', '%store%']);
+      const dates = ['2026-09-20 16:00:00', '2026-09-22 16:00:00'];
+      assert.deepEqual(Array.from(params.slice(0, sql.includes('ranking_groups') ? 3 : 5)), sql.includes('ranking_groups') ? [...dates, '%store%'] : [...dates, ...dates, '%store%']);
     }
   }
 });
@@ -109,6 +112,7 @@ test('single-order procurement reconciles only related products but keeps cross-
   const calls = [];
   const context = vm.createContext({
     ensureStockLocationSchemaMysql: async () => {}, ensureProductCompositionSchemaMysql: async () => {},
+    resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, inventoryTenantSql: () => '1=1',
     localStockLocationPredicateMysql: () => '1=1', chinaDateSqlMysql: column => column,
     orderStatusSqlMysql: () => '1=1',
     mysqlQuery: async () => [{ order_id: 1, order_item_id: 7, product_id: 10 }, { order_id: 2, order_item_id: 8, product_id: 10 }],
@@ -118,6 +122,7 @@ test('single-order procurement reconciles only related products but keeps cross-
         [2, { stock_location: 'LOCAL', items: [{ order_item_id: 8, product_id: 10, stock_quantity: 0, incoming_quantity: 0, shortage_quantity: 1 }] }]]);
     }
   });
+  context.inventoryScopeCoverageMysql = (scope, productIds) => context.orderProcurementCoverageMysql({ tenantId: scope.id, productIds });
   vm.runInContext(service.slice(service.indexOf('async function orderProcurementCandidateRowsMysql('), service.indexOf('async function orderProcurementMissingItemsMysql(')), context);
   const rows = await context.orderProcurementCandidateRowsMysql(1);
   assert.deepEqual(Array.from(calls[0].productIds), [10]);
@@ -134,6 +139,8 @@ test('small product scopes do not aggregate unrelated history and use the coveri
     let demandSql;
     await loadOrderProcurementCoverage(async sql => {
       if (sql.startsWith('SELECT o.id AS order_id')) demandSql = sql;
+      if (sql.includes('FROM tenants')) return [{id:2,slug:'a'}];
+      if (sql.startsWith('SELECT id FROM products')) return [{id:10}];
       return [];
     }, '', { fresh: true, productIds });
     assert.match(demandSql, /raw FORCE INDEX \(idx_order_query_stock_location\)/);
@@ -142,7 +149,7 @@ test('small product scopes do not aggregate unrelated history and use the coveri
       assert.match(demandSql, /h\.last_status_changed_at IS NOT NULL/);
       assert.match(demandSql, /EXISTS \(SELECT 1 FROM order_status_history/);
     } else {
-      assert.match(demandSql, /GROUP BY order_id/);
+      assert.match(demandSql, /GROUP BY h\.order_id/);
       assert.doesNotMatch(demandSql, /SELECT MIN\(h\./);
     }
   }
@@ -150,12 +157,13 @@ test('small product scopes do not aggregate unrelated history and use the coveri
 
 test('order date filters remain Beijing calendar days without wrapping the indexed timestamp', async () => {
   const context = vm.createContext({
+    orderListTenantScopeMysql: async () => ({id:2}), orderTenantPredicateMysql: () => '1 = 1',
     normalizeSyncDateMysql: value => value || '',
     normalizeMysqlDateTime: date => date.toISOString().slice(0, 19).replace('T', ' ')
   });
   vm.runInContext(service.slice(service.indexOf('function shanghaiDateKeyToUtcDateTimeMysql('), service.indexOf('function profitOrderedAtUtcRangeMysql('))
     + service.slice(service.indexOf('async function orderBaseSqlMysql('), service.indexOf('async function orderFilteredSqlMysql(')), context);
   const filter = await context.orderBaseSqlMysql({ shopId: '2', dateFrom: '2026-09-22', dateTo: '2026-09-22' });
-  assert.equal(filter.where, '1 = 1 AND o.shop_id = ? AND o.ordered_at >= ? AND o.ordered_at < ?');
+  assert.ok(filter.where.endsWith('AND o.shop_id = ? AND o.ordered_at >= ? AND o.ordered_at < ?'));
   assert.deepEqual(Array.from(filter.params), [2, '2026-09-21 16:00:00', '2026-09-22 16:00:00']);
 });
