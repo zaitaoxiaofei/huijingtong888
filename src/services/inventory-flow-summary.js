@@ -1,21 +1,18 @@
 import { mysqlQuery } from '../mysql-pool.js';
-import { inventoryFlow } from './inventory-flow.js';
+import { validateFlowSettings } from './inventory-flow-rules.js';
 import { inventoryTenantSql, resolveInventoryTenantScope, assertInventoryRecord } from './inventory-tenant-scope.js';
 
-import { buildInventoryFlowSummary } from './inventory-flow-summary-model.js';
+import { buildInventoryFlowSummary, calculateLocalInventorySafety } from './inventory-flow-summary-model.js';
 export { buildInventoryFlowSummary } from './inventory-flow-summary-model.js';
 
-export function createInventoryFlowSummaryReader({ query = mysqlQuery, forecast = (id, tenant, ledger) => inventoryFlow.detail(id, tenant, {
-  balance: { physical_stock: ledger.physical_estimate, open_order_demand_qty: ledger.open_order_demand, fbp_reserved_qty: ledger.fbp_reserved },
-  official: ledger.fbp_inventory
-}) } = {}) {
-  return async function read(ledger, tenantId) {
+export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
+  return async function read(ledger, tenantId, { localOnly = false, fbpOnly = false } = {}) {
     const scope = await resolveInventoryTenantScope(tenantId, query);
     const productId = Number(ledger.product.id);
-    await assertInventoryRecord(scope, 'product', productId, query);
+    const product = await assertInventoryRecord(scope, 'product', productId, query);
     const current = (ledger.orders || []).filter(row => row.needs_fulfillment);
     const ids = [...new Set(current.map(row => Number(row.order_id)))];
-    const metadata = ids.length ? await query(`SELECT o.id, o.shop_id, s.name AS shop_name, o.status
+    const metadata = !fbpOnly && ids.length ? await query(`SELECT o.id, o.shop_id, s.name AS shop_name, o.status
       FROM orders o JOIN shops s ON s.id = o.shop_id AND ${inventoryTenantSql(scope, 's')}
       WHERE o.id IN (${ids.map(() => '?').join(',')})`, ids) : [];
     const byId = new Map(metadata.map(row => [Number(row.id), row]));
@@ -25,6 +22,15 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery, forecast 
       incoming_quantity: row.incoming_quantity, shortage_quantity: row.shortage_quantity,
       ...byId.get(Number(row.order_id))
     }));
+    let projection;
+    if (!fbpOnly) {
+      const records = await query('SELECT product_id, settings_json FROM inventory_flow_settings WHERE tenant_id = ? AND product_id IN (0, ?)', [scope.id, productId]);
+      const parse = row => typeof row?.settings_json === 'string' ? JSON.parse(row.settings_json) : row?.settings_json || {};
+      const defaults = parse(records.find(row => !Number(row.product_id)));
+      const settings = validateFlowSettings({ ...defaults, ...parse(records.find(row => Number(row.product_id) === productId)), holidays: defaults.holidays || [] });
+      projection = calculateLocalInventorySafety({ ...ledger, product: { ...ledger.product, production_lead_days: product.production_lead_days, warehouse_logistics_days: product.warehouse_logistics_days } }, settings);
+      if (localOnly) return { ...buildInventoryFlowSummary(ledger, projection, orders), applications_pending: true, requested: null };
+    }
     const bindings = [...new Map((ledger.fbp_inventory?.rows || []).map(row => [`${row.shop_id}:${row.ozon_sku}`, row])).values()];
     const applications = await query(`SELECT o.id AS order_id, o.order_no, o.status, o.created_at,
       i.id AS item_id, i.shop_id, s.name AS shop_name, i.ozon_sku, i.product_id,
@@ -50,7 +56,8 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery, forecast 
       row.locked_quantity = ['approved', 'ozon_created'].includes(row.status) ? Number(row.final_qty) * perSet : 0;
       row.per_set_quantity = perSet;
     }
-    return buildInventoryFlowSummary(ledger, await forecast(productId, scope.id, ledger), orders, applications);
+    if (fbpOnly) return { applications, requested: applications.reduce((sum, row) => sum + row.requested_quantity, 0) };
+    return buildInventoryFlowSummary(ledger, projection, orders, applications);
   };
 }
 export const readInventoryFlowSummary = createInventoryFlowSummaryReader();

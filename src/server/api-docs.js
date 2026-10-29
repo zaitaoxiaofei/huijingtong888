@@ -18,7 +18,10 @@ const response = (status, mediaType, schema, description = "") => ({ status, med
 
 const schemas = {
   InventoryFlowSummary: objectOf("Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.", [
-    ...["physical", "order_demand", "locked", "safety", "free", "unoccupied", "protection_gap", "incoming", "incoming_assigned", "order_shortage", "requested", "local_days", "fbp_days"].map(name => field(name, scalar("number", "Physical units or named coverage days; nullable when unknown.", { nullable: true }))),
+    ...["physical", "order_demand", "locked", "safety", "free", "unoccupied", "protection_gap", "incoming", "incoming_assigned", "order_shortage", "requested", "local_days", "fbp_days", "consumed_7d", "daily_consumption", "estimated_dates", "production_days", "local_shipping_days"].map(name => field(name, scalar("number", "Physical units or named coverage days; nullable when unknown.", { nullable: true }))),
+    field("applications_pending", scalar("boolean", "Local-first response has not loaded FBP applications yet; requested is null, not zero.")),
+    field("consumption_from", scalar("string", "Inclusive UTC start of the seven complete Beijing days.")),
+    field("consumption_to", scalar("string", "Exclusive UTC end of the consumption window.")),
     field("unavailable", scalar("boolean", "Optional summary could not be loaded.")),
     field("message", scalar("string", "Non-sensitive recovery guidance when unavailable.")),
     field("safety_status", scalar("string", "Forecast completeness and interpretation.")),
@@ -29,7 +32,11 @@ const schemas = {
     field("calculated_at", scalar("string", "UTC calculation time; UI formats Beijing time."))
   ]),
   InventoryLedgerFlowResponse: objectOf("Existing ledger fields plus an optional shared flow summary. Inventory-only ledger retains its financial-field allowlist; procurement ledger retains its existing duty requirements.", [
-    field("flow_summary", ref("InventoryFlowSummary", "Present only for include_flow=1."))
+    field("flow_summary", ref("InventoryFlowSummary", "Present for include_flow=1 or local; local omits FBP-dependent work.")),
+    field("product_id", scalar("number", "Only for view=fbp, the requested scoped product.")),
+    field("fbp_inventory", scalar("object", "Official cached snapshot rows/present/available/incomplete; null or omitted before deferred read.")),
+    field("applications", arrayOf(scalar("object", "Same scoped FBP application fields as InventoryFlowSummary."), "Only for view=fbp.")),
+    field("requested", scalar("number", "Total active FBP requested physical units, only for view=fbp."))
   ], { additionalProperties: true }),
   EnterpriseMessagePeer: objectOf("Active person in the authenticated enterprise. No global account roster.", [
     field("id", scalar("number", "Person ID."), true), field("name", scalar("string", "Display name."), true),
@@ -1666,7 +1673,7 @@ const endpoints = [
   section("Inventory", [
     ...["/api/inventory/ledger", "/api/procurement/ledger"].map(path => endpoint("GET", path, "Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.", {
       auth: "authenticated",
-      query: [param("product_id", scalar("number", "Current-enterprise physical inventory product ID.")), param("include_flow", scalar("string", "Set to 1 to include shared flow_summary; omitted requests do not run forecasts."), false)],
+      query: [param("product_id", scalar("number", "Current-enterprise physical inventory product ID.")), param("include_flow", scalar("string", "1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast."), false), param("view", scalar("string", "fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request."), false)],
       responses: [response(200, "application/json", ref("InventoryLedgerFlowResponse"))]
     })),
     endpoint("GET", "/api/fbp-replenishment-orders", "Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.", {

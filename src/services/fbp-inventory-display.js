@@ -44,7 +44,7 @@ export function summarizeFbpInventory(mappings, snapshots) {
 export async function loadProductFbpStocks(query, productId, scope = null) {
   const tenant = alias => scope ? ` AND ${inventoryTenantSql(scope, alias)}` : '';
   const mappings = await query(`SELECT candidates.shop_id, candidates.ozon_sku, shop.name AS shop_name,
-      MAX(op.name) AS product_name, MAX(op.offer_id) AS offer_id,
+      MAX(op.name) AS product_name, COALESCE(NULLIF(MAX(op.offer_id), ''), MAX(sm.offer_id)) AS offer_id,
       CASE WHEN recipe.id IS NULL AND sm.product_id = ? THEN 1
         ELSE SUM(COALESCE(ri.quantity, pc.quantity, 1)) END AS per_set_quantity
     FROM (

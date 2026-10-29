@@ -26,6 +26,7 @@ function fixture() {
     CREATE TABLE order_items(order_id INTEGER, ozon_sku TEXT);
     INSERT INTO shops VALUES(1,'A店'),(2,'B店');
     INSERT INTO sku_mappings VALUES(1,1,'ONE',10,1),(2,1,'TWO',20,1),(3,2,'ONE',10,1),(4,1,'MISSING',10,1),(5,1,'ONE',10,1);
+    ALTER TABLE sku_mappings ADD COLUMN offer_id TEXT;
     INSERT INTO product_components VALUES(20,10,2);
     INSERT INTO ozon_stock_snapshots VALUES
       (1,1,'ONE','W1','仓一','fbp_real',5,4,1,'2026-09-28 01:00:00'),

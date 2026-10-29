@@ -47,6 +47,14 @@ Shared read-only inventory flow. Optional forecast failure returns unavailable/m
 | `requested` | `number` | No | Physical units or named coverage days; nullable when unknown. |
 | `local_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
 | `fbp_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `consumed_7d` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `daily_consumption` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `estimated_dates` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `production_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `local_shipping_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `applications_pending` | `boolean` | No | Local-first response has not loaded FBP applications yet; requested is null, not zero. |
+| `consumption_from` | `string` | No | Inclusive UTC start of the seven complete Beijing days. |
+| `consumption_to` | `string` | No | Exclusive UTC end of the consumption window. |
 | `unavailable` | `boolean` | No | Optional summary could not be loaded. |
 | `message` | `string` | No | Non-sensitive recovery guidance when unavailable. |
 | `safety_status` | `string` | No | Forecast completeness and interpretation. |
@@ -62,7 +70,11 @@ Existing ledger fields plus an optional shared flow summary. Inventory-only ledg
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `flow_summary` | `InventoryFlowSummary` | No | Present only for include_flow=1. |
+| `flow_summary` | `InventoryFlowSummary` | No | Present for include_flow=1 or local; local omits FBP-dependent work. |
+| `product_id` | `number` | No | Only for view=fbp, the requested scoped product. |
+| `fbp_inventory` | `object` | No | Official cached snapshot rows/present/available/incomplete; null or omitted before deferred read. |
+| `applications` | `array<object>` | No | Only for view=fbp. |
+| `requested` | `number` | No | Total active FBP requested physical units, only for view=fbp. |
 
 ### EnterpriseMessagePeer
 
@@ -2813,7 +2825,8 @@ Read current enterprise inventory detail, optionally with the shared read-only f
 - Auth: `authenticated`
 - Query parameters:
   - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
-  - `include_flow` (`string`, optional): Set to 1 to include shared flow_summary; omitted requests do not run forecasts.
+  - `include_flow` (`string`, optional): 1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast.
+  - `view` (`string`, optional): fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request.
 - Responses:
   - `200` `application/json` -> `InventoryLedgerFlowResponse`
 
@@ -2824,7 +2837,8 @@ Read current enterprise inventory detail, optionally with the shared read-only f
 - Auth: `authenticated`
 - Query parameters:
   - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
-  - `include_flow` (`string`, optional): Set to 1 to include shared flow_summary; omitted requests do not run forecasts.
+  - `include_flow` (`string`, optional): 1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast.
+  - `view` (`string`, optional): fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request.
 - Responses:
   - `200` `application/json` -> `InventoryLedgerFlowResponse`
 
