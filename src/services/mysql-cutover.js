@@ -7725,6 +7725,70 @@ async function fetchOzonStockAnalyticsSafeMysql(shop, rows = [], options = {}) {
   }
 }
 
+// Separate strict read-through for the new flow center. The original stock sync keeps its existing behavior.
+export async function prepareInventoryFlowMysql() {
+  ensureMysqlCutoverEnabled();
+  await ensureProductNamingSchemaMysql();
+  await ensureStockLocationSchemaMysql();
+  await ensureProductCompositionSchemaMysql();
+  await ensureSkuInventoryRecipeSchemaMysql();
+  await ensureFbpReplenishmentSchemaMysql();
+  await ensureFbpTransferRecordsSchemaMysql();
+  await ensureOzonStockStorageSchemaMysql();
+}
+
+export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
+  const scope = await resolveInventoryTenantScope(options.tenantId);
+  const productId = Number(body.product_id);
+  await assertInventoryRecord(scope, 'product', productId);
+  await ensureOzonStockStorageSchemaMysql();
+  const mappings = await mysqlQuery(`SELECT DISTINCT m.shop_id, m.ozon_sku, m.offer_id FROM sku_mappings m
+    JOIN shops s ON s.id = m.shop_id AND ${inventoryTenantSql(scope, 's')}
+    WHERE m.product_id = ? AND m.active = 1 AND ${inventoryTenantSql(scope, 'm')}`, [productId]);
+  if (!mappings.length) throw Object.assign(new Error('该库存尚未绑定店铺SKU，请先在SKU绑定中配置后同步'), { statusCode: 400 });
+  const shops = await shopsMysql(String(scope.id));
+  const results = [];
+  for (const shopId of [...new Set(mappings.map(row => Number(row.shop_id)))]) {
+    const shop = shops.find(row => Number(row.id) === shopId);
+    const targets = mappings.filter(row => Number(row.shop_id) === shopId);
+    const key = String(shop?.ozon_api_key || shop?.api_key || shop?.api_key_hint || '').trim();
+    try {
+      if (!shop || !shop.ozon_client_id || !key || key.startsWith('demo')) throw new Error('该店铺未配置真实Ozon凭据，请在企业店铺配置');
+      const offers = targets.map(row => row.offer_id).filter(Boolean);
+      if (offers.length !== targets.length) throw new Error('部分SKU缺少货号offer_id，请先同步在线商品并修复绑定');
+      const remote = await fetchOzonProductStocks(shop, { offerIds: offers, signal: options.signal });
+      if (targets.some(target => !remote.some(row => String(row.ozon_sku) === String(target.ozon_sku)))) throw new Error('Ozon响应未覆盖全部绑定SKU，保留原快照，请核对绑定及接口响应');
+      const rules = await stockWarehouseRulesEnabledMysql();
+      await withMysqlTransaction(async connection => {
+        const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
+        await assertInventoryRecord(scope, 'shop', shopId, run);
+        for (const target of targets) {
+          const current = await currentFbpSkuBindingMysql(run, shopId, target.ozon_sku, scope.id, scope.isDefault, true);
+          if (Number(current?.product_id) !== productId) throw new Error('SKU绑定发生变化，请刷新后重试');
+          const matched = remote.filter(row => String(row.ozon_sku) === String(target.ozon_sku));
+          if (matched.some(row => resolveStockTypeMysql({ ...row, rules }) === 'unknown')) throw new Error('仓库分类未明确，请先核对Ozon库存仓库类型');
+          let fbp = matched.filter(row => resolveStockTypeMysql({ ...row, rules }) === 'fbp_real');
+          // A successful full response for this SKU with no FBP stock means known zero,
+          // unlike an absent SKU or a failed request, which leave the old snapshot intact.
+          if (!fbp.length) fbp = [{ warehouse_id: 'flow-confirmed-zero', warehouse_name: 'FBP', present: 0, reserved: 0, available: 0 }];
+          await connection.execute("DELETE FROM ozon_stock_snapshots WHERE shop_id = ? AND ozon_sku = ? AND stock_type = 'fbp_real'", [shopId, target.ozon_sku]);
+          for (const row of fbp) await connection.execute(`INSERT INTO ozon_stock_snapshots
+            (shop_id, product_id, ozon_sku, offer_id, warehouse_id, warehouse_name, stock_type, present, reserved, available, synced_at)
+            VALUES (?,?,?,?,?,?,'fbp_real',?,?,?,UTC_TIMESTAMP())`,
+          [shopId, productId, target.ozon_sku, target.offer_id, String(row.warehouse_id || row.warehouse_name || 'FBP'), String(row.warehouse_name || 'FBP'),
+            snapshotStockNumberMysql(row.present), snapshotStockNumberMysql(row.reserved), snapshotStockNumberMysql(row.available ?? row.present)]);
+        }
+      });
+      results.push({ shop_id: shopId, shop_name: shop.name, ok: true, fetched: remote.length });
+    } catch (error) {
+      // Credential-bearing provider diagnostics are deliberately not returned.
+      results.push({ shop_id: shopId, shop_name: shop?.name || '', ok: false, message: /未配置|缺少货号|未覆盖|仓库分类/.test(error.message) ? error.message : 'Ozon库存请求失败，原快照保留，请稍后重试或检查店铺授权' });
+    }
+  }
+  invalidateFbpPlanningCachesMysql();
+  return { ok: results.every(row => row.ok), results };
+}
+
 export async function syncOzonStocksMysql(body = {}, options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(options.tenantId ?? "admin");

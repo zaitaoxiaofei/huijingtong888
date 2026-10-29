@@ -117,6 +117,8 @@ function balanceQueries(tenantId, includeLegacyTenantNull, productIds) {
   ];
 }
 
+export { balanceQueries as inventoryProductBalanceQueries };
+
 function completeRows(rows, productIds) {
   const byId = new Map(rows.map((row) => [Number(row.product_id), row]));
   if (byId.size !== productIds.length || productIds.some((id) => !byId.has(id))) return null;
