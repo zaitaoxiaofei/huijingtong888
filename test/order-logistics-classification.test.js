@@ -1,3 +1,4 @@
+import { orderLogisticsSummarySql } from "../src/services/order-report-query-sql.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -155,7 +156,7 @@ test("logistics summary bypasses old snapshots and uses the same safe classifier
     { id: 1, raw_json: '{"raw":{"delivery_method":{"warehouse":"OGL 嘉兴仓库"}}}', billing_logistics_rule_name: "OGL 陆运 Extra Small" },
     { id: 4, raw_json: '{"raw":{"fulfillment_schema":"FBP","delivery_method":{"name":"FBP"}}}', billing_logistics_rule_name: "CEL Standard Extra Small" }
   ];
-  const context = {
+  const context = { orderLogisticsSummarySql,
     createHash, classifyOrderLogistics,
     getCachedMasterData: async (key, load) => { queries.push(key); return load(); },
     ORDER_COUNTS_CACHE_TTL_MS: 180000,
@@ -170,13 +171,13 @@ test("logistics summary bypasses old snapshots and uses the same safe classifier
   };
   const { loadOrderLogisticsSummaryForBaseMysql } = functions(["loadOrderLogisticsSummaryForBaseMysql"], context);
   const rows = await loadOrderLogisticsSummaryForBaseMysql({ where: "o.shop_id = ?", params: [2] }, "tenant-a");
-  assert.match(queries[0], /^orders:logistics-summary:v8:tenant-a:/);
+  assert.match(queries[0], /^orders:logistics-summary:v9:tenant-a:/);
   assert.deepEqual(Array.from(rows, (row) => [row.id, row.logistics_carrier]), [[3, "guoo"], [1, "ogl"], [4, ""]]);
   assert.equal(rows[1].logistics_service_class_source, "billing_rule");
   assert.equal(rows[2].logistics_method_label, "FBP 仓配");
   assert.equal(rows[2].logistics_service_class_key, "");
   assert.equal(orderLogisticsServiceClassOptions(rows).find((item) => item.value === "extra_small").count, 2);
-  assert.deepEqual(Array.from(queries[1].params), [9, 2]);
+  assert.deepEqual(Array.from(queries[1].params), [2, 9]);
   assert.match(queries[1].sql, /summary_item\.frozen_logistics_rule_id/);
   assert.equal(writes.length, 1);
   assert.match(writes[0].sql, /INSERT INTO order_logistics_summary_snapshots/);
@@ -206,7 +207,7 @@ test("paged carrier and official-class filters, counts and dropdowns use one sho
     }
     return candidates;
   };
-  const context = {
+  const context = { orderLogisticsSummarySql,
     classifyOrderLogistics, normalizeLogisticsServiceClass, orderLogisticsServiceClassOptions,
     ensureMysqlCutoverEnabled() {}, orderListTenantScopeMysql: async () => null, assertTenantOrderListFiltersMysql() {},
     ensureOrderLabelPrintSchemaMysql: async () => {}, ensureSkuInventoryRecipeSchemaMysql: async () => {},

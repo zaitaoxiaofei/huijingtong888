@@ -1,3 +1,4 @@
+import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "../../src/services/order-report-query-sql.js";
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
@@ -89,14 +90,14 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
   const execute=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.execute(sql,params))[0];};
   const methods=[
     'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
-    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
+    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
     'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql',
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

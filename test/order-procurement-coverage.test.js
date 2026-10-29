@@ -153,6 +153,7 @@ test('actual receipt transaction keeps a pending remainder and cannot receive th
     return [{ affectedRows: 1, insertId: 6 }];
   } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
+    resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: value => value,
     postInventoryMysql: async (_, movement) => movements.push(movement), recordInboundCostVersionMysql: async () => {},
@@ -161,7 +162,8 @@ test('actual receipt transaction keeps a pending remainder and cannot receive th
   await apply(connection, 5, { receive_quantity: 6, expected_remaining_quantity: 10 });
   assert.equal(row.quantity, 6);
   assert.equal(row.status, 'approved');
-  assert.equal(inserts[0][2], 4);
+  assert.equal(inserts[0][0], 2);
+  assert.equal(inserts[0][3], 4);
   assert.equal(movements.length, 1);
   assert.equal(movements[0].quantity_delta, 6);
   await assert.rejects(() => apply(connection, 5, { receive_quantity: 6, expected_remaining_quantity: 10 }), /已入库/);
@@ -175,6 +177,7 @@ test('over receipt posts the entered quantity, requires a reason, and records ar
   const statements = [], movements = [];
   const connection = { execute: async (sql, values) => { statements.push({ sql, values }); return [{ affectedRows: 1 }]; } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
+    resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: () => '2026-10-10 17:00:00',
     postInventoryMysql: async (_, movement) => movements.push(movement), recordInboundCostVersionMysql: async () => {},
@@ -223,8 +226,10 @@ test('refresh reloads active orders and removes cancelled demand while retaining
   const query = async sql => {
     statements.push(sql);
     if (sql.includes('SELECT o.id AS order_id')) return refreshed
-      ? [item(1, { needs_fulfillment: 0, entered_transport: 0 })]
+      ? [item(1, { needs_fulfillment: 0, entered_transport: 0 }), item(2, { needs_fulfillment: 0, entered_transport: 1 })]
       : [item(), item(2, { needs_fulfillment: 0, entered_transport: 1 })];
+    if (sql.includes('FROM tenants')) return [{id:2,slug:'a'}];
+    if (sql.startsWith('SELECT id FROM products')) return [{id:10}];
     return [];
   };
   const first = await loadOrderProcurementCoverage(query, '');
@@ -234,7 +239,7 @@ test('refresh reloads active orders and removes cancelled demand while retaining
   const next = await loadOrderProcurementCoverage(query, '');
   assert.equal(next.get(1).shortage_quantity, 0);
   assert.equal(next.get(2).missing_record_quantity, 1);
-  assert.ok(statements.filter(sql => sql.includes('SELECT o.id AS order_id'))[1].includes('o.last_status_changed_at'));
+  assert.equal(statements.filter(sql => sql.includes('SELECT o.id AS order_id')).length,2, 'tenant snapshots reload all scoped history rather than reusing global demand');
 });
 
 test('FBP sales ignore linked procurement cost/quantity issues and never consume local stock', async () => {
@@ -273,6 +278,7 @@ test('order procurement endpoints reject FBP before changing purchase records', 
     const stockCheck = source.match(/async function orderUsesFbpStockMysql\([^]*?\n}/)[0];
     const fn = vm.runInNewContext(`${stockCheck};${block};${name}`, {
       ensureMysqlCutoverEnabled() {},
+      resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {}, assertInventoryMember: async () => {},
       mysqlQueryOne: async () => ({ stock_location: 'FBP' })
     });
     await assert.rejects(fn(1), /官方仓库存直接履约/);
