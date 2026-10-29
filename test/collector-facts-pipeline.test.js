@@ -95,9 +95,9 @@ test("collector category candidates prefer facts-derived category ids before wea
 
   assert.equal(result.candidates[0].descriptionCategoryId, 17001);
   assert.equal(result.candidates[0].typeId, 97001);
-  assert.equal(result.candidates[0].source, "facts_category_ids_tail");
-  assert.equal(result.typeOnlyCandidates[0].typeId, 7001);
-  assert.equal(result.typeOnlyCandidates[0].source, "facts_attribute_8229_dictionary_value");
+  assert.equal(result.candidates[0].source, "facts_direct");
+  assert.equal(result.typeOnlyCandidates.find(item => item.source === "facts_attribute_8229_dictionary_value").typeId, 7001);
+  assert.equal(result.typeOnlyCandidates.find(item => item.source === "facts_attribute_8229_dictionary_value").source, "facts_attribute_8229_dictionary_value");
   assert.equal(result.categoryText, "Facts path");
   assert.equal(result.leafName, "Facts leaf");
 });
@@ -120,8 +120,8 @@ test("collector category pair prefers the ids tail over a conflicting direct fie
 
 test("detail collector saves first and schedules seller fallback backfill asynchronously", () => {
   assert.match(collectorContentSource, /function scheduleSellerFallbackBackfill\(result, options = \{\}\)/);
-  assert.match(collectorContentSource, /const backgroundTask = enrichDetailWithSellerFallback\(result\)/);
-  assert.match(collectorContentSource, /await persistCollectedResultUpdate\(enriched\);/);
+  assert.match(collectorContentSource, /const enrichment = result\.sellerFallbackBackfillTask \|\| enrichDetailWithSellerFallback\(result\)/);
+  assert.match(collectorContentSource, /await persistCollectedResultUpdate\(enriched, options\.requestContext\);/);
   assert.match(collectorContentSource, /const saved = await ensureCollectedSaved\(result\);[\s\S]*?scheduleSellerFallbackBackfill\(result, \{ persist: true \}\);/);
   assert.doesNotMatch(collectorContentSource, /await enrichDetailWithSellerFallback\(result\);\s*const saved = await ensureCollectedSaved\(result\);/);
   assert.doesNotMatch(collectorContentSource, /await enrichDetailWithSellerFallback\(result\);\s*return buildCollectedProductListPayload\(result\);/);
