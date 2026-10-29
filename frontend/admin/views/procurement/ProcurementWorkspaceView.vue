@@ -1629,11 +1629,11 @@ onMounted(async () => {
               <el-option label="其他" value="other" />
             </el-select>
           </el-form-item>
-          <el-form-item label="采购时间"><DailyPurchaseExport :filters="state.filters" /></el-form-item>
         </el-form>
         <template #actions>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
+          <DailyPurchaseExport :filters="state.filters" />
           <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
           <el-button type="primary" plain @click="openCreate">＋ 自由采购</el-button>
         </template>

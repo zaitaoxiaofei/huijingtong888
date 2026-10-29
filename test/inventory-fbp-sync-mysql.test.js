@@ -10,11 +10,13 @@ test('official sync supports direct, composition and recipe stocks; partial fail
   const service = await import('../src/services/mysql-cutover.js');
   const { closeMysqlPool } = await import('../src/mysql-pool.js');
   const oldFetch = globalThis.fetch;
-  let failSecond = false, changed = false, calls = [];
+  let failSecond = false, changed = false, calls = [], active = 0, peak = 0;
   globalThis.fetch = async (url, options) => {
     assert.ok(String(url).endsWith('/v4/product/info/stocks'));
     const offers = JSON.parse(options.body).filter.offer_id;
     calls.push(offers);
+    active++; peak=Math.max(peak,active);
+    await new Promise(resolve=>setTimeout(resolve,25)); active--;
     if (changed) await q('UPDATE sku_mappings SET product_id=201 WHERE id=1');
     if (failSecond && offers.includes('B')) return new Response(JSON.stringify({message:'not authorized'}), {status:403});
     return new Response(JSON.stringify({result:{items:offers.map(offer_id => ({offer_id,sku:{A:'DIRECT',B:'COMBO',C:'RECIPE'}[offer_id],stocks:[{type:'fbo',warehouse_id:'1',warehouse_name:'FBP',present:3,reserved:1,available:2}]}))}}),{status:200});
@@ -34,6 +36,7 @@ test('official sync supports direct, composition and recipe stocks; partial fail
     const first = await service.syncInventoryFlowStocksMysql({product_id:200},{tenantId:2});
     assert.equal(first.ok,true,JSON.stringify(first));
     assert.equal(first.results.length,2);
+    assert.equal(peak,2,'shops are fetched concurrently with a maximum of two workers');
     assert.deepEqual(calls.flat().sort(),['A','B','C']);
     const ledger = await service.inventoryLedgerMysql({product_id:200,view:'fbp'},2);
     assert.equal(ledger.fbp_inventory.present,18); // 3 direct + 3*2 composition + 3*3 recipe

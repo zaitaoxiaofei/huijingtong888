@@ -72,6 +72,12 @@ async function submitStockTopup() {
   } catch (error) { if (scope === currentApiCacheScope() && error.name !== 'AbortError') ElMessage.error(error.message); }
   finally { stockTopup.busy = false; }
 }
+function parentInventoryItems(parent) {
+  return parent.virtual ? parent.children.filter(item => Number(item.product_id) > 0) : [{ product_id: parent.productId, product_name: parent.name, inventory_number: parent.inventoryNumber }].filter(item => item.product_id > 0);
+}
+function openParentInventoryLedger(row, parent, action = '', productId = 0) {
+  openInventoryLedger(row, action, productId || parentInventoryItems(parent)[0]?.product_id || 0);
+}
 const selectedInventoryRow = ref(null);
 const ledgerInitialAction = ref("");
 const stocktakeProductId = ref(0);
@@ -637,7 +643,28 @@ function procurementTimeText(row) {
         </template>
         <template #default="{ row }">
           <div class="inventory-compact">
-            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active" />
+            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
+              <template #actions="{ parent }">
+                <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
+                  <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
+                  <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
+                  <el-dropdown v-else-if="canUpdateInventory && parentInventoryItems(parent).length > 1" trigger="click" @command="id => openParentInventoryLedger(row, parent, 'stocktake', id)">
+                    <el-button link type="primary" size="small">更新本地库存</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                  <el-button v-if="parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
+                  <el-dropdown v-else-if="parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
+                    <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                  <el-button v-if="parent.productId > 0" link type="primary" size="small" :icon="EditPen" @click="emit('edit-inventory-product', parent.productId)">修改库存</el-button>
+                  <el-dropdown v-else-if="parentInventoryItems(parent).length" trigger="click" @command="id => emit('edit-inventory-product', id)">
+                    <el-button link type="primary" size="small" :icon="EditPen">修改子产品库存 ▾</el-button>
+                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
+                  </el-dropdown>
+                </div>
+              </template>
+            </InventoryIdentity>
             <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
               <div class="inventory-compact-heading">
                 <strong>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
@@ -653,35 +680,13 @@ function procurementTimeText(row) {
             </template>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
-              <el-button v-if="canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
-              <el-dropdown v-else-if="canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
+              <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
+              <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
                 <el-button link type="primary" size="small">更新本地库存</el-button>
                 <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
               </el-dropdown>
-              <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
-                <el-button
-                  v-if="product.sku"
-                  link
-                  type="primary"
-                  size="small"
-                  :icon="Link"
-                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
-                >
-                  修改绑定
-                </el-button>
-                <el-button
-                  v-if="Number(product.productId || 0) > 0"
-                  link
-                  type="primary"
-                  size="small"
-                  :icon="EditPen"
-                  @click="emit('edit-inventory-product', product.productId)"
-                >
-                  修改库存
-                </el-button>
-              </template>
-              <template v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`">
+              <div v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
                 <el-button
                   size="small"
                   class="orders-inline-accent-button orders-inline-accent-button-secondary"
@@ -696,7 +701,7 @@ function procurementTimeText(row) {
                 >
                   创建库存
                 </el-button>
-              </template>
+              </div>
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
           </div>

@@ -35,6 +35,7 @@ function toggle(id) {
         <small v-if="!parent.children.length">子产品组成待核对，请查看库存明细</small>
         <el-button v-if="parent.children.length > 2" link type="primary" size="small" @click="toggle(parent.id)">{{ expanded.has(parent.id) ? '收起子产品' : `展开其余 ${parent.children.length - 2} 项` }}</el-button>
       </div>
+      <slot name="actions" :parent="parent" />
     </section>
   </div>
 </template>

@@ -51,6 +51,16 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     await page.locator('.inventory-flow-popover:visible').getByText('申请人 运营小李 · 已审核待发', { exact: true }).waitFor();
     await page.locator('[data-node="application"]').click();
     assert.equal(await page.evaluate(() => window.lastFlowNavigation), '/inventory/fbp-replenishment?orderId=31');
+    await page.emulateMedia({reducedMotion:'reduce'});
+    await page.locator('[data-node="fbp-physical"]').click();
+    const fbpDetail=page.getByRole('region',{name:'FBP 实物明细',exact:true});
+    await fbpDetail.waitFor();
+    assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'click focuses the expanded detail');
+    assert.ok((await fbpDetail.boundingBox()).y>=0,'expanded detail is positioned in view');
+    await fbpDetail.getByRole('button',{name:'收起',exact:true}).click();
+    await page.getByRole('button',{name:'查看有库存 SKU',exact:true}).click();
+    await fbpDetail.waitFor();
+    assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'toolbar shares the direct detail behavior');
     await page.locator('[data-node="safety"]').click();
     await fs.mkdir('.verification', { recursive: true });
     for (const [width, height, dark] of [[1920,1080,false],[1920,1080,true],[1366,900,false],[1366,900,true],[390,844,false]]) {

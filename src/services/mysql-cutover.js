@@ -7765,7 +7765,7 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
   if (!mappings.length) throw Object.assign(new Error('该库存尚未绑定店铺SKU，请先在SKU绑定中配置后同步'), { statusCode: 400 });
   const shops = await shopsMysql(String(scope.id));
   const results = [];
-  for (const shopId of [...new Set(mappings.map(row => Number(row.shop_id)))]) {
+  await mapWithConcurrencyMysql([...new Set(mappings.map(row => Number(row.shop_id)))], 2, async shopId => {
     await checkAccess();
     const shop = shops.find(row => Number(row.id) === shopId);
     const targets = mappings.filter(row => Number(row.shop_id) === shopId);
@@ -7807,7 +7807,8 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
       // Credential-bearing provider diagnostics are deliberately not returned.
       results.push({ shop_id: shopId, shop_name: shop?.name || '', ok: false, message: /未配置|缺少货号|未覆盖|仓库分类/.test(error.message) ? error.message : 'Ozon库存请求失败，原快照保留，请稍后重试或检查店铺授权' });
     }
-  }
+  });
+  results.sort((a, b) => a.shop_id - b.shop_id);
   invalidateFbpPlanningCachesMysql();
   return { ok: results.every(row => row.ok), results };
 }
