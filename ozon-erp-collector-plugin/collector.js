@@ -1531,6 +1531,9 @@
     let variantApiType = 'variant_v2';
     let resolvedVariantId = '';
 
+    // Independent requests overlap; consume errors below without an unhandled rejection.
+    const baseInfoTask = requestSellerBridgeData(normalizedSku, 'search-sku-base')
+      .then(value => ({ value }), error => ({ error }));
     try {
       const salesResponse = await requestSellerBridgeData(normalizedSku, 'sales');
       if (Array.isArray(salesResponse?.items) && salesResponse.items.length > 0) {
@@ -1550,26 +1553,15 @@
 
     if (!baseInfo) {
       try {
-        baseInfo = await requestSellerBridgeData(normalizedSku, 'search-sku-base');
+        const baseResult = await baseInfoTask;
+        if (baseResult.error) throw baseResult.error;
+        baseInfo = baseResult.value;
         const categoryIds = fields.category_ids;
         Object.assign(fields, buildSellerBaseInfoFields(baseInfo));
         if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
         if (!resolvedVariantId) {
           resolvedVariantId = String(baseInfo?.variants?.[0]?.variant_id || '').trim();
         }
-      } catch (error) {
-        if (options.throwOnVariantError) throw error;
-        warnings.push(error?.message || String(error));
-      }
-    }
-
-    if (!resolvedVariantId && !baseInfo) {
-      try {
-        baseInfo = await requestSellerBridgeData(normalizedSku, 'search-sku-base');
-        const categoryIds = fields.category_ids;
-        Object.assign(fields, buildSellerBaseInfoFields(baseInfo));
-        if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
-        resolvedVariantId = String(baseInfo?.variants?.[0]?.variant_id || '').trim();
       } catch (error) {
         if (options.throwOnVariantError) throw error;
         warnings.push(error?.message || String(error));

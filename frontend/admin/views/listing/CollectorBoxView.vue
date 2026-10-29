@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, MagicStick, Refresh, Search } from "@element-plus/icons-vue";
+import { collectorCategoryPending, createCollectorRefresh } from "../../utils/collector-refresh.js";
 import { apiClient } from "../../utils/api";
 import { prepareBrowserWatermarkBatch } from "../../utils/browser-watermark-batch";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../../utils/ai-variant-lab-window";
@@ -442,21 +443,30 @@ function buildQuery(options = {}) {
   return params;
 }
 
+let collectorLoadGeneration = 0;
+let collectorRefresh;
+const collectorPollTime = ref(Date.now());
+const collectorTable = ref(null);
 async function loadRows(options = {}) {
-  loading.value = true;
+  const generation = ++collectorLoadGeneration;
+  const context = JSON.stringify(state.filters);
+  if (!options.quiet) loading.value = true;
   try {
     const result = await apiClient.get(`/api/listing/collector-box?${buildQuery(options).toString()}`, {
       noCache: true,
       routeScoped: false
     });
+    if (generation !== collectorLoadGeneration || context !== JSON.stringify(state.filters)) return;
+    const selected = new Set(state.selectedRows.map(row => String(row.sku)));
+    if (!options.quiet) collectorTable.value?.clearSelection();
     state.rows = prepareCollectorRows(result.rows || []);
-    state.selectedRows = [];
+    state.selectedRows = options.quiet ? state.rows.filter(row => selected.has(String(row.sku))) : [];
     if (result.total !== undefined && result.total !== null) state.total = Number(result.total || 0);
     if (result.summary) state.summary = result.summary;
   } catch (error) {
-    ElMessage.error(error.message || "采集箱加载失败");
+    if (!options.quiet && generation === collectorLoadGeneration) ElMessage.error(error.message || "采集箱加载失败");
   } finally {
-    loading.value = false;
+    if (generation === collectorLoadGeneration) loading.value = false;
   }
 }
 
@@ -603,7 +613,11 @@ async function openSelectionDialog(row) {
 }
 
 async function openEdit(row) {
-  await createListingTemplate(row);
+  if (!row?.sku) return;
+  router.push({ path: "/listing-automation", query: {
+    workbenchId: createListingWorkbenchId(), collectorSku: row.sku,
+    ...(row.listing_template_id ? { templateId: row.listing_template_id } : { collectorPreview: "1" })
+  } });
 }
 
 function openAiWorkbench(row, mode = "optimization") {
@@ -886,6 +900,17 @@ watch(
 
 onMounted(() => {
   window.addEventListener("beforeunload", guardBrowserPublishClose);
+  collectorRefresh = createCollectorRefresh({
+    visible: () => document.visibilityState !== "hidden" && route.path === "/collector-box",
+    pending: () => {
+      collectorPollTime.value = Date.now();
+      return state.rows.some(row => collectorCategoryPending(row, collectorPollTime.value));
+    },
+    refresh: () => loading.value ? Promise.resolve() : loadRows({ quiet: true, summaryMode: "skip", countMode: "skip" })
+  });
+  window.addEventListener("focus", refreshCollectorOnFocus);
+  document.addEventListener("visibilitychange", refreshCollectorOnFocus);
+  window.addEventListener("erp:auth-scope-changed", clearCollectorContext);
   ensureCollectorWorkbenchRouteId();
   const restoredDetailSku = restoreCollectorWorkbenchState();
   if (route.query.sku) state.filters.query = String(route.query.sku);
@@ -900,7 +925,24 @@ onMounted(() => {
   syncCollectorWorkbenchTabTitle();
 });
 
-onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBrowserPublishClose));
+function refreshCollectorOnFocus() { collectorRefresh?.focus(); }
+function clearCollectorContext() {
+  collectorLoadGeneration++;
+  collectorTable.value?.clearSelection();
+  state.rows = [];
+  state.selectedRows = [];
+  detail.value = null;
+  detailVisible.value = false;
+  loading.value = false;
+}
+onBeforeUnmount(() => {
+  collectorLoadGeneration++;
+  collectorRefresh?.stop();
+  window.removeEventListener("beforeunload", guardBrowserPublishClose);
+  window.removeEventListener("focus", refreshCollectorOnFocus);
+  document.removeEventListener("visibilitychange", refreshCollectorOnFocus);
+  window.removeEventListener("erp:auth-scope-changed", clearCollectorContext);
+});
 </script>
 
 <template>
@@ -930,14 +972,16 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBrowserPub
       </div>
 
       <el-table
+        ref="collectorTable"
         v-loading="loading"
         :data="state.rows"
+        row-key="sku"
         stripe
         border
         class="erp-data-table collector-table"
         @selection-change="handleSelectionChange"
       >
-        <el-table-column type="selection" width="42" align="center" fixed="left" />
+        <el-table-column type="selection" :reserve-selection="true" width="42" align="center" fixed="left" />
         <el-table-column label="图片" width="92" align="center" fixed="left">
           <template #default="{ row }">
             <ProductImagePreview :src="row.image_url" />
@@ -950,7 +994,7 @@ onBeforeUnmount(() => window.removeEventListener("beforeunload", guardBrowserPub
               <span>{{ collectorCategoryLabel(row) }}</span>
               <span v-if="vehicleModelText(row)" class="muted-text">{{ vehicleModelText(row) }}</span>
               <el-tag v-if="!collectorDataQualityOk(row)" type="warning" effect="plain" size="small">
-                采集不完整：{{ collectorDataQualityIssues(row).join("、") }}
+                {{ collectorCategoryPending(row, collectorPollTime) ? "类目暂未返回，正在自动核对" : `采集不完整：${collectorDataQualityIssues(row).join("、")}` }}
               </el-tag>
             </div>
           </template>

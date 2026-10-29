@@ -1695,6 +1695,58 @@ Resolved AI strategy plan with strategy modules and optional selected bundle.
 
 ## Endpoints
 
+### Collector editor and cache
+
+#### `POST /api/listing/collector-box/{sku}/create-listing-template`
+
+Prepare a current-enterprise collected product. previewOnly returns an ephemeral editor response without archiving media or writing a template; normal calls still archive all media before persistence.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `sku` (`string`, required): Current-enterprise collected SKU
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/listing/templates`
+
+Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `502` `application/json` -> `ErrorResponse`
+
+#### `PUT /api/listing/templates/{id}`
+
+Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Owned template ID
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `502` `application/json` -> `ErrorResponse`
+
+#### `POST /api/local-plugin/collected-products/lookup-batch`
+
+Look up current-enterprise collected product previews. Optional summary mode avoids reading raw JSON; missing summary preserves older plugin behavior.
+
+- Auth: `local-plugin`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 ### Docs
 
 #### `GET /api/docs`

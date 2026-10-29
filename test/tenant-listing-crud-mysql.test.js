@@ -143,6 +143,40 @@ test("real collector-to-template-to-draft CRUD and publish records isolate A/B/d
       assert.equal(resolved.shopId,20);assert.equal(resolved.category.ozon_category_id,'300:400');
       await assert.rejects(listing.resolveOzonCategoryFromSku({sku:'PRIVATE-SKU'},session(2)),/Local online product cache/);
     });
+    await t.test("optional lightweight lookup omits raw payload without exposing another enterprise or replacing full detail",async()=>{
+      const full=await listing.lookupCollectedProductFromPlugin('leaf-fixture','2');
+      const summary=await listing.lookupCollectedProductFromPlugin('leaf-fixture','2',{summary:true});
+      assert.equal(summary.found,true);assert.equal(summary.product.summary_only,true);assert.equal(summary.product.category,full.product.category);
+      assert.equal(summary.product.attributes,undefined);assert.ok(full.product.attributes.length);
+      assert.equal((await listing.lookupCollectedProductFromPlugin('leaf-fixture','3',{summary:true})).found,false);
+    });
+    await t.test("editor preview returns all selected media without durable writes; formal save still requires successful archival",async()=>{
+      const image='https://public-fixture.invalid/current.jpg',video='https://public-fixture.invalid/current.mp4';
+      await listing.syncCollectedProductsFromPlugin([{sku:'preview-fixture',title:'Preview',type_id:400,images:[image],editorVariants:[{sku:'preview-a',name:'A',images:[image],video_urls:[video]},{sku:'preview-b',name:'B',images:['https://public-fixture.invalid/b.jpg']}]}],'2');
+      const count=async()=>Number((await query('SELECT COUNT(*) n FROM listing_category_templates'))[0].n);
+      const before=await count();const archive=collectorContext.archiveCollectedProductMedia;let archives=0;
+      collectorContext.archiveCollectedProductMedia=async()=>{archives++;throw Error('fixture archive unavailable')};
+      try{
+        const preview=await collectorContext.createListingTemplateFromCollectorBox('preview-fixture',{previewOnly:true,openMode:'listing_editor'},session(2));
+        assert.equal(preview.preview,true);assert.equal(preview.template.id,null);assert.equal(preview.template.ozon_category_id,'300:400');
+        assert.equal(preview.template.editable_payload.variants.length,2);assert.ok(JSON.stringify(preview.template).includes(image));assert.ok(JSON.stringify(preview.template).includes(video));
+        assert.equal(archives,0);assert.equal(await count(),before);
+        await assert.rejects(collectorContext.createListingCategoryTemplate({...preview.template,archive_collector_media:true},session(2)),/fixture archive unavailable/);
+        assert.equal(archives,1);assert.equal(await count(),before);
+        await assert.rejects(collectorContext.createListingTemplateFromCollectorBox('preview-fixture',{previewOnly:true,openMode:'listing_editor'},session(3)));
+      }finally{collectorContext.archiveCollectedProductMedia=archive}
+    });
+    await t.test("thirty-day collector deletion preserves saved templates, drafts and publishing records",async()=>{
+      const {cleanupCollectorHistory}=await import('../src/services/collector-history-retention.js');
+      const before={};
+      for(const table of ['listing_category_templates','listing_drafts','listing_publish_records']) before[table]=await query(`SELECT * FROM ${table} ORDER BY id`);
+      await query("UPDATE ozon_plugin_collected_products SET collect_date='2026-08-01',updated_at='2026-08-01',edited_at=NULL WHERE sku='leaf-fixture' AND tenant_id='2'");
+      const report=await cleanupCollectorHistory({apply:true,now:new Date('2026-10-29T12:00:00Z')});
+      assert.ok(report.tables.find(r=>r.table==='ozon_plugin_collected_products').deleted>=1);
+      assert.equal((await query("SELECT COUNT(*) n FROM ozon_plugin_collected_products WHERE sku='leaf-fixture' AND tenant_id='2'"))[0].n,0);
+      for(const table of Object.keys(before)) assert.deepEqual(await query(`SELECT * FROM ${table} ORDER BY id`),before[table]);
+      for(const [id,templateId] of templates)assert.equal((await listing.listingCategoryTemplateDetail(templateId,session(id))).id,templateId);
+    });
   }finally{
     globalThis.fetch=originalFetch;
     if(closeMysqlPool)await closeMysqlPool();
