@@ -1,3 +1,5 @@
+import { inventoryProductSearch } from './inventory-product-search.js';
+import { inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern } from './inventory-search.js';
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { inventoryWorkflow, INVENTORY_DEMAND_TYPES, procurementDemandType } from '../shared/inventory-workflow.js';
 import { fbpSupplyState } from '../shared/fbp-supply-state.js';
@@ -17,7 +19,7 @@ import { validateFlowSettings } from './inventory-flow-rules.js';
 
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 export function createInventoryWorkflowService({ledger,receiveRecords,previewReceipts,query=mysqlQuery,transaction=withMysqlTransaction,forecast=inventoryFlow.detail,broadcast=broadcastGlobalEvent}={}){
-  async function batch(ids,tenantId,{fresh=false,coverage:providedCoverage,localOnly=false}={}){
+  async function batch(ids,tenantId,{fresh=false,coverage:providedCoverage,localOnly=false,cache=true}={}){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
     const products=await query(`SELECT id,name,production_lead_days,warehouse_logistics_days FROM products WHERE id IN (${marks}) AND ${inventoryTenantSql(scope)}`,ids);
     if(products.length!==ids.length)throw fail('部分库存商品不存在或不属于当前企业，请刷新列表',404);
@@ -32,11 +34,15 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
           JOIN inbound_records ir ON ir.purchase_order_item_id=poi.id AND ir.product_id=poi.product_id AND ${inventoryTenantSql(scope,'ir')}
           WHERE poi.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'poi')} AND ir.status='pending_arrival' AND po.status NOT IN ('cancelled','pending_purchase') GROUP BY poi.product_id`,missing),
-        localOnly?Promise.resolve([]):query(`SELECT id,product_id,quantity,status,demand_type,source_type,request_reason_code,source_order_item_id FROM procurement_requests WHERE product_id IN (${placeholders}) AND ${inventoryTenantSql(scope)} AND status IN ('submitted','pending','suggested')`,missing),
-        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,
+        localOnly?Promise.resolve([]):query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
+          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
+          FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,missing),
+        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,wo.order_no,wo.submitted_at,
+          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
           wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
           FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
           JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
+          LEFT JOIN people applicant ON applicant.id=COALESCE(wi.requested_by,wo.created_by)
           JOIN products wp ON wp.id IN (${placeholders}) AND ${inventoryTenantSql(scope,'wp')}
           LEFT JOIN sku_inventory_recipes wr ON wr.shop_id=wi.shop_id AND wr.ozon_sku=wi.ozon_sku AND wr.active=1
           LEFT JOIN sku_inventory_recipe_items wri ON wri.recipe_id=wr.id AND wri.product_id=wp.id
@@ -45,7 +51,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
             AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
             AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
             AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
-          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id`,missing)
+          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,wo.order_no,wo.submitted_at,applicant.id,applicant.name`,missing)
       ]);
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
       const defaults=parse(settingsRows.find(row=>!Number(row.product_id)));
@@ -70,11 +76,11 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const settings=validateFlowSettings({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]});
         const applications=applicationsByProduct.get(id)||[];
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
-        const policy=inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]});
+        const policy={...inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),applications};
         // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
         const result=localOnly?{product_id:id,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);
-        if(epoch===workflowRevision())workflowCache.set(`${prefix}${scope.id}:${id}`,{expires:Date.now()+20000,value:result});
+        if(cache&&epoch===workflowRevision())workflowCache.set(`${prefix}${scope.id}:${id}`,{expires:Date.now()+20000,value:result});
       }));
     }
     return ids.map(id=>values.get(id));
@@ -90,6 +96,48 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const count=key=>{if(!children.length)return value?.[key]??null;const quantities=children.map(row=>{const v=byId.get(Number(row.component_product_id))?.[key],units=Number(row.quantity);return v!=null&&units>0?Math.floor(v/units):null;});return quantities.every(v=>v!==null)?Math.min(...quantities):null;};
       return {product_id:id,workflow_free:count('free'),physical_stock:count('physical'),fbp_stock_known:official.get(id)?.present??null};
     });
+  }
+  async function workspaceProducts(params,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query),search=String(params.query||'').trim().slice(0,200),mode=String(params.searchMode||'auto');
+    const criteria=inventoryProductSearch({...params,query:mode==='sku'?'':search},scope,'p'),where=criteria.sql?[criteria.sql]:[],args=[...criteria.params];
+    if(search&&(mode==='auto'||mode==='sku')){
+      const exact=mode==='sku'||isInventoryIdentifier(search),operator=exact?'=':"LIKE",text=exact?search:inventoryNamePattern(search),escape=exact?'':" ESCAPE '='";
+      const skuSql=`(EXISTS(SELECT 1 FROM sku_mappings m JOIN shops s ON s.id=m.shop_id AND ${inventoryTenantSql(scope,'s')} JOIN products root ON root.id=m.product_id AND ${inventoryTenantSql(scope,'root')}
+        WHERE m.active=1 AND ${inventoryTenantSql(scope,'m')} AND (m.ozon_sku ${operator} ?${escape} OR m.offer_id ${operator} ?${escape})
+        AND ((NOT EXISTS(SELECT 1 FROM sku_inventory_recipes r WHERE r.active=1 AND r.shop_id=m.shop_id AND r.ozon_sku=m.ozon_sku)
+          AND (m.product_id=p.id OR EXISTS(SELECT 1 FROM product_components c WHERE c.product_id=m.product_id AND c.component_product_id=p.id AND ${inventoryTenantSql(scope,'c')})))
+          OR EXISTS(SELECT 1 FROM sku_inventory_recipes r JOIN sku_inventory_recipe_items i ON i.recipe_id=r.id WHERE r.active=1 AND r.shop_id=m.shop_id AND r.ozon_sku=m.ozon_sku AND i.product_id=p.id)))
+        OR EXISTS(SELECT 1 FROM sku_inventory_recipes r JOIN sku_inventory_recipe_items i ON i.recipe_id=r.id JOIN shops s ON s.id=r.shop_id AND ${inventoryTenantSql(scope,'s')} WHERE r.active=1 AND i.product_id=p.id AND r.ozon_sku ${operator} ?${escape}))`;
+      if(mode==='sku'){where.push(skuSql);args.push(text,text,text);}
+      else if(exact){const id=inventoryIdentifierSearch(search,'inventory_id');where.push(`(p.id IN (${id.sql}) OR ${skuSql})`);args.push(...id.params,text,text,text);}
+      else{const name=inventoryProductSearch({searchMode:'name',query:search},scope);where.push(`((${name.sql}) OR ${skuSql})`);args.push(...name.params,text,text,text);}
+    }
+    // Include never-stocked physical products, not a second copy of their virtual parent.
+    return query(`SELECT p.id AS product_id,p.name AS product_name,p.inventory_number,p.code AS inventory_id FROM products p
+      WHERE p.active=1 AND COALESCE(p.product_type,'main')!='selection' AND ${inventoryTenantSql(scope,'p')}
+        AND NOT EXISTS(SELECT 1 FROM product_components c WHERE c.product_id=p.id AND ${inventoryTenantSql(scope,'c')})
+        ${where.length?'AND '+where.map(w=>'('+w+')').join(' AND '):''} ORDER BY p.id`,args);
+  }
+  async function workspaceFeedback(ids,tenantId){
+    if(!ids.length)return[];
+    const scope=await resolveInventoryTenantScope(tenantId,query);
+    if(ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<=0))throw fail('请选择最多100个库存商品');
+    return query(`SELECT n.entity_id AS product_id,n.title,n.content,MAX(n.created_at) AS created_at FROM system_notifications n
+      JOIN products p ON p.id=n.entity_id AND ${inventoryTenantSql(scope,'p')}
+      WHERE n.tenant_id=? AND n.notification_type='stock_topup' AND n.entity_type='inventory' AND n.entity_id IN (${ids.map(()=>'?').join(',')})
+      GROUP BY n.entity_id,n.title,n.content ORDER BY created_at DESC LIMIT 500`,[scope.id,...ids]);
+  }
+  async function workspaceBatches(ids,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query);
+    if(!ids.length)return[];
+    if(ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<=0))throw fail('请选择最多100个库存商品');
+    return query(`SELECT ir.id,ir.product_id,ir.quantity,ir.updated_at,po.order_no,po.purchased_at,po.status AS purchase_status
+      FROM inbound_records ir JOIN products p ON p.id=ir.product_id AND ${inventoryTenantSql(scope,'p')}
+      LEFT JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
+      LEFT JOIN procurement_requests pr ON pr.id=ir.procurement_request_id AND ${inventoryTenantSql(scope,'pr')}
+      WHERE ir.product_id IN (${ids.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'ir')} AND ir.status='pending_arrival'
+        AND ((po.status IN ('purchased','partial_inbound') AND po.purchased_at IS NOT NULL) OR pr.status='purchased')
+      ORDER BY po.purchased_at,ir.id`,ids);
   }
   async function receiptSession(session,connection){
     const current=await authorizeBusinessTaskSession(session,connection?async(sql,args)=>(await connection.query(sql+' FOR SHARE',args))[0]:undefined);
@@ -231,5 +279,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,requests,skuDetails,localQuantities,batch,submit,receipts,receive};
+  return{read,requests,skuDetails,localQuantities,batch,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
 }

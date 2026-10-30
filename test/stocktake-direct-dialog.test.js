@@ -12,6 +12,7 @@ function fixture(get){
  const calls=[], events=[];
  const ref=value=>({value});
  const context=vm.createContext({Number,Object,Math,clearTimeout,
+  currentApiCacheScope:()=>context.testScope,workflow:ref(null),inventoryOnly:ref(true),testScope:'A',
   fbpLoading:ref(false),fbpSyncing:ref(false),fbpError:ref(''),
   props:{modelValue:true,initialAction:'stocktake',inventoryMode:true,stocktakeEnabled:true},directStocktake:ref(true),visible:ref(true),
   loading:ref(false),saving:ref(false),data:ref(null),productId:ref(10),preview:ref(null),submission:ref(null),
@@ -19,7 +20,7 @@ function fixture(get){
   shanghaiDateKey:()=> '2026-10-28',
   apiClient:{get:async url=>{calls.push(['get',url]);return get?get(url):{product:{id:10},revision:'v',physical_estimate:-5}},
     post:async(url,body)=>{calls.push(['post',url,body]);return {ok:true}}},
-  emit:(...args)=>events.push(args),ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>calls.push(['confirm'])}
+  emit:(...args)=>events.push(args),ElMessage:{error(){},success(){},warning(){}},ElMessageBox:{confirm:async()=>calls.push(['confirm'])}
  });
  vm.runInContext("let fbpVersion=0,pollTimer,finishPoll;let loadVersion=0;let pendingInitialAction='stocktake';",context);
  for(const name of ['stopFbpPoll','load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
@@ -37,7 +38,7 @@ test('a failed load can be retried into the same small form with no stale produc
 test('saving a direct count closes the controller and refreshes the caller once without reopening detail',async()=>{
  const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20};
  await f.context.save();assert.equal(f.context.visible.value,false);assert.equal(f.context.formVisible.value,false);
- assert.equal(f.calls.filter(c=>c[0]==='get').length,1);assert.equal(f.calls.filter(c=>c[0]==='post').length,1);
+ assert.equal(f.calls.filter(c=>c[0]==='get').length,1);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory/ledger').length,1);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory-workflow/feedback').length,1);
  assert.deepEqual(f.events,[['saved']]);
 });
 test('cancelling an untouched form closes immediately; cancelling discard preserves entered stock',async()=>{
@@ -56,4 +57,15 @@ test('physical 20 means 20 actual goods even with historical negative balances',
   const plan=planLedgerAction(snapshot,body);assert.equal(plan.counted_quantity,20);assert.equal(plan.available_after,20-demand);assert.equal(plan.local_delta,20-physical);
   assert.throws(()=>planLedgerAction(snapshot,{...body,stocktake_type:'available',available_quantity:20}),/家里还有 20 件就填 20/);
  }
+});
+
+test('a notification failure after saving stock does not retry or abandon the successful count',async()=>{
+ const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20,request_key:'count-key'};
+ const post=f.context.apiClient.post;f.context.apiClient.post=async(url,body)=>{await post(url,body);if(url.endsWith('/feedback'))throw Error('notice offline');return{ok:true};};
+ await f.context.save();assert.equal(f.context.visible.value,false);assert.deepEqual(f.events,[['saved']]);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory/ledger').length,1);
+});
+test('a tenant change while the count response is pending cannot send an old product feedback under the new tenant',async()=>{
+ const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20};
+ const post=f.context.apiClient.post;f.context.apiClient.post=async(url,body)=>{const result=await post(url,body);f.context.testScope='B';return result;};
+ await f.context.save();assert.equal(f.calls.filter(c=>c[0]==='post').length,1);assert.deepEqual(f.events,[]);
 });

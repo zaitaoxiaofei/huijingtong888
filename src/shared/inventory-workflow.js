@@ -1,3 +1,4 @@
+import { inventorySupplyPlan } from './inventory-supply-plan.js';
 import { fbpSupplyState, fbpLocalSupplyNeed } from './fbp-supply-state.js';
 // One physical-unit policy for the diagram, order badges and purchasing queue.
 export const INVENTORY_DEMAND_TYPES = [
@@ -40,7 +41,19 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
     submitted_quantity: Math.max(0,...requests.filter(r => procurementDemandType(r) === type.key && ['submitted','pending'].includes(r.status)).map(r=>qty(r.quantity)))
   });
   const demands = [make(INVENTORY_DEMAND_TYPES[0], orderGap, orderBuy), make(INVENTORY_DEMAND_TYPES[1], safetyGap, safetyBuy), make(INVENTORY_DEMAND_TYPES[2], fbpGap, fbpBuy, complete && applicationKnown)];
-  const local_stock_status = ['danger','warning','unknown','success'].find(status=>demands.some(d=>d.status===status));
+  const supply_plan=inventorySupplyPlan(ledger,applications,forecast);
+  if(supply_plan.known){
+    const required=[supply_plan.required_fbs,0,supply_plan.required_fbp];
+    const optional=[0,supply_plan.optional_local,supply_plan.optional_fbp??0];
+    for(let i=0;i<demands.length;i++){
+      demands[i].required_purchase_quantity=required[i];demands[i].optional_purchase_quantity=optional[i];
+      demands[i].purchase_quantity=required[i]+optional[i];
+      if(i===1)demands[i].physical_gap=supply_plan.local_physical_gap;
+      if(i===2)demands[i].physical_gap=supply_plan.fbp_physical_gap;
+      demands[i].status=required[i]>0?'danger':optional[i]>0||demands[i].physical_gap>0?'warning':'success';
+    }
+  }
+  const local_stock_status = ['danger','warning','unknown','success'].find(status=>demands.slice(0,2).some(d=>d.status===status));
   demands[2].replenishment_quantity = fbp.replenish_quantity;
   demands[2].fbp_stock_status = fbp.status;
   if (fbp.known && fbp.shortage > 0 && demands[2].status === 'success') demands[2].status = 'warning';
@@ -52,8 +65,8 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   const opportunities = (forecast?.skus || []).filter(row => qty(row.suggested_qty) > 0);
   if (!requested && !submitted.length && opportunities.length && demands[2].status === 'success') demands[2].advisory_status = opportunities.some(row => Number(row.available) > 0) ? 'warning' : 'opportunity';
   const overall = ['danger','warning','unknown','opportunity','success'].find(status => demands.some(d => d.status === status));
-  return { demands, overall, stock_status, local_stock_status, fbp, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
-    purchase_quantity: complete && applicationKnown ? orderBuy + safetyBuy + fbpBuy : null,
+  return { demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
+    purchase_quantity: complete && applicationKnown ? demands.reduce((sum,d)=>sum+d.purchase_quantity,0) : null,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',
     requests, calculated_at: new Date().toISOString() };

@@ -1,3 +1,4 @@
+import { createFbpSupplyFeedback } from './services/fbp-supply-feedback.js';
 import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
@@ -429,7 +430,11 @@ const routes = {
   "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-  "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+  "POST /api/fbp-replenishment-orders/status": async req=>{
+    const feedback=createFbpSupplyFeedback(req._session);
+    const result=await services.updateFbpReplenishmentOrderStatus(await readJson(req),req._session?.personId,tenantIdFromRequest(req),{afterSubmit:feedback.afterSubmit});
+    return{...result,feedback:feedback.committed()};
+  },
   "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req), req._session),

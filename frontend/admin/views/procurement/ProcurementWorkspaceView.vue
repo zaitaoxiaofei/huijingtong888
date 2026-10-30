@@ -1,10 +1,20 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, UploadFilled } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
 const router = useRouter();
+const InventorySupplyWorkspace=defineAsyncComponent(()=>import('../../components/inventory/InventorySupplyWorkspace.vue'));
+const workMode=ref(route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory');
+watch(()=>route.query.mode,value=>{if(value)workMode.value=value==='inventory'?'inventory':'purchase';});
+let legacyStarted=false;
+async function startPurchaseView(){
+ if(legacyStarted)return loadRows();legacyStarted=true;
+ await Promise.all([loadRows(),loadOptions().then(resetCreateForm).catch(error=>ElMessage.error(error.message||'采购基础资料加载失败'))]);
+ void refreshWorkbench();
+}
+watch(workMode,value=>{if(value==='purchase')void startPurchaseView();});
 import { apiClient, currentApiCacheScope } from "../../utils/api.js";
 import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
@@ -1551,11 +1561,7 @@ async function saveBinding() {
 
 onMounted(async () => {
   window.addEventListener("erp:auth-scope-changed", resetMessageRequest);
-  await Promise.all([
-    loadRows(),
-    loadOptions().then(resetCreateForm).catch((error) => ElMessage.error(error.message || "采购基础资料加载失败"))
-  ]);
-  void refreshWorkbench();
+  if(workMode.value==='purchase')await startPurchaseView();
   if (Number(route.query.review_product_id) > 0) {
     await openOrderHistory({ product_id: Number(route.query.review_product_id), product_name: `核对订单 ${route.query.review_order_no || ''} 的库存来源` });
     if (orderHistoryTabs.value.some(tab => tab.key === 'missing' && tab.rows.length)) orderHistoryActiveTab.value = 'missing';
@@ -1565,6 +1571,8 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
+    <div class="procurement-mode-switch"><el-radio-group v-model="workMode" aria-label="采购工作模式"><el-radio-button value="inventory">库存需求总览</el-radio-button><el-radio-button value="purchase">采购登记与历史</el-radio-button></el-radio-group><span>需求按实物汇总，来源人、订单和店铺SKU保留追溯</span></div>
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
       <div v-loading="messageRequestLoading" style="min-height: 100px">
         <el-alert v-if="messageRequestError" :title="messageRequestError" type="error" :closable="false" show-icon />
@@ -1594,7 +1602,7 @@ onMounted(async () => {
       </el-table>
       <el-pagination :current-page="costTasks.page" :page-size="30" :total="costTasks.total" layout="total, prev, pager, next" @current-change="loadCostTasks" />
     </el-dialog>
-    <el-card shadow="never" class="page-card">
+    <el-card v-show="workMode==='purchase'" shadow="never" class="page-card">
       <ErpFilterBar>
         <el-form inline>
           <el-form-item label="需求类型">
@@ -1994,4 +2002,8 @@ onMounted(async () => {
 @media(max-width:1300px){.free-purchase-dialog .create-layout{grid-template-columns:190px minmax(0,1fr)}.free-purchase-dialog .suggestion-panel{grid-column:1/-1}}
 @media(max-width:760px){.bound-inventory-specs{flex-wrap:wrap}.bound-inventory-specs span{flex:1 1 45%}.free-purchase-price-reason,.free-purchase-price-optional{grid-template-columns:1fr}.free-purchase-price-reason>.el-input,.free-purchase-price-optional>.el-input{grid-column:1}.free-purchase-price-summary{align-items:flex-start;flex-direction:column;gap:6px}}
 @media(max-width:720px){.free-purchase-name-preview{grid-template-columns:42px minmax(0,1fr) auto}.quick-inventory-scroll{min-height:260px;max-height:420px}}
+</style>
+
+<style scoped>
+.procurement-mode-switch{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:14px 18px;background:var(--el-bg-color-overlay);border:1px solid var(--el-border-color-lighter);border-radius:12px}.procurement-mode-switch>span{font-size:12px;color:var(--el-text-color-secondary)}
 </style>

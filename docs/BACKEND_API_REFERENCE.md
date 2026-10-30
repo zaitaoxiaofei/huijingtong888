@@ -28,9 +28,31 @@ Enforcement:
 
 ## Schemas
 
+### InventorySupplyPlan
+
+One physical supply pool for required FBS/formal FBP and optional local/FBP safety procurement. Existing FBP locks remain protected and each inbound unit is used once. Planning does not reserve, receive or purchase stock.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `known` | `boolean` | Yes | Physical, local safety and application evidence are complete |
+| `required_purchase` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_purchase` | `number` | No | Sum of verified optional requirements; consult fbp_forecast_known before treating this as a complete FBP forecast |
+| `required_fbs` | `number` | No | Physical units; unknown is null, never zero |
+| `required_fbp` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_local` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_fbp` | `number` | No | Physical units; unknown is null, never zero |
+| `fbs_waiting_incoming` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_waiting_incoming` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_ready_stock` | `number` | No | Physical units; unknown is null, never zero |
+| `submitted_fbp_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `unbacked_fbp_locks` | `number` | No | Physical units; unknown is null, never zero |
+| `order_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `locked_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_forecast_known` | `boolean` | No | All bound official FBP snapshots and safety targets are verified; formal applications can still be required while the forecast is unknown |
+
 ### InventoryWorkflowDemand
 
-Shared physical-unit procurement demand, in priority order real_order, local_safety, fbp_stock. Requests are reminders, never additional physical allocation.
+Three physical-unit procurement purposes: real_order, local_safety, fbp_stock. Required FBS/formal FBP take precedence over optional safety targets; requests are reminders, never additional physical allocation.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -42,6 +64,8 @@ Shared physical-unit procurement demand, in priority order real_order, local_saf
 | `status` | `string` | Yes | danger | warning | success | opportunity | unknown |
 | `physical_gap` | `number` | No | Dispatchable physical shortage; null when unknown |
 | `purchase_quantity` | `number` | No | Net additional purchase requirement after scoped inbound allocation; null when unknown |
+| `required_purchase_quantity` | `number` | No | Required FBS or formal FBP uncovered units |
+| `optional_purchase_quantity` | `number` | No | Optional local or FBP safety uncovered units |
 | `submitted_quantity` | `number` | No | Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand |
 | `requests` | `array<object>` | No | Source requests |
 
@@ -72,6 +96,7 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | `stock_status` | `string` | No | Supply sufficiency only; pending approvals never make surplus stock yellow |
 | `demands` | `array<InventoryWorkflowDemand>` | Yes | Three priority demands |
 | `fbp` | `FbpSupplyState` | No |  |
+| `supply_plan` | `InventorySupplyPlan` | No |  |
 | `local_stock_status` | `string` | No | Local supply colour, independent of the FBP safety alert |
 | `forecast` | `object` | No | Optional current-enterprise SKU projection for the detail UI; absent from lean first paint |
 | `physical` | `number` | No | Physical units, nullable when unknown |
@@ -3004,6 +3029,17 @@ Read current enterprise inventory detail, optionally with the shared read-only f
 - Responses:
   - `200` `application/json` -> `InventoryLedgerFlowResponse`
 
+#### `POST /api/fbp-replenishment-orders/status`
+
+Run the existing enterprise FBP status writer. A new transition into pending_review resolves physical SKU components and writes supply-gap notifications in the same transaction; repeated pending status does not notify again. Existing review, reserve, shipment and receipt accounting remain in the canonical writer.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
 #### `GET /api/fbp-replenishment-orders`
 
 Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.
@@ -3317,6 +3353,13 @@ Return procurement request rows.
 Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `product_ids` (`string`, optional): 1–20 comma-separated owned product IDs; alternatively product_id
+  - `product_id` (`number`, optional): Single owned product ID
+  - `view` (`string`, optional): local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details
+  - `shop_id` (`number`, optional): Current-enterprise shop for view=sku
+  - `ozon_sku` (`string`, optional): Bound SKU for view=sku
+  - `fresh` (`string`, optional): 1 bypasses the short-lived tenant/product cache
 - Responses:
   - `200` `application/json` -> `object`
   - `403` `application/json` -> `ErrorResponse`
@@ -3340,6 +3383,10 @@ Read product warnings from the same three-demand inventory policy; severity filt
   - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `view` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|incoming|review|all; product_id focuses one owned inventory
+  - `scope` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|incoming|review|all; product_id focuses one owned inventory
+  - `task` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|incoming|review|all; product_id focuses one owned inventory
+  - `product_id` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|incoming|review|all; product_id focuses one owned inventory
   - `alertType` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
   - `sortBy` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
   - `refresh` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
@@ -3347,6 +3394,18 @@ Read product warnings from the same three-demand inventory policy; severity filt
   - `pageSize` (`number`, optional): Page index or page size, maximum100
 - Responses:
   - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-workflow/feedback`
+
+Fresh current-enterprise packing, inventory.write or procurement membership can report stock discrepancies. Recomputes the inventory supply plan and atomically notifies active scoped administrators/procurement/operations. Feedback is a notification and does not add another procurement quantity, mutate stock or change costs. FBP submission can include this notification in its existing transaction; stocktake already committed is never retried just because notification failed.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
 
 #### `POST /api/inventory-workflow/requests`
 
@@ -3383,7 +3442,7 @@ Register only actual QC-passed quantity through the existing receipt writer, pre
 
 #### `POST /api/inventory-workflow/fbp`
 
-Create or update the existing FBP replenishment draft for owned bound shop SKUs; optionally submit in the same canonical transaction. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
+Create or update the existing FBP replenishment draft for owned bound shop SKUs; optionally submit in the same canonical transaction with supply-gap notifications for active enterprise procurement/operations. All SKU quantities share one physical inventory pool; unselected related SKUs are not created. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
 
 - Auth: `authenticated`
 - Request body: required

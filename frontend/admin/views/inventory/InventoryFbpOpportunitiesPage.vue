@@ -1,6 +1,6 @@
 <script setup>
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
-import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { InfoFilled } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -12,6 +12,7 @@ import { useAuthStore } from "../../stores/auth.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../../components/procurement/ProcurementLedgerDialog.vue'));
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
@@ -22,6 +23,11 @@ const listRequestGate = createLatestRequestGate();
 let syncingRoute = false;
 let routeReady = false;
 
+const inventoryPlanning=reactive({visible:false,productId:0});
+function openInventoryPlanning(row){
+ const id=Number(row.product_id);if(!id)return ElMessage.warning('请先在SKU绑定中关联实际库存商品，再按库存备货');
+ Object.assign(inventoryPlanning,{visible:true,productId:id});
+}
 const loading = ref(false);
 const exportLoading = ref(false);
 const supplySyncLoading = ref(false);
@@ -1120,6 +1126,7 @@ onActivated(() => {
 </script>
 
 <template>
+  <ProcurementLedgerDialog v-if="inventoryPlanning.visible" v-model="inventoryPlanning.visible" :product-id="inventoryPlanning.productId" @saved="loadPageData()"/>
   <div class="inventory-page-shell inventory-card fbp-opportunity-page">
     <InventoryPageToolbar
       product-search
@@ -1365,9 +1372,10 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="160" fixed="right">
           <template #default="{ row }">
             <div class="fbp-actions-cell">
+              <el-button size="small" type="primary" @click="openInventoryPlanning(row)">同库存一起备货</el-button>
               <el-button
                 size="small"
                 class="fbp-inline-button fbp-inline-button-primary"
