@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { planReviewedAftersaleRepair, readReviewedAftersaleSnapshot, applyReviewedAftersaleRepair } from '../src/services/reviewed-aftersale-repair.js';
-import { ensureOrderProfitCalculationState } from '../src/services/order-profit-calculation-versions.js';
+import { ensureOrderProfitCalculationState, recordOrderProfitCalculation } from '../src/services/order-profit-calculation-versions.js';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 
 function snapshot(code = 686) {
@@ -46,6 +46,7 @@ test('real MySQL repair retains old revisions, scopes ownership, refuses stale i
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && 'Requires isolated local MySQL socket'
 }, async () => {
   const f = await createTenantMysqlFixture('aftersale_repair');
+  f.connection.connection.config.timezone = 'Z';
   const tx = async operation => {
     await f.connection.beginTransaction();
     try { const value = await operation(); await f.connection.commit(); return value; }
@@ -86,5 +87,20 @@ test('real MySQL repair retains old revisions, scopes ownership, refuses stale i
     await assert.rejects(tx(() => applyReviewedAftersaleRepair(f.connection, latestPlan, { ...command, commandId: 'rollback-test' })), /injected/);
     f.connection.execute = execute;
     assert.deepEqual(await readReviewedAftersaleSnapshot(f.query, 10), after);
+
+    // A production manifest serializes Date values into ISO strings. Actual
+    // finance retains its original lock, rather than invalidating that layer.
+    await f.query("UPDATE order_profit_items SET profit_status='accrued',is_locked=1,locked_at='2026-06-29 12:45:12',lock_reason='finance_accrued',other_fee_cny=0.37,net_profit_cny=-0.37 WHERE order_item_id=10");
+    await f.query("UPDATE order_items SET settlement_state='accrued',actual_profit=-0.37 WHERE id=10");
+    await tx(() => recordOrderProfitCalculation(f.connection, { tenantId: '2', orderId: 1, orderItemId: 10,
+      layer: 'actual', formulaVersion: 'V3', source: 'ozon_finance', inputCompleteness: 'complete',
+      inputs: { acquiring: 0.37 }, outputs: { net_profit_cny: -0.37 } }));
+    const serialized = JSON.parse(JSON.stringify(await readReviewedAftersaleSnapshot(f.query, 10)));
+    const settledPlan = JSON.parse(JSON.stringify(planReviewedAftersaleRepair(serialized)));
+    await tx(() => applyReviewedAftersaleRepair(f.connection, settledPlan, { ...command, commandId: 'iso-lock-test' }));
+    const final = await readReviewedAftersaleSnapshot(f.query, 10);
+    assert.equal(Number(final.profit.net_profit_cny), -0.37);
+    assert.equal(final.profit.profit_status, 'accrued');
+    assert.equal(new Date(final.profit.locked_at).toISOString(), '2026-06-29T12:45:12.000Z');
   } finally { await f.cleanup(); }
 });

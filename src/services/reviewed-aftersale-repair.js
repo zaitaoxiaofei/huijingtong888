@@ -95,7 +95,10 @@ export async function applyReviewedAftersaleRepair(connection, plan, { commandId
   await connection.execute(`UPDATE order_items SET ${Object.keys(plan.nextItem).map(field => `${field}=?`).join(',')} WHERE id=?`,
     [...Object.values(plan.nextItem), plan.order_item_id]);
   await connection.execute(`UPDATE order_profit_items SET ${Object.keys(plan.nextProfit).map(field => `${field}=?`).join(',')},updated_at=CURRENT_TIMESTAMP WHERE order_item_id=?`,
-    [...Object.values(plan.nextProfit), plan.order_item_id]);
+    [...Object.entries(plan.nextProfit).map(([field, value]) => field === 'locked_at' && value
+      ? new Date(value instanceof Date || /(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(value)) ? value : String(value).replace(' ', 'T') + 'Z')
+        .toISOString().slice(0, 19).replace('T', ' ')
+      : value), plan.order_item_id]);
   for (const layer of ['estimate', 'actual']) await recordOrderProfitCalculation(connection, {
     ...shared, layer, formulaVersion: plan.formula_after, source: 'aftersale_policy_correction',
     commandId: `${commandId}:applied:${layer}`, inputs: { reviewed_reason: plan.reason_code, before_hash: plan.before_hash,
