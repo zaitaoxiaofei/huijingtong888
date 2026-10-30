@@ -70,12 +70,16 @@ export function isReturnedOutcome(row = {}) { return ['rejected_unclaimed', 'aft
 export function buildOrderOutcomeSql(alias = 'o', dialect = 'mysql') {
   const base = previous.buildOrderOutcomeSql(alias, dialect);
   const quote = value => `'${value.toLowerCase().replace(/'/g, "''")}'`;
-  const match = kind => '(' + reviewedAftersaleReasons.filter(reason => reason.kind === kind).map(reason =>
-    `(CAST(${alias}.cancel_reason_id AS CHAR) IN (${reason.codes.map(quote).join(',')}) OR LOWER(TRIM(COALESCE(NULLIF(${alias}.cancel_reason, ''), ${alias}.cancel_type, ''))) = ${quote(reason.original)})`
-  ).join(' OR ') + ')';
+  const match = kind => {
+    const reasons = reviewedAftersaleReasons.filter(reason => reason.kind === kind);
+    return `(CAST(${alias}.cancel_reason_id AS CHAR) IN (${reasons.flatMap(reason => reason.codes).map(quote).join(',')})
+      OR LOWER(TRIM(COALESCE(NULLIF(${alias}.cancel_reason, ''), ${alias}.cancel_type, ''))) IN (${reasons.map(reason => quote(reason.original)).join(',')}))`;
+  };
   const terminal = `(${base.cancelLike} OR ${base.afterDeliveryReturn})`;
-  const reviewedCancellation = `(${terminal} AND ${match('cancellation')})`;
-  const cargoLost = `(${terminal} AND ${match('cargo_loss')})`;
+  // Most orders have no cancellation reason. Do the cheap registry lookup
+  // before expanding status/history predicates for those rows.
+  const reviewedCancellation = `(CASE WHEN ${match('cancellation')} THEN ${terminal} ELSE 0 END)`;
+  const cargoLost = `(CASE WHEN ${match('cargo_loss')} THEN ${terminal} ELSE 0 END)`;
   const remaining = `(NOT ${reviewedCancellation} AND NOT ${cargoLost})`;
   return { ...base, cargoLost,
     cancelledPreFulfillment: `(${reviewedCancellation} OR (${remaining} AND ${base.cancelledPreFulfillment}))`,
