@@ -45,9 +45,25 @@ Shared physical-unit procurement demand, in priority order real_order, local_saf
 | `submitted_quantity` | `number` | No | Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand |
 | `requests` | `array<object>` | No | Source requests |
 
+### FbpSupplyState
+
+FBP sellable-stock safety loop. Official available already excludes platform reservations; transfer receipts never directly increase it. SKU units expand to physical inventory units once.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `known` | `boolean` | Yes | All bound SKU snapshots and targets are known |
+| `status` | `string` | Yes | unknown | warning | in_transit | success |
+| `available` | `number` | No | Physical units; null until verified |
+| `safety` | `number` | No | Physical units; null until verified |
+| `shortage` | `number` | No | Physical units; null until verified |
+| `in_transit` | `number` | No | Physical units; null until verified |
+| `committed` | `number` | No | Physical units; null until verified |
+| `replenish_quantity` | `number` | No | Physical units; null until verified |
+| `rows` | `array<object>` | No | Independent per-SKU shortages, never netted across shops |
+
 ### InventoryWorkflow
 
-Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations; pending_review applications do, approved stock is already reserved.
+Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations. Verified FBP safety shortages and submitted applications share one per-SKU requirement; approved stock and transit cover it before procurement.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -55,6 +71,9 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | `overall` | `string` | Yes | Worst demand/advisory status |
 | `stock_status` | `string` | No | Supply sufficiency only; pending approvals never make surplus stock yellow |
 | `demands` | `array<InventoryWorkflowDemand>` | Yes | Three priority demands |
+| `fbp` | `FbpSupplyState` | No |  |
+| `local_stock_status` | `string` | No | Local supply colour, independent of the FBP safety alert |
+| `forecast` | `object` | No | Optional current-enterprise SKU projection for the detail UI; absent from lean first paint |
 | `physical` | `number` | No | Physical units, nullable when unknown |
 | `order_demand` | `number` | No | Physical units, nullable when unknown |
 | `safety` | `number` | No | Physical units, nullable when unknown |
@@ -73,6 +92,7 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | `batches` | `array<object>` | No | Available for full detail; light status may omit |
 | `skus` | `array<object>` | No | Available for full detail; light status may omit |
 | `opportunities` | `array<object>` | No | Available for full detail; light status may omit |
+| `transfers` | `array<object>` | No | Available for full detail; light status may omit |
 | `settings` | `object` | No | Current effective replenishment settings |
 | `forecast_error` | `string` | No | Advisory forecast unavailable; core ledger remains usable |
 
@@ -108,6 +128,7 @@ Shared read-only inventory flow. Optional forecast failure returns unavailable/m
 | `safety_status` | `string` | No | Forecast completeness and interpretation. |
 | `orders` | `array<object>` | No | Current open orders, without finance fields. |
 | `applications` | `array<object>` | No | Active FBP requests and reservations; request quantity is not deducted again. |
+| `transfers` | `array<object>` | No | Read-only receipt evidence; never updates official available |
 | `purchases` | `array<object>` | No | Nonfinancial pending-purchase summary. |
 | `safety_rows` | `array<object>` | No | Per-SKU forecast basis. |
 | `calculated_at` | `string` | No | UTC calculation time; UI formats Beijing time. |
@@ -3245,7 +3266,7 @@ Read product warnings from the same three-demand inventory policy; severity filt
 
 #### `POST /api/inventory-workflow/requests`
 
-Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires a submitted replenishment application; FBS requires a matching unfulfilled local order.
+Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires either a submitted replenishment application or a verified official sellable-stock safety shortage not covered by transit/confirmed stock; FBS requires a matching unfulfilled local order.
 
 - Auth: `authenticated`
 - Request body: required

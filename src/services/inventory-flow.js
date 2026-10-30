@@ -57,6 +57,8 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
         SUM(CASE WHEN o.ordered_at >= ? AND o.ordered_at < ? THEN oi.quantity ELSE 0 END) AS w4,
         SUM(CASE WHEN o.ordered_at >= ? THEN oi.quantity ELSE 0 END) AS d14,
         SUM(oi.quantity) AS d60,
+        SUM(CASE WHEN o.ordered_at >= ? AND EXISTS (SELECT 1 FROM ozon_orders_raw raw
+          WHERE raw.store_id=o.shop_id AND raw.posting_number=o.posting_number AND raw.query_stock_location IN ('FBP','OGR')) THEN oi.quantity ELSE 0 END) AS fbp14,
         SUM(CASE WHEN o.ordered_at >= ? AND NOT EXISTS (SELECT 1 FROM ozon_orders_raw raw
           WHERE raw.store_id = o.shop_id AND raw.posting_number = o.posting_number AND raw.query_stock_location IN ('FBP','OGR')) THEN oi.quantity ELSE 0 END) AS fbs7
         FROM orders o JOIN shops shop ON shop.id = o.shop_id AND ${inventoryTenantSql(scope, "shop")}
@@ -66,7 +68,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
           AND NOT EXISTS (SELECT 1 FROM order_items newer WHERE newer.order_id = oi.order_id
             AND newer.ozon_sku = oi.ozon_sku AND newer.id > oi.id)
         GROUP BY o.shop_id, oi.ozon_sku`, [
-        dayStart(7), dayStart(14), dayStart(7), dayStart(21), dayStart(14), dayStart(28), dayStart(21), dayStart(14), dayStart(7),
+        dayStart(7), dayStart(14), dayStart(7), dayStart(21), dayStart(14), dayStart(28), dayStart(21), dayStart(14), dayStart(14), dayStart(7),
         ...skus.flatMap(row => [row.shop_id, row.ozon_sku]), dayStart(60), dayStart(0)
       ]);
       const transit = await q(`SELECT f.shop_id, f.ozon_sku, SUM(GREATEST(f.quantity - f.listed_quantity, 0)) AS quantity
@@ -74,7 +76,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
         WHERE f.status IN ('sent','in_transit','received') AND (${skus.map(() => '(f.shop_id = ? AND f.ozon_sku = ?)').join(' OR ')})
         GROUP BY f.shop_id, f.ozon_sku`, skus.flatMap(row => [row.shop_id, row.ozon_sku]));
       const planned = await q(`SELECT i.shop_id, i.ozon_sku,
-        SUM(CASE WHEN o.status IN ('draft','pending_review') THEN i.requested_qty ELSE 0 END) AS pending_qty,
+        SUM(CASE WHEN o.status IN ('pending_review') THEN i.requested_qty ELSE 0 END) AS pending_qty,
         SUM(CASE WHEN o.status IN ('approved','ozon_created') THEN GREATEST(0,i.approved_qty + COALESCE((SELECT SUM(a.adjustment_qty) FROM fbp_replenishment_item_adjustments a WHERE a.item_id = i.id),0)) ELSE 0 END) AS committed_qty
         FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id
         JOIN shops s ON s.id = o.shop_id AND ${inventoryTenantSql(scope, 's')}

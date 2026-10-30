@@ -55,7 +55,8 @@ export function calculateFlowProduct(product, balance, skus, settings, today) {
   let localSafety = 0;
   const detailed = skus.map(sku => {
     const perSet = Number(sku.per_set_quantity || 1);
-    const daily = Number(sku.sales.d14 || 0) / 14;
+    const daily = Number(sku.sales.fbp14 ?? sku.sales.d14 ?? 0) / 14;
+    const historicalDaily = Number(sku.sales.d14 || 0) / 14;
     const localDaily = Number(sku.sales.fbs7 || 0) / 7;
     const available = sku.available == null ? null : Math.max(0, Number(sku.available));
     const coverage = available != null && daily > 0 ? available / daily : null;
@@ -63,13 +64,13 @@ export function calculateFlowProduct(product, balance, skus, settings, today) {
     // Only physically sold FBP stock moves predicted demand away from local stock.
     // Existing in-transit is shown separately, without treating it as already sellable.
     const localNeed = available > 0
-      ? daily * Math.max(0, fbpDays - (coverage ?? fbpDays))
+      ? historicalDaily * Math.max(0, fbpDays - (historicalDaily > 0 ? available / historicalDaily : fbpDays))
       : localDaily * localDays;
     localSafety += localNeed * perSet;
     const category = classifyFlowSku(sku.sales, Number(product.created_days), settings);
     const fbpTarget = Math.ceil(daily * fbpDays);
     const shortage = available == null ? null : Math.max(0, fbpTarget - available - incoming - Number(sku.committed_qty || 0));
-    const recommended = available == null ? null : (shortage > 0 && (available > 0 || incoming > 0 || ["爆品", "潜力品"].includes(category)) ? Math.max(5, Math.ceil(shortage)) : 0);
+    const recommended = available == null ? null : (shortage > 0 && fbpTarget > 0 ? Math.max(5, Math.ceil(shortage)) : 0);
     return { ...sku, daily_sales: daily, local_daily_sales: localDaily, category,
       coverage_days: coverage, fbp_target: fbpTarget, suggested_qty: recommended,
       status: available == null ? "库存未同步" : available > 0 ? (coverage != null && coverage < fbpDays ? "FBP需补货／本地接替保障" : "FBP可售") : incoming > 0 ? "转FBP运输中" : "本地供货" };

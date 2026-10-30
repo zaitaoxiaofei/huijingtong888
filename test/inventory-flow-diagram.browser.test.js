@@ -13,7 +13,7 @@ const orders = [
 ];
 const ledger = { product: { id: 1 }, physical_estimate: 200, open_order_demand: 10, fbp_reserved: 90,
   incoming_quantity: 300, current_incoming: 0, available_estimate: 100,
-  last_stocktake_at: '2026-10-28T09:32:00Z', fbp_inventory: { incomplete: true },
+  last_stocktake_at: '2026-10-28T09:32:00Z', fbp_inventory: { incomplete: false, present:8,available:5,synced_at:'2026-10-30T01:00:00Z',rows:[{shop_id:20,shop_name:'店铺A',ozon_sku:'SKU-A',root_product_id:1,per_set_quantity:1,present:8,available:5,reserved:3,inventory_quantity:8,synced_at:'2026-10-30T01:00:00Z'}] },
   flow_summary: { safety: 100, free: 0, requested: 150, local_days: 10, fbp_days: 17,
     safety_status: '未来需求，不含实际订单', orders,
     applications: [{ order_id: 31, order_no: 'FBP-A', shop_name: '店铺A', ozon_sku: 'SKU-A', applicant_name: '运营小李', requested_quantity: 150, locked_quantity: 90, status: 'approved' }],
@@ -27,7 +27,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'inventory-flow-fixture', resolveId(id) { if (id === 'virtual:flow') return '\0flow'; },
-      load(id) { if (id === '\0flow') return `import { createApp, ref, h } from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import 'element-plus/theme-chalk/dark/css-vars.css'; import {createRouter,createMemoryHistory} from 'vue-router'; import Flow from '/frontend/admin/components/procurement/InventoryFlowDiagram.vue'; const router=createRouter({history:createMemoryHistory(),routes:[{path:'/:pathMatch(.*)*',component:{template:'<div />'}}]}); const ledger=ref(${JSON.stringify(ledger)});window.testLedger=ledger;router.afterEach(to=>window.lastFlowNavigation=to.fullPath);const app=createApp({setup(){return ()=>h(Flow,{ledger:ledger.value})}});app.use(ElementPlus).use(router).mount('#app');`; }
+      load(id) { if (id === '\0flow') return `import { createApp, ref, h, computed } from 'vue';import {inventoryWorkflow} from '/src/shared/inventory-workflow.js'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import 'element-plus/theme-chalk/dark/css-vars.css'; import {createRouter,createMemoryHistory} from 'vue-router'; import Flow from '/frontend/admin/components/procurement/InventoryFlowDiagram.vue'; const router=createRouter({history:createMemoryHistory(),routes:[{path:'/:pathMatch(.*)*',component:{template:'<div />'}}]}); const ledger=ref(${JSON.stringify(ledger)});window.testLedger=ledger;const workflow=computed(()=>inventoryWorkflow(ledger.value,{forecast:{skus:[{shop_id:20,ozon_sku:'SKU-A',per_set_quantity:1,available:5,fbp_target:200,in_transit:5,committed_qty:90}]}}));router.afterEach(to=>window.lastFlowNavigation=to.fullPath);const app=createApp({setup(){return ()=>h(Flow,{ledger:ledger.value,workflow:workflow.value})}});app.use(ElementPlus).use(router).mount('#app');`; }
     }], build: { outDir: output, cssCodeSplit: false, rollupOptions: { input: 'virtual:flow', output: { entryFileNames: 'entry.js' } } } });
     browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
     const page = await browser.newPage(); const errors = [];
@@ -35,6 +35,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
       if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><style>body{margin:0;background:var(--el-bg-color)}#app{padding:20px;max-width:1360px;margin:auto}</style></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
+      if(url.pathname.startsWith('/api/'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="84"><rect width="64" height="84" fill="#cbd5e1"/></svg>'});
       const asset = url.pathname === '/style.css' ? path.join('assets', (await fs.readdir(path.join(output, 'assets'))).find(name => name.endsWith('.css'))) : url.pathname.slice(1);
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
     });
@@ -51,9 +52,10 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     await page.locator('.inventory-flow-popover:visible').getByText('申请人 运营小李 · 已审核待发', { exact: true }).waitFor();
     await page.locator('[data-node="application"]').click();
     assert.equal(await page.evaluate(() => window.lastFlowNavigation), '/inventory/fbp-replenishment?orderId=31');
+    assert.match(await page.locator('[data-node="incoming"] .flow-icon svg').evaluate(el=>getComputedStyle(el).animationName),/^stock-transit/);
     await page.emulateMedia({reducedMotion:'reduce'});
     await page.locator('[data-node="fbp-physical"]').click();
-    const fbpDetail=page.getByRole('region',{name:'FBP官方库存核对明细',exact:true});
+    const fbpDetail=page.getByRole('region',{name:'FBP可用库存明细',exact:true});
     await fbpDetail.waitFor();
     assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'click focuses the expanded detail');
     assert.ok((await fbpDetail.boundingBox()).y>=0,'expanded detail is positioned in view');
@@ -61,6 +63,8 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     await page.getByRole('button',{name:'查看有库存 SKU',exact:true}).click();
     await fbpDetail.waitFor();
     assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'toolbar shares the direct detail behavior');
+    await page.locator('[data-node="fbp-physical"]').getByText('5 件',{exact:true}).waitFor();
+    await page.locator('.flow-fbp-feedback').getByText('FBP可用低于安全库存目标',{exact:true}).waitFor();
     await page.locator('[data-node="safety"]').click();
     await fs.mkdir('.verification', { recursive: true });
     for (const [width, height, dark] of [[1920,1080,false],[1920,1080,true],[1366,900,false],[1366,900,true],[390,844,false]]) {
@@ -70,13 +74,14 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
       await page.locator('.inventory-flow-popover:visible').first().waitFor({ state: 'hidden' });
       await page.locator('.flow-canvas').screenshot({ path: `.verification/inventory-flow-${width}-${dark ? 'dark' : 'light'}.png`, animations: 'disabled' });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}`);
-      assert.equal(await page.locator('.flow-node').count(), 12);
+      assert.equal(await page.locator('.flow-node').count(), 15);
+      assert.equal(await page.locator('.flow-lane').count(), 3);
+      assert.equal(await page.locator('.flow-icon svg').count(),15);
       if (width >= 1366) {
-        const positions=await page.locator('[data-node="physical"], [data-node="free"], [data-node="incoming"]').evaluateAll(nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.node,{x:node.getBoundingClientRect().x,y:node.getBoundingClientRect().y}])));
-        assert.ok(positions.physical.x<positions.free.x&&positions.free.x<positions.incoming.x,'local supply, allocation and procurement form separate stages');
-        await page.locator('[data-edge="incoming-receiving"]').waitFor({state:'attached'});
-        await page.locator('[data-edge="fbp-physical-application"]').waitFor({state:'attached'});
-        await page.locator('[data-node="free"]').getByText('可用库存', { exact: true }).waitFor();
+        const positions=await page.locator('.flow-lane').evaluateAll(nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.lane,node.getBoundingClientRect().y])));
+        assert.ok(positions.purchase<positions.local&&positions.local<positions.fbp,'procurement, local allocation and FBP are separate lanes');
+        await page.locator('[data-node="free"]').getByText('本地可用库存', { exact: true }).waitFor();
+        assert.equal(await page.locator('[data-node="incoming"] .flow-icon svg').evaluate(el=>getComputedStyle(el).animationName),'none','reduced motion disables transit animation');
       }
       const fits = await page.locator('.flow-node').evaluateAll(nodes => nodes.every(n => n.scrollWidth <= n.clientWidth + 1));
       assert.equal(fits, true, `node labels fit at ${width}`);

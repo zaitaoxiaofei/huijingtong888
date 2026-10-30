@@ -68,14 +68,19 @@ function productFbpMappingsQuery(productId,scope){
     GROUP BY candidates.shop_id, candidates.ozon_sku, shop.name, recipe.id, sm.product_id`,args:Array(6).fill(productId)};
 }
 
-export async function loadProductsFbpStockTotals(query,productIds,scope){
+export async function loadProductsFbpStockDetails(query,productIds,scope){
   const ids=[...new Set(productIds.map(Number))];if(!ids.length)return new Map();
   if(ids.some(id=>!Number.isSafeInteger(id)||id<=0))throw new Error('Invalid inventory product IDs');
   const statements=ids.map(id=>({id,...productFbpMappingsQuery(id,scope)}));
   const mappings=await query(statements.map(item=>`SELECT ? AS inventory_product_id,mapped.* FROM (${item.sql}) mapped`).join(' UNION ALL '),statements.flatMap(item=>[item.id,...item.args]));
   const pairs=[...new Map(mappings.map(row=>[`${row.shop_id}:${row.ozon_sku}`,row])).values()];
   const stocks=pairs.length?await query(`SELECT shop_id,ozon_sku,warehouse_id,warehouse_name,present,available,reserved,synced_at FROM ozon_stock_snapshots WHERE stock_type='fbp_real' AND (${pairs.map(()=>'(shop_id=? AND ozon_sku=?)').join(' OR ')})`,pairs.flatMap(row=>[row.shop_id,row.ozon_sku])):[];
-  return new Map(ids.map(id=>{const bound=mappings.filter(row=>Number(row.inventory_product_id)===id);const value=summarizeFbpInventory(bound,stocks);return[id,{present:bound.length?(value.incomplete?null:value.present):0,incomplete:value.incomplete&&bound.length>0}];}));
+  return new Map(ids.map(id=>[id,summarizeFbpInventory(mappings.filter(row=>Number(row.inventory_product_id)===id),stocks)]));
+}
+
+export async function loadProductsFbpStockTotals(query,productIds,scope){
+  const details=await loadProductsFbpStockDetails(query,productIds,scope);
+  return new Map([...details].map(([id,value])=>[id,{present:value.rows.length?(value.incomplete?null:value.present):0,incomplete:value.incomplete&&value.rows.length>0}]));
 }
 
 export async function loadProductFbpStocks(query, productId, scope = null) {
