@@ -9,6 +9,7 @@ const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialProductId: { type: [Number, String, null], default: null },
   lockProduct: { type: Boolean, default: false },
+  initialQuantity: { type: Number, default: 1 },
   sourceOrderContext: { type: Object, default: () => ({}) },
   sourceRequestIds: { type: Array, default: () => [] }
 });
@@ -53,6 +54,7 @@ function createDefaultForm() {
 
 function resetForm() {
   Object.assign(form, createDefaultForm());
+  if(Number.isSafeInteger(props.initialQuantity)&&props.initialQuantity>0)form.quantity=props.initialQuantity;
   if (props.lockProduct && props.initialProductId) form.product_id = Number(props.initialProductId);
   productQuery.value = "";
 }

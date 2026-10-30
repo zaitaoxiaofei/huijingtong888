@@ -2,19 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {inventoryWorkflow,procurementDemandType} from '../src/shared/inventory-workflow.js';
 const base={physical_estimate:200,open_order_demand:10,fbp_reserved:0,current_shortage:0,incoming_quantity:0,current_incoming:0,flow_summary:{safety:100,local_days:10,applications:[]}};
-test('allocation protects actual orders, then safety, then submitted FBP; draft never buys',()=>{
+test('procurement covers formal FBP after actual orders before optional safety; draft never buys',()=>{
  const draft=inventoryWorkflow(base,{applications:[{status:'draft',requested_quantity:300}]});
  assert.equal(draft.free,90);assert.equal(draft.requested,0);assert.equal(draft.purchase_quantity,0);assert.equal(draft.demands[2].status,'success');assert.equal(draft.demands[2].process_status,'draft');
  const submitted=inventoryWorkflow(base,{applications:[{status:'pending_review',requested_quantity:150}]});
- assert.deepEqual(submitted.demands.map(d=>d.purchase_quantity),[0,0,60]);assert.equal(submitted.purchase_quantity,60);assert.equal(submitted.free,90);
+ assert.deepEqual(submitted.demands.map(d=>d.purchase_quantity),[0,60,0]);assert.equal(submitted.purchase_quantity,60);assert.equal(submitted.free,90);
 });
 test('confirmed FBP is locked exactly once; historical shipment never creates a new shortage',()=>{
  const state=inventoryWorkflow({...base,fbp_reserved:90},{applications:[{status:'approved',requested_quantity:150},{status:'sent',requested_quantity:300}]});
  assert.equal(state.free,0);assert.equal(state.purchase_quantity,0);assert.equal(state.requested,0);
 });
-test('inbound is consumed by actual shortage, safety, then FBP, without increasing physical availability',()=>{
+test('inbound covers actual orders and formal FBP before optional safety without increasing physical availability',()=>{
  const state=inventoryWorkflow({...base,physical_estimate:3,open_order_demand:10,current_shortage:0,current_incoming:7,incoming_quantity:120},{applications:[{status:'pending_review',requested_quantity:20}]});
- assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,0,7]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'warning');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
+ assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,7,0]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'warning');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
 });
 test('unknown physical, protection or application data never claims a known procurement total',()=>{
  for(const patch of [{physical_estimate:-1},{physical_estimate:null},{flow_summary:{safety:null,applications:[]}}]){

@@ -42,6 +42,9 @@ const profileAvatarUploading = ref(false);
 const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
 let mobileViewportQuery = null;
 let notificationRefreshTimer = 0;
+let notificationEventTimer = 0;
+function queueNotificationRefresh(){window.clearTimeout(notificationEventTimer);notificationEventTimer=window.setTimeout(()=>loadNotifications({quiet:true}),250);}
+function resetNotificationsForScope(){notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;queueNotificationRefresh();}
 const notificationDrawerVisible = ref(false);
 const notificationLoading = ref(false);
 const notifications = ref([]);
@@ -767,6 +770,8 @@ onMounted(() => {
   window.addEventListener("app:plugin-update", handlePluginUpdate);
   window.addEventListener("app:plugin-update-clear", clearPluginUpdate);
   window.addEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
+  window.addEventListener('erp:system-notification',queueNotificationRefresh);
+  window.addEventListener('erp:auth-scope-changed',resetNotificationsForScope);
   loadNotifications({ quiet: true });
   notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
 });
@@ -778,6 +783,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
   window.removeEventListener("app:plugin-update-clear", clearPluginUpdate);
   window.removeEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
+  window.removeEventListener('erp:system-notification',queueNotificationRefresh);
+  window.removeEventListener('erp:auth-scope-changed',resetNotificationsForScope);
+  window.clearTimeout(notificationEventTimer);
   window.clearInterval(notificationRefreshTimer);
   window.clearTimeout(routeSwitchTimer);
 });

@@ -5793,6 +5793,7 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
     created.push({ id: orderId, order_no: orderNo, shop_id: shopId, order_date: orderDate, item_count: rows.length, inserted_count: insertedCount, updated_count: updatedCount });
   }
   await requireCurrentProcurementActorMysql(scope, userId, connection, permission);
+  if(options.workflow&&options.submit&&options.afterSubmit)await options.afterSubmit(connection,created);
   return { ok: true, rows: created };
   });
   invalidateOrderProcurementCoverage();
@@ -6515,7 +6516,7 @@ export async function deleteFbpReplenishmentOrderItemMysql(body = {}, userId = n
   return { ok: true, order_id: orderId, item_id: itemId, deleted: true, order_deleted: orderDeleted, deleted_by: userId || null };
 }
 
-export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null, tenantId = "admin") {
+export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   await assertInventoryMember(scope, userId);
@@ -6581,6 +6582,10 @@ export async function updateFbpReplenishmentOrderStatusMysql(body = {}, userId =
     }
     if (status === "sent" && ["approved", "ozon_created"].includes(currentStatus)) {
       approvalResult = await createFbpReplenishmentApprovedTransfersMysql(connection, id, userId, scope);
+    }
+    if(status==='pending_review'&&currentStatus!=='pending_review'&&options.afterSubmit){
+      const [submitted]=await connection.execute('SELECT shop_id,ozon_sku FROM fbp_replenishment_order_items WHERE order_id=?',[id]);
+      await options.afterSubmit(connection,submitted);
     }
   });
   invalidateFbpPlanningCachesMysql();

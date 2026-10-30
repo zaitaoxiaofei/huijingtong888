@@ -1,7 +1,7 @@
 <script setup>
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
-import { computed, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
@@ -16,6 +16,9 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
+const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../../components/procurement/ProcurementLedgerDialog.vue'));
+const stockFlow=reactive({visible:false,productId:0});
+function openStockFlow(row){const id=Number(row.product_id||row.items?.[0]?.product_id||row.inventory_key);if(!id)return ElMessage.warning('请先关联实际库存商品后核对');Object.assign(stockFlow,{visible:true,productId:id});}
 const authStore = useAuthStore();
 const route = useRoute();
 const router = useRouter();
@@ -1244,6 +1247,7 @@ onActivated(() => void loadPageData());
 </script>
 
 <template>
+  <ProcurementLedgerDialog v-if="stockFlow.visible" v-model="stockFlow.visible" :product-id="stockFlow.productId" @saved="loadPageData()"/>
   <div class="inventory-page-shell inventory-card">
     <el-alert v-if="focusedOrderId" type="info" :closable="false" class="focused-replenishment-notice">
       <template #title>当前仅查看库存明细关联的 FBP 备货单 #{{ focusedOrderId }}</template>
@@ -1274,7 +1278,7 @@ onActivated(() => void loadPageData());
         <el-table-column label="FBP 待入仓" width="115" align="center"><template #default="{ row }">{{ row.pending_receipt_qty ?? '—' }}</template></el-table-column>
         <el-table-column label="上次实际发货" width="160" align="center"><template #default="{ row }"><div v-if="row.last_shipped_at">{{ integer(row.last_shipped_qty) }} 件<small class="warehouse-secondary">{{ dateText(row.last_shipped_at) }}</small></div><span v-else>暂无记录</span></template></el-table-column>
         <el-table-column :label="state.filters.status === 'pending_dispatch' ? '本次备货' : '筛选备货合计'" width="155" align="right" class-name="warehouse-quantity"><template #default="{ row }"><strong>{{ integer(row.final_qty) }}</strong> 件<small v-if="row.local_stock !== null && row.pending_dispatch_qty > row.local_stock" class="warehouse-shortage">待发货本地缺 {{ row.pending_dispatch_qty - row.local_stock }} 件</small></template></el-table-column>
-        <el-table-column label="操作" width="295" fixed="right" align="center"><template #default="{ row }"><div class="warehouse-actions"><el-button size="small" @click="openWarehouseDetail(row)">查看明细</el-button><el-button size="small" type="primary" @click="openGroupPrint(row)">打印标签</el-button><el-button size="small" type="warning" plain @click="createInventoryProcurement(row)">采购申请</el-button></div><small class="warehouse-secondary">标签已确认 {{ row.printed_qty }} / 应打 {{ row.target_labels }}</small></template></el-table-column>
+        <el-table-column label="操作" width="295" fixed="right" align="center"><template #default="{ row }"><div class="warehouse-actions"><el-button size="small" type="primary" plain @click="openStockFlow(row)">库存核对与反馈</el-button><el-button size="small" @click="openWarehouseDetail(row)">查看明细</el-button><el-button size="small" type="primary" @click="openGroupPrint(row)">打印标签</el-button><el-button size="small" type="warning" plain @click="createInventoryProcurement(row)">采购申请</el-button></div><small class="warehouse-secondary">标签已确认 {{ row.printed_qty }} / 应打 {{ row.target_labels }}</small></template></el-table-column>
       </el-table>
     </div>
 
@@ -1446,7 +1450,7 @@ onActivated(() => void loadPageData());
           <template #default="{ row }">
             <div class="metric-stack">
               <strong>本地 {{ integer(row.local_stock) }}</strong>
-              <span>FBS {{ integer(row.fbs_available) }}</span>
+              <span>FBS {{ integer(row.fbs_available) }}</span><el-button link type="primary" @click="openStockFlow(row)">核对与反馈</el-button>
               <span>采购中 {{ integer(row.pending_procurement_qty) }}</span>
             </div>
           </template>

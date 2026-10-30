@@ -30,7 +30,7 @@ function expand(row,expanded){if(expanded.some(item=>key(item)===key(row)))void 
      <p v-if="details[key(row)].data.root">绑定库存：{{details[key(row)].data.root.inventory_number}} · {{details[key(row)].data.root.name}}</p>
      <p>下列数量是每套SKU包含的库存单位；仅高亮当前查看的库存，不把整套数量重复算入每个子产品。</p>
      <div v-for="part in details[key(row)].data.components" :key="part.product_id" class="fbp-component" :class="{'is-current':part.current}">
-      <ProductImagePreview :src="part.image_url" size="portrait" /><div><strong>{{part.name}}</strong><p>库存 {{part.inventory_number||part.product_id}} · 每套 {{part.quantity}} {{part.stock_unit||'份'}}</p><el-tag v-if="part.current" size="small">当前查看库存</el-tag></div>
+      <ProductImagePreview :src="part.image_url" size="portrait" /><div><strong>{{part.name}}</strong><p>库存 {{part.inventory_number||part.product_id}} · 每套 {{part.quantity}} {{part.stock_unit||'份'}}</p><el-tag v-if="part.current" size="small">当前查看库存</el-tag><el-button v-else link type="primary" @click="$router.push(`/inventory/products/${part.product_id}`)">查看此实物库存</el-button></div>
      </div>
     </template>
    </section>

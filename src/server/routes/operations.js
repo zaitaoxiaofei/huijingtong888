@@ -1,3 +1,6 @@
+import { createFbpSupplyFeedback } from '../../services/fbp-supply-feedback.js';
+import { inventorySupplyFeedback } from '../../services/inventory-supply-feedback.js';
+import { inventoryWorkspacePage } from '../../shared/inventory-workspace.js';
 import { createInventoryWorkflowService } from '../../services/inventory-workflow.js';
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from '../../services/business-task-tenant.js';
 import { createWarehouseStockTopup } from '../../services/warehouse-stock-topup.js';
@@ -59,12 +62,19 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/inventory-workflow/alerts": async (req,url)=>{
       const session=await authorizeBusinessTaskSession(req._session);assertBusinessTaskPermission(session,'inventory.read');
       const params=Object.fromEntries(url.searchParams);
-      const base=await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
+      const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
       const raw=Array.isArray(base)?base:base.rows||[];
       const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
-      const states=ids.length?await workflow.batch(ids,session.tenant.id,{fresh:params.refresh==='1'}):[];
+      const states=[];for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
       const byId=new Map(states.map(state=>[state.product_id,state]));
       const all=raw.map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
+      if(params.view==='workspace'){
+        const result=inventoryWorkspacePage(all,params);
+        const pageIds=result.rows.map(r=>Number(r.product_id));
+        const [batches,feedbacks]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),workflow.workspaceFeedback(pageIds,session.tenant.id)]);
+        const byProduct=new Map();for(const batch of batches){const id=Number(batch.product_id);if(!byProduct.has(id))byProduct.set(id,[]);byProduct.get(id).push(batch);}
+        return{...result,rows:result.rows.map(row=>({...row,pending_batches:byProduct.get(Number(row.product_id))||[],feedbacks:feedbacks.filter(f=>Number(f.product_id)===Number(row.product_id)).slice(0,5)}))};
+      }
       const status=params.alertType||'all',rows=all.filter(row=>status==='all'||row.workflow?.overall===status);
       const sortKey=['recent_7d_qty','recent_15d_qty','recent_30d_qty'].includes(params.sortBy)?params.sortBy:'recent_30d_qty';
       const rank={danger:0,warning:1,unknown:2,opportunity:3,success:4};rows.sort((a,b)=>(rank[a.workflow?.overall]??2)-(rank[b.workflow?.overall]??2)||Number(b[sortKey])-Number(a[sortKey]));
@@ -101,8 +111,11 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
         if(!sku?.mapping_id || seen.has(key) || !Number.isSafeInteger(Number(row.quantity)) || Number(row.quantity)<1 || Number(row.quantity)>1000000) throw Object.assign(new Error('SKU绑定或件数无效，请先核对绑定；一个SKU只能提交一次'),{statusCode:400});
         seen.add(key); return {...sku,requested_qty:Number(row.quantity)};
       });
-      return services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true});
+      const feedback=createFbpSupplyFeedback(session);
+      const result=await services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true,afterSubmit:connection=>feedback.afterSubmit(connection,rows)});
+      return{...result,feedback:feedback.committed()};
     },
+    "POST /api/inventory-workflow/feedback": async req=>{const body=await readJson(req);return inventorySupplyFeedback(body,req._session,{automatic:body.automatic===true});},
     "POST /api/inventory-workflow/requests": async req => workflow.submit(await readJson(req),req._session),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

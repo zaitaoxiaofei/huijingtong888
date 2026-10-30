@@ -281,6 +281,10 @@ function openUpdateEventStream() {
       console.warn("parse AI task event failed", error);
     }
   });
+  updateEventSource.addEventListener("system-notification",()=>{
+    if(!currentStream())return;
+    window.dispatchEvent(new CustomEvent('erp:system-notification',{detail:{scope:currentApiCacheScope()}}));
+  });
   updateEventSource.addEventListener("sku-order-tracking", (event) => {
     if (!currentStream()) return;
     try {

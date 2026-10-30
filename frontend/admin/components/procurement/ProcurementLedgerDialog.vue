@@ -374,9 +374,14 @@ async function save() {
   if (!submission.value || saving.value) return;
   if (inventoryOnly.value && submission.value.action_type !== 'stocktake') return;
   saving.value = true;
+  const savedScope=currentApiCacheScope(),savedProductId=productId.value,submitted={...submission.value};
   try {
-    await apiClient.post(ledgerBase.value, submission.value);
+    await apiClient.post(ledgerBase.value, submitted);
+    if(savedScope!==currentApiCacheScope())return;
     ElMessage.success('已保存对账记录，库存和历史缺口已重新计算');
+    try{await apiClient.post('/api/inventory-workflow/feedback',{product_id:savedProductId,request_key:submitted.request_key,note:`库存核对已保存：${submitted.reason_note||submitted.reason_code||submitted.action_type}，请核对订单和备货缺口。`.slice(0,500),automatic:true});}
+    catch(error){ElMessage.warning(`库存已保存，缺口反馈未送达：${error.message}；可从库存管理重新反馈`);}
+    if(savedScope!==currentApiCacheScope())return;
     formVisible.value = false;
     if (directStocktake.value) { visible.value = false; emit('saved'); return; }
     await load();

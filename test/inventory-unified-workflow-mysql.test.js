@@ -155,5 +155,83 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const broken=createInventoryWorkflowService({...opts,transaction:run=>withMysqlTransaction(c=>run({query:c.query.bind(c),execute:(sql,args)=>sql.includes('INSERT INTO system_notifications')?Promise.reject(new Error('notice failure')):c.execute(sql,args)}))});
   await assert.rejects(broken.submit(body(),session),/notice failure/);assert.equal(Number((await q('SELECT COUNT(*) n FROM procurement_requests'))[0].n),before);
  });
+ await t.test('workspace includes never-stocked physical products but excludes foreign and virtual duplicate parents',async()=>{
+  await q("INSERT INTO products(id,tenant_id,name,active) VALUES(9302,2,'Never stocked physical',1),(9303,2,'Virtual parent',1)");
+  await q("INSERT INTO product_components(tenant_id,product_id,component_product_id,quantity) VALUES(2,9303,9302,2)");
+  const products=await service.workspaceProducts({},2);
+  assert.ok(products.some(p=>Number(p.product_id)===9302));assert.ok(!products.some(p=>[9303,300].includes(Number(p.product_id))));
+  assert.deepEqual(await service.workspaceProducts({query:'B private'},2),[]);
+  await q("UPDATE products SET inventory_number='9-302' WHERE id=9302");
+  assert.deepEqual((await service.workspaceProducts({query:'9-302',searchMode:'inventory_id'},2)).map(p=>Number(p.product_id)),[9302]);
+  assert.ok((await service.workspaceProducts({query:'BUNDLE-202',searchMode:'sku'},2)).some(p=>Number(p.product_id)===200),'SKU search expands a virtual bundle to physical inventory');
+  assert.deepEqual(await service.workspaceProducts({query:'30001',searchMode:'sku'},2),[]);
+  const batches=await service.workspaceBatches([200,300],2);assert.ok(batches.every(b=>Number(b.product_id)===200));
+ });
+ await t.test('SKU supply feedback resolves physical components and recipe overrides without virtual or foreign purchases',async()=>{
+  const {fbpSupplyProductIds}=await import('../src/services/fbp-supply-products.js');
+  await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,active) VALUES(9303,2,9303,20,'VIRTUAL-SKU',1)");
+  assert.deepEqual(await fbpSupplyProductIds(q,[{shop_id:20,ozon_sku:'VIRTUAL-SKU'}],2),[9302]);
+  await q("INSERT INTO sku_inventory_recipes(id,shop_id,ozon_sku,active) VALUES(9303,20,'VIRTUAL-SKU',1)");
+  await q("INSERT INTO sku_inventory_recipe_items(recipe_id,product_id,quantity) VALUES(9303,200,2)");
+  assert.deepEqual(await fbpSupplyProductIds(q,[{shop_id:20,ozon_sku:'VIRTUAL-SKU'}],2),[200]);
+  await q("INSERT INTO sku_inventory_recipe_items(recipe_id,product_id,quantity) VALUES(9303,300,1)");
+  await assert.rejects(fbpSupplyProductIds(q,[{shop_id:20,ozon_sku:'VIRTUAL-SKU'}],2),{statusCode:403});
+  await q('DELETE FROM sku_inventory_recipe_items WHERE recipe_id=9303 AND product_id=300');
+ });
+ await t.test('FBP submission notification failure rolls back the canonical request instead of leaving an unnoticed formal demand',async()=>{
+  const before=await q('SELECT id,status,submitted_at,note FROM fbp_replenishment_orders ORDER BY id');
+  const items=await q('SELECT id,requested_qty,approved_qty,note FROM fbp_replenishment_order_items ORDER BY id');
+  await assert.rejects(legacy.createFbpReplenishmentOrdersMysql({rows:[{shop_id:20,ozon_sku:'20001',product_id:200,mapping_id:200,requested_qty:31}]},7,2,{workflow:true,submit:true,afterSubmit:async()=>{throw Error('FBP notification failure');}}),/FBP notification failure/);
+  assert.deepEqual(await q('SELECT id,status,submitted_at,note FROM fbp_replenishment_orders ORDER BY id'),before);
+  assert.deepEqual(await q('SELECT id,requested_qty,approved_qty,note FROM fbp_replenishment_order_items ORDER BY id'),items);
+ });
+ await t.test('existing FBP status submission shares transactional gap feedback and repeated pending status does not notify again',async()=>{
+  const {createFbpSupplyFeedback}=await import('../src/services/fbp-supply-feedback.js');
+  const draft=await legacy.createFbpReplenishmentOrdersMysql({rows:[{shop_id:20,ozon_sku:'9920201',product_id:9202,mapping_id:9202,requested_qty:15}]},7,2,{workflow:true});
+  const id=draft.rows[0].id;
+  await assert.rejects(legacy.updateFbpReplenishmentOrderStatusMysql({id,status:'pending_review'},7,2,{afterSubmit:async()=>{throw Error('status notice failure');}}),/status notice failure/);
+  assert.equal((await q('SELECT status FROM fbp_replenishment_orders WHERE id=?',[id]))[0].status,'draft');
+  const hook=createFbpSupplyFeedback({personId:7,tenant:{id:2,slug:'a'}});
+  const before=Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n);
+  await legacy.updateFbpReplenishmentOrderStatusMysql({id,status:'pending_review'},7,2,{afterSubmit:hook.afterSubmit});
+  assert.ok(hook.committed().notified>=3);
+  assert.equal(Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),before);
+  let repeated=0;await legacy.updateFbpReplenishmentOrderStatusMysql({id,status:'pending_review'},7,2,{afterSubmit:async()=>{repeated++;}});assert.equal(repeated,0);
+ });
+ await t.test('workspace route has A/B isolation, includes never-stocked requirements and keeps nonfinancial sources',async()=>{
+  const {createOperationsRoutes}=await import('../src/server/routes/operations.js');
+  const routes=createOperationsRoutes({services:{procurementLedger:legacy.inventoryLedgerMysql,batchUpdateInboundRecords:legacy.batchUpdateInboundRecordsMysql,previewInboundReceiptImpact:legacy.previewInboundReceiptImpactMysql,stockAlerts:()=>{throw Error('must not use stocked-only alert base');}},readJson:async req=>req.body});
+  const read=routes['GET /api/inventory-workflow/alerts'];
+  const a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  assert.ok(a.rows.some(r=>Number(r.product_id)===9302));assert.ok(a.rows.every(r=>Number(r.product_id)!==300));
+  assert.ok(a.rows.every(r=>r.amount===undefined&&r.cost===undefined));
+  const b=await read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  assert.deepEqual(b.rows.map(r=>Number(r.product_id)),[300]);assert.ok(!JSON.stringify(b).includes('A proposer'));
+  await q('UPDATE tenant_members SET active=0 WHERE tenant_id=3 AND person_id=4');
+  await assert.rejects(read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace')),{statusCode:403});
+  await q('UPDATE tenant_members SET active=1 WHERE tenant_id=3 AND person_id=4');
+ });
+ await t.test('inventory feedback is scoped, retry-safe, nonfinancial and atomic with an enclosing FBP submission',async()=>{
+  const {createInventorySupplyFeedback}=await import('../src/services/inventory-supply-feedback.js');
+  const buyer={personId:2,tenant:{id:2,slug:'a',role:'member'}},events=[];
+  const feedback=createInventorySupplyFeedback({broadcast:(...args)=>events.push(args),readState:async()=>({incoming:4,supply_plan:{known:true,required_fbs:2,required_fbp:3,required_purchase:5,optional_purchase:1}})});
+  const input={product_id:200,request_key:randomUUID(),note:'核实仓库缺少5件，请联动处理'};
+  const movements=Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),requests=Number((await q('SELECT COUNT(*) n FROM procurement_requests'))[0].n);
+  const result=await feedback(input,buyer);assert.equal(result.notified,3);assert.equal((await feedback(input,buyer)).duplicate,true);
+  const notices=await q("SELECT tenant_id,recipient_person_id,content FROM system_notifications WHERE entity_type='inventory' AND entity_id='200' AND dedupe_key LIKE ?",['%'+input.request_key+'%']);
+  assert.equal(notices.length,3);assert.ok(notices.every(n=>Number(n.tenant_id)===2&&[2,3,7].includes(Number(n.recipient_person_id))));
+  await assert.rejects(feedback({...input,note:'changed'},buyer),{statusCode:409});
+  await assert.rejects(feedback({...input,request_key:randomUUID(),product_id:300},buyer),{statusCode:404});
+  await assert.rejects(feedback({...input,request_key:randomUUID(),product_id:9303},buyer),{statusCode:409});
+  await assert.rejects(feedback({...input,request_key:randomUUID()},session),{statusCode:403});
+  assert.equal(Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),movements);
+  assert.equal(Number((await q('SELECT COUNT(*) n FROM procurement_requests'))[0].n),requests,'feedback updates the shared queue; it is not a duplicate purchase quantity');
+  const before=Number((await q("SELECT COUNT(*) n FROM system_notifications WHERE entity_type='inventory'"))[0].n);
+  await assert.rejects(withMysqlTransaction(async c=>{await feedback({...input,request_key:randomUUID()},buyer,{connection:c});throw Error('outer FBP failure');}),/outer FBP failure/);
+  assert.equal(Number((await q("SELECT COUNT(*) n FROM system_notifications WHERE entity_type='inventory'"))[0].n),before);
+  await q('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=2');
+  await assert.rejects(feedback({...input,request_key:randomUUID()},buyer),{statusCode:403});
+  await q('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=2');
+ });
  }finally{await closeMysqlPool();await f.cleanup();}
 });
