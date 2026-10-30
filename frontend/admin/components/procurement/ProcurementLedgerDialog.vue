@@ -230,12 +230,18 @@ async function load(id = productId.value, {syncFbpOnLoad=true}={}) {
   if (!id) { loading.value = false; if (directStocktake.value) loadError.value = '未找到库存商品，请先绑定实际库存商品后再更新库存。'; return; }
   loading.value = true;
   try {
-    const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}&include_flow=${directStocktake.value ? '0' : 'local'}`, { noCache: true });
-    if (version === loadVersion) {
-      data.value = result;
-      void loadFbp(id, version).then(() => {
-        if (!directStocktake.value && syncFbpOnLoad && version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
+    const localRequest = apiClient.get(`${ledgerBase.value}?product_id=${id}&include_flow=${directStocktake.value ? '0' : 'local'}`, { noCache: true }).then(result => {
+      if (version === loadVersion) data.value = result;
+      return result;
+    });
+    if (!directStocktake.value) {
+      void loadFbp(id, version, { after: localRequest }).then(async () => {
+        try { await localRequest; } catch { return; }
+        if (data.value && syncFbpOnLoad && version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
       });
+    }
+    await localRequest;
+    if (version === loadVersion) {
       if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
         pendingInitialAction = '';
         edit('stocktake');
@@ -244,14 +250,14 @@ async function load(id = productId.value, {syncFbpOnLoad=true}={}) {
   } catch (error) { if (version === loadVersion) { data.value = null; loadError.value = error.message; pendingInitialAction = ''; } }
   finally { if (version === loadVersion) loading.value = false; }
 }
-async function loadFbp(id = productId.value, version = loadVersion) {
+async function loadFbp(id = productId.value, version = loadVersion, { after = Promise.resolve() } = {}) {
   const token = ++fbpVersion;
   fbpLoading.value = true; fbpError.value = '';
   try {
-    const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}&view=fbp`, { noCache: true });
+    const [result] = await Promise.all([apiClient.get(`${ledgerBase.value}?product_id=${id}&view=fbp`, { noCache: true }), after]);
     if (token !== fbpVersion || version !== loadVersion || id !== productId.value || !data.value || !props.modelValue) return;
     data.value = { ...data.value, fbp_inventory: result.fbp_inventory,
-      flow_summary: { ...data.value.flow_summary, applications: result.applications, requested: result.requested, applications_pending: false } };
+      flow_summary: { ...data.value.flow_summary, applications: result.applications, transfers: result.transfers ?? data.value.flow_summary?.transfers, requested: result.requested, applications_pending: false } };
   } catch (error) {
     if (token === fbpVersion && version === loadVersion && id === productId.value) fbpError.value = error.message || 'FBP 库存加载失败，可单独重试';
   } finally { if (token === fbpVersion && version === loadVersion) fbpLoading.value = false; }

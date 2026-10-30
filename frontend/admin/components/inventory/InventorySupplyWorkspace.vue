@@ -11,6 +11,9 @@ import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 import InventoryPageToolbar from './InventoryPageToolbar.vue';
 import {inventorySearchDefaults} from '../../../../src/shared/inventory-search-fields.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
+const InventoryFbpReceiptReview=defineAsyncComponent(()=>import('./InventoryFbpReceiptReview.vue'));
+const workspaceTab=ref('stock');
+const fbpReceiptRef=ref(null);
 const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../procurement/ProcurementLedgerDialog.vue'));
 const ProcurementRequestCreateDialog=defineAsyncComponent(()=>import('../procurement/ProcurementRequestCreateDialog.vue'));
 const DemandDetails=defineAsyncComponent(()=>import('../procurement/ProcurementDemandDetails.vue'));
@@ -83,7 +86,10 @@ defineExpose({refresh:load});
 </script>
 <template>
  <section class="supply-workspace" :aria-label="role==='procurement'?'库存采购需求':'库存管理模式'">
-  <div class="supply-heading"><div><h2>{{role==='procurement'?'按库存统一采购':'库存管理'}}</h2><p>{{role==='procurement'?'按库存产品汇总：先处理订单与正式备货缺口，再决定保障采购':'按实物库存核对订单缺口、采购进度和到货验收'}}</p></div><div class="supply-heading-actions"><slot name="heading-actions"/><el-button v-if="productId" @click="emit('clear-product')">返回全部库存</el-button><el-button :loading="loading" @click="load()">{{hasUpdates?'有新变化 · 刷新库存需求':'刷新库存需求'}}</el-button><el-button :disabled="snapshot.refreshing" @click="load(false,true)">重新核算</el-button></div></div>
+  <div class="supply-heading"><div><h2>{{role==='procurement'?'按库存统一采购':'库存管理'}}</h2><p>{{role==='procurement'?'按库存产品汇总：先处理订单与正式备货缺口，再决定保障采购':'按实物库存核对订单缺口、采购进度和到货验收'}}</p></div><div class="supply-heading-actions"><slot name="heading-actions"/><el-button v-if="productId" @click="emit('clear-product')">返回全部库存</el-button><el-button :loading="loading" @click="workspaceTab==='fbp'?fbpReceiptRef?.refresh():load()">{{workspaceTab==='fbp'?'刷新入仓核对':hasUpdates?'有新变化 · 刷新库存需求':'刷新库存需求'}}</el-button><el-button v-if="workspaceTab==='stock'" :disabled="snapshot.refreshing" @click="load(false,true)">重新核算</el-button></div></div>
+  <el-tabs v-if="role==='warehouse'" v-model="workspaceTab"><el-tab-pane name="stock" label="库存核对"/><el-tab-pane name="fbp" label="FBP入库确认"/></el-tabs>
+  <InventoryFbpReceiptReview v-if="workspaceTab==='fbp'" ref="fbpReceiptRef" :product-id="productId"/>
+  <template v-else>
   <div class="supply-task-cards"><button v-for="task in tasks" :key="task.key" :data-task="task.key" :class="['supply-task',`is-${task.key}`,{'is-active':filters.task===task.key}]" @click="filters.task=task.key;load(true)"><component :is="task.icon"/><div><span>{{task.label}}</span><strong>{{meta[task.key]??'—'}}<span class="supply-task-unit">项库存</span></strong><small>{{task.hint}}</small></div></button></div>
   <InventoryPageToolbar :filters="filters" product-search :show-shop="false" :show-date-range="false" :loading="loading" @search="load(true)" @reset="Object.assign(filters,inventorySearchDefaults(),{query:'',scope:'all'});load(true)">
    <el-form-item label="库存范围"><el-select v-model="filters.scope" aria-label="库存范围" @change="load(true)"><el-option value="all" label="全部库存需求（含FBP）"/><el-option value="orders" label="FBS待发订单关联库存"/></el-select></el-form-item>
@@ -110,6 +116,7 @@ defineExpose({refresh:load});
    <el-table-column label="处理" min-width="155" fixed="right"><template #default="{row}"><div class="supply-row-actions"><el-button v-if="canReceive&&row.pending_batches?.length" type="primary" plain @click="openLedger(row,'receive')">验货入库</el-button><el-button v-if="canPurchase" type="primary" :loading="checkingProduct===Number(row.product_id)" :disabled="!!checkingProduct||!plan(row).known||!(plan(row).required_purchase>0||plan(row).optional_purchase>0)" @click="openPurchase(row)">登记采购</el-button><el-button v-if="canCount" link type="primary" @click="openLedger(row,'stocktake')">核对实物</el-button><el-button v-if="canReport" link type="warning" @click="openFeedback(row)">创建采购需求</el-button></div></template></el-table-column>
   </el-table>
   <el-pagination v-if="snapshot.available!==false" v-model:current-page="filters.page" :page-size="filters.pageSize" :total="total" layout="total, prev, pager, next" @current-change="load()"/>
+  </template>
   <ProcurementLedgerDialog v-if="ledger.visible" v-model="ledger.visible" :product-id="ledger.productId" :initial-action="ledger.action" :stocktake-enabled="canCount" @saved="load(false,true)"/>
   <ProcurementRequestCreateDialog v-if="purchase.visible" v-model="purchase.visible" :initial-product-id="purchase.row.product_id" :initial-quantity="Math.max(1,plan(purchase.row).required_purchase||plan(purchase.row).optional_purchase||1)" :source-request-ids="purchaseRequestIds(purchase.row)" lock-product @created="purchased"/>
   <el-drawer v-if="detail.visible" v-model="detail.visible" title="库存采购需求明细" size="min(1200px,96vw)" append-to-body destroy-on-close><DemandDetails :product-id="detail.productId" :initial-tab="detail.tab" @changed="applyDetail"/></el-drawer>

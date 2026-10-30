@@ -2,12 +2,13 @@
 import { Box, Van, ShoppingCart, Document, Lock, House, Warning, CircleCheck, Tickets, Goods, SoldOut } from '@element-plus/icons-vue';
 import InventoryNodeRecords from './InventoryNodeRecords.vue';
 import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
+import { defineAsyncComponent, computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import {procurementArrivalStage} from '../../../../src/shared/inventory-procurement-stage.js';
 import { inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import { useRouter } from 'vue-router';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
 
+const InventoryFbpReceiptReview=defineAsyncComponent(()=>import('../inventory/InventoryFbpReceiptReview.vue'));
 const props = defineProps({ ledger: { type: Object, required: true }, workflow: Object, inventoryMode: Boolean, fbpLoading: Boolean, fbpSyncing: Boolean, canSyncFbp: Boolean, fbpError: { type: String, default: '' } });
 const emit = defineEmits(['select-tab', 'navigate', 'retry-fbp', 'sync-fbp','workflow-action','stocktake','saved']);
 const router = useRouter();
@@ -18,7 +19,7 @@ const summary = computed(() => props.ledger.flow_summary || {});
 const facts = computed(() => summary.value.unavailable ? {} : summary.value);
 const quantity = value => value == null || !Number.isFinite(Number(value)) ? '待核对' : `${Number(value)} 件`;
 const time = value => value ? shanghaiDateTimeText(value) : '待核对';
-const statusText = status => ({ draft: '草稿', pending_review: '待审核', approved: '已审核待发', ozon_created: '已建发仓单', sent: '已发出', completed: '已完成入仓', rejected: '已拒绝', cancelled: '已取消' }[status] || status || '待核对');
+const statusText = status => ({ pending:'待审批',submitted:'待审批',suggested:'待审批',purchased:'已采购',merged:'待采购',inbound_done:'已入库',done:'已完成',draft: '草稿', pending_review: '待审核', approved: '已审核待发', ozon_created: '已建发仓单', sent: '已发出', completed: '已完成入仓', rejected: '已拒绝', cancelled: '已取消' }[status] || status || '待核对');
 const currentOrders = computed(() => facts.value.orders || (props.ledger.orders || []).filter(row => row.needs_fulfillment));
 const applications = computed(() => summary.value.applications || []);
 const official = computed(() => props.ledger.fbp_inventory);
@@ -212,8 +213,9 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
             <h4>{{node.label}} · {{node.display||quantity(node.value)}}</h4><p v-for="line in brief(node)" :key="line">{{line}}</p>
             <div v-for="(row,index) in rowsFor(node.key).slice(0,3)" :key="row.id||row.item_id||index" class="flow-hover-row">
               <template v-if="node.key==='orders'"><strong>{{row.shop_name}} · {{row.posting_number}}</strong><div>需求 {{quantity(row.quantity)}} · 现货 {{quantity(row.stock_quantity)}}</div></template>
+              <template v-else-if="node.key==='requests'"><strong>{{row.applicant_name||'历史申请人待核对'}} · {{time(row.created_at)}}</strong><div>{{statusText(row.status)}} · {{quantity(row.quantity)}}</div><div>{{row.reason_summary||row.request_reason_note||'采购申请'}}</div></template>
               <template v-else-if="['application','locked'].includes(node.key)"><strong>{{row.order_no}} · {{row.shop_name}}</strong><div>申请人 {{row.applicant_name||'未提供'}} · {{statusText(row.status)}}</div></template>
-              <template v-else-if="['dispatch','receipt'].includes(node.key)"><strong>{{row.shop_name}} · {{row.ozon_sku}}</strong><div>入仓确认 {{quantity(row.confirmed_quantity)}} · 待入仓 {{quantity(row.remaining_quantity)}}</div></template>
+              <template v-else-if="['dispatch','receipt'].includes(node.key)"><strong>{{row.shop_name}} · {{row.ozon_sku}}</strong><div>申请 {{time(row.application_at)}} · 发运 {{time(row.shipped_at)}}</div><div>预计到仓 {{time(row.expected_arrival_at)}} · 已确认 {{quantity(row.confirmed_quantity)}} · 待确认 {{quantity(row.remaining_quantity)}}</div></template>
               <template v-else-if="['fbp-physical','fbp-orders','fbp-fulfil'].includes(node.key)"><strong>{{row.shop_name}} · {{row.ozon_sku}}</strong><div>可用 {{row.available}} 套 · 平台占用 {{row.reserved}} 套</div></template>
               <template v-else><strong>{{row.order_no||row.shop_name||'库存核对'}}</strong><div>{{row.pending_quantity==null?'点击查看详细记录':`采购在途 ${quantity(row.pending_quantity)}`}}</div></template>
             </div>
@@ -250,7 +252,7 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
       <el-table v-else-if="['application', 'locked', 'fbp-history'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无关联申请；现有占用请到库存流水核对">
         <el-table-column prop="order_no" label="FBP 申请单" min-width="170" /><el-table-column prop="shop_name" label="店铺" min-width="110" /><el-table-column prop="applicant_name" label="申请人" width="100" /><el-table-column prop="ozon_sku" label="SKU" min-width="130" /><el-table-column prop="requested_quantity" label="申请实物数" width="110" /><el-table-column prop="locked_quantity" label="确认占用" width="100" /><el-table-column label="状态" width="110"><template #default="{ row }">{{ statusText(row.status) }}</template></el-table-column><el-table-column label="提交／审核／结束（北京）" min-width="210"><template #default="{ row }"><div>提交 {{ time(row.submitted_at) }}</div><div>审核 {{ time(row.reviewed_at) }}</div><div v-if="row.closed_at">结束 {{ time(row.closed_at) }}</div></template></el-table-column><el-table-column label="操作" width="110"><template #default="{ row }"><el-button link type="primary" @click="navigateApplication(row)">打开申请单</el-button></template></el-table-column>
       </el-table>
-      <el-table v-else-if="['dispatch','receipt'].includes(selected)" :data="rowsFor(selected)" max-height="340" empty-text="暂无对应发仓／入仓确认记录"><el-table-column prop="shop_name" label="店铺"/><el-table-column prop="ozon_sku" label="SKU"/><el-table-column prop="remaining_quantity" label="待入仓件数"/><el-table-column prop="confirmed_quantity" label="已确认入仓件数"/><el-table-column label="发运（北京）"><template #default="{row}">{{time(row.shipped_at)}}</template></el-table-column><el-table-column label="操作"><template #default="{row}"><el-button v-if="row.order_id" link type="primary" @click="navigateApplication(row)">打开申请单</el-button></template></el-table-column></el-table>
+      <InventoryFbpReceiptReview v-else-if="['dispatch','receipt'].includes(selected)" :key="selected" :product-id="Number(ledger.product.id)" :initial-all="selected==='receipt'" @saved="emit('saved')" @navigate="selected='';emit('navigate')"/>
       <el-table v-else-if="selected==='fbp-safety'" :data="rowsFor(selected)" max-height="340" empty-text="FBP官方库存或销量尚未核实"><el-table-column prop="shop_name" label="店铺"/><el-table-column prop="ozon_sku" label="SKU"/><el-table-column prop="available" label="可用（套）"/><el-table-column prop="fbp_target" label="安全目标（套）"/><el-table-column prop="in_transit" label="在途（套）"/><el-table-column prop="committed_qty" label="已确认待发（套）"/><el-table-column prop="replenish_quantity" label="仍需补货（套）"/><el-table-column prop="per_set_quantity" label="每套实物件数"/></el-table>
       <InventoryFbpSkuTable v-else-if="['fbp-physical','fbp-orders','fbp-fulfil'].includes(selected)" :rows="positiveFbpRows" :product-id="Number(ledger.product.id)" />
       <template v-else-if="selected==='incoming-free'">
