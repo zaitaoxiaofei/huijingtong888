@@ -94,6 +94,29 @@ test('procurement detail, manual safety, three-source requests and arrival track
   await assert.rejects(legacy.updateProductMysql(203,{...body,selection_status:'listed'},2),{statusCode:403});
   const editor=await readFile(new URL('../frontend/admin/components/inventory/ProductCreateEditDialog.vue',import.meta.url),'utf8');assert.match(editor,/if\(isEditMode.value&&!props.inventoryRequest\)\{delete payload.selection_status;delete payload.product_type;\}/);
  });
+ await t.test('completed purchases and parent-SKU FBP history remain visible without becoming local locks',async()=>{
+  const d=await details.details(202,buyer);assert.ok(d.purchase_history.total>=2);assert.ok(d.purchase_history.rows.some(r=>Number(r.received_quantity)===4));
+  const packed=await details.details(202,warehouse);assert.ok(packed.purchase_history.rows.every(r=>r.amount===undefined&&r.unit_cost===undefined));
+  await q("INSERT INTO products(id,tenant_id,name,product_type,selection_status) VALUES(220,2,'Bundle','main','listed')");
+  await q('INSERT INTO product_components(tenant_id,product_id,component_product_id,quantity) VALUES(2,220,200,2)');
+  await q("INSERT INTO fbp_replenishment_orders(id,shop_id,order_no,status,created_by,submitted_at) VALUES(220,20,'FBP-HISTORY','completed',3,UTC_TIMESTAMP()),(221,20,'FBP-LOCK','approved',3,UTC_TIMESTAMP())");
+  await q("INSERT INTO fbp_replenishment_order_items(order_id,shop_id,product_id,ozon_sku,requested_qty,approved_qty,requested_by) VALUES(220,20,220,'BUNDLE',11,11,3),(221,20,220,'BUNDLE',3,3,3)");
+  const current=await details.details(200,buyer);assert.equal(Number(current.applications.find(a=>a.order_no==='FBP-HISTORY').requested_quantity),22);assert.equal(current.state.locked,6,'only approved unshipped units lock local stock');
+  const {loadFbpReservations}=await import('../src/services/fbp-warehouse.js');assert.equal(Number((await loadFbpReservations(q,[200],{id:2,isDefault:false}))[0].quantity),6);
+  const before=current.state.order_demand;const revision=current.safety.revision;
+  await details.safety({product_id:200,quantity:null,note:'周期校准',revision,production_days:3,local_shipping_days:1,expected_product_updated_at:current.product.updated_at},buyer);
+  const after=await details.details(200,buyer);assert.equal(after.safety.production_days,3);assert.equal(after.safety.local_shipping_days,1);assert.equal(after.safety.local_days,7);assert.equal(after.state.order_demand,before);
+  const product=(await q('SELECT production_lead_days,warehouse_logistics_days FROM products WHERE id=200'))[0];assert.equal(product.production_lead_days,3);assert.equal(product.warehouse_logistics_days,1);
+  await legacy.updateProductMysql(200,{name:'A stock',owner_person_id:2,production_lead_days:5,warehouse_logistics_days:2},2);
+  const edited=await details.details(200,buyer);assert.equal(edited.safety.production_days,5);assert.equal(edited.safety.local_shipping_days,2);assert.equal(edited.safety.safety_override,null);assert.equal(edited.safety.updated_by_name,'','product editor does not attribute a cycle change to the previous override author');
+  await assert.rejects(details.safety({product_id:200,quantity:null,note:'过期',revision:edited.safety.revision,production_days:7,local_shipping_days:1,expected_product_updated_at:'2000-01-01T00:00:00Z'},buyer),{statusCode:409});
+  await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(2010,20,'FBP-SCHEMA-ONLY','awaiting_packaging',UTC_TIMESTAMP())");
+  await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(2010,2010,'SKU200',200,99)");
+  await q("INSERT INTO ozon_orders_raw(store_id,posting_number,raw_json,query_stock_location) VALUES(20,'FBP-SCHEMA-ONLY',?, 'LOCAL')",[JSON.stringify({fulfillment_schema:'FBP'})]);
+  const ledger=await legacy.procurementLedgerMysql({product_id:200,include_fbp:false},2);
+  assert.equal(ledger.fulfillment_summary.fbp.order_count,1);assert.equal(ledger.fulfillment_summary.fbp.quantity,99);assert.equal(ledger.open_order_demand,before);assert.ok(ledger.orders.every(o=>o.stock_location!=='FBP'));
+
+ });
  await t.test('revoked members cannot inspect, override, create demands or confirm arrival',async()=>{
   await q('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=2');
   await assert.rejects(details.details(200,buyer),{statusCode:403});await assert.rejects(arrivals.list({},buyer),{statusCode:403});await assert.rejects(details.safety({product_id:200,quantity:1,note:'revoked',revision:2},buyer),{statusCode:403});

@@ -60,7 +60,7 @@ export const navigationMenus = [
     label: "订单",
     icon: Document,
     children: [
-      { key: "orders", label: "订单列表", route: "/orders" },
+      { key: "orders", label: "订单处理", route: "/orders" },
       { key: "order-tracking", label: "单量追踪", route: "/order-tracking" },
       { key: "outbound", label: "出库记录", route: "/outbound" },
       { key: "customer-messages", label: "客户消息", route: "/customer-messages", icon: ChatDotRound }

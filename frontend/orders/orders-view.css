@@ -81,22 +81,16 @@
 }
 
 .orders-toolbar-type {
-  width: 116px;
-  flex: 0 0 116px;
+  width: 100px;
+  flex: 0 0 100px;
 }
 
 .orders-toolbar-search {
-  width: 220px;
-  flex: 1 1 220px;
+  width: 180px;
+  flex: 0 1 180px;
 }
 
-.orders-toolbar-last-sync {
-  flex: 0 0 auto;
-  color: var(--erp-detail-text-secondary, #64748b);
-  font-size: 12px;
-  line-height: 20px;
-  white-space: nowrap;
-}
+
 
 .orders-toolbar-date {
   width: 276px;
@@ -177,13 +171,13 @@
 }
 
 .orders-toolbar-type {
-  width: 116px;
-  flex: 0 0 116px;
+  width: 100px;
+  flex: 0 0 100px;
 }
 
 .orders-toolbar-search {
-  width: 220px;
-  flex: 1 1 220px;
+  width: 180px;
+  flex: 0 1 180px;
 }
 
 .orders-toolbar-date {

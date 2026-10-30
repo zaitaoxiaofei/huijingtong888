@@ -1,4 +1,5 @@
 import { hasPermission } from '../shared/permissions.js';
+import {isFbpInventory,pendingInventoryOrders} from '../shared/inventory-fulfillment.js';
 import { createHash } from 'node:crypto';
 import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js';
 import { inferProcurementSources } from './procurement-source-inference.js';
@@ -53,7 +54,7 @@ export async function ensureProcurementLedgerSchema(execute) {
 export function ledgerRevision(value) {
   // MySQL JSON normalizes object key order. A persisted retry must retain the
   // same identity even when storage reorders submitted object properties.
-  return createHash('sha256').update(JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  return createHash('sha256').update(JSON.stringify(value, (_key, item) => _key==='fulfillment_summary'?undefined:item && typeof item === 'object' && !Array.isArray(item)
     ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex');
 }
 function integer(value, label, minimum = 1) {
@@ -323,7 +324,9 @@ function conversionSources(body, productId) {
 }
 
 export function summarizeLedger(product, movements, purchases, orders, fbpReserved = 0) {
-  const local = movements.filter(row => row.stock_location !== 'FBP' && !['fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'].includes(row.source_type));
+  const fbpOrders=orders.filter(row=>isFbpInventory(row.stock_location));
+  orders=orders.filter(row=>!isFbpInventory(row.stock_location));
+  const local = movements.filter(row => !isFbpInventory(row.stock_location) && !['fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'].includes(row.source_type));
   const sum = (rows, fn) => rows.reduce((total, row) => total + Number(fn(row) || 0), 0);
   // Open orders may already have posted outbound movements; those goods are
   // still physically in the warehouse until shipment.
@@ -333,7 +336,7 @@ export function summarizeLedger(product, movements, purchases, orders, fbpReserv
   const reserved = sum(orders.filter(row => row.needs_fulfillment), row => row.stock_quantity);
   const openOrderDemand = sum(orders.filter(row => row.needs_fulfillment), row => row.quantity);
   return {
-    product, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
+    product, fulfillment_summary:{fbs:pendingInventoryOrders(orders),fbp:pendingInventoryOrders(fbpOrders)}, local_stock: localStock, physical_estimate: physical, open_order_deducted: openDeducted,
     current_stock_reserved: reserved, open_order_demand: openOrderDemand,
     fbp_reserved: fbpReserved, available_estimate: Math.max(0, physical - openOrderDemand - fbpReserved),
     purchase_quantity: sum(purchases, row => row.actual_quantity),
@@ -378,12 +381,12 @@ export function createProcurementLedgerService(hooks) {
         FROM inbound_records WHERE product_id = ? AND ${inventoryTenantSql(scope)} GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
       WHERE poi.product_id = ? AND ${inventoryTenantSql(scope, 'poi')} AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
     const projection = await coverage(run, productId, scope.id);
-    const orders = [...projection.values()].filter(order => order.stock_location !== 'FBP').flatMap(order => order.items
+    const orders = [...projection.values()].flatMap(order => order.items
       .filter(item => item.product_id === productId).map(item => ({ ...item, order_id: order.order_id,
-        posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
+        stock_location:order.stock_location, posting_number: order.posting_number, ordered_at: order.ordered_at, transport_at: order.transport_at, entered_transport: order.entered_transport, needs_fulfillment: order.needs_fulfillment })));
     const outbound = await run(`SELECT related_order_item_id AS order_item_id, -SUM(quantity_delta) AS quantity
       FROM inventory_movements WHERE product_id = ? AND status = 'posted' AND source_type = 'order_outbound'
-      AND COALESCE(stock_location, 'LOCAL') != 'FBP'${movementTenantSql} GROUP BY related_order_item_id`, movementArgs);
+      AND UPPER(COALESCE(stock_location, 'LOCAL')) NOT IN ('FBP','FBO','OGR')${movementTenantSql} GROUP BY related_order_item_id`, movementArgs);
     for (const order of orders) order.outbound_quantity = Number(outbound.find(row => Number(row.order_item_id) === order.order_item_id)?.quantity || 0);
     const fbpReserved = Number(projection.inventory_stocks?.find(row => Number(row.product_id) === productId)?.fbp_reserved || 0);
     const value = summarizeLedger(products[0], movements, purchases, orders, fbpReserved);
@@ -392,7 +395,7 @@ export function createProcurementLedgerService(hooks) {
     value.batches = (projection.available_batches || []).filter(row => Number(row.product_id) === productId);
     const posted = await run(`SELECT source_ref, SUM(quantity_delta) AS quantity FROM inventory_movements
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
-      AND COALESCE(stock_location, 'LOCAL') != 'FBP'${movementTenantSql} GROUP BY source_ref`, movementArgs);
+      AND UPPER(COALESCE(stock_location, 'LOCAL')) NOT IN ('FBP','FBO','OGR')${movementTenantSql} GROUP BY source_ref`, movementArgs);
     for (const batch of value.batches) batch.local_posted_quantity = Number(posted.find(row => row.source_ref === `inbound_${batch.id}`)?.quantity || 0);
     value.requests = await run(`SELECT pr.* FROM procurement_requests pr JOIN purchase_orders po ON po.id = pr.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
       WHERE pr.product_id = ? AND ${inventoryTenantSql(scope, 'pr')} AND pr.status != 'cancelled' ORDER BY pr.id`, [productId]);

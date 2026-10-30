@@ -1,3 +1,4 @@
+import {isFbpInventory} from '../shared/inventory-fulfillment.js';
 import { flowLeadDays } from './inventory-flow-rules.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
 
@@ -46,7 +47,7 @@ export function calculateLocalInventorySafety(ledger, settings = {}, now = new D
   let consumed = 0, estimatedDates = 0;
   const seen = new Set();
   for (const row of ledger.orders || []) {
-    if (!row.entered_transport || ['FBP', 'OGR'].includes(row.stock_location)) continue;
+    if (!row.entered_transport || isFbpInventory(row.stock_location)) continue;
     const key = `${row.order_id}:${row.order_item_id}`;
     if (seen.has(key)) continue;
     seen.add(key);

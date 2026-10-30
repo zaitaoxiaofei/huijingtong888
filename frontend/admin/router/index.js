@@ -192,7 +192,7 @@ export const router = createRouter({
         { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告分析", breadcrumb: ["数据看板", "广告分析"] } },
         { path: "finance-center", name: "finance-center", component: FinanceCenterView, meta: { title: "财务中心", breadcrumb: ["财务中心"] } },
         { path: "finance/payroll", name: "finance-payroll", component: PayrollView, meta: { title: "员工工资", breadcrumb: ["财务中心", "员工工资"] } },
-        { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单列表", breadcrumb: ["订单履约", "订单列表"] } },
+        { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单处理", breadcrumb: ["订单履约", "订单处理"] } },
         { path: "order-tracking", name: "order-tracking", component: OrderTrackingView, meta: { title: "单量追踪", breadcrumb: ["订单履约", "单量追踪"] } },
         { path: "outbound", name: "outbound", component: OutboundView, meta: { title: "出库记录", breadcrumb: ["订单履约", "出库记录"] } },
         { path: "customer-messages", name: "customer-messages", component: CustomerMessagesView, meta: { title: "客户消息", breadcrumb: ["订单履约", "客户消息"] } },
