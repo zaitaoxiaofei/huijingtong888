@@ -1,7 +1,7 @@
 <script setup>
 import { Box, Van, ShoppingCart, Document, Lock, House, Warning, CircleCheck, Tickets, Goods, SoldOut } from '@element-plus/icons-vue';
 import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
-import { computed, nextTick, ref, useId, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import { inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import { useRouter } from 'vue-router';
 import { shanghaiDateTimeText } from '../../utils/shanghai-date.js';
@@ -65,6 +65,69 @@ const lanes = [
  {key:'fbp',title:'FBP补货与销售',hint:'本地调拨 → 平台签收入库 → 官方可用 → FBP订单履约'}
 ];
 const laneNodes = key => nodes.value.filter(node => node.lane === key);
+const canvas = ref(null);
+const connections = ref([]);
+const canvasSize = ref({ width: 0, height: 0 });
+const arrowId = `inventory-arrow-${useId().replace(/[^a-z0-9-]/gi,'')}`;
+let observer, frame;
+// Measure the rendered nodes so connectors follow resizing, translated text and
+// delayed stock updates. The graph is a single scrollable map on narrow screens.
+function drawConnections() {
+  const root = canvas.value;
+  if (!root) return;
+  const bounds = root.getBoundingClientRect();
+  canvasSize.value = { width: bounds.width, height: bounds.height };
+  const rect = element => { const r=element.getBoundingClientRect();return {left:r.left-bounds.left,right:r.right-bounds.left,top:r.top-bounds.top,bottom:r.bottom-bounds.top,x:r.left-bounds.left+r.width/2,y:r.top-bounds.top+r.height/2}; };
+  const boxes = new Map([...root.querySelectorAll('[data-node]')].map(el=>[el.dataset.node,{...rect(el),icon:rect(el.querySelector('.flow-icon'))}]));
+  const port = (key,side) => { const b=boxes.get(key);return side==='left'?[b.icon.left-7,b.icon.y]:side==='right'?[b.icon.right+7,b.icon.y]:side==='top'?[b.x,b.top-6]:[b.x,b.bottom+6]; };
+  const rounded = points => {
+    let d=`M ${points[0].join(' ')}`;
+    for(let i=1;i<points.length-1;i++){
+      const [a,b,c]=[points[i-1],points[i],points[i+1]],distance=(u,v)=>Math.hypot(u[0]-v[0],u[1]-v[1]);
+      const radius=Math.min(8,distance(a,b)/2,distance(b,c)/2);
+      if(!radius)continue;
+      const before=b.map((v,k)=>v+(a[k]-v)*radius/distance(a,b)),after=b.map((v,k)=>v+(c[k]-v)*radius/distance(b,c));
+      d+=` L ${before.join(' ')} Q ${b.join(' ')} ${after.join(' ')}`;
+    }
+    return `${d} L ${points.at(-1).join(' ')}`;
+  };
+  const edges=[];
+  const add=(from,to,points,{kind='stock',label='',labelAt}={})=>edges.push({key:`${from}-${to}`,from,to,kind,label,labelAt,path:rounded(points)});
+  const across=(from,to)=>add(from,to,[port(from,'right'),port(to,'left')]);
+  across('requests','purchase-confirm');across('purchase-confirm','incoming');across('incoming','receiving');
+  for(const key of ['orders','safety']){
+    const a=port('physical','right'),b=port(key,'left'),trunk=(a[0]+b[0])/2;
+    add('physical',key,[a,[trunk,a[1]],[trunk,b[1]],b],{kind:'allocation'});
+  }
+  const a=port('physical','right'),b=port('free','left');
+  add('physical','free',[a,b],{kind:'allocation',label:'扣除订单、保障及锁定后',labelAt:[(a[0]+b[0])/2,a[1]-14]});
+  const purchase=rect(root.querySelector('[data-lane="purchase"]')),local=rect(root.querySelector('[data-lane="local"]'));
+  const received=port('receiving','bottom'),physicalIn=port('physical','left');
+  add('receiving','physical',[received,[received[0],purchase.bottom+15],[48,purchase.bottom+15],[48,physicalIn[1]],physicalIn],{label:'验收入库',labelAt:[bounds.width/2,purchase.bottom+10]});
+  const available=port('free','bottom'),application=port('application','left'),applicationSupply=[application[0],application[1]-9],applicationNeed=[application[0],application[1]+9];
+  add('free','application',[available,[available[0],local.bottom-15],[40,local.bottom-15],[40,applicationSupply[1]],applicationSupply],{label:'可用货源调拨',labelAt:[bounds.width/2,local.bottom-21]});
+  const fbpKeys=['application','locked','dispatch','receipt','fbp-physical','fbp-orders','fbp-fulfil'];
+  for(let i=1;i<fbpKeys.length;i++)across(fbpKeys[i-1],fbpKeys[i]);
+  const feedback=rect(root.querySelector('.flow-fbp-feedback')),official=port('fbp-physical','bottom');
+  add('fbp-physical','fbp-safety',[official,[official[0],feedback.top-6]],{kind:'feedback'});
+  const replenish=workflowState.value.fbp?.replenish_quantity>0;
+  add('fbp-safety','application',[[feedback.left+198,feedback.y],[28,feedback.y],[28,applicationNeed[1]],applicationNeed],{kind:replenish?'warning':'feedback',label:replenish?'低于目标先补货':workflowState.value.fbp?.known?(workflowState.value.fbp.shortage>0?'已有补货覆盖':'安全目标核对'):'库存待核对',labelAt:[feedback.left+105,feedback.y-10]});
+  const request=port('requests','left');
+  // Feedback is demand, never another physical deduction. Keep it outside the
+  // warehouse paths and only show an actionable purchase gap.
+  const demands=workflowState.value.demands||[];
+  const purchaseGap=demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0;
+  if(purchaseGap)add('fbp-safety','requests',[[feedback.left+14,feedback.bottom-14],[12,feedback.bottom-14],[12,request[1]],request],{kind:'warning'});
+  for(const key of ['orders','safety'])if(demands.find(d=>d.key===(key==='orders'?'real_order':'local_safety'))?.purchase_quantity>0){
+    const start=port(key,key==='orders'?'top':'bottom'),y=key==='orders'?boxes.get(key).top-14:local.bottom-29;
+    add(key,'requests',[start,[start[0],y],[12,y],[12,request[1]],request],{kind:'warning'});
+  }
+  connections.value=edges;
+}
+function scheduleConnections(){cancelAnimationFrame(frame);frame=requestAnimationFrame(drawConnections);}
+onMounted(()=>{observer=new ResizeObserver(scheduleConnections);observer.observe(canvas.value);for(const el of canvas.value.querySelectorAll('[data-node],.flow-fbp-feedback'))observer.observe(el);scheduleConnections();});
+watch(nodes,async()=>{await nextTick();scheduleConnections();});
+onBeforeUnmount(()=>{observer?.disconnect();cancelAnimationFrame(frame);});
 function gapText(type){const demand=workflowState.value.demands.find(d=>d.key===type);return demand?.purchase_quantity>0?` · 需采购 ${demand.purchase_quantity} 件`:demand?.physical_gap>0?' · 等待到货':'';}
 const activeNode = computed(() => selected.value === 'fbp-history' ? { key: 'fbp-history', label: '全部 FBP 单据', display: `${new Set(applications.value.map(row => row.order_id)).size} 单` } : nodes.value.find(node => node.key === selected.value));
 function rowsFor(key) {
@@ -119,7 +182,16 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
   <section class="inventory-flow-diagram" aria-label="库存流转与占用">
     <div class="flow-heading"><h3>库存流转与占用</h3><span>悬浮看摘要 · 点击查看对应单据</span></div>
     <el-alert v-if="summary.unavailable" :title="summary.message" type="warning" :closable="false" />
-    <div class="flow-canvas">
+    <p class="flow-mobile-hint">左右滑动查看完整流程，点击图标查看明细</p>
+    <div class="flow-map-scroll" role="region" aria-label="库存流程图，可横向滚动" tabindex="0">
+    <div ref="canvas" class="flow-canvas">
+      <svg class="flow-connections" :width="canvasSize.width" :height="canvasSize.height" aria-hidden="true">
+        <defs><marker v-for="kind in ['stock','allocation','feedback','warning']" :id="`${arrowId}-${kind}`" :key="kind" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" :class="`flow-arrow is-${kind}`"/></marker></defs>
+        <g v-for="edge in connections" :key="edge.key" :data-edge="edge.key" :class="`flow-edge is-${edge.kind}`">
+          <path :d="edge.path" :marker-end="`url(#${arrowId}-${edge.kind})`"/>
+          <text v-if="edge.label" :x="edge.labelAt[0]" :y="edge.labelAt[1]" text-anchor="middle">{{edge.label}}</text>
+        </g>
+      </svg>
       <div v-for="lane in lanes" :key="lane.key" class="flow-lane" :data-lane="lane.key">
         <div class="flow-lane-heading"><strong>{{lane.title}}</strong><span>{{lane.hint}}</span></div>
         <div class="flow-stages">
@@ -140,17 +212,20 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
             </div>
             <p v-if="!rowsFor(node.key).length && !brief(node).length">暂无关联记录；点击查看核对说明与操作。</p>
           </el-popover>
+          <div v-if="lane.key==='local'" class="flow-allocation-note"><strong>按用途分配</strong><p>订单与保障分别占用本地实物</p><p>剩余可用货源可申请调拨到FBP</p></div>
         </div>
       </div>
       <div class="flow-fbp-feedback" :class="`is-${workflowState.fbp?.status||'unknown'}`">
         <span class="flow-feedback-icon" aria-hidden="true"><Warning v-if="workflowState.fbp?.shortage>0"/><CircleCheck v-else/></span>
-        <div><strong>{{workflowState.fbp?.known?(workflowState.fbp.shortage>0?'FBP可用低于安全库存目标':'FBP可用库存达到当前安全目标'):'FBP安全库存正在核对'}}</strong>
+        <div class="flow-feedback-copy"><strong>{{workflowState.fbp?.known?(workflowState.fbp.shortage>0?'FBP可用低于安全库存目标':'FBP可用库存达到当前安全目标'):'FBP安全库存正在核对'}}</strong>
           <p v-if="workflowState.fbp?.known">可用 {{quantity(workflowState.fbp.available)}} · 安全目标 {{quantity(workflowState.fbp.safety)}} · 低于目标 {{quantity(workflowState.fbp.shortage)}}<span v-if="workflowState.fbp.shortage>0">；扣除在途及已确认备货后，还需补货 {{quantity(workflowState.fbp.replenish_quantity)}}</span></p>
           <p v-else>先显示本地库存；FBP官方库存和销量核对完成后再判断，不把未知数量当零。</p>
         </div>
         <div class="flow-feedback-actions"><el-button link type="primary" @click="openDetails('fbp-safety')">核对安全目标</el-button><el-button v-if="workflowState.fbp?.replenish_quantity>0" type="primary" plain @click="emit('workflow-action','fbp')">提交FBP补货需求</el-button><el-button v-if="workflowState.demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0" type="warning" plain @click="emit('workflow-action','request','fbp_stock')">提交采购申请</el-button></div>
       </div>
     </div>
+    </div>
+    <div class="flow-map-legend"><span class="legend-stock">实物流转</span><span class="legend-allocation">库存分配</span><span class="legend-feedback">需求反馈 · 不扣实物</span></div>
     <div class="flow-fbp-toolbar"><span>{{ fbpSyncing ? 'FBP 正在后台同步，本地库存可正常查看' : fbpLoading ? '正在读取 FBP 已保存库存' : canSyncFbp ? '每次打开明细后自动同步一次 FBP，零库存 SKU 不展开' : '只读查看已保存的 FBP 库存，零库存 SKU 不展开' }}</span><el-button v-if="canSyncFbp" size="small" type="primary" :loading="fbpSyncing" :disabled="fbpLoading" @click="emit('sync-fbp')">{{ fbpError ? '重试同步 FBP' : '同步 FBP 库存' }}</el-button><el-button link type="primary" @click="openDetails('fbp-physical')">查看有库存 SKU</el-button><el-button link type="primary" @click="openDetails('fbp-history')">全部 FBP 单据</el-button></div>
     <div v-if="fbpError" class="flow-fbp-error"><span>FBP 数据：{{ fbpError }}；本地库存与上次 FBP 快照保留</span><el-button link type="primary" :disabled="fbpLoading" @click="emit('retry-fbp')">重新读取</el-button></div>
     <section v-if="activeNode" ref="detail" :id="detailId" class="flow-node-detail" role="region" :aria-label="`${activeNode.label}明细`" tabindex="-1" aria-live="polite">
@@ -189,10 +264,11 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
 
 <style scoped>
 .inventory-flow-diagram{margin:18px 0;color:var(--el-text-color-primary)}.flow-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}.flow-heading h3,.flow-heading h4{margin:0}.flow-heading>span,.flow-footnote{font-size:12px;color:var(--el-text-color-secondary)}
-.flow-canvas{display:grid;gap:14px;padding:16px 0;container-type:inline-size}.flow-lane{border:1px solid var(--el-border-color-lighter);border-radius:14px;background:var(--el-bg-color-overlay);padding:16px 14px}.flow-lane-heading{display:flex;align-items:baseline;flex-wrap:wrap;gap:12px;padding:0 8px 14px}.flow-lane-heading strong{font-size:14px}.flow-lane-heading span{font-size:12px;color:var(--el-text-color-secondary)}.flow-stages{display:flex;gap:12px;align-items:stretch}.flow-node{position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;padding:10px 6px;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--el-text-color-primary);font:inherit;cursor:pointer;transition:background .18s,border-color .18s}.flow-node:not(:last-child)::after{content:'';position:absolute;right:0;top:34px;width:6px;height:6px;border-top:1px solid var(--el-text-color-placeholder);border-right:1px solid var(--el-text-color-placeholder);transform:rotate(45deg)}.flow-icon{display:grid;place-items:center;width:52px;height:52px;border-radius:18px;background:var(--el-fill-color-light);color:var(--el-color-primary);transition:transform .18s}.flow-icon svg{width:27px;height:27px}.flow-node-label{font-size:13px;font-weight:600;text-align:center}.flow-node strong{font-size:clamp(16px,1.2vw,22px);font-variant-numeric:tabular-nums;text-align:center}.flow-node small{font-size:11px;line-height:1.5;color:var(--el-text-color-secondary);text-align:center;overflow-wrap:anywhere}.flow-node:hover,.flow-node:focus-visible,.flow-node.is-selected{background:var(--el-fill-color-light);border-color:var(--el-color-primary-light-5)}.flow-node:hover .flow-icon{transform:translateY(-2px)}.flow-node.is-primary .flow-icon{background:var(--el-color-primary-light-9)}.flow-node.is-success .flow-icon{color:var(--el-color-success);background:var(--el-color-success-light-9)}.flow-node.is-warning .flow-icon{color:var(--el-color-warning);background:var(--el-color-warning-light-9)}.flow-node.is-danger .flow-icon{color:var(--el-color-danger);background:var(--el-color-danger-light-9)}.flow-node.is-moving .flow-icon svg{animation:stock-transit 2.4s ease-in-out infinite}.flow-node.is-warning .flow-icon::after{content:'';position:absolute;width:6px;height:6px;border-radius:50%;background:var(--el-color-warning);transform:translate(19px,-19px)}
-.flow-fbp-feedback{display:flex;align-items:center;gap:14px;padding:16px 20px;border:1px solid var(--el-border-color-lighter);border-radius:12px;background:var(--el-fill-color-extra-light)}.flow-feedback-icon{flex:none;width:30px;height:30px;color:var(--el-color-info)}.flow-feedback-icon svg{width:100%;height:100%}.flow-fbp-feedback.is-warning .flow-feedback-icon{color:var(--el-color-warning);animation:stock-warning 3s ease-in-out infinite}.flow-fbp-feedback.is-success .flow-feedback-icon{color:var(--el-color-success)}.flow-fbp-feedback p{margin:6px 0 0;font-size:12px;line-height:1.6;color:var(--el-text-color-secondary)}.flow-feedback-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.flow-fbp-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0;font-size:12px;color:var(--el-text-color-secondary)}.flow-fbp-error,.flow-warning{color:var(--el-color-warning);font-size:13px}.flow-node-detail{border-top:1px solid var(--el-border-color-lighter);margin-top:15px;padding-top:12px}.flow-node-detail p{font-size:13px}.flow-hover-row{border-top:1px solid var(--el-border-color-lighter);padding:9px 0;font-size:12px;overflow-wrap:anywhere}.flow-action-buttons{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}:global(.inventory-flow-popover){max-width:calc(100vw - 24px);box-sizing:border-box}
+.flow-map-scroll{overflow-x:auto;overscroll-behavior-x:contain;border:1px solid var(--el-border-color-lighter);border-radius:16px;margin-top:14px;background:var(--el-bg-color)}.flow-map-scroll:focus-visible{outline:2px solid var(--el-color-primary);outline-offset:2px}.flow-canvas{position:relative;isolation:isolate;display:grid;gap:30px;min-width:1120px;padding:22px 24px 24px 64px;box-sizing:border-box}.flow-connections{position:absolute;inset:0;z-index:1;pointer-events:none;overflow:visible}.flow-edge path{fill:none;stroke:var(--el-color-primary-light-3);stroke-width:1.6}.flow-edge.is-allocation path{stroke:var(--el-text-color-placeholder)}.flow-edge.is-feedback path,.flow-edge.is-warning path{stroke-dasharray:5 5}.flow-edge.is-feedback path{stroke:var(--el-color-info)}.flow-edge.is-warning path{stroke:var(--el-color-warning)}.flow-arrow.is-stock{fill:var(--el-color-primary-light-3)}.flow-arrow.is-allocation{fill:var(--el-text-color-placeholder)}.flow-arrow.is-feedback{fill:var(--el-color-info)}.flow-arrow.is-warning{fill:var(--el-color-warning)}.flow-edge text{font-size:11px;fill:var(--el-text-color-secondary);paint-order:stroke;stroke:var(--el-bg-color);stroke-width:5px;stroke-linejoin:round}
+.flow-lane{position:relative;border:1px solid var(--el-border-color-lighter);border-radius:12px;padding:14px 16px 20px;background:var(--el-bg-color-overlay)}.flow-lane-heading{display:flex;align-items:baseline;flex-wrap:wrap;gap:12px;padding:0 4px 20px}.flow-lane-heading strong{font-size:14px}.flow-lane-heading span{font-size:12px;color:var(--el-text-color-secondary)}.flow-stages{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));column-gap:28px;align-items:start}.flow-node{position:relative;z-index:2;min-width:0;min-height:138px;display:flex;flex-direction:column;align-items:center;gap:7px;padding:8px 2px;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--el-text-color-primary);font:inherit;cursor:pointer;transition:background .18s,border-color .18s}.flow-icon{position:relative;display:grid;place-items:center;flex:none;width:48px;height:48px;border-radius:16px;background:var(--el-fill-color-light);color:var(--el-color-primary);transition:transform .18s}.flow-icon svg{width:26px;height:26px}.flow-node-label{font-size:13px;font-weight:600;text-align:center}.flow-node strong{font-size:clamp(16px,1.2vw,21px);font-variant-numeric:tabular-nums;text-align:center}.flow-node small{font-size:11px;line-height:1.5;color:var(--el-text-color-secondary);text-align:center;overflow-wrap:anywhere}.flow-node:hover,.flow-node:focus-visible,.flow-node.is-selected{background:var(--el-fill-color-light);border-color:var(--el-color-primary-light-5)}.flow-node:hover .flow-icon{transform:translateY(-2px)}.flow-node.is-primary .flow-icon{background:var(--el-color-primary-light-9)}.flow-node.is-success .flow-icon{color:var(--el-color-success);background:var(--el-color-success-light-9)}.flow-node.is-warning .flow-icon{color:var(--el-color-warning);background:var(--el-color-warning-light-9)}.flow-node.is-danger .flow-icon{color:var(--el-color-danger);background:var(--el-color-danger-light-9)}.flow-node.is-moving .flow-icon svg{animation:stock-transit 2.4s ease-in-out infinite}.flow-node.is-warning .flow-icon::after{content:'';position:absolute;right:0;top:0;width:6px;height:6px;border-radius:50%;background:var(--el-color-warning)}
+[data-node="requests"]{grid-column:1}[data-node="purchase-confirm"]{grid-column:3}[data-node="incoming"]{grid-column:5}[data-node="receiving"]{grid-column:7}[data-lane="local"] .flow-stages{grid-template-rows:140px 140px;row-gap:40px;padding-bottom:26px}[data-node="physical"]{height:160px;grid-column:1;grid-row:1/3;align-self:center;transform:translateY(48px)}[data-node="orders"]{grid-column:3;grid-row:1}[data-node="safety"]{grid-column:3;grid-row:2}[data-node="free"]{height:160px;grid-column:5;grid-row:1/3;align-self:center;transform:translateY(48px)}.flow-allocation-note{grid-column:7;grid-row:1/3;align-self:center;font-size:11px;line-height:1.8;color:var(--el-text-color-secondary)}.flow-allocation-note strong{font-size:12px;color:var(--el-text-color-regular)}.flow-allocation-note p{margin:6px 0}
+.flow-fbp-feedback{position:relative;display:flex;align-items:center;gap:14px;padding:18px 20px 18px 210px;border:1px solid var(--el-border-color-lighter);border-radius:12px;background:var(--el-fill-color-extra-light);min-height:102px;box-sizing:border-box}.flow-feedback-icon{flex:none;width:28px;height:28px;color:var(--el-color-info)}.flow-feedback-icon svg{width:100%;height:100%}.flow-feedback-copy,.flow-feedback-actions{position:relative;z-index:2}.flow-fbp-feedback.is-warning .flow-feedback-icon{color:var(--el-color-warning);animation:stock-warning 3s ease-in-out infinite}.flow-fbp-feedback.is-success .flow-feedback-icon{color:var(--el-color-success)}.flow-fbp-feedback p{margin:6px 0 0;font-size:12px;line-height:1.6;color:var(--el-text-color-secondary)}.flow-feedback-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:210px;flex-shrink:0}.flow-fbp-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:12px 0;font-size:12px;color:var(--el-text-color-secondary)}.flow-fbp-error,.flow-warning{color:var(--el-color-warning);font-size:13px}.flow-node-detail{border-top:1px solid var(--el-border-color-lighter);margin-top:15px;padding-top:12px}.flow-node-detail p{font-size:13px}.flow-hover-row{border-top:1px solid var(--el-border-color-lighter);padding:9px 0;font-size:12px;overflow-wrap:anywhere}.flow-action-buttons{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}:global(.inventory-flow-popover){max-width:calc(100vw - 24px);box-sizing:border-box}.flow-map-legend{display:flex;gap:22px;flex-wrap:wrap;padding:10px 4px;font-size:11px;color:var(--el-text-color-secondary)}.flow-map-legend span{display:flex;align-items:center;gap:7px}.flow-map-legend span::before{content:'';width:22px;border-top:2px solid var(--el-color-primary-light-3)}.flow-map-legend .legend-allocation::before{border-color:var(--el-text-color-placeholder)}.flow-map-legend .legend-feedback::before{border-color:var(--el-color-info);border-top-style:dashed}.flow-mobile-hint{display:none;margin:12px 0 0;font-size:12px;color:var(--el-text-color-secondary)}
 @keyframes stock-transit{0%,100%{transform:translateX(-2px)}50%{transform:translateX(3px)}}@keyframes stock-warning{0%,100%{opacity:1}50%{opacity:.55}}
-@container (max-width:1050px){.flow-stages{flex-wrap:wrap}.flow-node{flex-basis:calc(25% - 14px)}.flow-node::after{display:none}.flow-fbp-feedback{flex-wrap:wrap}.flow-feedback-actions{margin-left:0}}
-@container (max-width:560px){.flow-node{flex-basis:calc(50% - 14px)}.flow-lane{padding:12px 8px}.flow-lane-heading{padding:0 4px 8px}.flow-lane-heading span{line-height:1.5}}
+@media(max-width:1180px){.flow-mobile-hint{display:block}}
 @media(prefers-reduced-motion:reduce){.flow-node,.flow-icon{transition:none}.flow-node.is-moving .flow-icon svg,.flow-fbp-feedback.is-warning .flow-feedback-icon{animation:none}.flow-node:hover .flow-icon{transform:none}}
 </style>

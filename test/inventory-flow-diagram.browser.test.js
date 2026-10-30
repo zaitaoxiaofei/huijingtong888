@@ -34,7 +34,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     page.on('pageerror', error => { errors.push(error.message); console.error('Flow fixture error:', error.message); });
     await page.route('http://localhost:8788/**', async route => {
       const url = new URL(route.request().url());
-      if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><style>body{margin:0;background:var(--el-bg-color)}#app{padding:20px;max-width:1360px;margin:auto}</style></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
+      if (url.pathname === '/admin.html') return route.fulfill({ contentType: 'text/html', body: '<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><style>body{margin:0;background:var(--el-bg-color)}#app{padding:20px;max-width:1360px;margin:auto}</style></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>' });
       if(url.pathname.startsWith('/api/'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="84"><rect width="64" height="84" fill="#cbd5e1"/></svg>'});
       const asset = url.pathname === '/style.css' ? path.join('assets', (await fs.readdir(path.join(output, 'assets'))).find(name => name.endsWith('.css'))) : url.pathname.slice(1);
       return route.fulfill({ contentType: asset.endsWith('.css') ? 'text/css' : 'text/javascript', body: await fs.readFile(path.join(output, asset)) });
@@ -75,17 +75,40 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
       await page.locator('.flow-canvas').screenshot({ path: `.verification/inventory-flow-${width}-${dark ? 'dark' : 'light'}.png`, animations: 'disabled' });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `no overflow at ${width}`);
       assert.equal(await page.locator('.flow-node').count(), 15);
+      await page.waitForFunction(()=>document.querySelectorAll('.flow-edge').length>=16);
+      for(const edge of ['physical-orders','physical-safety','physical-free','receiving-physical','free-application','fbp-physical-fbp-orders','fbp-safety-application'])
+        assert.equal(await page.locator(`[data-edge="${edge}"] path`).count(),1,`connected flow: ${edge}`);
+      assert.equal(await page.locator('[data-edge="fbp-safety-application"]').getAttribute('class'),'flow-edge is-warning');
+      const collision=await page.evaluate(()=>{
+        const svg=document.querySelector('.flow-connections'),base=svg.getBoundingClientRect();
+        const labels=[...document.querySelectorAll('.flow-node-label,.flow-node strong,.flow-node small')].map(el=>({text:el.textContent,r:el.getBoundingClientRect()}));
+        for(const path of document.querySelectorAll('.flow-edge>path'))for(let i=0;i<=path.getTotalLength();i+=4){
+          const p=path.getPointAtLength(i),x=p.x+base.x,y=p.y+base.y;
+          const hit=labels.find(({r})=>x>r.left+1&&x<r.right-1&&y>r.top+1&&y<r.bottom-1);
+          if(hit)return {edge:path.parentElement.dataset.edge,text:hit.text};
+        }
+        return null;
+      });
+      assert.equal(collision,null,`connectors must not cross node text at ${width}: ${JSON.stringify(collision)}`);
+      if(width===390)assert.equal(await page.locator('.flow-map-scroll').evaluate(el=>el.scrollWidth>el.clientWidth),true,'narrow screens retain the connected graph in a scrollable region');
       assert.equal(await page.locator('.flow-lane').count(), 3);
       assert.equal(await page.locator('.flow-icon svg').count(),15);
       if (width >= 1366) {
         const positions=await page.locator('.flow-lane').evaluateAll(nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.lane,node.getBoundingClientRect().y])));
         assert.ok(positions.purchase<positions.local&&positions.local<positions.fbp,'procurement, local allocation and FBP are separate lanes');
+        const allocation=await page.locator('[data-lane="local"] [data-node]').evaluateAll(nodes=>Object.fromEntries(nodes.map(n=>[n.dataset.node,n.getBoundingClientRect().y])));
+        assert.ok(allocation.orders<allocation.safety,'FBS orders and safety are separate branches');
         await page.locator('[data-node="free"]').getByText('本地可用库存', { exact: true }).waitFor();
         assert.equal(await page.locator('[data-node="incoming"] .flow-icon svg').evaluate(el=>getComputedStyle(el).animationName),'none','reduced motion disables transit animation');
       }
       const fits = await page.locator('.flow-node').evaluateAll(nodes => nodes.every(n => n.scrollWidth <= n.clientWidth + 1));
       assert.equal(fits, true, `node labels fit at ${width}`);
     }
+    await page.setViewportSize({width:1366,height:900});
+    await page.evaluate(()=>{window.testLedger.value={...window.testLedger.value,physical_estimate:0,incoming_quantity:0};});
+    for(const edge of ['orders-requests','safety-requests','fbp-safety-requests'])
+      await page.locator(`[data-edge="${edge}"]`).waitFor();
+    await page.locator('.flow-canvas').screenshot({path:'.verification/inventory-flow-purchase-gap.png',animations:'disabled'});
     await page.evaluate(() => { window.testLedger.value = { ...window.testLedger.value, flow_summary: { unavailable: true, message: '预测暂不可用' } }; });
     await page.locator('[data-node="free"]').getByText('待核对', { exact: true }).waitFor();
     assert.deepEqual(errors, []);
