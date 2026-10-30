@@ -31,7 +31,7 @@ export function buildInventoryFlowSummary(ledger, forecast, orders = [], applica
     orders, applications,
     purchases: (ledger.purchases || []).filter(row => Number(row.pending_quantity) > 0).map(row => ({
       id: row.id, order_no: row.order_no, person_name: row.person_name,
-      purchased_at: row.purchased_at, pending_quantity: row.pending_quantity
+      purchased_at: row.purchased_at, pending_quantity: row.pending_quantity,unarrived_quantity:row.unarrived_quantity,arrived_quantity:row.arrived_quantity
     })),
     requested: requestedFbpQuantity(applications),
     calculated_at: new Date().toISOString()

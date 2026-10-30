@@ -1,6 +1,7 @@
 // Only verified service entry points are admitted. New routes do not inherit
 // access from a business prefix; their full ownership chain must be reviewed.
 const routes = new Set([
+  'GET inventory-workflow/details', 'POST inventory-workflow/node-action',
   'POST inventory-workflow/feedback', 'GET inventory-workflow/alerts', 'POST inventory-workflow/fbp', 'GET inventory-workflow', 'POST inventory-workflow/requests', 'GET inventory-workflow/receipts', 'POST inventory-workflow/receipts',
   'GET monthly-billing-details', 'GET monthly-billing-orders',
   'GET dashboard', 'GET orders', 'GET orders/status-history/summary', 'GET order-quality-rules',

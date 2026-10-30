@@ -1724,7 +1724,7 @@ function normalizeStockUnitMysql(value) {
 function normalizeProductionLeadDaysMysql(value) {
   if (value === null || value === undefined || value === "") return null;
   const days = Number(value);
-  if (![3, 5, 7, 10, 15, 30].includes(days)) throw Object.assign(new Error("生产周期（production_lead_days）只能选择 3、5、7、10、15 或 30 天，请在库存商品中修改。"), { statusCode: 400 });
+  if (![1, 2, 3, 5, 7, 10, 15, 30].includes(days)) throw Object.assign(new Error("生产周期（production_lead_days）只能选择 1、2、3、5、7、10、15 或 30 天，请在库存商品中修改。"), { statusCode: 400 });
   return days;
 }
 
@@ -4382,7 +4382,7 @@ export async function updateInventoryProductLeadTimesMysql(body = {}, tenantId =
   const productId = Number(body.product_id);
   if (!Number.isSafeInteger(productId) || productId <= 0) throw Object.assign(new Error("请选择有效的库存商品 ID（product_id）"), { statusCode: 400 });
   const productionDays = normalizeProductionLeadDaysMysql(body.production_lead_days);
-  if (productionDays == null) throw Object.assign(new Error("请选择生产周期（production_lead_days）：3、5、7、10、15 或 30 天"), { statusCode: 400 });
+  if (productionDays == null) throw Object.assign(new Error("请选择生产周期（production_lead_days）：1、2、3、5、7、10、15 或 30 天"), { statusCode: 400 });
   const logisticsDays = normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days);
   const expectedProductionDays = normalizeProductionLeadDaysMysql(body.expected_production_lead_days);
   const expectedLogisticsDays = normalizeWarehouseLogisticsDaysMysql(body.expected_warehouse_logistics_days);

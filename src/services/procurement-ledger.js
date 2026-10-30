@@ -366,12 +366,15 @@ export function createProcurementLedgerService(hooks) {
       MAX(id) AS last_id, MAX(created_at) AS last_created_at, COUNT(*) AS record_count FROM inventory_movements
       WHERE product_id = ? AND status = 'posted'${movementTenantSql} GROUP BY source_type, stock_location ORDER BY source_type, stock_location`, movementArgs);
     const purchases = await run(`SELECT poi.*, po.order_no, po.purchased_at, person.name AS person_name,
-      COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity
+      COALESCE(ir.received_quantity, 0) AS received_quantity, COALESCE(ir.pending_quantity, 0) AS pending_quantity,
+      COALESCE(ir.unarrived_quantity,0) AS unarrived_quantity,COALESCE(ir.arrived_quantity,0) AS arrived_quantity
       FROM purchase_order_items poi JOIN purchase_orders po ON po.id = poi.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
       LEFT JOIN people person ON person.id = po.created_by_person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = person.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)
       LEFT JOIN (SELECT purchase_order_item_id,
         SUM(CASE WHEN status = 'approved' THEN quantity ELSE 0 END) AS received_quantity,
-        SUM(CASE WHEN status = 'pending_arrival' THEN quantity ELSE 0 END) AS pending_quantity
+        SUM(CASE WHEN status = 'pending_arrival' THEN quantity ELSE 0 END) AS pending_quantity,
+        SUM(CASE WHEN status='pending_arrival' AND received_at IS NULL THEN quantity ELSE 0 END) AS unarrived_quantity,
+        SUM(CASE WHEN status='pending_arrival' AND received_at IS NOT NULL THEN quantity ELSE 0 END) AS arrived_quantity
         FROM inbound_records WHERE product_id = ? AND ${inventoryTenantSql(scope)} GROUP BY purchase_order_item_id) ir ON ir.purchase_order_item_id = poi.id
       WHERE poi.product_id = ? AND ${inventoryTenantSql(scope, 'poi')} AND po.status NOT IN ('cancelled', 'pending_purchase') ORDER BY po.purchased_at DESC, poi.id DESC`, [productId, productId]);
     const projection = await coverage(run, productId, scope.id);

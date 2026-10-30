@@ -73,7 +73,7 @@ const fallbackLogisticsRules = ref([]);
 let similarProductsTimer = null;
 
 const STOCK_UNIT_OPTIONS = ["个", "件", "套", "对", "双", "条", "米", "卷", "包", "片", "张", "盒"];
-const PRODUCTION_LEAD_DAY_OPTIONS = [3, 5, 7, 10, 15, 30];
+const PRODUCTION_LEAD_DAY_OPTIONS = [1, 2, 3, 5, 7, 10, 15, 30];
 const WAREHOUSE_LOGISTICS_DAY_OPTIONS = [1, 2, 3, 4, 5];
 
 const formRules = {

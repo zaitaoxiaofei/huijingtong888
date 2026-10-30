@@ -3437,6 +3437,29 @@ Any active current-enterprise member may propose one of three purchase purposes.
   - `403` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `GET /api/inventory-workflow/details`
+
+Lazy, owned-product node records for requests, purchase-confirm, incoming, receiving, orders or safety. Fresh inventory.read membership; amounts are returned only with procurement permission. Requests/history default to three months while unfinished work remains visible; all=1 includes older history with 50-row pagination. Incoming warns strictly after48h; receiving includes actual arrival or elapsed72h without approving receipt. Orders expose scoped FBS image, shop, shipping and shared mark only. Safety returns effective cycle rules and optimistic revision.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/node-action`
+
+Fresh membership and per-action duty checked inside transaction. arrived/transit-check require packing or procurement; arrived records received_at but never changes status, money or stock. reject requires procurement and nonempty reason, cancels only an unpurchased request and records rejected approval. order-note requires orders.manage, packing, procurement or inventory.write, verifies selected product consumes this open order, preserves existing mark type and conflicts on stale expected_note. All changes append inventory_flow_events. Approval with purchase uses the existing confirm-from-requests writer, not this route.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/inventory-workflow/receipts`
 
 Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.
