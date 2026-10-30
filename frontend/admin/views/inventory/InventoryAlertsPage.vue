@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -44,6 +45,7 @@ const state = reactive({
   meta: {},
   shops: [],
   filters: {
+    ...inventorySearchDefaults(),
     view: "inventory",
     alertType: "all",
     sortBy: "recent_30d_qty",
@@ -58,6 +60,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  ...inventorySearchDefaults(),
   view: "inventory",
   alertType: "all",
   sortBy: "recent_30d_qty",
@@ -93,7 +96,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-  manualKeys: ["query"],
+
   isSyncingRoute: () => syncingRoute
 });
 
@@ -377,12 +380,11 @@ async function loadPageData({ refresh = false } = {}) {
     if (inventoryView.value) params.set("sortBy", state.filters.sortBy);
     else params.set("fbpFocus", state.filters.fbpFocus);
     if (refresh) params.set("refresh", "1");
-    if (!inventoryView.value) {
-      params.set("shopId", String(state.filters.shopId || "all"));
-    }
+    params.set("shopId", String(state.filters.shopId || "all"));
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    const requests = [apiClient.get(`${inventoryView.value?"/api/inventory-workflow/alerts":"/api/stock-alerts"}?${params.toString()}`), inventoryView.value ? Promise.resolve(state.shops) : loadShopDictionary()];
+    appendInventorySearch(params, state.filters);
+    const requests = [apiClient.get(`${inventoryView.value?"/api/inventory-workflow/alerts":"/api/stock-alerts"}?${params.toString()}`), loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
@@ -401,6 +403,7 @@ async function loadPageData({ refresh = false } = {}) {
 }
 
 watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
   const previousView = state.filters.view;
   applyRouteState();
   if (previousView !== state.filters.view) {
@@ -408,9 +411,9 @@ watch(() => route.query, () => {
     state.filters.page = 1;
     syncRouteQuery("manual");
     loadPageData();
-  }
+  } else if (previous !== JSON.stringify(state.filters)) void loadPageData();
 }, { deep: true });
-watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
+
 
 onMounted(async () => {
   applyRouteState();
@@ -421,12 +424,12 @@ onMounted(async () => {
 <template>
   <div class="inventory-page-shell inventory-card">
     <InventoryPageToolbar
+      product-search
+      :loading="loading"
       class="alert-toolbar"
       :filters="state.filters"
       :shops="state.shops"
-      :show-shop="!inventoryView"
       :show-date-range="false"
-      :query-label="inventoryView ? '' : 'FBP SKU 搜索'"
       :query-placeholder="inventoryView ? '库存编号 / 名称 / 店铺 / 线上 SKU' : '库存编号 / SKU / Offer / 名称关键词'"
       @search="handleSearch"
       @reset="handleReset"

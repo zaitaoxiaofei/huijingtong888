@@ -1,4 +1,5 @@
 <script setup>
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { InfoFilled } from "@element-plus/icons-vue";
@@ -101,6 +102,7 @@ const state = reactive({
   summary: {},
   shops: [],
   filters: {
+    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     priority: "all",
@@ -114,6 +116,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  ...inventorySearchDefaults(),
   query: "",
   shopId: "all",
   priority: "all",
@@ -226,6 +229,7 @@ function buildListParams(overrides = {}) {
   });
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
+  appendInventorySearch(params, state.filters);
   return params;
 }
 
@@ -289,6 +293,7 @@ function setSort(sortKey) {
     state.filters.sortDir = "desc";
   }
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -311,7 +316,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-  manualKeys: ["query", "minSales"],
+
   isSyncingRoute: () => syncingRoute
 });
 
@@ -329,12 +334,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -1093,21 +1100,13 @@ async function loadPageData() {
 watch(
   () => route.query,
   async () => {
+    const previous = JSON.stringify(state.filters);
     applyRouteState();
-    if (!routeReady) return;
-    await loadPageData();
+    if (routeReady && previous !== JSON.stringify(state.filters)) await loadPageData();
   },
   { deep: true }
 );
-watch(() => [
-  state.filters.shopId,
-  state.filters.priority,
-  state.filters.signal,
-  state.filters.sortKey,
-  state.filters.sortDir,
-  state.filters.page,
-  state.filters.pageSize
-], syncRouteQuery);
+
 
 onMounted(async () => {
   applyRouteState();
@@ -1123,10 +1122,11 @@ onActivated(() => {
 <template>
   <div class="inventory-page-shell inventory-card fbp-opportunity-page">
     <InventoryPageToolbar
+      product-search
+      :loading="loading"
       :filters="state.filters"
       :shops="state.shops"
       :show-date-range="false"
-      query-label="机会搜索"
       query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
       @search="handleSearch"
       @reset="handleReset"

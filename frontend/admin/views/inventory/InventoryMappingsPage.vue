@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -30,6 +31,7 @@ const state = reactive({
   people: [],
   products: [],
   filters: {
+    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     dateFrom: "",
@@ -47,6 +49,7 @@ const dialog = reactive({
 });
 
 const filterDefaults = {
+  ...inventorySearchDefaults(),
   query: "",
   shopId: "all",
   dateFrom: "",
@@ -100,7 +103,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-  manualKeys: ["query"],
+
   isSyncingRoute: () => syncingRoute
 });
 
@@ -118,12 +121,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -229,6 +234,7 @@ async function loadPageData() {
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
+    appendInventorySearch(params, state.filters);
     if (focusProductId.value) params.set("productId", String(focusProductId.value));
     const requests = [apiClient.get(`/api/mappings?${params.toString()}`), loadShopDictionary()];
     if (!dictionaryLoaded) requests.push(apiClient.get("/api/people"));
@@ -250,7 +256,11 @@ async function loadPageData() {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
+watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
+  applyRouteState();
+  if (previous !== JSON.stringify(state.filters)) void loadPageData();
+}, { deep: true });
 watch(
   () => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize],
   syncRouteQuery
@@ -277,9 +287,11 @@ onMounted(async () => {
     </div>
 
     <InventoryPageToolbar
+      date-label="绑定时间"
+      product-search
+      :loading="loading"
       :filters="state.filters"
       :shops="state.shops"
-      query-label="映射搜索"
       query-placeholder="库存产品 / SKU / 库存ID / 店铺"
       @search="handleSearch"
       @reset="handleReset"

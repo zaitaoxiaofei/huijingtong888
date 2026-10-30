@@ -2684,6 +2684,21 @@ Replace order quality-check prefix rules in bulk.
 Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `view` (`string`, optional): inventory for lean inventory list; omitted preserves other product consumers
+  - `includeStock` (`string`, optional): 0 returns list metadata immediately; quantities are nullable and loaded separately by view=local
 - Responses:
   - `200` `application/json` -> `array<ProductRecord>`
 
@@ -2700,6 +2715,19 @@ Return selection-facing product records.
 Return archived or hidden products.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `array<ProductRecord>`
 
@@ -2902,6 +2930,19 @@ Create a new ERP product from an online product.
 Return SKU mapping rows.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `array<SkuMappingRecord>`
 
@@ -2969,6 +3010,18 @@ Read the existing enterprise FBP replenishment list. An exact orderId never bypa
 
 - Auth: `authenticated`
 - Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `orderId` (`number`, optional): Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page.
   - `status` (`string`, optional): Existing workflow status filter; all for a deep link.
 - Responses:
@@ -3077,6 +3130,19 @@ Return inventory overview rows.
 Return inventory alert rows and replenishment suggestions.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `StockAlertsResponse`
 
@@ -3261,6 +3327,24 @@ Read the shared current-enterprise inventory policy. Fresh inventory.read member
 Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `alertType` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `sortBy` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `refresh` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `page` (`number`, optional): Page index or page size, maximum100
+  - `pageSize` (`number`, optional): Page index or page size, maximum100
 - Responses:
   - `200` `application/json` -> `object`
 

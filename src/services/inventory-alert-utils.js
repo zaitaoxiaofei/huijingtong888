@@ -1,5 +1,14 @@
 import { searchInventoryRows } from "./inventory-search.js";
-import { shanghaiDateDaysAgo } from "../shanghai-time.js";
+import { shanghaiDateKey, shanghaiDateDaysAgo } from "../shanghai-time.js";
+
+function inventoryDateKey(value) {
+  if (!value) return '';
+  if (value instanceof Date) return shanghaiDateKey(value);
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  const timestamp = /(Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : text.replace(' ', 'T') + 'Z';
+  return shanghaiDateKey(timestamp);
+}
 
 const flattenedSnapshots = new WeakMap();
 
@@ -36,6 +45,7 @@ export function applyStockAlertQuery(rows, query = {}) {
   const fbpMode = mode === "fbp" || fbpAlertMode || fbpOperationsMode;
   const sourceRows = fbpMode ? flattenFbpRows(rows) : rows;
   const filtered = searchInventoryRows(sourceRows, searchText).filter((row) => {
+    if (fbpMode && query.inventorySku && ![row.ozon_sku,row.offer_id].some(value => String(value || '').toLowerCase() === String(query.inventorySku).toLowerCase())) return false;
     if (fbpAlertMode && row.alert_level === "ok") return false;
     if (fbpOperationsMode && fbpFocus === "replenishment"
       && (row.replenishment_ignored || Number(row.suggested_qty || 0) <= 0)) return false;
@@ -52,7 +62,7 @@ export function applyStockAlertQuery(rows, query = {}) {
         if (!matched) return false;
       }
     }
-    const dateKey = String(row.created_at || "").slice(0, 10);
+    const dateKey = inventoryDateKey(row.created_at);
     if (dateFrom && (!dateKey || dateKey < dateFrom)) return false;
     if (dateTo && (!dateKey || dateKey > dateTo)) return false;
     return true;
