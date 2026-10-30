@@ -10,19 +10,20 @@ import ProcurementRequestCreateDialog from './ProcurementRequestCreateDialog.vue
 const props=defineProps({ledger:{type:Object,required:true},orderId:Number,initialAction:String});
 const emit=defineEmits(['loaded','saved']);
 const auth=getActivePinia()?useAuthStore():{user:null};
+const fbpProjection=ref(null);
 const state=ref(null), loading=ref(false), error=ref(''), dialog=ref(''), busy=ref(false), purchaseVisible=ref(false);
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement'));
 const canReceive=computed(()=>canPurchase.value||hasPermission(auth.user,'packing'));
 const canFbp=computed(()=>hasPermission(auth.user,'inventory.write'));
 const productId=computed(()=>Number(props.ledger.product?.id));
-const current=computed(()=>inventoryWorkflow(props.ledger,{requests:state.value?.requests||[],forecast:state.value?.skus?{skus:state.value.skus}:undefined}));
+const current=computed(()=>({...inventoryWorkflow(props.ledger,{requests:state.value?.requests||[],forecast:fbpProjection.value?.forecast||state.value?.forecast}),transfers:fbpProjection.value?.transfers??props.ledger.flow_summary?.transfers}));
 watch(current,value=>emit('loaded',value),{immediate:true});
 const form=reactive({type:'',quantity:1,note:'',requestKey:''}), receiptRows=ref([]), counted=ref(null), fbpRows=ref([]);
-let version=0,actionVersion=0,disposed=false;
-onBeforeUnmount(()=>{disposed=true;++version;++actionVersion;});
+let version=0,actionVersion=0,projectionVersion=0,disposed=false;
+onBeforeUnmount(()=>{disposed=true;++version;++actionVersion;++projectionVersion;});
 async function reload(fresh=false,full=false){
  const token=++version,id=productId.value,scope=currentApiCacheScope();loading.value=true;error.value='';state.value=null;emit('loaded',null);
- try{const result=await apiClient.get(`/api/inventory-workflow?product_id=${id}${full?'':'&view=requests'}${fresh?'&fresh=1':''}`,{noCache:true});if(!disposed&&token===version&&id===productId.value&&scope===currentApiCacheScope()){state.value=result.rows?.[0]||null;}}
+ try{const result=await apiClient.get(`/api/inventory-workflow?product_id=${id}${full?'':'&view=requests'}${fresh?'&fresh=1':''}`,{noCache:true});if(!disposed&&token===version&&id===productId.value&&scope===currentApiCacheScope()){state.value=result.rows?.[0]||null;if(full)fbpProjection.value=state.value;}}
  catch(e){if(!disposed&&token===version&&scope===currentApiCacheScope())error.value=e.message||'需求暂不可用';}
  finally{if(token===version)loading.value=false;}
 }
@@ -38,9 +39,9 @@ async function open(action,type=''){
  }
  if(action==='fbp'){
   fbpRows.value=[];
-  if(!state.value?.skus)await reload(true,true);
+  if(!fbpProjection.value?.skus&&!state.value?.skus)await reload(true,true);
   if(!active())return;
-  fbpRows.value=(state.value?.skus||[]).map(s=>({...s,selected:false,quantity:Math.max(5,Number(s.suggested_qty)||5)})).sort((a,b)=>({爆品:0,潜力品:1,常规品:2,淘汰品:3}[a.category]??4)-({爆品:0,潜力品:1,常规品:2,淘汰品:3}[b.category]??4));
+  fbpRows.value=(fbpProjection.value?.skus||state.value?.skus||[]).map(s=>({...s,selected:false,quantity:Math.max(5,Number(s.suggested_qty)||5)})).sort((a,b)=>({爆品:0,潜力品:1,常规品:2,淘汰品:3}[a.category]??4)-({爆品:0,潜力品:1,常规品:2,淘汰品:3}[b.category]??4));
  }
 }
 async function submitRequest(){
@@ -65,13 +66,20 @@ async function saveFbp(submit){
  try{await apiClient.post('/api/inventory-workflow/fbp',{product_id:productId.value,submit,note:form.note,rows:selected.map(r=>({shop_id:r.shop_id,ozon_sku:r.ozon_sku,quantity:r.quantity}))});ElMessage.success(submit?'FBP备货申请已提交，供货不足时可继续提交采购申请':'已保存FBP草稿，不占库存、不产生采购需求');dialog.value='';await reload(true);emit('saved');}catch(e){ElMessage.error(e.message);}finally{busy.value=false;}
 }
 watch([()=>productId.value,()=>props.ledger.revision],()=>{++actionVersion;busy.value=false;dialog.value='';purchaseVisible.value=false;void reload();},{immediate:true});
+watch([()=>productId.value,()=>props.ledger.fbp_inventory],async()=>{
+ const token=++projectionVersion,id=productId.value,scope=currentApiCacheScope();fbpProjection.value=null;
+ if(!props.ledger.fbp_inventory)return;
+ try{const result=await apiClient.get(`/api/inventory-workflow?product_id=${id}&fresh=1`,{noCache:true});
+  if(!disposed&&token===projectionVersion&&id===productId.value&&scope===currentApiCacheScope())fbpProjection.value=result.rows?.[0]||null;
+ }catch{ /* Local allocation stays usable; FBP remains explicitly unverified. */ }
+},{immediate:true});
 watch(()=>props.initialAction,value=>{if(value==='procurement')void open('request');},{immediate:true});
 defineExpose({open,reload});
 </script>
 <template>
  <section class="inventory-workflow-panel">
   <div class="workflow-actions"><el-button @click="open('request')">提交采购申请</el-button><el-button v-if="canPurchase" :disabled="loading||!state" @click="open('purchase')">登记实际采购</el-button><el-button v-if="canReceive" @click="open('receive')">登记入库</el-button><el-button v-if="canFbp" @click="open('fbp')">创建FBP备货申请</el-button><el-button link :loading="loading" @click="reload(true)">刷新需求判断</el-button></div>
-  <div class="workflow-demands"><button v-for="d in current.demands" :key="d.key" :class="['workflow-demand',`is-${d.status}`]" @click="open('request',d.key)"><strong>{{d.priority}}. {{d.label}}</strong><span>{{loading?'计算中':d.purchase_quantity==null?'待核对':`建议采购 ${d.purchase_quantity} 件`}}</span><small v-if="d.submitted_quantity">已提交 {{d.submitted_quantity}} 件</small><small v-if="d.process_status" class="process-note">{{({pending_review:'待仓库确认',draft:'备货草稿未提交',request_submitted:'采购申请待处理'})[d.process_status]}}</small><small v-if="d.advisory_status" :class="d.advisory_status==='warning'?'process-note':'advisory-note'">{{d.advisory_status==='warning'?'建议关注FBP补货周期':'存在FBP备货机会'}} · 尚未形成采购需求</small></button></div>
+  <div class="workflow-demands"><button v-for="d in current.demands" :key="d.key" :class="['workflow-demand',`is-${d.status}`]" @click="open('request',d.key)"><strong>{{d.priority}}. {{d.label}}</strong><span>{{loading?'计算中':d.purchase_quantity==null?'待核对':`建议采购 ${d.purchase_quantity} 件`}}</span><small v-if="d.submitted_quantity">已提交 {{d.submitted_quantity}} 件</small><small v-if="d.process_status" class="process-note">{{({pending_review:'待仓库确认',draft:'备货草稿未提交',request_submitted:'采购申请待处理'})[d.process_status]}}</small><small v-if="d.key==='fbp_stock' && current.fbp?.known && current.fbp.shortage>0" class="process-note">FBP可用低于安全目标 {{current.fbp.shortage}} 件；先用本地可用与已在途补货，剩余才采购</small><small v-if="d.advisory_status" :class="d.advisory_status==='warning'?'process-note':'advisory-note'">{{d.advisory_status==='warning'?'建议关注FBP补货周期':'存在FBP备货机会'}} · 尚未形成采购需求</small></button></div>
   <p v-if="error" class="workflow-warning">{{error}}；未知数据不当作零，可刷新或手动提交说明。</p><p v-if="current.incoming_note">{{current.incoming_note}}</p>
   <el-dialog v-if="dialog==='request'" :model-value="true" title="提交采购申请" width="min(600px,94vw)" append-to-body :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy" @close="dialog=''">
    <p><strong>{{ledger.product.name}}</strong>；申请不会直接生成采购在途，也不会改库存。</p>

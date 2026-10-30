@@ -1,8 +1,9 @@
+import { fbpSupplyState, fbpLocalSupplyNeed } from './fbp-supply-state.js';
 // One physical-unit policy for the diagram, order badges and purchasing queue.
 export const INVENTORY_DEMAND_TYPES = [
   { key: 'real_order', label: 'FBS真实订单需求', priority: 1 },
   { key: 'local_safety', label: '本地安全保障需求', priority: 2 },
-  { key: 'fbp_stock', label: 'FBP备货缺口需求', priority: 3 }
+  { key: 'fbp_stock', label: 'FBP补货与采购需求', priority: 3 }
 ];
 const known = value => value != null && value !== '' && Number.isFinite(Number(value));
 const qty = value => Math.max(0, Math.ceil(Number(value) || 0));
@@ -27,7 +28,9 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   // Warehouse approval closes the quantity decision; approved stock is already in locked.
   const submitted = (applications || []).filter(row => row.status === 'pending_review');
   const requested = submitted.reduce((sum, row) => sum + qty(row.requested_quantity), 0);
-  const fbpGap = Math.max(0, requested - free);
+  const fbp = fbpSupplyState(forecast, ledger.fbp_inventory);
+  const fbpNeed = fbpLocalSupplyNeed(applications, fbp);
+  const fbpGap = Math.max(0, fbpNeed - free);
   const fbpBuy = Math.max(0, fbpGap - Math.max(0, unassigned - safetyGap));
   const applicationKnown = Array.isArray(applications) && flow.applications_pending !== true;
   const make = (type, physicalGap, purchase, ready = complete) => ({ ...type,
@@ -37,6 +40,10 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
     submitted_quantity: Math.max(0,...requests.filter(r => procurementDemandType(r) === type.key && ['submitted','pending'].includes(r.status)).map(r=>qty(r.quantity)))
   });
   const demands = [make(INVENTORY_DEMAND_TYPES[0], orderGap, orderBuy), make(INVENTORY_DEMAND_TYPES[1], safetyGap, safetyBuy), make(INVENTORY_DEMAND_TYPES[2], fbpGap, fbpBuy, complete && applicationKnown)];
+  const local_stock_status = ['danger','warning','unknown','success'].find(status=>demands.some(d=>d.status===status));
+  demands[2].replenishment_quantity = fbp.replenish_quantity;
+  demands[2].fbp_stock_status = fbp.status;
+  if (fbp.known && fbp.shortage > 0 && demands[2].status === 'success') demands[2].status = 'warning';
   // Supply colour describes quantities; application progress is a separate signal.
   for(const demand of demands)if(demand.submitted_quantity>0)demand.process_status='request_submitted';
   if(submitted.length)demands[2].process_status='pending_review';
@@ -45,7 +52,7 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   const opportunities = (forecast?.skus || []).filter(row => qty(row.suggested_qty) > 0);
   if (!requested && !submitted.length && opportunities.length && demands[2].status === 'success') demands[2].advisory_status = opportunities.some(row => Number(row.available) > 0) ? 'warning' : 'opportunity';
   const overall = ['danger','warning','unknown','opportunity','success'].find(status => demands.some(d => d.status === status));
-  return { demands, overall, stock_status, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
+  return { demands, overall, stock_status, local_stock_status, fbp, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
     purchase_quantity: complete && applicationKnown ? orderBuy + safetyBuy + fbpBuy : null,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',

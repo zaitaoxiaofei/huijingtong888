@@ -126,6 +126,30 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   assert.equal(full.safety,18,'14 actually shipped physical units /7 *9 days, older history excluded');
   assert.equal(local.purchase_quantity,undefined,'quantity-only reading cannot be used as a purchase decision');
  });
+ await t.test('verified FBP stock shortage can request procurement before a replenishment application; transit coverage prevents duplicate requests',async()=>{
+  await q("INSERT INTO products(id,tenant_id,name,production_lead_days,warehouse_logistics_days) VALUES(9202,2,'FBP safety fixture',7,2)");
+  await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,active) VALUES(9202,2,9202,20,'9920201',1)");
+  await q("INSERT INTO ozon_stock_snapshots(shop_id,product_id,ozon_sku,stock_type,warehouse_id,present,available,reserved) VALUES(20,9202,'9920201','fbp_real','1',0,0,0)");
+  await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(92020,20,'FBP-SAFETY','delivered',DATE_SUB(UTC_TIMESTAMP(),INTERVAL 1 DAY))");
+  await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(92020,92020,'9920201',9202,14)");
+  await q("INSERT INTO ozon_orders_raw(store_id,posting_number,query_stock_location,raw_json) VALUES(20,'FBP-SAFETY','FBP',JSON_OBJECT('delivery_method',JSON_OBJECT('name','FBP')))");
+  const ownership=await q("SELECT o.id,o.shop_id,o.posting_number,r.store_id,r.posting_number raw_post,r.query_stock_location FROM orders o LEFT JOIN ozon_orders_raw r ON r.store_id=o.shop_id AND r.posting_number=o.posting_number WHERE o.id=92020");
+  assert.equal(ownership[0].query_stock_location,'FBP',JSON.stringify(ownership));
+  const direct=await (await import('../src/services/inventory-flow.js')).createInventoryFlowService({query:q}).detail(9202,2);
+  assert.ok(direct.skus[0]?.fbp_target>0,JSON.stringify(direct));
+  const draftCount=Number((await q('SELECT COUNT(*) n FROM fbp_replenishment_orders'))[0].n);
+  const warning=(await service.batch([9202],2,{fresh:true}))[0];assert.equal(warning.fbp.known,true);assert.ok(warning.fbp.shortage>0);assert.ok(warning.purchase_quantity>0);
+  const posted=await service.submit({...body('fbp_stock'),product_id:9202},session);assert.equal(posted.ok,true);
+  assert.equal(Number((await q('SELECT COUNT(*) n FROM fbp_replenishment_orders'))[0].n),draftCount);
+  assert.equal(Number((await q("SELECT COUNT(*) n FROM inventory_movements WHERE product_id=9202"))[0].n),0);
+  await q("INSERT INTO fbp_replenishment_orders(id,order_no,shop_id,order_date,status,created_by) VALUES(9210,'SAME-SKU-PENDING',20,CURRENT_DATE,'pending_review',1)");
+  await q("INSERT INTO fbp_replenishment_order_items(id,order_id,shop_id,product_id,mapping_id,ozon_sku,requested_qty) VALUES(9210,9210,20,9202,9202,'9920201',8)");
+  const pending=(await service.batch([9202],2,{fresh:true}))[0];assert.equal(pending.requested,8);assert.equal(pending.purchase_quantity,warning.purchase_quantity,'same-SKU application does not double the forecast');
+  await q("UPDATE fbp_replenishment_orders SET status='draft' WHERE id=9210");
+  await q("INSERT INTO fbp_transfer_records(product_id,mapping_id,shop_id,ozon_sku,quantity,listed_quantity,status,source_type,source_ref) VALUES(9202,9202,20,'9920201',1000,0,'sent','manual','SAFETY-INBOUND')");
+  await assert.rejects(service.submit({...body('fbp_stock'),product_id:9202},session),/在途/);
+  await assert.rejects(service.submit({...body('fbp_stock'),product_id:300},session));
+ });
  await t.test('notification persistence failure rolls back the request',async()=>{
   const before=Number((await q('SELECT COUNT(*) n FROM procurement_requests'))[0].n);
   const broken=createInventoryWorkflowService({...opts,transaction:run=>withMysqlTransaction(c=>run({query:c.query.bind(c),execute:(sql,args)=>sql.includes('INSERT INTO system_notifications')?Promise.reject(new Error('notice failure')):c.execute(sql,args)}))});

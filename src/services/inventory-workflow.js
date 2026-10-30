@@ -1,6 +1,8 @@
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { inventoryWorkflow, INVENTORY_DEMAND_TYPES, procurementDemandType } from '../shared/inventory-workflow.js';
-import { inventoryFlow } from './inventory-flow.js';
+import { fbpSupplyState } from '../shared/fbp-supply-state.js';
+import { loadFbpSafetyProjections } from './fbp-safety-projection.js';
+import { inventoryFlow, createInventoryFlowService } from './inventory-flow.js';
 import { resolveInventoryTenantScope, assertInventoryRecord, inventoryTenantSql } from './inventory-tenant-scope.js';
 import { authorizeBusinessTaskSession } from './business-task-tenant.js';
 import { stockTopupRecipients } from './warehouse-stock-topup.js';
@@ -31,7 +33,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
           JOIN inbound_records ir ON ir.purchase_order_item_id=poi.id AND ir.product_id=poi.product_id AND ${inventoryTenantSql(scope,'ir')}
           WHERE poi.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'poi')} AND ir.status='pending_arrival' AND po.status NOT IN ('cancelled','pending_purchase') GROUP BY poi.product_id`,missing),
         localOnly?Promise.resolve([]):query(`SELECT id,product_id,quantity,status,demand_type,source_type,request_reason_code,source_order_item_id FROM procurement_requests WHERE product_id IN (${placeholders}) AND ${inventoryTenantSql(scope)} AND status IN ('submitted','pending','suggested')`,missing),
-        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,
+        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,
           wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
           FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
           JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
@@ -43,7 +45,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
             AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
             AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
             AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
-          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.requested_qty,wr.id,wi.product_id`,missing)
+          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id`,missing)
       ]);
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
       const defaults=parse(settingsRows.find(row=>!Number(row.product_id)));
@@ -53,6 +55,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const settingsByProduct=new Map(settingsRows.map(row=>[Number(row.product_id),row]));
       const incomingByProduct=new Map(incoming.map(row=>[Number(row.product_id),row]));
       const requestsByProduct=group(requests),applicationsByProduct=group(applicationRows),ordersByProduct=new Map();
+      const fbpForecasts=localOnly?new Map():await loadFbpSafetyProjections(query,missing.map(id=>byProduct.get(id)),scope,id=>({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]}));
       // Index once: global warning pages must not scan the entire order history for every product.
       for(const order of coverage.values())if(order.stock_location!=='FBP')for(const item of order.items||[]){
         const id=Number(item.product_id);if(!ordersByProduct.has(id))ordersByProduct.set(id,[]);
@@ -67,7 +70,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const settings=validateFlowSettings({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]});
         const applications=applicationsByProduct.get(id)||[];
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
-        const policy=inventoryWorkflow(local,{applications,requests:requestsByProduct.get(id)||[]});
+        const policy=inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]});
         // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
         const result=localOnly?{product_id:id,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);
@@ -172,8 +175,9 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const projected={...local,fbp_inventory:fbp.fbp_inventory,flow_summary:{...local.flow_summary,applications:fbp.applications,applications_pending:false}};
       const result=inventoryWorkflow(projected,{applications:fbp.applications,forecast:prediction,requests});
       return {...result,product_id:id,forecast_error:forecastError,settings:prediction?.settings,
+        forecast:prediction?{skus:prediction.skus,stock_incomplete:prediction.stock_incomplete}:null,
         skus:(prediction?.skus||[]).map(r=>({shop_id:r.shop_id,shop_name:r.shop_name,ozon_sku:r.ozon_sku,mapping_id:r.mapping_id,offer_id:r.offer_id,per_set_quantity:r.per_set_quantity,category:r.category,suggested_qty:r.suggested_qty,available:r.available,status:r.status})),
-        applications:fbp.applications,
+        applications:fbp.applications,transfers:fbp.transfers,
         purchases:(local.purchases||[]).filter(p=>Number(p.pending_quantity)>0).map(p=>({id:p.id,order_no:p.order_no,person_name:p.person_name,purchased_at:p.purchased_at,pending_quantity:p.pending_quantity})),
         batches:(local.batches||[]).filter(b=>b.status==='pending_arrival').map(b=>({id:b.id,quantity:b.quantity,purchase_order_no:b.purchase_order_no,status:b.status})),
         requests:requests.map(r=>({...r,type:procurementDemandType(r)}))};
@@ -206,7 +210,11 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const summary=await createInventoryFlowSummaryReader({query:q})({product:{id},fbp_inventory:stocks},scope.id,{fbpOnly:true});
         const pending=summary.applications.filter(a=>a.status==='pending_review');
         const locked=pending.length?await q(`SELECT wo.id FROM fbp_replenishment_orders wo JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')} WHERE wo.id IN (${[...new Set(pending.map(a=>Number(a.order_id)))].map(()=>'?').join(',')}) AND wo.status='pending_review' FOR UPDATE`,[...new Set(pending.map(a=>Number(a.order_id)))]):[];
-        if(!locked.length)throw fail('请先提交FBP备货申请；备货机会和草稿不产生正式采购需求');
+        if(!locked.length){
+          const prediction=await createInventoryFlowService({query:q}).detail(id,scope.id,{official:stocks,balance:{physical_stock:0,open_order_demand_qty:0,fbp_reserved_qty:0}});
+          const replenishment=fbpSupplyState(prediction,stocks);
+          if(!replenishment.known||!(replenishment.replenish_quantity>0))throw fail('请先提交FBP备货申请，或核对FBP官方可用库存低于安全目标且尚未被在途、已确认备货覆盖的缺口；草稿不产生采购需求');
+        }
       }
       const members=await q(`SELECT p.id,p.name,p.role,p.roles_json,tm.role AS tenant_role,tm.business_roles_json,t.slug AS tenant_slug FROM tenant_members tm
         JOIN people p ON p.id=tm.person_id AND p.active=1 JOIN tenants t ON t.id=tm.tenant_id WHERE tm.tenant_id=? AND tm.active=1 FOR UPDATE`,[scope.id]);

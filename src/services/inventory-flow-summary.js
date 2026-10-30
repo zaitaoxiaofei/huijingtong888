@@ -56,8 +56,20 @@ export function createInventoryFlowSummaryReader({ query = mysqlQuery } = {}) {
       row.locked_quantity = ['approved', 'ozon_created'].includes(row.status) ? Number(row.final_qty) * perSet : 0;
       row.per_set_quantity = perSet;
     }
-    if (fbpOnly) return { applications, requested: requestedFbpQuantity(applications) };
-    return buildInventoryFlowSummary(ledger, projection, orders, applications);
+    const transfers = await query(`SELECT f.id,f.shop_id,s.name AS shop_name,f.ozon_sku,f.quantity,f.listed_quantity,f.status,f.source_type,f.source_ref,f.shipped_at,f.closed_at
+      FROM fbp_transfer_records f JOIN shops s ON s.id=f.shop_id AND ${inventoryTenantSql(scope,'s')}
+      WHERE f.status NOT IN ('draft','cancelled','closed') AND (f.product_id=?${bindings.length ? ` OR ${bindings.map(()=>'(f.shop_id=? AND f.ozon_sku=?)').join(' OR ')}` : ''})
+        AND (f.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=f.product_id AND ${inventoryTenantSql(scope,'parent')}))
+      ORDER BY f.shipped_at DESC,f.id DESC LIMIT 300`,[productId,...bindings.flatMap(row=>[row.shop_id,row.ozon_sku])]);
+    for(const row of transfers){
+      const binding=bindings.find(item=>Number(item.shop_id)===Number(row.shop_id)&&String(item.ozon_sku)===String(row.ozon_sku));
+      row.per_set_quantity=Number(binding?.per_set_quantity||1);
+      row.confirmed_quantity=Number(row.listed_quantity||0)*row.per_set_quantity;
+      row.remaining_quantity=Math.max(0,Number(row.quantity)-Number(row.listed_quantity||0))*row.per_set_quantity;
+      row.order_id=row.source_type==='fbp_replenishment'?Number(String(row.source_ref||'').split(':')[1])||null:null;
+    }
+    if (fbpOnly) return { applications, transfers, requested: requestedFbpQuantity(applications) };
+    return { ...buildInventoryFlowSummary(ledger, projection, orders, applications), transfers };
   };
 }
 export const readInventoryFlowSummary = createInventoryFlowSummaryReader();
