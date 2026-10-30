@@ -65,9 +65,12 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     await fbpDetail.getByRole('button',{name:'收起',exact:true}).click();
     await page.getByRole('button',{name:'FBP库存明细',exact:true}).click();
     await fbpDetail.waitFor();
+    await page.waitForFunction(()=>document.querySelector('.flow-node-detail')===document.activeElement);
     assert.equal(await fbpDetail.evaluate(el=>el===document.activeElement),true,'toolbar shares the direct detail behavior');
     await page.locator('[data-node="fbp-physical"]').getByText('5 件',{exact:true}).waitFor();
     await page.locator('.flow-fbp-feedback').getByText('FBP可用低于安全库存目标',{exact:true}).waitFor();
+    await fbpDetail.getByRole('button',{name:'收起',exact:true}).click();
+    await fbpDetail.waitFor({state:'hidden'});
     await page.locator('[data-node="safety"]').click();
     await page.getByRole('button',{name:'收起',exact:true}).click();
     await fs.mkdir('.verification', { recursive: true });

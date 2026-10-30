@@ -1549,6 +1549,9 @@ async function submitDialog(options = {}) {
       selection_status: isInventoryTarget.value ? "listed" : (isEditMode.value ? form.selection_status || "draft" : "draft"),
       product_type: isInventoryTarget.value ? "main" : (isEditMode.value ? form.product_type || "selection" : "selection")
     };
+    // Ordinary editing preserves the persisted workflow; inventory requests use
+    // their dedicated review endpoint and creation still chooses the initial type.
+    if(isEditMode.value&&!props.inventoryRequest){delete payload.selection_status;delete payload.product_type;}
     let savedProduct;
     if (props.inventoryRequest) {
       const reviewBody = { action: props.inventoryRequest.action, revision: props.inventoryRequest.revision, payload };

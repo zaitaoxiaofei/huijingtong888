@@ -12,7 +12,7 @@ watch(mode,value=>{if(value==='print')printMounted.value=true;});
  <div class="orders-mode-page">
   <div class="orders-mode-toolbar"><el-radio-group v-model="mode" aria-label="订单工作模式"><el-radio-button value="print">打印与日常发货</el-radio-button><el-radio-button value="inventory">库存管理</el-radio-button></el-radio-group><span>{{mode==='print'?'按订单处理打印、打包和发货':'按库存检查缺口、采购进度、到货验收与实物核对'}}</span></div>
   <div v-if="printMounted" v-show="mode==='print'"><OrdersPage ref="ordersPageRef"/></div>
-  <InventorySupplyWorkspace v-if="mode==='inventory'" role="warehouse" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
+  <InventorySupplyWorkspace v-if="mode==='inventory'" role="warehouse" @purchased="context=>router.push({path:'/procurement/workspace',query:{mode:'arrivals',product_id:context.productId}})" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
  </div>
 </template>
 <style scoped>
