@@ -52,15 +52,16 @@ const dateRange = computed({
 .inventory-search-toolbar { position: static; min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-search-form { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .inventory-search-fields { display: flex; flex: 1 1 650px; flex-wrap: wrap; gap: 8px; min-width: 0; align-items: flex-end; }
-.inventory-search-fields :deep(.el-form-item) { margin: 0; width: 112px; min-width: 0; }
-.inventory-search-fields :deep(.el-form-item__label) { margin-bottom: 5px; font-size: 12px; }
+.inventory-search-fields :deep(.el-form-item) { margin: 0; width: 96px; min-width: 0; }
+.inventory-search-fields :deep(.el-form-item__label) { height: auto; margin-bottom: 3px; font-size: 12px; line-height: 16px; }
+.inventory-search-fields :deep(.el-input__wrapper), .inventory-search-fields :deep(.el-select__wrapper) { min-height: 30px; }
 .inventory-search-fields :deep(.search-keyword) { flex: 1 1 160px; max-width: 250px; }
 .inventory-search-fields :deep(.search-dates) { width: 250px; }
 .inventory-search-fields :deep(.el-select), .inventory-search-fields :deep(.el-date-editor) { width: 100%; min-width: 0; }
 .inventory-search-actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 .inventory-search-actions :deep(.el-button) { margin: 0; }
-.inventory-search-fields :deep(.search-mode) { width: 132px; }
-.inventory-search-fields :deep(.search-shop) { width: 140px; }
+.inventory-search-fields :deep(.search-mode) { width: 120px; }
+.inventory-search-fields :deep(.search-shop) { width: 120px; }
 .inventory-search-fields :deep(.inventory-search-attributes) { display: contents; }
 .inventory-search-fields :deep(.inventory-search-attributes .search-group) { display: contents; }
 @media (max-width: 760px) {

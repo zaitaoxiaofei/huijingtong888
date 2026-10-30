@@ -9,11 +9,10 @@ import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createRouteQuerySync } from "../../utils/route-query-sync.js";
-import ErpFilterBar from "../../components/ErpFilterBar.vue";
-import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
-import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import InventoryReceivingToolbar from "../../components/inventory/InventoryReceivingToolbar.vue";
+import {receivingFilters,restoreReceivingFilters,receivingParams,receivingRouteQuery} from "../../utils/receiving-search.js";
 import { uploadTeamAttachment } from "../../api/tools/imageCropper.js";
 
 const route = useRoute();
@@ -60,26 +59,7 @@ const state = reactive({
   total: 0,
   people: [],
   suppliers: [],
-  filters: {
-    query: "",
-    status: "pending_arrival",
-    purchaseDateRange: [],
-    demandType: "all",
-    personId: "all",
-    supplierId: "all",
-    sourceType: "all",
-    inventoryCategory: "",
-    productName: "",
-    vehicleBrand: "",
-    vehicleModel: [],
-    accessoryName: "",
-    color: "",
-    material: [],
-    process: "",
-    productId: "",
-    page: 1,
-    pageSize: 20
-  },
+  filters: receivingFilters('pending_arrival'),
   selectedRows: []
 });
 
@@ -89,10 +69,7 @@ const detailDialog = reactive({
   rows: []
 });
 
-const tableRows = computed(() => state.rows.map((row) => ({
-  ...row,
-  row_key: `purchase-${row.product_id}`
-})));
+const tableRows = computed(() => state.rows);
 
 const totalRows = computed(() => Number(state.total || 0));
 
@@ -178,38 +155,7 @@ function asPositiveInt(value, fallback) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
 }
 
-function procurementQueryString() {
-  const params = new URLSearchParams({
-    paged: "1",
-    page: String(state.filters.page),
-    pageSize: String(state.filters.pageSize),
-    status: state.filters.status || "pending_arrival"
-  });
-  const [startDate, endDate] = Array.isArray(state.filters.purchaseDateRange) ? state.filters.purchaseDateRange : [];
-  if (startDate) params.set("startDate", startDate);
-  if (endDate) params.set("endDate", endDate);
-  const query = String(state.filters.query || "").trim();
-  if (query) params.set("query", query);
-  if (state.filters.productId) params.set("productId", String(state.filters.productId));
-  for (const [key, value] of Object.entries({
-    demandType: state.filters.demandType,
-    personId: state.filters.personId,
-    supplierId: state.filters.supplierId,
-    sourceType: state.filters.sourceType,
-    inventoryCategory: state.filters.inventoryCategory,
-    productName: state.filters.productName,
-    vehicleBrand: state.filters.vehicleBrand,
-    vehicleModel: state.filters.vehicleModel,
-    accessoryName: state.filters.accessoryName,
-    color: state.filters.color,
-    material: state.filters.material,
-    process: state.filters.process
-  })) {
-    const normalized = Array.isArray(value) ? value.join(",") : String(value || "").trim();
-    if (normalized && normalized !== "all") params.set(key, normalized);
-  }
-  return params.toString();
-}
+function procurementQueryString() { return receivingParams(state.filters,'pending_arrival'); }
 
 function normalizeInboundRow(record = {}) {
   const purchasedAt = record.purchased_at || record.created_at || "";
@@ -305,35 +251,29 @@ function handleSearch() {
 }
 
 function handleReset() {
-  Object.assign(state.filters, {
-    query: "", status: "pending_arrival", purchaseDateRange: [], demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
-    inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [],
-    accessoryName: "", color: "", material: [], process: "", productId: "", page: 1, pageSize: 20
-  });
+  const contextProductId=orderProcurementContext.value ? state.filters.productId : '';
+  Object.assign(state.filters,receivingFilters('pending_arrival'),{productId:contextProductId});
   syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function applyRouteState() {
   syncingRoute = true;
   try {
-    const query = String(route.query.query || "");
-    const productId = String(route.query.productId || "").trim();
-    state.filters.query = query;
-    state.filters.productId = productId;
-    state.filters.page = asPositiveInt(route.query.page, 1);
-    state.filters.pageSize = asPositiveInt(route.query.pageSize, 20);
+    restoreReceivingFilters(route.query,state.filters,'pending_arrival');
   } finally {
     syncingRoute = false;
   }
@@ -343,15 +283,7 @@ const syncRouteQuery = createRouteQuerySync({
   route,
   router,
   isSyncingRoute: () => syncingRoute,
-  buildQuery(mode) {
-    const includeTextFilters = mode === "manual";
-    return {
-      query: includeTextFilters ? state.filters.query || undefined : undefined,
-      productId: state.filters.productId || undefined,
-      page: state.filters.page > 1 ? String(state.filters.page) : undefined,
-      pageSize: state.filters.pageSize !== 20 ? String(state.filters.pageSize) : undefined
-    };
-  }
+  buildQuery() { return receivingRouteQuery(route.query,state.filters); }
 });
 
 const orderProcurementContext = computed(() => Number(route.query.orderId || 0) > 0 ? {
@@ -635,12 +567,10 @@ async function handleCancelAction(row) {
   await cancelRequests([row], `产品「${row.product_name || row.product_code || row.product_id}」`);
 }
 
-async function cancelSelectedRows() {
-  await cancelRequests(state.selectedRows, `选中的 ${state.selectedRows.length} 个商品`);
-}
 
-watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.page, state.filters.pageSize], syncRouteQuery);
+
+watch(() => route.query, () => { const before=JSON.stringify(state.filters);applyRouteState();if(before!==JSON.stringify(state.filters))void loadPageData(); }, {deep:true});
+
 
 onMounted(async () => {
   applyRouteState();
@@ -659,7 +589,6 @@ onMounted(async () => {
 <template>
   <div class="page-stack procurement-list-page procurement-workspace-page">
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" @saved="loadPageData" />
-    <ErpPageHeader title="待入库清单" description="查看待入库、已入库与全部采购批次，并按对应时间查看最新记录。" />
 
     <el-alert
       v-if="orderProcurementContext"
@@ -671,53 +600,14 @@ onMounted(async () => {
       <template #title>
         订单 {{ orderProcurementContext.orderNo || orderProcurementContext.orderId }} 的采购明细
       </template>
+      <el-button type="primary" plain @click="openNewPurchaseDialog">新增该订单采购记录</el-button>
       当前仅展示「{{ orderProcurementContext.productName || `库存商品 #${state.filters.productId}` }}」的待到货采购记录；可直接展开修改，或新增一笔并自动关联当前订单。
     </el-alert>
 
     <el-card shadow="never" class="page-card procurement-list-card procurement-workspace-card">
-      <div class="procurement-toolbar procurement-workspace-filter">
-        <div class="procurement-list-summary">
-          <strong>采购与收货明细</strong>
-          <span>共 {{ totalRows }} 条</span>
-          <span>已选 {{ state.selectedRows.length }} 条</span>
-        </div>
-        <el-radio-group v-model="state.filters.status" class="purchase-status-filter" @change="handleSearch">
-          <el-radio-button label="pending_arrival">待入库</el-radio-button>
-          <el-radio-button label="approved">已入库</el-radio-button>
-          <el-radio-button label="all">全部</el-radio-button>
-        </el-radio-group>
-        <div class="purchase-toolbar-actions">
-            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
-            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
-            <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
-            <el-button v-if="orderProcurementContext" class="erp-btn erp-btn-primary" type="primary" @click="openNewPurchaseDialog">
-              新增该订单采购记录
-            </el-button>
-            <el-button class="erp-btn erp-btn-primary" type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">
-              批量登记到货（{{ state.selectedRows.length }}）
-            </el-button>
-            <el-button class="erp-btn erp-btn-danger" :disabled="!state.selectedRows.length" :loading="cancelSubmitting" @click="cancelSelectedRows">
-              选中取消
-            </el-button>
-        </div>
-      </div>
-
-      <ErpFilterBar class="purchase-filter-bar"><el-form class="purchase-primary-filters">
-        <el-form-item label="关键词"><el-input v-model="state.filters.query" placeholder="商品名称 / 编码 / SKU / 申请人 / 采购链接" clearable @keyup.enter="handleSearch" /></el-form-item>
-        <el-form-item label="采购日期"><el-date-picker v-model="state.filters.purchaseDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" /></el-form-item>
-        <el-form-item label="需求类型"><el-select v-model="state.filters.demandType"><el-option label="全部需求" value="all" /><el-option label="真实订单需求" value="real_order" /><el-option label="库存预警需求" value="inventory_warning" /></el-select></el-form-item>
-        <el-form-item label="采购负责人"><el-select v-model="state.filters.personId" filterable><el-option label="全部" value="all" /><el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" /></el-select></el-form-item>
-        <el-form-item label="供应商"><el-select v-model="state.filters.supplierId" filterable><el-option label="全部供应商" value="all" /><el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" /></el-select></el-form-item>
-        <el-form-item label="采购平台"><el-select v-model="state.filters.sourceType"><el-option label="全部平台" value="all" /><el-option v-for="option in sourceTypeOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item>
-      </el-form></ErpFilterBar>
-
-      <InventoryStructuredSearch
-        compact
-        class="procurement-structured-search"
-        :model-value="state.filters"
-        @update:model-value="Object.assign(state.filters, $event)"
-        @change="handleSearch"
-      />
+      <InventoryReceivingToolbar :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset">
+        <el-button type="success" :disabled="!state.selectedRows.length" :loading="inboundSubmitting" @click="inboundSelectedRows">批量登记到货{{ state.selectedRows.length ? `（${state.selectedRows.length}）` : '' }}</el-button>
+      </InventoryReceivingToolbar>
 
       <div class="list-wrap erp-responsive-table" role="region" aria-label="待入库采购表格" tabindex="0">
         <el-table

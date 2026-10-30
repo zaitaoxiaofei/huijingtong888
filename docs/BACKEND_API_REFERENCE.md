@@ -3287,6 +3287,23 @@ Create a positive manual adjustment to clear historical negative stock debt.
 Return inbound record rows.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `status` (`string`, optional): pending_arrival for pending receipts, approved for received records; legacy all remains supported
+  - `demandType` (`string`, optional): all | real_order | local_safety | fbp_stock; inventory_warning retained for older callers
+  - `inventoryType` (`string`, optional): all | single | accessory | combo
+  - `productId` (`number`, optional): Optional owned product context
+  - `paged` (`string`, optional): 1 for rows/total/page/pageSize, all predicates apply before paging
 - Responses:
   - `200` `application/json` -> `array<InboundRecord>`
 

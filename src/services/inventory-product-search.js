@@ -26,6 +26,15 @@ export function inventoryProductSearch(query, scope, alias = 'p') {
   }
   const color = String(query.color || '').trim();
   if (color) add(`CONCAT(',', REPLACE(REPLACE(COALESCE(${alias}.color, ''), '，', ','), '/', ','), ',') LIKE ? ESCAPE '='`, inventoryNamePattern(','+color+','));
+  const inventoryType=String(query.inventoryType || query.inventory_type || 'all');
+  if (['single','combo','accessory'].includes(inventoryType)) {
+    if (inventoryType==='accessory') add(`${alias}.is_accessory=1`);
+    else {
+      add(`COALESCE(${alias}.is_accessory,0)=0`);
+      const components=`SELECT 1 FROM product_components search_pc JOIN products search_child ON search_child.id=search_pc.component_product_id AND ${inventoryTenantSql(scope,'search_child')} WHERE search_pc.product_id=${alias}.id AND ${inventoryTenantSql(scope,'search_pc')}`;
+      add(`${inventoryType==='single'?'NOT ':''}EXISTS (${components})`);
+    }
+  }
   const text = String(query.query || '').trim();
   if (text && query.searchMode === 'inventory_id') {
     const match = inventoryIdentifierSearch(text, 'inventory_id');

@@ -134,10 +134,7 @@ const filterDefaults = {
   pageSize: 20
 };
 
-const summaryCards = computed(() => [
-  { label: "推荐", value: integer(state.summary.total) },
-  { label: "建议入库", value: `${integer(state.summary.suggested_total_qty)} 件` }
-]);
+
 
 const currentSubmitterName = computed(() => authStore.user?.name || authStore.user?.username || "当前登录用户");
 const replenishmentDialogTitle = computed(() => (
@@ -1138,6 +1135,18 @@ onActivated(() => {
       @search="handleSearch"
       @reset="handleReset"
     >
+      <template #actions>
+        <el-button
+          class="erp-btn erp-btn-primary"
+          type="primary"
+          :disabled="!selectedRows.length"
+          :loading="rowActionLoading === 'batch-order'"
+          @click="openSelectedReplenishmentCreateDialog"
+        >
+          创建备货单
+        </el-button>
+        <el-popover trigger="click" placement="bottom-end" :width="380"><template #reference><el-button>更多</el-button></template>
+          <el-form label-position="top" class="fbp-more-filters">
       <el-form-item label="优先级">
         <el-select v-model="state.filters.priority" style="width: 150px">
           <el-option label="全部" value="all" />
@@ -1157,31 +1166,14 @@ onActivated(() => {
       <el-form-item label="30天销量">
         <el-input v-model="state.filters.minSales" placeholder="最低" style="width: 90px" @keyup.enter="handleSearch" />
       </el-form-item>
-      <template #actions>
-        <el-button class="erp-btn erp-btn-secondary" @click="openManualSkuDialog">
-          手工添加 SKU
-        </el-button>
-        <el-button
-          class="erp-btn erp-btn-primary"
-          type="primary"
-          :disabled="!selectedRows.length"
-          :loading="rowActionLoading === 'batch-order'"
-          @click="openSelectedReplenishmentCreateDialog"
-        >
-          批量创建备货单
-        </el-button>
-        <el-button class="erp-btn erp-btn-secondary" @click="openPdfImportDialog">
-          导入PDF
-        </el-button>
-        <el-button class="erp-btn erp-btn-secondary" :loading="supplySyncLoading" @click="syncOzonSupplyOrders">
-          同步入仓请求
-        </el-button>
-        <div class="fbp-toolbar-summary">
-          <article v-for="card in summaryCards" :key="card.label" class="fbp-toolbar-summary-item">
-            <span>{{ card.label }}</span>
-            <strong>{{ card.value }}</strong>
-          </article>
-        </div>
+            <el-button type="primary" @click="handleSearch">应用筛选</el-button>
+          </el-form>
+          <div class="fbp-more-actions">
+            <el-button @click="openManualSkuDialog">手工添加 SKU</el-button>
+            <el-button @click="openPdfImportDialog">导入PDF</el-button>
+            <el-button :loading="supplySyncLoading" @click="syncOzonSupplyOrders">同步入仓请求</el-button>
+          </div>
+        </el-popover>
       </template>
     </InventoryPageToolbar>
 
@@ -1819,6 +1811,7 @@ onActivated(() => {
 </template>
 
 <style scoped>
+.fbp-more-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:12px; }.fbp-more-actions .el-button { margin:0; }
 .fbp-opportunity-page {
   display: flex;
   flex-direction: column;
