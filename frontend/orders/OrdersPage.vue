@@ -1,4 +1,5 @@
 ﻿<script setup>
+import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useAuthStore } from "../admin/stores/auth.js";
 import { hasPermission } from "../../src/shared/permissions.js";
@@ -3300,6 +3301,7 @@ onBeforeUnmount(() => {
                     <div class="picker-item-meta">
                       <strong>{{ inventoryProductLabel(row) }}</strong>
                       <span>编码：{{ inventoryProductCode(row) }}</span>
+                      <InventoryCompositionBadge :product="row"/>
                     </div>
                   </div>
                 </template>

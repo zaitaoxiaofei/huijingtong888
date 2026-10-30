@@ -14,6 +14,11 @@ const more = ref(false);
 const busy = ref(false);
 const moreError = ref('');
 const scrollBox = ref(null);
+const root = ref(null);
+const visibleCount = ref(10);
+const scrolling = ref(false);
+let resizeObserver, scrollTimer;
+const PAGE_SIZE = 15;
 const detail = ref(null);
 const detailRows = ref([]);
 const detailLoading = ref(false);
@@ -23,10 +28,10 @@ const detailTotal = ref(0);
 const previews = reactive({});
 let version = 0;
 let detailVersion = 0;
-const allRows = computed(() => [...props.rows, ...extra.value]);
+const allRows = computed(() => expanded.value ? [...props.rows, ...extra.value] : props.rows.slice(0, visibleCount.value));
 const groups = computed(() => {
   const result = [];
-  for (let i = 0; i < allRows.value.length; i += 10) result.push(allRows.value.slice(i, i + 10));
+  for (let i = 0; i < allRows.value.length; i += visibleCount.value) result.push(allRows.value.slice(i, i + visibleCount.value));
   return result;
 });
 const money = value => `CNY ${Number(value || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`;
@@ -59,12 +64,12 @@ async function loadMore() {
   busy.value = true;
   moreError.value = '';
   try {
-    const result = await fetchRows({ dimension: 'product', page: String(page), pageSize: '10', fast: '1' });
+    const result = await fetchRows({ dimension: 'product', page: String(page), pageSize: String(PAGE_SIZE), fast: '1' });
     if (token !== version || scope !== currentApiCacheScope()) return;
     const known = new Set(allRows.value.map(row => Number(row.product_id)));
     extra.value.push(...(result.rows || []).filter(row => !known.has(Number(row.product_id))));
     nextPage.value++;
-    more.value = Number(result.total) > page * 10;
+    more.value = Number(result.total) > page * PAGE_SIZE;
   } catch (error) {
     if (token === version) moreError.value = error.message || '加载失败，请重试';
   } finally {
@@ -73,12 +78,18 @@ async function loadMore() {
 }
 function startMore() {
   expanded.value = true;
-  more.value = props.hasMore;
-  void loadMore();
+  if (props.rows.length + extra.value.length <= visibleCount.value) void loadMore();
+}
+function collapse() {
+  expanded.value = false;
+  if (scrollBox.value) scrollBox.value.scrollTop = 0;
 }
 function onScroll() {
+  scrolling.value = true;
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(() => { scrolling.value = false; }, 450);
   const el = scrollBox.value;
-  if (expanded.value && el && el.scrollHeight - el.scrollTop - el.clientHeight < 70 && !moreError.value) void loadMore();
+  if (expanded.value && el && el.scrollHeight - el.scrollTop - el.clientHeight < 180 && !moreError.value) void loadMore();
 }
 async function preview(row) {
   const id = Number(row.product_id);
@@ -119,19 +130,28 @@ function openDetail(row) {
 watch(() => props.date, reset);
 watch(() => props.rows, reset);
 watch(() => props.hasMore, value => { if (!expanded.value) more.value = value; });
-onMounted(() => window.addEventListener('erp:auth-scope-changed', reset));
+onMounted(() => {
+  window.addEventListener('erp:auth-scope-changed', reset);
+  resizeObserver = new ResizeObserver(entries => {
+    const width = entries[0]?.contentRect.width || 0;
+    visibleCount.value = width >= 1450 ? 15 : width >= 1100 ? 12 : 10;
+  });
+  if (root.value) resizeObserver.observe(root.value);
+});
 onBeforeUnmount(() => {
   ++version;
   ++detailVersion;
   window.removeEventListener('erp:auth-scope-changed', reset);
+  resizeObserver?.disconnect();
+  clearTimeout(scrollTimer);
 });
 </script>
 <template>
- <section class="overview-panel inventory-ranking" aria-label="库存商品销售榜单">
+ <section ref="root" class="overview-panel inventory-ranking" :style="{'--ranking-columns': visibleCount>10?3:2, '--ranking-rows': visibleCount===12?4:5}" aria-label="库存商品销售榜单">
   <header class="ranking-heading">
   <div>
   <span>TOP PRODUCTS</span>
-  <h2>Top 10 库存商品</h2>
+  <h2>Top {{visibleCount}} 库存商品</h2>
   </div>
   <small>{{dateText}} · 按销售额排序</small>
   </header>
@@ -139,11 +159,11 @@ onBeforeUnmount(() => {
    <el-alert v-if="error" type="warning" :title="error" :closable="false"/>
   <el-button v-if="error" size="small" @click="emit('retry')">重新读取榜单</el-button>
    <div v-for="(group,groupIndex) in groups" :key="groupIndex" class="ranking-group">
-    <el-popover v-for="(row,index) in group" :key="row.product_id" trigger="hover" :show-after="250" :width="460" placement="top" @show="preview(row)">
+    <el-popover v-for="(row,index) in group" :key="row.product_id" trigger="hover" :disabled="scrolling" :show-after="400" :width="460" placement="top" @show="preview(row)">
      <template #reference>
   <article class="inventory-rank-card">
-      <b class="rank-number">{{groupIndex*10+index+1}}</b>
-      <el-image class="rank-image" :src="row.image_url" fit="cover" :preview-src-list="row.image_url?[`/api/products/${row.product_id}/image`]:[]" preview-teleported>
+      <b class="rank-number">{{groupIndex*visibleCount+index+1}}</b>
+      <el-image class="rank-image" loading="lazy" :src="row.image_url" fit="cover" :preview-src-list="row.image_url?[`/api/products/${row.product_id}/image`]:[]" preview-teleported>
   <template #error>
   <span>无图</span>
   </template>
@@ -186,7 +206,7 @@ onBeforeUnmount(() => {
   <span v-if="busy">正在加载…</span>
   <el-button v-else-if="moreError" size="small" @click="loadMore">加载失败，点击重试</el-button>
   <span v-else>{{more?'继续向下滚动查看更多':'已全部加载'}} · 已展示 {{allRows.length}} 个库存商品</span>
-  <el-button size="small" @click="reset">收起</el-button>
+  <el-button size="small" @click="collapse">收起</el-button>
   </template>
   </footer>
   <el-dialog v-if="detail" :model-value="true" :title="`${detail.product_name} · 销售明细`" width="min(1100px,94vw)" top="7vh" append-to-body destroy-on-close @close="detail=null;++detailVersion">
@@ -216,8 +236,8 @@ onBeforeUnmount(() => {
 .ranking-heading small,.rank-copy small,.ranking-footer,.ranking-note{color:var(--dashboard-muted,var(--el-text-color-secondary));font-size:12px}
 .ranking-scroll{flex:1;min-height:0;overflow:hidden;scrollbar-gutter:stable}
 .ranking-scroll.is-expanded{overflow-y:auto;overscroll-behavior:contain}
-.ranking-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(5,98px);grid-auto-flow:column;gap:10px;margin-bottom:10px}
-.inventory-rank-card{display:grid;grid-template-columns:22px 64px minmax(0,1fr) 94px;align-items:center;gap:10px;height:98px;box-sizing:border-box;padding:6px 10px;border:1px solid var(--dashboard-theme-border-light,var(--el-border-color-lighter));border-radius:12px;background:var(--dashboard-theme-surface-alt,var(--el-fill-color-extra-light))}
+.ranking-group{display:grid;grid-template-columns:repeat(var(--ranking-columns),minmax(0,1fr));height:530px;grid-template-rows:repeat(var(--ranking-rows),minmax(0,1fr));grid-auto-flow:column;gap:10px;margin-bottom:10px}
+.inventory-rank-card{display:grid;grid-template-columns:22px 64px minmax(0,1fr) 94px;align-items:center;gap:10px;height:100%;box-sizing:border-box;padding:6px 10px;border:1px solid var(--dashboard-theme-border-light,var(--el-border-color-lighter));border-radius:12px;background:var(--dashboard-theme-surface-alt,var(--el-fill-color-extra-light))}
 .rank-number{color:var(--dashboard-theme-link,var(--el-color-primary));font-size:16px;text-align:center}
 .rank-image{width:64px;height:84px;border-radius:8px;background:var(--el-fill-color-light)}
 .rank-copy{min-width:0;display:grid;gap:4px}
@@ -234,9 +254,9 @@ onBeforeUnmount(() => {
 .ranking-note{line-height:1.6}
 .ranking-scroll::-webkit-scrollbar{width:6px}
 .ranking-scroll::-webkit-scrollbar-thumb{background:var(--el-border-color);border-radius:4px}
-@media(max-width:760px){.ranking-group{grid-template-columns:minmax(0,1fr);grid-template-rows:none;grid-auto-flow:row}
+@media(max-width:760px){.ranking-group{height:auto;grid-template-columns:minmax(0,1fr);grid-template-rows:none;grid-auto-flow:row}
 .inventory-ranking{height:680px}
-.inventory-rank-card{grid-template-columns:20px 64px minmax(0,1fr) 88px;gap:7px}
+.inventory-rank-card{height:98px;grid-template-columns:20px 64px minmax(0,1fr) 88px;gap:7px}
 .ranking-heading{align-items:start}
 .ranking-heading small{max-width:140px;text-align:right}}
 </style>

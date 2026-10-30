@@ -2435,7 +2435,7 @@ Create a new manual exchange-rate record.
 
 #### `GET /api/profit-ranking`
 
-Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination.
+Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination. Inventory mode reads only sales aggregates, skips profit/fee and advertising report calculations; only the requested page is returned.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3528,7 +3528,7 @@ Any active current-enterprise member may propose one of three purchase purposes.
 
 #### `GET /api/inventory-workflow/details`
 
-Lazy, owned-product node records for requests, purchase-confirm, incoming, receiving, orders or safety. Fresh inventory.read membership; amounts are returned only with procurement permission. Requests/history default to three months while unfinished work remains visible; all=1 includes older history with 50-row pagination. Incoming warns strictly after48h; receiving includes actual arrival or elapsed72h without approving receipt. Orders expose scoped FBS image, shop, shipping and shared mark only. Safety returns effective cycle rules and optimistic revision.
+Lazy, owned-product node records for requests, purchase-confirm, incoming, receiving, orders, safety, composition or fbp-receipts. composition exposes only owned child image/name/inventory code/quantity and flags incomplete links. fbp-receipts pages owned transfers, snapshot-change plus recorded FBP outbound evidence, due times and manual receipt state; it never confirms automatically. Fresh inventory.read membership; amounts are returned only with procurement permission. Requests/history default to three months while unfinished work remains visible; all=1 includes older history with 50-row pagination. Incoming warns strictly after48h; receiving includes actual arrival or elapsed72h without approving receipt. Orders expose scoped FBS image, shop, shipping and shared mark only. Safety returns effective cycle rules and optimistic revision.
 
 - Auth: `authenticated`
 - Responses:
@@ -3538,7 +3538,7 @@ Lazy, owned-product node records for requests, purchase-confirm, incoming, recei
 
 #### `POST /api/inventory-workflow/node-action`
 
-Fresh membership and per-action duty checked inside transaction. arrived/transit-check require packing or procurement; arrived records received_at but never changes status, money or stock. reject requires procurement and nonempty reason, cancels only an unpurchased request and records rejected approval. order-note requires orders.manage, packing, procurement or inventory.write, verifies selected product consumes this open order, preserves existing mark type and conflicts on stale expected_note. All changes append inventory_flow_events. Approval with purchase uses the existing confirm-from-requests writer, not this route.
+Fresh membership and per-action duty checked inside transaction. arrived/transit-check require packing or procurement; arrived records received_at but never changes status, money or stock. reject requires procurement and nonempty reason, cancels only an unpurchased request and records rejected approval. order-note requires orders.manage, packing, procurement or inventory.write, verifies selected product consumes this open order, preserves existing mark type and conflicts on stale expected_note. All changes append inventory_flow_events. Approval with purchase uses the existing confirm-from-requests writer, not this route. fbp-arrival-time/fbp-expected-time require packing or inventory.write and optimistic transfer/arrival state; they audit dates without posting stock. fbp-receive rechecks the fresh duty inside the canonical confirm-received transaction, requires an integer quantity and expected_listed_quantity, preserves official stock, and records the confirming operator.
 
 - Auth: `authenticated`
 - Request body: required
