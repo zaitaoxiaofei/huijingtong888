@@ -5,7 +5,7 @@ import {
   recordOrderProfitCalculation,
   retryProfitCalculationTransaction
 } from "./order-profit-calculation-versions.js";
-import { assertProfitFormulaSupported, getProfitFormula } from "./profit-formulas/registry.js";
+import { assertProfitFormulaSupported, getProfitFormula, usesDailyProfitFx } from "./profit-formulas/registry.js";
 import { orderFxSalePrice, pendingOrderFxEstimate, readOrderProfitFxState } from "./order-profit-fx-policy.js";
 
 // Business projections and their audit revision always use the same connection.
@@ -57,24 +57,24 @@ export function profitCalculationOutputForLayer(layer, snapshot = {}) {
 }
 
 export async function estimatePinnedOrderItemProfit(orderItemId, input) {
-  const calculateV2 = (state, sku) => {
+  const calculateV2 = (state, sku, version = "V4") => {
     const convertedPrice = orderFxSalePrice(state, sku);
-    if (!state?.orderFx || convertedPrice === null) return pendingOrderFxEstimate(state);
+    if (!state?.orderFx || convertedPrice === null) return { ...pendingOrderFxEstimate(state), formulaVersion: version };
     const original = state.prices.find(price => String(price.ozon_sku) === String(sku));
-    return { ...getProfitFormula("V2").estimateItemProfit({ ...input,
+    return { ...getProfitFormula(version).estimateItemProfit({ ...input,
       salePrice: convertedPrice,
       product: { ...input.product, pricing_effective_at: input.product?.pricing_effective_at || state.ordered_business_date },
       fx: state.orderFx, orderBusinessDate: state.ordered_business_date, salePriceCurrency: "CNY",
       pricingAmountRub: original.currency === "RUB" ? original.amount : original.amount * Number(state.orderFx.rate)
-    }), formulaVersion: "V2", fx: state.orderFx, orderBusinessDate: state.ordered_business_date, salePriceCny: convertedPrice };
+    }), formulaVersion: version, fx: state.orderFx, orderBusinessDate: state.ordered_business_date, salePriceCny: convertedPrice };
   };
   if (!Number(orderItemId)) return input.fxState ? calculateV2(input.fxState, input.ozonSku)
-    : { ...getProfitFormula("V1").estimateItemProfit(input), formulaVersion: "V1" };
+    : { ...getProfitFormula("V3").estimateItemProfit(input), formulaVersion: "V3" };
   const rows = await mysqlQuery(`SELECT oi.order_id, oi.ozon_sku, CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END AS tenant_key
     FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id WHERE oi.id = ?`, [Number(orderItemId)]);
   if (!rows[0]) throw new Error("订单商品不存在，无法确定利润公式版本");
   const version = await getPinnedProfitFormulaVersion({ query: mysqlQuery, tenantId: rows[0].tenant_key }, Number(orderItemId));
-  if (version === "V2") return calculateV2(input.fxState || await readOrderProfitFxState({ query: mysqlQuery }, rows[0].tenant_key, rows[0].order_id), rows[0].ozon_sku);
+  if (usesDailyProfitFx(version)) return calculateV2(input.fxState || await readOrderProfitFxState({ query: mysqlQuery }, rows[0].tenant_key, rows[0].order_id), rows[0].ozon_sku, version);
   return { ...getProfitFormula(version).estimateItemProfit(input), formulaVersion: version };
 }
 
@@ -109,9 +109,13 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
       rateVersion: before.frozen_logistics_rule_id || null
     });
     const version = state.formula_version || "V1";
+    const expectedVersion = options.expectedFormulaVersion || options.inputs?.estimate?.formulaVersion;
+    if (expectedVersion && expectedVersion !== version) throw Object.assign(new Error('利润公式版本已变化，停止写入并重新计算'), {
+      code: 'ORDER_PROFIT_FORMULA_MISMATCH', statusCode: 409
+    });
     assertProfitFormulaSupported(version, { operation: options.layer === "actual" ? "finance" : "estimate" });
-    const fxState = version === "V2" ? await readOrderProfitFxState(db, before.tenant_key, before.order_id) : null;
-    if (version === "V2" && !fxState) throw Object.assign(new Error("每日汇率订单缺少冻结记录，停止计算"), { code: "ORDER_PROFIT_FX_STATE_MISSING" });
+    const fxState = usesDailyProfitFx(version) ? await readOrderProfitFxState(db, before.tenant_key, before.order_id) : null;
+    if (usesDailyProfitFx(version) && !fxState) throw Object.assign(new Error("每日汇率订单缺少冻结记录，停止计算"), { code: "ORDER_PROFIT_FX_STATE_MISSING" });
     const result = await project({ connection, db, formulaVersion: version });
     const after = await db.queryOne(SNAPSHOT_SQL, [Number(orderItemId)]);
     const layer = options.layer || "estimate";
@@ -120,9 +124,9 @@ export async function withVersionedOrderProfitWrite(orderItemId, options, projec
       tenantId: before.tenant_key, orderId: before.order_id, orderItemId: Number(orderItemId),
       layer, formulaVersion: version,
       inputs: options.inputs || {}, outputs: { ...profitCalculationOutputForLayer(layer, after),
-        ...(version === "V2" && layer === "estimate" && after.profit_status === "estimated"
+        ...(usesDailyProfitFx(version) && layer === "estimate" && after.profit_status === "estimated"
           ? { estimated_breakdown: profitCalculationOutputForLayer("actual", after) } : {}),
-        ...(version === "V2" && options.inputs?.fx_attribution ? { fx_attribution: options.inputs.fx_attribution } : {}) },
+        ...(usesDailyProfitFx(version) && options.inputs?.fx_attribution ? { fx_attribution: options.inputs.fx_attribution } : {}) },
       rateVersion: options.rateVersion || (fxState ? { logistics_rule_id: after.frozen_logistics_rule_id || null,
         order_fx: fxState.orderFx, signed_fx: fxState.signedFx, state: fxState.state } : layer === "actual" ? { source } : after.frozen_logistics_rule_id || null),
       costVersion: options.costVersion || null,

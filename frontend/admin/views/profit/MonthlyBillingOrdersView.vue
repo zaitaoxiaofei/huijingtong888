@@ -42,6 +42,7 @@ const outcomeOptions = [
   { label: "全部退货/拒收", value: "returns" },
   { label: "拒收/未取", value: "rejected_unclaimed" },
   { label: "签收后退货", value: "after_delivery_return" },
+  { label: "配送货损", value: "cargo_lost" },
   { label: "取消", value: "cancelled_pre_fulfillment" }
 ];
 
@@ -57,6 +58,7 @@ const outcomeLabels = {
   delivered_signed: "已签收",
   rejected_unclaimed: "拒收/未取",
   after_delivery_return: "签收后退货",
+  cargo_lost: "配送货损/理赔待核",
   cancelled_pre_fulfillment: "取消"
 };
 

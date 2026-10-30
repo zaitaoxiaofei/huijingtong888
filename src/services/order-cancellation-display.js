@@ -1,8 +1,18 @@
+import { reviewedAftersaleReason, reviewedAftersaleReasons } from './reviewed-aftersale-reasons.js';
+
 const REASON_CODE_LABELS = new Map([
   ["992", "平台核验商品描述"],
+  ["578", "买家交付时拒收：商品不合适"],
+  ["79", "买家交付时拒收：商品不合适"],
+  ["647", "买家交付时拒收：商品不合适"],
+  ["586", "买家交付时拒收：商品不符"],
+  ["587", "买家交付时拒收：不满意商品质量"],
+  ["984", "买家交付时拒收：不满意商品质量"],
+  ["20", "买家交付时拒收：配件或数量不全"],
+  ["648", "买家交付时拒收：配件或数量不全"],
   ["994", "缺少商品护照或合规文件"],
   ["quality_inspection", "平台质量检查"],
-  ["missing_passport", "缺少商品护照或合规文件"],
+  ["missing_passport", "买家未提供护照资料"],
   ["seller_cancelled", "卖家取消订单"],
   ["buyer_requested_cancel", "买家主动取消订单"],
   ["out_of_stock", "商品缺货"],
@@ -49,13 +59,15 @@ const INITIATOR_RULES = [
 ];
 
 const LOSS_PROFILE_LABELS = {
-  none: "无规则损失",
+  none: "不预估履约损失",
+  cargo_purchase_collecting: "货损：商品成本＋收单费",
   purchase_collecting: "商品成本＋国际运费＋收单费",
   purchase_collecting_international: "商品成本＋国内运费＋国际运费＋收单费",
   commission_purchase_collecting_international: "商品成本＋国内运费＋国际运费＋收单费＋佣金"
 };
 
 const LOSS_PROFILE_FORMULAS = {
+  cargo_purchase_collecting: "预估损失 = 商品成本 + 收单费；不计佣金及运费，赔付到账后另核销",
   none: "预估损失 = 0；真实财务费用到账后以实际扣费为准",
   purchase_collecting: "预估损失 = 商品成本 + 国际运费 + 收单费",
   purchase_collecting_international: "预估损失 = 商品成本 + 国内运费 + 国际运费 + 收单费",
@@ -67,7 +79,9 @@ function normalize(value) {
 }
 
 export function cancellationReasonTypes() {
-  return [...REASON_CODE_LABELS].filter(([code]) => !/^\d+$/.test(code)).map(([value, label]) => ({ value, label }));
+  const types = new Map([...REASON_CODE_LABELS].filter(([code]) => !/^\d+$/.test(code)));
+  for (const reason of reviewedAftersaleReasons) types.set(reason.reason_code, reason.label);
+  return [...types].map(([value, label]) => ({ value, label }));
 }
 
 function translatedByText(value) {
@@ -82,7 +96,7 @@ function translatedByText(value) {
 export function translateCancellationReason(row = {}) {
   const original = String(row.cancel_reason || row.raw_cancellation_reason || row.cancel_type || "").trim();
   const code = normalize(row.cancel_reason_id || row.cancel_reason_code || row.reason_code);
-  const translated = REASON_CODE_LABELS.get(code) || translatedByText(original);
+  const translated = reviewedAftersaleReason(row)?.label || REASON_CODE_LABELS.get(code) || translatedByText(original);
   return {
     label: translated || (original ? `未收录原因：${original}` : "取消原因待同步"),
     original,

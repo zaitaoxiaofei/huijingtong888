@@ -34,9 +34,9 @@ export function fxSettlementInputFingerprint({ order, items, targetItemId, fxSta
 // No writes and no network calls. Currency/allocation evidence is supplied by
 // the V2 finance reader; bill completeness is established here separately.
 export async function planOrderFxSettlement({ order, items, fxState, finance, initialEstimates,
-  classifyCategory, packagingFeeForSaleAmount, accounting }) {
+  classifyCategory, packagingFeeForSaleAmount, accounting, formulaVersion = "V2" }) {
   if (!fxState?.orderFx) return pending("ORDER_PROFIT_ORDER_FX_PENDING");
-  const formula = getProfitFormula("V2");
+  const formula = getProfitFormula(formulaVersion);
   const outcome = accounting.outcome_type;
   if (outcome === "active") return pending("ORDER_PROFIT_TERMINAL_STATUS_PENDING");
   const requiresSigned = outcome === "delivered_signed" || outcome === "after_delivery_return";
@@ -69,12 +69,15 @@ export async function planOrderFxSettlement({ order, items, fxState, finance, in
   const hasSaleEvidence = signedAccruals ? incomeRows.length > 0 && Number.isFinite(grossSale) : grossSale > 0.005;
   const purchaseKnown = items.every(item => Number(item.purchase_cost_cny || 0) > 0.005
     || Number(item.frozen_purchase_cost || 0) * Number(item.quantity) > 0.005);
+  if (outcome === 'cargo_lost' && (!purchaseKnown || !Object.hasOwn(totals, 'collecting_fee'))) {
+    return pending('ORDER_PROFIT_CARGO_COST_PENDING');
+  }
   if (outcome === "delivered_signed" && (!purchaseKnown || !hasSaleEvidence || !(totals.commission > 0.005)
     || !(totals.collecting_fee > 0.005) || !(Number(totals.platform_delivery || 0) + Number(totals.international_transport || 0) > 0.005))) {
     return pending("ORDER_PROFIT_FINAL_BILL_INCOMPLETE");
   }
   const cancelled = outcome === "cancelled_pre_fulfillment";
-  const returned = ["rejected_unclaimed", "after_delivery_return"].includes(outcome);
+  const returned = ["rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(outcome);
   const terminalNoRevenue = cancelled || returned;
   const policy = returned ? formula.outcome.resolveReturnLossCostPolicy({ outcome, lossProfileCode: accounting.loss_profile_code }) : null;
   const use = {
@@ -94,7 +97,7 @@ export async function planOrderFxSettlement({ order, items, fxState, finance, in
     const domesticShipping = cancelled || (policy && !policy.domestic) ? 0 : Number(item.domestic_shipping_cny || Number(item.frozen_domestic_shipping || 0) * Number(item.quantity));
     // Packaging and other CNY costs are fixed for the counterfactual comparison.
     const packagingCost = cancelled || (policy && !policy.packaging) ? 0 : Number(await packagingFeeForSaleAmount(terminalNoRevenue ? localItemSale : itemSale));
-    const advertisingCost = cancelled ? 0 : Number(item.advertising_cost_cny || 0);
+    const advertisingCost = cancelled || outcome === "cargo_lost" ? 0 : Number(item.advertising_cost_cny || 0);
     const fee = category => use[category] ? round(Number(totals[category] || 0) * share) : 0;
     const commissionFeeCny = fee("commission"), actualServiceFeeCny = fee("other"), otherFee = fee("collecting_fee");
     const actualInternationalShipping = round(fee("platform_delivery") + fee("international_transport"));
@@ -122,7 +125,7 @@ export async function planOrderFxSettlement({ order, items, fxState, finance, in
     attribution.rounding_difference_cny = round(attribution.total_variance_cny - attribution.fx_gain_loss_cny - attribution.business_variance_cny);
     attribution.settlement_basis = basis;
     projections.push({ item, share, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost,
-      commissionFeeCny, commissionRate: grossSale > 0 ? Number(totals.commission || 0) / grossSale : 0,
+      commissionFeeCny, commissionRate: outcome === "cargo_lost" ? 0 : grossSale > 0 ? Number(totals.commission || 0) / grossSale : 0,
       actualServiceFeeCny, returnLoss, advertisingCost, otherFee, actualProfit, grossProfit,
       totalFinanceFeeCny: round(Object.entries(totals).reduce((sum, [category, value]) => sum + (category === "income" ? 0 : Number(value)), 0) * share),
       attribution, actualNetAmounts });
