@@ -129,6 +129,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
         ON DUPLICATE KEY UPDATE settings_json = VALUES(settings_json), updated_by = VALUES(updated_by), revision = revision + 1`, [scope.id, id, JSON.stringify(value), personId]);
       await audit(q, scope, personId, "settings", { product_id: id, settings: value }, null, id || null);
     });
+    changed();
     return { ok: true };
   }
   async function audit(q, scope, actor, action, data, orderId = null, productId = null) {

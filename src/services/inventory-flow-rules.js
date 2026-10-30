@@ -17,6 +17,7 @@ export function validateFlowSettings(value = {}) {
     hit_sales: Math.max(1, whole(value.hit_sales ?? 100, "爆品销量门槛")),
     holidays: []
   };
+  if(result.production_days===0)throw flowError("生产周期至少1天，请在本地安全保障规则中修改");
   if (!Array.isArray(value.holidays ?? []) || (value.holidays || []).length > 50) throw flowError("节假日最多设置50个区间");
   for (const holiday of value.holidays || []) {
     const from = String(holiday.from || ""), to = String(holiday.to || "");

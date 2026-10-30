@@ -34,7 +34,7 @@ test('alert search, status filters, and view switch remain compact and responsiv
 });
 
 test('lead time editing has explicit options, tenant-scoped API contract, and conflict protection', () => {
-  assert.match(page, /productionLeadOptions = \[3, 5, 7, 10, 15, 30\]/);
+  assert.match(page, /productionLeadOptions = \[1, 2, 3, 5, 7, 10, 15, 30\]/);
   assert.match(page, /logisticsDayOptions = \[1, 2, 3, 4, 5\]/);
   assert.match(page, /apiClient\.post\("\/api\/inventory\/products\/lead-times"/);
   assert.match(page, /expected_production_lead_days: leadForm\.expected_production_lead_days/);

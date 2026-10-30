@@ -633,10 +633,10 @@ test("生产周期只接受固定选项，新建库存默认七天且旧库存�
   vm.runInContext(service.slice(start, end), context);
   assert.equal(context.normalizeProductionLeadDaysMysql(null), null);
   assert.equal(context.normalizeProductionLeadDaysMysql(""), null);
-  for (const days of [3, 5, 7, 10, 15, 30]) assert.equal(context.normalizeProductionLeadDaysMysql(days), days);
+  for (const days of [1, 2, 3, 5, 7, 10, 15, 30]) assert.equal(context.normalizeProductionLeadDaysMysql(days), days);
   assert.throws(() => context.normalizeProductionLeadDaysMysql(14), /生产周期/);
   assert.match(schema, /production_lead_days INT NULL/);
-  assert.match(productDialog, /PRODUCTION_LEAD_DAY_OPTIONS = \[3, 5, 7, 10, 15, 30\]/);
+  assert.match(productDialog, /PRODUCTION_LEAD_DAY_OPTIONS = \[1, 2, 3, 5, 7, 10, 15, 30\]/);
   assert.ok(service.includes('normalizeProductionLeadDaysMysql(body.production_lead_days ?? (body.product_type === "selection" ? null : 7))'));
   assert.match(service, /normalizeProductionLeadDaysMysql\(body\.production_lead_days === undefined \? existing\.production_lead_days : body\.production_lead_days\)/);
 });

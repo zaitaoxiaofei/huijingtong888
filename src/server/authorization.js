@@ -119,10 +119,11 @@ export function authorizeApiRequest(req, parts = []) {
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");
   if (resource === "inventory-workflow") {
+    if(method==='POST'&&path==='inventory-workflow/node-action')return require('packing','inventory.write','procurement','orders.manage');
     if(method==='POST'&&path==='inventory-workflow/feedback')return require('packing','inventory.write','procurement');
     if (method==='POST' && path==='inventory-workflow/fbp') return require('inventory.write');
     if (path === 'inventory-workflow/receipts' && ['GET','POST'].includes(method)) return require('packing','procurement');
-    if (read && ['inventory-workflow','inventory-workflow/alerts'].includes(path)) return require('inventory.read');
+    if (read && ['inventory-workflow','inventory-workflow/alerts','inventory-workflow/details'].includes(path)) return require('inventory.read');
     if (method === 'POST' && path === 'inventory-workflow/requests') return req._session?.tenant?.id ? {allowed:true} : deny('请先选择有效企业');
     return deny();
   }

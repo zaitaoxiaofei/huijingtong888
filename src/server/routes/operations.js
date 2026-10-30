@@ -1,6 +1,7 @@
 import { createFbpSupplyFeedback } from '../../services/fbp-supply-feedback.js';
 import { inventorySupplyFeedback } from '../../services/inventory-supply-feedback.js';
 import { inventoryWorkspacePage } from '../../shared/inventory-workspace.js';
+import { createInventoryNodeRecords } from '../../services/inventory-node-records.js';
 import { createInventoryWorkflowService } from '../../services/inventory-workflow.js';
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from '../../services/business-task-tenant.js';
 import { createWarehouseStockTopup } from '../../services/warehouse-stock-topup.js';
@@ -35,6 +36,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
   readUnclassifiedCancellationReasons = unclassifiedCancellationReasons, saveCancellationClassification = saveCancellationReasonClassification,
   queryCancellationReview = queryCancellationReviewMysql, cancellationReviewTransaction = cancellationReviewMysqlTransaction }) {
   const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
+  const nodeRecords=createInventoryNodeRecords({ledger:services.procurementLedger});
   const workflow = createInventoryWorkflowService({ ledger: services.procurementLedger, receiveRecords: services.batchUpdateInboundRecords, previewReceipts: services.previewInboundReceiptImpact });
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
@@ -96,6 +98,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       for(let i=0;i<ids.length;i+=2) rows.push(...await Promise.all(ids.slice(i,i+2).map(id=>workflow.read(id,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'}))));
       return { rows };
     },
+    "GET /api/inventory-workflow/details": (req,url)=>nodeRecords.records(Object.fromEntries(url.searchParams),req._session),
+    "POST /api/inventory-workflow/node-action": async req=>nodeRecords.mutate(await readJson(req),req._session),
     "GET /api/inventory-workflow/receipts": async (req,url)=>({rows:await workflow.receipts(url.searchParams.get('product_id'),req._session)}),
     "POST /api/inventory-workflow/receipts": async req=>workflow.receive(await readJson(req),req._session),
     "POST /api/inventory-workflow/fbp": async req => {
@@ -176,7 +180,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/procurement/reconciliation/auto-match": async (req) => services.autoMatchProcurementPayments(tenantIdFromRequest(req)),
     "POST /api/procurement/reconciliation/apply-costs": async (req) => services.applyProcurementActualCosts(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req), req._session),
-    "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req), null, {session:req._session}),
     "POST /api/procurement/refresh-demand": (req) => services.refreshProcurementDemand(tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req), req._session?.personId, null, tenantIdFromRequest(req)),
     "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),

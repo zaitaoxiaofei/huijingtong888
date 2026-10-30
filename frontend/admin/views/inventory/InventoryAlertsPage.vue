@@ -37,7 +37,7 @@ const editingLeadProductId = ref(0);
 const editingLeadRow = ref(null);
 const leadSavingProductId = ref(0);
 const leadForm = reactive({ production_lead_days: 7, warehouse_logistics_days: 2, expected_production_lead_days: 7, expected_warehouse_logistics_days: 2 });
-const productionLeadOptions = [3, 5, 7, 10, 15, 30];
+const productionLeadOptions = [1, 2, 3, 5, 7, 10, 15, 30];
 const logisticsDayOptions = [1, 2, 3, 4, 5];
 const state = reactive({
   rows: [],

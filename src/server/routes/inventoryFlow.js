@@ -19,7 +19,11 @@ export function createInventoryFlowRoutes({ readJson, syncStocks, prepare = asyn
     "GET /api/inventory-flow": (req, url) => flow.list(Object.fromEntries(url.searchParams), tenantIdFromRequest(req)),
     "GET /api/inventory-flow/detail": (req, url) => flow.detail(url.searchParams.get('product_id'), tenantIdFromRequest(req)),
     "GET /api/inventory-flow/settings": req => flow.settings(tenantIdFromRequest(req)),
-    "POST /api/inventory-flow/settings": async req => flow.saveSettings(await readJson(req), tenantIdFromRequest(req), actor(req)),
+    "POST /api/inventory-flow/settings": async req => {
+      const session=await authorize(req._session);
+      assertBusinessTaskPermission(session,'inventory.write');
+      return flow.saveSettings(await readJson(req),tenantIdFromRequest(req),session.personId);
+    },
     "GET /api/inventory-flow/tasks": req => flow.tasks(tenantIdFromRequest(req)),
     "POST /api/inventory-flow/tasks": async req => flow.createTask(await readJson(req), tenantIdFromRequest(req), actor(req)),
     "POST /api/inventory-flow/task-action": async req => {

@@ -39,8 +39,10 @@ const loading = ref(false), saving = ref(false), searching = ref(false);
 const productId = ref(0), products = ref([]), targetProducts = ref([]), data = ref(null), target = ref(null);
 const preview = ref(null), submission = ref(null), formVisible = ref(false);
 const form = reactive({});
-const activeTab = ref('current');
-function selectFlowTab(tab) { if (tab === 'incoming-purchases') showPurchases('incoming'); else activeTab.value = tab; }
+const activeTab = ref('current'), recordsVisible=ref(false),showOrderBreakdown=ref(false);
+const recordTabs=computed(()=>[['fbp','FBP库存'],['current','订单分配'],['purchases','采购与成本'],['history','历史核对'],['batch-trace','采购批次及反查'],['movements','库存流水'],['actions','操作记录']].filter(([tab])=>!inventoryOnly.value||!['purchases','history','batch-trace'].includes(tab)));
+function openRecords(tab){activeTab.value=tab;recordsVisible.value=true;}
+function selectFlowTab(tab) { if (tab === 'incoming-purchases') showPurchases('incoming'); else openRecords(tab); }
 const traceBatchId = ref(null), historyFilter = ref('gap'), historyPage = ref(1);
 const historyPageSize = ref(20), historySelection = ref([]), historyLinkVisible = ref(false), historyBatchId = ref(null);
 const purchaseUsage = computed(() => buildPurchaseUsage(data.value || {}));
@@ -50,7 +52,7 @@ function showUsage(row) { usagePage.value = 1; usagePurchaseId.value = Number(ro
 const availableHistory = computed(() => availableHistoryBatches(data.value || {}));
 const selectedHistoryBatch = computed(() => availableHistory.value.find(row => Number(row.id) === historyBatchId.value));
 const selectedHistoryQuantity = computed(() => historySelection.value.reduce((sum, row) => sum + Number(row.missing_record_quantity || 0), 0));
-function showHistoryTodo() { activeTab.value = 'history'; historyFilter.value = 'gap'; historyPage.value = 1; }
+function showHistoryTodo() { openRecords('history'); historyFilter.value = 'gap'; historyPage.value = 1; }
 function startHistoryLink() { historyBatchId.value = null; historyLinkVisible.value = true; }
 async function saveHistoryLink() {
   if (!selectedHistoryBatch.value || selectedHistoryQuantity.value > selectedHistoryBatch.value.available_history_quantity) return;
@@ -66,7 +68,7 @@ function backfillSelectedHistory() {
 watch([historyPage, historyPageSize, historyFilter, data], () => { historySelection.value = []; });
 watch([historyPageSize, data], () => { historyPage.value = 1; });
 watch(productId, () => { historyLinkVisible.value = false; usagePurchaseId.value = null; });
-function showBatch(id) { traceBatchId.value = id; activeTab.value = 'batch-trace'; }
+function showBatch(id) { traceBatchId.value = id; openRecords('batch-trace'); }
 async function reconcileBatch({ inbound_id, allocations }) {
   if (inventoryOnly.value) return false;
   if (saving.value) return;
@@ -126,7 +128,7 @@ const countReasons = computed(() => inventoryAdjustmentReasons.filter(reason => 
   || (reason.direction === 'decrease' && countDelta.value < 0)
   || (reason.direction === 'increase' && countDelta.value >= 0)
   || (reason.direction === 'same' && countDelta.value === 0)));
-function showPurchases(filter = 'all') { purchaseFilter.value = filter; activeTab.value = 'purchases'; }
+function showPurchases(filter = 'all') { purchaseFilter.value = filter; openRecords('purchases'); }
 function startConversion() {
   const quantity = countDelta.value < 0 ? -countDelta.value : 1;
   edit('convert');
@@ -215,7 +217,7 @@ async function search(text, isTarget = false) {
   } catch (error) { ElMessage.error(error.message); }
   finally { searching.value = false; }
 }
-async function load(id = productId.value) {
+async function load(id = productId.value, {syncFbpOnLoad=true}={}) {
   const version = ++loadVersion;
   workflow.value=null;
   stopFbpPoll();
@@ -232,7 +234,7 @@ async function load(id = productId.value) {
     if (version === loadVersion) {
       data.value = result;
       if (!directStocktake.value) void loadFbp(id, version).then(() => {
-        if (version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
+        if (syncFbpOnLoad && version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
       });
       if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
         pendingInitialAction = '';
@@ -389,7 +391,7 @@ async function save() {
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
-watch(() => props.modelValue, value => { if (value) { activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !inventoryOnly.value ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !inventoryOnly.value && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; stopFbpPoll(); fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
+watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['purchases','history'].includes(props.initialTab)&&!inventoryOnly.value;showOrderBreakdown.value=false; activeTab.value = ['current', 'purchases', 'history'].includes(props.initialTab) && !inventoryOnly.value ? props.initialTab : 'current'; products.value = []; pendingInitialAction = props.initialAction; load(props.productId); if (!props.orderOverview && !inventoryOnly.value && !directStocktake.value) search(''); } else { pendingInitialAction = ''; ++loadVersion; ++fbpVersion; stopFbpPoll(); fbpLoading.value = false; fbpSyncing.value = false; } }, { immediate: true });
 </script>
 
 <template>
@@ -400,7 +402,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <span :id="titleId" :class="titleClass">{{ inventoryOnly ? '库存明细' : '库存明细与历史核对' }}</span>
           <small v-if="orderOverview && orderLabel" class="ledger-order-context" :title="orderLabel">{{ orderLabel }}</small>
         </div>
-        <div class="ledger-top-actions">
+        <div class="ledger-top-actions"><el-button v-if="orderOverview" @click="showOrderBreakdown=!showOrderBreakdown">本单商品与分配（{{orderItems.length}}）</el-button>
           <el-button v-if="stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
           <el-button v-if="!inventoryOnly" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
           <el-dropdown v-if="!inventoryOnly" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
@@ -412,7 +414,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
         </div>
       </div>
     </template>
-    <section v-if="orderOverview" class="ledger-order-summary">
+    <section v-if="orderOverview && showOrderBreakdown" class="ledger-order-summary">
       <div class="ledger-order-heading"><strong>本单需求分配</strong><span>点击库存产品切换详情；不同子产品的件数不合并相加。</span></div>
       <el-table :data="orderItems" row-key="product_id" max-height="290" :row-class-name="({ row }) => Number(row.product_id) === productId ? 'selected-inventory-row' : ''" @row-click="row => changeProduct(row.product_id)">
         <el-table-column label="库存产品" min-width="320"><template #default="{ row }"><div class="ledger-product ledger-order-product">
@@ -427,19 +429,20 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
       <el-alert v-if="data && !localOrderActive" type="info" :closable="false" title="本单暂无本地分配结果，横杠不表示数量为0；FBP订单请查看官方仓库存。" />
       <el-alert v-if="orderCoverageConclusion" :type="orderCoverageConclusion.type" :closable="false" show-icon class="ledger-order-conclusion" :title="orderCoverageConclusion.title" />
     </section>
-    <div v-if="!orderOverview && !inventoryOnly" class="ledger-toolbar">
-      <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
-        <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
-        <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
-      </el-select>
-    </div>
     <section v-if="managementVisible" class="ledger-management"><slot name="management" /></section>
     <el-alert v-if="loadError" type="error" :closable="false" title="库存明细加载失败，请点击刷新对账重试" :description="loadError" />
     <div v-loading="loading" class="ledger-detail-body" :class="{ 'is-loading': loading }" element-loading-text="正在读取本地库存与订单占用…">
       <template v-if="data">
-        <div v-if="!orderOverview" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
-        <InventoryWorkflowPanel v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" @loaded="value=>workflow=value" @saved="load();emit('saved')" />
-        <InventoryFlowDiagram :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false" />
+        <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
+        <InventoryWorkflowPanel compact v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" @loaded="value=>workflow=value" @saved="load();emit('saved')" />
+        <InventoryFlowDiagram @saved="load(productId,{syncFbpOnLoad:false});emit('saved')" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
+      <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
+        <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
+        <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />
+      </el-select>
+    </el-popover>
+</template></InventoryFlowDiagram>
+        <el-dialog v-model="recordsVisible" title="库存核对记录" width="88vw" top="5vh" append-to-body destroy-on-close>
         <p class="ledger-current-shortage">全部待履约订单待采购：{{ data.current_shortage }} 件（历史缺记录不计入此数）。</p>
         <section v-if="inventoryOnly && $slots['inventory-relations']" class="ledger-management"><slot name="inventory-relations" /></section>
         <div v-if="!inventoryOnly && (pendingCosts.length || data.current_shortage > 0)" class="ledger-toolbar">
@@ -576,7 +579,7 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
           <el-tab-pane label="操作记录" name="actions" lazy>
             <el-table :data="data.actions" max-height="400"><el-table-column label="北京时间" width="180"><template #default="{ row }">{{ time(row.created_at) }}</template></el-table-column><el-table-column label="操作" width="180"><template #default="{ row }">{{ labels[row.action_type] }}</template></el-table-column><el-table-column prop="person_name" label="操作人" width="110" /><el-table-column label="变动内容" min-width="260"><template #default="{ row }">{{ actionSummary(row) }}</template></el-table-column><el-table-column prop="reason" label="原因／凭证" /></el-table>
           </el-tab-pane>
-        </el-tabs>
+        </el-tabs></el-dialog>
       </template>
       <el-empty v-else-if="!loading && !loadError" :description="orderOverview ? '没有已绑定的库存商品，请通过更多操作中的绑定管理核对' : '请选择商品；没有当前采购任务的商品也可以对账'" />
     </div>
@@ -678,6 +681,8 @@ watch(() => props.modelValue, value => { if (value) { activeTab.value = ['curren
 </template>
 <style scoped>
 @media (max-width: 1100px) { :global(.unified-inventory-dialog) { width:96vw!important; } }
+.ledger-detail-body>.ledger-product .ledger-image{width:44px;height:58px}
+.ledger-record-buttons{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}.ledger-record-buttons :deep(.el-button){margin:0}
 .ledger-detail-body.is-loading { min-height: 470px; }
 .stocktake-loading { min-height:150px;display:flex;align-items:center;justify-content:center;color:var(--el-text-color-secondary); }
 .stocktake-book-warning { margin:12px 0; }
