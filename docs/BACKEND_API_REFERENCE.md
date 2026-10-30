@@ -2435,7 +2435,7 @@ Create a new manual exchange-rate record.
 
 #### `GET /api/profit-ranking`
 
-Return ranking rows for the selected profit dimension.
+Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -2447,6 +2447,8 @@ Return ranking rows for the selected profit dimension.
   - `metric` (`string`, optional): Optional metric selector.
   - `page` (`number`, optional): Optional page number.
   - `pageSize` (`number`, optional): Optional page size.
+  - `inventory` (`string`, optional): Set to 1 for the inventory sales leaderboard (product/sku dimensions).
+  - `productId` (`integer`, optional): Filter inventory leaderboard details by inventory product ID.
 - Responses:
   - `200` `application/json` -> `array<object>`
 

@@ -27115,6 +27115,8 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   const tenantScope = await orderListTenantScopeMysql(tenantId);
   const orderScope = `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`;
   const dimension = String(query.dimension || "sku").toLowerCase();
+  const inventoryMode = String(query.inventory || "") === "1" && ["product", "sku"].includes(dimension);
+  const inventoryProductId = Number(query.productId || query.product_id || 0);
   const page = Math.max(Number(query.page || 1), 1);
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 200);
   const offset = (page - 1) * pageSize;
@@ -27176,6 +27178,19 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     adParams.push(to);
   }
   const adWhereSql = adWhere.length ? adWhere.join(" AND ") : "1=1";
+  // Keep the existing report untouched unless the inventory leaderboard is requested.
+  // Resolve at most one mapping per order item: never fan out sales into components.
+  const inventoryMappingJoin = inventoryMode ? `LEFT JOIN sku_mappings sm ON sm.id=COALESCE(
+    (SELECT original_mapping.id FROM sku_mappings original_mapping WHERE original_mapping.id=oi.sku_mapping_id AND original_mapping.shop_id=o.shop_id AND ${orderTenantPredicateMysql("original_mapping",tenantScope)} LIMIT 1),
+    (SELECT current_mapping.id FROM sku_mappings current_mapping WHERE current_mapping.shop_id=o.shop_id AND current_mapping.ozon_sku=oi.ozon_sku AND current_mapping.active=1 AND ${orderTenantPredicateMysql("current_mapping",tenantScope)} ORDER BY current_mapping.id DESC LIMIT 1))
+    LEFT JOIN products p ON p.id=sm.product_id AND ${orderTenantPredicateMysql("p",tenantScope)}` : '';
+  if (inventoryMode) {
+    where.push("p.id IS NOT NULL", effectiveBusinessSale);
+    if (inventoryProductId > 0) {
+      where.push("p.id = ?");
+      whereParams.push(inventoryProductId);
+    }
+  }
   if (dimension === "shop") {
     selectFields = "s.id AS shop_id, s.name AS shop_name";
     groupFields = "s.id, s.name";
@@ -27191,8 +27206,12 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     }
   } else if (dimension === "product") {
     selectFields = "p.id AS product_id, MAX(p.code) AS product_code, MAX(p.name) AS product_name, MAX(p.image_url) AS image_url";
+    if (inventoryMode) selectFields = `p.id AS product_id,MAX(p.code) AS product_code,MAX(p.inventory_number) AS inventory_number,MAX(p.name) AS product_name,MAX(p.stock_unit) AS stock_unit,
+      MAX(CASE WHEN COALESCE(p.image_url,'')!='' THEN CONCAT('/api/products/',p.id,'/image?thumb=1&w=180') ELSE '' END) AS image_url,
+      COUNT(DISTINCT o.shop_id) AS shop_count,COUNT(DISTINCT o.shop_id,oi.ozon_sku) AS sku_count`;
     groupFields = "p.id";
     joinSql = `LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)} LEFT JOIN products p ON p.id = sm.product_id AND ${orderTenantPredicateMysql("p", tenantScope)}`;
+    if (inventoryMode) joinSql = inventoryMappingJoin;
     if (keyword) {
       where.push("(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?)");
       whereParams.push(`%${keyword}%`, `%${keyword}%`);
@@ -27201,6 +27220,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     selectFields = "o.shop_id, MAX(s.name) AS shop_name, oi.ozon_sku, MAX(COALESCE(NULLIF(oi.ozon_product_id, ''), NULLIF(op.ozon_product_id, ''), '')) AS ozon_product_id, MAX(COALESCE(NULLIF(oi.ozon_name, ''), NULLIF(op.name, ''), NULLIF(sm.display_name, ''), NULLIF(p.name, ''), '')) AS product_name, MAX(COALESCE(NULLIF(p.image_url, ''), NULLIF(op.primary_image, ''), NULLIF(op.image_url, ''), '')) AS image_url";
     groupFields = "o.shop_id, oi.ozon_sku";
     joinSql = `JOIN shops s ON s.id = o.shop_id LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)} LEFT JOIN products p ON p.id = sm.product_id AND ${orderTenantPredicateMysql("p", tenantScope)} LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku`;
+    if (inventoryMode) joinSql = `JOIN shops s ON s.id=o.shop_id ${inventoryMappingJoin} LEFT JOIN online_products op ON op.shop_id=o.shop_id AND op.ozon_sku=oi.ozon_sku`;
     if (keyword) {
       where.push("(LOWER(COALESCE(oi.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(oi.ozon_name, '')) LIKE ? OR LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(s.name, '')) LIKE ?)");
       whereParams.push(`%${keyword}%`, `%${keyword}%`, `%${keyword}%`, `%${keyword}%`);
@@ -27226,17 +27246,18 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   `;
   const sortable = new Set(["order_count", "item_quantity", "revenue", "profit", "purchase_cost", "domestic_shipping_cost", "international_shipping_cost", "packaging_cost", "commission_fee", "ozon_service_fee", "return_loss", "order_advertising_cost", "other_fee", "cancelled_revenue"]);
   const orderField = sortable.has(sortBy) ? sortBy : "profit";
+  const stableOrder = inventoryMode ? (dimension === "product" ? ", p.id ASC" : ", o.shop_id ASC, oi.ozon_sku ASC") : "";
   let total = 0;
   let rows = [];
   if (fastMode) {
-    const fastRows = await mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize + 1, offset]);
+    const fastRows = await mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder}${stableOrder} LIMIT ? OFFSET ?`, [...params, pageSize + 1, offset]);
     const hasMore = fastRows.length > pageSize;
     rows = hasMore ? fastRows.slice(0, pageSize) : fastRows;
     total = offset + rows.length + (hasMore ? 1 : 0);
   } else {
     const [totalRow, resultRows] = await Promise.all([
       mysqlQueryOne(profitRankingGroupCountSql({ groupFields, joinSql, orderScope, dateWhereSql: dateFilter.whereSql, whereSql }), [...dateFilter.params, ...whereParams]),
-      mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
+      mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder}${stableOrder} LIMIT ? OFFSET ?`, [...params, pageSize, offset])
     ]);
     total = Number(totalRow?.total || 0);
     rows = resultRows;

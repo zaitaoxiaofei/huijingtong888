@@ -1431,9 +1431,9 @@ const endpoints = [
       requestBody: body(ref("ExchangeRateUpdateRequest")),
       responses: [response(200, "application/json", ref("ExchangeRate"))]
     }),
-    endpoint("GET", "/api/profit-ranking", "Return ranking rows for the selected profit dimension.", {
+    endpoint("GET", "/api/profit-ranking", "Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination.", {
       auth: "authenticated",
-      query: queryFieldsFromSchema("ProfitFiltersQuery"),
+      query: [...queryFieldsFromSchema("ProfitFiltersQuery"), param("inventory", scalar("string", "Set to 1 for the inventory sales leaderboard (product/sku dimensions)."), false), param("productId", scalar("integer", "Filter inventory leaderboard details by inventory product ID."), false)],
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
     }),
     endpoint("GET", "/api/profit-reconciliation", "Compare estimated and finance-accrued profit and identify inventory-data risks.", {
