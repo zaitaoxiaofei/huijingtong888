@@ -139,8 +139,6 @@ function handlePrintCommand(command) {
             />
           </div>
 
-
-
           <el-date-picker
             v-model="dateRange"
             type="daterange"
@@ -153,26 +151,6 @@ function handlePrintCommand(command) {
           />
 
           <div class="orders-toolbar-actions-main">
-            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
-            <el-dropdown
-              class="orders-toolbar-print"
-              split-button
-              trigger="click"
-              :button-props="{ class: 'orders-toolbar-btn orders-toolbar-btn-secondary' }"
-              :disabled="syncRunning || !pageRowCount"
-              @click="emit('print-selected')"
-              @command="handlePrintCommand"
-            >
-              <el-icon class="el-icon--left"><Printer /></el-icon>批量打印
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="print-selected" :disabled="!selectedCount">打印所选</el-dropdown-item>
-                  <el-dropdown-item command="print-page" :disabled="!pageRowCount">打印整页</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-
-            <OrderWorkModeSwitch v-if="workMode" :mode="workMode.mode.value" @change="workMode.mode.value=$event"/>
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
               <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
                 <el-button
@@ -182,7 +160,7 @@ function handlePrintCommand(command) {
                   :disabled="syncRunning"
                   @click="emit('sync-incremental')"
                 >
-                  拉取新单
+                  拉取新订单
                 </el-button>
               </el-tooltip>
               <el-tooltip :content="`最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
@@ -200,6 +178,8 @@ function handlePrintCommand(command) {
               </el-tooltip>
             </div>
 
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
+
             <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
               <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
               <template #dropdown>
@@ -207,6 +187,24 @@ function handlePrintCommand(command) {
                   <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value" :disabled="action.requiresSelection && !selectedCount">
                     {{ action.label }}
                   </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+
+            <el-dropdown
+              class="orders-toolbar-print"
+              split-button
+              trigger="click"
+              :button-props="{ class: 'orders-toolbar-btn orders-toolbar-btn-secondary' }"
+              :disabled="syncRunning || !pageRowCount"
+              @click="emit('print-selected')"
+              @command="handlePrintCommand"
+            >
+              <el-icon class="el-icon--left"><Printer /></el-icon>批量打印
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="print-selected" :disabled="!selectedCount">打印所选</el-dropdown-item>
+                  <el-dropdown-item command="print-page" :disabled="!pageRowCount">打印整页</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -226,6 +224,7 @@ function handlePrintCommand(command) {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
+          <OrderWorkModeSwitch v-if="workMode" :mode="workMode.mode.value" @change="workMode.mode.value=$event"/>
         </div>
       </div>
     </el-form>

@@ -75,11 +75,13 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   async function workspaceSources(ids,tenantId,{includeHistory=false}={}){
     if(!ids.length)return {requests:[],applications:[]};
     const scope=await resolveInventoryTenantScope(tenantId,query),placeholders=ids.map(()=>'?').join(',');
+    const bindingValid=`(wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))`;
     const [requests,applications]=await Promise.all([
         query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
           FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,ids),
         query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,ws.name AS shop_name,wo.order_no,wo.submitted_at,wo.created_at,
+          CASE WHEN ${bindingValid} THEN 'current' ELSE 'changed_or_missing' END AS binding_status,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
           wi.requested_qty AS sku_requested_quantity,MAX(wi.approved_qty) AS sku_approved_quantity,
           CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS units_per_sku,
@@ -94,7 +96,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
           WHERE ${includeHistory?"wo.status!='draft'":"wo.status IN ('draft','pending_review','approved','ozon_created')"}
             AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
             AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
-            AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
+            AND (${bindingValid}${includeHistory?" OR wo.status NOT IN ('draft','pending_review','approved','ozon_created')":''})
           GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,ws.name,wo.order_no,wo.submitted_at,wo.created_at,applicant.id,applicant.name`,ids)
     ]);return{requests,applications};
   }

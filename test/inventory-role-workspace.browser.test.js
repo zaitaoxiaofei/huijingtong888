@@ -37,7 +37,10 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
    return route.fulfill({contentType:asset.endsWith('.css')?'text/css':'text/javascript',body:await fs.readFile(path.join(output,asset))});
   });
   await page.goto('http://localhost:8788/admin.html');
-  await page.locator('.vue-orders-shell').waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'order toolbar and table stay within the viewport');await page.screenshot({path:'.verification/orders-processing-print.png',fullPage:true,animations:'disabled'});await page.evaluate(()=>{window.printElement=document.querySelector('.vue-orders-shell');});
+  await page.locator('.vue-orders-shell').waitFor();
+  const toolbarLabels=await page.locator('.orders-toolbar-row button:visible').evaluateAll(buttons=>buttons.map(b=>b.innerText));const labels=toolbarLabels.map(s=>s.trim());
+  const ordered=['拉取新订单','同步当前范围','查询','更多操作','批量打印','OGL 发运','打印模式'];const positions=ordered.map(text=>labels.findIndex(label=>label===text));assert.ok(positions.every((pos,i)=>pos>=0&&(!i||pos>positions[i-1])),JSON.stringify(labels));
+  assert.equal(await page.locator('.orders-toolbar-search-group').evaluate(e=>e.nextElementSibling?.classList.contains('orders-toolbar-date')),true,'date range stays beside order search');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'order toolbar and table stay within the viewport');await page.screenshot({path:'.verification/orders-processing-print.png',fullPage:true,animations:'disabled'});await page.evaluate(()=>{window.printElement=document.querySelector('.vue-orders-shell');});
   await page.getByRole('button',{name:'当前打印模式，切换模式',exact:true}).click();await page.getByRole('menuitem').filter({hasText:'库存管理模式'}).click();await page.locator('.el-dropdown-menu:visible').waitFor({state:'hidden'});
   await page.getByText(demoRows[0].product_name,{exact:true}).first().waitFor();
   assert.equal(await page.locator('.vue-orders-shell').isVisible(),false,'print workflow is retained but hidden in inventory mode');
