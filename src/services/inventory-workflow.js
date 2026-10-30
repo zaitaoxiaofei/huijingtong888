@@ -1,3 +1,4 @@
+import { createInventoryWorkspaceReader } from './inventory-workspace-reader.js';
 import { inventoryProductSearch } from './inventory-product-search.js';
 import { inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern } from './inventory-search.js';
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
@@ -85,6 +86,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     }
     return ids.map(id=>values.get(id));
   }
+  const workspaceStates=createInventoryWorkspaceReader({batch,coverage:(ids,tenantId)=>loadOrderProcurementCoverage(query,'',{...(ids.length<=32?{productIds:ids}:{}),tenantId}),revision:workflowRevision});
   async function localQuantities(ids,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
     const parts=await query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c WHERE c.product_id IN (${marks}) AND ${inventoryTenantSql(scope,'c')}`,ids);
@@ -279,5 +281,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,requests,skuDetails,localQuantities,batch,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
+  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
 }

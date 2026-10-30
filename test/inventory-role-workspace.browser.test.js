@@ -12,7 +12,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
     if(id==='\0workspace')return `import {createApp,h} from 'vue';import {createPinia} from 'pinia';import {createRouter,createMemoryHistory,RouterView} from 'vue-router';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import 'element-plus/theme-chalk/dark/css-vars.css';import Orders from '/frontend/admin/views/orders/OrdersView.vue';import Procurement from '/frontend/admin/views/procurement/ProcurementWorkspaceView.vue';import Operations from '/frontend/admin/views/inventory/InventoryFbpOpportunitiesPage.vue';import {useAuthStore} from '/frontend/admin/stores/auth.js';import {setAuthToken,currentApiCacheScope} from '/frontend/admin/utils/api.js';const app=createApp({render:()=>h(RouterView)});const pinia=createPinia();app.use(pinia);const auth=useAuthStore();const user=${JSON.stringify(demoUser)};auth.user=user;localStorage.setItem('baodanAuthUser',JSON.stringify(user));setAuthToken('preview-token');currentApiCacheScope();window.previewAuth=auth;window.previewScope=()=>{auth.user={...user,id:2,personId:2,tenant:{id:3,slug:'other',role:'owner'}};localStorage.setItem('baodanAuthUser',JSON.stringify(auth.user));setAuthToken('other-preview-token');};const router=createRouter({history:createMemoryHistory(),routes:[{path:'/orders',component:Orders},{path:'/procurement/workspace',component:Procurement},{path:'/inventory/fbp-opportunities',component:Operations}]});window.previewRouter=router;app.use(ElementPlus).use(router);await router.push('/orders');await router.isReady();app.mount('#app');`;
    }}],build:{outDir:output,cssCodeSplit:false,rollupOptions:{input:'virtual:workspace',output:{entryFileNames:'entry.js',chunkFileNames:'chunks/[name]-[hash].js'}}}});
   browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
-  const page=await browser.newPage({viewport:{width:1600,height:1060}}),errors=[],posts=[];let otherScope=false,workspaceReads=0;
+  const page=await browser.newPage({viewport:{width:1600,height:1060}}),errors=[],posts=[];let otherScope=false,workspaceReads=0,workspaceFail=false,manualRefresh=false;
   page.on('pageerror',e=>errors.push(e.message));
   await page.route('http://localhost:8788/**',async route=>{
    const url=new URL(route.request().url()),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
@@ -20,7 +20,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
    if(url.pathname.includes('/image'))return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="84"><rect width="64" height="84" rx="6" fill="#e5edf6"/><path d="M15 30h34v30H15zM15 30l17-10 17 10-17 9zM32 39v21" fill="#a9bfd9" stroke="#6685aa"/><text x="32" y="76" font-size="9" text-anchor="middle" fill="#6685aa">预览图</text></svg>'});
    const id=Number(url.searchParams.get('product_id'))||101,ledger=demoLedgers.get(id)||demoLedgers.get(101),forecast=demoForecasts.get(id)||demoForecasts.get(101);
    if(url.pathname.startsWith('/api/')&&route.request().method()!=='GET'){const body=route.request().postDataJSON();posts.push({path:url.pathname,body});if(url.pathname==='/api/inventory-flow/sync')return json({ok:true,background:true,task:{status:'completed'}});return json({ok:true,notified:2,rows:[],status:'completed'});}
-   if(url.pathname==='/api/inventory-workflow/alerts'){workspaceReads++;return json(inventoryWorkspacePage(otherScope?[]:demoRows,Object.fromEntries(url.searchParams)));}
+   if(url.pathname==='/api/inventory-workflow/alerts'){workspaceReads++;if(workspaceFail){manualRefresh=url.searchParams.get('refresh')==='1';return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:'系统繁忙，请稍后重试'})});}return json(inventoryWorkspacePage(otherScope?[]:demoRows,Object.fromEntries(url.searchParams)));}
    if(url.pathname==='/api/inventory-workflow/receipts')return json({rows:[{id:301,quantity:18,order_no:'PO-DEMO-102'}]});
    if(url.pathname==='/api/inventory-workflow')return json({rows:[{...demoRows.find(r=>r.product_id===id)?.workflow,forecast,skus:forecast.skus}]});
    if(['/api/inventory/ledger','/api/procurement/ledger'].includes(url.pathname))return json(ledger);
@@ -58,6 +58,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
   await page.getByRole('button',{name:'查看全部库存'}).click();await page.getByText(demoRows[2].product_name,{exact:true}).waitFor();
   await page.locator('.el-message').first().waitFor({state:'hidden'});
   const beforeEvents=workspaceReads;await page.evaluate(()=>{for(let i=0;i<10;i++)window.dispatchEvent(new CustomEvent('erp:system-notification'));});await page.waitForTimeout(800);assert.equal(workspaceReads-beforeEvents,1,'a burst of scoped notifications coalesces into one inventory refresh');
+  workspaceFail=true;await page.getByRole('button',{name:'刷新库存需求'}).click();await page.getByText('当前保留上次成功结果',{exact:false}).waitFor();assert.equal(manualRefresh,true);assert.equal(await page.getByText(demoRows[0].product_name,{exact:true}).count(),1,'failed refresh retains last successful inventory');workspaceFail=false;await page.getByRole('button',{name:'刷新库存需求'}).click();await page.locator('.el-alert--error').waitFor({state:'hidden'});
   await page.screenshot({path:'.verification/role-procurement-light.png',fullPage:true,animations:'disabled'});
   await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.dataset.theme='dark';document.body.dataset.theme='dark';});
   await page.screenshot({path:'.verification/role-procurement-dark.png',fullPage:true,animations:'disabled'});
@@ -88,6 +89,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
   otherScope=true;await page.evaluate(()=>window.previewScope());
   await page.getByText(demoRows[0].product_name,{exact:true}).first().waitFor({state:'hidden'});
   assert.equal(await page.getByRole('dialog').count(),0,'tenant switch closes old product workflows');
+  workspaceFail=true;await page.getByRole('button',{name:'刷新库存需求'}).click();await page.getByText('库存需求加载失败，请重试；这不代表没有采购需求',{exact:true}).waitFor();
   assert.deepEqual(errors,[]);
  }finally{await browser?.close();await fs.rm(output,{recursive:true,force:true});}
 });

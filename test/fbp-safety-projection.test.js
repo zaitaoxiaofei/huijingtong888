@@ -4,7 +4,7 @@ test('batch FBP warnings use bounded snapshot queries, expanding each SKU to phy
  const products=Array.from({length:40},(_,i)=>({id:i+1,production_lead_days:7,warehouse_logistics_days:2}));
  const rows=products.map(p=>({inventory_product_id:p.id,shop_id:20,ozon_sku:'SKU-'+p.id,per_set_quantity:2}));
  const calls=[];const q=async(sql,args)=>{calls.push({sql,args});
-  if(sql.includes('mapped.*'))return rows;
+  if(sql.includes('AS inventory_product_id'))return rows;
   if(sql.includes('FROM ozon_stock_snapshots'))return rows.map(r=>({...r,present:8,available:5,reserved:3,synced_at:'2026-10-30 00:00:00'}));
   if(sql.startsWith('SELECT o.shop_id'))return rows.map(r=>({...r,quantity:14}));
   if(sql.startsWith('SELECT f.shop_id'))return rows.map(r=>({...r,quantity:2}));
