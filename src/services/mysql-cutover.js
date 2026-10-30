@@ -25573,6 +25573,13 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
   await assertInventoryReferences(scope, body);
   const items = Array.isArray(body.items) ? body.items : [];
   if (!items.length) throw new Error("请至少填写一条采购商品");
+  const workspaceBatch=body.workspace_batch===true;
+  const requestKey=String(body.request_key||'');
+  if(workspaceBatch){
+    if(!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(requestKey)||items.length>100||new Set(items.map(i=>Number(i.product_id))).size!==items.length)throw Object.assign(new Error('批量登记限1至100个不同库存商品，请重新打开采购表'),{statusCode:400});
+    for(const item of items)if(!Number.isSafeInteger(Number(item.quantity))||Number(item.quantity)<1||Number(item.quantity)>1000000||(item.actual_quantity!=null&&Number(item.actual_quantity)!==Number(item.quantity))||!Number.isFinite(Number(item.amount))||Number(item.amount)<=0||!Number.isFinite(Number(item.shipping_amount||0))||Number(item.shipping_amount||0)<0||normalizeProcurementPurchaseMode(item.purchase_mode)!=='shortage_purchase')throw Object.assign(new Error('批量登记请填写每项实际采购件数和货款，运费不可为负；本入口只登记缺货采购'),{statusCode:400});
+  }
+  const requestHash=workspaceBatch?createHash('sha256').update(JSON.stringify({...body,request_key:undefined})).digest('hex'):null;
   const unbound = items.find((item) => !Number(item.product_id || 0));
   if (unbound) throw new Error(`「${unbound.raw_name || unbound.name || "采购商品"}」尚未绑定库存商品，无法登记采购记录`);
   await assertDefaultProcurementProductsMysql(items.map(item => item.product_id), defaultTenantId);
@@ -25593,11 +25600,20 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     for (const id of [...new Set(items.map(item => Number(item.product_id)))].sort((a, b) => a - b)) {
       await assertInventoryRecord(scope, 'product', id, inspect, { lock: true });
     }
+    let savedPurchase=null;
+    if(workspaceBatch){
+      // Product locks precede actor lock, consistent with the existing purchase guard.
+      // Serialize one actor's retry identity even if a changed payload names other products.
+      await connection.query('SELECT id FROM people WHERE id=? FOR UPDATE',[sessionPersonId]);
+      const [previous]=await mysqlConnectionQuery(connection,"SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND person_id=? AND action='workspace_batch_purchase' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,sessionPersonId,requestKey]);
+      if(previous)savedPurchase=typeof previous.detail_json==='string'?JSON.parse(previous.detail_json):previous.detail_json;
+    }
     // Current locking reads follow all entity lock waits. These shared locks
     // serialize authority changes with this purchase's atomic commit.
     const guard = () => requireCurrentProcurementActorMysql(scope, sessionPersonId, connection);
     await guard();
     await assertInventoryReferences(scope, body, inspect);
+    if(savedPurchase){if(savedPurchase.hash!==requestHash)throw Object.assign(new Error('这次批量采购已登记，不能用同一提交标识修改内容，请刷新采购记录'),{statusCode:409});return{...savedPurchase.result,duplicate:true};}
     const directResults = [];
     for (const item of directItems) {
       await guard();
@@ -25609,15 +25625,19 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     }
     const shortageBody = { ...body, items: shortageItems };
     await guard();
-    const created = await createProcurementRequestMysql(shortageBody, sessionPersonId, tenantId, connection);
+    const sources=workspaceBatch?await mysqlConnectionQuery(connection,`SELECT id,product_id FROM procurement_requests WHERE product_id IN (${shortageItems.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope)} AND status IN('submitted','pending','suggested') AND COALESCE(purchase_mode,'shortage_purchase')='shortage_purchase' ORDER BY id FOR UPDATE`,shortageItems.map(i=>Number(i.product_id))):[];
+    const missingItems=workspaceBatch?shortageItems.filter(i=>!sources.some(r=>Number(r.product_id)===Number(i.product_id))):shortageItems;
+    const created=missingItems.length?await createProcurementRequestMysql({...shortageBody,items:missingItems},sessionPersonId,tenantId,connection):{ids:[]};
     await guard();
     const purchased = await confirmProcurementRequestsPurchasedMysql({
       ...shortageBody,
-      request_ids: created.ids,
+      request_ids: [...sources.map(r=>Number(r.id)),...created.ids],
       note: body.note || "采购工作台登记采购"
     }, sessionPersonId, tenantId, connection, { session: current });
     await guard();
-    return { ...created, ...purchased, direct_results: directResults };
+    const saved={...created,...purchased,direct_results:directResults};
+    if(workspaceBatch)await connection.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,Number(items[0].product_id),sessionPersonId,'workspace_batch_purchase',JSON.stringify({request_key:requestKey,hash:requestHash,result:saved,product_ids:items.map(i=>Number(i.product_id))})]);
+    return saved;
   });
   invalidateOrderProcurementCoverage();
   return result;

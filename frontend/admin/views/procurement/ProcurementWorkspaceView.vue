@@ -1575,7 +1575,7 @@ onMounted(async () => {
 <template>
   <div class="page-stack procurement-workspace">
     <div class="procurement-mode-switch"><el-radio-group v-model="workMode" aria-label="采购工作模式"><el-radio-button value="inventory">库存需求总览</el-radio-button><el-radio-button value="purchase">登记采购</el-radio-button><el-radio-button value="arrivals">采购到货跟踪</el-radio-button></el-radio-group><span>需求按实物汇总，来源人、订单和店铺SKU保留追溯</span></div>
-    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" @purchased="showArrivals" @track="showArrivals" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" @track="showArrivals" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
     <ProcurementArrivalTracker v-if="workMode==='arrivals'" :product-id="arrivalProductId"/>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
       <div v-loading="messageRequestLoading" style="min-height: 100px">

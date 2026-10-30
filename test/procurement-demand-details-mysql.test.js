@@ -87,6 +87,25 @@ test('procurement detail, manual safety, three-source requests and arrival track
   await legacy.recordProcurementPurchaseMysql({items:[{product_id:300,quantity:2,amount:20}]},4,3);
   assert.ok((await arrivals.list({status:'all'},buyer)).rows.every(r=>Number(r.product_id)!==300));assert.ok((await arrivals.list({status:'all'},foreign)).rows.every(r=>Number(r.product_id)===300));
  });
+ await t.test('arrival queues summarize real batches and logistics edits preserve quantity, stock and tenant boundaries',async()=>{
+  const listed=await arrivals.list({product_id:202,status:'open'},buyer);assert.equal(listed.summary.open,2);assert.equal(listed.summary.arrived,0);
+  const row=listed.rows[0],before=Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n);
+  const body={operation:'logistics',id:row.id,courier_company:'测试快递',tracking_number:'TEST-123',expected_updated_at:row.updated_at,expected_courier_company:row.courier_company||'',expected_tracking_number:row.tracking_number||''};
+  await assert.rejects(arrivals.confirm(body,warehouse),{statusCode:403});await assert.rejects(arrivals.confirm(body,foreign),{statusCode:404});await arrivals.confirm(body,buyer);assert.equal((await arrivals.confirm(body,buyer)).duplicate,true);
+  const changed=(await arrivals.list({product_id:202,status:'open'},buyer)).rows.find(r=>r.id===row.id);assert.equal(changed.tracking_number,'TEST-123');assert.equal(Number(changed.quantity),Number(row.quantity));assert.equal(Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),before);
+  await assert.rejects(arrivals.confirm({...body,tracking_number:'STALE'},buyer),{statusCode:409});
+  const summary=await arrivals.list({product_id:202,status:'open',summary_only:'1'},buyer);assert.equal(summary.rows.length,0);assert.equal(summary.summary.open,2);
+ });
+ await t.test('batch purchase creates multiple real inbound rows atomically, reuses existing demands and is retry-safe',async()=>{
+  const payload={workspace_batch:true,request_key:randomUUID(),person_id:2,source_type:'1688',note:'批量采购测试',items:[{product_id:200,quantity:20,actual_quantity:20,amount:200,shipping_amount:0,purchase_mode:'shortage_purchase'},{product_id:203,quantity:3,actual_quantity:3,amount:30,shipping_amount:0,purchase_mode:'shortage_purchase'}]};
+  const before=Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),result=await legacy.recordProcurementPurchaseMysql(payload,2,2);
+  assert.ok(result.purchase_order_id);const inbound=await q('SELECT product_id,quantity,status FROM inbound_records WHERE purchase_order_id=?',[result.purchase_order_id]);assert.equal(inbound.length,2);assert.equal(inbound.reduce((n,r)=>n+Number(r.quantity),0),23);assert.ok(inbound.every(r=>r.status==='pending_arrival'));assert.equal(Number((await q('SELECT COUNT(*) n FROM inventory_movements'))[0].n),before);
+  const retry=await legacy.recordProcurementPurchaseMysql(payload,2,2);assert.equal(retry.duplicate,true);assert.equal(retry.purchase_order_id,result.purchase_order_id);assert.equal(Number((await q('SELECT COUNT(*) n FROM inbound_records WHERE purchase_order_id=?',[result.purchase_order_id]))[0].n),2);
+  await assert.rejects(legacy.recordProcurementPurchaseMysql({...payload,note:'changed'},2,2),{statusCode:409});await assert.rejects(legacy.recordProcurementPurchaseMysql({...payload,request_key:randomUUID()},1,2),{statusCode:403});
+  const requests=await q("SELECT id,status,quantity FROM procurement_requests WHERE product_id=200 AND status IN('submitted','pending','suggested')");assert.ok(requests.reduce((n,r)=>n+Number(r.quantity),0)<=2,'existing22 demand units are consumed by actual20 purchase instead of another20 request');
+  const count=Number((await q('SELECT COUNT(*) n FROM purchase_orders'))[0].n);await assert.rejects(legacy.recordProcurementPurchaseMysql({...payload,request_key:randomUUID(),items:[payload.items[0],{...payload.items[1],product_id:300}]},2,2));assert.equal(Number((await q('SELECT COUNT(*) n FROM purchase_orders'))[0].n),count);
+  const concurrent={...payload,request_key:randomUUID(),items:[payload.items[1]]};const both=await Promise.all([legacy.recordProcurementPurchaseMysql(concurrent,2,2),legacy.recordProcurementPurchaseMysql(concurrent,2,2)]);assert.equal(both[0].purchase_order_id,both[1].purchase_order_id);assert.equal(both.filter(r=>r.duplicate).length,1);
+ });
  await t.test('ordinary inventory edits retain selection state; protected selection transitions still fail',async()=>{
   const body={name:'Edited inventory',owner_person_id:2,purchase_cost:0,domestic_shipping:0,handling_fee:0,purchase_quantity:1,package_weight_g:30,length_cm:30,width_cm:20,height_cm:10,stock_unit:'个',exchange_rate:11.3};
   await legacy.updateProductMysql(203,body,2);

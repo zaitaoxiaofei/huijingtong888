@@ -7,7 +7,7 @@ import { useAuthStore } from '../../stores/auth.js';
 import { hasPermission } from '../../../../src/shared/permissions.js';
 import { INVENTORY_DEMAND_TYPES, inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import ProcurementRequestCreateDialog from './ProcurementRequestCreateDialog.vue';
-const props=defineProps({ledger:{type:Object,required:true},orderId:Number,initialAction:String,compact:Boolean});
+const props=defineProps({ledger:{type:Object,required:true},orderId:Number,initialAction:String,initialInboundId:Number,compact:Boolean});
 const emit=defineEmits(['loaded','saved']);
 const auth=getActivePinia()?useAuthStore():{user:null};
 const fbpProjection=ref(null),showDemands=ref(false);
@@ -37,7 +37,7 @@ async function open(action,type=''){
  dialog.value=action;
  if(action==='receive'){
   counted.value=null;receiptRows.value=[];busy.value=true;
-  try{const r=await apiClient.get(`/api/inventory-workflow/receipts?product_id=${id}`,{noCache:true});if(!active())return;receiptRows.value=(r.rows||[]).map(row=>({...row,selected:false,actual:Number(row.quantity),reason:'',note:''}));}catch(e){if(active())ElMessage.error(e.message);}finally{if(active())busy.value=false;}
+  try{const r=await apiClient.get(`/api/inventory-workflow/receipts?product_id=${id}`,{noCache:true});if(!active())return;receiptRows.value=(r.rows||[]).map(row=>({...row,selected:Number(row.id)===Number(props.initialInboundId),actual:Number(row.quantity),reason:'',note:''}));}catch(e){if(active())ElMessage.error(e.message);}finally{if(active())busy.value=false;}
  }
  if(action==='fbp'){
   fbpRows.value=[];

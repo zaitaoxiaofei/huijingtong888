@@ -23,10 +23,37 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
     LEFT JOIN people buyer ON buyer.id=ir.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=buyer.id AND tm.active=1)
     WHERE ${where.map(w=>'('+w+')').join(' AND ')}`;
   const page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1))),pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
+  const summaryFilter=[...where.filter(w=>!w.startsWith("ir.status=")),"ir.status='pending_arrival'"];
+  const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
+  const [summaryRow]=await query(`SELECT SUM(ir.status='pending_arrival' AND ir.received_at IS NULL) AS open,SUM(ir.status='pending_arrival' AND ir.received_at IS NOT NULL) AS arrived ${summaryJoins}`,args);
+  const summary={open:Number(summaryRow?.open)||0,arrived:Number(summaryRow?.arrived)||0};
+  if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary};
   const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${joins}`,args),query(`SELECT ir.id,ir.product_id,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.courier_company,ir.tracking_number,po.id AS purchase_order_id,po.order_no,COALESCE(po.purchased_at,ir.created_at) AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${joins} ORDER BY COALESCE(po.purchased_at,ir.created_at) DESC,ir.id DESC LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize])]);
-  return{rows:rows.map(r=>({...r,arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize};
+  return{rows:rows.map(r=>({...r,arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary};
+ }
+ async function logistics(body,session){
+  const id=Number(body.id),courier=String(body.courier_company||'').trim(),tracking=String(body.tracking_number||'').trim();
+  if(!Number.isSafeInteger(id)||id<=0||courier.length>128||tracking.length>128||!body.expected_updated_at)throw fail('请选择采购批次并填写不超过128字的快递信息；请先刷新最新记录');
+  return transaction(async c=>{
+   const q=async(sql,args=[])=>(await c.query(sql,args))[0],current=await authorizeBusinessTaskSession(session,(sql,args)=>q(sql+' FOR UPDATE',args));
+   if(!hasPermission(current,'procurement'))throw fail('只有本企业采购岗位可以修改采购物流',403);
+   const scope=await resolveInventoryTenantScope(current.tenant.id,q),before=await assertInventoryRecord(scope,'inbound',id,q);
+   await assertInventoryRecord(scope,'product',Number(before.product_id),q,{lock:true});
+   const row=await assertInventoryRecord(scope,'inbound',id,q,{lock:true});
+   if(Number(row.product_id)!==Number(before.product_id)||row.status!=='pending_arrival')throw fail('采购批次已经变化或关闭，请刷新后重试',409);
+   const [purchased]=await q(`SELECT id FROM purchase_orders po WHERE id=? AND purchased_at IS NOT NULL AND status NOT IN('cancelled','pending_purchase') AND ${inventoryTenantSql(scope,'po')} FOR UPDATE`,[row.purchase_order_id||0]);
+   const [legacy]=purchased?[]:await q(`SELECT id FROM procurement_requests pr WHERE id=? AND product_id=? AND status='purchased' AND ${inventoryTenantSql(scope,'pr')} FOR UPDATE`,[row.procurement_request_id||0,row.product_id]);
+   if(!purchased&&!legacy)throw fail('此批次尚未登记真实采购，不能修改到货物流',409);
+   if(String(row.courier_company||'')===courier&&String(row.tracking_number||'')===tracking)return{ok:true,duplicate:true};
+   const stamp=v=>new Date(typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v).getTime();
+   if(stamp(row.updated_at)!==stamp(body.expected_updated_at)||String(row.courier_company||'')!==String(body.expected_courier_company||'')||String(row.tracking_number||'')!==String(body.expected_tracking_number||''))throw fail('采购物流已被修改，请刷新后重新填写',409);
+   await c.execute(`UPDATE inbound_records SET courier_company=?,tracking_number=?,updated_at=UTC_TIMESTAMP() WHERE id=? AND ${inventoryTenantSql(scope)}`,[courier||null,tracking||null,id]);
+   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,row.product_id,current.personId,'purchase_logistics',JSON.stringify({inbound_id:id,courier_company:courier,tracking_number:tracking,before:{courier_company:row.courier_company,tracking_number:row.tracking_number}})]);
+   return{ok:true};
+  });
  }
  async function confirm(body,session){
+  if(body.operation==='logistics')return logistics(body,session);
   const id=Number(body.id),note=String(body.note||'').trim(),key=String(body.request_key||'');
   if(!Number.isSafeInteger(id)||id<=0||!note||note.length>500||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key)||!body.expected_updated_at)throw fail('请选择采购批次，填写到货说明，并重新打开最新记录后确认');
   const result=await transaction(async c=>{

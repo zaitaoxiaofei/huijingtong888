@@ -3438,6 +3438,18 @@ Fresh inventory.write/procurement membership can override only a specific produc
   - `403` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `POST /api/procurement/purchases`
+
+Canonical actual purchase registration. Optional workspace_batch=true enables a 1..100 distinct-product shortage-purchase table: positive integer quantities and actual goods amounts, nonnegative shipping; fresh procurement duty and tenant ownership for all references. Reuses open requests for selected products and creates requests only for products without one. All products, costs and inbound batches commit atomically. A UUID request_key is mandatory for workspace batches; serialized retry identity and audited payload hash return the original purchase order on identical retries, changed payload returns409. Does not post local stock. Existing non-batch purchase modes retain their existing behavior.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/inventory-workflow/demand-request`
 
 Create or reuse real procurement requests for exactly three demand purposes. Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.
@@ -3468,17 +3480,18 @@ Paged current-enterprise actual purchase arrival batches, including multiple pur
   - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
-  - `status` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
-  - `product_id` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
-  - `page` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
-  - `pageSize` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
+  - `status` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `product_id` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `page` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `pageSize` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `summary_only` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
 - Responses:
   - `200` `application/json` -> `object`
   - `403` `application/json` -> `ErrorResponse`
 
 #### `POST /api/inventory-workflow/purchase-arrivals`
 
-Buyer confirms all remaining units in one owned purchased batch arrived. Fresh procurement duty, owned purchase chain and observed timestamp checked under locks. Sets received_at and audits confirmation; does not approve QC, post inventory or change financial amounts. Partial arrival uses the canonical receipt path to split the remaining batch.
+Buyer confirms all remaining units in one owned purchased batch arrived, or operation=logistics updates only courier_company/tracking_number (max128 characters each). Logistics requires observed expected_updated_at plus expected_courier_company and expected_tracking_number, validates a real owned purchased batch, and audits old/new values without changing quantities, amounts, receipt state or stock. Fresh procurement duty, owned purchase chain and observed timestamp checked under locks. Sets received_at and audits confirmation; does not approve QC, post inventory or change financial amounts. Partial arrival uses the canonical receipt path to split the remaining batch.
 
 - Auth: `authenticated`
 - Request body: required
