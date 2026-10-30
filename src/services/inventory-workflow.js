@@ -1,3 +1,4 @@
+import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
 import { createInventoryWorkspaceReader } from './inventory-workspace-reader.js';
 import { inventoryProductSearch } from './inventory-product-search.js';
 import { inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern } from './inventory-search.js';
@@ -29,31 +30,15 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const missing=ids.filter(id=>fresh||!(workflowCache.get(`${prefix}${scope.id}:${id}`)?.expires>Date.now()));
     if(missing.length){
       const placeholders=missing.map(()=>'?').join(',');
-      const [coverage,settingsRows,incoming,requests,applicationRows]=await Promise.all([
+      const [coverage,settingsRows,incoming,sourceRows]=await Promise.all([
         providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault,localStateOnly:localOnly}),
         query(`SELECT product_id,settings_json FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,${placeholders})`,[scope.id,...missing]),
         localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
           JOIN inbound_records ir ON ir.purchase_order_item_id=poi.id AND ir.product_id=poi.product_id AND ${inventoryTenantSql(scope,'ir')}
           WHERE poi.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'poi')} AND ir.status='pending_arrival' AND po.status NOT IN ('cancelled','pending_purchase') GROUP BY poi.product_id`,missing),
-        localOnly?Promise.resolve([]):query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
-          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
-          FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,missing),
-        localOnly?Promise.resolve([]):query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,wo.order_no,wo.submitted_at,
-          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
-          wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
-          FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
-          JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
-          LEFT JOIN people applicant ON applicant.id=COALESCE(wi.requested_by,wo.created_by)
-          JOIN products wp ON wp.id IN (${placeholders}) AND ${inventoryTenantSql(scope,'wp')}
-          LEFT JOIN sku_inventory_recipes wr ON wr.shop_id=wi.shop_id AND wr.ozon_sku=wi.ozon_sku AND wr.active=1
-          LEFT JOIN sku_inventory_recipe_items wri ON wri.recipe_id=wr.id AND wri.product_id=wp.id
-          LEFT JOIN product_components wc ON wc.product_id=wi.product_id AND wc.component_product_id=wp.id AND wr.id IS NULL AND ${inventoryTenantSql(scope,'wc')}
-          WHERE wo.status IN ('draft','pending_review','approved','ozon_created')
-            AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
-            AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
-            AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
-          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,wo.order_no,wo.submitted_at,applicant.id,applicant.name`,missing)
+        localOnly?Promise.resolve({requests:[],applications:[]}):workspaceSources(missing,scope.id)
       ]);
+      const {requests,applications:applicationRows}=sourceRows;
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
       const defaults=parse(settingsRows.find(row=>!Number(row.product_id)));
       const group=rows=>{const values=new Map();for(const row of rows){const id=Number(row.product_id);if(!values.has(id))values.set(id,[]);values.get(id).push(row);}return values;};
@@ -87,6 +72,33 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     return ids.map(id=>values.get(id));
   }
   const workspaceStates=createInventoryWorkspaceReader({batch,coverage:(ids,tenantId)=>loadOrderProcurementCoverage(query,'',{...(ids.length<=32?{productIds:ids}:{}),tenantId}),revision:workflowRevision});
+  async function workspaceSources(ids,tenantId){
+    if(!ids.length)return {requests:[],applications:[]};
+    const scope=await resolveInventoryTenantScope(tenantId,query),placeholders=ids.map(()=>'?').join(',');
+    const [requests,applications]=await Promise.all([
+        query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
+          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
+          FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,ids),
+        query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,wo.order_no,wo.submitted_at,
+          CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
+          wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
+          FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
+          JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')}
+          LEFT JOIN people applicant ON applicant.id=COALESCE(wi.requested_by,wo.created_by)
+          JOIN products wp ON wp.id IN (${placeholders}) AND ${inventoryTenantSql(scope,'wp')}
+          LEFT JOIN sku_inventory_recipes wr ON wr.shop_id=wi.shop_id AND wr.ozon_sku=wi.ozon_sku AND wr.active=1
+          LEFT JOIN sku_inventory_recipe_items wri ON wri.recipe_id=wr.id AND wri.product_id=wp.id
+          LEFT JOIN product_components wc ON wc.product_id=wi.product_id AND wc.component_product_id=wp.id AND wr.id IS NULL AND ${inventoryTenantSql(scope,'wc')}
+          WHERE wo.status IN ('draft','pending_review','approved','ozon_created')
+            AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
+            AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
+            AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
+          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,wo.order_no,wo.submitted_at,applicant.id,applicant.name`,ids)
+    ]);return{requests,applications};
+  }
+  const backgroundQuery=limitInventoryDemandQueries(query);let backgroundService;
+  const background=()=>backgroundService??=createInventoryWorkflowService({query:backgroundQuery});
+  const workspaceSnapshot=createInventoryDemandSnapshot({query,calculate:(ids,tenantId,options)=>background().workspaceStates(ids,tenantId,options),products:tenantId=>background().workspaceProducts({},tenantId),revision:workflowRevision});
   async function localQuantities(ids,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
     const parts=await query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c WHERE c.product_id IN (${marks}) AND ${inventoryTenantSql(scope,'c')}`,ids);
@@ -281,5 +293,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
+  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceSnapshot,workspaceSources,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
 }

@@ -3384,7 +3384,7 @@ Read the shared current-enterprise inventory policy. Fresh inventory.read member
 
 #### `GET /api/inventory-workflow/alerts`
 
-Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Workspace reads one tenant-wide order coverage snapshot, bounded FBP batches, and shares in-flight work/20-second snapshots keyed by tenant and inventory set; inventory revision invalidates reuse, refresh=1 bypasses completed snapshots. Errors never become empty successful queues. Current inventory.read membership required.
+Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. view=workspace immediately reads a persisted enterprise demand snapshot and current-page nonfinancial sources. It never waits for history/forecast rebuilding: first use returns snapshot.available=false and null total/task counts while warming; stale successful results remain visible. Background work is serialized and limited to two SQL queries, automatically coalesced to once/minute per active enterprise and periodically renewed after five minutes. refresh=1 queues manual reconciliation, sharing active jobs; a write during an older manual job schedules one follow-up. Poll only while snapshot.refreshing; business writes do not use snapshots. Errors retain last success, personnel details are loaded freshly, and inventory_demand_snapshots must be initialized before readiness. Current inventory.read membership required.
 
 - Auth: `authenticated`
 - Query parameters:

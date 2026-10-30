@@ -9,6 +9,7 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
  const legacy=await import('../src/services/mysql-cutover.js');
  const {createInventoryWorkflowService}=await import('../src/services/inventory-workflow.js');
  const {closeMysqlPool,withMysqlTransaction}=await import('../src/mysql-pool.js');
+ const {waitForInventoryDemandJobs}=await import('../src/services/inventory-demand-snapshot.js');
  const {invalidateOrderProcurementCoverage}=await import('../src/services/mysql-order-procurement-coverage.js');
  const events=[];
  const opts={ledger:legacy.inventoryLedgerMysql,receiveRecords:legacy.batchUpdateInboundRecordsMysql,previewReceipts:legacy.previewInboundReceiptImpactMysql,broadcast:(...e)=>events.push(e),forecast:async()=>({skus:[]})};
@@ -202,10 +203,13 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const {createOperationsRoutes}=await import('../src/server/routes/operations.js');
   const routes=createOperationsRoutes({services:{procurementLedger:legacy.inventoryLedgerMysql,batchUpdateInboundRecords:legacy.batchUpdateInboundRecordsMysql,previewInboundReceiptImpact:legacy.previewInboundReceiptImpactMysql,stockAlerts:()=>{throw Error('must not use stocked-only alert base');}},readJson:async req=>req.body});
   const read=routes['GET /api/inventory-workflow/alerts'];
-  const a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  let a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  assert.equal(a.snapshot.status,'warming');assert.equal(a.total,null);assert.equal(a.meta.required,null);
+  await waitForInventoryDemandJobs();a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
   assert.ok(a.rows.some(r=>Number(r.product_id)===9302));assert.ok(a.rows.every(r=>Number(r.product_id)!==300));
   assert.ok(a.rows.every(r=>r.amount===undefined&&r.cost===undefined));
-  const b=await read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  let b=await read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  await waitForInventoryDemandJobs();b=await read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
   assert.deepEqual(b.rows.map(r=>Number(r.product_id)),[300]);assert.ok(!JSON.stringify(b).includes('A proposer'));
   await q('UPDATE tenant_members SET active=0 WHERE tenant_id=3 AND person_id=4');
   await assert.rejects(read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace')),{statusCode:403});
@@ -268,5 +272,36 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   assert.deepEqual(quantities(rows.slice(0,10)),quantities(expected));
   t.diagnostic(`isolated 681 products / 5000 orders: cold ${elapsed}ms, ${before} queries, cached 0 queries`);
  });
- }finally{await closeMysqlPool();await f.cleanup();}
+ await t.test('demand snapshot persists numeric results across service restart and does not persist personnel details',async()=>{
+  const first=await service.workspaceSnapshot(2,{fresh:true});assert.ok(first.snapshot.refreshing);await waitForInventoryDemandJobs();
+  const [stored]=await q('SELECT payload_json FROM inventory_demand_snapshots WHERE tenant_id=?',[2]);
+  assert.ok(stored);assert.ok(!stored.payload_json.includes('A proposer'));assert.ok(!stored.payload_json.includes('applicant_name'));
+  const restarted=createInventoryWorkflowService(opts),state=await restarted.workspaceSnapshot(2);
+  assert.equal(state.snapshot.available,true);assert.equal(state.snapshot.status,'updating');
+  const ids=state.rows.slice(0,3).map(r=>Number(r.product_id)),expected=await service.batch(ids,2,{fresh:true,cache:false});
+  for(const original of expected){const current=state.rows.find(r=>r.product_id===original.product_id);for(const key of ['physical','free','purchase_quantity','supply_plan'])assert.deepEqual(current[key],original[key]);}
+  await waitForInventoryDemandJobs();
+ });
+ await t.test('cached workspace stays readable across repeated invalidations without waiting for history',async()=>{
+  const {createOperationsRoutes}=await import('../src/server/routes/operations.js');
+  const routes=createOperationsRoutes({services:{procurementLedger:legacy.inventoryLedgerMysql,batchUpdateInboundRecords:legacy.batchUpdateInboundRecordsMysql,previewInboundReceiptImpact:legacy.previewInboundReceiptImpactMysql},readJson:async()=>({})}),read=routes['GET /api/inventory-workflow/alerts'];
+  const req={_session:{personId:2,tenant:{id:2,slug:'a'}}},url=new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=required&pageSize=20');
+  await waitForInventoryDemandJobs();await q('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=1');
+  const start=performance.now();let response;
+  for(let i=0;i<5;i++){invalidateOrderProcurementCoverage();response=await read(req,url);assert.equal(response.snapshot.available,true);assert.ok(response.rows.length);assert.ok(!JSON.stringify(response).includes('A proposer'));}
+  t.diagnostic(`five snapshot API reads under invalidation: ${Math.round(performance.now()-start)}ms; ${response.rows.length} visible rows`);
+  await waitForInventoryDemandJobs();await q('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=1');
+ });
+ await t.test('dedicated snapshot migration defaults to read-only and creates only the cache table idempotently',async()=>{
+  await waitForInventoryDemandJobs();const {initializeInventoryDemandSnapshot}=await import('../scripts/init-inventory-demand-snapshot.mjs');
+  const before=Number((await q('SELECT COUNT(*) n FROM orders'))[0].n);
+  await q('DROP TABLE inventory_demand_snapshots');
+  assert.deepEqual(await initializeInventoryDemandSnapshot(f.connection),{create_required:true,applied:false});
+  const applied=await initializeInventoryDemandSnapshot(f.connection,{apply:true});assert.equal(applied.applied,true);assert.equal(applied.tenant_primary_key_verified,true);
+  await q("INSERT INTO inventory_demand_snapshots(tenant_id,version,payload_json,calculated_at) VALUES(2,'test','{}',UTC_TIMESTAMP())");
+  assert.equal((await initializeInventoryDemandSnapshot(f.connection,{apply:true})).applied,false);
+  assert.equal((await q('SELECT version FROM inventory_demand_snapshots WHERE tenant_id=2'))[0].version,'test');
+  assert.equal(Number((await q('SELECT COUNT(*) n FROM orders'))[0].n),before);
+ });
+ }finally{await waitForInventoryDemandJobs();await closeMysqlPool();await f.cleanup();}
 });
