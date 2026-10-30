@@ -120,6 +120,7 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     const scope = await resolveInventoryTenantScope(tenantId, query), id = whole(body.product_id || 0, "库存编号");
     if (id) await assertInventoryRecord(scope, "product", id, query);
     const value = validateFlowSettings(body.settings);
+    if(!id&&value.local_safety_override!=null)throw flowError("人工保障数量只允许设置到具体库存商品，请选择库存后修改");
     await transaction(async connection => {
       const q = connectionQuery(connection);
       await assertInventoryMember(scope, personId, q);

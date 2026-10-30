@@ -79,7 +79,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
           FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,ids),
-        query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,wo.order_no,wo.submitted_at,
+        query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,ws.name AS shop_name,wo.order_no,wo.submitted_at,wo.created_at,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=applicant.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN applicant.name ELSE NULL END AS applicant_name,
           wi.requested_qty * CASE WHEN wr.id IS NULL AND wi.product_id=wp.id THEN 1 ELSE SUM(COALESCE(wri.quantity,wc.quantity,1)) END AS requested_quantity
           FROM fbp_replenishment_order_items wi JOIN fbp_replenishment_orders wo ON wo.id=wi.order_id AND wo.shop_id=wi.shop_id
@@ -93,7 +93,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
             AND ((wr.id IS NULL AND wi.product_id=wp.id) OR COALESCE(wri.product_id,wc.component_product_id)=wp.id)
             AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
             AND (wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))
-          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,wo.order_no,wo.submitted_at,applicant.id,applicant.name`,ids)
+          GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,ws.name,wo.order_no,wo.submitted_at,wo.created_at,applicant.id,applicant.name`,ids)
     ]);return{requests,applications};
   }
   const backgroundQuery=limitInventoryDemandQueries(query);let backgroundService;
@@ -145,7 +145,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const scope=await resolveInventoryTenantScope(tenantId,query);
     if(!ids.length)return[];
     if(ids.length>100||ids.some(id=>!Number.isSafeInteger(id)||id<=0))throw fail('请选择最多100个库存商品');
-    return query(`SELECT ir.id,ir.product_id,ir.quantity,ir.updated_at,po.order_no,po.purchased_at,po.status AS purchase_status
+    return query(`SELECT ir.id,ir.product_id,ir.quantity,ir.updated_at,ir.status,ir.received_at,ir.purchase_order_id,ir.tracking_number,ir.courier_company,po.order_no,po.purchased_at,po.status AS purchase_status
       FROM inbound_records ir JOIN products p ON p.id=ir.product_id AND ${inventoryTenantSql(scope,'p')}
       LEFT JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
       LEFT JOIN procurement_requests pr ON pr.id=ir.procurement_request_id AND ${inventoryTenantSql(scope,'pr')}
@@ -270,8 +270,8 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       if(type==='fbp_stock'){
         const stocks=await loadProductFbpStocks(q,id,scope);
         const summary=await createInventoryFlowSummaryReader({query:q})({product:{id},fbp_inventory:stocks},scope.id,{fbpOnly:true});
-        const pending=summary.applications.filter(a=>a.status==='pending_review');
-        const locked=pending.length?await q(`SELECT wo.id FROM fbp_replenishment_orders wo JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')} WHERE wo.id IN (${[...new Set(pending.map(a=>Number(a.order_id)))].map(()=>'?').join(',')}) AND wo.status='pending_review' FOR UPDATE`,[...new Set(pending.map(a=>Number(a.order_id)))]):[];
+        const pending=summary.applications.filter(a=>['pending_review','approved','ozon_created'].includes(a.status));
+        const locked=pending.length?await q(`SELECT wo.id FROM fbp_replenishment_orders wo JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')} WHERE wo.id IN (${[...new Set(pending.map(a=>Number(a.order_id)))].map(()=>'?').join(',')}) AND wo.status IN ('pending_review','approved','ozon_created') FOR UPDATE`,[...new Set(pending.map(a=>Number(a.order_id)))]):[];
         if(!locked.length){
           const prediction=await createInventoryFlowService({query:q}).detail(id,scope.id,{official:stocks,balance:{physical_stock:0,open_order_demand_qty:0,fbp_reserved_qty:0}});
           const replenishment=fbpSupplyState(prediction,stocks);

@@ -23,6 +23,7 @@ export function buildInventoryFlowSummary(ledger, forecast, orders = [], applica
     consumption_to: forecast?.consumption_to, production_days: forecast?.production_days,
     local_shipping_days: forecast?.local_shipping_days,
     local_days: forecast?.local_days ?? null, fbp_days: forecast?.fbp_days ?? null,
+    recommended_safety:forecast?.recommended_safety_qty??safety, safety_override:forecast?.safety_override??null, safety_override_note:forecast?.safety_override_note||'',
     safety_status: safety === null ? '待核对 SKU 绑定、官方库存及销量数据' : '预测保障，不含实际订单需求',
     safety_rows: (forecast?.skus || []).map(row => ({ shop_id: row.shop_id, shop_name: row.shop_name,
       ozon_sku: row.ozon_sku, per_set_quantity: row.per_set_quantity, daily_sales: row.daily_sales,
@@ -59,7 +60,8 @@ export function calculateLocalInventorySafety(ledger, settings = {}, now = new D
   const production = settings.production_days ?? Number(ledger.product.production_lead_days ?? 7);
   const shipping = settings.local_days ?? Number(ledger.product.warehouse_logistics_days ?? 2);
   const days = flowLeadDays(production + shipping, 7, settings.holidays || [], today);
-  return { safety_qty: Math.ceil(consumed / 7 * days), local_days: days,
+  const recommended=Math.ceil(consumed / 7 * days);
+  return { safety_qty: settings.local_safety_override ?? recommended, recommended_safety_qty:recommended,safety_override:settings.local_safety_override??null,safety_override_note:settings.local_safety_override_note||'', local_days: days,
     fbp_days: flowLeadDays(production + shipping + (settings.fbp_days ?? 7), 15, settings.holidays || [], today),
     consumed_7d: consumed, daily_consumption: consumed / 7, estimated_dates: estimatedDates,
     consumption_from: new Date(start).toISOString(), consumption_to: new Date(end).toISOString(),

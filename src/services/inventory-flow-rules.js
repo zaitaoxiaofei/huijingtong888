@@ -9,6 +9,8 @@ export function whole(value, label = "数量", max = 1000000) {
 }
 export function validateFlowSettings(value = {}) {
   const result = {
+    local_safety_override: value.local_safety_override == null ? null : whole(value.local_safety_override, '人工本地保障'),
+    local_safety_override_note: String(value.local_safety_override_note||'').trim().slice(0,500),
     fbp_days: whole(value.fbp_days ?? 7, "送FBP仓天数", 180),
     production_days: value.production_days == null ? null : whole(value.production_days, "生产天数", 180),
     local_days: value.local_days == null ? null : whole(value.local_days, "送本地仓天数", 180),
@@ -76,7 +78,7 @@ export function calculateFlowProduct(product, balance, skus, settings, today) {
       coverage_days: coverage, fbp_target: fbpTarget, suggested_qty: recommended,
       status: available == null ? "库存未同步" : available > 0 ? (coverage != null && coverage < fbpDays ? "FBP需补货／本地接替保障" : "FBP可售") : incoming > 0 ? "转FBP运输中" : "本地供货" };
   });
-  const safety = Math.ceil(localSafety);
+  const recommendedSafety = Math.ceil(localSafety), safety = settings.local_safety_override ?? recommendedSafety;
   const physical = Number(balance.physical_stock), orders = Number(balance.open_order_demand_qty), locked = Number(balance.fbp_reserved_qty);
   const free = Math.max(0, Math.floor(physical - orders - locked - safety));
   const localGap = Math.max(0, Math.ceil(orders + locked + safety - physical));
@@ -85,7 +87,7 @@ export function calculateFlowProduct(product, balance, skus, settings, today) {
   const localPurchase = Math.max(0, localGap - incoming);
   const fbpPurchase = Math.max(0, fbpNeed - free - Math.max(0, incoming - localGap));
   return { ...product, physical_stock: physical, order_qty: orders, locked_qty: locked,
-    safety_qty: safety, free_qty: free, local_gap: localGap, local_purchase: localPurchase,
+    safety_qty: safety, recommended_safety_qty:recommendedSafety, safety_override:settings.local_safety_override??null, free_qty: free, local_gap: localGap, local_purchase: localPurchase,
     fbp_purchase: fbpPurchase, purchase_qty: Math.ceil((localPurchase + fbpPurchase) / settings.minimum_order) * settings.minimum_order,
     local_days: localDays, fbp_days: fbpDays, settings,
     official_qty: detailed.some(sku => sku.present == null) ? null : detailed.reduce((n, sku) => n + Number(sku.present) * Number(sku.per_set_quantity), 0),

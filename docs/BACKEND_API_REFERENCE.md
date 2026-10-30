@@ -3412,6 +3412,80 @@ Read product warnings from the same three-demand inventory policy; severity filt
 - Responses:
   - `200` `application/json` -> `object`
 
+#### `GET /api/inventory-workflow/demand-details`
+
+Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; submitted/approved FBP applications with source people; pending purchase batches and typed gap reports. No finance columns or remote Ozon calls.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Owned physical inventory product
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/local-safety`
+
+Fresh inventory.write/procurement membership can override only a specific product's local safety. Atomically preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/demand-request`
+
+Create or reuse real procurement requests for exactly three demand purposes. Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/purchase-arrivals`
+
+Paged current-enterprise actual purchase arrival batches, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `status` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
+  - `product_id` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
+  - `page` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
+  - `pageSize` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/purchase-arrivals`
+
+Buyer confirms all remaining units in one owned purchased batch arrived. Fresh procurement duty, owned purchase chain and observed timestamp checked under locks. Sets received_at and audits confirmation; does not approve QC, post inventory or change financial amounts. Partial arrival uses the canonical receipt path to split the remaining batch.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/inventory-workflow/feedback`
 
 Fresh current-enterprise packing, inventory.write or procurement membership can report stock discrepancies. Recomputes the inventory supply plan and atomically notifies active scoped administrators/procurement/operations. Feedback is a notification and does not add another procurement quantity, mutate stock or change costs. FBP submission can include this notification in its existing transaction; stocktake already committed is never retried just because notification failed.
@@ -3426,7 +3500,7 @@ Fresh current-enterprise packing, inventory.write or procurement membership can 
 
 #### `POST /api/inventory-workflow/requests`
 
-Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires either a submitted replenishment application or a verified official sellable-stock safety shortage not covered by transit/confirmed stock; FBS requires a matching unfulfilled local order.
+Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires either a submitted/approved replenishment application or a verified official sellable-stock safety shortage not covered by transit/confirmed stock; FBS requires a matching unfulfilled local order.
 
 - Auth: `authenticated`
 - Request body: required

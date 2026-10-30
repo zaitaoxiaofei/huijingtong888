@@ -6,8 +6,11 @@ import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
 const router = useRouter();
 const InventorySupplyWorkspace=defineAsyncComponent(()=>import('../../components/inventory/InventorySupplyWorkspace.vue'));
-const workMode=ref(route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory');
-watch(()=>route.query.mode,value=>{if(value)workMode.value=value==='inventory'?'inventory':'purchase';});
+const ProcurementArrivalTracker=defineAsyncComponent(()=>import('../../components/procurement/ProcurementArrivalTracker.vue'));
+const arrivalProductId=ref(Number(route.query.product_id)||0);
+function showArrivals(context={}){arrivalProductId.value=Number(context.productId)||0;workMode.value='arrivals';}
+const workMode=ref(route.query.mode==='arrivals'?'arrivals':route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory');
+watch(()=>route.query.mode,value=>{if(value)workMode.value=['inventory','arrivals'].includes(value)?value:'purchase';});
 let legacyStarted=false;
 async function startPurchaseView(){
  if(legacyStarted)return loadRows();legacyStarted=true;
@@ -1571,8 +1574,9 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
-    <div class="procurement-mode-switch"><el-radio-group v-model="workMode" aria-label="采购工作模式"><el-radio-button value="inventory">库存需求总览</el-radio-button><el-radio-button value="purchase">采购登记与历史</el-radio-button></el-radio-group><span>需求按实物汇总，来源人、订单和店铺SKU保留追溯</span></div>
-    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
+    <div class="procurement-mode-switch"><el-radio-group v-model="workMode" aria-label="采购工作模式"><el-radio-button value="inventory">库存需求总览</el-radio-button><el-radio-button value="purchase">登记采购</el-radio-button><el-radio-button value="arrivals">采购到货跟踪</el-radio-button></el-radio-group><span>需求按实物汇总，来源人、订单和店铺SKU保留追溯</span></div>
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" @purchased="showArrivals" @track="showArrivals" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
+    <ProcurementArrivalTracker v-if="workMode==='arrivals'" :product-id="arrivalProductId"/>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
       <div v-loading="messageRequestLoading" style="min-height: 100px">
         <el-alert v-if="messageRequestError" :title="messageRequestError" type="error" :closable="false" show-icon />
