@@ -1,3 +1,4 @@
+import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from './inventory-product-search.js';
 import { createInventoryWorkflowService } from './inventory-workflow.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
 import { readInventoryFlowSummary } from './inventory-flow-summary.js';
@@ -4438,7 +4439,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     }
     const products = await getCachedMasterData(cacheKey,
       () => loadFbpStockAlertBaseMysql(operationTenantPk, { operational, defaultTenant: operationDefaultTenant }), STOCK_ALERT_BASE_CACHE_TTL_MS);
-    const result = applyStockAlertQuery(products, query);
+    const result = applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query));
     if (!operational || !result.rows.length) return result;
     await ensureSkuInventoryRecipeSchemaMysql();
     await ensureProductCompositionSchemaMysql();
@@ -4533,7 +4534,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
       });
       return { baseRows, salesRows };
     }, 30_000);
-    const result = applyStockAlertQuery(baseRows, query);
+    const result = applyStockAlertQuery(await filterInventoryProductRows(baseRows, query, scope, mysqlQuery), inventoryBusinessSearch(query));
     const pageIds = result.rows.map((row) => Number(row.product_id));
     const pageSkus = await inventoryAlertProductSkusMysql(pageIds, inventoryTenantPk, inventoryDefaultTenant);
     const fullByProduct = new Map();
@@ -4784,7 +4785,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     return prepared;
   }, STOCK_ALERT_BASE_CACHE_TTL_MS);
 
-  return applyStockAlertQuery(products, query);
+  return applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query));
 }
 
 async function loadFbpOperationalHistoryMysql(tenantPk = null, defaultTenant = false) {
@@ -5173,7 +5174,7 @@ function applyFbpOpportunityQuery(rows, query = {}) {
   const manualSku = String(query.manualSku || query.manual_sku || "").trim().toLowerCase();
   const sortable = new Set(["score", "suggested_qty", "suggested_transfer_qty", "suggested_purchase_qty", "recent_30d_qty", "recent_7d_qty", "coverage_days", "fbp_available", "fbp_transfer_in_transit_qty"]);
 
-  const searchRows = searchInventoryRows(rows, text);
+  const searchRows = searchInventoryRows(rows, text).filter(row => !query.inventorySku || [row.ozon_sku,row.offer_id].some(value => String(value || '').toLowerCase() === String(query.inventorySku).toLowerCase()));
   let filtered = manualSku
     ? searchRows.filter((row) => String(row.ozon_sku || "").trim().toLowerCase() === manualSku)
     : searchRows.filter((row) => row.score >= 50 && row.suggested_qty > 0);
@@ -5324,7 +5325,7 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", opti
   }));
   const fresh = await authorizeBusinessTaskSession(options.session);
   assertBusinessTaskPermission(fresh, "inventory.read");
-  return applyFbpOpportunityQuery(normalizedRows, query);
+  return applyFbpOpportunityQuery(await filterInventoryProductRows(normalizedRows, query, scope, mysqlQuery), inventoryBusinessSearch(query));
 }
 
 export async function ignoreFbpReplenishmentMysql(body = {}, userId = null, tenantId = "admin") {
@@ -5410,11 +5411,17 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
   if (query.orderId && (!Number.isSafeInteger(focusedOrderId) || focusedOrderId <= 0)) {
     throw Object.assign(new Error("FBP 备货单编号（orderId）无效，请从库存明细重新打开申请单"), { statusCode: 400 });
   }
-  const text = String(query.query || query.search || "").trim();
+  const text = String(inventoryBusinessSearch(query).query || inventoryBusinessSearch(query).search || "").trim();
   const page = Math.max(1, Number(query.page || 1));
   const pageSize = Math.min(100, Math.max(1, Number(query.pageSize || 20)));
   const where = [shopScope];
   const params = [normalizedTenantId];
+  const productSearch = inventoryProductSearch(query, scope, 'search_product');
+  if (productSearch.sql) {
+    where.push(`EXISTS (SELECT 1 FROM fbp_replenishment_order_items search_item JOIN products search_product ON search_product.id=search_item.product_id AND ${inventoryTenantSql(scope,'search_product')}
+      WHERE search_item.order_id=o.id AND ${itemOwnership('search_item')} AND ${productSearch.sql})`);
+    params.push(...productSearch.params);
+  }
   if (focusedOrderId) { where.push("o.id = ?"); params.push(focusedOrderId); }
   if (status === "applying") {
     where.push("o.status IN ('draft', 'pending_review')");
@@ -11903,7 +11910,7 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
-  const searchText = String(query.query || query.search || "").trim().toLowerCase();
+  const searchText = String(inventoryBusinessSearch(query).query || inventoryBusinessSearch(query).search || "").trim().toLowerCase();
   const shopId = String(query.shopId || query.shop_id || "all");
   const productId = Number(query.productId || query.product_id || 0);
   const dateFrom = String(query.dateFrom || query.date_from || "").slice(0, 10);
@@ -11919,11 +11926,11 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
     params.push(Number(shopId));
   }
   if (dateFrom) {
-    where.push("DATE(COALESCE(sm.created_at, sm.updated_at)) >= ?");
+    where.push(`${chinaDateSqlMysql("COALESCE(sm.created_at, sm.updated_at)")} >= ?`);
     params.push(dateFrom);
   }
   if (dateTo) {
-    where.push("DATE(COALESCE(sm.created_at, sm.updated_at)) <= ?");
+    where.push(`${chinaDateSqlMysql("COALESCE(sm.created_at, sm.updated_at)")} <= ?`);
     params.push(dateTo);
   }
   if (searchText && isInventoryIdentifier(searchText)) {
@@ -11942,6 +11949,12 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
       OR LOWER(COALESCE(pe.name, '')) LIKE ?
     )`);
     params.push(like, like, like, like, like, like, like);
+  }
+  const productSearch = inventoryProductSearch(query, scope);
+  if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
+  if (query.searchMode === 'sku' && String(query.query || query.search || '').trim()) {
+    where.push('(sm.ozon_sku = ? OR sm.offer_id = ?)');
+    params.push(String(query.query || query.search).trim(), String(query.query || query.search).trim());
   }
   const whereSql = `WHERE ${where.join(" AND ")}`;
   const selectSql = `
@@ -12112,8 +12125,8 @@ async function tenantProductsMysql(query = {}, tenantId) {
   const ownerJoinSql = `LEFT JOIN people pe ON pe.id = p.owner_person_id
     AND EXISTS (SELECT 1 FROM tenant_members owner_member WHERE owner_member.tenant_id = ${tenantPk} AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1)`;
 
-  if (dateFrom) { where.push("DATE(p.created_at) >= ?"); params.push(dateFrom); }
-  if (dateTo) { where.push("DATE(p.created_at) <= ?"); params.push(dateTo); }
+  if (dateFrom) { where.push(`${chinaDateSqlMysql("p.created_at")} >= ?`); params.push(dateFrom); }
+  if (dateTo) { where.push(`${chinaDateSqlMysql("p.created_at")} <= ?`); params.push(dateTo); }
   if (shopId !== "all") {
     where.push(`EXISTS (SELECT 1 FROM sku_mappings sm_filter
       JOIN shops sh_filter ON sh_filter.id = sm_filter.shop_id AND ${scope.predicate('sh_filter').sql}
@@ -12130,33 +12143,10 @@ async function tenantProductsMysql(query = {}, tenantId) {
       WHERE ${inventoryTenantSql(scope, 'pc_filter')} AND pc_filter.product_id = p.id)`);
   } else if (inventoryType === "accessory") where.push("p.is_accessory = 1");
 
-  const structuredFilters = [
-    [String(query.inventoryCategory || query.inventory_category || "").trim(), "p.inventory_category = ?"],
-    [String(query.productName || query.product_name || "").trim(), "p.name LIKE ?"],
-    [normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false }), "p.vehicle_brand = ?"],
-    [String(query.fitmentType || query.fitment_type || "").trim(), "p.fitment_type = ?"],
-    [String(query.accessoryName || query.accessory_name || "").trim(), "p.accessory_name = ?"],
-    [String(query.process || query.surface_process || "").trim(), "p.surface_process = ?"]
-  ];
-  for (const [value, clause] of structuredFilters) {
-    if (!value || (clause.includes("fitment_type") && !["universal", "specific"].includes(value))) continue;
-    where.push(clause);
-    params.push(clause.includes("LIKE") ? `%${value}%` : value);
-  }
-  const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
-  if (vehicleModels.length) {
-    where.push(`(${vehicleModels.map(() => "CONCAT('/', COALESCE(p.vehicle_model, ''), '/') LIKE ?").join(" OR ")})`);
-    params.push(...vehicleModels.map((model) => `%/${model}/%`));
-  }
-  const color = String(query.color || "").trim();
-  if (color) { where.push("CONCAT(',', REPLACE(REPLACE(COALESCE(p.color, ''), '，', ','), '/', ','), ',') LIKE ?"); params.push(`%,${color},%`); }
-  const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
-  if (materials.length) {
-    where.push(`(${materials.map(() => "CONCAT('/', COALESCE(p.material, ''), '/') LIKE ?").join(" OR ")})`);
-    params.push(...materials.map((material) => `%/${material}/%`));
-  }
+  const productSearch = inventoryProductSearch(query, scope);
+  if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
 
-  if (searchText) {
+  if (searchText && !["inventory_id", "sku", "name"].includes(searchMode)) {
     const like = `%${searchText}%`;
     const skuSearch = `EXISTS (SELECT 1 FROM sku_mappings sm_search
       JOIN shops s_search ON s_search.id = sm_search.shop_id AND ${inventoryTenantSql(scope, 's_search')}
@@ -12164,20 +12154,9 @@ async function tenantProductsMysql(query = {}, tenantId) {
       WHERE ${inventoryTenantSql(scope, 'sm_search')} AND sm_search.product_id = p.id AND sm_search.active = 1
         AND (LOWER(COALESCE(sm_search.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(sm_search.offer_id, '')) LIKE ?
           OR LOWER(COALESCE(op_search.name, '')) LIKE ? OR LOWER(COALESCE(s_search.name, '')) LIKE ?))`;
-    if (searchMode === "inventory_id") {
-      where.push("(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?)");
-      params.push(like, like);
-    } else if (searchMode === "sku") {
-      where.push(skuSearch);
-      params.push(like, like, like, like);
-    } else if (searchMode === "auto" && isInventoryIdentifier(searchText)) {
+    if (isInventoryIdentifier(searchText)) {
       where.push(`(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ? OR ${skuSearch})`);
       params.push(like, like, like, like, like, like);
-    } else if (searchMode === "name") {
-      where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases alias_search
-        WHERE ${inventoryTenantSql(scope, 'alias_search')} AND alias_search.product_id = p.id AND alias_search.active = 1
-          AND LOWER(alias_search.alias_name) LIKE ?))`);
-      params.push(like, like);
     } else {
       where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?
         OR LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(pe.name, '')) LIKE ?
@@ -13230,7 +13209,7 @@ export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
   const paged = String(query.paged || "") === "1";
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
-  const searchText = String(query.query || query.search || "").trim().toLowerCase();
+  const searchText = String(inventoryBusinessSearch(query).query || inventoryBusinessSearch(query).search || "").trim().toLowerCase();
   const shopId = String(query.shopId || query.shop_id || "all");
   const dateFrom = String(query.dateFrom || query.date_from || "").slice(0, 10);
   const dateTo = String(query.dateTo || query.date_to || "").slice(0, 10);
@@ -13241,11 +13220,11 @@ export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
     params.push(tenantPk);
   }
   if (dateFrom) {
-    where.push("DATE(COALESCE(p.updated_at, p.created_at)) >= ?");
+    where.push(`${chinaDateSqlMysql("COALESCE(p.updated_at, p.created_at)")} >= ?`);
     params.push(dateFrom);
   }
   if (dateTo) {
-    where.push("DATE(COALESCE(p.updated_at, p.created_at)) <= ?");
+    where.push(`${chinaDateSqlMysql("COALESCE(p.updated_at, p.created_at)")} <= ?`);
     params.push(dateTo);
   }
   if (shopId !== "all") {
@@ -13284,6 +13263,8 @@ export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
     )`);
     params.push(like, like, like, like, like, like, like, like, like);
   }
+  const productSearch = inventoryProductSearch(query, scope);
+  if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
   const productPeopleJoins = tenantScoped
     ? `LEFT JOIN people pe ON pe.id = p.owner_person_id AND EXISTS (SELECT 1 FROM tenant_members owner_member WHERE owner_member.tenant_id = ${tenantPk} AND owner_member.person_id = p.owner_person_id AND owner_member.active = 1)
        LEFT JOIN people creator ON creator.id = p.created_by_person_id AND EXISTS (SELECT 1 FROM tenant_members creator_member WHERE creator_member.tenant_id = ${tenantPk} AND creator_member.person_id = p.created_by_person_id AND creator_member.active = 1)`

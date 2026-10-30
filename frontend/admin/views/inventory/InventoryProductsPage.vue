@@ -13,7 +13,7 @@ import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
-import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import ProductCompositionDialog from "../../components/inventory/ProductCompositionDialog.vue";
 import InventoryProductRequestsDialog from "../../components/inventory/InventoryProductRequestsDialog.vue";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
@@ -214,10 +214,7 @@ const state = reactive({
     color: "",
     material: [],
     process: "",
-    shopId: "all",
     inventoryType: "all",
-    dateFrom: "",
-    dateTo: "",
     page: 1,
     pageSize: 20,
     sortKey: "",
@@ -237,10 +234,7 @@ const filterDefaults = {
   color: "",
   material: [],
   process: "",
-  shopId: "all",
   inventoryType: "all",
-  dateFrom: "",
-  dateTo: "",
   page: 1,
   pageSize: 20,
   sortKey: "",
@@ -876,13 +870,16 @@ function profitDetailModelValueText(item) {
 function applyRouteState() {
   syncingRoute = true;
   try {
-    applyFilterQuery(route, state.filters, filterDefaults);
+    const obsoleteKeys = ['shopId', 'shop_id', 'dateFrom', 'dateTo', 'date_from', 'date_to'];
+    const query = Object.fromEntries(Object.entries(route.query).filter(([key]) => !obsoleteKeys.includes(key)));
+    applyFilterQuery({ query }, state.filters, filterDefaults);
+    if (obsoleteKeys.some(key => route.query[key] !== undefined)) void router.replace({ query });
     for (const key of ["vehicleModel", "material"]) {
       state.filters[key] = String(route.query[key] || "").split(",").filter(Boolean);
     }
     if (state.filters.searchMode === "fuzzy") state.filters.searchMode = "name";
     if (state.filters.searchMode === "exact") state.filters.query = "";
-    if (!["inventory_id", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
+    if (!["auto", "inventory_id", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
     if (route.query.productId && !state.filters.query) state.filters.query = String(route.query.productId);
   } finally {
     syncingRoute = false;
@@ -898,13 +895,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
 });
 
 const deletingProducts = ref(false);
-const searchDateRange = computed({
-  get: () => state.filters.dateFrom && state.filters.dateTo ? [state.filters.dateFrom, state.filters.dateTo] : [],
-  set: (value) => {
-    state.filters.dateFrom = value?.[0] || "";
-    state.filters.dateTo = value?.[1] || "";
-  }
-});
+
 
 async function removeSelectedProducts() {
   const rows = [...selectedRows.value];
@@ -945,12 +936,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -1835,10 +1828,7 @@ async function loadPageData({ silent = false } = {}) {
       includeStock: "0",
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize),
-      shopId: String(state.filters.shopId || "all"),
       inventoryType: String(state.filters.inventoryType || "all"),
-      dateFrom: String(state.filters.dateFrom || ""),
-      dateTo: String(state.filters.dateTo || ""),
       sortKey: String(state.filters.sortKey || ""),
       sortDir: String(state.filters.sortDir || "")
     });
@@ -1882,7 +1872,11 @@ async function loadPageData({ silent = false } = {}) {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
+watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
+  applyRouteState();
+  if (previous !== JSON.stringify(state.filters)) void loadPageData();
+}, { deep: true });
 watch(() => mergePreview.targetProductId, () => {
   updateMergeCountSummary();
   selectDefaultMergeCompositionSource();
@@ -1907,53 +1901,19 @@ onActivated(() => {
 
 <template>
   <div class="inventory-page-shell inventory-card">
-    <div class="product-header-actions" aria-label="商品库存操作">
-      <el-button type="primary" :loading="loading" @click="handleSearch">查询</el-button>
-      <el-button v-if="canWriteInventory" plain @click="openCreateDialog">新增库存</el-button>
-      <el-button v-if="canWriteInventory" plain @click="productRequestsVisible = true">库存创建申请</el-button>
-      <el-button v-if="canSubmitProcurementRequest" plain :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
-      <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>
-        <el-dropdown-item @click="handleReset">重置</el-dropdown-item>
-        <el-dropdown-item @click="openMergeHistoryDialog">合并历史</el-dropdown-item>
-        <el-dropdown-item v-if="canWriteInventory" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-dropdown-item>
-        <el-dropdown-item v-if="canWriteInventory" :disabled="!selectedRows.length || deletingProducts" divided @click="removeSelectedProducts">删除所选库存</el-dropdown-item>
-      </el-dropdown-menu></template></el-dropdown>
-    </div>
-    <el-form class="product-search-row" label-position="top" @submit.prevent="handleSearch">
-      <el-form-item label="搜索方式">
-        <el-select v-model="state.filters.searchMode">
-          <el-option label="库存 ID 精确搜索" value="inventory_id" />
-          <el-option label="产品名称模糊搜索" value="name" />
-          <el-option label="SKU／货号精确搜索" value="sku" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="搜索内容">
-        <el-input v-model="state.filters.query" clearable :placeholder="state.filters.searchMode === 'inventory_id' ? '完整新编号或旧编码，如 1-23' : state.filters.searchMode === 'sku' ? '完整 Ozon SKU 或货号' : '名称关键词，多个词用空格分隔'" @keyup.enter="handleSearch" />
-      </el-form-item>
-      <el-form-item label="店铺">
-        <el-select v-model="state.filters.shopId" filterable>
-          <el-option label="全部店铺" value="all" />
-          <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="创建时间区间">
-        <el-date-picker v-model="searchDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
-      </el-form-item>
-      <el-form-item label="产品类型">
-        <el-select v-model="state.filters.inventoryType">
-          <el-option label="全部库存" value="all" />
-          <el-option label="单品" value="single" />
-          <el-option label="套装" value="combo" />
-          <el-option label="配件" value="accessory" />
-        </el-select>
-      </el-form-item>
-    </el-form>
-
-    <InventoryStructuredSearch
-      compact
-      :model-value="state.filters"
-      @update:model-value="Object.assign(state.filters, $event)"
-    />
+    <InventoryPageToolbar product-search :show-shop="false" :show-date-range="false" :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset">
+      <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /></el-select></el-form-item>
+      <template #actions>
+        <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>
+          <el-dropdown-item v-if="canWriteInventory" @click="openCreateDialog">新增库存</el-dropdown-item>
+          <el-dropdown-item v-if="canWriteInventory" @click="productRequestsVisible = true">库存创建申请</el-dropdown-item>
+          <el-dropdown-item v-if="canSubmitProcurementRequest" :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-dropdown-item>
+          <el-dropdown-item divided @click="openMergeHistoryDialog">合并历史</el-dropdown-item>
+          <el-dropdown-item v-if="canWriteInventory" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-dropdown-item>
+          <el-dropdown-item v-if="canWriteInventory" :disabled="!selectedRows.length || deletingProducts" divided @click="removeSelectedProducts">删除所选库存</el-dropdown-item>
+        </el-dropdown-menu></template></el-dropdown>
+      </template>
+    </InventoryPageToolbar>
 
     <el-alert v-if="localQuantities.error.value" :title="localQuantities.error.value" type="warning" :closable="false" />
     <div class="mobile-landscape-hint">库存字段较多，横屏查看更完整；表格可左右滑动。</div>
@@ -2885,19 +2845,13 @@ onActivated(() => {
 .inventory-more-actions{display:flex;flex-direction:column;align-items:flex-start;gap:10px}.inventory-more-actions .el-button{margin-left:0}.product-header-actions { padding:4px 0 10px;display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .product-header-actions .el-button { margin-left: 0; height: 38px; min-width: 80px; font-size: 14px; }
 .product-header-actions .product-main-action { width: 128px; font-weight: 600; }
-.inventory-page-shell > .erp-page-header, .inventory-page-shell > .product-search-row, .inventory-page-shell > .inventory-structured-search { flex: 0 0 auto; }
-.inventory-page-shell > .inventory-structured-search { width: auto; overflow: visible; grid-template-columns: repeat(8, minmax(0, 1fr)); padding: 14px 18px; gap: 12px; }
-@media (max-width: 1200px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .inventory-page-shell.inventory-card { overflow-y: auto; } .inventory-page-shell > .inventory-table-wrap { flex-shrink: 0; min-height: 280px; } }
+.inventory-page-shell > .erp-page-header, .inventory-page-shell > .inventory-search-toolbar { flex: 0 0 auto; }
+
+@media (max-width: 600px) { .inventory-page-shell.inventory-card { overflow-y: auto; } .inventory-page-shell > .inventory-table-wrap { flex-shrink: 0; min-height: 280px; } }
 .product-action-divider { height: 22px; width: 1px; background: var(--erp-detail-border-light, #e2e8f0); margin: 0 4px; }
 .inventory-page-shell :deep(.erp-image-preview) { border-color: var(--erp-detail-border-light, #e5e7eb); background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-page-shell :deep(.erp-image-preview__empty) { color: var(--erp-detail-text-secondary, #94a3b8); }
-.product-search-row { display: grid; grid-template-columns: 150px minmax(200px, 1fr) 150px 240px 120px; gap: 10px; padding: 10px 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
-.product-search-row :deep(.el-form-item) { margin: 0; min-width: 0; }
-.product-search-row :deep(.el-form-item__label) { margin-bottom: 6px; font-size: 12px; color: var(--erp-detail-text-secondary, #64748b); }
-.product-search-row :deep(.el-select), .product-search-row :deep(.el-date-editor) { width: 100%; min-width: 0; }
-@media (max-width: 1100px) { .product-search-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .product-search-row { grid-template-columns: 1fr; } .product-action-divider { display: none; } }
+
 
 .sku-summary-cell {
   display: flex;

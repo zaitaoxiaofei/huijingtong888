@@ -1,4 +1,6 @@
 <script setup>
+import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -12,7 +14,7 @@ import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
-import { dateText, integer } from "./inventory-utils.js";
+import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const authStore = useAuthStore();
 const route = useRoute();
@@ -109,6 +111,7 @@ const state = reactive({
   total: 0,
   shops: [],
   filters: {
+    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     status: sharedReplenishmentStatus.value || "applying",
@@ -116,6 +119,16 @@ const state = reactive({
     pageSize: 10
   }
 });
+const searchDefaults = { ...inventorySearchDefaults(), query: '', shopId: 'all' };
+applyFilterQuery(route, state.filters, searchDefaults);
+function syncSearchRoute() {
+  const query = { ...route.query };
+  for (const key of Object.keys(searchDefaults)) {
+    const value = Array.isArray(state.filters[key]) ? state.filters[key].join(',') : String(state.filters[key] || '');
+    query[key] = value && value !== String(searchDefaults[key]) ? value : undefined;
+  }
+  void router.replace({ query });
+}
 const viewMode = ref("operations");
 if (focusedOrderId.value) { sharedReplenishmentStatus.value = "all"; state.filters.status = "all"; }
 
@@ -781,6 +794,7 @@ function buildParams() {
   if (focusedOrderId.value) { params.set("orderId", String(focusedOrderId.value)); params.set("status", "all"); params.set("shopId", "all"); params.delete("query"); return params; }
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
+  appendInventorySearch(params, state.filters);
   return params;
 }
 
@@ -1177,15 +1191,18 @@ function retryBarcodePrint() {
 
 function handleSearch() {
   state.filters.page = 1;
+  syncSearchRoute();
   loadPageData();
 }
 
 function handleReset() {
+  Object.assign(state.filters, inventorySearchDefaults());
   state.filters.query = "";
   state.filters.shopId = "all";
   state.filters.status = "applying";
   sharedReplenishmentStatus.value = "applying";
   state.filters.page = 1;
+  syncSearchRoute();
   loadPageData();
 }
 
@@ -1200,10 +1217,7 @@ function handlePageSizeChange(size) {
   if (viewMode.value !== 'inventory') loadPageData();
 }
 
-watch(() => state.filters.shopId, () => {
-  state.filters.page = 1;
-  loadPageData();
-});
+
 
 watch(viewMode, () => {
   state.filters.page = 1;
@@ -1217,7 +1231,14 @@ watch(sharedReplenishmentStatus, (status) => {
   loadPageData();
 });
 
-watch(() => route.query.orderId, () => { state.filters.page = 1; loadPageData(); });
+watch(() => route.query, (next, previous) => {
+  const before = JSON.stringify(state.filters);
+  applyFilterQuery(route, state.filters, searchDefaults);
+  if (next.orderId !== previous.orderId || before !== JSON.stringify(state.filters)) {
+    state.filters.page = 1;
+    void loadPageData();
+  }
+}, { deep: true });
 onMounted(loadPageData);
 onActivated(() => void loadPageData());
 </script>
@@ -1228,13 +1249,8 @@ onActivated(() => void loadPageData());
       <template #title>当前仅查看库存明细关联的 FBP 备货单 #{{ focusedOrderId }}</template>
       <el-button link type="primary" @click="router.replace({ query: { ...route.query, orderId: undefined } })">返回全部备货单</el-button>
     </el-alert>
-    <div class="replenishment-command-bar">
-      <div class="replenishment-filter-row">
-        <div class="replenishment-filter-heading">
-          <strong>筛选备货单</strong>
-          <span>按单号、商品或店铺快速定位</span>
-        </div>
-        <div class="replenishment-filter-controls">
+    <InventoryPageToolbar :product-search="!focusedOrderId" :filters="state.filters" :shops="state.shops" :loading="loading" :show-date-range="false" :show-query="!focusedOrderId" :show-shop="!focusedOrderId" query-placeholder="单号 / SKU / 产品 / 申请人" @search="handleSearch" @reset="handleReset">
+      <template #actions>
           <el-radio-group v-model="viewMode" size="small">
             <el-radio-button value="operations">运营视角</el-radio-button>
             <el-radio-button value="inventory">库存视角</el-radio-button>
@@ -1246,23 +1262,9 @@ onActivated(() => void loadPageData());
               创建关联汇总
             </el-button>
           </div>
-          <el-input
-            v-model="state.filters.query"
-            clearable
-            class="replenishment-search"
-            placeholder="搜索单号 / SKU / 产品 / 申请人"
-            @keyup.enter="handleSearch"
-          />
-          <el-select v-model="state.filters.shopId" class="replenishment-shop-select" placeholder="选择店铺">
-            <el-option label="全部店铺" value="all" />
-            <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
-          </el-select>
-          <el-button type="primary" @click="handleSearch">查询</el-button>
-          <el-button @click="handleReset">重置</el-button>
-          <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
-        </div>
-      </div>
-    </div>
+        <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
+      </template>
+    </InventoryPageToolbar>
 
     <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
       <el-table :data="inventoryPage" v-loading="loading" row-key="inventory_key" border class="erp-data-table replenishment-table">

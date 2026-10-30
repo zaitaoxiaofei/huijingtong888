@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -26,6 +27,7 @@ const state = reactive({
   total: 0,
   shops: [],
   filters: {
+    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     dateFrom: "",
@@ -39,6 +41,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  ...inventorySearchDefaults(),
   query: "",
   shopId: "all",
   dateFrom: "",
@@ -56,7 +59,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-  manualKeys: ["query"],
+
   isSyncingRoute: () => syncingRoute
 });
 
@@ -122,6 +125,7 @@ function setSort(sortKey) {
     state.filters.sortDir = "asc";
   }
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -148,12 +152,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -271,6 +277,7 @@ async function loadPageData() {
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
+    appendInventorySearch(params, state.filters);
     const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
@@ -285,8 +292,12 @@ async function loadPageData() {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.alertType, state.filters.sortKey, state.filters.sortDir, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
+  applyRouteState();
+  if (previous !== JSON.stringify(state.filters)) void loadPageData();
+}, { deep: true });
+
 
 onMounted(async () => {
   applyRouteState();
@@ -297,14 +308,15 @@ onMounted(async () => {
 <template>
   <div class="inventory-page-shell inventory-card">
     <InventoryPageToolbar
+      product-search
+      :loading="loading"
       :filters="state.filters"
       :shops="state.shops"
-      query-label="FBP搜索"
       query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
       @search="handleSearch"
       @reset="handleReset"
     >
-      <el-form-item label="库存状态"><el-select v-model="state.filters.alertType" style="width:140px" @change="handleSearch"><el-option value="in_stock" label="有库存" /><el-option value="out_of_stock" label="已断货" /><el-option value="all" label="全部" /></el-select></el-form-item>
+      <el-form-item label="库存状态"><el-select v-model="state.filters.alertType" style="width:140px"><el-option value="in_stock" label="有库存" /><el-option value="out_of_stock" label="已断货" /><el-option value="all" label="全部" /></el-select></el-form-item>
       <template #actions>
         <el-button class="erp-btn erp-btn-secondary" :loading="syncLoading" @click="refreshStocks">刷新同步</el-button>
       </template>

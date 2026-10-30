@@ -16,6 +16,13 @@ const body = (schema, required = true, description = "") => ({ required, descrip
 const param = (name, schema, required = true) => ({ name, required, ...schema });
 const response = (status, mediaType, schema, description = "") => ({ status, mediaType, schema, description });
 
+const inventorySearchParams = [
+  param("query", scalar("string", "Keyword interpreted by searchMode; default auto keeps page-specific business fields"), false),
+  param("shopId", scalar("string", "Current-enterprise shop ID, or all"), false),
+  param("searchMode", scalar("string", "auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms"), false),
+  ...["inventoryCategory", "productName", "vehicleBrand", "fitmentType", "vehicleModel", "accessoryName", "color", "material", "process"].map(name => param(name, scalar("string", "Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination."), false))
+];
+
 const schemas = {
   InventoryWorkflowDemand: objectOf("Shared physical-unit procurement demand, in priority order real_order, local_safety, fbp_stock. Requests are reminders, never additional physical allocation.", [
     field("key", scalar("string", "real_order | local_safety | fbp_stock"), true), field("label", scalar("string", "Business purpose"), true),
@@ -1582,7 +1589,7 @@ const endpoints = [
   ]),
   section("Catalog", [
     endpoint("GET", "/api/products", "Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.", {
-      auth: "authenticated",queryParams:[param("view",scalar("string","inventory for lean inventory list; omitted preserves other product consumers"),false),param("includeStock",scalar("string","0 returns list metadata immediately; quantities are nullable and loaded separately by view=local"),false)],
+      auth: "authenticated",query:[...inventorySearchParams,param("view",scalar("string","inventory for lean inventory list; omitted preserves other product consumers"),false),param("includeStock",scalar("string","0 returns list metadata immediately; quantities are nullable and loaded separately by view=local"),false)],
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows; paged=1 returns rows/total/page/pageSize."))]
     }),
     endpoint("GET", "/api/products/selection", "Return selection-facing product records.", {
@@ -1590,7 +1597,7 @@ const endpoints = [
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Selection product rows."))]
     }),
     endpoint("GET", "/api/products/hidden", "Return archived or hidden products.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Hidden product rows."))]
     }),
     endpoint("GET", "/api/products/:id", "Return one product with full computed detail.", {
@@ -1690,7 +1697,7 @@ const endpoints = [
       responses: [response(200, "application/json", scalar("object", "Created product linkage result."))]
     }),
     endpoint("GET", "/api/mappings", "Return SKU mapping rows.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", arrayOf(ref("SkuMappingRecord"), "SKU mapping rows."))]
     }),
     endpoint("PUT", "/api/mappings/:id", "Update an existing SKU mapping.", {
@@ -1718,7 +1725,7 @@ const endpoints = [
     })),
     endpoint("GET", "/api/fbp-replenishment-orders", "Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.", {
       auth: "authenticated",
-      query: [param("orderId", scalar("number", "Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page."), false), param("status", scalar("string", "Existing workflow status filter; all for a deep link."), false)],
+      query: [...inventorySearchParams,param("orderId", scalar("number", "Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page."), false), param("status", scalar("string", "Existing workflow status filter; all for a deep link."), false)],
       responses: [response(200, "application/json", scalar("object", "Existing paged rows/total/page/pageSize response."))]
     }),
     ...["", "/detail", "/settings", "/tasks", "/events"].map(suffix => endpoint("GET", `/api/inventory-flow${suffix}`, "Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.", {
@@ -1737,7 +1744,7 @@ const endpoints = [
       responses: [response(200, "application/json", ref("InventorySnapshot"))]
     }),
     endpoint("GET", "/api/stock-alerts", "Return inventory alert rows and replenishment suggestions.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", ref("StockAlertsResponse"))]
     }),
     endpoint("GET", "/api/stock-warehouse-rules", "Return stock warehouse classification rules.", {
@@ -1833,7 +1840,7 @@ const endpoints = [
       responses:[response(200,"application/json",objectOf("Workflow result",[field("rows",arrayOf(ref("InventoryWorkflow"),"Requested products or requests-only metadata; omitted for view=sku")),field("source",scalar("string","view=sku: direct | bundle | recipe")),field("root",scalar("object","Owned root inventory identity")),field("components",arrayOf(scalar("object","Owned inventory product_id, name, inventory_number, quantity, stock_unit, image_url and current marker"),"view=sku: every component of the current effective binding"))])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
     }),
     endpoint("GET", "/api/inventory-workflow/alerts", "Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.", {
-      auth:"authenticated", queryParams:[...['query','alertType','sortBy','refresh'].map(name=>param(name,scalar("string","Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1"),false)),...['page','pageSize'].map(name=>param(name,scalar("number","Page index or page size, maximum100"),false))],
+      auth:"authenticated", query:[...inventorySearchParams,...['alertType','sortBy','refresh'].map(name=>param(name,scalar("string","Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1"),false)),...['page','pageSize'].map(name=>param(name,scalar("number","Page index or page size, maximum100"),false))],
       responses:[response(200,"application/json",objectOf("Paged shared warnings",[field("rows",arrayOf(scalar("object","Product row with workflow InventoryWorkflow"),"Filtered products")),field("total",scalar("number","Filtered count")),field("meta",scalar("object","Counts by shared status"))]))]
     }),
     endpoint("POST", "/api/inventory-workflow/requests", "Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires either a submitted replenishment application or a verified official sellable-stock safety shortage not covered by transit/confirmed stock; FBS requires a matching unfulfilled local order.", {

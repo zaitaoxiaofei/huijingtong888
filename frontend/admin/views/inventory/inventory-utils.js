@@ -57,6 +57,10 @@ export function applyFilterQuery(route, filters, defaults = {}) {
       filters[key] = asPositiveInt(route.query[key], defaults[key]);
       return;
     }
+    if (Array.isArray(defaults[key])) {
+      filters[key] = String(route.query[key] || "").split(",").filter(Boolean);
+      return;
+    }
     filters[key] = String(route.query[key] ?? defaults[key] ?? "");
   });
 }
