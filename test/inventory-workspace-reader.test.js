@@ -4,9 +4,9 @@ import {createInventoryWorkspaceReader} from '../src/services/inventory-workspac
 
 test('workspace scans coverage once, batches forecasts, and preserves every product',async()=>{
   let reads=0;const batches=[],snapshot=new Map();
-  const read=createInventoryWorkspaceReader({revision:()=>0,coverage:async(ids,tenant)=>{reads++;assert.equal(ids.length,601);assert.equal(tenant,2);return snapshot;},batch:async(ids,tenant,options)=>{assert.equal(options.coverage,snapshot);assert.equal(options.cache,false);assert.equal(options.fresh,true);batches.push(ids.length);return ids.map(product_id=>({product_id}));}});
-  const ids=Array.from({length:601},(_,i)=>i+1);
-  const rows=await read(ids,2);assert.equal(reads,1);assert.deepEqual(batches,[200,200,200,1]);assert.deepEqual(rows.map(r=>r.product_id),ids);
+  const read=createInventoryWorkspaceReader({revision:()=>0,coverage:async(ids,tenant)=>{reads++;assert.equal(ids.length,2001);assert.equal(tenant,2);return snapshot;},batch:async(ids,tenant,options)=>{assert.equal(options.coverage,snapshot);assert.equal(options.cache,false);assert.equal(options.fresh,true);batches.push(ids.length);return ids.map(product_id=>({product_id}));}});
+  const ids=Array.from({length:2001},(_,i)=>i+1);
+  const rows=await read(ids,2);assert.equal(reads,1);assert.deepEqual(batches,[1000,1000,1]);assert.deepEqual(rows.map(r=>r.product_id),ids);
   assert.equal(await read([...ids].reverse(),2),rows);assert.equal(reads,1);
 });
 

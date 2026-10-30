@@ -17,7 +17,7 @@ export function createInventoryWorkspaceReader({batch,coverage,revision,now=Date
     entry.pending=(async()=>{
       const snapshot=await coverage(products,tenantId),values=[];
       // Bound SQL parameter lists and forecast payloads without rescanning history.
-      for(let i=0;i<products.length;i+=200)values.push(...await batch(products.slice(i,i+200),tenantId,{coverage:snapshot,fresh:true,cache:false}));
+      for(let i=0;i<products.length;i+=1000)values.push(...await batch(products.slice(i,i+1000),tenantId,{coverage:snapshot,fresh:true,cache:false}));
       entry.value=values;entry.expires=now()+20000;return values;
     })();
     try{return await entry.pending;}
