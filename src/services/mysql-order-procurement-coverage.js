@@ -93,7 +93,9 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
           OR LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way)( |$)'
           OR (LOWER(CONCAT_WS(' ', o.status, o.tracking_stage)) REGEXP 'cancel|return|reject'
             AND ${hasTransportHistory}) THEN 1 ELSE 0 END AS entered_transport,
-        COALESCE(raw.query_stock_location, 'LOCAL') AS stock_location
+        CASE WHEN UPPER(COALESCE(raw.query_stock_location,'')) IN ('FBP','FBO','OGR') THEN 'FBP'
+          WHEN (CASE WHEN JSON_VALID(raw.raw_json) THEN UPPER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json,'$.fulfillment_schema')),JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json,'$.raw.fulfillment_schema')),'')) ELSE '' END) IN ('FBP','FBO','OGR') THEN 'FBP'
+          ELSE 'LOCAL' END AS stock_location
         FROM orders o JOIN order_items oi ON oi.order_id = o.id
         ${tenantPk === null ? '' : `JOIN shops tenant_shop ON tenant_shop.id = o.shop_id${tenantScope('tenant_shop.tenant_id')}`}
         ${smallProductScope ? '' : `LEFT JOIN (
@@ -137,7 +139,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         SUM(CASE WHEN movement_type = 'ORDER_RESERVED' THEN ABS(quantity_delta)
           WHEN movement_type = 'CANCEL_RESTORE' THEN -ABS(quantity_delta) ELSE 0 END) AS fbp_reserved
         FROM inventory_movements
-        WHERE status = 'posted' AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
+        WHERE status = 'posted' AND UPPER(COALESCE(NULLIF(stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
           AND (source_type IS NULL OR source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'))${scope()}${tenantScope()} GROUP BY product_id`),
       allocationQuery(`SELECT a.order_item_id, a.product_id, a.procurement_request_id, a.allocated_quantity
         FROM procurement_order_allocations a JOIN order_items ai ON ai.id = a.order_item_id JOIN orders ao ON ao.id = ai.order_id AND ao.id = a.order_id
@@ -168,7 +170,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         JOIN shops ms ON ms.id = mo.shop_id${tenantScope('ms.tenant_id')} WHERE marks.status = 'handled'${scope('marks.product_id')}`),
       query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit
         FROM inventory_movements im LEFT JOIN products p ON p.id = im.product_id WHERE im.status = 'posted' AND im.source_type = 'order_outbound'
-          AND COALESCE(NULLIF(im.stock_location, ''), 'LOCAL') != 'FBP'
+          AND UPPER(COALESCE(NULLIF(im.stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
           ${scope('im.product_id')}${tenantScope('im.tenant_id')}
         GROUP BY im.related_order_item_id, im.product_id`),
       allocationQuery(`SELECT hs.order_item_id, hs.product_id, hs.quantity, hs.inbound_record_id FROM procurement_history_sources hs
@@ -180,14 +182,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         WHERE status = 'posted' AND quantity_delta > 0
           AND source_type IN ('return_in', 'initial_stock', 'opening_stock')
           AND (source_type != 'return_in' OR source_ref IS NULL OR source_ref NOT LIKE 'cancel_%')
-          AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'${scope()}${tenantScope()}`),
-      tenantPk === null ? loadFbpReservations(query, scopedIds) : query(`SELECT i.product_id,
-        SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)) AS quantity
-        FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id AND o.shop_id = i.shop_id
-        JOIN shops reservation_shop ON reservation_shop.id = o.shop_id${tenantScope('reservation_shop.tenant_id')}
-        LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
-        WHERE o.status IN ('approved', 'ozon_created') AND i.product_id IN (${scopedIdSql})
-        GROUP BY i.product_id`),
+          AND UPPER(COALESCE(NULLIF(stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')${scope()}${tenantScope()}`),
+      loadFbpReservations(query,scopedIds,ownerScope),
       allocationQuery(`SELECT ip.product_id, ip.order_item_id, ip.priority FROM inventory_order_priorities ip
         JOIN order_items pi ON pi.id = ip.order_item_id JOIN orders po ON po.id = pi.order_id
         JOIN shops ps ON ps.id = po.shop_id${tenantScope('ps.tenant_id')} WHERE ip.priority > 0${scope('ip.product_id')}`)

@@ -14867,6 +14867,9 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
       .filter((item) => !item.exists).map((item) => `${item.table}.tenant_id`);
     if (missing.length) throw Object.assign(new Error(`企业选品编辑暂不可用：缺少租户归属字段 ${missing.join("、")}，请管理员先完成对应迁移。`), { statusCode: 503 });
   }
+  const syncCycleSettings = (body.production_lead_days !== undefined || body.warehouse_logistics_days !== undefined)
+    && await mysqlSchemaColumnExists('inventory_flow_settings','settings_json');
+  let cycleSettingsChanged = false;
   let shouldSyncOutbound = false;
   await withMysqlTransaction(async (connection) => {
   const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
@@ -15011,6 +15014,13 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     productId,
     ...(tenantScoped ? [tenantPk] : [])
   ]);
+  const productionDays=normalizeProductionLeadDaysMysql(body.production_lead_days === undefined ? existing.production_lead_days : body.production_lead_days);
+  const shippingDays=normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days === undefined ? existing.warehouse_logistics_days ?? 2 : body.warehouse_logistics_days);
+  if(syncCycleSettings && (productionDays!==existing.production_lead_days || shippingDays!==Number(existing.warehouse_logistics_days??2))){
+    await mysqlConnectionQuery(connection,`INSERT INTO inventory_flow_settings(tenant_id,product_id,settings_json) VALUES(?,?,JSON_OBJECT('production_days',?,'local_days',?))
+      ON DUPLICATE KEY UPDATE settings_json=JSON_SET(COALESCE(settings_json,JSON_OBJECT()),'$.production_days',?,'$.local_days',?),updated_by=NULL,revision=revision+1`,[tenantPk,productId,productionDays,shippingDays,productionDays,shippingDays]);
+    cycleSettingsChanged=true;
+  }
   if (body.composition_items !== undefined || body.components !== undefined) {
     await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantPk) : "admin");
     shouldSyncOutbound = true;
@@ -15019,6 +15029,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   });
 
   if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
+  if(cycleSettingsChanged)invalidateOrderProcurementCoverage();
 
   let outboundSync = null;
   let outboundSyncWarning = "";

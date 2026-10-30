@@ -233,8 +233,8 @@ async function load(id = productId.value, {syncFbpOnLoad=true}={}) {
     const result = await apiClient.get(`${ledgerBase.value}?product_id=${id}&include_flow=${directStocktake.value ? '0' : 'local'}`, { noCache: true });
     if (version === loadVersion) {
       data.value = result;
-      if (!directStocktake.value) void loadFbp(id, version).then(() => {
-        if (syncFbpOnLoad && version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
+      void loadFbp(id, version).then(() => {
+        if (!directStocktake.value && syncFbpOnLoad && version === loadVersion && id === productId.value && props.modelValue && props.stocktakeEnabled) void syncFbp(true);
       });
       if ((pendingInitialAction === 'stocktake' || directStocktake.value) && props.modelValue && props.stocktakeEnabled) {
         pendingInitialAction = '';
@@ -635,19 +635,32 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
         <template v-if="needsTarget"><el-form-item :label="form.action_type === 'substitute' ? '实际使用来源商品' : '转换目标商品'"><el-select v-model="form.target_product_id" filterable remote :remote-method="value => search(value, true)" @change="selectTarget" style="width:100%"><el-option v-for="p in targetProducts" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || ''}`" /></el-select></el-form-item><el-form-item :label="form.action_type === 'substitute' ? '来源实际消耗数量' : '目标入库数量'"><el-input-number v-model="form.target_quantity" :min="1" :precision="0" /><span v-if="target">该商品本地库存 {{ target.local_stock }}</span></el-form-item></template>
         <template v-if="form.action_type === 'stocktake'">
           <p><strong>{{ data.product.name }}</strong> · 库存 ID：{{ data.product.inventory_number || '—' }}</p>
-          <el-alert type="info" :closable="false" title="家里或仓库现在实际有多少件，就填多少件" description="例如实际还有 20 件，就填 20。包含已经分给待发订单但还没寄出的货；路上未到货的采购不算。" />
+          <div class="stocktake-warehouses">
+            <section class="stocktake-warehouse" aria-label="FBS本地库存">
+              <h3>FBS · 本地仓库</h3>
+              <dl><div><dt>账面实物</dt><dd>{{data.physical_estimate}} 件</dd></div><div><dt>本地可用</dt><dd>{{data.available_estimate}} 件</dd></div></dl>
+              <p>待发订单 {{data.fulfillment_summary?.fbs?.order_count??'待核对'}} 单 · {{data.open_order_demand}} 件</p>
+              <p>待发往 FBP 的本地锁定 {{data.fbp_reserved}} 件</p>
+            </section>
+            <section class="stocktake-warehouse is-readonly" aria-label="FBP官方库存">
+              <h3>FBP · 官方仓库 <small>只读</small></h3>
+              <dl><div><dt>官方实物</dt><dd>{{fbpLoading?'加载中':fbpError||!data.fbp_inventory||data.fbp_inventory.incomplete?'待核对':`${data.fbp_inventory.present} 件`}}</dd></div><div><dt>官方可用</dt><dd>{{fbpLoading?'加载中':fbpError||!data.fbp_inventory||data.fbp_inventory.incomplete?'待核对':`${data.fbp_inventory.available} 件`}}</dd></div></dl>
+              <p>待发订单 {{data.fulfillment_summary?.fbp?.order_count??'待核对'}} 单 · {{data.fulfillment_summary?.fbp?.quantity??'待核对'}} 件</p>
+              <p>以 Ozon 同步结果为准，不从本地库存扣减。</p>
+              <el-button v-if="fbpError" link type="primary" @click="loadFbp()">重新读取 FBP 库存</el-button>
+            </section>
+          </div>
+          <p class="stocktake-help">本次仅校准 FBS 本地库存。填写本地仓库实际清点总数，包含尚未发出的订单货物，不含采购在途及 FBP 仓库存。</p>
           <el-alert v-if="negativeBookStock" type="warning" :closable="false" class="stocktake-book-warning"
             :title="`账面推算为 ${data.physical_estimate} 件，这是历史出入库待核差异，不代表实物是负数`"
             description="直接填写现在实际清点的在仓总数，系统会记录盘点差额，不需要先把账面补到 0。当前请使用“更新仓库实物数”。" />
-          <el-form-item label="你要填写的数量"><el-radio-group v-model="form.stocktake_type"><el-radio value="physical">更新仓库实物数（推荐）</el-radio><el-radio value="available" :disabled="negativeBookStock">更新剩余可用数</el-radio></el-radio-group></el-form-item>
-          <el-form-item label="当前账面／可用">{{ data.physical_estimate }} 件（{{ negativeBookStock ? '历史差异待核对' : '账面推算' }}）／{{ data.available_estimate }} 件</el-form-item>
-          <el-form-item label="待发订单／FBP">{{ data.open_order_demand }} 件／{{ data.fbp_reserved }} 件</el-form-item>
-          <el-form-item v-if="form.stocktake_type === 'physical'" label="实际在仓总数"><el-input-number v-model="form.counted_quantity" aria-label="实际在仓总数" placeholder="实物还有 20 件，就填 20" :min="0" :precision="0" /></el-form-item>
-          <el-form-item v-if="form.stocktake_type === 'available'" label="扣除占用后剩余"><el-input-number v-model="form.available_quantity" aria-label="扣除占用后剩余" placeholder="已扣除待发订单与 FBP 的数量" :min="0" :precision="0" /></el-form-item>
-          <p v-if="form.stocktake_type === 'available'" class="stocktake-help">只有已经扣除了待发订单和 FBP 占用，才填写这里。输入正数时，系统会加回这些占用，换算成实物总数；输入 0 时会保留已有订单缺口，不补库存。</p>
+          <el-form-item label="校准方式"><el-radio-group v-model="form.stocktake_type"><el-radio value="physical">本地实物总数（推荐）</el-radio><el-radio value="available" :disabled="negativeBookStock">本地可用数量</el-radio></el-radio-group></el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'physical'" label="本地仓库实物总数"><el-input-number v-model="form.counted_quantity" aria-label="本地仓库实物总数" placeholder="输入实际清点数量" :min="0" :precision="0" /></el-form-item>
+          <el-form-item v-if="form.stocktake_type === 'available'" label="扣除占用后剩余"><el-input-number v-model="form.available_quantity" aria-label="扣除占用后剩余" placeholder="扣除FBS订单与本地锁定后" :min="0" :precision="0" /></el-form-item>
+          <p v-if="form.stocktake_type === 'available'" class="stocktake-help">仅填写扣除 FBS 待发需求及待发往 FBP 的本地锁定后剩余数量。输入 0 不会自动补足已有缺口。</p>
           <div v-if="stocktakeTargetPhysical != null" class="stocktake-outcome">
             <strong>保存后：仓库实物 {{ stocktakeTargetPhysical }} 件，剩余可用 {{ stocktakeTargetAvailable }} 件</strong>
-            <span>系统会自动扣除待发订单 {{ data.open_order_demand }} 件和 FBP 占用 {{ data.fbp_reserved }} 件。</span>
+            <span>本地可用扣除 FBS 待发需求 {{ data.open_order_demand }} 件与待发往 FBP 的本地锁定 {{ data.fbp_reserved }} 件。</span>
             <span v-if="countDelta != null">账面校准差额 {{ countDelta >= 0 ? '+' : '' }}{{ countDelta }} 件{{ negativeBookStock ? '，包含历史账面差异，并不代表这次新到货的数量。' : '，会写入库存流水。' }}</span>
           </div>
           <el-form-item label="调整原因"><el-radio-group v-model="form.reason_code"><el-radio v-for="reason in countReasons" :key="reason.code" :value="reason.code">{{ reason.label }}</el-radio></el-radio-group></el-form-item>
@@ -669,7 +682,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
       </el-form>
       <el-alert v-if="preview && form.action_type === 'stocktake'" type="warning" :closable="false"
         :title="`仓库实物 ${preview.physical_before} → ${preview.physical_after}；剩余可用 ${preview.available_before} → ${preview.available_after}`"
-        :description="`待发订单需求 ${preview.open_order_demand} 件（现货已分配 ${preview.order_reserved} 件），FBP 占用 ${preview.fbp_reserved} 件；库存流水差额 ${preview.stocktake_delta > 0 ? '+' : ''}${preview.stocktake_delta} 件。采购在途不变。`" />
+        :description="`FBS待发需求 ${preview.open_order_demand} 件（现货已分配 ${preview.order_reserved} 件），待发往FBP的本地锁定 ${preview.fbp_reserved} 件；库存流水差额 ${preview.stocktake_delta > 0 ? '+' : ''}${preview.stocktake_delta} 件。采购在途不变。`" />
       <el-alert v-if="preview && form.action_type !== 'stocktake'" type="warning" :closable="false" :title="`本地账面库存：${preview.local_before} → ${preview.local_after}${needsTarget ? `；另一商品库存：${preview.target_before} → ${preview.target_after}` : ''}`" :description="form.action_type === 'revise_purchase' ? '采购、收货及关联订单覆盖将同步重算；负库存保留为待核差异，不自动补采购。' : '历史补录只解释所选订单来源；不会新增一笔当前待采购任务。'" />
       <el-table v-if="preview?.affected_orders?.length" :data="preview.affected_orders" max-height="180"><el-table-column prop="posting_number" label="覆盖减少的订单" /><el-table-column prop="before" label="原关联数量" /><el-table-column prop="after" label="纠正后关联数量" /></el-table>
       <el-alert v-if="preview?.cost_task_quantity > 0" type="info" :closable="false" :title="`将生成 ${preview.cost_task_quantity} 件现货成本核对任务，交由采购关联已有采购或补录成本；不是要求再采购这些货物。`" />
@@ -686,6 +699,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
 .ledger-detail-body.is-loading { min-height: 470px; }
 .stocktake-loading { min-height:150px;display:flex;align-items:center;justify-content:center;color:var(--el-text-color-secondary); }
 .stocktake-book-warning { margin:12px 0; }
+.stocktake-warehouses{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.stocktake-warehouse{border:1px solid var(--el-border-color);border-radius:10px;padding:14px;background:var(--el-fill-color-extra-light)}.stocktake-warehouse h3{margin:0 0 12px;font-size:15px}.stocktake-warehouse h3 small{font-weight:normal;color:var(--el-text-color-secondary)}.stocktake-warehouse dl{display:flex;gap:24px;margin:0}.stocktake-warehouse dt{color:var(--el-text-color-secondary);font-size:12px}.stocktake-warehouse dd{margin:5px 0;font-size:18px;font-weight:600}.stocktake-warehouse p{font-size:12px;line-height:1.6;margin:8px 0 0}.stocktake-warehouse.is-readonly{background:var(--el-bg-color)}@media(max-width:600px){.stocktake-warehouses{grid-template-columns:1fr}}
 .stocktake-help { color:var(--el-text-color-secondary);line-height:1.7; }
 .stocktake-outcome { display:flex;flex-direction:column;gap:6px;padding:12px;margin:8px 0 16px;border-radius:6px;background:var(--el-fill-color-light);line-height:1.6; }
 .stocktake-outcome span { font-size:13px;color:var(--el-text-color-secondary); }

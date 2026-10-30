@@ -82,11 +82,18 @@ export async function appendPrintRecord(connection, body, userId, expectedShopId
 }
 export async function loadFbpReservations(query, productIds = [], scope = null) {
   const ids = [...new Set(productIds.map(Number).filter(id => Number.isSafeInteger(id) && id > 0))];
-  return query(`SELECT i.product_id, SUM(GREATEST(i.approved_qty + COALESCE(a.quantity, 0), 0)) AS quantity
-    FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id = i.order_id AND o.shop_id = i.shop_id
-    LEFT JOIN (SELECT item_id, SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id = i.id
-    WHERE o.status IN ('approved', 'ozon_created')${ids.length ? ` AND i.product_id IN (${ids.map(() => '?').join(',')})` : ''}
-      ${scope ? `AND EXISTS (SELECT 1 FROM shops reservation_shop WHERE reservation_shop.id = o.shop_id AND ${inventoryTenantSql(scope, "reservation_shop")})
-        AND EXISTS (SELECT 1 FROM products reservation_product WHERE reservation_product.id = i.product_id AND ${inventoryTenantSql(scope, "reservation_product")})` : ""}
-    GROUP BY i.product_id`, ids);
+  const owned=alias=>scope?` AND ${inventoryTenantSql(scope,alias)}`:'';
+  return query(`SELECT p.id AS product_id,SUM(GREATEST(i.approved_qty+COALESCE(a.quantity,0),0)*
+      CASE WHEN r.id IS NOT NULL THEN ri.quantity ELSE COALESCE(c.quantity,1) END) AS quantity
+    FROM fbp_replenishment_order_items i JOIN fbp_replenishment_orders o ON o.id=i.order_id AND o.shop_id=i.shop_id
+    JOIN shops shop ON shop.id=o.shop_id${owned('shop')}
+    JOIN products root ON root.id=i.product_id${owned('root')}
+    LEFT JOIN sku_inventory_recipes r ON r.shop_id=i.shop_id AND r.ozon_sku=i.ozon_sku AND r.active=1
+    LEFT JOIN sku_inventory_recipe_items ri ON ri.recipe_id=r.id
+    LEFT JOIN product_components c ON c.product_id=i.product_id AND r.id IS NULL${owned('c')}
+    JOIN products p ON p.id=CASE WHEN r.id IS NOT NULL THEN ri.product_id ELSE COALESCE(c.component_product_id,i.product_id) END${owned('p')}
+    LEFT JOIN (SELECT item_id,SUM(adjustment_qty) AS quantity FROM fbp_replenishment_item_adjustments GROUP BY item_id) a ON a.item_id=i.id
+    WHERE o.status IN ('approved','ozon_created')${ids.length?` AND p.id IN (${ids.map(()=>'?').join(',')})`:''}
+      AND (i.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=i.mapping_id AND m.shop_id=i.shop_id AND m.product_id=i.product_id${owned('m')}))
+    GROUP BY p.id`,ids);
 }

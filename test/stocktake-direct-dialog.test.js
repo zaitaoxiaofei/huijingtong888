@@ -23,12 +23,13 @@ function fixture(get){
   emit:(...args)=>events.push(args),ElMessage:{error(){},success(){},warning(){}},ElMessageBox:{confirm:async()=>calls.push(['confirm'])}
  });
  vm.runInContext("let fbpVersion=0,pollTimer,finishPoll;let loadVersion=0;let pendingInitialAction='stocktake';",context);
+ vm.runInContext('var fbpReads=0;function loadFbp(){fbpReads++;return Promise.resolve();}',context);
  for(const name of ['stopFbpPoll','load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
  return {context,calls,events};
 }
 test('direct update loads only its inventory then defaults to the actual physical count',async()=>{
  const f=fixture();await f.context.load();assert.equal(f.context.form.action_type,'stocktake');assert.equal(f.context.form.stocktake_type,'physical');
- assert.equal(f.context.form.counted_quantity,undefined);assert.equal(f.context.formVisible.value,true);assert.equal(f.calls.length,1);
+ assert.equal(f.context.form.counted_quantity,undefined);assert.equal(f.context.formVisible.value,true);assert.equal(f.calls.length,1);assert.equal(f.context.fbpReads,1);
 });
 test('a failed load can be retried into the same small form with no stale product',async()=>{
  let failed=true;const f=fixture(async()=>{if(failed)throw new Error('offline');return {product:{id:10},revision:'v'}});

@@ -6,26 +6,30 @@ import {useAuthStore} from '../../stores/auth.js';
 import {PROCUREMENT_GAP_CAUSES} from '../../../../src/shared/procurement-demand-types.js';
 import {hasPermission} from '../../../../src/shared/permissions.js';
 import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
+import {flowLeadDays} from '../../../../src/services/inventory-flow-rules.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
 const props=defineProps({productId:Number,initialTab:{type:String,default:'orders'}}),emit=defineEmits(['changed','track']);
 const auth=useAuthStore(),tab=ref(props.initialTab),data=ref(null),loading=ref(false),error=ref(''),saving=ref(false);
-const form=reactive({system:true,quantity:0,note:''});let version=0,controller;
+const form=reactive({system:true,quantity:0,note:'',production:7,shipping:2});let version=0,controller;
 const canEdit=computed(()=>hasPermission(auth.user,'inventory.write')||hasPermission(auth.user,'procurement'));
-const fbpLabels={pending_review:'待审核申请',approved:'已确认占用',ozon_created:'已提交官方'};
+const canViewCosts=computed(()=>hasPermission(auth.user,'procurement'));
+const fbpLabels={pending_review:'待审核申请',approved:'已确认占用',ozon_created:'已提交官方',sent:'已发运',in_transit:'发运在途',received:'已签收',completed:'已完成',cancelled:'已取消',rejected:'已拒绝',listing:'入仓上架中',partially_received:'部分签收'};
+const activeApplications=computed(()=>(data.value?.applications||[]).filter(a=>['pending_review','approved','ozon_created'].includes(a.status)));
+const previewDays=computed(()=>flowLeadDays(Number(form.production||0)+Number(form.shipping||0),7,data.value?.safety?.holidays||[]));
 const time=v=>v?shanghaiDateTimeText(v,{assumeUtcWhenNaive:true}):'未记录';
 const openBatches=computed(()=>(data.value?.batches||[]).filter(r=>!r.received_at&&r.status!=='approved'));
 const activeReports=computed(()=>(data.value?.reports||[]).filter(r=>r.types?.includes({orders:'real_order',safety:'local_safety',fbp:'fbp_stock'}[tab.value])));
-const skuCount=computed(()=>new Set((data.value?.applications||[]).map(a=>`${a.shop_id}:${a.ozon_sku}`)).size);
+const skuCount=computed(()=>new Set(activeApplications.value.map(a=>`${a.shop_id}:${a.ozon_sku}`)).size);
 async function load(){
  controller?.abort();controller=new AbortController();const token=++version,scope=currentApiCacheScope();loading.value=true;error.value='';
- try{const result=await apiClient.get(`/api/inventory-workflow/demand-details?product_id=${props.productId}`,{noCache:true,signal:controller.signal});if(token!==version||scope!==currentApiCacheScope())return;data.value=result;Object.assign(form,{system:result.safety.safety_override==null,quantity:result.safety.safety_override??result.safety.recommended_safety_qty,note:result.safety.override_note||''});}
+ try{const result=await apiClient.get(`/api/inventory-workflow/demand-details?product_id=${props.productId}`,{noCache:true,signal:controller.signal});if(token!==version||scope!==currentApiCacheScope())return;data.value=result;Object.assign(form,{system:result.safety.safety_override==null,quantity:result.safety.safety_override??result.safety.recommended_safety_qty,note:result.safety.override_note||'',production:result.safety.production_days,shipping:result.safety.local_shipping_days});}
  catch(e){if(token===version&&e.name!=='AbortError')error.value=e.message;}finally{if(token===version)loading.value=false;}
 }
 async function save(){
  if(!form.system&&(form.quantity==null||!Number.isSafeInteger(Number(form.quantity))))return ElMessage.warning('请填写0或更大的整数保障数量');
  if(!form.system&&!form.note.trim())return ElMessage.warning('请填写调整原因，例如销量下滑或季节变化');
  const scope=currentApiCacheScope();saving.value=true;
- try{await apiClient.post('/api/inventory-workflow/local-safety',{product_id:props.productId,quantity:form.system?null:form.quantity,note:form.note,revision:data.value.safety.revision});if(scope!==currentApiCacheScope())return;ElMessage.success('本地保障已保存，其他两类真实需求保持独立');await load();emit('changed',data.value?.state);}
+ try{await apiClient.post('/api/inventory-workflow/local-safety',{product_id:props.productId,quantity:form.system?null:form.quantity,note:form.note,revision:data.value.safety.revision,production_days:form.production,local_shipping_days:form.shipping,expected_product_updated_at:data.value.product.updated_at});if(scope!==currentApiCacheScope())return;ElMessage.success('本地保障已保存，其他两类真实需求保持独立');await load();emit('changed',data.value?.state);}
  catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{saving.value=false;}
 }
 watch(()=>props.productId,load,{immediate:true});onBeforeUnmount(()=>{version++;controller?.abort();});
@@ -54,18 +58,30 @@ watch(()=>props.productId,load,{immediate:true});onBeforeUnmount(()=>{version++;
     </el-descriptions>
     <p v-if="data.safety.updated_at">最近调整：{{data.safety.updated_by_name||'历史修改人待核'}} · {{time(data.safety.updated_at)}}</p>
     <p>系统建议 = 平均日销量 × 保障周期，向上取整。人工覆盖只调整本地保障，不减少真实订单和正式FBP申请。</p>
-    <el-form v-if="canEdit" label-position="top" class="safety-editor"><el-checkbox v-model="form.system">使用系统建议</el-checkbox><el-form-item label="人工保障数量"><el-input-number v-model="form.quantity" :disabled="form.system" :min="0" :max="1000000" :precision="0"/></el-form-item><el-form-item label="调整原因"><el-input v-model="form.note" type="textarea" :rows="2" :disabled="form.system" maxlength="500" placeholder="例如：近期销量下滑，保障从10件调整为5件"/></el-form-item><el-button type="primary" :loading="saving" @click="save">保存本地保障</el-button></el-form>
+    <el-form v-if="canEdit" label-position="top" class="safety-editor"><div class="safety-cycle-fields"><el-form-item label="生产周期（天）"><el-select v-model="form.production" aria-label="生产周期"><el-option v-for="day in [1,2,3,5,7,10,15,30]" :key="day" :value="day" :label="`${day} 天`"/></el-select></el-form-item><el-form-item label="运往本地仓（天）"><el-input-number v-model="form.shipping" :min="1" :max="5" :precision="0"/></el-form-item></div><p>调整后保障周期：{{previewDays}} 天。周期与库存商品信息同步保存；平均日销量按实际 FBS 消耗计算。</p><el-checkbox v-model="form.system">使用系统建议</el-checkbox><el-form-item label="人工保障数量"><el-input-number v-model="form.quantity" :disabled="form.system" :min="0" :max="1000000" :precision="0"/></el-form-item><el-form-item label="调整原因"><el-input v-model="form.note" type="textarea" :rows="2" :disabled="form.system" maxlength="500" placeholder="例如：近期销量下滑，保障从10件调整为5件"/></el-form-item><el-button type="primary" :loading="saving" @click="save">保存本地保障</el-button></el-form>
    </el-tab-pane>
    <el-tab-pane label="FBP备货申请" name="fbp">
-    <p>{{skuCount}} 个店铺SKU已提交申请 · 待审核需求 {{data.state.requested}} 件 · 本库存正式FBP采购缺口 {{data.state.supply_plan?.required_fbp??'待核对'}} 件</p>
+    <p>{{skuCount}} 个店铺SKU有进行中的申请 · 待审核需求 {{data.state.requested}} 件 · 本库存正式FBP采购缺口 {{data.state.supply_plan?.required_fbp??'待核对'}} 件</p>
+    <p>当前本地锁定 {{data.state.locked??'待核对'}} 件 · 历史及当前申请 {{data.applications.length}} 条。已发运、已完成记录不再占用本地库存；实物数量按当前SKU组成折算，原始SKU申请数同时保留。</p>
     <el-alert type="info" :closable="false" title="现货和采购在途按库存共享，缺口统一去重汇总；具体SKU的最终占用由仓库确认分配。预测预警不等于正式申请。"/>
-    <el-table :data="data.applications" border empty-text="当前没有正式FBP备货申请" max-height="55vh"><el-table-column label="申请单 / SKU" min-width="220"><template #default="{row}"><b>{{row.order_no}}</b><p>{{row.ozon_sku}}</p><small>{{row.shop_name}}</small></template></el-table-column><el-table-column label="状态" min-width="130"><template #default="{row}">{{fbpLabels[row.status]||row.status}}</template></el-table-column><el-table-column label="申请实物" width="100"><template #default="{row}">{{row.requested_quantity}} 件</template></el-table-column><el-table-column label="申请人" min-width="130"><template #default="{row}">{{row.applicant_name||'历史申请人待核'}}</template></el-table-column><el-table-column label="申请时间" min-width="175"><template #default="{row}">{{time(row.submitted_at||row.created_at)}}</template></el-table-column></el-table>
+    <el-table :data="data.applications" border empty-text="未找到关联本库存的FBP申请记录" max-height="55vh"><el-table-column label="申请单 / SKU" min-width="220"><template #default="{row}"><b>{{row.order_no}}</b><p>{{row.ozon_sku}}</p><small>{{row.shop_name}}</small></template></el-table-column><el-table-column label="状态" min-width="130"><template #default="{row}">{{fbpLabels[row.status]||'状态待核对'}}</template></el-table-column><el-table-column label="申请实物折算" min-width="160"><template #default="{row}">{{row.requested_quantity}} 件<small v-if="row.units_per_sku"> · SKU申请 {{row.sku_requested_quantity}} × {{row.units_per_sku}}</small></template></el-table-column><el-table-column label="申请人" min-width="130"><template #default="{row}">{{row.applicant_name||'历史申请人待核'}}</template></el-table-column><el-table-column label="申请时间" min-width="175"><template #default="{row}">{{time(row.submitted_at||row.created_at)}}</template></el-table-column></el-table>
    </el-tab-pane>
-   <el-tab-pane label="采购与到货记录" name="batches"><p>未关闭采购 {{openBatches.length}} 个批次；确认到货后进入“已到货待验收”，验收入库后才增加本地实物。</p><el-table :data="data.batches" border><el-table-column label="采购单" min-width="180"><template #default="{row}">{{row.order_no||`采购批次 #${row.id}`}}</template></el-table-column><el-table-column label="剩余待验收" width="130"><template #default="{row}">{{row.quantity}} 件</template></el-table-column><el-table-column label="采购时间" min-width="180"><template #default="{row}">{{time(row.purchased_at)}}</template></el-table-column><el-table-column label="状态" min-width="160"><template #default="{row}">{{row.received_at?'已到货待验收':'采购未完成 · 待到货'}}</template></el-table-column></el-table></el-tab-pane>
+   <el-tab-pane label="采购与到货记录" name="batches">
+    <h3>采购历史</h3><p>已登记采购 {{data.purchase_history?.total??'待核对'}} 条 · 累计采购 {{data.purchase_history?.purchased_quantity??'待核对'}} 件；最近50条记录。</p>
+    <el-table :data="data.purchase_history?.rows||[]" border empty-text="未找到关联本库存的已登记采购记录" max-height="35vh">
+     <el-table-column label="采购单" min-width="180"><template #default="{row}">{{row.order_no}}</template></el-table-column>
+     <el-table-column label="采购数量" width="110"><template #default="{row}">{{row.actual_quantity}} 件</template></el-table-column>
+     <el-table-column label="已验收入库" width="140"><template #default="{row}">{{row.received_quantity==null?'验收记录待核对':`${row.received_quantity} 件`}}</template></el-table-column>
+     <el-table-column label="剩余待验收" width="125"><template #default="{row}">{{row.pending_quantity}} 件</template></el-table-column>
+     <el-table-column v-if="canViewCosts" label="采购单价（元）" width="140"><template #default="{row}">{{row.unit_cost==null?'成本待补充':row.unit_cost}}</template></el-table-column>
+     <el-table-column label="采购人" min-width="130"><template #default="{row}">{{row.buyer_name||'历史人员待核'}}</template></el-table-column>
+     <el-table-column label="采购时间" min-width="180"><template #default="{row}">{{time(row.purchased_at)}}</template></el-table-column>
+    </el-table>
+    <h3>待到货及待验收批次</h3><p>未关闭采购 {{openBatches.length}} 个批次；确认到货后进入“已到货待验收”，验收入库后才增加本地实物。</p><el-table :data="data.batches" border><el-table-column label="采购单" min-width="180"><template #default="{row}">{{row.order_no||`采购批次 #${row.id}`}}</template></el-table-column><el-table-column label="剩余待验收" width="130"><template #default="{row}">{{row.quantity}} 件</template></el-table-column><el-table-column label="采购时间" min-width="180"><template #default="{row}">{{time(row.purchased_at)}}</template></el-table-column><el-table-column label="状态" min-width="160"><template #default="{row}">{{row.received_at?'已到货待验收':'采购未完成 · 待到货'}}</template></el-table-column></el-table></el-tab-pane>
   </el-tabs>
   <div v-if="activeReports.length" class="demand-reports"><h3>本类需求的补充说明</h3><div v-for="(report,index) in activeReports" :key="index"><b>{{PROCUREMENT_GAP_CAUSES[report.cause]||report.cause}}</b> · {{report.person_name||'历史人员待核'}} · {{time(report.created_at)}}<p>{{report.note}}</p></div></div>
  </div>
 </template>
 <style scoped>
-.procurement-demand-detail{min-height:220px}.detail-heading{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:20px}.order-product{display:flex;gap:12px;align-items:center;min-height:100px}.order-product>div{display:grid;gap:8px}.order-product small{color:var(--el-text-color-secondary)}.gap{color:var(--el-color-danger)}.safety-editor{max-width:620px;margin-top:24px;padding:20px;background:var(--el-fill-color-extra-light);border-radius:8px}
+.procurement-demand-detail{min-height:220px}.detail-heading{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:20px}.order-product{display:flex;gap:12px;align-items:center;min-height:100px}.order-product>div{display:grid;gap:8px}.order-product small{color:var(--el-text-color-secondary)}.gap{color:var(--el-color-danger)}.safety-cycle-fields{display:flex;gap:18px;flex-wrap:wrap}.safety-editor{max-width:620px;margin-top:24px;padding:20px;background:var(--el-fill-color-extra-light);border-radius:8px}
 </style>

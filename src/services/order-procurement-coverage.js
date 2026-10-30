@@ -1,3 +1,4 @@
+import {inventoryLocation} from '../shared/inventory-fulfillment.js';
 const positive = (value) => Math.max(0, Number(value) || 0);
 const rounded = (value) => Math.round(value * 10000) / 10000;
 
@@ -18,6 +19,7 @@ export function planPartialReceipt(record, quantity, expectedQuantity, allowOver
 // This is an operational projection. It never repairs the inventory ledger or
 // creates purchases from a shipping status. All quantities use physical product units.
 export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [], includeTrace = false }) {
+  demands = demands.map(row => ({...row,stock_location:inventoryLocation(row.stock_location)}));
   // All caches live for this calculation only. They do not alter the source
   // rows, FIFO ordering, batch identity or freshness of another request.
   const receivedTimes = new WeakMap(), boughtTimes = new WeakMap(), transportTimes = new WeakMap();

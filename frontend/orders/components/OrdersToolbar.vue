@@ -1,7 +1,9 @@
 <script setup>
-import { computed } from "vue";
+import { computed,inject } from "vue";
 import { ArrowDown, Printer, Refresh, Search } from "@element-plus/icons-vue";
 
+import OrderWorkModeSwitch from './OrderWorkModeSwitch.vue';
+const workMode=inject('orders-work-mode',null);
 const props = defineProps({
   filters: { type: Object, default: () => ({}) },
   shops: { type: Array, default: () => [] },
@@ -137,9 +139,7 @@ function handlePrintCommand(command) {
             />
           </div>
 
-          <div class="orders-toolbar-last-sync" title="最近一次成功写入订单同步日志的北京时间">
-            最近同步：{{ lastSyncText }}
-          </div>
+
 
           <el-date-picker
             v-model="dateRange"
@@ -172,6 +172,7 @@ function handlePrintCommand(command) {
               </template>
             </el-dropdown>
 
+            <OrderWorkModeSwitch v-if="workMode" :mode="workMode.mode.value" @change="workMode.mode.value=$event"/>
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
               <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
                 <el-button
@@ -184,7 +185,7 @@ function handlePrintCommand(command) {
                   拉取新单
                 </el-button>
               </el-tooltip>
-              <el-tooltip content="按上方店铺和日期范围重新同步，适合补历史漏单、找旧日期订单或校正状态。" placement="top">
+              <el-tooltip :content="`最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
                 <el-button
                   class="orders-toolbar-btn orders-toolbar-btn-secondary"
                   type="primary"

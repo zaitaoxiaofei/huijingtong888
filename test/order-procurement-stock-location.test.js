@@ -5,10 +5,10 @@ import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage, procu
 
 test('procurement uses the displayed non-FBP ledger, including legacy warehouse movements', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE products (id INTEGER, name TEXT, stock_unit TEXT);
-    INSERT INTO products VALUES (5, 'TENET', 'unit');
+  db.exec(`CREATE TABLE products (id INTEGER, name TEXT, stock_unit TEXT,tenant_id INTEGER DEFAULT 1);
+    INSERT INTO products(id,name,stock_unit) VALUES (5, 'TENET', 'unit');
     CREATE TABLE inventory_movements (id INTEGER PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP, source_ref TEXT, product_id INTEGER, quantity_delta INTEGER, status TEXT,
-      stock_location TEXT, source_type TEXT, movement_type TEXT, related_order_item_id INTEGER);
+      tenant_id INTEGER DEFAULT 1, stock_location TEXT, source_type TEXT, movement_type TEXT, related_order_item_id INTEGER);
     INSERT INTO inventory_movements (product_id, quantity_delta, status, stock_location, source_type, related_order_item_id) VALUES
       (5, 500, 'posted', 'UNKNOWN', 'purchase_inbound', NULL),
       (5, 3, 'posted', 'UNKNOWN', 'return_in', NULL),
@@ -22,9 +22,11 @@ test('procurement uses the displayed non-FBP ledger, including legacy warehouse 
   const demands = [1, 2].map(id => ({ order_id: id, order_item_id: id, product_id: 5,
     quantity: id === 1 ? 207 : 1, ordered_at: `2026-09-0${id}T00:00:00Z`,
     needs_fulfillment: 1, entered_transport: 0, stock_location: 'LOCAL' }));
-  const query = async sql => {
+  const query = async (sql,args=[]) => {
+    if(sql.includes('FROM tenants'))return [{id:1,slug:'default'}];
+    if(sql.startsWith('SELECT id FROM products'))return db.prepare(sql).all(...args);
     if (sql.includes('SELECT o.id AS order_id')) return demands.map(row => ({ ...row }));
-    if (sql.includes('FROM inventory_movements')) return db.prepare(sql).all();
+    if (sql.includes('FROM inventory_movements')) return db.prepare(sql).all(...args);
     return [];
   };
   try {

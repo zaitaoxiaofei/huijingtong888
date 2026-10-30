@@ -3007,7 +3007,7 @@ Fetch a remote image through the backend with response validation.
 
 #### `GET /api/inventory/ledger`
 
-Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3019,7 +3019,7 @@ Read current enterprise inventory detail, optionally with the shared read-only f
 
 #### `GET /api/procurement/ledger`
 
-Read current enterprise inventory detail, optionally with the shared read-only flow graph. Existing write/revision behavior is unchanged.
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3414,7 +3414,7 @@ Read product warnings from the same three-demand inventory policy; severity filt
 
 #### `GET /api/inventory-workflow/demand-details`
 
-Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; submitted/approved FBP applications with source people; pending purchase batches and typed gap reports. No finance columns or remote Ozon calls.
+Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; active and historical FBP applications expanded through current SKU recipes/components with original SKU quantities; pending batches plus recent50 actual purchase records and all-record totals. Purchase amount/unit_cost are returned only to procurement members; packing sees nonfinancial quantities. No remote Ozon calls.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3426,7 +3426,7 @@ Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage 
 
 #### `POST /api/inventory-workflow/local-safety`
 
-Fresh inventory.write/procurement membership can override only a specific product's local safety. Atomically preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.
+Fresh inventory.write/procurement membership can override only a specific product's local safety. Optional production_days/local_shipping_days update the same product fields used by inventory editing and the effective flow overrides atomically, requiring expected_product_updated_at. Preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.
 
 - Auth: `authenticated`
 - Request body: required

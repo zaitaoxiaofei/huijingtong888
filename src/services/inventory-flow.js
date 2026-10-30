@@ -124,6 +124,12 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
     await transaction(async connection => {
       const q = connectionQuery(connection);
       await assertInventoryMember(scope, personId, q);
+      if(id){
+        await assertInventoryRecord(scope,'product',id,q,{lock:true});
+        if(value.production_days!=null&&![1,2,3,5,7,10,15,30].includes(value.production_days))throw flowError('生产周期须与库存商品一致，请选择1、2、3、5、7、10、15或30天');
+        if(value.local_days!=null&&(value.local_days<1||value.local_days>5))throw flowError('运往本地仓周期须为1至5天，请在本地保障规则中修改');
+        if(value.production_days!=null||value.local_days!=null)await q(`UPDATE products SET production_lead_days=COALESCE(?,production_lead_days),warehouse_logistics_days=COALESCE(?,warehouse_logistics_days),updated_at=CURRENT_TIMESTAMP WHERE id=? AND ${inventoryTenantSql(scope)}`,[value.production_days,value.local_days,id]);
+      }
       const [row] = await q("SELECT revision FROM inventory_flow_settings WHERE tenant_id = ? AND product_id = ? FOR UPDATE", [scope.id, id]);
       if (Number(row?.revision || 0) !== whole(body.revision ?? 0, "规则版本")) throw flowError("规则已被其他同事修改，请刷新后重试", 409);
       await q(`INSERT INTO inventory_flow_settings (tenant_id, product_id, settings_json, updated_by) VALUES (?,?,?,?)
