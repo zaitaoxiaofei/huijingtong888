@@ -1,7 +1,8 @@
 <script setup>
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import InventoryStructuredSearch from "./InventoryStructuredSearch.vue";
 const props = defineProps({
+  compactSearch: {type:Boolean,default:false},
   filters: { type: Object, required: true }, shops: { type: Array, default: () => [] },
   showShop: { type: Boolean, default: true }, showDateRange: { type: Boolean, default: true },
   showQuery: { type: Boolean, default: true }, productSearch: { type: Boolean, default: false },
@@ -10,6 +11,8 @@ const props = defineProps({
   queryLabel: { type: String, default: "搜索内容" },
   queryPlaceholder: { type: String, default: "库存编号 / SKU / 货号 / 名称关键词" }
 });
+const preciseVisible=ref(false);
+const preciseCount=computed(()=>['inventoryCategory','vehicleBrand','vehicleModel','color','accessoryName','material','process','productName'].filter(key=>Array.isArray(props.filters[key])?props.filters[key].length:props.filters[key]).length);
 const emit = defineEmits(["search", "reset"]);
 const searchPlaceholder = computed(() => ({ inventory_id: '完整库存编号，如 1-23', sku: '完整 Ozon SKU 或货号', name: '名称关键词，多个词用空格分隔' }[props.filters.searchMode] || props.queryPlaceholder));
 const dateRange = computed({
@@ -18,9 +21,10 @@ const dateRange = computed({
 });
 </script>
 <template>
-  <section class="inventory-toolbar inventory-search-toolbar" aria-label="库存搜索">
+  <section class="inventory-toolbar inventory-search-toolbar" :class="{'is-compact-search':compactSearch}" aria-label="库存搜索">
     <el-form label-position="top" class="inventory-search-form" @submit.prevent="emit('search')">
       <div class="inventory-search-fields">
+        <slot v-if="compactSearch" />
         <el-form-item v-if="productSearch && showQuery" label="搜索方式" class="search-mode">
           <el-select v-model="filters.searchMode" aria-label="搜索方式">
             <el-option label="综合搜索" value="auto" /><el-option label="库存编号精确" value="inventory_id" />
@@ -36,8 +40,12 @@ const dateRange = computed({
         <el-form-item v-if="showDateRange" :label="dateLabel" class="search-dates">
           <el-date-picker v-model="dateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
         </el-form-item>
-        <slot />
-        <InventoryStructuredSearch v-if="productSearch" compact simple class="inventory-search-attributes" :model-value="filters" @update:model-value="Object.assign(filters, $event)" @keyup.enter.prevent.stop="emit('search')" />
+        <slot v-if="!compactSearch" />
+        <el-popover v-if="productSearch&&compactSearch" v-model:visible="preciseVisible" trigger="click" placement="bottom-start" :width="'min(680px,94vw)'" popper-class="inventory-precise-popover">
+          <template #reference><el-button :type="preciseCount?'primary':'default'" plain>精确搜索{{preciseCount?`（${preciseCount}）`:''}}</el-button></template>
+          <el-form v-if="preciseVisible" label-position="top" class="inventory-precise-fields" @submit.prevent="preciseVisible=false;emit('search')"><InventoryStructuredSearch compact simple :model-value="filters" @update:model-value="Object.assign(filters,$event)"/><el-button type="primary" @click="preciseVisible=false;emit('search')">应用筛选</el-button><el-button @click="preciseVisible=false">收起</el-button></el-form>
+        </el-popover>
+        <InventoryStructuredSearch v-if="productSearch&&!compactSearch" compact simple class="inventory-search-attributes" :model-value="filters" @update:model-value="Object.assign(filters, $event)" @keyup.enter.prevent.stop="emit('search')" />
       </div>
       <div class="inventory-search-actions">
         <el-button type="primary" :loading="loading" @click="emit('search')">查询</el-button>
@@ -45,10 +53,12 @@ const dateRange = computed({
         <slot name="actions" />
       </div>
 
+      <div v-if="compactSearch" class="inventory-toolbar-right"><slot name="right"/></div>
     </el-form>
   </section>
 </template>
 <style scoped>
+.is-compact-search .inventory-search-fields{flex:0 1 auto;flex-wrap:nowrap}.is-compact-search .inventory-search-fields :deep(.search-keyword){width:190px;flex:none}.is-compact-search .inventory-search-form{align-items:flex-end;flex-wrap:nowrap}.inventory-toolbar-right{display:flex;align-items:center;gap:8px;margin-left:auto;white-space:nowrap}.inventory-precise-fields :deep(.inventory-structured-search){display:flex;flex-wrap:wrap;gap:10px}.inventory-precise-fields :deep(.search-group){display:contents}.inventory-precise-fields :deep(.el-form-item){width:190px}.inventory-precise-fields :deep(.el-select){width:100%}@media(max-width:1250px){.is-compact-search .inventory-search-form{flex-wrap:wrap}.inventory-toolbar-right{flex-wrap:wrap;white-space:normal}}
 .inventory-search-toolbar { position: static; min-width: 0; padding: 12px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-search-form { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .inventory-search-fields { display: flex; flex: 1 1 650px; flex-wrap: wrap; gap: 8px; min-width: 0; align-items: flex-end; }

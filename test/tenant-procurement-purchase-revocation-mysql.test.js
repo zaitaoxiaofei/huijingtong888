@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import mysql from "mysql2/promise";
+import {randomUUID} from "node:crypto";
 import { createTenantMysqlFixture } from "./helpers/tenant-mysql-fixture.js";
 
 test("free purchases preserve tenant ownership and recheck current procurement authority after row-lock waits", {
@@ -80,14 +81,14 @@ test("free purchases preserve tenant ownership and recheck current procurement a
       ["subscription", "UPDATE tenants SET subscription_expires_at=DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) WHERE id=2", "UPDATE tenants SET subscription_expires_at=NULL WHERE id=2"],
       ["login identity", "UPDATE people SET active=0 WHERE id=7", "UPDATE people SET active=1 WHERE id=7"]
     ]) {
-      await t.test(`revoked ${name} during an actual product row-lock wait rolls back all purchase and inventory writes`, async () => {
+      for(const workspaceBatch of [false,true])await t.test(`revoked ${name} ${workspaceBatch?'in batch purchase':'in free purchase'} during an actual product row-lock wait rolls back all purchase and inventory writes`, async () => {
         const blocker = await mysql.createConnection({ socketPath: fixture.env.DB_SOCKET_PATH, user: "root", database: fixture.database });
         let checked;
         try {
           await blocker.beginTransaction();
           await blocker.query("SELECT id FROM products WHERE id=200 FOR UPDATE");
           const before = await snapshot();
-          checked = service.recordProcurementPurchaseMysql(body(), 7, 2).then(value => ({ value }), error => ({ error }));
+          checked = service.recordProcurementPurchaseMysql({...body(),...(workspaceBatch?{workspace_batch:true,request_key:randomUUID()}:{})}, 7, 2).then(value => ({ value }), error => ({ error }));
           let waiting = false;
           for (let n = 0; n < 100; n++) {
             const [row] = await q("SELECT COUNT(*) n FROM performance_schema.data_lock_waits w JOIN performance_schema.threads t ON t.THREAD_ID=w.REQUESTING_THREAD_ID WHERE t.PROCESSLIST_DB=?", [fixture.database]);

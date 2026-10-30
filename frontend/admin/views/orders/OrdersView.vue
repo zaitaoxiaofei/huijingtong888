@@ -14,7 +14,7 @@ watch(mode,value=>{if(value==='print')printMounted.value=true;});
  <div class="orders-mode-page">
 
   <div class="orders-print-workspace" v-if="printMounted" v-show="mode==='print'"><OrdersPage ref="ordersPageRef"/></div>
-  <InventorySupplyWorkspace v-if="mode==='inventory'" role="warehouse" @purchased="context=>router.push({path:'/procurement/workspace',query:{mode:'arrivals',product_id:context.productId}})" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><OrderWorkModeSwitch :mode="mode" @change="mode=$event"/></template></InventorySupplyWorkspace>
+  <InventorySupplyWorkspace v-if="mode==='inventory'" role="warehouse" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><OrderWorkModeSwitch :mode="mode" @change="mode=$event"/></template></InventorySupplyWorkspace>
  </div>
 </template>
 <style scoped>
