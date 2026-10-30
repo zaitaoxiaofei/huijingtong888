@@ -38,12 +38,15 @@ test('inventory leaderboard aggregates before paging and keeps SKU details/date/
     await q("UPDATE orders SET tracking_stage='delivered',delivered_at='2026-10-30 01:00:00' WHERE id=?",[orderId]);
     await order(20,[[1,'sku1',99,999]],'awaiting_packaging','2026-10-29 15:59:59');
     await order(20,[[1,'sku1',99,999]],'awaiting_packaging','2026-10-30 16:00:00');
-    const { service } = loadTenantOrderService(f.connection,{extraMethods:['profitRankingMysql','profitOrderedAtUtcRangeMysql','profitTimestampUtcRangeMysql','terminalOrderLossSqlMysql','returnLossTotalSqlMysql','roundMoneyMysql'],buildOrderOutcomeSql});
+    const { service, calls } = loadTenantOrderService(f.connection,{extraMethods:['profitRankingMysql','profitOrderedAtUtcRangeMysql','profitTimestampUtcRangeMysql','terminalOrderLossSqlMysql','returnLossTotalSqlMysql','roundMoneyMysql'],buildOrderOutcomeSql});
     const base = {inventory:'1',dimension:'product',from:'2026-10-30',to:'2026-10-30',sortBy:'revenue',sortOrder:'desc',pageSize:10};
     const first = await service.profitRankingMysql({...base,fast:'1'},'2');
     assert.equal(first.rows.length,10);
+    const rankingSql=calls.find(c=>c.sql.includes('AS revenue')&&c.sql.includes('GROUP BY p.id'))?.sql||'';
+    assert.ok(rankingSql);assert.doesNotMatch(rankingSql,/order_outcomes|opi\.net_profit_cny|commission_fee/,'inventory paging must not recalculate unrelated finance fields');
     assert.equal(first.rows[0].product_id,1);
     assert.equal(first.rows[0].revenue,240);
+    assert.equal(first.rows[0].profit,undefined,'inventory sales responses must not claim zero profit');
     assert.equal(Number(first.rows[0].item_quantity),4);
     assert.equal(Number(first.rows[0].order_count),2);
     assert.equal(Number(first.rows[0].shop_count),2);

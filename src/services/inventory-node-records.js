@@ -1,3 +1,5 @@
+import { createFbpReceiptReview } from './fbp-receipt-review.js';
+import { procurementRequestDisplay } from '../shared/procurement-request-display.js';
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { authorizeBusinessTaskSession } from './business-task-tenant.js';
 import { resolveInventoryTenantScope, assertInventoryRecord, inventoryTenantSql } from './inventory-tenant-scope.js';
@@ -7,7 +9,8 @@ import { invalidateOrderProcurementCoverage } from './mysql-order-procurement-co
 
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 const pending=['submitted','pending','suggested'];
-export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMysqlTransaction,ledger}={}) {
+export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMysqlTransaction,ledger,confirmTransfer}={}) {
+  const fbpReview = createFbpReceiptReview({query});
   async function access(session,q=query,permission='inventory.read') {
     const current=await authorizeBusinessTaskSession(session,q);
     if(!hasPermission(current,permission))throw fail('当前岗位没有操作权限，请联系企业管理员授权',403);
@@ -16,6 +19,16 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
   async function records(params,session) {
     const {current,scope}=await access(session),id=Number(params.product_id),node=String(params.node),page=Number(params.page||1),offset=(page-1)*50;
     if(!Number.isSafeInteger(page)||page<1||page>1000000)throw fail('页码须为有效正整数，请重新查询');
+    if(node==='fbp-receipts')return fbpReview.records(params,current);
+    if(node==='composition') {
+      const [product]=await query(`SELECT p.id,p.name,p.inventory_number,p.is_accessory,(SELECT COUNT(*) FROM product_components c WHERE c.product_id=p.id AND ${inventoryTenantSql(scope,'c')}) AS component_count FROM products p WHERE p.id=? AND ${inventoryTenantSql(scope,'p')}`,[id]);
+      if(!product)throw fail('库存商品不存在或不属于当前企业',404);
+      const rows=await query(`SELECT child.id,child.name,child.inventory_number,child.stock_unit,child.active,c.quantity,
+        CONCAT('/api/products/',child.id,'/image?thumb=1') AS image_url FROM product_components c
+        JOIN products child ON child.id=c.component_product_id AND ${inventoryTenantSql(scope,'child')}
+        WHERE c.product_id=? AND ${inventoryTenantSql(scope,'c')} ORDER BY c.id`,[id]);
+      return {product,rows,incomplete:Number(product.component_count)!==rows.length};
+    }
     await assertInventoryRecord(scope,'product',id,query);
     if(node==='safety') {
       const rows=await query('SELECT product_id,settings_json,revision FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,?)',[scope.id,id]);
@@ -25,13 +38,15 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
       return {settings:{...defaults,...parse(own),holidays:defaults.holidays||[]},revision:Number(own?.revision||0),product};
     }
     if(node==='requests') {
-      const rows=await query(`SELECT COUNT(*) OVER() AS total,pr.id,pr.quantity,pr.created_at,pr.updated_at,pr.status,pr.approval_status,pr.note,pr.request_reason_note,pr.purchase_order_id,
+      const rows=await query(`SELECT COUNT(*) OVER() AS total,pr.id,pr.quantity,pr.created_at,pr.updated_at,pr.status,pr.approval_status,pr.note,pr.request_reason_note,pr.purchase_order_id,pr.created_by_person_id,pr.source_order_id,
+        source_order.posting_number AS source_order_number,
         CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=p.id AND tm.active=1) THEN p.name END AS applicant_name
         FROM procurement_requests pr LEFT JOIN people p ON p.id=pr.created_by_person_id
+        LEFT JOIN orders source_order ON source_order.id=pr.source_order_id AND EXISTS(SELECT 1 FROM shops os WHERE os.id=source_order.shop_id AND ${inventoryTenantSql(scope,'os')})
         WHERE pr.product_id=? AND ${inventoryTenantSql(scope,'pr')}
         AND (pr.status IN ('submitted','pending','suggested','merged') OR ${params.all==='1'?'1=1':"pr.created_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 3 MONTH)"})
         ORDER BY pr.id DESC LIMIT 50 OFFSET ?`,[id,offset]);
-      return {rows,total:Number(rows[0]?.total||0)};
+      return {rows:rows.map(procurementRequestDisplay),total:Number(rows[0]?.total||0)};
     }
     if(['incoming','receiving','purchase-confirm'].includes(node)) {
       // Warehouse users see dates and quantities; costs remain procurement-only.
@@ -72,13 +87,47 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
     throw fail('请选择采购、到货或FBS订单节点');
   }
   async function mutate(body,session) {
+    if(body.action==='fbp-receive') {
+      if(!confirmTransfer)throw fail('入仓确认服务尚未接入，请刷新后重试',503);
+      if(!Number.isSafeInteger(Number(body.received_quantity))||Number(body.received_quantity)<1||body.expected_listed_quantity==null)throw fail('请填写大于0的整数实收数量，并刷新当前已确认数量');
+      if(String(body.note||'').length>1000||!Number.isSafeInteger(Number(body.expected_listed_quantity))||Number(body.expected_listed_quantity)<0||body.expected_listed_quantity==='')throw fail('请核对当前已确认数量，备注最多1000字');
+      const {current,scope}=await access(session);
+      const receipt={id:Number(body.id),received_quantity:Number(body.received_quantity),expected_listed_quantity:Number(body.expected_listed_quantity),note:String(body.note||'')};
+      return confirmTransfer(receipt,current.personId,scope.id,{beforeWrite:async connection=>{
+        const q=async(sql,args)=>(await connection.query(sql,args))[0];
+        const {current:fresh,scope:owned}=await access(session,(sql,args)=>q(sql+' FOR SHARE',args));
+        if(!hasPermission(fresh,'packing')&&!hasPermission(fresh,'inventory.write'))throw fail('FBP逐项入仓确认需要仓库或库存管理岗位',403);
+        const transfer=await assertInventoryRecord(owned,'transfer',Number(body.id),q,{lock:true});
+        if(Number(transfer.product_id)!==Number(body.product_id))throw fail('发仓记录不属于当前库存商品',409);
+      }});
+    }
     const result=await transaction(async c=>{
       const q=async(sql,args=[]) => (await c.query(sql,args))[0];
       const {current,scope}=await access(session,(sql,args)=>q(sql+' FOR SHARE',args));
       const id=Number(body.product_id);await assertInventoryRecord(scope,'product',id,q,{lock:true});
       const action=String(body.action),recordId=Number(body.id),note=String(body.note||'').trim();
       if(note.length>1000)throw fail('备注最多1000字');
-      if(['arrived','transit-check'].includes(action)) {
+      if(['fbp-arrival-time','fbp-expected-time'].includes(action)) {
+        if(!hasPermission(current,'packing')&&!hasPermission(current,'inventory.write'))throw fail('需要仓库或库存管理岗位权限',403);
+        await assertInventoryRecord(scope,'transfer',recordId,q,{lock:true});
+        const [row]=await q('SELECT * FROM fbp_transfer_records WHERE id=? AND product_id=? FOR UPDATE',[recordId,id]);
+        if(!row||['draft','cancelled','closed'].includes(row.status))throw fail('发仓记录不可修改，请刷新核对',409);
+        const asTime=value=>new Date(typeof value==='string'&&!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)?value.replace(' ','T')+'Z':value).getTime();
+        if(asTime(row.updated_at)!==asTime(body.expected_updated_at))throw fail('发仓记录刚被修改，请刷新后再保存',409);
+        const date=new Date(body.at);
+        if(!/(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(body.at||''))||!Number.isFinite(date.getTime()))throw fail('请选择包含时区的到仓日期和时间');
+        if(row.shipped_at&&date.getTime()<asTime(row.shipped_at))throw fail('到仓时间不能早于发运时间');
+        if(action==='fbp-arrival-time'&&date.getTime()>Date.now()+60000)throw fail('实际到仓时间不能晚于现在');
+        if(action==='fbp-expected-time'){
+          if((row.expected_arrival_at||body.expected_expected_arrival_at)&&asTime(row.expected_arrival_at)!==asTime(body.expected_expected_arrival_at))throw fail('预计到仓时间刚被修改，请刷新后重试',409);
+          await q('UPDATE fbp_transfer_records SET expected_arrival_at=?,updated_at=UTC_TIMESTAMP() WHERE id=?',[date.toISOString().slice(0,19).replace('T',' '),recordId]);
+        }else {
+          const [last]=await q("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND product_id=? AND action IN ('fbp_arrival_time','fbp_receipt_confirm') AND JSON_EXTRACT(detail_json,'$.transfer_id')=? ORDER BY (action='fbp_arrival_time') DESC,id DESC LIMIT 1 FOR UPDATE",[scope.id,id,recordId]);
+          const previous=last?(typeof last.detail_json==='string'?JSON.parse(last.detail_json):last.detail_json).arrival_at:row.closed_at;
+          if((previous||body.expected_arrival_at)&&asTime(previous)!==asTime(body.expected_arrival_at))throw fail('到仓时间刚被其他同事修改，请刷新后再保存',409);
+          await q("INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,'fbp_arrival_time',?)",[scope.id,id,current.personId,JSON.stringify({transfer_id:recordId,arrival_at:date.toISOString(),note})]);
+        }
+      }else if(['arrived','transit-check'].includes(action)) {
         if(!hasPermission(current,'procurement')&&!hasPermission(current,'packing'))throw fail('确认到货需要采购或仓库岗位权限',403);
         await assertInventoryRecord(scope,'inbound',recordId,q,{lock:true});
         const [row]=await q(`SELECT ir.* FROM inbound_records ir JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'po')}

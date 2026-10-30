@@ -1007,12 +1007,12 @@ async function loadTopInventory(dateKey = selectedDate.value) {
   const requestSeq = ++rankingRequestSeq;
   topInventoryError.value = "";
   const params = new URLSearchParams({ dimension: "product", inventory: "1", from: dateKey, to: dateKey,
-    page: "1", pageSize: "10", sortBy: "revenue", sortOrder: "desc", fast: "1" });
+    page: "1", pageSize: "15", sortBy: "revenue", sortOrder: "desc", fast: "1" });
   try {
     const result = await getDashboardWithRetry(`/api/profit-ranking?${params}`, { noCache: true, routeScoped: false });
     if (requestSeq !== rankingRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
     topInventoryRows.value = Array.isArray(result?.rows) ? result.rows : [];
-    topInventoryHasMore.value = Number(result?.total) > 10;
+    topInventoryHasMore.value = Number(result?.total) > 15;
   } catch (error) {
     if (requestSeq === rankingRequestSeq && scope === currentApiCacheScope()) {
       topInventoryError.value = error?.message || "库存榜单读取失败，请重试";

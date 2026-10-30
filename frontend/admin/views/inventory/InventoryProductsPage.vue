@@ -1,4 +1,5 @@
 ﻿<script setup>
+import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
@@ -585,16 +586,6 @@ function fbsStock(row) {
 function totalProductStock(row) {
   if (hasProductComponents(row)) return localStock(row) + fbpStock(row);
   return rowNumber(row, "stock");
-}
-
-function productAutoType(row) {
-  if (hasProductComponents(row)) return "套装";
-  return Number(row?.is_accessory || 0) ? "配件" : "单品";
-}
-
-function productAutoTypeTag(row) {
-  if (hasProductComponents(row)) return "warning";
-  return Number(row?.is_accessory || 0) ? "success" : "info";
 }
 
 function productUnit(row) {
@@ -1939,7 +1930,7 @@ onActivated(() => {
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
                 <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <div class="product-type-tags">
-                  <el-tag size="small" :type="productAutoTypeTag(row)" effect="light">{{ productAutoType(row) }}</el-tag>
+                  <InventoryCompositionBadge :product="row"/>
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
                 </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>

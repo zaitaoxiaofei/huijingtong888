@@ -39,7 +39,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
   readUnclassifiedCancellationReasons = unclassifiedCancellationReasons, saveCancellationClassification = saveCancellationReasonClassification,
   queryCancellationReview = queryCancellationReviewMysql, cancellationReviewTransaction = cancellationReviewMysqlTransaction }) {
   const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
-  const nodeRecords=createInventoryNodeRecords({ledger:services.procurementLedger});
+  const nodeRecords=createInventoryNodeRecords({ledger:services.procurementLedger,confirmTransfer:services.confirmFbpTransferReceived});
   const workflow = createInventoryWorkflowService({ ledger: services.procurementLedger, receiveRecords: services.batchUpdateInboundRecords, previewReceipts: services.previewInboundReceiptImpact });
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),

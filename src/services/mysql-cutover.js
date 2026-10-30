@@ -1,3 +1,4 @@
+import { captureFbpReceiptBaseline } from './fbp-receipt-review.js';
 import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from './inventory-product-search.js';
 import { createInventoryWorkflowService } from './inventory-workflow.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
@@ -6682,6 +6683,7 @@ async function postFbpTransferInventoryMovementMysql(connection, record = {}, qu
     const mapping = await assertInventoryRecord(scope, "mapping", record.mapping_id, run);
     if (Number(mapping.product_id) !== productId || Number(mapping.shop_id) !== Number(record.shop_id)) throw new Error("发仓记录绑定与当前企业商品、店铺不一致");
   }
+  if (qty < 0 && stockLocation === 'LOCAL') await captureFbpReceiptBaseline(run, scope, transferId);
   const product = await mysqlConnectionQueryOne(connection, "SELECT purchase_cost FROM products WHERE id = ?", [productId]);
   const unitCost = Number(product?.purchase_cost || 0);
   return await postInventoryMysql(connection, {
@@ -6989,7 +6991,7 @@ export async function createFbpTransferRecordMysql(body = {}, userId = null, ten
   return { ok: true, id };
 }
 
-export async function confirmFbpTransferReceivedMysql(body = {}, userId = null, tenantId = "admin") {
+export async function confirmFbpTransferReceivedMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   await assertInventoryMember(scope, userId);
@@ -6998,6 +7000,7 @@ export async function confirmFbpTransferReceivedMysql(body = {}, userId = null, 
   const id = Number(body.id || body.record_id || body.recordId || 0);
   if (!id) throw new Error("缺少 FBP 发仓记录");
   const result = await withMysqlTransaction(async (connection) => {
+    await options.beforeWrite?.(connection);
     await assertInventoryRecord(scope, 'transfer', id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     const source = await mysqlConnectionQueryOne(connection, "SELECT source_type, source_ref FROM fbp_transfer_records WHERE id = ?", [id]);
     const orderId = source?.source_type === "fbp_replenishment" ? Number(String(source.source_ref || "").split(":")[1]) : 0;
@@ -7045,6 +7048,7 @@ export async function confirmFbpTransferReceivedMysql(body = {}, userId = null, 
       receivedAt,
       id
     ]);
+    await connection.execute("INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,'fbp_receipt_confirm',?)",[scope.id,record.product_id,operatorId,JSON.stringify({transfer_id:id,received_quantity:receivedQuantity,listed_quantity:nextListedQuantity,arrival_at:receivedAt,note:String(body.note||'')})]);
     await postFbpTransferInventoryMovementMysql(
       connection,
       { ...record, person_id: record.person_id || operatorId },
@@ -7807,12 +7811,16 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
         await checkAccess();
         const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
         await assertInventoryRecord(scope, 'shop', shopId, run);
+        const currentBindings = new Map();
         for (const target of targets) {
-          const current = await currentFbpSkuBindingMysql(run, shopId, target.ozon_sku, scope.id, scope.isDefault, true);
-          // Components and explicit recipes may bind this SKU to a different parent product.
-          // Re-read the scoped composition, rather than requiring a direct parent ID match.
-          const fresh = await loadProductFbpStocks(run, productId, scope);
-          const binding = fresh.rows.find(row => Number(row.shop_id) === shopId && String(row.ozon_sku) === String(target.ozon_sku));
+          currentBindings.set(String(target.ozon_sku), await currentFbpSkuBindingMysql(run, shopId, target.ozon_sku, scope.id, scope.isDefault, true));
+        }
+        // One scoped composition read per shop, after all direct mapping locks.
+        const fresh = await loadProductFbpStocks(run, productId, scope);
+        const freshBySku = new Map(fresh.rows.filter(row => Number(row.shop_id) === shopId).map(row => [String(row.ozon_sku), row]));
+        for (const target of targets) {
+          const current = currentBindings.get(String(target.ozon_sku));
+          const binding = freshBySku.get(String(target.ozon_sku));
           if (!binding || String(binding.offer_id || '') !== String(target.offer_id || '')) throw new Error('SKU绑定发生变化，请刷新后重试');
           const matched = remote.filter(row => String(row.ozon_sku) === String(target.ozon_sku));
           if (matched.some(row => resolveStockTypeMysql({ ...row, rules }) === 'unknown')) throw new Error('仓库分类未明确，请先核对Ozon库存仓库类型');
@@ -27156,7 +27164,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
   const nonEffectiveLoss = terminalOrderLossSqlMysql();
   const returnLossTotal = returnLossTotalSqlMysql();
-  const outcomeCteSql = `
+  const outcomeCteSql = inventoryMode ? "" : `
     WITH order_outcomes AS (
       SELECT
         o.id,
@@ -27168,7 +27176,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
       GROUP BY o.id
     )
   `;
-  const costFields = `
+  const costFields = inventoryMode ? "COALESCE(SUM(COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)), 0) AS revenue" : `
       COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
       COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN CASE
         WHEN opi.order_item_id IS NOT NULL THEN COALESCE(opi.net_profit_cny, 0)
@@ -27247,7 +27255,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     }
   }
   const whereSql = where.length ? `AND ${where.join(" AND ")}` : "";
-  const params = [...dateFilter.params, ...dateFilter.params, ...whereParams];
+  const params = [...(inventoryMode ? [] : dateFilter.params), ...dateFilter.params, ...whereParams];
   const baseSql = `
     SELECT ${selectFields},
       COUNT(DISTINCT o.id) AS order_count,
@@ -27258,14 +27266,14 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
       0 AS cancelled_revenue
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
-    JOIN order_outcomes outcomes ON outcomes.id = o.id
+    ${inventoryMode ? "" : "JOIN order_outcomes outcomes ON outcomes.id = o.id"}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     ${joinSql}
     WHERE ${orderScope} ${dateFilter.whereSql} ${whereSql}
     GROUP BY ${groupFields}
   `;
   const sortable = new Set(["order_count", "item_quantity", "revenue", "profit", "purchase_cost", "domestic_shipping_cost", "international_shipping_cost", "packaging_cost", "commission_fee", "ozon_service_fee", "return_loss", "order_advertising_cost", "other_fee", "cancelled_revenue"]);
-  const orderField = sortable.has(sortBy) ? sortBy : "profit";
+  const orderField = inventoryMode ? (["revenue", "item_quantity", "order_count"].includes(sortBy) ? sortBy : "revenue") : (sortable.has(sortBy) ? sortBy : "profit");
   const stableOrder = inventoryMode ? (dimension === "product" ? ", p.id ASC" : ", o.shop_id ASC, oi.ozon_sku ASC") : "";
   let total = 0;
   let rows = [];
@@ -27291,7 +27299,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
       rows = rows.map((row) => ({ ...row, advertising_report_spend: Number(adByShop.get(Number(row.shop_id))?.spend_cny || 0), advertising_report_revenue: Number(adByShop.get(Number(row.shop_id))?.revenue_cny || 0) }));
     }
   }
-  if (dimension === "sku" && rows.length) {
+  if (!inventoryMode && dimension === "sku" && rows.length) {
     const skuPairs = rows.map((row) => [Number(row.shop_id || 0), String(row.ozon_sku || "").trim()]).filter(([shopId, sku]) => shopId && sku);
     if (skuPairs.length) {
       const pairWhere = skuPairs.map(() => "(shop_id = ? AND ozon_sku = ?)").join(" OR ");
@@ -27306,7 +27314,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   }
   return {
     dimension,
-    rows: rows.map((row) => ({
+    rows: rows.map((row) => inventoryMode ? ({ ...row, item_quantity: Number(row.item_quantity || 0), revenue: roundMoneyMysql(row.revenue) }) : ({
       ...row,
       item_quantity: Number(row.item_quantity || row.quantity || 0),
       revenue: roundMoneyMysql(row.revenue),

@@ -1,3 +1,4 @@
+import { procurementRequestDisplay } from '../shared/procurement-request-display.js';
 import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
 import { createInventoryWorkspaceReader } from './inventory-workspace-reader.js';
 import { inventoryProductSearch } from './inventory-product-search.js';
@@ -77,7 +78,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const scope=await resolveInventoryTenantScope(tenantId,query),placeholders=ids.map(()=>'?').join(',');
     const bindingValid=`(wi.mapping_id IS NULL OR EXISTS(SELECT 1 FROM sku_mappings m WHERE m.id=wi.mapping_id AND m.shop_id=wi.shop_id AND m.product_id=wi.product_id AND ${inventoryTenantSql(scope,'m')}))`;
     const [requests,applications]=await Promise.all([
-        query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,
+        query(`SELECT pr.id,pr.product_id,pr.quantity,pr.status,pr.demand_type,pr.source_type,pr.request_reason_code,pr.source_order_item_id,pr.created_at,pr.note,pr.created_by_person_id,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=person.id AND tm.tenant_id=${scope.id} AND tm.active=1) THEN person.name ELSE NULL END AS applicant_name
           FROM procurement_requests pr LEFT JOIN people person ON person.id=pr.created_by_person_id WHERE pr.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')`,ids),
         query(`SELECT wp.id AS product_id,wo.id AS order_id,wi.id AS item_id,wo.status,wi.shop_id,wi.ozon_sku,ws.name AS shop_name,wo.order_no,wo.submitted_at,wo.created_at,
@@ -98,7 +99,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
             AND (wi.product_id IS NULL OR EXISTS(SELECT 1 FROM products parent WHERE parent.id=wi.product_id AND ${inventoryTenantSql(scope,'parent')}))
             AND (${bindingValid}${includeHistory?" OR wo.status NOT IN ('draft','pending_review','approved','ozon_created')":''})
           GROUP BY wp.id,wo.id,wi.id,wo.status,wi.shop_id,wi.ozon_sku,wi.requested_qty,wr.id,wi.product_id,ws.name,wo.order_no,wo.submitted_at,wo.created_at,applicant.id,applicant.name`,ids)
-    ]);return{requests,applications};
+    ]);return{requests:requests.map(procurementRequestDisplay),applications};
   }
   const backgroundQuery=limitInventoryDemandQueries(query);let backgroundService;
   const background=()=>backgroundService??=createInventoryWorkflowService({query:backgroundQuery});
@@ -215,7 +216,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       components:components.map(row=>({...row,quantity:Number(row.quantity),current:Number(row.product_id)===id,image_url:`/api/products/${Number(row.product_id)}/image?thumb=1`}))};
   }
   async function readRequestRows(id,scope){
-    return query(`SELECT pr.id,pr.quantity,pr.status,pr.demand_type,pr.request_reason_code,pr.request_reason_note,pr.source_type,pr.source_order_id,pr.source_order_item_id,pr.created_at,
+    return query(`SELECT pr.id,pr.quantity,pr.status,pr.demand_type,pr.request_reason_code,pr.request_reason_note,pr.source_type,pr.source_order_id,pr.source_order_item_id,pr.created_at,pr.note,pr.created_by_person_id,
           CASE WHEN EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.person_id=p.id AND tm.tenant_id=? AND tm.active=1) THEN p.name ELSE NULL END AS applicant_name
           FROM procurement_requests pr LEFT JOIN people p ON p.id=pr.created_by_person_id
           WHERE pr.product_id=? AND ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('pending','submitted','suggested') ORDER BY pr.created_at DESC`,[scope.id,id]);
@@ -223,7 +224,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   async function requests(productId,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId);
     await assertInventoryRecord(scope,'product',id,query);
-    return {product_id:id,requests:(await readRequestRows(id,scope)).map(row=>({...row,type:procurementDemandType(row)}))};
+    return {product_id:id,requests:(await readRequestRows(id,scope)).map(row=>({...procurementRequestDisplay(row),type:procurementDemandType(row)}))};
   }
   async function read(productId,tenantId,{fresh=false}={}){
     const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId);
@@ -246,7 +247,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         applications:fbp.applications,transfers:fbp.transfers,
         purchases:(local.purchases||[]).filter(p=>Number(p.pending_quantity)>0).map(p=>({id:p.id,order_no:p.order_no,person_name:p.person_name,purchased_at:p.purchased_at,pending_quantity:p.pending_quantity})),
         batches:(local.batches||[]).filter(b=>b.status==='pending_arrival').map(b=>({id:b.id,quantity:b.quantity,purchase_order_no:b.purchase_order_no,status:b.status})),
-        requests:requests.map(r=>({...r,type:procurementDemandType(r)}))};
+        requests:requests.map(r=>({...procurementRequestDisplay(r),type:procurementDemandType(r)}))};
     })();
     if(workflowCache.size>3000)workflowCache.clear();
     workflowCache.set(key,{promise,expires:Date.now()+20000});
