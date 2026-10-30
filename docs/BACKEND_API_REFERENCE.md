@@ -3414,7 +3414,7 @@ Read product warnings from the same three-demand inventory policy; severity filt
 
 #### `GET /api/inventory-workflow/demand-details`
 
-Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; active and historical FBP applications expanded through current SKU recipes/components with original SKU quantities; pending batches plus recent50 actual purchase records and all-record totals. Purchase amount/unit_cost are returned only to procurement members; packing sees nonfinancial quantities. No remote Ozon calls.
+Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; active and historical FBP applications expanded through current SKU recipes/components with original SKU quantities; historical binding_status=changed_or_missing retains owned shop/product provenance after SKU rebinding, while active requests still require the current mapping chain; pending batches plus recent50 actual purchase records and all-record totals. Purchase amount/unit_cost are returned only to procurement members; packing sees nonfinancial quantities. No remote Ozon calls.
 
 - Auth: `authenticated`
 - Query parameters:

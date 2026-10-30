@@ -103,6 +103,12 @@ test('procurement detail, manual safety, three-source requests and arrival track
   await q("INSERT INTO fbp_replenishment_order_items(order_id,shop_id,product_id,ozon_sku,requested_qty,approved_qty,requested_by) VALUES(220,20,220,'BUNDLE',11,11,3),(221,20,220,'BUNDLE',3,3,3)");
   const current=await details.details(200,buyer);assert.equal(Number(current.applications.find(a=>a.order_no==='FBP-HISTORY').requested_quantity),22);assert.equal(current.state.locked,6,'only approved unshipped units lock local stock');
   const {loadFbpReservations}=await import('../src/services/fbp-warehouse.js');assert.equal(Number((await loadFbpReservations(q,[200],{id:2,isDefault:false}))[0].quantity),6);
+  await q("INSERT INTO fbp_replenishment_orders(id,shop_id,order_no,status,created_by) VALUES(222,20,'FBP-CHANGED-HISTORY','completed',3),(223,20,'FBP-CHANGED-ACTIVE','approved',3)");
+  await q("INSERT INTO fbp_replenishment_order_items(order_id,shop_id,product_id,mapping_id,ozon_sku,requested_qty,approved_qty) VALUES(222,20,220,200,'BUNDLE-OLD',7,7),(223,20,220,200,'BUNDLE-OLD',4,4)");
+  const changed=await details.details(200,buyer),historical=changed.applications.find(a=>a.order_no==='FBP-CHANGED-HISTORY');
+  assert.equal(historical.binding_status,'changed_or_missing');assert.equal(Number(historical.requested_quantity),14);assert.equal(Number(historical.sku_requested_quantity),7);
+  assert.ok(!changed.applications.some(a=>a.order_no==='FBP-CHANGED-ACTIVE'));assert.equal(changed.state.locked,6,'stale active binding never reserves extra stock');
+  await assert.rejects(details.details(200,foreign),{statusCode:404});
   const before=current.state.order_demand;const revision=current.safety.revision;
   await details.safety({product_id:200,quantity:null,note:'周期校准',revision,production_days:3,local_shipping_days:1,expected_product_updated_at:current.product.updated_at},buyer);
   const after=await details.details(200,buyer);assert.equal(after.safety.production_days,3);assert.equal(after.safety.local_shipping_days,1);assert.equal(after.safety.local_days,7);assert.equal(after.state.order_demand,before);
