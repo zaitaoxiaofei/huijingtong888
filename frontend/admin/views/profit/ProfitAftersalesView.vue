@@ -83,7 +83,8 @@ const detailTotals = computed(() => (
 
 const bucketOptions = [
   { label: "全部", value: "all" },
-  { label: "履约前取消", value: "pre_fulfillment_cancel" },
+  { label: "取消订单", value: "pre_fulfillment_cancel" },
+  { label: "配送货损/理赔待核", value: "cargo_loss" },
   { label: "拒收/未取", value: "rejected_unclaimed" },
   { label: "不合适/发错货/破损", value: "unsuitable_wrong_damaged" },
   { label: "质量问题", value: "quality_issue" },
@@ -132,6 +133,7 @@ function bucketLabel(key) {
 function bucketHint(key) {
   return {
     pre_fulfillment_cancel: "履约前取消，默认损失 0。",
+    cargo_loss: "计商品成本和收单费，不计佣金及运费；理赔到账后另核销。",
     rejected_unclaimed: "至少核对商品成本、国际运费和收单费。",
     unsuitable_wrong_damaged: "至少核对商品成本、国内/国际运费和平台费。",
     quality_issue: "重点核对佣金、平台售后费和完整履约成本。",

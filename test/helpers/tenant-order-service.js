@@ -13,7 +13,7 @@ import { hasPermission, primaryRole, getRoles } from '../../src/shared/permissio
 import { isDemoPackageLabelBufferMysql, normalizePackageLabelBufferMysql, orderPackageLabelFailureMysql } from '../../src/services/mysql-order-label-utils.js';
 import * as profitVersioning from '../../src/services/order-profit-calculation-versions.js';
 import { getOrderProfitFxPolicy, prepareOrderProfitFx, readOrderProfitFxState, orderFxSalePrice, pendingOrderFxEstimate } from '../../src/services/order-profit-fx-policy.js';
-import {getProfitFormula,assertProfitFormulaSupported} from '../../src/services/profit-formulas/registry.js';
+import {getProfitFormula,assertProfitFormulaSupported,usesDailyProfitFx} from '../../src/services/profit-formulas/registry.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord, assertInventoryReferences } from '../../src/services/inventory-tenant-scope.js';
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from '../../src/services/order-transport-evidence.js';
 import { ORDER_HEATMAP_TENANT_SCHEMA } from '../../src/services/order-heatmap-tenant-schema.js';
@@ -45,7 +45,7 @@ export function loadOrderProfitWriter(connection) {
     .replace(/^import[\s\S]*?;\r?\n/gm,'').replaceAll('export ','');
   const query=async(sql,params=[])=>(await connection.execute(sql,params))[0];
   const transaction=async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}};
-  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,console,...profitVersioning,getProfitFormula,assertProfitFormulaSupported,mysqlQuery:query,withMysqlTransaction:transaction});
+  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,console,...profitVersioning,getProfitFormula,assertProfitFormulaSupported,usesDailyProfitFx,mysqlQuery:query,withMysqlTransaction:transaction});
   vm.runInContext(writer,context);
   return context;
 }

@@ -1,5 +1,6 @@
 import { ensureOrderProfitDailyFx, getOrderProfitDailyFx, orderProfitFxBusinessDate } from "./order-profit-daily-fx.js";
 import { dailyFxQuery } from "./order-profit-daily-fx-schema.js";
+import { usesDailyProfitFx } from "./profit-formulas/registry.js";
 import { moneyToCny } from "./profit-formulas/v2/fx.js";
 
 export const ORDER_PROFIT_FX_POLICY_KEY = "profit.daily_fx_policy.v2";
@@ -65,13 +66,13 @@ export async function prepareOrderProfitFx(db, input, options = {}) {
   const policy = await getOrderProfitFxPolicy(db);
   if (!policy) {
     const [pinned] = await dailyFxQuery(db, "SELECT formula_version FROM order_profit_calc_state WHERE tenant_key = ? AND order_id = ? LIMIT 1", [tenantKey(input.tenantId), Number(input.orderId)]);
-    if (pinned?.formula_version !== "V2") return null;
+    if (!usesDailyProfitFx(pinned?.formula_version)) return null;
   }
   const existing = await readOrderProfitFxState(db, input.tenantId, input.orderId);
   const legacyItems = async connection => {
     const [legacy] = await dailyFxQuery(connection, `SELECT oi.id FROM order_items oi LEFT JOIN order_profit_calc_state calc
       ON calc.order_item_id = oi.id AND calc.tenant_key = ?
-      WHERE oi.order_id = ? AND COALESCE(calc.formula_version, 'V1') <> 'V2' LIMIT 1`, [tenantKey(input.tenantId), Number(input.orderId)]);
+      WHERE oi.order_id = ? AND COALESCE(calc.formula_version, 'V1') NOT IN ('V2', 'V4') LIMIT 1`, [tenantKey(input.tenantId), Number(input.orderId)]);
     return Boolean(legacy);
   };
   if (!existing && await legacyItems(db)) return null;
@@ -151,5 +152,5 @@ export function orderFxSalePrice(state, sku) {
 }
 
 export function pendingOrderFxEstimate(state) {
-  return { formulaVersion: "V2", fxPending: true, fxState: state?.state || "awaiting_order_rate", commission: 0, profit: 0 };
+  return { formulaVersion: "V4", fxPending: true, fxState: state?.state || "awaiting_order_rate", commission: 0, profit: 0 };
 }

@@ -1,6 +1,47 @@
 # Ozon cancellation and return reasons
 
-Last updated: 2026-10-26
+Last updated: 2026-10-30
+
+## Reviewed cancellation and cargo loss policy
+
+The 2026-10-30 business review is registered separately as V3 (legacy currency
+inputs) and V4 (V2 daily FX inputs). Frozen V1 and V2 financial results and their
+implementations are not changed in place. New items use V3/V4; an existing item's
+financial writer continues to honor its pinned version until an explicit repair.
+
+`reviewed-aftersale-reasons.js` records the reviewed platform codes and exact raw
+texts. Missing buyer passport/personal data, seller shipment timeout, incorrect
+labels, shipment registration failure, seller/buyer-requested cancellation,
+carrier requirements and stockout are cancellations, even if an old
+`cancelled_after_ship` flag was set. Their estimated fulfilment loss is zero.
+Verified acquiring charges remain traceable as actual financial expenses.
+
+Codes 809 and 699 are cargo lost during delivery, not buyer rejection or return.
+The cargo loss estimate includes product cost and acquiring fee once, excluding
+commission, domestic/international freight, packaging and withdrawal fees.
+Cargo loss has its own aftersale bucket and is excluded from return counts and
+rates. Compensation remains pending review until there is evidence of payment;
+eligibility for a claim is not income. Genuine rejection/return reasons retain
+their existing rules. Platform statuses, original reasons, inventory and physical
+return evidence are not rewritten by this classification repair.
+
+### Explicit historical repair
+
+`scripts/review-aftersale-policy.mjs --input=SNAPSHOT --output=MANIFEST` is an
+offline, read-only preview. It reports each item's before/after amounts and a
+manifest hash. Missing historical acquiring-fee inputs block a cargo-loss
+monetary repair rather than silently assuming zero. Legacy actual amounts without
+complete evidence become estimates pending finance, retaining their original
+snapshots and locks in revision history.
+
+Apply requires the exact reviewed manifest and hash, an active platform admin,
+command ID and review reason. In one transaction it checks ownership and every
+snapshot, archives existing amounts under the old formula, switches only reviewed
+items to V3/V4, records both new layers and installs code-specific classification
+rules. Retries reuse the command; stale input or any write failure rolls back the
+transaction. Blocked items remain listed for follow-up. Existing enterprise-scoped
+daily/detail analytics must be refreshed after applying the manifest. A production
+apply/deployment follows the repository release approval and concurrency rules.
 
 ## Local handling rule
 

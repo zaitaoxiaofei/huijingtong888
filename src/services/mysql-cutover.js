@@ -34,7 +34,7 @@ import { config } from "../config.js";
 import { actualItemProfit } from "../profit.js";
 import { estimatePinnedOrderItemProfit, orderProfitFormulaLabels, profitCalculationDatabase, profitEstimateInputs, withVersionedOrderProfitBatchWrite, withVersionedOrderProfitWrite } from "./mysql-order-profit-version-write.js";
 import { readOrderProfitCalculationVersions, retryProfitCalculationTransaction } from "./order-profit-calculation-versions.js";
-import { getProfitFormula } from "./profit-formulas/registry.js";
+import { getProfitFormula, usesDailyProfitFx } from "./profit-formulas/registry.js";
 import { readOrderFxFinanceRows } from "./order-profit-fx-finance.js";
 import { fxSettlementInputFingerprint, planOrderFxSettlement } from "./order-profit-fx-settlement.js";
 import { getOrderProfitFxPolicy, orderFxSalePrice, pendingOrderFxEstimate, prepareOrderProfitFx, readOrderProfitFxState } from "./order-profit-fx-policy.js";
@@ -2462,6 +2462,7 @@ function orderOutcomeLabelMysql(outcome = "") {
     active: "active",
     cancelled_pre_fulfillment: "cancelled",
     rejected_unclaimed: "rejected",
+    cargo_lost: "配送货损/理赔待核",
     after_delivery_return: "returned",
     delivered_signed: "delivered"
   }[String(outcome || "").toLowerCase()] || "active";
@@ -2469,6 +2470,7 @@ function orderOutcomeLabelMysql(outcome = "") {
 
 function orderOutcomeHintMysql(outcome = "") {
   switch (String(outcome || "").toLowerCase()) {
+    case "cargo_lost": return "配送途中丢失，计商品成本与收单费，不计佣金及运费，赔付待核对。";
     case "cancelled_pre_fulfillment":
       return "Order cancelled before fulfillment loss.";
     case "rejected_unclaimed":
@@ -2532,7 +2534,7 @@ function financeCategoryTotalsMysql(rows = []) {
 }
 
 function hasRequiredFinanceBasisMysql(rows = [], orderOutcome = "", items = []) {
-  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(orderOutcome || ""))) return true;
+  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(orderOutcome || ""))) return true;
   const totals = financeCategoryTotalsMysql(rows);
   const hasPurchaseCost = items.length > 0 && items.every((item) => (
     Number(item.purchase_cost_cny || 0) > 0.005
@@ -3410,7 +3412,7 @@ function resolveProfitStageMysql(row = {}) {
 }
 
 async function estimateOrderItemReturnLossMysql({ order, item, product, estimated, quantity, salePrice }) {
-  if (estimated?.formulaVersion === "V2") salePrice = estimated.salePriceCny;
+  if (usesDailyProfitFx(estimated?.formulaVersion)) salePrice = estimated.salePriceCny;
   const formula = getProfitFormula(estimated?.formulaVersion || "V1");
   const orderContext = {
     ...order,
@@ -9893,8 +9895,7 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null, tenantId = "admin", taskOptions = {}, requiredPermissions = ["finance"] } = {}) {
   const tenantScope = await orderOwnershipTenantScopeMysql(tenantId);
   await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
-  const formula = getProfitFormula("V1");
-  const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
+
   from = normalizeSyncDateMysql(from);
   to = normalizeSyncDateMysql(to);
   const orderIds = Array.isArray(arguments[0]?.orderIds) ? [...new Set(arguments[0].orderIds.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value > 0))] : [];
@@ -9963,18 +9964,18 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       WHERE oi.order_id = ?
     `, [row.order_id]);
     const itemVersions = [...new Set(items.map(item => item.formula_version || "V1"))];
-    if (itemVersions.includes("V2")) {
+    if (itemVersions.some(usesDailyProfitFx)) {
       if (itemVersions.length !== 1) throw Object.assign(new Error("同一订单的利润公式版本不一致，停止财务入账并等待核查"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
       const profitTenantKey = items[0].profit_tenant_key;
       const fxState = await readOrderProfitFxState({ query: mysqlQuery }, profitTenantKey, row.order_id);
-      const accounting = getProfitFormula("V2").outcome.classifyOrderAccounting({ ...row, status: row.order_status }, { qualityPrefixes: await orderQualityPrefixesMysql() });
+      const accounting = getProfitFormula(itemVersions[0]).outcome.classifyOrderAccounting({ ...row, status: row.order_status }, { qualityPrefixes: await orderQualityPrefixesMysql() });
       const finalRate = fxState?.signedFx || (!["delivered_signed", "after_delivery_return"].includes(accounting.outcome_type) ? fxState?.orderFx : null);
       const finance = finalRate && fxState?.orderFx ? await readOrderFxFinanceRows({ query: mysqlQuery,
         order: row, items: (fxState.prices || []).map(price => ({ ozon_sku: price.ozon_sku, sale_price: price.amount, sale_currency_code: price.currency })),
         rateRubPerCny: finalRate.rate, allocationRateRubPerCny: fxState.orderFx.rate, classifyCategory: ozonFinanceCategoryMysql }) : null;
       const firstEstimates = new Map();
       const revisions = await mysqlQuery(`SELECT order_item_id, inputs_json, outputs_json
-        FROM order_profit_calc_revisions WHERE tenant_key = ? AND order_id = ? AND layer = 'estimate' AND formula_version = 'V2'
+        FROM order_profit_calc_revisions WHERE tenant_key = ? AND order_id = ? AND layer = 'estimate' AND formula_version IN ('V2', 'V4')
         ORDER BY order_item_id, revision_no`, [profitTenantKey, row.order_id]);
       for (const revision of revisions) {
         if (firstEstimates.has(Number(revision.order_item_id))) continue;
@@ -9983,7 +9984,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
         if (Number.isFinite(Number(output.estimated_profit))) firstEstimates.set(Number(revision.order_item_id), Number(output.estimated_profit));
       }
       const planned = await planOrderFxSettlement({ order: row, items, fxState, finance, initialEstimates: firstEstimates,
-        classifyCategory: ozonFinanceCategoryMysql, packagingFeeForSaleAmount: packagingFeeForSaleAmountMysql, accounting });
+        classifyCategory: ozonFinanceCategoryMysql, packagingFeeForSaleAmount: packagingFeeForSaleAmountMysql, accounting, formulaVersion: itemVersions[0] });
       if (!planned.ok) {
         fxPending.push({ order_id: Number(row.order_id), code: planned.code });
         if (fxState) await mysqlExecute(`UPDATE order_profit_fx_state SET last_error_code = ?, updated_at = CURRENT_TIMESTAMP
@@ -9994,7 +9995,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
         const { item, itemSale, purchaseCost, domesticShipping, actualInternationalShipping, packagingCost, commissionFeeCny,
           commissionRate, actualServiceFeeCny, returnLoss, advertisingCost, otherFee, actualProfit, grossProfit, totalFinanceFeeCny } = projection;
         await assertOrderTaskAccessMysql(tenantScope, taskOptions, requiredPermissions);
-        await withVersionedOrderProfitWrite(item.id, { layer: "actual", source: "ozon_finance_daily_fx", reason: "按冻结业务日汇率及完整官方账单计算实际利润",
+        await withVersionedOrderProfitWrite(item.id, { layer: "actual", expectedFormulaVersion: itemVersions[0], source: "ozon_finance_daily_fx", reason: "按冻结业务日汇率及完整官方账单计算实际利润",
           rateVersion: { order_fx: planned.orderFx, signed_fx: planned.finalFx, settlement_basis: planned.settlementBasis, parent_allocation: finance.allocation },
           inputs: { outcome: accounting.outcome_type, loss_profile: accounting.loss_profile_code, share: projection.share,
             category_totals: planned.categoryTotals, uses_estimated_collecting: false,
@@ -10002,7 +10003,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
             purchase_cost_cny: purchaseCost, domestic_shipping_cny: domesticShipping, packaging_cost_cny: packagingCost, advertising_cost_cny: advertisingCost,
             finance_rows: finance.source_rows, parent_allocation: finance.allocation }
         }, async ({ connection, db, formulaVersion }) => {
-          if (formulaVersion !== "V2") throw Object.assign(new Error("订单利润版本在财务提交前发生变化，停止写入"), { code: "ORDER_PROFIT_FORMULA_MISMATCH" });
+          if (formulaVersion !== itemVersions[0]) throw Object.assign(new Error("订单利润版本在财务提交前发生变化，停止写入"), { code: "ORDER_PROFIT_FORMULA_MISMATCH" });
           // Candidate planning occurs before the transaction. Re-lock and
           // compare every amount/status/quantity that can affect this item,
           // including sibling weights and a concurrent actual revision.
@@ -10051,7 +10052,10 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
     }
     const newSource = await mysqlQueryOne(`SELECT id FROM ozon_finance_items WHERE shop_id = ?
       AND posting_number IN (?, ?) AND LEFT(operation_id, 15) = 'accrual_by_day:' LIMIT 1`, [row.shop_id, row.posting_number, parentOrderNumberMysql(row)]);
-    if (newSource) continue; // Restoring new bills must not recalculate historical V1 orders.
+    if (newSource && itemVersions.every(version => version === "V1")) continue; // Restoring new bills must not recalculate historical V1 orders.
+    if (itemVersions.length !== 1) throw Object.assign(new Error("订单利润公式版本不一致，停止财务入账"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
+    const formula = getProfitFormula(itemVersions[0]);
+    const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
     const financeRows = await orderFinanceRowsWithParentAllocationMysql(row, items, { from, to });
     let categoryTotals = financeCategoryTotalsMysql(financeRows);
     const localTotalSale = items.reduce((sum, item) => sum + Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1))), 0);
@@ -10066,7 +10070,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       };
     }
     const actualCommissionFeeTotal = Number(categoryTotals.commission || 0);
-    const commissionRate = Number(row.sale_accrual_cny || 0) > 0
+    let commissionRate = Number(row.sale_accrual_cny || 0) > 0
       ? actualCommissionFeeTotal / Number(row.sale_accrual_cny || 0)
       : 0;
     const orderAccounting = formula.outcome.classifyOrderAccounting({
@@ -10084,6 +10088,10 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       cancelled_after_ship: row.cancelled_after_ship
     }, { qualityPrefixes: await orderQualityPrefixesMysql() });
     const orderOutcome = orderAccounting.outcome_type;
+    if (orderOutcome === "cargo_lost") {
+      commissionRate = 0;
+      if (!Object.hasOwn(categoryTotals, "collecting_fee") || !items.every(item => Number(item.purchase_cost_cny || 0) > 0.005 || Number(item.frozen_purchase_cost || 0) * Number(item.quantity || 1) > 0.005)) continue;
+    }
     const cancellation = describeCancellation({ ...row, outcome_type: orderOutcome });
     const orderLossProfile = { ...cancellation, code: orderAccounting.loss_profile_code };
     const hasFinalFinanceBasis = Number(row.sale_accrual_cny || 0) > 0.005 || orderOutcome !== "active";
@@ -10098,7 +10106,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       if (!hasCompleteDeliveredCosts) continue;
     }
     const cancelOnlyCollectingFee = String(orderOutcome || "") === "cancelled_pre_fulfillment";
-    const returnedNoRevenue = ["rejected_unclaimed", "after_delivery_return"].includes(String(orderOutcome || ""));
+    const returnedNoRevenue = ["rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(orderOutcome || ""));
     const terminalNoRevenue = cancelOnlyCollectingFee || returnedNoRevenue;
     for (const item of items) {
       const localItemSale = Number(item.sale_amount_cny || (Number(item.sale_price || 0) * Number(item.quantity || 1)));
@@ -10148,7 +10156,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
           returnRateLossTotal: Number(item.return_loss_cny || item.aftersale_loss || 0)
         });
       }
-      const advertisingCost = cancelOnlyCollectingFee ? 0 : Number(item.advertising_cost_cny || 0);
+      const advertisingCost = cancelOnlyCollectingFee || orderOutcome === "cargo_lost" ? 0 : Number(item.advertising_cost_cny || 0);
       const hasCollectingFinance = usesEstimatedCollecting || Object.prototype.hasOwnProperty.call(categoryTotals, "collecting_fee");
       const otherFee = hasCollectingFinance ? actualCollectingFee : (returnedNoRevenue ? 0 : Number(item.other_fee_cny || 0));
       const { actualProfit, grossProfit } = formula.aggregateActualProfit({
@@ -10156,7 +10164,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
         packagingCost, commissionFeeCny, actualServiceFeeCny, returnLoss, advertisingCost, otherFee
       });
       await withVersionedOrderProfitWrite(item.id, {
-        layer: "actual", source: "ozon_finance", reason: "Ozon 财务数据更新",
+        layer: "actual", expectedFormulaVersion: itemVersions[0], source: "ozon_finance", reason: "Ozon 财务数据更新",
         inputs: {
           outcome: orderOutcome, loss_profile: orderLossProfile.code, share,
           category_totals: categoryTotals, uses_estimated_collecting: usesEstimatedCollecting,
@@ -17981,7 +17989,7 @@ async function upsertOrderOutboundRecordMysql(row = {}, outboundStockLocation = 
 
 async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, salePrice, settlement, order = null, item = null, connection = null }) {
   if (estimated?.fxPending) return;
-  if (estimated?.formulaVersion === "V2") salePrice = estimated.salePriceCny;
+  if (usesDailyProfitFx(estimated?.formulaVersion)) salePrice = estimated.salePriceCny;
   const formula = getProfitFormula(estimated?.formulaVersion || "V1");
   const { classifyOrderOutcome, classifyOrderAccounting, resolveReturnLossCostPolicy } = formula.outcome;
   const db = connection ? profitCalculationDatabase(connection) : { queryOne: mysqlQueryOne, execute: mysqlExecute };
@@ -18011,7 +18019,7 @@ async function saveProfitItemMysql({ orderItemId, product, estimated, quantity, 
   const rawInternationalShipping = Number(estimated.freight ?? product.international_shipping ?? 0) * qty;
   const rawPackagingCost = await packagingFeeForSaleAmountMysql(terminalNoRevenue ? rawSaleAmount : saleAmount);
   const rawCommission = Number(estimated.commission || 0);
-  const rawCollectingFee = Number(estimated.paymentFee || 0) + Number(estimated.withdrawalFee || 0);
+  const rawCollectingFee = Number(estimated.paymentFee || 0) + (outcomeType === "cargo_lost" ? 0 : Number(estimated.withdrawalFee || 0));
   const purchaseCost = terminalPolicy ? (terminalPolicy.purchase ? rawPurchaseCost : 0) : rawPurchaseCost;
   const domesticShipping = terminalPolicy ? (terminalPolicy.domestic ? rawDomesticShipping : 0) : rawDomesticShipping;
   const internationalShipping = terminalPolicy ? (terminalPolicy.international ? rawInternationalShipping : 0) : rawInternationalShipping;
@@ -19135,7 +19143,7 @@ async function orderCancelLossAppliesMysql(posting) {
 
 function estimatedProfitValueMysql({ order = null, item, product, estimated, returnLossEstimate }) {
   if (estimated?.fxPending) return 0;
-  if (estimated?.formulaVersion === "V2") item = { ...item, sale_price: estimated.salePriceCny };
+  if (usesDailyProfitFx(estimated?.formulaVersion)) item = { ...item, sale_price: estimated.salePriceCny };
   return getProfitFormula(estimated?.formulaVersion || "V1").estimatedProfitValue({ order, item, product, estimated, returnLossEstimate });
 }
 
@@ -19149,7 +19157,7 @@ async function persistRecalculatedItemMysql({ itemId, mapping, product, estimate
     inputs: profitEstimateInputs({ product, mapping, estimated, quantity, salePrice, order, item })
   }, async ({ connection, db }) => {
   if (estimated?.fxPending) return;
-  if (estimated?.formulaVersion === "V2") await db.execute("UPDATE order_items SET sale_price = ? WHERE id = ?", [estimated.salePriceCny, itemId]);
+  if (usesDailyProfitFx(estimated?.formulaVersion)) await db.execute("UPDATE order_items SET sale_price = ? WHERE id = ?", [estimated.salePriceCny, itemId]);
   const existingStageRow = await db.queryOne(`
     SELECT oi.settlement_state,
       oi.actual_profit,
@@ -19798,7 +19806,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     const orderItemId = Number(itemResult.insertId);
     await withVersionedOrderProfitWrite(orderItemId, {
       connection, layer: "estimate", legacy: false, source: "order_created",
-      initialFormulaVersion: profitFxState ? "V2" : "V1",
+      initialFormulaVersion: estimated?.formulaVersion || (profitFxState ? "V4" : "V3"),
       inputs: profitEstimateInputs({ product, mapping, estimated, quantity: item.quantity, salePrice: item.sale_price, order: posting, item })
     }, async () => {
       if (!product || !mapping) return;
@@ -20929,7 +20937,7 @@ function financeProfitRepairReasonsMysql(row = {}) {
       + Number(row.return_loss_cny || 0);
     if (financeNonCommissionFee - appliedNonCommissionFee > 0.01) reasons.push("missing_finance_delivery_cost");
   }
-  if (reasons.length && ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row.outcome_type || ""))) reasons.push("terminal_no_revenue_formula");
+  if (reasons.length && ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row.outcome_type || ""))) reasons.push("terminal_no_revenue_formula");
   if (["rejected_unclaimed", "after_delivery_return"].includes(String(row.outcome_type || ""))) {
     const policy = resolveReturnLossCostPolicy({ outcome: row.outcome_type, lossProfileCode: row.loss_profile_code });
     if (
@@ -21167,7 +21175,7 @@ export async function repairHistoricalFinanceProfitFactsMysql(body = {}, tenantI
       first_finance_date: finance?.first_finance_date || null,
       last_finance_date: finance?.last_finance_date || null
     };
-    const isTerminalNoRevenue = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(row.outcome_type);
+    const isTerminalNoRevenue = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(row.outcome_type);
     const hasCompleteSaleFinance = row.sale_accrual_rows > 0 && row.commission_rows > 0 && row.delivery_rows > 0;
     const hasAnyFinance = row.finance_rows > 0 || row.parent_acquiring_rows > 0;
     if (!(hasCompleteSaleFinance || (isTerminalNoRevenue && hasAnyFinance))) continue;
@@ -26286,7 +26294,7 @@ function returnLossTotalSqlMysql() {
 }
 
 function isTerminalNoRevenueOutcomeMysql(outcomeType = "") {
-  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(outcomeType || ""));
+  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(outcomeType || ""));
 }
 
 function terminalOrderLossSqlMysql() {
@@ -26576,7 +26584,8 @@ async function buildProfitSummaryOverviewFromOrdersMysql(from = "", to = "") {
 }
 
 const AFTERSALE_BUCKETS_MYSQL = [
-  { key: "pre_fulfillment_cancel", label: "履约前取消", hint: "未发生实质履约损失，销售额不计入有效销售，损失默认为 0。" },
+  { key: "cargo_loss", label: "配送货损/理赔待核", hint: "配送途中丢失，计商品成本与收单费，不计佣金及运费；不计入退货率，赔付另核销。" },
+  { key: "pre_fulfillment_cancel", label: "取消订单", hint: "未发生实质履约损失，销售额不计入有效销售，损失默认为 0。" },
   { key: "rejected_unclaimed", label: "拒收/未取", hint: "买家拒签、未取、配送失败或清关失败，至少核对商品成本、国际运费和收单费。" },
   { key: "unsuitable_wrong_damaged", label: "不合适/发错货/破损", hint: "商品不合适、错发、破损等售后责任，核对商品成本、国内运费、国际运费和平台扣费。" },
   { key: "quality_issue", label: "质量问题", hint: "质量问题或售后退货风险最高，需要核对佣金、售后平台费和完整履约成本。" },
@@ -26586,7 +26595,8 @@ const AFTERSALE_BUCKETS_MYSQL = [
 const AFTERSALE_BUCKET_LABELS_MYSQL = Object.fromEntries(AFTERSALE_BUCKETS_MYSQL.map((item) => [item.key, item.label]));
 const AFTERSALE_BUCKET_HINTS_MYSQL = Object.fromEntries(AFTERSALE_BUCKETS_MYSQL.map((item) => [item.key, item.hint]));
 const AFTERSALE_LOSS_POLICY_MYSQL = {
-  pre_fulfillment_cancel: "收单费",
+  pre_fulfillment_cancel: "不预估履约损失；真实收单扣费另核对",
+  cargo_loss: "商品成本 + 收单费；理赔到账后核销",
   rejected_unclaimed: "商品成本 + 国际运费 + 收单费",
   unsuitable_wrong_damaged: "商品成本 + 国内运费 + 国际运费 + 收单费",
   quality_issue: "商品成本 + 国内运费 + 国际运费 + 收单费 + 佣金/售后平台费",
@@ -26662,14 +26672,15 @@ function normalizeAftersaleRowMysql(row = {}, qualityPrefixes = []) {
     aftersale_finance_fee_cny: roundMoneyMysql(returnLoss),
     missing_cost: policy.purchase && referencePurchase <= 0.005 && purchase <= 0.005 ? 1 : 0,
     missing_shipping: policy.international && referenceInternational <= 0.005 && international <= 0.005 ? 1 : 0,
-    needs_review: bucket === "platform_document_issue" ? 1 : 0
+    claim_status: accounting.claim_status || null,
+    needs_review: ["platform_document_issue", "cargo_loss"].includes(bucket) ? 1 : 0
   };
 }
 
 function aftersaleRelevantMysql(row = {}) {
   if (String(row.bucket || "") === "platform_document_issue") return true;
   if (Number(row.is_quality_order || 0) > 0) return false;
-  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row.outcome_type || ""))
+  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row.outcome_type || ""))
     || Boolean(row.cancel_reason || row.cancel_reason_id || row.cancel_type || row.cancel_initiator);
 }
 
@@ -26811,7 +26822,7 @@ async function aftersaleSalesBaseRowsMysql({ from = "", to = "", shopId = "all" 
 }
 
 function buildAftersaleOperationalOverviewMysql(salesRows = [], aftersaleRows = []) {
-  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue"].includes(String(row.bucket || "")));
+  const returnRows = aftersaleRows.filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss"].includes(String(row.bucket || "")));
   const shops = new Map();
   const skus = new Map();
   const ensureShop = (row) => {
@@ -26975,7 +26986,7 @@ export async function profitAftersalesMysql(query = {}, tenantId = "admin") {
   const returnQuantity = operational.shops.reduce((sum, row) => sum + Number(row.return_quantity || 0), 0);
   const salesQuantity = operational.shops.reduce((sum, row) => sum + Number(row.sales_quantity || 0), 0);
   const returnOrders = new Set(normalized
-    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue"].includes(String(row.bucket || "")))
+    .filter((row) => !["pre_fulfillment_cancel", "platform_document_issue", "cargo_loss"].includes(String(row.bucket || "")))
     .map((row) => Number(row.order_id))).size;
   return {
     from,
@@ -27566,7 +27577,7 @@ function monthlyBillingOrderSettlementMysql(row = {}) {
   const itemCount = Number(row.item_count || 0);
   const accruedItems = Number(row.accrued_items || 0);
   const outcomeType = String(row.outcome_type || "");
-  const isTerminal = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcomeType);
+  const isTerminal = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(outcomeType);
   if (itemCount > 0 && accruedItems >= itemCount) return "finance_accrued";
   if (isTerminal) return "terminal_estimate";
   return "pending_estimate";
@@ -27594,7 +27605,8 @@ function monthlyBillingOrderFilterMysql({ shopId = "", keyword = "", outcomeType
   }
   const outcome = buildOrderOutcomeSql("o", "mysql");
   const normalizedOutcome = String(outcomeType || "").trim();
-  if (normalizedOutcome === "active") where.push(`NOT (${outcome.effectiveSale} OR ${outcome.cancelledPreFulfillment} OR ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn})`);
+  if (normalizedOutcome === "active") where.push(outcome.active);
+  if (normalizedOutcome === "cargo_lost") where.push(outcome.cargoLost);
   if (normalizedOutcome === "delivered_signed") where.push(outcome.deliveredSigned);
   if (normalizedOutcome === "rejected_unclaimed") where.push(outcome.rejectedUnclaimed);
   if (normalizedOutcome === "after_delivery_return") where.push(outcome.afterDeliveryReturn);
@@ -27606,7 +27618,7 @@ function monthlyBillingOrderFilterMysql({ shopId = "", keyword = "", outcomeType
 function monthlyBillingOrderSettlementHavingMysql(settlementState = "") {
   const normalized = String(settlementState || "").trim();
   const accrued = "item_count > 0 AND accrued_items >= item_count";
-  const terminal = "outcome_type IN ('cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return')";
+  const terminal = "outcome_type IN ('cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return', 'cargo_lost')";
   if (normalized === "finance_accrued") return accrued;
   if (normalized === "terminal_estimate") return `NOT (${accrued}) AND ${terminal}`;
   if (normalized === "pending_estimate") return `NOT (${accrued}) AND NOT ${terminal}`;
@@ -27653,6 +27665,7 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       MAX(o.accrued_at) AS accrued_at,
       MAX(o.last_status_changed_at) AS last_status_changed_at,
       CASE
+        WHEN ${outcome.cargoLost} THEN 'cargo_lost'
         WHEN ${outcome.afterDeliveryReturn} THEN 'after_delivery_return'
         WHEN ${outcome.rejectedUnclaimed} THEN 'rejected_unclaimed'
         WHEN ${outcome.cancelledPreFulfillment} THEN 'cancelled_pre_fulfillment'
@@ -27661,7 +27674,7 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       END AS outcome_type,
       CASE
         WHEN ${outcome.cancelledPreFulfillment} THEN COALESCE(MAX(o.last_status_changed_at), MAX(o.accrued_at), MAX(o.delivered_at))
-        WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(MAX(o.delivered_at), MAX(o.accrued_at), MAX(o.last_status_changed_at))
+        WHEN ${outcome.cargoLost} OR ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(MAX(o.delivered_at), MAX(o.accrued_at), MAX(o.last_status_changed_at))
         WHEN ${outcome.deliveredSigned} THEN COALESCE(MAX(o.delivered_at), MAX(o.accrued_at), MAX(o.last_status_changed_at))
         ELSE NULL
       END AS terminal_at,
@@ -27714,7 +27727,7 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
       ? "未同步到拒收/未取的具体原因"
       : cancellation.reason_label;
     const settlement_state = monthlyBillingOrderSettlementMysql(row);
-    const isTerminal = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row.outcome_type || ""));
+    const isTerminal = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row.outcome_type || ""));
     const componentCost = Number(row.purchase_cost || 0)
       + Number(row.domestic_shipping_cost || 0)
       + Number(row.international_shipping_cost || 0)
@@ -27802,6 +27815,7 @@ async function monthlyBillingOrderTotalMysql(from = "", to = "", shopId = "", op
       SELECT
         o.id,
         CASE
+          WHEN ${outcome.cargoLost} THEN 'cargo_lost'
           WHEN ${outcome.afterDeliveryReturn} THEN 'after_delivery_return'
           WHEN ${outcome.rejectedUnclaimed} THEN 'rejected_unclaimed'
           WHEN ${outcome.cancelledPreFulfillment} THEN 'cancelled_pre_fulfillment'
@@ -31603,11 +31617,11 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     tenantId: ownership?.tenant_id || "admin", orderId: Number(id)
   });
   const formulaVersions = [...new Set(calculationVersions.items.map((entry) => entry.formula_version))];
-  let profitFx = formulaVersions.includes("V2")
+  let profitFx = formulaVersions.some(usesDailyProfitFx)
     ? await readOrderProfitFxState({ query: mysqlQuery }, ownership?.tenant_id || "admin", Number(id)) : null;
   let finance;
   let financeErrorCode = null;
-  if (formulaVersions.includes("V2")) {
+  if (formulaVersions.some(usesDailyProfitFx)) {
     const finalRate = orderProfitFxDetailFinalRate(order, profitFx);
     const converted = finalRate && profitFx?.orderFx ? await readOrderFxFinanceRows({ query: mysqlQuery, order,
       items: (profitFx.prices || []).map(price => ({ ozon_sku: price.ozon_sku, sale_price: price.amount, sale_currency_code: price.currency })),
@@ -31616,7 +31630,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     financeErrorCode = converted?.ok ? null : converted?.code || (profitFx?.orderFx ? "ORDER_PROFIT_SIGNED_FX_PENDING" : "ORDER_PROFIT_ORDER_FX_PENDING");
     if (profitFx && financeErrorCode) profitFx = { ...profitFx, last_error_code: financeErrorCode };
   } else finance = await orderDetailFinanceMysql(order, items);
-  const profitDetailSnapshot = formulaVersions.includes("V2")
+  const profitDetailSnapshot = formulaVersions.some(usesDailyProfitFx)
     ? buildOrderProfitFxDetailSnapshotPayload(order, items, finance, profitFx, { financeErrorCode, calculationVersions })
     : buildOrderProfitDetailSnapshotPayload(order, items, finance);
   order.profit_formula_versions = formulaVersions.join(",");

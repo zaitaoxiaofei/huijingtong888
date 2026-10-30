@@ -76,6 +76,13 @@ test("output selection keeps estimate values and actual finance values in their 
   assert.throws(() => profitCalculationOutputForLayer("unknown", projection), /layer/);
 });
 
+test('a formula migration between planning and committing cannot overwrite the corrected profit', async () => {
+  const db = memoryProjection();
+  await assert.rejects(withVersionedOrderProfitWrite(101, {
+    connection: db.connection, legacy: false, layer: 'actual', expectedFormulaVersion: 'V3'
+  }, async () => assert.fail('must not project using a different pinned formula')), { code: 'ORDER_PROFIT_FORMULA_MISMATCH' });
+});
+
 test("finance changes do not add a revision when the same estimate is synchronized again", async () => {
   const db = memoryProjection();
   const estimate = () => withVersionedOrderProfitWrite(101, {

@@ -12,6 +12,7 @@ Options:
   --port PORT                 SSH port (or OZON_ECS_PORT; default: 22)
   --identity-file PATH        SSH private key (or OZON_ECS_IDENTITY_FILE)
   --version VERSION           Release version (default: local timestamp)
+  --expected-production-commit SHA  Abort activation if production changed while building/uploading
   --reviewed-identity-manifest PATH  Apply an explicitly reviewed identity manifest
   --reviewed-ai-material-manifest PATH  Apply an explicitly reviewed material ownership manifest
   --reviewed-ai-media-retention-manifest PATH  Reclaim reviewed unused AI media during offline maintenance
@@ -73,6 +74,7 @@ host="${OZON_ECS_HOST:-}"
 ssh_user="${OZON_ECS_USER:-}"
 ssh_port="${OZON_ECS_PORT:-}"
 identity_file="${OZON_ECS_IDENTITY_FILE:-}"
+expected_production_commit=""
 version=""
 reviewed_identity_manifest=""
 reviewed_ai_material_manifest=""
@@ -87,7 +89,7 @@ allow_service_interruption=0
 
 while (($#)); do
   case "$1" in
-    --host|--user|--port|--identity-file|--version|--reviewed-identity-manifest|--reviewed-ai-material-manifest|--reviewed-ai-media-retention-manifest)
+    --host|--user|--port|--identity-file|--version|--expected-production-commit|--reviewed-identity-manifest|--reviewed-ai-material-manifest|--reviewed-ai-media-retention-manifest)
       (($# >= 2)) || fail "$1 requires a value"
       case "$1" in
         --host) host="$2" ;;
@@ -95,6 +97,7 @@ while (($#)); do
         --port) ssh_port="$2" ;;
         --identity-file) identity_file="$2" ;;
         --version) version="$2" ;;
+        --expected-production-commit) expected_production_commit="$2" ;;
         --reviewed-identity-manifest) reviewed_identity_manifest="$2" ;;
         --reviewed-ai-material-manifest) reviewed_ai_material_manifest="$2" ;;
         --reviewed-ai-media-retention-manifest) reviewed_ai_media_retention_manifest="$2" ;;
@@ -128,6 +131,7 @@ ssh_port="${ssh_port:-22}"
 version="${version:-$(date '+%Y.%m.%d-%H%M%S')}"
 
 [[ "$version" =~ ^[0-9A-Za-z._-]+$ ]] || fail "version contains unsupported characters: $version"
+[[ -z "$expected_production_commit" || "$expected_production_commit" =~ ^[a-f0-9]{40}$ ]] || fail "expected production commit must be a full Git SHA"
 [[ "$ssh_port" =~ ^[0-9]+$ ]] && ((ssh_port >= 1 && ssh_port <= 65535)) || fail "invalid SSH port"
 [[ "$ssh_user" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || fail "invalid SSH user"
 [[ "$host" =~ ^[A-Za-z0-9._:-]+$ ]] || fail "invalid ECS host"
@@ -168,6 +172,10 @@ db_maintenance_flag=0
 ((skip_database_maintenance)) && db_maintenance_flag=0
 activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest' '$allow_service_interruption'"
 if [[ -n "$remote_ai_media_retention_manifest" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi
+if [[ -n "$expected_production_commit" ]]; then
+  if [[ -z "$remote_ai_media_retention_manifest" ]]; then activation_command+=" ''"; fi
+  activation_command+=" '$expected_production_commit'"
+fi
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'

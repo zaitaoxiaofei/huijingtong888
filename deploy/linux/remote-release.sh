@@ -9,6 +9,7 @@ reviewed_identity_manifest="${5:-}"
 reviewed_ai_material_manifest="${6:-}"
 allow_service_interruption="${7:-0}"
 reviewed_ai_media_retention_manifest="${8:-}"
+expected_production_commit="${9:-}"
 material_change_required="ready"
 candidate_warmup_seconds=360
 rollback_warmup_seconds=360
@@ -88,6 +89,20 @@ exec 9>"$release_lock_file"
 if ! flock -n 9; then
   echo "Another ECS release is already active; wait for it to finish before deploying." >&2
   exit 75
+fi
+
+# Check after taking the shared lock: another window may have deployed during
+# this artifact's build/upload. Stop before touching staging or the candidate.
+if [[ -n "$expected_production_commit" ]]; then
+  if [[ ! "$expected_production_commit" =~ ^[a-f0-9]{40}$ ]]; then
+    echo "Invalid expected production commit." >&2
+    exit 2
+  fi
+  current_commit="$(node -e 'try { process.stdout.write(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).commit || ""); } catch {}' "$current_link/public/release.json")"
+  if [[ "$current_commit" != "$expected_production_commit" ]]; then
+    echo "Production changed during build/upload ($current_commit); reconcile the latest release before deploying." >&2
+    exit 76
+  fi
 fi
 
 release_dir="$releases_root/$release_version"

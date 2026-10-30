@@ -10,7 +10,7 @@ const ACTUAL_FIELDS = {
 };
 
 function firstEstimateRevision(record) {
-  const eligible = revision => revision?.formula_version === "V2" && revision.layer === "estimate"
+  const eligible = revision => ["V2", "V4"].includes(revision?.formula_version) && revision.layer === "estimate"
     && !revision.legacy_baseline && !revision.inputs?.estimate?.fxPending;
   if (record?.first_estimate_revision) return eligible(record.first_estimate_revision) ? record.first_estimate_revision : null;
   if (record?.truncated) return null;
@@ -47,7 +47,7 @@ export function buildOrderProfitFxDetailSnapshotPayload(order, items, finance, f
   estimated.costTotal = completeEstimate ? round(Object.keys(ACTUAL_FIELDS).filter(key => !["sale", "profit"].includes(key))
     .reduce((sum, key) => sum + estimated[key], 0)) : estimated.sale !== null && estimated.profit !== null ? round(estimated.sale - estimated.profit) : null;
   const signedOutcome = ["delivered_signed", "after_delivery_return"].includes(order.outcome_type);
-  const noDeliveryOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed"].includes(order.outcome_type);
+  const noDeliveryOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "cargo_lost"].includes(order.outcome_type);
   const expectedLock = fxState?.signedFx && (signedOutcome || noDeliveryOutcome) ? "finance_accrued_signed_day_fx"
     : noDeliveryOutcome ? "finance_accrued_no_delivery_order_day_fx" : null;
   const completeProjection = items.length > 0 && items.every(item => item.profit_status === "accrued" && item.settlement_state === "accrued"

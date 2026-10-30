@@ -765,7 +765,7 @@ function detailItemImageUrl(item = {}) {
 
 function detailItemSaleAmount(item = {}) {
   const outcome = String(detailOrder.value?.outcome_type || "");
-  if (outcome === "cancelled_pre_fulfillment") return 0;
+  if (["cancelled_pre_fulfillment", "cargo_lost"].includes(outcome)) return 0;
   if (["rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
     const hasRetainedSale = detailFinance.value.some((row) => Math.abs(Number(row.accruals_for_sale_cny || row.accruals_for_sale || 0)) > 0.005);
     if (!hasRetainedSale) return 0;
@@ -1245,7 +1245,7 @@ function buildTableRow(row) {
       seenProductIds.set(dedupeKey, item);
       return true;
     });
-  const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row?.outcome_type || ""));
+  const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row?.outcome_type || ""));
   const cancelReasonText = terminalOutcome || ["cancelled", "returned", "rejected"].includes(displayStateKey)
     ? row?.cancel_reason_label || "取消原因待同步"
     : "--";
@@ -2905,7 +2905,7 @@ onBeforeUnmount(() => {
 
         <div v-if="detailDialog.mode === 'profit'" class="orders-profit-detail-shell">
           <div
-            v-if="['cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return'].includes(detailOrder.outcome_type)"
+            v-if="['cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return', 'cargo_lost'].includes(detailOrder.outcome_type)"
             class="orders-profit-attribution"
           >
             <div>
