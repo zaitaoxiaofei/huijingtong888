@@ -2360,6 +2360,7 @@ async function prepareRuntimeBeforeListen() {
     await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();
     await assertTenantPilotSchemaReady();
+    await mysqlQuery("SELECT tenant_id,version,payload_json,calculated_at FROM inventory_demand_snapshots LIMIT 0");
     console.log("listing automation schema warmup completed");
     runtimeReadiness.ready = true;
     runtimeReadiness.readyAt = new Date().toISOString();

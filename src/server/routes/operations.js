@@ -65,16 +65,17 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
       const raw=Array.isArray(base)?base:base.rows||[];
       const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
-      const states=params.view==='workspace'?await workflow.workspaceStates(ids,session.tenant.id,{fresh:params.refresh==='1'}):[];
+      const cached=params.view==='workspace'?await workflow.workspaceSnapshot(session.tenant.id,{fresh:params.refresh==='1',productIds:ids}):null;
+      const states=cached?.rows||[];
       if(params.view!=='workspace')for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
       const byId=new Map(states.map(state=>[state.product_id,state]));
-      const all=raw.map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
+      const all=(cached&&!cached.snapshot.available?[]:raw).map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
       if(params.view==='workspace'){
         const result=inventoryWorkspacePage(all,params);
         const pageIds=result.rows.map(r=>Number(r.product_id));
-        const [batches,feedbacks]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),workflow.workspaceFeedback(pageIds,session.tenant.id)]);
+        const [batches,feedbacks,sources]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),workflow.workspaceFeedback(pageIds,session.tenant.id),workflow.workspaceSources(pageIds,session.tenant.id)]);
         const byProduct=new Map();for(const batch of batches){const id=Number(batch.product_id);if(!byProduct.has(id))byProduct.set(id,[]);byProduct.get(id).push(batch);}
-        return{...result,rows:result.rows.map(row=>({...row,pending_batches:byProduct.get(Number(row.product_id))||[],feedbacks:feedbacks.filter(f=>Number(f.product_id)===Number(row.product_id)).slice(0,5)}))};
+        return{...result,...(!cached.snapshot.available?{total:null,meta:Object.fromEntries(Object.keys(result.meta).map(k=>[k,null]))}:{}),snapshot:cached.snapshot,rows:result.rows.map(row=>({...row,workflow:{...row.workflow,requests:sources.requests.filter(r=>Number(r.product_id)===Number(row.product_id)),applications:sources.applications.filter(r=>Number(r.product_id)===Number(row.product_id))},pending_batches:byProduct.get(Number(row.product_id))||[],feedbacks:feedbacks.filter(f=>Number(f.product_id)===Number(row.product_id)).slice(0,5)}))};
       }
       const status=params.alertType||'all',rows=all.filter(row=>status==='all'||row.workflow?.overall===status);
       const sortKey=['recent_7d_qty','recent_15d_qty','recent_30d_qty'].includes(params.sortBy)?params.sortBy:'recent_30d_qty';

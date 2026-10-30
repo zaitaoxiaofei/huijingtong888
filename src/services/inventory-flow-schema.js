@@ -1,4 +1,6 @@
+import { INVENTORY_DEMAND_SNAPSHOT_SCHEMA } from './inventory-demand-snapshot.js';
 export const INVENTORY_FLOW_SCHEMA = [
+  INVENTORY_DEMAND_SNAPSHOT_SCHEMA,
   `CREATE TABLE IF NOT EXISTS inventory_flow_settings (
     tenant_id BIGINT UNSIGNED NOT NULL, product_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
     settings_json JSON NOT NULL, revision INT NOT NULL DEFAULT 1,
