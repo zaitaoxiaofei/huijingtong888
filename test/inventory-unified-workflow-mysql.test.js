@@ -233,5 +233,40 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   await assert.rejects(feedback({...input,request_key:randomUUID()},buyer),{statusCode:403});
   await q('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=2');
  });
+ await t.test('workspace shares coverage without changing quantities and invalidates after stock writes',async()=>{
+  const ids=(await q('SELECT id FROM products WHERE tenant_id=2')).map(r=>Number(r.id));let scans=0;
+  const {mysqlQuery}=await import('../src/mysql-pool.js');
+  const tracked=async(sql,args)=>{if(sql.includes('SELECT o.id AS order_id'))scans++;return mysqlQuery(sql,args);};
+  const fast=createInventoryWorkflowService({...opts,query:tracked});
+  const expected=await service.batch(ids,2,{fresh:true,cache:false});
+  const actual=await fast.workspaceStates(ids,2);const quantities=rows=>rows.map(({calculated_at,...row})=>row);assert.deepEqual(quantities(actual),quantities(expected));assert.equal(scans,1);
+  await fast.workspaceStates(ids,2);assert.equal(scans,1);
+  invalidateOrderProcurementCoverage();await fast.workspaceStates(ids,2);assert.equal(scans,2);
+ });
+ await t.test('bulk FBP mapping and warehouse totals match canonical per-product detail',async()=>{
+  const {loadProductFbpStocks,loadProductsFbpStockDetails}=await import('../src/services/fbp-inventory-display.js');
+  const {resolveInventoryTenantScope}=await import('../src/services/inventory-tenant-scope.js');
+  const scope=await resolveInventoryTenantScope(2,q),ids=(await q('SELECT id FROM products WHERE tenant_id=2')).map(r=>Number(r.id));
+  const bulk=await loadProductsFbpStockDetails(q,ids,scope);
+  const normalize=v=>({...v,rows:v.rows.map(({inventory_product_id,...r})=>r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))});
+  for(const id of ids)assert.deepEqual(normalize(bulk.get(id)),normalize(await loadProductFbpStocks(q,id,scope)),`inventory ${id}`);
+ });
+ await t.test('681-product queue with 5000 orders reads history once and reuses the whole snapshot',async()=>{
+  const {mysqlQuery}=await import('../src/mysql-pool.js');
+  const insert=async(table,columns,rows)=>{for(let i=0;i<rows.length;i+=500){const part=rows.slice(i,i+500);await q(`INSERT INTO ${table}(${columns}) VALUES ${part.map(r=>'('+r.map(()=>'?').join(',')+')').join(',')}`,part.flat());}};
+  const ids=Array.from({length:681},(_,i)=>20000+i);
+  await insert('products','id,tenant_id,name',ids.map(id=>[id,2,'load stock '+id]));
+  await insert('sku_mappings','id,tenant_id,product_id,shop_id,ozon_sku,active',ids.map(id=>[id,2,id,20,'LOAD-'+id,1]));
+  await insert('inventory_movements','tenant_id,product_id,source_type,quantity_delta,status,stock_location',ids.map(id=>[2,id,'initial_stock',20,'posted','LOCAL']));
+  const orders=Array.from({length:5000},(_,i)=>[20000+i,20,'LOAD-ORDER-'+i,i%3?'awaiting_packaging':'delivered','2026-10-20 00:00:00']);
+  await insert('orders','id,shop_id,posting_number,status,ordered_at',orders);
+  await insert('order_items','id,order_id,ozon_sku,sku_mapping_id,quantity',orders.map((r,i)=>[r[0],r[0],'LOAD-'+ids[i%ids.length],ids[i%ids.length],i%3+1]));
+  let scans=0,queries=0;const query=async(sql,args)=>{queries++;if(sql.includes('SELECT o.id AS order_id'))scans++;return mysqlQuery(sql,args);};
+  const fast=createInventoryWorkflowService({...opts,query});const start=performance.now();const rows=await fast.workspaceStates(ids,2);const elapsed=Math.round(performance.now()-start),before=queries;
+  assert.equal(rows.length,681);assert.equal(scans,1);assert.equal(await fast.workspaceStates(ids,2),rows);assert.equal(queries,before);
+  const expected=await service.batch(ids.slice(0,10),2,{fresh:true,cache:false});const quantities=values=>values.map(({calculated_at,...row})=>row);
+  assert.deepEqual(quantities(rows.slice(0,10)),quantities(expected));
+  t.diagnostic(`isolated 681 products / 5000 orders: cold ${elapsed}ms, ${before} queries, cached 0 queries`);
+ });
  }finally{await closeMysqlPool();await f.cleanup();}
 });

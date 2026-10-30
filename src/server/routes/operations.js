@@ -65,7 +65,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
       const raw=Array.isArray(base)?base:base.rows||[];
       const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
-      const states=[];for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
+      const states=params.view==='workspace'?await workflow.workspaceStates(ids,session.tenant.id,{fresh:params.refresh==='1'}):[];
+      if(params.view!=='workspace')for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
       const byId=new Map(states.map(state=>[state.product_id,state]));
       const all=raw.map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
       if(params.view==='workspace'){

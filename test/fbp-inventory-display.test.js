@@ -20,7 +20,7 @@ function fixture() {
     CREATE TABLE product_components(product_id INTEGER, component_product_id INTEGER, quantity INTEGER);
     CREATE TABLE sku_inventory_recipes(id INTEGER, shop_id INTEGER, ozon_sku TEXT, active INTEGER);
     CREATE TABLE sku_inventory_recipe_items(recipe_id INTEGER, product_id INTEGER, quantity INTEGER);
-    CREATE TABLE online_products(shop_id INTEGER, ozon_sku TEXT, name TEXT, offer_id TEXT);
+    CREATE TABLE online_products(shop_id INTEGER, ozon_sku TEXT, name TEXT, offer_id TEXT, primary_image TEXT, image_url TEXT);
     CREATE TABLE ozon_stock_snapshots(id INTEGER, shop_id INTEGER, ozon_sku TEXT, warehouse_id TEXT, warehouse_name TEXT, stock_type TEXT, present INTEGER, available INTEGER, reserved INTEGER, synced_at TEXT);
     CREATE TABLE orders(id INTEGER, shop_id INTEGER);
     CREATE TABLE order_items(order_id INTEGER, ozon_sku TEXT);

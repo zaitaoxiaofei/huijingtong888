@@ -3367,7 +3367,7 @@ Read the shared current-enterprise inventory policy. Fresh inventory.read member
 
 #### `GET /api/inventory-workflow/alerts`
 
-Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Current inventory.read membership required.
+Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. Workspace reads one tenant-wide order coverage snapshot, bounded FBP batches, and shares in-flight work/20-second snapshots keyed by tenant and inventory set; inventory revision invalidates reuse, refresh=1 bypasses completed snapshots. Errors never become empty successful queues. Current inventory.read membership required.
 
 - Auth: `authenticated`
 - Query parameters:
