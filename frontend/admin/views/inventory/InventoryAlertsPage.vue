@@ -451,6 +451,7 @@ onMounted(async () => {
       <el-select v-else v-model="state.filters.fbpFocus" class="alert-sort-select" aria-label="FBP SKU 备货筛选" size="small" @change="changeFbpFocus">
         <el-option v-for="option in fbpFocusOptions" :key="option.value" :label="option.label" :value="option.value" />
       </el-select>
+      <template #actions><el-radio-group :model-value="inventoryView ? 'inventory' : 'sku'" size="small" @change="view=>router.replace({query:{...route.query,view:view==='sku'?'sku':undefined,alertType:undefined,page:undefined}})"><el-radio-button value="inventory">库存视角</el-radio-button><el-radio-button value="sku">FBP SKU视角</el-radio-button></el-radio-group></template>
     </InventoryPageToolbar>
 
     <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存预警表格" tabindex="0">

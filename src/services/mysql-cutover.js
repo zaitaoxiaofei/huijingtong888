@@ -12148,7 +12148,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
       WHERE ${inventoryTenantSql(scope, 'pc_filter')} AND pc_filter.product_id = p.id)`);
   } else if (inventoryType === "accessory") where.push("p.is_accessory = 1");
 
-  const productSearch = inventoryProductSearch(query, scope);
+  const productSearch = inventoryProductSearch({...query,inventoryType:"all"}, scope);
   if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
 
   if (searchText && !["inventory_id", "sku", "name"].includes(searchMode)) {
@@ -16515,19 +16515,11 @@ export async function inboundRecordsMysql(query = {}, tenantId = "admin") {
 function inboundRecordsWhereMysql(query = {}, scope) {
   const status = String(query.status || "all");
   const productId = nullableInteger(query.productId || query.product_id);
-  const searchText = String(query.query || query.search || "").trim();
+  const searchText = String(inventoryBusinessSearch(query).query || inventoryBusinessSearch(query).search || "").trim();
   const demandType = String(query.demandType || query.demand_type || "all");
   const personId = String(query.personId || query.person_id || "all");
   const supplierId = String(query.supplierId || query.supplier_id || "all");
   const sourceType = String(query.sourceType || query.source_type || "all").trim().toLowerCase();
-  const inventoryCategory = String(query.inventoryCategory || query.inventory_category || "").trim();
-  const productName = String(query.productName || query.product_name || "").trim();
-  const vehicleBrand = normalizeVehicleBrand(query.vehicleBrand || query.vehicle_brand, { strict: false });
-  const vehicleModels = String(query.vehicleModel || query.vehicle_model || "").split(",").map((item) => item.trim()).filter(Boolean);
-  const accessoryName = String(query.accessoryName || query.accessory_name || "").trim();
-  const color = String(query.color || "").trim();
-  const materials = String(query.material || "").split(",").map((item) => item.trim()).filter(Boolean);
-  const process = String(query.process || query.surface_process || "").trim();
   const startDate = String(query.startDate || query.start_date || "").trim();
   const endDate = String(query.endDate || query.end_date || "").trim();
   const params = [];
@@ -16580,29 +16572,24 @@ function inboundRecordsWhereMysql(query = {}, scope) {
       NULLIF(p.source_platform, ''), 'other')) = ?`);
     params.push(sourceType);
   }
-  if (demandType === "real_order") {
-    where.push(`(
-      EXISTS (SELECT 1 FROM procurement_requests inbound_direct_order WHERE inbound_direct_order.id = ir.procurement_request_id AND (COALESCE(inbound_direct_order.source_order_id, 0) > 0 OR COALESCE(inbound_direct_order.source_order_item_id, 0) > 0))
-      OR EXISTS (SELECT 1 FROM procurement_requests inbound_purchase_order WHERE inbound_purchase_order.purchase_order_id = ir.purchase_order_id AND inbound_purchase_order.product_id = ir.product_id AND (COALESCE(inbound_purchase_order.source_order_id, 0) > 0 OR COALESCE(inbound_purchase_order.source_order_item_id, 0) > 0))
-    )`);
-  } else if (demandType === "inventory_warning") {
+  if (['real_order','local_safety','fbp_stock'].includes(demandType)) {
+    where.push(`EXISTS (SELECT 1 FROM procurement_requests inbound_demand
+      WHERE inbound_demand.product_id=ir.product_id AND ${inventoryTenantSql(scope,'inbound_demand')}
+      AND (inbound_demand.id=ir.procurement_request_id OR (ir.purchase_order_id IS NOT NULL AND inbound_demand.purchase_order_id=ir.purchase_order_id))
+      AND CASE WHEN inbound_demand.request_reason_code='flow_real_order' THEN 'real_order'
+        WHEN inbound_demand.request_reason_code IN ('flow_fbp_stock','fbp_stock_shortage') OR inbound_demand.source_type='fbp' THEN 'fbp_stock'
+        WHEN inbound_demand.demand_type='real_order' OR (COALESCE(inbound_demand.demand_type,'')!='warehouse_request' AND COALESCE(inbound_demand.source_order_item_id,0)>0) THEN 'real_order'
+        ELSE 'local_safety' END=?)`);
+    params.push(demandType);
+  }
+  else if (demandType === "inventory_warning") {
     where.push(`(
       EXISTS (SELECT 1 FROM procurement_requests inbound_direct_warning WHERE inbound_direct_warning.id = ir.procurement_request_id AND inbound_direct_warning.request_group_no LIKE 'AUTO-STOCK-%')
       OR EXISTS (SELECT 1 FROM procurement_requests inbound_order_warning WHERE inbound_order_warning.purchase_order_id = ir.purchase_order_id AND inbound_order_warning.product_id = ir.product_id AND inbound_order_warning.request_group_no LIKE 'AUTO-STOCK-%')
     )`);
   }
-  if (inventoryCategory) { where.push("p.inventory_category = ?"); params.push(inventoryCategory); }
-  if (productName) { where.push("p.name LIKE ?"); params.push(`%${productName}%`); }
-  if (vehicleBrand) {
-    const brandTokens = [...new Set(vehicleBrand.split(/\s+/).filter(Boolean))];
-    where.push(`(REPLACE(COALESCE(p.vehicle_brand, ''), '|', ' ') = ? OR ${brandTokens.map(() => "p.vehicle_brand LIKE ?").join(" OR ")})`);
-    params.push(vehicleBrand, ...brandTokens.map((token) => `%${token}%`));
-  }
-  if (vehicleModels.length) { where.push(`(${vehicleModels.map(() => "CONCAT('/', COALESCE(p.vehicle_model, ''), '/') LIKE ?").join(" OR ")})`); params.push(...vehicleModels.map((model) => `%/${model}/%`)); }
-  if (accessoryName) { where.push("p.accessory_name = ?"); params.push(accessoryName); }
-  if (color) { where.push("CONCAT(',', REPLACE(COALESCE(p.color, ''), '/', ','), ',') LIKE ?"); params.push(`%,${color},%`); }
-  if (materials.length) { where.push(`(${materials.map(() => "CONCAT('/', COALESCE(p.material, ''), '/') LIKE ?").join(" OR ")})`); params.push(...materials.map((material) => `%/${material}/%`)); }
-  if (process) { where.push("p.surface_process = ?"); params.push(process); }
+  const productSearch=inventoryProductSearch(query,scope);
+  if(productSearch.sql){where.push(productSearch.sql);params.push(...productSearch.params);}
 
   return { whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
 }

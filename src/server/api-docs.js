@@ -1813,6 +1813,12 @@ const endpoints = [
     }),
     endpoint("GET", "/api/inbound-records", "Return inbound record rows.", {
       auth: "authenticated",
+      query: [...inventorySearchParams.filter(item=>item.name!=="shopId"),
+        param("status",scalar("string","pending_arrival for pending receipts, approved for received records; legacy all remains supported"),false),
+        param("demandType",scalar("string","all | real_order | local_safety | fbp_stock; inventory_warning retained for older callers"),false),
+        param("inventoryType",scalar("string","all | single | accessory | combo"),false),
+        param("productId",scalar("number","Optional owned product context"),false),
+        param("paged",scalar("string","1 for rows/total/page/pageSize, all predicates apply before paging"),false)],
       responses: [response(200, "application/json", arrayOf(ref("InboundRecord"), "Inbound rows."))]
     }),
     endpoint("POST", "/api/inbound-records", "Create an inbound record.", {

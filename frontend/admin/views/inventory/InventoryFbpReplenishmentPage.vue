@@ -1,4 +1,5 @@
 <script setup>
+import { fbpRouteStatus } from "../../constants/inventory-modules.js";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, defineAsyncComponent, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
@@ -23,7 +24,7 @@ const authStore = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const focusedOrderId = computed(() => Number(route.query.orderId || 0));
-const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", ref("applying"));
+const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", computed(()=>fbpRouteStatus(route.query)));
 const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const exportLoading = ref(false);
@@ -133,7 +134,7 @@ function syncSearchRoute() {
   void router.replace({ query });
 }
 const viewMode = ref("operations");
-if (focusedOrderId.value) { sharedReplenishmentStatus.value = "all"; state.filters.status = "all"; }
+if (focusedOrderId.value) state.filters.status = "all";
 
 const currentUserId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
 function aggregateBatchOrder(orders) {
@@ -1202,8 +1203,7 @@ function handleReset() {
   Object.assign(state.filters, inventorySearchDefaults());
   state.filters.query = "";
   state.filters.shopId = "all";
-  state.filters.status = "applying";
-  sharedReplenishmentStatus.value = "applying";
+  state.filters.status = sharedReplenishmentStatus.value;
   state.filters.page = 1;
   syncSearchRoute();
   loadPageData();
@@ -1259,14 +1259,13 @@ onActivated(() => void loadPageData());
             <el-radio-button value="operations">运营视角</el-radio-button>
             <el-radio-button value="inventory">库存视角</el-radio-button>
           </el-radio-group>
-          <el-button v-if="viewMode === 'inventory'" :loading="exportLoading" :disabled="loading" @click="exportInventorySummary">导出库存汇总</el-button>
-          <div class="replenishment-selection">
-            <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
-            <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
-              创建关联汇总
-            </el-button>
-          </div>
-        <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
+          <el-popover trigger="click" placement="bottom-end" :width="270"><template #reference><el-button>更多{{ selectedOrderIds.length ? `（已选 ${selectedOrderIds.length}）` : '' }}</el-button></template>
+            <div class="replenishment-more-actions">
+              <el-button v-if="viewMode === 'inventory'" :loading="exportLoading" :disabled="loading" @click="exportInventorySummary">导出库存汇总</el-button>
+              <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">创建关联汇总</el-button>
+              <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
+            </div>
+          </el-popover>
       </template>
     </InventoryPageToolbar>
 
@@ -1857,6 +1856,7 @@ onActivated(() => void loadPageData());
 </template>
 
 <style scoped>
+.replenishment-more-actions { display:flex;flex-direction:column;align-items:stretch;gap:8px; }.replenishment-more-actions .el-button { margin:0; }
 .warehouse-product { display: flex; align-items: center; gap: 12px; min-height: 92px; }
 .warehouse-product .cell-stack { display: flex; flex-direction: column; gap: 8px; }
 .warehouse-product :deep(.erp-image-preview), .warehouse-dialog-header :deep(.erp-image-preview) { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 5px; overflow: hidden; background: var(--erp-detail-surface-alt, #f3f5f8); }

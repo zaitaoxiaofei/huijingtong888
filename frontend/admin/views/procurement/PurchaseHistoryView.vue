@@ -1,14 +1,15 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 import { createLatestRequestGate } from "../../utils/request-gate";
-import ErpFilterBar from "../../components/ErpFilterBar.vue";
-import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
-import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import InventoryReceivingToolbar from "../../components/inventory/InventoryReceivingToolbar.vue";
+import {useRoute,useRouter} from 'vue-router';
+import {receivingFilters,restoreReceivingFilters,receivingParams,receivingRouteQuery} from '../../utils/receiving-search.js';
+const route=useRoute(),router=useRouter();
 
 const loading = ref(false);
 const dialogVisible = ref(false);
@@ -21,24 +22,7 @@ const state = reactive({
   people: [],
   suppliers: [],
   total: 0,
-  filters: {
-    query: "",
-    status: "approved",
-    demandType: "all",
-    personId: "all",
-    supplierId: "all",
-    sourceType: "all",
-    inventoryCategory: "",
-    productName: "",
-    vehicleBrand: "",
-    vehicleModel: [],
-    accessoryName: "",
-    color: "",
-    material: [],
-    process: "",
-    page: 1,
-    pageSize: 20
-  }
+  filters: receivingFilters('approved')
 });
 
 const dialog = reactive({
@@ -102,56 +86,31 @@ function inboundStatusText(status) {
 
 function handleSearch() {
   state.filters.page = 1;
+  syncSearchRoute();
   loadPageData();
 }
 
 function handleReset() {
-  Object.assign(state.filters, {
-    query: "", status: "approved", demandType: "all", personId: "all", supplierId: "all", sourceType: "all",
-    inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "",
-    color: "", material: [], process: "", page: 1, pageSize: 20
-  });
+  Object.assign(state.filters,receivingFilters('approved'));
+  syncSearchRoute();
   loadPageData();
 }
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncSearchRoute();
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncSearchRoute();
   loadPageData();
 }
 
-function inboundQueryString() {
-  const params = new URLSearchParams({
-    paged: "1",
-    page: String(state.filters.page),
-    pageSize: String(state.filters.pageSize),
-    status: state.filters.status || "approved",
-    query: String(state.filters.query || "").trim()
-  });
-  for (const [key, value] of Object.entries({
-    demandType: state.filters.demandType,
-    personId: state.filters.personId,
-    supplierId: state.filters.supplierId,
-    sourceType: state.filters.sourceType,
-    inventoryCategory: state.filters.inventoryCategory,
-    productName: state.filters.productName,
-    vehicleBrand: state.filters.vehicleBrand,
-    vehicleModel: state.filters.vehicleModel,
-    accessoryName: state.filters.accessoryName,
-    color: state.filters.color,
-    material: state.filters.material,
-    process: state.filters.process
-  })) {
-    const normalized = Array.isArray(value) ? value.join(",") : String(value || "").trim();
-    if (normalized && normalized !== "all") params.set(key, normalized);
-  }
-  return params.toString();
-}
+function inboundQueryString() { return receivingParams(state.filters,'approved'); }
+function syncSearchRoute() { void router.replace({query:receivingRouteQuery(route.query,state.filters)}); }
 
 function openEditDialog(row) {
   dialog.form = {
@@ -262,81 +221,14 @@ async function loadPageData() {
   }
 }
 
-onMounted(loadPageData);
+watch(()=>route.query,()=>{const before=JSON.stringify(state.filters);restoreReceivingFilters(route.query,state.filters,'approved');if(before!==JSON.stringify(state.filters))void loadPageData();},{deep:true});
+onMounted(()=>{restoreReceivingFilters(route.query,state.filters,'approved');loadPageData();});
 </script>
 
 <template>
   <div class="page-stack procurement-history-page procurement-workspace-page">
-    <ErpPageHeader title="入库记录" description="这里按每笔独立入库流水展示，不再按采购单聚合。">
-      <template #actions>
-        <el-button class="erp-btn erp-btn-secondary" @click="loadPageData">刷新数据</el-button>
-      </template>
-    </ErpPageHeader>
-
     <el-card shadow="never" class="page-card procurement-history-card procurement-workspace-card">
-      <div class="procurement-toolbar procurement-toolbar-sticky procurement-filter-panel procurement-workspace-filter">
-        <ErpFilterBar>
-          <el-form inline>
-            <el-form-item label="关键词">
-              <el-input
-                v-model="state.filters.query"
-                placeholder="采购单号 / 商品名称 / 编码 / 申请人 / 备注"
-                clearable
-                style="width: 340px"
-                @keyup.enter="handleSearch"
-              />
-            </el-form-item>
-            <el-form-item label="状态">
-              <el-select v-model="state.filters.status" style="width: 140px">
-                <el-option label="已入库" value="approved" />
-                <el-option label="全部" value="all" />
-                <el-option label="待入库" value="pending_arrival" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="需求类型">
-              <el-select v-model="state.filters.demandType" style="width: 150px">
-                <el-option label="全部需求" value="all" />
-                <el-option label="真实订单需求" value="real_order" />
-                <el-option label="库存预警需求" value="inventory_warning" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="采购负责人">
-              <el-select v-model="state.filters.personId" filterable style="width: 140px">
-                <el-option label="全部" value="all" />
-                <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="供应商">
-              <el-select v-model="state.filters.supplierId" filterable style="width: 150px">
-                <el-option label="全部供应商" value="all" />
-                <el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="采购平台">
-              <el-select v-model="state.filters.sourceType" style="width: 130px">
-                <el-option label="全部平台" value="all" />
-                <el-option label="1688" value="1688" />
-                <el-option label="拼多多" value="pdd" />
-                <el-option label="供应商" value="supplier" />
-                <el-option label="微信" value="wechat" />
-                <el-option label="其他" value="other" />
-              </el-select>
-            </el-form-item>
-          </el-form>
-          <template #actions>
-            <el-button class="erp-btn erp-btn-primary" type="primary" @click="handleSearch">查询</el-button>
-            <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
-          </template>
-        </ErpFilterBar>
-      </div>
-
-      <InventoryStructuredSearch
-        compact
-        class="procurement-structured-search"
-        :model-value="state.filters"
-        @update:model-value="Object.assign(state.filters, $event)"
-        @change="handleSearch"
-      />
+      <InventoryReceivingToolbar :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset" />
 
       <div class="list-wrap">
         <el-table v-loading="loading" :data="state.rows" height="100%" stripe border class="erp-data-table procurement-history-table">

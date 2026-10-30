@@ -1951,9 +1951,9 @@ onActivated(() => {
         <el-table-column label="库存" prop="stock" width="180" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="inventory-stock-cell">
-              <div class="stock-split-grid">
+              <div class="stock-summary-list">
                 <span class="local-stock-line">
-                  本地 {{ row.physical_stock==null?'待核对':integer(row.physical_stock) }} {{ productUnit(row) }}
+                  本地库存 {{ row.physical_stock==null?'待核对':integer(row.physical_stock) }} {{ productUnit(row) }}
                   <el-popover
                     v-if="hasProductComponents(row)"
                     placement="left"
@@ -1993,14 +1993,15 @@ onActivated(() => {
                     </div>
                   </el-popover>
                 </span>
-                <span>FBP {{ row.fbp_stock_known==null?'待同步':integer(row.fbp_stock_known) }} {{ productUnit(row) }}</span><span><el-tooltip content="与库存明细同口径：本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><span>可用 {{ row.workflow_free==null?'待核对':integer(row.workflow_free) }} {{ productUnit(row) }}</span></el-tooltip></span>
+                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free==null?'待核对':integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
+                <el-button size="small" plain @click="openInventoryLedger(row)">库存明细</el-button>
               </div>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductSalesDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductSalesDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
                 <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
@@ -2016,7 +2017,7 @@ onActivated(() => {
         </el-table-column>
         <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductProcurementDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductProcurementDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
                 <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
@@ -2032,7 +2033,7 @@ onActivated(() => {
         </el-table-column>
         <el-table-column label="历史出库" prop="manual_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="warning" @click.stop="openManualOutboundRecords(row)">
+            <el-button class="metric-cell-link" plain type="warning" @click.stop="openManualOutboundRecords(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>共 {{ integer(Number(row.total_sales_quantity||0)+Number(row.manual_outbound_quantity||0)) }} 件</strong>
                 <span class="muted-text">销售出库 {{ integer(row.total_sales_quantity) }} · 人工登记 {{ integer(row.manual_outbound_quantity) }}</span>
@@ -2049,19 +2050,19 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }"><div class="inventory-actions">
-            <el-button v-if="canWriteInventory" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-            <el-button v-if="canWriteInventory" link type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
-            <el-button link type="primary" @click="openInventoryLedger(row)">库存明细</el-button>
-            <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button link>更多</el-button></template><div class="inventory-more-actions">
-              <el-button v-if="canManageProductComponents" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
-              <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
-              <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
-              <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
+            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openEditDialog(row)">编辑</el-button>
+            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
+            <el-button size="small" plain type="primary" @click="openInventoryLedger(row)">库存明细</el-button>
+            <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">
+              <el-button v-if="canManageProductComponents" class="inventory-more-button" size="small" plain type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
+              <el-button v-if="canProcure" class="inventory-more-button" size="small" plain @click="openProcurement(row)">创建采购</el-button>
+              <el-button v-if="canOutbound" class="inventory-more-button" size="small" plain type="warning" @click="openManualOutbound(row)">手动出库</el-button>
+              <el-button class="inventory-more-button" size="small" plain @click="openManualOutboundRecords(row)">出库记录</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="danger" @click="removeFromInventory(row)">删除</el-button>
             </div></el-popover>
           </div></template>
         </el-table-column>
@@ -2968,9 +2969,9 @@ onActivated(() => {
   width: 100%;
   min-height: 64px;
   padding: 8px 10px;
-  border: 1px solid transparent;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
-  background: transparent;
+  background: var(--el-fill-color-blank);
   text-align: right;
   transition: background 0.18s ease, border-color 0.18s ease;
 }
@@ -3165,23 +3166,10 @@ onActivated(() => {
   line-height: 1;
 }
 
-.stock-split-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.stock-split-grid span {
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid var(--erp-detail-border-light, #dbe6f3);
-  border-radius: 8px;
-  background: var(--erp-detail-surface-alt, #f8fbff);
-  color: var(--erp-detail-text-regular, #334155);
-  font-size: 12px;
-  line-height: 1.3;
-}
-
+.stock-summary-list { display: flex; flex-direction: column; align-items: stretch; gap: 7px; }
+.stock-summary-list > .local-stock-line, .available-stock-line { display:flex; align-items:center; justify-content:space-between; gap:6px; white-space:nowrap; font-size:12px; line-height:1.6; }
+.available-stock-line strong { font-size:13px; font-variant-numeric:tabular-nums; }
+.stock-summary-list > .el-button { align-self:center; margin:0; }
 .local-stock-line {
   display: inline-flex;
   align-items: center;
