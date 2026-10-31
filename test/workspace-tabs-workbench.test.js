@@ -28,6 +28,7 @@ test("left navigation reuses fixed workbench ids instead of opening random dupli
 test("workspace tabs keep every open page alive by its stable tab key", () => {
   assert.match(layoutSource, /<KeepAlive(?:\s[^>]*)?>/);
   assert.doesNotMatch(layoutSource, /<KeepAlive\s+:include=/);
-  assert.match(layoutSource, /:key="`\$\{tabsStore\.tabKeyForRoute\(currentRoute\)\}:\$\{tabsStore\.refreshToken\}`"/);
+  // Scoped finance/AI pages already append their authority scope to this key.
+  assert.match(layoutSource, /:key="`\$\{tabsStore\.tabKeyForRoute\(currentRoute\)\}:\$\{tabsStore\.refreshToken\}(?:`|\$\{)/);
   assert.doesNotMatch(layoutSource, /:key="`\$\{currentRoute\.fullPath\}/);
 });
