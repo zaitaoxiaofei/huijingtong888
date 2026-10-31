@@ -281,7 +281,7 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const tracked=async(sql,args)=>{if(sql.includes('SELECT o.id AS order_id'))scans++;return mysqlQuery(sql,args);};
   const fast=createInventoryWorkflowService({...opts,query:tracked});
   const expected=await service.batch(ids,2,{fresh:true,cache:false});
-  const actual=await fast.workspaceStates(ids,2);const quantities=rows=>rows.map(({calculated_at,...row})=>row);assert.deepEqual(quantities(actual),quantities(expected));assert.equal(scans,1);
+  const actual=await fast.workspaceStates(ids,2);const quantities=rows=>rows.map(({calculated_at,...row})=>row).sort((a,b)=>a.product_id-b.product_id);assert.deepEqual(quantities(actual),quantities(expected));assert.equal(scans,1);
   await fast.workspaceStates(ids,2);assert.equal(scans,1);
   invalidateOrderProcurementCoverage();await fast.workspaceStates(ids,2);assert.equal(scans,2);
  });

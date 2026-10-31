@@ -68,6 +68,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/inventory-workflow/demand-details":(req,url)=>procurementDemandDetails.details(url.searchParams.get('product_id'),req._session),
     "POST /api/inventory-workflow/local-safety":async req=>procurementDemandDetails.safety(await readJson(req),req._session),
     "GET /api/inventory-workflow/purchase-arrivals":(req,url)=>procurementArrivals.list(Object.fromEntries(url.searchParams),req._session),
+    "GET /api/inventory-workflow/purchase-bundle":(req,url)=>services.purchaseBundleContext(Object.fromEntries(url.searchParams),req._session),
+    "POST /api/inventory-workflow/purchase-bundle":async req=>services.reviewPurchaseBundle(await readJson(req),req._session),
     "POST /api/inventory-workflow/purchase-arrivals":async req=>procurementArrivals.confirm(await readJson(req),req._session),
     "POST /api/inventory-workflow/demand-request":async req=>procurementDemandRequest(await readJson(req),req._session),
     "GET /api/inventory-workflow/alerts": async (req,url)=>{
@@ -100,6 +102,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       assertBusinessTaskPermission(session,'inventory.read');
       const ids=[...new Set(String(url.searchParams.get('product_ids') || url.searchParams.get('product_id') || '').split(',').map(Number))];
       if(!ids.length || ids.length>20 || ids.some(id=>!Number.isSafeInteger(id)||id<=0)) throw Object.assign(new Error('请选择1至20个库存商品'),{statusCode:400});
+      if(url.searchParams.get('view')==='components')return workflow.productComposition(ids,session.tenant.id);
       if(url.searchParams.get('view')==='local')return {rows:await workflow.localQuantities(ids,session.tenant.id)};
       if(url.searchParams.get('view')==='sku'){if(ids.length!==1)throw Object.assign(new Error('请选择一个库存商品查看SKU组成'),{statusCode:400});return workflow.skuDetails(ids[0],url.searchParams.get('shop_id'),url.searchParams.get('ozon_sku'),session.tenant.id);}
       if(url.searchParams.get('view')==='requests')return {rows:await Promise.all(ids.map(id=>workflow.requests(id,session.tenant.id)))};

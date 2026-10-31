@@ -1,3 +1,4 @@
+import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
 const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
 import { createOrderSplitService } from "./order-split.js";
 import { mergeDashboardSections } from "../shared/dashboard-sections.js";
@@ -25349,6 +25350,7 @@ async function applyInboundRecordUpdateMysql(connection, id, body = {}, options 
   const existing = await mysqlConnectionQueryOne(connection, "SELECT * FROM inbound_records WHERE id = ? FOR UPDATE", [inboundId]);
   if (!existing) throw new Error("Inbound record not found");
   assertFreshRecord(body, existing, "入库记录已被其他用户保存，请刷新后再继续编辑");
+  if(existing.status==='pending_arrival'&&(body.status==='approved'||body.receive_quantity!==undefined))await assertWholeBundleReview(run,scope,existing);
   if (body.receive_quantity === undefined && existing.purchase_order_item_id && body.quantity !== undefined && Number(body.quantity) !== Number(existing.quantity)) {
     throw new Error('该批次属于正式采购，收货数量（quantity）不能单独改账。实际部分收货请使用实收数量；纠正录入错误请打开“数量纠正／对账”');
   }
@@ -25727,7 +25729,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
   const requestKey=String(body.request_key||'');
   if(workspaceBatch){
     if(!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(requestKey)||items.length>100||new Set(items.map(i=>Number(i.product_id))).size!==items.length)throw Object.assign(new Error('批量登记限1至100个不同库存商品，请重新打开采购表'),{statusCode:400});
-    for(const item of items)if(!Number.isSafeInteger(Number(item.quantity))||Number(item.quantity)<1||Number(item.quantity)>1000000||(item.actual_quantity!=null&&Number(item.actual_quantity)!==Number(item.quantity))||!Number.isFinite(Number(item.amount))||Number(item.amount)<=0||!Number.isFinite(Number(item.shipping_amount||0))||Number(item.shipping_amount||0)<0||normalizeProcurementPurchaseMode(item.purchase_mode)!=='shortage_purchase')throw Object.assign(new Error('批量登记请填写每项实际采购件数和货款，运费不可为负；本入口只登记缺货采购'),{statusCode:400});
+    for(const item of items)if(!Number.isSafeInteger(Number(item.product_id))||Number(item.product_id)<=0||!Number.isSafeInteger(Number(item.quantity))||Number(item.quantity)<1||Number(item.quantity)>1000000||(item.actual_quantity!=null&&Number(item.actual_quantity)!==Number(item.quantity))||!Number.isFinite(Number(item.amount))||Number(item.amount)<=0||!Number.isFinite(Number(item.shipping_amount||0))||Number(item.shipping_amount||0)<0||normalizeProcurementPurchaseMode(item.purchase_mode)!=='shortage_purchase')throw Object.assign(new Error('批量登记请填写每项实际采购件数和货款，运费不可为负；本入口只登记缺货采购'),{statusCode:400});
   }
   const requestHash=workspaceBatch?createHash('sha256').update(JSON.stringify({...body,request_key:undefined})).digest('hex'):null;
   const unbound = items.find((item) => !Number(item.product_id || 0));
@@ -25764,6 +25766,12 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     await guard();
     await assertInventoryReferences(scope, body, inspect);
     if(savedPurchase){if(savedPurchase.hash!==requestHash)throw Object.assign(new Error('这次批量采购已登记，不能用同一提交标识修改内容，请刷新采购记录'),{statusCode:409});return{...savedPurchase.result,duplicate:true};}
+    if(workspaceBatch){
+    const bundle=(await mysqlConnectionQuery(connection,`SELECT c.product_id FROM product_components c JOIN products p ON p.id=c.product_id AND ${inventoryTenantSql(scope,'p')}
+      WHERE c.product_id IN (${items.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'c')} LIMIT 1 FOR SHARE`,items.map(item=>Number(item.product_id))))[0];
+    if(bundle)throw Object.assign(new Error('请展开套装，按实际缺少的最小实物库存登记采购；不要把整个套装当作一个配件'),{statusCode:409});
+  }
+
     const directResults = [];
     for (const item of directItems) {
       await guard();
@@ -34651,6 +34659,9 @@ async function readLedgerWithFlow(query, tenantId) {
   }
   return ledger;
 }
+const purchaseBundleReviewService=createPurchaseBundleReview({ledger:procurementLedgerService});
+export const purchaseBundleContextMysql=(params,session)=>purchaseBundleReviewService.context(params,session);
+export const reviewPurchaseBundleMysql=(body,session)=>purchaseBundleReviewService.review(body,session);
 export const procurementLedgerMysql = (query, tenantId = "admin") => readLedgerWithFlow(query, tenantId);
 export const procurementStockCostTasksMysql = (query, tenantId = "admin") => procurementLedgerService.costTasks(query, tenantId);
 export const applyProcurementLedgerMysql = (body, personId, tenantId = "admin") => procurementLedgerService.apply(body, personId, null, tenantId);

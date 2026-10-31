@@ -1,3 +1,4 @@
+import { loadInventoryComposition } from './inventory-composition.js';
 import { procurementRequestDisplay } from '../shared/procurement-request-display.js';
 import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
 import { createInventoryWorkspaceReader } from './inventory-workspace-reader.js';
@@ -31,13 +32,18 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const missing=ids.filter(id=>fresh||!(workflowCache.get(`${prefix}${scope.id}:${id}`)?.expires>Date.now()));
     if(missing.length){
       const placeholders=missing.map(()=>'?').join(',');
-      const [coverage,settingsRows,incoming,sourceRows]=await Promise.all([
+      const [coverage,settingsRows,incoming,sourceRows,stocktakes,composition]=await Promise.all([
         providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault,localStateOnly:localOnly}),
         query(`SELECT product_id,settings_json FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,${placeholders})`,[scope.id,...missing]),
         localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
           JOIN inbound_records ir ON ir.purchase_order_item_id=poi.id AND ir.product_id=poi.product_id AND ${inventoryTenantSql(scope,'ir')}
           WHERE poi.product_id IN (${placeholders}) AND ${inventoryTenantSql(scope,'poi')} AND ir.status='pending_arrival' AND po.status NOT IN ('cancelled','pending_purchase') GROUP BY poi.product_id`,missing),
-        localOnly?Promise.resolve({requests:[],applications:[]}):workspaceSources(missing,scope.id)
+        localOnly?Promise.resolve({requests:[],applications:[]}):workspaceSources(missing,scope.id),
+        query(`SELECT a.product_id,a.created_at,a.result_json FROM procurement_ledger_actions a
+          JOIN products p ON p.id=a.product_id AND ${inventoryTenantSql(scope,'p')}
+          WHERE a.action_type='stocktake' AND a.product_id IN (${placeholders})
+          AND NOT EXISTS(SELECT 1 FROM procurement_ledger_actions newer WHERE newer.product_id=a.product_id AND newer.action_type='stocktake' AND newer.id>a.id)`,missing),
+        localOnly?Promise.resolve(null):loadInventoryComposition(query,scope)
       ]);
       const {requests,applications:applicationRows}=sourceRows;
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
@@ -59,11 +65,14 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const product=byProduct.get(id),stock=stocks.get(id);
         const orders=ordersByProduct.get(id)||[];
         const open=orders.filter(o=>o.needs_fulfillment),sum=key=>open.reduce((s,o)=>s+Number(o[key]||0),0);
-        const local={product,physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incomingByProduct.get(id)?.quantity||0),orders};
+        const local={product,stocktake_evidence:stocktakes.find(row=>Number(row.product_id)===id),local_stock:Number(stock?.ledger||0),open_order_deducted:Number(stock?.open_deducted||0),physical_estimate:Number(stock?.ledger||0)+Number(stock?.open_deducted||0),open_order_demand:sum('quantity'),fbp_reserved:Number(stock?.fbp_reserved||0),current_shortage:sum('shortage_quantity'),current_incoming:sum('incoming_quantity'),incoming_quantity:Number(incomingByProduct.get(id)?.quantity||0),orders};
         const settings=validateFlowSettings({...defaults,...parse(settingsByProduct.get(id)),holidays:defaults.holidays||[]});
         const applications=applicationsByProduct.get(id)||[];
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
-        const policy={...inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),applications};
+        const rootIds=[...new Set(open.filter(o=>Number(o.root_product_id)!==id).map(o=>Number(o.root_product_id)).filter(Boolean))];
+        const relatedBundles=(composition?.affected(id)||[]).map(bundle=>({...bundle,has_open_demand:rootIds.includes(Number(bundle.id))}));
+        for(const item of open){const root=Number(item.root_product_id);if(root&&root!==id&&!relatedBundles.some(b=>Number(b.id)===root))relatedBundles.push({id:root,name:item.root_product_name,inventory_number:item.root_inventory_number,per_set_quantity:Number(item.quantity)/Math.max(1,Number(item.root_quantity)),has_open_demand:true});}
+        const policy={...inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),applications,affected_bundles:relatedBundles};
         // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
         const result=localOnly?{product_id:id,physical_recorded:policy.physical_recorded,safety_target:policy.safety_target,order_quantity:local.open_order_demand,locked_quantity:local.fbp_reserved,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);
@@ -104,6 +113,11 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   const backgroundQuery=limitInventoryDemandQueries(query);let backgroundService;
   const background=()=>backgroundService??=createInventoryWorkflowService({query:backgroundQuery});
   const workspaceSnapshot=createInventoryDemandSnapshot({query,calculate:(ids,tenantId,options)=>background().workspaceStates(ids,tenantId,options),products:tenantId=>background().workspaceProducts({},tenantId),revision:workflowRevision});
+  async function productComposition(ids,tenantId){
+    const scope=await resolveInventoryTenantScope(tenantId,query),graph=await loadInventoryComposition(query,scope);
+    for(const id of ids)await assertInventoryRecord(scope,'product',id,query);
+    return {rows:ids.map(id=>({product_id:id,product:graph.products.get(id),is_bundle:graph.isBundle(id),components:graph.components(id),affected_bundles:graph.affected(id)}))};
+  }
   async function localQuantities(ids,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),marks=ids.map(()=>'?').join(',');
     const parts=await query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c WHERE c.product_id IN (${marks}) AND ${inventoryTenantSql(scope,'c')}`,ids);
@@ -322,5 +336,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceSnapshot,workspaceSources,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receiptContext,previewReceive,receive};
+  return{read,requests,skuDetails,productComposition,localQuantities,batch,workspaceStates,workspaceSnapshot,workspaceSources,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receiptContext,previewReceive,receive};
 }
