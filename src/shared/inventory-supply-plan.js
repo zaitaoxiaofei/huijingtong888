@@ -26,6 +26,8 @@ export function inventorySupplyPlan(ledger={},applications,forecast){
  return{...evidence,known:true,required_purchase:requiredFbs+requiredFbp.purchase,optional_purchase:local.purchase+(optionalFbp?.purchase||0),required_fbs:requiredFbs,required_fbp:requiredFbp.purchase,
   optional_local:local.purchase,optional_fbp:optionalFbp?.purchase??null,fbp_forecast_known:fbp.known,fbp_forecast_quantity:predicted,required_fbp_physical_gap:requiredFbp.physical_gap,forecast_fbp_physical_gap:optionalFbp?.physical_gap??null,
   fbs_waiting_incoming:orderIncoming,fbp_waiting_incoming:requiredFbp.incoming,fbp_ready_stock:requiredFbp.stock,
+  fbs_physical_gap:orderGap,local_ready_stock:local.stock,local_waiting_incoming:local.incoming,
+  forecast_ready_stock:optionalFbp?.stock??null,forecast_waiting_incoming:optionalFbp?.incoming??null,
   local_physical_gap:local.physical_gap,fbp_physical_gap:requiredFbp.physical_gap+(optionalFbp?.physical_gap||0),
   submitted_fbp_quantity:requested,unbacked_fbp_locks:Math.max(0,locked-physical)};
 }
