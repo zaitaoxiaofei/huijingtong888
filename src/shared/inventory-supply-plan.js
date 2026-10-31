@@ -10,7 +10,7 @@ export function inventorySupplyPlan(ledger={},applications,forecast){
  const fbp=fbpSupplyState(forecast,ledger.fbp_inventory);
  const requested=applicationsKnown?applications.filter(a=>a.status==='pending_review').reduce((sum,a)=>sum+qty(a.requested_quantity),0):null;
  const evidence={order_quantity:known(ledger.open_order_demand)?qty(ledger.open_order_demand):null,locked_quantity:known(ledger.fbp_reserved)?qty(ledger.fbp_reserved):null,submitted_fbp_quantity:requested};
- const empty={...evidence,known:false,required_purchase:null,optional_purchase:null,required_fbs:null,required_fbp:null,optional_local:null,optional_fbp:null,fbp_forecast_known:fbp.known};
+ const empty={...evidence,known:false,required_purchase:null,optional_purchase:null,required_fbs:null,required_fbp:null,optional_local:null,optional_fbp:null,fbp_forecast_known:fbp.known,fbp_forecast_quantity:null,required_fbp_physical_gap:null,forecast_fbp_physical_gap:null};
  if(!ready)return empty;
  const physical=qty(ledger.physical_estimate),orders=qty(ledger.open_order_demand),locked=qty(ledger.fbp_reserved),incoming=qty(ledger.incoming_quantity);
  const orderGap=Math.max(0,orders-Math.max(0,physical-locked));
@@ -24,7 +24,7 @@ export function inventorySupplyPlan(ledger={},applications,forecast){
  const predicted=fbp.known?Math.max(0,fbpLocalSupplyNeed(applications,fbp)-requested):null;
  const optionalFbp=predicted===null?null:cover(predicted);
  return{...evidence,known:true,required_purchase:requiredFbs+requiredFbp.purchase,optional_purchase:local.purchase+(optionalFbp?.purchase||0),required_fbs:requiredFbs,required_fbp:requiredFbp.purchase,
-  optional_local:local.purchase,optional_fbp:optionalFbp?.purchase??null,fbp_forecast_known:fbp.known,
+  optional_local:local.purchase,optional_fbp:optionalFbp?.purchase??null,fbp_forecast_known:fbp.known,fbp_forecast_quantity:predicted,required_fbp_physical_gap:requiredFbp.physical_gap,forecast_fbp_physical_gap:optionalFbp?.physical_gap??null,
   fbs_waiting_incoming:orderIncoming,fbp_waiting_incoming:requiredFbp.incoming,fbp_ready_stock:requiredFbp.stock,
   local_physical_gap:local.physical_gap,fbp_physical_gap:requiredFbp.physical_gap+(optionalFbp?.physical_gap||0),
   submitted_fbp_quantity:requested,unbacked_fbp_locks:Math.max(0,locked-physical)};

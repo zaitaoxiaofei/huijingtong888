@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {procurementDemandDetails} from '../../services/procurement-demand-details.js';
 import {procurementArrivals} from '../../services/procurement-arrivals.js';
 import {procurementDemandRequest} from '../../services/procurement-demand-request.js';
@@ -125,8 +126,11 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
         if(!sku?.mapping_id || seen.has(key) || !Number.isSafeInteger(Number(row.quantity)) || Number(row.quantity)<1 || Number(row.quantity)>1000000) throw Object.assign(new Error('SKU绑定或件数无效，请先核对绑定；一个SKU只能提交一次'),{statusCode:400});
         seen.add(key); return {...sku,requested_qty:Number(row.quantity)};
       });
+      const forecastConfirmation=body.forecast_confirmation===true;
+      if(forecastConfirmation&&(body.submit!==true||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(String(body.request_key||''))))throw Object.assign(new Error('请正式确认FBP预测申请，并保留有效提交标识重试'),{statusCode:400});
+      const confirmation=forecastConfirmation?{key:body.request_key,hash:createHash('sha256').update(JSON.stringify({productId,note:String(body.note||'').slice(0,500),rows:rows.map(r=>({shop_id:r.shop_id,ozon_sku:r.ozon_sku,requested_qty:r.requested_qty})).sort((a,b)=>`${a.shop_id}:${a.ozon_sku}`.localeCompare(`${b.shop_id}:${b.ozon_sku}`))})).digest('hex')}:null;
       const feedback=createFbpSupplyFeedback(session);
-      const result=await services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true,afterSubmit:connection=>feedback.afterSubmit(connection,rows)});
+      const result=await services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true,forecastConfirmation:confirmation,afterSubmit:connection=>feedback.afterSubmit(connection,rows)});
       return{...result,feedback:feedback.committed()};
     },
     "POST /api/inventory-workflow/feedback": async req=>{const body=await readJson(req);return inventorySupplyFeedback(body,req._session,{automatic:body.automatic===true});},

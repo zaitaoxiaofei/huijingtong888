@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {build} from 'vite';import vue from '@vitejs/plugin-vue';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {chromium} from 'playwright-core';
 import {demoUser,demoRows,demoLedgers,demoForecasts,demoOpportunities} from './fixtures/inventory-role-workspace.js';
+import {fbpForecastSuggestions,fbpSupplyState} from '../src/shared/fbp-supply-state.js';
 import {inventoryWorkspacePage} from '../src/shared/inventory-workspace.js';
 test('role workspace previews real views, preserves printing, opens receipt/stock/FBP workflows and clears tenant scope', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1',timeout:120000},async()=>{
  const output=await fs.mkdtemp(path.join(os.tmpdir(),'role-workspace-browser-'));let browser;
@@ -13,7 +14,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
    }}],build:{outDir:output,cssCodeSplit:false,rollupOptions:{input:'virtual:workspace',output:{entryFileNames:'entry.js',chunkFileNames:'chunks/[name]-[hash].js'}}}});
   browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});
   const page=await browser.newPage({viewport:{width:1600,height:1060}}),errors=[],posts=[];let otherScope=false,workspaceReads=0,workspaceFail=false,manualRefresh=false,snapshotMode='ready',forceReads=0,statusReads=0,currentCovered=false,manualSafety=5,arrived=false;
-  page.on('pageerror',e=>errors.push(e.message));
+  page.on('pageerror',e=>errors.push(e.stack));
   await page.route('http://localhost:8788/**',async route=>{
    const url=new URL(route.request().url()),json=data=>route.fulfill({contentType:'application/json',body:JSON.stringify(data)});
    if(url.pathname==='/admin.html')return route.fulfill({contentType:'text/html',body:'<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/style.css"><style>body{margin:0;background:var(--el-bg-color-page);font-family:Arial,sans-serif;color:var(--el-text-color-primary)}.preview-banner{padding:12px 28px;background:#15253c;color:#c9defa;font-size:13px}#app{padding:24px;max-width:1550px;margin:auto;box-sizing:border-box}</style></head><body><div class="preview-banner">爆单 ERP · 库存联动开发预览 · 以下均为演示数据，不连接生产</div><div id="app"></div><script type="module" src="/entry.js"></script></body></html>'});
@@ -25,7 +26,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
    if(url.pathname==='/api/inventory-workflow/purchase-arrivals'){const status=url.searchParams.get('status');return json({rows:(!arrived&&status==='open')||(arrived&&status==='arrived')?[{id:301,product_id:102,product_name:demoRows[1].product_name,inventory_number:'8-1',quantity:18,status:'pending_arrival',arrival_state:arrived?'arrived':'open',received_at:arrived?'2026-10-30T02:00:00Z':null,updated_at:'2026-10-30T01:00:00Z',order_no:'PO-DEMO-102',buyer_name:'演示采购',purchased_at:'2026-10-26T02:00:00Z'}]:[],total:1,summary:{open:arrived?0:1,arrived:arrived?1:0}});}
    if(url.pathname==='/api/inventory-workflow/receipts')return json({rows:[{id:301,quantity:18,order_no:'PO-DEMO-102'}]});
    if(url.pathname==='/api/inventory-workflow'&&url.searchParams.get('view')==='status'){statusReads++;if(currentCovered)return json({rows:[{product_id:id,supply_plan:{known:true,required_purchase:0,optional_purchase:0}}]});}
-   if(url.pathname==='/api/inventory-workflow')return json({rows:[{...demoRows.find(r=>r.product_id===id)?.workflow,product_id:id,forecast,skus:forecast.skus}]});
+   if(url.pathname==='/api/inventory-workflow')return json({rows:[{...demoRows.find(r=>r.product_id===id)?.workflow,product_id:id,forecast,skus:forecast.skus,fbp_forecast_suggestions:fbpForecastSuggestions(demoRows.find(r=>r.product_id===id)?.workflow.applications||[],fbpSupplyState(forecast,{incomplete:false}))}]});
    if(['/api/inventory/ledger','/api/procurement/ledger'].includes(url.pathname))return json(ledger);
    if(url.pathname==='/api/inventory-flow/sync-status')return json({task:{status:'completed'},status:'completed'});
    if(url.pathname==='/api/fbp-opportunities')return json({rows:demoOpportunities,total:demoOpportunities.length,summary:{}});
@@ -69,6 +70,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
   const firstRow=page.locator('tr').filter({hasText:demoRows[0].product_name}).first();await firstRow.getByRole('button',{name:'FBS订单',exact:true}).click();await page.getByText('FBS-DEMO-1001',{exact:true}).waitFor();await page.getByText('客户要求确认后发货',{exact:true}).waitFor();assert.equal(await page.locator('.order-product .erp-image-preview').first().evaluate(e=>{const r=e.getBoundingClientRect();return Math.round(r.width/r.height*100);}),75);await page.waitForFunction(()=>!document.querySelector('.el-loading-mask'));await page.screenshot({path:'.verification/procurement-fbs-details.png',fullPage:true,animations:'disabled'});
   await page.getByRole('tab',{name:'采购与到货记录',exact:true}).click();await page.getByText('PO-HISTORY-652',{exact:true}).waitFor();await page.getByRole('tab',{name:'本地保障规则',exact:true}).click();await page.locator('.safety-editor input[role="spinbutton"]').last().fill('3');await page.getByRole('button',{name:'保存本地保障',exact:true}).click();await page.getByText('3 件 · 人工覆盖',{exact:false}).waitFor();assert.equal(posts.find(p=>p.path==='/api/inventory-workflow/local-safety').body.quantity,3);
   await page.getByRole('tab',{name:'FBP备货申请',exact:true}).click();await page.getByText('FBP-DEMO-101',{exact:true}).waitFor();await page.waitForFunction(()=>!document.querySelector('.el-loading-mask'));await page.screenshot({path:'.verification/procurement-fbp-details.png',fullPage:true,animations:'disabled'});await page.locator('.el-drawer__close-btn').click();
+  await firstRow.getByRole('button',{name:'FBP预测预警',exact:true}).click();const forecastDetails=page.locator('[aria-label="FBP预测预警明细"]');await forecastDetails.waitFor();await forecastDetails.getByRole('button',{name:'创建FBP申请',exact:true}).click();const forecastDialog=page.getByRole('dialog',{name:'确认FBP预测并创建备货申请',exact:true});await forecastDialog.waitFor();await forecastDialog.getByText('SKU-101',{exact:true}).waitFor();assert.equal(await forecastDialog.getByRole('spinbutton').first().inputValue(),'4');await page.screenshot({path:'.verification/fbp-forecast-confirm.png',fullPage:true,animations:'disabled'});await forecastDialog.getByRole('button',{name:'确认创建FBP申请',exact:true}).click();await forecastDialog.waitFor({state:'hidden'});const conversion=posts.find(p=>p.path==='/api/inventory-workflow/fbp'&&p.body.forecast_confirmation);assert.equal(conversion.body.submit,true);assert.equal(conversion.body.rows.length,1);assert.equal(conversion.body.rows[0].quantity,4);assert.match(conversion.body.request_key,/^[a-f0-9-]{36}$/);await page.locator('.el-drawer__close-btn').click();
   await page.screenshot({path:'.verification/role-procurement-light.png',fullPage:true,animations:'disabled'});
   await page.evaluate(()=>{document.documentElement.classList.add('dark');document.documentElement.dataset.theme='dark';document.body.dataset.theme='dark';});
   await page.screenshot({path:'.verification/role-procurement-dark.png',fullPage:true,animations:'disabled'});
@@ -102,7 +104,7 @@ test('role workspace previews real views, preserves printing, opens receipt/stoc
   await fbp.locator('.el-checkbox').nth(1).click();await fbp.getByText('24 件',{exact:true}).waitFor();
   await page.screenshot({path:'.verification/role-operations-grouped-fbp.png',fullPage:true,animations:'disabled'});
   await fbp.getByRole('button',{name:'提交备货申请',exact:true}).click();
-  const submitted=posts.find(p=>p.path==='/api/inventory-workflow/fbp');assert.equal(submitted.body.rows.length,1,'unselected related SKU is not copied into a request');assert.equal(submitted.body.submit,true);
+  const submitted=posts.find(p=>p.path==='/api/inventory-workflow/fbp'&&!p.body.forecast_confirmation);assert.equal(submitted.body.rows.length,1,'unselected related SKU is not copied into a request');assert.equal(submitted.body.submit,true);
   await page.evaluate(()=>window.previewRouter.push('/orders?mode=inventory'));
   await page.getByText(demoRows[0].product_name,{exact:true}).first().waitFor();
   otherScope=true;await page.evaluate(()=>window.previewScope());

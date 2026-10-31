@@ -17,6 +17,11 @@ test('receiving tabs share exact product matching, status, demand type and enter
   await t.test('three demand types use request purpose, not whether an FBP application happens to have an order ID',async()=>{for(const [demandType,id] of [['real_order',1],['local_safety',2],['fbp_stock',3]]){const result=await read({status:'pending_arrival',demandType,pageSize:1});assert.equal(result.total,1,demandType);assert.equal(Number(result.rows[0].id),id);}});
   await t.test('exact SKU and structured attributes apply before pagination',async()=>{const result=await read({status:'pending_arrival',searchMode:'sku',query:'20001',color:'黑色',vehicleModel:'T4',material:'TPU',pageSize:1});assert.equal(result.total,2);assert.equal(result.rows.length,1);assert.equal((await read({status:'pending_arrival',searchMode:'sku',query:'2000'})).total,0);assert.equal((await read({status:'approved',inventoryType:'accessory'})).total,1);});
   await t.test('foreign enterprise records cannot be selected by SKU or direct product ID',async()=>{assert.equal((await read({status:'pending_arrival',searchMode:'sku',query:'30001'})).total,0);assert.equal((await read({status:'all',productId:300})).total,0);});
-  assert.equal(Number((await q('SELECT SUM(quantity) n FROM inbound_records'))[0].n),125,'Read-only filters never change receipt quantities');
+  await t.test('purchased FBP forecasts remain a separate fourth purpose and never fall through into local safety',async()=>{
+   await q("INSERT INTO procurement_requests(id,tenant_id,product_id,quantity,amount,status,demand_type,request_reason_code,source_type) VALUES(7,2,201,4,8,'purchased','warehouse_request','flow_fbp_forecast','warehouse')");
+   await q("INSERT INTO inbound_records(id,tenant_id,product_id,procurement_request_id,quantity,amount,status) VALUES(7,2,201,7,4,8,'pending_arrival')");
+   const forecast=await read({status:'pending_arrival',demandType:'fbp_forecast'});assert.equal(forecast.total,1);assert.equal(Number(forecast.rows[0].id),7);assert.equal((await read({status:'pending_arrival',demandType:'local_safety'})).total,1);assert.equal((await read({status:'pending_arrival',demandType:'fbp_stock'})).total,1);
+  });
+  assert.equal(Number((await q('SELECT SUM(quantity) n FROM inbound_records'))[0].n),129,'Read-only filters never change receipt quantities');
  }finally{await closeMysqlPool();await f.cleanup();}
 });

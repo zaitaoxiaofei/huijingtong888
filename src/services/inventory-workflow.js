@@ -5,7 +5,7 @@ import { inventoryProductSearch } from './inventory-product-search.js';
 import { inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern } from './inventory-search.js';
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { inventoryWorkflow, INVENTORY_DEMAND_TYPES, procurementDemandType } from '../shared/inventory-workflow.js';
-import { fbpSupplyState } from '../shared/fbp-supply-state.js';
+import { fbpSupplyState,fbpForecastSuggestions } from '../shared/fbp-supply-state.js';
 import { loadFbpSafetyProjections } from './fbp-safety-projection.js';
 import { inventoryFlow, createInventoryFlowService } from './inventory-flow.js';
 import { resolveInventoryTenantScope, assertInventoryRecord, inventoryTenantSql } from './inventory-tenant-scope.js';
@@ -242,6 +242,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const projected={...local,fbp_inventory:fbp.fbp_inventory,flow_summary:{...local.flow_summary,applications:fbp.applications,applications_pending:false}};
       const result=inventoryWorkflow(projected,{applications:fbp.applications,forecast:prediction,requests});
       return {...result,product_id:id,forecast_error:forecastError,settings:prediction?.settings,
+        fbp_forecast_suggestions:fbpForecastSuggestions(fbp.applications,result.fbp),
         forecast:prediction?{skus:prediction.skus,stock_incomplete:prediction.stock_incomplete}:null,
         skus:(prediction?.skus||[]).map(r=>({shop_id:r.shop_id,shop_name:r.shop_name,ozon_sku:r.ozon_sku,mapping_id:r.mapping_id,offer_id:r.offer_id,per_set_quantity:r.per_set_quantity,category:r.category,suggested_qty:r.suggested_qty,available:r.available,status:r.status})),
         applications:fbp.applications,transfers:fbp.transfers,
@@ -255,7 +256,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   }
   async function submit(body,session){
     const id=Number(body.product_id),quantity=Number(body.quantity),type=String(body.demand_type||''),note=String(body.note||'').trim(),requestKey=String(body.request_key||'');
-    if(!INVENTORY_DEMAND_TYPES.some(t=>t.key===type)||!Number.isSafeInteger(quantity)||quantity<1||quantity>1000000||!Number.isSafeInteger(id)||id<1)throw fail('请选择三类采购需求之一、库存商品和大于0的整数件数');
+    if(!INVENTORY_DEMAND_TYPES.some(t=>t.key===type)||!Number.isSafeInteger(quantity)||quantity<1||quantity>1000000||!Number.isSafeInteger(id)||id<1)throw fail('请选择四类采购需求之一、库存商品和大于0的整数件数');
     if(!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(requestKey)||note.length>500)throw fail('本次申请标识无效或说明超过500字，请重新打开申请表');
     const result=await transaction(async c=>{
       const q=async(sql,args=[])=>(await c.query(sql,args))[0];
@@ -277,11 +278,11 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const summary=await createInventoryFlowSummaryReader({query:q})({product:{id},fbp_inventory:stocks},scope.id,{fbpOnly:true});
         const pending=summary.applications.filter(a=>['pending_review','approved','ozon_created'].includes(a.status));
         const locked=pending.length?await q(`SELECT wo.id FROM fbp_replenishment_orders wo JOIN shops ws ON ws.id=wo.shop_id AND ${inventoryTenantSql(scope,'ws')} WHERE wo.id IN (${[...new Set(pending.map(a=>Number(a.order_id)))].map(()=>'?').join(',')}) AND wo.status IN ('pending_review','approved','ozon_created') FOR UPDATE`,[...new Set(pending.map(a=>Number(a.order_id)))]):[];
-        if(!locked.length){
-          const prediction=await createInventoryFlowService({query:q}).detail(id,scope.id,{official:stocks,balance:{physical_stock:0,open_order_demand_qty:0,fbp_reserved_qty:0}});
-          const replenishment=fbpSupplyState(prediction,stocks);
-          if(!replenishment.known||!(replenishment.replenish_quantity>0))throw fail('请先提交FBP备货申请，或核对FBP官方可用库存低于安全目标且尚未被在途、已确认备货覆盖的缺口；草稿不产生采购需求');
-        }
+        if(!locked.length)throw fail('请先提交FBP备货申请；未确认的缺货属于黄色FBP预测预警建议，不是正式申请');
+      }
+      if(type==='fbp_forecast'){
+        const [state]=await createInventoryWorkflowService({query:q}).batch([id],scope.id,{fresh:true,cache:false});
+        if(!state.supply_plan?.known||!state.supply_plan.fbp_forecast_known||!(state.supply_plan.optional_fbp>0)||quantity>state.supply_plan.optional_fbp)throw fail('FBP预测采购缺口已被申请、现货或在途覆盖，或数据尚未核实；请刷新后按黄色建议数量创建，不重复增加采购',409);
       }
       const members=await q(`SELECT p.id,p.name,p.role,p.roles_json,tm.role AS tenant_role,tm.business_roles_json,t.slug AS tenant_slug FROM tenant_members tm
         JOIN people p ON p.id=tm.person_id AND p.active=1 JOIN tenants t ON t.id=tm.tenant_id WHERE tm.tenant_id=? AND tm.active=1 FOR UPDATE`,[scope.id]);

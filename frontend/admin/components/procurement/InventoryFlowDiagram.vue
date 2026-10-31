@@ -61,7 +61,7 @@ const nodes = computed(() => [
  {key:'fbp-physical',label:'FBP可用库存',display:props.fbpLoading?'正在核对':props.fbpError?'同步未完成':official.value?.incomplete?'部分未同步':'',value:official.value?.incomplete?null:official.value?.available,hint:'官方可售数量 · 独立于本地仓',icon:House,lane:'fbp',primary:true},
  {key:'fbp-orders',label:'FBP订单占用',value:fbpReserved.value,hint:'从FBP可用库存出单',icon:Document,lane:'fbp'},
  {key:'fbp-fulfil',label:'FBP仓销售发货',display:'平台仓履约',hint:'销售消耗后继续核对可用库存',icon:SoldOut,lane:'fbp'},
- {key:'fbp-safety',label:'FBP安全库存目标',value:workflowState.value.fbp?.safety,hint:'低于目标先补货，货源不足再采购',icon:Warning,lane:'alert'}
+ {key:'fbp-safety',label:'FBP安全库存目标',value:workflowState.value.fbp?.safety,hint:'黄色预测建议，正式确认后再保障采购',icon:Warning,lane:'alert'}
 ]);
 const lanes = [
  {key:'purchase',title:'采购与到货',hint:'采购到货验收后，才进入本地实物'},
@@ -123,8 +123,9 @@ function drawConnections() {
   // Feedback is demand, never another physical deduction. Keep it outside the
   // warehouse paths and only show an actionable purchase gap.
   const demands=workflowState.value.demands||[];
-  const purchaseGap=demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0;
+  const purchaseGap=demands.find(d=>d.key==='fbp_forecast')?.purchase_quantity>0;
   if(purchaseGap)add('fbp-safety','requests',[[feedback.left+14,feedback.bottom-14],[12,feedback.bottom-14],[12,request[1]],request],{kind:'warning'});
+  if(demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0)add('application','requests',[applicationNeed,[12,applicationNeed[1]],[12,request[1]],request],{kind:'warning'});
   for(const key of ['orders','safety'])if(demands.find(d=>d.key===(key==='orders'?'real_order':'local_safety'))?.purchase_quantity>0){
     const start=port(key,key==='orders'?'top':'bottom'),y=key==='orders'?boxes.get(key).top-14:local.bottom-29;
     add(key,'requests',[start,[start[0],y],[12,y],[12,request[1]],request],{kind:'warning'});
@@ -227,10 +228,11 @@ watch(() => props.ledger.product?.id, () => { selected.value = ''; });
       <div class="flow-fbp-feedback" :class="`is-${workflowState.fbp?.status||'unknown'}`">
         <span class="flow-feedback-icon" aria-hidden="true"><Warning v-if="workflowState.fbp?.shortage>0"/><CircleCheck v-else/></span>
         <div class="flow-feedback-copy"><strong>{{workflowState.fbp?.known?(workflowState.fbp.shortage>0?'FBP可用低于安全库存目标':'FBP可用库存达到当前安全目标'):'FBP安全库存正在核对'}}</strong>
-          <p v-if="workflowState.fbp?.known">可用 {{quantity(workflowState.fbp.available)}} · 安全目标 {{quantity(workflowState.fbp.safety)}} · 低于目标 {{quantity(workflowState.fbp.shortage)}}<span v-if="workflowState.fbp.shortage>0">；扣除在途及已确认备货后，还需补货 {{quantity(workflowState.fbp.replenish_quantity)}}</span></p>
+          <p v-if="workflowState.fbp?.known">可用 {{quantity(workflowState.fbp.available)}} · 安全目标 {{quantity(workflowState.fbp.safety)}} · 低于目标 {{quantity(workflowState.fbp.shortage)}}<span v-if="workflowState.fbp.shortage>0">；扣除在途及已确认备货后，待安排补货 {{quantity(workflowState.fbp.replenish_quantity)}}</span></p>
           <p v-else>先显示本地库存；FBP官方库存和销量核对完成后再判断，不把未知数量当零。</p>
+          <p>本地保障建议 {{quantity(workflowState.supply_plan?.optional_local)}} · FBP预测建议 {{quantity(workflowState.supply_plan?.optional_fbp)}} · FBP正式申请必须采购 {{quantity(workflowState.supply_plan?.required_fbp)}}</p>
         </div>
-        <div class="flow-feedback-actions"><el-button link type="primary" @click="openDetails('fbp-safety')">核对安全目标</el-button><el-button v-if="workflowState.fbp?.replenish_quantity>0" type="primary" plain @click="emit('workflow-action','fbp')">提交FBP补货需求</el-button><el-button v-if="workflowState.demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0" type="warning" plain @click="emit('workflow-action','request','fbp_stock')">提交采购申请</el-button></div>
+        <div class="flow-feedback-actions"><el-button link type="primary" @click="openDetails('fbp-safety')">核对安全目标</el-button><el-button v-if="workflowState.fbp?.replenish_quantity>0" type="primary" plain @click="emit('workflow-action','forecast')">确认预测并创建FBP申请</el-button><el-button v-if="workflowState.demands.find(d=>d.key==='fbp_forecast')?.purchase_quantity>0" type="warning" plain @click="emit('workflow-action','request','fbp_forecast')">提交黄色采购建议</el-button><el-button v-if="workflowState.demands.find(d=>d.key==='fbp_stock')?.purchase_quantity>0" type="warning" plain @click="emit('workflow-action','request','fbp_stock')">提交采购申请</el-button></div>
       </div>
     </div>
     </div>

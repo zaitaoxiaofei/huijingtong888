@@ -6,7 +6,7 @@ test('procurement covers formal FBP after actual orders before optional safety; 
  const draft=inventoryWorkflow(base,{applications:[{status:'draft',requested_quantity:300}]});
  assert.equal(draft.free,90);assert.equal(draft.requested,0);assert.equal(draft.purchase_quantity,0);assert.equal(draft.demands[2].status,'success');assert.equal(draft.demands[2].process_status,'draft');
  const submitted=inventoryWorkflow(base,{applications:[{status:'pending_review',requested_quantity:150}]});
- assert.deepEqual(submitted.demands.map(d=>d.purchase_quantity),[0,60,0]);assert.equal(submitted.purchase_quantity,60);assert.equal(submitted.free,90);
+ assert.deepEqual(submitted.demands.map(d=>d.purchase_quantity),[0,60,0,null]);assert.equal(submitted.purchase_quantity,60);assert.equal(submitted.free,90);
 });
 test('confirmed FBP is locked exactly once; historical shipment never creates a new shortage',()=>{
  const state=inventoryWorkflow({...base,fbp_reserved:90},{applications:[{status:'approved',requested_quantity:150},{status:'sent',requested_quantity:300}]});
@@ -14,7 +14,7 @@ test('confirmed FBP is locked exactly once; historical shipment never creates a 
 });
 test('inbound covers actual orders and formal FBP before optional safety without increasing physical availability',()=>{
  const state=inventoryWorkflow({...base,physical_estimate:3,open_order_demand:10,current_shortage:0,current_incoming:7,incoming_quantity:120},{applications:[{status:'pending_review',requested_quantity:20}]});
- assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,7,0]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'warning');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
+ assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,7,0,null]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'warning');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
 });
 test('unknown physical, protection or application data never claims a known procurement total',()=>{
  for(const patch of [{physical_estimate:-1},{physical_estimate:null},{flow_summary:{safety:null,applications:[]}}]){
@@ -29,7 +29,7 @@ test('multiple people remind one supply pool without multiplying the recommended
 });
 test('FBP opportunity remains advisory, source and demand type stay separate',()=>{
  const state=inventoryWorkflow(base,{forecast:{skus:[{suggested_qty:100,available:0}]}});
- assert.equal(state.demands[2].status,'success');assert.equal(state.demands[2].advisory_status,'opportunity');assert.equal(state.purchase_quantity,0);assert.equal(state.free,90);
+ assert.equal(state.demands[2].status,'success');assert.equal(state.demands[3].advisory_status,'opportunity');assert.equal(state.purchase_quantity,0);assert.equal(state.free,90);
  assert.equal(procurementDemandType({demand_type:'warehouse_request',request_reason_code:'flow_real_order'}),'real_order');
  assert.equal(procurementDemandType({demand_type:'warehouse_request',request_reason_code:'flow_fbp_stock'}),'fbp_stock');
  assert.equal(procurementDemandType({demand_type:'warehouse_request',source_order_item_id:1}),'local_safety');

@@ -29,7 +29,7 @@ export function createInventorySupplyFeedback({transaction=withMysqlTransaction,
    if(!recipients.length)throw fail('本企业暂无管理员、采购或运营接收人，请先配置有效岗位再反馈',409);
    const sender=people.find(p=>Number(p.id)===current.personId)?.name||'企业成员';
    const quantity=v=>v==null?'待核对':`${v}件`;
-   const content=`${sender}反馈：${product.name}。FBS必须采购${quantity(plan.required_fbs)}；正式FBP必须采购${quantity(plan.required_fbp)}；保障建议${quantity(plan.optional_purchase)}。采购在途${quantity(state.incoming)}，已有货源不重复采购。反馈说明：${note}`;
+   const content=`${sender}反馈：${product.name}。FBS必须采购${quantity(plan.required_fbs)}；正式FBP必须采购${quantity(plan.required_fbp)}；本地保障建议${quantity(plan.optional_local)}；FBP预测建议${quantity(plan.optional_fbp)}。采购在途${quantity(state.incoming)}，已有货源不重复采购。反馈说明：${note}`;
    for(const personId of recipients)await c.execute(`INSERT INTO system_notifications(tenant_id,recipient_person_id,notification_type,title,content,severity,route,entity_type,entity_id,dedupe_key,status) VALUES(?,?,'stock_topup',?,?,?,?,'inventory',?,?,'unread')`,[scope.id,personId,`${sender} · 库存缺口反馈`,content,plan.required_purchase>0?'danger':'warning',`${buyers.includes(personId)?'/procurement/workspace':'/orders'}?mode=inventory&product_id=${id}`,String(id),prefix+personId]);
    return{ok:true,duplicate:false,notified:recipients.length,recipients,tenantId:scope.id,required_purchase:plan.required_purchase??null};
   };
