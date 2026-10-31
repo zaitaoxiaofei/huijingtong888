@@ -9,21 +9,22 @@ import {startPagedWorkspacePreview} from './fixtures/paged-workspace-preview.js'
 // Real order page and real OGL drawers; all API traffic terminates in fixtures.
 test('OGL printed-order composer preserves cross-page selections, reviews and nested navigation', {skip:process.env.RUN_TASK_BROWSER_TESTS!=='1',timeout:180000},async()=>{
  const calls=[];let marked=false;
- const order=id=>({id,posting_number:`OGL-TEST-${id}`,shop_id:id%2?1:2,shop_name:id%2?'创建店铺':'同企业其他店铺',status:'awaiting_deliver',ordered_at:'2026-10-31T01:00:00Z',printed_at:'2026-10-31T02:00:00Z',item_count:1,skus:`SKU-${id}`,fulfillment_type_key:'fbs',logistics_carrier:'ogl',logistics_carrier_label:'OGL',needs_review:id===2,mark_note:id===2?(marked?'Changed note':'Manual review'):'',review_signature:id===2?(marked?'review-v2':'review-v1'):undefined});
+ const order=id=>({id,posting_number:`OGL-TEST-${id}`,shop_id:id%2?1:2,shop_name:id%2?'创建店铺':'同企业其他店铺',status:'awaiting_deliver',ordered_at:'2026-10-31T01:00:00Z',printed_at:'2026-10-31T02:00:00Z',item_count:1,skus:`SKU-${id}`,sku_names:`SKU-${id}:演示订单商品 ${id}`,sku_quantities:`SKU-${id}:1`,sku_images:`SKU-${id}:/api/products/1/image`,revenue:30,estimated_profit:5,order_details_loaded:true,fulfillment_type_key:'fbs',logistics_carrier:'ogl',logistics_carrier_label:'OGL',needs_review:id===2,mark_note:id===2?(marked?'Changed note':'Manual review'):'',review_signature:id===2?(marked?'review-v2':'review-v1'):undefined});
  const detail=()=>({batch:{id:10,official_carriage_id:'901',default_shop_id:1,dispatch_shop_name:'创建店铺',containers_count:2,official_status:'observed',status:'preparing',official_result:{}},members:[{...order(1),order_id:1,active:true,official_member:1}],summary:{active:1},events:[]});
  const server=await startPagedWorkspacePreview({stableDeps:true,apiHandler(req,res,url,send){
   if(url.pathname==='/api/orders'){const page=Number(url.searchParams.get('page')||1),size=Number(url.searchParams.get('pageSize')||30);send({rows:[order(page===1?1:2)],total:60,page,pageSize:size,counts:{all:60,awaiting_deliver:60}});return true;}
+  if(/^\/api\/orders\/\d+$/.test(url.pathname)){const id=Number(url.pathname.split('/').at(-1));send({order:order(id),items:[],finance:[]});return true;}
   if(!url.pathname.startsWith('/api/ogl-dispatch/'))return false;
   const call={path:url.pathname,method:req.method};calls.push(call);
   if(req.method==='POST'){let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{const data=JSON.parse(body||'{}');call.body=data;if(url.pathname.endsWith('/preview'))send({eligible:data.order_ids.map(order),rejected:[],counts:{eligible:data.order_ids.length}});else send(detail());});return true;}
   if(url.pathname.endsWith('/bootstrap'))send({settings:{dispatch_shop_id:1},shops:[{id:1,name:'创建店铺'},{id:2,name:'同企业其他店铺'}]});
-  else if(url.pathname.endsWith('/candidates')){const page=Number(url.searchParams.get('page')||1);send({eligible:[order(page===1?1:2)],rejected:[],total:21,page});}
+  else if(url.pathname.endsWith('/candidates')){const page=Number(url.searchParams.get('page')||1),eligibility=url.searchParams.get('eligibility')||'eligible';const all=Array.from({length:40},(_,i)=>({...order(i+1),can_select:i<6,blocked:i>=6,reason:i>=6?'仅可加入 OGL 物流订单':''}));const selected=eligibility==='all'?all:eligibility==='rejected'?all.filter(row=>row.blocked):all.filter(row=>row.can_select);const rows=selected.slice((page-1)*20,page*20);send({rows,eligible:rows.filter(row=>!row.blocked),rejected:rows.filter(row=>row.blocked),total:selected.length,page,summary:{matched:40,eligible:6,rejected:34},rejection_summary:[{code:'NON_OGL',reason:'仅可加入 OGL 物流订单',count:34}]});}
   else if(url.pathname.endsWith('/official-carriages'))send({rows:[{carriage_id:'901',local_batch_id:10,dispatch_shop:{name:'创建店铺'},status:'formed',containers_count:2,departure_date:'2026-10-31'}]});
   else if(url.pathname.endsWith('/batch'))send(detail());else send({rows:[],total:0});return true;
  }});
  const space=process.env.EGO_OGL_SPACE_ID;
  const script=`
-const task=await taskSpace(${space?Number(space):JSON.stringify('OGL workflow QA 20261031')});console.log('SPACE='+task.spaceId);const page=task.page('p1');
+const task=await taskSpace(${space?Number(space):JSON.stringify('OGL picker details QA 20261031')});console.log('SPACE='+task.spaceId);const page=task.page('p1');
 try {
 await page.cdp('Network.enable');await page.cdp('Network.setCacheDisabled',{cacheDisabled:true});
 await page.goto('http://localhost:8788/admin.html?oglqa='+Date.now()+'#/orders');await page.waitForSelector('.orders-table .el-table__body tbody tr');
@@ -39,20 +40,31 @@ console.log('STAGE_COMPOSE');await page.click('text="OGL 发运"');
 await page.click('text="组批 / 绑定发运（已选 2 单）"');await page.waitForSelector('.ogl-composer');
 await page.click("loc=role:button[name='选择']");
 await page.waitForFunction(()=>document.querySelector('.composer-target'));
+await page.evaluate(()=>{const table=document.querySelector('.ogl-composer .composer-section:nth-of-type(2) .ogl-order-table');if(table.querySelectorAll('.el-table__body tbody tr').length!==6||!table.textContent.includes('演示订单商品 1')||!table.textContent.includes('下单：'))throw Error('Full order rows or correct first-page count missing');});
+await page.click('.ogl-composer .composer-section:nth-of-type(2) button:has-text("OGL-TEST-1")');
+await page.waitForSelector('.vue-orders-detail-dialog-body');
+await page.evaluate(()=>{if(!document.querySelector('.vue-orders-detail-dialog-body').textContent.includes('OGL-TEST-1'))throw Error('Order detail did not open');document.querySelector('.vue-orders-detail-dialog-body').closest('.el-dialog').querySelector('.el-dialog__headerbtn').click();});
+await page.waitForFunction(()=>!document.querySelector('.vue-orders-detail-dialog-body'));
+await page.click('.ogl-composer .el-radio-button:has-text("不可加入")');
+await page.waitForFunction(()=>document.querySelector('.ogl-composer .composer-section:nth-of-type(2) .ogl-order-table').querySelectorAll('.el-table__body tbody tr').length===20);
+await page.evaluate(()=>{const table=document.querySelector('.ogl-composer .composer-section:nth-of-type(2) .ogl-order-table');if(!table.textContent.includes('仅可加入 OGL 物流订单')||table.querySelector('.el-table__body .el-checkbox input:not(:disabled)'))throw Error('Rejected rows hidden or selectable');});
+await page.click('.ogl-composer .el-radio-button:has-text("可加入（6）")');
+await page.waitForFunction(()=>document.querySelector('.ogl-composer .composer-section:nth-of-type(2) .ogl-order-table').querySelectorAll('.el-table__body tbody tr').length===6);
+await page.screenshot({path:${JSON.stringify(path.resolve('.verification/ogl-picker-details-preview.png'))}});
 await page.evaluate(()=>{const btn=[...document.querySelectorAll('.composer-footer button')].at(-1);if(!btn.disabled)throw Error('Marked order accepted without review');});
 await page.click('.ogl-composer .composer-section:last-child .el-checkbox');
 await page.fill('textarea[aria-label="发运复核说明"]','已核对，可合并发运');
 await page.click('text="查看申请、多个运单与分箱详情"');
-await page.waitForFunction(()=>document.querySelectorAll('.el-drawer').length===2);
+await page.waitForFunction(()=>document.querySelector('.ogl-dispatch-panel')&&document.querySelector('.ogl-composer'));
 await page.evaluate(()=>{document.querySelector('.ogl-dispatch-panel').closest('.el-drawer').querySelector('.el-drawer__close-btn').click();});
-await page.waitForFunction(()=>document.querySelectorAll('.el-drawer').length===1);
+await page.waitForFunction(()=>!document.querySelector('.ogl-dispatch-panel')&&document.querySelector('.ogl-composer'));
 await page.evaluate(()=>{if(!document.querySelector('.composer-section:last-child').textContent.includes('本次已选 2 单'))throw Error('Nested return lost selection');});
 await page.click('text="确认绑定，保持待交运"');
 await page.waitForFunction(()=>!document.querySelector('.ogl-composer'));
 console.log('OGL_BROWSER_OK');console.log(await page.snapshot());
 await page.screenshot({path:${JSON.stringify(path.resolve('.verification/ogl-composer-preview.png'))}});
 } catch(error){console.log('DIAGNOSTIC='+JSON.stringify(await page.evaluate(()=>({body:document.body.innerText.slice(0,2000),errors:window.layoutErrors}))));throw error;}
-${space?'':"await task.finish({keep:[]});"}
+
 `;
  try{const running=promisify(execFile)('ego-browser',['nodejs','-e',script],{timeout:160000,maxBuffer:1024*1024});running.child.stdin.end();running.child.stdout.on('data',data=>process.stdout.write(data));running.child.stderr.on('data',data=>process.stdout.write(data));const {stdout,stderr}=await running;await fs.writeFile('.verification/ogl-browser.log',stdout+stderr);assert.match(stdout+stderr,/OGL_BROWSER_OK/);assert.ok(!calls.some(row=>['dispatch','official-create','official-confirm'].includes(row.body?.action)));const binding=calls.find(row=>row.body?.action==='bind-orders');assert.deepEqual(binding.body.order_ids.sort(),[1,2]);assert.equal(binding.body.review_signatures['2'],'review-v1');}
  finally{await server.close();await fs.rm(server.config.cacheDir,{recursive:true,force:true});}
