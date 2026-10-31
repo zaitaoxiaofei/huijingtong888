@@ -21,6 +21,11 @@ import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
 import { consumeMembershipDialogRequest, membershipDialogRequest } from "../utils/membership-dialog.js";
 import { consumeExchangeRateDialogRequest, exchangeRateDialogRequest } from "../utils/exchange-rate-dialog.js";
+import { usePagedWorkspaceLayout } from "../composables/usePagedWorkspaceLayout.js";
+import "../styles/paged-workspace.css";
+
+const workspacePanel = ref(null);
+usePagedWorkspaceLayout(workspacePanel);
 
 const MembershipView = defineAsyncComponent(() => import("../views/MembershipView.vue"));
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
@@ -999,7 +1004,7 @@ onBeforeUnmount(() => {
               <strong>正在切换页面</strong>
             </div>
             <InventoryModuleTabs />
-            <div class="erp-workspace-panel">
+            <div ref="workspacePanel" class="erp-workspace-panel">
               <RouterView v-slot="{ Component, route: currentRoute }">
                 <!-- Closing a tab can change activeKey before its route navigation finishes. -->
                 <KeepAlive :max="6">
