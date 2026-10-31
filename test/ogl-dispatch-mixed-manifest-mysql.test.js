@@ -381,7 +381,7 @@ test('mixed OGL bags keep original-shop official evidence, local membership and 
       assert.equal((await service.candidates(session(2),{printed_from:'2026-10-22',printed_to:'2026-10-22',batch_id:batchId})).total,0);
       await assert.rejects(service.candidates(session(2),{shop_id:30}),/不属于/);
       await assert.rejects(service.action(session(2),{batch_id:batchId,action:'bind-orders',order_ids:[3],client_request_id:'foreign-bind-attempt'}),/不能绑定/);
-      await query("INSERT INTO orders(id,shop_id,posting_number,status) VALUES(4,20,'NOT-IN-OZON','awaiting_deliver')");
+      await query("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(4,20,'NOT-IN-OZON','awaiting_deliver','2026-10-23 01:00:00')");
       await query('INSERT INTO order_label_prints(order_id) VALUES(4)');
       await query("INSERT INTO ozon_orders_raw(store_id,posting_number,status,raw_json) VALUES(20,'NOT-IN-OZON','awaiting_deliver',?)",[JSON.stringify({delivery_method:{id:77,name:'OGL pickup'}})]);
       await assert.rejects(service.action(session(2),{batch_id:batchId,action:'bind-orders',order_ids:[4],client_request_id:'unlisted-own-posting'}),/未被 Ozon/);
