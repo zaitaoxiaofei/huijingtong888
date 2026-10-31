@@ -7,7 +7,7 @@ const frontendSource = fs.readFileSync(new URL("../frontend/admin/views/Dashboar
 
 test("FBP opportunity sales aggregation is bounded to recent orders", () => {
   assert.match(backendSource, /WHERE o\.ordered_at >= DATE_SUB\(UTC_TIMESTAMP\(\), INTERVAL 31 DAY\)/);
-  assert.match(backendSource, /getCachedMasterData\("fbp-opportunities:base:v2"/);
+  assert.match(backendSource, /getCachedMasterData\(`fbp-opportunities:base:v2:\$\{scope.id\}`/);
 });
 
 test("dashboard loads FBP opportunities independently from the main snapshot", () => {

@@ -1,4 +1,5 @@
 <script setup>
+import { mergeDashboardSections } from "../../../src/shared/dashboard-sections.js";
 import { hasPermission } from "../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -37,7 +38,9 @@ const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);
 const hasDashboardLoaded = ref(false);
-const overviewPanelsLoading = ref(false);
+const shopLimitsLoading = ref(false);
+const topInventoryLoading = ref(false);
+let overviewRequestSeq = 0;
 const shopProductLimits = ref([]);
 const topInventoryRows = ref([]);
 const topInventoryError = ref("");
@@ -165,26 +168,7 @@ async function getDashboardWithRetry(url, options = {}, retries = 2) {
 }
 
 function mergeDashboardPayload(payload) {
-  dashboard.value = {
-    ...dashboard.value,
-    ...(payload || {}),
-    summary: {
-      ...dashboard.value.summary,
-      ...(payload?.summary || {})
-    },
-    commerce: {
-      ...dashboard.value.commerce,
-      ...(payload?.commerce || {}),
-      advertising: {
-        ...dashboard.value.commerce.advertising,
-        ...(payload?.commerce?.advertising || {})
-      }
-    },
-    alerts: {
-      ...dashboard.value.alerts,
-      ...(payload?.alerts || {})
-    }
-  };
+  dashboard.value = mergeDashboardSections(dashboard.value, payload || {});
 }
 
 async function applyDashboardDate(value) {
@@ -942,6 +926,7 @@ const dashboardInsightCards = computed(() => [
 ]);
 
 async function loadDashboard(options = {}) {
+  const scope = currentApiCacheScope();
   const requestSeq = ++dashboardRequestSeq;
   const dateKey = String(options?.dateKey || selectedDate.value).slice(0, 10);
   const forceRefresh = options === true || options?.refresh === true;
@@ -953,7 +938,7 @@ async function loadDashboard(options = {}) {
       hasDashboardLoaded.value = true;
     }
   }
-  if (!snapshotOnly) loadOverviewPanels(dateKey);
+
   if (!snapshotOnly) dashboardSnapshotRefreshAttempts = 0;
   const showInitialLoading = !hasDashboardLoaded.value;
   if (showInitialLoading) {
@@ -972,12 +957,13 @@ async function loadDashboard(options = {}) {
       ...(forceRefresh ? { noCache: true, cache: "no-store" } : {}),
       routeScoped: false
     });
-    if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value) return;
+    if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
     snapshotBuilding.value = res?.snapshot?.status === "building";
     mergeDashboardPayload(res);
+    if (res?.snapshot?.status === "partial") ElMessage.warning("部分首页指标暂未更新，请稍后刷新");
     hasDashboardLoaded.value = true;
-    if (res?.snapshot?.status !== "building") writeDashboardSessionCache(dateKey, res);
-    if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 20) {
+    if (["fresh", "snapshot"].includes(res?.snapshot?.status)) writeDashboardSessionCache(dateKey, res);
+    if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 60) {
       dashboardSnapshotRefreshAttempts += 1;
       scheduleDashboardSnapshotReload(1500);
     } else if (!forceRefresh && !snapshotOnly) {
@@ -986,14 +972,15 @@ async function loadDashboard(options = {}) {
     }
   } catch (error) {
     console.error(error);
-    if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 20) {
+    if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 60) {
       dashboardSnapshotRefreshAttempts += 1;
       scheduleDashboardSnapshotReload(Math.min(1500 * dashboardSnapshotRefreshAttempts, 6000));
     }
     if (hasDashboardLoaded.value || (!showInitialLoading && !forceRefresh)) return;
     ElMessage.error("首页摘要加载失败");
   } finally {
-    if (requestSeq !== dashboardRequestSeq) return;
+    if (requestSeq !== dashboardRequestSeq || scope !== currentApiCacheScope()) return;
+    if (!snapshotOnly) loadOverviewPanels(dateKey);
     if (showInitialLoading) {
       loading.value = false;
     } else {
@@ -1006,6 +993,7 @@ async function loadTopInventory(dateKey = selectedDate.value) {
   const scope = currentApiCacheScope();
   const requestSeq = ++rankingRequestSeq;
   topInventoryError.value = "";
+  topInventoryLoading.value = true;
   const params = new URLSearchParams({ dimension: "product", inventory: "1", from: dateKey, to: dateKey,
     page: "1", pageSize: "15", sortBy: "revenue", sortOrder: "desc", fast: "1" });
   try {
@@ -1017,6 +1005,8 @@ async function loadTopInventory(dateKey = selectedDate.value) {
     if (requestSeq === rankingRequestSeq && scope === currentApiCacheScope()) {
       topInventoryError.value = error?.message || "库存榜单读取失败，请重试";
     }
+  } finally {
+    if (requestSeq === rankingRequestSeq) topInventoryLoading.value = false;
   }
 }
 
@@ -1028,24 +1018,25 @@ function clearInventoryRanking() {
 }
 
 async function loadOverviewPanels(dateKey = selectedDate.value) {
-  overviewPanelsLoading.value = true;
-  try {
-    const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
-      if (dateKey !== selectedDate.value) return;
-      shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
-    });
-    const rankingRequest = loadTopInventory(dateKey);
-    const fbpOpportunityRequest = getDashboardWithRetry("/api/fbp-opportunities?page=1&pageSize=1", { routeScoped: false }).then((result) => {
-      if (dateKey !== selectedDate.value) return;
-      dashboard.value.summary = {
-        ...dashboard.value.summary,
-        fbp_opportunities: result?.summary || {}
-      };
-    });
-    await Promise.allSettled([limitsRequest, rankingRequest, fbpOpportunityRequest]);
-  } finally {
-    if (dateKey === selectedDate.value) overviewPanelsLoading.value = false;
-  }
+  const requestSeq = ++overviewRequestSeq;
+  const scope = currentApiCacheScope();
+  const isCurrent = () => requestSeq === overviewRequestSeq && dateKey === selectedDate.value && scope === currentApiCacheScope();
+  shopLimitsLoading.value = true;
+  const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
+    if (!isCurrent()) return;
+    shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
+  }).finally(() => {
+    if (isCurrent()) shopLimitsLoading.value = false;
+  });
+  const rankingRequest = loadTopInventory(dateKey);
+  const fbpOpportunityRequest = getDashboardWithRetry("/api/fbp-opportunities?page=1&pageSize=1", { routeScoped: false }).then((result) => {
+    if (!isCurrent()) return;
+    dashboard.value.summary = {
+      ...dashboard.value.summary,
+      fbp_opportunities: result?.summary || {}
+    };
+  });
+  await Promise.allSettled([limitsRequest, rankingRequest, fbpOpportunityRequest]);
 }
 
 function scheduleDashboardSnapshotReload(delay = 2500) {
@@ -1067,6 +1058,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   ++rankingRequestSeq;
+  ++overviewRequestSeq;
+  ++dashboardRequestSeq;
   window.removeEventListener("erp:auth-scope-changed", clearInventoryRanking);
   clearDashboardSnapshotReload();
 });
@@ -1524,7 +1517,7 @@ onBeforeUnmount(() => {
         <div class="dashboard-overview-grid">
           <DashboardInventoryRanking
             :rows="topInventoryRows" :date="selectedDate" :date-text="selectedDateText"
-            :loading="overviewPanelsLoading" :error="topInventoryError" :has-more="topInventoryHasMore"
+            :loading="topInventoryLoading" :error="topInventoryError" :has-more="topInventoryHasMore"
             @retry="loadTopInventory()"
           />
 
@@ -1555,7 +1548,7 @@ onBeforeUnmount(() => {
                 </div>
               </article>
             </div>
-            <el-skeleton v-else-if="overviewPanelsLoading" :rows="5" animated />
+            <el-skeleton v-else-if="shopLimitsLoading" :rows="5" animated />
             <el-empty v-else description="暂无店铺额度数据" :image-size="72" />
           </section>
         </div>

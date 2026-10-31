@@ -1,3 +1,4 @@
+import { mergeDashboardSections } from "../shared/dashboard-sections.js";
 import { captureFbpReceiptBaseline } from './fbp-receipt-review.js';
 import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from './inventory-product-search.js';
 import { createInventoryWorkflowService } from './inventory-workflow.js';
@@ -407,6 +408,7 @@ let fbpReplenishmentSchemaReadyMysql = false;
 let skuInventoryRecipeSchemaReadyMysql = false;
 let productCompositionSchemaReadyMysql = false;
 const dashboardSnapshotRefreshJobsMysql = new Map();
+const dashboardSnapshotProgressMysql = new Map();
 
 const FALLBACK_ORDER_LOGISTICS_METHODS_MYSQL = DEFAULT_ORDER_LOGISTICS_FILTER_RULES.map((item) => ({
   value: item.value,
@@ -29120,39 +29122,6 @@ export async function pendingSettlementCostsMysql(query = {}) {
   return { rows: groups.slice(offset, offset + pageSize), total: groups.length, itemTotal: normalized.length, page, pageSize, totalPages: Math.max(1, Math.ceil(groups.length / pageSize)), summary, shops: await shopsMysql() };
 }
 
-async function dashboardSnapshotIsStaleMysql(snapshot = {}, dateKey = todayDateKeyMysql(), tenantId = "admin") {
-  const scope = await orderListTenantScopeMysql(tenantId);
-  const snapshotUpdatedAt = new Date(snapshot?.snapshot?.source_updated_at || snapshot?.snapshot?.refreshed_at || "");
-  if (Number.isNaN(snapshotUpdatedAt.getTime())) return true;
-  const dateFilter = profitOrderedAtUtcRangeMysql("o", dateKey, dateKey);
-  const outcome = buildOrderOutcomeSql("o", "mysql");
-  const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
-  const [source, orders] = await Promise.all([
-    mysqlQueryOne(`
-      SELECT MAX(refreshed_at) AS refreshed_at
-      FROM analytics_shop_daily
-      WHERE date_key = ? AND ${dashboardShopPredicateMysql("analytics_shop_daily", scope)}
-    `, [dateKey]),
-    mysqlQueryOne(`
-      SELECT
-        COUNT(DISTINCT o.id) AS order_count,
-        COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} THEN o.id END) AS effective_orders,
-        COUNT(DISTINCT CASE WHEN ${outcome.cancelledPreFulfillment} THEN o.id END) AS cancelled_orders,
-        MAX(o.id) AS order_max_id
-      FROM orders o
-      JOIN order_items oi ON oi.order_id = o.id
-      WHERE ${dashboardShopPredicateMysql("o", scope)} ${dateFilter.whereSql}
-    `, dateFilter.params)
-  ]);
-  const snapshotOrders = snapshot?.commerce?.today || {};
-  if (["order_count", "effective_orders", "cancelled_orders"].some((key) =>
-    Number(orders?.[key] || 0) !== Number(snapshotOrders[key] || 0))) return true;
-  if (Number(orders?.order_max_id || 0) !== Number(snapshot?.snapshot?.order_max_id || 0)) return true;
-  if (!source?.refreshed_at) return false;
-  const sourceUpdatedAt = new Date(source.refreshed_at);
-  return !Number.isNaN(sourceUpdatedAt.getTime()) && sourceUpdatedAt > snapshotUpdatedAt;
-}
-
 async function saveDashboardSnapshotMysql(dateKey, payload = {}, tenantId = "admin") {
   await ensureDashboardSnapshotSchemaMysql();
   const snapshotKey = dashboardSnapshotKeyMysql(dateKey, tenantId);
@@ -29173,7 +29142,7 @@ async function saveDashboardSnapshotMysql(dateKey, payload = {}, tenantId = "adm
   return nextPayload;
 }
 
-async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = todayDateKeyMysql(), tenantId = "admin" } = {}) {
+async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = todayDateKeyMysql(), tenantId = "admin", onProgress = () => {} } = {}) {
   const scope = await orderListTenantScopeMysql(tenantId);
   if (forceRefresh) invalidateDashboardCachesMysql();
   const selectedDate = String(dateKey || todayDateKeyMysql()).slice(0, 10);
@@ -29189,24 +29158,43 @@ async function buildDashboardPayloadMysql({ forceRefresh = false, dateKey = toda
   const adCurrentDate = adLatestDate || selectedDate;
   const adPreviousDate = adLatestDate ? dateKeyMysql(addDaysMysql(new Date(`${adLatestDate}T00:00:00+08:00`), -1)) : previousDate;
   const adMonthFrom = `${selectedDate.slice(0, 7)}-01`;
+  // Prioritize order/profit metrics. Publish each completed section without waiting
+  // for stock-alert or procurement scans; the saved full snapshot remains atomic.
+  const report = async (load, project) => {
+    const result = await load();
+    onProgress(project(result));
+    return result;
+  };
   const dashboardSections = await mapWithConcurrencyMysql([
-    () => stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }, tenantId),
-    () => procurementRequestsMysql({ grouped: "1", paged: "1", compact: "1", page: 1, pageSize: 8 }, tenantId),
-    // Today's operating dashboard must reflect orders that have already landed in MySQL.
-    // The analytics snapshot is refreshed less frequently, so using it here makes both the
-    // periodic dashboard rebuild and the explicit Refresh button return stale order counts.
-    () => dashboardRecentCommerceMysql(selectedDate, previousDate, tenantId),
-    () => dashboardProfitTrendSummaryMysql(selectedDate, tenantId),
-    () => dashboardAdSummaryMysql(adCurrentDate, adCurrentDate, tenantId),
-    () => dashboardAdSummaryMysql(adPreviousDate, adPreviousDate, tenantId),
-    () => dashboardAdSummaryMysql(adMonthFrom, selectedDate, tenantId),
-    () => dashboardFbpInventoryValueMysql(tenantId),
-    () => dashboardMonthShippingCostSummaryMysql(selectedDate, tenantId),
-    () => dashboardAftersalesLossSummaryMysql(selectedDate, tenantId),
+    () => report(() => dashboardRecentCommerceMysql(selectedDate, previousDate, tenantId), (recent) => ({
+      commerce: { date_key: selectedDate, previous_date_key: previousDate, ...recent }
+    })),
+    () => report(() => dashboardProfitTrendSummaryMysql(selectedDate, tenantId), (trend) => ({ commerce: { profit_trend: trend } })),
+    () => report(() => dashboardMonthShippingCostSummaryMysql(selectedDate, tenantId), (month) => ({
+      summary: { month_shipping_cost: month, ...(month.order_outcomes_available ? { month_order_outcomes: {
+        effective_orders: month.order_count, cancelled_orders: month.cancelled_orders,
+        cancelled_quantity: month.cancelled_quantity, return_orders: month.return_orders,
+        return_quantity: month.return_quantity, return_revenue: month.return_revenue
+      } } : {}) }
+    })),
+    () => report(() => dashboardAdSummaryMysql(adCurrentDate, adCurrentDate, tenantId), (ad) => ({ commerce: { advertising: {
+      date_key: adCurrentDate, latest_date_key: adLatestDate || "", is_latest_today: adLatestDate === selectedDate, today: ad
+    } } })),
+    () => report(() => dashboardAdSummaryMysql(adPreviousDate, adPreviousDate, tenantId), (ad) => ({ commerce: { advertising: { yesterday: ad } } })),
+    () => report(() => dashboardAdSummaryMysql(adMonthFrom, selectedDate, tenantId), (ad) => ({ commerce: { advertising: { month: ad } } })),
+    () => report(() => dashboardFbpInventoryValueMysql(tenantId), (stock) => ({ summary: { fbp_inventory_value: stock.value, fbp_inventory_quantity: stock.quantity } })),
+    () => report(() => dashboardAftersalesLossSummaryMysql(selectedDate, tenantId), (loss) => ({ summary: { aftersales_loss: loss } })),
     () => Promise.resolve({}),
-    () => dashboardAiUsageMysql(selectedDate, tenantId)
-  ], 3, (loadSection) => loadSection());
-  const [stock, procurement, recentCommerce, profitTrend, adToday, adYesterday, adMonth, fbpInventoryValue, monthShippingCost, aftersalesLoss, scheduledJobs, aiUsage] = dashboardSections;
+    () => report(() => dashboardAiUsageMysql(selectedDate, tenantId), (usage) => ({ summary: { ai_usage: usage } })),
+    () => stockAlertsMysql({ mode: "fbp-alerts", paged: "1", page: 1, pageSize: 100 }, tenantId),
+    () => procurementRequestsMysql({ grouped: "1", paged: "1", compact: "1", page: 1, pageSize: 8 }, tenantId)
+  ], 3, async (loadSection) => {
+    try { return await loadSection(); }
+    catch (error) { return { dashboard_section_error: error }; }
+  });
+  const failedSection = dashboardSections.find((section) => section?.dashboard_section_error);
+  if (failedSection) throw failedSection.dashboard_section_error;
+  const [recentCommerce, profitTrend, monthShippingCost, adToday, adYesterday, adMonth, fbpInventoryValue, aftersalesLoss, scheduledJobs, aiUsage, stock, procurement] = dashboardSections;
   const todayProfit = recentCommerce.today;
   const yesterdayProfit = recentCommerce.yesterday;
   const shopBreakdown = recentCommerce.shops;
@@ -29296,7 +29284,7 @@ async function rebuildDashboardSnapshotMysql(options = {}) {
   ensureMysqlCutoverEnabled();
   const scope = await orderListTenantScopeMysql(options.tenantId || "admin");
   const dateKey = String(options.dateKey || todayDateKeyMysql()).slice(0, 10);
-  const payload = await buildDashboardPayloadMysql({ forceRefresh: options.forceRefresh === true, dateKey, tenantId: scope.id });
+  const payload = await buildDashboardPayloadMysql({ forceRefresh: options.forceRefresh === true, dateKey, tenantId: scope.id, onProgress: options.onProgress });
   return saveDashboardSnapshotMysql(dateKey, payload, scope.id);
 }
 
@@ -29312,12 +29300,23 @@ function queueDashboardSnapshotRefreshMysql(options = {}) {
   const dateKey = String(options.dateKey || todayDateKeyMysql()).slice(0, 10);
   const snapshotKey = dashboardSnapshotKeyMysql(dateKey, options.tenantId);
   if (dashboardSnapshotRefreshJobsMysql.has(snapshotKey)) return;
-  const job = rebuildDashboardSnapshotMysql(options)
+  dashboardSnapshotProgressMysql.set(snapshotKey, mergeDashboardSections(options.snapshot || pendingDashboardPayloadMysql(dateKey), {
+    snapshot: { status: "building", date_key: dateKey }
+  }));
+  const job = rebuildDashboardSnapshotMysql({ ...options, onProgress: (patch) => {
+    dashboardSnapshotProgressMysql.set(snapshotKey, mergeDashboardSections(dashboardSnapshotProgressMysql.get(snapshotKey), patch));
+  } })
     .catch((error) => {
       console.warn("[dashboard] snapshot refresh failed:", error.message);
+      dashboardSnapshotProgressMysql.set(snapshotKey, mergeDashboardSections(dashboardSnapshotProgressMysql.get(snapshotKey), {
+        snapshot: { status: "partial" }
+      }));
     })
     .finally(() => {
       dashboardSnapshotRefreshJobsMysql.delete(snapshotKey);
+      if (dashboardSnapshotProgressMysql.get(snapshotKey)?.snapshot?.status !== "partial") {
+        dashboardSnapshotProgressMysql.delete(snapshotKey);
+      }
     });
   dashboardSnapshotRefreshJobsMysql.set(snapshotKey, job);
 }
@@ -29361,39 +29360,15 @@ export async function dashboardMysql(query = {}, tenantId = "admin") {
   const snapshotOnly = ["1", "true", "yes"].includes(String(query.snapshotOnly || query.snapshot_only || "").toLowerCase());
   const dateKey = dashboardDateKeyMysql(query);
 
-  if (forceRefresh) {
-    const snapshot = await loadDashboardSnapshotMysql(dateKey, tenantId);
-    queueDashboardSnapshotRefreshMysql({ forceRefresh: true, dateKey, tenantId });
-    if (snapshot) {
-      return {
-        ...snapshot,
-        snapshot: {
-          ...(snapshot.snapshot || {}),
-          status: "building"
-        }
-      };
-    }
-    return pendingDashboardPayloadMysql(dateKey);
-  }
-
+  const snapshotKey = dashboardSnapshotKeyMysql(dateKey, tenantId);
+  if (dashboardSnapshotRefreshJobsMysql.has(snapshotKey)) return dashboardSnapshotProgressMysql.get(snapshotKey);
   const snapshot = await loadDashboardSnapshotMysql(dateKey, tenantId);
-  if (snapshot) {
-    if (await dashboardSnapshotIsStaleMysql(snapshot, dateKey, tenantId)) {
-      queueDashboardSnapshotRefreshMysql({ forceRefresh: true, dateKey, tenantId });
-      return {
-        ...snapshot,
-        snapshot: {
-          ...(snapshot.snapshot || {}),
-          status: "building"
-        }
-      };
-    }
-    if (!snapshotOnly) queueDashboardSnapshotRefreshMysql({ forceRefresh: false, dateKey, tenantId });
-    return snapshot;
+  // Polling reads only saved/in-progress data, never the order/outcome aggregate.
+  // A normal visit or explicit Refresh starts one tenant/date-scoped rebuild.
+  if (forceRefresh || (!snapshotOnly && !dashboardSnapshotRefreshJobsMysql.has(snapshotKey)) || !snapshot) {
+    queueDashboardSnapshotRefreshMysql({ forceRefresh, dateKey, tenantId, snapshot });
   }
-
-  queueDashboardSnapshotRefreshMysql({ forceRefresh: false, dateKey, tenantId });
-  return pendingDashboardPayloadMysql(dateKey);
+  return dashboardSnapshotProgressMysql.get(snapshotKey) || snapshot || pendingDashboardPayloadMysql(dateKey);
 }
 
 export async function inventoryMysql(query = {}, tenantId = "admin") {

@@ -9,61 +9,12 @@ function loadFunction(name, nextName, dependencies) {
   const start = source.indexOf(`async function ${name}(`);
   const end = source.indexOf(`\nasync function ${nextName}(`, start);
   assert.ok(start >= 0 && end > start);
-  return vm.runInNewContext(`(${source.slice(start, end)})`, dependencies);
+  return vm.runInNewContext(`(${source.slice(start, end)})`, {
+    orderListTenantScopeMysql: async (id = "admin") => ({ id }),
+    dashboardShopPredicateMysql: () => "1=1",
+    ...dependencies
+  });
 }
-
-test("dashboard detects a new order even when daily analytics did not refresh", async () => {
-  const orderRows = [
-    { order_count: 153, effective_orders: 144, cancelled_orders: 9, order_max_id: 100 },
-    { order_count: 154, effective_orders: 145, cancelled_orders: 9, order_max_id: 101 },
-    { order_count: 153, effective_orders: 144, cancelled_orders: 9, order_max_id: 101 }
-  ];
-  const ranges = [];
-  const isStale = loadFunction("dashboardSnapshotIsStaleMysql", "saveDashboardSnapshotMysql", {
-    todayDateKeyMysql: () => "2026-10-19",
-    profitOrderedAtUtcRangeMysql: (_alias, from, to) => {
-      ranges.push([from, to]);
-      return { whereSql: "AND o.ordered_at >= ? AND o.ordered_at < ?", params: [from, to] };
-    },
-    buildOrderOutcomeSql: () => ({
-      effectiveSale: "o.status != 'cancelled'",
-      afterDeliveryReturn: "o.status = 'returned'",
-      cancelledPreFulfillment: "o.status = 'cancelled'"
-    }),
-    mysqlQueryOne: async (sql) => sql.includes("analytics_shop_daily")
-      ? { refreshed_at: "2026-10-19T10:12:29Z" }
-      : orderRows.shift()
-  });
-  const snapshot = {
-    snapshot: { source_updated_at: "2026-10-19T10:15:43Z", order_max_id: 100 },
-    commerce: { today: { order_count: 153, effective_orders: 144, cancelled_orders: 9 } }
-  };
-
-  assert.equal(await isStale(snapshot, "2026-10-19"), false);
-  assert.equal(await isStale(snapshot, "2026-10-19"), true);
-  assert.equal(await isStale(snapshot, "2026-10-19"), true);
-  assert.deepEqual(ranges, Array(3).fill(["2026-10-19", "2026-10-19"]));
-});
-
-test("an order header without items does not keep the dashboard rebuilding", async () => {
-  const isStale = loadFunction("dashboardSnapshotIsStaleMysql", "saveDashboardSnapshotMysql", {
-    todayDateKeyMysql: () => "2026-10-19",
-    profitOrderedAtUtcRangeMysql: () => ({ whereSql: "AND o.ordered_at >= ?", params: [] }),
-    buildOrderOutcomeSql: () => ({ effectiveSale: "1=1", afterDeliveryReturn: "1=0", cancelledPreFulfillment: "1=0" }),
-    mysqlQueryOne: async (sql) => {
-      if (sql.includes("analytics_shop_daily")) return { refreshed_at: "2026-10-19T10:12:29Z" };
-      assert.match(sql, /JOIN order_items oi ON oi\.order_id = o\.id/);
-      // Order 101 exists but has no item; the visible order watermark remains 100.
-      return { order_count: 153, effective_orders: 144, cancelled_orders: 9, order_max_id: 100 };
-    }
-  });
-  const snapshot = {
-    snapshot: { source_updated_at: "2026-10-19T10:15:43Z", order_max_id: 100 },
-    commerce: { today: { order_count: 153, effective_orders: 144, cancelled_orders: 9 } }
-  };
-
-  assert.equal(await isStale(snapshot, "2026-10-19"), false);
-});
 
 test("dashboard monthly order totals use the live monthly order scan", async () => {
   let monthlySql = "";
