@@ -1,3 +1,4 @@
+import { ORDER_SPLIT_SCHEMA } from '../../src/services/order-split-schema.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "../../src/services/order-report-query-sql.js";
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
@@ -58,7 +59,7 @@ export async function createOrderFixtureSchema(connection) {
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
-  for (const statement of [...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
+  for (const statement of [ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
   const exceptionSnapshot = source.match(/CREATE TABLE IF NOT EXISTS exception_workbench_snapshots[\s\S]*?ENGINE=InnoDB[^\r\n]*/)?.[0];
   if (!exceptionSnapshot) throw new Error('Missing exception snapshot schema');
   await connection.query(exceptionSnapshot);
@@ -93,11 +94,11 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
-    'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql',
+    'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql','reconcileRemovedPostingItemsMysql',
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

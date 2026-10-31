@@ -1,3 +1,4 @@
+import { ORDER_SPLIT_SCHEMA } from "./services/order-split-schema.js";
 import { createFbpSupplyFeedback } from './services/fbp-supply-feedback.js';
 import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
@@ -2357,6 +2358,7 @@ async function prepareRuntimeBeforeListen() {
   try {
     await warmMysqlPool();
     await ensureOglDispatchSchema(mysqlExecute);
+    await mysqlExecute(ORDER_SPLIT_SCHEMA);
     await services.warmCoreInventoryRuntime?.();
     await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();

@@ -1569,6 +1569,15 @@ const endpoints = [
       requestBody: body(scalar("object", "Print batch identifier returned by the printed endpoint.")),
       responses: [response(200, "application/json", scalar("object", "Mutation result with removed count."))]
     }),
+    endpoint("GET", "/api/orders/:id/split", "Read the owned order's unfinished split operation so reopening the dialog resumes reconciliation instead of sending another split.", {
+      auth: "authenticated", pathParams: [param("id", scalar("number", "Order identifier."))],
+      responses: [response(200, "application/json", scalar("object|null", "Saved request key, allocation and original items; never credentials."))]
+    }),
+    endpoint("POST", "/api/orders/split", "Split one owned FBS posting without preparing or dispatching. The UUID request key prevents duplicate upstream mutations; reconciliation repeats reads only. Official child details are imported before ok=true; the operator separately confirms preparation through orders/ship.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "order_id, packages of order_item_id/quantity, client_request_id; optional action=reconcile.")),
+      responses: [response(200, "application/json", scalar("object", "split_confirmed, prepared=false, orders, posting_numbers and optional sync_pending/error."))]
+    }),
     endpoint("POST", "/api/orders/ship", "Submit shipment confirmation to Ozon for selected orders.", {
       auth: "authenticated",
       requestBody: body(ref("ShipOrdersRequest")),

@@ -751,7 +751,7 @@ function procurementTimeText(row) {
             </el-button>
             <el-tooltip
               v-if="row.availableActions.showSplitPrepare"
-              :content="row.availableActions.splitPrepare ? '按商品数量拆分多个包裹后备货' : '订单已经备货并进入等待发货，Ozon 不允许撤回后重新拆分'"
+              :content="row.availableActions.splitPrepare ? '仅拆分订单，成功后再单独确认备货' : '订单已经备货并进入等待发货，Ozon 不允许撤回后重新拆分'"
               placement="top"
             >
               <span>
@@ -761,7 +761,7 @@ function procurementTimeText(row) {
                   :disabled="row.availableActions.splitPrepare === false"
                   @click="emit('split-order', row.id)"
                 >
-                  {{ row.availableActions.splitPrepare ? "拆分备货" : "已备货，不能拆分" }}
+                  {{ row.availableActions.splitPrepare ? "拆单" : "已备货，不能拆分" }}
                 </el-button>
               </span>
             </el-tooltip>
