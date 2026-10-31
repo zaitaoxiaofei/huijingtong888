@@ -8,7 +8,7 @@ import { oglDispatchService as service, normalizeOglOrderIds, oglMemberMatches, 
 import { orderStateKey } from "../constants/orders-ui.js";
 
 const props = defineProps({ orderIds: { type: Array, default: () => [] }, batchId: { type: Number, default: 0 }, mode: { type: String, default: "history" } });
-const emit = defineEmits(["close", "changed"]);
+const emit = defineEmits(["close", "changed", "compose"]);
 const auth = useAuthStore();
 const currentScope = () => `${currentApiCacheScope()}:${auth.user?.id || ""}:${auth.user?.tenant?.id || ""}`;
 const scope = computed(currentScope);
@@ -58,6 +58,8 @@ const masterTrackingLabel = computed(() => officialTracking.value?.master_tracki
 const selectedMembers = ref([]);
 const memberFilter = ref("all");
 const assignment = ref(1);
+const trackingAssignment=ref(''),cargoType=ref('normal');
+const trackingOptions=computed(()=>[...new Set([...(batch.value.official_result?.label_tracking?.tracking_numbers||[]),...(detail.value?.members||[]).map(row=>row.tracking_assignment?.tracking_number)].filter(Boolean))]);
 const options = ref([]);
 const officialSubmitting = ref(false);
 const matchingOfficialOptions = computed(() => options.value.filter((option) => !oglHandoverType(option) || oglHandoverType(option) === form.handover_type));
@@ -137,7 +139,7 @@ function orderPath(row) {
   if (Number(row.shop_id) > 0) query.set("shopId", String(row.shop_id));
   return `/orders?${query}`;
 }
-const eventLabel = (value) => ({ create: "创建内部批次", assign: "分配货位", dispatch: "标记实际交运", withdraw: "撤回待发", exception: "标记异常", resolve: "解决异常", cancel: "取消批次", close: "结束跟进", refresh: "刷新物流", "official-sync": "核对官方单", "official-create-start": "开始创建官方单", "official-created": "官方单已创建", "official-create-error": "官方创建失败或待核实", "official-confirm-start": "开始确认官方单", "official-confirm-error": "官方确认待核实" }[value] || "批次操作");
+const eventLabel = (value) => ({ create: "创建内部批次", assign: "分配货位", "assign-tracking":"分配本地运单", "bind-orders":"绑定订单", dispatch: "标记实际交运", withdraw: "撤回待发", exception: "标记异常", resolve: "解决异常", cancel: "取消批次", close: "结束跟进", refresh: "刷新物流", "official-sync": "核对官方单", "official-create-start": "开始创建官方单", "official-created": "官方单已创建", "official-create-error": "官方创建失败或待核实", "official-confirm-start": "开始确认官方单", "official-confirm-error": "官方确认待核实" }[value] || "批次操作");
 const memberPhase = (row) => row.withdrawn_at || row.active === 0 || row.active === false ? "已撤回" : row.online ? "已上网" : row.dispatched_at ? "已发运" : "待交运";
 const advancedPlatformStatus = (row) => ({ returned: "已退回", rejected: "拒收/未领取", cancelled: "已取消", delivered: "已签收", dispute: "有争议", delivering: "运输中" }[orderStateKey({ ...row, status: row.platform_status || row.status })]) || "";
 const platformStatusLabel = (row) => advancedPlatformStatus(row) || row.logistics_status_label || ({ awaiting_packaging: "等待备货", awaiting_deliver: "等待发货", acceptance_in_progress: "交接处理中", posting_acceptance_in_progress: "交接处理中", awaiting_registration: "等待配送注册", posting_awaiting_registration: "等待配送注册", posting_registered: "配送已注册", posting_registration_error: "配送注册异常", sent_by_seller: "卖家已交运", posting_ready_for_pickup: "等待取件", posting_transferring_to_delivery: "正在移交配送", posting_in_carriage: "已加入发运", posting_transferring: "正在转运", delivering: "运输中", delivered: "已签收", cancelled: "已取消" }[row.logistics_status || row.tracking_stage || row.platform_status || row.status]) || (row.online ? "平台已上网" : row.cancelled ? "平台已取消" : "平台状态待核对");
@@ -535,7 +537,7 @@ onMounted(() => run(async () => {
       </div>
 
       <template v-if="tab === 'official'">
-        <div class="ogl-dispatch-actions"><h3>已申请发运</h3><el-select v-model="syncShopId" placeholder="选择本企业店铺" aria-label="同步申请的店铺" :disabled="refreshingOfficial" style="width: 230px"><el-option v-for="shop in bootstrap.shops" :key="shop.id" :label="shop.name" :value="Number(shop.id)" /></el-select><el-button type="primary" :loading="refreshingOfficial" :disabled="busy || !syncShopId" @click="refreshOfficialCarriages">同步申请</el-button></div>
+        <div class="ogl-dispatch-actions"><h3>已申请发运</h3><el-button type="primary" plain @click="emit('compose',0)">按打印时间选单并绑定</el-button><el-select v-model="syncShopId" placeholder="选择本企业店铺" aria-label="同步申请的店铺" :disabled="refreshingOfficial" style="width: 230px"><el-option v-for="shop in bootstrap.shops" :key="shop.id" :label="shop.name" :value="Number(shop.id)" /></el-select><el-button type="primary" :loading="refreshingOfficial" :disabled="busy || !syncShopId" @click="refreshOfficialCarriages">同步申请</el-button></div>
         <p class="ogl-dispatch-snapshot-note">{{ officialSnapshot.notice }} 最近缓存：{{ officialSnapshot.snapshot_at ? formatTime(officialSnapshot.snapshot_at) : '尚未获取' }}（逐行时间可能不同）</p>
         <p>本企业已保存申请 · 共 {{ officialTotal }} 份；选择店铺并点击“同步申请”才会读取 Ozon，不会更改默认发运店铺。</p>
         <el-table :data="officialRows" :row-key="officialCarriageKey" border @row-dblclick="openOfficialCarriage">
@@ -725,7 +727,10 @@ onMounted(() => run(async () => {
           <span>已选 {{ selectedMembers.length }} / 当前 {{ members.length }} 单</span>
           <el-input-number v-model="assignment" :min="1" :max="Number(batch.containers_count)" :precision="0" :disabled="busy || closed" style="width: 110px" />
           <el-button :disabled="busy || !canAssign" @click="action('assign', { order_ids: memberIds(), container_no: assignment }, '货位已分配')">分配货位</el-button>
-          <el-button type="primary" :disabled="busy || !canDispatch" @click="selectedAction('dispatch')">标记已发运</el-button>
+          <el-select v-model="trackingAssignment" filterable allow-create default-first-option clearable placeholder="选择或输入共用运单号" style="width:230px" aria-label="分配运单号"><el-option v-for="number in trackingOptions" :key="number" :value="number" :label="number"/></el-select>
+          <el-select v-model="cargoType" style="width:120px" aria-label="货物类型"><el-option value="normal" label="普通货物"/><el-option value="special" label="特殊货物"/></el-select>
+          <el-button :disabled="busy || !hasSelected || closed || !officialExists || selectedMembers.some(row=>row.dispatched_at || row.online || row.cancelled)" @click="action('assign-tracking',{order_ids:memberIds(),tracking_number:trackingAssignment,cargo_type:cargoType},'本地运单关联已保存，未标记交运')">保存所选订单运单</el-button>
+          <el-button type="primary" :disabled="busy || !canDispatch" @click="selectedAction('dispatch')">确认实际交运 / 出库</el-button>
           <el-button :disabled="busy || !hasSelected || closed" @click="selectedAction('withdraw')">撤回待发</el-button>
           <el-button :disabled="busy || !hasSelected || closed" @click="selectedAction('exception')">标记异常</el-button>
           <el-button :disabled="busy || !hasSelected || closed" @click="selectedAction('resolve')">解决异常</el-button>
@@ -735,6 +740,7 @@ onMounted(() => run(async () => {
           <el-table-column label="订单号" min-width="190"><template #default="{ row }"><router-link v-if="orderPath(row)" :to="orderPath(row)" target="_blank" rel="noopener" class="ogl-dispatch-order-link">{{ row.posting_number }}</router-link><span v-else>{{ row.posting_number }}</span></template></el-table-column>
           <el-table-column prop="shop_name" label="原店铺" min-width="130" />
           <el-table-column label="下单时间" min-width="180"><template #default="{ row }">{{ row.ordered_at ? formatTime(row.ordered_at) : '待获取' }}</template></el-table-column>
+          <el-table-column label="本地运单 / 货物" min-width="190"><template #default="{row}"><span>{{row.tracking_assignment?.tracking_number||'未分配'}}</span><small v-if="row.tracking_assignment">{{row.tracking_assignment.cargo_type==='special'?'特殊货物':'普通货物'}} · 人工关联</small></template></el-table-column>
           <el-table-column label="货位" width="110"><template #default="{ row }">{{ row.container_no ? `货位 ${row.container_no}` : '货位未记录' }}</template></el-table-column>
           <el-table-column label="本地阶段" width="100"><template #default="{ row }"><span :title="memberPhase(row) === '已发运' ? '运往集运仓' : ''">{{ memberPhase(row) }}</span></template></el-table-column>
           <el-table-column label="平台物流" min-width="160"><template #default="{ row }"><span :title="row.logistics_status || row.tracking_stage || row.platform_status || row.status || ''">{{ platformStatusLabel(row) }}</span><div v-if="row.sync_error" class="ogl-dispatch-error">物流待更新：{{ row.sync_error }}</div><small v-else-if="row.dispatched_at && !row.logistics_fresh && !row.online && !row.cancelled">尚无交运后的最新物流，请刷新核对</small></template></el-table-column>

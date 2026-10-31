@@ -1,5 +1,7 @@
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 
+const OGL_FIELD_LABELS={delivery_method_id:'配送方式',departure_date:'发运日期',carriage_id:'官方申请号',posting_numbers:'货件清单',containers_count:'货位数量',has_entrusted_acceptance:'信任验收配置',warehouse_id:'官方仓库'};
+
 const MUTATION_PATHS = new Set([
   "/v1/carriage/create",
   "/v1/carriage/set-postings",
@@ -27,6 +29,18 @@ function requestError(message, { code, statusCode = 502, unknown = false, remote
     operationOutcome: unknown ? "unknown" : "failed",
     ...(remoteStatus ? { remoteStatus } : {})
   });
+}
+
+function officialFailure(buffer,status) {
+  let data;try{data=JSON.parse(buffer.toString('utf8'));}catch{return {hint:'请核对官方发运状态后重试',fields:[],remoteCode:null};}
+  const raw=JSON.stringify(data);
+  // Return only known fields and mapped codes, never remote free text.
+  const fields=['delivery_method_id','departure_date','carriage_id','posting_numbers','containers_count','has_entrusted_acceptance','warehouse_id'].filter(field=>new RegExp('\\b'+field+'\\b','i').test(raw));
+  const codes={INVALID_ARGUMENT:'请求参数不符合 Ozon 要求',FAILED_PRECONDITION:'当前官方状态不允许执行此操作',ALREADY_EXISTS:'官方单可能已存在，请先同步已有申请',PERMISSION_DENIED:'当前店铺授权无此接口权限',UNAUTHENTICATED:'当前店铺授权已失效',NOT_FOUND:'官方申请或配送方式不存在'};
+  const remoteCode=typeof data.code==='string'&&Object.hasOwn(codes,data.code)?data.code:null;
+  const numeric={3:'请求参数不符合 Ozon 要求',5:'官方申请或配送方式不存在',6:'官方单可能已存在，请先同步已有申请',7:'当前店铺授权无此接口权限',9:'当前官方状态不允许执行此操作',16:'当前店铺授权已失效'};
+  const hint=remoteCode?codes[remoteCode]:typeof data.code==='number'&&numeric[data.code]?numeric[data.code]:status===401||status===403?'请核对当前店铺的授权和接口权限':'请核对所选日期、配送方式及官方发运状态';
+  return {hint,fields,remoteCode};
 }
 
 function credentials(shop) {
@@ -112,12 +126,14 @@ export function createOglCarriageClient({ fetchImpl = globalThis.fetch, timeoutM
     }
     if (afterRequest) await afterRequest();
     if (!response.ok) {
-      // Never expose the raw response: it may echo credentials, phone numbers or postings.
-      throw requestError(`Ozon 发运接口请求失败（HTTP ${response.status}），请检查店铺授权、接口权限与平台发运状态。`, {
+      const safe=officialFailure(buffer,response.status);
+      const issue=requestError(`Ozon 发运接口请求失败（HTTP ${response.status}，${path}）：${safe.hint}${safe.fields.length?'；请检查发运窗口的 '+safe.fields.map(field=>`${OGL_FIELD_LABELS[field]}（${field}）`).join('、'):''}。创建结果不明时请先同步已有申请，避免重复创建。`, {
         code: `OGL_API_HTTP_${response.status}`,
         remoteStatus: response.status,
         unknown: mutation && response.status >= 500
       });
+      Object.assign(issue,{requestPath:path,remoteCode:safe.remoteCode,remoteFields:safe.fields});
+      throw issue;
     }
     // This method documents an HTTP 200 with no response body/schema.
     if (!binary && !buffer.length && path === "/v1/carriage/courier-contact/set") return {};

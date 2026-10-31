@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import mysql from 'mysql2/promise';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { createOglDispatchService } from '../src/services/ogl-dispatch.js';
-import { withOglDispatch, oglDispatchedStatusSql, oglPhysicalDispatchSql } from '../src/services/ogl-dispatch-state.js';
+import { withOglDispatch, oglBoundStatusSql, oglDispatchedStatusSql, oglPhysicalDispatchSql } from '../src/services/ogl-dispatch-state.js';
 
 test('official discovery and scheduler retain tenant/original-shop authority without physical handover',{
   skip:!process.env.TENANT_TEST_MYSQL_SOCKET&&'Requires independent socket-only MySQL',timeout:120000
@@ -41,7 +41,7 @@ test('official discovery and scheduler retain tenant/original-shop authority wit
     extractLabelTracking:async()=>({source:'official_container_label',status:'found',carrier_name:'Fixture carrier',tracking_numbers:['YT3000000000001'],master_tracking_number:'YT3000000000001'}),
     syncPostings:async(current,shopId,numbers)=>{syncCalls.push({tenant:Number(current.tenant.id),person:current.personId,shopId,numbers});return {rows:numbers.map(posting_number=>({posting_number,shop_id:shopId}))};}});
   const service=make();let batchId;
-  const evidence=async orderId=>(await query(`SELECT ${oglDispatchedStatusSql('o')} AS tracking,${oglPhysicalDispatchSql('o')} AS physical FROM orders o WHERE id=?`,[orderId]))[0];
+  const evidence=async orderId=>(await query(`SELECT (${oglBoundStatusSql('o')} OR ${oglDispatchedStatusSql('o')}) AS tracking,${oglPhysicalDispatchSql('o')} AS physical FROM orders o WHERE id=?`,[orderId]))[0];
   try {
     for(const tenantId of [1,2,3]) {
       await query('INSERT INTO tenants(id,slug,name) VALUES(?,?,?)',[tenantId,tenantId===1?'default':`discovery-${tenantId}`,`Fixture ${tenantId}`]);
@@ -66,7 +66,7 @@ test('official discovery and scheduler retain tenant/original-shop authority wit
       assert.equal(Number((await evidence(1)).tracking),1);assert.equal(Number((await evidence(1)).physical),0);
       const member={...detail.members[0],default_shop_id:20,official_carriage_id:'901',official_status:'observed',batch_status:'preparing'};
       const state=withOglDispatch({id:1,shop_id:20,status:'awaiting_deliver',logistics_carrier:'ogl'},member);
-      assert.equal(state.ogl_dispatch.tracking,true);assert.equal(state.ogl_dispatch.applied,true);assert.equal(state.ogl_dispatch.dispatched,false);assert.equal(state.ogl_dispatch.stage,'applied');
+      assert.equal(state.ogl_dispatch.tracking,true);assert.equal(state.ogl_dispatch.applied,true);assert.equal(state.ogl_dispatch.dispatched,false);assert.equal(state.ogl_dispatch.stage,'bound');
       assert.equal(withOglDispatch({...state,status:'delivered'},member).display_status,'delivered');
       await assert.rejects(service.detail(session(3),batchId),{statusCode:404});
       const other=await service.discover(session(3),{date:'2026-10-22'});assert.notEqual(other.rows[0].batch_id,batchId);

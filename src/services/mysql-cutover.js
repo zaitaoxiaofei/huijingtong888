@@ -26,7 +26,7 @@ import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidat
 import { isOrderInTransport as isOrderInTransportMysql } from "./order-query-facts.js";
 import { planPartialReceipt } from "./order-procurement-coverage.js";
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from "./order-transport-evidence.js";
-import { withOglDispatch, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql } from "./ogl-dispatch-state.js";
+import { withOglDispatch, oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql } from "./ogl-dispatch-state.js";
 import { OGL_DISPATCH_REFRESH } from "./ogl-dispatch-access.js";
 import { orderStatusHistoryBusinessFingerprint } from "./order-history-fingerprint.js";
 import { PDFDocument } from "pdf-lib";
@@ -30288,7 +30288,7 @@ async function orderTenantCoverageMysql(scope) {
 
 async function loadOglDispatchMembersMysql(ids, tenantScope) {
   if (!ids.length) return new Map();
-  const rows = await mysqlQuery(`SELECT m.*, b.batch_number, b.default_shop_id, b.official_carriage_id,
+  const rows = await mysqlQuery(`SELECT m.*, (SELECT te.detail_json FROM ogl_dispatch_events te WHERE te.tenant_id=m.tenant_id AND te.batch_id=m.batch_id AND te.member_id=m.id AND te.action='assign-tracking' ORDER BY te.id DESC LIMIT 1) AS manual_tracking_json, b.batch_number, b.default_shop_id, b.official_carriage_id,
     b.official_status, b.status AS batch_status FROM ogl_dispatch_members m
     JOIN ogl_dispatch_batches b ON b.id = m.batch_id AND b.tenant_id = m.tenant_id
     JOIN orders member_order ON member_order.id = m.order_id AND member_order.shop_id = m.shop_id AND member_order.posting_number = m.posting_number
@@ -30304,7 +30304,7 @@ async function loadOglDispatchMembersMysql(ids, tenantScope) {
 function assertTenantOrderListFiltersMysql(query = {}, tenantScope = null) {
   if (!tenantScope) return;
   const status = String(query.status || "all");
-  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing"]);
+  const tenantSafeStatuses = new Set(["all", "awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "dispute", "cancelled", "delivered", "unbound", "pending_purchase", "purchase_in_transit", "purchase_records_missing"]);
   if (!tenantSafeStatuses.has(status)) {
     throw Object.assign(new Error("企业订单列表暂不支持该状态筛选：关联库存或采购数据租户隔离尚未完成。"), { statusCode: 503 });
   }
@@ -30923,7 +30923,7 @@ function orderPagedOglEvidenceJoinMysql(tenantScope) {
   // Aggregate once rather than re-running the same evidence EXISTS in every
   // nested status predicate. Grouping also keeps one result per source order.
   return `LEFT JOIN (
-    SELECT ogl_count_member.order_id
+    SELECT ogl_count_member.order_id, MAX(ogl_count_member.dispatched_at IS NOT NULL) AS physical_dispatch
     FROM ogl_dispatch_members ogl_count_member
     JOIN ogl_dispatch_batches ogl_count_batch ON ogl_count_batch.id = ogl_count_member.batch_id
       AND ogl_count_batch.tenant_id = ogl_count_member.tenant_id
@@ -30933,8 +30933,8 @@ function orderPagedOglEvidenceJoinMysql(tenantScope) {
     WHERE ogl_count_member.tenant_id = ${tenantScope.id} AND ${orderTenantPredicateMysql("ogl_count_shop", tenantScope)}
       AND ogl_count_member.withdrawn_at IS NULL
       AND (ogl_count_member.dispatched_at IS NOT NULL OR (
-        ogl_count_member.posting_number = ogl_count_order.posting_number AND ogl_count_member.official_member = 1
-        AND ogl_count_batch.default_shop_id = ogl_count_member.shop_id AND ogl_count_batch.official_carriage_id IS NOT NULL
+        ogl_count_member.posting_number = ogl_count_order.posting_number
+        AND ogl_count_batch.official_carriage_id REGEXP '^[1-9][0-9]*$'
         AND ogl_count_batch.status NOT IN ('cancelled','closed')
         AND ogl_count_batch.official_status IN ('observed','created','approved','sync_required','confirm_unknown','mismatch')
       ))
@@ -30967,6 +30967,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
       COUNT(*) AS all_count,
       SUM(CASE WHEN ${statusSql("awaiting_packaging")} THEN 1 ELSE 0 END) AS awaiting_packaging,
       SUM(CASE WHEN ${statusSql("awaiting_deliver")} THEN 1 ELSE 0 END) AS awaiting_deliver,
+      SUM(CASE WHEN ${statusSql("ogl_bound")} THEN 1 ELSE 0 END) AS ogl_bound,
       SUM(CASE WHEN ${statusSql("ogl_dispatched")} THEN 1 ELSE 0 END) AS ogl_dispatched,
       SUM(CASE WHEN ${statusSql("delivering")} THEN 1 ELSE 0 END) AS delivering,
       SUM(CASE WHEN ${statusSql("dispute")} THEN 1 ELSE 0 END) AS dispute,
@@ -30985,6 +30986,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
     all: Number(row?.all_count || 0),
     awaiting_packaging: Number(row?.awaiting_packaging || 0),
     awaiting_deliver: Number(row?.awaiting_deliver || 0),
+    ogl_bound: Number(row?.ogl_bound || 0),
     ogl_dispatched: Number(row?.ogl_dispatched || 0),
     delivering: Number(row?.delivering || 0),
     dispute: Number(row?.dispute || 0),
@@ -31342,11 +31344,12 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
   const exactTransit = `${value} REGEXP '(^|[[:space:]])(delivering|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^[:space:]]*|posting_in_courier_service|posting_in_pickup_point)([[:space:]]|$)'`;
   const waitingStates = "'acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'";
   const awaitingDelivery = `(${state} IN (${waitingStates}) OR ${stage} IN (${waitingStates}) OR LOWER(COALESCE(o.logistics_status, '')) IN (${waitingStates}))`;
+  if (status === "ogl_bound") return oglBoundStatusSql("o", evidenceAlias);
   if (status === "ogl_dispatched") return oglDispatchedStatusSql("o", evidenceAlias);
   if (status === "awaiting_packaging") {
     return `((${state} IN ('awaiting_approve','awaiting_packaging','posting_created')
       OR ${stage} IN ('awaiting_approve','awaiting_packaging','posting_created'))
-      AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)}
+      AND NOT ${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("awaiting_deliver", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("delivering", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
@@ -31356,7 +31359,7 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
   if (status === "awaiting_deliver") {
     return `(${awaitingDelivery}
       AND NOT (${exactTransit})
-      AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+      AND NOT ${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
@@ -31375,7 +31378,7 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
         OR ${value} LIKE '%sorting%' OR ${value} LIKE '%customs%' OR ${value} LIKE '%shipped%' OR ${value} LIKE '%sent%'
         OR ${value} LIKE '%on_way%'
       )
-    )) AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+    )) AND NOT ${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)})`;

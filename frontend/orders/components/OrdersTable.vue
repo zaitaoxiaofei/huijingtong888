@@ -448,6 +448,8 @@ function procurementTimeText(row) {
               {{ row.statusDeadlineHint }}
             </div>
             <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" title="查看此运货单的已保存详情" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">运货单 {{ row.ogl_dispatch.official_carriage_id || row.ogl_dispatch.batch_number || '待获取' }}</el-button>
+            <el-tag v-if="row.ogl_dispatch?.bound || row.ogl_dispatch?.dispatched" size="small" :type="row.ogl_dispatch.association_type === 'official' ? 'primary' : 'info'">{{ row.ogl_dispatch.association_label || (row.ogl_dispatch.official_member ? 'Ozon' : '系统') }}</el-tag>
+            <small v-if="row.ogl_dispatch?.tracking_assignment" class="orders-cell-subtext">{{row.ogl_dispatch.tracking_assignment.tracking_number}} · {{row.ogl_dispatch.tracking_assignment.cargo_type==='special'?'特殊货物':'普通货物'}} · 系统关联</small>
             <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
           </div>
         </template>

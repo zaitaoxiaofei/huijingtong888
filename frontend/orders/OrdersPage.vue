@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
 import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useAuthStore } from "../admin/stores/auth.js";
@@ -47,10 +48,17 @@ const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
 const ProfitCalculationVersions = defineAsyncComponent(() => import("./components/ProfitCalculationVersions.vue"));
 const OglDispatchPanel = defineAsyncComponent(() => import("./components/OglDispatchPanel.vue"));
-const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [] });
+const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [], version: 0 });
+const OglDispatchComposer = defineAsyncComponent(() => import("./components/OglDispatchComposer.vue"));
+const oglComposer = reactive({ visible: false, orderIds: [], batchId: 0 });
+const selectionDialogVisible = ref(false);
 
 function openOglDispatch(mode = "history", batchId = 0) {
-  if (mode === "create" && !selectedOrderIds.value.size) return ElMessage.warning("请先勾选本次要发运的 OGL 已打印订单");
+  if (mode === "create") {
+    Object.assign(oglComposer, { visible: true, orderIds: [...selectedOrderIds.value], batchId: Number(batchId) });
+    return;
+  }
+  oglDispatchPanel.version += 1;
   Object.assign(oglDispatchPanel, { visible: true, mode, batchId: Number(batchId), orderIds: [...selectedOrderIds.value] });
 }
 
@@ -582,9 +590,7 @@ watch(inventoryListPageSize, () => {
 });
 
 function toggleAll(checked) {
-  selectedOrderIds.value = checked
-    ? new Set((vm.rows || []).map((row) => Number(row.id)).filter(Boolean))
-    : new Set();
+  selectedOrderIds.value = selectOrderPage(selectedOrderIds.value, vm.rows || [], checked);
 }
 
 function toggleRow(orderId, checked) {
@@ -1280,7 +1286,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
+    statusHint: displayStateKey === "ogl_bound" ? "已绑定发运单，等待仓库确认实际交运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),
@@ -1294,6 +1300,21 @@ function buildTableRow(row) {
 const tableRows = computed(() => (
   Array.isArray(vm.rows) ? vm.rows.map((row) => buildTableRow(row)) : []
 ));
+
+const selectedOrderRecords = ref(new Map());
+watch([tableRows, () => [...selectedOrderIds.value]], ([rows]) => {
+  selectedOrderRecords.value = retainSelectedOrders(selectedOrderRecords.value, rows, selectedOrderIds.value);
+}, { immediate: true, flush: "sync" });
+const selectedRows = computed(() => [...selectedOrderIds.value].map(id => selectedOrderRecords.value.get(id) || { id }));
+
+async function oglComposed(result) {
+  const next = new Set(selectedOrderIds.value);
+  for (const member of result.members || []) next.delete(Number(member.order_id));
+  selectedOrderIds.value = next;
+  oglComposer.visible = false;
+  openOglDispatch("history", result.batch.id);
+  await refreshOglDispatchOrders();
+}
 
 function findOrderRow(orderId) {
   return tableRows.value.find((row) => Number(row.id) === Number(orderId)) || null;
@@ -1676,8 +1697,8 @@ function resetInventoryDialog() {
 }
 
 function selectedActionOrderIds(action) {
-  return tableRows.value
-    .filter((row) => selectedOrderIds.value.has(Number(row.id)) && row.availableActions?.[action] !== false)
+  return selectedRows.value
+    .filter((row) => row.availableActions?.[action] !== false)
     .map((row) => Number(row.id))
     .filter(Boolean);
 }
@@ -2641,12 +2662,25 @@ onBeforeUnmount(() => {
         @change-print-view="changePrintView"
         @change-mark-filter="changeMarkFilter"
         @configure-status-tabs="openStatusPreferenceDialog"
+        @review-selection="selectionDialogVisible = true"
       >
         <template #quick-filters><OrdersQuickFilters :filters="vm.filters" @apply="submitFilters" /></template>
       </OrdersStatusTabs>
     </OrdersToolbar>
 
-    <OglDispatchPanel v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" />
+    <OglDispatchComposer v-if="oglComposer.visible" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
+    <el-dialog v-if="selectionDialogVisible" v-model="selectionDialogVisible" title="跨页已选订单" width="min(1100px,94vw)" append-to-body>
+      <p>已选 {{ selectedCount }} 单；翻页、调整筛选不会清空。批量操作前会由服务端重新校验订单状态。</p>
+      <el-table :data="selectedRows" row-key="id" max-height="55vh" border>
+        <el-table-column label="订单号" min-width="180"><template #default="{ row }">{{ row.posting_number || row.id }}</template></el-table-column>
+        <el-table-column prop="shop_name" label="店铺" min-width="140" />
+        <el-table-column prop="statusLabel" label="状态" min-width="130" />
+        <el-table-column label="打印时间" min-width="180"><template #default="{ row }">{{ row.printed_at ? formatDateTime(row.printed_at) : '未打印' }}</template></el-table-column>
+        <el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="danger" @click="toggleRow(row.id, false)">移除</el-button></template></el-table-column>
+      </el-table>
+      <template #footer><el-button @click="selectedOrderIds = new Set()">清空全部已选</el-button><el-button type="primary" @click="selectionDialogVisible = false">返回订单</el-button></template>
+    </el-dialog>
+    <OglDispatchPanel :key="oglDispatchPanel.version" v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" @compose="id => openOglDispatch('create', id)" />
 
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
     <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />

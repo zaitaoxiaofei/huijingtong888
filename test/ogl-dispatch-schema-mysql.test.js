@@ -96,7 +96,7 @@ test('OGL release migration creates explicit tenant tables before dependent read
 
 test('release backs up and installs OGL schema before maintenance and candidate readers even when maintenance is skipped',()=>{
   const source=readFileSync(new URL('../deploy/linux/remote-release.sh',import.meta.url),'utf8');
-  const hook=source.indexOf('if [[ -f "$staging_dir/scripts/migrate-ogl-dispatch-schema.mjs" ]]');
+  const hook=source.indexOf('if migration_pending migrate-ogl-dispatch-schema.mjs; then');
   assert.ok(hook>source.indexOf('  backup_database\n'));
   assert.ok(hook<source.indexOf('if [[ "$run_db_maintenance" == "1" && "$run_db_init" == "1" ]]'));
   assert.ok(hook<source.indexOf('\nstart_candidate\n'));

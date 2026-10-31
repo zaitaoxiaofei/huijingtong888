@@ -24,7 +24,7 @@ test('OGL transport deadline starts at the known ordered instant, handles UTC SQ
 
 test('OGL applications and physical handovers keep counting until actual platform transport; no physical evidence is manufactured', () => {
   const result = withOglDispatch(order, applied);
-  assert.equal(result.ogl_dispatch.stage_label, '已申请');
+  assert.equal(result.ogl_dispatch.stage_label, '已绑定待交运');
   assert.equal(result.ogl_dispatch.official_carriage_id, '124237634');
   assert.equal(result.ogl_dispatch.dispatched, false);
   assert.equal(result.ogl_dispatch.dispatched_at, null);
@@ -32,6 +32,7 @@ test('OGL applications and physical handovers keep counting until actual platfor
   assert.equal(withOglDispatch(order, { ...applied, dispatched_at: '2026-10-22 06:00:00' }).ogl_dispatch.transport_deadline_at, result.ogl_dispatch.transport_deadline_at);
   for (const status of ['delivering', 'delivered', 'cancelled', 'returned_to_seller', 'arbitration']) assert.equal(withOglDispatch({ ...order, status }, applied).ogl_dispatch.transport_deadline_at, null, status);
   for (const tracking_stage of ['posting_in_transit', 'posting_received_by_buyer', 'posting_in_customs']) assert.equal(withOglDispatch({ ...order, tracking_stage }, applied).ogl_dispatch.transport_deadline_at, null, tracking_stage);
-  for (const member of [{ ...applied, active_order_id: 88 }, { ...applied, withdrawn_at: '2026-10-22 06:00:00' }, { ...applied, official_member: 0 }, { ...applied, default_shop_id: 9 }]) assert.equal(withOglDispatch(order, member).ogl_dispatch.transport_deadline_at, null);
+  for (const member of [{ ...applied, active_order_id: 88 }, { ...applied, withdrawn_at: '2026-10-22 06:00:00' }]) assert.equal(withOglDispatch(order, member).ogl_dispatch.transport_deadline_at, null);
+  for(const member of [{...applied,official_member:0},{...applied,default_shop_id:9}])assert.equal(withOglDispatch(order,member).ogl_dispatch.transport_deadline_at,result.ogl_dispatch.transport_deadline_at,'System associations keep the same pretransport clock');
   assert.equal(withOglDispatch({ ...order, ordered_at: null }, applied).ogl_dispatch.transport_deadline_at, null);
 });
