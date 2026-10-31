@@ -33,12 +33,17 @@ export function createFbpReceiptReview({query=mysqlQuery}={}) {
     const productFilter=id?`AND (f.product_id=?${related.length?' OR '+related.map(()=>'(f.shop_id=? AND f.ozon_sku=?)').join(' OR '):''})`:'';
     const onlyOpen=params.all!=='1';
     const criteria=inventoryProductSearch(params,scope,'p');
-    const rows=await query(`SELECT COUNT(*) OVER() AS total,f.*,p.name AS product_name,p.inventory_number,s.name AS shop_name,
-      CONCAT('/api/products/',p.id,'/image?thumb=1') AS image_url
-      FROM fbp_transfer_records f JOIN products p ON p.id=f.product_id AND ${inventoryTenantSql(scope,'p')}
+    const fromSql=`FROM fbp_transfer_records f JOIN products p ON p.id=f.product_id AND ${inventoryTenantSql(scope,'p')}
       JOIN shops s ON s.id=f.shop_id AND ${inventoryTenantSql(scope,'s')}
       WHERE f.status NOT IN ('draft','cancelled','closed') ${productFilter} ${criteria.sql?'AND ('+criteria.sql+')':''}
-      ${onlyOpen?'AND f.quantity>f.listed_quantity':''} ORDER BY f.shipped_at,f.id LIMIT 50 OFFSET ?`, [...(id?[id,...related.flatMap(r=>[r.shop_id,r.ozon_sku])]:[]),...criteria.params,(page-1)*50]);
+      ${onlyOpen?'AND f.quantity>f.listed_quantity':''}`;
+    const args=[...(id?[id,...related.flatMap(r=>[r.shop_id,r.ozon_sku])]:[]),...criteria.params];
+    if(params.summary_only==='1'){
+      const [summary]=await query(`SELECT COUNT(*) AS total,COALESCE(SUM(GREATEST(f.quantity-f.listed_quantity,0)),0) AS pending_quantity ${fromSql}`,args);
+      return {rows:[],total:Number(summary?.total||0),pending_quantity:Number(summary?.pending_quantity||0)};
+    }
+    const rows=await query(`SELECT COUNT(*) OVER() AS total,f.*,p.name AS product_name,p.inventory_number,s.name AS shop_name,
+      CONCAT('/api/products/',p.id,'/image?thumb=1') AS image_url ${fromSql} ORDER BY f.shipped_at,f.id LIMIT 50 OFFSET ?`,[...args,(page-1)*50]);
     if(!rows.length)return {rows:[],total:0};
     const productIds=[...new Set(rows.map(r=>Number(r.product_id)))];
     const pairs=[...new Map(rows.map(r=>[pair(r),r])).values()];

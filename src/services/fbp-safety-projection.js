@@ -36,7 +36,7 @@ export async function loadFbpSafetyProjections(query,products,scope,settingsFor)
   const cfg=validateFlowSettings(settingsFor(Number(p.id))),days=flowLeadDays((cfg.production_days??Number(p.production_lead_days??7))+(cfg.local_days??Number(p.warehouse_logistics_days??2))+cfg.fbp_days,15,cfg.holidays);
   const stocks=official.get(Number(p.id));const groups=new Map();
   for(const row of stocks?.rows||[]){const key=`${row.shop_id}:${row.ozon_sku}`;if(!groups.has(key))groups.set(key,{...row,available:0});if(row.available!=null)groups.get(key).available+=Number(row.available);}
-  const skus=[...groups].map(([key,row])=>{const r=index.get(key)||{};return{...row,available:stocks.incomplete?null:row.available,fbp_target:Math.ceil((r.sales||0)/14*days),in_transit:r.in_transit||0,committed_qty:r.committed_qty||0};});
+  const skus=[...groups].map(([key,row])=>{const r=index.get(key)||{};return{...row,available:row.available,fbp_target:Math.ceil((r.sales||0)/14*days),in_transit:r.in_transit||0,committed_qty:r.committed_qty||0};});
   return[Number(p.id),{skus,stock_incomplete:stocks?.incomplete??true}];
  }));
 }

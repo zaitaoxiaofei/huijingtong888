@@ -96,6 +96,11 @@ test('node records, approval purchase, receipt markers and order notes preserve 
    const before=await q('SELECT COUNT(*) AS n FROM inventory_movements');
    await q("UPDATE ozon_stock_snapshots SET present=62,available=62,synced_at='2026-10-06 00:00:00' WHERE shop_id=20 AND ozon_sku='20001'");
    let result=await service.records({node:'fbp-receipts',product_id:200},warehouse);
+   const statements=[];const summaryService=createInventoryNodeRecords({query:(sql,args)=>{statements.push(sql);return q(sql,args);}});
+   const counts=await summaryService.records({node:'fbp-receipts',product_id:200,summary_only:'1'},warehouse);
+   assert.equal(counts.total,result.total);assert.ok(counts.pending_quantity>=30);
+   assert.equal(statements.some(sql=>sql.includes('FROM inventory_flow_events')),false);
+   await assert.rejects(summaryService.records({node:'fbp-receipts',product_id:300,summary_only:'1'},warehouse),{statusCode:404});
    let row=result.rows.find(r=>Number(r.id)===id);assert.equal(row.suspected,true);assert.equal(row.remaining,30);assert.equal(row.baseline_present,32);assert.equal(row.inferred_arrival,30);
    assert.deepEqual(await q('SELECT COUNT(*) AS n FROM inventory_movements'),before);
    await assert.rejects(service.records({node:'fbp-receipts',product_id:300},warehouse),{statusCode:404});

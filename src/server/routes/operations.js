@@ -84,7 +84,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
       if(params.view==='workspace'){
         const result=inventoryWorkspacePage(all,params);
         const pageIds=result.rows.map(r=>Number(r.product_id));
-        const [batches,feedbacks,sources]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),workflow.workspaceFeedback(pageIds,session.tenant.id),workflow.workspaceSources(pageIds,session.tenant.id)]);
+        const compact=params.compact==='1';
+        const [batches,feedbacks,sources]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),compact?Promise.resolve([]):workflow.workspaceFeedback(pageIds,session.tenant.id),compact?Promise.resolve({requests:[],applications:[]}):workflow.workspaceSources(pageIds,session.tenant.id)]);
         const byProduct=new Map();for(const batch of batches){const id=Number(batch.product_id);if(!byProduct.has(id))byProduct.set(id,[]);byProduct.get(id).push(batch);}
         return{...result,...(!cached.snapshot.available?{total:null,meta:Object.fromEntries(Object.keys(result.meta).map(k=>[k,null]))}:{}),snapshot:cached.snapshot,rows:result.rows.map(row=>({...row,workflow:{...row.workflow,requests:sources.requests.filter(r=>Number(r.product_id)===Number(row.product_id)),applications:sources.applications.filter(r=>Number(r.product_id)===Number(row.product_id))},pending_batches:byProduct.get(Number(row.product_id))||[],feedbacks:feedbacks.filter(f=>Number(f.product_id)===Number(row.product_id)).slice(0,5)}))};
       }
