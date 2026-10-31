@@ -96,7 +96,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         CASE WHEN UPPER(COALESCE(raw.query_stock_location,'')) IN ('FBP','FBO','OGR') THEN 'FBP'
           WHEN (CASE WHEN JSON_VALID(raw.raw_json) THEN UPPER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json,'$.fulfillment_schema')),JSON_UNQUOTE(JSON_EXTRACT(raw.raw_json,'$.raw.fulfillment_schema')),'')) ELSE '' END) IN ('FBP','FBO','OGR') THEN 'FBP'
           ELSE 'LOCAL' END AS stock_location
-        FROM orders o JOIN order_items oi ON oi.order_id = o.id
+        FROM orders o JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
         ${tenantPk === null ? '' : `JOIN shops tenant_shop ON tenant_shop.id = o.shop_id${tenantScope('tenant_shop.tenant_id')}`}
         ${smallProductScope ? '' : `LEFT JOIN (
           SELECT h.order_id, 1 AS has_history, MIN(h.last_status_changed_at) AS transport_at
@@ -142,7 +142,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         WHERE status = 'posted' AND UPPER(COALESCE(NULLIF(stock_location, ''), 'LOCAL')) NOT IN ('FBP','FBO','OGR')
           AND (source_type IS NULL OR source_type NOT IN ('fbp_replenishment_reserve', 'fbp_replenishment_reserve_release'))${scope()}${tenantScope()} GROUP BY product_id`),
       allocationQuery(`SELECT a.order_item_id, a.product_id, a.procurement_request_id, a.allocated_quantity
-        FROM procurement_order_allocations a JOIN order_items ai ON ai.id = a.order_item_id JOIN orders ao ON ao.id = ai.order_id AND ao.id = a.order_id
+        FROM procurement_order_allocations a JOIN order_items ai ON ai.id = a.order_item_id AND ai.quantity > 0 JOIN orders ao ON ao.id = ai.order_id AND ao.id = a.order_id
         JOIN shops ash ON ash.id = ao.shop_id${tenantScope('ash.tenant_id')}
         LEFT JOIN procurement_requests ar ON ar.id = a.procurement_request_id AND ar.product_id = a.product_id${tenantScope('ar.tenant_id')}
         WHERE a.status = 'allocated' AND (a.procurement_request_id IS NULL OR ar.id IS NOT NULL)${scope('a.product_id')}`),
@@ -166,7 +166,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       allocationQuery(`SELECT id, product_id, source_order_item_id, quantity, amount, status, purchase_order_id
         FROM procurement_requests WHERE status != 'cancelled'${scope()}${tenantScope()}`),
       allocationQuery(`SELECT marks.order_item_id, marks.product_id, marks.handling_type, marks.status FROM order_item_procurement_marks marks
-        JOIN order_items mi ON mi.id = marks.order_item_id JOIN orders mo ON mo.id = mi.order_id AND mo.id = marks.order_id
+        JOIN order_items mi ON mi.id = marks.order_item_id AND mi.quantity > 0 JOIN orders mo ON mo.id = mi.order_id AND mo.id = marks.order_id
         JOIN shops ms ON ms.id = mo.shop_id${tenantScope('ms.tenant_id')} WHERE marks.status = 'handled'${scope('marks.product_id')}`),
       query(`SELECT im.related_order_item_id AS order_item_id, im.product_id, SUM(-im.quantity_delta) AS quantity, MAX(p.name) AS product_name, MAX(p.stock_unit) AS stock_unit
         FROM inventory_movements im LEFT JOIN products p ON p.id = im.product_id WHERE im.status = 'posted' AND im.source_type = 'order_outbound'

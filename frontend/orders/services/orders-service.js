@@ -495,10 +495,10 @@ export async function prepareSingleOrder(orderId) {
   return bulkPrepareOrders([orderId]);
 }
 
-export async function prepareSplitOrder(orderId, packages = []) {
+export async function prepareSplitOrder(orderId, packages = [], requestKey = crypto.randomUUID(), reconcile = false) {
   const id = Number(orderId || 0);
   if (!id) return null;
-  return apiClient.post("/api/orders/ship", { order_ids: [id], packages });
+  return apiClient.post("/api/orders/split", { order_id: id, packages, client_request_id: requestKey, ...(reconcile ? { action: "reconcile" } : {}) });
 }
 
 export async function previewOrderProcurement(orderId) {

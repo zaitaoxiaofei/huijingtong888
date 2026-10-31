@@ -21,7 +21,7 @@ test("normal shipping submits the authoritative live Ozon quantities", () => {
   const block = mysqlSource.slice(start, end);
 
   assert.match(block, /const liveProducts = buildLiveShippingProductsMysql\(livePosting\)/);
-  assert.match(block, /const shippingItems = splitPackages \|\| !liveProducts\.length \? items : liveProducts/);
+  assert.match(block, /const shippingItems = !liveProducts\.length \? items : liveProducts/);
   assert.match(block, /shipOzonPosting\(shop, order\.posting_number, shippingItems/);
 });
 

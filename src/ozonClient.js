@@ -48,7 +48,7 @@ export async function fetchOzonPostings(shop, options = {}) {
           barcodes: true,
           financial_data: true
         }
-      }, { signal: params.signal });
+      }, { signal: params.signal, beforeRequest: params.beforeRequest });
       requests += 1;
       const page = Array.isArray(data.postings) ? data : data.result;
       if (!Array.isArray(page?.postings) || typeof page.has_next !== "boolean") {
@@ -1083,6 +1083,15 @@ export async function fetchOzonFinanceTransactions(shop, options = {}) {
   return { operations, fetched: operations.length, requests };
 }
 
+export async function splitOzonPosting(shop, postingNumber, postings, options = {}) {
+  if (!hasRealOzonCredentials(shop)) throw Object.assign(new Error("店铺尚未配置有效 Ozon API Key，不能拆单"), { statusCode: 409 });
+  // Splitting is a non-idempotent mutation: a lost response must be reconciled,
+  // never retried automatically through the generic request loop.
+  return ozonRequestOnce(shop, "/v1/posting/fbs/split", {
+    posting_number: String(postingNumber), postings
+  }, options);
+}
+
 export async function shipOzonPosting(shop, postingNumber, products = [], options = {}) {
   const posting = String(postingNumber || "").trim();
   if (!posting) throw new Error("缺少需要备货的货件编号");
@@ -1436,8 +1445,12 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
   }
   if (!response.ok) {
     const message = data.message || data.error || text || `Ozon API ${response.status}`;
-    const error = new Error(`Ozon ${path} failed: ${message}`);
-    error.statusCode = response.status;
+    const credentialFailure = /api[ -]?key/i.test(String(message)) && /expired|invalid|not valid/i.test(String(message));
+    const error = new Error(credentialFailure
+      ? `店铺「${shop.name || shop.id}」的 Ozon API Key ${/expired/i.test(String(message)) ? '已过期' : '无效'}。请在「企业店铺 → 编辑 → Ozon API Key」更新并保存；密钥备注不会替换密钥。`
+      : `Ozon ${path} failed: ${message}`);
+    error.statusCode = credentialFailure ? 409 : response.status;
+    if (credentialFailure) error.code = "OZON_API_KEY_INVALID";
     error.path = path;
     error.retryAfterMs = retryAfterMs(response.headers?.get?.("retry-after"));
     throw error;

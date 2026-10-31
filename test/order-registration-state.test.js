@@ -167,7 +167,7 @@ test("order list enrichment exposes label permissions without exposing the raw p
 
 test("SQL filters put registration in the same tab as the frontend without rewriting stored status", () => {
   const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
-    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+    oglBoundStatusSql: () => "0", oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
   });
   const db = new DatabaseSync(":memory:");
   registerStatusSqlFunctions(db);
@@ -187,7 +187,7 @@ test("SQL filters put registration in the same tab as the frontend without rewri
 
 test("SQL and frontend give exact transit facts priority over stale acceptance without reading tracking numbers", () => {
   const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
-    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+    oglBoundStatusSql: () => "0", oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
   });
   const transit = ["delivering", "posting_in_transit", "posting_in_customs", "posting_sorting", "posting_on_way", "posting_on_way_to_city", "posting_in_courier_service", "posting_in_pickup_point"];
   const rows = transit.flatMap(value => ["status", "tracking_stage", "logistics_status"].map(field => ({
@@ -257,7 +257,7 @@ test("clicking prepare on a stale row reconciles registration without submitting
     orderTenantPredicateMysql: () => "1 = 1",
     assertOrderBatchOwnershipMysql: (rows, ids) => assert.equal(rows.length, ids.length),
     activeShopForTenantMysql: async id => ({ id, tenant_id: 1, name: "Fixture shop" }),
-    mysqlQuery: async (sql) => sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
+    mysqlQuery: async (sql) => sql.includes("order_split_operations") ? [] : sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
     mysqlQueryOne: async () => ({ raw_json: "{}" }),
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); },
     markInventoryAlertSkuDailyDirtyMysql: async () => {},

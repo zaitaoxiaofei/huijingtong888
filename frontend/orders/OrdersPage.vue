@@ -161,8 +161,19 @@ const splitOrderDialog = reactive({
   submitting: false,
   orderId: null,
   postingNumber: "",
+  requestKey: "",
+  attempted: false,
+  result: null,
+  prepareIds: [],
+  scope: "",
   items: [],
   packages: []
+});
+
+const splitOrderReady = computed(() => {
+  const result = splitOrderDialog.result;
+  return result?.ok === true && result?.split_confirmed === true && result?.prepared === false
+    && Array.isArray(result.orders) && result.orders.length >= 2 && result.orders.every(row => Number(row.id) > 0);
 });
 
 const splitOrderValidation = computed(() => {
@@ -1913,11 +1924,17 @@ async function openSplitOrderDialog(orderId) {
   splitOrderDialog.visible = true;
   splitOrderDialog.loading = true;
   splitOrderDialog.orderId = Number(orderId);
+  splitOrderDialog.requestKey = crypto.randomUUID();
+  splitOrderDialog.attempted = false;
+  splitOrderDialog.result = null;
+  splitOrderDialog.prepareIds = [];
+  splitOrderDialog.scope = `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`;
   splitOrderDialog.items = [];
   splitOrderDialog.packages = [];
   try {
     const detail = await fetchOrderDetail(orderId);
-    const items = (detail?.items || []).map((item) => ({
+    const pendingSplit = await apiClient.get(`/api/orders/${Number(orderId)}/split`, { noCache: true });
+    const items = (pendingSplit?.items || detail?.items || []).map((item) => ({
       id: Number(item.id),
       sku: String(item.ozon_sku || item.mapped_ozon_sku || "-"),
       name: String(item.product_name || item.online_product_name || item.ozon_name || item.ozon_sku || "商品"),
@@ -1931,7 +1948,11 @@ async function openSplitOrderDialog(orderId) {
     }
     splitOrderDialog.postingNumber = String(detail?.order?.posting_number || orderId);
     splitOrderDialog.items = items;
-    distributeSplitPackages();
+    if (pendingSplit) {
+      splitOrderDialog.requestKey = pendingSplit.request_key;
+      splitOrderDialog.attempted = true;
+      splitOrderDialog.packages = pendingSplit.packages.map(pkg => ({ quantities: Object.fromEntries(pkg.products.map(product => [product.order_item_id, product.quantity])) }));
+    } else distributeSplitPackages();
   } catch (error) {
     splitOrderDialog.visible = false;
     ElMessage.error(error?.message || "订单商品加载失败");
@@ -1952,16 +1973,41 @@ async function submitSplitOrder() {
         }))
         .filter((item) => item.quantity > 0)
     }));
-    const result = await prepareSplitOrder(splitOrderDialog.orderId, packages);
+    const reconcile = splitOrderDialog.attempted;
+    splitOrderDialog.attempted = true;
+    const result = await prepareSplitOrder(splitOrderDialog.orderId, packages, splitOrderDialog.requestKey, reconcile);
+    if (splitOrderDialog.scope !== `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`) { splitOrderDialog.visible = false; return; }
+    splitOrderDialog.result = result;
+    if (!result?.ok || !result?.split_confirmed || result.prepared !== false) {
+      ElMessage.warning(result?.error || "拆单结果尚未核实，未自动备货，请重新同步结果");
+      return;
+    }
     orderDetailCache.delete(Number(splitOrderDialog.orderId));
-    splitOrderDialog.visible = false;
     await loadOrders({ includeCounts: true });
-    ElMessage.success(`已拆分为 ${Number(result?.package_count || packages.length)} 个包裹并完成备货`);
+    ElMessage.success("拆单结果已同步；请核对状态，需备货的子单请单独确认");
   } catch (error) {
-    ElMessage.error(error?.message || "拆分备货失败");
+    if (error?.payload?.validation?.split_retry_safe === true) {
+      splitOrderDialog.attempted = false;
+      splitOrderDialog.requestKey = crypto.randomUUID();
+    }
+    ElMessage.error(error?.message || "拆单失败；未自动备货");
   } finally {
     splitOrderDialog.submitting = false;
   }
+}
+
+async function prepareSplitChildren() {
+  if (!splitOrderReady.value || !splitOrderDialog.prepareIds.length || splitOrderDialog.submitting) return;
+  const ids = [...splitOrderDialog.prepareIds];
+  try {
+    await ElMessageBox.confirm(`确认仅为已选择的 ${ids.length} 个子单备货？`, "确认子单备货", { type: "warning", confirmButtonText: "确认备货" });
+    if (splitOrderDialog.scope !== `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`) { splitOrderDialog.visible = false; return; }
+    splitOrderDialog.submitting = true;
+    await bulkPrepare(ids);
+    splitOrderDialog.visible = false;
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error?.message || "子单备货失败，未确认的订单请核对后重试");
+  } finally { splitOrderDialog.submitting = false; }
 }
 
 async function handlePrintOrder(orderId) {
@@ -2820,14 +2866,23 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="splitOrderDialog.visible"
-      title="拆分包裹并备货"
+      title="拆分订单"
       width="920px"
       align-center
       class="erp-centered-dialog orders-split-dialog"
       destroy-on-close
     >
       <div v-loading="splitOrderDialog.loading" class="orders-split-dialog-body">
-        <div class="orders-split-summary">
+        <el-alert title="此处只拆单，不自动备货。子单同步成功后，请核对并单独确认备货。" type="info" :closable="false" />
+        <el-alert v-if="splitOrderDialog.result?.error" :title="splitOrderDialog.result.error" type="warning" :closable="false" />
+        <div v-if="splitOrderReady" class="orders-split-result">
+          <el-table :data="splitOrderDialog.result.orders" row-key="id" @selection-change="rows => splitOrderDialog.prepareIds = rows.map(row => Number(row.id))">
+            <el-table-column type="selection" width="45" :selectable="row => row.status === 'awaiting_packaging'" />
+            <el-table-column label="已同步订单"><template #default="{row}"><el-button link type="primary" @click="openDrawer('detail', row.id)">{{row.posting_number}}</el-button></template></el-table-column>
+            <el-table-column label="状态"><template #default="{row}">{{row.status === 'awaiting_packaging' ? '待备货 · 需单独确认' : row.status}}</template></el-table-column>
+          </el-table>
+        </div>
+        <div v-if="!splitOrderReady" class="orders-split-summary">
           <div>
             <span>货件号</span>
             <strong>{{ splitOrderDialog.postingNumber || "-" }}</strong>
@@ -2836,11 +2891,11 @@ onBeforeUnmount(() => {
             <span>包裹数量</span>
             <strong>{{ splitOrderDialog.packages.length }}</strong>
           </div>
-          <el-button :icon="Plus" @click="addSplitPackage">新增包裹</el-button>
-          <el-button @click="distributeSplitPackages">重新均分</el-button>
+          <el-button :disabled="splitOrderDialog.attempted" :icon="Plus" @click="addSplitPackage">新增包裹</el-button>
+          <el-button :disabled="splitOrderDialog.attempted" @click="distributeSplitPackages">重新均分</el-button>
         </div>
 
-        <div class="orders-split-packages">
+        <div v-if="!splitOrderReady" class="orders-split-packages">
           <section
             v-for="(pkg, packageIndex) in splitOrderDialog.packages"
             :key="packageIndex"
@@ -2854,7 +2909,7 @@ onBeforeUnmount(() => {
                   circle
                   plain
                   type="danger"
-                  :disabled="splitOrderDialog.packages.length <= 2"
+                  :disabled="splitOrderDialog.attempted || splitOrderDialog.packages.length <= 2"
                   aria-label="删除包裹"
                   @click="removeSplitPackage(packageIndex)"
                 />
@@ -2873,6 +2928,7 @@ onBeforeUnmount(() => {
                 step-strictly
                 controls-position="right"
                 aria-label="包裹商品数量"
+                :disabled="splitOrderDialog.attempted"
                 @update:model-value="updateSplitPackageQuantity(pkg, item, $event)"
               />
             </div>
@@ -2880,7 +2936,7 @@ onBeforeUnmount(() => {
         </div>
 
         <el-alert
-          v-if="splitOrderValidation"
+          v-if="!splitOrderReady && splitOrderValidation"
           :title="splitOrderValidation"
           type="warning"
           :closable="false"
@@ -2888,21 +2944,23 @@ onBeforeUnmount(() => {
         />
         <el-alert
           v-else
-          title="商品数量已全部分配，提交后 Ozon 将按这些包裹完成备货。"
+          title="商品数量已分配；拆单成功不代表已备货，需再次确认。"
           type="success"
           :closable="false"
           show-icon
         />
       </div>
       <template #footer>
-        <el-button @click="splitOrderDialog.visible = false">取消</el-button>
+        <el-button :disabled="splitOrderDialog.submitting" @click="splitOrderDialog.visible = false">返回订单</el-button>
+        <el-button v-if="splitOrderReady" type="primary" :loading="splitOrderDialog.submitting" :disabled="!splitOrderDialog.prepareIds.length" @click="prepareSplitChildren">确认所选子单备货</el-button>
         <el-button
           type="primary"
           :loading="splitOrderDialog.submitting"
           :disabled="Boolean(splitOrderValidation) || splitOrderDialog.loading"
+          v-if="!splitOrderReady"
           @click="submitSplitOrder"
         >
-          确认拆分并备货
+          {{ splitOrderDialog.attempted ? "重新同步拆单结果" : "确认拆单，不备货" }}
         </el-button>
       </template>
     </el-dialog>

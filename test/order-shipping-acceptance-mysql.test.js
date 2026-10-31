@@ -152,6 +152,13 @@ test("FBS acceptance shipping compensation preserves real SQL state, stock, prin
       });
     }
 
+    await t.test("false or empty Ozon preparation success cannot update local preparation state", async()=>{
+      for(const response of [{result:false},{result:[]}]){
+        await reset(a);const before=await untouched();get=async()=>posting(a.id,"awaiting_packaging");ship=async()=>response;
+        await assert.rejects(call(a),/未更新本地备货/);assert.equal((await query("SELECT status FROM orders WHERE id=20"))[0].status,"awaiting_packaging");assert.deepEqual(await untouched(),before);
+      }
+    });
+
     for (const state of ["cancelled", "unknown", "get-failed"]) await t.test(`wrong-status compensation cannot fabricate success for ${state}`, async () => {
       await reset(a); const before = await untouched(); let reads = 0;
       get = async () => { if (++reads === 1) return posting(a.id, "awaiting_packaging"); if (state === "get-failed") throw new Error("Fixture detail unavailable"); return posting(a.id, state); };

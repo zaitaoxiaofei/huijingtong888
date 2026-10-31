@@ -121,8 +121,8 @@ onMounted(load);
         <el-form-item label="主体名称"><el-input v-model="form.legal_entity" /></el-form-item>
         <el-form-item label="Ozon Client ID"><el-input v-model="form.ozon_client_id" /></el-form-item>
         <el-form-item label="Seller ID"><el-input v-model="form.ozon_seller_id" /></el-form-item>
-        <el-form-item label="Ozon API Key"><el-input v-model="form.ozon_api_key" type="password" show-password :placeholder="editing ? '留空保持现有密钥' : '请输入店铺 API Key'" /></el-form-item>
-        <el-form-item label="密钥备注"><el-input v-model="form.api_key_hint" /></el-form-item>
+        <el-form-item label="Ozon API Key"><el-input v-model="form.ozon_api_key" type="password" autocomplete="new-password" show-password :placeholder="editing ? '粘贴新密钥可替换旧密钥；留空不更改' : '请输入店铺 API Key'" /></el-form-item>
+        <el-form-item label="授权备注（选填）"><el-input v-model="form.api_key_hint" placeholder="仅作备注；新密钥请填上方 Ozon API Key" /></el-form-item>
         <el-form-item label="广告 Client ID"><el-input v-model="form.performance_client_id" /></el-form-item>
         <el-form-item label="广告 Client Secret"><el-input v-model="form.performance_client_secret" type="password" show-password :placeholder="editing ? '留空保持现有密钥' : '选填'" /></el-form-item>
         <el-form-item label="结算比例"><el-input-number v-model="form.payout_rate" :min="0" :max="1" :step="0.01" :precision="4" /></el-form-item>

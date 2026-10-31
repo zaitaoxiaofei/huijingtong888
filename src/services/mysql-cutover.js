@@ -1,3 +1,5 @@
+const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
+import { createOrderSplitService } from "./order-split.js";
 import { mergeDashboardSections } from "../shared/dashboard-sections.js";
 import { captureFbpReceiptBaseline } from './fbp-receipt-review.js';
 import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from './inventory-product-search.js';
@@ -41,7 +43,7 @@ import { fxSettlementInputFingerprint, planOrderFxSettlement } from "./order-pro
 import { getOrderProfitFxPolicy, orderFxSalePrice, pendingOrderFxEstimate, prepareOrderProfitFx, readOrderProfitFxState } from "./order-profit-fx-policy.js";
 import { ensureOrderProfitDailyFx, orderProfitFxBusinessDate } from "./order-profit-daily-fx.js";
 import { writeOrderFinanceAccrual } from "./order-finance-accrual-write.js";
-import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
+import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory, fetchOzonChatList, fetchOzonFboSupplyOrderItems, fetchOzonFboSupplyOrders, fetchOzonFbpPostings, fetchOzonPackageLabel, fetchOzonPostingByNumber, fetchOzonPostings, fetchOzonFinanceTransactions, fetchOzonProductInfoAttributes, fetchOzonProductInfoLimit, fetchOzonProductRefs, fetchOzonProducts, fetchOzonProductsByIds, fetchOzonProductStocks, fetchOzonStockTurnover, fetchOzonWarehouses, filterPendingListingProductsWithoutFbsStock, pendingListingVisibilityFilters, sendOzonCustomerChatMessage, shipOzonPosting, splitOzonPosting, startOzonCustomerChat, updateOzonProductStocks } from "../ozonClient.js";
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { matchesCancellationRule } from "./order-cancellation-review.js";
@@ -87,7 +89,7 @@ import {
   resolveDevelopmentMeta
 } from "./product-development-meta.js";
 import { normalizePurchasePlanMysql } from "./mysql-procurement-plan.js";
-import { buildLiveShippingProductsMysql, buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
+import { buildLiveShippingProductsMysql } from "./mysql-order-shipping-packages.js";
 import {
   orderProfitDetailSnapshotMysqlService,
   refreshOrderProfitDetailSnapshotsMysqlService
@@ -8383,7 +8385,52 @@ async function syncOrderShippingStateFromOzonMysql(shop, order, options = {}, po
   } };
 }
 
+export async function splitOrderMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  const authorize = async orderId => {
+    await assertOrderTaskAccessMysql(scope, options, ["packing"]);
+    const order = await mysqlQueryOne(`SELECT o.* FROM orders o JOIN shops s ON s.id=o.shop_id
+      WHERE o.id=? AND ${orderTenantPredicateMysql("s", scope)}`, [orderId]);
+    if (!order) throw Object.assign(new Error("订单不存在或不属于当前企业"), { statusCode: 404 });
+    const shop = await activeShopForTenantMysql(order.shop_id, scope.id);
+    const items = await mysqlQuery("SELECT id,ozon_sku,quantity FROM order_items WHERE order_id=? AND quantity>0 ORDER BY id", [orderId]);
+    return { tenantId: scope.id, order, shop, items };
+  };
+  const split = createOrderSplitService({
+    query: mysqlQuery, execute: mysqlExecute, authorize,
+    splitRemote: (shop, posting, packages) => splitOzonPosting(shop, posting, packages, {
+      beforeRequest: async () => { await assertOrderTaskAccessMysql(scope, options, ["packing"]); return activeShopForTenantMysql(shop.id, scope.id); }
+    }),
+    fetchRemote: (shop, posting) => fetchOzonPostingByNumber(shop, posting, {
+      beforeRequest: async () => { await assertOrderTaskAccessMysql(scope, options, ["packing"]); return activeShopForTenantMysql(shop.id, scope.id); }
+    }),
+    fetchSiblings: async context => {
+      const date = new Date(context.order.ordered_at instanceof Date ? context.order.ordered_at : `${String(context.order.ordered_at).replace(" ", "T")}Z`);
+      if (!Number.isFinite(date.getTime())) throw new Error("原单下单时间缺失，请先核对官方记录");
+      const from = new Date(date.getTime() - 1000).toISOString(), to = new Date(date.getTime() + 1000).toISOString();
+      const result = await fetchOzonPostings(context.shop, { from, to, beforeRequest: async () => {
+        await assertOrderTaskAccessMysql(scope, options, ["packing"]); return activeShopForTenantMysql(context.shop.id, scope.id);
+      } });
+      return result.postings.filter(posting => posting.posting_number === context.order.posting_number || posting.raw?.parent_posting_number === context.order.posting_number);
+    },
+    importPostings: async (context, postings) => {
+      const rows = [];
+      for (const posting of postings) {
+        await authorize(context.order.id);
+        await upsertPostingMysql(context.shop, posting, "sync", { ...options, [ORDER_SPLIT_IMPORT]: true, tenantId: scope.id });
+        const row = await mysqlQueryOne("SELECT id,posting_number,status FROM orders WHERE shop_id=? AND posting_number=?", [context.shop.id, posting.posting_number]);
+        rows.push(row);
+      }
+      invalidateOrderProcurementCoverage();
+      return rows;
+    }
+  });
+  return split(body, userId || options.session?.personId);
+}
+
 export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
+  if (Object.hasOwn(body, "packages")) throw Object.assign(new Error("拆单不会自动备货。请刷新页面后使用拆单功能并同步子单，再单独确认备货。"), { statusCode: 409 });
   ensureMysqlCutoverEnabled();
   const scope = await orderListTenantScopeMysql(tenantId);
   await assertOrderTaskAccessMysql(scope, options, ["packing"]);
@@ -8398,7 +8445,8 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
     WHERE o.id IN (${ids.map(() => "?").join(",")}) AND ${orderTenantPredicateMysql("s", scope)}
   `, ids);
   assertOrderBatchOwnershipMysql(ordersToShip, ids);
-  if (Array.isArray(body.packages) && ids.length !== 1) throw new Error("拆分备货一次只能处理一个订单");
+  const pendingSplits = await mysqlQuery(`SELECT id FROM order_split_operations WHERE tenant_id=? AND active_order_id IN (${ids.map(() => "?").join(",")}) LIMIT 1`, [scope.id, ...ids]);
+  if (pendingSplits.length) throw Object.assign(new Error("订单拆单结果尚未核实，请先同步并核对子单，再单独确认备货。"), { statusCode: 409 });
   const shipped = [];
   const alreadyShipped = [];
   const updatedOrders = [];
@@ -8439,7 +8487,7 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
         op.id = sm.online_product_id AND op.shop_id = ?
         OR (op.shop_id = ? AND op.ozon_sku = oi.ozon_sku)
       )
-      WHERE oi.order_id = ?
+      WHERE oi.order_id = ? AND oi.quantity > 0
     `, [order.shop_id, order.shop_id, order.shop_id, order.shop_id, order.id])).map((item, index) => ({
       ...item,
       product_id: resolveShippingProductIdMysql(item, index, rawProductItems)
@@ -8465,14 +8513,13 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
         continue;
       }
     }
-    let splitPackages = null;
-    if (Array.isArray(body.packages)) {
-      splitPackages = buildSplitShippingPackagesMysql(items, body.packages);
-    }
     const liveProducts = buildLiveShippingProductsMysql(livePosting);
-    const shippingItems = splitPackages || !liveProducts.length ? items : liveProducts;
+    const shippingItems = !liveProducts.length ? items : liveProducts;
     try {
-      await shipOzonPosting(shop, order.posting_number, shippingItems, splitPackages ? { packages: splitPackages } : {});
+      const receipt = await shipOzonPosting(shop, order.posting_number, shippingItems);
+      if (receipt?.result === false || (Array.isArray(receipt?.result) && !receipt.result.length)) {
+        throw Object.assign(new Error("Ozon 尚未确认备货成功，请刷新官方状态后核对；未更新本地备货状态"), { statusCode: 409 });
+      }
     } catch (error) {
       const rawMessage = String(error?.message || error || "");
       if (rawMessage.includes("UNKNOWN_PRODUCT_DEFINED")) {
@@ -8528,7 +8575,7 @@ export async function shipOrdersMysql(body = {}, userId = null, tenantId = "admi
     order_ids: shipped,
     already_shipped_ids: alreadyShipped,
     already_shipped_count: alreadyShipped.length,
-    package_count: Array.isArray(body.packages) ? body.packages.length : shipped.length,
+    package_count: shipped.length,
     updated_orders: updatedOrders
   };
 }
@@ -9971,7 +10018,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
       LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
       LEFT JOIN order_profit_calc_state calc_state ON calc_state.order_item_id = oi.id AND calc_state.order_id = oi.order_id
         AND calc_state.tenant_key = (CASE WHEN owned_shop.tenant_id > 0 THEN CAST(owned_shop.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
-      WHERE oi.order_id = ?
+      WHERE oi.order_id = ? AND oi.quantity > 0
     `, [row.order_id]);
     const itemVersions = [...new Set(items.map(item => item.formula_version || "V1"))];
     if (itemVersions.some(usesDailyProfitFx)) {
@@ -10025,7 +10072,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
             LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
             LEFT JOIN order_profit_calc_state current_calc ON current_calc.order_item_id = oi.id AND current_calc.order_id = o.id
               AND current_calc.tenant_key = (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) COLLATE utf8mb4_0900_ai_ci
-            WHERE o.id = ? AND o.shop_id = ?
+            WHERE o.id = ? AND o.shop_id = ? AND oi.quantity > 0
               AND (CASE WHEN s.tenant_id > 0 THEN CAST(s.tenant_id AS CHAR) ELSE 'admin' END) = ?
             ORDER BY oi.id FOR UPDATE`, [row.order_id, row.shop_id, profitTenantKey]);
           const freshFx = await readOrderProfitFxState(db, profitTenantKey, row.order_id);
@@ -18104,7 +18151,7 @@ async function syncOrderItemProfitFromBreakdownMysql(orderItemId, settlement, co
 }
 
 function orderOutboundSyncScopeMysql(options = {}, tenantScope) {
-  const where = [`EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
+  const where = ["oi.quantity > 0", `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`];
   const params = [];
   const shopId = Number(options.shop_id || options.shopId || 0);
   const ozonSku = String(options.ozon_sku || options.ozonSku || "").trim();
@@ -19426,7 +19473,7 @@ export async function recalculateOrderItemsForMappingMysql(mappingId, options = 
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
-    WHERE o.shop_id = ? AND oi.ozon_sku = ?
+    WHERE o.shop_id = ? AND oi.ozon_sku = ? AND oi.quantity > 0
       ${finalScopeSql}
       ${onlyMissingPurchase ? "AND COALESCE(opi.purchase_cost_cny, 0) <= 0.005" : ""}
   `, [mapping.shop_id, mapping.ozon_sku]);
@@ -19471,7 +19518,7 @@ async function accrueDeliveredItemsMysql(orderId, tenantId = "admin") {
   const scope = await orderOwnershipTenantScopeMysql(tenantId);
   const order = await mysqlQueryOne(`SELECT o.* FROM orders o JOIN shops s ON s.id = o.shop_id WHERE o.id = ? AND ${orderTenantPredicateMysql("s", scope)}`, [orderId]);
   if (!order || order.status !== "delivered") return;
-  const pendingItems = await mysqlQuery("SELECT id FROM order_items WHERE order_id = ? AND COALESCE(settlement_state, '') != 'accrued' ORDER BY id", [orderId]);
+  const pendingItems = await mysqlQuery("SELECT id FROM order_items WHERE order_id = ? AND quantity > 0 AND COALESCE(settlement_state, '') != 'accrued' ORDER BY id", [orderId]);
   const pendingItemIds = pendingItems.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0).join(",") || "NULL";
   await withVersionedOrderProfitBatchWrite(pendingItems.map((row) => row.id), {
     source: "delivered_pending_normalization", operation: "aftersale", inputs: { order_id: Number(orderId) }, reason: "已送达但未完成财务结算的状态同步"
@@ -19590,6 +19637,66 @@ async function reconcileTransportedProcurementBacklogMysql(tenantId = "admin") {
   }
 }
 
+async function reconcileRemovedPostingItemsMysql(shop, posting, orderId, scope, options = {}) {
+  // Only a complete official product list can retire a formerly present SKU.
+  // Retain the item and its revision history; never delete settled financial facts.
+  if (!Array.isArray(posting.raw?.products) || !posting.raw.products.length || !(posting.items || []).length) return;
+  const skus = [...new Set(posting.items.map(item => String(item.ozon_sku || "")).filter(Boolean))];
+  if (!skus.length || skus.length !== posting.items.length) return;
+  const removed = await mysqlQuery(`SELECT oi.id,oi.ozon_sku,oi.quantity FROM order_items oi
+    WHERE oi.order_id=? AND oi.quantity>0 AND oi.ozon_sku NOT IN (${skus.map(() => "?").join(",")})`, [orderId, ...skus]);
+  for (const row of removed) {
+    await assertOrderTaskAccessMysql(scope, options);
+    const evidence = await mysqlQueryOne(`SELECT child_order.id FROM orders child_order
+      JOIN order_items child_item ON child_item.order_id=child_order.id AND child_item.quantity>0
+      JOIN ozon_orders_raw child_raw ON child_raw.store_id=child_order.shop_id AND child_raw.posting_number=child_order.posting_number
+      WHERE child_order.shop_id=? AND child_order.id<>? AND child_item.ozon_sku=?
+        AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(child_raw.raw_json,'$.raw.parent_posting_number')),''),
+          NULLIF(JSON_UNQUOTE(JSON_EXTRACT(child_raw.raw_json,'$.parent_posting_number')),''))=? LIMIT 1`,[shop.id,orderId,row.ozon_sku,posting.posting_number]);
+    if (!evidence) continue;
+    await withVersionedOrderProfitWrite(row.id, {
+      layer: "estimate", source: "ozon_posting_item_removed", reason: "官方完整明细已移除此 SKU，保留历史并归零当前数量，避免拆单重复计数",
+      inputs: { posting_number: posting.posting_number, official_skus: skus }
+    }, async ({ connection, db }) => {
+      const item = await db.queryOne(`SELECT oi.*,o.status AS order_status,o.tracking_stage,o.logistics_status,
+        sm.product_id,sm.person_id,opi.is_locked,opi.profit_status,
+        ${orderTransportEvidenceSql("o")} AS entered_transport,
+        ${oglPhysicalDispatchSql("o")} AS ogl_handed_over
+        FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id
+        LEFT JOIN sku_mappings sm ON sm.id=oi.sku_mapping_id AND sm.shop_id=o.shop_id AND ${orderTenantPredicateMysql("sm", scope)}
+        LEFT JOIN order_profit_items opi ON opi.order_item_id=oi.id
+        WHERE oi.id=? AND o.id=? AND o.shop_id=? AND ${orderTenantPredicateMysql("s", scope)} FOR UPDATE`, [row.id,orderId,shop.id]);
+      if (!item || Number(item.quantity)<=0) return;
+      const child = await db.queryOne(`SELECT SUM(child_item.quantity) AS moved_quantity
+        FROM orders child_order JOIN order_items child_item ON child_item.order_id=child_order.id AND child_item.quantity>0
+        JOIN ozon_orders_raw child_raw ON child_raw.store_id=child_order.shop_id AND child_raw.posting_number=child_order.posting_number
+        WHERE child_order.shop_id=? AND child_order.id<>? AND child_item.ozon_sku=?
+          AND COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT(child_raw.raw_json,'$.raw.parent_posting_number')),''),
+            NULLIF(JSON_UNQUOTE(JSON_EXTRACT(child_raw.raw_json,'$.parent_posting_number')),''))=?`, [shop.id,orderId,item.ozon_sku,posting.posting_number]);
+      if (Number(child?.moved_quantity||0)<Number(item.quantity)) throw Object.assign(new Error(`订单 ${posting.posting_number} 的子单商品明细尚未完整同步，请先按完整单号同步子单，再核对原单；未覆盖原数量`),{statusCode:409});
+      const finance = await db.queryOne("SELECT id FROM ozon_finance_items WHERE shop_id=? AND posting_number=? LIMIT 1", [shop.id,posting.posting_number]);
+      if (!['awaiting_packaging','awaiting_deliver'].includes(item.order_status) || Number(item.entered_transport) || Number(item.ogl_handed_over) || Number(item.is_locked) || item.profit_status==='accrued' || item.settlement_state==='accrued' || finance) {
+        throw Object.assign(new Error(`订单 ${posting.posting_number} 的商品已发运或存在账单，官方明细变化需人工核对，未覆盖历史利润或出库记录`), { statusCode:409 });
+      }
+      const outbound = await db.queryOne("SELECT id,quantity,stock_location,stock_location_source FROM outbound_records WHERE order_item_id=? AND shop_id=? AND status='deducted' LIMIT 1 FOR UPDATE",[item.id,shop.id]);
+      if (outbound && Number(outbound.quantity)>0 && item.product_id) {
+        await postProductInventoryWithComponentsMysql(connection, {
+          product_id:item.product_id,shop_id:shop.id,sku_mapping_id:item.sku_mapping_id,owner_person_id:item.person_id,
+          source_type:'order_outbound_adjustment',source_ref:`${posting.posting_number}:removed:${item.id}`,
+          quantity_delta:Number(outbound.quantity),stock_location:outbound.stock_location,stock_location_source:outbound.stock_location_source,
+          unit_cost:item.frozen_purchase_cost||0,amount:Number(outbound.quantity)*Number(item.frozen_purchase_cost||0),
+          related_posting_number:posting.posting_number,related_order_item_id:item.id,note:'官方商品移至子单，冲销原商品登记'
+        },scope.id);
+        await db.execute("UPDATE outbound_records SET quantity=0,status='split_transferred',note='官方商品明细移除，保留原登记追溯' WHERE id=? AND shop_id=?",[outbound.id,shop.id]);
+      }
+      await db.execute("UPDATE order_items SET quantity=0,estimated_commission=0,estimated_profit=0,aftersale_loss=0 WHERE id=? AND order_id=?",[item.id,orderId]);
+      await db.execute(`UPDATE order_profit_items SET sale_amount_cny=0,purchase_cost_cny=0,domestic_shipping_cny=0,
+        international_shipping_cny=0,packaging_cost_cny=0,commission_fee_cny=0,ozon_service_fee_cny=0,return_loss_cny=0,
+        advertising_cost_cny=0,other_fee_cny=0,gross_profit_cny=0,net_profit_cny=0 WHERE order_item_id=? AND COALESCE(is_locked,0)=0`,[item.id]);
+    });
+  }
+}
+
 async function upsertPostingMysql(shop, posting, historySource = "sync", options = {}) {
   const tenantScope = await orderListTenantScopeMysql(options.tenantId || shop.tenant_id || "admin");
   await assertOrderTaskAccessMysql(tenantScope, options);
@@ -19688,6 +19795,7 @@ async function upsertPostingMysql(shop, posting, historySource = "sync", options
     updated = 1;
   }
   await recordOrderStatusHistoryMysql(shop, posting, orderId, lifecycle, historySource, exists);
+  await reconcileRemovedPostingItemsMysql(shop, posting, orderId, tenantScope, options);
   const profitFxState = await prepareOrderProfitFx({ query: mysqlQuery,
     transaction: callback => retryProfitCalculationTransaction(withMysqlTransaction, connection => callback(profitCalculationDatabase(connection)))
   }, { tenantId: shop.tenant_id || "admin", orderId, orderedAt: exists?.ordered_at || posting.ordered_at,
@@ -19986,7 +20094,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
         }
       }
       if (!successfulFeeds) throw new Error(feedErrors.join(" | "));
-      const postings = [...postingsByNumber.values()];
+      const postings = [...postingsByNumber.values()].sort((a,b) => Number(Boolean(b.raw?.parent_posting_number)) - Number(Boolean(a.raw?.parent_posting_number)));
       const shopStats = {
         shop_id: shop.id,
         shop_name: shop.name,
@@ -20216,6 +20324,7 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
   if (targetShopId && !activeShops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const rows = [];
   const errors = [];
+  const pending = new Map();
   let inserted = 0;
   let updated = 0;
   let insertedItems = 0;
@@ -20234,20 +20343,7 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
           }
         });
         if (!posting?.posting_number) continue;
-        const stats = await upsertPostingMysql(shop, posting, "sync", { ...options, tenantId });
-        inserted += stats.inserted;
-        updated += stats.updated;
-        insertedItems += stats.insertedItems;
-        rows.push({
-          posting_number: postingNumber,
-          shop_id: shop.id,
-          shop_name: shop.name,
-          status: posting.status,
-          tracking_stage: posting.tracking_stage || posting.substatus || "",
-          inserted: stats.inserted,
-          updated: stats.updated,
-          inserted_items: stats.insertedItems
-        });
+        pending.set(`${shop.id}:${posting.posting_number}`, {shop,posting});
         matched = true;
         break;
       } catch (error) {
@@ -20259,6 +20355,29 @@ export async function syncOzonPostingsByNumberMysql(body = {}, options = {}) {
     if (!matched) {
       rows.push({ posting_number: postingNumber, found: false });
     }
+  }
+  // A known official child carries its parent number; fetch that exact parent,
+  // never guess suffixes. This repairs the original even when only a child was searched.
+  for (const {shop,posting} of [...pending.values()]) {
+    const parent = String(posting.raw?.parent_posting_number || "").trim();
+    if (!parent || parent===posting.posting_number || pending.has(`${shop.id}:${parent}`)) continue;
+    try {
+      const current = await activeShopForTenantMysql(shop.id, tenantScope.id);
+      const detail = await fetchOzonPostingByNumber(current,parent,{signal:options.signal,beforeRequest:async()=>{
+        await assertOrderTaskAccessMysql(tenantScope,options);return activeShopForTenantMysql(shop.id,tenantScope.id);
+      }});
+      if(detail?.posting_number===parent)pending.set(`${shop.id}:${parent}`,{shop:current,posting:detail});
+    } catch(error) { errors.push(`${shop.name} ${parent}: ${error.message}`); }
+  }
+  for (const {shop,posting} of [...pending.values()].sort((a,b)=>Number(Boolean(b.posting.raw?.parent_posting_number))-Number(Boolean(a.posting.raw?.parent_posting_number)))) {
+    await assertOrderTaskAccessMysql(tenantScope,options);
+    const current=await activeShopForTenantMysql(shop.id,tenantScope.id);
+    try {
+      const stats=await upsertPostingMysql(current,posting,"sync",{...options,tenantId});
+      inserted+=stats.inserted;updated+=stats.updated;insertedItems+=stats.insertedItems;
+      rows.push({posting_number:posting.posting_number,shop_id:shop.id,shop_name:shop.name,status:posting.status,
+        tracking_stage:posting.tracking_stage||posting.substatus||"",inserted:stats.inserted,updated:stats.updated,inserted_items:stats.insertedItems});
+    } catch(error) { errors.push(`${shop.name} ${posting.posting_number}: ${error.message}`);rows.push({posting_number:posting.posting_number,found:false}); }
   }
   await assertOrderTaskAccessMysql(tenantScope, options);
     await syncOutboundForOpenOrdersMysql({ ...options, tenantId, posting_numbers: postingNumbers });
@@ -20490,7 +20609,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN ${returnLossTotal} ELSE 0 END), 0) AS return_loss,
       CURRENT_TIMESTAMP
     FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
+    JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE ${orderScope} ${orderedAtFilter.whereSql}
     GROUP BY ${chinaDateSqlMysql("o.ordered_at")}, o.shop_id
@@ -20533,7 +20652,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
       COALESCE(SUM(CASE WHEN ${outcome.effectiveSale} THEN CASE WHEN COALESCE(opi.profit_status, oi.settlement_state, '') = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) END ELSE 0 END), 0) AS current_profit,
       CURRENT_TIMESTAMP
     FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
+    JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
     JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = sm.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)})
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE ${orderScope} ${orderedAtFilter.whereSql}
@@ -20572,7 +20691,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
       COALESCE(SUM(CASE WHEN ${outcome.rejectedUnclaimed} OR ${outcome.afterDeliveryReturn} THEN COALESCE(oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS return_revenue,
       CURRENT_TIMESTAMP
     FROM orders o
-    JOIN order_items oi ON oi.order_id = o.id
+    JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
     LEFT JOIN sku_mappings sm ON sm.id = oi.sku_mapping_id AND sm.shop_id = o.shop_id AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", tenantScope)} AND EXISTS (SELECT 1 FROM products owned_product WHERE owned_product.id = sm.product_id AND ${orderTenantPredicateMysql("owned_product", tenantScope)})
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE ${orderScope} ${orderedAtFilter.whereSql}
@@ -20625,7 +20744,7 @@ export async function recalculateOrderProfitMysql(orderId, options = {}) {
     SELECT oi.*, o.shop_id, o.status AS order_status
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
-    WHERE oi.order_id = ?
+    WHERE oi.order_id = ? AND oi.quantity > 0
   `, [Number(orderId)]);
   let updated = 0;
   let unbound = 0;
@@ -21299,7 +21418,7 @@ export async function forceRecalculateOrderProfitsForProductMysql(productId, bod
     JOIN orders o ON o.id = oi.order_id
     JOIN sku_mappings sm_current ON sm_current.id = oi.sku_mapping_id
     WHERE EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)}) AND ${orderTenantPredicateMysql("sm_current", tenantScope)} AND sm_current.shop_id = o.shop_id AND sm_current.product_id = ?
-      AND oi.id IN (${placeholders})
+      AND oi.quantity > 0 AND oi.id IN (${placeholders})
   `, [Number(productId), ...orderItemIds]);
 
   let updated = 0;
@@ -27182,7 +27301,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   const fastMode = ["1", "true", "yes"].includes(String(query.fast || query.noCount || "").toLowerCase());
   const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
   const whereParams = [];
-  const where = [];
+  const where = ["oi.quantity > 0"];
   let selectFields = "";
   let groupFields = "";
   let joinSql = "";
@@ -30007,7 +30126,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       raw.raw_json AS raw_json
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
-    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
       AND sm.active = 1
@@ -30210,7 +30329,7 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
       olp.printed_at, olp.print_batch_id, olp.print_sequence, raw.raw_json
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
-    LEFT JOIN order_items oi ON oi.order_id = o.id
+    LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku)) AND sm.active = 1
       ${tenantScope ? `AND ${orderTenantPredicateMysql("sm", tenantScope)}` : ""}
@@ -30266,6 +30385,7 @@ function orderTenantPredicateMysql(alias, scope) {
 }
 
 async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["orders.manage", "technical"]) {
+  if (options[ORDER_SPLIT_IMPORT] === true && permissions.length === 2 && permissions[0] === "orders.manage" && permissions[1] === "technical") permissions = ["packing", "orders.manage"];
   if (options[OGL_DISPATCH_REFRESH] === true && permissions.length === 2
     && permissions[0] === "orders.manage" && permissions[1] === "technical") permissions = ["packing", "orders.manage"];
   throwIfAbortedMysql(options.signal);
@@ -31573,7 +31693,7 @@ export async function orderDetailMysql(id, tenantId = "admin") {
     ${peopleJoinSql}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN logistics_fee_rules frozen_rule ON frozen_rule.id = oi.frozen_logistics_rule_id AND ${billingScope.sql}
-    WHERE oi.order_id = ?
+    WHERE oi.order_id = ? AND oi.quantity > 0
   `, [...itemTenantParams, Number(order.shop_id), ...billingScope.params, Number(id)]);
 
   const billingRuleNames = [...new Set(items.map((item) => String(item.billing_logistics_rule_name || "").trim()).filter(Boolean))];

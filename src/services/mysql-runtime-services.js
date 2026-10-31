@@ -529,6 +529,7 @@ import {
   userPreferenceMysql,
   updateSupplierMysql,
   shipOrdersMysql,
+  splitOrderMysql,
   warmCoreInventoryRuntimeMysql
 } from "./mysql-cutover.js";
 import { hashPassword, validatePasswordStrength } from "../auth-password.js";
@@ -1151,6 +1152,7 @@ export const mysqlRuntimeServices = {
   deleteListingPublishRecord,
   refreshOzonCategoryCache,
   shipOrders: shipOrdersMysql,
+  splitOrder: splitOrderMysql,
   syncDemoOrders: syncDemoOrdersMysql,
   latestOrderSyncStatus: latestOrderSyncStatusMysql,
   syncCustomerChats: syncCustomerChatsMysql,

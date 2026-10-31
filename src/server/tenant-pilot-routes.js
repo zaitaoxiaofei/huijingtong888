@@ -8,7 +8,7 @@ const routes = new Set([
   'GET monthly-billing-details', 'GET monthly-billing-orders',
   'GET dashboard', 'GET orders', 'GET orders/status-history/summary', 'GET order-quality-rules',
   'POST orders/package-label', 'POST orders/package-label-printed', 'POST orders/package-label-print-failed',
-  'POST orders/ship', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
+  'POST orders/ship', 'POST orders/split', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
   'GET profit-ranking', 'GET profit-aftersales', 'GET profit-aftersales/details',
   'GET order-car-heatmap/models', 'GET order-car-heatmap/products', 'GET order-car-heatmap/skus', 'GET order-car-heatmap/unmatched',
   'POST order-car-heatmap/ai-classify', 'POST order-car-heatmap/confirm-tag',
@@ -96,6 +96,7 @@ const routes = new Set([
 ]);
 
 const recordRoutes = [
+  ['GET', /^orders\/\d+\/split$/],
   ['DELETE', /^products\/\d+$/],
   ['POST', /^products\/\d+\/(?:add-to-inventory|remove-from-inventory|undo-merge|recalculate-profits|force-recalculate-profits)$/],
   ['GET', /^online-products\/\d+\/edit-draft$/],

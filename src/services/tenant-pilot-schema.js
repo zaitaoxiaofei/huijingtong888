@@ -23,6 +23,7 @@ export async function assertTenantPilotSchemaReady(query = mysqlQuery) {
   await assertOglDispatchSchemaReady(query);
   await assertListingFrozenContentReady(query);
   const required = {
+    order_split_operations: ["tenant_id","order_id","shop_id","request_key","request_hash","active_order_id"],
     products: ["tenant_id"], shops: ["tenant_id"], sku_mappings: ["tenant_id"],
     suppliers: ["tenant_id"], logistics_fee_rules: ["tenant_id"],
     procurement_requests: ["tenant_id"], inventory_movements: ["tenant_id"],

@@ -5,7 +5,7 @@ import { useAuthStore } from "../../admin/stores/auth.js";
 import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
-import { summarizeOrderSyncResult } from "../utils/order-sync-result.js";
+import { summarizeOrderSyncResult, exactPostingNumbers } from "../utils/order-sync-result.js";
 import { orderStateKey } from "../constants/orders-ui.js";
 import { orderSearchMatchForInput } from "../../../src/shared/order-search.js";
 import {
@@ -1011,9 +1011,11 @@ export function useOrdersPage() {
     },
     syncRecent: async () => {
       const body = { from_latest: true, fallback_days: 7, overlap_minutes: 15 };
+      const postingNumbers = exactPostingNumbers(vm.filters.searchType, vm.filters.searchQuery);
+      if (postingNumbers.length) body.posting_numbers = postingNumbers;
       if (vm.filters.shopId && vm.filters.shopId !== "all") body.shop_id = vm.filters.shopId;
       return runOrderSync("/api/sync/ozon/incremental", body, {
-        running: "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
+        running: postingNumbers.length ? `正在按完整单号核对 ${postingNumbers.length} 个 Ozon 货件，不受新单时间窗口限制。` : "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
         refreshing: "拉取完成，正在刷新订单列表...",
         success: (result, summary) => `新订单拉取完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result, summary) => `已拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
@@ -1025,9 +1027,11 @@ export function useOrdersPage() {
         from: vm.filters.dateFrom || "",
         to: vm.filters.dateTo || ""
       };
+      const postingNumbers = exactPostingNumbers(vm.filters.searchType, vm.filters.searchQuery);
+      if (postingNumbers.length) body.posting_numbers = postingNumbers;
       if (vm.filters.shopId && vm.filters.shopId !== "all") body.shop_id = vm.filters.shopId;
       return runOrderSync("/api/sync/ozon", body, {
-        running: `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
+        running: postingNumbers.length ? `正在按完整单号核对 ${postingNumbers.length} 个 Ozon 货件，不受新单时间窗口限制。` : `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
         refreshing: "同步完成，正在刷新订单列表...",
         success: (result, summary) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result, summary) => `已同步 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
@@ -1058,7 +1062,7 @@ export function useOrdersPage() {
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),
     openOrderProfit: (orderId) => openOrderProfit(orderId),
     prepareSingleOrder: (orderId) => runPrepareOrders([orderId]),
-    prepareSplitOrder: (orderId, packages) => prepareSplitOrder(orderId, packages),
+    prepareSplitOrder: (orderId, packages, requestKey, reconcile) => prepareSplitOrder(orderId, packages, requestKey, reconcile),
     previewOrderProcurement: (orderId) => previewOrderProcurement(orderId),
     createOrderProcurementRequests: (orderId, payload = {}) => createOrderProcurementRequests(orderId, payload),
     printSingleOrder: (orderId) => runPrintOrders([orderId]),

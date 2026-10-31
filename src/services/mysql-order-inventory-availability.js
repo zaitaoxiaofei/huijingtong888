@@ -60,7 +60,7 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
     JOIN products child ON child.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
       WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
       AND child.active = 1 AND ${owned("child")}
-    WHERE oi.order_id IN (${placeholders})${scope}`, args);
+    WHERE oi.quantity > 0 AND oi.order_id IN (${placeholders})${scope}`, args);
   const productsByOrder = new Map(orderIds.map((id) => [id, new Set()]));
   const productsByTenant = new Map();
   for (const row of products) {

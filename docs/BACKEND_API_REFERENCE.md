@@ -2662,6 +2662,26 @@ Remove the current operator's failed label-print batch.
 - Responses:
   - `200` `application/json` -> `object`
 
+#### `GET /api/orders/:id/split`
+
+Read the owned order's unfinished split operation so reopening the dialog resumes reconciliation instead of sending another split.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Order identifier.
+- Responses:
+  - `200` `application/json` -> `object|null`
+
+#### `POST /api/orders/split`
+
+Split one owned FBS posting without preparing or dispatching. The UUID request key prevents duplicate upstream mutations; reconciliation repeats reads only. Official child details are imported before ok=true; the operator separately confirms preparation through orders/ship.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `POST /api/orders/ship`
 
 Submit shipment confirmation to Ozon for selected orders.
