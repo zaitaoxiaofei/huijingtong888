@@ -14,7 +14,7 @@ import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
 import { listOrderProfitDailyFx } from "./services/order-profit-daily-fx.js";
 import { createExchangeRateToolRoutes } from "./server/routes/exchangeRateTool.js";
 import { ORDER_PROFIT_DAILY_FX_JOB, runOrderProfitDailyFxArchive } from "./services/order-profit-daily-fx-job.js";
-import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
+import { backfillInventoryAlertSalesMysql, orderRowsByIdsMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
@@ -126,6 +126,7 @@ const orderProfitDailyFxDb = { query: mysqlQuery };
 const oglDispatch = createOglDispatchService({
   transaction: withMysqlTransaction,
   api: oglCarriageClient,
+  loadOrderRows: (ids, tenantId) => orderRowsByIdsMysql(ids, null, String(tenantId)),
   syncPostings: (session, shopId, postingNumbers) => services.syncOzonPostingsByNumber({
     shop_id: shopId, posting_numbers: postingNumbers
   }, { session, tenantId: tenantIdFromRequest({ _session: session }), [OGL_DISPATCH_REFRESH]: true })

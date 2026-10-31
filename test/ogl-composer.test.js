@@ -25,3 +25,15 @@ test('enterprise rotation closes the composer and a late preview cannot replace 
 test('changing to API-create clears the old target and review proof rather than reusing a manifest binding',async()=>{
  const f=fixture();await f.mount();f.get("target.value={batch:{id:10}};review(selectedRows.value[1],true);mode.value='create'");await nextTick();assert.equal(f.get('target.value'),null);assert.equal(f.get('reviewed.value.size'),0);
 });
+
+test('fresh preview keeps full order display fields and clears stale blocked/unknown flags',async()=>{
+ const f=fixture();await f.mount();f.get("selected.value.set(1,{...selected.value.get(1),blocked:true,unknown:true,sku_names:'SKU:Main page product',productDisplayRows:[{sku:'SKU',name:'Main page product'}]})");await f.get('recheck()');assert.equal(f.get('selected.value.get(1).blocked'),false);assert.equal(f.get('selected.value.get(1).unknown'),false);assert.equal(f.get('selected.value.get(1).productDisplayRows[0].name'),'Main page product');
+});
+
+test('historical binding requires explicit acknowledgment and explanation and forwards both without dispatch',async()=>{
+ const f=fixture();await f.mount();f.get("target.value={batch:{id:10,status:'closed',official_result:{info:{status:'closed'}}}};review(selectedRows.value[1],true);reviewNote.value='checked'");
+ assert.equal(f.get('historicalTarget.value'),true);assert.equal(f.get('canSave.value'),false);
+ f.get("historicalConfirmed.value=true");assert.equal(f.get('canSave.value'),false);
+ f.get("historicalNote.value='已核实同批发出'");assert.equal(f.get('canSave.value'),true);await f.get('save()');
+ assert.equal(f.calls.length,1);assert.equal(f.calls[0][1],'bind-orders');assert.equal(f.calls[0][2].confirm_historical_binding,true);assert.equal(f.calls[0][2].historical_binding_note,'已核实同批发出');
+});

@@ -355,6 +355,33 @@ test('mixed OGL bags keep original-shop official evidence, local membership and 
       proof=await query(`SELECT o.id,${oglPhysicalDispatchSql()} AS consumed FROM orders o WHERE o.id IN (1,2)`);assert.ok(proof.every(row=>Number(row.consumed)===1));
       assert.deepEqual(await foreignEvidence(),foreignBefore);
     });
+    await t.test('historical received and closed batches accept acknowledged other-shop supplements without inventing handover',async()=>{
+      for(const status of ['received','closed']){
+        const batchId=await observed();
+        await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+        await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[1]});
+        const old=(await memberEvidence(batchId)).find(row=>row.order_id===1);
+        state.remoteStatus=status;
+        if(status==='closed')await query("UPDATE ogl_dispatch_batches SET status='closed' WHERE tenant_id=2 AND id=?",[batchId]);
+        const payload={batch_id:batchId,action:'bind-orders',order_ids:[2],client_request_id:`historical-${status}-other`};
+        await assert.rejects(service.action(session(2),payload),error=>error.code==='OGL_HISTORICAL_CONFIRMATION_REQUIRED');
+        await assert.rejects(service.action(session(2),{...payload,confirm_historical_binding:true}),/核对说明/);
+        const offset=calls.length;
+        const bound=await service.action(session(2),{...payload,confirm_historical_binding:true,historical_binding_note:'核实当时同批发出，等待仓库复核'});
+        assert.equal(bound.batch.status,'tracking');
+        const rows=await memberEvidence(batchId);
+        assert.deepEqual(rows.find(row=>row.order_id===1),old,'old dispatch evidence must remain unchanged');
+        assert.equal(rows.find(row=>row.order_id===2).dispatched_at,null);
+        assert.equal(rows.find(row=>row.order_id===2).official_member,0);
+        assert.ok(calls.slice(offset).every(row=>!['/v1/carriage/create','/v1/carriage/set-postings','/v1/carriage/approve'].includes(row.path)));
+        await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),/接管/);
+        await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+        await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]});
+        assert.ok((await memberEvidence(batchId)).find(row=>row.order_id===2).dispatched_at);
+        assert.deepEqual((await memberEvidence(batchId)).find(row=>row.order_id===1),old);
+        assert.deepEqual(await foreignEvidence(),foreignBefore);
+      }
+    });
     await t.test('manual notes require exact current review proof and a later changed note blocks physical handover',async()=>{
       const batchId=await observed();
       await query("INSERT INTO order_marks(order_id,mark_type,note) VALUES(2,'manual_check','warehouse inspected')");
