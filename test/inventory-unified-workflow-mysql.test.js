@@ -228,6 +228,10 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   let a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
   assert.equal(a.snapshot.status,'warming');assert.equal(a.total,null);assert.equal(a.meta.required,null);
   await waitForInventoryDemandJobs();a=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));
+  const compact=await read({_session:{personId:2,tenant:{id:2,slug:'a'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100&compact=1'));
+  assert.equal(compact.total,a.total);assert.deepEqual(compact.rows.map(r=>r.product_id),a.rows.map(r=>r.product_id));
+  for(let i=0;i<compact.rows.length;i++){assert.deepEqual(compact.rows[i].workflow.supply_plan,a.rows[i].workflow.supply_plan);assert.deepEqual(compact.rows[i].pending_batches,a.rows[i].pending_batches);assert.deepEqual(compact.rows[i].workflow.requests,[]);assert.deepEqual(compact.rows[i].feedbacks,[]);}
+
   assert.ok(a.rows.some(r=>Number(r.product_id)===9302));assert.ok(a.rows.every(r=>Number(r.product_id)!==300));
   assert.ok(a.rows.every(r=>r.amount===undefined&&r.cost===undefined));
   let b=await read({_session:{personId:4,tenant:{id:3,slug:'b'}}},new URL('http://localhost/api/inventory-workflow/alerts?view=workspace&task=all&pageSize=100'));

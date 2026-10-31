@@ -73,7 +73,12 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   const opportunities = (forecast?.skus || []).filter(row => qty(row.suggested_qty) > 0);
   if (!requested && !submitted.length && opportunities.length && demands[3].status === 'unknown') demands[3].advisory_status = opportunities.some(row => Number(row.available) > 0) ? 'warning' : 'opportunity';
   const overall = ['danger','warning','unknown','opportunity','success'].find(status => statusDemands.some(d => d.status === status));
-  return { demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
+  const review_reasons = [];
+  if (!known(ledger.physical_estimate)) review_reasons.push('缺少本地账面库存，请核对实物');
+  else if (Number(ledger.physical_estimate) < 0) review_reasons.push('本地账面库存为负，请盘点并更新实物');
+  if (!known(flow.safety)) review_reasons.push('本地保障规则或消耗数据待核对');
+  if (!applicationKnown) review_reasons.push('FBP申请数据尚未完整读取');
+  return { review_reasons, physical_recorded: known(ledger.physical_estimate) ? Number(ledger.physical_estimate) : null, safety_target: known(flow.safety) ? qty(flow.safety) : null, demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
     purchase_quantity: complete && applicationKnown ? demands.reduce((sum,d)=>sum+d.purchase_quantity,0) : null,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',
