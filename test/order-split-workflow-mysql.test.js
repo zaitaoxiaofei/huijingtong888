@@ -81,6 +81,12 @@ test('split-only SQL workflow never prepares on failure or success and keeps own
    await service.reconcileRemovedPostingItemsMysql({id:20},original,20,{id:2,defaultTenant:false},options);
    assert.equal(Number((await query('SELECT quantity FROM order_items WHERE id=22'))[0].quantity),1);assert.equal(compensated,0);
    await query("UPDATE ozon_orders_raw SET raw_json=JSON_SET(raw_json,'$.parent_posting_number','PARENT') WHERE store_id=20 AND posting_number='CHILD'");
+   await query("UPDATE orders SET status='delivering' WHERE id=20");
+   await assert.rejects(service.reconcileRemovedPostingItemsMysql({id:20},original,20,{id:2,defaultTenant:false},options),/发运/);
+   assert.equal(Number((await query('SELECT quantity FROM order_items WHERE id=22'))[0].quantity),1);
+   assert.equal(compensated,0);
+   // Acceptance is still pre-transport; official split evidence can reconcile it.
+   await query("UPDATE orders SET status='acceptance_in_progress',tracking_stage='posting_acceptance_in_progress' WHERE id=20");
    await service.reconcileRemovedPostingItemsMysql({id:20},original,20,{id:2,defaultTenant:false},options);
    assert.equal(Number((await query('SELECT quantity FROM order_items WHERE id=22'))[0].quantity),0);
    assert.equal(Number((await query('SELECT net_profit_cny FROM order_profit_items WHERE order_item_id=22'))[0].net_profit_cny),0);

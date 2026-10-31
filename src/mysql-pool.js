@@ -170,6 +170,33 @@ export async function mysqlExecute(sql, params = []) {
   }
 }
 
+// INSERT ... SELECT under REPEATABLE READ locks source rows. Analytics must
+// use a statement snapshot without blocking normal order/shop writes. SET
+// TRANSACTION applies only to this transaction, preserving pooled defaults.
+export async function mysqlExecuteReadCommitted(sql, params = []) {
+  const connection = await getMysqlConnection();
+  try {
+    await ensureMysqlSessionUtc(connection);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await connection.query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
+        await connection.beginTransaction();
+        const [result] = await connection.execute(sql, params);
+        await connection.commit();
+        return result;
+      } catch (error) {
+        await connection.rollback();
+        if (error?.code !== "ER_LOCK_DEADLOCK" || attempt === 3) throw error;
+        // A deadlock rolls back its transaction. Retry the complete transaction
+        // so the retried INSERT SELECT cannot fall back to pooled RR isolation.
+        await new Promise(resolve => setTimeout(resolve, attempt * 100));
+      }
+    }
+  } finally {
+    releaseMysqlConnection(connection);
+  }
+}
+
 export async function executeMysqlStatementWithRetry(connection, sql, params = [], options = {}) {
   const maxAttempts = Math.max(1, Number(options.maxAttempts || 3));
   const sleepImpl = options.sleepImpl || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));

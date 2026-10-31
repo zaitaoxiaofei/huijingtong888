@@ -47,7 +47,7 @@ import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory,
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { matchesCancellationRule } from "./order-cancellation-review.js";
-import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { isMysqlPrimaryEnabled, mysqlExecute, mysqlExecuteReadCommitted, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
 import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
@@ -19675,7 +19675,7 @@ async function reconcileRemovedPostingItemsMysql(shop, posting, orderId, scope, 
             NULLIF(JSON_UNQUOTE(JSON_EXTRACT(child_raw.raw_json,'$.parent_posting_number')),''))=?`, [shop.id,orderId,item.ozon_sku,posting.posting_number]);
       if (Number(child?.moved_quantity||0)<Number(item.quantity)) throw Object.assign(new Error(`订单 ${posting.posting_number} 的子单商品明细尚未完整同步，请先按完整单号同步子单，再核对原单；未覆盖原数量`),{statusCode:409});
       const finance = await db.queryOne("SELECT id FROM ozon_finance_items WHERE shop_id=? AND posting_number=? LIMIT 1", [shop.id,posting.posting_number]);
-      if (!['awaiting_packaging','awaiting_deliver'].includes(item.order_status) || Number(item.entered_transport) || Number(item.ogl_handed_over) || Number(item.is_locked) || item.profit_status==='accrued' || item.settlement_state==='accrued' || finance) {
+      if (!['awaiting_packaging','awaiting_deliver','acceptance_in_progress'].includes(item.order_status) || Number(item.entered_transport) || Number(item.ogl_handed_over) || Number(item.is_locked) || item.profit_status==='accrued' || item.settlement_state==='accrued' || finance) {
         throw Object.assign(new Error(`订单 ${posting.posting_number} 的商品已发运或存在账单，官方明细变化需人工核对，未覆盖历史利润或出库记录`), { statusCode:409 });
       }
       const outbound = await db.queryOne("SELECT id,quantity,stock_location,stock_location_source FROM outbound_records WHERE order_item_id=? AND shop_id=? AND status='deducted' LIMIT 1 FOR UPDATE",[item.id,shop.id]);
@@ -20579,7 +20579,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
   await mysqlExecute(`DELETE FROM analytics_product_profit_daily WHERE date_key >= ? AND date_key <= ? AND ${shopScope}`, [rangeFrom, rangeTo]);
   await mysqlExecute(`DELETE FROM analytics_sku_profit_daily WHERE date_key >= ? AND date_key <= ? AND ${shopScope}`, [rangeFrom, rangeTo]);
 
-  await mysqlExecute(`
+  await mysqlExecuteReadCommitted(`
     INSERT INTO analytics_shop_daily (
       date_key, shop_id, order_count, effective_orders, item_quantity, total_revenue, revenue,
       estimated_profit, confirmed_profit, current_profit, accrued_profit, accrued_order_count, pending_profit, pending_order_count,
@@ -20636,7 +20636,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
       refreshed_at = VALUES(refreshed_at)
   `, orderedAtFilter.params);
 
-  await mysqlExecute(`
+  await mysqlExecuteReadCommitted(`
     INSERT INTO analytics_product_profit_daily (
       date_key, product_id, shop_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit, refreshed_at
     )
@@ -20667,7 +20667,7 @@ export async function refreshProfitAnalyticsSnapshotsMysql(body = {}, tenantId =
       refreshed_at = VALUES(refreshed_at)
   `, orderedAtFilter.params);
 
-  await mysqlExecute(`
+  await mysqlExecuteReadCommitted(`
     INSERT INTO analytics_sku_profit_daily (
       date_key, shop_id, ozon_sku, product_id, order_count, item_quantity, revenue, estimated_profit, confirmed_profit, current_profit,
       cancelled_orders, cancelled_quantity, cancelled_revenue, return_orders, return_quantity, return_revenue, refreshed_at

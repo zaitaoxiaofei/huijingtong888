@@ -86,6 +86,12 @@ export async function createOrderFixtureSchema(connection) {
   await initializeOrderQueryFacts(connection);
 }
 export function loadTenantOrderService(connection, { extraMethods = [], ...overrides }={}) {
+  const analyticsContext=vm.createContext({setTimeout,
+    getMysqlConnection:async()=>connection,
+    ensureMysqlSessionUtc:async()=>{},releaseMysqlConnection:()=>{}});
+  const analyticsSql=readFileSync(new URL('../../src/mysql-pool.js',import.meta.url),'utf8')
+    .match(/export async function mysqlExecuteReadCommitted[\s\S]*?\n}/)[0].replace('export ','');
+  vm.runInContext(analyticsSql,analyticsContext);
   const calls=[];
   const query=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.query(sql,params))[0];};
   const execute=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.execute(sql,params))[0];};
@@ -102,7 +108,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
-    mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,
+    mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,mysqlExecuteReadCommitted:analyticsContext.mysqlExecuteReadCommitted,
     ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,
     ensureOrderLabelPrintSchemaMysql:noop,ensureSkuInventoryRecipeSchemaMysql:noop,ensureProductCompositionSchemaMysql:noop,ensureProductNamingSchemaMysql:noop,ensureProcurementOrderSourceSchemaMysql:noop,ensureOrderPackageLabelCacheSchemaMysql:noop,
     normalizeSyncDateMysql:value=>String(value||'').slice(0,10),shanghaiDateKeyToUtcDateTimeMysql:(value,days=0)=>value?new Date(new Date(value+'T00:00:00+08:00').getTime()+days*86400000).toISOString().slice(0,19).replace('T',' '):'',
