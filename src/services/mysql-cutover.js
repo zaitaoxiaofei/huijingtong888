@@ -24885,6 +24885,9 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
           statusCode: 409,
           validation: {
             field: "items.anomaly_reason",
+            product_id: Number(item.product_id),
+            reference_unit_cost: historicalUnitCost,
+            actual_unit_cost: goodsUnitCost,
             message: `商品 #${item.product_id} 本次单价 ¥${goodsUnitCost.toFixed(2)}，历史均价 ¥${historicalUnitCost.toFixed(2)}，请在批量采购确认页选择涨价原因`
           }
         });

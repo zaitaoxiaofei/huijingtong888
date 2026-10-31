@@ -1,5 +1,6 @@
 ﻿<script setup>
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
+import {PROCUREMENT_PRICE_REASONS,procurementPriceReason} from '../../../../src/shared/procurement-price-reason.js';
 import { ElMessage } from "element-plus";
 import ProductImagePreview from "../ProductImagePreview.vue";
 import { apiClient, currentApiCacheScope } from "../../utils/api.js";
@@ -53,6 +54,7 @@ function createDefaultForm() {
     source_type: "1688",
     supplier_id: "",
     purchase_url: "",
+    anomaly_reason: "",anomaly_note:"",
     note: ""
   };
 }
@@ -89,6 +91,7 @@ function preferredPersonId() {
 }
 
 function applyProductToForm(row, preserve=false) {
+  if(Number(form.product_id)!==Number(row.id)){form.anomaly_reason="";form.anomaly_note="";}
   form.product_id = row.id;
   if(preserve&&formTouched.value)return;
   if(!preserve||!form.person_id)form.person_id = preferredPersonId();
@@ -164,6 +167,7 @@ async function submit() {
     ElMessage.warning("请填写实际采购货款；提交即表示已经完成下单");
     return;
   }
+  if(form.anomaly_reason==='其他原因'&&!String(form.anomaly_note||'').trim())return ElMessage.warning('请选择其他原因的具体价格变动说明');
   const scope=currentApiCacheScope(),token=loadVersion;
   submitting.value = true;
   try {
@@ -176,6 +180,7 @@ async function submit() {
       note: form.note,
       items: [{
         ...form,
+        anomaly_reason:procurementPriceReason(form),
         quantity: Number(form.quantity || 1),
         actual_quantity: Number(form.quantity || 1),
         amount: Number(form.amount || 0),
@@ -193,7 +198,7 @@ async function submit() {
     emit("update:modelValue", false);
     resetForm();
   } catch (error) {
-    if(!disposed&&token===loadVersion&&scope===currentApiCacheScope())ElMessage.error(error.message || "创建采购请求失败");
+    if(!disposed&&token===loadVersion&&scope===currentApiCacheScope())ElMessage.error(error.payload?.validation?.message || error.message || "创建采购请求失败");
   } finally {
     if(token===loadVersion)submitting.value = false;
   }
@@ -325,6 +330,7 @@ watch(currentUserPersonId, () => {
                 </el-select>
               </el-form-item>
             </el-col>
+            <el-col :span="24"><el-form-item label="价格变动原因"><el-select v-model="form.anomaly_reason" clearable placeholder="涨价超10%时必填"><el-option v-for="reason in PROCUREMENT_PRICE_REASONS" :key="reason" :label="reason" :value="reason"/></el-select><el-input v-if="form.anomaly_reason==='其他原因'" v-model="form.anomaly_note" placeholder="请填写具体原因" maxlength="300"/></el-form-item></el-col>
             <el-col :span="12">
               <el-form-item label="货款总额">
                 <el-input-number v-model="form.amount" :min="0" :precision="2" :step="1" controls-position="right" />
