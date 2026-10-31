@@ -113,7 +113,7 @@ test('flow graph previews real node metadata, navigates exact documents, and fit
     }
     await page.setViewportSize({width:1366,height:900});
     await page.evaluate(()=>{window.testLedger.value={...window.testLedger.value,physical_estimate:0,incoming_quantity:0};});
-    for(const edge of ['orders-requests','safety-requests','fbp-safety-requests'])
+    for(const edge of ['orders-requests','safety-requests','fbp-safety-requests','application-requests'])
       await page.locator(`[data-edge="${edge}"]`).waitFor();
     await page.locator('.flow-canvas').screenshot({path:'.verification/inventory-flow-purchase-gap.png',animations:'disabled'});
     await page.evaluate(() => { window.testLedger.value = { ...window.testLedger.value, flow_summary: { unavailable: true, message: '预测暂不可用' } }; });

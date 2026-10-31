@@ -5657,9 +5657,15 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
       assertFbpSkuBindingMysql(row, binding, row.ozon_sku || row.ozonSku);
     }
   }
+  if(options.forecastConfirmation){
+    await connection.query('SELECT id FROM people WHERE id=? FOR UPDATE',[userId]);
+    await requireCurrentProcurementActorMysql(scope,userId,connection,permission);
+    const prior=await mysqlQueryOne("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND person_id=? AND action='fbp_forecast_application' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,userId,options.forecastConfirmation.key]);
+    if(prior){const saved=typeof prior.detail_json==='string'?JSON.parse(prior.detail_json):prior.detail_json;if(saved.hash!==options.forecastConfirmation.hash)throw Object.assign(new Error('这次FBP预测申请已提交，请勿用同一标识修改内容'),{statusCode:409});return{...saved.result,duplicate:true};}
+  }
   const created = [];
   for (const [shopId, rows] of grouped.entries()) {
-    let order = await mysqlQueryOne(`
+    let order = options.forecastConfirmation?null:await mysqlQueryOne(`
       SELECT *
       FROM fbp_replenishment_orders
       WHERE shop_id = ?
@@ -5799,7 +5805,9 @@ export async function createFbpReplenishmentOrdersMysql(body = {}, userId = null
   }
   await requireCurrentProcurementActorMysql(scope, userId, connection, permission);
   if(options.workflow&&options.submit&&options.afterSubmit)await options.afterSubmit(connection,created);
-  return { ok: true, rows: created };
+  const saved={ok:true,rows:created};
+  if(options.forecastConfirmation)await mysqlExecute('INSERT INTO inventory_flow_events(tenant_id,person_id,action,detail_json) VALUES(?,?,?,?)',[scope.id,userId,'fbp_forecast_application',JSON.stringify({request_key:options.forecastConfirmation.key,hash:options.forecastConfirmation.hash,result:saved})]);
+  return saved;
   });
   invalidateOrderProcurementCoverage();
   return result;
@@ -16601,11 +16609,11 @@ function inboundRecordsWhereMysql(query = {}, scope) {
       NULLIF(p.source_platform, ''), 'other')) = ?`);
     params.push(sourceType);
   }
-  if (['real_order','local_safety','fbp_stock'].includes(demandType)) {
+  if (['real_order','local_safety','fbp_stock','fbp_forecast'].includes(demandType)) {
     where.push(`EXISTS (SELECT 1 FROM procurement_requests inbound_demand
       WHERE inbound_demand.product_id=ir.product_id AND ${inventoryTenantSql(scope,'inbound_demand')}
       AND (inbound_demand.id=ir.procurement_request_id OR (ir.purchase_order_id IS NOT NULL AND inbound_demand.purchase_order_id=ir.purchase_order_id))
-      AND CASE WHEN inbound_demand.request_reason_code='flow_real_order' THEN 'real_order'
+      AND CASE WHEN inbound_demand.request_reason_code='flow_fbp_forecast' THEN 'fbp_forecast' WHEN inbound_demand.request_reason_code='flow_real_order' THEN 'real_order'
         WHEN inbound_demand.request_reason_code IN ('flow_fbp_stock','fbp_stock_shortage') OR inbound_demand.source_type='fbp' THEN 'fbp_stock'
         WHEN inbound_demand.demand_type='real_order' OR (COALESCE(inbound_demand.demand_type,'')!='warehouse_request' AND COALESCE(inbound_demand.source_order_item_id,0)>0) THEN 'real_order'
         ELSE 'local_safety' END=?)`);
@@ -17642,8 +17650,10 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     where.push("pr.demand_type = 'real_order'");
   } else if (["advance_stock", "inventory_warning"].includes(demandType)) {
     where.push("pr.demand_type = 'advance_stock'");
+  } else if (demandType === 'fbp_forecast') {
+    where.push("pr.request_reason_code='flow_fbp_forecast'");
   } else if (demandType === 'local_safety') {
-    where.push("(COALESCE(pr.request_reason_code,'') NOT IN ('flow_real_order','flow_fbp_stock','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' AND pr.demand_type IN ('advance_stock','warehouse_request'))");
+    where.push("(COALESCE(pr.request_reason_code,'') NOT IN ('flow_real_order','flow_fbp_stock','flow_fbp_forecast','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' AND pr.demand_type IN ('advance_stock','warehouse_request'))");
   } else if (demandType === "warehouse_request") {
     where.push("pr.demand_type = 'warehouse_request'");
   }
@@ -17652,7 +17662,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     SELECT p.id AS product_id, COALESCE(MAX(pr.created_at), p.created_at) AS latest_created_at,
       ${shortageProductIds?.length ? `CASE WHEN p.id IN (${shortageProductIds.filter(Number.isSafeInteger).join(',')}) THEN 1 ELSE 0 END` : "0"} AS real_order_priority,
       MIN(CASE WHEN pr.status IN ('pending','suggested','submitted') AND pr.request_reason_code='flow_real_order' THEN 1
-        WHEN pr.status IN ('pending','submitted') AND COALESCE(pr.request_reason_code,'') NOT IN ('flow_fbp_stock','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' THEN 2 ELSE 3 END) AS demand_priority
+        WHEN pr.status IN ('pending','submitted') AND COALESCE(pr.request_reason_code,'') NOT IN ('flow_fbp_stock','flow_fbp_forecast','fbp_stock_shortage') AND COALESCE(pr.source_type,'')!='fbp' THEN 2 ELSE 3 END) AS demand_priority
     FROM products p
     LEFT JOIN procurement_requests pr ON p.id = pr.product_id AND ${inventoryTenantSql(scope, 'pr')}
     LEFT JOIN people pe ON pe.id = pr.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)

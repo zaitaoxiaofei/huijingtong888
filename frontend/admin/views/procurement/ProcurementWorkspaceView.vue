@@ -112,7 +112,7 @@ async function loadCostTasks(page = 1) {
   finally { if (version === costTasksVersion) costTasksLoading.value = false; }
 }
 function openCostTasks() { costTasksVisible.value = true; loadCostTasks(); }
-const warehouseReasonLabels = { flow_real_order: "FBS真实订单需求", flow_local_safety: "本地安全保障需求", flow_fbp_stock: "FBP备货缺口需求", inventory_stock_topup: "库存补足", accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
+const warehouseReasonLabels = { flow_real_order: "FBS真实订单需求", flow_local_safety: "本地安全保障需求", flow_fbp_stock: "FBP正式备货申请", flow_fbp_forecast: "FBP预测预警建议（可暂缓）", inventory_stock_topup: "库存补足", accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
 function purchaseTypeLabel(row) {
   if(row.workflow)return row.primary_suggestion_reason?.label || '供货已满足／申请待核对';
   if (row.primary_suggestion_reason?.type === 'real_order' || Number(row.real_order_shortage) > 0) return '真实订单需求';
@@ -194,11 +194,11 @@ const state = reactive({
   people: [],
   suppliers: [],
   suggestions: [],
-  filters: { query: "", demandType: ["all", "real_order", "local_safety", "fbp_stock", "advance_stock", "warehouse_request"].includes(route.query.demandType) ? route.query.demandType : "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
+  filters: { query: "", demandType: ["all", "real_order", "local_safety", "fbp_stock", "fbp_forecast", "advance_stock", "warehouse_request"].includes(route.query.demandType) ? route.query.demandType : "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
 });
 
 watch(() => route.query.demandType, value => {
-  if (["all", "real_order", "local_safety", "fbp_stock", "advance_stock", "warehouse_request"].includes(value) && value !== state.filters.demandType) {
+  if (["all", "real_order", "local_safety", "fbp_stock", "fbp_forecast", "advance_stock", "warehouse_request"].includes(value) && value !== state.filters.demandType) {
     state.filters.demandType = value;
     handleSearch();
   }
@@ -1614,7 +1614,7 @@ onMounted(async () => {
               <el-option label="全部待采购" value="all" />
               <el-option label="FBS真实订单需求" value="real_order" />
               <el-option label="本地安全保障需求" value="local_safety" />
-              <el-option label="FBP备货缺口需求" value="fbp_stock" />
+              <el-option label="FBP正式备货申请" value="fbp_stock" /><el-option label="FBP预测预警建议" value="fbp_forecast" />
             </el-select>
           </el-form-item>
           <el-form-item label="关键词">

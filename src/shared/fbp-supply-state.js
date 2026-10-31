@@ -36,3 +36,12 @@ export function fbpLocalSupplyNeed(applications, fbp) {
   if (fbp.known) for (const row of fbp.rows) needs.set(key(row), Math.max(needs.get(key(row)) || 0, Math.ceil(row.replenish_quantity) * Number(row.per_set_quantity)));
   return [...needs.values()].reduce((a,b)=>a+b,0) + unkeyed;
 }
+
+// Remaining prediction per shop/SKU. Submitted units replace the same-SKU
+// forecast, never another shop's deficit. Quantities for application are sets.
+export function fbpForecastSuggestions(applications,fbp){
+ if(!fbp?.known)return [];
+ const pending=new Map();
+ for(const r of applications||[])if(r.status==='pending_review'&&r.shop_id&&r.ozon_sku)pending.set(key(r),(pending.get(key(r))||0)+(number(r.requested_quantity)||0));
+ return fbp.rows.map(r=>{const units=Number(r.per_set_quantity),submitted=pending.get(key(r))||0,remaining=Math.max(0,Math.ceil(r.replenish_quantity)*units-submitted);return{...r,pending_physical:submitted,forecast_physical:remaining,suggested_application_qty:Math.ceil(remaining/units)};});
+}

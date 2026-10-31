@@ -48,19 +48,22 @@ One physical supply pool for required FBS/formal FBP and optional local/FBP safe
 | `unbacked_fbp_locks` | `number` | No | Physical units; unknown is null, never zero |
 | `order_quantity` | `number` | No | Physical units; unknown is null, never zero |
 | `locked_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_forecast_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `required_fbp_physical_gap` | `number` | No | Physical units; unknown is null, never zero |
+| `forecast_fbp_physical_gap` | `number` | No | Physical units; unknown is null, never zero |
 | `fbp_forecast_known` | `boolean` | No | All bound official FBP snapshots and safety targets are verified; formal applications can still be required while the forecast is unknown |
 
 ### InventoryWorkflowDemand
 
-Three physical-unit procurement purposes: real_order, local_safety, fbp_stock. Required FBS/formal FBP take precedence over optional safety targets; requests are reminders, never additional physical allocation.
+Four physical-unit procurement purposes: real_order, local_safety, fbp_stock, fbp_forecast. Required FBS/formal FBP take precedence over optional safety targets; requests are reminders, never additional physical allocation.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `key` | `string` | Yes | real_order | local_safety | fbp_stock |
+| `key` | `string` | Yes | real_order | local_safety | fbp_stock | fbp_forecast |
 | `label` | `string` | Yes | Business purpose |
-| `priority` | `number` | Yes | 1 through 3 |
+| `priority` | `number` | Yes | 1 through 4 |
 | `process_status` | `string` | No | Optional request_submitted, pending_review or draft; separate from supply colour |
-| `advisory_status` | `string` | No | Optional FBP opportunity/warning advisory, never changes sufficient stock colour |
+| `advisory_status` | `string` | No | Optional FBP opportunity/warning advisory; never reserves or purchases stock |
 | `status` | `string` | Yes | danger | warning | success | opportunity | unknown |
 | `physical_gap` | `number` | No | Dispatchable physical shortage; null when unknown |
 | `purchase_quantity` | `number` | No | Net additional purchase requirement after scoped inbound allocation; null when unknown |
@@ -94,7 +97,7 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | `product_id` | `number` | Yes | Owned inventory product ID |
 | `overall` | `string` | Yes | Worst demand/advisory status |
 | `stock_status` | `string` | No | Supply sufficiency only; pending approvals never make surplus stock yellow |
-| `demands` | `array<InventoryWorkflowDemand>` | Yes | Three priority demands |
+| `demands` | `array<InventoryWorkflowDemand>` | Yes | Four purposes; FBS and formal FBP required, local safety and unconfirmed FBP forecasts optional yellow |
 | `fbp` | `FbpSupplyState` | No |  |
 | `supply_plan` | `InventorySupplyPlan` | No |  |
 | `local_stock_status` | `string` | No | Local supply colour, independent of the FBP safety alert |
@@ -118,6 +121,7 @@ Current-enterprise common inventory policy, no purchase costs. Pending inbound n
 | `skus` | `array<object>` | No | Available for full detail; light status may omit |
 | `opportunities` | `array<object>` | No | Available for full detail; light status may omit |
 | `transfers` | `array<object>` | No | Available for full detail; light status may omit |
+| `fbp_forecast_suggestions` | `array<object>` | No | Available for full detail; light status may omit |
 | `settings` | `object` | No | Current effective replenishment settings |
 | `forecast_error` | `string` | No | Advisory forecast unavailable; core ledger remains usable |
 
@@ -3302,7 +3306,7 @@ Return inbound record rows.
   - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `status` (`string`, optional): pending_arrival for pending receipts, approved for received records; legacy all remains supported
-  - `demandType` (`string`, optional): all | real_order | local_safety | fbp_stock; inventory_warning retained for older callers
+  - `demandType` (`string`, optional): all | real_order | local_safety | fbp_stock | fbp_forecast; inventory_warning retained for older callers
   - `inventoryType` (`string`, optional): all | single | accessory | combo
   - `productId` (`number`, optional): Optional owned product context
   - `paged` (`string`, optional): 1 for rows/total/page/pageSize, all predicates apply before paging
@@ -3386,7 +3390,7 @@ Read the shared current-enterprise inventory policy. Fresh inventory.read member
 
 #### `GET /api/inventory-workflow/alerts`
 
-Read product warnings from the same three-demand inventory policy; severity filtering occurs before paging. view=workspace immediately reads a persisted enterprise demand snapshot and current-page nonfinancial sources. It never waits for history/forecast rebuilding: first use returns snapshot.available=false and null total/task counts while warming; stale successful results remain visible. Background work is serialized and limited to two SQL queries, automatically coalesced to once/minute per active enterprise and periodically renewed after five minutes. refresh=1 queues manual reconciliation, sharing active jobs; a write during an older manual job schedules one follow-up. Poll only while snapshot.refreshing; business writes do not use snapshots. Errors retain last success, personnel details are loaded freshly, and inventory_demand_snapshots must be initialized before readiness. Current inventory.read membership required.
+Read product warnings from the same four-demand inventory policy; severity filtering occurs before paging. view=workspace immediately reads a persisted enterprise demand snapshot and current-page nonfinancial sources. It never waits for history/forecast rebuilding: first use returns snapshot.available=false and null total/task counts while warming; stale successful results remain visible. Background work is serialized and limited to two SQL queries, automatically coalesced to once/minute per active enterprise and periodically renewed after five minutes. refresh=1 queues manual reconciliation, sharing active jobs; a write during an older manual job schedules one follow-up. Poll only while snapshot.refreshing; business writes do not use snapshots. Errors retain last success, personnel details are loaded freshly, and inventory_demand_snapshots must be initialized before readiness. Current inventory.read membership required.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -3452,7 +3456,7 @@ Canonical actual purchase registration. Optional workspace_batch=true enables a 
 
 #### `POST /api/inventory-workflow/demand-request`
 
-Create or reuse real procurement requests for exactly three demand purposes. Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.
+Create or reuse real procurement requests for four demand purposes (FBS real orders and formal FBP applications required; local safety and unconfirmed FBP forecasts optional yellow). Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3515,7 +3519,7 @@ Fresh current-enterprise packing, inventory.write or procurement membership can 
 
 #### `POST /api/inventory-workflow/requests`
 
-Any active current-enterprise member may propose one of three purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. FBP requires either a submitted/approved replenishment application or a verified official sellable-stock safety shortage not covered by transit/confirmed stock; FBS requires a matching unfulfilled local order.
+Any active current-enterprise member may propose one of four purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. fbp_stock requires a submitted/approved application; fbp_forecast remains an optional yellow suggestion and requires a verified net prediction shortage after pending requests, stock and transit; FBS requires a matching unfulfilled local order.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3571,7 +3575,7 @@ Register only actual QC-passed quantity through the existing receipt writer, pre
 
 #### `POST /api/inventory-workflow/fbp`
 
-Create or update the existing FBP replenishment draft for owned bound shop SKUs; optionally submit in the same canonical transaction with supply-gap notifications for active enterprise procurement/operations. All SKU quantities share one physical inventory pool; unselected related SKUs are not created. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
+Create or update the existing FBP replenishment draft for owned bound shop SKUs. Optional forecast_confirmation=true plus UUID request_key and submit=true creates independent confirmed orders without overwriting same-day requests or submitting unselected existing draft SKUs. Identical retries return the original orders; changed contents with the same key return409. Unpurchased flow_fbp_forecast reminders are capped to the remaining net forecast in the same transaction; purchased records are preserved. Forecast and formal demand do not double count; optionally submit in the same canonical transaction with supply-gap notifications for active enterprise procurement/operations. All SKU quantities share one physical inventory pool; unselected related SKUs are not created. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
 
 - Auth: `authenticated`
 - Request body: required

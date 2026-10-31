@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient, currentApiCacheScope } from '../../utils/api.js';
 import { getActivePinia } from 'pinia';
@@ -7,6 +7,8 @@ import { useAuthStore } from '../../stores/auth.js';
 import { hasPermission } from '../../../../src/shared/permissions.js';
 import { INVENTORY_DEMAND_TYPES, inventoryWorkflow } from '../../../../src/shared/inventory-workflow.js';
 import ProcurementRequestCreateDialog from './ProcurementRequestCreateDialog.vue';
+const ForecastDialog=defineAsyncComponent(()=>import('./InventoryFbpForecastDialog.vue'));
+const forecastVisible=ref(false);
 const props=defineProps({ledger:{type:Object,required:true},orderId:Number,initialAction:String,initialInboundId:Number,compact:Boolean});
 const emit=defineEmits(['loaded','saved']);
 const auth=getActivePinia()?useAuthStore():{user:null};
@@ -30,6 +32,7 @@ async function reload(fresh=false,full=false){
  finally{if(token===version)loading.value=false;}
 }
 async function open(action,type=''){
+ if(action==='forecast'){if(canFbp.value)forecastVisible.value=true;return;}
  const actionToken=++actionVersion,id=productId.value,scope=currentApiCacheScope();
  const active=()=>!disposed&&actionToken===actionVersion&&id===productId.value&&scope===currentApiCacheScope()&&dialog.value===action;
  form.type=type;form.quantity=Math.max(1,Number(current.value.demands.find(d=>d.key===type)?.purchase_quantity)||1);form.note='';form.requestKey=crypto.randomUUID();
@@ -89,13 +92,14 @@ defineExpose({open,reload});
 <template>
  <section class="inventory-workflow-panel">
   <div class="workflow-actions"><el-button v-if="compact" @click="showDemands=!showDemands">需求判断</el-button><el-button @click="open('request')">提交采购申请</el-button><el-button v-if="canPurchase" :disabled="loading||!state" @click="open('purchase')">登记实际采购</el-button><el-button v-if="canReceive" @click="open('receive')">登记入库</el-button><el-button v-if="canFbp" @click="open('fbp')">创建FBP备货申请</el-button><el-button v-if="canFeedback" type="warning" plain @click="feedbackSupply">反馈缺口</el-button><el-button link :loading="loading" @click="reload(true)">刷新需求判断</el-button></div>
-  <div v-if="!compact||showDemands" class="workflow-demands"><button v-for="d in current.demands" :key="d.key" :class="['workflow-demand',`is-${d.status}`]" @click="open('request',d.key)"><strong>{{d.label}}</strong><span>{{loading?'计算中':d.purchase_quantity==null?'待核对':d.required_purchase_quantity>0?`必须采购 ${d.required_purchase_quantity} 件`:`建议采购 ${d.purchase_quantity} 件`}}<small v-if="d.required_purchase_quantity>0&&d.optional_purchase_quantity>0">另有可暂缓保障建议 {{d.optional_purchase_quantity}} 件</small></span><small v-if="d.submitted_quantity">已提交 {{d.submitted_quantity}} 件</small><small v-if="d.process_status" class="process-note">{{({pending_review:'待仓库确认',draft:'备货草稿未提交',request_submitted:'采购申请待处理'})[d.process_status]}}</small><small v-if="d.key==='fbp_stock' && current.fbp?.known && current.fbp.shortage>0" class="process-note">FBP可用低于安全目标 {{current.fbp.shortage}} 件；先用本地可用与已在途补货，剩余才采购</small><small v-if="d.advisory_status" :class="d.advisory_status==='warning'?'process-note':'advisory-note'">{{d.advisory_status==='warning'?'建议关注FBP补货周期':'存在FBP备货机会'}} · 尚未形成采购需求</small></button></div>
+  <div v-if="!compact||showDemands" class="workflow-demands"><button v-for="d in current.demands" :key="d.key" :class="['workflow-demand',`is-${d.status}`]" @click="d.key==='fbp_forecast'?open('forecast'):open('request',d.key)"><strong>{{d.label}}</strong><span>{{loading?'计算中':d.purchase_quantity==null?'待核对':d.required_purchase_quantity>0?`必须采购 ${d.required_purchase_quantity} 件`:`建议采购 ${d.purchase_quantity} 件`}}<small v-if="d.required_purchase_quantity>0&&d.optional_purchase_quantity>0">另有可暂缓保障建议 {{d.optional_purchase_quantity}} 件</small></span><small v-if="d.submitted_quantity">已提交 {{d.submitted_quantity}} 件</small><small v-if="d.process_status" class="process-note">{{({pending_review:'待仓库确认',draft:'备货草稿未提交',request_submitted:'采购申请待处理'})[d.process_status]}}</small><small v-if="d.key==='fbp_forecast' && current.fbp?.known && current.fbp.shortage>0" class="process-note">FBP可用低于安全目标 {{current.fbp.shortage}} 件；先用本地可用与已在途补货，剩余才采购</small><small v-if="d.advisory_status" :class="d.advisory_status==='warning'?'process-note':'advisory-note'">{{d.advisory_status==='warning'?'建议关注FBP补货周期':'存在FBP备货机会'}} · 尚未形成采购需求</small></button></div>
   <p v-if="error" class="workflow-warning">{{error}}；未知数据不当作零，可刷新或手动提交说明。</p><p v-if="!compact&&current.incoming_note">{{current.incoming_note}}</p>
   <el-dialog v-if="dialog==='request'" :model-value="true" title="提交采购申请" width="min(600px,94vw)" append-to-body :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy" @close="dialog=''">
    <p><strong>{{ledger.product.name}}</strong>；申请不会直接生成采购在途，也不会改库存。</p>
    <el-form label-width="100px" :disabled="busy"><el-form-item label="需求类型" required><el-select v-model="form.type" placeholder="请选择用途"><el-option v-for="t in INVENTORY_DEMAND_TYPES" :key="t.key" :value="t.key" :label="t.label" /></el-select></el-form-item><el-form-item label="申请件数" required><el-input-number v-model="form.quantity" :precision="0" :min="1" :max="1000000" /></el-form-item><el-form-item label="说明"><el-input v-model="form.note" type="textarea" maxlength="500" show-word-limit /></el-form-item></el-form>
    <template #footer><el-button :disabled="busy" @click="dialog=''">取消</el-button><el-button type="primary" :loading="busy" @click="submitRequest">提交并提醒采购</el-button></template>
   </el-dialog>
+  <ForecastDialog v-if="forecastVisible" v-model="forecastVisible" :product-id="productId" :product-name="ledger.product.name" @created="forecastVisible=false;emit('saved');reload(true,true)"/>
   <ProcurementRequestCreateDialog v-if="purchaseVisible" v-model="purchaseVisible" :initial-product-id="productId" :source-request-ids="(state?.requests||[]).map(r=>r.id)" lock-product @created="emit('saved');reload(true)" />
   <el-dialog v-if="dialog==='receive'" :model-value="true" title="登记入库" width="min(1000px,94vw)" append-to-body :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy" @close="dialog=''">
    <p>仅登记验收合格的实物；未到货或不合格部分不增加库存。一次可登记多个批次。</p>
