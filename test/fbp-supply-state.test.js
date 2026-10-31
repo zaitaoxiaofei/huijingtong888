@@ -24,7 +24,7 @@ test('FBP low stock creates a replenishment warning and net procurement without 
  const ledger={physical_estimate:20,open_order_demand:4,fbp_reserved:0,current_shortage:0,current_incoming:0,incoming_quantity:0,fbp_inventory:{incomplete:false},flow_summary:{safety:6,applications:[]}};
  const forecast={skus:[sku({available:0,fbp_target:15,per_set_quantity:1,in_transit:0,committed_qty:0})]};const result=inventoryWorkflow(ledger,{forecast});
  assert.equal(result.free,10);assert.equal(result.fbp.shortage,15);assert.equal(result.demands[3].purchase_quantity,5);assert.equal(result.requested,0);assert.equal(result.purchase_quantity,5);
- const covered=inventoryWorkflow({...ledger,physical_estimate:100},{forecast});assert.equal(covered.demands[2].purchase_quantity,0);assert.equal(covered.demands[3].status,'warning');assert.equal(covered.local_stock_status,'success');
+ const covered=inventoryWorkflow({...ledger,physical_estimate:100},{forecast});assert.equal(covered.demands[2].purchase_quantity,0);assert.equal(covered.demands[3].status,'success');assert.equal(covered.local_stock_status,'success');
 });
 test('FBS sales do not inflate FBP safety or create a new FBP purchase obligation',()=>{
  const product={created_days:100,incoming_stock:0},balance={physical_stock:200,open_order_demand_qty:0,fbp_reserved_qty:0},settings=validateFlowSettings({production_days:7,local_days:3});

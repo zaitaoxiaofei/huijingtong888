@@ -1,4 +1,4 @@
-import { inventorySupplyPlan } from './inventory-supply-plan.js';
+import { inventorySupplyPlan,inventoryPurchaseQuantity } from './inventory-supply-plan.js';
 import { fbpSupplyState, fbpLocalSupplyNeed } from './fbp-supply-state.js';
 // One physical-unit policy for the diagram, order badges and purchasing queue.
 export const INVENTORY_DEMAND_TYPES = [
@@ -53,12 +53,19 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
       if(i===1)demands[i].physical_gap=supply_plan.local_physical_gap;
       if(i===2)demands[i].physical_gap=supply_plan.required_fbp_physical_gap;
       if(i===3)demands[i].physical_gap=supply_plan.forecast_fbp_physical_gap;
-      demands[i].status=required[i]>0?'danger':optional[i]>0||demands[i].physical_gap>0?'warning':'success';
+      demands[i].status=required[i]>0?'danger':optional[i]>0?'warning':'success';
+    }
+  }else{
+    for(const [index,quantity] of [[0,supply_plan.required_fbs],[1,supply_plan.optional_local],[2,supply_plan.required_fbp],[3,supply_plan.optional_fbp]]){
+      demands[index].purchase_quantity=quantity;
+      demands[index].required_purchase_quantity=index===0||index===2?quantity:0;
+      demands[index].optional_purchase_quantity=index===1||index===3?quantity:0;
+      demands[index].status=quantity==null?'unknown':quantity>0?(index===0||index===2?'danger':'warning'):'success';
     }
   }
   const local_stock_status = ['danger','warning','unknown','success'].find(status=>demands.slice(0,2).some(d=>d.status===status));
   demands[3].replenishment_quantity=supply_plan.fbp_forecast_quantity??(fbp.known?Math.max(0,fbpNeed-requested):null);
-  demands[3].status=!fbp.known?'unknown':demands[3].replenishment_quantity>0?'warning':'success';
+  demands[3].status=!fbp.known?'unknown':supply_plan.optional_fbp!=null?supply_plan.optional_fbp>0?'warning':'success':fbp.replenish_quantity>0?'warning':'success';
   if(!fbp.known)demands[3].purchase_quantity=null;
   demands[3].fbp_stock_status=fbp.status;
   demands[2].replenishment_quantity = requested;
@@ -79,7 +86,7 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   if (!known(flow.safety)) review_reasons.push('本地保障规则或消耗数据待核对');
   if (!applicationKnown) review_reasons.push('FBP申请数据尚未完整读取');
   return { review_reasons, physical_recorded: known(ledger.physical_estimate) ? Number(ledger.physical_estimate) : null, safety_target: known(flow.safety) ? qty(flow.safety) : null, demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
-    purchase_quantity: complete && applicationKnown ? demands.reduce((sum,d)=>sum+d.purchase_quantity,0) : null,
+    purchase_quantity: inventoryPurchaseQuantity(supply_plan),purchase_partial:!supply_plan.known&&supply_plan.fbs_known&&supply_plan.required_fbs>0,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',
     requests, calculated_at: new Date().toISOString() };

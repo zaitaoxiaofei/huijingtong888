@@ -360,7 +360,7 @@ function addProcurementDecisionMysql(row, query = {}) {
   if(row.workflow) {
     const requestedType=String(query.demandType||query.demand_type||'all');
     const relevant=row.workflow.demands.filter(d=>!['real_order','local_safety','fbp_stock'].includes(requestedType)||d.key===requestedType);
-    row.suggestion_reasons=relevant.filter(d=>Number(d.purchase_quantity)>0||Number(d.submitted_quantity)>0).map(d=>({type:d.key,label:d.label,quantity:Math.max(Number(d.purchase_quantity)||0,Number(d.submitted_quantity)||0),text:`${d.label}：当前建议 ${d.purchase_quantity??'待核对'} 件；已提交 ${d.submitted_quantity} 件`}));
+    row.suggestion_reasons=relevant.filter(d=>Number(d.purchase_quantity)>0||Number(d.submitted_quantity)>0).map(d=>({type:d.key,label:d.label,quantity:Number(d.purchase_quantity)||0,submitted_quantity:Number(d.submitted_quantity)||0,text:`${d.label}：当前建议 ${d.purchase_quantity??'待核对'} 件；已提交 ${d.submitted_quantity} 件`}));
     row.primary_suggestion_reason=row.suggestion_reasons[0]||null;
     row.suggested_purchase_qty=row.suggestion_reasons.reduce((sum,r)=>sum+r.quantity,0);
     row.primary_suggested_purchase_qty=row.suggested_purchase_qty;

@@ -10,8 +10,9 @@ const forecast={skus:[sku]};
 test('FBP shortage stays quantitative when local stock and procurement inbound cover all purchases',()=>{
  const state=inventoryWorkflow(ledger,{applications:[],forecast}),lines=inventorySupplyLines(state);
  assert.equal(state.fbp.physical,30);assert.equal(state.fbp.available,25);
- assert.deepEqual(lines.map(r=>r.key),['forecast']);
- assert.equal(lines[0].quantity,100);assert.equal(lines[0].stock,51);assert.equal(lines[0].incoming,49);assert.equal(lines[0].purchase,0);
+ assert.deepEqual(lines.map(r=>r.key),['orders','safety','fbp','forecast']);
+ const prediction=lines.find(r=>r.key==='forecast');assert.equal(prediction.status,'success');
+ assert.equal(prediction.quantity,100);assert.equal(prediction.stock,51);assert.equal(prediction.incoming,49);assert.equal(prediction.purchase,0);
  assert.equal(state.supply_plan.required_purchase+state.supply_plan.optional_purchase,0);
 });
 test('partial coverage shows separate shortage and purchase amounts; inbound is spent only once',()=>{

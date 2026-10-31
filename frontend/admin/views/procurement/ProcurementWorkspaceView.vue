@@ -648,6 +648,8 @@ async function openBulkPurchase() {
         Object.assign(row, fresh);
       }
     }
+    const covered = selectedDemandRows.value.find(row => !(Number(row.suggested_purchase_qty) > 0));
+    if (covered) throw new Error(`${covered.product_name} 的需求已被覆盖或尚未核实，请刷新后重新选择；额外采购可使用自由采购`);
     const expandedItems = [];
     const coveredComponents = [];
     for (const row of selectedDemandRows.value) {
@@ -1654,7 +1656,7 @@ onMounted(async () => {
       </ErpFilterBar>
 
       <el-table v-loading="loading" :data="state.rows" row-key="product_id" border height="calc(100vh - 350px)" class="demand-table" @selection-change="handleDemandSelection">
-        <el-table-column type="selection" width="48" fixed="left" />
+        <el-table-column type="selection" width="48" fixed="left" :selectable="row => Number(row.suggested_purchase_qty) > 0" />
         <el-table-column label="库存商品" min-width="340" fixed="left">
           <template #default="{ row }">
             <div class="demand-product-card">
