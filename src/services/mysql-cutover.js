@@ -29822,7 +29822,7 @@ export async function ordersMysql(tenantId = "admin") {
   return orderRowsByIdsMysql(ids.map((row) => row.id), undefined, tenantId);
 }
 
-async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin") {
+export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin") {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);

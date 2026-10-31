@@ -2668,7 +2668,7 @@ onBeforeUnmount(() => {
       </OrdersStatusTabs>
     </OrdersToolbar>
 
-    <OglDispatchComposer v-if="oglComposer.visible" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
+    <OglDispatchComposer v-if="oglComposer.visible" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" :order-rows="selectedRows" @open-order="id => openDrawer('detail', id)" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
     <el-dialog v-if="selectionDialogVisible" v-model="selectionDialogVisible" title="跨页已选订单" width="min(1100px,94vw)" append-to-body>
       <p>已选 {{ selectedCount }} 单；翻页、调整筛选不会清空。批量操作前会由服务端重新校验订单状态。</p>
       <el-table :data="selectedRows" row-key="id" max-height="55vh" border>
