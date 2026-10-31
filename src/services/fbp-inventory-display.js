@@ -26,20 +26,21 @@ export async function loadOrderFbpStocks(query, orderIds) {
 }
 
 export function summarizeFbpInventory(mappings, snapshots) {
+  const quantity = value => value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
   const rows = mappings.flatMap(mapping => {
     const matched = snapshots.filter(stock => Number(stock.shop_id) === Number(mapping.shop_id) && String(stock.ozon_sku) === String(mapping.ozon_sku));
     return (matched.length ? matched : [null]).map(stock => ({ ...mapping,
       warehouse_name: stock?.warehouse_name || '未提供仓库', warehouse_id: stock?.warehouse_id || '',
-      present: stock ? Number(stock.present) : null, available: stock ? Number(stock.available) : null,
-      reserved: stock ? Number(stock.reserved) : null, synced_at: stock?.synced_at || null,
-      inventory_quantity: stock ? Number(stock.present) * Number(mapping.per_set_quantity) : null,
-      available_inventory_quantity: stock ? Number(stock.available) * Number(mapping.per_set_quantity) : null
+      present: quantity(stock?.present), available: quantity(stock?.available),
+      reserved: quantity(stock?.reserved), synced_at: stock?.synced_at || null,
+      inventory_quantity: quantity(stock?.present) == null ? null : Number(stock.present) * Number(mapping.per_set_quantity),
+      available_inventory_quantity: quantity(stock?.available) == null ? null : Number(stock.available) * Number(mapping.per_set_quantity)
     }));
   });
   const times = rows.map(row => row.synced_at).filter(Boolean).sort((a, b) => new Date(a) - new Date(b));
   return { rows, synced_at: times[0] || null, missing_skus: rows.filter(row => row.present === null).length, present: rows.length ? rows.reduce((sum, row) => sum + (row.inventory_quantity || 0), 0) : null,
     available: rows.length ? rows.reduce((sum, row) => sum + (row.available_inventory_quantity || 0), 0) : null,
-    incomplete: !rows.length || rows.some(row => row.present === null) };
+    incomplete: !rows.length || rows.some(row => row.present === null || row.available === null) };
 }
 
 function productFbpMappingsQuery(productId,scope){

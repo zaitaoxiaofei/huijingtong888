@@ -3399,7 +3399,7 @@ Read the shared current-enterprise inventory policy. Fresh inventory.read member
 - Query parameters:
   - `product_ids` (`string`, optional): 1–20 comma-separated owned product IDs; alternatively product_id
   - `product_id` (`number`, optional): Single owned product ID
-  - `view` (`string`, optional): local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details
+  - `view` (`string`, optional): local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; components for owned minimum physical inventory composition and related bundles; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details
   - `shop_id` (`number`, optional): Current-enterprise shop for view=sku
   - `ozon_sku` (`string`, optional): Bound SKU for view=sku
   - `fresh` (`string`, optional): 1 bypasses the short-lived tenant/product cache
@@ -3487,9 +3487,33 @@ Create or reuse real procurement requests for four demand purposes (FBS real ord
   - `403` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `GET /api/inventory-workflow/purchase-bundle`
+
+Read a current-enterprise purchased bundle batch, observed revision, minimum physical components and proposed cost allocation. Procurement duty required; financial values are not part of the nonfinancial arrivals list. Missing component costs remain unknown.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `id` (`number`, required): Owned purchased inbound batch
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/purchase-bundle`
+
+Procurement manually reconciles one pending/arrived bundle purchase into minimum-unit purchased batches. Whole mode requires every component at the saved composition ratio and explicit cost-allocation confirmation; goods/freight totals each stay equal to the source. Parts mode records only selected actually purchased components, with explicit confirmation if correcting the paid amount. Canonical ledger actions retire only the source pending quantity and create the chosen physical batches atomically; no stock is received. Source, buyer/date/logistics, actor and lineage remain audited. Fresh duty, ownership, observed source/BOM revision, product locks and retry identity are checked; approved/cancelled history is protected.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/inventory-workflow/purchase-arrivals`
 
-Paged current-enterprise actual purchase arrival batches, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
+Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage; unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
 
 - Auth: `authenticated`
 - Query parameters:

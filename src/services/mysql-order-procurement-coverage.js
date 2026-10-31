@@ -81,7 +81,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         o.logistics_status AS source_order_logistics_status,
         COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
-        cp.name AS product_name, cp.stock_unit,
+        cp.name AS product_name, cp.stock_unit,p.id AS root_product_id,p.name AS root_product_name,p.inventory_number AS root_inventory_number,oi.quantity AS root_quantity,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity,
         CASE WHEN (o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
           OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))

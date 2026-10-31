@@ -41,7 +41,8 @@ export function createInventoryFlowService({ query = mysqlQuery, transaction = w
         offer_id: row.offer_id || "", mapping_id: row.mapping_id || null, per_set_quantity: Number(row.per_set_quantity), present: row.present == null ? null : 0,
         available: row.available == null ? null : 0, synced_at: row.synced_at, in_transit: 0, sales: {} });
       const sku = groups.get(key);
-      if (row.present != null) { sku.present += Number(row.present); sku.available += Number(row.available); }
+      sku.present = sku.present == null || row.present == null ? null : sku.present + Number(row.present);
+      sku.available = sku.available == null || row.available == null ? null : sku.available + Number(row.available);
       if (row.synced_at && (!sku.synced_at || row.synced_at < sku.synced_at)) sku.synced_at = row.synced_at;
     }
     const skus = [...groups.values()];

@@ -118,7 +118,7 @@ export function planLedgerAction(snapshot, body) {
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
   if (type === 'revise_pending_batch') {
     const batch = snapshot.batches.find(row => Number(row.id) === Number(body.inbound_id));
-    if (!batch || batch.status !== 'pending_arrival' || batch.received_at) throw new Error('此批次已到货、入库或关闭，请刷新后使用采购对账；待到货编辑不能改动已收货记录');
+    if (!batch || batch.status !== 'pending_arrival' || (batch.received_at && body.allow_arrived_bundle_review !== true)) throw new Error('此批次已到货、入库或关闭，请刷新后使用采购对账；待到货编辑不能改动已收货记录');
     const quantity = integer(body.quantity, '修改后待到货数量', 0), amount = money(body.amount), shipping = money(body.shipping_amount || 0);
     if (!quantity && (amount || shipping)) throw new Error('删除记录时货款和运费必须为0；实际退货退款请走采购对账');
     const correction = { id: Number(batch.id), quantity, amount, shipping_amount: shipping,
@@ -468,6 +468,8 @@ export function createProcurementLedgerService(hooks) {
     return { rows, total: Number(count?.total || 0), page, pageSize };
   }
   async function apply(body, personId, existingConnection = null, tenantId = 'admin', access = 'procurement') {
+    const {allow_arrived_bundle_review: ignored, ...submittedBody}=body;
+    body=access==='bundle-review'?{...submittedBody,allow_arrived_bundle_review:true}:submittedBody;
     if (!existingConnection) await prepare();
     const productId = integer(body.product_id, '库存商品 ID');
     const requestKey = String(body.request_key || '');

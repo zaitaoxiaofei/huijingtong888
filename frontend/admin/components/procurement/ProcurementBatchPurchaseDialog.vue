@@ -12,7 +12,20 @@ const form=reactive({person_id:null,source_type:'1688',note:''}),detail=reactive
 const amount=computed(()=>items.value.reduce((n,r)=>n+Number(r.amount||0)+Number(r.shipping_amount||0),0).toFixed(2));
 let generation=0,disposed=false,searchVersion=0;
 const visible=computed({get:()=>props.modelValue,set:v=>emit('update:modelValue',v)});
-function add(row){const id=Number(row.product_id||row.id);if(!id||items.value.some(i=>i.product_id===id))return ElMessage.info('该库存已在采购表中');if(items.value.length>=100)return ElMessage.warning('一次最多登记100项库存');const p=row.workflow?.supply_plan;items.value.push({product_id:id,name:row.product_name||row.name,number:row.inventory_number||row.code,quantity:Math.max(1,Number(p?.required_purchase||0)+Number(p?.optional_purchase||0)),amount:0,shipping_amount:0,purchase_url:row.purchase_url||'',note:row.workflow?.purchase_partial?'仅采购已确认FBS缺口；历史账面差异另核对':'',purchase_mode:'shortage_purchase',anomaly_reason:'',anomaly_note:'',price_warning:null});}
+function addPhysical(row,initialQuantity){const id=Number(row.product_id||row.id);if(!id||items.value.some(i=>i.product_id===id))return ElMessage.info('该库存已在采购表中');if(items.value.length>=100)return ElMessage.warning('一次最多登记100项库存');const p=row.workflow?.supply_plan;items.value.push({product_id:id,name:row.product_name||row.name,number:row.inventory_number||row.code,quantity:initialQuantity??Math.max(1,Number(p?.required_purchase||0)+Number(p?.optional_purchase||0)),amount:0,shipping_amount:0,purchase_url:row.purchase_url||'',note:row.workflow?.purchase_partial?'仅采购已确认FBS缺口；历史账面差异另核对':'',purchase_mode:'shortage_purchase',anomaly_reason:'',anomaly_note:'',price_warning:null});}
+async function add(row){
+ const scope=currentApiCacheScope(),token=generation;
+ if(row.workflow){addPhysical(row);return;}
+ try{
+  const result=await apiClient.get(`/api/inventory-workflow?view=components&product_id=${Number(row.product_id||row.id)}`,{noCache:true});
+  if(disposed||token!==generation||scope!==currentApiCacheScope()||!visible.value)return;
+  const composition=result.rows?.[0];if(!composition?.components?.length)throw new Error('未读取到完整库存组成，请刷新后重试');
+  if(items.value.length+composition.components.filter(p=>!items.value.some(i=>i.product_id===Number(p.id))).length>100)return ElMessage.warning('展开后超过100项库存，请分批采购');
+  if(!composition.is_bundle){addPhysical(row);return;}
+  for(const part of composition.components)addPhysical({...part,product_id:part.id,product_name:part.name},Number(part.per_set_quantity));
+  ElMessage.info('套装已展开为实物库存，请移除不采购的配件并填写实际件数及货款');
+ }catch(e){if(!disposed&&scope===currentApiCacheScope())ElMessage.error(e.message);}
+}
 async function search(){const token=++searchVersion,scope=currentApiCacheScope();searching.value=true;try{const r=await apiClient.get(`/api/products?${new URLSearchParams({paged:'1',page:'1',pageSize:'20',query:query.value,searchMode:searchMode.value})}`,{noCache:true});if(!disposed&&token===searchVersion&&scope===currentApiCacheScope())results.value=r.rows||[];}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===searchVersion)searching.value=false;}}
 async function close(done){if(busy.value||detail.visible)return;if(items.value.length){try{await ElMessageBox.confirm('关闭会放弃本次尚未登记的采购表。查看库存详情后可直接关闭详情返回，无需关闭采购表。','关闭批量采购',{confirmButtonText:'放弃并关闭',cancelButtonText:'继续填写'});}catch{return;}}done();}
 function clearScope(){++generation;++searchVersion;items.value=[];results.value=[];submitted.value=null;detail.visible=false;emit('update:modelValue',false);}

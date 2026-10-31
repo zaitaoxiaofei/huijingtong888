@@ -1,3 +1,4 @@
+import { inventoryLocalEvidence } from './inventory-local-evidence.js';
 import { inventorySupplyPlan,inventoryPurchaseQuantity } from './inventory-supply-plan.js';
 import { fbpSupplyState, fbpLocalSupplyNeed } from './fbp-supply-state.js';
 // One physical-unit policy for the diagram, order badges and purchasing queue.
@@ -85,7 +86,7 @@ export function inventoryWorkflow(ledger = {}, { applications, forecast, request
   else if (Number(ledger.physical_estimate) < 0) review_reasons.push('本地账面库存为负，请盘点并更新实物');
   if (!known(flow.safety)) review_reasons.push('本地保障规则或消耗数据待核对');
   if (!applicationKnown) review_reasons.push('FBP申请数据尚未完整读取');
-  return { review_reasons, physical_recorded: known(ledger.physical_estimate) ? Number(ledger.physical_estimate) : null, safety_target: known(flow.safety) ? qty(flow.safety) : null, demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
+  return { local_evidence: inventoryLocalEvidence(ledger), review_reasons, physical_recorded: known(ledger.physical_estimate) ? Number(ledger.physical_estimate) : null, safety_target: known(flow.safety) ? qty(flow.safety) : null, demands, overall, stock_status, local_stock_status, fbp, supply_plan, physical:complete?physical:null, order_demand:complete?orders:null, safety:complete?safety:null, locked:complete?locked:null, free: complete ? free : null, requested, opportunities,
     purchase_quantity: inventoryPurchaseQuantity(supply_plan),purchase_partial:!supply_plan.known&&supply_plan.fbs_known&&supply_plan.required_fbs>0,
     local_days: flow.local_days, fbp_days: flow.fbp_days, incoming,
     incoming_note: incoming ? '在途不能立即发货；请核对到货时间，晚于交付期限的批次不能保障本次发货' : '',
