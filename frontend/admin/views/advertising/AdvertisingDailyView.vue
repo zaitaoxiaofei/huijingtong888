@@ -26,6 +26,7 @@ const quality = ref(null);
 const detailRows = ref([]);
 const trendRows = ref([]);
 const currentRow = ref(null);
+let rowsRequestSeq = 0;
 let qualityRequestSeq = 0;
 let trendRequestSeq = 0;
 const strategyForm = reactive({
@@ -77,7 +78,7 @@ const pendingCampaignSyncScope = computed(() => {
     skuCount: new Set(pendingRows.value.map((row) => String(row.ozon_sku || "")).filter(Boolean)).size
   };
 });
-const filteredSummary = computed(() => summarizeRows(settledRows.value));
+const periodSummary = computed(() => summary.value);
 const dashboard = computed(() => summarizeAdDashboard(settledRows.value));
 const tasks = computed(() => buildAdTasks(settledRows.value));
 const prioritizedTasks = computed(() => [...tasks.value]
@@ -114,40 +115,16 @@ const diagnosisOptions = computed(() => {
   const values = [...new Set(filteredRows.value.map((row) => primaryTag(row).label).filter(Boolean))];
   return values.map((value) => ({ value, label: value }));
 });
-const storeSpendRank = computed(() => {
-  const map = new Map();
-  for (const row of settledRows.value) {
-    const key = String(row.shop_id || row.shop_name || "unknown");
-    const current = map.get(key) || {
-      shop_id: row.shop_id,
-      shop_name: row.shop_name || "未知店铺",
-      spend: 0,
-      revenue: 0,
-      clicks: 0,
-      addToCart: 0,
-      impressions: 0,
-      orders: 0,
-      skuCount: new Set()
-    };
-    current.spend += Number(row.evaluation.metrics.spend || 0);
-    current.revenue += Number(row.evaluation.metrics.revenue || 0);
-    current.clicks += Number(row.evaluation.metrics.clicks || 0);
-    current.addToCart += Number(row.evaluation.metrics.addToCart || 0);
-    current.impressions += Number(row.evaluation.metrics.impressions || 0);
-    current.orders += Number(row.evaluation.metrics.orders || 0);
-    current.skuCount.add(String(row.ozon_sku || ""));
-    map.set(key, current);
-  }
-  return [...map.values()]
-    .map((item) => ({
-      ...item,
-      skuTotal: item.skuCount.size,
-      roas: item.spend > 0 ? item.revenue / item.spend : 0,
-      ctr: item.impressions > 0 ? item.clicks / item.impressions : 0,
-      cr: item.clicks > 0 ? item.orders / item.clicks : 0
-    }))
-    .sort((a, b) => b.spend - a.spend);
-});
+const storeSpendRank = computed(() => (summary.value.shops || []).map((row) => ({
+  shop_id: row.shop_id,
+  shop_name: row.shop_name,
+  spend: Number(row.spend_rub || 0),
+  revenue: Number(row.revenue_rub || 0),
+  skuTotal: Number(row.sku_count || 0),
+  roas: Number(row.roas || 0),
+  ctr: Number(row.ctr || 0),
+  cr: Number(row.conversion_rate || 0)
+})).sort((a, b) => b.spend - a.spend));
 const highSpendSkuRank = computed(() => [...settledRows.value]
   .sort((a, b) => b.evaluation.metrics.spend - a.evaluation.metrics.spend));
 const maxStoreCompare = computed(() => Math.max(1, ...storeSpendRank.value.flatMap((item) => [item.spend, item.revenue])));
@@ -237,7 +214,7 @@ const activeTodoModule = computed(() => todoModules.value.find((item) => item.ke
 
 const countMainImageTasks = computed(() => settledRows.value.filter((row) => row.evaluation.tags.some((tag) => tag.label.includes("主图"))).length);
 const countDetailTasks = computed(() => settledRows.value.filter((row) => row.evaluation.tags.some((tag) => tag.label.includes("转化"))).length);
-const averageCpc = computed(() => Number(filteredSummary.value.clicks || 0) ? Number(filteredSummary.value.spend_rub || 0) / Number(filteredSummary.value.clicks || 1) : 0);
+const averageCpc = computed(() => Number(periodSummary.value.clicks || 0) ? Number(periodSummary.value.spend_rub || 0) / Number(periodSummary.value.clicks || 1) : 0);
 const riskSkuCount = computed(() => settledRows.value.filter((row) => ["pause", "optimize"].includes(row.evaluation.status.key)).length);
 const storeHealth = computed(() => ({
   score: dashboard.value.averageScore,
@@ -361,27 +338,6 @@ function isAdPending(row = {}) {
     || String(row.source || "") === "ozon_performance_pending";
 }
 
-function summarizeRows(rows = []) {
-  const total = rows.reduce((acc, row) => {
-    const metrics = row.evaluation?.metrics || evaluateAdSku(row).metrics;
-    acc.spend_rub += Number(metrics.spend || row.spend_rub || 0);
-    acc.revenue_rub += Number(metrics.revenue || row.revenue_rub || 0);
-    acc.impressions += Number(metrics.impressions || row.impressions || 0);
-    acc.clicks += Number(metrics.clicks || row.clicks || 0);
-    acc.add_to_cart += Number(metrics.addToCart || row.add_to_cart || 0);
-    acc.add_to_cart_available = acc.add_to_cart_available || Number(metrics.addToCartAvailable || row.add_to_cart_available || 0);
-    acc.orders += Number(metrics.orders || row.orders || 0);
-    acc.units += Number(row.units || 0);
-    return acc;
-  }, { spend_rub: 0, revenue_rub: 0, impressions: 0, clicks: 0, add_to_cart: 0, add_to_cart_available: 0, orders: 0, units: 0 });
-  return {
-    ...total,
-    ctr: total.impressions ? total.clicks / total.impressions : 0,
-    conversion_rate: total.clicks ? total.orders / total.clicks : 0,
-    acos: total.revenue_rub ? total.spend_rub / total.revenue_rub : 0,
-    roas: total.spend_rub ? total.revenue_rub / total.spend_rub : 0
-  };
-}
 
 function taskPriorityScore(task) {
   let score = 0;
@@ -752,6 +708,7 @@ function buildParams(options = {}) {
 }
 
 async function loadRows() {
+  const seq = ++rowsRequestSeq;
   loading.value = true;
   try {
     const params = buildParams();
@@ -759,6 +716,7 @@ async function loadRows() {
       apiClient.get(`/api/advertising/daily?${params.toString()}`),
       apiClient.get(`/api/advertising/daily/summary?${params.toString()}`)
     ]);
+    if (seq !== rowsRequestSeq) return;
     state.rows = Array.isArray(listPayload?.rows) ? listPayload.rows : [];
     state.total = Number(listPayload?.total || state.rows.length);
     state.page = Number(listPayload?.page || state.page);
@@ -767,9 +725,9 @@ async function loadRows() {
     void loadQualitySnapshot();
     if (activeTab.value === "insights") void loadTrendRows();
   } catch (error) {
-    ElMessage.error(error.message || "广告数据加载失败");
+    if (seq === rowsRequestSeq) ElMessage.error(error.message || "广告数据加载失败");
   } finally {
-    loading.value = false;
+    if (seq === rowsRequestSeq) loading.value = false;
   }
 }
 
@@ -1007,7 +965,8 @@ onMounted(bootstrap);
       <div class="sync-quality-main">
         <el-tag :type="qualityStatus.type" effect="light">{{ qualityStatus.label }}</el-tag>
         <strong>同步可信度 {{ quality?.score ?? "--" }} 分</strong>
-        <span>核心 KPI 已排除待返回报表：{{ settledRowsText }}</span>
+        <span>统计范围：{{ summary.from || "--" }} 至 {{ summary.to || "--" }} · {{ summary.shop_count || 0 }} 家店铺 · 币种 RUB（卢布）</span>
+        <span>完整汇总已返回报表，不随翻页或列表状态筛选变化；待返回 {{ summary.pending_rows || 0 }} 行</span>
       </div>
       <div class="sync-quality-metrics">
         <div><span>待 Ozon 返回</span><strong>{{ pendingRowsText }}</strong></div>
@@ -1027,25 +986,27 @@ onMounted(bootstrap);
     <section class="decision-layer">
       <div class="health-card" :class="storeHealth.tone">
         <div class="health-title">
-          <span>今日广告健康度</span>
+          <span>所选期间广告概览</span>
           <el-tag :type="toneType(storeHealth.tone)" effect="light">{{ storeHealth.label }}</el-tag>
         </div>
         <div class="health-score">
-          <span>健康分</span>
+          <span>当前页商品健康分</span>
           <strong>{{ storeHealth.score }}</strong>
           <i><b :style="{ width: `${storeHealth.score}%` }"></b></i>
         </div>
-        <div class="health-metrics">
-          <div><span>ROAS</span><strong>{{ decimal(filteredSummary.roas) }}</strong></div>
-          <div><span>CTR</span><strong>{{ percent(filteredSummary.ctr) }}</strong></div>
-          <div><span>CR</span><strong>{{ percent(filteredSummary.conversion_rate) }}</strong></div>
-          <div><span>ACOS</span><strong>{{ percent(filteredSummary.acos) }}</strong></div>
+        <div class="health-metrics" v-loading="loading">
+          <div><span>广告花费（RUB）</span><strong>{{ money(periodSummary.spend_rub) }}</strong></div>
+          <div><span>广告销售额（RUB）</span><strong>{{ money(periodSummary.revenue_rub) }}</strong></div>
+          <div><span>ROAS</span><strong>{{ decimal(periodSummary.roas) }}</strong></div>
+          <div><span>CTR</span><strong>{{ percent(periodSummary.ctr) }}</strong></div>
+          <div><span>CR</span><strong>{{ percent(periodSummary.conversion_rate) }}</strong></div>
+          <div><span>ACOS</span><strong>{{ percent(periodSummary.acos) }}</strong></div>
         </div>
         <p>{{ aiConclusion }}</p>
       </div>
       <div class="todo-panel">
         <div class="panel-head">
-          <strong>今日待办</strong>
+          <strong>当前页商品待办</strong>
           <span>点击筛选下方 SKU</span>
         </div>
         <div class="todo-module-grid">
@@ -1254,13 +1215,13 @@ onMounted(bootstrap);
     <section class="spend-overview-panel">
       <div class="panel-head">
         <strong>广告花费总览</strong>
-        <span>{{ state.filters.from }} ~ {{ state.filters.to }}，随当前店铺、关键词和状态筛选联动</span>
+        <span>{{ summary.from || "--" }} ~ {{ summary.to || "--" }}，店铺完整汇总；商品列表按当前页展示</span>
       </div>
       <div class="spend-overview-grid">
         <div class="spend-card">
           <div class="sub-panel-head">
             <strong>店铺花费排行</strong>
-            <span>看各店铺广告预算消耗</span>
+            <span>所选期间完整汇总（RUB）</span>
           </div>
           <div v-if="!storeSpendRank.length" class="empty-state">暂无店铺广告数据</div>
           <div v-else class="spend-list">
@@ -1276,7 +1237,7 @@ onMounted(bootstrap);
                   <em>{{ money(shop.spend) }}</em>
                 </div>
                 <div class="spend-bar-line revenue">
-                  <span>收益</span>
+                  <span>广告销售额</span>
                   <i><b :style="{ width: progressWidth(shop.revenue, maxStoreCompare) }"></b></i>
                   <em>{{ money(shop.revenue) }}</em>
                 </div>
@@ -1289,7 +1250,7 @@ onMounted(bootstrap);
         </div>
         <div class="spend-card">
           <div class="sub-panel-head">
-            <strong>高花费 SKU</strong>
+            <strong>当前页高花费 SKU</strong>
             <span>优先复核烧钱 SKU 和放量 SKU</span>
           </div>
           <div v-if="!highSpendSkuRank.length" class="empty-state">暂无 SKU 广告数据</div>
@@ -1310,7 +1271,7 @@ onMounted(bootstrap);
                   <em>{{ money(row.evaluation.metrics.spend) }}</em>
                 </div>
                 <div class="spend-bar-line revenue">
-                  <span>收益</span>
+                  <span>广告销售额</span>
                   <i><b :style="{ width: progressWidth(row.evaluation.metrics.revenue, maxSkuCompare) }"></b></i>
                   <em>{{ money(row.evaluation.metrics.revenue) }}</em>
                 </div>
@@ -1326,7 +1287,7 @@ onMounted(bootstrap);
 
     <section class="bottom-layer">
       <div class="ranking-panel">
-        <div class="panel-head"><strong>排行榜</strong><span>快速找机会和风险</span></div>
+        <div class="panel-head"><strong>当前页商品排行</strong><span>快速找机会和风险</span></div>
         <div class="rank-grid">
           <div>
             <h3>ROAS Top 5</h3>
@@ -1788,7 +1749,7 @@ onMounted(bootstrap);
 .health-metrics {
   grid-area: metrics;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
   margin: 0;
   align-self: center;

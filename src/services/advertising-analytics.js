@@ -540,30 +540,31 @@ export async function advertisingDailySummaryMysql(query = {}) {
   const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   const { sql, params, from, to } = buildAdDailyWhere(query, scope);
+  // Aggregate the whole filtered period in SQL; list pagination must never change KPIs.
+  const settled = "ad.source <> 'ozon_performance_pending'";
+  const sums = ["spend_rub", "spend_cny", "impressions", "clicks", "add_to_cart", "orders", "units", "revenue_rub", "revenue_cny"]
+    .map((field) => `COALESCE(SUM(CASE WHEN ${settled} THEN ad.${field} ELSE 0 END), 0) AS ${field}`)
+    .join(",\n      ");
   const rows = await mysqlQuery(`
     SELECT
-      COUNT(DISTINCT ad.shop_id) AS shop_count,
-      COUNT(DISTINCT ad.ozon_sku) AS sku_count,
-      COUNT(DISTINCT NULLIF(ad.campaign_id, '')) AS campaign_count,
-      COALESCE(SUM(ad.spend_rub), 0) AS spend_rub,
-      COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
-      COALESCE(SUM(ad.impressions), 0) AS impressions,
-      COALESCE(SUM(ad.clicks), 0) AS clicks,
-      COALESCE(SUM(ad.add_to_cart), 0) AS add_to_cart,
-      COALESCE(MAX(ad.add_to_cart_available), 0) AS add_to_cart_available,
-      COALESCE(SUM(ad.orders), 0) AS orders,
-      COALESCE(SUM(ad.units), 0) AS units,
-      COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
-      COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
-      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
-      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS data_pending,
-      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 'ozon_report_not_ready' ELSE '' END AS data_pending_reason
+      ad.shop_id,
+      MAX(s.name) AS shop_name,
+      COUNT(DISTINCT CASE WHEN ${settled} THEN ad.shop_id END) AS shop_count,
+      COUNT(DISTINCT CASE WHEN ${settled} THEN ad.ozon_sku END) AS sku_count,
+      COUNT(DISTINCT CASE WHEN ${settled} THEN NULLIF(ad.campaign_id, '') END) AS campaign_count,
+      ${sums},
+      COALESCE(MAX(CASE WHEN ${settled} THEN ad.add_to_cart_available ELSE 0 END), 0) AS add_to_cart_available,
+      COUNT(*) AS row_count,
+      SUM(CASE WHEN ${settled} THEN 1 ELSE 0 END) AS settled_rows,
+      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows
     FROM ozon_ad_sku_daily ad
     JOIN shops s ON s.id = ad.shop_id
     ${sql}
+    GROUP BY ad.shop_id WITH ROLLUP
   `, params);
   return {
-    ...rowMetrics(rows?.[0] || {}),
+    ...rowMetrics(rows.find((row) => row.shop_id == null) || {}),
+    shops: rows.filter((row) => row.shop_id != null).map(rowMetrics),
     from,
     to,
     metricBasis: advertisingMetricBasis()
