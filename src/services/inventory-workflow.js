@@ -65,7 +65,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         local.flow_summary=buildInventoryFlowSummary(local,calculateLocalInventorySafety(local,settings),orders,applications);
         const policy={...inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),applications};
         // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
-        const result=localOnly?{product_id:id,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
+        const result=localOnly?{product_id:id,physical_recorded:policy.physical_recorded,safety_target:policy.safety_target,order_quantity:local.open_order_demand,locked_quantity:local.fbp_reserved,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);
         if(cache&&epoch===workflowRevision())workflowCache.set(`${prefix}${scope.id}:${id}`,{expires:Date.now()+20000,value:result});
       }));
@@ -173,7 +173,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         AND ((po.status IN ('purchased','partial_inbound') AND po.purchased_at IS NOT NULL) OR pr.status='purchased')
       ORDER BY ir.id`,[Number(productId)]);
   }
-  async function receive(body,session){
+  async function prepareReceipt(body,session){
     const current=await receiptSession(session),id=Number(body.product_id),rows=await receipts(id,current);
     const selected=Array.isArray(body.records)?body.records:[];
     if(!selected.length||selected.length>100)throw fail('请选择实际验收合格的到货批次，单次最多100条');
@@ -185,6 +185,29 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       return{id:Number(saved.id),receive_quantity:amount,expected_remaining_quantity:Number(saved.quantity),receipt_difference_reason:String(row.reason||'').slice(0,100),receipt_difference_note:String(row.note||'').slice(0,500),version_updated_at:saved.updated_at};
     });
     const impact=await previewReceipts({records:checked},current.tenant.id);
+    if(impact.impacts.some(r=>Number(r.physical_before)<0))impact.suggest_historical=true;
+    return{current,id,checked,impact};
+  }
+  async function receiptContext(productId,session){
+    const current=await receiptSession(session),id=Number(productId),rows=await receipts(id,current);
+    const [state]=await batch([id],current.tenant.id,{localOnly:true,fresh:true,cache:false});
+    return{rows,physical:state.physical_recorded,available:state.free};
+  }
+  async function previewReceive(body,session){
+    const {current,id,checked,impact}=await prepareReceipt(body,session);
+    const [state]=await batch([id],current.tenant.id,{localOnly:true,fresh:true,cache:false});
+    const quantity=checked.reduce((sum,r)=>sum+r.receive_quantity,0),reference=impact.impacts.find(r=>Number(r.product_id)===id);
+    const counted=body.counted_quantity,validCount=counted!=null&&Number.isSafeInteger(Number(counted))&&Number(counted)>=0;
+    const after=impact.suggest_historical?(validCount?Number(counted):null):Number(reference.physical_before)+quantity;
+    const projected=after==null?null:inventoryWorkflow({physical_estimate:after,open_order_demand:state.order_quantity,
+      fbp_reserved:state.locked_quantity,flow_summary:{safety:state.safety_target}},{applications:[]});
+    return{quantity,physical_before:reference.physical_before,available_before:state.free,physical_after:after,available_after:projected?.free??null,
+      requires_count:impact.suggest_historical,revision:reference.revision};
+  }
+  async function receive(body,session){
+    const {current,id,checked,impact}=await prepareReceipt(body,session);
+    const reference=impact.impacts.find(r=>Number(r.product_id)===id);
+    if(body.expected_revision&&reference?.revision!==body.expected_revision)throw fail('库存或采购批次已变化，请返回上一步重新核对入库影响',409);
     let payload;
     if(impact.suggest_historical){
       const count=Number(body.counted_quantity);
@@ -299,5 +322,5 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }
-  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceSnapshot,workspaceSources,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receive};
+  return{read,requests,skuDetails,localQuantities,batch,workspaceStates,workspaceSnapshot,workspaceSources,workspaceProducts,workspaceBatches,workspaceFeedback,submit,receipts,receiptContext,previewReceive,receive};
 }

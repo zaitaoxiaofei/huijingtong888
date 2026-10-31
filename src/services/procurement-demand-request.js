@@ -23,7 +23,7 @@ export function createProcurementDemandRequest({transaction=withMysqlTransaction
    const [previous]=await q("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND person_id=? AND action='procurement_demand_request' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,current.personId,key]);
    if(previous){const old=typeof previous.detail_json==='string'?JSON.parse(previous.detail_json):previous.detail_json;if(old.product_id!==id||old.note!==note||old.cause!==cause||JSON.stringify(old.types)!==JSON.stringify(types))throw fail('此需求已经创建，请勿用原标识修改商品、类型或说明',409);return{ok:true,duplicate:true,requests:old.requests,tenantId:scope.id};}
    const workflow=createInventoryWorkflowService({query:q,transaction:work=>work(c),broadcast:()=>{}}),[state]=await workflow.batch([id],scope.id,{fresh:true,cache:false});
-   if(!state.supply_plan?.known)throw fail('库存数量尚未核实，请先核对本地实物，再创建采购需求',409);
+   if(!state.supply_plan?.known&&!(state.supply_plan?.fbs_known&&types.every(type=>type==='real_order')))throw fail('所选需求的覆盖量尚未核实；已确认的FBS缺口可单独创建，本地保障或FBP需求请先由仓库核对实物',409);
    const requests=[],sources=(await workflow.workspaceSources([id],scope.id)).requests;
    const members=await q('SELECT p.id,p.role,p.roles_json,tm.role AS tenant_role,tm.business_roles_json,t.slug AS tenant_slug FROM tenant_members tm JOIN people p ON p.id=tm.person_id AND p.active=1 JOIN tenants t ON t.id=tm.tenant_id WHERE tm.tenant_id=? AND tm.active=1',[scope.id]);
    const buyers=stockTopupRecipients(members);if(!buyers.length)throw fail('本企业暂无有效采购接收人，请先配置采购岗位',409);

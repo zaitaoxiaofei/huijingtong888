@@ -18,9 +18,9 @@ test('a page is isolated by session/filters, expires and is bounded; manual writ
  cache.clear();assert.equal(cache.get('A','page=2'),null);
 });
 
-test('negative ledger evidence stays visible while procurement quantities remain unconfirmed, not zero',()=>{
+test('negative ledger stays visible while the confirmed uncovered FBS quantity remains actionable',()=>{
  const r=inventoryWorkflow({...ledger,physical_estimate:-7},{applications,forecast});
- assert.equal(r.physical_recorded,-7);assert.equal(r.physical,null);assert.equal(r.supply_plan.required_purchase,null);
+ assert.equal(r.physical_recorded,-7);assert.equal(r.physical,null);assert.equal(r.supply_plan.required_purchase,8);
  assert.equal(r.safety_target,10);assert.equal(r.supply_plan.order_quantity,30);
  assert.match(r.review_reasons[0],/账面库存为负/);
  assert.equal(inventoryWorkspacePage([{product_id:1,workflow:r}],{task:'required'}).total,1);

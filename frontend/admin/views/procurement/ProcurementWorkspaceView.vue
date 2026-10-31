@@ -1,5 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
+import {markProcurementPriceException} from '../../../../src/shared/procurement-price-reason.js';
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, UploadFilled } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
@@ -648,6 +649,8 @@ async function openBulkPurchase() {
         Object.assign(row, fresh);
       }
     }
+    const covered = selectedDemandRows.value.find(row => !(Number(row.suggested_purchase_qty) > 0));
+    if (covered) throw new Error(`${covered.product_name} 的需求已被覆盖或尚未核实，请刷新后重新选择；额外采购可使用自由采购`);
     const expandedItems = [];
     const coveredComponents = [];
     for (const row of selectedDemandRows.value) {
@@ -1089,7 +1092,9 @@ async function saveBulkPurchase() {
     selectedDemandRows.value = [];
     await loadRows();
   } catch (error) {
-    ElMessage.error(error.message || "批量采购保存失败");
+    const index=markProcurementPriceException(error,bulkItems.value);
+    if(index>=0)bulkPage.value=Math.floor(index/bulkPageSize.value)+1;
+    ElMessage.error(index>=0?`${bulkItems.value[index].product_name}：${error.payload.validation.message}；请补充本项原因后再次提交`:error.message || "批量采购保存失败");
   } finally {
     bulkSaving.value = false;
   }
@@ -1509,7 +1514,9 @@ async function submitCreate() {
     createVisible.value = false;
     await loadRows();
   } catch (error) {
-    ElMessage.error(error.message || "创建采购失败");
+    const index=markProcurementPriceException(error,createForm.items);
+    if(index>=0)activeItemIndex.value=index;
+    ElMessage.error(index>=0?`${createForm.items[index].product_name||createForm.items[index].raw_name}：${error.payload.validation.message}；请补充本项原因后再次提交`:error.message || "创建采购失败");
   } finally {
     submitting.value = false;
   }
@@ -1654,7 +1661,7 @@ onMounted(async () => {
       </ErpFilterBar>
 
       <el-table v-loading="loading" :data="state.rows" row-key="product_id" border height="calc(100vh - 350px)" class="demand-table" @selection-change="handleDemandSelection">
-        <el-table-column type="selection" width="48" fixed="left" />
+        <el-table-column type="selection" width="48" fixed="left" :selectable="row => Number(row.suggested_purchase_qty) > 0" />
         <el-table-column label="库存商品" min-width="340" fixed="left">
           <template #default="{ row }">
             <div class="demand-product-card">
@@ -1730,7 +1737,7 @@ onMounted(async () => {
         <el-table-column label="采购依据与库存流水" min-width="620"><template #default="{ row }"><div class="purchase-basis"><div class="purchase-basis-head"><strong class="purchase-basis-title">{{ row.purchase_basis }}</strong><el-button link type="primary" @click="openOrderHistory(row.source_row || row)">历史订单明细</el-button></div><div class="history-ledger"><span><em>业务记录</em><span>有效订单 <strong>{{ Number(row.historical_order_count || 0) }} 单 / {{ Number(row.historical_outbound_quantity || 0) }} 件</strong> · 已记录采购 <strong>{{ Number(row.historical_purchased_quantity || 0) }} 件</strong></span></span><span><em>本地流水</em><span>采购入库 <strong class="ledger-positive">+{{ Number(row.historical_purchase_inbound_quantity || 0) }}</strong> · 订单退回 <strong class="ledger-positive">+{{ Number(row.historical_return_in_quantity || 0) }}</strong> · 订单出库 <strong class="ledger-negative">-{{ Number(row.historical_inventory_order_outbound_quantity || 0) }}</strong> · 转FBP <strong class="ledger-negative">-{{ Number(row.historical_fbp_transfer_outbound_quantity || 0) }}</strong><template v-if="Number(row.historical_other_inventory_quantity || 0)"> · 其他 <strong>{{ Number(row.historical_other_inventory_quantity) > 0 ? '+' : '' }}{{ Number(row.historical_other_inventory_quantity) }}</strong></template></span></span><span><em>当前供给</em><span>现货 <strong>{{ Number(row.current_stock ?? row.source_row?.stock ?? 0) }} 件</strong> · 采购在途 <strong>{{ Number(row.source_row?.incoming_stock || 0) }} 件</strong> · FBP在途 <strong>{{ Number(row.source_row?.fbp_transfer_in_transit_qty || 0) }} 件</strong></span></span><span v-if="historicalDebt(row)" class="history-debt">历史库存待核 <strong>{{ historicalDebt(row) }} 件</strong><small>单独核对，不计本次采购</small></span><span v-else class="history-surplus">剩余总供给 <strong>{{ remainingSupply(row) }} 件</strong></span></div></div></template></el-table-column>
         <el-table-column label="处理类型" width="240"><template #default="{ row }"><div class="bulk-purchase-mode"><el-select v-model="row.purchase_mode"><el-option v-for="option in purchaseModeOptions" :key="option.value" :label="option.label" :value="option.value"><span :title="option.description">{{ option.label }}</span></el-option></el-select><small :title="purchaseModeDescription(row.purchase_mode)">{{ purchaseModeDescription(row.purchase_mode) }}</small></div></template></el-table-column>
         <el-table-column label="本次录入" width="290"><template #default="{ row }"><div class="purchase-entry-fields"><label><span>{{ purchaseQuantityLabel(row.purchase_mode) }}</span><el-input-number v-model="row.quantity" class="bulk-number-input" :min="row.purchase_mode === 'inventory_update' ? 0 : 1" :precision="0" controls-position="right" /></label><label><span>{{ purchaseAmountLabel(row.purchase_mode) }}</span><el-input v-model="row.amount" class="plain-money-input" inputmode="decimal" @blur="normalizeBulkMoney(row, 'amount')"><template #prefix>¥</template></el-input></label><label v-if="row.purchase_mode !== 'inventory_update'"><span>运费</span><el-input v-model="row.shipping_amount" class="plain-money-input" inputmode="decimal" @blur="normalizeBulkMoney(row, 'shipping_amount')"><template #prefix>¥</template></el-input></label></div></template></el-table-column>
-        <el-table-column label="价格对比" width="230"><template #default="{ row }"><div class="price-comparison"><span>历史均价 <strong>{{ Number(row.historical_unit_cost || 0) > 0 ? `¥${Number(row.historical_unit_cost).toFixed(2)}` : '暂无' }}</strong></span><el-button link type="primary" @click="openPurchaseHistory(row)">查看 {{ Number(row.historical_purchase_count || 0) }} 笔采购明细</el-button><span>本次均价 <strong>¥{{ currentBulkUnitCost(row).toFixed(2) }}</strong></span><em v-if="bulkPriceChange(row) !== null" :class="bulkPriceChange(row) > 0 ? 'price-up' : 'price-down'">{{ bulkPriceChange(row) > 0 ? '贵' : '便宜' }} {{ Math.abs(bulkPriceChange(row) * 100).toFixed(1) }}%</em><template v-if="bulkPriceChange(row) > 0.1"><el-select v-model="row.anomaly_reason" placeholder="请选择涨价原因" size="small" class="price-reason"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select><el-input v-if="row.anomaly_reason === '其他原因'" v-model="row.anomaly_note" placeholder="请说明原因" size="small" /></template></div></template></el-table-column>
+        <el-table-column label="价格对比" width="230"><template #default="{ row }"><div class="price-comparison"><span>历史均价 <strong>{{ Number(row.historical_unit_cost || 0) > 0 ? `¥${Number(row.historical_unit_cost).toFixed(2)}` : '暂无' }}</strong></span><el-button link type="primary" @click="openPurchaseHistory(row)">查看 {{ Number(row.historical_purchase_count || 0) }} 笔采购明细</el-button><span>本次均价 <strong>¥{{ currentBulkUnitCost(row).toFixed(2) }}</strong></span><em v-if="bulkPriceChange(row) !== null" :class="bulkPriceChange(row) > 0 ? 'price-up' : 'price-down'">{{ bulkPriceChange(row) > 0 ? '贵' : '便宜' }} {{ Math.abs(bulkPriceChange(row) * 100).toFixed(1) }}%</em><template v-if="bulkPriceChange(row) > 0.1 || row.price_confirmation_required"><el-select v-model="row.anomaly_reason" placeholder="请选择涨价原因" size="small" class="price-reason"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select><el-input v-if="row.anomaly_reason === '其他原因'" v-model="row.anomaly_note" placeholder="请说明原因" size="small" /></template></div></template></el-table-column>
         <el-table-column label="货源与操作" width="160" align="center"><template #default="{ row }"><div class="bulk-link-actions"><el-button type="primary" :disabled="!row.purchase_url" @click="openBulkPurchaseUrl(row)">打开货源</el-button><el-button plain @click="openBulkLinkEditor(row)">{{ row.purchase_url ? '修改链接' : '添加链接' }}</el-button><el-button link type="danger" @click="removeBulkItem(row)">移出本次采购</el-button></div></template></el-table-column>
       </el-table>
       <div class="bulk-pagination"><span>本页 {{ pagedBulkItems.length }} 条，共 {{ bulkItems.length }} 个库存商品</span><el-pagination v-model:current-page="bulkPage" v-model:page-size="bulkPageSize" background layout="prev, pager, next" :total="bulkItems.length" /></div>
@@ -1884,7 +1891,7 @@ onMounted(async () => {
                 <span>本次单价 <strong>¥{{ currentFreePurchaseUnitCost(activeItem).toFixed(2) }}/件</strong></span>
                 <em v-if="freePurchasePriceChange(activeItem) !== null">{{ freePurchasePriceChange(activeItem) >= 0 ? '上涨' : '下降' }} {{ Math.abs(freePurchasePriceChange(activeItem) * 100).toFixed(1) }}%</em>
               </div>
-              <div v-if="activeItem.purchase_mode !== 'inventory_update' && freePurchasePriceChange(activeItem) > 0.1" class="free-purchase-price-reason">
+              <div v-if="activeItem.purchase_mode !== 'inventory_update' && (freePurchasePriceChange(activeItem) > 0.1 || activeItem.price_confirmation_required)" class="free-purchase-price-reason">
                 <div><strong>单价超过历史均价 10%</strong><span>选择原因后可以正常提交，并保留价格审计记录。</span></div>
                 <el-select v-model="activeItem.anomaly_reason" placeholder="请选择价格异常原因"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select>
                 <el-input v-if="activeItem.anomaly_reason === '其他原因'" v-model="activeItem.anomaly_note" placeholder="请填写具体原因" maxlength="120" show-word-limit />

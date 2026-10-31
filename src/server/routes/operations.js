@@ -111,6 +111,8 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/inventory-workflow/details": (req,url)=>nodeRecords.records(Object.fromEntries(url.searchParams),req._session),
     "POST /api/inventory-workflow/node-action": async req=>nodeRecords.mutate(await readJson(req),req._session),
     "GET /api/inventory-workflow/receipts": async (req,url)=>({rows:await workflow.receipts(url.searchParams.get('product_id'),req._session)}),
+    "GET /api/inventory-workflow/receipts/context": (req,url)=>workflow.receiptContext(url.searchParams.get('product_id'),req._session),
+    "POST /api/inventory-workflow/receipts/preview": async req=>workflow.previewReceive(await readJson(req),req._session),
     "POST /api/inventory-workflow/receipts": async req=>workflow.receive(await readJson(req),req._session),
     "POST /api/inventory-workflow/fbp": async req => {
       const session=await authorizeBusinessTaskSession(req._session);

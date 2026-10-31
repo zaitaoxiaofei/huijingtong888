@@ -52,7 +52,7 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const rows=await q('SELECT request_reason_code,source_order_item_id FROM procurement_requests');assert.equal(rows.length,1);assert.equal(rows[0].request_reason_code,'flow_local_safety');assert.equal(rows[0].source_order_item_id,null);
   assert.equal(Number((await q('SELECT SUM(quantity_delta) n FROM inventory_movements WHERE tenant_id=2'))[0].n),200);
   await assert.rejects(service.submit({...input,quantity:4},session),{statusCode:409});
-  const queue=await legacy.procurementRequestsMysql({grouped:'1',paged:'1',compact:'1',demandType:'local_safety'},2);assert.equal(queue.rows.length,1);assert.equal(queue.rows[0].primary_suggested_purchase_qty,3);
+  const queue=await legacy.procurementRequestsMysql({grouped:'1',paged:'1',compact:'1',demandType:'local_safety'},2);assert.equal(queue.rows.length,1);assert.equal(queue.rows[0].primary_suggested_purchase_qty,0);assert.equal(queue.rows[0].suggestion_reasons[0].submitted_quantity,3,'covered manual request stays traceable without repurchasing');
  });
  await t.test('FBP opportunity requires a submitted application, never a draft',async()=>{
   await assert.rejects(service.submit(body('fbp_stock'),session),/先提交FBP/);

@@ -16,8 +16,8 @@ test('drafts never confirm demand and a different store cannot consume this SKU 
  const s=inventoryWorkflow(ledger,{applications:[app(8,{status:'draft'})],forecast});assert.equal(s.supply_plan.required_fbp,0);assert.equal(s.supply_plan.optional_fbp,20);
  const other=inventoryWorkflow(ledger,{applications:[app(8,{shop_id:2})],forecast});assert.equal(other.supply_plan.required_fbp,8);assert.equal(other.supply_plan.optional_fbp,20);
 });
-test('known local stock can cover purchase cost but operations still needs the FBP warning and transfer entry',()=>{
- const s=inventoryWorkflow({...ledger,physical_estimate:100,current_shortage:0},{applications:[],forecast});assert.equal(s.supply_plan.optional_fbp,0);assert.equal(s.supply_plan.fbp_forecast_quantity,20);assert.equal(demand(s,'fbp_forecast').status,'warning');assert.equal(inventoryWorkspacePage([{product_id:1,workflow:s}],{task:'advisory'}).total,1);
+test('covered procurement is green while operations retains the FBP shortage and transfer entry',()=>{
+ const s=inventoryWorkflow({...ledger,physical_estimate:100,current_shortage:0},{applications:[],forecast});assert.equal(s.supply_plan.optional_fbp,0);assert.equal(s.supply_plan.fbp_forecast_quantity,20);assert.equal(demand(s,'fbp_forecast').status,'success');assert.equal(inventoryWorkspacePage([{product_id:1,workflow:s}],{task:'advisory'}).total,1);
  const incoming=inventoryWorkflow({...ledger,incoming_quantity:35,current_incoming:10,current_shortage:0},{applications:[],forecast});assert.equal(incoming.purchase_quantity,0);
 });
 test('quick suggestions subtract pending physical quantities per shop/SKU and retain set conversion',()=>{
@@ -26,4 +26,4 @@ test('quick suggestions subtract pending physical quantities per shop/SKU and re
  assert.deepEqual(fbpForecastSuggestions([], {known:false}),[]);
 });
 
-test('verified low FBP stock remains yellow even when local stock is not counted; no invented purchase quantity',()=>{const s=inventoryWorkflow({...ledger,physical_estimate:null},{applications:[],forecast});assert.equal(demand(s,'fbp_forecast').status,'warning');assert.equal(demand(s,'fbp_forecast').purchase_quantity,null);assert.equal(s.purchase_quantity,null);});
+test('verified low FBP stock remains yellow even when local stock is not counted; no invented purchase quantity',()=>{const s=inventoryWorkflow({...ledger,physical_estimate:null},{applications:[],forecast});assert.equal(demand(s,'fbp_forecast').status,'warning');assert.equal(demand(s,'fbp_forecast').purchase_quantity,null);assert.equal(s.purchase_quantity,10);assert.equal(s.purchase_partial,true);});

@@ -116,7 +116,33 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (type === 'link_purchase_bulk') {
+  if (type === 'revise_pending_batch') {
+    const batch = snapshot.batches.find(row => Number(row.id) === Number(body.inbound_id));
+    if (!batch || batch.status !== 'pending_arrival' || batch.received_at) throw new Error('此批次已到货、入库或关闭，请刷新后使用采购对账；待到货编辑不能改动已收货记录');
+    const quantity = integer(body.quantity, '修改后待到货数量', 0), amount = money(body.amount), shipping = money(body.shipping_amount || 0);
+    if (!quantity && (amount || shipping)) throw new Error('删除记录时货款和运费必须为0；实际退货退款请走采购对账');
+    const correction = { id: Number(batch.id), quantity, amount, shipping_amount: shipping,
+      courier_company: String(body.courier_company || '').trim(), tracking_number: String(body.tracking_number || '').trim() };
+    if (correction.courier_company.length > 128 || correction.tracking_number.length > 128) throw new Error('快递公司和单号不能超过128字');
+    if (batch.purchase_order_item_id) {
+      const item = snapshot.purchases.find(row => Number(row.id) === Number(batch.purchase_order_item_id));
+      if (!item) throw new Error('批次的正式采购明细缺失，请先核对采购关联');
+      const plan = planLedgerAction(snapshot, { ...body, action_type: 'revise_purchase', purchase_item_id: item.id,
+        quantity: Number(item.actual_quantity) - Number(batch.quantity) + quantity,
+        amount: money(Number(item.amount) - Number(batch.amount) + amount),
+        shipping_amount: money(Number(item.shipping_amount) - Number(batch.shipping_amount) + shipping), correct_received: false });
+      return { ...plan, batch_correction: correction };
+    }
+    const request = snapshot.requests.find(row => Number(row.id) === Number(batch.procurement_request_id) && row.status === 'purchased' && !row.purchase_order_id);
+    if (!request) throw new Error('此批次缺少有效采购来源，请先在采购对账核实关联，不能只改到货记录');
+    const requestQuantity = Number(request.quantity) - Number(batch.quantity) + quantity;
+    const otherQuantity = snapshot.batches.filter(row => Number(row.id)!==Number(batch.id) && Number(row.procurement_request_id)===Number(request.id) && ['approved','pending_arrival'].includes(row.status)).reduce((sum,row)=>sum+Number(row.quantity),0);
+    if (requestQuantity < otherQuantity) throw new Error('关联采购数量与其他批次不一致，请先核对采购来源，不能覆盖其他批次');
+    return { ...result, type: 'revise_legacy_pending_batch', batch_correction: correction, request,
+      quantity: requestQuantity, amount: money(Number(request.amount) - Number(batch.amount) + amount),
+      shipping_amount: money(Number(request.shipping_amount) - Number(batch.shipping_amount) + shipping),
+      request_adjustments: planAllocationCorrection({ ...snapshot, requests: [request] }, 0, requestQuantity) };
+  } else if (type === 'link_purchase_bulk') {
     if (!Array.isArray(body.allocations) || !body.allocations.length || body.allocations.length > 500) throw new Error('请在采购批次核对中勾选 1～500 条历史订单（allocations）');
     const seen = new Set();
     result.allocations = body.allocations.map(row => {
@@ -397,8 +423,8 @@ export function createProcurementLedgerService(hooks) {
       WHERE product_id = ? AND status = 'posted' AND source_type IN ('purchase_inbound', 'purchase_inbound_correction', 'historical_receipt_offset')
       AND UPPER(COALESCE(stock_location, 'LOCAL')) NOT IN ('FBP','FBO','OGR')${movementTenantSql} GROUP BY source_ref`, movementArgs);
     for (const batch of value.batches) batch.local_posted_quantity = Number(posted.find(row => row.source_ref === `inbound_${batch.id}`)?.quantity || 0);
-    value.requests = await run(`SELECT pr.* FROM procurement_requests pr JOIN purchase_orders po ON po.id = pr.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
-      WHERE pr.product_id = ? AND ${inventoryTenantSql(scope, 'pr')} AND pr.status != 'cancelled' ORDER BY pr.id`, [productId]);
+    value.requests = await run(`SELECT pr.* FROM procurement_requests pr LEFT JOIN purchase_orders po ON po.id = pr.purchase_order_id AND ${inventoryTenantSql(scope, 'po')}
+      WHERE pr.product_id = ? AND ${inventoryTenantSql(scope, 'pr')} AND (pr.purchase_order_id IS NULL OR po.id IS NOT NULL) AND pr.status != 'cancelled' ORDER BY pr.id`, [productId]);
     const orderOwner = `EXISTS (SELECT 1 FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN shops s ON s.id = o.shop_id WHERE oi.id = order_item_id AND ${inventoryTenantSql(scope, 's')})`;
     value.allocations = await run(`SELECT * FROM procurement_order_allocations WHERE product_id = ? AND status = 'allocated' AND ${orderOwner} ORDER BY id`, [productId]);
     value.sources = await run(`SELECT * FROM procurement_history_sources WHERE product_id = ? AND ${orderOwner} ORDER BY id`, [productId]);
@@ -591,6 +617,13 @@ export function createProcurementLedgerService(hooks) {
       } else if (plan.type === 'revise_purchase') {
         await revisePurchase(connection, run, before, plan, actor, note, actionId, scope.id);
         purchaseOrderId = Number(plan.item.purchase_order_id);
+      } else if (plan.type === 'revise_legacy_pending_batch') {
+        await correctPendingBatch(connection, plan.batch_correction, note);
+        await connection.execute(`UPDATE procurement_requests SET quantity=?,amount=?,shipping_amount=?,status=?,note=CONCAT(COALESCE(note,''),'；',?) WHERE id=?`,
+          [plan.quantity,plan.amount,plan.shipping_amount,plan.quantity?'purchased':'cancelled',note,plan.request.id]);
+        for (const request of plan.request_adjustments) for (const allocation of request.allocations) await connection.execute(
+          'UPDATE procurement_order_allocations SET allocated_quantity=?,status=?,release_reason=? WHERE id=?',
+          [allocation.quantity,allocation.quantity?'allocated':'released',note.slice(0,255),allocation.id]);
       } else {
         await movement(productId, plan.local_delta, `reconciliation_${plan.type}`);
         for (const source of extraSources) await movement(source.product_id, -source.quantity, 'reconciliation_convert');
@@ -658,13 +691,20 @@ export function createProcurementLedgerService(hooks) {
     hooks.invalidate();
     return { ok: true, results };
   }
+  async function correctPendingBatch(connection, batch, note) {
+    await connection.execute(`UPDATE inbound_records SET quantity=?,amount=?,shipping_amount=?,unit_cost=?,status=?,
+      courier_company=?,tracking_number=?,note=CONCAT(COALESCE(note,''),'；',?),updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      [batch.quantity,batch.amount,batch.shipping_amount,batch.quantity?(batch.amount+batch.shipping_amount)/batch.quantity:0,
+        batch.quantity?'pending_arrival':'cancelled',batch.courier_company||null,batch.tracking_number||null,note,batch.id]);
+  }
   async function revisePurchase(connection, run, before, plan, actor, note, actionId, tenantId) {
     const item = plan.item;
     const productId = Number(before.product.id);
     let pendingLeft = plan.pending_quantity;
     const unitCost = plan.quantity ? (plan.amount + plan.shipping_amount) / plan.quantity : 0;
     const batches = before.batches.filter(row => Number(row.purchase_order_item_id) === Number(item.id));
-    for (const batch of batches.filter(row => row.status === 'pending_arrival')) {
+    if (plan.batch_correction) await correctPendingBatch(connection, plan.batch_correction, note);
+    for (const batch of batches.filter(row => !plan.batch_correction && row.status === 'pending_arrival')) {
       const quantity = Math.min(pendingLeft, Number(batch.quantity));
       pendingLeft -= quantity;
       await connection.execute(`UPDATE inbound_records SET quantity = ?, amount = ?, shipping_amount = ?, unit_cost = ?,
@@ -672,11 +712,11 @@ export function createProcurementLedgerService(hooks) {
         plan.quantity ? plan.amount * quantity / plan.quantity : 0, plan.quantity ? plan.shipping_amount * quantity / plan.quantity : 0,
         unitCost, quantity ? 'pending_arrival' : 'cancelled', note, batch.id]);
     }
-    if (pendingLeft > 0) await connection.execute(`INSERT INTO inbound_records
+    if (!plan.batch_correction && pendingLeft > 0) await connection.execute(`INSERT INTO inbound_records
       (tenant_id, product_id, person_id, quantity, amount, shipping_amount, unit_cost, status, note, purchase_order_id, purchase_order_item_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending_arrival', ?, ?, ?)`, [tenantId, productId, actor, pendingLeft,
       plan.amount * pendingLeft / plan.quantity, plan.shipping_amount * pendingLeft / plan.quantity, unitCost, note, item.purchase_order_id, item.id]);
-    for (const change of plan.receipt_adjustments) {
+    for (const change of plan.batch_correction ? [] : plan.receipt_adjustments) {
       await connection.execute(`UPDATE inbound_records SET quantity = ?, amount = ?, shipping_amount = ?, unit_cost = ?, status = ?,
         note = CONCAT(COALESCE(note, ''), '；', ?) WHERE id = ?`, [change.quantity,
         plan.quantity ? plan.amount * change.quantity / plan.quantity : 0,

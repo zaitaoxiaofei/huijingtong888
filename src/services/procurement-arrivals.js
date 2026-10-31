@@ -25,8 +25,10 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1))),pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
   const summaryFilter=[...where.filter(w=>!w.startsWith("ir.status=")),"ir.status='pending_arrival'"];
   const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
-  const [summaryRow]=await query(`SELECT SUM(ir.status='pending_arrival' AND ir.received_at IS NULL) AS open,SUM(ir.status='pending_arrival' AND ir.received_at IS NOT NULL) AS arrived ${summaryJoins}`,args);
-  const summary={open:Number(summaryRow?.open)||0,arrived:Number(summaryRow?.arrived)||0};
+  const [summaryRow]=await query(`SELECT SUM(ir.status='pending_arrival' AND ir.received_at IS NULL) AS open,SUM(ir.status='pending_arrival' AND ir.received_at IS NOT NULL) AS arrived,
+    SUM(CASE WHEN ir.received_at IS NULL THEN ir.quantity ELSE 0 END) AS open_quantity,
+    SUM(CASE WHEN ir.received_at IS NOT NULL THEN ir.quantity ELSE 0 END) AS arrived_quantity ${summaryJoins}`,args);
+  const summary={open:Number(summaryRow?.open)||0,arrived:Number(summaryRow?.arrived)||0,open_quantity:Number(summaryRow?.open_quantity)||0,arrived_quantity:Number(summaryRow?.arrived_quantity)||0};
   if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary};
   const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${joins}`,args),query(`SELECT ir.id,ir.product_id,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.courier_company,ir.tracking_number,po.id AS purchase_order_id,po.order_no,COALESCE(po.purchased_at,ir.created_at) AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${joins} ORDER BY COALESCE(po.purchased_at,ir.created_at) DESC,ir.id DESC LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize])]);
   return{rows:rows.map(r=>({...r,arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary};

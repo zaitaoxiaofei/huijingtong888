@@ -37,7 +37,7 @@ test('explicit procurement-demand refresh invalidates the cached order/status pr
 
 test('inventory-warning demand upgrades legacy product components before querying tenant-scoped components', async () => {
   const source = await fs.readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
-  const body = source.slice(source.indexOf('async function ensureInventoryWarningProcurementRequestsMysql()'), source.indexOf('async function ensurePendingOrderProcurementRequestsMysql()'));
+  const body = source.slice(source.indexOf('async function ensureInventoryWarningProcurementRequestsMysql('), source.indexOf('async function ensurePendingOrderProcurementRequestsMysql('));
   const calls = [];
   const synchronize = new Function(
     'ensureProcurementFlexibleRequestSchemaMysql',
@@ -72,15 +72,15 @@ test('live paging queries products before paging, preserves filters and never wr
   const source = await fs.readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
   const body = source.slice(source.indexOf('async function procurementGroupedPageIdsMysql('), source.indexOf('async function nextPurchaseOrderNoMysql('));
   const calls = [];
-  const page = new Function('mysqlQuery', 'normalizeVehicleBrand', `${body};return procurementGroupedPageIdsMysql;`)(async (sql, params) => {
+  const page = new Function('mysqlQuery', 'normalizeVehicleBrand', 'resolveInventoryTenantScope', 'inventoryTenantSql', `${body};return procurementGroupedPageIdsMysql;`)(async (sql, params) => {
     calls.push({ sql, params });
     return sql.startsWith('SELECT COUNT') ? [{ total: 28 }] : [{ product_id: 827 }];
-  }, value => value || '');
+  }, value => value || '', async()=>({id:1,isDefault:true}), (_scope,alias)=>`${alias}.tenant_id = 1`);
   const result = await page({ demandType: 'real_order', page: 2, pageSize: 20, query: '1-261', productId: 827 }, [827, 829]);
   assert.equal(result.total, 28);
   assert.deepEqual(result.productIds, [827]);
   assert.match(calls[0].sql, /FROM products p\s+LEFT JOIN procurement_requests/);
-  assert.match(calls[0].sql, /WHERE p.id IN/);
+  assert.match(calls[0].sql, /WHERE \(p.id IN/);
   assert.match(calls[0].sql, /p.inventory_number/);
   assert.deepEqual(calls[0].params.slice(-2), [20, 20]);
   assert.ok(calls.every(call => !/INSERT|UPDATE|DELETE/.test(call.sql)));

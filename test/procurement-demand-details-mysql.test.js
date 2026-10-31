@@ -142,6 +142,26 @@ test('procurement detail, manual safety, three-source requests and arrival track
   assert.equal(ledger.fulfillment_summary.fbp.order_count,1);assert.equal(ledger.fulfillment_summary.fbp.quantity,99);assert.equal(ledger.open_order_demand,before);assert.ok(ledger.orders.every(o=>o.stock_location!=='FBP'));
 
  });
+ await t.test('negative ledger does not block a confirmed FBS request or duplicate the current net purchasing quantity',async()=>{
+  await q("INSERT INTO products(id,tenant_id,name,production_lead_days,warehouse_logistics_days,owner_person_id) VALUES(204,2,'Negative history stock',7,2,2)");
+  await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,active) VALUES(204,2,204,20,'SKU204',1)");
+  await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,status,stock_location) VALUES(2,204,'manual_outbound',-37,'posted','LOCAL')");
+  await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(2040,20,'NEGATIVE-OPEN','awaiting_packaging',UTC_TIMESTAMP())");
+  await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(2040,2040,'SKU204',204,13)");
+  const {invalidateOrderProcurementCoverage}=await import('../src/services/mysql-order-procurement-coverage.js');invalidateOrderProcurementCoverage();
+  const workflow=createInventoryWorkflowService({ledger:legacy.inventoryLedgerMysql,forecast:async()=>({skus:[]})});
+  const initial=(await workflow.batch([204],2,{fresh:true}))[0];
+  assert.equal(initial.physical_recorded,-37);assert.equal(initial.supply_plan.required_fbs,13);assert.equal(initial.purchase_quantity,13);assert.equal(initial.purchase_partial,true);
+  const payload={product_id:204,demand_types:['real_order'],cause:'physical_mismatch',note:'历史账面差异另核对，仅采购未覆盖订单',request_key:randomUUID()};
+  const created=await request(payload,warehouse);assert.equal(created.requests[0].quantity,13);
+  await assert.rejects(request({...payload,demand_types:['real_order','local_safety'],request_key:randomUUID()},warehouse),{statusCode:409});
+  const old=await legacy.procurementRequestsMysql({grouped:'1',paged:'1',compact:'1',demandType:'real_order',productId:204},2);
+  assert.equal(old.rows.length,1);assert.equal(old.rows[0].suggested_purchase_qty,13);
+  await legacy.recordProcurementPurchaseMysql({items:[{product_id:204,quantity:5,amount:50}]},2,2);invalidateOrderProcurementCoverage();
+  const after=(await workflow.batch([204],2,{fresh:true}))[0];assert.equal(after.supply_plan.required_fbs,8);assert.equal(after.physical_recorded,-37);
+  const oldAfter=await legacy.procurementRequestsMysql({grouped:'1',paged:'1',compact:'1',demandType:'real_order',productId:204},2);
+  assert.equal(oldAfter.rows[0].suggested_purchase_qty,8,'old and new entry points agree after allocated inbound');
+ });
  await t.test('revoked members cannot inspect, override, create demands or confirm arrival',async()=>{
   await q('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=2');
   await assert.rejects(details.details(200,buyer),{statusCode:403});await assert.rejects(arrivals.list({},buyer),{statusCode:403});await assert.rejects(details.safety({product_id:200,quantity:1,note:'revoked',revision:2},buyer),{statusCode:403});

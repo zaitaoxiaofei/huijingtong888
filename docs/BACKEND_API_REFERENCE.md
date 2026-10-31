@@ -3554,6 +3554,27 @@ Fresh membership and per-action duty checked inside transaction. arrived/transit
   - `403` `application/json` -> `ErrorResponse`
   - `409` `application/json` -> `ErrorResponse`
 
+#### `GET /api/inventory-workflow/receipts/context`
+
+Read pending purchased batches and independent local physical/available quantities for direct receipt entry. Fresh packing/procurement duty; tenant ownership; no prices or FBP calls.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/receipts/preview`
+
+Validate selected quantities through the canonical receipt impact preview. Read-only: returns requires_count, revision, quantity, physical_before/after and available_before/after. Historical count is never guessed; missing count leaves after values unknown. No cost fields or stock writes.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `GET /api/inventory-workflow/receipts`
 
 Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.
@@ -3564,7 +3585,7 @@ Read owned-product pending purchased arrival batches without costs. Fresh packin
 
 #### `POST /api/inventory-workflow/receipts`
 
-Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound requires current physical count and uses the canonical receipt-and-count transaction.
+Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
 
 - Auth: `authenticated`
 - Request body: required

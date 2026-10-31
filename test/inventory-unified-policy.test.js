@@ -14,11 +14,11 @@ test('confirmed FBP is locked exactly once; historical shipment never creates a 
 });
 test('inbound covers actual orders and formal FBP before optional safety without increasing physical availability',()=>{
  const state=inventoryWorkflow({...base,physical_estimate:3,open_order_demand:10,current_shortage:0,current_incoming:7,incoming_quantity:120},{applications:[{status:'pending_review',requested_quantity:20}]});
- assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,7,0,null]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'warning');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
+ assert.deepEqual(state.demands.map(d=>d.purchase_quantity),[0,7,0,null]);assert.equal(state.free,0);assert.equal(state.demands[0].status,'success');assert.equal(state.demands[1].status,'warning');assert.match(state.incoming_note,/晚于交付期限/);
 });
-test('unknown physical, protection or application data never claims a known procurement total',()=>{
+test('unknown physical, protection or application data keeps the total unknown but preserves covered FBS evidence',()=>{
  for(const patch of [{physical_estimate:-1},{physical_estimate:null},{flow_summary:{safety:null,applications:[]}}]){
- const state=inventoryWorkflow({...base,...patch});assert.equal(state.free,null);assert.equal(state.purchase_quantity,null);assert.equal(state.demands[0].status,'unknown');
+ const state=inventoryWorkflow({...base,...patch});assert.equal(state.free,null);assert.equal(state.purchase_quantity,null);assert.equal(state.demands[0].status,'success');
  }
  const state=inventoryWorkflow({...base,flow_summary:{safety:100,applications_pending:true}});
  assert.equal(state.demands[2].status,'unknown');assert.equal(state.purchase_quantity,null);
