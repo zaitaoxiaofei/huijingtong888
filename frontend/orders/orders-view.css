@@ -5526,3 +5526,5 @@
   background: var(--el-disabled-bg-color);
   border-color: var(--el-disabled-border-color);
 }
+
+button.orders-selected-count { font-family: inherit; cursor: pointer; }

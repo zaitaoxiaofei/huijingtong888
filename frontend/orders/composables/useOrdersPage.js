@@ -100,7 +100,8 @@ const STATUS_TABS = [
   { value: "all", label: "全部订单" },
   { value: "awaiting_packaging", label: "等待备货" },
   { value: "awaiting_deliver", label: "等待发运" },
-  { value: "ogl_dispatched", label: "已发运", title: "已申请·待交接与已实际交运分别展示，实际交运以逐行状态为准" },
+  { value: "ogl_bound", label: "已绑定待交运", title: "已绑定官方发运或系统关联；尚未确认实际交运，不扣本地库存" },
+  { value: "ogl_dispatched", label: "已交运待上网", title: "仓库已确认实际交运，尚未收到平台运输状态" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
@@ -215,7 +216,7 @@ function friendlyPrepareError(error) {
 
 function orderTabKey(row = {}) {
   const key = orderStateKey(row);
-  return ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
+  return ["awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
 }
 
 export function useOrdersPage() {

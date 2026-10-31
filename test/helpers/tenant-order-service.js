@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { loadOrderProcurementCoverage, procurementQueueSql } from '../../src/services/mysql-order-procurement-coverage.js';
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from '../../src/services/order-profit-calculation-schema.js';
 import { OGL_DISPATCH_SCHEMA_SQL } from '../../src/services/ogl-dispatch-schema.js';
-import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql, withOglDispatch } from '../../src/services/ogl-dispatch-state.js';
+import { oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql, withOglDispatch } from '../../src/services/ogl-dispatch-state.js';
 import { OGL_DISPATCH_REFRESH } from '../../src/services/ogl-dispatch-access.js';
 import { initializeOrderQueryFacts } from '../../src/services/order-query-facts.js';
 import { authorizeBusinessTaskSession } from '../../src/services/business-task-tenant.js';
@@ -97,7 +97,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

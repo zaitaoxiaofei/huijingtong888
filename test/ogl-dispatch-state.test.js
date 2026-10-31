@@ -26,7 +26,7 @@ test('OGL display is derived from physical handover and gives platform terminal/
 
 test('OGL routes allow only exact reviewed enterprise paths and preserve settings permission', () => {
   const session = { personId: 2, roles: ['packing'], tenant: { id: 2, slug: 'company', role: 'member' } };
-  for (const [method, path] of [['GET', 'bootstrap'], ['POST', 'preview'], ['POST', 'batches'], ['POST','discover'], ['GET', 'batch'], ['POST', 'action'], ['GET', 'file'], ['GET','official-carriages'], ['GET','official-carriage'], ['GET','official-carriage-tracking']]) {
+  for (const [method, path] of [['GET', 'candidates'], ['GET', 'bootstrap'], ['POST', 'preview'], ['POST', 'batches'], ['POST','discover'], ['GET', 'batch'], ['POST', 'action'], ['GET', 'file'], ['GET','official-carriages'], ['GET','official-carriage'], ['GET','official-carriage-tracking']]) {
     const parts = ['api', 'ogl-dispatch', path];
     assert.equal(tenantIsolationDecision(session, parts, method).allowed, true);
     assert.equal(authorizeApiRequest({ _session: session, method }, parts).allowed, true);
@@ -85,7 +85,7 @@ test('OGL MySQL tabs, counts, rollback and stock transport evidence share one sc
     assert.equal(await evidence(1),0);
     await query('UPDATE ogl_dispatch_members SET tenant_id=2,batch_id=1,official_member=1,dispatched_at=NULL WHERE order_id=1');
     await query("UPDATE ogl_dispatch_batches SET official_status='observed',official_carriage_id='901' WHERE id=1");
-    result=await list('ogl_dispatched');assert.equal(result.total,1);assert.equal(result.counts.ogl_dispatched,1);assert.equal(result.counts.awaiting_deliver,1);
+    result=await list('ogl_bound');assert.equal(result.total,1);assert.equal(result.counts.ogl_bound,1);assert.equal(result.counts.ogl_dispatched,0);assert.equal(result.counts.awaiting_deliver,1);
     assert.equal(await evidence(1),0,'An application can enter tracking without physical inventory evidence');
     await query("UPDATE orders SET status='awaiting_deliver',tracking_stage='posting_received_by_buyer' WHERE id=1");
     assert.equal((await list('delivered')).total,1,'Real buyer receipt wins over stale waiting state for applied rows');

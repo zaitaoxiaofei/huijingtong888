@@ -15,7 +15,7 @@ function fixture() {
     if(statement.includes('FROM tenants t'))return [state.active&&Number(params[0])===7&&Number(params[1])===2?[{id:2,slug:'snapshot-a',tenant_role:'member',business_roles_json:['packing']}]:[]];
     if(statement.includes('FROM ogl_dispatch_settings'))return [[{default_shop_id:state.shop}]];
     if(statement.includes('FROM shops s'))return [statement.includes('ORDER BY s.id')?[20,21].map(id=>({id,name:`Fixture shop ${id}`,ozon_client_id:'fixture-client',ozon_api_key:'fixture-secret'})):[20,21].includes(Number(params[0]))?[{id:Number(params[0]),name:'Fixture shop',ozon_client_id:'fixture-client',ozon_api_key:'fixture-secret'}]:[]];
-    if(statement.includes('FROM ogl_dispatch_events'))return [[]];
+    if(statement.includes('FROM ogl_dispatch_events')&&!statement.includes('FROM ogl_dispatch_members m'))return [[]];
     if(statement.includes('FROM ogl_dispatch_members m')&&!statement.includes('FROM ogl_dispatch_batches'))return [[member]];
     if(statement.includes('FROM ogl_dispatch_batches')) {
       let selected;

@@ -5,7 +5,7 @@ import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql } from
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { createOrderFixtureSchema, loadTenantOrderService } from './helpers/tenant-order-service.js';
 
-const statuses = ['awaiting_packaging', 'awaiting_deliver', 'ogl_dispatched', 'delivering', 'dispute', 'delivered', 'cancelled',
+const statuses = ['awaiting_packaging', 'awaiting_deliver', 'ogl_bound', 'ogl_dispatched', 'delivering', 'dispute', 'delivered', 'cancelled',
   'unbound', 'pending_purchase', 'purchase_in_transit', 'purchase_records_missing'];
 
 function baselineCountSql(service, base, coverage, scope) {
@@ -120,7 +120,7 @@ test('live count aggregation preserves every tab across OGL/application, physica
     const scope = await service.orderListTenantScopeMysql('2');
     const base = await service.orderBaseSqlMysql({}, '2');
     await query('INSERT INTO order_label_prints(order_id,printed_by_person_id,printed_at) VALUES(?,?,UTC_TIMESTAMP())', [221, null]);
-    for (const status of ['all', 'awaiting_deliver', 'ogl_dispatched', 'delivering']) {
+    for (const status of ['all', 'awaiting_deliver', 'ogl_bound', 'ogl_dispatched', 'delivering']) {
       const filtered = await service.orderFilteredSqlMysql({ status, searchType: 'order', searchQuery: 'shared', printFilter: 'unprinted' }, base, coverage, scope);
       const original = await query(`SELECT o.id FROM orders o WHERE ${filtered.where} ORDER BY o.id LIMIT 17 OFFSET 3`, filtered.params);
       const replacement = service.orderStatusSqlMysql(status, coverage, scope, 'ogl_count_evidence');
