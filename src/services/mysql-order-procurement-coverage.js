@@ -147,7 +147,7 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
         LEFT JOIN procurement_requests ar ON ar.id = a.procurement_request_id AND ar.product_id = a.product_id${tenantScope('ar.tenant_id')}
         WHERE a.status = 'allocated' AND (a.procurement_request_id IS NULL OR ar.id IS NOT NULL)${scope('a.product_id')}`),
       allocationQuery(`SELECT ir.id, ir.product_id, ir.procurement_request_id, ir.purchase_order_id, ir.quantity, ir.amount,
-        ir.shipping_amount, ir.status, ir.updated_at, ir.created_at, ir.approved_at, p.name AS product_name, p.stock_unit,
+        ir.shipping_amount, ir.courier_company, ir.tracking_number, ir.status, ir.received_at, ir.updated_at, ir.created_at, ir.approved_at, p.name AS product_name, p.stock_unit,
         pe.name AS person_name, po.order_no AS purchase_order_no,
         poi.id AS purchase_order_item_id, poi.actual_quantity AS purchase_quantity,
         poi.inbound_quantity AS purchase_received_quantity, poi.amount AS purchase_amount,

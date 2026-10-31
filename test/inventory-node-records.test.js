@@ -19,8 +19,8 @@ import {tenantIsolationDecision} from '../src/server/tenant-isolation.js';
 import {validateFlowSettings} from '../src/services/inventory-flow-rules.js';
 test('node APIs remain exact-gated and production rules allow one day',()=>{
  const session=role=>({personId:2,roles:[role],tenant:{id:2,slug:'a',role:'member'}});
- for(const [verb,suffix] of [['GET','details'],['POST','node-action']]){
-  const parts=['api','inventory-workflow',suffix];
+ for(const [verb,suffix] of [['GET','details'],['POST','node-action'],['GET','receipts/context'],['POST','receipts/preview']]){
+  const parts=['api','inventory-workflow',...suffix.split('/')];
   assert.equal(tenantIsolationDecision(session('packing'),parts,verb).allowed,true);
   assert.equal(authorizeApiRequest({method:verb,_session:session('packing')},parts).allowed,true);
  }

@@ -10,7 +10,11 @@ export function fbpSupplyState(forecast, official) {
   const sum = fn => rows.reduce((total, row) => total + fn(row) * Number(row.per_set_quantity), 0);
   const missing = rows.filter(row => number(row.available) === null).length;
   const reason = !rows.length ? '未绑定可核算SKU' : missing ? `缺少 ${missing} 个SKU的FBP库存快照，请同步官方库存` : forecast?.stock_incomplete||official?.incomplete ? '官方FBP库存快照不完整，请同步官方库存' : !known ? 'SKU组成或预测目标待核实，请查看预测明细' : '';
-  const state = { known, unknown_reason: reason, sku_count: rows.length, missing_stock_count: missing, status: 'unknown', available: null, safety: null, shortage: null, in_transit: null, committed: null, replenish_quantity: null, rows: [] };
+  // Physical stock is a fact independent of the sales target. Available stock
+  // excludes official reservations and must not be relabelled as physical stock.
+  const physical = !forecast?.stock_incomplete && !official?.incomplete && rows.length
+    ? number(forecast?.official_qty) ?? (rows.every(r => number(r.present) !== null && number(r.per_set_quantity) > 0) ? sum(r => Number(r.present)) : null) : null;
+  const state = { known, physical, unknown_reason: reason, sku_count: rows.length, missing_stock_count: missing, status: 'unknown', available: null, safety: null, shortage: null, in_transit: null, committed: null, replenish_quantity: null, rows: [] };
   if (!known) return state;
   state.rows = rows.map(row => ({ ...row,
     shortage: Math.max(0, Number(row.fbp_target) - Number(row.available)),
