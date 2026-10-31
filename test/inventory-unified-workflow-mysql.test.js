@@ -70,6 +70,18 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   await assert.rejects(service.receipts(200,session),{statusCode:403});
   await q('UPDATE tenant_members SET active=0 WHERE tenant_id=2 AND person_id=1');await assert.rejects(service.submit(body(),session),{statusCode:403});await q('UPDATE tenant_members SET active=1 WHERE tenant_id=2 AND person_id=1');
  });
+ await t.test('fresh status read after a physical count returns the new stock and removes the old negative demand',async()=>{
+  await q("INSERT INTO products(id,tenant_id,name) VALUES(205,2,'Count refresh stock')");
+  await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,active) VALUES(205,2,205,20,'20501',1)");
+  await q("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(2050,20,'COUNT-REFRESH','awaiting_packaging',UTC_TIMESTAMP())");
+  await q("INSERT INTO order_items(id,order_id,ozon_sku,sku_mapping_id,quantity) VALUES(2050,2050,'20501',205,1)");
+  await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,status,stock_location) VALUES(2,205,'manual_outbound',-1,'posted','LOCAL')");
+  invalidateOrderProcurementCoverage();
+  const before=(await service.batch([205],2,{fresh:true}))[0];assert.equal(before.physical_recorded,-1);assert.equal(before.supply_plan.required_fbs,1);
+  const ledger=await legacy.procurementLedgerMysql({product_id:205},2);
+  await legacy.applyProcurementLedgerMysql({product_id:205,action_type:'stocktake',revision:ledger.revision,counted_quantity:5,reason_code:'other',reason_note:'盘点确认5件，验证外侧刷新',request_key:randomUUID()},2,2);
+  const after=(await service.batch([205],2,{fresh:true}))[0];assert.equal(after.physical_recorded,5);assert.equal(after.free,4);assert.equal(after.supply_plan.required_fbs,0);
+ });
  await t.test('warehouse receives only passed actual pieces; remainder stays pending and stale retries cannot double count',async()=>{
   await q("INSERT INTO people(id,name,role) VALUES(6,'A warehouse','packing')");
   await q("INSERT INTO tenant_members(tenant_id,person_id,role,business_roles_json,active) VALUES(2,6,'member',JSON_ARRAY('packing'),1)");
