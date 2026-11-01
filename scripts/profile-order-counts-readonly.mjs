@@ -1,3 +1,4 @@
+import {procurementQueueOrderIds} from '../src/services/order-procurement-queues.js';
 import mysql from "mysql2/promise";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
@@ -78,7 +79,7 @@ function coverageReader(source, algorithm = calculateOrderProcurementCoverage) {
     try { return algorithm(input); }
     finally { algorithmMs += performance.now() - before; }
   };
-  const context = vm.createContext({ calculateOrderProcurementCoverage: calculate, calculateOrderProcurementCoverageAsync:async input=>calculate(input), transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
+  const context = vm.createContext({ procurementQueueOrderIds, calculateOrderProcurementCoverage: calculate, calculateOrderProcurementCoverageAsync:async input=>calculate(input), transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
     __profileCoveragePhase: profileMark, shanghaiDateKey, loadFbpReservations });
   const code = source.replace(/^import[^\n]*\r?\n/gm, "").replace(/^export /gm, "")
     .replace("const liveItems =", "__profileCoveragePhase('inputs'); const liveItems =")

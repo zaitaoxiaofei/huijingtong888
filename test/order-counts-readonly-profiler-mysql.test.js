@@ -1,3 +1,4 @@
+import {loadOrderProcurementCoverage,procurementQueueSql} from '../src/services/mysql-order-procurement-coverage.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -48,6 +49,14 @@ test("read-only count profiler executes the real isolated coverage and aggregati
     const cli = fileURLToPath(new URL("../scripts/profile-order-counts-readonly.mjs", import.meta.url));
     const baseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-read-e672094.js", import.meta.url));
     const run = async (tenant = "admin") => JSON.parse((await promisify(execFile)(process.execPath, [cli, `--database=${f.database}`, `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`, `--tenant-id=${tenant}`, "--date-from=2026-07-26", "--date-to=2026-10-24", `--compare-coverage-source=${baseline}`, "--explain"], { windowsHide: true, timeout: 30000 })).stdout);
+    await t.test('real full and compact readers preserve every queue for default and customer scopes',async()=>{
+      for(const tenantId of ['admin',2]){
+        const full=await loadOrderProcurementCoverage(f.query,'',{tenantId,fresh:true});
+        const compact=await loadOrderProcurementCoverage(f.query,'',{tenantId,fresh:true,queuesOnly:true});
+        assert.equal(compact.size,0);
+        for(const status of ['pending_purchase','purchase_in_transit','purchase_records_missing'])assert.equal(procurementQueueSql(compact,status),procurementQueueSql(full,status));
+      }
+    });
     const before = await f.query("SELECT COUNT(*) n FROM inventory_movements");
     const report = await run();
     assert.equal(report.mode, "read-only"); assert.equal(report.initialization_performed, false);

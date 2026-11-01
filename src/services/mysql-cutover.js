@@ -30572,10 +30572,10 @@ async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["o
   throwIfAbortedMysql(options.signal);
 }
 
-async function orderTenantCoverageMysql(scope) {
-  return cachedOrderRead(`coverage:${scope.id}:${scope.defaultTenant ? 1 : 0}`, () => orderProcurementCoverageMysql({
+async function orderTenantCoverageMysql(scope, { queuesOnly = false } = {}) {
+  return cachedOrderRead(`${queuesOnly ? "queues" : "coverage"}:${scope.id}:${scope.defaultTenant ? 1 : 0}`, () => orderProcurementCoverageMysql({
     tenantId: scope.id,
-    includeLegacyTenantNull: scope.defaultTenant, fresh: true
+    includeLegacyTenantNull: scope.defaultTenant, fresh: true, queuesOnly
   }));
 }
 
@@ -31390,7 +31390,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const [logisticsSummaryRows, coverage] = await Promise.all([
     carrierOnly ? loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
       : reuseLogisticsSummary ? loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null,
-    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope) : null
+    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope, { queuesOnly: !includeRows }) : null
   ]);
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);

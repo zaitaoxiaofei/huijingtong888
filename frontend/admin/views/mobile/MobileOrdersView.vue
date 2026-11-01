@@ -25,6 +25,9 @@ const loadingMore = ref(false);
 const rows = ref([]);
 const total = ref(0);
 const counts = ref({});
+let orderLoadGeneration = 0;
+let countLoadGeneration = 0;
+const knownCount = key => counts.value[key] == null ? "—" : Number(counts.value[key]);
 const page = ref(1);
 const pageSize = 20;
 const { dateFrom, dateTo } = defaultOrderDateRange();
@@ -38,9 +41,9 @@ const filters = reactive({
 
 const hasMore = computed(() => rows.value.length < total.value);
 const summaryCards = computed(() => [
-  { label: "待绑定", value: Number(counts.value.unbound || 0), status: "unbound" },
-  { label: "待备货", value: Number(counts.value.awaiting_packaging || 0), status: "awaiting_packaging" },
-  { label: "待发货", value: Number(counts.value.awaiting_deliver || 0), status: "awaiting_deliver" }
+  { label: "待绑定", value: knownCount("unbound"), status: "unbound" },
+  { label: "待备货", value: knownCount("awaiting_packaging"), status: "awaiting_packaging" },
+  { label: "待发货", value: knownCount("awaiting_deliver"), status: "awaiting_deliver" }
 ]);
 
 function buildParams(nextPage = 1) {
@@ -61,13 +64,27 @@ function buildParams(nextPage = 1) {
     printFilter: "all",
     sortMode: "ordered",
     includeRows: "1",
-    includeCounts: nextPage === 1 ? "1" : "0",
+    includeCounts: "0",
     includeLogisticsOptions: "0"
   });
   return params;
 }
 
+async function loadOrderCounts(params, generation) {
+  const query = new URLSearchParams(params);
+  query.set("includeRows", "0");
+  query.set("includeCounts", "1");
+  try {
+    const result = await apiClient.get(`/api/orders?${query.toString()}`, { noCache: true });
+    if (generation === countLoadGeneration && result.counts) counts.value = result.counts;
+  } catch {
+    // Keep the last known counts; a metadata failure must not hide usable rows.
+  }
+}
+
 async function loadOrders({ append = false } = {}) {
+  const generation = ++orderLoadGeneration;
+  const countsGeneration = append ? countLoadGeneration : ++countLoadGeneration;
   if (append) {
     loadingMore.value = true;
   } else {
@@ -75,19 +92,23 @@ async function loadOrders({ append = false } = {}) {
   }
   try {
     const nextPage = append ? page.value + 1 : 1;
-    const result = await apiClient.get(`/api/orders?${buildParams(nextPage).toString()}`, {
+    const params = buildParams(nextPage);
+    const result = await apiClient.get(`/api/orders?${params.toString()}`, {
       noCache: true
     });
+    if (generation !== orderLoadGeneration) return;
     page.value = Number(result.page || nextPage);
     total.value = Number(result.total || 0);
-    if (result.counts) counts.value = result.counts;
     const nextRows = Array.isArray(result.rows) ? result.rows : [];
     rows.value = append ? [...rows.value, ...nextRows] : nextRows;
+    if (!append) void loadOrderCounts(params, countsGeneration);
   } catch (error) {
-    ElMessage.error(error.message || "订单加载失败");
+    if (generation === orderLoadGeneration) ElMessage.error(error.message || "订单加载失败");
   } finally {
-    loading.value = false;
-    loadingMore.value = false;
+    if (generation === orderLoadGeneration) {
+      loading.value = false;
+      loadingMore.value = false;
+    }
   }
 }
 
