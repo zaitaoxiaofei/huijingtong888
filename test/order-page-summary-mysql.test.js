@@ -50,6 +50,28 @@ test('order page summary keeps profit, quantities, kit stock and tenant ownershi
    assert.deepEqual(loads,[{ids:[22,23],tenant:2,legacy:false,fresh:true}]);
    await assert.rejects(loadOrderInventoryAvailability({query,loadBalances:async()=>{throw Error('Must not read balances');}},{orderIds:'1,30',productId:'22'},{tenantId:2,defaultTenantId:1}),{statusCode:404});
   });
+  await t.test('optional inline balances retain customer and legacy ownership without changing profit/quantity fields',async()=>{
+   await query("INSERT INTO shops(id,tenant_id,name) VALUES(10,NULL,'Legacy')");
+   await query("INSERT INTO products(id,tenant_id,name,code) VALUES(10,NULL,'Legacy product','P-10')");
+   await query("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku) VALUES(10,NULL,10,10,'legacy')");
+   await query("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(10,10,'LEGACY','awaiting_deliver','2026-11-01')");
+   await query("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(10,10,10,'legacy',1,10)");
+   const loads=[];
+   service.orderInventoryAvailabilityMysql=(request,tenant)=>loadOrderInventoryAvailability({query,loadBalances:async(productIds,actualTenant,legacy)=>{
+    loads.push({tenant:actualTenant,legacy,ids:Array.from(productIds)});
+    return new Map(productIds.map(id=>[id,{physical_stock:id===22?-3:12,available_stock:id===22?0:7,inventory_needs_review:id===22}]));
+   }},request,{tenantId:tenant==='admin'?null:Number(tenant),defaultTenantId:1});
+   const filters={includeCounts:'0',includeLogisticsOptions:'0',includeInventoryAvailability:'1',status:'all',pageSize:20};
+   for(const tenant of ['2','admin']){
+    const result=await service.ordersPagedMysql(filters,tenant);
+    assert.deepEqual(Array.from(result.rows,row=>Number(row.id)),tenant==='2'?[4,3,2,1]:[10]);
+    for(const row of result.rows){assert.ok(Array.isArray(row.inventory_availability));if(tenant==='2'){const old=compact.find(item=>item.id===row.id);for(const field of ['estimated_profit','actual_profit','revenue','total_quantity'])assert.equal(row[field],old[field]);}}
+   }
+   assert.ok(loads.some(load=>load.tenant===2&&!load.legacy&&load.ids.includes(22)));
+   assert.ok(loads.some(load=>load.tenant===1&&load.legacy&&load.ids[0]===10));
+   assert.ok(!loads.some(load=>load.tenant===3));
+   const plain=await service.ordersPagedMysql({...filters,includeInventoryAvailability:'0'},'2');assert.ok(plain.rows.every(row=>!Object.hasOwn(row,'inventory_availability')));
+  });
   await t.test('inventory sorting uses the same single mapping as displayed rows',async()=>{
    const sorted=await service.orderInventorySortRowsMysql(ids,'2');
    for(const row of sorted){const shown=compact.find(item=>item.id===row.id);assert.equal(row.product_codes,shown.product_codes);assert.equal(row.inventory_ids,shown.inventory_ids);}

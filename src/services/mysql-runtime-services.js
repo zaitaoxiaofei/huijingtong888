@@ -1052,8 +1052,10 @@ export const mysqlRuntimeServices = {
   fbpOpportunities: fbpOpportunitiesMysql,
   productInventoryAvailability: productInventoryAvailabilityMysql,
   orderInventoryAvailability: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
-    String(query.includeRows || '') === '1' ? 'foreground' : 'background',
-    () => orderInventoryAvailabilityMysql(query, tenantId)
+    'foreground',
+    () => String(query.includeRows || '') === '1'
+      ? orderInventoryAvailabilityMysql(query, tenantId)
+      : withMysqlInteractiveRead(() => orderInventoryAvailabilityMysql(query, tenantId))
   )),
   updateInventoryProductLeadTimes: updateInventoryProductLeadTimesMysql,
   fbpReplenishmentOrders: fbpReplenishmentOrdersMysql,

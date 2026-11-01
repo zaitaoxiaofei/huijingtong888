@@ -1,5 +1,5 @@
 import {startPagedWorkspacePreview} from './paged-workspace-preview.js';
-export async function startOrderLocalRefreshPreview(){
+export async function startOrderLocalRefreshPreview({inlineInventory=false}={}){
  const calls=[];let stock=5;
  const base=(id,product)=>({id,posting_number:'REFRESH-'+id,shop_id:1,shop_name:'验证店铺',status:'awaiting_deliver',ordered_at:'2026-11-01T01:00:00Z',revenue:50,item_count:1,estimated_profit:7,product_names:'库存 '+product,product_ids:String(product),skus:'SKU-'+id,sku_quantities:`SKU-${id}:1`,sku_names:`SKU-${id}:验证商品`,sku_images:`SKU-${id}:/api/products/${id}/image`,sku_product_ids:`SKU-${id}:${product}`,sku_inventory_numbers:`SKU-${id}:1-${product}`,sku_inventory_names:`SKU-${id}:库存 ${product}`,sku_stock_summaries:`SKU-${id}:0:0:5`,fulfillment_type_key:'fbs',fulfillment_type_label:'FBS',logistics_carrier_label:'OGL'});
  const orders=[base(1,80),base(2,8),base(3,9)];
@@ -9,7 +9,7 @@ export async function startOrderLocalRefreshPreview(){
  const server=await startPagedWorkspacePreview({stableDeps:true,apiHandler(req,res,url,send){
   const ledgerPath=url.pathname.replace('/api/inventory/ledger','/api/procurement/ledger');
   calls.push({path:url.pathname,query:Object.fromEntries(url.searchParams),method:req.method});
-  if(url.pathname==='/api/orders')return send({rows:orders,total:3,page:1,pageSize:20,counts:{all:3,awaiting_deliver:3}}),true;
+  if(url.pathname==='/api/orders')return send({rows:inlineInventory&&url.searchParams.get('includeInventoryAvailability')==='1'?orders.map(row=>({...row,inventory_availability:[facts(row.id)]})):orders,total:3,page:1,pageSize:20,counts:{all:3,awaiting_deliver:3}}),true;
   if(url.pathname==='/api/orders/inventory-availability'){
    if(url.searchParams.get('includeRows')==='1')return send({rows:orders.slice(0,2).map(row=>({order_id:row.id,order:{...row,inventory_availability:[facts(row.id)],procurement_coverage:null}}))}),true;
    return send({rows:orders.map(row=>({order_id:row.id,inventory_availability:[facts(row.id)]}))}),true;

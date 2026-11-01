@@ -543,6 +543,7 @@ export function useOrdersPage() {
   }
 
   async function loadPageInventory(rows, requestToken, cacheKey, forceRefresh = false) {
+    if (!forceRefresh && rows.every(row => Array.isArray(row.inventory_availability))) return;
     const scope = ensureOrdersViewScope();
     const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
     if (!orderIds.length) return;
@@ -589,7 +590,8 @@ export function useOrdersPage() {
       if (ordersMetaAbort.value && ordersMetaRequestKey.value !== metaKey) ordersMetaAbort.value.abort();
       const params = buildOrdersParams(filtersSnapshot, {
         includeCounts: "0",
-        includeLogisticsOptions: "0"
+        includeLogisticsOptions: "0",
+        includeInventoryAvailability: options.forceRefresh ? "0" : "1"
       });
       const requestUrl = `/api/orders?${params.toString()}`;
       const cacheKey = `${scope}:${requestUrl}`;
