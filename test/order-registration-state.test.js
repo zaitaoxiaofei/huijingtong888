@@ -293,3 +293,12 @@ test('FBP order actions disable procurement even when the API previously permitt
     assert.equal(page.rowAvailableActions({ status, fulfillment_type_key: 'fbs' }).showPurchase, true);
   }
 });
+
+ test("officially included unprinted orders keep the waiting label and print actions", () => {
+  const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
+  const row={status:'sent_by_seller',display_status:'awaiting_deliver',printed_at:null,ogl_dispatch:{tracking:true,bound:true,awaiting_print:true,dispatched:false}};
+  assert.equal(page.rowStateLabel(row),'等待发运');
+  assert.equal(page.rowAvailableActions(row).showPrint,true);
+  assert.equal(page.rowAvailableActions(row).print,true);
+  assert.equal(page.rowAvailableActions(row).prepare,false);
+ });

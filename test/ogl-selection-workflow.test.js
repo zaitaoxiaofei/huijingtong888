@@ -24,7 +24,7 @@ test('an off-page updated row replaces its selected snapshot without restoring e
 });
 
 test('official and system bindings both wait for handover; only physical dispatch becomes shipped and platform transport wins',()=>{
- const order={id:1,shop_id:20,status:'awaiting_deliver',logistics_carrier:'ogl'};
+ const order={id:1,shop_id:20,status:'awaiting_deliver',logistics_carrier:'ogl',printed_at:'2026-10-31 00:00:00'};
  const member={order_id:1,active_order_id:1,batch_id:7,default_shop_id:20,official_carriage_id:'901',batch_status:'preparing',official_status:'observed',official_member:1};
  for(const official of [1,0]){
   const bound=withOglDispatch(order,{...member,official_member:official});
