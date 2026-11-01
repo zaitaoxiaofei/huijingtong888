@@ -1,5 +1,5 @@
 ﻿<script setup>
-import {orderSelectionSummary,orderPrintPlan,removePrintedSelection} from "./utils/order-print-selection.js";
+import {orderSelectionSummary,orderPrintPlan,removePrintedSelection,currentPagePreparePlan} from "./utils/order-print-selection.js";
 import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
 import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -1323,6 +1323,9 @@ watch([tableRows, () => [...selectedOrderIds.value]], ([rows]) => {
   selectedOrderRecords.value = retainSelectedOrders(selectedOrderRecords.value, rows, selectedOrderIds.value);
 }, { immediate: true, flush: "sync" });
 const selectedRows = computed(() => [...selectedOrderIds.value].map(id => selectedOrderRecords.value.get(id) || { id }));
+const preparingCurrentPage=ref(false);
+const pagePreparePlan=computed(()=>currentPagePreparePlan(tableRows.value));
+const canPreparePage=computed(()=>hasPermission(inventoryAuth.user,'packing'));
 
 async function oglComposed(result) {
   const next = new Set(selectedOrderIds.value);
@@ -1771,6 +1774,21 @@ function handleToolbarMoreAction(action) {
   if (action === "ogl-batch-history") return openOglDispatch("history");
   if (action === "print-selected") return bulkPrintSelected();
   return handleMoreAction(action);
+}
+
+async function bulkPrepareCurrentPage(){
+ if(!canPreparePage.value||preparingCurrentPage.value)return;
+ const {ids,skipped}=pagePreparePlan.value,scope=currentApiCacheScope();
+ if(!ids.length)return ElMessage.warning('当前页没有可直接备货的FBS订单');
+ preparingCurrentPage.value=true;
+ try{
+  await ElMessageBox.confirm(`确认备货当前页 ${ids.length} 个FBS订单？跳过 ${skipped} 个不可直接备货的订单（含FBP及需单独拆单确认的订单）。不会备货其他页。`,'批量备货当前页',{type:'warning',confirmButtonText:`确认备货 ${ids.length} 单`,cancelButtonText:'取消'});
+  if(scope!==currentApiCacheScope()||!canPreparePage.value)return;
+  const current=pagePreparePlan.value.ids;
+  if(ids.some(id=>!current.includes(id)))return ElMessage.warning('当前页订单状态已变化，请重新核对后备货');
+  await bulkPrepare([...ids]);
+ }catch(error){if(!['cancel','close'].includes(error))ElMessage.error(error.message||'批量备货失败');}
+ finally{preparingCurrentPage.value=false;}
 }
 
 function bulkPrepareSelected() {
@@ -2685,6 +2703,9 @@ onBeforeUnmount(() => {
       :more-actions="vm.moreActions"
       :selected-count="selectedCount"
       :page-row-count="tableRows.length"
+      :preparable-count="pagePreparePlan.ids.length"
+      :can-prepare="canPreparePage"
+      :preparing-page="preparingCurrentPage"
       @update:filters="vm.filters = $event"
       @submit="submitFilters"
       @sync-incremental="syncRecentOrdersAction"
@@ -2693,6 +2714,7 @@ onBeforeUnmount(() => {
       @more-action="handleToolbarMoreAction"
       @print-selected="bulkPrintSelected"
       @print-page="bulkPrintPage"
+      @prepare-page="bulkPrepareCurrentPage"
       @open-quality-rules="showQualityRules"
       @load-logistics-options="loadLogisticsOptions"
     >

@@ -16,7 +16,9 @@ const props = defineProps({
   lastSyncText: { type: String, default: "暂无同步记录" },
   moreActions: { type: Array, default: () => [] },
   selectedCount: { type: Number, default: 0 },
-  pageRowCount: { type: Number, default: 0 }
+  pageRowCount: { type: Number, default: 0 },
+  preparableCount:{type:Number,default:0},canPrepare:{type:Boolean,default:false},
+  preparingPage:{type:Boolean,default:false}
 });
 
 const emit = defineEmits([
@@ -28,6 +30,7 @@ const emit = defineEmits([
   "more-action",
   "print-selected",
   "print-page",
+  "prepare-page",
   "open-quality-rules",
   "load-logistics-options"
 ]);
@@ -137,6 +140,7 @@ function handlePrintCommand(command) {
               @input="patchFilters({ searchQuery: $event })"
               @keyup.enter="emit('submit')"
             />
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
           </div>
 
           <el-date-picker
@@ -152,17 +156,6 @@ function handlePrintCommand(command) {
 
           <div class="orders-toolbar-actions-main">
             <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
-              <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
-                <el-button
-                  class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
-                  :icon="Refresh"
-                  :loading="syncRunning"
-                  :disabled="syncRunning"
-                  @click="emit('sync-incremental')"
-                >
-                  拉取新订单
-                </el-button>
-              </el-tooltip>
               <el-tooltip :content="`最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
                 <el-button
                   class="orders-toolbar-btn orders-toolbar-btn-secondary"
@@ -176,9 +169,19 @@ function handlePrintCommand(command) {
                   同步当前范围
                 </el-button>
               </el-tooltip>
+              <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
+                <el-button
+                  class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
+                  :icon="Refresh"
+                  :loading="syncRunning"
+                  :disabled="syncRunning"
+                  @click="emit('sync-incremental')"
+                >
+                  拉取新订单
+                </el-button>
+              </el-tooltip>
             </div>
 
-            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
 
             <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
               <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
@@ -190,6 +193,10 @@ function handlePrintCommand(command) {
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+
+            <el-tooltip v-if="canPrepare" content="仅备货当前页可备货的FBS订单；跳过FBP及需要单独拆单确认的订单，不使用跨页勾选。" placement="top">
+              <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="preparingPage" :disabled="syncRunning||preparingPage||!preparableCount" @click="emit('prepare-page')">批量备货</el-button>
+            </el-tooltip>
 
             <el-dropdown
               class="orders-toolbar-print"

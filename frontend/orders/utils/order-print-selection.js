@@ -19,3 +19,8 @@ export function removePrintedSelection(selected,result){
  const printed=new Set((result.printed_ids||[]).map(Number).filter(id=>validId(id)&&!failed.has(id)));
  return new Set([...selected].filter(id=>!printed.has(Number(id))));
 }
+
+export function currentPagePreparePlan(rows=[]){
+ const eligible=rows.filter(row=>row.availableActions?.prepare===true&&!row.availableActions?.showSplitPrepare);
+ return{ids:[...new Set(eligible.map(row=>Number(row.id)).filter(validId))],skipped:rows.length-eligible.length};
+}
