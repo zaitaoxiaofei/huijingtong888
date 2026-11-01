@@ -1,3 +1,4 @@
+import { withMysqlWorkload } from "../mysql-workload.js";
 import { orderTransportEvidenceSql } from "./order-transport-evidence.js";
 
 const FRESH_SECONDS = 45;
@@ -144,7 +145,7 @@ export async function loadInventoryProductBalances(query, withTransaction, tenan
     if (background && Date.now() - (lastBackgroundRefresh.get(refreshKey) || 0) < BACKGROUND_REFRESH_INTERVAL_MS) return null;
     if (background) lastBackgroundRefresh.set(refreshKey, Date.now());
     const version = invalidationVersion;
-    const work = (async () => {
+    const operation = async () => {
       try {
         const source = await Promise.all(sql.map((statement) => query(statement)));
         const calculated = buildInventoryProductBalances(ids, ...source);
@@ -170,7 +171,8 @@ export async function loadInventoryProductBalances(query, withTransaction, tenan
       } finally {
         if (pendingRefreshes.get(refreshKey)?.promise === work) pendingRefreshes.delete(refreshKey);
       }
-    })();
+    };
+    const work = background ? withMysqlWorkload('background', operation) : operation();
     pendingRefreshes.set(refreshKey, { promise: work, version });
     return work;
   };

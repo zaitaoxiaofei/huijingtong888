@@ -31358,6 +31358,24 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
   });
 }
 
+// Current-page physical/available balances are independent of full queue counts.
+// Start both reads together and retain the established deferred fallback if
+// a balance cannot be loaded; never substitute a zero for an unknown balance.
+async function orderPageRowsMysql(ids, coverage, tenantId, includeInventoryAvailability = false) {
+  const balances = includeInventoryAvailability && ids.length
+    ? orderInventoryAvailabilityMysql({ orderIds: ids.join(',') }, tenantId).catch(error => {
+      console.warn(`[orders] current-page inventory deferred: ${String(error?.code || error?.name || 'unknown')}`);
+      return null;
+    }) : null;
+  const [rows, facts] = await Promise.all([
+    orderRowsByIdsMysql(ids, coverage, tenantId, { summaryOnly: true }), balances
+  ]);
+  if (!facts) return rows;
+  const byOrder = new Map(facts.rows.map(row => [Number(row.order_id), row.inventory_availability]));
+  return rows.map(row => Array.isArray(byOrder.get(Number(row.id)))
+    ? { ...row, inventory_availability: byOrder.get(Number(row.id)) } : row);
+}
+
 export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
@@ -31371,6 +31389,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const includeRows = String(query.includeRows ?? query.include_rows ?? "1") !== "0";
+  const includeInventoryAvailability = String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? "0") === "1";
   const includeCounts = String(query.includeCounts ?? query.include_counts ?? "1") !== "0";
   const includeLogisticsOptions = String(query.includeLogisticsOptions ?? query.include_logistics_options ?? "1") !== "0";
   const [rawBase, optionsBase] = await Promise.all([
@@ -31436,7 +31455,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       inventoryTotal = idRows.length;
       const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId);
       const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
-      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, { summaryOnly: true });
+      rows = await orderPageRowsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, includeInventoryAvailability);
     } else {
       const idRows = await mysqlQuery(`
         SELECT o.id, COUNT(*) OVER() AS filtered_total
@@ -31451,10 +31470,10 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       // come from one statement. An out-of-range page still needs its total.
       totalPromise = idRows.length && idRows[0].filtered_total != null
         ? Promise.resolve({ total: idRows[0].filtered_total }) : loadFilteredTotal();
-      rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
+      rows = sortPagedOrdersMysql(await orderPageRowsMysql(
         idRows.map((row) => row.id),
         needsCoverageForFilter || includeCounts ? coverage : null,
-        tenantId, { summaryOnly: true }
+        tenantId, includeInventoryAvailability
       ), query);
     }
   }
