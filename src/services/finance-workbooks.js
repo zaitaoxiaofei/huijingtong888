@@ -126,13 +126,14 @@ export async function parseReimbursements(buffer, { companies, name }) {
   return rows;
 }
 
-export async function payrollTemplate({ companies }) {
+export async function payrollTemplate({ companies, month = "" }) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("工资表");
   sheet.mergeCells("A1:S1"); sheet.getCell("A1").value = "员工工资表";
   sheet.getCell("A3").value = `公司名称：${companies[0]?.name || '请填写完整公司名称'}`;
   const today = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date());
-  sheet.getCell("L3").value = `${today.slice(0,4)}年`; sheet.getCell("M3").value = `${Number(today.slice(5,7))}月`;
+  const selected = /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : today.slice(0,7);
+  sheet.getCell("L3").value = `${selected.slice(0,4)}年`; sheet.getCell("M3").value = `${Number(selected.slice(5,7))}月`;
   const headers = ["序号", "部门", "姓名", "基本工资", "单位应缴费用", "", "", "", "", "", "", "个人应缴费用", "", "", "", "", "当月应缴纳个税", "实发工资", "确认签字"];
   sheet.getRow(4).values = headers;
   sheet.getRow(5).values = ["", "", "", "", "养老保险", "医疗保险", "附加医疗保险", "失业保险", "工伤保险", "公积金", "小计", "养老保险", "医疗保险", "失业保险", "公积金", "小计"];

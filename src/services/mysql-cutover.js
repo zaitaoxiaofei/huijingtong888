@@ -31049,65 +31049,72 @@ async function billingAiUsageMysql(from, to, scope) {
   };
 }
 
-async function currentInventoryCapitalMysql(scope) {
-  const [localInventory, fbpInventory, inTransit] = await Promise.all([
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(stock.quantity * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
-        COALESCE(SUM(stock.quantity), 0) AS inventory_quantity
-      FROM (
-        SELECT im.product_id, GREATEST(SUM(im.quantity_delta), 0) AS quantity
-        FROM inventory_movements im
-        WHERE im.status = 'posted' AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
-        GROUP BY im.product_id
-      ) stock
-      JOIN products p ON p.id = stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
-      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
-        SELECT pcv.id
-        FROM purchase_cost_versions pcv
-        WHERE pcv.product_id = stock.product_id AND pcv.status = 'active' AND ${orderTenantPredicateMysql("pcv", scope)}
-        ORDER BY pcv.version_no DESC, pcv.id DESC
-        LIMIT 1
-      )
-    `),
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0) * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
-        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0)), 0) AS inventory_quantity
-      FROM ozon_stock_snapshots oss
-      JOIN shops owned_shop ON owned_shop.id = oss.shop_id AND ${orderTenantPredicateMysql("owned_shop", scope)}
-      LEFT JOIN sku_mappings sm ON sm.shop_id = oss.shop_id AND sm.ozon_sku = oss.ozon_sku AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", scope)}
-      LEFT JOIN products p ON p.id = COALESCE(oss.product_id, sm.product_id) AND ${orderTenantPredicateMysql("p", scope)}
-      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
-        SELECT pcv.id
-        FROM purchase_cost_versions pcv
-        WHERE pcv.product_id = p.id AND pcv.status = 'active' AND ${orderTenantPredicateMysql("pcv", scope)}
-        ORDER BY pcv.version_no DESC, pcv.id DESC
-        LIMIT 1
-      )
-      WHERE oss.stock_type = 'fbp_real'
-    `),
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(quantity), 0) AS inventory_quantity,
-        COALESCE(SUM(amount + shipping_amount), 0) AS inventory_value
-      FROM inbound_records ir
-      WHERE ir.status = 'pending_arrival' AND ${orderTenantPredicateMysql("ir", scope)}
-    `)
-  ]);
-  const localValue = Number(localInventory?.inventory_value || 0);
-  const fbpValue = Number(fbpInventory?.inventory_value || 0);
-  const inTransitValue = Number(inTransit?.inventory_value || 0);
+// Summary and drill-down share these sources so valuation and stock boundaries stay identical.
+function inventoryCapitalSourcesMysql(scope) {
+  const cost = "COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)";
+  const costJoin = `LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
+    SELECT pcv.id FROM purchase_cost_versions pcv WHERE pcv.product_id=p.id
+      AND pcv.status='active' AND ${orderTenantPredicateMysql("pcv", scope)}
+    ORDER BY pcv.version_no DESC, pcv.id DESC LIMIT 1)`;
+  const costFields = `${cost} AS unit_cost,
+    CASE WHEN COALESCE(latest_cost.landed_unit_cost,0) != 0 THEN 'purchase_version' ELSE 'product_cost' END AS cost_basis,
+    latest_cost.version_no AS cost_version, CASE WHEN ${cost} <= 0 THEN 1 ELSE 0 END AS cost_missing`;
   return {
-    snapshot_basis: "current",
-    local_inventory_quantity: Number(localInventory?.inventory_quantity || 0),
-    local_inventory_value: roundMoneyMysql(localValue),
-    fbp_inventory_quantity: Number(fbpInventory?.inventory_quantity || 0),
-    fbp_inventory_value: roundMoneyMysql(fbpValue),
-    in_transit_quantity: Number(inTransit?.inventory_quantity || 0),
-    in_transit_value: roundMoneyMysql(inTransitValue),
-    inventory_total_value: roundMoneyMysql(localValue + fbpValue + inTransitValue)
+    local: `SELECT p.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      stock.quantity,stock.quantity * ${cost} AS inventory_value,${costFields},
+      stock.updated_at,stock.unclassified_movements,
+      NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
+      FROM (SELECT im.product_id,GREATEST(SUM(im.quantity_delta),0) AS quantity,
+        MAX(im.created_at) AS updated_at,
+        SUM(CASE WHEN COALESCE(im.stock_location,'') != 'LOCAL' THEN 1 ELSE 0 END) AS unclassified_movements
+        FROM inventory_movements im WHERE im.status='posted'
+          AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
+        GROUP BY im.product_id) stock
+      JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
+      ${costJoin} WHERE stock.quantity > 0`,
+    fbp: `SELECT oss.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      GREATEST(COALESCE(oss.present,0),0) AS quantity,
+      GREATEST(COALESCE(oss.present,0),0) * ${cost} AS inventory_value,${costFields},
+      oss.synced_at AS updated_at,0 AS unclassified_movements,
+      owned_shop.name AS shop_name,oss.warehouse_name,oss.ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
+      FROM ozon_stock_snapshots oss
+      JOIN shops owned_shop ON owned_shop.id=oss.shop_id AND ${orderTenantPredicateMysql("owned_shop", scope)}
+      LEFT JOIN sku_mappings sm ON sm.shop_id=oss.shop_id AND sm.ozon_sku=oss.ozon_sku
+        AND sm.active=1 AND ${orderTenantPredicateMysql("sm", scope)}
+      LEFT JOIN products p ON p.id=COALESCE(oss.product_id,sm.product_id) AND ${orderTenantPredicateMysql("p", scope)}
+      ${costJoin} WHERE oss.stock_type='fbp_real' AND oss.present > 0`,
+    transit: `SELECT ir.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      ir.quantity,ir.amount + ir.shipping_amount AS inventory_value,
+      CASE WHEN ir.quantity > 0 THEN (ir.amount+ir.shipping_amount)/ir.quantity ELSE NULL END AS unit_cost,
+      'purchase_batch' AS cost_basis,NULL AS cost_version,
+      CASE WHEN ir.amount+ir.shipping_amount <= 0 THEN 1 ELSE 0 END AS cost_missing,
+      ir.updated_at,0 AS unclassified_movements,NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,
+      po.order_no,ir.tracking_number,ir.received_at
+      FROM inbound_records ir
+      LEFT JOIN products p ON p.id=ir.product_id AND ${orderTenantPredicateMysql("p", scope)}
+      LEFT JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${orderTenantPredicateMysql("po", scope)}
+      WHERE ir.status='pending_arrival' AND ${orderTenantPredicateMysql("ir", scope)}`
   };
+}
+
+async function currentInventoryCapitalMysql(scope) {
+  const sources = inventoryCapitalSourcesMysql(scope);
+  const values = await Promise.all(Object.entries(sources).map(async ([kind, sql]) => {
+    const row = await mysqlQueryOne(`SELECT COALESCE(SUM(quantity),0) AS quantity,
+      COALESCE(SUM(inventory_value),0) AS value,COUNT(*) AS item_count,
+      COALESCE(SUM(cost_missing),0) AS missing_cost_count,
+      COALESCE(SUM(CASE WHEN product_id IS NULL THEN 1 ELSE 0 END),0) AS unmapped_count,
+      COALESCE(SUM(CASE WHEN unclassified_movements > 0 THEN 1 ELSE 0 END),0) AS unclassified_count
+      FROM (${sql}) capital`);
+    return [kind,{quantity:Number(row.quantity),value:Number(row.value),item_count:Number(row.item_count),
+      missing_cost_count:Number(row.missing_cost_count),unmapped_count:Number(row.unmapped_count),unclassified_count:Number(row.unclassified_count)}];
+  }));
+  const categories = Object.fromEntries(values), local = categories.local, fbp = categories.fbp, transit = categories.transit;
+  return { snapshot_basis:'current', categories,
+    local_inventory_quantity:local.quantity,local_inventory_value:roundMoneyMysql(local.value),
+    fbp_inventory_quantity:fbp.quantity,fbp_inventory_value:roundMoneyMysql(fbp.value),
+    in_transit_quantity:transit.quantity,in_transit_value:roundMoneyMysql(transit.value),
+    inventory_total_value:roundMoneyMysql(local.value+fbp.value+transit.value) };
 }
 
 export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admin") {
@@ -31115,6 +31122,33 @@ export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admi
   const scope = await orderListTenantScopeMysql(tenantId);
   await ensureStockLocationSchemaMysql();
   return { ...await currentInventoryCapitalMysql(scope), snapshot_at: new Date().toISOString() };
+}
+
+export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  await ensureStockLocationSchemaMysql();
+  const kind = String(query.kind || 'local'), sources = inventoryCapitalSourcesMysql(scope);
+  if (!Object.hasOwn(sources,kind)) throw Object.assign(new Error('请选择国内仓、FBP仓或采购在途'),{statusCode:400});
+  const page = Math.max(1,Math.min(100000,Math.floor(Number(query.page)||1)));
+  const pageSize = Math.max(1,Math.min(100,Math.floor(Number(query.pageSize)||20)));
+  const keyword = String(query.query || '').trim().slice(0,128), params = [];
+  let where = '';
+  if (keyword) {
+    where = " WHERE CONCAT_WS(' ',product_name,inventory_number,code,ozon_sku,shop_name,warehouse_name,order_no,tracking_number,CAST(row_id AS CHAR)) COLLATE utf8mb4_unicode_ci LIKE ? ESCAPE '='";
+    params.push(`%${keyword.replace(/[=%_]/g,'=$&')}%`);
+  }
+  const source = `FROM (${sources[kind]}) capital${where}`;
+  const [rows, totals, summary] = await Promise.all([
+    mysqlQuery(`SELECT * ${source} ORDER BY inventory_value DESC,quantity DESC,row_id LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]),
+    mysqlQueryOne(`SELECT COUNT(*) AS total,COALESCE(SUM(quantity),0) AS quantity,COALESCE(SUM(inventory_value),0) AS value ${source}`,params),
+    currentInventoryCapitalMysql(scope)
+  ]);
+  return {kind,page,pageSize,total:Number(totals.total),filtered_quantity:Number(totals.quantity),
+    filtered_value:roundMoneyMysql(totals.value),summary,snapshot_at:new Date().toISOString(),
+    rows:rows.map(row=>({...row,product_id:Number(row.product_id)||null,row_id:Number(row.row_id),
+      quantity:Number(row.quantity),unit_cost:row.unit_cost==null?null:Number(row.unit_cost),inventory_value:Number(row.inventory_value),
+      cost_missing:Boolean(Number(row.cost_missing)),unclassified_movements:Number(row.unclassified_movements)}))};
 }
 
 async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope) {

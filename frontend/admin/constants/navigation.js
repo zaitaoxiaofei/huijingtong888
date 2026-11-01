@@ -71,6 +71,7 @@ export const navigationMenus = [
     label: "库存",
     icon: Goods,
     children: [
+      { key: "inventory-capital", label: "库存占用", route: "/finance/inventory-capital", adminOnly: true },
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
       { key: "purchase-list", label: "收货入库", route: "/purchase-list" },
       { key: "inventory-fbp", label: "FBP", route: "/inventory/fbp" },
