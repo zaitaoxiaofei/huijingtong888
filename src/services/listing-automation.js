@@ -15995,6 +15995,10 @@ async function initializeListingAutomationSchema() {
       UPDATE listing_drafts
       SET development_type = 'copy', vehicle_brand = '', vehicle_model = '', vehicle_model_key = '', updated_at = CURRENT_TIMESTAMP
       WHERE status <> 'deleted'
+        AND NOT (CAST(development_type AS BINARY) <=> _binary'copy'
+          AND CAST(vehicle_brand AS BINARY) <=> _binary''
+          AND CAST(vehicle_model AS BINARY) <=> _binary''
+          AND CAST(vehicle_model_key AS BINARY) <=> _binary'')
         AND (ai_payload_json LIKE '%ai_product_material_optimizer%'
           OR manual_facts_json LIKE '%ai_product_material_optimizer%')
     `).catch(() => null);
