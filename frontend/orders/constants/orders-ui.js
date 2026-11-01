@@ -1,3 +1,4 @@
+import {orderHasDispatchHold} from '../../../src/shared/order-dispatch-hold.js';
 export const SEARCH_TYPE_OPTIONS = [
   { value: "order", label: "订单号" },
   { value: "sku", label: "SKU" },
@@ -42,6 +43,7 @@ export function orderStateKey(row = {}) {
   const oglDisplayStatus = row?.ogl_dispatch?.dispatched === true || row?.ogl_dispatch?.tracking === true ? String(row?.display_status || "") : "";
   if (["delivering", "delivered", "cancelled", "dispute"].includes(oglDisplayStatus)) return oglDisplayStatus;
   if (DELIVERING_KEYWORDS.some(value => text.includes(value)) && !AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "delivering";
+  if (orderHasDispatchHold(row)) return "awaiting_deliver";
   if (oglDisplayStatus === "awaiting_deliver") return "awaiting_deliver";
   if (["ogl_bound", "ogl_dispatched"].includes(oglDisplayStatus)) return oglDisplayStatus;
   if (AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "awaiting_deliver";

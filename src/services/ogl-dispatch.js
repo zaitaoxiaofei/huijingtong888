@@ -1,3 +1,4 @@
+import {hasManualOrderMark} from '../shared/order-dispatch-hold.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { classifyOrderLogistics } from './order-logistics-classification.js';
 import { effectiveTenantMembershipRole } from './tenant-membership-authority.js';
@@ -371,6 +372,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       if(!manual&&historical&&(body.confirm_historical_binding!==true||!text(body.historical_binding_note)))fail('历史批次补关联须确认当时实际同批发出并填写核对说明；补关联后仍须仓库单独确认实际交运',409,'OGL_HISTORICAL_CONFIRMATION_REQUIRED');
       const checked=await previewRows(connection,current,selected,true,item.id);
       if(checked.rejected.length)fail(`有 ${checked.rejected.length} 个订单不能绑定：${checked.rejected[0].reason}`,409);
+      if(manual&&checked.eligible.some(row=>hasManualOrderMark(row)&&!row.dispatched_at))fail('订单仍有人工标记（mark_type），请在订单页处理后选择无标记，再确认实际交运',409,'OGL_ORDER_MARK_HOLD');
       assertOrderReview(checked.eligible,body);
       for(const row of checked.eligible){
         const own=Number(row.shop_id)===Number(item.default_shop_id);
@@ -1013,6 +1015,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
         }
       } else if (action==='dispatch') {
         if(!selected.length) fail('该批次没有可交运订单',409);
+        if(selected.some(row=>!row.dispatched_at&&hasManualOrderMark(row)))fail('订单仍有人工标记（mark_type），请在订单页处理后选择无标记，再确认实际交运',409,'OGL_ORDER_MARK_HOLD');
         const marked=selected.filter(row=>!row.dispatched_at&&(text(row.mark_type)||text(row.mark_note)));
         if(marked.length){
           const [reviewEvents]=await connection.execute("SELECT detail_json FROM ogl_dispatch_events WHERE tenant_id=? AND batch_id=? AND action IN ('create','bind-orders') ORDER BY id",[current.id,item.id]);

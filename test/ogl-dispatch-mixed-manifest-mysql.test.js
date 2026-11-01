@@ -382,7 +382,7 @@ test('mixed OGL bags keep original-shop official evidence, local membership and 
         assert.deepEqual(await foreignEvidence(),foreignBefore);
       }
     });
-    await t.test('manual notes require exact current review proof and a later changed note blocks physical handover',async()=>{
+    await t.test('manual marks block handover until cleared; note review remains current and notes are preserved',async()=>{
       const batchId=await observed();
       await query("INSERT INTO order_marks(order_id,mark_type,note) VALUES(2,'manual_check','warehouse inspected')");
       const payload={batch_id:batchId,action:'bind-orders',order_ids:[2],client_request_id:'review-first-operation'};
@@ -391,10 +391,15 @@ test('mixed OGL bags keep original-shop official evidence, local membership and 
       await service.action(session(2),{...payload,reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'人工确认可以发运'});
       await query("UPDATE order_marks SET note='changed: hold delivery' WHERE order_id=2");
       await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
-      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),/复核/);
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),e=>e.code==='OGL_ORDER_MARK_HOLD');
       await assert.rejects(service.action(session(2),{...payload,client_request_id:'review-second-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'old proof'}),/复核/);
       preview=await service.preview(session(2),{order_ids:[2],batch_id:batchId});signature=preview.eligible[0].review_signature;
       await service.action(session(2),{...payload,client_request_id:'review-second-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'已重新核对'});
+      await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),e=>e.code==='OGL_ORDER_MARK_HOLD','Review proof cannot bypass an active manual mark');
+      await query("UPDATE order_marks SET mark_type='' WHERE order_id=2");
+      preview=await service.preview(session(2),{order_ids:[2],batch_id:batchId});signature=preview.eligible[0].review_signature;
+      await service.action(session(2),{...payload,client_request_id:'review-cleared-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'已取消标记，保留核对备注'});
       await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
       await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]});
       assert.equal((await query('SELECT note FROM order_marks WHERE order_id=2'))[0].note,'changed: hold delivery','dispatch does not erase notes');
