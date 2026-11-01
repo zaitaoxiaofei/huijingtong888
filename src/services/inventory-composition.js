@@ -3,7 +3,7 @@ import { createPhysicalInventoryReader } from '../shared/inventory-composition.j
 
 export async function loadInventoryComposition(query, scope) {
   const [products, edges] = await Promise.all([
-    query(`SELECT p.id,p.name,p.inventory_number,p.code,p.stock_unit,p.active FROM products p WHERE ${inventoryTenantSql(scope, 'p')}`),
+    query(`SELECT p.id,p.name,p.inventory_number,p.code,p.stock_unit,p.active,p.is_accessory FROM products p WHERE ${inventoryTenantSql(scope, 'p')}`),
     query(`SELECT c.product_id,c.component_product_id,c.quantity FROM product_components c
       JOIN products p ON p.id=c.product_id AND ${inventoryTenantSql(scope, 'p')}
       WHERE ${inventoryTenantSql(scope, 'c')}`)

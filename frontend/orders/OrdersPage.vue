@@ -1,4 +1,5 @@
 ﻿<script setup>
+import {orderSelectionSummary,orderPrintPlan,removePrintedSelection} from "./utils/order-print-selection.js";
 import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
 import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -20,7 +21,7 @@ import OzonCategorySelect from "../admin/components/listing/OzonCategorySelect.v
 import ProductCompositionDialog from "../admin/components/inventory/ProductCompositionDialog.vue";
 import ProductCreateEditDialog from "../admin/components/inventory/ProductCreateEditDialog.vue";
 import InventoryStructuredSearch from "../admin/components/inventory/InventoryStructuredSearch.vue";
-import { apiClient } from "../admin/utils/api.js";
+import { apiClient,currentApiCacheScope } from "../admin/utils/api.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
   INVENTORY_LIST_PAGE_SIZE,
@@ -116,6 +117,11 @@ const {
 
 const selectedCount = computed(() => selectedOrderIds.value.size);
 const selectedOrderIdList = computed(() => [...selectedOrderIds.value]);
+const selectionSummary=computed(()=>orderSelectionSummary(selectedOrderIds.value,vm.rows||[]));
+function clearAllSelected(){selectedOrderIds.value=new Set();}
+const printReview=reactive({visible:false,rows:[],pageIds:[],includePrinted:false,busy:false,scope:""});
+const printReviewPlan=computed(()=>orderPrintPlan(printReview.rows,printReview.pageIds,printReview.includePrinted));
+watch(()=>[inventoryAuth.user,inventoryAuth.user?.tenant?.id],()=>{printReview.visible=false;printReview.rows=[];},{flush:"sync"});
 const allRowsSelected = computed(() => {
   const rows = Array.isArray(vm.rows) ? vm.rows : [];
   return rows.length > 0 && rows.every((row) => selectedOrderIds.value.has(Number(row.id)));
@@ -1722,43 +1728,40 @@ async function syncAllOrdersAction() {
   await syncAll();
 }
 
-async function openPrintDialog(orderIds = []) {
-  const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
-  if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
-  if (ids.length > 80) return ElMessage.warning("单次最多打印 80 单，请将每页数量调为 50 条，或分批勾选打印");
+function openPrintDialog(orderIds = []) {
+  if(printReview.busy)return;
+  const ids=[...new Set(orderIds.map(Number).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  if(!ids.length)return ElMessage.warning("请选择需要打印的订单");
+  if(ids.length>80)return ElMessage.warning("单次最多打印 80 单，请分批勾选打印");
+  const records=new Map([...selectedRows.value,...tableRows.value].map(row=>[Number(row.id),row]));
+  Object.assign(printReview,{visible:true,rows:ids.map(id=>({...records.get(id),id})),pageIds:tableRows.value.map(row=>Number(row.id)),includePrinted:false,scope:currentApiCacheScope()});
+}
+async function confirmPrintReview(){
+  if(printReview.busy)return;
+  const scope=printReview.scope;
+  if(scope!==currentApiCacheScope()){printReview.visible=false;return ElMessage.warning("企业或登录状态已变化，请重新选择订单");}
+  const ids=[...printReviewPlan.value.ids];
+  if(!ids.length)return ElMessage.warning("本次没有待打印订单；重打已打印订单请主动勾选允许重复打印");
+  printReview.busy=true;
   try {
     const result = await previewOrderLabels(ids);
-    if (result?.printed) {
-      orderDetailCache.clear();
-      await loadOrders({ includeCounts: true });
-      ElMessage.success("已记录面单打印时间；如打印失败，请在确认窗口选择“失败”");
-    } else if (result?.failed) {
-      orderDetailCache.clear();
-      await loadOrders({ includeCounts: true });
-      ElMessage.warning("已撤销本批面单的打印记录");
+    if(scope!==currentApiCacheScope())return;
+    if(result?.printed){
+      selectedOrderIds.value=removePrintedSelection(selectedOrderIds.value,result);
+      printReview.visible=false;
+      ElMessage.success("已记录面单打印时间，并清除已打印成功订单的勾选；失败订单保留");
+    }else if(result?.failed){
+      ElMessage.warning("已撤销本批面单的打印记录，勾选保留，可重新打印");
     }
-  } catch (error) {
-    ElMessage.error(`打开面单失败：${error?.message || "未知错误"}`);
-  }
+    if(result?.printed||result?.failed){
+      orderDetailCache.clear();
+      try{await loadOrders({includeCounts:true});}catch{ElMessage.warning("打印结果已处理，订单列表刷新失败，请手动刷新");}
+    }
+  }catch(error){if(scope===currentApiCacheScope())ElMessage.error(`打开面单失败：${error?.message||"未知错误"}`);}
+  finally{printReview.busy=false;}
 }
-
-function bulkPrintSelected() {
-  if (!selectedOrderIds.value.size) return ElMessage.warning("请先选择订单");
-  const ids = selectedActionOrderIds("print");
-  if (!ids.length) return ElMessage.warning("已选订单里没有可打印面单的订单");
-  const skipped = selectedOrderIds.value.size - ids.length;
-  if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
-  return openPrintDialog(ids);
-}
-
-function bulkPrintPage() {
-  const rows = tableRows.value;
-  const ids = rows.filter((row) => row.availableActions?.print !== false).map((row) => Number(row.id)).filter(Boolean);
-  if (!ids.length) return ElMessage.warning("当前页没有可打印面单的订单");
-  const skipped = rows.length - ids.length;
-  if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
-  return openPrintDialog(ids);
-}
+function bulkPrintSelected(){return openPrintDialog([...selectedOrderIds.value]);}
+function bulkPrintPage(){return openPrintDialog(tableRows.value.map(row=>Number(row.id)));}
 
 function handleToolbarMoreAction(action) {
   if (action === "shipped-receipts") return previewShippedReceipts();
@@ -2724,7 +2727,7 @@ onBeforeUnmount(() => {
         <el-table-column label="打印时间" min-width="180"><template #default="{ row }">{{ row.printed_at ? formatDateTime(row.printed_at) : '未打印' }}</template></el-table-column>
         <el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="danger" @click="toggleRow(row.id, false)">移除</el-button></template></el-table-column>
       </el-table>
-      <template #footer><el-button @click="selectedOrderIds = new Set()">清空全部已选</el-button><el-button type="primary" @click="selectionDialogVisible = false">返回订单</el-button></template>
+      <template #footer><el-button @click="clearAllSelected">清空全部已选</el-button><el-button type="primary" @click="selectionDialogVisible = false">返回订单</el-button></template>
     </el-dialog>
     <OglDispatchPanel :key="oglDispatchPanel.version" v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" @compose="id => openOglDispatch('create', id)" />
 
@@ -2821,6 +2824,12 @@ onBeforeUnmount(() => {
       />
 
       <div class="orders-page-footer">
+        <div class="orders-selection-summary" role="status" aria-live="polite">
+          <span>已选 <strong>{{selectionSummary.total}}</strong> 单<span v-if="selectionSummary.total">（本页 {{selectionSummary.current}} 单，其他页 {{selectionSummary.other}} 单）</span></span>
+          <el-button size="small" :disabled="!selectedCount" @click="selectionDialogVisible=true">查看已选</el-button>
+          <el-button size="small" :disabled="!selectedCount" @click="clearAllSelected">清空全部已选</el-button>
+          <span class="orders-selection-hint">表头勾选框仅选择／取消当前页</span>
+        </div>
         <PageFooterPagination
           :page="vm.filters.page"
           :total-pages="totalPages"
@@ -2831,6 +2840,24 @@ onBeforeUnmount(() => {
         />
       </div>
     </div>
+
+    <el-dialog v-if="printReview.visible" v-model="printReview.visible" title="确认本次打印范围" width="min(960px,94vw)" append-to-body :close-on-click-modal="false" :close-on-press-escape="!printReview.busy" :show-close="!printReview.busy">
+      <div class="order-print-review">
+        <p>本次选择 <strong>{{printReviewPlan.total}}</strong> 单（本页 {{printReviewPlan.current}} 单，其他页 <strong>{{printReviewPlan.other}}</strong> 单）；将打印 <strong>{{printReviewPlan.ids.length}}</strong> 单。</p>
+        <el-alert v-if="printReviewPlan.other" type="warning" :closable="false" :title="`包含其他页 ${printReviewPlan.other} 单，请核对下方订单号；如只想打印本页，请返回后清空全部已选再勾选。`"/>
+        <el-checkbox v-if="printReviewPlan.printed" v-model="printReview.includePrinted" :disabled="printReview.busy">允许重复打印已打印的 {{printReviewPlan.printed}} 单（默认排除）</el-checkbox>
+        <p v-if="printReviewPlan.excluded">{{printReviewPlan.excluded}} 单不可打印或缺少已选信息，已排除；请返回订单页重新核对。</p>
+        <el-table :data="printReviewPlan.orders" row-key="id" max-height="45vh" border>
+          <el-table-column label="订单号" min-width="190"><template #default="{row}">{{row.postingNumber||row.posting_number||row.id}}</template></el-table-column>
+          <el-table-column label="店铺" min-width="140"><template #default="{row}">{{row.shopName||row.shop_name||'—'}}</template></el-table-column>
+          <el-table-column label="选择范围" width="105"><template #default="{row}">{{row.onPage?'本页':'其他页'}}</template></el-table-column>
+          <el-table-column label="上次打印" min-width="165"><template #default="{row}">{{row.printed_at?formatDateTime(row.printed_at):row.printed?'已打印':'未打印'}}</template></el-table-column>
+          <el-table-column label="本次处理" min-width="135"><template #default="{row}">{{row.included?'打印':!row.eligible?'不可打印':'已打印，已排除'}}</template></el-table-column>
+        </el-table>
+        <p>请在面单预览窗口确认打印结果；打印失败的订单保留勾选，方便重试。</p>
+      </div>
+      <template #footer><el-button :disabled="printReview.busy" @click="printReview.visible=false">返回选择</el-button><el-button type="primary" :disabled="!printReviewPlan.ids.length" :loading="printReview.busy" @click="confirmPrintReview">确认打印 {{printReviewPlan.ids.length}} 单</el-button></template>
+    </el-dialog>
 
     <el-dialog
       v-model="statusPreferenceDialog.visible"

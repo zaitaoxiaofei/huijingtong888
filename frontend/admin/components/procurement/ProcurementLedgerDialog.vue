@@ -3,6 +3,8 @@ import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { getActivePinia } from 'pinia';
 import { useAuthStore } from '../../stores/auth.js';
 import { hasPermission } from '../../../../src/shared/permissions.js';
+import InventoryCompositionBadge from '../inventory/InventoryCompositionBadge.vue';
+import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
 import InventoryWorkflowPanel from './InventoryWorkflowPanel.vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient, currentApiCacheScope } from '../../utils/api.js';
@@ -13,6 +15,7 @@ import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
 const props = defineProps({ modelValue: Boolean, fullPage: Boolean, allowFullPage:{type:Boolean,default:true}, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialInboundId: {type:Number,default:0}, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
+const identityVersion=ref(0);
 const workflowPanel=ref(null), workflow=ref(null);
 const auth=getActivePinia()?useAuthStore():{user:null};
 const inventoryOnly=computed(()=>props.inventoryMode || (!!auth.user && !hasPermission(auth.user,'procurement')));
@@ -439,7 +442,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
     <el-alert v-if="loadError" type="error" :closable="false" title="库存明细加载失败，请点击刷新对账重试" :description="loadError" />
     <div v-loading="loading" class="ledger-detail-body" :class="{ 'is-loading': loading }" element-loading-text="正在读取本地库存与订单占用…">
       <template v-if="data">
-        <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span></div>
+        <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span><InventoryCompositionBadge :key="identityVersion" :product="data.product" resolve-on-mount/><InventoryProductEditAction v-if="stocktakeEnabled" :product-id="Number(productId)" @saved="identityVersion++;load(productId,{syncFbpOnLoad:false});emit('saved')"/></div>
         <InventoryWorkflowPanel compact v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" :initial-inbound-id="initialInboundId" @loaded="value=>workflow=value" @saved="load();emit('saved')" />
         <InventoryFlowDiagram @saved="load(productId,{syncFbpOnLoad:false});emit('saved')" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
       <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">

@@ -1,12 +1,12 @@
 <script setup>
-import {computed,onBeforeUnmount,ref,watch} from 'vue';
+import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
-const props=defineProps({product:{type:Object,required:true}});
+const props=defineProps({product:{type:Object,required:true},resolveOnMount:{type:Boolean,default:false}});
 const data=ref(null),loading=ref(false),error=ref('');let version=0,loadedAt=0;
 const count=computed(()=>Number(data.value?.product?.component_count??props.product.component_count??0));
 const accessory=computed(()=>Number(data.value?.product?.is_accessory??props.product.is_accessory??0)!==0);
-const label=computed(()=>count.value>0?'套装':accessory.value?'配件':'单品');
+const label=computed(()=>props.resolveOnMount&&!data.value&&props.product.component_count==null?'类型待核实':count.value>0?'套装':accessory.value?'配件':'单品');
 function reset(){++version;data.value=null;error.value='';loading.value=false;loadedAt=0;}
 async function load(){
  if(loading.value||(data.value&&Date.now()-loadedAt<30000))return;
@@ -15,7 +15,8 @@ async function load(){
  try{const r=await apiClient.get(`/api/inventory-workflow/details?node=composition&product_id=${id}`,{noCache:true});if(token===version&&scope===currentApiCacheScope()){data.value=r;loadedAt=Date.now();}}
  catch(e){if(token===version&&scope===currentApiCacheScope())error.value=e.message||'子产品组成读取失败';}finally{if(token===version)loading.value=false;}
 }
-watch(()=>[props.product.id,props.product.updated_at,props.product.component_count],reset);
+watch(()=>[props.product.id,props.product.updated_at,props.product.component_count],()=>{reset();if(props.resolveOnMount)void load();});
+onMounted(()=>{if(props.resolveOnMount)void load();});
 window.addEventListener('erp:auth-scope-changed',reset);
 onBeforeUnmount(()=>{++version;window.removeEventListener('erp:auth-scope-changed',reset);});
 </script>
