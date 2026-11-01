@@ -26,3 +26,27 @@ export function withMysqlTransactionPriority(operation) {
   backgroundTransactionTail = task.then(() => undefined, () => undefined);
   return task;
 }
+
+let interactiveReads = 0;
+const interactiveWaiters = new Set();
+// Ordinary row reads do not depend on the background coverage calculation.
+// Let an already running scan finish, then pause new scans until rows return.
+export async function withMysqlInteractiveRead(operation) {
+  interactiveReads++;
+  try { return await operation(); }
+  finally {
+    if (--interactiveReads === 0) {
+      for (const resume of interactiveWaiters) resume();
+      interactiveWaiters.clear();
+    }
+  }
+}
+export async function waitForMysqlInteractiveReads() {
+  if (currentMysqlWorkload() !== 'background' || !interactiveReads) return;
+  // Bound the delay so a continuous stream of readers cannot starve workers.
+  await new Promise(resolve => {
+    const resume = () => { clearTimeout(timer); interactiveWaiters.delete(resume); resolve(); };
+    const timer = setTimeout(resume, 2000);
+    interactiveWaiters.add(resume);
+  });
+}
