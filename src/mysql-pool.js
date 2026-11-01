@@ -1,11 +1,15 @@
 import mysql from "mysql2/promise";
+import { currentMysqlWorkload, withMysqlWorkload, mysqlWorkloadLimits } from "./mysql-workload.js";
 import { config } from "./config.js";
 
-let mysqlPool = null;
+const mysqlPools = new Map();
+const connectionWorkloads = new WeakMap();
 const MYSQL_SESSION_TIME_ZONE = "+00:00";
 const initializedMysqlSessions = new WeakSet();
 const mysqlPoolMetrics = {
   activeConnections: 0,
+  foregroundActive: 0,
+  backgroundActive: 0,
   peakActiveConnections: 0,
   acquisitions: 0,
   acquireWaitMsTotal: 0,
@@ -28,9 +32,11 @@ export function getMysqlPool() {
   if (!isMysqlPrimaryEnabled()) {
     throw new Error("MySQL primary mode is not enabled");
   }
-  if (!mysqlPool) {
-    const connectionLimit = effectiveMysqlConnectionLimit();
-    mysqlPool = mysql.createPool({
+  const limits = mysqlWorkloadLimits(effectiveMysqlConnectionLimit());
+  const lane = currentMysqlWorkload() === 'background' && limits.background ? 'background' : 'foreground';
+  if (!mysqlPools.has(lane)) {
+    const connectionLimit = limits[lane];
+    mysqlPools.set(lane, mysql.createPool({
       ...(process.env.DB_SOCKET_PATH ? { socketPath: process.env.DB_SOCKET_PATH } : {}),
       host: config.dbHost,
       port: config.dbPort,
@@ -46,9 +52,9 @@ export function getMysqlPool() {
       maxPreparedStatements: Math.max(8, Number(process.env.DB_MAX_PREPARED_STATEMENTS || 32)),
       queueLimit: Math.max(0, Number(config.dbPoolQueueLimit ?? 100)),
       multipleStatements: false
-    });
+    }));
   }
-  return mysqlPool;
+  return mysqlPools.get(lane);
 }
 
 function createMysqlBusyError(message, cause) {
@@ -68,6 +74,8 @@ function normalizeMysqlAcquireError(error) {
 }
 
 async function getMysqlConnection() {
+  const limits = mysqlWorkloadLimits(effectiveMysqlConnectionLimit());
+  const lane = currentMysqlWorkload() === 'background' && limits.background ? 'background' : 'foreground';
   const pool = getMysqlPool();
   const timeoutMs = Math.max(1000, Number(config.dbPoolAcquireTimeoutMs || 10000));
   const startedAt = performance.now();
@@ -101,6 +109,8 @@ async function getMysqlConnection() {
     mysqlPoolMetrics.acquireWaitMsTotal += waitMs;
     mysqlPoolMetrics.lastAcquireWaitMs = waitMs;
     mysqlPoolMetrics.activeConnections += 1;
+    mysqlPoolMetrics[lane + 'Active'] += 1;
+    connectionWorkloads.set(connection, lane);
     mysqlPoolMetrics.peakActiveConnections = Math.max(mysqlPoolMetrics.peakActiveConnections, mysqlPoolMetrics.activeConnections);
     if (waitMs >= MYSQL_SLOW_ACQUIRE_MS) {
       mysqlPoolMetrics.slowAcquisitions += 1;
@@ -113,6 +123,9 @@ async function getMysqlConnection() {
 }
 
 function releaseMysqlConnection(connection) {
+  const lane = connectionWorkloads.get(connection);
+  if (lane) mysqlPoolMetrics[lane + 'Active'] = Math.max(0, mysqlPoolMetrics[lane + 'Active'] - 1);
+  connectionWorkloads.delete(connection);
   mysqlPoolMetrics.activeConnections = Math.max(0, mysqlPoolMetrics.activeConnections - 1);
   connection.release();
 }
@@ -122,6 +135,7 @@ export function getMysqlPoolMetrics() {
   return {
     ...mysqlPoolMetrics,
     connectionLimit: effectiveMysqlConnectionLimit(),
+    workloadLimits: mysqlWorkloadLimits(effectiveMysqlConnectionLimit()),
     averageAcquireWaitMs: acquisitions ? mysqlPoolMetrics.acquireWaitMsTotal / acquisitions : 0
   };
 }
@@ -129,7 +143,7 @@ export function getMysqlPoolMetrics() {
 export async function warmMysqlPool() {
   const connectionCount = Math.max(1, Math.min(
     Number(config.dbPoolMin || 0) || 2,
-    effectiveMysqlConnectionLimit()
+    mysqlWorkloadLimits(effectiveMysqlConnectionLimit())[currentMysqlWorkload()] || 1
   ));
   await Promise.all(Array.from({ length: connectionCount }, async () => {
     const connection = await getMysqlConnection();
@@ -213,13 +227,18 @@ export async function executeMysqlStatementWithRetry(connection, sql, params = [
 }
 
 export async function closeMysqlPool() {
-  if (!mysqlPool) return;
-  const pool = mysqlPool;
-  mysqlPool = null;
-  await pool.end();
+  const pools = [...mysqlPools.values()];
+  mysqlPools.clear();
+  await Promise.all(pools.map(pool => pool.end()));
 }
 
 export async function withMysqlTransaction(callback) {
+  // Lock-holding transactions and their nested business reads must not queue
+  // behind long analytics reads, even when initiated by a scheduled job.
+  return withMysqlWorkload('foreground', () => runMysqlTransaction(callback));
+}
+
+async function runMysqlTransaction(callback) {
   const connection = await getMysqlConnection();
   try {
     await ensureMysqlSessionUtc(connection);

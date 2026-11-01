@@ -2691,7 +2691,9 @@ watch(() => route.query.orderId, async () => {
 });
 
 onMounted(async () => {
-  await Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()]);
+  // Auxiliary toolbar data must not delay the first order request.
+  void Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()])
+    .catch(error => console.warn('load order toolbar metadata failed', error));
   latestOrderSyncTimer = window.setInterval(() => {
     orderClock.value = Date.now();
     void loadLatestOrderSyncStatus();
