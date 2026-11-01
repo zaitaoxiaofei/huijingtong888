@@ -6,7 +6,7 @@ const emit=defineEmits(['detail','sync']);
 const lines=computed(()=>inventorySupplyLines(props.workflow));
 const quantity=n=>n==null?'待核对':`${Number(n)} 件`;
 function summary(line){
- if(line.quantity==null)return line.key==='forecast'?'待同步':'待核实';
+ if(line.quantity==null){if(line.key==='forecast')return props.workflow?.fbp?.sku_count===0?'未绑定SKU':'待同步';if(line.key==='safety'&&props.workflow?.physical_recorded<0)return '需盘点';return '待核实';}
  if(line.key==='fbp'&&line.quantity===0)return '暂无申请';
  if(line.quantity===0)return '已覆盖';
  return `${line.partial?'未覆盖 ':''}${quantity(line.quantity)}`;

@@ -475,9 +475,10 @@ export function createProcurementLedgerService(hooks) {
     const requestKey = String(body.request_key || '');
     if (!/^[a-zA-Z0-9-]{16,80}$/.test(requestKey)) throw new Error('本次操作标识缺失，请重新打开对账窗口');
     const transact = existingConnection ? callback => callback(existingConnection) : transaction;
+    let affectedTenantId;
     const result = await transact(async connection => {
       const run = (sql, args = []) => connection.query(sql, args).then(([rows]) => rows);
-      const scope = await resolveScope(tenantId, run);
+      const scope = await resolveScope(tenantId, run);affectedTenantId=scope.id;
       const actor = await requirePerson(personId, connection);
       await (hooks.assertActor || assertInventoryMember)(scope, actor, run);
       await (hooks.assertReferences || assertInventoryReferences)(scope, body, run);
@@ -668,7 +669,7 @@ export function createProcurementLedgerService(hooks) {
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);
       return response;
     });
-    if (!existingConnection) hooks.invalidate();
+    if (!existingConnection) hooks.invalidate(['stocktake','record_purchase','revise_pending_batch','receive','receive_and_count'].includes(body.action_type)?{tenantId:affectedTenantId,productIds:[productId]}:undefined);
     return result;
   }
   async function receiveAndCount(body, personId, tenantId = 'admin', options = {}) {

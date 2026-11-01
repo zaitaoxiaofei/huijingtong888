@@ -36,7 +36,7 @@ export function createProcurementDemandRequest({transaction=withMysqlTransaction
    await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,id,current.personId,'procurement_demand_request',JSON.stringify({request_key:key,product_id:id,types,cause,note,requests})]);
    return{ok:true,duplicate:false,requests,tenantId:scope.id};
   });
-  invalidateOrderProcurementCoverage();if(!result.duplicate)try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId});}catch{}
+  invalidateOrderProcurementCoverage({tenantId:result.tenantId,productIds:[id]});if(!result.duplicate)try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId});}catch{}
   const {tenantId,...publicResult}=result;return publicResult;
  };
 }

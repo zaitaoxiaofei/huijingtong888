@@ -100,7 +100,7 @@ export function createPurchaseBundleReview({ledger,query=mysqlQuery,transaction=
    await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,batch.product_id,current.personId,'purchase_bundle_review',JSON.stringify({request_key:key,hash,source:ctx.batch,content_revision:ctx.content_revision,note:payload.note,result:saved})]);
    return saved;
   });
-  invalidateOrderProcurementCoverage();return result;
+  invalidateOrderProcurementCoverage({tenantId:scope.id,productIds:[Number(original.product_id),...result.created.map(row=>Number(row.product_id))]});return result;
  }
  return{context,review};
 }

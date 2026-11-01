@@ -1,5 +1,5 @@
 import { inventoryTenantSql } from './inventory-tenant-scope.js';
-import { physicalInventoryComponents } from '../shared/inventory-composition.js';
+import { createPhysicalInventoryReader } from '../shared/inventory-composition.js';
 
 export async function loadInventoryComposition(query, scope) {
   const [products, edges] = await Promise.all([
@@ -9,15 +9,24 @@ export async function loadInventoryComposition(query, scope) {
       WHERE ${inventoryTenantSql(scope, 'c')}`)
   ]);
   const byId = new Map(products.map(p => [Number(p.id), p]));
-  const components = id => physicalInventoryComponents(id, products, edges);
+  // Request-scoped indexes: rebuild from current owned rows on each read, but
+  // never rebuild the entire product/BOM map for every component and parent.
+  const components = createPhysicalInventoryReader(products,edges);
+  const roots=new Set(edges.map(e=>Number(e.product_id))),reverse=new Map();
+  let indexed=false;
   const affected = (id, rootIds) => {
-    const roots = rootIds ? [...new Set(rootIds.map(Number))] : [...new Set(edges.map(e => Number(e.product_id)))];
-    return roots.filter(root => root !== Number(id) && byId.has(root)).flatMap(root => {
-      try {
-        const part = components(root).find(p => Number(p.id) === Number(id));
-        return part ? [{ ...byId.get(root), per_set_quantity: part.per_set_quantity }] : [];
-      } catch { return []; }
-    });
+    if(!indexed){
+      for(const root of roots){
+        if(!byId.has(root))continue;
+        try{for(const part of components(root)){
+          const leaf=Number(part.id);if(!reverse.has(leaf))reverse.set(leaf,[]);
+          reverse.get(leaf).push({...byId.get(root),per_set_quantity:part.per_set_quantity});
+        }}catch{/* Invalid compositions remain blocked by components(), not guessed. */}
+      }
+      indexed=true;
+    }
+    const selected=rootIds?new Set(rootIds.map(Number)):null;
+    return (reverse.get(Number(id))||[]).filter(root=>Number(root.id)!==Number(id)&&(!selected||selected.has(Number(root.id))));
   };
-  return { products: byId, edges, components, affected, isBundle: id => edges.some(e => Number(e.product_id) === Number(id)) };
+  return { products: byId, edges, components, affected, isBundle: id => roots.has(Number(id)) };
 }

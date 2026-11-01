@@ -16,7 +16,7 @@ import { loadOrderProcurementCoverage, invalidateOrderProcurementCoverage } from
 import { loadProductsFbpStockTotals, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { createInventoryFlowSummaryReader } from './inventory-flow-summary.js';
 import { broadcastGlobalEvent } from '../server/notifications.js';
-import { workflowCache, workflowRevision } from './inventory-workflow-cache.js';
+import { workflowCache, workflowRevision, inventoryWorkflowChanges } from './inventory-workflow-cache.js';
 import { hasPermission } from '../shared/permissions.js';
 import { calculateLocalInventorySafety, buildInventoryFlowSummary } from './inventory-flow-summary-model.js';
 import { validateFlowSettings } from './inventory-flow-rules.js';
@@ -112,7 +112,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   }
   const backgroundQuery=limitInventoryDemandQueries(query);let backgroundService;
   const background=()=>backgroundService??=createInventoryWorkflowService({query:backgroundQuery});
-  const workspaceSnapshot=createInventoryDemandSnapshot({query,calculate:(ids,tenantId,options)=>background().workspaceStates(ids,tenantId,options),products:tenantId=>background().workspaceProducts({},tenantId),revision:workflowRevision});
+  const workspaceSnapshot=createInventoryDemandSnapshot({query,calculate:(ids,tenantId,options)=>background().workspaceStates(ids,tenantId,options),products:tenantId=>background().workspaceProducts({},tenantId),revision:workflowRevision,changes:inventoryWorkflowChanges});
   async function productComposition(ids,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),graph=await loadInventoryComposition(query,scope);
     for(const id of ids)await assertInventoryRecord(scope,'product',id,query);
@@ -332,7 +332,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         VALUES(?,?,'stock_topup',?,?,'warning',?,'procurement',?,?,'unread')`,[scope.id,recipient,label,`${sender}提请采购：${product.name}，${quantity}件。${note}`,`/procurement/workspace?demandType=${type}&message_request_id=${requestId}`,String(requestId),`${scope.id}:workflow:${requestId}:${recipient}`]);
       return{ok:true,id:requestId,duplicate:false,recipients,tenantId:scope.id};
     });
-    invalidateOrderProcurementCoverage();
+    invalidateOrderProcurementCoverage({tenantId:result.tenantId,productIds:[id]});
     for(const personId of result.recipients){try{broadcast('system-notification',{refresh:true},{tenantId:result.tenantId,personId});}catch{}}
     return{ok:true,id:result.id,duplicate:result.duplicate,notified:result.recipients.length};
   }

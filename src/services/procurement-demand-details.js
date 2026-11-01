@@ -73,7 +73,7 @@ export function createProcurementDemandDetails({query=mysqlQuery,transaction=wit
      ON DUPLICATE KEY UPDATE settings_json=VALUES(settings_json),updated_by=VALUES(updated_by),revision=revision+1`,[scope.id,id,JSON.stringify(settings),current.personId]);
    await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,id,current.personId,'local_safety_override',JSON.stringify({...(cycles?{production_days:production,local_shipping_days:shipping,previous_production_days:product.production_lead_days,previous_local_shipping_days:product.warehouse_logistics_days}:{}),quantity:value,note,previous:parse(old?.settings_json).local_safety_override??null})]);
    return{ok:true,quantity:value};
-  });invalidateOrderProcurementCoverage();return result;
+  });invalidateOrderProcurementCoverage({tenantId:Number(session.tenant.id),productIds:[id]});return result;
  }
  return{details,safety};
 }
