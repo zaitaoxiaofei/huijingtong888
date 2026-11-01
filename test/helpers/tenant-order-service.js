@@ -1,3 +1,4 @@
+import { orderReadIdentity } from "../../src/services/order-read-cache.js";
 import { ORDER_SPLIT_SCHEMA } from '../../src/services/order-split-schema.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "../../src/services/order-report-query-sql.js";
 import { readFileSync } from 'node:fs';
@@ -104,7 +105,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

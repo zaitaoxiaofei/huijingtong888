@@ -31,3 +31,13 @@ Read-only profiling found the full procurement demand query exceeding 10 seconds
 ## Deployment acceptance
 
 Build only from the exact merged latest release, with expected-production-commit protection. Recheck remote release and production before activation. After rollout, record cold/warm first-page and cross-page samples, concurrent counts, result membership/numeric comparison, artifact hashes and browser interaction. Keep optimizing if the 2-second target / 3-second ceiling is missed; never report isolated SQL improvements as full acceptance.
+
+## Post-rollout follow-up
+
+Release b9e3819 passed 40-row numeric comparison and artifact integrity. Its 15-request concurrency matrix had one 4,108 ms list call; the browser saw 2,022 ms navigation and 3,328 ms next-page API. This did not meet acceptance. Most row APIs were 287–1,540 ms, while full status metadata still took 8,890 ms.
+
+The follow-up keeps raw order JSON out of the summary GROUP BY temporary rows and fetches the same owned source payload after aggregation, before enrichment. Detail readers remain unchanged. A same-snapshot, cache-bypassed live comparison returned identical fields across 40 rows: first summary 1,605 → 148 ms (131 ms aggregation + 9 ms raw read), second 95 → 66 ms. This is query-level evidence only; repeat full browser/API acceptance after rollout.
+
+Status-count keys also include the allocation Map identity. This prevents an older in-flight inventory snapshot from seeding the new revision's derived count cache after an inventory write. A deferred-response regression reproduces the race and verifies that the newer snapshot cannot consume old counts.
+
+Validation: 53 local tests passed, one MySQL-only case covered independently; 11 independent socket-only MySQL cases passed, including large raw payload preservation, foreign-tenant isolation, exact profit/stock fields, count membership and cache invalidation. Encoding, SQL binding and frontend safety checks passed with the existing AI-workbench warning.

@@ -1,4 +1,4 @@
-import { cachedOrderRead, invalidateOrderReadCache } from "./order-read-cache.js";
+import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
@@ -30280,7 +30280,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       olp.printed_at AS printed_at,
       olp.print_batch_id AS print_batch_id,
       olp.print_sequence AS print_sequence,
-      raw.raw_json AS raw_json
+      ${summaryOnly ? "NULL" : "raw.raw_json"} AS raw_json
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
@@ -30452,11 +30452,21 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     LEFT JOIN logistics_fee_rules visible_rule ON visible_rule.id = oi.frozen_logistics_rule_id AND ${billingScope.sql}
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
-    LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    ${summaryOnly ? "" : "LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number"}
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
       ${tenantScope ? `AND ${orderTenantPredicateMysql("s", tenantScope)}` : ""}
     GROUP BY o.id
   `, [...cleanIds, ...billingScope.params, ...cleanIds]);
+  // Keep large raw payloads out of GROUP BY temporary rows. Fetch exactly the
+  // same owned source payload after numeric aggregation, before enrichment.
+  if (summaryOnly && rows.length) {
+    const payloads = await mysqlQuery(`SELECT o.id, raw.raw_json
+      FROM orders o JOIN shops s ON s.id=o.shop_id
+      LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
+      WHERE o.id IN (${cleanIds.map(() => "?").join(",")}) AND ${orderTenantPredicateMysql("s", tenantScope)}`, cleanIds);
+    const byOrder = new Map(payloads.map(row => [Number(row.id), row.raw_json]));
+    for (const row of rows) row.raw_json = byOrder.get(Number(row.id)) ?? null;
+  }
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
   return (await enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
 }
@@ -31298,7 +31308,7 @@ function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
 }
 
 async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
-  const cacheKey = `counts:${tenantScope?.id || "all"}:${createHash("sha256").update(JSON.stringify([base.where,base.params])).digest("hex")}`;
+  const cacheKey = `counts:${tenantScope?.id || "all"}:${orderReadIdentity(coverage)}:${createHash("sha256").update(JSON.stringify([base.where,base.params])).digest("hex")}`;
   return cachedOrderRead(cacheKey, async () => {
   const evidenceAlias = tenantScope ? "ogl_count_evidence" : null;
   const statusSql = status => status === "unbound" && tenantScope
