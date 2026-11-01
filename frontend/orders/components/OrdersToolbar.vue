@@ -15,6 +15,8 @@ const props = defineProps({
   syncRunning: { type: Boolean, default: false },
   lastSyncText: { type: String, default: "暂无同步记录" },
   moreActions: { type: Array, default: () => [] },
+  markOptions:{type:Array,default:()=>[]},
+  marking:{type:Boolean,default:false},
   selectedCount: { type: Number, default: 0 },
   pageRowCount: { type: Number, default: 0 },
   preparableCount:{type:Number,default:0},canPrepare:{type:Boolean,default:false},
@@ -22,6 +24,7 @@ const props = defineProps({
 });
 
 const emit = defineEmits([
+  "batch-mark",
   "update:filters",
   "submit",
   "sync-incremental",
@@ -221,6 +224,11 @@ function handlePrintCommand(command) {
         </div>
 
         <div class="orders-toolbar-actions-side">
+          <el-dropdown trigger="click" :disabled="!selectedCount||marking" @command="value=>emit('batch-mark',value)">
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="marking" :disabled="!selectedCount||marking">批量标记（{{selectedCount}}）</el-button>
+            <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="option in markOptions" :key="option.value" :command="option.value">{{option.label}}</el-dropdown-item></el-dropdown-menu></template>
+          </el-dropdown>
+          <el-button type="primary" :disabled="!selectedCount" @click="handleCommand('ogl-manual-ship')">关联 OGL 发运并标记已发运</el-button>
           <el-dropdown trigger="click" @command="handleCommand">
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">OGL 发运</el-button>
             <template #dropdown>

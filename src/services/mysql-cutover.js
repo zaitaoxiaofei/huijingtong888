@@ -30436,7 +30436,7 @@ async function orderTenantCoverageMysql(scope) {
 
 async function loadOglDispatchMembersMysql(ids, tenantScope) {
   if (!ids.length) return new Map();
-  const rows = await mysqlQuery(`SELECT m.*, (SELECT te.detail_json FROM ogl_dispatch_events te WHERE te.tenant_id=m.tenant_id AND te.batch_id=m.batch_id AND te.member_id=m.id AND te.action='assign-tracking' ORDER BY te.id DESC LIMIT 1) AS manual_tracking_json, b.batch_number, b.default_shop_id, b.official_carriage_id,
+  const rows = await mysqlQuery(`SELECT m.*, (SELECT JSON_UNQUOTE(JSON_EXTRACT(de.detail_json,'$.source')) FROM ogl_dispatch_events de WHERE de.tenant_id=m.tenant_id AND de.batch_id=m.batch_id AND de.member_id=m.id AND de.action='dispatch' ORDER BY de.id DESC LIMIT 1) AS dispatch_source, (SELECT te.detail_json FROM ogl_dispatch_events te WHERE te.tenant_id=m.tenant_id AND te.batch_id=m.batch_id AND te.member_id=m.id AND te.action='assign-tracking' ORDER BY te.id DESC LIMIT 1) AS manual_tracking_json, b.batch_number, b.default_shop_id, b.official_carriage_id,
     b.official_status, b.status AS batch_status FROM ogl_dispatch_members m
     JOIN ogl_dispatch_batches b ON b.id = m.batch_id AND b.tenant_id = m.tenant_id
     JOIN orders member_order ON member_order.id = m.order_id AND member_order.shop_id = m.shop_id AND member_order.posting_number = m.posting_number
