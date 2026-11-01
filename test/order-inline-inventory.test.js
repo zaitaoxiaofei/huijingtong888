@@ -20,10 +20,21 @@ test('balance failures and callers without the optional flag retain rows for the
  assert.equal(await service.orderPageRowsMysql([1],null,'2',false),rows);assert.equal(calls,0);
  assert.equal(await service.orderPageRowsMysql([1],null,'2',true),rows);assert.equal(calls,1);assert.ok(!('inventory_availability' in rows[0]));
 });
-test('current-page balance endpoint gets foreground priority while full row refresh avoids waiting on its own background coverage',async()=>{
+test('current-page balance reads are foreground and never pause a pending background balance they need',async()=>{
  const source=readFileSync(new URL('../src/services/mysql-runtime-services.js',import.meta.url),'utf8');
  const body=source.match(/orderInventoryAvailability: ([\s\S]*?),\n  updateInventoryProductLeadTimes:/)?.[1];assert.ok(body);
  const events=[];const context=vm.createContext({String,withRequestReadCache:op=>op(),withMysqlWorkload:(priority,op)=>{events.push(priority);return op();},withMysqlInteractiveRead:op=>{events.push('interactive');return op();},orderInventoryAvailabilityMysql:async(query,tenant)=>({query,tenant})});
  const read=vm.runInContext('('+body+')',context);
- for(const query of [{},{includeRows:'0'},{includeRows:'1'}]){events.length=0;const result=await read(query,'2');assert.equal(result.tenant,'2');assert.deepEqual(events,query.includeRows==='1'?['foreground']:['foreground','interactive']);}
+ for(const query of [{},{includeRows:'0'},{includeRows:'1'}]){events.length=0;const result=await read(query,'2');assert.equal(result.tenant,'2');assert.deepEqual(events,['foreground']);}
+});
+
+test('an inline page can await a pending background balance without pausing that dependency',async()=>{
+ const {withMysqlWorkload,withMysqlInteractiveRead,waitForMysqlInteractiveReads}=await import('../src/mysql-workload.js');
+ const source=readFileSync(new URL('../src/services/mysql-runtime-services.js',import.meta.url),'utf8');
+ const body=source.match(/ordersPaged: ([\s\S]*?),\n  outboundRecords:/)?.[1];assert.ok(body);
+ const ready=deferred();const context=vm.createContext({String,withRequestReadCache:op=>op(),withMysqlWorkload,withMysqlInteractiveRead,ordersPagedMysql:()=>ready.promise});
+ const read=vm.runInContext('('+body+')',context),started=performance.now();
+ const result=read({includeCounts:'0',includeInventoryAvailability:'1'},'2');
+ await withMysqlWorkload('background',async()=>{await waitForMysqlInteractiveReads();ready.resolve('complete');});
+ assert.equal(await result,'complete');assert.ok(performance.now()-started<500,'must not wait for the interactive pause timeout');
 });

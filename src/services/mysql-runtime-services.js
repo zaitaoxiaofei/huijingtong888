@@ -919,10 +919,12 @@ export const mysqlRuntimeServices = {
   ordersPaged: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
     String(query.includeRows ?? query.include_rows ?? '1') === '0' ? 'background' : 'foreground',
     () => {
-      const needsCoverage = String(query.includeRows ?? query.include_rows ?? '1') === '0'
+      // Inline balances may await a cache refresh already running in the background.
+      const needsBackgroundResult = String(query.includeRows ?? query.include_rows ?? '1') === '0'
         || String(query.includeCounts ?? query.include_counts ?? '1') !== '0'
-        || ['pending_purchase', 'purchase_in_transit', 'purchase_records_missing'].includes(String(query.status || 'all'));
-      return needsCoverage ? ordersPagedMysql(query, tenantId)
+        || ['pending_purchase', 'purchase_in_transit', 'purchase_records_missing'].includes(String(query.status || 'all'))
+        || String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? '0') === '1';
+      return needsBackgroundResult ? ordersPagedMysql(query, tenantId)
         : withMysqlInteractiveRead(() => ordersPagedMysql(query, tenantId));
     }
   )),
@@ -1053,9 +1055,7 @@ export const mysqlRuntimeServices = {
   productInventoryAvailability: productInventoryAvailabilityMysql,
   orderInventoryAvailability: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
     'foreground',
-    () => String(query.includeRows || '') === '1'
-      ? orderInventoryAvailabilityMysql(query, tenantId)
-      : withMysqlInteractiveRead(() => orderInventoryAvailabilityMysql(query, tenantId))
+    () => orderInventoryAvailabilityMysql(query, tenantId)
   )),
   updateInventoryProductLeadTimes: updateInventoryProductLeadTimesMysql,
   fbpReplenishmentOrders: fbpReplenishmentOrdersMysql,

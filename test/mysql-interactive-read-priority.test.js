@@ -25,7 +25,7 @@ test('only ordinary row-only order pages pause scans; coverage-dependent pages r
  const seen=[];const context=vm.createContext({String,withRequestReadCache:op=>op(),withMysqlWorkload:(_,op)=>op(),withMysqlInteractiveRead:op=>{seen.push('interactive');return op();},ordersPagedMysql:async()=>seen.push('rows')});
  const read=vm.runInContext('('+body+')',context);
  for(const query of [{includeCounts:0},{include_counts:'0',include_rows:1,status:'all'}]){seen.length=0;await read(query);assert.deepEqual(seen,['interactive','rows']);}
- for(const query of [{},{includeCounts:1},{includeRows:0,includeCounts:0},...['pending_purchase','purchase_in_transit','purchase_records_missing'].map(status=>({status,includeCounts:0}))]){seen.length=0;await read(query);assert.deepEqual(seen,['rows']);}
+ for(const query of [{},{includeCounts:1},{includeRows:0,includeCounts:0},{includeCounts:0,includeInventoryAvailability:1},{includeCounts:0,include_inventory_availability:'1'},...['pending_purchase','purchase_in_transit','purchase_records_missing'].map(status=>({status,includeCounts:0}))]){seen.length=0;await read(query);assert.deepEqual(seen,['rows']);}
 });
 test('background read admission is serial, preserves priority, and recovers after errors without delaying foreground SQL',async()=>{
  const {withMysqlBackgroundReadAdmission,currentMysqlWorkload}=await import('../src/mysql-workload.js');
