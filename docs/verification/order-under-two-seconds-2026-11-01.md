@@ -67,3 +67,15 @@ Release 9d0807c passed the ordinary concurrent matrix: 15 calls, max/p95 1,424 m
 Keep transaction connections, callback behavior, nested business reads and rollback semantics unchanged. Serialize only transactions initiated in a background workload before promoting each admitted transaction. Foreground and nested transactions bypass this queue; failures do not poison later work, and the tail does not retain transaction return values. The tradeoff is slower concurrent background writers, with foreground capacity preserved.
 
 Validation: 19 focused local tests passed. Six independent socket-only MySQL cases passed: while a background transaction is held, a second remains unstarted and an interactive transaction commits; the held transaction then commits, the queued failure rolls back, and the following background transaction commits. Existing UTC, nested-read, pool isolation and recoverable queue saturation tests also pass. No SQL, accounting arithmetic, transaction reuse or UI styles change. Repeat cold/browser acceptance while normal synchronization is active.
+
+## Single scan and request-local enterprise reads
+
+Release 354b06b made browser next-page rendering 1,697 ms, but cold first rows remained 4,025 ms. Under the next metadata-concurrency run, two calls still exceeded 3 seconds, so acceptance remained open.
+
+Ordinary pagination scanned the same active filter once for COUNT(DISTINCT id) and again for page IDs. A grouped COUNT(*) OVER() now returns the filtered total with the page IDs from one statement. Metadata-only and empty/out-of-range pages retain the count fallback; inventory sort uses its existing full ID count. Add order ID descending as a stable tie-breaker for identical order timestamps (the old pagination plan could select different tied boundary rows).
+
+Same read-only production snapshot, five statuses × first/second/out-of-range pages: all 15 counts and ID sets equal under the stable tie order. Waiting-delivery total+IDs 2,681 → 995 ms and 2,269 → 733 ms; most other probes improved, while one delivering second-page probe regressed (951 → 1,152 ms), reinforcing the need for full post-rollout measurement.
+
+Also memoize the validated enterprise ID/default flag only within one order-list or inventory-read request. Order and logistics scope aliases share the result; the next request always checks active ownership again. No global permission cache is introduced. Unit coverage proves concurrent coalescing, tenant separation, failed-read retry, nested request contexts and revocation on the next request.
+
+Validation: 25 focused local cases passed; 11 independent MySQL cases passed, including pagination with tied timestamps, active print/search/status filters, default/customer ownership, out-of-range totals, manual holds, OGL membership and unchanged numeric profit/stock fields. SQL binding, encoding and syntax checks pass. No layout or accounting formula changes.

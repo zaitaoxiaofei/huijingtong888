@@ -1,3 +1,4 @@
+import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
@@ -3529,8 +3530,7 @@ export async function updatePackagingFeeRuleMysql(body = {}, personId = null) {
 }
 
 async function logisticsTenantScopeMysql(tenantId = "admin", alias = "l") {
-  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
-  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const { id: normalizedTenantId, defaultTenant } = await readRequestTenantContextMysql(tenantId);
   const hasTenantColumn = await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id");
   if (!hasTenantColumn) {
     throw Object.assign(new Error("物流规则企业隔离暂不可用：logistics_fee_rules.tenant_id 尚未迁移，请管理员先完成物流规则租户迁移。"), { statusCode: 503 });
@@ -30529,9 +30529,15 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
   }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id)));
 }
 
+async function readRequestTenantContextMysql(tenantId = "admin") {
+  return memoRequestRead(`tenant-context:${String(tenantId || "admin").trim()}`, async () => {
+    const id = await resolveShopTenantIdMysql(tenantId);
+    return Object.freeze({ id, defaultTenant: await isDefaultShopTenantMysql(id) });
+  });
+}
+
 async function orderListTenantScopeMysql(tenantId = "admin") {
-  const id = await resolveShopTenantIdMysql(tenantId);
-  const defaultTenant = await isDefaultShopTenantMysql(id);
+  const { id, defaultTenant } = await readRequestTenantContextMysql(tenantId);
   for (const table of ["shops", "sku_mappings", "products", "procurement_requests", "inventory_movements", "product_components", "logistics_fee_rules", "inbound_records", "purchase_orders", "purchase_order_items"]) {
     if (!await mysqlSchemaColumnExists(table, "tenant_id")) {
       throw Object.assign(new Error(`企业订单列表暂不可用：${table}.tenant_id 尚未迁移，无法安全隔离订单及关联数据。`), { statusCode: 503 });
@@ -30705,10 +30711,10 @@ function orderQuickFilterOrderSqlMysql(query = {}, tenantScope = null) {
   )`;
   const nearDeadline = String(query.nearShipmentDeadline || query.near_shipment_deadline || "") === "1";
   const procurementTransit = String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1";
-  if (nearDeadline && procurementTransit) return `${deadline} ASC, ${oldestInbound} ASC, o.ordered_at DESC`;
-  if (nearDeadline) return `${deadline} ASC, o.ordered_at DESC`;
-  if (procurementTransit) return `${oldestInbound} ASC, o.ordered_at DESC`;
-  return "o.ordered_at DESC";
+  if (nearDeadline && procurementTransit) return `${deadline} ASC, ${oldestInbound} ASC, o.ordered_at DESC, o.id DESC`;
+  if (nearDeadline) return `${deadline} ASC, o.ordered_at DESC, o.id DESC`;
+  if (procurementTransit) return `${oldestInbound} ASC, o.ordered_at DESC, o.id DESC`;
+  return "o.ordered_at DESC, o.id DESC";
 }
 
 function orderProductShippingExistsSqlMysql(methods = []) {
@@ -31407,12 +31413,13 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   // Pagination must use the active filter, not the all-status tab count.
   // Status counts deliberately omit filters such as the selected status,
   // search, mark, fulfillment type, and print state.
-  const totalPromise = mysqlQueryOne(`
+  const loadFilteredTotal = () => mysqlQueryOne(`
     SELECT COUNT(DISTINCT o.id) AS total
     FROM orders o
     ${filtered.joins}
     WHERE ${filtered.where}
   `, filtered.params);
+  let totalPromise = includeRows ? Promise.resolve(null) : loadFilteredTotal();
   const start = (page - 1) * pageSize;
   let inventoryTotal = null;
   let rows = [];
@@ -31432,7 +31439,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, { summaryOnly: true });
     } else {
       const idRows = await mysqlQuery(`
-        SELECT o.id
+        SELECT o.id, COUNT(*) OVER() AS filtered_total
         FROM orders o
         ${filtered.joins}
         WHERE ${filtered.where}
@@ -31440,6 +31447,10 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
         ORDER BY ${orderQuickFilterOrderSqlMysql(query, tenantScope)}
         LIMIT ? OFFSET ?
       `, [...filtered.params, pageSize, start]);
+      // The window runs after grouping, so the page and its filtered total
+      // come from one statement. An out-of-range page still needs its total.
+      totalPromise = idRows.length && idRows[0].filtered_total != null
+        ? Promise.resolve({ total: idRows[0].filtered_total }) : loadFilteredTotal();
       rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
         idRows.map((row) => row.id),
         needsCoverageForFilter || includeCounts ? coverage : null,

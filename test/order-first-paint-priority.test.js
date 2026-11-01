@@ -1,3 +1,4 @@
+import {withRequestReadCache} from '../src/services/request-read-cache.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -41,7 +42,7 @@ test('secondary order counts and initial inventory hydration are background, whi
   const contexts = [];
   const extract = (name, nextName) => source.slice(source.indexOf(`  ${name}:`), source.indexOf(`  ${nextName}:`, source.indexOf(`  ${name}:`)));
   const callbacks = vm.runInNewContext(`({${extract('ordersPaged', 'outboundRecords')}${extract('orderInventoryAvailability', 'updateInventoryProductLeadTimes')}})`, {
-    withMysqlWorkload, String,
+    withRequestReadCache, withMysqlWorkload, String,
     ordersPagedMysql: async (query, tenant) => contexts.push({ lane: currentMysqlWorkload(), tenant, query }),
     orderInventoryAvailabilityMysql: async (query, tenant) => contexts.push({ lane: currentMysqlWorkload(), tenant, query })
   });
