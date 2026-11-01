@@ -1,5 +1,5 @@
 import mysql from "mysql2/promise";
-import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads } from "./mysql-workload.js";
+import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads, withMysqlBackgroundReadAdmission } from "./mysql-workload.js";
 import { config } from "./config.js";
 
 const mysqlPools = new Map();
@@ -165,6 +165,10 @@ async function ensureMysqlSessionUtc(connection) {
 }
 
 export async function mysqlQuery(sql, params = []) {
+  return withMysqlBackgroundReadAdmission(() => runMysqlQuery(sql, params));
+}
+
+async function runMysqlQuery(sql, params) {
   const connection = await getMysqlConnection();
   try {
     await ensureMysqlSessionUtc(connection);
