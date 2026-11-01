@@ -21,6 +21,7 @@ const auth=getActivePinia()?useAuthStore():{user:null};
 const inventoryOnly=computed(()=>props.inventoryMode || (!!auth.user && !hasPermission(auth.user,'procurement')));
 function workflowAction(action,type) { void workflowPanel.value?.open(action,type); }
 const emit = defineEmits(['update:modelValue', 'saved']);
+function notifySaved() { emit('saved', { productId: productId.value }); }
 const visible = computed({ get: () => props.modelValue, set: value => emit('update:modelValue', value) });
 const directStocktake = computed(() => props.initialAction === 'stocktake' && props.stocktakeEnabled);
 const stockFormVisible = computed({
@@ -83,7 +84,7 @@ async function reconcileBatch({ inbound_id, allocations }) {
     await apiClient.post('/api/procurement/ledger/preview', payload);
     await apiClient.post('/api/procurement/ledger', payload);
     ElMessage.success('采购来源已关联，库存数量未改变');
-    await load(); emit('saved'); return true;
+    await load(); notifySaved(); return true;
   } catch (error) { if (error?.message) ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
@@ -394,9 +395,9 @@ async function save() {
     catch(error){ElMessage.warning(`库存已保存，缺口反馈未送达：${error.message}；可从库存管理重新反馈`);}
     if(savedScope!==currentApiCacheScope())return;
     formVisible.value = false;
-    if (directStocktake.value) { visible.value = false; emit('saved'); return; }
+    if (directStocktake.value) { visible.value = false; notifySaved(); return; }
     await load();
-    emit('saved');
+    notifySaved();
   } catch (error) { ElMessage.error(error.message); }
   finally { saving.value = false; }
 }
@@ -442,9 +443,9 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
     <el-alert v-if="loadError" type="error" :closable="false" title="库存明细加载失败，请点击刷新对账重试" :description="loadError" />
     <div v-loading="loading" class="ledger-detail-body" :class="{ 'is-loading': loading }" element-loading-text="正在读取本地库存与订单占用…">
       <template v-if="data">
-        <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span><InventoryCompositionBadge :key="identityVersion" :product="data.product" resolve-on-mount/><InventoryProductEditAction v-if="stocktakeEnabled" :product-id="Number(productId)" @saved="identityVersion++;load(productId,{syncFbpOnLoad:false});emit('saved')"/></div>
-        <InventoryWorkflowPanel compact v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" :initial-inbound-id="initialInboundId" @loaded="value=>workflow=value" @saved="load();emit('saved')" />
-        <InventoryFlowDiagram @saved="load(productId,{syncFbpOnLoad:false});emit('saved')" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
+        <div v-if="!orderOverview||!showOrderBreakdown" class="ledger-product"><el-image class="ledger-image" :src="`/api/products/${productId}/image?thumb=1&w=180`" fit="cover" :preview-src-list="[`/api/products/${productId}/image` ]" :initial-index="0" preview-teleported><template #error><span>无图</span></template></el-image><strong>{{ data.product.name }}</strong><span>库存 ID：{{ data.product.inventory_number || '—' }}</span><span>{{ data.product.code }}</span><InventoryCompositionBadge :key="identityVersion" :product="data.product" resolve-on-mount/><InventoryProductEditAction v-if="stocktakeEnabled" :product-id="Number(productId)" @saved="identityVersion++;load(productId,{syncFbpOnLoad:false});notifySaved()"/></div>
+        <InventoryWorkflowPanel compact v-if="!directStocktake" ref="workflowPanel" :ledger="data" :order-id="orderId" :initial-action="initialAction" :initial-inbound-id="initialInboundId" @loaded="value=>workflow=value" @saved="load();notifySaved()" />
+        <InventoryFlowDiagram @saved="load(productId,{syncFbpOnLoad:false});notifySaved()" :workflow="workflow" @workflow-action="workflowAction" @stocktake="edit('stocktake')" :ledger="data" :fbp-loading="fbpLoading || fbpSyncing" :fbp-error="fbpError" :fbp-syncing="fbpSyncing" :can-sync-fbp="stocktakeEnabled" @sync-fbp="syncFbp()" @retry-fbp="loadFbp()" :inventory-mode="inventoryOnly" @select-tab="selectFlowTab" @navigate="visible = false"><template #records><el-popover trigger="click" width="420"><template #reference><el-button size="small">核对记录</el-button></template><div class="ledger-record-buttons"><el-button v-for="[tab,label] in recordTabs" :key="tab" size="small" @click="openRecords(tab)">{{label}}</el-button></div></el-popover>    <el-popover v-if="!orderOverview && !inventoryOnly" trigger="click" width="500"><template #reference><el-button size="small">切换商品</el-button></template>
       <el-select :model-value="productId || undefined" filterable remote :remote-method="search" :loading="searching" placeholder="搜索全部库存商品名称或编码" @change="changeProduct" style="width:460px">
         <el-option v-if="data && !products.some(p => Number(p.id) === productId)" :value="productId" :label="data.product.name" />
         <el-option v-for="p in products" :key="p.id" :value="Number(p.id)" :label="`${p.name} · ${p.code || p.inventory_id || ''}`" />

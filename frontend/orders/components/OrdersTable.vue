@@ -652,6 +652,7 @@ function procurementTimeText(row) {
               <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
+            <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">库存已变更，正在核对或等待重试</small>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
               <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
@@ -684,7 +685,8 @@ function procurementTimeText(row) {
 
       <el-table-column label="采购信息" min-width="192">
         <template #default="{ row }">
-          <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
+          <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">采购覆盖待核对</small>
+          <div v-else-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
             <strong>{{ procurementTimeText(row) }}</strong>
             <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
             <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">全部入库<template v-if="row.procurementState.latestReceivedAt"> · {{ formatDateTime(row.procurementState.latestReceivedAt, { assumeUtcWhenNaive: true }) }}</template></small>
@@ -705,7 +707,7 @@ function procurementTimeText(row) {
           </div>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
           <small v-else class="orders-cell-meta-line">暂无关联采购</small>
-          <el-button v-if="canRemindProcurement && !isFbpOrder(row)" link type="warning" size="small" @click="openStockTopup(row)">提醒采购</el-button>
+          <el-button v-if="canRemindProcurement && !isFbpOrder(row) && !row.inventory_refresh_pending" link type="warning" size="small" @click="openStockTopup(row)">提醒采购</el-button>
         </template>
       </el-table-column>
 
@@ -813,7 +815,7 @@ function procurementTimeText(row) {
       </template>
     </Teleport>
 
-    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved')">
+    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
       <template #management>
         <template v-for="row in [inventoryRow]" :key="row.id">
           <p>账面参考与子产品绑定管理（不计入本单需求）</p>

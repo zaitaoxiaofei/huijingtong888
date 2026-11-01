@@ -87,6 +87,9 @@ const {
   totalPages,
   selectedOrderIds,
   loadOrders,
+  refreshInventoryRows,
+  inventoryRefreshNotice,
+  inventoryRefreshFailed,
   loadLogisticsOptions,
   submitFilters,
   changeStatus,
@@ -728,10 +731,10 @@ function rowAvailableActions(row) {
   const isAwaitingPackaging = ["awaiting_packaging", "unbound", "stock_issue"].includes(displayStateKey);
   const beforeTransit = !isCancelled && !isDelivered && !isDispute && !isDelivering;
   const apiActions = row?.availableActions && typeof row.availableActions === "object" ? row.availableActions : {};
-  const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false;
+  const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false && !row.inventory_refresh_pending;
   const quantitySummary = Number(row?.total_quantity || row?.quantity_total || row?.quantity || row?.item_count || 1);
   const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
-  const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
+  const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false && !row.inventory_refresh_pending;
   const isRegistering = statusText.includes("acceptance_in_progress") || statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
   const ozonActions = Array.isArray(row?.ozon_available_actions) ? row.ozon_available_actions : [];
   const labelReady = ozonActions.some((action) => ["label_download", "label_download_small"].includes(action));
@@ -873,6 +876,7 @@ function buildProcurementState(row = {}) {
   if (coverage?.stock_location === 'FBP' || row.fulfillment_type_key === 'fbp') {
     return { handled: true, detail: '官方仓履约，无需采购', hasOrderIncoming: false, inboundRecordCount: 0 };
   }
+  if (row.inventory_refresh_pending) return { handled: false, detail: '库存已变更，待刷新', hasOrderIncoming: false, inboundRecordCount: 0 };
   if (coverage) {
     const allBatches = coverage.batches || [];
     const batches = allBatches.filter(batch => batch.status === 'pending_arrival');
@@ -1803,6 +1807,11 @@ function bulkPrepareSelected() {
     : "确认批量备货所选订单？";
   ElMessageBox.confirm(message, "批量备货", { type: "warning" })
     .then(() => bulkPrepare(ids));
+}
+
+async function handleInventoryRowsSaved(change = {}) {
+  orderDetailCache.clear();
+  await refreshInventoryRows(change);
 }
 
 async function openDrawer(mode, orderId) {
@@ -2755,6 +2764,7 @@ onBeforeUnmount(() => {
       >
         <template #quick-filters><OrdersQuickFilters :filters="vm.filters" @apply="submitFilters" /></template>
       </OrdersStatusTabs>
+      <div v-if="inventoryRefreshNotice" class="orders-toolbar-status" role="status">{{ inventoryRefreshNotice }} <el-button v-if="inventoryRefreshFailed" size="small" link type="primary" @click="handleInventoryRowsSaved()">重试库存刷新</el-button></div>
     </OrdersToolbar>
 
     <OglDispatchComposer v-if="oglComposer.visible" :manual-ship="oglComposer.manualShip" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" :order-rows="selectedRows" @open-order="id => openDrawer('detail', id)" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
@@ -2772,7 +2782,7 @@ onBeforeUnmount(() => {
     <OglDispatchPanel :key="oglDispatchPanel.version" v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" @compose="id => openOglDispatch('create', id)" />
 
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
-    <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
+    <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="handleInventoryRowsSaved" />
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
@@ -2857,7 +2867,7 @@ onBeforeUnmount(() => {
         @view-procurement-details="handleViewProcurementDetails"
         @review-procurement-records="openOrderProcurementRecords"
         @view-inventory-detail="openInventoryDetail"
-        @inventory-saved="loadOrders({ forceRefresh: true, silent: true, includeCounts: true })"
+        @inventory-saved="handleInventoryRowsSaved"
         @quick-history-purchase="historicalPurchaseProducts = $event"
         @open-ogl-batch="id => openOglDispatch('history', id)"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"

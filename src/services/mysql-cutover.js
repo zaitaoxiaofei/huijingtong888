@@ -2907,9 +2907,22 @@ export async function orderInventoryAvailabilityMysql(query = {}, tenantId = "ad
   }
   const defaultTenantId = await resolveShopTenantIdMysql("admin");
   const requestTenantId = String(tenantId) === "admin" ? null : await resolveShopTenantIdMysql(tenantId);
-  return loadOrderInventoryAvailability({ query: mysqlQuery, loadBalances: inventoryProductBalanceMysql }, query, {
+  const result = await loadOrderInventoryAvailability({ query: mysqlQuery, loadBalances: inventoryProductBalanceMysql }, query, {
     tenantId: requestTenantId, defaultTenantId
   });
+  if (String(query.includeRows || '') !== '1' || !result.rows.length) return result;
+  const scope = await orderListTenantScopeMysql(tenantId);
+  const ids = result.rows.map(row => row.order_id);
+  // Reconcile every competing order for these products, not just the visible
+  // orders, so a shared accessory cannot be allocated twice after a stocktake.
+  const productIds = [...new Set(result.rows.flatMap(row => row.inventory_availability.map(fact => fact.product_id)))];
+  const coverage = productIds.length ? orderProcurementCoverageMysql({
+    productIds, tenantId: scope.id, includeLegacyTenantNull: scope.defaultTenant, fresh: true
+  }) : Promise.resolve(new Map());
+  const rows = await orderRowsByIdsMysql(ids, coverage, tenantId, { summaryOnly: true });
+  const byId = new Map(rows.map(row => [Number(row.id), row]));
+  if (byId.size !== ids.length) throw Object.assign(new Error("订单状态已变化，请重新刷新库存"), { statusCode: 409 });
+  return { rows: result.rows.map(facts => ({ ...facts, order: { ...byId.get(facts.order_id), inventory_availability: facts.inventory_availability } })) };
 }
 
 export async function orderProcurementBatchesMysql(orderId, tenantId = "admin") {
@@ -29984,7 +29997,7 @@ export async function ordersMysql(tenantId = "admin") {
   return orderRowsByIdsMysql(ids.map((row) => row.id), undefined, tenantId);
 }
 
-export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin") {
+export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false } = {}) {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
@@ -29998,16 +30011,22 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     coveragePromise = orderTenantCoverageMysql(tenantScope);
     coveragePromise.catch(() => {});
   }
+  // Resolve one active mapping, preferring the explicit binding. Avoid an OR
+  // join that scans every mapping and can multiply profit/quantity aggregates.
+  const mappingJoin = `LEFT JOIN sku_mappings sm ON sm.id = COALESCE(
+    (SELECT direct_mapping.id FROM sku_mappings direct_mapping
+      WHERE direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id
+        AND direct_mapping.active = 1 AND ${orderTenantPredicateMysql("direct_mapping", tenantScope)}),
+    (SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
+      WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
+        AND fallback_mapping.active = 1 AND ${orderTenantPredicateMysql("fallback_mapping", tenantScope)})
+  )`;
   const rows = await mysqlQuery(`
     WITH scoped_order_items AS (
-      SELECT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, scoped_product.id AS product_id
+      SELECT DISTINCT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, sm.id AS mapping_id, scoped_product.id AS product_id
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
-      LEFT JOIN sku_mappings sm ON (
-        (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
-        AND sm.active = 1
-        ${tenantScope ? `AND ${orderTenantPredicateMysql("sm", tenantScope)}` : ""}
-      )
+      ${mappingJoin}
       LEFT JOIN products scoped_product ON scoped_product.id = sm.product_id AND ${orderTenantPredicateMysql("scoped_product", tenantScope)}
       WHERE oi.order_id IN (${cleanIds.map(() => "?").join(",")})
         ${tenantScope ? `AND o.shop_id IN (SELECT tenant_shop.id FROM shops tenant_shop WHERE ${orderTenantPredicateMysql("tenant_shop", tenantScope)})` : ""}
@@ -30045,13 +30064,13 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       (SELECT COALESCE(SUM(revenue_oi.sale_price * revenue_oi.quantity), 0) FROM order_items revenue_oi WHERE revenue_oi.order_id = o.id) AS revenue,
       COALESCE(SUM(COALESCE(oi.estimated_profit, opi.net_profit_cny, 0)), 0) AS estimated_profit,
       COALESCE(SUM(CASE WHEN opi.profit_status = 'accrued' OR oi.settlement_state = 'accrued' THEN COALESCE(opi.net_profit_cny, oi.actual_profit, oi.estimated_profit, 0) ELSE 0 END), 0) AS actual_profit,
-      COALESCE(SUM(opi.purchase_cost_cny), 0) AS profit_purchase_cost,
-      COALESCE(SUM(opi.domestic_shipping_cny), 0) AS profit_domestic_shipping,
-      COALESCE(SUM(opi.international_shipping_cny), 0) AS profit_international_shipping,
-      COALESCE(SUM(opi.packaging_cost_cny), 0) AS profit_packaging_cost,
-      COALESCE(SUM(opi.commission_fee_cny), 0) AS profit_commission_fee,
-      COALESCE(SUM(opi.ozon_service_fee_cny), 0) AS profit_ozon_service_fee,
-      COALESCE(SUM(opi.return_loss_cny), 0) AS profit_return_loss,
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.purchase_cost_cny), 0) AS profit_purchase_cost,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.domestic_shipping_cny), 0) AS profit_domestic_shipping,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.international_shipping_cny), 0) AS profit_international_shipping,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.packaging_cost_cny), 0) AS profit_packaging_cost,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.commission_fee_cny), 0) AS profit_commission_fee,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.ozon_service_fee_cny), 0) AS profit_ozon_service_fee,`}
+      ${summaryOnly ? '' : `COALESCE(SUM(opi.return_loss_cny), 0) AS profit_return_loss,`}
       GROUP_CONCAT(DISTINCT oi.settlement_state) AS settlement_states,
       GROUP_CONCAT(DISTINCT opi.profit_status) AS profit_statuses,
       GROUP_CONCAT(DISTINCT oi.ozon_sku) AS skus,
@@ -30086,8 +30105,8 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(stock.fbs_present, 0), ':', COALESCE(stock.fbp_present, 0), ':', COALESCE(sku_recipe_stock.local_stock, parent_component_stock.local_stock, local_stock.local_stock, 0))) AS sku_stock_summaries,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', COALESCE(parent_component_stock.component_count, 0))) AS sku_component_counts,
       GROUP_CONCAT(DISTINCT CONCAT(oi.ozon_sku, ':', GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.incoming_stock, 0)))) AS sku_incoming_summaries,
-      GROUP_CONCAT(DISTINCT purchase_info.purchase_order_numbers) AS purchase_order_numbers,
-      GROUP_CONCAT(DISTINCT purchase_info.purchase_tracking_numbers) AS purchase_tracking_numbers,
+      ${summaryOnly ? '' : `GROUP_CONCAT(DISTINCT purchase_info.purchase_order_numbers) AS purchase_order_numbers,`}
+      ${summaryOnly ? '' : `GROUP_CONCAT(DISTINCT purchase_info.purchase_tracking_numbers) AS purchase_tracking_numbers,`}
       COALESCE(SUM(procurement_allocation.allocated_quantity), 0) AS procurement_allocated_quantity,
       COALESCE(
         MAX(procurement_allocation.latest_purchase_at),
@@ -30124,12 +30143,12 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       MAX(CASE WHEN COALESCE(purchase_info.pending_incoming_quantity, 0) > 0 OR parent_component_stock.inbound_record_ids IS NOT NULL THEN 1 ELSE 0 END) AS procurement_has_product_incoming,
       MAX(GREATEST(COALESCE(purchase_info.pending_incoming_quantity, 0), COALESCE(parent_component_stock.component_incoming_quantity, 0))) AS procurement_product_incoming_quantity,
       GROUP_CONCAT(DISTINCT procurement_allocation.pending_inbound_record_ids) AS procurement_inbound_record_ids,
-      COALESCE(MAX(procurement_allocation.person_name), MAX(NULLIF(pr_person.name, '')), MAX(NULLIF(pr_creator.name, '')), MAX(NULLIF(mark_creator.name, '')), '未记录') AS procurement_person_name,
+      ${summaryOnly ? '' : `COALESCE(MAX(procurement_allocation.person_name), MAX(NULLIF(pr_person.name, '')), MAX(NULLIF(pr_creator.name, '')), MAX(NULLIF(mark_creator.name, '')), '未记录') AS procurement_person_name,`}
       MAX(procurement_allocation.purchase_order_no) AS procurement_purchase_order_no,
-      MAX(procurement_allocation.product_name) AS procurement_product_name,
+      ${summaryOnly ? '' : `MAX(procurement_allocation.product_name) AS procurement_product_name,`}
       COALESCE(MAX(procurement_allocation.pending_incoming_quantity), 0) AS procurement_inbound_quantity,
-      COALESCE(MAX(procurement_allocation.amount), 0) AS procurement_inbound_amount,
-      COALESCE(MAX(procurement_allocation.shipping_amount), 0) AS procurement_inbound_shipping_amount,
+      ${summaryOnly ? '' : `COALESCE(MAX(procurement_allocation.amount), 0) AS procurement_inbound_amount,`}
+      ${summaryOnly ? '' : `COALESCE(MAX(procurement_allocation.shipping_amount), 0) AS procurement_inbound_shipping_amount,`}
       GROUP_CONCAT(DISTINCT procurement_allocation.request_ids) AS procurement_request_ids,
       MIN(procurement_allocation.request_unallocated_quantity) AS procurement_request_unallocated_quantity,
       COUNT(DISTINCT oi.id) AS procurement_total_item_count,
@@ -30167,11 +30186,8 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
-    LEFT JOIN sku_mappings sm ON (
-      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
-      AND sm.active = 1
-      ${tenantScope ? `AND ${orderTenantPredicateMysql("sm", tenantScope)}` : ""}
-    )
+    LEFT JOIN scoped_order_items page_item ON page_item.order_item_id = oi.id AND page_item.order_id = o.id
+    LEFT JOIN sku_mappings sm ON sm.id = page_item.mapping_id
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("p", tenantScope)}` : ""}
     LEFT JOIN online_products op ON op.shop_id = o.shop_id AND op.ozon_sku = oi.ozon_sku
     LEFT JOIN (
@@ -30201,12 +30217,13 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       FROM sku_inventory_recipe_items ri
       JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ri.product_id
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_delta) AS local_stock
-        FROM inventory_movements
-        WHERE status = 'posted'
-          ${tenantScope ? `AND ${orderTenantPredicateMysql("", tenantScope)}` : ""}
-          AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
-        GROUP BY product_id
+        SELECT movement.product_id, SUM(movement.quantity_delta) AS local_stock
+        FROM inventory_movements movement
+        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = movement.product_id
+        WHERE movement.status = 'posted'
+          ${tenantScope ? `AND ${orderTenantPredicateMysql("movement", tenantScope)}` : ""}
+          AND ${localStockLocationPredicateMysql("movement")}
+        GROUP BY movement.product_id
       ) stock ON stock.product_id = ri.product_id
       GROUP BY ri.recipe_id
     ) sku_recipe_stock ON sku_recipe_stock.recipe_id = sku_recipe.id
@@ -30221,11 +30238,11 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
         SUM(COALESCE(incoming.incoming_stock, 0)) AS component_incoming_quantity,
         MAX(incoming.latest_purchase_at) AS latest_purchase_at,
         GROUP_CONCAT(DISTINCT incoming.inbound_record_ids) AS inbound_record_ids,
-        MAX(incoming.person_name) AS person_name,
+        ${summaryOnly ? '' : `MAX(incoming.person_name) AS person_name,`}
         MAX(incoming.purchase_order_no) AS purchase_order_no,
-        MAX(incoming.product_name) AS product_name,
-        MAX(incoming.amount) AS amount,
-        MAX(incoming.shipping_amount) AS shipping_amount
+        ${summaryOnly ? '' : `MAX(incoming.product_name) AS product_name,`}
+        ${summaryOnly ? '' : `MAX(incoming.amount) AS amount,`}
+        ${summaryOnly ? 'NULL AS shipping_amount' : 'MAX(incoming.shipping_amount) AS shipping_amount'}
       FROM product_components pc
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("component_product", tenantScope)} AND ${orderTenantPredicateMysql("pc", tenantScope)}` : ""}
@@ -30243,17 +30260,17 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
           SUM(ir.quantity) AS incoming_stock,
           MAX(COALESCE(po.purchased_at, ir.created_at)) AS latest_purchase_at,
           GROUP_CONCAT(DISTINCT ir.id ORDER BY ir.id) AS inbound_record_ids,
-          MAX(COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录')) AS person_name,
+          ${summaryOnly ? '' : `MAX(COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录')) AS person_name,`}
           MAX(po.order_no) AS purchase_order_no,
-          MAX(product.name) AS product_name,
-          MAX(ir.amount) AS amount,
-          MAX(ir.shipping_amount) AS shipping_amount
+          ${summaryOnly ? '' : `MAX(product.name) AS product_name,`}
+          ${summaryOnly ? '' : `MAX(ir.amount) AS amount,`}
+          ${summaryOnly ? 'NULL AS shipping_amount' : 'MAX(ir.shipping_amount) AS shipping_amount'}
         FROM inbound_records ir
         JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ir.product_id
         LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id AND ${orderTenantPredicateMysql("po", tenantScope)}
-        LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pe.id AND member.active = 1)` : ""}
-        LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = creator.id AND member.active = 1)` : ""}
-        LEFT JOIN products product ON product.id = ir.product_id
+        ${summaryOnly ? '' : `LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pe.id AND member.active = 1)` : ""}`}
+        ${summaryOnly ? '' : `LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = creator.id AND member.active = 1)` : ""}`}
+        ${summaryOnly ? '' : `LEFT JOIN products product ON product.id = ir.product_id`}
         WHERE ir.status = 'pending_arrival' AND ${orderTenantPredicateMysql("ir", tenantScope)} AND (ir.purchase_order_id IS NULL OR po.id IS NOT NULL)
         GROUP BY ir.product_id
       ) incoming ON incoming.product_id = pc.component_product_id
@@ -30261,24 +30278,25 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     ) parent_component_stock ON parent_component_stock.product_id = p.id
     LEFT JOIN (
       SELECT ir.product_id,
-        GROUP_CONCAT(DISTINCT po.order_no ORDER BY po.order_no SEPARATOR ',') AS purchase_order_numbers,
-        GROUP_CONCAT(DISTINCT COALESCE(NULLIF(ir.note, ''), NULLIF(ir.purchase_url, ''), po.order_no) ORDER BY ir.id SEPARATOR ',') AS purchase_tracking_numbers,
+        ${summaryOnly ? '' : `GROUP_CONCAT(DISTINCT po.order_no ORDER BY po.order_no SEPARATOR ',') AS purchase_order_numbers,`}
+        ${summaryOnly ? '' : `GROUP_CONCAT(DISTINCT COALESCE(NULLIF(ir.note, ''), NULLIF(ir.purchase_url, ''), po.order_no) ORDER BY ir.id SEPARATOR ',') AS purchase_tracking_numbers,`}
         SUM(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity ELSE 0 END) AS pending_incoming_quantity,
         GROUP_CONCAT(DISTINCT CASE WHEN ir.status = 'pending_arrival' THEN ir.id END ORDER BY ir.id SEPARATOR ',') AS pending_inbound_record_ids,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录') END) AS pending_person_name,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN po.order_no END) AS pending_purchase_order_no,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN product.name END) AS pending_product_name,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity END) AS pending_quantity,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.amount END) AS pending_amount,
-        MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.shipping_amount END) AS pending_shipping_amount,
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(NULLIF(pe.name, ''), NULLIF(creator.name, ''), '未记录') END) AS pending_person_name,`}
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN po.order_no END) AS pending_purchase_order_no,`}
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN product.name END) AS pending_product_name,`}
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.quantity END) AS pending_quantity,`}
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.amount END) AS pending_amount,`}
+        ${summaryOnly ? '' : `MAX(CASE WHEN ir.status = 'pending_arrival' THEN ir.shipping_amount END) AS pending_shipping_amount,`}
         MAX(CASE WHEN ir.status = 'pending_arrival' THEN COALESCE(po.purchased_at, ir.created_at) END) AS latest_incoming_purchase_at
       FROM inbound_records ir
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = ir.product_id
       LEFT JOIN purchase_orders po ON po.id = ir.purchase_order_id AND ${orderTenantPredicateMysql("po", tenantScope)}
-      LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pe.id AND member.active = 1)` : ""}
-      LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = creator.id AND member.active = 1)` : ""}
-      LEFT JOIN products product ON product.id = ir.product_id
+      ${summaryOnly ? '' : `LEFT JOIN people pe ON pe.id = ir.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pe.id AND member.active = 1)` : ""}`}
+      ${summaryOnly ? '' : `LEFT JOIN people creator ON creator.id = po.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = creator.id AND member.active = 1)` : ""}`}
+      ${summaryOnly ? '' : `LEFT JOIN products product ON product.id = ir.product_id`}
       WHERE ir.purchase_order_id IS NOT NULL AND ${orderTenantPredicateMysql("ir", tenantScope)} AND po.id IS NOT NULL
+        ${summaryOnly ? "AND ir.status = 'pending_arrival'" : ''}
       GROUP BY ir.product_id
     ) purchase_info ON purchase_info.product_id = p.id
     LEFT JOIN (
@@ -30290,10 +30308,10 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
         MAX(TIMESTAMPDIFF(DAY, request.created_at, CURRENT_TIMESTAMP)) AS in_transit_days,
         MAX(request.quantity) AS purchase_quantity,
         MAX(allocation_purchase.order_no) AS purchase_order_no,
-        MAX(allocation_product.name) AS product_name,
-        MAX(request.amount) AS amount,
-        MAX(request.shipping_amount) AS shipping_amount,
-        MAX(COALESCE(NULLIF(request_person.name, ''), NULLIF(request_creator.name, ''), '未记录')) AS person_name,
+        ${summaryOnly ? '' : `MAX(allocation_product.name) AS product_name,`}
+        ${summaryOnly ? '' : `MAX(request.amount) AS amount,`}
+        ${summaryOnly ? '' : `MAX(request.shipping_amount) AS shipping_amount,`}
+        ${summaryOnly ? '' : `MAX(COALESCE(NULLIF(request_person.name, ''), NULLIF(request_creator.name, ''), '未记录')) AS person_name,`}
         MAX(CASE
           WHEN request.status NOT IN ('done', 'cancelled', 'inbound_done')
             AND TIMESTAMPDIFF(HOUR, request.created_at, CURRENT_TIMESTAMP) >= 72 THEN 1
@@ -30306,10 +30324,10 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN procurement_requests request ON request.id = allocation.procurement_request_id
         AND request.status != 'cancelled'
         ${tenantScope ? `AND ${orderTenantPredicateMysql("request", tenantScope)}` : ""}
-      LEFT JOIN people request_person ON request_person.id = request.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = request_person.id AND member.active = 1)` : ""}
-      LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = request_creator.id AND member.active = 1)` : ""}
+      ${summaryOnly ? '' : `LEFT JOIN people request_person ON request_person.id = request.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = request_person.id AND member.active = 1)` : ""}`}
+      ${summaryOnly ? '' : `LEFT JOIN people request_creator ON request_creator.id = request.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = request_creator.id AND member.active = 1)` : ""}`}
       LEFT JOIN purchase_orders allocation_purchase ON allocation_purchase.id = request.purchase_order_id AND ${orderTenantPredicateMysql("allocation_purchase", tenantScope)}
-      LEFT JOIN products allocation_product ON allocation_product.id = request.product_id ${tenantScope ? `AND ${orderTenantPredicateMysql("allocation_product", tenantScope)}` : ""}
+      ${summaryOnly ? '' : `LEFT JOIN products allocation_product ON allocation_product.id = request.product_id ${tenantScope ? `AND ${orderTenantPredicateMysql("allocation_product", tenantScope)}` : ""}`}
       LEFT JOIN inbound_records allocation_inbound ON allocation_inbound.purchase_order_id = request.purchase_order_id
         AND allocation_inbound.product_id = request.product_id
         AND allocation_inbound.status = 'pending_arrival' AND ${orderTenantPredicateMysql("allocation_inbound", tenantScope)}
@@ -30329,9 +30347,9 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     ) procurement_allocation ON procurement_allocation.order_item_id = oi.id
     LEFT JOIN procurement_requests pr_source ON pr_source.source_order_item_id = oi.id AND pr_source.status NOT IN ('cancelled', 'pending', 'suggested') ${tenantScope ? `AND ${orderTenantPredicateMysql("pr_source", tenantScope)}` : ""}
     LEFT JOIN order_item_procurement_marks oipm ON oipm.order_item_id = oi.id AND oipm.status = 'handled'
-    LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pr_person.id AND member.active = 1)` : ""}
-    LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pr_creator.id AND member.active = 1)` : ""}
-    LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = mark_creator.id AND member.active = 1)` : ""}
+    ${summaryOnly ? '' : `LEFT JOIN people pr_person ON pr_person.id = pr_source.person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pr_person.id AND member.active = 1)` : ""}`}
+    ${summaryOnly ? '' : `LEFT JOIN people pr_creator ON pr_creator.id = pr_source.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = pr_creator.id AND member.active = 1)` : ""}`}
+    ${summaryOnly ? '' : `LEFT JOIN people mark_creator ON mark_creator.id = oipm.created_by_person_id ${tenantScope ? `AND EXISTS (SELECT 1 FROM tenant_members member WHERE ${orderTenantPredicateMysql("member", tenantScope)} AND member.person_id = mark_creator.id AND member.active = 1)` : ""}`}
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     LEFT JOIN logistics_fee_rules visible_rule ON visible_rule.id = oi.frozen_logistics_rule_id AND ${billingScope.sql}
     LEFT JOIN order_marks om ON om.order_id = o.id
@@ -30370,9 +30388,13 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
-    LEFT JOIN sku_mappings sm ON (
-      (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku)) AND sm.active = 1
-      ${tenantScope ? `AND ${orderTenantPredicateMysql("sm", tenantScope)}` : ""}
+    LEFT JOIN sku_mappings sm ON sm.id = COALESCE(
+      (SELECT direct_mapping.id FROM sku_mappings direct_mapping
+        WHERE direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id
+          AND direct_mapping.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("direct_mapping", tenantScope)}` : ""}),
+      (SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
+        WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
+          AND fallback_mapping.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("fallback_mapping", tenantScope)}` : ""})
     )
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("p", tenantScope)}` : ""}
     LEFT JOIN sku_inventory_recipes sku_recipe ON sku_recipe.shop_id = o.shop_id
@@ -31239,7 +31261,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       inventoryTotal = idRows.length;
       const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId);
       const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
-      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId);
+      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, { summaryOnly: true });
     } else {
       const idRows = await mysqlQuery(`
         SELECT o.id
@@ -31253,7 +31275,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
         idRows.map((row) => row.id),
         needsCoverageForFilter || includeCounts ? coverage : null,
-        tenantId
+        tenantId, { summaryOnly: true }
       ), query);
     }
   }

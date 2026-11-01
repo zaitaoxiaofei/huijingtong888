@@ -43,6 +43,15 @@ export function inventoryOverview(row) {
     if (fact.available_stock != null && Number.isFinite(Number(fact.available_stock))) item.local_available = Number(fact.available_stock);
     if (fact.physical_stock != null && Number.isFinite(Number(fact.physical_stock))) item.physical_estimate = Number(fact.physical_stock);
   }
+  if (row.inventory_refresh_pending) {
+    for (const item of products.values()) {
+      item.local_available = undefined;
+      item.physical_estimate = undefined;
+      item.stock_quantity = undefined;
+      item.incoming_quantity = undefined;
+      item.shortage_quantity = undefined;
+    }
+  }
   const items = [...products.values()].sort((a, b) => Number(b.shortage_quantity || 0) - Number(a.shortage_quantity || 0));
   return {
     shopId: Number(row.shop_id), skus: (row.fbp_inventory || []).map(stock => String(stock.ozon_sku)),
@@ -54,7 +63,7 @@ export function inventoryOverview(row) {
       quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
       localAvailable: localSets(summary, products, 'local_available'),
       localPhysical: localSets(summary, products, 'physical_estimate'),
-      localLedger: summary.stock?.local,
+      localLedger: row.inventory_refresh_pending ? undefined : summary.stock?.local,
       fbpStocks: [...new Set(summary.skus || [summary.sku])].filter(Boolean).map(sku =>
         (row.fbp_inventory || []).find(stock => String(stock.ozon_sku) === String(sku)) || { ozon_sku: sku, present: null, available: null }),
       children: (summary.pickingItems || []).map(part => ({
