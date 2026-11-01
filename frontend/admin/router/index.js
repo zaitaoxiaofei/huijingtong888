@@ -49,7 +49,7 @@ const OrdersView = () => import("../views/orders/OrdersView.vue");
 const OrderTrackingView = () => import("../views/orders/OrderTrackingView.vue");
 const OutboundView = () => import("../views/orders/OutboundView.vue");
 const CustomerMessagesView = () => import("../views/orders/CustomerMessagesView.vue");
-const PurchaseListView = () => import("../views/procurement/PurchaseListView.vue");
+const PurchaseListView = () => import("../views/inventory/InventoryReceivingWorkspace.vue");
 const ProcurementWorkspaceView = () => import("../views/procurement/ProcurementWorkspaceView.vue");
 const ProcurementPlatformOrdersView = () => import("../views/procurement/ProcurementPlatformOrdersView.vue");
 const ProcurementReconciliationView = () => import("../views/procurement/ProcurementReconciliationView.vue");
