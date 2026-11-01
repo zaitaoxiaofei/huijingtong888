@@ -1,3 +1,4 @@
+import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
 import { hasPermission } from '../shared/permissions.js';
 import {isFbpInventory,pendingInventoryOrders} from '../shared/inventory-fulfillment.js';
 import { createHash } from 'node:crypto';
@@ -171,7 +172,7 @@ export function planLedgerAction(snapshot, body) {
       const differenceReason = String(row.receipt_difference_reason || '').trim();
       if (quantity !== Number(batch.quantity) && !differenceReason) throw new Error(`批次 #${id} 的待收数量与本次实收不同，请选择差异原因`);
       ids.add(id);
-      return { id, receive_quantity: quantity, expected_remaining_quantity: Number(batch.quantity),
+      return { ...receiptEvidence(row), id, receive_quantity: quantity, expected_remaining_quantity: Number(batch.quantity),
         receipt_difference_reason: differenceReason, receipt_difference_note: String(row.receipt_difference_note || '').trim() };
     });
     result.quantity = result.receipts.reduce((sum, row) => sum + row.receive_quantity, 0);
@@ -522,6 +523,7 @@ export function createProcurementLedgerService(hooks) {
       await run('SELECT id FROM procurement_order_allocations WHERE product_id = ? FOR UPDATE', [productId]);
       const before = await snapshot(productId, run, tenantId);
       const plan = planLedgerAction(before, body);
+      for (const row of plan.receipts || []) await assertEvidenceOwnership(row.receipt_images_json, scope.id, run);
       if (plan.allocations?.length) {
         const orderItems = plan.allocations.map(row => row.order_item_id);
         await run(`SELECT oi.id FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE oi.id IN (${orderItems.map(() => '?').join(',')}) FOR UPDATE`, orderItems);

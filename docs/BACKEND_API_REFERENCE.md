@@ -2369,7 +2369,7 @@ Read the safe shared tariff projection for enterprise calculators. Includes enab
 
 #### `GET /api/dashboard`
 
-Return dashboard summary counters and grouped metrics.
+Return dashboard summary counters and grouped metrics. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. view=mobile-finance requires fresh finance duty and returns current-month actual purchase amount and current local/FBP/in-transit inventory values using existing monthly-billing semantics. Mobile sections load independently; no external sync or historical profit recalculation.
 
 - Auth: `authenticated`
 - Responses:
@@ -3529,11 +3529,12 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
   - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
-  - `status` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `product_id` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `page` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `pageSize` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
-  - `summary_only` (`string`, optional): open|arrived|received|all; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `status` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `product_id` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `page` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `pageSize` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `summary_only` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `recent` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
 - Responses:
   - `200` `application/json` -> `object`
   - `403` `application/json` -> `ErrorResponse`
@@ -3609,7 +3610,7 @@ Read pending purchased batches and independent local physical/available quantiti
 
 #### `POST /api/inventory-workflow/receipts/preview`
 
-Validate selected quantities through the canonical receipt impact preview. Read-only: returns requires_count, revision, quantity, physical_before/after and available_before/after. Historical count is never guessed; missing count leaves after values unknown. No cost fields or stock writes.
+Validate selected quantities through the canonical receipt impact preview. Read-only: returns requires_count, revision, quantity, physical_before/after and available_before/after. Mobile records may include courier_company/tracking_number and up to six receipt_images_json URLs; only owned image attachments are accepted. Historical count is never guessed; missing count leaves after values unknown. No cost fields or stock writes.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3961,7 +3962,7 @@ Create a team planning task.
 
 #### `POST /api/team/attachments`
 
-Upload an attachment for a product-development candidate.
+Upload an enterprise-private attachment for team work, mobile procurement evidence or receipt photos. Canonical procurement and receipt writers recheck ownership before attaching images.
 
 - Auth: `authenticated`
 - Request body: required

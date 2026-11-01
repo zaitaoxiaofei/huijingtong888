@@ -1,3 +1,4 @@
+import {createMobileDashboardHandler} from './server/routes/mobileDashboard.js';
 import { ORDER_SPLIT_SCHEMA } from "./services/order-split-schema.js";
 import { createFbpSupplyFeedback } from './services/fbp-supply-feedback.js';
 import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
@@ -388,7 +389,11 @@ const routes = {
     const body = await readJson(req);
     return withAiTenantSession(req._session, () => services.chatWithAiProvider(body));
   },
-  "GET /api/dashboard": async (req) => dashboardForSession(await services.dashboard(req.query || {}, tenantIdFromRequest(req)), req._session),
+  "GET /api/dashboard": async (req) => {
+    if (['mobile','mobile-finance'].includes(req.query?.view)) return createMobileDashboardHandler({dashboard:services.dashboard,finance:services.mobileDashboardFinance})(req);
+    const payload = await services.dashboard(req.query || {}, tenantIdFromRequest(req));
+    return dashboardForSession(payload, req._session);
+  },
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
   "GET /api/scheduled-job-runs": (req) => scheduledJobRuns(req.query || {}),
   "GET /api/scheduled-job-run-events": (req) => scheduledJobRunEvents(req.query || {}),

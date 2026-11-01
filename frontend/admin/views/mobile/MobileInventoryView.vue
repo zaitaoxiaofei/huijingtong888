@@ -1,172 +1,33 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
-import { Search } from "@element-plus/icons-vue";
-import { ElMessage } from "element-plus";
-import { apiClient } from "../../utils/api";
-
-const router = useRouter();
-const loading = ref(false);
-const loadingMore = ref(false);
-const query = ref("");
-const rows = ref([]);
-const total = ref(0);
-const page = ref(1);
-const pageSize = 20;
-
-const hasMore = computed(() => rows.value.length < total.value);
-
-function number(value) {
-  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(Number(value || 0));
-}
-
-function productImage(row) {
-  const normalize = (value) => {
-    if (typeof value === "string") return value.trim();
-    if (!value || typeof value !== "object") return "";
-    return String(value.url || value.image_url || value.src || "").trim();
-  };
-  const value = row?.image_url || row?.product_image_url || "";
-  if (Array.isArray(value)) return normalize(value[0]);
-  if (typeof value === "string" && value.trim().startsWith("[")) {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? normalize(parsed[0]) : normalize(parsed);
-    } catch {}
-  }
-  return normalize(value).split(",")[0].trim();
-}
-
-function localStock(row) {
-  return Number(row?.local_stock ?? row?.stock ?? 0);
-}
-
-function fbpStock(row) {
-  return Number(row?.fbp_stock || 0);
-}
-
-function totalStock(row) {
-  return Number(row?.stock ?? localStock(row) + fbpStock(row));
-}
-
-function skuText(row) {
-  const preview = Array.isArray(row?.sku_preview) ? row.sku_preview : [];
-  return preview.map((item) => item?.sku || item?.ozon_sku || item?.offer_id || item).filter(Boolean).slice(0, 2).join(" / ") || "暂无绑定 SKU";
-}
-
-function buildParams(nextPage) {
-  const params = new URLSearchParams({
-    paged: "1",
-    page: String(nextPage),
-    pageSize: String(pageSize)
-  });
-  const keyword = query.value.trim();
-  if (keyword) params.set("query", keyword);
-  return params;
-}
-
-async function loadProducts({ append = false } = {}) {
-  if (append) loadingMore.value = true;
-  else loading.value = true;
-  try {
-    const nextPage = append ? page.value + 1 : 1;
-    const result = await apiClient.get(`/api/products?${buildParams(nextPage).toString()}`, { noCache: true });
-    const nextRows = Array.isArray(result?.rows) ? result.rows : [];
-    page.value = Number(result?.page || nextPage);
-    total.value = Number(result?.total || 0);
-    rows.value = append ? [...rows.value, ...nextRows] : nextRows;
-  } catch (error) {
-    ElMessage.error(error.message || "库存商品加载失败");
-  } finally {
-    loading.value = false;
-    loadingMore.value = false;
-  }
-}
-
-function openDesktop() {
-  window.localStorage?.setItem("baodanMobileMode", "desktop");
-  router.push("/inventory/products");
-}
-
-onMounted(() => loadProducts());
+import {computed,onBeforeUnmount,onMounted,reactive,ref} from 'vue';
+import {apiClient,currentApiCacheScope} from '../../utils/api.js';
+import {useAuthStore} from '../../stores/auth.js';
+import {hasPermission} from '../../../../src/shared/permissions.js';
+import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
+import {useInventoryLocalQuantities} from '../../utils/use-inventory-local-quantities.js';
+import InventoryStructuredSearch from '../../components/inventory/InventoryStructuredSearch.vue';
+import InventoryCompositionBadge from '../../components/inventory/InventoryCompositionBadge.vue';
+import ProductImagePreview from '../../components/ProductImagePreview.vue';
+import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
+import MobileWorkQueue from '../../components/mobile/MobileWorkQueue.vue';
+const auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),showFields=ref(false),section=ref('stock');
+const filters=reactive({...inventorySearchDefaults(),query:'',inventoryType:'all'}),dialog=reactive({visible:false,product:{},readOnly:false});
+const local=useInventoryLocalQuantities(()=>rows.value),canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
+let version=0,disposed=false;
+const units=value=>value==null?'正在读取':`${Number(value)} 件`;
+async function load(reset=false){if(reset)page.value=1;const token=++version,scope=currentApiCacheScope();loading.value=true;error.value='';try{const p=appendInventorySearch(new URLSearchParams({paged:'1',view:'inventory',includeStock:'0',page:String(page.value),pageSize:'20',query:filters.query.trim(),inventoryType:filters.inventoryType}),filters);const r=await apiClient.get('/api/products?'+p,{noCache:true});if(disposed||token!==version||scope!==currentApiCacheScope())return;rows.value=r.rows||[];total.value=Number(r.total||0);}catch(e){if(token===version&&scope===currentApiCacheScope())error.value=e.message;}finally{if(token===version)loading.value=false;}}
+function reset(){Object.assign(filters,inventorySearchDefaults(),{query:'',inventoryType:'all'});load(true);}
+async function saved(){await load();await local.refresh(true);}
+function clearScope(){++version;rows.value=[];total.value=0;dialog.visible=false;}
+onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',clearScope);});onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
 </script>
-
-<template>
-  <div class="mobile-inventory-page" v-loading="loading">
-    <section class="mobile-inventory-search">
-      <el-input v-model="query" clearable placeholder="商品名 / 库存编码 / SKU" @keyup.enter="loadProducts()">
-        <template #prefix><el-icon><Search /></el-icon></template>
-      </el-input>
-      <el-button type="primary" @click="loadProducts()">查询</el-button>
-    </section>
-
-    <div class="mobile-inventory-summary">
-      <span>库存商品</span>
-      <strong>{{ number(total) }}</strong>
-      <small>当前显示 {{ rows.length }} 条</small>
-    </div>
-
-    <section v-if="!rows.length && !loading" class="mobile-inventory-empty">
-      <strong>没有找到库存商品</strong>
-      <span>可以更换商品名、库存编码或 SKU。</span>
-    </section>
-
-    <section class="mobile-inventory-list">
-      <article v-for="row in rows" :key="row.id" class="mobile-inventory-card">
-        <div class="mobile-inventory-card__main">
-          <img v-if="productImage(row)" :src="productImage(row)" alt="">
-          <div v-else class="mobile-inventory-card__placeholder">无图</div>
-          <div class="mobile-inventory-card__copy">
-            <h2>{{ row.name || "未命名商品" }}</h2>
-            <p>{{ row.inventory_number || row.inventory_id || row.code || `ID ${row.id}` }}</p>
-            <span>{{ skuText(row) }}</span>
-          </div>
-        </div>
-        <div class="mobile-inventory-card__stocks">
-          <span><small>总库存</small><strong>{{ number(totalStock(row)) }}</strong></span>
-          <span><small>本地</small><strong>{{ number(localStock(row)) }}</strong></span>
-          <span><small>FBP</small><strong>{{ number(fbpStock(row)) }}</strong></span>
-          <span><small>采购在途</small><strong>{{ number(row.incoming_stock) }}</strong></span>
-          <span><small>FBP在途</small><strong>{{ number(row.fbp_transfer_in_transit_qty) }}</strong></span>
-        </div>
-        <div class="mobile-inventory-card__foot">
-          <span>{{ row.owner_name ? `负责人：${row.owner_name}` : "未设置负责人" }}</span>
-          <button type="button" @click="openDesktop">电脑版管理</button>
-        </div>
-      </article>
-    </section>
-
-    <el-button v-if="hasMore" class="mobile-inventory-more" :loading="loadingMore" @click="loadProducts({ append: true })">
-      加载更多
-    </el-button>
-  </div>
-</template>
-
-<style scoped>
-.mobile-inventory-page { display: grid; gap: 12px; }
-.mobile-inventory-search { display: grid; grid-template-columns: minmax(0, 1fr) 68px; gap: 8px; }
-.mobile-inventory-summary { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 12px; padding: 13px 14px; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 14px; background: var(--erp-detail-surface, #fff); }
-.mobile-inventory-summary span, .mobile-inventory-summary small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
-.mobile-inventory-summary strong { grid-row: 1 / 3; grid-column: 2; color: var(--erp-detail-primary, #1d4ed8); font-size: 24px; }
-.mobile-inventory-list { display: grid; gap: 10px; }
-.mobile-inventory-card { overflow: hidden; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 16px; background: var(--erp-detail-surface, #fff); }
-.mobile-inventory-card__main { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 12px; padding: 13px; }
-.mobile-inventory-card__main img, .mobile-inventory-card__placeholder { width: 64px; height: 84px; border-radius: 9px; }
-.mobile-inventory-card__main img { display: block; object-fit: cover; background: var(--erp-detail-surface-alt, #eef2f7); }
-.mobile-inventory-card__placeholder { display: grid; place-items: center; color: var(--erp-detail-text-secondary, #94a3b8); background: var(--erp-detail-surface-alt, #eef2f7); font-size: 12px; }
-.mobile-inventory-card__copy { min-width: 0; display: grid; align-content: start; gap: 5px; }
-.mobile-inventory-card__copy h2 { display: -webkit-box; margin: 0; overflow: hidden; color: var(--erp-detail-text-main, #172033); font-size: 14px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.mobile-inventory-card__copy p, .mobile-inventory-card__copy span { margin: 0; overflow: hidden; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-inventory-card__stocks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--erp-detail-border, #edf1f6); border-bottom: 1px solid var(--erp-detail-border, #edf1f6); background: var(--erp-detail-surface-alt, #f8fafc); }
-.mobile-inventory-card__stocks span { min-width: 0; display: grid; gap: 3px; padding: 9px 5px; text-align: center; }
-.mobile-inventory-card__stocks small { overflow: hidden; color: var(--erp-detail-text-regular, #64748b); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-inventory-card__stocks strong { color: var(--erp-detail-text-main, #172033); font-size: 14px; }
-.mobile-inventory-card__foot { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 13px; color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
-.mobile-inventory-card__foot button { min-height: 32px; padding: 0 10px; border: 1px solid var(--erp-detail-primary-border, #bfdbfe); border-radius: 9px; background: var(--erp-detail-primary-soft, #eff6ff); color: var(--erp-detail-primary, #1d4ed8); font-weight: 700; }
-.mobile-inventory-empty { display: grid; gap: 5px; padding: 28px 18px; border: 1px dashed var(--erp-detail-border, #cbd5e1); border-radius: 14px; color: var(--erp-detail-text-regular, #64748b); text-align: center; }
-.mobile-inventory-empty strong { color: var(--erp-detail-text-main, #334155); }
-.mobile-inventory-more { width: 100%; min-height: 44px; }
-@media (max-width: 360px) {
-  .mobile-inventory-card__stocks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-</style>
+<template><div class="mobile-inventory-page"><nav class="mobile-inventory-tabs"><el-button :type="section==='stock'?'primary':''" @click="section='stock'">商品库存</el-button><el-button :type="section==='receiving'?'primary':''" @click="section='receiving'">核验收货</el-button><el-button :type="section==='fbp'?'primary':''" @click="section='fbp'">核验 FBP 入仓</el-button></nav><MobileWorkQueue v-if="section==='receiving'" warehouse/><section v-else-if="section==='fbp'" class="mobile-record"><h3>核验 FBP 入仓</h3><p class="mobile-muted">FBP 入仓逐项核验暂在电脑端完成。请在电脑端打开采购工作台的「FBP入库确认」，核对批次、店铺和SKU后再确认。</p></section><template v-else>
+ <section class="mobile-inventory-search"><el-select v-model="filters.searchMode" aria-label="搜索方式"><el-option label="综合搜索" value="auto"/><el-option label="库存编号精确" value="inventory_id"/><el-option label="SKU／货号精确" value="sku"/><el-option label="名称搜索" value="name"/></el-select><el-input v-model="filters.query" clearable placeholder="库存编码 / SKU / 商品名称" @keyup.enter="load(true)"/><el-button :loading="loading" @click="load(true)">查询</el-button></section>
+ <div class="mobile-record-actions"><el-button @click="showFields=!showFields">{{showFields?'收起精确筛选':'精确筛选'}}</el-button><el-button @click="reset">重置</el-button><small class="mobile-muted">共 {{total}} 个商品</small></div>
+ <el-form v-if="showFields" class="mobile-inventory-fields" label-position="top"><el-form-item label="库存类型"><el-select v-model="filters.inventoryType"><el-option label="全部" value="all"/><el-option label="单品" value="single"/><el-option label="配件" value="accessory"/><el-option label="套装" value="combo"/></el-select></el-form-item><InventoryStructuredSearch :model-value="filters" @update:model-value="v=>Object.assign(filters,v)" compact simple/></el-form>
+ <el-alert v-if="error" :title="error" type="warning" :closable="false"/><p v-if="local.error.value" class="mobile-muted">{{local.error.value}}，可点击库存明细重新核对。</p>
+ <article v-for="row in rows" :key="row.id" class="mobile-record"><div class="mobile-record-head"><ProductImagePreview :src="`/api/products/${row.id}/image?thumb=1`" :preview-list="[`/api/products/${row.id}/image`]" size="portrait"/><div><h3>{{row.name}}</h3><small>库存 {{row.inventory_number||row.code||row.id}}</small><InventoryCompositionBadge :product="row" trigger="click" width="min(400px,92vw)"/></div></div><div class="mobile-record-grid"><span>本地实物<b>{{units(local.rows.value.get(Number(row.id))?.physical_stock)}}</b></span><span>可用库存<b>{{units(local.rows.value.get(Number(row.id))?.workflow_free)}}</b></span></div><div class="mobile-record-actions"><el-button @click="Object.assign(dialog,{visible:true,product:row,readOnly:true})">库存明细</el-button><el-button v-if="canWrite&&!(Number(row.component_count)>0)" type="primary" @click="Object.assign(dialog,{visible:true,product:row,readOnly:false})">更新库存</el-button></div></article>
+ <p v-if="!rows.length&&!loading&&!error" class="mobile-muted">没有找到库存商品，请调整筛选条件。</p><div class="mobile-record-actions"><el-button :disabled="page<=1||loading" @click="page--;load()">上一页</el-button><span>第 {{page}} 页</span><el-button :disabled="page*20>=total||loading" @click="page++;load()">下一页</el-button></div>
+ <MobileStocktakeDialog v-if="dialog.visible" v-model="dialog.visible" :product="dialog.product" :read-only="dialog.readOnly" @saved="saved"/>
+</template></div></template>
+<style scoped>.mobile-inventory-page{display:grid;gap:12px;min-width:0}.mobile-inventory-tabs{display:flex;gap:8px;flex-wrap:wrap}.mobile-inventory-tabs .el-button{margin:0}.mobile-inventory-search{display:grid;grid-template-columns:1fr auto;gap:8px}.mobile-inventory-search>.el-select{grid-column:1/-1}.mobile-inventory-fields :deep(.inventory-structured-search),.mobile-inventory-fields :deep(.search-group){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important;min-width:0!important}.mobile-inventory-fields :deep(.search-group){grid-column:1/-1}.mobile-inventory-fields :deep(.el-form-item){min-width:0;margin:0}.mobile-inventory-fields :deep(.el-form-item__content){min-width:0}.mobile-inventory-fields :deep(.el-select){width:100%}</style>

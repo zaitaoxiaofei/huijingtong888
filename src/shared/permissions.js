@@ -71,7 +71,11 @@ export function pagePermission(path = "") {
   if (path === "/tenant-shops" || path === "/tenant-people") return "enterprise.admin";
   if (path.startsWith("/finance") || path.startsWith("/profit") || path === "/exceptions/profit") return "finance";
   if (path.startsWith("/team")) return "team";
-  if (path === "/orders" || path.startsWith("/mobile")) return "orders.read";
+  if (["/mobile", "/mobile/account"].includes(path)) return "common";
+  if (path.startsWith("/mobile/procurement")) return "procurement";
+  if (path.startsWith("/mobile/inventory") || path === "/mobile/stock-alerts") return "inventory.read";
+  if (path === "/mobile/online-products") return "operations";
+  if (path === "/orders" || path.startsWith("/mobile/orders")) return "orders.read";
   if (path === "/outbound") return "packing";
   if (path === "/inventory/suppliers" || path.startsWith("/procurement") || path.startsWith("/purchase")) return "procurement";
   if (path.startsWith("/inventory")) return "inventory.read";
