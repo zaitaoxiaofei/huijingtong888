@@ -30,6 +30,10 @@ test('order-page manual dispatch is atomic, idempotent, scoped and never claims 
   await assert.rejects(svc.action(session,{...body,order_ids:[1,3]}),/不能绑定/);
   assert.equal((await q('SELECT * FROM ogl_dispatch_members')).length,0);
   remoteStatus='cancelled';await assert.rejects(svc.action(session,body),/取消/);remoteStatus='closed';
+  await q("INSERT INTO order_marks(order_id,mark_type,note) VALUES(1,'follow','待确认')");
+  await assert.rejects(svc.action(session,body),e=>e.code==='OGL_ORDER_MARK_HOLD');
+  assert.equal((await q('SELECT * FROM ogl_dispatch_members')).length,0,'Marked batch must not be partially dispatched');
+  await q('DELETE FROM order_marks WHERE order_id=1');
   const result=await svc.action(session,body);
   assert.equal(result.members.length,2);
   assert.ok(result.members.every(row=>row.dispatched_at&&row.dispatched_by===2&&row.official_member===0&&row.dispatch_source==='manual'));
