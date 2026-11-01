@@ -124,3 +124,12 @@ test("classification leaves the inspected schema facts unchanged", () => {
     assert.deepEqual(report, before);
   }
 });
+
+test('indexed procurement facts are planned even when the existing order search index is ready', () => {
+  const report = { ok: true, mode: 'dry-run', changes_database: false,
+    before: { exists: true, present: true, valid: true },
+    procurement_facts: { exists: true, ready: false, compatible: true } };
+  assert.equal(migrationNeedsApply('migrate-order-search-indexes.mjs', report), true);
+  assert.equal(migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: true } }), false);
+  assert.throws(() => migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: false } }), /incompatible/);
+});

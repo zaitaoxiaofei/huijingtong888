@@ -1,3 +1,4 @@
+import { ensureProcurementQueryFacts } from "./order-procurement-query-facts.js";
 // Persist warehouse classification in the source row's write transaction.
 // History remains live and is aggregated once, without cross-row write locks.
 export const transportStatusesSql = "('delivering','delivered','posting_delivered','posting_in_transit')";
@@ -52,4 +53,5 @@ export async function initializeOrderQueryFacts(connection, { triggerDefiner = '
   const [indexes] = await connection.query("SHOW INDEX FROM ozon_orders_raw WHERE Key_name = 'idx_order_query_stock_location'");
   if (!indexes.length) await connection.query(`ALTER TABLE ozon_orders_raw
     ADD INDEX idx_order_query_stock_location (store_id, posting_number, query_stock_location), ALGORITHM=INPLACE, LOCK=NONE`);
+  await ensureProcurementQueryFacts(connection);
 }

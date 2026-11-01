@@ -1,3 +1,4 @@
+import { cachedOrderRead, invalidateOrderReadCache } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
@@ -7997,6 +7998,7 @@ export async function updateOrderMarkMysql(orderId, body = {}, userId = null, te
   if (!markType && !note) {
     await mysqlExecute("DELETE FROM order_marks WHERE order_id = ?", [id]);
 
+    invalidateOrderReadCache();
     return { ok: true, id, mark_type: "", note: "" };
   }
 
@@ -8012,6 +8014,7 @@ export async function updateOrderMarkMysql(orderId, body = {}, userId = null, te
 
 
 
+  invalidateOrderReadCache();
   return { ok: true, id, mark_type: markType, note };
 }
 
@@ -8050,6 +8053,7 @@ export async function markOrderLabelsPrintedMysql(body = {}, userId = null, tena
         printed_by_person_id = VALUES(printed_by_person_id)
     `, [row.id, batchId, inputOrder.get(String(row.id)) || null, personId]);
   }
+  invalidateOrderReadCache();
   return { ok: true, count: orderedRows.length, print_batch_id: batchId };
 }
 
@@ -8070,6 +8074,7 @@ export async function removeFailedOrderLabelPrintBatchMysql(body = {}, userId = 
       `DELETE printed FROM order_label_prints printed JOIN orders o ON o.id = printed.order_id JOIN shops s ON s.id = o.shop_id WHERE printed.print_batch_id = ? AND printed.printed_by_person_id IS NULL AND ${orderTenantPredicateMysql("s", scope)}`,
       [batchId]
     );
+  invalidateOrderReadCache();
   return { ok: true, count: Number(result?.affectedRows || 0), print_batch_id: batchId };
 }
 
@@ -15135,6 +15140,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
 
   if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
   if(cycleSettingsChanged)invalidateOrderProcurementCoverage();
+  invalidateOrderReadCache();
 
   let outboundSync = null;
   let outboundSyncWarning = "";
@@ -30084,10 +30090,15 @@ export async function ordersMysql(tenantId = "admin") {
   return orderRowsByIdsMysql(ids.map((row) => row.id), undefined, tenantId);
 }
 
-export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false } = {}) {
+export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false, bypassCache = false } = {}) {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
+  if (summaryOnly && coveragePromise === null && !bypassCache) {
+    const value = await cachedOrderRead(`rows:${tenantScope.id}:${tenantScope.defaultTenant ? 1 : 0}:${cleanIds.join(',')}`,
+      () => orderRowsByIdsMysql(cleanIds, null, tenantId, { summaryOnly: true, bypassCache: true }));
+    return structuredClone(value);
+  }
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "visible_rule");
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureSkuInventoryRecipeSchemaMysql();
@@ -30145,7 +30156,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id AND scoped_item.order_id = allocation.order_id
       WHERE allocation.status = 'allocated'
     )
-    SELECT o.*, s.name AS shop_name,
+    SELECT ${summaryOnly ? 'STRAIGHT_JOIN ' : ''}o.*, s.name AS shop_name,
       (SELECT COUNT(*) FROM order_items item_count_oi WHERE item_count_oi.order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(total_oi.quantity), 0) FROM order_items total_oi WHERE total_oi.order_id = o.id) AS total_quantity,
       (SELECT COALESCE(SUM(revenue_oi.sale_price * revenue_oi.quantity), 0) FROM order_items revenue_oi WHERE revenue_oi.order_id = o.id) AS revenue,
@@ -30552,10 +30563,10 @@ async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["o
 }
 
 async function orderTenantCoverageMysql(scope) {
-  return orderProcurementCoverageMysql({
+  return cachedOrderRead(`coverage:${scope.id}:${scope.defaultTenant ? 1 : 0}`, () => orderProcurementCoverageMysql({
     tenantId: scope.id,
     includeLegacyTenantNull: scope.defaultTenant, fresh: true
-  });
+  }));
 }
 
 async function loadOglDispatchMembersMysql(ids, tenantScope) {
@@ -30614,7 +30625,12 @@ async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope =
   const where = [base.where];
   const params = [...base.params];
   addOrderSearchSqlMysql(where, params, query, tenantScope);
-  where.push(orderStatusSqlMysql(String(query.status || "all"), coverage, tenantScope));
+  const status = String(query.status || "all");
+  const reuseEvidence = tenantScope && !String(query.searchQuery || query.search_query || "").trim()
+    && ["awaiting_packaging","awaiting_deliver","ogl_bound","ogl_dispatched","delivering"].includes(status);
+  const evidenceAlias = reuseEvidence ? "ogl_filter_evidence" : null;
+  const joins = reuseEvidence ? orderPagedOglEvidenceJoinMysql(tenantScope, evidenceAlias) : "";
+  where.push(orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias));
 
   const mark = String(query.markFilter || query.mark_filter || "all");
   if (mark === "quality") {
@@ -30663,7 +30679,7 @@ async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope =
     const transitDays = Number.isFinite(requestedTransitDays) ? Math.min(10, Math.max(1, requestedTransitDays)) : 3;
     where.push(`EXISTS (SELECT 1 FROM order_items overdue_item LEFT JOIN sku_mappings overdue_mapping ON overdue_mapping.shop_id = o.shop_id AND overdue_mapping.ozon_sku = overdue_item.ozon_sku AND overdue_mapping.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("overdue_mapping", tenantScope)}` : ""} JOIN inbound_records overdue_inbound ON overdue_inbound.product_id = overdue_mapping.product_id AND overdue_inbound.status = 'pending_arrival' ${tenantScope ? `AND ${orderTenantPredicateMysql("overdue_inbound", tenantScope)}` : ""} WHERE overdue_item.order_id = o.id AND TIMESTAMPDIFF(HOUR, overdue_inbound.created_at, UTC_TIMESTAMP()) >= ${transitDays * 24})`);
   }
-  return { joins: "", where: where.filter(Boolean).join(" AND "), params };
+  return { joins, where: where.filter(Boolean).join(" AND "), params };
 }
 
 function orderQuickFilterOrderSqlMysql(query = {}, tenantScope = null) {
@@ -31241,8 +31257,9 @@ function withRestrictedOrderIdsMysql(base, ids) {
   };
 }
 
-function orderPagedOglEvidenceJoinMysql(tenantScope) {
+function orderPagedOglEvidenceJoinMysql(tenantScope, alias = "ogl_count_evidence") {
   if (!tenantScope) return "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error("Invalid order evidence alias");
   // Aggregate once rather than re-running the same evidence EXISTS in every
   // nested status predicate. Grouping also keeps one result per source order.
   return `LEFT JOIN (
@@ -31262,7 +31279,7 @@ function orderPagedOglEvidenceJoinMysql(tenantScope) {
         AND ogl_count_batch.official_status IN ('observed','created','approved','sync_required','confirm_unknown','mismatch')
       ))
     GROUP BY ogl_count_member.order_id
-  ) ogl_count_evidence ON ogl_count_evidence.order_id = o.id`;
+  ) ${alias} ON ${alias}.order_id = o.id`;
 }
 
 function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
@@ -31281,6 +31298,8 @@ function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
 }
 
 async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
+  const cacheKey = `counts:${tenantScope?.id || "all"}:${createHash("sha256").update(JSON.stringify([base.where,base.params])).digest("hex")}`;
+  return cachedOrderRead(cacheKey, async () => {
   const evidenceAlias = tenantScope ? "ogl_count_evidence" : null;
   const statusSql = status => status === "unbound" && tenantScope
     ? "unbound_count_evidence.order_id IS NOT NULL"
@@ -31320,6 +31339,7 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
     purchase_in_transit: Number(row?.purchase_in_transit || 0),
     purchase_records_missing: Number(row?.purchase_records_missing || 0)
   };
+  });
 }
 
 export async function ordersPagedMysql(query = {}, tenantId = "admin") {

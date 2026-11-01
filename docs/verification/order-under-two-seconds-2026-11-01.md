@@ -1,0 +1,33 @@
+# Order read latency acceptance — 2026-11-01
+
+Target: ordinary order opening and paging below 2,000 ms; samples above 3,000 ms fail acceptance. Validate both the authenticated API and browser rows becoming visible, including a concurrent metadata request. Do not substitute a warm isolated SQL measurement for end-to-end production acceptance.
+
+## Baseline and concurrency
+
+PR #68 was deployed as `2026.11.01-order-priority-e672094`, preserving finance PR #67. Its source/file integrity, 40 summary rows and scoped inventory-row refresh were checked. Quiet list calls measured 1,930 / 1,265 / 1,176 ms, but concurrent full metadata produced 5–8 seconds and one browser request took 23.9 seconds. The full metadata request exceeded the 45-second verifier timeout. Connection isolation alone was insufficient.
+
+This task began at release e672094 and rebased onto `b69f86d6b3611578344ba85a170f2be6d7a22498`, preserving PR #70 inventory capital, billing-month, mobile and finance changes. A live probe stopped when production changed rather than comparing against the old release.
+
+Read-only profiling found the full procurement demand query exceeding 10 seconds over roughly 88万 status-history records. FBP snapshot, picking and formula labels took about 7–23 ms each. The heavy reader also repeatedly fetched and parsed raw JSON, joined history into recipe/component expansion, and ran synchronous enterprise allocation in the API event loop.
+
+## Changes
+
+- Materialize the exact existing procurement warehouse/schema classification in an indexed virtual column. Preserve explicit schema fallback, root/null precedence, FBP/FBO/OGR, Unicode-escaped keys and malformed JSON behavior. The index avoids fetching large raw payloads for demand classification. MySQL maintains it within source writes; no historical order, quantity or profit arithmetic is rewritten.
+- Add the index through the existing reviewed order-index migration: dry-run/compatibility inspection, release backup, `ALGORITHM=INPLACE, LOCK=NONE`, and verification before candidate startup. Unexpected column/index definitions fail closed. Reference: https://dev.mysql.com/doc/refman/8.0/en/alter-table-generated-columns.html
+- Read order-level transport/physical evidence separately and attach it by owned order ID, preserving null-history timestamps, cancellation evidence, warehouse reservations and tenant boundaries.
+- Execute large pure allocation calculations in one bounded worker per process. Preserve both Map entries and attached `available_batches` / `product_availability` properties. Small product saves stay local; profit formula code is unchanged.
+- Coalesce/cache enterprise coverage, status counts and ordinary summary rows for 15 seconds. Shared inventory/workflow revisions immediately invalidate them; marks, printing, print rollback and inventory-product edits explicitly invalidate reads. Old in-flight results cannot repopulate a new revision. Returns are cloned to prevent accidental cache mutation. Detail and explicit product-scope reconciliation keep their fresh paths.
+- Fix summary join order and reuse one owned OGL evidence relation for ordinary status filtering/count/paging. Search-specific predicates retain their existing targeted path. No toolbar, layout or selection behavior changes.
+
+## Evidence before merge
+
+- Live read-only, same-snapshot, 40-row comparison: first 20-row summary query 1,587 → 468 ms; second 193 → 112 ms, with every returned field equal.
+- Live read-only complete membership comparison for five statuses: waiting-packaging 1,256 → 54 ms; waiting-delivery 293 → 214; OGL-bound 126 → 21; OGL-dispatched 6 → 175; delivering 558 → 231. All ID sets identical. These are query measurements, not whole-page latency claims.
+- Local regression: 120 passed, one MySQL-only case skipped locally and covered in the independent run. Build, encoding, SQL bindings and frontend safety passed; pre-existing bundle-size / AI-workbench warnings remain.
+- Independent socket-only MySQL: full coverage and all count hashes match a frozen e672094 reader in one snapshot for default/customer enterprises; generated facts, rollback, index repair/refusal, summary profit/stock, manual holds, complete status sets and real row-cache write invalidation are covered.
+- Real Vue browser regression on the dedicated 8788 port passed: shared-component stock save updates only related orders, preserves unrelated rows and product image DOM, and leaves the order list request count unchanged. The other window's preview was not interrupted.
+- A 30,000-demand worker test compares the complete Map and properties with direct calculation and confirms that heavy work yields the API event loop.
+
+## Deployment acceptance
+
+Build only from the exact merged latest release, with expected-production-commit protection. Recheck remote release and production before activation. After rollout, record cold/warm first-page and cross-page samples, concurrent counts, result membership/numeric comparison, artifact hashes and browser interaction. Keep optimizing if the 2-second target / 3-second ceiling is missed; never report isolated SQL improvements as full acceptance.
