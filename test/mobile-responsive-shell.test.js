@@ -117,7 +117,7 @@ test("mobile inventory reuses the paged product API and presents stock as cards"
   assert.match(mobileLayout, /to="\/mobile\/inventory"/);
   assert.match(mobileInventory, /apiClient.get\('\/api\/products\?'\+p/);
   assert.match(mobileInventory, /class="mobile-record-grid"/);
-  assert.match(mobileInventory, /pageSize:'20'/);
+  assert.match(mobileInventory, /pageSize=ref\(20\)/);
 });
 
 test("inventory desktop table uses the shared keyboard-accessible responsive frame", () => {

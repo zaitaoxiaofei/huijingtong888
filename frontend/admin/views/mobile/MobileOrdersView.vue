@@ -1,9 +1,9 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Search } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { apiClient } from "../../utils/api";
+import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { orderSearchMatchForInput } from "../../../../src/shared/order-search.js";
 import {
   MOBILE_STATUS_OPTIONS,
@@ -18,15 +18,21 @@ import {
   unboundSkus
 } from "./mobile-orders-utils.js";
 
+import MobilePagination from "../../components/mobile/MobilePagination.vue";
+
 const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
-const loadingMore = ref(false);
 const rows = ref([]);
 const total = ref(0);
 const counts = ref({});
 const page = ref(1);
-const pageSize = 20;
+const pageSize = ref(20);
+const countsLoading=ref(false),countsError=ref('');
+let version=0,countsVersion=0,disposed=false,rowController=null,countsController=null,countsKey='';
+let restoreScroll=Number(window.history.state?.mobileOrdersScroll||0);
+const initialPage=Math.max(1,Math.trunc(Number(route.query.page)||1));
+pageSize.value=[20,50,100].includes(Number(route.query.pageSize))?Number(route.query.pageSize):20;
 const { dateFrom, dateTo } = defaultOrderDateRange();
 const filters = reactive({
   status: String(route.query.status || "all"),
@@ -36,18 +42,17 @@ const filters = reactive({
   dateTo
 });
 
-const hasMore = computed(() => rows.value.length < total.value);
 const summaryCards = computed(() => [
-  { label: "待绑定", value: Number(counts.value.unbound || 0), status: "unbound" },
-  { label: "待备货", value: Number(counts.value.awaiting_packaging || 0), status: "awaiting_packaging" },
-  { label: "待发货", value: Number(counts.value.awaiting_deliver || 0), status: "awaiting_deliver" }
+  { label: "待绑定", value: counts.value.unbound ?? '—', status: "unbound" },
+  { label: "待备货", value: counts.value.awaiting_packaging ?? '—', status: "awaiting_packaging" },
+  { label: "待发货", value: counts.value.awaiting_deliver ?? '—', status: "awaiting_deliver" }
 ]);
 
 function buildParams(nextPage = 1) {
   const params = new URLSearchParams({
     paged: "1",
     page: String(nextPage),
-    pageSize: String(pageSize),
+    pageSize: String(pageSize.value),
     status: filters.status,
     shopId: "all",
     logisticsMethod: "all",
@@ -61,52 +66,58 @@ function buildParams(nextPage = 1) {
     printFilter: "all",
     sortMode: "ordered",
     includeRows: "1",
-    includeCounts: nextPage === 1 ? "1" : "0",
+    includeCounts: "0",
     includeLogisticsOptions: "0"
   });
   return params;
 }
 
-async function loadOrders({ append = false } = {}) {
-  if (append) {
-    loadingMore.value = true;
-  } else {
-    loading.value = true;
-  }
-  try {
-    const nextPage = append ? page.value + 1 : 1;
-    const result = await apiClient.get(`/api/orders?${buildParams(nextPage).toString()}`, {
-      noCache: true
-    });
-    page.value = Number(result.page || nextPage);
-    total.value = Number(result.total || 0);
-    if (result.counts) counts.value = result.counts;
-    const nextRows = Array.isArray(result.rows) ? result.rows : [];
-    rows.value = append ? [...rows.value, ...nextRows] : nextRows;
-  } catch (error) {
-    ElMessage.error(error.message || "订单加载失败");
-  } finally {
-    loading.value = false;
-    loadingMore.value = false;
-  }
+async function loadCounts(force=false) {
+  const scope=currentApiCacheScope(),key=JSON.stringify([scope,filters.dateFrom,filters.dateTo]);
+  if(!force&&key===countsKey)return;
+  countsKey=key;const token=++countsVersion;countsController?.abort();countsController=new AbortController();const controller=countsController;countsLoading.value=true;countsError.value='';
+  const params=buildParams(1);params.set('includeRows','0');params.set('includeCounts','1');params.set('status','all');params.set('searchQuery','');
+  const timeout=window.setTimeout(()=>controller.abort(),20000);
+  try {const r=await apiClient.get('/api/orders?'+params,{noCache:true,signal:controller.signal});if(!disposed&&token===countsVersion&&scope===currentApiCacheScope())counts.value=r.counts||{};}
+  catch(e){if(token===countsVersion&&scope===currentApiCacheScope()){countsKey='';countsError.value='统计暂未更新，可重试';}}
+  finally{window.clearTimeout(timeout);if(token===countsVersion)countsLoading.value=false;}
 }
+async function loadOrders({nextPage=1}={}) {
+  rowController?.abort();rowController=new AbortController();const controller=rowController,token=++version,scope=currentApiCacheScope();loading.value=true;
+  const timeout=window.setTimeout(()=>controller.abort(),20000);
+  try {
+    const result=await apiClient.get(`/api/orders?${buildParams(nextPage).toString()}`,{noCache:true,signal:controller.signal});
+    if(disposed||token!==version||scope!==currentApiCacheScope())return;
+    page.value=Number(result.page||nextPage);total.value=Number(result.total||0);rows.value=Array.isArray(result.rows)?result.rows:[];
+    await nextTick();if(disposed||token!==version||scope!==currentApiCacheScope())return;
+    document.querySelector('.mobile-orders-page .mobile-list-scroll')?.scrollTo(0,restoreScroll);restoreScroll=0;
+  }catch(e){if(token===version&&scope===currentApiCacheScope())ElMessage.error(e.name==='AbortError'?'订单读取超时，请重试':e.message||'订单加载失败');}
+  finally{window.clearTimeout(timeout);if(token===version)loading.value=false;}
+}
+function changePage(value){restoreScroll=0;pageSize.value=value.pageSize;router.replace({path:'/mobile/orders',query:{...route.query,page:value.page,pageSize:value.pageSize}});loadOrders({nextPage:value.page});}
+function clearScope(){++version;++countsVersion;rowController?.abort();countsController?.abort();countsKey='';rows.value=[];counts.value={};total.value=0;}
 
 function setStatus(status) {
+  restoreScroll=0;
   filters.status = status;
-  router.replace({ path: "/mobile/orders", query: { ...route.query, status, q: filters.searchQuery || undefined } });
+  router.replace({ path: "/mobile/orders", query: { ...route.query, page:1, pageSize:pageSize.value, status, q: filters.searchQuery || undefined } });
   loadOrders();
 }
 
 function submitSearch() {
-  router.replace({ path: "/mobile/orders", query: { ...route.query, status: filters.status, q: filters.searchQuery || undefined } });
+  restoreScroll=0;
+  router.replace({ path: "/mobile/orders", query: { ...route.query, page:1, pageSize:pageSize.value, status: filters.status, q: filters.searchQuery || undefined } });
   loadOrders();
 }
 
+function saveListPosition(){window.history.replaceState({...window.history.state,mobileOrdersScroll:document.querySelector('.mobile-orders-page .mobile-list-scroll')?.scrollTop||0},'');}
 function openDetail(row) {
+  saveListPosition();
   router.push(`/mobile/orders/${row.id}`);
 }
 
 function openDesktopBind(row) {
+  saveListPosition();
   const sku = unboundSkus(row)[0] || firstCsv(row.skus);
   ElMessage.info(sku ? "已进入订单详情，请在商品明细里绑定库存" : "已进入订单详情");
   router.push({ path: `/mobile/orders/${row.id}`, query: sku ? { sku, action: "bind" } : { action: "bind" } });
@@ -123,11 +134,13 @@ watch(
   }
 );
 
-onMounted(() => loadOrders());
+onMounted(()=>{loadOrders({nextPage:initialPage});window.addEventListener('erp:auth-scope-changed',clearScope);});
+onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
 </script>
 
 <template>
-  <div class="mobile-orders-page" v-loading="loading">
+  <div class="mobile-orders-page mobile-list-page">
+    <div class="mobile-list-controls">
     <section class="mobile-workbench">
       <button
         v-for="card in summaryCards"
@@ -167,6 +180,11 @@ onMounted(() => loadOrders());
       </button>
     </section>
 
+    <small v-if="loading" class="mobile-muted" role="status">正在读取订单…</small>
+    <small v-else-if="countsLoading" class="mobile-muted">状态统计更新中，订单可正常操作</small>
+    <div class="mobile-counts-action"><small v-if="countsError" class="mobile-muted">{{countsError}}</small><el-button size="small" :disabled="countsLoading" @click="loadCounts(true)">{{countsLoading?'统计更新中':'更新统计'}}</el-button></div>
+    </div>
+    <div class="mobile-list-scroll">
     <section v-if="!rows.length && !loading" class="mobile-empty">
       <strong>暂无订单</strong>
       <span>可以换个状态或搜索词试试。</span>
@@ -180,7 +198,7 @@ onMounted(() => loadOrders());
         </div>
 
         <div class="mobile-order-card__body">
-          <img v-if="orderImage(row)" :src="orderImage(row)" alt="">
+          <img v-if="orderImage(row)" :src="orderImage(row)" loading="lazy" decoding="async" width="64" height="84" alt="">
           <div v-else class="mobile-order-card__image-fallback">SKU</div>
           <div class="mobile-order-card__main">
             <h2>{{ orderTitle(row) }}</h2>
@@ -210,14 +228,8 @@ onMounted(() => loadOrders());
       </article>
     </section>
 
-    <el-button
-      v-if="hasMore"
-      class="mobile-load-more"
-      :loading="loadingMore"
-      @click="loadOrders({ append: true })"
-    >
-      加载更多
-    </el-button>
+    </div>
+    <MobilePagination :page="page" :page-size="pageSize" :total="total" :loading="loading" @change="changePage"/>
   </div>
 </template>
 

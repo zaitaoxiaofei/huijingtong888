@@ -154,6 +154,14 @@ export const useAuthStore = defineStore("auth", () => {
     return await apiClient.post("/api/auth/wechat/bind", { ticket });
   }
 
+  async function updateProfile(payload) {
+    const scope = currentApiCacheScope();
+    const currentUser = await apiClient.put("/api/auth/profile", payload);
+    if (scope !== currentApiCacheScope()) throw new DOMException("账号已切换，请重新打开个人资料", "AbortError");
+    applyUser(currentUser);
+    return currentUser;
+  }
+
   async function logout() {
     const scope = currentApiCacheScope();
     try {
@@ -183,6 +191,7 @@ export const useAuthStore = defineStore("auth", () => {
     applyLoginResult,
     verifySession,
     bindWechat,
+    updateProfile,
     logout,
     clearSession
   };
