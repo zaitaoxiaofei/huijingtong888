@@ -31529,7 +31529,12 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
   const exactTransit = `${value} REGEXP '(^|[[:space:]])(delivering|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^[:space:]]*|posting_in_courier_service|posting_in_pickup_point)([[:space:]]|$)'`;
   const waitingStates = "'acceptance_in_progress','posting_acceptance_in_progress','awaiting_registration','posting_awaiting_registration','posting_registration_error','awaiting_deliver','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery'";
   const awaitingDelivery = `(${state} IN (${waitingStates}) OR ${stage} IN (${waitingStates}) OR LOWER(COALESCE(o.logistics_status, '')) IN (${waitingStates}))`;
-  if (status === "ogl_bound") return oglBoundStatusSql("o", evidenceAlias);
+  const manualHold = `(EXISTS (SELECT 1 FROM order_marks dispatch_mark WHERE dispatch_mark.order_id=o.id AND TRIM(COALESCE(dispatch_mark.mark_type,'')) <> '')
+    AND NOT COALESCE((${evidenceAlias ? `COALESCE(${evidenceAlias}.physical_dispatch,0)=1` : oglPhysicalDispatchSql('o')}),0)
+    AND o.delivered_at IS NULL AND COALESCE(o.cancelled_after_ship,0)=0
+    AND ${value} NOT REGEXP 'cancel|return|reject|not_accepted|unclaimed|arbitration|dispute'
+    AND ${value} NOT REGEXP '(^| )(delivering|delivered|posting_delivered|posting_received|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^ ]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer|driver_pickup|posting_driver_pick_up|shipped|sent|transferring|on_way|pickup|sorting|customs)( |$)')`;
+  if (status === "ogl_bound") return `(${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${manualHold})`;
   if (status === "ogl_dispatched") return oglDispatchedStatusSql("o", evidenceAlias);
   if (status === "awaiting_packaging") {
     return `((${state} IN ('awaiting_approve','awaiting_packaging','posting_created')
@@ -31542,9 +31547,9 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
   }
   if (status === "awaiting_deliver") {
-    return `((${awaitingDelivery} OR ${oglBoundStatusSql("o", evidenceAlias, false)})
+    return `((${awaitingDelivery} OR ${oglBoundStatusSql("o", evidenceAlias, false)} OR ${manualHold})
       AND NOT (${exactTransit})
-      AND NOT ${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+      AND NOT (${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${manualHold}) AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
@@ -31694,9 +31699,10 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "frozen_rule");
   const shopScope = `AND ${tenantShopPredicateMysql("s", scope.defaultTenant)}`;
   let order = await mysqlQueryOne(
-    `SELECT o.*, s.name AS shop_name, raw.raw_json, olp.printed_at
+    `SELECT o.*, s.name AS shop_name, raw.raw_json, olp.printed_at, om.mark_type, om.note AS mark_note
      FROM orders o
      JOIN shops s ON s.id = o.shop_id
+     LEFT JOIN order_marks om ON om.order_id = o.id
      LEFT JOIN order_label_prints olp ON olp.order_id = o.id
      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
      WHERE o.id = ? ${shopScope}`,
