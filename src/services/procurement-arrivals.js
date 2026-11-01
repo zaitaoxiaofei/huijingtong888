@@ -15,7 +15,7 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
  async function list(params,session){
   const current=await authorizeBusinessTaskSession(session);if(!hasPermission(current,'inventory.read'))throw fail('请由本企业库存或采购人员查看到货情况',403);
   const scope=await resolveInventoryTenantScope(current.tenant.id,query),where=[inventoryTenantSql(scope,'ir'),inventoryTenantSql(scope,'p'),"(po.purchased_at IS NOT NULL OR pr.status='purchased')"],args=[];
-  const status=params.status||'open';if(status==='open')where.push("ir.status='pending_arrival' AND ir.received_at IS NULL");else if(status==='arrived')where.push("ir.status='pending_arrival' AND ir.received_at IS NOT NULL");else if(status==='received')where.push("ir.status='approved'");else if(status!=='all')throw fail('请选择未到货、已到货待验收、已入库或全部记录');
+  const status=params.status||'open';if(status==='open')where.push("ir.status='pending_arrival' AND ir.received_at IS NULL");else if(status==='arrived')where.push("ir.status='pending_arrival' AND ir.received_at IS NOT NULL");else if(status==='inspection')where.push("ir.status='pending_arrival' AND (ir.received_at IS NOT NULL OR po.purchased_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 72 HOUR))");else if(status==='received')where.push("ir.status='approved'");else if(status!=='all')throw fail('请选择未到货、已到货待验收、已入库或全部记录');
   const graph=await loadInventoryComposition(query,scope);
   const search=inventoryProductSearch(params,scope),productWhere=[inventoryTenantSql(scope,'p')],productArgs=[];
   if(search.sql){productWhere.push(search.sql);productArgs.push(...search.params);}
@@ -38,10 +38,13 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    const ids=expand(matching.map(p=>Number(p.id)));
    where.push(`(${ids.length?`ir.product_id IN (${ids.map(()=>'?').join(',')})`:'1=0'} OR po.order_no LIKE ? ESCAPE '=')`);args.push(...ids,inventoryNamePattern(text));
   }
+  if(params.recent==='1')where.push("(ir.status='pending_arrival' OR po.purchased_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 3 MONTH))");
   const reviews=await query("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_bundle_review' ORDER BY id DESC",[scope.id]);
   const lineage=new Map();const reviewed=new Map();for(const row of reviews){const v=typeof row.detail_json==='string'?JSON.parse(row.detail_json):row.detail_json;if(v?.result?.mode==='whole'&&!reviewed.has(Number(v.result.inbound_id)))reviewed.set(Number(v.result.inbound_id),v.content_revision);for(const child of v?.result?.created||[])if(!lineage.has(Number(child.inbound_id)))lineage.set(Number(child.inbound_id),{id:Number(v.result.inbound_id),product_id:Number(v.source?.product_id)});}
+  const financial=hasPermission(current,'procurement');
   const project=(row,details=true)=>{
-   const {amount,shipping_amount,...safe}=row;
+   const {amount,shipping_amount,purchase_note,...safe}=row;
+   if(financial)Object.assign(safe,{amount,shipping_amount,purchase_note});
    try{
     const components=graph.components(Number(row.product_id)).map(part=>({...part,quantity:Number(row.quantity)*Number(part.per_set_quantity)}));
     const bundle=graph.isBundle(row.product_id),needsReview=bundle&&reviewed.get(Number(row.id))!==bundleReviewContentRevision(row,components);
@@ -61,7 +64,7 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const summary={open:0,arrived:0,open_quantity:0,arrived_quantity:0,open_unknown_batches:0,arrived_unknown_batches:0};
   for(const raw of summaryRows){const row=project(raw,false),key=row.received_at?'arrived':'open';summary[key]++;if(row.physical_quantity==null)summary[key+'_unknown_batches']++;else summary[key+'_quantity']+=row.physical_quantity;}
   if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary};
-  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${joins}`,args),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.courier_company,ir.tracking_number,po.id AS purchase_order_id,po.order_no,COALESCE(po.purchased_at,ir.created_at) AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${joins} ORDER BY COALESCE(po.purchased_at,ir.created_at) DESC,ir.id DESC LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize])]);
+  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${joins}`,args),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,COALESCE(po.purchased_at,ir.created_at) AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${joins} ORDER BY COALESCE(po.purchased_at,ir.created_at) DESC,ir.id DESC LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize])]);
   return{rows:rows.map(r=>({...project(r),arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary};
  }
  async function logistics(body,session){

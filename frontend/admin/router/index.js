@@ -72,6 +72,7 @@ const EcommerceImageSplitterView = () => import("../views/tools/EcommerceImageSp
 const ProductVideoGeneratorView = () => import("../views/tools/ProductVideoGenerator.vue");
 const PricingToolView = () => import("../views/tools/PricingToolView.vue");
 const ProfitCalculatorView = () => import("../views/tools/ProfitCalculatorView.vue");
+const MobileAccountView = () => import("../views/mobile/MobileAccountView.vue");
 const MobileHomeView = () => import("../views/mobile/MobileHomeView.vue");
 const MobileOrdersView = () => import("../views/mobile/MobileOrdersView.vue");
 const MobileOrderDetailView = () => import("../views/mobile/MobileOrderDetailView.vue");
@@ -107,6 +108,7 @@ export const router = createRouter({
       component: MobileLayout,
       meta: { mobile: true },
       children: [
+        { path: "account", name: "mobile-account", component: MobileAccountView, meta: { title: "我的账号", mobile: true } },
         { path: "", name: "mobile-home", component: MobileHomeView, meta: { title: "手机工作台", mobile: true } },
         { path: "orders", name: "mobile-orders", component: MobileOrdersView, meta: { title: "手机订单", mobile: true } },
         { path: "orders/:id", name: "mobile-order-detail", component: MobileOrderDetailView, meta: { title: "订单详情", mobile: true } },
@@ -283,7 +285,7 @@ router.beforeEach(async (to, from) => {
   }
   if (!to.meta?.mobile && !membershipDialogRequest.value && !needsMembershipActivation(auth.user) && auth.user?.tenant?.id && isMobileBrowser() && !prefersDesktopMode() && hasPermission(auth.user, "orders.read")) {
     return {
-      path: "/mobile/orders",
+      path: "/mobile",
       query: {
         ...(to.name === "orders" ? to.query : {}),
         desktopTarget: to.fullPath

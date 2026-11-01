@@ -4,6 +4,8 @@ import { RouterLink, RouterView, useRoute, useRouter } from "vue-router";
 import { ArrowLeft, Box, House, Monitor, Refresh, ShoppingCart, Tickets } from "@element-plus/icons-vue";
 import { useAuthStore } from "../stores/auth";
 
+import {hasPermission} from "../../../src/shared/permissions.js";
+import "../styles/mobile-workbench.css";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
@@ -44,7 +46,7 @@ onBeforeUnmount(() => setMobileViewportState(false));
       <button v-if="canGoBack" type="button" class="mobile-icon-button" aria-label="返回" @click="goBack">
         <el-icon><ArrowLeft /></el-icon>
       </button>
-      <RouterLink v-else to="/mobile/orders" class="mobile-icon-button" aria-label="手机工作台">
+      <RouterLink v-else to="/mobile" class="mobile-icon-button" aria-label="手机工作台">
         <el-icon><House /></el-icon>
       </RouterLink>
 
@@ -66,22 +68,23 @@ onBeforeUnmount(() => setMobileViewportState(false));
     </section>
 
     <nav class="mobile-tabbar" aria-label="手机导航">
-      <RouterLink to="/mobile" class="mobile-tabbar__item">
+      <RouterLink to="/mobile" active-class="mobile-home-parent" class="mobile-tabbar__item">
         <el-icon><House /></el-icon>
         <span>首页</span>
       </RouterLink>
-      <RouterLink to="/mobile/orders" class="mobile-tabbar__item">
-        <el-icon><Tickets /></el-icon>
-        <span>订单</span>
-      </RouterLink>
-      <RouterLink to="/mobile/inventory" class="mobile-tabbar__item">
-        <el-icon><Box /></el-icon>
-        <span>库存</span>
-      </RouterLink>
-      <RouterLink to="/mobile/procurement" class="mobile-tabbar__item">
+      <RouterLink v-if="hasPermission(authStore.user,'procurement')" to="/mobile/procurement" class="mobile-tabbar__item">
         <el-icon><ShoppingCart /></el-icon>
         <span>采购</span>
       </RouterLink>
+      <RouterLink v-if="hasPermission(authStore.user,'inventory.read')" to="/mobile/inventory" class="mobile-tabbar__item">
+        <el-icon><Box /></el-icon>
+        <span>库存</span>
+      </RouterLink>
+      <RouterLink v-if="hasPermission(authStore.user,'orders.read')" to="/mobile/orders" class="mobile-tabbar__item">
+        <el-icon><Tickets /></el-icon>
+        <span>订单</span>
+      </RouterLink>
+      <RouterLink to="/mobile/account" class="mobile-tabbar__item"><el-icon><House /></el-icon><span>我的</span></RouterLink>
     </nav>
   </main>
 </template>
@@ -170,7 +173,7 @@ onBeforeUnmount(() => setMobileViewportState(false));
   bottom: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
   padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--erp-detail-primary-border, #dbe3ef);
@@ -192,7 +195,8 @@ onBeforeUnmount(() => setMobileViewportState(false));
   text-decoration: none;
 }
 
-.mobile-tabbar__item.router-link-active {
+.mobile-tabbar__item.router-link-active,
+.mobile-tabbar__item.router-link-exact-active {
   background: var(--erp-detail-primary-soft, #eaf1ff);
   color: var(--erp-detail-primary, #1d4ed8);
 }

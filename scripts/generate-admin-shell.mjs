@@ -52,7 +52,12 @@ async function main() {
       window.__ERP_BOOT_STARTED_AT = performance && performance.now ? performance.now() : Date.now();
     </script>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <link rel="manifest" href="/mobile.webmanifest" />
+    <link rel="apple-touch-icon" href="/mobile-icon-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="爆单ERP" />
+    <meta name="theme-color" content="#2563eb" />
     <title>${text.title}</title>
     <meta http-equiv="Cache-Control" content="no-cache, must-revalidate, max-age=0" />
     <meta http-equiv="Pragma" content="no-cache" />

@@ -1,3 +1,4 @@
+import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
 import { loadInventoryComposition } from './inventory-composition.js';
 import { procurementRequestDisplay } from '../shared/procurement-request-display.js';
 import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
@@ -196,8 +197,9 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const saved=rows.find(r=>Number(r.id)===Number(row.id)),amount=Number(row.quantity);
       if(!saved||!Number.isSafeInteger(amount)||amount<=0||amount>Number(saved.quantity)||Number(row.expected_quantity)!==Number(saved.quantity))throw fail('实收件数须大于0且不超过当前待收数量；批次已变化时请刷新核对',409);
       if(amount<Number(saved.quantity)&&!String(row.reason||'').trim())throw fail('部分入库须说明未收部分：尚未到货、验货不合格或其他原因');
-      return{id:Number(saved.id),receive_quantity:amount,expected_remaining_quantity:Number(saved.quantity),receipt_difference_reason:String(row.reason||'').slice(0,100),receipt_difference_note:String(row.note||'').slice(0,500),version_updated_at:saved.updated_at};
+      return{...receiptEvidence(row),id:Number(saved.id),receive_quantity:amount,expected_remaining_quantity:Number(saved.quantity),receipt_difference_reason:String(row.reason||'').slice(0,100),receipt_difference_note:String(row.note||'').slice(0,500),version_updated_at:saved.updated_at};
     });
+    for(const row of checked)await assertEvidenceOwnership(row.receipt_images_json,current.tenant.id,query);
     const impact=await previewReceipts({records:checked},current.tenant.id);
     if(impact.impacts.some(r=>Number(r.physical_before)<0))impact.suggest_historical=true;
     return{current,id,checked,impact};
@@ -229,7 +231,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const reference=impact.impacts.find(r=>Number(r.product_id)===id);
       payload={request_key:String(body.request_key||''),historical_receipt_groups:[{product_id:id,revision:reference?.revision,counted_quantity:count,receipts:checked}]};
     }else payload={receipt_impact_confirmed:true,records:checked.map(r=>({id:r.id,payload:{...r,status:'approved',qc_status:'approved',receipt_context:'统一库存详情登记入库'}}))};
-    return receiveRecords(payload,current.personId,current.tenant.id,{receipt:true,beforeWrite:connection=>receiptSession(session,connection)});
+    return receiveRecords(payload,current.personId,current.tenant.id,{receipt:true,beforeWrite:async connection=>{await receiptSession(session,connection);const inspect=connection?async(sql,args)=>(await connection.query(sql,args))[0]:query;for(const row of checked)await assertEvidenceOwnership(row.receipt_images_json,current.tenant.id,inspect);}});
   }
   async function skuDetails(productId,shopId,ozonSku,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId),shop=Number(shopId),sku=String(ozonSku||'');

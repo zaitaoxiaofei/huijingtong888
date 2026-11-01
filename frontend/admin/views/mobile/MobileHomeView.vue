@@ -1,156 +1,37 @@
 <script setup>
-import { computed } from "vue";
-import { useRoute, useRouter } from "vue-router";
-import { Box, Connection, Goods, Monitor, ShoppingCart, Tickets, Warning } from "@element-plus/icons-vue";
-
-const route = useRoute();
-const router = useRouter();
-
-const desktopTarget = computed(() => {
-  const target = String(route.query.desktopTarget || "").trim();
-  return target.startsWith("/") && !target.startsWith("/mobile") ? target : "";
-});
-
-const workbenchItems = [
-  {
-    title: "订单工作台",
-    description: "查看订单、待绑定商品和发货状态",
-    route: "/mobile/orders",
-    icon: Tickets,
-    tone: "blue"
-  },
-  {
-    title: "采购工作台",
-    description: "处理采购需求、到货和入库任务",
-    route: "/mobile/procurement",
-    icon: ShoppingCart,
-    tone: "green"
-  },
-  {
-    title: "库存查询",
-    description: "按商品名、库存编码或 SKU 快速查库存",
-    route: "/mobile/inventory",
-    icon: Goods,
-    tone: "purple"
-  },
-  {
-    title: "待绑定订单",
-    description: "快速定位尚未绑定库存商品的订单",
-    route: "/mobile/orders?status=unbound",
-    icon: Warning,
-    tone: "orange"
-  },
-  {
-    title: "库存预警",
-    description: "查看断货、低库存和 FBP 备货建议",
-    route: "/mobile/stock-alerts",
-    icon: Warning,
-    tone: "red"
-  },
-  {
-    title: "在线商品",
-    description: "查询 Ozon 在售商品、价格、库存和绑定状态",
-    route: "/mobile/online-products",
-    icon: Connection,
-    tone: "cyan"
-  }
-];
-
-function openWorkbench(target) {
-  router.push(target);
-}
-
-function openDesktopTarget() {
-  window.localStorage?.setItem("baodanMobileMode", "desktop");
-  router.push(desktopTarget.value || "/dashboard");
-}
+import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
+import {useRouter} from 'vue-router';
+import {apiClient,currentApiCacheScope} from '../../utils/api.js';
+import {shanghaiDateKey} from '../../utils/shanghai-date.js';
+import {useAuthStore} from '../../stores/auth.js';
+import {hasPermission} from '../../../../src/shared/permissions.js';
+const router=useRouter(),auth=useAuthStore(),data=ref({metrics:{}}),loading=ref(false),error=ref('');
+let generation=0,financeGeneration=0,timer=0,disposed=false,attempt=0;const financeError=ref('');const financeMetrics=ref({});
+const fields=computed(()=>[
+ ...(data.value.financial?[['today_profit','今日利润','money']]:[]),
+ ['today_revenue','今日有效营业额','money'],['today_orders','今日有效订单','单'],['today_cancelled','今日取消','单'],['today_returns','今日退件','件'],['ad_roas','广告回报 ROAS','ratio'],['month_quantity','当月销售件数','件'],['month_orders','当月有效订单','单'],
+ ...(data.value.financial?[['month_revenue','当月营业额','money'],['month_profit','当月利润','money'],['month_purchase_amount','当月实际采购','money'],['month_ad_spend','当月广告花费','money'],['inventory_total_value','库存占用金额（含在途）','money']]:[]),
+ ['return_rate','当月退货率','percent'],['cancel_rate','当月取消率','percent']
+]);
+function display(key,type){const value=financeMetrics.value[key]??data.value.metrics?.[key];if(value==null||value==='')return '—';const n=Number(value);if(!Number.isFinite(n))return '—';if(type==='percent')return `${(n*100).toFixed(1)}%`;if(type==='ratio')return n.toFixed(2);return `${type==='money'?'¥ ':''}${new Intl.NumberFormat('zh-CN',{maximumFractionDigits:type==='money'?2:0}).format(n)}${['单','件'].includes(type)?` ${type}`:''}`;}
+async function load(poll=false){const token=++generation,scope=currentApiCacheScope();if(!poll){attempt=0;loading.value=true;}clearTimeout(timer);error.value='';try{const r=await apiClient.get(`/api/dashboard?view=mobile&date=${shanghaiDateKey()}${poll?'&snapshotOnly=1':''}`,{noCache:true});if(disposed||token!==generation||scope!==currentApiCacheScope())return;
+ data.value={...r,metrics:{...data.value.metrics,...r.metrics}};
+ if(r.snapshot?.status==='building'&&attempt++<60)timer=window.setTimeout(()=>load(true),2500);
+ }catch(e){if(token===generation&&scope===currentApiCacheScope())error.value=e.message;}finally{if(token===generation)loading.value=false;}}
+async function loadFinance(){if(!hasPermission(auth.user,'finance'))return;const token=++financeGeneration,scope=currentApiCacheScope();financeError.value='';try{const r=await apiClient.get(`/api/dashboard?view=mobile-finance&date=${shanghaiDateKey()}`,{noCache:true});if(!disposed&&token===financeGeneration&&scope===currentApiCacheScope())financeMetrics.value=r;}catch(e){if(token===financeGeneration&&scope===currentApiCacheScope())financeError.value=e.message;}}
+function refresh(){load();loadFinance();}
+function resetScope(){++financeGeneration;financeMetrics.value={};financeError.value='';++generation;clearTimeout(timer);data.value={metrics:{}};error.value='';}
+onMounted(()=>{refresh();window.addEventListener('erp:auth-scope-changed',resetScope);});onBeforeUnmount(()=>{disposed=true;resetScope();window.removeEventListener('erp:auth-scope-changed',resetScope);});
 </script>
-
-<template>
-  <div class="mobile-home-page">
-    <section class="mobile-home-hero">
-      <span class="mobile-home-hero__icon"><el-icon><Box /></el-icon></span>
-      <div>
-        <p>爆单 ERP</p>
-        <h1>手机工作台</h1>
-        <span>先处理高频任务，复杂编辑可继续使用电脑版。</span>
-      </div>
-    </section>
-
-    <button
-      v-if="desktopTarget"
-      type="button"
-      class="mobile-continue-card"
-      @click="openDesktopTarget"
-    >
-      <el-icon><Monitor /></el-icon>
-      <span>
-        <strong>继续访问原页面</strong>
-        <small>{{ desktopTarget }}</small>
-      </span>
-      <b>打开</b>
-    </button>
-
-    <section class="mobile-home-section">
-      <div class="mobile-home-section__heading">
-        <strong>常用工作台</strong>
-        <span>适合手机操作</span>
-      </div>
-      <div class="mobile-home-grid">
-        <button
-          v-for="item in workbenchItems"
-          :key="item.route"
-          type="button"
-          class="mobile-home-card"
-          :class="`is-${item.tone}`"
-          @click="openWorkbench(item.route)"
-        >
-          <span class="mobile-home-card__icon"><el-icon><component :is="item.icon" /></el-icon></span>
-          <strong>{{ item.title }}</strong>
-          <small>{{ item.description }}</small>
-        </button>
-      </div>
-    </section>
-
-    <button type="button" class="mobile-desktop-entry" @click="openDesktopTarget">
-      <el-icon><Monitor /></el-icon>
-      <span>打开完整电脑版</span>
-    </button>
-  </div>
-</template>
-
+<template><div class="mobile-home-page">
+ <div class="mobile-home-heading"><div><h1>经营概览</h1><small>{{data.date_key||shanghaiDateKey()}} · 北京时间 · 金额人民币</small></div><el-button :loading="loading" @click="refresh()">刷新</el-button></div>
+ <el-alert v-if="financeError" :title="'采购和库存金额读取失败，可刷新重试：'+financeError" type="warning" :closable="false"/>
+ <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
+ <p v-if="data.snapshot?.status==='building'" class="mobile-status">指标正在更新，已返回的数据先展示。</p>
+ <section class="mobile-metric-grid"><article v-for="[key,label,type] in fields" :key="key"><small>{{label}}</small><strong>{{display(key,type)}}</strong></article></section>
+ <p class="mobile-status">广告回报为归因销售额／广告花费；取消率按当月有效、取消、退货订单分类合计计算。库存占用金额为当前本地、FBP及采购在途货值；采购金额按本月已登记实际采购统计。</p>
+ <section class="mobile-task-grid"><button v-if="hasPermission(auth.user,'procurement')" @click="router.push('/mobile/procurement')"><b>采购工作台</b><small>必须采购 · 保障补货 · 采购在途</small></button><button v-if="hasPermission(auth.user,'inventory.read')" @click="router.push('/mobile/inventory')"><b>库存与收货</b><small>精确搜索 · 更新库存 · 拍照验收</small></button><button v-if="hasPermission(auth.user,'orders.read')" @click="router.push('/mobile/orders')"><b>订单</b><small>订单查询与处理</small></button></section>
+</div></template>
 <style scoped>
-.mobile-home-page { display: grid; gap: 14px; }
-.mobile-home-hero { min-height: 132px; display: flex; align-items: center; gap: 14px; padding: 20px; border-radius: 18px; color: var(--erp-primary-contrast, #fff); background: linear-gradient(135deg, var(--erp-primary-fill, #1d4ed8), var(--erp-primary-fill, #2563eb) 55%, var(--erp-primary-fill, #38bdf8)); box-shadow: 0 14px 30px rgba(37, 99, 235, 0.2); }
-.mobile-home-hero__icon { width: 52px; height: 52px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 16px; background: var(--erp-primary-soft, rgba(255, 255, 255, 0.18)); font-size: 26px; color: var(--erp-primary, #1d4ed8); }
-.mobile-home-hero p, .mobile-home-hero h1, .mobile-home-hero span { margin: 0; }
-.mobile-home-hero p { color: inherit; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
-.mobile-home-hero h1 { margin-top: 4px; font-size: 24px; line-height: 1.25; }
-.mobile-home-hero div > span { display: block; margin-top: 7px; color: inherit; font-size: 13px; line-height: 1.5; }
-.mobile-continue-card, .mobile-desktop-entry { width: 100%; min-height: 52px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--erp-detail-border, #c7d7f2); border-radius: 14px; background: var(--erp-detail-surface, #fff); color: var(--erp-detail-text-main, #1e3a5f); text-align: left; }
-.mobile-continue-card { padding: 12px 14px; }
-.mobile-continue-card > .el-icon { font-size: 22px; color: var(--erp-detail-primary, #2563eb); }
-.mobile-continue-card span { min-width: 0; display: grid; flex: 1; gap: 3px; }
-.mobile-continue-card small { overflow: hidden; color: var(--erp-detail-text-regular, #64748b); text-overflow: ellipsis; white-space: nowrap; }
-.mobile-continue-card b { color: var(--erp-detail-primary, #2563eb); font-size: 13px; }
-.mobile-home-section { display: grid; gap: 10px; }
-.mobile-home-section__heading { display: flex; align-items: baseline; justify-content: space-between; padding: 0 2px; }
-.mobile-home-section__heading strong { color: var(--erp-detail-text-main, #172033); font-size: 16px; }
-.mobile-home-section__heading span { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; }
-.mobile-home-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.mobile-home-card { min-width: 0; min-height: 148px; display: flex; align-items: flex-start; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--erp-detail-primary-border, #dbe3ef); border-radius: 16px; background: var(--erp-detail-surface, #fff); color: var(--erp-detail-text-main, #172033); text-align: left; }
-.mobile-home-card__icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 12px; font-size: 20px; }
-.mobile-home-card.is-blue .mobile-home-card__icon { color: var(--erp-detail-primary, #1d4ed8); background: var(--erp-detail-primary-soft, #dbeafe); }
-.mobile-home-card.is-green .mobile-home-card__icon { color: var(--erp-detail-success-text, #047857); background: var(--erp-detail-success-bg, #d1fae5); }
-.mobile-home-card.is-orange .mobile-home-card__icon { color: var(--erp-detail-danger-text, #c2410c); background: var(--erp-detail-warning-bg, #ffedd5); }
-.mobile-home-card.is-purple .mobile-home-card__icon { color: var(--erp-detail-primary, #6d28d9); background: var(--erp-detail-primary-soft, #ede9fe); }
-.mobile-home-card.is-red .mobile-home-card__icon { color: var(--erp-detail-danger-text, #b91c1c); background: var(--erp-detail-danger-bg, #fee2e2); }
-.mobile-home-card.is-cyan .mobile-home-card__icon { color: var(--erp-detail-primary, #0e7490); background: var(--erp-detail-surface-alt, #cffafe); }
-.mobile-home-card strong { font-size: 14px; line-height: 1.35; }
-.mobile-home-card small { color: var(--erp-detail-text-regular, #64748b); font-size: 12px; line-height: 1.5; }
-.mobile-desktop-entry { justify-content: center; padding: 0 16px; color: var(--erp-detail-text-regular, #475569); font-size: 14px; font-weight: 700; }
-@media (max-width: 360px) {
-  .mobile-home-grid { grid-template-columns: 1fr; }
-  .mobile-home-card { min-height: 116px; }
-}
+.mobile-home-page{display:grid;gap:12px}.mobile-home-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}.mobile-home-heading h1{margin:0 0 6px;font-size:20px}.mobile-home-heading small,.mobile-status{color:var(--erp-text-secondary);font-size:12px;line-height:1.6}.mobile-metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.mobile-metric-grid article{min-width:0;display:grid;gap:9px;padding:13px 10px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color)}.mobile-metric-grid small{font-size:12px;color:var(--el-text-color-regular)}.mobile-metric-grid strong{font-size:20px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;color:var(--el-color-primary)}.mobile-task-grid{display:grid;gap:8px}.mobile-task-grid button{display:grid;gap:6px;text-align:left;padding:14px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color);color:var(--el-text-color-primary)}.mobile-task-grid small{color:var(--el-text-color-regular)}@media(min-width:700px){.mobile-metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 </style>

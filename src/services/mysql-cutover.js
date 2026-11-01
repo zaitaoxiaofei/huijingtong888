@@ -1,3 +1,4 @@
+import { mobilePurchaseEvidence } from './procurement-evidence.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
 const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
@@ -25737,6 +25738,7 @@ export async function confirmProcurementRequestsPurchasedMysql(body = {}, sessio
 export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId = null, tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
   const current = await requireCurrentProcurementActorMysql(scope, sessionPersonId);
+  body = await mobilePurchaseEvidence(body, scope.id, mysqlQuery);
   const defaultTenantId = scope.id;
   await assertInventoryMember(scope, sessionPersonId);
   await assertInventoryReferences(scope, body);
@@ -25781,6 +25783,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     // serialize authority changes with this purchase's atomic commit.
     const guard = () => requireCurrentProcurementActorMysql(scope, sessionPersonId, connection);
     await guard();
+    if(body.mobile_input===true) await mobilePurchaseEvidence(body,scope.id,inspect);
     await assertInventoryReferences(scope, body, inspect);
     if(savedPurchase){if(savedPurchase.hash!==requestHash)throw Object.assign(new Error('这次批量采购已登记，不能用同一提交标识修改内容，请刷新采购记录'),{statusCode:409});return{...savedPurchase.result,duplicate:true};}
     if(workspaceBatch){
@@ -25810,6 +25813,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
       note: body.note || "采购工作台登记采购"
     }, sessionPersonId, tenantId, connection, { session: current });
     await guard();
+    if(body.mobile_input===true&&(body.tracking_number||body.courier_company))await connection.execute(`UPDATE inbound_records SET tracking_number=?,courier_company=?,updated_at=UTC_TIMESTAMP() WHERE purchase_order_id=? AND status='pending_arrival' AND ${inventoryTenantSql(scope)}`,[body.tracking_number||null,body.courier_company||null,purchased.purchase_order_id]);
     const saved={...created,...purchased,direct_results:directResults};
     if(workspaceBatch)await connection.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,Number(items[0].product_id),sessionPersonId,'workspace_batch_purchase',JSON.stringify({request_key:requestKey,hash:requestHash,result:saved,product_ids:items.map(i=>Number(i.product_id))})]);
     return saved;
@@ -29508,6 +29512,16 @@ function pendingDashboardPayloadMysql(dateKey) {
       source_updated_at: ""
     }
   };
+}
+
+export async function mobileDashboardFinanceMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  const date = dashboardDateKeyMysql(query), from = date.slice(0, 7) + '-01';
+  const values = await monthlyProcurementInventorySummaryMysql(from, date, scope);
+  return { date_key: date, month_purchase_amount: values.purchase_total_amount,
+    inventory_total_value: values.inventory_total_value, local_inventory_value: values.local_inventory_value,
+    fbp_inventory_value: values.fbp_inventory_value, in_transit_value: values.in_transit_value };
 }
 
 export async function dashboardMysql(query = {}, tenantId = "admin") {

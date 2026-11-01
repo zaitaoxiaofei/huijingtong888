@@ -2,7 +2,7 @@
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
-const props=defineProps({product:{type:Object,required:true},resolveOnMount:{type:Boolean,default:false}});
+const props=defineProps({product:{type:Object,required:true},resolveOnMount:{type:Boolean,default:false},trigger:{type:String,default:'hover'},width:{type:[String,Number],default:430}});
 const data=ref(null),loading=ref(false),error=ref('');let version=0,loadedAt=0;
 const count=computed(()=>Number(data.value?.product?.component_count??props.product.component_count??0));
 const accessory=computed(()=>Number(data.value?.product?.is_accessory??props.product.is_accessory??0)!==0);
@@ -21,7 +21,7 @@ window.addEventListener('erp:auth-scope-changed',reset);
 onBeforeUnmount(()=>{++version;window.removeEventListener('erp:auth-scope-changed',reset);});
 </script>
 <template>
- <el-popover placement="right" trigger="hover" :show-after="300" :width="430" @show="load">
+ <el-popover placement="right" :trigger="trigger" :show-after="trigger==='click'?0:300" :width="width" @show="load">
   <template #reference><el-tag size="small" :type="count?'warning':accessory?'success':'info'" effect="light" class="composition-badge" @click.stop>{{label}}<span v-if="count"> · {{count}} 子产品</span></el-tag></template>
   <div class="composition-preview"><strong>{{product.name||'库存商品'}} · {{label}}</strong><p v-if="loading">正在读取子产品组成…</p><template v-else-if="error"><p>{{error}}</p><el-button size="small" @click="load">重试</el-button></template><template v-else-if="data"><el-alert v-if="data.incomplete" title="组成有缺失或不可访问的子产品，请管理员核对；未隐藏成空套装。" type="warning" :closable="false"/><div v-for="row in data.rows" :key="row.id" class="composition-child"><ProductImagePreview :src="row.image_url"/><div class="composition-child-copy"><strong>{{row.name}}</strong><small>库存 {{row.inventory_number||row.id}}</small><small>组成数量 {{Number(row.quantity)}} {{row.stock_unit||'件'}}<span v-if="!row.active"> · 已停用</span></small></div></div><p v-if="!data.rows.length&&!data.incomplete">当前没有子产品组成。{{accessory?'这是独立配件库存。':'这是独立单品库存。'}}</p></template></div>
  </el-popover>
