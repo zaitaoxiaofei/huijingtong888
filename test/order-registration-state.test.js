@@ -172,8 +172,9 @@ test("SQL filters put registration in the same tab as the frontend without rewri
   const db = new DatabaseSync(":memory:");
   registerStatusSqlFunctions(db);
   try {
-    db.exec("CREATE TABLE orders (status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
-    const insert = db.prepare("INSERT INTO orders VALUES (?, ?, '', '')");
+    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT, delivered_at TEXT, cancelled_after_ship INTEGER DEFAULT 0)");
+    db.exec("CREATE TABLE order_marks (order_id INTEGER PRIMARY KEY, mark_type TEXT)");
+    const insert = db.prepare("INSERT INTO orders(status,tracking_stage,logistics_status,tracking_number) VALUES (?, ?, '', '')");
     for (const row of registrationRows) insert.run(row.status, row.tracking_stage);
     for (const row of acceptanceRows) insert.run(row.status, row.tracking_stage);
     insert.run("awaiting_packaging", "posting_created");
@@ -202,8 +203,9 @@ test("SQL and frontend give exact transit facts priority over stale acceptance w
   const db = new DatabaseSync(":memory:");
   registerStatusSqlFunctions(db);
   try {
-    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
-    const insert = db.prepare("INSERT INTO orders VALUES (?, ?, ?, ?, ?)");
+    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT, delivered_at TEXT, cancelled_after_ship INTEGER DEFAULT 0)");
+    db.exec("CREATE TABLE order_marks (order_id INTEGER PRIMARY KEY, mark_type TEXT)");
+    const insert = db.prepare("INSERT INTO orders(id,status,tracking_stage,logistics_status,tracking_number) VALUES (?, ?, ?, ?, ?)");
     const waiting = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("awaiting_deliver")}`);
     const delivering = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("delivering")}`);
     for (const [index, row] of rows.entries()) {
