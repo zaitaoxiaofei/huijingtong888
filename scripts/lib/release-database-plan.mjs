@@ -59,7 +59,15 @@ export function migrationNeedsApply(filename, report) {
       const exists = boolean(before.exists, "before.exists"), present = boolean(before.present, "before.present"), valid = boolean(before.valid, "before.valid");
       if ((!exists && (present || valid)) || (!present && valid)) invalid("inconsistent order search index state");
       if (present && !valid) invalid("existing order search index is incompatible");
-      return exists && !present;
+      let factsPending = false;
+      if (Object.hasOwn(report, "procurement_facts")) {
+        const facts = object(report.procurement_facts, "procurement_facts");
+        if (!boolean(facts.compatible, "procurement_facts.compatible")) invalid("procurement query facts are incompatible");
+        const factsExist = boolean(facts.exists, "procurement_facts.exists"), factsReady = boolean(facts.ready, "procurement_facts.ready");
+        if (!factsExist && factsReady) invalid("absent procurement query facts cannot be ready");
+        factsPending = factsExist && !factsReady;
+      }
+      return (exists && !present) || factsPending;
     }
     case "migrate-listing-draft-list-indexes.mjs": {
       if (Object.hasOwn(report, "absent_table") && boolean(report.absent_table, "absent_table")) return false;
