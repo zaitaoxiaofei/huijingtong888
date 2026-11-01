@@ -6,6 +6,7 @@ import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
 import { summarizeOrderSyncResult, exactPostingNumbers } from "../utils/order-sync-result.js";
+import { orderUsesInventoryProduct } from "../utils/order-inventory-refresh.js";
 import { orderStateKey } from "../constants/orders-ui.js";
 import { orderSearchMatchForInput } from "../../../src/shared/order-search.js";
 import {
@@ -235,6 +236,8 @@ export function useOrdersPage() {
   const logisticsOptionsPromise = ref(null);
   const logisticsOptionsRequestKey = ref("");
   const ordersLoadToken = ref(0);
+  const inventoryRefreshNotice = ref('');
+  const inventoryRefreshFailed = ref(false);
   const statusTabOrder = ref([...DEFAULT_STATUS_TAB_ORDER]);
   const defaultTo = shanghaiDateKey();
   const defaultFrom = shanghaiDateDaysAgo(90);
@@ -422,6 +425,8 @@ export function useOrdersPage() {
     const scope = currentOrdersCacheScope();
     if (viewCacheScope !== scope) {
       viewCacheScope = scope;
+      inventoryRefreshNotice.value = '';
+      inventoryRefreshFailed.value = false;
       abortOrderReads();
       ordersLoadToken.value += 1;
       selectedOrderIds.value = new Set();
@@ -497,6 +502,46 @@ export function useOrdersPage() {
     }
   }
 
+  async function refreshInventoryRows({ productId = null } = {}) {
+    const scope = ensureOrdersViewScope(), token = ordersLoadToken.value;
+    // A second save must also reconcile an earlier interrupted save.
+    const changedProduct = vm.rows.some(row => row.inventory_refresh_pending) ? null : productId;
+    const ids = vm.rows.map(row => Number(row.id));
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+    window.clearTimeout(ordersMetaTimer);
+    ordersMetaAbort.value?.abort();
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    if (!ids.length) return;
+    const controller = new AbortController();
+    ordersInventoryAbort.value = controller;
+    inventoryRefreshNotice.value = '正在更新受影响订单的库存与采购覆盖…';
+    inventoryRefreshFailed.value = false;
+    vm.rows = vm.rows.map(row => orderUsesInventoryProduct(row, changedProduct)
+      ? { ...row, inventory_refresh_pending: true } : row);
+    try {
+      const params = new URLSearchParams({ orderIds: ids.join(','), refresh: '1', includeRows: '1' });
+      if (Number(changedProduct) > 0) params.set('productId', String(changedProduct));
+      const result = await apiClient.get(`/api/orders/inventory-availability?${params}`, { signal: controller.signal, noCache: true });
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || token !== ordersLoadToken.value) return;
+      const updates = new Map((result?.rows || []).map(row => [Number(row.order_id), row.order]));
+      if ([...updates.values()].some(row => !row || !Array.isArray(row.inventory_availability))
+        || vm.rows.some(row => row.inventory_refresh_pending && !updates.has(Number(row.id)))) throw new Error('订单库存刷新结果不完整');
+      vm.rows = vm.rows.map(row => updates.has(Number(row.id))
+        ? { ...updates.get(Number(row.id)), inventory_refresh_pending: false }
+        : row.inventory_refresh_pending ? { ...row, inventory_refresh_pending: false } : row);
+      inventoryRefreshNotice.value = `已更新 ${updates.size} 条受影响订单。当前排序和分页保持不变；刷新列表可查看最新筛选结果和数量。`;
+    } catch (error) {
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || token !== ordersLoadToken.value) return;
+      inventoryRefreshFailed.value = true;
+      inventoryRefreshNotice.value = '库存已保存，关联订单刷新失败，旧数量暂不作为最新结果。请重试库存刷新。';
+      console.warn('refresh affected order inventory failed', error);
+    } finally {
+      if (ordersInventoryAbort.value === controller) ordersInventoryAbort.value = null;
+    }
+  }
+
   async function loadPageInventory(rows, requestToken, cacheKey, forceRefresh = false) {
     const scope = ensureOrdersViewScope();
     const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
@@ -527,6 +572,8 @@ export function useOrdersPage() {
 
   async function loadOrders(options = {}) {
     const scope = ensureOrdersViewScope();
+    inventoryRefreshNotice.value = '';
+    inventoryRefreshFailed.value = false;
     window.clearTimeout(ordersMetaTimer);
     ordersListAbort.value?.abort();
     ordersInventoryAbort.value?.abort();
@@ -943,6 +990,9 @@ export function useOrdersPage() {
     activeStatusLabel,
     patch,
     loadOrders,
+    refreshInventoryRows,
+    inventoryRefreshNotice,
+    inventoryRefreshFailed,
     loadLogisticsOptions,
     submitFilters: async (nextFilters = null) => {
       if (nextFilters && typeof nextFilters === "object") {
