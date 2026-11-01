@@ -1,3 +1,4 @@
+import { withMysqlWorkload } from "./mysql-workload.js";
 import {createMobileDashboardHandler} from './server/routes/mobileDashboard.js';
 import { ORDER_SPLIT_SCHEMA } from "./services/order-split-schema.js";
 import { createFbpSupplyFeedback } from './services/fbp-supply-feedback.js';
@@ -463,7 +464,7 @@ function logSlowApiRequest({ req, res, url, startedAt }) {
   const query = url.search || "";
   const pool = getMysqlPoolMetrics();
   const memory = process.memoryUsage();
-  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait=${pool.lastAcquireWaitMs.toFixed(1)}ms rss_mb=${(memory.rss / 1024 / 1024).toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)}`;
+  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms db_active=${pool.activeConnections}/${pool.connectionLimit} db_foreground=${pool.foregroundActive}/${pool.workloadLimits.foreground} db_background=${pool.backgroundActive}/${pool.workloadLimits.background} db_wait=${pool.lastAcquireWaitMs.toFixed(1)}ms rss_mb=${(memory.rss / 1024 / 1024).toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)}`;
   console[level](message);
   if (req._timingMarks?.length) {
     const segments = [];
@@ -556,7 +557,7 @@ function withForegroundApiDeferral(jobKey, handler) {
       console.log(`background job ${jobKey} deferred: ${deferred.reason}`);
       return deferred;
     }
-    return handler(context);
+    return withMysqlWorkload('background', () => handler(context));
   };
 }
 
@@ -613,7 +614,7 @@ setInterval(() => {
   const poolPressure = pool.activeConnections >= Math.max(1, pool.connectionLimit - 1);
   const newSlowAcquisitions = pool.slowAcquisitions > lastReportedSlowAcquisitions;
   if (eventLoopLagMs >= 200 || rssMb >= 512 || poolPressure || newSlowAcquisitions) {
-    console.warn(`[runtime-health] event_loop_lag=${eventLoopLagMs}ms rss_mb=${rssMb.toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)} db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait_avg=${pool.averageAcquireWaitMs.toFixed(1)}ms db_wait_slow=${pool.slowAcquisitions} foreground=${activeForegroundApiRequests} module_lanes=${backgroundModuleLaneStatus()}`);
+    console.warn(`[runtime-health] event_loop_lag=${eventLoopLagMs}ms rss_mb=${rssMb.toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)} db_active=${pool.activeConnections}/${pool.connectionLimit} db_foreground=${pool.foregroundActive}/${pool.workloadLimits.foreground} db_background=${pool.backgroundActive}/${pool.workloadLimits.background} db_wait_avg=${pool.averageAcquireWaitMs.toFixed(1)}ms db_wait_slow=${pool.slowAcquisitions} foreground=${activeForegroundApiRequests} module_lanes=${backgroundModuleLaneStatus()}`);
   }
   lastReportedSlowAcquisitions = pool.slowAcquisitions;
 }, 30_000).unref();

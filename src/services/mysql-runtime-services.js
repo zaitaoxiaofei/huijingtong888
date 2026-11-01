@@ -1,3 +1,4 @@
+import { withMysqlWorkload } from "../mysql-workload.js";
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
 import { bindListingDrafts, listingDraftBindingOptions, listingDraftBindings } from "./listing-draft-bindings.js";
 import { procurementDailyReport } from "./procurement-daily-report.js";
@@ -913,7 +914,10 @@ export const mysqlRuntimeServices = {
   orderCarHeatmapSkus: orderCarHeatmapSkusMysql,
   orderCarHeatmapUnmatched: orderCarHeatmapUnmatchedMysql,
   orders: ordersMysql,
-  ordersPaged: ordersPagedMysql,
+  ordersPaged: (query = {}, tenantId = 'admin') => withMysqlWorkload(
+    String(query.includeRows ?? query.include_rows ?? '1') === '0' ? 'background' : 'foreground',
+    () => ordersPagedMysql(query, tenantId)
+  ),
   outboundRecords: outboundRecordsMysql,
   packagingFeeRule: packagingFeeRuleMysql,
   packagingFeeRuleChanges: packagingFeeRuleChangesMysql,
@@ -1039,7 +1043,10 @@ export const mysqlRuntimeServices = {
   ensureProcurementWorkspaceSchema: ensureProcurementWorkspaceSchemaMysql,
   fbpOpportunities: fbpOpportunitiesMysql,
   productInventoryAvailability: productInventoryAvailabilityMysql,
-  orderInventoryAvailability: orderInventoryAvailabilityMysql,
+  orderInventoryAvailability: (query = {}, tenantId = 'admin') => withMysqlWorkload(
+    String(query.includeRows || '') === '1' ? 'foreground' : 'background',
+    () => orderInventoryAvailabilityMysql(query, tenantId)
+  ),
   updateInventoryProductLeadTimes: updateInventoryProductLeadTimesMysql,
   fbpReplenishmentOrders: fbpReplenishmentOrdersMysql,
   fbpTransferRecords: fbpTransferRecordsMysql,
