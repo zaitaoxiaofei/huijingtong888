@@ -25,6 +25,7 @@ test('generated shell script, preloads and route imports share canonical fingerp
   assert.equal(preloads.filter(url=>url===script).length,1);assert.equal(new Set(preloads).size,preloads.length);
   assert.ok(!/\/vue-apps\/[^"\s]+\?v=/.test(html));
   assert.match(html,/href="\/vue-apps\/assets\/admin-style-abcdef-12345\.css"/);
+  assert.ok(html.indexOf('href="/vue-apps/assets/vendor-style-abcdef-12345.css"')<html.indexOf('href="/vue-apps/assets/admin-style-abcdef-12345.css"'),'ERP overrides must remain after library CSS');
   assert.ok(html.indexOf('rel="modulepreload"')<html.indexOf('<script type="module"'));
  }finally{await fs.rm(root,{recursive:true,force:true});}
 });
