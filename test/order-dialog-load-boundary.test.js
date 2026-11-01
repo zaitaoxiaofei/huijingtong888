@@ -11,3 +11,8 @@ test('production order entry defers inventory editor, category and procurement d
  const lazy=manifest['frontend/orders/OrdersPage.vue'].dynamicImports||[];
  for(const name of names)assert.ok(lazy.some(key=>key.includes(name)),name+' must be explicitly reachable on demand');
 });
+test('spreadsheet exports are not in the shared admin entry graph',{skip:!existsSync(path)&&'Requires production frontend build'},()=>{
+ const manifest=JSON.parse(readFileSync(path,'utf8')),seen=new Set(),files=[];
+ function visit(key){if(seen.has(key))return;seen.add(key);const item=manifest[key];if(!item)return;files.push(item.file);for(const child of item.imports||[])visit(child);}
+ visit('frontend/admin/main.js');assert.ok(!files.some(file=>file?.includes('vendor-exceljs')));assert.ok(Object.values(manifest).some(item=>item.file?.includes('vendor-exceljs')),'exports remain shipped');
+});
