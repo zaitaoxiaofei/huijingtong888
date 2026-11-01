@@ -70,6 +70,7 @@ test('live count aggregation preserves every tab across OGL/application, physica
         await query(`INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,logistics_status,ordered_at)
           VALUES(?,?,?,?,?,?,?)`, [id, shop, posting, ...state, stateIndex % 2 ? '2026-10-20 18:00:00' : '2026-10-21 18:00:00']);
         await query('INSERT INTO order_items(id,order_id,ozon_sku,quantity,sale_price) VALUES(?,?,?,?,1)', [id, id, 'same-sku', 1]);
+        if (modeIndex % 2 === 0 && id !== 221) await query('INSERT INTO order_label_prints(order_id,printed_at) VALUES(?,?)',[id,'2026-10-21 18:00:00']);
         if (mode === 'none') continue;
         const foreignShop = tenant === 3 ? 20 : 30, foreignTenant = tenant === 3 ? 2 : 3;
         const selectedBatch = batches.get(`${shop}:${mode === 'closed' ? 'closed' : mode === 'cancelled_batch' ? 'cancelled' : mode === 'manual_physical' ? 'manual' : 'observed'}`);
