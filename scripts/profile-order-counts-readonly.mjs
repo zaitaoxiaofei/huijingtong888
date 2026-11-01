@@ -131,7 +131,7 @@ try {
     if (!match) throw Error("Checked-in order count function is missing");
     return match[0].replace(/^export /, "");
   });
-  const context = vm.createContext({ createHash, cachedOrderRead:(_key,loader)=>loader(), Number, String, Object, Array, Math, procurementQueueSql: coverageContext.procurementQueueSql,
+  const context = vm.createContext({ createHash, cachedOrderRead:(_key,loader)=>loader(), orderReadIdentity:()=>0, Number, String, Object, Array, Math, procurementQueueSql: coverageContext.procurementQueueSql,
     oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, mysqlQueryOne: async (sql, params) => (await query(sql, params))[0] });
   vm.runInContext(definitions.join("\n"), context);
   const started = performance.now();

@@ -26,12 +26,14 @@ test('order page summary keeps profit, quantities, kit stock and tenant ownershi
   await query("INSERT INTO inventory_movements(tenant_id,product_id,source_type,source_ref,quantity_delta,status,stock_location) VALUES(2,20,'manual_adjustment','a',8,'posted','LOCAL'),(2,22,'manual_adjustment','b',12,'posted','LOCAL'),(2,23,'manual_adjustment','c',6,'posted','LOCAL'),(2,22,'manual_adjustment','fbp',100,'posted','FBP'),(3,22,'manual_adjustment','poison',999,'posted','LOCAL')");
   await query("INSERT INTO purchase_orders(id,tenant_id,order_no,created_by_person_id,purchased_at) VALUES(1,2,'PO-A',2,'2026-10-31')");
   await query("INSERT INTO inbound_records(tenant_id,product_id,person_id,quantity,amount,purchase_order_id,status) VALUES(2,22,2,4,20,1,'pending_arrival'),(2,22,2,100,500,1,'approved')");
-  const ids=[1,2,3,4,30];const full=await service.orderRowsByIdsMysql(ids,null,'2');const compact=await service.orderRowsByIdsMysql(ids,null,'2',{summaryOnly:true});
+  const payload=JSON.stringify({raw:{delivery_method:{name:'CEL'},note:'测试'.repeat(30000)}});
+ await query('INSERT INTO ozon_orders_raw(store_id,posting_number,raw_json) VALUES(?,?,?),(?,?,?)',[20,'DIRECT',payload,30,'SECRET',JSON.stringify({secret:true})]);
+ const ids=[1,2,3,4,30];const full=await service.orderRowsByIdsMysql(ids,null,'2');const compact=await service.orderRowsByIdsMysql(ids,null,'2',{summaryOnly:true});
   await t.test('only deferred fields disappear; numeric profit and procurement summaries remain identical',()=>{
    assert.deepEqual(Array.from(compact,row=>row.id),[1,2,3,4]);
    for(const row of compact){const old=full.find(x=>x.id===row.id);for(const key of Object.keys(row))assert.deepEqual(row[key],old[key],`${row.id}.${key}`);assert.equal('profit_purchase_cost' in row,false);assert.equal('procurement_person_name' in row,false);}
    assert.equal(Number(compact[0].revenue),10);assert.equal(Number(compact[0].estimated_profit),7);assert.equal(Number(compact[0].total_quantity),1);
-   assert.equal(full[0].profit_purchase_cost,'0.0000');
+   assert.equal(full[0].profit_purchase_cost,'0.0000');assert.equal(compact[0].raw_json,payload);assert.equal(compact[1].raw_json,null);
   });
   await t.test('explicit binding wins, fallback works, foreign binding cannot reveal another tenant',()=>{
    assert.equal(compact[0].product_ids,'20');assert.equal(compact[1].product_ids,'21');assert.equal(compact[3].product_ids,'22');assert.ok(!JSON.stringify(compact).includes('Secret B'));
@@ -55,6 +57,7 @@ test('order page summary keeps profit, quantities, kit stock and tenant ownershi
   });
   await t.test('query resolves mappings once, removes optional people joins and narrows purchase history',()=>{
    const sql=calls.filter(call=>call.sql.includes('WITH scoped_order_items')).at(-1).sql;
+   assert.match(sql,/NULL AS raw_json/);assert.doesNotMatch(sql,/JOIN ozon_orders_raw raw/);
    assert.doesNotMatch(sql,/sm\.id = oi\.sku_mapping_id OR/);assert.match(sql,/SELECT DISTINCT oi\.id AS order_item_id/);assert.match(sql,/sm\.id = page_item\.mapping_id/);
    assert.doesNotMatch(sql,/JOIN people (pe|creator|pr_person|pr_creator|mark_creator|request_person|request_creator) /);assert.match(sql,/AND ir.status = 'pending_arrival'/);
   });

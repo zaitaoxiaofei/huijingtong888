@@ -2,7 +2,13 @@ import { workflowRevision } from './inventory-workflow-cache.js';
 
 const cache = new Map(), pending = new Map();
 const MAX_ENTRIES = 80;
-let revision = 0;
+let revision = 0, nextIdentity = 0;
+const identities = new WeakMap();
+export function orderReadIdentity(value) {
+  if (value === null || typeof value !== 'object') return 0;
+  if (!identities.has(value)) identities.set(value, ++nextIdentity);
+  return identities.get(value);
+}
 const version = () => `${revision}:${workflowRevision()}`;
 export function invalidateOrderReadCache() {
   revision++;
