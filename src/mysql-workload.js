@@ -8,8 +8,10 @@ export function withMysqlWorkload(priority, operation) {
   return workload.run(priority === 'background' ? 'background' : 'foreground', operation);
 }
 
-// Divide the existing budget rather than creating extra database connections.
+// Keep background scans serial: parallel ledger/history reads compete with
+// interactive paging for database CPU and I/O even in separate pools.
+// Divide the existing connection budget without adding connections.
 export function mysqlWorkloadLimits(total) {
-  const background = total > 1 ? Math.max(1, Math.floor(total / 3)) : 0;
+  const background = total > 1 ? 1 : 0;
   return { foreground: total - background, background };
 }

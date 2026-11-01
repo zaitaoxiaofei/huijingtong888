@@ -1,3 +1,4 @@
+import { adminOrderPreloadScript } from './lib/admin-order-preloads.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -65,6 +66,7 @@ async function main() {
     <link rel="icon" type="image/svg+xml" href="/brand/baodan-mark.svg" />
 ${styleTags}
 ${modulePreloadTags}
+    <script>${adminOrderPreloadScript(manifest)}</script>
     <style>
       .admin-static-login-fallback {
         position: fixed;

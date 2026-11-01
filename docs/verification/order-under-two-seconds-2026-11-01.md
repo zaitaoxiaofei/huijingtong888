@@ -41,3 +41,11 @@ The follow-up keeps raw order JSON out of the summary GROUP BY temporary rows an
 Status-count keys also include the allocation Map identity. This prevents an older in-flight inventory snapshot from seeding the new revision's derived count cache after an inventory write. A deferred-response regression reproduces the race and verifies that the newer snapshot cannot consume old counts.
 
 Validation: 53 local tests passed, one MySQL-only case covered independently; 11 independent socket-only MySQL cases passed, including large raw payload preservation, foreign-tenant isolation, exact profit/stock fields, count membership and cache invalidation. Encoding, SQL binding and frontend safety checks passed with the existing AI-workbench warning.
+
+## Background contention and startup resource waterfall
+
+Release ca60064 preserved all 40 compared order results and brought targeted stock refresh to 1,527 ms. Its immediate post-start concurrent matrix still had 3–5 second list requests; a subsequent browser run also failed the target. The SQL-only improvement was insufficient under contention.
+
+A read-only comparison with one background query at a time produced six representative foreground calls of 607 / 689 / 1,521 / 933 / 1,470 / 1,147 ms. Limit background scans to one connection while preserving the configured total budget (10 = 9 foreground + 1 background; candidate 4 = 3 + 1). Background completion may take longer; list SQL and accounting remain unchanged. Five independent MySQL cases pass, including saturated-background isolation, transaction rollback/commit, UTC sessions, queue recovery and the normal ten-connection budget.
+
+Browser resource timing also showed a second download wave for OrdersView / OrdersPage dependencies before the first API call. Generate a route- and mode-specific modulepreload graph in the shell, following static imports only. Other routes and detail dialogs remain lazy; no script is executed by the preload. Both preload graph tests pass (cycles, mode boundaries, unsafe/missing paths), the full frontend build passes, and all 47 mode-specific URLs exist. Real Vue stock-save regression passes without replacing product images or reloading the list. Repeat real browser and concurrent API acceptance after this exact merged release is deployed.
