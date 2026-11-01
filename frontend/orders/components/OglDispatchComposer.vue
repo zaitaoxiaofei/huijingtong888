@@ -6,7 +6,7 @@ import { useAuthStore } from '../../admin/stores/auth.js';
 import { currentApiCacheScope } from '../../admin/utils/api.js';
 import { shanghaiDateKey, shanghaiDateDaysAgo, shanghaiDateTimeText } from '../../admin/utils/shanghai-date.js';
 import { oglDispatchService as service, normalizeOglOrderIds } from '../services/ogl-dispatch-service.js';
-const props=defineProps({orderIds:{type:Array,default:()=>[]},batchId:{type:Number,default:0},orderRows:{type:Array,default:()=>[]}});
+const props=defineProps({manualShip:{type:Boolean,default:false},orderIds:{type:Array,default:()=>[]},batchId:{type:Number,default:0},orderRows:{type:Array,default:()=>[]}});
 const emit=defineEmits(['close','created','open-batch','open-order']);
 const visible=ref(true),busy=ref(false),loading=ref(false),error=ref(''),boot=ref({settings:{},shops:[]});
 const filters=reactive({printed_from:shanghaiDateKey(),printed_to:shanghaiDateKey(),shop_id:'all',search:'',print_batch_id:'',binding:'unbound',review:'all',eligibility:'eligible',page:1,page_size:20});
@@ -17,13 +17,14 @@ const auth=useAuthStore();
 const currentScope=()=>`${currentApiCacheScope()}:${auth.user?.id||''}:${auth.user?.tenant?.id||''}`;
 const scope=currentScope();let alive=true,readVersion=0,previewVersion=0;
 const current=()=>alive&&scope===currentScope();
+const dispatchConfirmed=ref(false);
 const historicalConfirmed=ref(false),historicalNote=ref('');
 const historicalTarget=computed(()=>{const batch=target.value?.batch||{},saved=batch.official_result||{};return ['received','closed'].includes(String(saved.carriage?.status||saved.info?.status||'').toLowerCase())||['tracking','closed'].includes(batch.status)||(target.value?.members||[]).some(row=>row.dispatched_at);});
 const selectedRows=computed(()=>[...selected.value.values()]);
 const reviewRows=computed(()=>selectedRows.value.filter(row=>row.needs_review));
 const selectedIds=()=>[...selected.value.keys()];
 const blocked=computed(()=>selectedRows.value.some(row=>row.blocked||row.unknown));
-const canSave=computed(()=>(!historicalTarget.value||(historicalConfirmed.value&&Boolean(historicalNote.value.trim())))&&selected.value.size>0&&!blocked.value&&reviewRows.value.every(row=>reviewed.value.get(Number(row.id))===row.review_signature)&&(!reviewRows.value.length||reviewNote.value.trim())&&(mode.value==='create'?Boolean(boot.value.settings.dispatch_shop_id):Boolean(target.value)));
+const canSave=computed(()=>(props.manualShip?dispatchConfirmed.value:(!historicalTarget.value||(historicalConfirmed.value&&Boolean(historicalNote.value.trim()))))&&selected.value.size>0&&!blocked.value&&reviewRows.value.every(row=>reviewed.value.get(Number(row.id))===row.review_signature)&&(!reviewRows.value.length||reviewNote.value.trim())&&(mode.value==='create'?Boolean(boot.value.settings.dispatch_shop_id):Boolean(target.value)));
 const pageSelectable=computed(()=>rows.value.filter(row=>!row.blocked&&row.can_select!==false&&(!row.needs_review||reviewed.value.get(Number(row.id))===row.review_signature)));
 const pageSelected=computed(()=>pageSelectable.value.length>0&&pageSelectable.value.every(row=>selected.value.has(Number(row.id))));
 const time=value=>value?shanghaiDateTimeText(value,{assumeUtcWhenNaive:true}):'未记录';
@@ -45,24 +46,25 @@ async function savedApplications(sync=false){const [date_from,date_to]=range.val
  const query={date_from:date_from||shanghaiDateKey(),date_to:date_to||shanghaiDateKey(),...(boot.value.settings.dispatch_shop_id?{shop_id:boot.value.settings.dispatch_shop_id}:{})};
  const result=sync?await service.discoverOfficial(query):await service.officialSnapshot(query);if(current())officialRows.value=result.rows||[];
 }
-async function choose(row){await work(async()=>{const id=Number(row.local_batch_id||row.batch_id);if(!id)throw Error('该申请尚未保存到本企业，请先点击“同步 Ozon 已有申请”');const result=await service.detail(id);if(!current())return;target.value=result;historicalConfirmed.value=false;historicalNote.value='';mode.value='bind';requestKey.value=crypto.randomUUID();reviewed.value=new Map();await recheck();await load(true);});}
+async function choose(row){await work(async()=>{const id=Number(row.local_batch_id||row.batch_id);if(!id)throw Error('该申请尚未保存到本企业，请先点击“同步 Ozon 已有申请”');const result=await service.detail(id);if(!current())return;target.value=result;dispatchConfirmed.value=false;historicalConfirmed.value=false;historicalNote.value='';mode.value='bind';requestKey.value=crypto.randomUUID();reviewed.value=new Map();await recheck();if(!props.manualShip)await load(true);});}
 async function save(){if(!canSave.value)return;await work(async()=>{
  await recheck();if(!canSave.value)throw Error('部分订单状态或标记已变化，请重新复核所选列表');
- const payload={order_ids:selectedIds(),client_request_id:requestKey.value,reviewed_order_ids:reviewRows.value.map(row=>Number(row.id)),review_signatures:Object.fromEntries(reviewRows.value.map(row=>[row.id,row.review_signature])),review_note:reviewNote.value.trim(),...(historicalTarget.value?{confirm_historical_binding:historicalConfirmed.value,historical_binding_note:historicalNote.value.trim()}:{})};
- const result=mode.value==='bind'?await service.action(target.value.batch.id,'bind-orders',payload):await service.create({...payload,container_count:Number(count.value)});
- if(!current())return;ElMessage.success(mode.value==='bind'?'已绑定，等待仓库确认实际交运':'内部批次已保存，请继续核对官方发运');emit('created',result);
+ const payload={order_ids:selectedIds(),client_request_id:requestKey.value,reviewed_order_ids:reviewRows.value.map(row=>Number(row.id)),review_signatures:Object.fromEntries(reviewRows.value.map(row=>[row.id,row.review_signature])),review_note:reviewNote.value.trim(),...(props.manualShip?{confirm_dispatched:dispatchConfirmed.value}:{}),...(!props.manualShip&&historicalTarget.value?{confirm_historical_binding:historicalConfirmed.value,historical_binding_note:historicalNote.value.trim()}:{})};
+ const result=mode.value==='bind'?await service.action(target.value.batch.id,props.manualShip?'manual-ship-orders':'bind-orders',payload):await service.create({...payload,container_count:Number(count.value)});
+ if(!current())return;ElMessage.success(props.manualShip?'已关联 OGL 发运并人工标记为已发运':mode.value==='bind'?'已绑定，等待仓库确认实际交运':'内部批次已保存，请继续核对官方发运');emit('created',result);
  });}
-onMounted(()=>work(async()=>{boot.value=await service.bootstrap();if(!current())return;if(props.batchId){target.value=await service.detail(props.batchId);if(!current())return;}await recheck();await Promise.all([load(),savedApplications()]);}));
+onMounted(()=>work(async()=>{boot.value=await service.bootstrap();if(!current())return;if(props.batchId){target.value=await service.detail(props.batchId);if(!current())return;}await recheck();await Promise.all([...(props.manualShip?[]:[load()]),savedApplications()]);}));
 watch(computed(currentScope),()=>{alive=false;visible.value=false;emit('close');});
-watch(mode,value=>{if(value!=='create')return;target.value=null;reviewed.value=new Map();requestKey.value=crypto.randomUUID();work(async()=>{await recheck();await load(true);});});
+watch(mode,value=>{if(value!=='create')return;target.value=null;reviewed.value=new Map();requestKey.value=crypto.randomUUID();work(async()=>{await recheck();if(!props.manualShip)await load(true);});});
 onBeforeUnmount(()=>{alive=false;++readVersion;++previewVersion;});
 </script>
 <template>
- <el-dialog v-model="visible" title="OGL 组批与绑定发运" width="min(2200px,98vw)" top="3vh" class="ogl-composer-dialog" append-to-body destroy-on-close :close-on-click-modal="false" @closed="emit('close')">
+ <el-dialog v-model="visible" :title="manualShip?'关联 OGL 发运并标记已发运':'OGL 组批与绑定发运'" width="min(2200px,98vw)" top="3vh" class="ogl-composer-dialog" append-to-body destroy-on-close :close-on-click-modal="false" @closed="emit('close')">
   <section class="ogl-composer" v-loading="busy">
    <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon/>
-   <el-alert title="绑定仅建立跟踪关系。仓库确认实际交运后才登记出库；各店铺订单仍由原店铺同步平台状态。" type="info" :closable="false"/>
-   <el-radio-group v-model="mode" aria-label="发运处理方式"><el-radio-button value="bind">绑定已有 Ozon 发运单</el-radio-button><el-radio-button value="create">接口创建：先保存内部批次</el-radio-button></el-radio-group>
+   <el-alert v-if="!manualShip" title="绑定仅建立跟踪关系。仓库确认实际交运后才登记出库；各店铺订单仍由原店铺同步平台状态。" type="info" :closable="false"/>
+   <el-alert v-if="manualShip" :title="`已选 ${selected.size} 单。选择已有 OGL 发运后，批量归入已发运并显示人工标记；平台状态仍由原店铺同步。`" type="info" :closable="false"/>
+   <el-radio-group v-if="!manualShip" v-model="mode" aria-label="发运处理方式"><el-radio-button value="bind">绑定已有 Ozon 发运单</el-radio-button><el-radio-button value="create">接口创建：先保存内部批次</el-radio-button></el-radio-group>
    <section v-if="mode==='bind'" class="composer-section">
     <header><strong>选择默认发运店铺的已有申请</strong><span>仅显示本企业有权访问的记录</span></header>
     <div class="composer-toolbar"><el-date-picker v-model="range" type="daterange" value-format="YYYY-MM-DD" start-placeholder="发运开始日期" end-placeholder="发运结束日期"/><el-button @click="work(()=>savedApplications())">查询已保存申请</el-button><el-button type="primary" plain @click="work(()=>savedApplications(true))">同步 Ozon 已有申请</el-button></div>
@@ -75,9 +77,9 @@ onBeforeUnmount(()=>{alive=false;++readVersion;++previewVersion;});
      <el-table-column label="选择" width="100"><template #default="{row}"><el-button type="primary" plain :disabled="!row.local_batch_id&&!row.batch_id" @click="choose(row)">{{Number(target?.batch.id)===Number(row.local_batch_id||row.batch_id)?'已选择':'选择'}}</el-button></template></el-table-column>
     </el-table>
     <div v-if="target" class="composer-target"><strong>已选：{{target.batch.official_carriage_id}} · {{target.batch.dispatch_shop_name}}</strong><el-button link type="primary" @click="emit('open-batch',target.batch.id)">查看申请、多个运单与分箱详情</el-button><span>关闭详情可回到本窗口，所选订单保留。</span></div>
-    <div v-if="historicalTarget" class="composer-history-review"><el-alert title="历史批次补关联：请核对这些订单确实同批发出。这里只补充系统关联，仓库仍需单独确认实际交运。" type="warning" :closable="false"/><el-checkbox v-model="historicalConfirmed">确认这些订单当时实际同批发出，先补关联待仓库核实</el-checkbox><el-input v-model="historicalNote" type="textarea" :rows="2" maxlength="500" placeholder="填写核对依据，例如交运日期、打包批次或原始记录（必填）" aria-label="历史批次补关联说明"/></div>
+    <div v-if="historicalTarget&&!manualShip" class="composer-history-review"><el-alert title="历史批次补关联：请核对这些订单确实同批发出。这里只补充系统关联，仓库仍需单独确认实际交运。" type="warning" :closable="false"/><el-checkbox v-model="historicalConfirmed">确认这些订单当时实际同批发出，先补关联待仓库核实</el-checkbox><el-input v-model="historicalNote" type="textarea" :rows="2" maxlength="500" placeholder="填写核对依据，例如交运日期、打包批次或原始记录（必填）" aria-label="历史批次补关联说明"/></div>
    </section>
-   <section class="composer-section">
+   <section v-if="!manualShip" class="composer-section">
     <header><strong>按打印记录选择订单</strong><span>默认今天打印 · 可跨页勾选 · 北京时间</span></header>
     <div class="composer-toolbar">
      <el-date-picker v-model="filters.printed_from" type="date" value-format="YYYY-MM-DD" placeholder="打印开始日期"/><el-date-picker v-model="filters.printed_to" type="date" value-format="YYYY-MM-DD" placeholder="打印结束日期"/>
@@ -96,13 +98,14 @@ onBeforeUnmount(()=>{alive=false;++readVersion;++previewVersion;});
    </section>
    <section class="composer-section">
     <header><strong>本次已选 {{selected.size}} 单（含其他页）</strong><el-button :disabled="!selected.size" @click="selected=new Map()">清空本次已选</el-button></header>
-    <OglOrderTable v-if="selected.size" :rows="selectedRows" :selected="selected" :reviewed="reviewed" removable @toggle="toggle" @review="review" @open-order="id=>emit('open-order',id)" @open-batch="id=>emit('open-batch',id)"/>
+    <OglOrderTable :manual-ship="manualShip" v-if="selected.size" :rows="selectedRows" :selected="selected" :reviewed="reviewed" removable @toggle="toggle" @review="review" @open-order="id=>emit('open-order',id)" @open-batch="id=>emit('open-batch',id)"/>
     <p v-else>尚未选择订单。点击上方订单号可查看完整详情；关闭详情后会回到这里，保留筛选、页码和跨页选择。</p>
     <el-input v-if="reviewRows.length" v-model="reviewNote" type="textarea" :rows="2" maxlength="500" placeholder="填写人工复核说明；不会自动清除原标记或备注" aria-label="发运复核说明"/>
     <el-form-item v-if="mode==='create'" label="实际大袋 / 大箱数量"><el-input-number v-model="count" :min="1" :max="1000" :precision="0"/></el-form-item>
    </section>
   </section>
-  <template #footer><div class="composer-footer"><span>已选 {{selected.size}} 单；绑定后待交运，实际交出后再确认出库。</span><el-button :disabled="busy" @click="visible=false">返回订单</el-button><el-button type="primary" :loading="busy" :disabled="!canSave" @click="save">{{mode==='bind'?(historicalTarget?'确认补关联，等待仓库核实':'确认绑定，保持待交运'):'保存内部批次并继续'}}</el-button></div></template>
+  <el-checkbox v-if="manualShip" v-model="dispatchConfirmed">确认所选订单已实际发出，关联此发运并记录为人工标记</el-checkbox>
+  <template #footer><div class="composer-footer"><span v-if="!manualShip">已选 {{selected.size}} 单；绑定后待交运，实际交出后再确认出库。</span><el-button :disabled="busy" @click="visible=false">返回订单</el-button><el-button type="primary" :loading="busy" :disabled="!canSave" @click="save">{{manualShip?'关联并标记已发运':mode==='bind'?(historicalTarget?'确认补关联，等待仓库核实':'确认绑定，保持待交运'):'保存内部批次并继续'}}</el-button></div></template>
  </el-dialog>
 </template>
 <style scoped>

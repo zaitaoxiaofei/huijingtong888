@@ -51,12 +51,13 @@ const ProfitCalculationVersions = defineAsyncComponent(() => import("./component
 const OglDispatchPanel = defineAsyncComponent(() => import("./components/OglDispatchPanel.vue"));
 const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [], version: 0 });
 const OglDispatchComposer = defineAsyncComponent(() => import("./components/OglDispatchComposer.vue"));
-const oglComposer = reactive({ visible: false, orderIds: [], batchId: 0 });
+const oglComposer = reactive({ visible: false, orderIds: [], batchId: 0, manualShip: false });
 const selectionDialogVisible = ref(false);
 
 function openOglDispatch(mode = "history", batchId = 0) {
-  if (mode === "create") {
-    Object.assign(oglComposer, { visible: true, orderIds: [...selectedOrderIds.value], batchId: Number(batchId) });
+  if (mode === "create" || mode === "manual-ship") {
+    if(mode === "manual-ship" && !selectedOrderIds.value.size){ ElMessage.warning("请先勾选订单"); return; }
+    Object.assign(oglComposer, { visible: true, orderIds: [...selectedOrderIds.value], batchId: Number(batchId), manualShip: mode === "manual-ship" });
     return;
   }
   oglDispatchPanel.version += 1;
@@ -1332,7 +1333,7 @@ async function oglComposed(result) {
   for (const member of result.members || []) next.delete(Number(member.order_id));
   selectedOrderIds.value = next;
   oglComposer.visible = false;
-  openOglDispatch("history", result.batch.id);
+  if(!oglComposer.manualShip)openOglDispatch("history", result.batch.id);
   await refreshOglDispatchOrders();
 }
 
@@ -1769,6 +1770,7 @@ function bulkPrintPage(){return openPrintDialog(tableRows.value.map(row=>Number(
 function handleToolbarMoreAction(action) {
   if (action === "shipped-receipts") return previewShippedReceipts();
   if (action === "quality-rules") return showQualityRules();
+  if (action === "ogl-manual-ship") return openOglDispatch("manual-ship");
   if (action === "ogl-official-carriages") return openOglDispatch("official");
   if (action === "ogl-create-batch") return openOglDispatch("create");
   if (action === "ogl-batch-history") return openOglDispatch("history");
@@ -2066,6 +2068,21 @@ async function submitQualityRules() {
 
 function closeQualityDialog() {
   qualityDialog.visible = false;
+}
+
+const markingSelected=ref(false);
+async function handleBatchMark(markType){
+  if(markingSelected.value)return;
+  const ids=[...selectedOrderIds.value];if(!ids.length)return;
+  const {value:note}=await ElMessageBox.prompt(`为已选 ${ids.length} 单统一设置标记和备注`,"批量标记",{inputType:"textarea",inputPlaceholder:"填写本次统一备注（可留空）",confirmButtonText:"保存标记",cancelButtonText:"取消",closeOnClickModal:false}).catch(()=>({value:null}));
+  if(note===null)return;
+  markingSelected.value=true;let saved=0;const failed=[];
+  try{
+    for(const id of ids){try{await saveOrderMark(id,markType,note);saved++;}catch(error){failed.push(error?.message||"保存失败");}}
+    orderDetailCache.clear();await loadOrders({forceRefresh:true});
+    if(failed.length)ElMessage.error(`成功 ${saved} 单，失败 ${failed.length} 单：${failed[0]}`);
+    else ElMessage.success(`已批量标记 ${saved} 单`);
+  }finally{markingSelected.value=false;}
 }
 
 async function handleSaveMark(orderId, markType) {
@@ -2691,6 +2708,7 @@ onBeforeUnmount(() => {
     </div>
 
     <OrdersToolbar
+      :mark-options="vm.markOptions" :marking="markingSelected" @batch-mark="handleBatchMark"
       :filters="vm.filters"
       :shops="vm.shops"
       :logistics-carrier-options="vm.logisticsCarrierOptions"
@@ -2739,7 +2757,7 @@ onBeforeUnmount(() => {
       </OrdersStatusTabs>
     </OrdersToolbar>
 
-    <OglDispatchComposer v-if="oglComposer.visible" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" :order-rows="selectedRows" @open-order="id => openDrawer('detail', id)" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
+    <OglDispatchComposer v-if="oglComposer.visible" :manual-ship="oglComposer.manualShip" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" :order-rows="selectedRows" @open-order="id => openDrawer('detail', id)" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
     <el-dialog v-if="selectionDialogVisible" v-model="selectionDialogVisible" title="跨页已选订单" width="min(1100px,94vw)" append-to-body>
       <p>已选 {{ selectedCount }} 单；翻页、调整筛选不会清空。批量操作前会由服务端重新校验订单状态。</p>
       <el-table :data="selectedRows" row-key="id" max-height="55vh" border>

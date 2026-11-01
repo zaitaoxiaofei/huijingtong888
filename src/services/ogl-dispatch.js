@@ -172,7 +172,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     return rows[0];
   }
   async function members(connection, current, batchId, lock = false) {
-    const [rows] = await connection.execute(`SELECT m.*, (SELECT te.detail_json FROM ogl_dispatch_events te WHERE te.tenant_id=m.tenant_id AND te.batch_id=m.batch_id AND te.member_id=m.id AND te.action='assign-tracking' ORDER BY te.id DESC LIMIT 1) AS manual_tracking_json, o.status AS platform_status, o.logistics_status, o.tracking_stage,
+    const [rows] = await connection.execute(`SELECT m.*, (SELECT JSON_UNQUOTE(JSON_EXTRACT(de.detail_json,'$.source')) FROM ogl_dispatch_events de WHERE de.tenant_id=m.tenant_id AND de.batch_id=m.batch_id AND de.member_id=m.id AND de.action='dispatch' ORDER BY de.id DESC LIMIT 1) AS dispatch_source, (SELECT te.detail_json FROM ogl_dispatch_events te WHERE te.tenant_id=m.tenant_id AND te.batch_id=m.batch_id AND te.member_id=m.id AND te.action='assign-tracking' ORDER BY te.id DESC LIMIT 1) AS manual_tracking_json, o.status AS platform_status, o.logistics_status, o.tracking_stage,
       o.ordered_at, o.last_synced_at AS order_last_synced_at, raw.raw_json, raw.substatus, om.mark_type, om.note AS mark_note, s.name AS shop_name,
       s.status AS shop_status FROM ogl_dispatch_members m
       JOIN orders o ON o.id = m.order_id AND o.shop_id = m.shop_id AND o.posting_number = m.posting_number
@@ -350,6 +350,8 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
 
   async function bindOrders(session,body) {
     const requestKey=text(body.client_request_id,128);if(!/^[a-zA-Z0-9_-]{8,128}$/.test(requestKey))fail('绑定缺少有效操作标识，请重新打开组批窗口');
+    const manual=body.action==='manual-ship-orders';
+    if(manual&&body.confirm_dispatched!==true)fail('请确认所选订单已实际发出，再人工标记已发运',409);
     const selected=ids(body.order_ids),ctx=await context(session,body.batch_id,true);
     if(!ctx.batch.official_carriage_id||!['observed','approved'].includes(ctx.batch.official_status))fail('请先同步已有官方申请并选择可核对的批次',409);
     const official=await readOfficial(ctx,ctx.batch.official_carriage_id);
@@ -362,26 +364,34 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const item=await batch(connection,current,ctx.batch.id,true);
       if(item.official_status!==ctx.batch.official_status||item.official_carriage_id!==ctx.batch.official_carriage_id||(item.official_operation_token??null)!==ctx.operationToken)fail('申请状态已变化，请刷新后绑定',409);
       const [events]=await connection.execute("SELECT detail_json FROM ogl_dispatch_events WHERE tenant_id=? AND batch_id=? AND action='bind-orders' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1",[current.id,item.id,requestKey]);
-      if(events[0]){const previous=parsed(events[0].detail_json);if(JSON.stringify([...previous.order_ids].sort((a,b)=>a-b))!==JSON.stringify([...selected].sort((a,b)=>a-b)))fail('同一操作标识不能用于不同订单，请重新核对',409);return getDetail(connection,current,item.id);}
+      if(events[0]){const previous=parsed(events[0].detail_json);if(Boolean(previous.manual_dispatch)!==manual||JSON.stringify([...previous.order_ids].sort((a,b)=>a-b))!==JSON.stringify([...selected].sort((a,b)=>a-b)))fail('同一操作标识不能用于不同订单，请重新核对',409);return getDetail(connection,current,item.id);}
       const previous=await members(connection,current,item.id,true);
       const historical=['received','closed'].includes(officialState)||['tracking','closed'].includes(item.status)||previous.some(row=>row.active&&row.dispatched_at);
       if(item.status==='cancelled')fail('该批次已取消，不能追加订单',409);
-      if(historical&&(body.confirm_historical_binding!==true||!text(body.historical_binding_note)))fail('历史批次补关联须确认当时实际同批发出并填写核对说明；补关联后仍须仓库单独确认实际交运',409,'OGL_HISTORICAL_CONFIRMATION_REQUIRED');
+      if(!manual&&historical&&(body.confirm_historical_binding!==true||!text(body.historical_binding_note)))fail('历史批次补关联须确认当时实际同批发出并填写核对说明；补关联后仍须仓库单独确认实际交运',409,'OGL_HISTORICAL_CONFIRMATION_REQUIRED');
       const checked=await previewRows(connection,current,selected,true,item.id);
       if(checked.rejected.length)fail(`有 ${checked.rejected.length} 个订单不能绑定：${checked.rejected[0].reason}`,409);
       assertOrderReview(checked.eligible,body);
       for(const row of checked.eligible){
         const own=Number(row.shop_id)===Number(item.default_shop_id);
-        if(historical&&own&&!row.already_bound)fail('历史批次只允许补关联本企业其他店铺订单；本店货件请按官方记录核对',409);
-        if(own&&!accepted.has(row.posting_number))fail(`本店订单 ${row.posting_number} 未被 Ozon 发运单收录，请在 Ozon 后台添加后同步；不能冒充官方关联`,409);
+        if(!manual&&historical&&own&&!row.already_bound)fail('历史批次只允许补关联本企业其他店铺订单；本店货件请按官方记录核对',409);
+        if(!manual&&own&&!accepted.has(row.posting_number))fail(`本店订单 ${row.posting_number} 未被 Ozon 发运单收录，请在 Ozon 后台添加后同步；不能冒充官方关联`,409);
         if(row.already_bound)continue;
         const [old]=await connection.execute('SELECT id FROM ogl_dispatch_members WHERE tenant_id=? AND batch_id=? AND order_id=? FOR UPDATE',[current.id,item.id,row.id]);
-        if(old[0])await connection.execute('UPDATE ogl_dispatch_members SET active_order_id=order_id,withdrawn_at=NULL,withdrawn_by=NULL,official_member=? WHERE tenant_id=? AND id=?',[Number(own),current.id,old[0].id]);
-        else await connection.execute('INSERT INTO ogl_dispatch_members(tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number,official_member) VALUES(?,?,?,?,?,?,?)',[current.id,item.id,row.id,row.id,row.shop_id,row.posting_number,Number(own)]);
+        if(old[0])await connection.execute('UPDATE ogl_dispatch_members SET active_order_id=order_id,withdrawn_at=NULL,withdrawn_by=NULL,official_member=? WHERE tenant_id=? AND id=?',[Number(own&&accepted.has(row.posting_number)),current.id,old[0].id]);
+        else await connection.execute('INSERT INTO ogl_dispatch_members(tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number,official_member) VALUES(?,?,?,?,?,?,?)',[current.id,item.id,row.id,row.id,row.shop_id,row.posting_number,Number(own&&accepted.has(row.posting_number))]);
+      }
+      if(manual){
+        const linked=await members(connection,current,item.id,true);
+        for(const row of linked.filter(row=>selected.includes(Number(row.order_id))&&!row.dispatched_at)){
+          await connection.execute('UPDATE ogl_dispatch_members SET dispatched_at=?,dispatched_by=? WHERE tenant_id=? AND id=?',[timestamp(),current.personId,current.id,row.id]);
+          await event(connection,current,item.id,'dispatch',{source:'manual',order_id:Number(row.order_id),official_member:Boolean(row.official_member)},row.id,'订单页批量人工标记已发运');
+        }
+        await connection.execute("UPDATE ogl_dispatch_batches SET status='tracking' WHERE tenant_id=? AND id=?",[current.id,item.id]);
       }
       const metadata={...parsed(item.official_result_json)};delete metadata.local_management;
       await connection.execute("UPDATE ogl_dispatch_batches SET official_result_json=?,status=CASE WHEN status='closed' THEN 'tracking' ELSE status END WHERE tenant_id=? AND id=?",[JSON.stringify(metadata),current.id,item.id]);
-      await event(connection,current,item.id,'bind-orders',{request_key:requestKey,order_ids:selected,historical_binding:historical,historical_binding_note:historical?text(body.historical_binding_note):null,reopened_from:item.status==='closed'?'closed':null,reviewed_order_ids:body.reviewed_order_ids||[],review_signatures:orderReviews(checked.eligible),physical_dispatch:false},null,text(body.review_note));
+      await event(connection,current,item.id,'bind-orders',{request_key:requestKey,order_ids:selected,manual_dispatch:manual,historical_binding:historical,historical_binding_note:historical?text(body.historical_binding_note):null,reopened_from:item.status==='closed'?'closed':null,reviewed_order_ids:body.reviewed_order_ids||[],review_signatures:orderReviews(checked.eligible),physical_dispatch:false},null,text(body.review_note));
       return getDetail(connection,current,item.id);
     });
   }
@@ -1321,7 +1331,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   async function action(session,body={}) {
     let result;
     if(body.action==='refresh') result=await refresh(session,body);
-    else if(body.action==='bind-orders') result=await bindOrders(session,body);
+    else if(['bind-orders','manual-ship-orders'].includes(body.action)) result=await bindOrders(session,body);
     else if(body.action==='official-options') return officialOptions(session,body);
     else if(body.action==='official-create') result=await officialCreate(session,body);
     else if(body.action==='official-confirm') result=await officialConfirm(session,body);
