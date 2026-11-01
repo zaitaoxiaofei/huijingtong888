@@ -22,5 +22,13 @@ export const FINANCE_SUBMISSIONS_SCHEMA = [
     tenant_id BIGINT UNSIGNED NOT NULL, company_id BIGINT UNSIGNED NOT NULL,
     month_key CHAR(7) NOT NULL, submission_id BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (tenant_id, company_id, month_key)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+  `CREATE TABLE IF NOT EXISTS finance_payroll_payment_updates (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id BIGINT UNSIGNED NOT NULL, item_id BIGINT UNSIGNED NOT NULL,
+    paid_amount DECIMAL(18,2) NOT NULL,
+    recorded_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_payroll_paid_tenant_item (tenant_id, item_id, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`
 ];

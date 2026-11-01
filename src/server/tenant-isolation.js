@@ -203,7 +203,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantSellerMediaJobs = parts[1] === "listing" && parts[2] === "media" && parts[3] === "ozon-upload-jobs" && parts.length === 4 && ["GET", "POST"].includes(verb);
   if (tenantSellerMediaJobs) return { allowed: true };
   const tenantFinanceRead = parts[1] === "finance-center" && parts.length === 3
-    && ["companies", "report", "expenses", "vouchers", "platform-items", "export"].includes(parts[2]) && verb === "GET";
+    && ["companies", "report", "inventory-capital", "expenses", "vouchers", "platform-items", "export"].includes(parts[2]) && verb === "GET";
   const tenantFinanceWrite = parts[1] === "finance-center" && parts.length === 3
     && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(parts[2]) && verb === "POST";
   const tenantFinanceExpenseDelete = parts[1] === "finance-center" && parts[2] === "expenses"

@@ -175,11 +175,13 @@ export async function parsePayroll(buffer, { companies }) {
       const employee = money([12,13,14,15].reduce((sum, col) => sum + number(get(col), `第${row}行个人缴费`, true), 0));
       const tax = number(get(17), `第${row}行个税`, true);
       const net = number(get(18), `第${row}行实发工资`);
+      const employer_items = Object.fromEntries(["pension", "medical", "supplementary_medical", "unemployment", "injury", "housing_fund"].map((key, index) => [key, number(get(index + 5), `第${row}行单位缴费`, true)]));
+      const employee_items = Object.fromEntries(["pension", "medical", "unemployment", "housing_fund"].map((key, index) => [key, number(get(index + 12), `第${row}行个人缴费`, true)]));
       if (Math.abs(cents(base) - cents(employee) - cents(tax) - cents(net)) > 1) fail(`“${sheet.name}”第${row}行实发工资与基本工资、个人缴费、个税不符，请核对表格`);
       if (Math.abs(cents(number(get(11), "单位缴费小计")) - cents(employer)) > 1 || Math.abs(cents(number(get(16), "个人缴费小计")) - cents(employee)) > 1) fail(`“${sheet.name}”第${row}行缴费小计不符，请先在Excel中重新计算并保存`);
       rows.push({ source_row: row, sheet: sheet.name, company_id: Number(company.id), company_name: company.name, month: monthKey,
         person_name: bounded(text(get(3)), 128, "员工姓名"), department: text(get(2)), category: "salary", expense_date: expenseDate,
-        description: `${monthKey}工资 · ${text(get(3))}`, base, employer, employee, tax, net, amount: money(base + employer), images: [] });
+        description: `${monthKey}工资 · ${text(get(3))}`, base, employer, employee, tax, net, employer_items, employee_items, confirmation: text(get(19)), amount: money(base + employer), images: [] });
     }
   }
   if (!rows.length || rows.length > 500) fail("未识别到工资明细，或超过500行；请使用现有19列工资表格式");
@@ -203,5 +205,18 @@ export async function submissionExport(batches) {
   sheet.views = [{ state: "frozen", ySplit: 1 }];
   sheet.getRow(1).font = { bold: true };
   sheet.getColumn(9).numFmt = "#,##0.00";
+  return Buffer.from(await workbook.xlsx.writeBuffer());
+}
+
+export async function payrollLedgerExport(rows) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("工资明细");
+  const headers = ["公司", "工资月份", "序号", "部门", "姓名", "基本工资", "单位养老", "单位医疗", "单位附加医疗", "单位失业", "单位工伤", "单位公积金", "单位小计", "个人养老", "个人医疗", "个人失业", "个人公积金", "个人小计", "个税", "实发工资（表内）", "确认签字", "已发金额", "未发差额"];
+  sheet.columns = headers.map(header => ({ header, width: header === "公司" ? 36 : 18 }));
+  rows.forEach((row, index) => sheet.addRow([row.company_name, row.month, index + 1, row.department, row.person_name, row.base,
+    ...["pension", "medical", "supplementary_medical", "unemployment", "injury", "housing_fund"].map(key => row.employer_items?.[key] ?? null), row.employer,
+    ...["pension", "medical", "unemployment", "housing_fund"].map(key => row.employee_items?.[key] ?? null), row.employee, row.tax, row.net, row.confirmation || "", row.paid_amount, row.remaining_amount]));
+  sheet.getRow(1).font = { bold: true }; sheet.views = [{ state: "frozen", ySplit: 1, xSplit: 5 }];
+  for (const column of [...Array.from({ length: 15 }, (_, index) => index + 6), 22, 23]) sheet.getColumn(column).numFmt = "#,##0.00";
   return Buffer.from(await workbook.xlsx.writeBuffer());
 }

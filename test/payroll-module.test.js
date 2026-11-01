@@ -32,14 +32,15 @@ test("locked payroll creates one idempotent salary expense", () => {
   assert.match(service, /status === "approved"/);
 });
 
-test("legacy payroll stays routed while the main finance navigation uses the new import entry", () => {
+test("dedicated payroll management and reimbursement are separate finance entries", () => {
   assert.match(routes, /GET \/api\/payroll\/setup/);
   assert.match(routes, /POST \/api\/payroll\/calculate/);
   assert.match(authorization, /resource === "payroll"/);
   assert.match(router, /path: "finance\/payroll"/);
-  assert.doesNotMatch(navigation, /route: "\/finance\/payroll"/);
+  assert.match(navigation, /route: "\/finance\/payroll"/);
   assert.match(navigation, /route: "\/finance\/reimbursements"/);
-  assert.match(fs.readFileSync(new URL("../frontend/admin/views/finance/FinanceOverviewView.vue", import.meta.url), "utf8"), /工资表导入与汇总/);
+  assert.match(router, /PayrollLedgerView.vue/);
+  assert.match(fs.readFileSync(new URL("../frontend/admin/views/finance/PayrollLedgerView.vue", import.meta.url), "utf8"), /未发差额/);
   assert.match(frontend, /城市最低缴费方案/);
   assert.match(frontend, /工资试算/);
 });

@@ -55,12 +55,14 @@ test("only exact reimbursement routes open for employees, while other financial 
     assert.equal(authorizeApiRequest({method,_session:member},parts).allowed,true);
     assert.equal(tenantIsolationDecision(member,parts,method).allowed,true);
   }
-  for(const parts of [["api","finance-submissions","review"],["api","finance-submissions","submit","extra"]]) {
+  for(const parts of [["api","finance-submissions","review"],["api","finance-submissions","payroll-paid"],["api","finance-submissions","submit","extra"]]) {
     assert.equal(authorizeApiRequest({method:"POST",_session:member},parts).allowed,false);
     assert.equal(tenantIsolationDecision(member,parts,"POST").allowed,false);
   }
   assert.equal(canAccessPage(member,"/finance/reimbursements"),true);
   assert.equal(canAccessPage(member,"/finance-center"),false);
+  for(const path of ['/profit/monthly-billing','/finance/payroll'])assert.equal(canAccessPage(member,path),false);
+  for(const path of ['payroll-ledger','payroll-export'])assert.equal(authorizeApiRequest({method:'GET',_session:member},['api','finance-submissions',path]).allowed,false);
   assert.equal(canAccessPage(null,"/finance/reimbursements"),false);
   assert.equal(authorizeApiRequest({method:"GET",_session:{platform_role:"super_admin"}},["api","finance-submissions","list"]).allowed,false);
 });

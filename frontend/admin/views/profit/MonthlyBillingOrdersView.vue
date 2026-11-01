@@ -26,6 +26,7 @@ const state = reactive({
   filters: {
     dateRange: [String(route.query.from || `${legacyMonth}-01`), String(route.query.to || legacyTo)],
     shopId: String(route.query.shopId || "all"),
+    companyId: String(route.query.companyId || "all"),
     keyword: String(route.query.keyword || ""),
     outcomeType: String(route.query.outcomeType || ""),
     settlementState: String(route.query.settlementState || ""),
@@ -123,6 +124,7 @@ function syncRouteQuery() {
       from: state.filters.dateRange[0],
       to: state.filters.dateRange[1],
       shopId: String(state.filters.shopId || "all"),
+      companyId: state.filters.companyId,
       keyword: state.filters.keyword || undefined,
       outcomeType: state.filters.outcomeType || undefined,
       settlementState: state.filters.settlementState || undefined,
@@ -143,6 +145,7 @@ async function loadRows() {
       from: state.filters.dateRange[0],
       to: state.filters.dateRange[1],
       shopId: String(state.filters.shopId || "all"),
+      companyId: state.filters.companyId,
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize)
     });
@@ -199,10 +202,11 @@ function handlePageSizeChange(size) {
 }
 
 watch(
-  () => [route.query.from, route.query.to, route.query.shopId],
+  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId],
   () => {
     state.filters.dateRange = [String(route.query.from || state.filters.dateRange[0]), String(route.query.to || state.filters.dateRange[1])];
     state.filters.shopId = String(route.query.shopId || state.filters.shopId || "all");
+    state.filters.companyId = String(route.query.companyId || "all");
   }
 );
 
