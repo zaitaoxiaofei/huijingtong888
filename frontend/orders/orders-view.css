@@ -5528,3 +5528,8 @@
 }
 
 button.orders-selected-count { font-family: inherit; cursor: pointer; }
+
+.orders-selection-summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:5px 0;font-size:12px;color:var(--erp-detail-text-regular,#46556c)}
+.orders-selection-summary strong{color:var(--el-color-primary)}
+.orders-selection-hint{color:var(--el-text-color-secondary)}
+.order-print-review{display:grid;gap:10px}.order-print-review p{margin:0}

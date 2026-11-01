@@ -146,7 +146,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       else{const name=inventoryProductSearch({searchMode:'name',query:search},scope);where.push(`((${name.sql}) OR ${skuSql})`);args.push(...name.params,text,text,text);}
     }
     // Include never-stocked physical products, not a second copy of their virtual parent.
-    return query(`SELECT p.id AS product_id,p.name AS product_name,p.inventory_number,p.code AS inventory_id FROM products p
+    return query(`SELECT p.id AS product_id,p.name AS product_name,p.inventory_number,p.code AS inventory_id,p.is_accessory,p.updated_at,0 AS component_count FROM products p
       WHERE p.active=1 AND COALESCE(p.product_type,'main')!='selection' AND ${inventoryTenantSql(scope,'p')}
         AND NOT EXISTS(SELECT 1 FROM product_components c WHERE c.product_id=p.id AND ${inventoryTenantSql(scope,'c')})
         ${where.length?'AND '+where.map(w=>'('+w+')').join(' AND '):''} ORDER BY p.id`,args);

@@ -349,6 +349,8 @@ function procurementTimeText(row) {
       <el-table-column width="54" fixed="left" align="center">
         <template #header>
           <el-checkbox
+            aria-label="选择或取消当前页订单"
+            title="仅选择或取消当前页；清除所有页面请点底部“清空全部已选”"
             :model-value="allSelected"
             :indeterminate="someSelected"
             @change="emit('toggle-all', $event)"
