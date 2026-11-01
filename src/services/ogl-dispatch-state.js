@@ -1,3 +1,4 @@
+import {orderHasDispatchHold} from '../shared/order-dispatch-hold.js';
 import { oglTransportDeadlineAt, oglTransportDeadlineRule } from './ogl-transport-deadline.js';
 
 const ONLINE = /(^|\s)(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^\s]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer)(\s|$)/;
@@ -49,7 +50,7 @@ export function withOglDispatch(order, member) {
     const stopped = isOglPlatformOnline(order) || /cancel|return|reject|not_accepted|unclaimed|arbitration|dispute/.test(platformText(order));
     order = { ...order, ogl_transport_deadline: { at: stopped ? null : oglTransportDeadlineAt(order.ordered_at, deadlineRule), rule: deadlineRule, stopped } };
   }
-  if (!member) return order;
+  if (!member) return orderHasDispatchHold(order) ? {...order,display_status:'awaiting_deliver'} : order;
   const active=!member.withdrawn_at&&(member.active_order_id === undefined || Number(member.active_order_id) === Number(order.id));
   const applied=Boolean(active&&Number(member.official_member)===1&&member.official_carriage_id
     &&Number(member.default_shop_id)===Number(order.shop_id)&&!['cancelled','closed'].includes(member.batch_status)
@@ -73,10 +74,11 @@ export function withOglDispatch(order, member) {
     exception_code: member.exception_code || '', exception_note: member.exception_note || '',
     official_member: Boolean(member.official_member)
   };
-  const status = oglPlatformDisplayStatus(order, dispatch) || (dispatch.tracking?oglOrderDisplayStatus(order, dispatch):'');
-  dispatch.awaiting_print=status==='awaiting_deliver';
-  dispatch.stage=status==='awaiting_deliver'?'awaiting_print':status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':bound?'bound':'preparing';
-  dispatch.stage_label={awaiting_print:'已加入发运单 · 待打印',delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',bound:'已绑定待交运',preparing:'准备中'}[dispatch.stage];
+  const held=orderHasDispatchHold({...order,ogl_dispatch:dispatch});
+  const status = held ? 'awaiting_deliver' : oglPlatformDisplayStatus(order, dispatch) || (dispatch.tracking?oglOrderDisplayStatus(order, dispatch):'');
+  dispatch.awaiting_print=status==='awaiting_deliver'&&!order.printed_at;
+  dispatch.stage=held?'held':status==='awaiting_deliver'?'awaiting_print':status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':bound?'bound':'preparing';
+  dispatch.stage_label={held:'人工标记待处理',awaiting_print:'已加入发运单 · 待打印',delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',bound:'已绑定待交运',preparing:'准备中'}[dispatch.stage];
   dispatch.transport_deadline_rule = deadlineRule;
   dispatch.transport_deadline_at = ['awaiting_deliver','ogl_bound','ogl_dispatched'].includes(status) ? oglTransportDeadlineAt(order.ordered_at, dispatch.transport_deadline_rule) : null;
   return { ...order, ogl_dispatch: dispatch, ...(status ? { display_status: status } : {}) };
