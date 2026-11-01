@@ -22,7 +22,7 @@ export function hasOglPlatformHandover(order = {}) {
 export function oglOrderDisplayStatus(order = {}, member = order.ogl_dispatch) {
   if (order.logistics_carrier && order.logistics_carrier !== 'ogl') return '';
   if (!member || !(member.dispatched_at || member.tracking) || member.withdrawn_at || TERMINAL.test(platformText(order)) || isOglPlatformOnline(order)) return '';
-  return member.dispatched_at || member.dispatched ? 'ogl_dispatched' : 'ogl_bound';
+  return member.dispatched_at || member.dispatched ? 'ogl_dispatched' : order.printed_at ? 'ogl_bound' : 'awaiting_deliver';
 }
 
 function oglPlatformDisplayStatus(order, member) {
@@ -74,10 +74,11 @@ export function withOglDispatch(order, member) {
     official_member: Boolean(member.official_member)
   };
   const status = oglPlatformDisplayStatus(order, dispatch) || (dispatch.tracking?oglOrderDisplayStatus(order, dispatch):'');
-  dispatch.stage=status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':bound?'bound':'preparing';
-  dispatch.stage_label={delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',bound:'已绑定待交运',preparing:'准备中'}[dispatch.stage];
+  dispatch.awaiting_print=status==='awaiting_deliver';
+  dispatch.stage=status==='awaiting_deliver'?'awaiting_print':status==='delivered'?'delivered':status==='cancelled'||status==='dispute'?'cancelled':status==='delivering'?'in_transit':dispatch.dispatched?'dispatched':bound?'bound':'preparing';
+  dispatch.stage_label={awaiting_print:'已加入发运单 · 待打印',delivered:'已签收',cancelled:'平台已取消或异常',in_transit:'运输中',dispatched:'已实际交运',applied:'已申请',bound:'已绑定待交运',preparing:'准备中'}[dispatch.stage];
   dispatch.transport_deadline_rule = deadlineRule;
-  dispatch.transport_deadline_at = ['ogl_bound','ogl_dispatched'].includes(status) ? oglTransportDeadlineAt(order.ordered_at, dispatch.transport_deadline_rule) : null;
+  dispatch.transport_deadline_at = ['awaiting_deliver','ogl_bound','ogl_dispatched'].includes(status) ? oglTransportDeadlineAt(order.ordered_at, dispatch.transport_deadline_rule) : null;
   return { ...order, ogl_dispatch: dispatch, ...(status ? { display_status: status } : {}) };
 }
 
@@ -134,10 +135,12 @@ export function oglBoundDispatchSql(alias='o') {
       AND ogl_batch.official_status IN ('observed','created','approved','sync_required','confirm_unknown','mismatch')
       AND (ogl_shop.tenant_id=ogl_member.tenant_id OR (ogl_shop.tenant_id IS NULL AND ogl_tenant.slug='default')))`;
 }
-export function oglBoundStatusSql(alias='o',evidenceAlias=null) {
+// The unprinted branch stays in awaiting delivery; membership alone is not packing evidence.
+export function oglBoundStatusSql(alias='o',evidenceAlias=null,printed=true) {
   const evidence=oglStatusEvidenceSql(alias,evidenceAlias),physical=oglStatusEvidenceSql(alias,evidenceAlias,true);
   const text=`LOWER(CONCAT_WS(' ', ${alias}.status, ${alias}.tracking_stage, ${alias}.logistics_status))`;
   return `(${evidence} AND NOT COALESCE((${physical}),0)
+    AND ${printed?'':'NOT '}EXISTS (SELECT 1 FROM order_label_prints ogl_print WHERE ogl_print.order_id=${alias}.id AND ogl_print.printed_at IS NOT NULL)
     AND ${text} NOT REGEXP 'cancel|return|reject|not_accepted|arbitration|dispute'
     AND ${text} NOT REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way[^ ]*|posting_in_courier_service|posting_in_pickup_point|posting_received_by_buyer)( |$)')`;
 }
