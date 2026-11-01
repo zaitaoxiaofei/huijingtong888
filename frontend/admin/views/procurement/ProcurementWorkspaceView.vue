@@ -6,12 +6,10 @@ import { Delete, UploadFilled } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
 const router = useRouter();
-const InventorySupplyWorkspace=defineAsyncComponent(()=>import('../../components/inventory/InventorySupplyWorkspace.vue'));
 const ProcurementArrivalTracker=defineAsyncComponent(()=>import('../../components/procurement/ProcurementArrivalTracker.vue'));
-const arrivalProductId=ref(Number(route.query.product_id)||0);
-function showArrivals(context={}){arrivalProductId.value=Number(context.productId)||0;workMode.value='arrivals';}
-const workMode=ref(route.query.mode==='arrivals'?'arrivals':route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory');
-watch(()=>route.query.mode,value=>{if(value)workMode.value=['inventory','arrivals'].includes(value)?value:'purchase';});
+const arrivalRecordsVisible=ref(false);
+const InventorySupplyWorkspace=defineAsyncComponent(()=>import('../../components/inventory/InventorySupplyWorkspace.vue'));
+const workMode=computed({get:()=>route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory',set:value=>router.replace({query:{...route.query,mode:value==='purchase'?'purchase':undefined,message_request_id:undefined,review_product_id:undefined}})});
 let legacyStarted=false;
 async function startPurchaseView(){
  if(legacyStarted)return loadRows();legacyStarted=true;
@@ -1581,9 +1579,9 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
-    <div class="procurement-mode-switch"><el-radio-group v-model="workMode" aria-label="采购工作模式"><el-radio-button value="inventory">库存需求总览</el-radio-button><el-radio-button value="purchase">登记采购</el-radio-button><el-radio-button value="arrivals">采购到货跟踪</el-radio-button></el-radio-group><span>需求按实物汇总，来源人、订单和店铺SKU保留追溯</span></div>
-    <InventorySupplyWorkspace v-if="workMode==='inventory'" role="procurement" @track="showArrivals" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"/>
-    <ProcurementArrivalTracker v-if="workMode==='arrivals'" :product-id="arrivalProductId"/>
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" entry="procurement" :initial-task="route.query.mode==='arrivals'?'incoming':''" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><el-button plain @click="arrivalRecordsVisible=true">采购批次记录</el-button><el-button plain @click="workMode='purchase'">旧版登记采购</el-button></template></InventorySupplyWorkspace>
+    <div v-else class="procurement-mode-switch"><el-button @click="workMode='inventory'">返回采购工作平台</el-button><span>旧版登记采购</span></div>
+    <el-dialog v-if="arrivalRecordsVisible" v-model="arrivalRecordsVisible" title="采购批次记录" width="95%" append-to-body destroy-on-close><ProcurementArrivalTracker :product-id="Number(route.query.product_id)||0"/></el-dialog>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
       <div v-loading="messageRequestLoading" style="min-height: 100px">
         <el-alert v-if="messageRequestError" :title="messageRequestError" type="error" :closable="false" show-icon />
