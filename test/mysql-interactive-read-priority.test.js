@@ -36,3 +36,17 @@ test('background read admission is serial, preserves priority, and recovers afte
  await withMysqlWorkload('foreground',()=>withMysqlBackgroundReadAdmission(async()=>events.push('foreground')));
  assert.ok(!events.includes('next'));hold.resolve();await rejected;assert.equal(await next,42);assert.ok(events.indexOf('next')>events.indexOf('first'));
 });
+test('scheduled transaction read fan-out is serial without demoting or queueing interactive reads',async()=>{
+ const {withMysqlTransactionPriority,withMysqlBackgroundReadAdmission,currentMysqlWorkload}=await import('../src/mysql-workload.js');
+ const hold=deferred(),started=deferred();let active=0,peak=0;const events=[];
+ const writer=withMysqlWorkload('background',()=>withMysqlTransactionPriority(async()=>{
+  await Promise.all(Array.from({length:12},(_,id)=>withMysqlBackgroundReadAdmission(async()=>{
+   assert.equal(currentMysqlWorkload(),'foreground');active++;peak=Math.max(peak,active);started.resolve();if(id===0)await hold.promise;active--;events.push(id);
+  })));
+  await assert.rejects(withMysqlBackgroundReadAdmission(async()=>{throw Error('nested read failed');}),/nested read failed/);
+  assert.equal(await withMysqlBackgroundReadAdmission(async()=>42),42);
+ }));
+ await started.promise;
+ await withMysqlWorkload('foreground',()=>withMysqlBackgroundReadAdmission(async()=>events.push('interactive')));
+ assert.deepEqual(events,['interactive']);hold.resolve();await writer;assert.equal(peak,1);assert.equal(events.length,13);
+});

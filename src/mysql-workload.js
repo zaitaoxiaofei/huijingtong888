@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const workload = new AsyncLocalStorage();
+const backgroundTransaction = new AsyncLocalStorage();
 export function currentMysqlWorkload() {
   return workload.getStore() === 'background' ? 'background' : 'foreground';
 }
@@ -22,7 +23,7 @@ let backgroundTransactionTail = Promise.resolve();
 export function withMysqlTransactionPriority(operation) {
   const run = () => withMysqlWorkload('foreground', operation);
   if (currentMysqlWorkload() !== 'background') return run();
-  const task = backgroundTransactionTail.catch(() => {}).then(run);
+  const task = backgroundTransactionTail.catch(() => {}).then(() => backgroundTransaction.run(true, run));
   backgroundTransactionTail = task.then(() => undefined, () => undefined);
   return task;
 }
@@ -52,11 +53,20 @@ export async function waitForMysqlInteractiveReads() {
 }
 
 let backgroundReadTail = Promise.resolve();
+let backgroundTransactionReadTail = Promise.resolve();
 // Queue background reads before acquiring a pooled connection. Waiting for
 // interactive rows must not consume other background reads' acquire timeout.
 export function withMysqlBackgroundReadAdmission(operation) {
-  if (currentMysqlWorkload() !== 'background') return operation();
-  const task = backgroundReadTail.catch(() => {}).then(operation);
-  backgroundReadTail = task.then(() => undefined, () => undefined);
+  const transactionOrigin = backgroundTransaction.getStore() === true && currentMysqlWorkload() !== 'background';
+  if (!transactionOrigin && currentMysqlWorkload() !== 'background') return operation();
+  // Scheduled transactions retain foreground connections for nested reads,
+  // but their fan-out must leave capacity for interactive requests. Keep this
+  // queue separate from background scans so a transaction does not hold row
+  // locks while waiting for the scan backlog. Connection reuse is unchanged.
+  const previous = transactionOrigin ? backgroundTransactionReadTail : backgroundReadTail;
+  const task = previous.catch(() => {}).then(operation);
+  const tail = task.then(() => undefined, () => undefined);
+  if (transactionOrigin) backgroundTransactionReadTail = tail;
+  else backgroundReadTail = tail;
   return task;
 }
