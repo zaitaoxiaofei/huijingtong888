@@ -24,7 +24,6 @@ async function main() {
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const adminEntry = manifest["frontend/admin/main.js"];
   const globalStyleEntry = manifest["style.css"];
-  const buildStamp = Date.now().toString(36);
 
   if (!adminEntry?.file) {
     throw new Error(text.missingManifest);
@@ -39,11 +38,13 @@ async function main() {
   ];
 
   const styleTags = [...new Set(styleFiles)]
-    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}?v=${buildStamp}" />`)
+    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}" />`)
     .join("\n");
-  const modulePreloadTags = (adminEntry.imports || [])
+  // Entry URLs must match imports from route chunks. A second query-string
+  // URL creates a second module instance despite the fingerprinted filename.
+  const modulePreloadTags = [...new Set([adminEntry.file, ...(adminEntry.imports || [])
     .map((key) => manifest[key]?.file)
-    .filter(Boolean)
+    .filter(Boolean)])]
     .map((file) => `    <link rel="modulepreload" href="/vue-apps/${file}" />`)
     .join("\n");
   const html = `<!doctype html>
@@ -269,7 +270,7 @@ ${modulePreloadTags}
         });
       })();
     </script>
-    <script type="module" src="/vue-apps/${adminEntry.file}?v=${buildStamp}"></script>
+    <script type="module" src="/vue-apps/${adminEntry.file}"></script>
   </body>
 </html>
 `;
