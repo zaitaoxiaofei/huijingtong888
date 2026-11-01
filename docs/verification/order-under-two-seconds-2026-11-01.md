@@ -79,3 +79,11 @@ Same read-only production snapshot, five statuses × first/second/out-of-range p
 Also memoize the validated enterprise ID/default flag only within one order-list or inventory-read request. Order and logistics scope aliases share the result; the next request always checks active ownership again. No global permission cache is introduced. Unit coverage proves concurrent coalescing, tenant separation, failed-read retry, nested request contexts and revocation on the next request.
 
 Validation: 25 focused local cases passed; 11 independent MySQL cases passed, including pagination with tied timestamps, active print/search/status filters, default/customer ownership, out-of-range totals, manual holds, OGL membership and unchanged numeric profit/stock fields. SQL binding, encoding and syntax checks pass. No layout or accounting formula changes.
+
+## Canonical shell asset URLs
+
+Release f5f38d4 reached 2,522 ms cold first rows and 1,074 ms next-page rendering in the browser. It still missed the two-second cold target. Browser resources showed the same fingerprinted admin entry fetched twice: `admin-view-...js?v=...` and the same pathname without a query. Route chunks import the canonical pathname; module identity includes the query string. Shell stylesheet query suffixes likewise differed from Vite's dependency URLs.
+
+Generate canonical fingerprinted module/style URLs, preload the same entry URL in the head, and deduplicate preload tags. Existing content hashes/build stamps remain the cache-busting mechanism; shell no-cache and chunk-error recovery stay intact. Frontend safety accepts canonical fingerprinted entries while retaining compatibility with older tracked shells.
+
+A generated-shell regression verifies exact entry/preload/import URL equality and no query aliases. Seven focused local cases, full frontend build/encoding/safety and the real stock-save/image-node regression pass. No backend arithmetic or layout changes. Repeat cold browser/module-count and API acceptance after deployment.
