@@ -29,12 +29,14 @@ async function main() {
     throw new Error(text.missingManifest);
   }
 
+  // Match the bundler cascade: component-library CSS first, ERP theme last.
+  // Canonical URLs prevent a later duplicate stylesheet from masking order.
   const styleFiles = [
-    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
-    ...((adminEntry.css || []).filter(Boolean)),
     ...((adminEntry.imports || [])
       .flatMap((key) => manifest[key]?.css || [])
-      .filter(Boolean))
+      .filter(Boolean)),
+    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
+    ...((adminEntry.css || []).filter(Boolean))
   ];
 
   const styleTags = [...new Set(styleFiles)]
