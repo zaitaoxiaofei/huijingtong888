@@ -16,6 +16,7 @@ import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "../
 import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-schema.js";
 import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-voucher-schema.js";
 import { SKU_ORDER_TRACKERS_SCHEMA } from "../src/services/sku-order-tracking-schema.js";
+import { FINANCE_SUBMISSIONS_SCHEMA } from "../src/services/finance-submissions-schema.js";
 
 const mysqlSchemaSql = `
 ${ORDER_SPLIT_SCHEMA};
@@ -1702,6 +1703,7 @@ const connection = await createMysqlConnection();
 
 try {
   await connection.query(mysqlSchemaSql);
+  for (const sql of FINANCE_SUBMISSIONS_SCHEMA) await connection.query(sql);
   const alterStatements = [
     "ALTER TABLE shops ADD COLUMN tenant_id BIGINT UNSIGNED NULL",
     "ALTER TABLE shops ADD COLUMN watermark_path TEXT NULL",

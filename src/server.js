@@ -44,6 +44,7 @@ import { withAdvertisingTenant } from "./services/advertising-tenant-context.js"
 import { runCustomerMessageTenantScheduledOperation } from "./services/customer-message-tenant-scope.js";
 import { createFinanceCenterRoutes, handleFinanceCenterRestRoute } from "./server/routes/financeCenter.js";
 import { createPayrollRoutes } from "./server/routes/payroll.js";
+import { createFinanceSubmissionRoutes, handleFinanceSubmissionDownload } from "./server/routes/financeSubmissions.js";
 import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "./server/routes/sellerAnalytics.js";
 import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
@@ -242,6 +243,7 @@ const routeModules = {
   ...createAdvertisingRoutes({ services, readJson }),
   ...createFinanceCenterRoutes({ readJson, services }),
   ...createPayrollRoutes({ readJson }),
+  ...createFinanceSubmissionRoutes({ readJson }),
   ...createSellerAnalyticsRoutes({ services, readJson }),
   ...createOzonActionRoutes({ services, readJson }),
   ...createReviewRoutes({ services, readJson }),
@@ -1366,6 +1368,7 @@ async function handleRestRoute(req, res, url, parts) {
     return orderRestHandled;
   }
 
+  if (await handleFinanceSubmissionDownload({ req, res, url, parts, writeHead })) return true;
   const financeCenterHandled = await handleFinanceCenterRestRoute({ req, res, url, parts, json, writeHead });
   if (financeCenterHandled !== false) return financeCenterHandled;
 

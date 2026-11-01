@@ -8,11 +8,9 @@ export const navigationMenus = [
     key: "finance",
     label: "财务中心",
     icon: Coin,
-    adminOnly: true,
     children: [
-      { key: "finance-center", label: "财务总览", route: "/finance-center" },
-      { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
-      { key: "finance-payroll", label: "员工工资", route: "/finance/payroll" },
+      { key: "finance-center", label: "经营总览", route: "/finance-center" },
+      { key: "finance-reimbursements", label: "报销中心", route: "/finance/reimbursements" },
     ]
   },
   {

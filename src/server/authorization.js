@@ -3,6 +3,7 @@ import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 import { isAiCreditReadRoute } from "./ai-credit-paths.js";
+import { financeSubmissionRoute, canReviewFinance } from "../shared/finance-submissions.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -19,6 +20,10 @@ export function authorizeApiRequest(req, parts = []) {
   const session = req._session;
   if (!session) return deny("未登录");
   if (parts[0] !== "api") return { allowed: true };
+  if (parts[1] === "finance-submissions") {
+    const access = financeSubmissionRoute(parts, String(req.method || "GET").toUpperCase());
+    return session.tenant?.id && session.tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : deny();
+  }
   if (isEnterpriseMessageRoute(parts, String(req.method || "GET").toUpperCase())) return session.tenant?.id ? { allowed: true } : deny("请先选择有效企业后使用私信");
   if (isPlatformAdmin(session)) return { allowed: true };
   if (!getRoles(session).length && !isEnterpriseAdmin(session)) return deny();
