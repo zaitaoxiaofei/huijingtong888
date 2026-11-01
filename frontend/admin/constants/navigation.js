@@ -10,6 +10,8 @@ export const navigationMenus = [
     icon: Coin,
     children: [
       { key: "finance-center", label: "经营总览", route: "/finance-center" },
+      { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
+      { key: "finance-payroll", label: "工资管理", route: "/finance/payroll" },
       { key: "finance-reimbursements", label: "报销中心", route: "/finance/reimbursements" },
     ]
   },

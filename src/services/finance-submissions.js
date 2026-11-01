@@ -126,13 +126,62 @@ export function createFinanceSubmissions({ query = mysqlQuery, execute = mysqlEx
           [actor.legacy ? null : actor.tenantId, item.company_id, row.expense_date, batch.kind === "payroll" ? "salary" : row.category, row.description, row.amount, row.amount, batch.kind === "reimbursement" ? batch.applicant_name : null, batch.kind === "reimbursement" ? 1 : 0, batch.kind === "reimbursement" ? "matched" : "missing", item.id, batch.applicant_id]);
         }
       } else if (batch.kind === "payroll") {
+        const paid = await run(`SELECT p.id FROM finance_submission_items i JOIN finance_payroll_payment_updates p
+          ON p.id=(SELECT MAX(last.id) FROM finance_payroll_payment_updates last WHERE last.tenant_id=i.tenant_id AND last.item_id=i.id)
+          WHERE i.tenant_id=? AND i.submission_id=? AND p.paid_amount>0 LIMIT 1`, [actor.tenantId, batch.id]);
+        if (paid.length) fail("这份工资表已有发放记录，请先核对已发金额，不能直接退回重导", 409);
         await run("DELETE FROM finance_imported_payroll_periods WHERE tenant_id=? AND submission_id=?", [actor.tenantId, batch.id]);
       }
       await run("UPDATE finance_submissions SET status=?, review_note=?, reviewed_by=?, reviewed_at=UTC_TIMESTAMP() WHERE id=? AND tenant_id=?", [body.status, note, actor.personId, batch.id, actor.tenantId]);
       return { ok: true, status: body.status };
     });
   }
-  return { companies, identity, list, detail, submit, review, preview: async (body, session) => {
+  async function payrollLedger(filters, session) {
+    const actor = submissionActor(session, true);
+    const year = String(filters.year || new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date()).slice(0, 4));
+    if (!/^20\d{2}$/.test(year)) fail("工资年份无效");
+    const companyList = await companies(session);
+    const selected = filters.company_id && filters.company_id !== "all" ? Number(filters.company_id) : null;
+    if (selected != null && !companyList.some(company => Number(company.id) === selected)) fail("公司不存在或不属于当前企业", 404);
+    if (!companyList.length) return { year, companies: [], rows: [] };
+    const companyIds = selected ? [selected] : companyList.map(company => Number(company.id));
+    const records = await query(`SELECT i.id, i.detail_json, s.status AS approval_status, p.paid_amount, p.created_at AS paid_updated_at
+      FROM finance_submission_items i
+      JOIN finance_submissions s ON s.id=i.submission_id AND s.tenant_id=i.tenant_id AND s.kind='payroll'
+      JOIN finance_imported_payroll_periods period ON period.tenant_id=i.tenant_id AND period.submission_id=i.submission_id
+        AND period.company_id=i.company_id AND period.month_key=DATE_FORMAT(i.expense_date,'%Y-%m')
+      LEFT JOIN finance_payroll_payment_updates p ON p.id=(SELECT MAX(last.id) FROM finance_payroll_payment_updates last WHERE last.tenant_id=i.tenant_id AND last.item_id=i.id)
+      WHERE i.tenant_id=? AND i.company_id IN (${companyIds.map(() => "?").join(",")}) AND i.expense_date>=? AND i.expense_date<?
+        AND s.status IN ('pending','approved') ORDER BY i.expense_date, i.company_id, i.id`, [actor.tenantId, ...companyIds, `${year}-01-01`, `${Number(year) + 1}-01-01`]);
+    return { year, companies: companyList, rows: records.map(record => {
+      const row = JSON.parse(record.detail_json), paid = money(record.paid_amount || 0);
+      return { ...row, id: record.id, approval_status: record.approval_status, paid_amount: paid,
+        remaining_amount: money(row.net - paid), paid_updated_at: record.paid_updated_at };
+    }) };
+  }
+  async function recordPayrollPaid(body, session) {
+    const actor = submissionActor(session, true);
+    const itemId = Number(body.item_id), amount = Number(body.paid_amount), expected = Number(body.expected_paid_amount);
+    if (!Number.isSafeInteger(itemId) || itemId <= 0) fail("工资明细编号无效");
+    if (body.paid_amount == null || body.paid_amount === "" || !Number.isFinite(amount) || amount < 0 || amount > 100000000) fail("已发金额应为有效的非负金额");
+    if (body.expected_paid_amount == null || !Number.isFinite(expected)) fail("请刷新工资明细后再登记发放金额");
+    await ensure();
+    return transaction(async connection => {
+      const run = async (sql, params = []) => (await connection.execute(sql, params))[0];
+      const [item] = await run("SELECT id, submission_id FROM finance_submission_items WHERE id=? AND tenant_id=?", [itemId, actor.tenantId]);
+      if (!item) fail("工资明细不存在、不属于当前企业或已退回", 404);
+      // Match review's lock order so payment and rejection serialize on the parent.
+      const [batch] = await run("SELECT id FROM finance_submissions WHERE id=? AND tenant_id=? AND kind='payroll' AND status IN ('pending','approved') FOR UPDATE", [item.submission_id, actor.tenantId]);
+      if (!batch) fail("工资明细不存在、不属于当前企业或已退回", 404);
+      const [last] = await run("SELECT paid_amount FROM finance_payroll_payment_updates WHERE tenant_id=? AND item_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE", [actor.tenantId, itemId]);
+      const current = money(last?.paid_amount || 0), next = money(amount);
+      if (next === current) return { ok: true, paid_amount: current };
+      if (money(expected) !== current) fail("已发金额已被其他管理员修改，请刷新后核对", 409);
+      await run("INSERT INTO finance_payroll_payment_updates (tenant_id, item_id, paid_amount, recorded_by) VALUES (?, ?, ?, ?)", [actor.tenantId, itemId, next, actor.personId]);
+      return { ok: true, paid_amount: next };
+    });
+  }
+  return { companies, identity, list, detail, submit, review, payrollLedger, recordPayrollPaid, preview: async (body, session) => {
     const { rows, total } = await parse(body, session);
     return { items: rows, total_amount: total, item_count: rows.length };
   } };

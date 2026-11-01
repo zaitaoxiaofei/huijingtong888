@@ -27325,11 +27325,14 @@ function addDaysMysql(date, days) {
   return new Date(date.getTime() + Number(days || 0) * 24 * 60 * 60 * 1000);
 }
 
-export async function profitRankingMysql(query = {}, tenantId = "admin") {
+export async function profitRankingMysql(query = {}, tenantId = "admin", { groupByMonth = false, companyId = 0 } = {}) {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
-  const orderScope = `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})`;
+  const companyScope = companyId ? ` AND ${billingCompanyOrderPredicateMysql("o", companyId, tenantScope)}` : "";
+  const orderScope = `EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", tenantScope)})${companyScope}`;
   const dimension = String(query.dimension || "sku").toLowerCase();
+  const monthlyGroups = dimension === "shop" && groupByMonth;
+  const orderMonth = "DATE_FORMAT(CONVERT_TZ(o.ordered_at, '+00:00', '+08:00'), '%Y-%m')";
   const inventoryMode = String(query.inventory || "") === "1" && ["product", "sku"].includes(dimension);
   const inventoryProductId = Number(query.productId || query.product_id || 0);
   const page = Math.max(Number(query.page || 1), 1);
@@ -27392,6 +27395,9 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     adWhere.push("date_key <= ?");
     adParams.push(to);
   }
+  if (companyId) adWhere.push(`EXISTS (SELECT 1 FROM finance_shop_company_assignments ca WHERE ca.shop_id=ozon_ad_sku_daily.shop_id
+    AND ca.company_id=${companyId} AND ${monthlyFinanceTenantPredicateMysql("ca", tenantScope)}
+    AND ca.effective_from<=date_key AND (ca.effective_to IS NULL OR ca.effective_to>=date_key))`);
   const adWhereSql = adWhere.length ? adWhere.join(" AND ") : "1=1";
   // Keep the existing report untouched unless the inventory leaderboard is requested.
   // Resolve at most one mapping per order item: never fan out sales into components.
@@ -27407,8 +27413,8 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
     }
   }
   if (dimension === "shop") {
-    selectFields = "s.id AS shop_id, s.name AS shop_name";
-    groupFields = "s.id, s.name";
+    selectFields = `${monthlyGroups ? `${orderMonth} AS month_key, ` : ""}s.id AS shop_id, s.name AS shop_name`;
+    groupFields = `${monthlyGroups ? `${orderMonth}, ` : ""}s.id, s.name`;
     joinSql = "JOIN shops s ON s.id = o.shop_id";
     if (keyword) {
       where.push("LOWER(COALESCE(s.name, '')) LIKE ?");
@@ -27464,7 +27470,11 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   const stableOrder = inventoryMode ? (dimension === "product" ? ", p.id ASC" : ", o.shop_id ASC, oi.ozon_sku ASC") : "";
   let total = 0;
   let rows = [];
-  if (fastMode) {
+  if (monthlyGroups) {
+    // The overview needs every month/shop group, not a leaderboard's first page.
+    rows = await mysqlQuery(`${outcomeCteSql} ${baseSql}`, params);
+    total = rows.length;
+  } else if (fastMode) {
     const fastRows = await mysqlQuery(`${outcomeCteSql} ${baseSql} ORDER BY ${orderField} ${sortOrder}${stableOrder} LIMIT ? OFFSET ?`, [...params, pageSize + 1, offset]);
     const hasMore = fastRows.length > pageSize;
     rows = hasMore ? fastRows.slice(0, pageSize) : fastRows;
@@ -27480,10 +27490,12 @@ export async function profitRankingMysql(query = {}, tenantId = "admin") {
   if (dimension === "shop" && rows.length) {
     const shopIds = [...new Set(rows.map((row) => Number(row.shop_id || 0)).filter(Boolean))];
     if (shopIds.length) {
-      const adRows = await mysqlQuery(`SELECT shop_id, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
-        FROM ozon_ad_sku_daily WHERE ${adWhereSql} AND shop_id IN (${shopIds.map(() => "?").join(", ")}) GROUP BY shop_id`, [...adParams, ...shopIds]);
-      const adByShop = new Map(adRows.map((row) => [Number(row.shop_id), row]));
-      rows = rows.map((row) => ({ ...row, advertising_report_spend: Number(adByShop.get(Number(row.shop_id))?.spend_cny || 0), advertising_report_revenue: Number(adByShop.get(Number(row.shop_id))?.revenue_cny || 0) }));
+      const adMonth = "DATE_FORMAT(date_key, '%Y-%m')";
+      const adRows = await mysqlQuery(`SELECT ${monthlyGroups ? `${adMonth} AS month_key, ` : ""}shop_id, COALESCE(SUM(spend_cny), 0) AS spend_cny, COALESCE(SUM(revenue_cny), 0) AS revenue_cny
+        FROM ozon_ad_sku_daily WHERE ${adWhereSql} AND shop_id IN (${shopIds.map(() => "?").join(", ")}) GROUP BY ${monthlyGroups ? `${adMonth}, ` : ""}shop_id`, [...adParams, ...shopIds]);
+      const key = row => monthlyGroups ? `${row.month_key}:${Number(row.shop_id)}` : Number(row.shop_id);
+      const adByShop = new Map(adRows.map((row) => [key(row), row]));
+      rows = rows.map((row) => ({ ...row, advertising_report_spend: Number(adByShop.get(key(row))?.spend_cny || 0), advertising_report_revenue: Number(adByShop.get(key(row))?.revenue_cny || 0) }));
     }
   }
   if (!inventoryMode && dimension === "sku" && rows.length) {
@@ -27671,7 +27683,25 @@ function monthlyFinanceTenantPredicateMysql(alias, scope) {
   return scope.defaultTenant ? `(${owned} OR ${alias}.tenant_id = 0)` : owned;
 }
 
-async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scope) {
+function billingCompanyOrderPredicateMysql(alias, companyId, scope) {
+  if (!Number.isSafeInteger(companyId) || companyId <= 0) throw new Error("Invalid finance company scope");
+  const day = `DATE(CONVERT_TZ(${alias}.ordered_at,'+00:00','+08:00'))`;
+  return `EXISTS (SELECT 1 FROM finance_shop_company_assignments ca WHERE ca.shop_id=${alias}.shop_id AND ca.company_id=${companyId}
+    AND ${monthlyFinanceTenantPredicateMysql("ca", scope)} AND ca.effective_from<=${day} AND (ca.effective_to IS NULL OR ca.effective_to>=${day}))`;
+}
+
+async function billingCompanyIdMysql(query, scope) {
+  const requested = query.companyId || query.company_id;
+  if (!requested || requested === "all") return 0;
+  const id = Number(requested);
+  if (!Number.isSafeInteger(id) || id <= 0) throw Object.assign(new Error("公司标识无效"), { statusCode: 400 });
+  await ensureFinanceCenterSchema();
+  const row = await mysqlQueryOne(`SELECT id FROM finance_companies c WHERE id=? AND c.status!='deleted' AND ${monthlyFinanceTenantPredicateMysql("c", scope)} LIMIT 1`, [id]);
+  if (!row) throw Object.assign(new Error("公司不存在或不属于当前企业"), { statusCode: 404 });
+  return id;
+}
+
+async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scope, companyId = 0) {
   await ensureFinanceCenterSchema();
   const nextDate = new Date(`${to}T00:00:00Z`);
   nextDate.setUTCDate(nextDate.getUTCDate() + 1);
@@ -27679,6 +27709,7 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
   const where = ["e.expense_date >= ?", "e.expense_date < ?", monthlyFinanceTenantPredicateMysql("e", scope),
     monthlyFinanceTenantPredicateMysql("c", scope), `(e.shop_id IS NULL OR ${orderTenantPredicateMysql("s", scope)})`];
   const params = [from, toExclusive];
+  if (companyId) { where.push("e.company_id = ?"); params.push(companyId); }
   const numericShopId = Number(shopId || 0);
   if (Number.isFinite(numericShopId) && numericShopId > 0) {
     where.push("e.shop_id = ?");
@@ -27724,9 +27755,59 @@ async function monthlyBillingExpensesMysql(from = "", to = "", shopId = "", scop
   };
 }
 
-async function monthlyBillingPendingByShopMysql(from = "", to = "", shopId = "", scope) {
+async function annualBillingExpensesMysql(from, to, shopId, scope, companyId) {
+  await ensureFinanceCenterSchema();
+  const where = ["e.expense_date >= ?", "e.expense_date <= ?", monthlyFinanceTenantPredicateMysql("e", scope),
+    monthlyFinanceTenantPredicateMysql("c", scope), `(e.shop_id IS NULL OR ${orderTenantPredicateMysql("s", scope)})`];
+  const params = [from, to];
+  if (Number(shopId) > 0) { where.push("e.shop_id = ?"); params.push(Number(shopId)); }
+  if (companyId) { where.push("e.company_id = ?"); params.push(companyId); }
+  const rows = await mysqlQuery(`
+    SELECT DATE_FORMAT(e.expense_date, '%Y-%m') AS month_key,
+      COALESCE(SUM(CASE WHEN e.category='salary' THEN e.amount_cny ELSE 0 END), 0) AS salary_expense,
+      COALESCE(SUM(CASE WHEN e.category='salary' THEN 0 ELSE e.amount_cny END), 0) AS manual_expense
+    FROM finance_expenses e
+    JOIN finance_companies c ON c.id=e.company_id
+    LEFT JOIN shops s ON s.id=e.shop_id
+    WHERE ${where.join(" AND ")}
+    GROUP BY DATE_FORMAT(e.expense_date, '%Y-%m')`, params);
+  return new Map(rows.map(row => [row.month_key, row]));
+}
+
+async function annualBillingOverviewMysql({ ranges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: requestedCompany }) {
+  const from = ranges[0].from, to = ranges.at(-1).to;
+  await ensureFinanceCenterSchema();
+  const companies = await mysqlQuery(`SELECT c.id,c.name FROM finance_companies c WHERE c.status!='deleted' AND ${monthlyFinanceTenantPredicateMysql("c", tenantScope)} ORDER BY c.id`);
+  const companyId = requestedCompany && requestedCompany !== "all" ? Number(requestedCompany) : 0;
+  if (companyId && (!Number.isSafeInteger(companyId) || !companies.some(c => Number(c.id) === companyId))) throw Object.assign(new Error("公司不存在或不属于当前企业"), { statusCode: 404 });
+  if (requestedCompany && requestedCompany !== "all" && !companyId) throw Object.assign(new Error("公司标识无效"), { statusCode: 400 });
+  const [ranking, expenses] = await Promise.all([
+    profitRankingMysql({ dimension: "shop", from, to, shopId, fast: "1" }, tenantId, { groupByMonth: true, companyId }),
+    annualBillingExpensesMysql(from, to, shopId, tenantScope, companyId)
+  ]);
+  const byMonth = new Map();
+  for (const row of ranking.rows) {
+    const rows = byMonth.get(row.month_key) || [];
+    rows.push(row); byMonth.set(row.month_key, rows);
+  }
+  const months = ranges.map(range => {
+    const summary = sumMonthlyBillingRowsMysql(byMonth.get(range.month_key) || []);
+    const expense = expenses.get(range.month_key) || {};
+    summary.manual_expense = roundMoneyMysql(expense.manual_expense);
+    summary.salary_expense = roundMoneyMysql(expense.salary_expense);
+    summary.net_profit = roundMoneyMysql(summary.operating_profit - summary.manual_expense - summary.salary_expense);
+    summary.net_profit_margin = summary.revenue ? summary.net_profit / summary.revenue : 0;
+    return { ...range, label: `${Number(range.month_key.slice(5))}月`, summary, procurement_inventory: {}, ai_usage: {} };
+  });
+  return { year, fromMonth, toMonth, selectedMonth, selectedMonthKey, shopId, companyId: companyId || "all", companies,
+    shops: shops.map(shop => ({ id: shop.id, name: shop.name })), months,
+    selected: months.find(row => row.month_key === selectedMonthKey) || months[0] };
+}
+
+async function monthlyBillingPendingByShopMysql(from = "", to = "", shopId = "", scope, companyId = 0) {
   const dateFilter = profitOrderedAtUtcRangeMysql("o", from, to);
   const where = [`EXISTS (SELECT 1 FROM shops owned_shop WHERE owned_shop.id = o.shop_id AND ${orderTenantPredicateMysql("owned_shop", scope)})`];
+  if (companyId) where.push(billingCompanyOrderPredicateMysql("o", companyId, scope));
   const params = [...dateFilter.params];
   const numericShopId = Number(shopId || 0);
   if (Number.isFinite(numericShopId) && numericShopId > 0) {
@@ -27812,6 +27893,7 @@ async function monthlyBillingOrderRowsMysql(from = "", to = "", shopId = "", opt
     outcomeType: options.outcomeType || options.outcome_type
   });
   const where = [orderTenantPredicateMysql("s", scope), ...extraFilter.where];
+  if (options.companyId) where.push(billingCompanyOrderPredicateMysql("o", options.companyId, scope));
   const params = [...dateFilter.params];
   params.push(...extraFilter.params);
   const pageSize = Math.min(Math.max(Number(options.pageSize || options.page_size || options.limit || 5000), 1), 5000);
@@ -27973,6 +28055,7 @@ async function monthlyBillingOrderTotalMysql(from = "", to = "", shopId = "", op
     outcomeType: options.outcomeType || options.outcome_type
   });
   extraFilter.where.unshift(orderTenantPredicateMysql("s", scope));
+  if (options.companyId) extraFilter.where.push(billingCompanyOrderPredicateMysql("o", options.companyId, scope));
   const settlementHaving = monthlyBillingOrderSettlementHavingMysql(options.settlementState || options.settlement_state);
   const outcome = buildOrderOutcomeSql("o", "mysql");
   const params = [...dateFilter.params, ...extraFilter.params];
@@ -28015,6 +28098,7 @@ async function monthlyBillingOrderTotalMysql(from = "", to = "", shopId = "", op
 export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
+  const companyId = await billingCompanyIdMysql(query, tenantScope);
   const today = todayDateKeyMysql();
   const currentYear = Number(today.slice(0, 4));
   const year = Math.min(Math.max(Number(query.year || currentYear), 2020), currentYear + 1);
@@ -28025,6 +28109,7 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 50), 1), 200);
   const options = {
     tenantScope,
+    companyId,
     keyword: query.keyword || query.search || "",
     outcomeType: query.outcomeType || query.outcome_type || "",
     settlementState: query.settlementState || query.settlement_state || "",
@@ -28057,6 +28142,7 @@ export async function monthlyBillingOrderDetailsMysql(query = {}, tenantId = "ad
 export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
+  const companyId = await billingCompanyIdMysql(query, tenantScope);
   const today = todayDateKeyMysql();
   const currentYear = Number(today.slice(0, 4));
   const year = Math.min(Math.max(Number(query.year || currentYear), 2020), currentYear + 1);
@@ -28068,9 +28154,9 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   const explicitRange = billingDateRangeMysql(query);
   if (explicitRange) {
     const [ranking, pendingByShop, expenses, procurementInventory, aiUsage] = await Promise.all([
-      profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId),
-      monthlyBillingPendingByShopMysql(explicitRange.from, explicitRange.to, shopId, tenantScope),
-      monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId, tenantScope),
+      profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId }),
+      monthlyBillingPendingByShopMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
+      monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
       monthlyProcurementInventorySummaryMysql(explicitRange.from, explicitRange.to, tenantScope),
       billingAiUsageMysql(explicitRange.from, explicitRange.to, tenantScope)
     ]);
@@ -28117,16 +28203,17 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   }
   const selectedMonthKey = `${year}-${String(selectedMonth).padStart(2, "0")}`;
   const overviewOnly = query.overviewOnly === "1";
+  if (overviewOnly) return annualBillingOverviewMysql({ ranges: monthRanges, shops, shopId, year, fromMonth, toMonth, selectedMonth, selectedMonthKey, tenantId, tenantScope, companyId: query.companyId || query.company_id });
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;
     const [ranking, pendingByShop, expenses, orders, procurementInventory, aiUsage] = await Promise.all([
-      profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId),
-      overviewOnly ? Promise.resolve(new Map()) : monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope),
-      monthlyBillingExpensesMysql(range.from, range.to, shopId, tenantScope),
-      includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId, { tenantScope }) : Promise.resolve([]),
-      overviewOnly ? Promise.resolve({}) : monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope),
-      overviewOnly ? Promise.resolve({}) : billingAiUsageMysql(range.from, range.to, tenantScope)
+      profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId }),
+      monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope, companyId),
+      monthlyBillingExpensesMysql(range.from, range.to, shopId, tenantScope, companyId),
+      includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId, { tenantScope, companyId }) : Promise.resolve([]),
+      monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope),
+      billingAiUsageMysql(range.from, range.to, tenantScope)
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};
@@ -30962,34 +31049,8 @@ async function billingAiUsageMysql(from, to, scope) {
   };
 }
 
-async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope) {
-  await ensureStockLocationSchemaMysql();
-  const periodStartUtc = `${from} 00:00:00`;
-  const periodEndUtc = `${to} 23:59:59`;
-  const [purchase, inbound, localInventory, fbpInventory, inTransit] = await Promise.all([
-    mysqlQueryOne(`
-      SELECT
-        COUNT(DISTINCT po.id) AS purchase_order_count,
-        COALESCE(SUM(poi.actual_quantity), 0) AS purchase_quantity,
-        COALESCE(SUM(poi.amount), 0) AS goods_amount,
-        COALESCE(SUM(poi.shipping_amount), 0) AS shipping_amount
-      FROM purchase_orders po
-      JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
-      WHERE po.status IN ('purchased', 'partial_inbound', 'inbound_done')
-        AND ${orderTenantPredicateMysql("po", scope)} AND ${orderTenantPredicateMysql("poi", scope)}
-        AND po.purchased_at >= CONVERT_TZ(?, '+08:00', '+00:00')
-        AND po.purchased_at <= CONVERT_TZ(?, '+08:00', '+00:00')
-        AND poi.status != 'cancelled'
-    `, [periodStartUtc, periodEndUtc]),
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(quantity), 0) AS inbound_quantity,
-        COALESCE(SUM(amount + shipping_amount), 0) AS inbound_amount
-      FROM inbound_records ir
-      WHERE ir.status = 'approved' AND ${orderTenantPredicateMysql("ir", scope)}
-        AND ir.approved_at >= CONVERT_TZ(?, '+08:00', '+00:00')
-        AND ir.approved_at <= CONVERT_TZ(?, '+08:00', '+00:00')
-    `, [periodStartUtc, periodEndUtc]),
+async function currentInventoryCapitalMysql(scope) {
+  const [localInventory, fbpInventory, inTransit] = await Promise.all([
     mysqlQueryOne(`
       SELECT
         COALESCE(SUM(stock.quantity * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
@@ -31034,11 +31095,60 @@ async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope
       WHERE ir.status = 'pending_arrival' AND ${orderTenantPredicateMysql("ir", scope)}
     `)
   ]);
-  const goodsAmount = Number(purchase?.goods_amount || 0);
-  const shippingAmount = Number(purchase?.shipping_amount || 0);
   const localValue = Number(localInventory?.inventory_value || 0);
   const fbpValue = Number(fbpInventory?.inventory_value || 0);
   const inTransitValue = Number(inTransit?.inventory_value || 0);
+  return {
+    snapshot_basis: "current",
+    local_inventory_quantity: Number(localInventory?.inventory_quantity || 0),
+    local_inventory_value: roundMoneyMysql(localValue),
+    fbp_inventory_quantity: Number(fbpInventory?.inventory_quantity || 0),
+    fbp_inventory_value: roundMoneyMysql(fbpValue),
+    in_transit_quantity: Number(inTransit?.inventory_quantity || 0),
+    in_transit_value: roundMoneyMysql(inTransitValue),
+    inventory_total_value: roundMoneyMysql(localValue + fbpValue + inTransitValue)
+  };
+}
+
+export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  await ensureStockLocationSchemaMysql();
+  return { ...await currentInventoryCapitalMysql(scope), snapshot_at: new Date().toISOString() };
+}
+
+async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope) {
+  await ensureStockLocationSchemaMysql();
+  const periodStartUtc = `${from} 00:00:00`;
+  const periodEndUtc = `${to} 23:59:59`;
+  const [purchase, inbound, inventory] = await Promise.all([
+    mysqlQueryOne(`
+      SELECT
+        COUNT(DISTINCT po.id) AS purchase_order_count,
+        COALESCE(SUM(poi.actual_quantity), 0) AS purchase_quantity,
+        COALESCE(SUM(poi.amount), 0) AS goods_amount,
+        COALESCE(SUM(poi.shipping_amount), 0) AS shipping_amount
+      FROM purchase_orders po
+      JOIN purchase_order_items poi ON poi.purchase_order_id = po.id
+      WHERE po.status IN ('purchased', 'partial_inbound', 'inbound_done')
+        AND ${orderTenantPredicateMysql("po", scope)} AND ${orderTenantPredicateMysql("poi", scope)}
+        AND po.purchased_at >= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND po.purchased_at <= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND poi.status != 'cancelled'
+    `, [periodStartUtc, periodEndUtc]),
+    mysqlQueryOne(`
+      SELECT
+        COALESCE(SUM(quantity), 0) AS inbound_quantity,
+        COALESCE(SUM(amount + shipping_amount), 0) AS inbound_amount
+      FROM inbound_records ir
+      WHERE ir.status = 'approved' AND ${orderTenantPredicateMysql("ir", scope)}
+        AND ir.approved_at >= CONVERT_TZ(?, '+08:00', '+00:00')
+        AND ir.approved_at <= CONVERT_TZ(?, '+08:00', '+00:00')
+    `, [periodStartUtc, periodEndUtc]),
+    currentInventoryCapitalMysql(scope)
+  ]);
+  const goodsAmount = Number(purchase?.goods_amount || 0);
+  const shippingAmount = Number(purchase?.shipping_amount || 0);
   return {
     period_basis: "purchased_at",
     snapshot_basis: "current",
@@ -31049,13 +31159,7 @@ async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope
     purchase_total_amount: roundMoneyMysql(goodsAmount + shippingAmount),
     inbound_quantity: Number(inbound?.inbound_quantity || 0),
     inbound_amount: roundMoneyMysql(inbound?.inbound_amount || 0),
-    local_inventory_quantity: Number(localInventory?.inventory_quantity || 0),
-    local_inventory_value: roundMoneyMysql(localValue),
-    fbp_inventory_quantity: Number(fbpInventory?.inventory_quantity || 0),
-    fbp_inventory_value: roundMoneyMysql(fbpValue),
-    in_transit_quantity: Number(inTransit?.inventory_quantity || 0),
-    in_transit_value: roundMoneyMysql(inTransitValue),
-    inventory_total_value: roundMoneyMysql(localValue + fbpValue + inTransitValue)
+    ...inventory
   };
 }
 

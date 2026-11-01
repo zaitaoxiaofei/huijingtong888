@@ -13,7 +13,7 @@ test('monthly billing reads only the current enterprise, including every financi
     fixture.useEnvironment();
     globalThis.fetch = async () => { throw Error('External requests forbidden in financial read tests'); };
     ({ closeMysqlPool } = await import('../src/mysql-pool.js'));
-    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql } = await import('../src/services/mysql-cutover.js');
+    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
     const q = fixture.query;
     // Match the runtime component migration required by scoped reads.
@@ -76,6 +76,43 @@ test('monthly billing reads only the current enterprise, including every financi
       const overview=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,month:10,overviewOnly:'1'},'2');
       for(const key of ['revenue','net_profit','salary_expense','manual_expense','order_count'])assert.equal(overview.selected.summary[key],r.selected.summary[key],key);
       assert.deepEqual(overview.selected.procurement_inventory,{});assert.deepEqual(overview.selected.ai_usage,{});
+    });
+    await t.test('current inventory is an independent enterprise snapshot without purchasing history',async()=>{
+      const snapshot=await financeInventoryCapitalMysql({tenant_id:3},'2');
+      const expected=(await monthlyBillingDetailsMysql(range,'2')).selected.procurement_inventory;
+      for(const key of ['inventory_total_value','local_inventory_value','fbp_inventory_value','in_transit_value','local_inventory_quantity'])assert.equal(snapshot[key],expected[key],key);
+      assert.equal(snapshot.purchase_total_amount,undefined);assert.equal(snapshot.snapshot_basis,'current');assert.ok(snapshot.snapshot_at);
+    });
+    await t.test('annual grouping matches each month including Beijing boundaries, ads and company expenses',async()=>{
+      await q("INSERT INTO finance_shop_company_assignments(tenant_id,shop_id,company_id,effective_from) VALUES(2,20,2,'2026-01-01')");
+      for(const [id,date] of [[201,'2026-08-31 15:59:59'],[202,'2026-08-31 16:00:00'],[203,'2026-09-30 16:00:00']]){
+        await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at,delivered_at) VALUES(?,20,?,'delivered','delivered',?,?)",[id,`boundary-${id}`,date,date]);
+        await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price,estimated_profit) VALUES(?,?,20,'same-sku',1,100,25)",[id,id]);
+      }
+      await q("INSERT INTO ozon_ad_sku_daily(shop_id,ozon_sku,date_key,spend_cny,revenue_cny) VALUES(20,'same-sku','2026-08-31',2,0),(20,'same-sku','2026-09-01',3,0),(20,'same-sku','2026-10-01',5,0)");
+      const annual=await monthlyBillingDetailsMysql({year:2026,fromMonth:8,toMonth:10,overviewOnly:'1'},'2');
+      for(const month of [8,9,10]){
+        const ordinary=(await monthlyBillingDetailsMysql({year:2026,fromMonth:month,toMonth:month},'2')).selected;
+        const grouped=annual.months.find(row=>row.month_key===`2026-${String(month).padStart(2,'0')}`);
+        for(const key of ['revenue','order_count','advertising_cost','operating_profit','net_profit','manual_expense','salary_expense'])assert.equal(grouped.summary[key],ordinary.summary[key],`${month}/${key}`);
+      }
+      const company=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,companyId:2,overviewOnly:'1'},'2');
+      const bill=await monthlyBillingDetailsMysql({from:'2026-10-01',to:'2026-10-31',companyId:2},'2');
+      assert.equal(company.selected.summary.net_profit,bill.selected.summary.net_profit);
+      assert.deepEqual((await monthlyBillingOrderDetailsMysql({from:'2026-10-01',to:'2026-10-31',companyId:2},'2')).rows.map(row=>row.order_id).sort((a,b)=>a-b),[20,203]);
+      await assert.rejects(monthlyBillingDetailsMysql({year:2026,companyId:3,overviewOnly:'1'},'2'),{statusCode:404});
+      await assert.rejects(monthlyBillingOrderDetailsMysql({...range,companyId:3},'2'),{statusCode:404});
+    });
+    await t.test('annual overview query count stays bounded instead of growing per month',async()=>{
+      const {getMysqlPoolMetrics}=await import('../src/mysql-pool.js');
+      let before=getMysqlPoolMetrics().acquisitions;
+      await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,overviewOnly:'1'},'2');
+      const single=getMysqlPoolMetrics().acquisitions-before;
+      before=getMysqlPoolMetrics().acquisitions;
+      const start=performance.now();await monthlyBillingDetailsMysql({year:2026,fromMonth:1,toMonth:12,overviewOnly:'1'},'2');
+      const annual=getMysqlPoolMetrics().acquisitions-before;
+      assert.ok(annual<=single+2,`one month ${single}, full year ${annual}`);
+      t.diagnostic(`overview SQL acquisitions: one month=${single}, full year=${annual}; fixture full year=${Math.round(performance.now()-start)}ms`);
     });
     await t.test('cross-enterprise child references do not disclose product or cost identity',async()=>{
       await q("UPDATE sku_mappings SET product_id=30 WHERE id=20");

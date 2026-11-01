@@ -31,7 +31,7 @@ test("reimbursement and payroll approvals are transactional, idempotent and isol
       return {kind:"reimbursement",file_name:"申请.xlsx",base64:Buffer.from(await b.xlsx.writeBuffer()).toString("base64")};
     };
     const body=await payload();
-    let id;
+    let id, salaryItemId;
     await t.test("preview never books expenses; employee creates pending application and cannot read others",async()=>{
       assert.equal((await service.preview(body,member)).total_amount,123.45);
       assert.equal((await q("SELECT COUNT(*) n FROM finance_expenses"))[0].n,0);
@@ -76,7 +76,28 @@ test("reimbursement and payroll approvals are transactional, idempotent and isol
       s.getCell("D6").value=1100;s.getCell("R6").value=1050;
       const replacement=await service.submit({...body,base64:Buffer.from(await book.xlsx.writeBuffer()).toString("base64")},owner);
       await service.review({id:replacement.id,status:"approved"},owner);
+      salaryItemId=(await service.detail(replacement.id,owner)).items[0].id;
       const [salary]=await q("SELECT amount_cny FROM finance_expenses WHERE category='salary'");assert.equal(Number(salary.amount_cny),1200);
+    });
+    await t.test("payroll ledger keeps table amounts separate from partial or complete salary payments",async()=>{
+      await assert.rejects(service.payrollLedger({year:2026},member),{statusCode:403});
+      await assert.rejects(service.recordPayrollPaid({item_id:salaryItemId,paid_amount:1,expected_paid_amount:0},member),{statusCode:403});
+      await assert.rejects(service.recordPayrollPaid({item_id:salaryItemId,paid_amount:1,expected_paid_amount:0},foreign),{statusCode:404});
+      await assert.rejects(service.payrollLedger({year:2026,company_id:30},owner),{statusCode:404});
+      const initial=await service.payrollLedger({year:2026,company_id:20},owner);
+      assert.equal(initial.rows[0].net,1050);assert.equal(initial.rows[0].paid_amount,0);assert.equal(initial.rows[0].remaining_amount,1050);
+      const expensesBefore=await q("SELECT COUNT(*) n,SUM(amount_cny) amount FROM finance_expenses");
+      await service.recordPayrollPaid({item_id:salaryItemId,paid_amount:400,expected_paid_amount:0},owner);
+      let row=(await service.payrollLedger({year:2026,company_id:20},owner)).rows[0];
+      assert.equal(row.remaining_amount,650);assert.equal(row.paid_amount,400);
+      const edits=await Promise.allSettled([800,1050].map(paid_amount=>service.recordPayrollPaid({item_id:salaryItemId,paid_amount,expected_paid_amount:400},owner)));
+      assert.equal(edits.filter(result=>result.status==='fulfilled').length,1);
+      row=(await service.payrollLedger({year:2026,company_id:20},owner)).rows[0];
+      await service.recordPayrollPaid({item_id:salaryItemId,paid_amount:1050,expected_paid_amount:row.paid_amount},owner);
+      row=(await service.payrollLedger({year:2026,company_id:20},owner)).rows[0];assert.equal(row.remaining_amount,0);
+      await service.recordPayrollPaid({item_id:salaryItemId,paid_amount:1050,expected_paid_amount:0},owner);
+      assert.deepEqual(await q("SELECT COUNT(*) n,SUM(amount_cny) amount FROM finance_expenses"),expensesBefore,"payment records never deduct salary costs again");
+      assert.ok((await q("SELECT COUNT(*) n FROM finance_payroll_payment_updates WHERE item_id=?",[salaryItemId]))[0].n>=2,"amount changes retain history");
     });
     await t.test("legacy default-company expenses stay compatible without crossing enterprise scope",async()=>{
       const legacy={...member,tenant:{id:1,slug:"default",role:"owner"}};

@@ -7,6 +7,8 @@ export function canReviewFinance(session) {
 // Keep authorization and tenant-isolation gates on the same exact route list.
 export function financeSubmissionRoute(parts, method) {
   if (parts[1] !== "finance-submissions" || parts.length !== 3) return null;
+  if (method === "GET" && ["payroll-ledger", "payroll-export"].includes(parts[2])) return "reviewer";
+  if (method === "POST" && parts[2] === "payroll-paid") return "reviewer";
   if (method === "GET" && ["companies", "template", "list", "detail", "export"].includes(parts[2])) return "member";
   if (method === "POST" && ["preview", "submit"].includes(parts[2])) return "member";
   if (method === "POST" && parts[2] === "review") return "reviewer";

@@ -26,6 +26,7 @@ const state = reactive({
   loading: false,
   dateRange: initialDateRange(),
   shopId: String(route.query.shopId || "all"),
+  companyId: String(route.query.companyId || "all"),
   shops: [],
   companies: [],
   assignments: [],
@@ -143,7 +144,8 @@ function applyBillingFilters() {
       ...route.query,
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: String(state.shopId || "all")
+      shopId: String(state.shopId || "all"),
+      companyId: state.companyId
     }
   });
   loadData();
@@ -156,7 +158,8 @@ function detailRoute(shop = null) {
       tab: "orders",
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: shop?.shop_id ? String(shop.shop_id) : String(state.shopId || "all")
+      shopId: shop?.shop_id ? String(shop.shop_id) : String(state.shopId || "all"),
+      companyId: state.companyId
     }
   };
 }
@@ -259,7 +262,8 @@ async function loadData() {
     const params = new URLSearchParams({
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: String(state.shopId || "all")
+      shopId: String(state.shopId || "all"),
+      companyId: state.companyId
     });
     const [payload, financeMeta] = await Promise.all([
       apiClient.get(`/api/monthly-billing-details?${params.toString()}`, { signal }),
@@ -289,14 +293,16 @@ function handleReset() {
 
 onMounted(loadData);
 watch(
-  () => [route.query.from, route.query.to, route.query.shopId],
-  ([from, to, shopId], previous) => {
+  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId],
+  ([from, to, shopId, companyId], previous) => {
     if (!previous) return;
     const nextRange = [String(from || state.dateRange[0]), String(to || state.dateRange[1])];
     const nextShopId = String(shopId || state.shopId || "all");
-    if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId) return;
+    const nextCompanyId = String(companyId || "all");
+    if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId && nextCompanyId === state.companyId) return;
     state.dateRange = nextRange;
     state.shopId = nextShopId;
+    state.companyId = nextCompanyId;
     loadData();
   }
 );
@@ -322,6 +328,7 @@ onBeforeUnmount(() => abortController?.abort());
                 style="width: 260px"
               />
             </el-form-item>
+            <el-form-item label="公司"><el-select v-model="state.companyId" filterable style="width:240px"><el-option label="全部公司" value="all" /><el-option v-for="company in state.companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select></el-form-item>
             <el-form-item label="店铺">
               <el-select v-model="state.shopId" filterable style="width: 210px">
                 <el-option label="全部店铺" value="all" />
