@@ -1,5 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { ElMessage } from "element-plus";
 import { apiClient, currentApiCacheScope } from "../../utils/api";
 import { useAuthStore } from "../../stores/auth";
@@ -7,9 +8,10 @@ import { canAccessPage } from "../../../../src/shared/permissions.js";
 import { shanghaiDateKey } from "../../utils/shanghai-date.js";
 
 const FinanceImportPanel = defineAsyncComponent(() => import("../../components/finance/FinanceImportPanel.vue"));
-const auth = useAuthStore(), today = shanghaiDateKey();
+const auth = useAuthStore(), route = useRoute(), today = shanghaiDateKey();
+const routeMonth = () => /^\d{4}-(0[1-9]|1[0-2])$/.test(String(route.query.month || "")) ? String(route.query.month) : today.slice(0,7);
 const allowed = computed(() => canAccessPage(auth.user, "/finance/payroll"));
-const year = ref(today.slice(0, 4)), companyId = ref("all"), companies = ref([]), rows = ref([]), selectedMonth = ref(today.slice(0, 7));
+const year = ref(routeMonth().slice(0, 4)), companyId = ref(String(route.query.companyId || "all")), companies = ref([]), rows = ref([]), selectedMonth = ref(routeMonth());
 const loading = ref(false), errorText = ref(""), importOpen = ref(false), contributionDetails = ref(false);
 const paymentRow = ref(null), paidAmount = ref(0), paymentOpen = ref(false), saving = ref(false);
 let generation = 0, controller;
@@ -36,7 +38,7 @@ async function load() {
     const response = await apiClient.get(`/api/finance-submissions/payroll-ledger?year=${year.value}&company_id=${encodeURIComponent(companyId.value)}`, { noCache: true, signal: controller.signal });
     if (token !== generation || !allowed.value) return;
     rows.value = response.rows || []; companies.value = response.companies || [];
-    if (!rows.value.some(row => row.month === selectedMonth.value)) selectedMonth.value = rows.value.at(-1)?.month || `${year.value}-${today.slice(5,7)}`;
+    if (!selectedMonth.value.startsWith(`${year.value}-`)) selectedMonth.value = `${year.value}-${today.slice(5,7)}`;
   } catch (error) { if (token === generation && error.name !== "AbortError") { errorText.value = error.message || "工资明细加载失败"; rows.value = []; } }
   finally { if (token === generation) loading.value = false; }
 }
@@ -61,20 +63,26 @@ async function exportMonth() {
   } catch (error) { if (token === generation) ElMessage.error(error.message || "导出失败"); }
 }
 watch(() => [auth.user?.id, auth.user?.tenant?.id, allowed.value, currentApiCacheScope()], () => {
-  generation++; controller?.abort(); rows.value = []; companies.value = []; companyId.value = "all";
-  paymentOpen.value = false; paymentRow.value = null; importOpen.value = false; saving.value = false; load();
+  generation++; controller?.abort(); rows.value = []; companies.value = []; companyId.value = String(route.query.companyId || "all");
+  paymentOpen.value = false; paymentRow.value = null; importOpen.value = allowed.value && route.query.action === "import"; saving.value = false; load();
 }, { immediate: true });
+watch(() => [route.query.month,route.query.companyId,route.query.action], () => {
+  if(route.path!=="/finance/payroll")return;
+  selectedMonth.value=routeMonth(); year.value=selectedMonth.value.slice(0,4); companyId.value=String(route.query.companyId||"all");
+  importOpen.value=allowed.value&&route.query.action==='import'; if(allowed.value)load();
+});
 onBeforeUnmount(() => { generation++; controller?.abort(); });
 </script>
 
 <template>
   <div v-if="allowed" class="payroll-ledger">
     <header class="ledger-header"><div><h1>工资管理</h1><p>按公司、月份查看工资表，登记已发金额和未发差额。</p></div><el-button type="primary" @click="importOpen=true">导入工资表</el-button></header>
+    <el-alert type="info" :closable="false" title="补录历史工资：选择公司和年份，点击对应月份的补录工资，下载该月模板或上传原工资表。按表内所属月份记账，审批通过后计入该月人工成本；已发金额另行登记。" />
     <div class="ledger-filters"><el-date-picker v-model="year" type="year" value-format="YYYY" format="YYYY年" aria-label="工资年份" :clearable="false" @change="load" /><el-select v-model="companyId" aria-label="工资归属公司" @change="load"><el-option label="全部公司" value="all" /><el-option v-for="company in companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select><el-button :loading="loading" @click="load">刷新</el-button></div>
     <el-alert v-if="errorText" :title="errorText" type="error" :closable="false" />
     <section v-else v-loading="loading" class="ledger-section">
       <div class="ledger-totals"><div><span>{{ year }}年工资表金额</span><strong>¥{{ money(annual.net) }}</strong></div><div><span>已发金额</span><strong>¥{{ money(annual.paid) }}</strong></div><div><span>未发差额</span><strong>¥{{ money(annual.remaining) }}</strong></div></div>
-      <el-table :data="months" class="month-ledger" :row-class-name="({row}) => row.month===selectedMonth ? 'selected-month' : ''" @row-click="row => selectedMonth=row.month"><el-table-column prop="label" label="月份" min-width="100" /><el-table-column prop="count" label="员工数" align="right" min-width="90" /><el-table-column label="工资表金额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.net) : '—' }}</template></el-table-column><el-table-column label="已发金额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.paid) : '—' }}</template></el-table-column><el-table-column label="未发差额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.remaining) : '—' }}</template></el-table-column><el-table-column prop="state" label="发放状态" min-width="115" /><el-table-column width="90"><template #default="{row}"><el-button link type="primary" @click.stop="selectedMonth=row.month">查看明细</el-button></template></el-table-column></el-table>
+      <el-table :data="months" class="month-ledger" :row-class-name="({row}) => row.month===selectedMonth ? 'selected-month' : ''" @row-click="row => selectedMonth=row.month"><el-table-column prop="label" label="月份" min-width="100" /><el-table-column prop="count" label="员工数" align="right" min-width="90" /><el-table-column label="工资表金额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.net) : '—' }}</template></el-table-column><el-table-column label="已发金额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.paid) : '—' }}</template></el-table-column><el-table-column label="未发差额" align="right" min-width="140"><template #default="{row}">{{ row.count ? money(row.remaining) : '—' }}</template></el-table-column><el-table-column prop="state" label="发放状态" min-width="115" /><el-table-column width="105"><template #default="{row}"><el-button link type="primary" @click.stop="selectedMonth=row.month; if(!row.count)importOpen=true">{{row.count?'查看明细':'补录工资'}}</el-button></template></el-table-column></el-table>
     </section>
     <section class="ledger-section details-section">
       <div class="details-header"><div><h2>{{ selectedMonth }} 工资明细</h2><p>差额 = 表内实发工资 − 已发金额；社保、公积金缴纳不代表工资已发。</p></div><div class="detail-actions"><el-switch v-model="contributionDetails" active-text="缴费分项" /><el-button :disabled="!details.length" @click="exportMonth">导出本月</el-button></div></div>
@@ -90,7 +98,7 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
       <p v-if="contributionDetails && details.some(row => !row.employer_items)" class="ledger-note">部分旧导入记录未保存缴费分项，以“—”显示，合计金额仍保留。</p>
     </section>
     <el-dialog v-model="paymentOpen" title="登记已发金额" width="420px" destroy-on-close><template v-if="paymentRow"><p>{{ paymentRow.company_name }} · {{ paymentRow.person_name }}</p><p>{{ paymentRow.month }} · 表内实发工资 ¥{{ money(paymentRow.net) }}</p><el-form label-position="top" @submit.prevent="savePayment"><el-form-item label="累计已发金额"><el-input-number v-model="paidAmount" :min="0" :precision="2" :max="100000000" /></el-form-item><p>未发差额：¥{{ money((cents(paymentRow.net)-cents(paidAmount))/100) }}</p></el-form></template><template #footer><el-button :disabled="saving" @click="paymentOpen=false">取消</el-button><el-button type="primary" :loading="saving" :disabled="paidAmount==null" @click="savePayment">保存</el-button></template></el-dialog>
-    <el-dialog v-model="importOpen" title="工资表导入与审核" width="min(94vw, 1200px)" destroy-on-close><FinanceImportPanel v-if="importOpen" kind="payroll" @changed="load" /></el-dialog>
+    <el-dialog v-model="importOpen" title="工资表导入与审核" width="min(94vw, 1200px)" destroy-on-close><FinanceImportPanel v-if="importOpen" kind="payroll" :month="selectedMonth" :company-id="companyId" @changed="load" /></el-dialog>
   </div>
 </template>
 

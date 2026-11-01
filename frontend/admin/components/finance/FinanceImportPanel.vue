@@ -7,7 +7,7 @@ import { useAuthStore } from "../../stores/auth";
 import { canReviewFinance } from "../../../../src/shared/finance-submissions.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
 
-const props = defineProps({ kind: { type: String, default: "reimbursement" } });
+const props = defineProps({ kind: { type: String, default: "reimbursement" }, month: {type:String,default:""}, companyId:{type:String,default:"all"} });
 const emit = defineEmits(["changed"]);
 const auth = useAuthStore();
 const payroll = computed(() => props.kind === "payroll");
@@ -21,6 +21,8 @@ const money = value => Number(value || 0).toLocaleString("zh-CN", { minimumFract
 const statusText = value => ({ pending: "待审批", approved: "已通过", rejected: "已退回" })[value] || value;
 const picture = image => `data:image/${image.extension};base64,${image.base64}`;
 function current(token) { return token === generation && allowed.value; }
+const templatePath = computed(() => `/api/finance-submissions/template?${new URLSearchParams({kind:props.kind,...(payroll.value?{month:props.month,company_id:props.companyId}:{})})}`);
+const mismatchedMonth = computed(() => payroll.value && props.month && preview.value?.items?.some(row => row.month !== props.month));
 async function download(path, name) {
   try {
     const token = generation;
@@ -105,13 +107,15 @@ onBeforeUnmount(() => { generation++; controller?.abort(); });
     <div class="import-toolbar">
       <div><h2>{{ payroll ? '工资表导入' : '填写表格，上传报销' }}</h2><p>{{ payroll ? '读取公司抬头与工资月份，核对后提交审批；人工成本为基本工资加单位承担费用。' : '下载企业模板，填写费用并插入凭证截图，上传核对后提交待审批。' }}</p></div>
       <div class="buttons">
-        <el-button :icon="Download" @click="download(`/api/finance-submissions/template?kind=${kind}`, `企业${label}模板.xlsx`)">下载{{ label }}模板</el-button>
+        <el-button :icon="Download" @click="download(templatePath, `企业${label}模板.xlsx`)">下载{{ label }}模板</el-button>
         <el-button type="primary" :icon="Upload" :loading="busy" @click="fileInput?.click()">{{ payroll ? '上传工资表' : '上传报销表' }}</el-button>
         <input ref="fileInput" type="file" accept=".xlsx" hidden @change="importFile">
       </div>
     </div>
     <el-alert v-if="!payroll" type="info" :closable="false" title="每行一笔费用；在G列插入普通PNG/JPEG截图，图片左上角放在对应行。支持多张，每次最多100笔、8MB。审批通过不代表已付款。" />
     <el-alert v-else type="info" :closable="false" title="支持现有19列工资表及多个公司、月份工作表；读取表内金额，不套用统一社保比例。同公司同月份不重复导入；已退回批次可修改后重新上传。" />
+    <el-alert v-if="payroll&&month" type="info" :closable="false" :title="`当前补录 ${month}：模板已带入月份；上传原工资表时仍按表内公司和年月记账。`" />
+    <el-alert v-if="mismatchedMonth" type="warning" :closable="false" title="上传表内包含其他月份，请核对预览中的费用日期；系统不会把历史工资自动改到当前月份。" />
     <el-alert v-if="errorText" type="error" :closable="false" :title="errorText" show-icon />
     <el-card v-if="preview" shadow="never" class="preview-card">
       <div class="import-toolbar"><div><h3>核对导入内容 · {{ preview.item_count }} 笔</h3><p>{{ upload.file_name }} · {{ payroll ? '公司人工成本' : '报销合计' }} ¥{{ money(preview.total_amount) }}</p></div><div class="buttons"><el-button :disabled="busy" @click="preview=null; upload=null">取消</el-button><el-button :disabled="busy" type="primary" :loading="busy" @click="submit">确认提交待审批</el-button></div></div>

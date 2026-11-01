@@ -1,8 +1,9 @@
 <script setup>
 import {computed,onBeforeUnmount,onMounted,reactive,ref} from 'vue';
+import {useRouter} from 'vue-router';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {useAuthStore} from '../../stores/auth.js';
-import {hasPermission} from '../../../../src/shared/permissions.js';
+import {canAccessPage,hasPermission} from '../../../../src/shared/permissions.js';
 import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
 import {useInventoryLocalQuantities} from '../../utils/use-inventory-local-quantities.js';
 import InventoryStructuredSearch from '../../components/inventory/InventoryStructuredSearch.vue';
@@ -10,7 +11,7 @@ import InventoryCompositionBadge from '../../components/inventory/InventoryCompo
 import ProductImagePreview from '../../components/ProductImagePreview.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
 import MobileWorkQueue from '../../components/mobile/MobileWorkQueue.vue';
-const auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),showFields=ref(false),section=ref('stock');
+const router=useRouter(),auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),showFields=ref(false),section=ref('stock');
 const filters=reactive({...inventorySearchDefaults(),query:'',inventoryType:'all'}),dialog=reactive({visible:false,product:{},readOnly:false});
 const local=useInventoryLocalQuantities(()=>rows.value),canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
 let version=0,disposed=false;
@@ -21,7 +22,7 @@ async function saved(){await load();await local.refresh(true);}
 function clearScope(){++version;rows.value=[];total.value=0;dialog.visible=false;}
 onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',clearScope);});onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
 </script>
-<template><div class="mobile-inventory-page"><nav class="mobile-inventory-tabs"><el-button :type="section==='stock'?'primary':''" @click="section='stock'">商品库存</el-button><el-button :type="section==='receiving'?'primary':''" @click="section='receiving'">核验收货</el-button><el-button :type="section==='fbp'?'primary':''" @click="section='fbp'">核验 FBP 入仓</el-button></nav><MobileWorkQueue v-if="section==='receiving'" warehouse/><section v-else-if="section==='fbp'" class="mobile-record"><h3>核验 FBP 入仓</h3><p class="mobile-muted">FBP 入仓逐项核验暂在电脑端完成。请在电脑端打开采购工作台的「FBP入库确认」，核对批次、店铺和SKU后再确认。</p></section><template v-else>
+<template><div class="mobile-inventory-page"><nav class="mobile-inventory-tabs"><el-button v-if="canAccessPage(auth.user,'/mobile/inventory-capital')" @click="router.push('/mobile/inventory-capital')">库存占用</el-button><el-button :type="section==='stock'?'primary':''" @click="section='stock'">商品库存</el-button><el-button :type="section==='receiving'?'primary':''" @click="section='receiving'">核验收货</el-button><el-button :type="section==='fbp'?'primary':''" @click="section='fbp'">核验 FBP 入仓</el-button></nav><MobileWorkQueue v-if="section==='receiving'" warehouse/><section v-else-if="section==='fbp'" class="mobile-record"><h3>核验 FBP 入仓</h3><p class="mobile-muted">FBP 入仓逐项核验暂在电脑端完成。请在电脑端打开采购工作台的「FBP入库确认」，核对批次、店铺和SKU后再确认。</p></section><template v-else>
  <section class="mobile-inventory-search"><el-select v-model="filters.searchMode" aria-label="搜索方式"><el-option label="综合搜索" value="auto"/><el-option label="库存编号精确" value="inventory_id"/><el-option label="SKU／货号精确" value="sku"/><el-option label="名称搜索" value="name"/></el-select><el-input v-model="filters.query" clearable placeholder="库存编码 / SKU / 商品名称" @keyup.enter="load(true)"/><el-button :loading="loading" @click="load(true)">查询</el-button></section>
  <div class="mobile-record-actions"><el-button @click="showFields=!showFields">{{showFields?'收起精确筛选':'精确筛选'}}</el-button><el-button @click="reset">重置</el-button><small class="mobile-muted">共 {{total}} 个商品</small></div>
  <el-form v-if="showFields" class="mobile-inventory-fields" label-position="top"><el-form-item label="库存类型"><el-select v-model="filters.inventoryType"><el-option label="全部" value="all"/><el-option label="单品" value="single"/><el-option label="配件" value="accessory"/><el-option label="套装" value="combo"/></el-select></el-form-item><InventoryStructuredSearch :model-value="filters" @update:model-value="v=>Object.assign(filters,v)" compact simple/></el-form>
