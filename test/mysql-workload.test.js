@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { currentMysqlWorkload, withMysqlWorkload, mysqlWorkloadLimits } from '../src/mysql-workload.js';
+import { currentMysqlWorkload, withMysqlWorkload, mysqlWorkloadLimits, withMysqlTransactionPriority } from '../src/mysql-workload.js';
 
 test('foreground reserve divides the existing connection budget, including deployment candidate and single-connection mode', () => {
   assert.deepEqual(mysqlWorkloadLimits(10), { foreground: 9, background: 1 });
@@ -33,4 +33,17 @@ test('background priority survives awaits but does not leak across concurrent re
   release();
   await background;
   assert.equal(currentMysqlWorkload(), 'foreground');
+});
+
+
+test('scheduled transactions serialize without holding up interactive or nested transactions; failures do not poison the queue',async()=>{
+ let release;const gate=new Promise(resolve=>{release=resolve;}),events=[];
+ const first=withMysqlWorkload('background',()=>withMysqlTransactionPriority(async()=>{events.push('first');assert.equal(currentMysqlWorkload(),'foreground');await gate;await withMysqlTransactionPriority(async()=>events.push('nested'));events.push('done');}));
+ const second=withMysqlWorkload('background',()=>withMysqlTransactionPriority(async()=>{events.push('second');throw Error('rollback');}));
+ const failed=assert.rejects(second,/rollback/);
+ await withMysqlTransactionPriority(async()=>events.push('interactive'));
+ await new Promise(setImmediate);assert.ok(events.includes('interactive'));assert.ok(!events.includes('second'));
+ release();await first;await failed;
+ await withMysqlWorkload('background',()=>withMysqlTransactionPriority(async()=>events.push('recovered')));
+ assert.ok(events.indexOf('second')>events.indexOf('done'));assert.equal(events.at(-1),'recovered');assert.equal(currentMysqlWorkload(),'foreground');
 });
