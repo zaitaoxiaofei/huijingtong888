@@ -1,3 +1,4 @@
+import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
 const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
 import { createOrderSplitService } from "./order-split.js";
@@ -348,8 +349,8 @@ async function ensureProfitAnalyticsSchemaMysql() {
 
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
 const FBP_OPPORTUNITY_CACHE_TTL_MS = STOCK_ALERT_BASE_CACHE_TTL_MS;
-function invalidateOrderProcurementCoverage() {
-  invalidateProcurementCoverageCache();
+function invalidateOrderProcurementCoverage(change) {
+  invalidateProcurementCoverageCache(change);
   invalidateInventoryProductBalance();
   invalidateMasterDataCachePrefix("stock-alerts:inventory-base:v1:");
 }
@@ -7634,6 +7635,12 @@ async function upsertStockSnapshotMysql(shopId, row, { beforeWrite = null } = {}
   const stockType = resolveStockTypeMysql({ ...row, rules: await stockWarehouseRulesEnabledMysql() });
   const normalizedSku = normalizedOzonSkuCandidateMysql(row, row.ozon_sku) || missingOnlineProductSkuMarker(row);
   const warehouseId = String(row.warehouse_id || row.warehouse_name || "default");
+  // A real FBP row supersedes an earlier explicitly verified zero. FBS-only
+  // responses must not erase that separate FBP fact or forge its timestamp.
+  if(stockType==='fbp_real'&&warehouseId!=='flow-confirmed-zero'){
+    await beforeWrite?.();
+    await mysqlExecute("DELETE FROM ozon_stock_snapshots WHERE shop_id=? AND ozon_sku=? AND stock_type='fbp_real' AND warehouse_id='flow-confirmed-zero'",[Number(shopId),normalizedSku]);
+  }
   await beforeWrite?.();
   await mysqlExecute(`
     DELETE FROM ozon_stock_snapshots
@@ -7712,6 +7719,10 @@ async function clearStockSnapshotsForSyncMysql(shopId, { productId = null, filte
     clauses.push(`(${scopedClauses.join(" OR ")})`);
   }
 
+  // The bulk stock API may omit SKUs with zero FBP stock. Keep only explicit
+  // per-SKU zero confirmations, with their original verification time. Missing
+  // or failed responses are never converted to zero here.
+  clauses.push("NOT (stock_type='fbp_real' AND warehouse_id='flow-confirmed-zero' AND COALESCE(present,-1)=0 AND COALESCE(available,-1)=0 AND COALESCE(reserved,-1)=0)");
   await mysqlExecute(`DELETE FROM ozon_stock_snapshots WHERE ${clauses.join(" AND ")}`, params);
 }
 
@@ -7877,8 +7888,11 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
     try {
       const filters = await stockSyncFiltersMysql(shop.id, productId);
       let rows = await fetchOzonProductStocks(shop, { ...filters, signal: options.signal });
+      const confirmedZeros=confirmedFbpZeroSnapshots(rows);
       const analytics = await fetchOzonStockAnalyticsSafeMysql(shop, rows, options);
       rows = mergeOzonStockAnalyticsRowsMysql(rows, analytics.rows);
+      const actualFbp=new Set(rows.filter(row=>row.stock_type==='fbp_real').map(row=>String(row.ozon_sku)));
+      rows.push(...confirmedZeros.filter(row=>!actualFbp.has(row.ozon_sku)));
       if (analytics.errors.length) errors.push(`${shop.name}: stock analytics unavailable (${analytics.errors.join("; ")})`);
       await clearStockSnapshotsForSyncMysql(shop.id, { productId, filters });
       if (!rows.length) rows = await fallbackStockRowsFromOnlineProductsMysql(shop.id, productId);
@@ -7902,6 +7916,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
     }
   }
   await reclassifyStockSnapshotsMysql(String(scope.id));
+  if(upserted>0)invalidateOrderProcurementCoverage();
   // Stock changes do not identify a received shipment. Keep receipts explicit.
   const autoFbpReceive = { confirmedQuantity: 0, confirmedRecords: 0, details: [] };
   invalidateMasterDataCache("stock-alerts:base");
@@ -9712,7 +9727,9 @@ async function refreshPendingListingStockSnapshotsMysql(shopId, productIds = [],
     await beforeWrite?.();
     await clearStockSnapshotsForSyncMysql(shopId, { filters: { productIds: ids } });
   }
-  await mapWithConcurrencyMysql(stockRows || [], 2, (row) => upsertStockSnapshotMysql(shopId, row, { beforeWrite }));
+  const confirmedZeros=confirmedFbpZeroSnapshots(stockRows||[]);
+  await mapWithConcurrencyMysql([...(stockRows||[]),...confirmedZeros], 2, (row) => upsertStockSnapshotMysql(shopId, row, { beforeWrite }));
+  if(stockRows?.length)invalidateOrderProcurementCoverage();
 }
 
 async function upsertFinanceOperationMysql(shopId, operation, options = {}) {
@@ -25797,7 +25814,7 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     if(workspaceBatch)await connection.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,Number(items[0].product_id),sessionPersonId,'workspace_batch_purchase',JSON.stringify({request_key:requestKey,hash:requestHash,result:saved,product_ids:items.map(i=>Number(i.product_id))})]);
     return saved;
   });
-  invalidateOrderProcurementCoverage();
+  invalidateOrderProcurementCoverage(workspaceBatch?{tenantId:scope.id,productIds:items.map(item=>Number(item.product_id))}:undefined);
   return result;
 }
 

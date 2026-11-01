@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import {confirmedFbpZeroSnapshots} from "../src/shared/fbp-zero-snapshots.js";
 
 const source = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -16,8 +17,9 @@ for (const scenario of [
 ]) {
   test(`stock sync does not confirm shipment receipt when ${scenario.name}`, async () => {
     let stock = scenario.before;
-    const receipts = [];
-    const context = vm.createContext({
+    const receipts = [];let invalidations=0;
+    const context = vm.createContext({ invalidateOrderProcurementCoverage() {invalidations++;},
+      confirmedFbpZeroSnapshots,
       ensureMysqlCutoverEnabled() {}, ensureOzonStockStorageSchemaMysql() {},
       resolveInventoryTenantScope: async () => ({id:1,isDefault:true}),
       assertInventoryReferences: async () => {},
@@ -47,6 +49,7 @@ for (const scenario of [
     ].map(functionSource).join("\n"), context);
     const result = await context.syncOzonStocksMysql({ shop_id: 4 });
     assert.equal(stock, scenario.after, "stock snapshots still refresh");
+    assert.equal(invalidations,1,"updated official snapshots invalidate demand reads");
     assert.equal(receipts.length, 0, "inventory changes are not shipment receipt evidence");
     assert.equal(result.upserted, 1);
     assert.equal(result.status, scenario.fail ? "partial_error" : "ok");

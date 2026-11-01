@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import {startPhysicalPurchasePreview} from './fixtures/inventory-physical-preview.js';
 test('compact physical procurement supports FBP retry, legacy-part review and retained batch forms',{skip:process.env.RUN_TASK_BROWSER_TESTS!=='1',timeout:180000},async()=>{
  const {server,calls}=await startPhysicalPurchasePreview();
- const script=`const task=await taskSpace('procurement-units-20261031');const page=task.page('p1');
+ const script=`const task=await taskSpace(${JSON.stringify(process.env.BROWSER_TASK_SPACE||'procurement-units-20261031')});const page=task.page('p1');
  await page.goto('http://localhost:8788/admin.html?physicalqa='+Date.now()+'#/procurement/workspace');await page.waitForSelector('.supply-table');console.log(await page.snapshot());
  await page.click('.compact-demand-lines button:has-text("同步重算")');await page.waitForFunction(()=>document.body.textContent.includes('同步未完成，点击重试'));await page.click('text="同步未完成，点击重试"');await page.waitForFunction(()=>document.body.textContent.includes('官方库存已同步'));
  console.log(await page.evaluate(()=>({rowHeight:document.querySelector('.supply-table tbody tr').getBoundingClientRect().height,negative:document.body.textContent.includes('账面 -3 件')})));

@@ -32,7 +32,7 @@ let pending;
 let generation = 0;
 const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
-export function invalidateOrderProcurementCoverage() { invalidateInventoryWorkflow(); generation += 1; cached = null; pending = null; }
+export function invalidateOrderProcurementCoverage(change) { invalidateInventoryWorkflow(change); generation += 1; cached = null; pending = null; }
 
 export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false } = {}) {
   if (includeTrace) fresh = true;

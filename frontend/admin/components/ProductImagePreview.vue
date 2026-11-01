@@ -1,6 +1,7 @@
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { getAuthToken } from "../utils/api";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { getAuthToken, currentApiCacheScope } from "../utils/api";
+import {loadProductThumbnail,productThumbnailUrl} from "../utils/product-thumbnail-cache.js";
 
 const props = defineProps({
   src: { type: String, default: "" },
@@ -16,6 +17,11 @@ const props = defineProps({
   initialIndex: { type: Number, default: 0 }
 });
 
+const host=ref(null),visible=ref(false),scope=ref(currentApiCacheScope()),retry=ref(0);
+const thumbnailSrc=ref(''),thumbnailError=ref('');let thumbnailVersion=0,observer;
+function revokeThumbnail(){if(thumbnailSrc.value)URL.revokeObjectURL(thumbnailSrc.value);thumbnailSrc.value='';}
+function scopeChanged(){scope.value=currentApiCacheScope();revokeThumbnail();thumbnailError.value='';}
+function imageChanged(event){if(productThumbnailUrl(primarySrc.value)?.split('?')[0]===`/api/products/${Number(event.detail?.productId)}/image`)retry.value++;}
 const useProxyFallback = ref(false);
 const fallbackIndex = ref(0);
 const imageReady = ref(true);
@@ -110,8 +116,9 @@ function withImageToken(url) {
 }
 
 watch(
-  () => [props.src, props.previewList, props.loadDelay],
+  () => JSON.stringify([firstImageValue(props.src),(Array.isArray(props.previewList)?props.previewList:[]).map(firstImageValue),props.loadDelay,props.proxyRemote,scope.value]),
   () => {
+    retry.value=0;
     useProxyFallback.value = false;
     fallbackIndex.value = 0;
     scheduleImageLoad();
@@ -119,15 +126,31 @@ watch(
   { immediate: true }
 );
 
+onMounted(()=>{
+ window.addEventListener('erp:auth-scope-changed',scopeChanged);window.addEventListener('erp:product-image-changed',imageChanged);
+ if(!props.lazy||typeof IntersectionObserver==='undefined')visible.value=true;
+ else{observer=new IntersectionObserver(entries=>{if(entries.some(e=>e.isIntersecting)){visible.value=true;observer.disconnect();}},{rootMargin:'160px'});if(host.value)observer.observe(host.value);}
+});
 onBeforeUnmount(() => {
+  ++thumbnailVersion;observer?.disconnect();revokeThumbnail();window.removeEventListener('erp:auth-scope-changed',scopeChanged);window.removeEventListener('erp:product-image-changed',imageChanged);
   if (imageDelayTimer) clearTimeout(imageDelayTimer);
 });
 
 const previewSrcList = computed(() => {
+  scope.value;
   const list = Array.isArray(props.previewList) && props.previewList.length ? props.previewList : [props.src];
   return list.map((item) => normalizeImageSrc(item, { forceProxy: props.proxyRemote || useProxyFallback.value })).filter(Boolean);
 });
-const primarySrc = computed(() => normalizeImageSrc(props.src, { forceProxy: props.proxyRemote || useProxyFallback.value }));
+const primarySrc = computed(() => {scope.value;return normalizeImageSrc(props.src, { forceProxy: props.proxyRemote || useProxyFallback.value });});
+const managedUrl=computed(()=>productThumbnailUrl(primarySrc.value));
+watch(()=>[managedUrl.value,visible.value,imageReady.value,scope.value,retry.value],async([url,shown,ready,current,attempt])=>{
+ const version=++thumbnailVersion;if(!url||!shown||!ready){revokeThumbnail();thumbnailError.value="";return;}
+ // Preview-array identity changes never reset this request or the decoded image.
+ revokeThumbnail();thumbnailError.value="";
+ try{const blob=await loadProductThumbnail(url,{force:attempt>0});if(version!==thumbnailVersion||current!==currentApiCacheScope())return;thumbnailSrc.value=URL.createObjectURL(blob);}
+ catch(error){if(version===thumbnailVersion&&error.name!=="AbortError")thumbnailError.value=error.message||"图片加载失败";}
+},{immediate:true});
+function retryThumbnail(){retry.value++;}
 const displaySrc = computed(() => {
   const list = previewSrcList.value;
   const primary = primarySrc.value;
@@ -144,6 +167,7 @@ const previewInitialIndex = computed(() => {
 });
 
 function handleImageError() {
+  if(managedUrl.value){revokeThumbnail();thumbnailError.value="图片解码失败，可单独重试";return;}
   const value = firstImageValue(props.src);
   if (/^(https?:)?\/\//i.test(value) && !props.proxyRemote && !useProxyFallback.value) {
     useProxyFallback.value = true;
@@ -159,10 +183,10 @@ function handleImageError() {
 </script>
 
 <template>
-  <div class="erp-image-preview" :class="`erp-image-preview--${props.size}`">
+  <div ref="host" class="erp-image-preview" :class="`erp-image-preview--${props.size}`">
     <el-image
-      v-if="imageReady && displaySrc"
-      :src="displaySrc"
+      v-if="imageReady && (managedUrl ? thumbnailSrc : displaySrc)"
+      :src="managedUrl ? thumbnailSrc : displaySrc"
       :alt="props.alt"
       :fit="props.fit"
       :lazy="props.lazy"
@@ -172,6 +196,10 @@ function handleImageError() {
       class="erp-image-preview__image"
       @error="handleImageError"
     />
-    <div v-else class="erp-image-preview__empty">{{ props.src ? "加载图片" : "无图" }}</div>
+    <div v-else class="erp-image-preview__empty"><button v-if="thumbnailError" type="button" :title="thumbnailError" class="erp-image-preview__retry" @click.stop="retryThumbnail">重试图片</button><span v-else>{{ props.src ? "加载图片" : "无图" }}</span></div>
   </div>
 </template>
+
+<style scoped>
+.erp-image-preview__retry{border:0;background:transparent;color:var(--el-color-primary);font:inherit;cursor:pointer;padding:4px}
+</style>

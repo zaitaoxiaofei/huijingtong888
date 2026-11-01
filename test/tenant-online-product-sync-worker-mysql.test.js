@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import test from 'node:test';
 import vm from 'node:vm';
+import {confirmedFbpZeroSnapshots} from '../src/shared/fbp-zero-snapshots.js';
 import mysql from 'mysql2/promise';
 import { createOrderFixtureSchema, orderFunctionSource } from './helpers/tenant-order-service.js';
 import { resolveInventoryTenantScope, assertInventoryRecord, assertInventoryReferences, inventoryTenantSql } from '../src/services/inventory-tenant-scope.js';
@@ -55,7 +56,7 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
     const names = ['syncOzonOnlineProductsMysql', 'mapWithConcurrencyMysql', 'assertOrderTaskAccessMysql',
       'upsertOnlineProductDualWrite', 'buildOnlineProductPayload', 'archiveOnlineProductSkuAliasRowsMysql',
       'reconcileArchivedOnlineProductsMysql', 'refreshPendingListingStockSnapshotsMysql', 'clearStockSnapshotsForSyncMysql', 'upsertStockSnapshotMysql'];
-    const context = vm.createContext({ Date, Map, Set, Object, Array, Number, String, Boolean, Math, Promise, Error,
+    const context = vm.createContext({ invalidateOrderProcurementCoverage() {}, ORDER_SPLIT_IMPORT: Symbol("fixtureOrderSplitImport"), confirmedFbpZeroSnapshots, Date, Map, Set, Object, Array, Number, String, Boolean, Math, Promise, Error,
       ...client, ...sku, hasPermission, authorizeBusinessTaskSession, inventoryTenantSql, requestPublicMediaStream,
       mysqlQuery: query, mysqlQueryOne: async (sql, params) => (await query(sql, params))[0] || null, mysqlExecute: query,
       resolveInventoryTenantScope: tenant => resolveInventoryTenantScope(tenant, query),
@@ -99,8 +100,8 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
       await restore(); withStocks = true;
       await query("INSERT INTO ozon_stock_snapshots(shop_id,ozon_product_id,ozon_sku,warehouse_id,stock_type,present) VALUES(30,'101','1101','fbs-1','fbs_virtual',77)");
       await run(2);
-      const rows = await query("SELECT shop_id,present FROM ozon_stock_snapshots WHERE ozon_sku='1101' ORDER BY shop_id");
-      assert.deepEqual(rows.map(row => [row.shop_id, Number(row.present)]), [[20, 0], [30, 77]]);
+      const rows = await query("SELECT shop_id,present,stock_type,warehouse_id FROM ozon_stock_snapshots WHERE ozon_sku='1101' ORDER BY shop_id,stock_type");
+      assert.deepEqual(rows.map(row => [row.shop_id, Number(row.present),row.stock_type,row.warehouse_id]), [[20,0,"fbp_real","flow-confirmed-zero"],[20,0,"fbs_virtual","fbs-1"],[30,77,"fbs_virtual","fbs-1"]]);
     });
     await t.test('empty pending refs never send the unfiltered ALL stock request or clear saved stock', async () => {
       await restore(); empty = true;

@@ -72,7 +72,7 @@ function pollSnapshot(result,scope,token){
  if(!result.snapshot?.refreshing||result.snapshot?.error||snapshotAttempts>=150)return;
  snapshotAttempts++;snapshotTimer=setTimeout(()=>{snapshotTimer=null;if(!disposed&&active&&token===version&&scope===currentApiCacheScope())void load(false,false,false,true);},2000);
 }
-async function stockSaved(id){await refreshPurchased([Number(id)]);if(!disposed&&active)void load(false,true,false,true);}
+async function stockSaved(id){await refreshPurchased([Number(id)]);if(!disposed&&active)void load(false,false,false,true);}
 const hasUpdates=ref(false);
 function queueRefresh(){clearPages();hasUpdates.value=true;}
 const units=n=>n==null?'待核对':`${Number(n)} 件`;
