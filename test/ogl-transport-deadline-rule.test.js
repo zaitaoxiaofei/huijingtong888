@@ -24,7 +24,8 @@ test('OGL transport deadline starts at the known ordered instant, handles UTC SQ
 
 test('OGL applications and physical handovers keep counting until actual platform transport; no physical evidence is manufactured', () => {
   const result = withOglDispatch(order, applied);
-  assert.equal(result.ogl_dispatch.stage_label, '已绑定待交运');
+  assert.equal(result.display_status,'awaiting_deliver');
+  assert.equal(result.ogl_dispatch.stage_label, '已加入发运单 · 待打印');
   assert.equal(result.ogl_dispatch.official_carriage_id, '124237634');
   assert.equal(result.ogl_dispatch.dispatched, false);
   assert.equal(result.ogl_dispatch.dispatched_at, null);
