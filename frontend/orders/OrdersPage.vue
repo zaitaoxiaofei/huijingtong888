@@ -1,4 +1,5 @@
 ﻿<script setup>
+import {orderHasDispatchHold} from "../../src/shared/order-dispatch-hold.js";
 import {orderSelectionSummary,orderPrintPlan,removePrintedSelection,currentPagePreparePlan} from "./utils/order-print-selection.js";
 import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
 import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
@@ -1298,6 +1299,7 @@ function buildTableRow(row) {
     inventorySummaries,
     inventoryBoundCount,
     inventoryPendingCount,
+    dispatchHold: orderHasDispatchHold(row),
     printedState: Boolean(row.printed_at),
     printed_at: row.printed_at || "",
     profitSummary,
@@ -1308,7 +1310,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : displayStateKey === "ogl_bound" ? "已绑定发运单，等待仓库确认实际交运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
+    statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : displayStateKey === "ogl_bound" ? "已绑定发运单，等待仓库确认实际交运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),
@@ -2108,6 +2110,8 @@ async function handleSaveMark(orderId, markType) {
         ? { ...row, mark_type: String(saved?.mark_type ?? markType ?? ""), mark_note: String(saved?.note ?? note).trim() }
         : row
     ));
+    orderDetailCache.delete(Number(orderId));
+    await loadOrders({forceRefresh:true});
     ElMessage.success("订单标记和备注已保存");
   } catch (error) {
     ElMessage.error(error?.message || "标记和备注保存失败，请重试");
