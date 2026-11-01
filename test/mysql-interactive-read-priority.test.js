@@ -27,3 +27,12 @@ test('only ordinary row-only order pages pause scans; coverage-dependent pages r
  for(const query of [{includeCounts:0},{include_counts:'0',include_rows:1,status:'all'}]){seen.length=0;await read(query);assert.deepEqual(seen,['interactive','rows']);}
  for(const query of [{},{includeCounts:1},{includeRows:0,includeCounts:0},...['pending_purchase','purchase_in_transit','purchase_records_missing'].map(status=>({status,includeCounts:0}))]){seen.length=0;await read(query);assert.deepEqual(seen,['rows']);}
 });
+test('background read admission is serial, preserves priority, and recovers after errors without delaying foreground SQL',async()=>{
+ const {withMysqlBackgroundReadAdmission,currentMysqlWorkload}=await import('../src/mysql-workload.js');
+ const hold=deferred(),events=[];
+ const first=withMysqlWorkload('background',()=>withMysqlBackgroundReadAdmission(async()=>{events.push('first');assert.equal(currentMysqlWorkload(),'background');await hold.promise;throw Error('failed scan');}));
+ const rejected=assert.rejects(first,/failed scan/);
+ const next=withMysqlWorkload('background',()=>withMysqlBackgroundReadAdmission(async()=>{events.push('next');return 42;}));
+ await withMysqlWorkload('foreground',()=>withMysqlBackgroundReadAdmission(async()=>events.push('foreground')));
+ assert.ok(!events.includes('next'));hold.resolve();await rejected;assert.equal(await next,42);assert.ok(events.indexOf('next')>events.indexOf('first'));
+});

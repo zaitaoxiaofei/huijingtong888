@@ -50,3 +50,13 @@ export async function waitForMysqlInteractiveReads() {
     interactiveWaiters.add(resume);
   });
 }
+
+let backgroundReadTail = Promise.resolve();
+// Queue background reads before acquiring a pooled connection. Waiting for
+// interactive rows must not consume other background reads' acquire timeout.
+export function withMysqlBackgroundReadAdmission(operation) {
+  if (currentMysqlWorkload() !== 'background') return operation();
+  const task = backgroundReadTail.catch(() => {}).then(operation);
+  backgroundReadTail = task.then(() => undefined, () => undefined);
+  return task;
+}
