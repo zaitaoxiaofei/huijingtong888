@@ -6,6 +6,8 @@ import { authorizeApiRequest } from '../src/server/authorization.js';
 import { tenantIsolationDecision } from '../src/server/tenant-isolation.js';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { createOrderFixtureSchema, loadTenantOrderService } from './helpers/tenant-order-service.js';
+import { orderStateKey } from '../frontend/orders/constants/orders-ui.js';
+import { oglTransportDeadlineHint } from '../frontend/orders/utils/ogl-transport-deadline.js';
 import { OGL_DISPATCH_REFRESH } from '../src/services/ogl-dispatch-access.js';
 
 test('OGL display is derived from physical handover and gives platform terminal/online state priority', () => {
@@ -22,6 +24,30 @@ test('OGL display is derived from physical handover and gives platform terminal/
   assert.equal(oglOrderDisplayStatus(waiting, { ...member, withdrawn_at: '2026-10-22 02:00:00' }), '');
   assert.equal(oglOrderDisplayStatus(waiting, { ...member, dispatched_at: null }), '');
   assert.equal(withOglDispatch(waiting,{...member,active_order_id:999}).display_status,undefined,'Inactive historical member cannot provide a current tracking label');
+});
+
+test('official membership without a print stays awaiting dispatch and keeps its countdown until actual handover', () => {
+  const order={id:1,shop_id:2,status:'awaiting_packaging',logistics_carrier:'ogl',ordered_at:'2026-10-22T00:00:00Z',printed_at:null};
+  const member={batch_id:1,active_order_id:1,official_carriage_id:'901',official_member:1,default_shop_id:2,batch_status:'preparing',official_status:'observed'};
+  const pending=withOglDispatch(order,member);
+  assert.equal(pending.display_status,'awaiting_deliver');
+  assert.equal(orderStateKey(pending),'awaiting_deliver');
+  assert.equal(pending.ogl_dispatch.bound,true,'Keep the official association visible');
+  assert.equal(pending.ogl_dispatch.awaiting_print,true);
+  assert.equal(pending.ogl_dispatch.stage_label,'已加入发运单 · 待打印');
+  assert.equal(pending.ogl_dispatch.dispatched,false);
+  assert.ok(pending.ogl_transport_deadline.at);
+  assert.match(oglTransportDeadlineHint(pending,Date.parse(order.ordered_at)),/剩余/);
+  const printed=withOglDispatch({...order,printed_at:'2026-10-22T01:00:00Z'},member);
+  assert.equal(orderStateKey(printed),'ogl_bound');
+  assert.equal(printed.ogl_dispatch.awaiting_print,false);
+  assert.equal(orderStateKey(withOglDispatch(order,{...member,dispatched_at:'2026-10-22T02:00:00Z'})),'ogl_dispatched');
+  for(const status of ['delivering','delivered','cancelled','arbitration']){
+    const actual=withOglDispatch({...order,status},member);
+    assert.notEqual(orderStateKey(actual),'awaiting_deliver',status);
+    assert.equal(actual.ogl_dispatch.awaiting_print,false,status);
+  }
+  assert.equal(withOglDispatch(order,{...member,withdrawn_at:'2026-10-22T03:00:00Z'}).display_status,undefined);
 });
 
 test('OGL routes allow only exact reviewed enterprise paths and preserve settings permission', () => {
@@ -85,6 +111,12 @@ test('OGL MySQL tabs, counts, rollback and stock transport evidence share one sc
     assert.equal(await evidence(1),0);
     await query('UPDATE ogl_dispatch_members SET tenant_id=2,batch_id=1,official_member=1,dispatched_at=NULL WHERE order_id=1');
     await query("UPDATE ogl_dispatch_batches SET official_status='observed',official_carriage_id='901' WHERE id=1");
+    result=await list('ogl_bound');assert.equal(result.total,0);assert.equal(result.counts.ogl_bound,0);assert.equal(result.counts.awaiting_deliver,2);
+    assert.equal((await list('awaiting_deliver')).total,2,'Official unprinted order remains in waiting queue');
+    await query("UPDATE orders SET status='awaiting_packaging',tracking_stage='awaiting_packaging' WHERE id=1");
+    assert.equal((await list('awaiting_deliver')).total,2,'Official unprinted membership stays waiting even with an old platform preparation state');
+    assert.equal((await list('awaiting_packaging')).total,0);
+    await query("INSERT INTO order_label_prints(order_id,printed_at) VALUES(1,'2026-10-22 01:00:00')");
     result=await list('ogl_bound');assert.equal(result.total,1);assert.equal(result.counts.ogl_bound,1);assert.equal(result.counts.ogl_dispatched,0);assert.equal(result.counts.awaiting_deliver,1);
     assert.equal(await evidence(1),0,'An application can enter tracking without physical inventory evidence');
     await query("UPDATE orders SET status='awaiting_deliver',tracking_stage='posting_received_by_buyer' WHERE id=1");
