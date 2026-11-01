@@ -31506,7 +31506,7 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
   }
   if (status === "awaiting_deliver") {
-    return `(${awaitingDelivery}
+    return `((${awaitingDelivery} OR ${oglBoundStatusSql("o", evidenceAlias, false)})
       AND NOT (${exactTransit})
       AND NOT ${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
@@ -31658,9 +31658,10 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "frozen_rule");
   const shopScope = `AND ${tenantShopPredicateMysql("s", scope.defaultTenant)}`;
   let order = await mysqlQueryOne(
-    `SELECT o.*, s.name AS shop_name, raw.raw_json
+    `SELECT o.*, s.name AS shop_name, raw.raw_json, olp.printed_at
      FROM orders o
      JOIN shops s ON s.id = o.shop_id
+     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
      LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
      WHERE o.id = ? ${shopScope}`,
     tenantScoped ? [Number(id), normalizedTenantId] : [Number(id)]
