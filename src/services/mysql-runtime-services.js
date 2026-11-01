@@ -1,5 +1,5 @@
 import { withRequestReadCache } from './request-read-cache.js';
-import { withMysqlWorkload } from "../mysql-workload.js";
+import { withMysqlWorkload, withMysqlInteractiveRead } from "../mysql-workload.js";
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
 import { bindListingDrafts, listingDraftBindingOptions, listingDraftBindings } from "./listing-draft-bindings.js";
 import { procurementDailyReport } from "./procurement-daily-report.js";
@@ -918,7 +918,13 @@ export const mysqlRuntimeServices = {
   orders: ordersMysql,
   ordersPaged: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
     String(query.includeRows ?? query.include_rows ?? '1') === '0' ? 'background' : 'foreground',
-    () => ordersPagedMysql(query, tenantId)
+    () => {
+      const needsCoverage = String(query.includeRows ?? query.include_rows ?? '1') === '0'
+        || String(query.includeCounts ?? query.include_counts ?? '1') !== '0'
+        || ['pending_purchase', 'purchase_in_transit', 'purchase_records_missing'].includes(String(query.status || 'all'));
+      return needsCoverage ? ordersPagedMysql(query, tenantId)
+        : withMysqlInteractiveRead(() => ordersPagedMysql(query, tenantId));
+    }
   )),
   outboundRecords: outboundRecordsMysql,
   packagingFeeRule: packagingFeeRuleMysql,
