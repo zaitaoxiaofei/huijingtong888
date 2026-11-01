@@ -1,5 +1,5 @@
 import mysql from "mysql2/promise";
-import { currentMysqlWorkload, withMysqlWorkload, mysqlWorkloadLimits } from "./mysql-workload.js";
+import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits } from "./mysql-workload.js";
 import { config } from "./config.js";
 
 const mysqlPools = new Map();
@@ -235,7 +235,7 @@ export async function closeMysqlPool() {
 export async function withMysqlTransaction(callback) {
   // Lock-holding transactions and their nested business reads must not queue
   // behind long analytics reads, even when initiated by a scheduled job.
-  return withMysqlWorkload('foreground', () => runMysqlTransaction(callback));
+  return withMysqlTransactionPriority(() => runMysqlTransaction(callback));
 }
 
 async function runMysqlTransaction(callback) {

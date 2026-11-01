@@ -15,3 +15,14 @@ export function mysqlWorkloadLimits(total) {
   const background = total > 1 ? 1 : 0;
   return { foreground: total - background, background };
 }
+
+let backgroundTransactionTail = Promise.resolve();
+// Transactions keep their existing foreground connection and nested-read
+// behavior, but scheduled writers must not fan out across that entire pool.
+export function withMysqlTransactionPriority(operation) {
+  const run = () => withMysqlWorkload('foreground', operation);
+  if (currentMysqlWorkload() !== 'background') return run();
+  const task = backgroundTransactionTail.catch(() => {}).then(run);
+  backgroundTransactionTail = task.then(() => undefined, () => undefined);
+  return task;
+}
