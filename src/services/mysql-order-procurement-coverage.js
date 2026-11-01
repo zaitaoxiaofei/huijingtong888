@@ -1,3 +1,4 @@
+import { procurementQueueOrderIds } from './order-procurement-queues.js';
 import { invalidateInventoryWorkflow } from './inventory-workflow-cache.js';
 import { shanghaiDateKey } from '../shanghai-time.js';
 import { calculateOrderProcurementCoverageAsync } from './order-procurement-coverage-async.js';
@@ -34,7 +35,7 @@ const COVERAGE_CACHE_TTL_MS = 5 * 60 * 1000;
 export function cachedOrderProcurementCoverage() { return cached && cached.expires > Date.now() ? cached.value : null; }
 export function invalidateOrderProcurementCoverage(change) { invalidateInventoryWorkflow(change); generation += 1; cached = null; pending = null; }
 
-export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false } = {}) {
+export async function loadOrderProcurementCoverage(query, openSql, { fresh = false, productId = null, productIds = null, includeTrace = false, tenantId = null, includeLegacyTenantNull = false, localStateOnly = false, queuesOnly = false } = {}) {
   if (includeTrace) fresh = true;
   if (productId !== null && (!Number.isSafeInteger(Number(productId)) || Number(productId) <= 0)) throw new Error('库存商品 ID 无效');
   const ownerScope = await resolveInventoryTenantScope(tenantId ?? 'admin', query);
@@ -221,8 +222,8 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
     }
     const priorityByItem = new Map(priorities.map(row => [`${row.product_id}:${row.order_item_id}`, Number(row.priority)]));
     const prioritizedDemands = resolvedDemands.map(row => ({ ...row, allocation_priority: priorityByItem.get(`${row.product_id}:${row.order_item_id}`) || 0 }));
-    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace });
-    value.inventory_stocks = [...byProduct.values()];
+    const value = await calculateOrderProcurementCoverageAsync({ demands: prioritizedDemands.filter(row => scopedIdSet.has(Number(row.product_id))), stocks: [...byProduct.values()], allocations, inbounds, requests, marks, sources, stockSources, includeTrace, queuesOnly });
+    if (!queuesOnly) value.inventory_stocks = [...byProduct.values()];
     if (!fresh && generation === version) cached = { value, expires: Date.now() + COVERAGE_CACHE_TTL_MS };
     return value;
   })();
@@ -231,10 +232,6 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
 }
 
 export function procurementQueueSql(coverage, status) {
-  const ids = [...coverage.values()].filter(row => row.stock_location !== 'FBP').filter(row => status === 'pending_purchase'
-    ? row.needs_fulfillment && row.items.some(item => item.product_id > 0 && item.shortage_quantity > 0)
-    : status === 'purchase_in_transit' ? row.incoming_quantity > 0 || row.quantity_needs_review
-      : row.entered_transport && (row.missing_record_quantity > 0 || row.missing_amount || row.quantity_needs_review))
-    .map(row => Number(row.order_id)).filter(Number.isSafeInteger);
+  const ids = procurementQueueOrderIds(coverage, status);
   return ids.length ? `o.id IN (${ids.join(',')})` : '1 = 0';
 }

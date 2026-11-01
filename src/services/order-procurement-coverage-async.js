@@ -1,3 +1,4 @@
+import {compactProcurementCoverage} from './order-procurement-queues.js';
 import { Worker } from 'node:worker_threads';
 import { calculateOrderProcurementCoverage } from './order-procurement-coverage.js';
 let tail = Promise.resolve();
@@ -5,7 +6,10 @@ let tail = Promise.resolve();
 // Full enterprise reconciliation can occupy the API event loop for seconds.
 // Limit heavy calculations to one worker per process; ordinary saves stay local.
 export function calculateOrderProcurementCoverageAsync(input) {
-  if (input.demands.length < 1000) return Promise.resolve(calculateOrderProcurementCoverage(input));
+  if (input.demands.length < 1000) {
+    const value = calculateOrderProcurementCoverage(input);
+    return Promise.resolve(input.queuesOnly ? compactProcurementCoverage(value) : value);
+  }
   const task = tail.catch(() => {}).then(() => new Promise((resolve, reject) => {
     const worker = new Worker(new URL('./order-procurement-coverage-worker.js', import.meta.url), {
       resourceLimits: { maxOldGenerationSizeMb: 256 }

@@ -18,6 +18,6 @@ export function adminOrderPreloadScript(manifest) {
     roots.forEach(visit);
     return [...files];
   };
-  const paths = {print:collect([orders,print]),inventory:collect([orders,inventory])};
-  return `(function(){if(!/^#\\/orders(?:[?]|$)/.test(location.hash))return;var mode=new URLSearchParams(location.hash.split('?')[1]||'').get('mode')==='inventory'?'inventory':'print';var paths=${JSON.stringify(paths)};paths[mode].forEach(function(href){if(document.querySelector('link[rel="modulepreload"][href="'+href+'"]'))return;var link=document.createElement('link');link.rel='modulepreload';link.href=href;document.head.appendChild(link);});})();`;
+  const paths = {print:collect([orders,print]),inventory:collect([orders,inventory]),mobile:collect(['frontend/admin/views/mobile/MobileOrdersView.vue'])};
+  return `(function(){var mobile=/^#\\/mobile\\/orders(?:[?]|$)/.test(location.hash);if(!mobile&&!/^#\\/orders(?:[?]|$)/.test(location.hash))return;var mode=mobile?'mobile':new URLSearchParams(location.hash.split('?')[1]||'').get('mode')==='inventory'?'inventory':'print';var paths=${JSON.stringify(paths)};paths[mode].forEach(function(href){if(document.querySelector('link[rel="modulepreload"][href="'+href+'"]'))return;var link=document.createElement('link');link.rel='modulepreload';link.href=href;document.head.appendChild(link);});})();`;
 }
