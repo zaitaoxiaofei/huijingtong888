@@ -28099,16 +28099,17 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
     monthRanges.push(monthRangeMysql(year, month, true));
   }
   const selectedMonthKey = `${year}-${String(selectedMonth).padStart(2, "0")}`;
+  const overviewOnly = query.overviewOnly === "1";
 
   const monthRows = await Promise.all(monthRanges.map(async (range) => {
     const includeOrders = (query.includeOrders === "1" || query.include_orders === "1") && range.month_key === selectedMonthKey;
     const [ranking, pendingByShop, expenses, orders, procurementInventory, aiUsage] = await Promise.all([
       profitRankingMysql({ dimension: "shop", from: range.from, to: range.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId),
-      monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope),
+      overviewOnly ? Promise.resolve(new Map()) : monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope),
       monthlyBillingExpensesMysql(range.from, range.to, shopId, tenantScope),
       includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId, { tenantScope }) : Promise.resolve([]),
-      monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope),
-      billingAiUsageMysql(range.from, range.to, tenantScope)
+      overviewOnly ? Promise.resolve({}) : monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope),
+      overviewOnly ? Promise.resolve({}) : billingAiUsageMysql(range.from, range.to, tenantScope)
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};

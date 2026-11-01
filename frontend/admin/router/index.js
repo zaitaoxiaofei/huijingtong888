@@ -40,7 +40,8 @@ const ProfitInventoryRisksView = () => import("../views/profit/ProfitInventoryRi
 const ProfitOrderItemVariancesView = () => import("../views/profit/ProfitOrderItemVariancesView.vue");
 const PendingSettlementCostsView = () => import("../views/profit/PendingSettlementCostsView.vue");
 const AdvertisingDailyView = () => import("../views/advertising/AdvertisingDailyView.vue");
-const FinanceCenterView = () => import("../views/finance/FinanceCenterView.vue");
+const FinanceCenterView = () => import("../views/finance/FinanceOverviewView.vue");
+const ReimbursementView = () => import("../views/finance/ReimbursementView.vue");
 const PayrollView = () => import("../views/finance/PayrollView.vue");
 const SellerAnalyticsView = () => import("../views/analytics/SellerAnalyticsView.vue");
 const OrderCarHeatmapView = () => import("../views/analytics/OrderCarHeatmapView.vue");
@@ -190,7 +191,8 @@ export const router = createRouter({
         { path: "profit/sku-ranking", redirect: "/profit/monthly-billing" },
         { path: "profit/shop-ranking", redirect: "/profit/monthly-billing" },
         { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告分析", breadcrumb: ["数据看板", "广告分析"] } },
-        { path: "finance-center", name: "finance-center", component: FinanceCenterView, meta: { title: "财务中心", breadcrumb: ["财务中心"] } },
+        { path: "finance-center", name: "finance-center", component: FinanceCenterView, meta: { title: "经营总览", breadcrumb: ["财务中心", "经营总览"] } },
+        { path: "finance/reimbursements", name: "finance-reimbursements", component: ReimbursementView, meta: { title: "报销中心", breadcrumb: ["财务中心", "报销中心"] } },
         { path: "finance/payroll", name: "finance-payroll", component: PayrollView, meta: { title: "员工工资", breadcrumb: ["财务中心", "员工工资"] } },
         { path: "orders", name: "orders", component: OrdersView, meta: { title: "订单处理", breadcrumb: ["订单履约", "订单处理"] } },
         { path: "order-tracking", name: "order-tracking", component: OrderTrackingView, meta: { title: "单量追踪", breadcrumb: ["订单履约", "单量追踪"] } },

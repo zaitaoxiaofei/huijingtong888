@@ -62,6 +62,7 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
+  if (path === "/finance/reimbursements") return "common";
   if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";
   if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path)) return "inventory.read";
   if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
@@ -96,5 +97,5 @@ export function canAccessPage(subject, path) {
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
   if (permission === "finance") return isPlatformAdmin(subject) || (enterpriseFinancePages.has(path) && isEnterpriseAdmin(subject));
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;
-  return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
+  return permission === "common" ? ((path === "/finance/reimbursements" && Boolean(subject?.tenant?.id)) || getRoles(subject).length > 0) : hasPermission(subject, permission);
 }

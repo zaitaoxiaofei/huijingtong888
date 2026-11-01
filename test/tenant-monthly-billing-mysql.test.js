@@ -73,6 +73,9 @@ test('monthly billing reads only the current enterprise, including every financi
     await t.test('calendar-month includeOrders uses the same enterprise scope',async()=>{
       const r=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,month:10,includeOrders:'1'},'2');
       assert.deepEqual(r.selected.orders.map(row=>row.order_id),[20]);assert.equal(r.selected.ai_usage.request_count,20);
+      const overview=await monthlyBillingDetailsMysql({year:2026,fromMonth:10,toMonth:10,month:10,overviewOnly:'1'},'2');
+      for(const key of ['revenue','net_profit','salary_expense','manual_expense','order_count'])assert.equal(overview.selected.summary[key],r.selected.summary[key],key);
+      assert.deepEqual(overview.selected.procurement_inventory,{});assert.deepEqual(overview.selected.ai_usage,{});
     });
     await t.test('cross-enterprise child references do not disclose product or cost identity',async()=>{
       await q("UPDATE sku_mappings SET product_id=30 WHERE id=20");
