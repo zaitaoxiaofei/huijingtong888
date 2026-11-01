@@ -23,9 +23,13 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const expand=ids=>{const leaves=new Set(ids);for(const id of ids){try{for(const p of graph.components(id))leaves.add(Number(p.id));}catch{}}
     const allowed=new Set(leaves);for(const id of graph.products.keys()){try{if(graph.components(id).some(p=>leaves.has(Number(p.id))))allowed.add(id);}catch{}}
     return [...allowed];};
-  const matched=await query(`SELECT p.id FROM products p WHERE ${productWhere.map(w=>'('+w+')').join(' AND ')}`,productArgs);
-  const allowed=expand(matched.map(p=>Number(p.id)));
-  where.push(allowed.length?`ir.product_id IN (${allowed.map(()=>'?').join(',')})`:'1=0');args.push(...allowed);
+  // No product filter means all owned batches already covered by SQL scope.
+  // Expanding every owned product into itself and every parent is redundant.
+  if(search.sql||params.product_id){
+   const matched=await query(`SELECT p.id FROM products p WHERE ${productWhere.map(w=>'('+w+')').join(' AND ')}`,productArgs);
+   const allowed=expand(matched.map(p=>Number(p.id)));
+   where.push(allowed.length?`ir.product_id IN (${allowed.map(()=>'?').join(',')})`:'1=0');args.push(...allowed);
+  }
   const text=String(params.query||'').trim();
   if(text&&(!params.searchMode||params.searchMode==='auto')){
    const match=isInventoryIdentifier(text)?inventoryIdentifierSearch(text,'inventory_id'):null;
@@ -36,12 +40,12 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   }
   const reviews=await query("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_bundle_review' ORDER BY id DESC",[scope.id]);
   const lineage=new Map();const reviewed=new Map();for(const row of reviews){const v=typeof row.detail_json==='string'?JSON.parse(row.detail_json):row.detail_json;if(v?.result?.mode==='whole'&&!reviewed.has(Number(v.result.inbound_id)))reviewed.set(Number(v.result.inbound_id),v.content_revision);for(const child of v?.result?.created||[])if(!lineage.has(Number(child.inbound_id)))lineage.set(Number(child.inbound_id),{id:Number(v.result.inbound_id),product_id:Number(v.source?.product_id)});}
-  const project=row=>{
+  const project=(row,details=true)=>{
    const {amount,shipping_amount,...safe}=row;
    try{
     const components=graph.components(Number(row.product_id)).map(part=>({...part,quantity:Number(row.quantity)*Number(part.per_set_quantity)}));
     const bundle=graph.isBundle(row.product_id),needsReview=bundle&&reviewed.get(Number(row.id))!==bundleReviewContentRevision(row,components);
-    return{...safe,source_bundle_batch:lineage.get(Number(row.id))||null,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
+    return{...safe,source_bundle_batch:lineage.get(Number(row.id))||null,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:!details?[]:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
    }catch(e){return{...safe,components:[],is_bundle:true,review_required:true,physical_quantity:null,composition_error:e.message,affected_bundles:[]};}
   };
   const joins=`FROM inbound_records ir JOIN products p ON p.id=ir.product_id
@@ -55,7 +59,7 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
   const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at ${summaryJoins}`,args);
   const summary={open:0,arrived:0,open_quantity:0,arrived_quantity:0,open_unknown_batches:0,arrived_unknown_batches:0};
-  for(const raw of summaryRows){const row=project(raw),key=row.received_at?'arrived':'open';summary[key]++;if(row.physical_quantity==null)summary[key+'_unknown_batches']++;else summary[key+'_quantity']+=row.physical_quantity;}
+  for(const raw of summaryRows){const row=project(raw,false),key=row.received_at?'arrived':'open';summary[key]++;if(row.physical_quantity==null)summary[key+'_unknown_batches']++;else summary[key+'_quantity']+=row.physical_quantity;}
   if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary};
   const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${joins}`,args),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.courier_company,ir.tracking_number,po.id AS purchase_order_id,po.order_no,COALESCE(po.purchased_at,ir.created_at) AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${joins} ORDER BY COALESCE(po.purchased_at,ir.created_at) DESC,ir.id DESC LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize])]);
   return{rows:rows.map(r=>({...project(r),arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary};
