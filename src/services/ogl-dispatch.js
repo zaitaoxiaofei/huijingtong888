@@ -300,6 +300,8 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
     if(pending.some(row=>!reviewed.has(Number(row.id))||body.review_signatures?.[row.id]!==oglOrderReviewSignature(row))||pending.length&&!text(body.review_note))fail('有标记或备注的订单须逐单确认并填写复核说明；原备注将保留',409,'OGL_ORDER_REVIEW_REQUIRED');
   }
   async function candidates(session,query={}) {
+    const quick=query.selection==='today-clear',today=shanghaiDateKey(now());
+    if(quick)query={selection:'today-clear',printed_from:today,printed_to:today,review:'clear',binding:'unbound',eligibility:'eligible',page:query.page,page_size:20};
     const range=oglOfficialDateRange({date_from:query.printed_from||shanghaiDateKey(now()),date_to:query.printed_to||shanghaiDateKey(now())},now());
     const pageValue=Number(query.page)||1;if(!Number.isSafeInteger(pageValue)||pageValue<1||pageValue>100000)fail('页码无效，请重新查询打印订单');
     const page=pageValue,size=Math.min(100,Math.max(1,Math.floor(Number(query.page_size)||20)));
@@ -331,12 +333,14 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const classified=scoped.map(row=>({row,issue:oglCandidateIssue(row,target)}));
       const available=classified.filter(item=>!item.issue),unavailable=classified.filter(item=>item.issue);
       const selected=eligibility==='all'?classified:eligibility==='rejected'?unavailable:available;
+      if(quick&&available.length>2000)fail('今日可快速绑定订单超过 2000 单，请使用组批 / 绑定发运入口分批处理',409);
+      const selectionRows=quick?available.map(({row})=>{const {raw_json,...safe}=row;return {...safe,can_select:true,blocked:false,needs_review:false,review_signature:oglOrderReviewSignature(row)};}):null;
       const pageRows=selected.slice((page-1)*size,page*size);
       const checked=pageRows.length?await previewRows(connection,current,pageRows.map(item=>Number(item.row.id)),false,target):{eligible:[],rejected:[]};
       const summaries=new Map();for(const {issue} of unavailable){const entry=summaries.get(issue.code)||{code:issue.code,reason:issue.reason,count:0};entry.count++;summaries.set(issue.code,entry);}
       const byId=new Map([...checked.eligible,...checked.rejected].map(row=>[Number(row.id),row]));
       return {...checked,rows:pageRows.map(item=>byId.get(Number(item.row.id))).filter(Boolean),page,page_size:size,total:selected.length,
-        summary:{matched:scoped.length,eligible:available.length,rejected:unavailable.length},rejection_summary:[...summaries.values()]};
+        summary:{matched:scoped.length,eligible:available.length,rejected:unavailable.length},rejection_summary:[...summaries.values()],...(quick?{selection_rows:selectionRows,selection_date:today}:{})};
     });
     if(loadOrderRows&&result.rows.length){
       const enriched=await loadOrderRows(result.rows.map(row=>Number(row.id)),Number(session.tenant.id));
@@ -351,7 +355,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
 
   async function bindOrders(session,body) {
     const requestKey=text(body.client_request_id,128);if(!/^[a-zA-Z0-9_-]{8,128}$/.test(requestKey))fail('绑定缺少有效操作标识，请重新打开组批窗口');
-    const manual=body.action==='manual-ship-orders';
+    const manual=body.action==='manual-ship-orders',quick=body.action==='quick-bind-orders';
     if(manual&&body.confirm_dispatched!==true)fail('请确认所选订单已实际发出，再人工标记已发运',409);
     const selected=ids(body.order_ids),ctx=await context(session,body.batch_id,true);
     if(!ctx.batch.official_carriage_id||!['observed','approved'].includes(ctx.batch.official_status))fail('请先同步已有官方申请并选择可核对的批次',409);
@@ -365,19 +369,25 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       const item=await batch(connection,current,ctx.batch.id,true);
       if(item.official_status!==ctx.batch.official_status||item.official_carriage_id!==ctx.batch.official_carriage_id||(item.official_operation_token??null)!==ctx.operationToken)fail('申请状态已变化，请刷新后绑定',409);
       const [events]=await connection.execute("SELECT detail_json FROM ogl_dispatch_events WHERE tenant_id=? AND batch_id=? AND action='bind-orders' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1",[current.id,item.id,requestKey]);
-      if(events[0]){const previous=parsed(events[0].detail_json);if(Boolean(previous.manual_dispatch)!==manual||JSON.stringify([...previous.order_ids].sort((a,b)=>a-b))!==JSON.stringify([...selected].sort((a,b)=>a-b)))fail('同一操作标识不能用于不同订单，请重新核对',409);return getDetail(connection,current,item.id);}
+      if(events[0]){const previous=parsed(events[0].detail_json);if(Boolean(previous.manual_dispatch)!==manual||Boolean(previous.quick_binding)!==quick||JSON.stringify([...previous.order_ids].sort((a,b)=>a-b))!==JSON.stringify([...selected].sort((a,b)=>a-b)))fail('同一操作标识不能用于不同订单，请重新核对',409);return getDetail(connection,current,item.id);}
       const previous=await members(connection,current,item.id,true);
       const historical=['received','closed'].includes(officialState)||['tracking','closed'].includes(item.status)||previous.some(row=>row.active&&row.dispatched_at);
       if(item.status==='cancelled')fail('该批次已取消，不能追加订单',409);
+      if(quick&&historical)fail('该发运单已有交运或历史完成记录，请选择尚未交运的已有发运单；历史补关联请使用组批 / 绑定发运入口',409);
       if(!manual&&historical&&(body.confirm_historical_binding!==true||!text(body.historical_binding_note)))fail('历史批次补关联须确认当时实际同批发出并填写核对说明；补关联后仍须仓库单独确认实际交运',409,'OGL_HISTORICAL_CONFIRMATION_REQUIRED');
       const checked=await previewRows(connection,current,selected,true,item.id);
       if(checked.rejected.length)fail(`有 ${checked.rejected.length} 个订单不能绑定：${checked.rejected[0].reason}`,409);
       if(manual&&checked.eligible.some(row=>hasManualOrderMark(row)&&!row.dispatched_at))fail('订单仍有人工标记（mark_type），请在订单页处理后选择无标记，再确认实际交运',409,'OGL_ORDER_MARK_HOLD');
+      if(quick){
+        const today=shanghaiDateKey(now());
+        if(body.printed_date!==today)fail('北京日期已变化，请重新打开快速绑定，按今天的打印记录重新选择',409);
+        if(checked.eligible.some(row=>row.active_batch_id||text(row.mark_type)||text(row.mark_note)||shanghaiDateKey(new Date(instant(row.printed_at)))!==today))fail('部分订单已被关联、增加标记 / 备注或不再属于今天打印，请重新打开快速绑定',409);
+      }
       assertOrderReview(checked.eligible,body);
       for(const row of checked.eligible){
         const own=Number(row.shop_id)===Number(item.default_shop_id);
         if(!manual&&historical&&own&&!row.already_bound)fail('历史批次只允许补关联本企业其他店铺订单；本店货件请按官方记录核对',409);
-        if(!manual&&own&&!accepted.has(row.posting_number))fail(`本店订单 ${row.posting_number} 未被 Ozon 发运单收录，请在 Ozon 后台添加后同步；不能冒充官方关联`,409);
+        if(!manual&&!quick&&own&&!accepted.has(row.posting_number))fail(`本店订单 ${row.posting_number} 未被 Ozon 发运单收录，请在 Ozon 后台添加后同步；不能冒充官方关联`,409);
         if(row.already_bound)continue;
         const [old]=await connection.execute('SELECT id FROM ogl_dispatch_members WHERE tenant_id=? AND batch_id=? AND order_id=? FOR UPDATE',[current.id,item.id,row.id]);
         if(old[0])await connection.execute('UPDATE ogl_dispatch_members SET active_order_id=order_id,withdrawn_at=NULL,withdrawn_by=NULL,official_member=? WHERE tenant_id=? AND id=?',[Number(own&&accepted.has(row.posting_number)),current.id,old[0].id]);
@@ -393,7 +403,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       }
       const metadata={...parsed(item.official_result_json)};delete metadata.local_management;
       await connection.execute("UPDATE ogl_dispatch_batches SET official_result_json=?,status=CASE WHEN status='closed' THEN 'tracking' ELSE status END WHERE tenant_id=? AND id=?",[JSON.stringify(metadata),current.id,item.id]);
-      await event(connection,current,item.id,'bind-orders',{request_key:requestKey,order_ids:selected,manual_dispatch:manual,historical_binding:historical,historical_binding_note:historical?text(body.historical_binding_note):null,reopened_from:item.status==='closed'?'closed':null,reviewed_order_ids:body.reviewed_order_ids||[],review_signatures:orderReviews(checked.eligible),physical_dispatch:false},null,text(body.review_note));
+      await event(connection,current,item.id,'bind-orders',{request_key:requestKey,order_ids:selected,manual_dispatch:manual,quick_binding:quick,printed_date:quick?body.printed_date:null,historical_binding:historical,historical_binding_note:historical?text(body.historical_binding_note):null,reopened_from:item.status==='closed'?'closed':null,reviewed_order_ids:body.reviewed_order_ids||[],review_signatures:orderReviews(checked.eligible),physical_dispatch:false},null,text(body.review_note));
       return getDetail(connection,current,item.id);
     });
   }
@@ -1334,7 +1344,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
   async function action(session,body={}) {
     let result;
     if(body.action==='refresh') result=await refresh(session,body);
-    else if(['bind-orders','manual-ship-orders'].includes(body.action)) result=await bindOrders(session,body);
+    else if(['bind-orders','manual-ship-orders','quick-bind-orders'].includes(body.action)) result=await bindOrders(session,body);
     else if(body.action==='official-options') return officialOptions(session,body);
     else if(body.action==='official-create') result=await officialCreate(session,body);
     else if(body.action==='official-confirm') result=await officialConfirm(session,body);
