@@ -214,7 +214,20 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       byProduct.get(id).open_deducted += Number(movement.quantity || 0);
     }
     const historicItems = new Map(demands.filter(d => Number(d.entered_transport) && d.stock_location === 'LOCAL').map(d => [Number(d.order_item_id), d]));
-    const frozenItems = new Set(deductions.filter(d => historicItems.has(Number(d.order_item_id))).map(d => Number(d.order_item_id)));
+    // A recorded physical shipment pins the whole historical item, even when
+    // its recorded components are outside this product-filtered view. Otherwise
+    // a single-product read invents consumption from today's changed recipe.
+    const historicIds = [...historicItems.keys()].filter(id => Number.isSafeInteger(id) && id > 0);
+    const outsideEvidence = requestedIds.length && historicIds.length ? await query(`
+      SELECT DISTINCT im.related_order_item_id AS order_item_id
+      FROM inventory_movements im
+      JOIN products evidence_product ON evidence_product.id=im.product_id${tenantScope('evidence_product.tenant_id')}
+      WHERE im.status='posted' AND im.source_type='order_outbound'
+        AND UPPER(COALESCE(NULLIF(im.stock_location,''),'LOCAL')) NOT IN ('FBP','FBO','OGR')
+        AND im.related_order_item_id IN (${historicIds.join(',')})
+        AND im.product_id NOT IN (${scopedIdSql})${tenantScope('im.tenant_id')}
+    `) : [];
+    const frozenItems = new Set([...deductions,...outsideEvidence].filter(d => historicItems.has(Number(d.order_item_id))).map(d => Number(d.order_item_id)));
     const resolvedDemands = demands.filter(d => !frozenItems.has(Number(d.order_item_id)));
     for (const movement of deductions) {
       const original = historicItems.get(Number(movement.order_item_id));
