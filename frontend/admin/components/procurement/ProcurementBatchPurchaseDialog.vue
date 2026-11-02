@@ -6,7 +6,7 @@ import {useAuthStore} from '../../stores/auth.js';
 import {PROCUREMENT_PRICE_REASONS,procurementPriceReason} from '../../../../src/shared/procurement-price-reason.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
 const Ledger=defineAsyncComponent(()=>import('./ProcurementLedgerDialog.vue'));
-const props=defineProps({modelValue:Boolean,initialRows:{type:Array,default:()=>[]}}),emit=defineEmits(['update:modelValue','created']);
+const props=defineProps({modelValue:Boolean,freePurchase:Boolean,initialRows:{type:Array,default:()=>[]}}),emit=defineEmits(['update:modelValue','created']);
 const auth=useAuthStore(),items=ref([]),people=ref([]),results=ref([]),query=ref(''),searchMode=ref('auto'),searching=ref(false),loading=ref(false),busy=ref(false),submitted=ref(null),requestKey=ref(''),priceError=ref('');
 const form=reactive({person_id:null,source_type:'1688',note:''}),detail=reactive({visible:false,id:0});
 const amount=computed(()=>items.value.reduce((n,r)=>n+Number(r.amount||0)+Number(r.shipping_amount||0),0).toFixed(2));
@@ -26,7 +26,7 @@ async function add(row){
   ElMessage.info('套装已展开为实物库存，请移除不采购的配件并填写实际件数及货款');
  }catch(e){if(!disposed&&scope===currentApiCacheScope())ElMessage.error(e.message);}
 }
-async function search(){const token=++searchVersion,scope=currentApiCacheScope();searching.value=true;try{const r=await apiClient.get(`/api/products?${new URLSearchParams({paged:'1',page:'1',pageSize:'20',query:query.value,searchMode:searchMode.value})}`,{noCache:true});if(!disposed&&token===searchVersion&&scope===currentApiCacheScope())results.value=r.rows||[];}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===searchVersion)searching.value=false;}}
+async function search(){if(!query.value.trim()&&searchMode.value!=='auto')return ElMessage.warning('请先填写完整库存编号、SKU、货号或名称关键词');const token=++searchVersion,scope=currentApiCacheScope();searching.value=true;try{const r=await apiClient.get(`/api/products?${new URLSearchParams({paged:'1',page:'1',pageSize:'20',query:query.value,searchMode:searchMode.value})}`,{noCache:true});if(!disposed&&token===searchVersion&&scope===currentApiCacheScope())results.value=r.rows||[];}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===searchVersion)searching.value=false;}}
 async function close(done){if(busy.value||detail.visible)return;if(items.value.length){try{await ElMessageBox.confirm('关闭会放弃本次尚未登记的采购表。查看库存详情后可直接关闭详情返回，无需关闭采购表。','关闭批量采购',{confirmButtonText:'放弃并关闭',cancelButtonText:'继续填写'});}catch{return;}}done();}
 function clearScope(){++generation;++searchVersion;items.value=[];results.value=[];submitted.value=null;detail.visible=false;emit('update:modelValue',false);}
 async function submit(){
@@ -44,14 +44,15 @@ async function submit(){
  catch(e){if(disposed||scope!==currentApiCacheScope()||token!==generation)return;if([400,403,404,409].includes(e.status))submitted.value=null;const validation=e.payload?.validation;if(validation?.field==='items.anomaly_reason'){const row=items.value.find(r=>r.product_id===Number(validation.product_id));if(row)row.price_warning=validation;priceError.value=`${row?.name||'本次采购'}：请在对应商品的价格变动原因中选择原因；其他原因需填写说明，然后再次确认采购。`;}ElMessage.error(`${e.message}。采购表已保留；重试将使用同一提交标识，避免重复登记`);}
  finally{if(token===generation)busy.value=false;}
 }
-watch(()=>props.modelValue,async value=>{if(!value)return;const token=++generation,scope=currentApiCacheScope();items.value=[];results.value=[];query.value='';priceError.value='';submitted.value=null;requestKey.value=crypto.randomUUID();form.person_id=Number(auth.user?.personId||auth.user?.id)||null;form.source_type='1688';form.note='';props.initialRows.forEach(add);loading.value=true;try{const r=await apiClient.get('/api/people');if(token===generation&&scope===currentApiCacheScope()&&!disposed)people.value=(Array.isArray(r)?r:r.rows||[]).filter(p=>Number(p.active)!==0);}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===generation)loading.value=false;}},{immediate:true});
+watch(()=>props.modelValue,async value=>{if(!value)return;const token=++generation,scope=currentApiCacheScope();items.value=[];results.value=[];query.value='';searchMode.value=props.freePurchase?'inventory_id':'auto';priceError.value='';submitted.value=null;requestKey.value=crypto.randomUUID();form.person_id=Number(auth.user?.personId||auth.user?.id)||null;form.source_type='1688';form.note='';props.initialRows.forEach(add);loading.value=true;try{const r=await apiClient.get('/api/people');if(token===generation&&scope===currentApiCacheScope()&&!disposed)people.value=(Array.isArray(r)?r:r.rows||[]).filter(p=>Number(p.active)!==0);}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===generation)loading.value=false;}},{immediate:true});
 onMounted(()=>window.addEventListener('erp:auth-scope-changed',clearScope));onBeforeUnmount(()=>{disposed=true;++generation;++searchVersion;window.removeEventListener('erp:auth-scope-changed',clearScope);});
 </script>
 <template>
- <el-dialog v-model="visible" title="批量登记采购" width="min(1400px,96vw)" append-to-body :before-close="close" :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!busy">
+ <el-dialog v-model="visible" :title="freePurchase?'自由采购':'批量登记采购'" width="min(1400px,96vw)" append-to-body :before-close="close" :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!busy">
   <div v-loading="loading" class="batch-purchase"><el-alert title="仅登记已经完成下单的真实采购。各库存分别生成明细和在途批次；验收入库后才增加本地实物。" type="info" :closable="false"/>
+   <p v-if="freePurchase" class="free-purchase-hint">无需先有缺货需求。按库存编号或 SKU／货号精确搜索，加入采购表后填写你实际买的数量与货款。</p>
    <el-form inline :disabled="busy||!!submitted"><el-form-item label="采购人" required><el-select v-model="form.person_id" aria-label="采购人" style="width:170px"><el-option v-for="p in people" :key="p.id" :value="Number(p.id)" :label="p.name"/></el-select></el-form-item><el-form-item label="采购平台"><el-select v-model="form.source_type" style="width:130px"><el-option v-for="v in ['1688','pdd','taobao','other']" :key="v" :value="v" :label="({pdd:'拼多多',taobao:'淘宝',other:'其他'})[v]||v"/></el-select></el-form-item><el-form-item label="采购备注"><el-input v-model="form.note" maxlength="500"/></el-form-item></el-form>
-   <div v-if="!submitted" class="batch-add"><el-select v-model="searchMode" aria-label="添加库存搜索方式"><el-option label="综合搜索" value="auto"/><el-option label="库存编号精确" value="inventory_id"/><el-option label="SKU／货号精确" value="sku"/></el-select><el-input v-model="query" placeholder="搜索库存编号 / SKU / 名称，加入本次采购" @keyup.enter="search" clearable/><el-button :loading="searching" @click="search">搜索库存</el-button></div>
+   <div v-if="!submitted" class="batch-add"><el-select v-model="searchMode" aria-label="添加库存搜索方式"><el-option label="综合搜索" value="auto"/><el-option label="库存编号精确" value="inventory_id"/><el-option label="SKU／货号精确" value="sku"/><el-option label="产品名称关键词" value="name"/></el-select><el-input v-model="query" placeholder="搜索库存编号 / SKU / 名称，加入本次采购" @keyup.enter="search" clearable/><el-button :loading="searching" @click="search">搜索库存</el-button></div>
    <div v-if="results.length&&!submitted" class="batch-results"><div v-for="p in results" :key="p.id"><span>{{p.inventory_number||p.code||p.id}} · {{p.name}}</span><el-button size="small" :disabled="items.some(i=>i.product_id===Number(p.id))" @click="add(p)">加入采购</el-button></div></div>
    <el-alert v-if="priceError" :title="priceError" type="warning" :closable="false"/>
    <el-table :data="items" row-key="product_id" border aria-label="批量采购明细" empty-text="请选择或搜索库存加入采购表">
@@ -65,7 +66,7 @@ onMounted(()=>window.addEventListener('erp:auth-scope-changed',clearScope));onBe
    </el-table>
    <el-alert v-if="submitted" type="warning" :closable="false" title="已发起登记，内容暂时锁定。若响应中断，请直接重试；系统会核对原提交，避免重复采购。"/>
   </div>
-  <template #footer><span class="batch-total">{{items.length}} 项库存 · 合计 {{amount}} 元</span><el-button :disabled="busy||detail.visible" @click="close(()=>visible=false)">取消</el-button><el-button type="primary" :loading="busy" :disabled="!items.length||loading||detail.visible" @click="submit">{{submitted?'重试原采购登记':'确认批量登记采购'}}</el-button></template>
+  <template #footer><span class="batch-total">{{items.length}} 项库存 · 合计 {{amount}} 元</span><el-button :disabled="busy||detail.visible" @click="close(()=>visible=false)">取消</el-button><el-button type="primary" :loading="busy" :disabled="!items.length||loading||detail.visible" @click="submit">{{submitted?'重试原采购登记':freePurchase?'确认登记采购':'确认批量登记采购'}}</el-button></template>
   <Ledger v-if="detail.visible" v-model="detail.visible" :product-id="detail.id" :allow-full-page="false"/>
  </el-dialog>
 </template>
