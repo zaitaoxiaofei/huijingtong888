@@ -32,7 +32,7 @@ const calendar = computed(() => Array.from({ length: 12 }, (_, index) => {
   return { ...months.value.find(item => item.month_key === key), month_key: key, label: `${index + 1}月`, future: key > today.slice(0, 7) };
 }));
 const inventoryParts = [
-  { label: "国内仓", value: "local_inventory_value", quantity: "local_inventory_quantity" },
+  { label: "国内仓（可用）", value: "local_inventory_value", quantity: "local_inventory_quantity" },
   { label: "FBP仓", value: "fbp_inventory_value", quantity: "fbp_inventory_quantity" },
   { label: "采购在途", value: "in_transit_value", quantity: "in_transit_quantity" }
 ];
@@ -80,8 +80,8 @@ onBeforeUnmount(() => { generation++; inventoryGeneration++; controller?.abort()
   <div v-if="allowed" class="finance-overview">
     <header class="overview-header"><div><h1>经营总览</h1><p>经营结果与库存资金，一页看清。</p></div><div class="page-actions"><el-button text @click="companyOpen=true">公司设置</el-button></div></header>
     <section class="inventory-summary" aria-label="当前库存占用">
-      <button class="inventory-total inventory-link" @click="capital()" aria-label="查看全部库存占用明细"><div class="section-label">当前库存占用 <span>全部公司</span></div><strong v-if="inventory && !inventoryError">¥{{ money(inventory.inventory_total_value) }}</strong><span v-else class="metric-placeholder">{{ inventoryError ? '暂不可用' : '加载中' }}</span><p>国内仓 + FBP仓 + 采购在途 · 查看明细 →</p></button>
-      <button v-for="(part,index) in inventoryParts" :key="part.value" class="inventory-part inventory-link" @click="capital(['local','fbp','transit'][index])" :aria-label="`查看${part.label}库存明细`"><span>{{ part.label }}</span><b>{{ inventory && !inventoryError ? `¥${money(inventory[part.value])}` : '—' }}</b><small>{{ inventory && !inventoryError ? `${integer(inventory[part.quantity])} 件 · 查看明细 →` : '当前库存' }}</small></button>
+      <button class="inventory-total inventory-link" @click="capital()" aria-label="查看全部库存占用明细"><div class="section-label">当前库存占用 <span>全部公司</span></div><strong v-if="inventory && !inventoryError">{{ inventory.inventory_total_value==null?'待核实':`¥${money(inventory.inventory_total_value)}` }}</strong><span v-else class="metric-placeholder">{{ inventoryError ? '暂不可用' : '加载中' }}</span><p>国内可用库存 + FBP仓 + 采购在途 · 查看明细 →</p></button>
+      <button v-for="(part,index) in inventoryParts" :key="part.value" class="inventory-part inventory-link" @click="capital(['local','fbp','transit'][index])" :aria-label="`查看${part.label}库存明细`"><span>{{ part.label }}</span><b>{{ inventory && !inventoryError ? (inventory[part.value]==null?'待核实':`¥${money(inventory[part.value])}`) : '—' }}</b><small>{{ inventory && !inventoryError ? (inventory[part.quantity]==null?'数量待核实':`${integer(inventory[part.quantity])} 件 · 查看明细 →`) : '当前库存' }}</small></button>
       <div class="inventory-status"><el-button text :icon="Refresh" :loading="inventoryLoading" aria-label="刷新库存占用" @click="loadInventory" /><small v-if="inventory && !inventoryError">{{ shanghaiDateTimeText(inventory.snapshot_at) }} 更新</small><small v-else-if="inventoryError" class="error-text">{{ inventoryError }}</small></div>
     </section>
     <section class="annual-statement">

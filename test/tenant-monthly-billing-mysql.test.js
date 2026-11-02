@@ -13,12 +13,12 @@ test('monthly billing reads only the current enterprise, including every financi
     fixture.useEnvironment();
     globalThis.fetch = async () => { throw Error('External requests forbidden in financial read tests'); };
     ({ closeMysqlPool } = await import('../src/mysql-pool.js'));
-    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql } = await import('../src/services/mysql-cutover.js');
+    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql, prepareInventoryFlowMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
     const q = fixture.query;
     await q('ALTER TABLE products ADD COLUMN inventory_number VARCHAR(64) NULL');
     // Match the runtime component migration required by scoped reads.
-    await q('CREATE TABLE product_components(id BIGINT PRIMARY KEY AUTO_INCREMENT,tenant_id BIGINT,product_id BIGINT,component_product_id BIGINT)');
+    await prepareInventoryFlowMysql();
     await q("INSERT INTO tenants(id,slug,name,status) VALUES(1,'default','Default','active'),(2,'a','A','active'),(3,'b','B','active')");
     await q("INSERT INTO people(id,name,role) VALUES(1,'Default','admin'),(2,'A owner','operations'),(3,'B secret','operations')");
     await q("INSERT INTO tenant_members(tenant_id,person_id,role) VALUES(1,1,'owner'),(2,2,'owner'),(3,3,'owner')");
@@ -121,6 +121,39 @@ test('monthly billing reads only the current enterprise, including every financi
       await q("DELETE FROM purchase_cost_versions WHERE source_key IN ('capital-test','foreign-cost')");
       await q("DELETE FROM inventory_movements WHERE source_type='legacy-test'");
       await q("DELETE FROM ozon_stock_snapshots WHERE ozon_sku='unmapped-a'");
+    });
+    await t.test('local capital exactly follows free inventory after orders, FBP locks and safety',async()=>{
+      await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(220,20,'capital-pending','awaiting_packaging','awaiting_packaging',UTC_TIMESTAMP())");
+      await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price) VALUES(220,220,20,'same-sku',4,20)");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status,related_order_item_id) VALUES(2,20,'order_outbound',-4,'LOCAL','posted',220)");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,movement_type,quantity_delta,stock_location,status) VALUES(2,20,'capital-lock','ORDER_RESERVED',-3,'LOCAL','posted')");
+      await q("INSERT INTO inventory_flow_settings(tenant_id,product_id,settings_json) VALUES(2,20,JSON_OBJECT('local_safety_override',2)) ON DUPLICATE KEY UPDATE settings_json=VALUES(settings_json)");
+      const detail=await financeInventoryCapitalDetailsMysql({kind:'local'},'2'),row=detail.rows[0];
+      assert.equal(row.physical_quantity,20);assert.equal(row.ledger_quantity,13);
+      assert.equal(row.order_quantity,4);assert.equal(row.locked_quantity,3);assert.equal(row.safety_quantity,2);
+      assert.equal(row.quantity,11);assert.equal(row.inventory_value,22);
+      assert.equal(detail.summary.local_inventory_quantity,11);assert.equal(detail.summary.local_inventory_value,22);
+      assert.equal(detail.summary.fbp_inventory_quantity,20);assert.equal(detail.summary.in_transit_quantity,20);
+      const {createInventoryWorkflowService}=await import('../src/services/inventory-workflow.js');
+      const [expected]=await createInventoryWorkflowService().batch([20],2,{localOnly:true,fresh:true,cache:false});
+      assert.equal(row.quantity,expected.free);
+      await q("UPDATE inventory_flow_settings SET settings_json=JSON_OBJECT('local_safety_override',30) WHERE tenant_id=2 AND product_id=20");
+      const occupied=await financeInventoryCapitalDetailsMysql({kind:'local'},'2');
+      assert.equal(occupied.rows[0].quantity,0);assert.equal(occupied.rows[0].physical_quantity,20);assert.equal(occupied.summary.local_inventory_value,0);
+      await q("DELETE FROM inventory_flow_settings WHERE tenant_id=2 AND product_id=20");
+      await q("DELETE FROM inventory_movements WHERE related_order_item_id=220 OR source_type='capital-lock'");
+      await q("DELETE FROM order_items WHERE id=220");await q("DELETE FROM orders WHERE id=220");
+    });
+    await t.test('unknown available quantity is not capitalized as zero',async()=>{
+      await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost,inventory_number) VALUES(25,2,'Unverified negative stock','P-25',2,'STOCK-25')");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,25,'capital-unknown',-5,'LOCAL','posted')");
+      const summary=await financeInventoryCapitalMysql({},'2');
+      assert.equal(summary.local_inventory_value,null);assert.equal(summary.inventory_total_value,null);
+      assert.equal(summary.categories.local.availability_unknown_count,1);
+      const detail=await financeInventoryCapitalDetailsMysql({kind:'local',query:'STOCK-25'},'2');
+      assert.equal(detail.rows[0].quantity,null);assert.equal(detail.rows[0].inventory_value,null);assert.equal(detail.filtered_value,null);
+      assert.equal(detail.rows[0].physical_quantity,-5);
+      await q("DELETE FROM inventory_movements WHERE source_type='capital-unknown'");await q("DELETE FROM products WHERE id=25");
     });
     await t.test('annual grouping matches each month including Beijing boundaries, ads and company expenses',async()=>{
       await q("INSERT INTO finance_shop_company_assignments(tenant_id,shop_id,company_id,effective_from) VALUES(2,20,2,'2026-01-01')");

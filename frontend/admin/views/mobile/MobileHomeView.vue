@@ -13,7 +13,7 @@ const fields=computed(()=>[
  ...(data.value.financial?[['month_revenue','当月营业额','money'],['month_profit','当月利润','money'],['month_purchase_amount','当月实际采购','money'],['month_ad_spend','当月广告花费','money'],['inventory_total_value','库存占用金额（含在途）','money']]:[]),
  ['return_rate','当月退货率','percent'],['cancel_rate','当月取消率','percent']
 ]);
-function display(key,type){const value=financeMetrics.value[key]??data.value.metrics?.[key];if(value==null||value==='')return '—';const n=Number(value);if(!Number.isFinite(n))return '—';if(type==='percent')return `${(n*100).toFixed(1)}%`;if(type==='ratio')return n.toFixed(2);return `${type==='money'?'¥ ':''}${new Intl.NumberFormat('zh-CN',{maximumFractionDigits:type==='money'?2:0}).format(n)}${['单','件'].includes(type)?` ${type}`:''}`;}
+function display(key,type){const value=Object.hasOwn(financeMetrics.value,key)?financeMetrics.value[key]:data.value.metrics?.[key];if(value==null||value==='')return '—';const n=Number(value);if(!Number.isFinite(n))return '—';if(type==='percent')return `${(n*100).toFixed(1)}%`;if(type==='ratio')return n.toFixed(2);return `${type==='money'?'¥ ':''}${new Intl.NumberFormat('zh-CN',{maximumFractionDigits:type==='money'?2:0}).format(n)}${['单','件'].includes(type)?` ${type}`:''}`;}
 async function load(poll=false){const token=++generation,scope=currentApiCacheScope();if(!poll){attempt=0;loading.value=true;}clearTimeout(timer);error.value='';try{const r=await apiClient.get(`/api/dashboard?view=mobile&date=${shanghaiDateKey()}${poll?'&snapshotOnly=1':''}`,{noCache:true});if(disposed||token!==generation||scope!==currentApiCacheScope())return;
  data.value={...r,metrics:{...data.value.metrics,...r.metrics}};
  if(r.snapshot?.status==='building'&&attempt++<60)timer=window.setTimeout(()=>load(true),2500);
