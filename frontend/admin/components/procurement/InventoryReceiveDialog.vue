@@ -1,6 +1,7 @@
 <script setup>
 import {computed,onBeforeUnmount,reactive,ref,watch} from 'vue';
-import {ElMessage} from 'element-plus';
+import {ElDialog,ElMessage} from 'element-plus';
+import MobileDialog from '../mobile/MobileDialog.vue';
 import MobileEvidencePicker from '../mobile/MobileEvidencePicker.vue';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 const props=defineProps({modelValue:Boolean,productId:Number,productName:String,inboundId:Number,mobile:Boolean}),emit=defineEmits(['update:modelValue','saved']);
@@ -29,7 +30,7 @@ function scopeChanged(){++version;visible.value=false;}window.addEventListener('
 onBeforeUnmount(()=>{disposed=true;++version;window.removeEventListener('erp:auth-scope-changed',scopeChanged);});
 </script>
 <template>
- <el-dialog v-model="visible" :class="{'mobile-dialog':mobile}" :title="preview?'确认入库影响':'快速登记入库'" width="min(780px,94vw)" append-to-body :show-close="!saving" :close-on-click-modal="false" :close-on-press-escape="!saving">
+ <component :is="mobile?MobileDialog:ElDialog" v-model="visible" :class="{'mobile-dialog':mobile}" :title="preview?'确认入库影响':'快速登记入库'" width="min(780px,94vw)" append-to-body :show-close="!saving" :close-on-click-modal="false" :close-on-press-escape="!saving">
   <div v-loading="loading"><p><strong>{{productName||`库存商品 #${productId}`}}</strong></p><el-alert v-if="error" :title="error" type="warning" :closable="false"/>
    <div class="receive-overview"><div><span>本地实物</span><strong>{{units(preview?.physical_before??context.physical)}}<template v-if="preview"> → {{units(preview.physical_after)}}</template></strong></div><div><span>可用库存</span><strong>{{units(preview?.available_before??context.available)}}<template v-if="preview"> → {{units(preview.available_after)}}</template></strong></div><div><span>本次入库</span><strong>{{units(preview?.quantity??quantity)}}</strong></div></div>
    <template v-if="preview"><el-alert title="仅合格到货计入库存，未收部分继续保留待处理。" type="info" :closable="false"/><p v-if="preview.requires_count">本次按已核实的在仓总数登记，不重复叠加历史实物。</p><p v-for="row in submitted.records" :key="row.id">批次 #{{row.id}}：{{row.quantity}} 件<span v-if="row.reason"> · 差异原因：{{row.reason}}</span></p></template>
@@ -37,7 +38,7 @@ onBeforeUnmount(()=>{disposed=true;++version;window.removeEventListener('erp:aut
     <el-form v-if="requiresCount" label-position="top"><el-form-item label="核实当前实物总数（包含本次合格到货）" required><el-input-number v-model="counted" :min="0" :precision="0" :disabled="saving"/></el-form-item></el-form>
    </template>
   </div><template #footer><el-button :disabled="saving" @click="visible=false">取消</el-button><el-button v-if="preview" :disabled="saving" @click="preview=null;submitted=null">返回修改</el-button><el-button type="primary" :disabled="loading||!selected.length||(mobile&&(!photoState.ready||photoState.busy))" :loading="saving" @click="preview?save():next()">{{preview?'确认入库':'确认数量，查看影响'}}</el-button></template>
- </el-dialog>
+ </component>
 </template>
 <style scoped>
 .receive-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:18px 0}.receive-overview>div{display:grid;gap:10px;padding:16px;background:var(--el-fill-color-light);border:1px solid var(--el-border-color-lighter);border-radius:8px}.receive-overview span{font-size:12px;color:var(--el-text-color-secondary)}.receive-overview strong{font-size:17px}.el-input-number{max-width:100%}@media(max-width:600px){.receive-overview{grid-template-columns:1fr}}

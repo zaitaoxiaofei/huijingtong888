@@ -1,4 +1,5 @@
 <script setup>
+import MobileDialog from './MobileDialog.vue';
 import {computed,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -58,7 +59,7 @@ watch(tab,()=>{rows.value=[];snapshot.value={};load(true);});onMounted(()=>{load
  <p v-if="!loading&&!rows.length&&!error" class="mobile-muted">{{snapshot.refreshing?'需求正在计算，请稍候':'当前筛选暂无待处理记录'}}</p></div><MobilePagination :page="page" :page-size="pageSize" :total="total" :loading="loading" @change="changePage"/>
 
  <MobilePurchaseDialog v-if="purchase.visible" v-model="purchase.visible" :initial-rows="purchase.rows" @saved="changed"/><InventoryReceiveDialog v-if="receive.visible" v-model="receive.visible" :product-id="receive.id" :inbound-id="receive.batch" :product-name="receive.name" mobile @saved="changed"/>
- <el-dialog :model-value="!!edit.row" class="mobile-dialog" title="采购物流" append-to-body :show-close="!busy" :close-on-click-modal="false" @update:model-value="v=>{if(!v)edit.row=null}"><div class="mobile-form"><label>快递公司<input v-model="edit.courier" maxlength="128" :disabled="busy"></label><label>快递单号<input v-model="edit.tracking" placeholder="粘贴快递单号" maxlength="128" :disabled="busy"></label></div><template #footer><el-button :loading="busy" @click="saveLogistics">保存物流</el-button></template></el-dialog>
+ <MobileDialog :model-value="!!edit.row" class="mobile-dialog mobile-logistics-dialog" title="采购物流" mode="compact" append-to-body :show-close="!busy" :close-on-click-modal="false" @update:model-value="v=>{if(!v)edit.row=null}"><div class="mobile-form"><label>快递公司<input v-model="edit.courier" maxlength="128" :disabled="busy"></label><label>快递单号<input v-model="edit.tracking" placeholder="粘贴快递单号" maxlength="128" :disabled="busy"></label></div><template #footer><el-button :loading="busy" @click="saveLogistics">保存物流</el-button></template></MobileDialog>
 
 </div></template>
 <style scoped>.mobile-work-queue{display:grid;gap:12px;min-width:0}.mobile-queue-tabs{display:flex;overflow-x:auto;gap:7px;padding-bottom:5px}.mobile-queue-tabs button{flex:0 0 auto;min-height:42px;padding:8px 12px;border:1px solid var(--el-border-color);background:var(--el-bg-color);color:var(--el-text-color-regular);border-radius:10px}.mobile-queue-tabs button.active{color:var(--el-color-primary);border-color:var(--el-color-primary)}.mobile-history-photos{display:flex;gap:8px;flex-wrap:wrap}.mobile-history-photos .el-image{width:72px;height:84px}.covered{color:var(--el-color-success)}.mobile-overdue,.required{color:var(--el-color-danger)!important}</style>
