@@ -7,7 +7,7 @@ import MobileDialog from '../../components/mobile/MobileDialog.vue';
 import MobilePagination from '../../components/mobile/MobilePagination.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
 import ProductImagePreview from '../../components/ProductImagePreview.vue';
-import InventoryStructuredSearch from '../../components/inventory/InventoryStructuredSearch.vue';
+import MobileInventorySearch from '../../components/mobile/MobileInventorySearch.vue';
 import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
 import {useInventoryLocalQuantities} from '../../utils/use-inventory-local-quantities.js';
 import { money, shortText } from "./mobile-orders-utils.js";
@@ -25,7 +25,7 @@ const detail = ref(null);
 const procurement = ref(null);
 const productOptions = ref([]);
 const peopleOptions = ref([]);
-const bindingFilters=reactive({...inventorySearchDefaults(),inventoryType:'all'}),bindingPage=ref(1),bindingTotal=ref(0),bindingError=ref(''),bindingSearched=ref(false),bindingExpanded=ref(false),bindingOwnerExpanded=ref(false),selectedProduct=ref(null),previewProduct=ref(null),bindList=ref(null);
+const bindingFilters=reactive({...inventorySearchDefaults(),inventoryType:'all',searchMode:'inventory_id',query:''}),bindingPageSize=ref(20),bindingPage=ref(1),bindingTotal=ref(0),bindingError=ref(''),bindingSearched=ref(false),bindingOwnerExpanded=ref(false),selectedProduct=ref(null),previewProduct=ref(null),bindList=ref(null);
 const bindingLocal=useInventoryLocalQuantities(()=>productOptions.value);
 let bindingVersion=0,detailVersion=0,disposed=false;
 const inventoryType=product=>Number(product.component_count)>0?'套装':Number(product.is_accessory)?'配件':'单品';
@@ -38,7 +38,6 @@ const autoBindOpened = ref(false);
 const bindingForm = reactive({
   product_id: "",
   person_id: "",
-  query: ""
 });
 
 const orderId = computed(() => Number(route.params.id || 0));
@@ -96,7 +95,7 @@ async function loadPeopleOptions() {
 async function loadProductOptions(query = "",page=1) {
   const token=++bindingVersion,scope=currentApiCacheScope();productOptionsLoading.value=true;bindingError.value='';bindingSearched.value=true;
   try {
-    const params=appendInventorySearch(new URLSearchParams({paged:'1',view:'inventory',includeStock:'0',page:String(page),pageSize:'20',query:String(query||'').trim(),inventoryType:bindingFilters.inventoryType}),bindingFilters);
+    const params=appendInventorySearch(new URLSearchParams({paged:'1',view:'inventory',includeStock:'0',page:String(page),pageSize:String(bindingPageSize.value),query:String(query||'').trim(),inventoryType:bindingFilters.inventoryType}),bindingFilters);
     const result=await apiClient.get(`/api/products?${params}`,{noCache:true});
     if(disposed||token!==bindingVersion||scope!==currentApiCacheScope()||!bindingVisible.value)return;
     productOptions.value=Array.isArray(result?.rows)?result.rows:[];bindingTotal.value=Number(result.total||0);bindingPage.value=page;
@@ -111,16 +110,16 @@ async function openMobileBind(item = {}) {
     return;
   }
   bindingItem.value = item;
-  selectedProduct.value=null;previewProduct.value=null;bindingSearched.value=false;bindingExpanded.value=false;bindingOwnerExpanded.value=false;bindingPage.value=1;bindingTotal.value=0;productOptions.value=[];
-  Object.assign(bindingFilters,inventorySearchDefaults(),{inventoryType:'all'});
+  selectedProduct.value=null;previewProduct.value=null;bindingSearched.value=false;bindingPageSize.value=20;bindingOwnerExpanded.value=false;bindingPage.value=1;bindingTotal.value=0;productOptions.value=[];
+  Object.assign(bindingFilters,inventorySearchDefaults(),{inventoryType:'all',searchMode:'inventory_id',query:''});
   bindingForm.product_id = "";
   bindingForm.person_id = "";
-  bindingForm.query = item.ozon_name || item.offer_id || item.ozon_sku || "";
+  bindingFilters.query = "";
   bindingVisible.value = true;
   bindingLoading.value = true;
   try {
     await Promise.all([
-      loadProductOptions(bindingForm.query)
+      loadProductOptions(bindingFilters.query)
     ]);
   } finally {
     bindingLoading.value = false;
@@ -129,8 +128,11 @@ async function openMobileBind(item = {}) {
 
 function toggleBindingOwner(){bindingOwnerExpanded.value=!bindingOwnerExpanded.value;if(bindingOwnerExpanded.value)void loadPeopleOptions();}
 
+function resetBindingFilters(){Object.assign(bindingFilters,inventorySearchDefaults(),{inventoryType:'all',searchMode:'inventory_id',query:''});return searchBindingProducts();}
+function changeBindingPage(value){bindingPageSize.value=value.pageSize;return loadProductOptions(bindingFilters.query,value.page);}
+
 async function searchBindingProducts() {
-  await loadProductOptions(bindingForm.query);
+  await loadProductOptions(bindingFilters.query);
 }
 
 async function submitMobileBind() {
@@ -321,24 +323,22 @@ onBeforeUnmount(()=>{disposed=true;resetBindingScope();window.removeEventListene
       <template #tools>
         <div class="mobile-bind-tools">
           <details v-if="bindingItem" class="mobile-bind-target"><summary>{{shortText(bindingItem.ozon_name||bindingItem.online_product_name||bindingItem.ozon_sku,'待绑定商品')}}</summary><div class="mobile-bind-source"><ProductImagePreview v-if="bindingItem.image_url" :src="bindingItem.image_url" size="portrait"/><div><small>{{order.shop_name}} · SKU {{bindingItem.ozon_sku}}</small><small>货号 {{bindingItem.offer_id||'未记录'}}</small></div></div></details>
-          <div class="mobile-bind-search"><el-input v-model="bindingForm.query" clearable aria-label="搜索库存" placeholder="库存ID / SKU / 商品名" @keyup.enter="searchBindingProducts"/><el-button type="primary" :loading="productOptionsLoading" @click="searchBindingProducts">查询</el-button></div>
-          <div class="mobile-bind-filter-row"><select v-model="bindingFilters.searchMode" aria-label="绑定搜索方式"><option value="auto">综合搜索</option><option value="inventory_id">库存ID精确搜索</option><option value="sku">SKU / 货号精确搜索</option><option value="name">产品名称搜索</option></select><button type="button" :aria-expanded="bindingExpanded" @click="bindingExpanded=!bindingExpanded">{{bindingExpanded?'收起筛选':'更多筛选'}}</button></div>
-          <el-form v-if="bindingExpanded" label-position="top" class="mobile-bind-structured"><el-form-item label="库存类型"><el-select v-model="bindingFilters.inventoryType"><el-option label="全部库存" value="all"/><el-option label="单品" value="single"/><el-option label="配件" value="accessory"/><el-option label="套装" value="combo"/></el-select></el-form-item><InventoryStructuredSearch :model-value="bindingFilters" compact simple @update:model-value="Object.assign(bindingFilters,$event)"/></el-form>
+          <MobileInventorySearch :filters="bindingFilters" :loading="productOptionsLoading" @search="searchBindingProducts" @reset="resetBindingFilters"/>
         </div>
       </template>
       <div ref="bindList" class="mobile-bind-options" :aria-busy="productOptionsLoading">
         <p v-if="productOptionsLoading" class="mobile-muted" role="status">正在查找库存…</p>
-        <el-alert v-if="bindingError" :title="bindingError" type="warning" :closable="false"/><el-button v-if="bindingError" @click="loadProductOptions(bindingForm.query,bindingPage)">重新查询</el-button>
+        <el-alert v-if="bindingError" :title="bindingError" type="warning" :closable="false"/><el-button v-if="bindingError" @click="loadProductOptions(bindingFilters.query,bindingPage)">重新查询</el-button>
         <div v-else-if="bindingSearched&&!productOptionsLoading&&!productOptions.length" class="mobile-bind-empty"><strong>没有找到匹配库存</strong><span>可切换为库存ID精确搜索，或缩短商品名后重新查询。</span></div>
         <article v-for="product in productOptions" :key="product.id" class="mobile-bind-option" :class="{active:String(product.id)===bindingForm.product_id}" @click="!bindingSubmitting&&!productOptionsLoading&&selectBindingProduct(product)">
           <label class="mobile-bind-choice"><input type="radio" name="mobile-binding-product" :checked="String(product.id)===bindingForm.product_id" :disabled="bindingSubmitting||productOptionsLoading" @change="selectBindingProduct(product)"><span class="sr-only">选择 {{product.name}}</span></label>
           <ProductImagePreview :src="`/api/products/${product.id}/image?thumb=1`" :preview-list="[`/api/products/${product.id}/image`]" size="portrait" @click.stop/>
           <div class="mobile-bind-option__text"><button type="button" class="mobile-bind-name" :disabled="bindingSubmitting||productOptionsLoading" @click="selectBindingProduct(product)">{{product.name||'库存商品'}}</button><small>库存 {{product.inventory_number||product.inventory_id||product.code||product.id}}</small><el-tag size="small" :type="Number(product.component_count)>0?'warning':'info'">{{inventoryType(product)}}</el-tag><small>实物 {{inventoryQuantity(product,'physical_stock')}} · 可用 {{inventoryQuantity(product,'workflow_free')}}</small><button type="button" class="mobile-bind-detail" @click.stop="previewProduct=product">库存详情</button></div>
         </article>
-        <MobilePagination v-if="bindingTotal>20" :page="bindingPage" :page-size="20" :total="bindingTotal" :loading="productOptionsLoading" @change="v=>loadProductOptions(bindingForm.query,v.page)"/>
+
       </div>
       <template #footer>
-        <div class="mobile-bind-confirm"><div class="mobile-bind-selection"><strong>{{selectedProduct?'已选：'+selectedProduct.name:'请选择要绑定的库存'}}</strong><button type="button" :aria-expanded="bindingOwnerExpanded" @click="toggleBindingOwner">{{bindingForm.person_id?'已选负责人':'负责人（选填）'}}</button></div><el-select v-if="bindingOwnerExpanded" v-model="bindingForm.person_id" :disabled="bindingSubmitting" clearable filterable placeholder="选择负责人"><el-option v-for="person in peopleOptions" :key="person.id" :label="person.name" :value="String(person.id)"/></el-select><div class="mobile-bind-footer"><el-button :disabled="bindingSubmitting" @click="bindingVisible=false">取消</el-button><el-button type="primary" :disabled="!selectedProduct||productOptionsLoading||bindingLoading" :loading="bindingSubmitting" @click="submitMobileBind">确认绑定</el-button></div></div>
+        <div class="mobile-bind-confirm"><MobilePagination v-if="bindingSearched" :page="bindingPage" :page-size="bindingPageSize" :total="bindingTotal" :loading="productOptionsLoading" @change="changeBindingPage"/><div class="mobile-bind-selection"><strong>{{selectedProduct?'已选：'+selectedProduct.name:'请选择要绑定的库存'}}</strong><button type="button" :aria-expanded="bindingOwnerExpanded" @click="toggleBindingOwner">{{bindingForm.person_id?'已选负责人':'负责人（选填）'}}</button></div><el-select v-if="bindingOwnerExpanded" v-model="bindingForm.person_id" :disabled="bindingSubmitting" clearable filterable placeholder="选择负责人"><el-option v-for="person in peopleOptions" :key="person.id" :label="person.name" :value="String(person.id)"/></el-select><div class="mobile-bind-footer"><el-button :disabled="bindingSubmitting" @click="bindingVisible=false">取消</el-button><el-button type="primary" :disabled="!selectedProduct||productOptionsLoading||bindingLoading" :loading="bindingSubmitting" @click="submitMobileBind">确认绑定</el-button></div></div>
       </template>
     </MobileDialog>
     <MobileStocktakeDialog v-if="previewProduct" :model-value="!!previewProduct" :product="previewProduct" read-only @update:model-value="v=>{if(!v)previewProduct=null}"/>
@@ -576,5 +576,5 @@ onBeforeUnmount(()=>{disposed=true;resetBindingScope();window.removeEventListene
   font-size: 16px;
 }
 
-.mobile-bind-tools{display:grid;gap:8px}.mobile-bind-target{font-size:12px;line-height:1.4;background:var(--el-fill-color-light);border-radius:8px;padding:8px 10px}.mobile-bind-target summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600}.mobile-bind-target[open] summary{white-space:normal}.mobile-bind-source{display:flex;gap:10px;align-items:center;margin-top:8px}.mobile-bind-source>div{min-width:0}.mobile-bind-target small{display:block;margin-top:5px;overflow-wrap:anywhere}.mobile-bind-search{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:8px}.mobile-bind-search :deep(.el-button){min-height:44px;margin:0}.mobile-bind-search :deep(.el-input__wrapper){min-height:44px;box-sizing:border-box}.mobile-bind-filter-row{display:flex;align-items:center;gap:12px}.mobile-bind-filter-row select{min-width:0;flex:1;min-height:44px;padding:5px 8px;border:1px solid var(--el-border-color);background:var(--el-bg-color);color:var(--el-text-color-primary);border-radius:7px}.mobile-bind-filter-row button,.mobile-bind-selection button{min-height:44px;border:0;background:none;color:var(--el-color-primary);padding:4px;font-size:13px}.mobile-bind-options{display:grid;gap:10px}.mobile-bind-option{display:grid;grid-template-columns:24px 64px minmax(0,1fr);gap:8px;padding:10px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color)}.mobile-bind-option.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.mobile-bind-choice{display:flex;align-items:flex-start;padding-top:12px;min-width:24px;cursor:pointer}.mobile-bind-choice input{width:20px;height:20px;margin:0;accent-color:var(--el-color-primary)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.mobile-bind-option__text{display:grid;gap:5px;min-width:0;justify-items:start}.mobile-bind-name{border:0;background:none;padding:0;color:var(--el-text-color-primary);font-size:14px;line-height:1.5;font-weight:600;text-align:left;overflow-wrap:anywhere}.mobile-bind-option__text small{font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.mobile-bind-detail{min-height:32px;padding:3px 0;border:0;background:none;color:var(--el-color-primary);font-size:13px}.mobile-bind-empty{display:grid;gap:10px;text-align:center;padding:24px 8px;font-size:14px}.mobile-bind-empty span{font-size:13px;line-height:1.6;color:var(--el-text-color-secondary)}.mobile-bind-confirm{display:grid;gap:8px;width:100%;text-align:left}.mobile-bind-selection{display:flex;align-items:center;gap:8px;min-width:0}.mobile-bind-selection strong{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-bind-selection button{flex:none;font-size:12px;min-height:44px}.mobile-bind-footer{display:grid;grid-template-columns:1fr 2fr;gap:8px}.mobile-bind-structured :deep(.inventory-structured-search),.mobile-bind-structured :deep(.search-group){display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:8px!important;min-width:0!important}.mobile-bind-structured :deep(.search-group){grid-column:1/-1}.mobile-bind-structured :deep(.el-form-item){min-width:0;margin-bottom:8px}.mobile-bind-structured :deep(.el-select){width:100%}
+.mobile-bind-tools{display:grid;gap:8px;min-width:0}.mobile-bind-target{min-width:0;max-width:100%;box-sizing:border-box}.mobile-bind-target{font-size:12px;line-height:1.4;background:var(--el-fill-color-light);border-radius:8px;padding:8px 10px}.mobile-bind-target summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600}.mobile-bind-target[open] summary{white-space:normal}.mobile-bind-source{display:flex;gap:10px;align-items:center;margin-top:8px}.mobile-bind-source>div{min-width:0}.mobile-bind-target small{display:block;margin-top:5px;overflow-wrap:anywhere}.mobile-bind-options{display:grid;gap:10px}.mobile-bind-option{display:grid;grid-template-columns:24px 64px minmax(0,1fr);gap:8px;padding:10px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color)}.mobile-bind-option.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.mobile-bind-choice{display:flex;align-items:flex-start;padding-top:12px;min-width:24px;cursor:pointer}.mobile-bind-choice input{width:20px;height:20px;margin:0;accent-color:var(--el-color-primary)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.mobile-bind-option__text{display:grid;gap:5px;min-width:0;justify-items:start}.mobile-bind-name{border:0;background:none;padding:0;color:var(--el-text-color-primary);font-size:14px;line-height:1.5;font-weight:600;text-align:left;overflow-wrap:anywhere}.mobile-bind-option__text small{font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.mobile-bind-detail{min-height:32px;padding:3px 0;border:0;background:none;color:var(--el-color-primary);font-size:13px}.mobile-bind-empty{display:grid;gap:10px;text-align:center;padding:24px 8px;font-size:14px}.mobile-bind-empty span{font-size:13px;line-height:1.6;color:var(--el-text-color-secondary)}.mobile-bind-confirm{display:grid;gap:8px;width:100%;text-align:left}.mobile-bind-selection{display:flex;align-items:center;gap:8px;min-width:0}.mobile-bind-selection strong{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-bind-selection button{flex:none;font-size:12px;min-height:44px}.mobile-bind-footer{display:grid;grid-template-columns:1fr 2fr;gap:8px}
 </style>

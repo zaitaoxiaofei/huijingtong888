@@ -13,13 +13,13 @@ import ProductImagePreview from '../../components/ProductImagePreview.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
 import MobileWorkQueue from '../../components/mobile/MobileWorkQueue.vue';
 const router=useRouter(),auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),pageSize=ref(20),section=ref('stock');
-const filters=reactive({...inventorySearchDefaults(),query:'',inventoryType:'all'}),dialog=reactive({visible:false,product:{},readOnly:false});
+const filters=reactive({...inventorySearchDefaults(),searchMode:'inventory_id',query:'',inventoryType:'all'}),dialog=reactive({visible:false,product:{},readOnly:false});
 const local=useInventoryLocalQuantities(()=>rows.value),canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
 let version=0,disposed=false;
 const units=value=>value==null?'正在读取':`${Number(value)} 件`;
 async function load(reset=false){if(reset)page.value=1;const token=++version,scope=currentApiCacheScope();loading.value=true;error.value='';try{const p=appendInventorySearch(new URLSearchParams({paged:'1',view:'inventory',includeStock:'0',page:String(page.value),pageSize:String(pageSize.value),query:filters.query.trim(),inventoryType:filters.inventoryType}),filters);const r=await apiClient.get('/api/products?'+p,{noCache:true});if(disposed||token!==version||scope!==currentApiCacheScope())return;rows.value=r.rows||[];total.value=Number(r.total||0);document.querySelector('.mobile-inventory-page>.mobile-list-scroll')?.scrollTo(0,0);}catch(e){if(token===version&&scope===currentApiCacheScope())error.value=e.message;}finally{if(token===version)loading.value=false;}}
 function changePage(value){page.value=value.page;pageSize.value=value.pageSize;load();}
-function reset(){Object.assign(filters,inventorySearchDefaults(),{query:'',inventoryType:'all'});load(true);}
+function reset(){Object.assign(filters,inventorySearchDefaults(),{searchMode:'inventory_id',query:'',inventoryType:'all'});load(true);}
 async function saved(){await load();await local.refresh(true);}
 function clearScope(){++version;rows.value=[];total.value=0;dialog.visible=false;}
 onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',clearScope);});onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
