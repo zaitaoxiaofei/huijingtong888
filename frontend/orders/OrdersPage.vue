@@ -713,7 +713,9 @@ function rowAvailableActions(row) {
   const isDispute = displayStateKey === "dispute" || statusText.includes("dispute") || statusText.includes("arbitration");
   const isDelivering = displayStateKey === "delivering";
   const isAwaitingDeliver = displayStateKey === "awaiting_deliver";
-  const isOglAwaitingHandover = displayStateKey === "ogl_dispatched"
+  // Local label printing may move an officially included order into the bound queue.
+  // Keep label recovery available there until physical handover is confirmed.
+  const isOglAwaitingHandover = ["ogl_bound", "ogl_dispatched"].includes(displayStateKey)
     && row?.ogl_dispatch?.dispatched !== true && !row?.ogl_dispatch?.dispatched_at
     && rowDisplayStateKey({ ...row, ogl_dispatch: undefined, display_status: undefined }) === "awaiting_deliver";
   const logisticsText = [
