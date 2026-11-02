@@ -5,10 +5,27 @@ body.admin-mobile-open input,body.admin-mobile-open select,body.admin-mobile-ope
 body.admin-mobile-open .mobile-tabbar{display:flex;justify-content:space-around}
 body.admin-mobile-open .mobile-tabbar__item{flex:1;min-width:0;min-height:48px}
 body.admin-mobile-open .el-message-box{max-width:calc(100vw - 24px)}
-body.admin-mobile-open .mobile-dialog.el-dialog{width:min(680px,calc(100vw - 16px))!important;max-height:calc(100dvh - 16px);margin:8px auto!important;overflow:auto;border-radius:14px}
-body.admin-mobile-open .mobile-dialog .el-dialog__body{padding:12px}
-body.admin-mobile-open .mobile-dialog .el-dialog__footer{position:sticky;bottom:0;background:var(--el-bg-color);padding:12px;z-index:3}
+/* A dialog has one scrolling content region; controls remain reachable with the keyboard open. */
+body.admin-mobile-open .mobile-dialog.el-dialog{width:min(680px,calc(100vw - 24px))!important;height:calc(var(--mobile-viewport-height,100dvh) - 24px);max-height:calc(var(--mobile-viewport-height,100dvh) - 24px);margin:calc(var(--mobile-viewport-top,0px) + 12px) auto 0!important;display:flex;flex-direction:column;overflow:hidden;border-radius:16px;padding:0}
+body.admin-mobile-open .mobile-dialog .el-dialog__header{flex:none;padding:16px 48px 14px 16px;margin:0;border-bottom:1px solid var(--el-border-color-light)}
+body.admin-mobile-open .mobile-dialog .el-dialog__headerbtn{width:44px;height:48px;top:0;right:4px}
+body.admin-mobile-open .mobile-dialog .el-dialog__body{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;padding:0}
+body.admin-mobile-open .mobile-dialog-content{min-height:0;flex:1;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:16px}
+body.admin-mobile-open .mobile-dialog-tools{flex:none;max-height:48%;overflow:auto;padding:12px 16px;border-bottom:1px solid var(--el-border-color-light);background:var(--el-bg-color)}
+body.admin-mobile-open .mobile-dialog .el-dialog__footer{position:static;flex:none;background:var(--el-bg-color);padding:12px 16px max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--el-border-color-light);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;z-index:3}
+body.admin-mobile-open .mobile-dialog .el-dialog__footer .el-button{margin:0;min-height:44px;white-space:normal;line-height:1.35;padding:10px 14px}
+body.admin-mobile-open .mobile-dialog--compact.el-dialog{height:auto;max-height:calc(var(--mobile-viewport-height,100dvh) - 32px)}
+body.admin-mobile-open .mobile-dialog--compact .mobile-dialog-content{flex:0 1 auto}
 body.admin-mobile-open .mobile-dialog .el-input-number{width:100%}
+body.admin-mobile-open .mobile-dialog .el-input__wrapper,body.admin-mobile-open .mobile-dialog .el-select__wrapper{min-height:44px;box-sizing:border-box}
+body.admin-mobile-open .mobile-dialog .el-button:not(.is-link):not(.is-text){min-height:44px}
+body.admin-mobile-open .mobile-content .el-button{min-height:44px}
+body.admin-mobile-open .el-message-box{border-radius:14px;padding:16px;max-height:calc(var(--mobile-viewport-height,100dvh) - 24px);overflow:auto}
+body.admin-mobile-open .el-message-box__btns{display:flex;gap:8px;flex-wrap:wrap}
+body.admin-mobile-open .el-message-box__btns .el-button{min-height:44px;margin:0;flex:1}
+@media(max-width:600px){
+ body.admin-mobile-open .mobile-dialog:not(.mobile-dialog--compact).el-dialog{width:100%!important;max-width:100vw!important;height:var(--mobile-viewport-height,100dvh);max-height:var(--mobile-viewport-height,100dvh);margin:var(--mobile-viewport-top,0px) auto 0!important;border-radius:0}
+}
 .mobile-form{display:grid;gap:12px}.mobile-form label{display:grid;gap:7px;font-size:13px;min-width:0}.mobile-form input,.mobile-form textarea,.mobile-form select{width:100%;min-height:44px;box-sizing:border-box;padding:9px;border:1px solid var(--el-border-color);border-radius:8px;color:var(--el-text-color-primary);background:var(--el-bg-color)}.mobile-form-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mobile-muted{font-size:12px;color:var(--el-text-color-secondary);line-height:1.5}.mobile-record{border:1px solid var(--el-border-color-light);border-radius:12px;padding:12px;background:var(--el-bg-color);display:grid;gap:10px;min-width:0}.mobile-record h3{font-size:14px;margin:0;overflow-wrap:anywhere}.mobile-record-actions{display:flex;gap:8px;flex-wrap:wrap}.mobile-record-actions .el-button{margin:0}.mobile-record-head{display:flex;gap:10px;align-items:center;min-width:0}.mobile-record-head>div{min-width:0;flex:1}.mobile-record small{display:block;overflow-wrap:anywhere}.mobile-record-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;font-size:13px}.mobile-record-grid span{color:var(--el-text-color-secondary)}.mobile-record-grid b{display:block;margin-top:4px;color:var(--el-text-color-primary)}
 
 /* Only the list scrolls: search/actions and pagination keep their own rows. */

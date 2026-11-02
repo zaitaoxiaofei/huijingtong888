@@ -34,8 +34,13 @@ function refreshPage() {
   router.go(0);
 }
 
-onMounted(() => setMobileViewportState(true));
-onBeforeUnmount(() => setMobileViewportState(false));
+function updateVisibleViewport(){
+ const viewport=window.visualViewport;
+ document.body.style.setProperty('--mobile-viewport-height',`${Math.round(viewport?.height||window.innerHeight)}px`);
+ document.body.style.setProperty('--mobile-viewport-top',`${Math.max(0,Math.round(viewport?.offsetTop||0))}px`);
+}
+onMounted(() => {setMobileViewportState(true);updateVisibleViewport();window.visualViewport?.addEventListener('resize',updateVisibleViewport);window.visualViewport?.addEventListener('scroll',updateVisibleViewport);window.addEventListener('resize',updateVisibleViewport);});
+onBeforeUnmount(() => {setMobileViewportState(false);window.visualViewport?.removeEventListener('resize',updateVisibleViewport);window.visualViewport?.removeEventListener('scroll',updateVisibleViewport);window.removeEventListener('resize',updateVisibleViewport);document.body.style.removeProperty('--mobile-viewport-height');document.body.style.removeProperty('--mobile-viewport-top');});
 </script>
 
 <template>

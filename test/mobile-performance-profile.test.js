@@ -11,7 +11,7 @@ import * as orderSearch from '../src/shared/order-search.js';
 import * as orderUtils from '../frontend/admin/views/mobile/mobile-orders-utils.js';
 import * as shanghai from '../frontend/admin/utils/shanghai-date.js';
 const owner={id:1,personId:1,name:'Fixture member',username:'fixture',roles:['admin'],tenant:{id:2,role:'owner'}};
-export async function component(file,{inlineTemplate=false,get=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
+export async function component(file,{inlineTemplate=false,get=async()=>({}),post=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
  const {descriptor}=parse(fs.readFileSync(new URL('../frontend/admin/'+file,import.meta.url),'utf8'));
  const script=compileScript(descriptor,{id:'mobile-regression',inlineTemplate});
  const code=script.content.replace(/^import\s+['"][^'"]+['"];?$/gm,'').replace(/import\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\2;?/g,(_whole,bindings,_quote,id)=>{
@@ -19,7 +19,7 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),rou
   return `const ${bindings.trim()}=require(${JSON.stringify(id)});`;
  }).replace(/export\s+default/,'module.exports.default =');
  const h={scope:'A',calls:[],timers:new Set(),mounted:[],auth,history:{state:{},replaceState(){}}};
- const api={get:async(path,options)=>{h.calls.push({path,options});return get(path,options);}};
+ const api={get:async(path,options)=>{h.calls.push({path,options});return get(path,options);},post:async(path,body)=>{h.calls.push({path,body,method:'POST'});return post(path,body);}};
  const deps={...vue,onMounted:fn=>h.mounted.push(fn),onBeforeUnmount:()=>{}};
  function require(id){
   if(id==='vue')return deps;
@@ -35,6 +35,8 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),rou
   if(id.endsWith('shanghai-date.js'))return shanghai;
   if(id.endsWith('imageCropper.js'))return{withImageToken:x=>x};
   if(id.endsWith('mobile-evidence.js'))return{};
+  if(id.endsWith('use-inventory-local-quantities.js'))return{useInventoryLocalQuantities:()=>({rows:vue.ref(new Map()),error:vue.ref('')})};
+  if(id.endsWith('MobileDialog.vue'))return{props:['modelValue'],setup(props,{slots}){return()=>props.modelValue?vue.h('section',[slots.default?.(),slots.footer?.()]):null;}};
   if(id.endsWith('.vue')||id.endsWith('.css'))return{};
   throw Error('Unexpected component dependency '+id);
  }
@@ -62,11 +64,22 @@ test('procurement opens a lightweight product page, keeps structured filters, an
  sut.tab.value='required';await vue.nextTick();await new Promise(setImmediate);
  assert.equal(h.calls.filter(c=>c.path.includes('/alerts')).length,1);assert.match(h.calls.at(-1).path,/snapshot_only=1/);assert.equal(h.timers.size,0);sut.reset();
 });
-test('my account renders real profile/password controls for a valid member, including string role labels',async()=>{
+test('my account starts with an account overview and opens separate profile/password editors',async()=>{
  const h=await component('views/mobile/MobileAccountView.vue',{inlineTemplate:true});
  const app=vue.createSSRApp(h.definition);for(const name of ['el-avatar','el-button','el-alert'])app.component(name,{setup(_,{slots}){return()=>vue.h('div',slots.default?.());}});
- const html=await renderToString(app);for(const text of ['保存个人资料','更换头像','姓名','当前密码','新密码','确认新密码','确认修改密码','管理员'])assert.ok(html.includes(text),text);
- assert.equal((html.match(/type="password"/g)||[]).length,3);
+ const html=await renderToString(app);for(const text of ['个人资料','账号安全','岗位与权限','添加到手机桌面'])assert.ok(html.includes(text),text);
+ assert.equal((html.match(/type="password"/g)||[]).length,0,'password form stays out of the account overview');
+ const state=await component('views/mobile/MobileAccountView.vue');const sut=state.definition.setup({}, {expose(){}});
+ sut.openPanel('password');assert.equal(sut.panel.value,'password');sut.password.old_password='private';sut.password.new_password='new';sut.closePanel();assert.equal(sut.password.old_password,'');assert.equal(sut.panel.value,'');
+ sut.openPanel('profile');sut.profile.name='Draft';sut.profileError.value='Retry';sut.closePanel();sut.openPanel('profile');assert.equal(sut.profile.name,owner.name);assert.equal(sut.profileError.value,'');
+});
+test('binding paginates candidates, retains selected inventory, and rejects stale or other-scope search results',async()=>{
+ let resolveOld;
+ const h=await component('views/mobile/MobileOrderDetailView.vue',{get:async path=>{const p=new URL(path,'http://fixture').searchParams;if(p.get('query')==='old')return new Promise(r=>resolveOld=r);return{rows:[{id:Number(p.get('page')),name:'Candidate'}],total:100};}});
+ const sut=h.definition.setup({}, {expose(){}});sut.bindingVisible.value=true;sut.bindingFilters.searchMode='inventory_id';
+ const old=sut.loadProductOptions('old');await sut.loadProductOptions('1-14',2);assert.equal(sut.productOptions.value[0].id,2);assert.equal(sut.bindingPage.value,2);assert.match(h.calls.at(-1).path,/includeStock=0/);assert.match(h.calls.at(-1).path,/searchMode=inventory_id/);assert.match(h.calls.at(-1).path,/pageSize=20/);
+ sut.selectBindingProduct(sut.productOptions.value[0]);await sut.loadProductOptions('',3);assert.equal(sut.selectedProduct.value.id,2);assert.equal(sut.bindingForm.product_id,'2');resolveOld({rows:[{id:99}],total:1});await old;assert.equal(sut.productOptions.value[0].id,3);
+ const late=sut.loadProductOptions('old');h.scope='B';sut.resetBindingScope();resolveOld({rows:[{id:100}],total:1});await late;assert.equal(sut.productOptions.value.length,0);assert.equal(sut.selectedProduct.value,null);assert.equal(sut.bindingItem.value,null);
 });
 
 test('mobile header back returns only within mobile history and otherwise falls back to home',async()=>{
@@ -74,4 +87,9 @@ test('mobile header back returns only within mobile history and otherwise falls 
  const sut=h.definition.setup({}, {expose(){}});assert.equal(sut.canGoBack.value,true);
  h.history.state.back='/mobile/orders?page=2';sut.goBack();h.history.state.back='/orders';sut.goBack();h.history.state.back=null;sut.goBack();
  assert.deepEqual(moves,['back','/mobile','/mobile']);
+});
+
+test('failed binding preserves selection and concurrent confirmation sends one request',async()=>{
+ let reject;const h=await component('views/mobile/MobileOrderDetailView.vue',{post:()=>new Promise((_,r)=>reject=r)});const sut=h.definition.setup({}, {expose(){}});
+ sut.bindingVisible.value=true;sut.bindingItem.value={online_product_id:7};sut.selectBindingProduct({id:3,name:'Chosen inventory'});const saving=sut.submitMobileBind();await sut.submitMobileBind();assert.equal(h.calls.length,1);assert.equal(h.calls[0].body.product_id,3);reject(new Error('Fixture unavailable'));await saving;assert.equal(sut.bindingVisible.value,true);assert.equal(sut.selectedProduct.value.id,3);assert.equal(sut.bindingSubmitting.value,false);
 });
