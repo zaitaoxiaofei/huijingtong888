@@ -233,6 +233,7 @@ function handlePrintCommand(command) {
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">OGL 发运</el-button>
             <template #dropdown>
               <el-dropdown-menu>
+                <el-dropdown-item command="ogl-quick-bind">今日打印无标记 · 快速绑定</el-dropdown-item>
                 <el-dropdown-item command="ogl-create-batch">组批 / 绑定发运（已选 {{ selectedCount }} 单）</el-dropdown-item>
                 <el-dropdown-item command="ogl-official-carriages">已申请</el-dropdown-item>
                 <el-dropdown-item command="ogl-batch-history">发运历史</el-dropdown-item>
