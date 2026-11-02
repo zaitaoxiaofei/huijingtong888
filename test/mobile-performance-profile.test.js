@@ -93,3 +93,27 @@ test('failed binding preserves selection and concurrent confirmation sends one r
  let reject;const h=await component('views/mobile/MobileOrderDetailView.vue',{post:()=>new Promise((_,r)=>reject=r)});const sut=h.definition.setup({}, {expose(){}});
  sut.bindingVisible.value=true;sut.bindingItem.value={online_product_id:7};sut.selectBindingProduct({id:3,name:'Chosen inventory'});const saving=sut.submitMobileBind();await sut.submitMobileBind();assert.equal(h.calls.length,1);assert.equal(h.calls[0].body.product_id,3);reject(new Error('Fixture unavailable'));await saving;assert.equal(sut.bindingVisible.value,true);assert.equal(sut.selectedProduct.value.id,3);assert.equal(sut.bindingSubmitting.value,false);
 });
+
+
+test('mobile exact filter stages edits and only applies on explicit search',async()=>{
+ const h=await component('components/mobile/MobileInventorySearch.vue');
+ const filters={...search.inventorySearchDefaults(),searchMode:'inventory_id',query:'1-14',inventoryType:'all',vehicleModel:['J6']},events=[];
+ const sut=h.definition.setup({filters,loading:false},{expose(){},emit:event=>events.push(event)});
+ sut.openFields();sut.draft.vehicleModel.push('J7');sut.draft.inventoryType='combo';sut.expanded.value=false;
+ assert.deepEqual(filters.vehicleModel,['J6']);assert.equal(filters.inventoryType,'all');assert.equal(events.length,0);
+ sut.openFields();sut.draft.inventoryCategory='钥匙壳';sut.applyFields();assert.equal(filters.inventoryCategory,'钥匙壳');assert.equal(filters.query,'');assert.equal(filters.searchMode,'inventory_id');assert.equal(events[0],'search');assert.equal(sut.expanded.value,false);
+ sut.openFields();sut.clearFields();assert.equal(filters.inventoryCategory,'钥匙壳');assert.equal(sut.draft.inventoryCategory,'');
+});
+test('mobile binding starts with inventory ID instead of an unrelated listing title and supports page size',async()=>{
+ const h=await component('views/mobile/MobileOrderDetailView.vue',{get:async()=>({rows:[],total:250})});
+ const sut=h.definition.setup({}, {expose(){}});await sut.openMobileBind({online_product_id:7,ozon_name:'Очень длинное название товара',ozon_sku:'12345'});
+ let p=new URL(h.calls.at(-1).path,'http://local').searchParams;assert.equal(p.get('searchMode'),'inventory_id');assert.equal(p.get('query'),'');
+ await sut.changeBindingPage({page:2,pageSize:50});p=new URL(h.calls.at(-1).path,'http://local').searchParams;assert.equal(p.get('pageSize'),'50');assert.equal(p.get('page'),'2');
+ sut.bindingFilters.searchMode='name';await sut.resetBindingFilters();assert.equal(sut.bindingFilters.searchMode,'inventory_id');
+});
+test('mobile pagination clamps jumps, preserves page size and blocks requests while loading',async()=>{
+ const h=await component('components/mobile/MobilePagination.vue'),events=[],props=vue.reactive({page:2,pageSize:20,total:798,loading:false});
+ const sut=h.definition.setup(props,{expose(){},emit:(event,value)=>events.push({event,...value})});
+ sut.move(999);assert.equal(events[0].page,40);assert.equal(events[0].pageSize,20);sut.move(-5);assert.equal(events[1].page,1);
+ props.loading=true;sut.move(3);assert.equal(events.length,2);props.loading=false;props.total=null;sut.move(3);assert.equal(events.length,2);
+});

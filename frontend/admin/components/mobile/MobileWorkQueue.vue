@@ -13,7 +13,7 @@ import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
 import MobilePurchaseDialog from './MobilePurchaseDialog.vue';
 import InventoryReceiveDialog from '../procurement/InventoryReceiveDialog.vue';
-const props=defineProps({warehouse:Boolean});const auth=useAuthStore(),rows=ref([]),total=ref(null),page=ref(1),pageSize=ref(20),tab=ref(props.warehouse?'arrived':'register'),filters=reactive({...inventorySearchDefaults(),query:'',inventoryType:'all'}),loading=ref(false),error=ref(''),snapshot=ref({}),busy=ref(false);
+const props=defineProps({warehouse:Boolean});const auth=useAuthStore(),rows=ref([]),total=ref(null),page=ref(1),pageSize=ref(20),tab=ref(props.warehouse?'arrived':'register'),filters=reactive({...inventorySearchDefaults(),searchMode:'inventory_id',query:'',inventoryType:'all'}),loading=ref(false),error=ref(''),snapshot=ref({}),busy=ref(false);
 const purchase=reactive({visible:false,rows:[]}),receive=reactive({visible:false,id:0,batch:0,name:''}),edit=reactive({row:null,tracking:'',courier:''});let generation=0,disposed=false,controller=null;
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement')),canReceive=computed(()=>hasPermission(auth.user,'packing')||canPurchase.value);
 const tabs=computed(()=>props.warehouse?[['arrived','核验收货']]:[['register','登记采购'],['required','必须采购'],['advisory','保障补货'],['open','采购待到货'],['arrived','到货待验收'],['history','采购记录']]);
@@ -38,7 +38,7 @@ async function load(reset=false,fresh=false){
  finally{window.clearTimeout(timeout);if(token===generation)loading.value=false;}
 }
 function changed(){return load();}
-function resetFilters(){Object.assign(filters,inventorySearchDefaults(),{query:'',inventoryType:'all'});load(true);}
+function resetFilters(){Object.assign(filters,inventorySearchDefaults(),{searchMode:'inventory_id',query:'',inventoryType:'all'});load(true);}
 function changePage(value){page.value=value.page;pageSize.value=value.pageSize;load();}
 
 function openPurchase(row){purchase.rows=row?[row]:[];purchase.visible=true;}
