@@ -201,8 +201,10 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     });
     for(const row of checked)await assertEvidenceOwnership(row.receipt_images_json,current.tenant.id,query);
     const impact=await previewReceipts({records:checked},current.tenant.id);
-    if(impact.impacts.some(r=>Number(r.physical_before)<0))impact.suggest_historical=true;
-    return{current,id,checked,impact};
+    if(body.receipt_mode!=null&&!['new_arrival','historical'].includes(body.receipt_mode))throw fail('请选择本次新到货或历史补登记');
+    // Existing outbound/stocktake activity is not evidence that this new delivery was counted before.
+    const historical=body.receipt_mode==='historical'||(body.receipt_mode==null&&body.counted_quantity!=null);
+    return{current,id,checked,impact,historical};
   }
   async function receiptContext(productId,session){
     const current=await receiptSession(session),id=Number(productId),rows=await receipts(id,current);
@@ -210,24 +212,24 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     return{rows,physical:state.physical_recorded,available:state.free};
   }
   async function previewReceive(body,session){
-    const {current,id,checked,impact}=await prepareReceipt(body,session);
+    const {current,id,checked,impact,historical}=await prepareReceipt(body,session);
     const [state]=await batch([id],current.tenant.id,{localOnly:true,fresh:true,cache:false});
     const quantity=checked.reduce((sum,r)=>sum+r.receive_quantity,0),reference=impact.impacts.find(r=>Number(r.product_id)===id);
     const counted=body.counted_quantity,validCount=counted!=null&&Number.isSafeInteger(Number(counted))&&Number(counted)>=0;
-    const after=impact.suggest_historical?(validCount?Number(counted):null):Number(reference.physical_before)+quantity;
+    const after=historical?(validCount?Number(counted):null):Number(reference.physical_before)+quantity;
     const projected=after==null?null:inventoryWorkflow({physical_estimate:after,open_order_demand:state.order_quantity,
       fbp_reserved:state.locked_quantity,flow_summary:{safety:state.safety_target}},{applications:[]});
     return{quantity,physical_before:reference.physical_before,available_before:state.free,physical_after:after,available_after:projected?.free??null,
-      requires_count:impact.suggest_historical,revision:reference.revision};
+      requires_count:historical,ledger_warning:Number(reference.physical_before)<0,revision:reference.revision};
   }
   async function receive(body,session){
-    const {current,id,checked,impact}=await prepareReceipt(body,session);
+    const {current,id,checked,impact,historical}=await prepareReceipt(body,session);
     const reference=impact.impacts.find(r=>Number(r.product_id)===id);
     if(body.expected_revision&&reference?.revision!==body.expected_revision)throw fail('库存或采购批次已变化，请返回上一步重新核对入库影响',409);
     let payload;
-    if(impact.suggest_historical){
+    if(historical){
       const count=Number(body.counted_quantity);
-      if(!Number.isSafeInteger(count)||count<0||body.counted_quantity==null)throw fail('本商品有历史出库或盘点，请填写当前实际在仓总数（counted_quantity），避免重复增加已经盘点过的货');
+      if(!Number.isSafeInteger(count)||count<0||body.counted_quantity==null)throw fail('历史补登记须填写当前实际在仓总数（counted_quantity）；正常新到货请使用本次实收登记，无需整仓盘点');
       const reference=impact.impacts.find(r=>Number(r.product_id)===id);
       payload={request_key:String(body.request_key||''),historical_receipt_groups:[{product_id:id,revision:reference?.revision,counted_quantity:count,receipts:checked}]};
     }else payload={receipt_impact_confirmed:true,records:checked.map(r=>({id:r.id,payload:{...r,status:'approved',qc_status:'approved',receipt_context:'统一库存详情登记入库'}}))};
