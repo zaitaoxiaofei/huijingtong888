@@ -53,6 +53,8 @@ const canFbp=computed(()=>hasPermission(auth.user,'inventory.write'));
 const canReport=computed(()=>canCount.value||canReceive.value);
 const ledger=reactive({visible:false,productId:0,action:''}),purchase=reactive({visible:false,row:null,error:''});
 const feedback=reactive({visible:false,row:null,note:'',key:'',busy:false,loading:false,types:[],cause:'physical_shortage',plan:{}});
+const freePurchase=ref(false);
+function startFreePurchase(){freePurchase.value=true;batchRows.value=[];batchVisible.value=true;}
 const supplyTable=ref(null),selected=ref([]),batchVisible=ref(false),batchRows=ref([]),batchCounts=ref({}),readAt=ref(''),batchRevision=ref(0);
 const fbpReceiptCount=ref(null);
 const pageCache=createInventoryWorkspacePageCache();
@@ -88,6 +90,7 @@ function taskCount(key){if(key==='fbp-receipts')return fbpReceiptCount.value??'�
 function taskHint(task){if(task.key==='incoming')return `${batchCounts.value.open_quantity??'—'} 件待到货${batchCounts.value.open_unknown_batches?` · ${batchCounts.value.open_unknown_batches}批待核对`:''}`;if(task.key==='receiving')return `${batchCounts.value.arrived_quantity??'—'} 件待验收${batchCounts.value.arrived_unknown_batches?` · ${batchCounts.value.arrived_unknown_batches}批待核对`:''}`;return task.hint;}
 function switchTask(key){if(key==='fbp-receipts'){stopSnapshotPoll();++version;controller?.abort();loading.value=false;workspaceTab.value='fbp';void loadBatchCounts();return;}workspaceTab.value='stock';filters.task=key;selected.value=[];if(['incoming','receiving'].includes(key))filters.scope='all';void load(true);}
 async function startBatch(){
+ freePurchase.value=false;
  if(checkingProduct.value)return;
  if(!selected.value.length){batchRows.value=[];batchVisible.value=true;return;}
  if(selected.value.length>100)return ElMessage.warning('一次最多登记100项库存，请分批选择');
@@ -199,7 +202,7 @@ defineExpose({refresh:load});
   <template v-else>
   <InventoryPageToolbar :filters="filters" product-search compact-search :show-shop="false" :show-date-range="false" :loading="loading" @search="load(true)" @reset="Object.assign(filters,inventorySearchDefaults(),{query:'',scope:'all'});load(true)">
    <el-form-item label="库存范围"><el-select v-model="filters.scope" aria-label="库存范围" @change="load(true)"><el-option value="all" label="全部库存"/><el-option v-if="!isBatch" value="orders" label="FBS订单关联库存"/></el-select></el-form-item>
-   <template #right><span class="supply-read-time" :title="'读取时间：'+(readAt?shanghaiDateTimeText(readAt):'未读取')">读取 {{readAt?shanghaiDateTimeText(readAt):'尚未读取'}}<small v-if="!isBatch">核算 {{snapshot.calculated_at?shanghaiDateTimeText(snapshot.calculated_at):'尚未完成'}}</small></span><el-button :loading="loading" @click="load(false,true)">{{isBatch?'刷新采购批次':hasUpdates?'有新变化 · 刷新库存需求':'刷新库存需求'}}</el-button><el-button v-if="!isBatch" :disabled="snapshot.refreshing" @click="load(false,true)">重新核算</el-button><div class="supply-context-actions"><el-button v-if="canPurchase&&!isBatch" type="primary" :disabled="!!checkingProduct" :loading="checkingProduct===-1" @click="startBatch">批量登记采购{{selected.length?`（${selected.length}）`:''}}</el-button><el-button plain size="small" @click="switchTask('review')">库存异常 / 资料待核实 {{meta.review??'—'}}</el-button><el-button v-if="!isBatch" plain size="small" @click="switchTask('all')">查看全部库存</el-button><el-button v-if="productId" size="small" @click="emit('clear-product')">返回全部库存</el-button></div></template>
+   <template #right><span class="supply-read-time" :title="'读取时间：'+(readAt?shanghaiDateTimeText(readAt):'未读取')">读取 {{readAt?shanghaiDateTimeText(readAt):'尚未读取'}}<small v-if="!isBatch">核算 {{snapshot.calculated_at?shanghaiDateTimeText(snapshot.calculated_at):'尚未完成'}}</small></span><el-button :loading="loading" @click="load(false,true)">{{isBatch?'刷新采购批次':hasUpdates?'有新变化 · 刷新库存需求':'刷新库存需求'}}</el-button><el-button v-if="!isBatch" :disabled="snapshot.refreshing" @click="load(false,true)">重新核算</el-button><div class="supply-context-actions"><el-button v-if="canPurchase&&!isBatch" type="primary" plain :disabled="!!checkingProduct" @click="startFreePurchase">自由采购</el-button><el-button v-if="canPurchase&&!isBatch" type="primary" :disabled="!!checkingProduct" :loading="checkingProduct===-1" @click="startBatch">批量登记采购{{selected.length?`（${selected.length}）`:''}}</el-button><el-button plain size="small" @click="switchTask('review')">库存异常 / 资料待核实 {{meta.review??'—'}}</el-button><el-button v-if="!isBatch" plain size="small" @click="switchTask('all')">查看全部库存</el-button><el-button v-if="productId" size="small" @click="emit('clear-product')">返回全部库存</el-button></div></template>
   </InventoryPageToolbar>
 
 
@@ -224,7 +227,7 @@ defineExpose({refresh:load});
   </template>
   </template>
   <ForecastDialog v-if="forecastDialog.visible" v-model="forecastDialog.visible" :product-id="forecastDialog.id" :product-name="forecastDialog.name" @created="forecastCreated"/>
-  <BatchPurchase v-if="batchVisible" v-model="batchVisible" :initial-rows="batchRows" @created="batchPurchased"/>
+  <BatchPurchase v-if="batchVisible" v-model="batchVisible" :initial-rows="batchRows" :free-purchase="freePurchase" @created="batchPurchased"/>
   <ReceiveDialog v-if="receiving.visible" v-model="receiving.visible" :product-id="receiving.id" :product-name="receiving.name" @saved="stockSaved(receiving.id)"/>
   <ProcurementLedgerDialog v-if="ledger.visible" v-model="ledger.visible" :product-id="ledger.productId" :initial-action="ledger.action" :stocktake-enabled="canCount" @saved="stockSaved(ledger.productId)"/>
   <ProcurementRequestCreateDialog v-if="purchase.visible" v-model="purchase.visible" :initial-product-id="purchase.row.product_id" :initial-quantity="Math.max(1,Number(plan(purchase.row).required_purchase||0)+Number(plan(purchase.row).optional_purchase||0))" :source-request-ids="purchaseRequestIds(purchase.row)" :verifying-demand="checkingProduct===Number(purchase.row.product_id)" :demand-error="purchase.error" :initial-product="{id:Number(purchase.row.product_id),name:purchase.row.product_name,inventory_id:purchase.row.inventory_number,image_url:`/api/products/${purchase.row.product_id}/image?thumb=1`}" lock-product @created="purchased"/>
