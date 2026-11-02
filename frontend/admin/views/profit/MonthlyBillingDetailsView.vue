@@ -115,7 +115,7 @@ const inventoryCards = computed(() => {
   const row = procurementInventory.value;
   return [
     { label: "当前库存占用总额", value: row.inventory_total_value, quantity: null, total: true },
-    { label: "国内库存", value: row.local_inventory_value, quantity: row.local_inventory_quantity },
+    { label: "国内可用库存", value: row.local_inventory_value, quantity: row.local_inventory_quantity },
     { label: "FBP 库存", value: row.fbp_inventory_value, quantity: row.fbp_inventory_quantity },
     { label: "采购在途", value: row.in_transit_value, quantity: row.in_transit_quantity }
   ];
@@ -458,13 +458,13 @@ onBeforeUnmount(() => abortController?.abort());
         <div class="capital-panel">
           <div class="capital-panel__title">
             <strong>当前库存占用</strong>
-            <span>采用最新采购落地成本，缺失时回退商品采购成本</span>
+            <span>国内仓按可用数量计价；单价采用最新采购落地成本，缺失时回退商品采购成本</span>
           </div>
           <div class="capital-metric-grid inventory-metric-grid">
             <article v-for="item in inventoryCards" :key="item.label" class="capital-metric" :class="{ 'is-total': item.total }">
               <span>{{ item.label }}</span>
-              <strong>¥{{ formatMoney(item.value) }}</strong>
-              <small>{{ item.quantity == null ? '国内 + FBP + 在途' : `${formatInteger(item.quantity)} 件` }}</small>
+              <strong>{{ item.value==null?'待核实':`¥${formatMoney(item.value)}` }}</strong>
+              <small>{{ item.total ? '国内可用 + FBP + 在途' : item.quantity==null?'数量待核实':`${formatInteger(item.quantity)} 件` }}</small>
             </article>
           </div>
         </div>

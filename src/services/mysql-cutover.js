@@ -1,3 +1,4 @@
+import { availableLocalCapitalRows, localCapitalTotals } from "./inventory-capital-local.js";
 import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
@@ -31096,14 +31097,14 @@ function inventoryCapitalSourcesMysql(scope) {
       stock.quantity,stock.quantity * ${cost} AS inventory_value,${costFields},
       stock.updated_at,stock.unclassified_movements,
       NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
-      FROM (SELECT im.product_id,GREATEST(SUM(im.quantity_delta),0) AS quantity,
+      FROM (SELECT im.product_id,SUM(im.quantity_delta) AS quantity,
         MAX(im.created_at) AS updated_at,
         SUM(CASE WHEN COALESCE(im.stock_location,'') != 'LOCAL' THEN 1 ELSE 0 END) AS unclassified_movements
         FROM inventory_movements im WHERE im.status='posted'
           AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
         GROUP BY im.product_id) stock
       JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
-      ${costJoin} WHERE stock.quantity > 0`,
+      ${costJoin}`,
     fbp: `SELECT oss.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
       GREATEST(COALESCE(oss.present,0),0) AS quantity,
       GREATEST(COALESCE(oss.present,0),0) * ${cost} AS inventory_value,${costFields},
@@ -31129,24 +31130,36 @@ function inventoryCapitalSourcesMysql(scope) {
   };
 }
 
-async function currentInventoryCapitalMysql(scope) {
+async function availableLocalInventoryCapitalMysql(scope) {
+  const rows = await mysqlQuery(inventoryCapitalSourcesMysql(scope).local);
+  if (!rows.length) return [];
+  await ensureProcurementLedgerSchema(mysqlExecute);
+  const states = await createInventoryWorkflowService().batch(rows.map(row=>Number(row.product_id)),scope.id,
+    {localOnly:true,fresh:true,cache:false});
+  return availableLocalCapitalRows(rows,states);
+}
+
+async function currentInventoryCapitalMysql(scope, localRows = null) {
   const sources = inventoryCapitalSourcesMysql(scope);
-  const values = await Promise.all(Object.entries(sources).map(async ([kind, sql]) => {
-    const row = await mysqlQueryOne(`SELECT COALESCE(SUM(quantity),0) AS quantity,
-      COALESCE(SUM(inventory_value),0) AS value,COUNT(*) AS item_count,
-      COALESCE(SUM(cost_missing),0) AS missing_cost_count,
-      COALESCE(SUM(CASE WHEN product_id IS NULL THEN 1 ELSE 0 END),0) AS unmapped_count,
-      COALESCE(SUM(CASE WHEN unclassified_movements > 0 THEN 1 ELSE 0 END),0) AS unclassified_count
-      FROM (${sql}) capital`);
-    return [kind,{quantity:Number(row.quantity),value:Number(row.value),item_count:Number(row.item_count),
-      missing_cost_count:Number(row.missing_cost_count),unmapped_count:Number(row.unmapped_count),unclassified_count:Number(row.unclassified_count)}];
-  }));
-  const categories = Object.fromEntries(values), local = categories.local, fbp = categories.fbp, transit = categories.transit;
-  return { snapshot_basis:'current', categories,
-    local_inventory_quantity:local.quantity,local_inventory_value:roundMoneyMysql(local.value),
+  const [local, values] = await Promise.all([
+    localRows == null ? availableLocalInventoryCapitalMysql(scope).then(localCapitalTotals) : localCapitalTotals(localRows),
+    Promise.all(['fbp','transit'].map(async kind => {
+      const row = await mysqlQueryOne(`SELECT COALESCE(SUM(quantity),0) AS quantity,
+        COALESCE(SUM(inventory_value),0) AS value,COUNT(*) AS item_count,
+        COALESCE(SUM(cost_missing),0) AS missing_cost_count,
+        COALESCE(SUM(CASE WHEN product_id IS NULL THEN 1 ELSE 0 END),0) AS unmapped_count,
+        COALESCE(SUM(CASE WHEN unclassified_movements > 0 THEN 1 ELSE 0 END),0) AS unclassified_count
+        FROM (${sources[kind]}) capital`);
+      return [kind,{quantity:Number(row.quantity),value:Number(row.value),item_count:Number(row.item_count),
+        missing_cost_count:Number(row.missing_cost_count),unmapped_count:Number(row.unmapped_count),unclassified_count:Number(row.unclassified_count)}];
+    }))
+  ]);
+  const categories = {local,...Object.fromEntries(values)}, {fbp,transit} = categories;
+  return { snapshot_basis:'current', local_valuation_basis:'available', categories,
+    local_inventory_quantity:local.quantity,local_inventory_value:local.value==null?null:roundMoneyMysql(local.value),
     fbp_inventory_quantity:fbp.quantity,fbp_inventory_value:roundMoneyMysql(fbp.value),
     in_transit_quantity:transit.quantity,in_transit_value:roundMoneyMysql(transit.value),
-    inventory_total_value:roundMoneyMysql(local.value+fbp.value+transit.value) };
+    inventory_total_value:local.value==null?null:roundMoneyMysql(local.value+fbp.value+transit.value) };
 }
 
 export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admin") {
@@ -31164,6 +31177,21 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   if (!Object.hasOwn(sources,kind)) throw Object.assign(new Error('请选择国内仓、FBP仓或采购在途'),{statusCode:400});
   const page = Math.max(1,Math.min(100000,Math.floor(Number(query.page)||1)));
   const pageSize = Math.max(1,Math.min(100,Math.floor(Number(query.pageSize)||20)));
+  if (kind === 'local') {
+    const all = await availableLocalInventoryCapitalMysql(scope);
+    const keyword = String(query.query || '').trim().slice(0,128).toLocaleLowerCase();
+    const filtered = all.filter(row=>!keyword || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword));
+    const compare = (a,b,key) => a[key]===b[key]?0:a[key]==null?1:b[key]==null?-1:Number(b[key])-Number(a[key]);
+    filtered.sort((a,b)=>compare(a,b,'inventory_value')||compare(a,b,'quantity')||Number(a.row_id)-Number(b.row_id));
+    const totals = localCapitalTotals(filtered);
+    return {kind,page,pageSize,total:filtered.length,filtered_quantity:totals.quantity,
+      filtered_value:totals.value==null?null:roundMoneyMysql(totals.value),availability_unknown_count:totals.availability_unknown_count,
+      summary:await currentInventoryCapitalMysql(scope,all),snapshot_at:new Date().toISOString(),
+      rows:filtered.slice((page-1)*pageSize,page*pageSize).map(row=>({...row,
+        row_id:Number(row.row_id),product_id:Number(row.product_id),unit_cost:Number(row.unit_cost),
+        cost_missing:Boolean(Number(row.cost_missing)),unclassified_movements:Number(row.unclassified_movements)}))};
+  }
+
   const keyword = String(query.query || '').trim().slice(0,128), params = [];
   let where = '';
   if (keyword) {
