@@ -84,16 +84,27 @@ test('pending purchase correction and direct receipt preserve money, stock and e
    assert.equal(transit.rows.length,1);assert.equal(transit.rows[0].quantity,4);assert.equal(transit.rows[0].inventory_value,40);
 
   });
-  await t.test('historical stocktake count remains explicit; preview never guesses an after total',async()=>{
+  await t.test('normal new arrivals do not demand a count after stocktake; historical count stays opt-in',async()=>{
    const before=await ledger(203);await legacy.applyProcurementLedgerMysql({action_type:'stocktake',product_id:203,revision:before.revision,request_key:randomUUID(),counted_quantity:7,reason_code:'other',reason_note:'实盘核实'},3,2);
    const rows=await service.receipts(203,session(2)),input={product_id:203,request_key:randomUUID(),records:[{id:rows[0].id,quantity:4,expected_quantity:4}]};
-   const unknown=await service.previewReceive(input,session(2));assert.equal(unknown.requires_count,true);assert.equal(unknown.physical_after,null);assert.equal(unknown.available_after,null);
+   const normal=await service.previewReceive(input,session(2));assert.equal(normal.requires_count,false);assert.equal(normal.physical_after,11);
+   const unknown=await service.previewReceive({...input,receipt_mode:'historical'},session(2));assert.equal(unknown.requires_count,true);assert.equal(unknown.physical_after,null);assert.equal(unknown.available_after,null);
    const known=await service.previewReceive({...input,counted_quantity:11},session(2));assert.equal(known.physical_after,11);assert.equal(known.available_after,11);
-   await service.receive({...input,counted_quantity:11,expected_revision:known.revision},session(2));assert.equal(await stock(203),11);
+   await service.receive({...input,receipt_mode:'new_arrival',expected_revision:normal.revision},session(2));assert.equal(await stock(203),11);
    const local=await legacy.financeInventoryCapitalDetailsMysql({kind:'local',query:'Receipt stock'},2);
    assert.equal(local.rows[0].quantity,11);assert.equal(local.rows[0].inventory_value,110);
    assert.equal((await legacy.financeInventoryCapitalDetailsMysql({kind:'transit',query:'Receipt stock'},2)).rows.length,0);
 
+  });
+  await t.test('negative historical balance does not block a new delivery or overwrite historical movements',async()=>{
+   await q("INSERT INTO products(id,tenant_id,name) VALUES(204,2,'New delivery after shipment')");
+   await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,status,stock_location) VALUES(2,204,'order_outbound',-1,'posted','LOCAL')");
+   await legacy.recordProcurementPurchaseMysql({items:[{product_id:204,quantity:25,amount:250}]},1,2);
+   const pending=await service.receipts(204,session(2)),input={product_id:204,request_key:randomUUID(),records:[{id:pending[0].id,quantity:25,expected_quantity:25}]};
+   const preview=await service.previewReceive(input,session(2));assert.equal(preview.requires_count,false);assert.equal(preview.ledger_warning,true);assert.equal(preview.physical_before,-1);assert.equal(preview.physical_after,24);
+   await service.receive({...input,expected_revision:preview.revision},session(2));assert.equal(await stock(204),24);
+   assert.equal(Number((await q("SELECT quantity_delta FROM inventory_movements WHERE product_id=204 AND source_type='order_outbound'"))[0].quantity_delta),-1);
+   await assert.rejects(service.receive({...input,expected_revision:preview.revision},session(2)));assert.equal(await stock(204),24,'A retried receipt never increments stock twice');
   });
   await t.test('arrival cards count pending quantities across batches, respecting search and tenant',async()=>{
    const result=await createProcurementArrivals().list({status:'open',summary_only:'1',product_id:200},session());assert.equal(result.summary.open,1);assert.equal(result.summary.open_quantity,6);assert.equal(result.summary.arrived_quantity,0);
