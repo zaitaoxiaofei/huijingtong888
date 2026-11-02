@@ -23,7 +23,7 @@ test('quick today binding selects every clear owned printed OGL order and revali
   for(const [id,carriage] of [[1,'901'],[2,'902']])await q("INSERT INTO ogl_dispatch_batches(id,tenant_id,batch_number,client_request_id,default_shop_id,containers_count,status,official_status,official_carriage_id,created_by) VALUES(?,2,?,?,20,1,'preparing','observed',?,2)",[id,'QUICK-BATCH-'+id,'quick-batch-'+id,carriage]);
   await q("INSERT INTO ogl_dispatch_members(tenant_id,batch_id,order_id,active_order_id,shop_id,posting_number) VALUES(2,2,11,11,20,'QUICK-11')");
   const result=await svc.candidates(session,{selection:'today-clear',printed_from:'2020-01-01',printed_to:'2030-01-01',binding:'all',review:'all',batch_id:2,page_size:100});
-  assert.equal(result.selection_date,'2026-11-02');assert.equal(result.selection_rows.length,26);assert.equal(result.rows.length,20);assert.equal(enriched[0].length,20);
+  assert.equal(result.selection_date,'2026-11-02');assert.equal(result.selection_rows.length,26);assert.equal(result.rows.length,20);assert.equal(enriched.length,0,'Quick selection must not calculate profits or inventory for its lightweight order list');
   assert.deepEqual(result.selection_rows.map(r=>r.id).sort((a,b)=>a-b),[2,3,...Array.from({length:24},(_,i)=>i+13)]);
   assert.ok(result.selection_rows.every(row=>!row.raw_json&&!row.active_batch_id&&!row.needs_review));
   assert.equal((await q('SELECT * FROM ogl_dispatch_members')).length,1,'Selection must not create membership');
