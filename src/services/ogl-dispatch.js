@@ -342,7 +342,7 @@ export function createOglDispatchService({ transaction, api, syncPostings, extra
       return {...checked,rows:pageRows.map(item=>byId.get(Number(item.row.id))).filter(Boolean),page,page_size:size,total:selected.length,
         summary:{matched:scoped.length,eligible:available.length,rejected:unavailable.length},rejection_summary:[...summaries.values()],...(quick?{selection_rows:selectionRows,selection_date:today}:{})};
     });
-    if(loadOrderRows&&result.rows.length){
+    if(!quick&&loadOrderRows&&result.rows.length){
       const enriched=await loadOrderRows(result.rows.map(row=>Number(row.id)),Number(session.tenant.id));
       // Recheck the live operator, not just the tenant, after asynchronous reads.
       await transaction(connection=>scope(connection,session));
