@@ -12,7 +12,7 @@ const validRoles = new Set(ROLE_DEFINITIONS.map(role => role.value));
 const business = ["orders.read", "orders.manage", "packing", "procurement", "procurement.request.submit", "inventory.read", "inventory.write", "operations", "analytics", "team"];
 const enterpriseAdministration = [...business, "inventory.review", "onboarding.edit", "finance"];
 const enterpriseFinancePages = new Set([
-  "/finance-center", "/finance/payroll", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
+  "/finance-center", "/finance/payroll", "/finance/inventory-capital", "/mobile/inventory-capital", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
 ]);
 const rolePermissions = {
   admin: enterpriseAdministration, manager: [...business, "inventory.review", "onboarding.edit"], operator: business,
@@ -62,6 +62,7 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
+  if (path === "/mobile/inventory-capital") return "finance";
   if (path === "/finance/reimbursements") return "common";
   if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";
   if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path)) return "inventory.read";

@@ -1,8 +1,9 @@
 <script setup>
 import {computed,onBeforeUnmount,onMounted,reactive,ref} from 'vue';
+import {useRouter} from 'vue-router';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {useAuthStore} from '../../stores/auth.js';
-import {hasPermission} from '../../../../src/shared/permissions.js';
+import {canAccessPage,hasPermission} from '../../../../src/shared/permissions.js';
 import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
 import {useInventoryLocalQuantities} from '../../utils/use-inventory-local-quantities.js';
 import MobileInventorySearch from '../../components/mobile/MobileInventorySearch.vue';
@@ -11,7 +12,7 @@ import InventoryCompositionBadge from '../../components/inventory/InventoryCompo
 import ProductImagePreview from '../../components/ProductImagePreview.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
 import MobileWorkQueue from '../../components/mobile/MobileWorkQueue.vue';
-const auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),pageSize=ref(20),section=ref('stock');
+const router=useRouter(),auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),loading=ref(false),error=ref(''),pageSize=ref(20),section=ref('stock');
 const filters=reactive({...inventorySearchDefaults(),query:'',inventoryType:'all'}),dialog=reactive({visible:false,product:{},readOnly:false});
 const local=useInventoryLocalQuantities(()=>rows.value),canWrite=computed(()=>hasPermission(auth.user,'inventory.write'));
 let version=0,disposed=false;
@@ -23,7 +24,7 @@ async function saved(){await load();await local.refresh(true);}
 function clearScope(){++version;rows.value=[];total.value=0;dialog.visible=false;}
 onMounted(()=>{load();window.addEventListener('erp:auth-scope-changed',clearScope);});onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
 </script>
-<template><div class="mobile-inventory-page mobile-list-page"><nav class="mobile-inventory-tabs"><el-button :type="section==='stock'?'primary':''" @click="section='stock'">商品库存</el-button><el-button :type="section==='receiving'?'primary':''" @click="section='receiving'">核验收货</el-button><el-button :type="section==='fbp'?'primary':''" @click="section='fbp'">核验 FBP 入仓</el-button></nav><MobileWorkQueue v-if="section==='receiving'" warehouse/><section v-else-if="section==='fbp'" class="mobile-record"><h3>核验 FBP 入仓</h3><p class="mobile-muted">FBP 入仓逐项核验暂在电脑端完成。请在电脑端打开采购工作台的「FBP入库确认」，核对批次、店铺和SKU后再确认。</p></section><template v-else>
+<template><div class="mobile-inventory-page mobile-list-page"><nav class="mobile-inventory-tabs"><el-button v-if="canAccessPage(auth.user,'/mobile/inventory-capital')" @click="router.push('/mobile/inventory-capital')">库存占用</el-button><el-button :type="section==='stock'?'primary':''" @click="section='stock'">商品库存</el-button><el-button :type="section==='receiving'?'primary':''" @click="section='receiving'">核验收货</el-button><el-button :type="section==='fbp'?'primary':''" @click="section='fbp'">核验 FBP 入仓</el-button></nav><MobileWorkQueue v-if="section==='receiving'" warehouse/><section v-else-if="section==='fbp'" class="mobile-record"><h3>核验 FBP 入仓</h3><p class="mobile-muted">FBP 入仓逐项核验暂在电脑端完成。请在电脑端打开采购工作台的「FBP入库确认」，核对批次、店铺和SKU后再确认。</p></section><template v-else>
  <div class="mobile-list-controls"><MobileInventorySearch :filters="filters" :loading="loading" @search="load(true)" @reset="reset"/>
  <el-alert v-if="error" :title="error" type="warning" :closable="false"/><p v-if="local.error.value" class="mobile-muted">{{local.error.value}}，可点击库存明细重新核对。</p>
  </div><div class="mobile-list-scroll"><article v-for="row in rows" :key="row.id" class="mobile-record"><div class="mobile-record-head"><ProductImagePreview :src="`/api/products/${row.id}/image?thumb=1`" :preview-list="[`/api/products/${row.id}/image`]" size="portrait"/><div><h3>{{row.name}}</h3><small>库存 {{row.inventory_number||row.code||row.id}}</small><InventoryCompositionBadge :product="row" trigger="click" width="min(400px,92vw)"/></div></div><div class="mobile-record-grid"><span>本地实物<b>{{units(local.rows.value.get(Number(row.id))?.physical_stock)}}</b></span><span>可用库存<b>{{units(local.rows.value.get(Number(row.id))?.workflow_free)}}</b></span></div><div class="mobile-record-actions"><el-button @click="Object.assign(dialog,{visible:true,product:row,readOnly:true})">库存明细</el-button><el-button v-if="canWrite&&!(Number(row.component_count)>0)" type="primary" @click="Object.assign(dialog,{visible:true,product:row,readOnly:false})">更新库存</el-button></div></article>

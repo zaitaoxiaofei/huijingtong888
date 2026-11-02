@@ -1,3 +1,5 @@
+import { memoRequestRead } from '../../src/services/request-read-cache.js';
+import { orderReadIdentity } from "../../src/services/order-read-cache.js";
 import { ORDER_SPLIT_SCHEMA } from '../../src/services/order-split-schema.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "../../src/services/order-report-query-sql.js";
 import { readFileSync } from 'node:fs';
@@ -96,15 +98,15 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
   const query=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.query(sql,params))[0];};
   const execute=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.execute(sql,params))[0];};
   const methods=[
-    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
-    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
+    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
+    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','orderPageRowsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
     'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql','reconcileRemovedPostingItemsMysql',
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},

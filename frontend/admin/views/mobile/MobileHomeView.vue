@@ -1,10 +1,11 @@
 <script setup>
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
+import {useRouter} from 'vue-router';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {shanghaiDateKey} from '../../utils/shanghai-date.js';
 import {useAuthStore} from '../../stores/auth.js';
-import {hasPermission} from '../../../../src/shared/permissions.js';
-const auth=useAuthStore(),data=ref({metrics:{}}),loading=ref(false),error=ref('');
+import {canAccessPage,hasPermission} from '../../../../src/shared/permissions.js';
+const router=useRouter(),auth=useAuthStore(),data=ref({metrics:{}}),loading=ref(false),error=ref('');
 let generation=0,financeGeneration=0,timer=0,disposed=false,attempt=0;const financeError=ref('');const financeMetrics=ref({});
 const fields=computed(()=>[
  ...(data.value.financial?[['today_profit','今日利润','money']]:[]),
@@ -27,9 +28,10 @@ onMounted(()=>{refresh();window.addEventListener('erp:auth-scope-changed',resetS
  <el-alert v-if="financeError" :title="'采购和库存金额读取失败，可刷新重试：'+financeError" type="warning" :closable="false"/>
  <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
  <p v-if="data.snapshot?.status==='building'" class="mobile-status">指标正在更新，已返回的数据先展示。</p>
- <section class="mobile-metric-grid"><article v-for="[key,label,type] in fields" :key="key" :class="{'is-key':key==='today_profit'||key==='today_revenue'}" :data-metric="key"><small>{{label}}</small><strong :title="display(key,type)">{{display(key,type)}}</strong></article></section>
+ <section class="mobile-metric-grid"><article v-for="[key,label,type] in fields" :key="key" :class="{'is-key':key==='today_profit'||key==='today_revenue'}" :data-metric="key"><template v-if="key==='inventory_total_value'&&canAccessPage(auth.user,'/mobile/inventory-capital')"><button class="inventory-metric-link" @click="router.push('/mobile/inventory-capital')"><small>{{label}} · 查看明细 →</small><strong :title="display(key,type)">{{display(key,type)}}</strong></button></template><template v-else><small>{{label}}</small><strong :title="display(key,type)">{{display(key,type)}}</strong></template></article></section>
 
 </div></template>
 <style scoped>
+.inventory-metric-link{display:grid;gap:9px;text-align:left;border:0;background:none;padding:0;color:inherit;font:inherit;cursor:pointer;min-width:0}
 .mobile-home-page{display:grid;gap:12px}.mobile-home-heading{display:flex;justify-content:space-between;align-items:center;gap:8px}.mobile-home-heading h1{margin:0 0 5px;font-size:20px}.mobile-home-heading small,.mobile-status{color:var(--el-text-color-secondary);font-size:11px;line-height:1.5}.mobile-metric-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.mobile-metric-grid article{min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:10px;padding:13px 12px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color);min-height:76px;box-sizing:border-box}.mobile-metric-grid article.is-key{background:var(--el-color-primary-light-9);border-color:var(--el-color-primary-light-7)}.mobile-metric-grid small{font-size:12px;color:var(--el-text-color-regular)}.mobile-metric-grid strong{font-size:clamp(17px,4.6vw,23px);line-height:1.2;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--el-text-color-primary)}.mobile-metric-grid .is-key strong{color:var(--el-color-primary)}@media(min-width:700px){.mobile-metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 </style>

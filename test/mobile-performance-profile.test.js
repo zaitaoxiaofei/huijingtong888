@@ -11,7 +11,7 @@ import * as orderSearch from '../src/shared/order-search.js';
 import * as orderUtils from '../frontend/admin/views/mobile/mobile-orders-utils.js';
 import * as shanghai from '../frontend/admin/utils/shanghai-date.js';
 const owner={id:1,personId:1,name:'Fixture member',username:'fixture',roles:['admin'],tenant:{id:2,role:'owner'}};
-async function component(file,{inlineTemplate=false,get=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
+export async function component(file,{inlineTemplate=false,get=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
  const {descriptor}=parse(fs.readFileSync(new URL('../frontend/admin/'+file,import.meta.url),'utf8'));
  const script=compileScript(descriptor,{id:'mobile-regression',inlineTemplate});
  const code=script.content.replace(/^import\s+['"][^'"]+['"];?$/gm,'').replace(/import\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\2;?/g,(_whole,bindings,_quote,id)=>{

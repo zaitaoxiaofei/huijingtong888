@@ -78,6 +78,11 @@ test('pending purchase correction and direct receipt preserve money, stock and e
    const preview=await service.previewReceive(receipt,session(2));await service.receive({...receipt,expected_revision:preview.revision},session(2));assert.equal(await stock(203),7);
    await assert.rejects(service.receive(receipt,session(2)));assert.equal(await stock(203),7);
    const left=await service.receipts(203,session(2));assert.equal(left.length,1);assert.equal(Number(left[0].quantity),4);
+   const local=await legacy.financeInventoryCapitalDetailsMysql({kind:'local',query:'Receipt stock'},2);
+   const transit=await legacy.financeInventoryCapitalDetailsMysql({kind:'transit',query:'Receipt stock'},2);
+   assert.equal(local.rows[0].quantity,7);assert.equal(local.rows[0].inventory_value,70);
+   assert.equal(transit.rows.length,1);assert.equal(transit.rows[0].quantity,4);assert.equal(transit.rows[0].inventory_value,40);
+
   });
   await t.test('historical stocktake count remains explicit; preview never guesses an after total',async()=>{
    const before=await ledger(203);await legacy.applyProcurementLedgerMysql({action_type:'stocktake',product_id:203,revision:before.revision,request_key:randomUUID(),counted_quantity:7,reason_code:'other',reason_note:'实盘核实'},3,2);
@@ -85,6 +90,10 @@ test('pending purchase correction and direct receipt preserve money, stock and e
    const unknown=await service.previewReceive(input,session(2));assert.equal(unknown.requires_count,true);assert.equal(unknown.physical_after,null);assert.equal(unknown.available_after,null);
    const known=await service.previewReceive({...input,counted_quantity:11},session(2));assert.equal(known.physical_after,11);assert.equal(known.available_after,11);
    await service.receive({...input,counted_quantity:11,expected_revision:known.revision},session(2));assert.equal(await stock(203),11);
+   const local=await legacy.financeInventoryCapitalDetailsMysql({kind:'local',query:'Receipt stock'},2);
+   assert.equal(local.rows[0].quantity,11);assert.equal(local.rows[0].inventory_value,110);
+   assert.equal((await legacy.financeInventoryCapitalDetailsMysql({kind:'transit',query:'Receipt stock'},2)).rows.length,0);
+
   });
   await t.test('arrival cards count pending quantities across batches, respecting search and tenant',async()=>{
    const result=await createProcurementArrivals().list({status:'open',summary_only:'1',product_id:200},session());assert.equal(result.summary.open,1);assert.equal(result.summary.open_quantity,6);assert.equal(result.summary.arrived_quantity,0);

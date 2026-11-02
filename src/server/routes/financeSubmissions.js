@@ -29,6 +29,16 @@ export async function handleFinanceSubmissionDownload({ req, res, url, parts, wr
     const payroll = url.searchParams.get("kind") === "payroll";
     if (payroll) submissionActor(req._session, true);
     const options = { companies: await financeSubmissions.companies(req._session), name: await financeSubmissions.identity(req._session) };
+    if (payroll) {
+      const month=url.searchParams.get("month"),company=url.searchParams.get("company_id");
+      if(month&&!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))throw Object.assign(new Error("工资月份无效，请选择 YYYY-MM 格式的月份"),{statusCode:400});
+      if(company&&company!=="all") {
+        const owned=options.companies.find(row=>String(row.id)===company);
+        if(!owned)throw Object.assign(new Error("公司不存在或不属于当前企业"),{statusCode:404});
+        options.companies=[owned];
+      }
+      options.month=month||"";
+    }
     buffer = payroll ? await payrollTemplate(options) : await reimbursementTemplate(options);
     name = payroll ? "企业工资模板.xlsx" : "企业报销模板.xlsx";
   } else {

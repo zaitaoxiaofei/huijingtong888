@@ -8,19 +8,14 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import ErpPeriodSwitcher from "../../components/ErpPeriodSwitcher.vue";
 import { shanghaiDateKey, shanghaiDateText } from "../../utils/shanghai-date.js";
+import { billingDateRange } from "../../utils/billing-period.js";
 import { formatInteger, formatMoney } from "./profit-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let abortController = null;
 
-function initialDateRange() {
-  const today = shanghaiDateKey();
-  const legacyMonth = `${route.query.year || today.slice(0, 4)}-${String(route.query.month || route.query.selectedMonth || today.slice(5, 7)).padStart(2, "0")}`;
-  const lastDay = new Date(Number(legacyMonth.slice(0, 4)), Number(legacyMonth.slice(5, 7)), 0).getDate();
-  const legacyTo = legacyMonth === today.slice(0, 7) ? today : `${legacyMonth}-${String(lastDay).padStart(2, "0")}`;
-  return [String(route.query.from || `${legacyMonth}-01`), String(route.query.to || legacyTo)];
-}
+function initialDateRange() { return billingDateRange(route.query, shanghaiDateKey()); }
 
 const state = reactive({
   loading: false,
@@ -169,6 +164,7 @@ function openOrderDetails(shop = null) {
 }
 
 function defaultCompanyId(shopId = "") {
+  if (state.companyId !== "all") return String(state.companyId);
   const assignment = state.assignments.find((item) => String(item.shop_id) === String(shopId || state.shopId));
   return String(assignment?.company_id || state.companies[0]?.id || "");
 }
@@ -293,11 +289,11 @@ function handleReset() {
 
 onMounted(loadData);
 watch(
-  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId],
+  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId, route.query.year, route.query.month, route.query.selectedMonth],
   ([from, to, shopId, companyId], previous) => {
-    if (!previous) return;
-    const nextRange = [String(from || state.dateRange[0]), String(to || state.dateRange[1])];
-    const nextShopId = String(shopId || state.shopId || "all");
+    if (!previous || route.path !== "/profit/monthly-billing") return;
+    const nextRange = initialDateRange();
+    const nextShopId = String(shopId || "all");
     const nextCompanyId = String(companyId || "all");
     if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId && nextCompanyId === state.companyId) return;
     state.dateRange = nextRange;
@@ -363,6 +359,7 @@ onBeforeUnmount(() => abortController?.abort());
           <el-button class="erp-btn erp-btn-secondary" @click="router.push('/finance-center')">返回年度总览</el-button>
           <el-button class="erp-btn erp-btn-secondary" @click="capitalDrawer = true">采购支出与库存资金</el-button>
           <el-button class="erp-btn erp-btn-secondary" :icon="Plus" @click="openExpense(null, 'other')">补录费用</el-button>
+          <el-button class="erp-btn erp-btn-secondary" @click="router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId,action:'import'}})">补录本月工资</el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :icon="View" @click="openOrderDetails()">订单明细</el-button>
         </div>
       </div>

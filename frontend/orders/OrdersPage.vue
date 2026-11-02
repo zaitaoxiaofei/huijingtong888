@@ -14,14 +14,8 @@ import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import OrdersQuickFilters from "./components/OrdersQuickFilters.vue";
 import ShippedReceiptDialog from "./components/ShippedReceiptDialog.vue";
 import OrdersTable from "./components/OrdersTable.vue";
-import ProcurementLedgerDialog from "../admin/components/procurement/ProcurementLedgerDialog.vue";
-import HistoricalPurchaseQuickDialog from "../admin/components/procurement/HistoricalPurchaseQuickDialog.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
-import OzonCategorySelect from "../admin/components/listing/OzonCategorySelect.vue";
-import ProductCompositionDialog from "../admin/components/inventory/ProductCompositionDialog.vue";
-import ProductCreateEditDialog from "../admin/components/inventory/ProductCreateEditDialog.vue";
-import InventoryStructuredSearch from "../admin/components/inventory/InventoryStructuredSearch.vue";
 import { apiClient,currentApiCacheScope } from "../admin/utils/api.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
@@ -40,6 +34,13 @@ import { inventoryProductNameGroup, scoreInventorySimilarity } from "../admin/ut
 import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
+
+const ProcurementLedgerDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementLedgerDialog.vue"));
+const HistoricalPurchaseQuickDialog = defineAsyncComponent(() => import("../admin/components/procurement/HistoricalPurchaseQuickDialog.vue"));
+const OzonCategorySelect = defineAsyncComponent(() => import("../admin/components/listing/OzonCategorySelect.vue"));
+const ProductCompositionDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCompositionDialog.vue"));
+const ProductCreateEditDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCreateEditDialog.vue"));
+const InventoryStructuredSearch = defineAsyncComponent(() => import("../admin/components/inventory/InventoryStructuredSearch.vue"));
 
 const route = useRoute();
 const inventoryAuth = useAuthStore();
@@ -3903,6 +3904,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <ProductCreateEditDialog
+      v-if="inventoryProductEditorVisible"
       ref="inventoryProductEditorRef"
       v-model:visible="inventoryProductEditorVisible"
       :mode="inventoryProductEditorMode"
@@ -3920,6 +3922,7 @@ onBeforeUnmount(() => {
     />
 
     <ProductCreateEditDialog
+      v-if="quickComponentCreateVisible"
       v-model:visible="quickComponentCreateVisible"
       mode="create"
       target="inventory"
@@ -3932,6 +3935,7 @@ onBeforeUnmount(() => {
     />
 
     <ProductCompositionDialog
+      v-if="compositionDialogVisible"
       v-model:visible="compositionDialogVisible"
       :product="compositionDialogProduct"
       :refresh-key="compositionDialogRefreshKey"

@@ -1,3 +1,5 @@
+import { memoRequestRead } from './request-read-cache.js';
+import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
@@ -3528,8 +3530,7 @@ export async function updatePackagingFeeRuleMysql(body = {}, personId = null) {
 }
 
 async function logisticsTenantScopeMysql(tenantId = "admin", alias = "l") {
-  const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
-  const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
+  const { id: normalizedTenantId, defaultTenant } = await readRequestTenantContextMysql(tenantId);
   const hasTenantColumn = await mysqlSchemaColumnExists("logistics_fee_rules", "tenant_id");
   if (!hasTenantColumn) {
     throw Object.assign(new Error("物流规则企业隔离暂不可用：logistics_fee_rules.tenant_id 尚未迁移，请管理员先完成物流规则租户迁移。"), { statusCode: 503 });
@@ -7997,6 +7998,7 @@ export async function updateOrderMarkMysql(orderId, body = {}, userId = null, te
   if (!markType && !note) {
     await mysqlExecute("DELETE FROM order_marks WHERE order_id = ?", [id]);
 
+    invalidateOrderReadCache();
     return { ok: true, id, mark_type: "", note: "" };
   }
 
@@ -8012,6 +8014,7 @@ export async function updateOrderMarkMysql(orderId, body = {}, userId = null, te
 
 
 
+  invalidateOrderReadCache();
   return { ok: true, id, mark_type: markType, note };
 }
 
@@ -8050,6 +8053,7 @@ export async function markOrderLabelsPrintedMysql(body = {}, userId = null, tena
         printed_by_person_id = VALUES(printed_by_person_id)
     `, [row.id, batchId, inputOrder.get(String(row.id)) || null, personId]);
   }
+  invalidateOrderReadCache();
   return { ok: true, count: orderedRows.length, print_batch_id: batchId };
 }
 
@@ -8070,6 +8074,7 @@ export async function removeFailedOrderLabelPrintBatchMysql(body = {}, userId = 
       `DELETE printed FROM order_label_prints printed JOIN orders o ON o.id = printed.order_id JOIN shops s ON s.id = o.shop_id WHERE printed.print_batch_id = ? AND printed.printed_by_person_id IS NULL AND ${orderTenantPredicateMysql("s", scope)}`,
       [batchId]
     );
+  invalidateOrderReadCache();
   return { ok: true, count: Number(result?.affectedRows || 0), print_batch_id: batchId };
 }
 
@@ -15135,6 +15140,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
 
   if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
   if(cycleSettingsChanged)invalidateOrderProcurementCoverage();
+  invalidateOrderReadCache();
 
   let outboundSync = null;
   let outboundSyncWarning = "";
@@ -30084,10 +30090,15 @@ export async function ordersMysql(tenantId = "admin") {
   return orderRowsByIdsMysql(ids.map((row) => row.id), undefined, tenantId);
 }
 
-export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false } = {}) {
+export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false, bypassCache = false } = {}) {
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
+  if (summaryOnly && coveragePromise === null && !bypassCache) {
+    const value = await cachedOrderRead(`rows:${tenantScope.id}:${tenantScope.defaultTenant ? 1 : 0}:${cleanIds.join(',')}`,
+      () => orderRowsByIdsMysql(cleanIds, null, tenantId, { summaryOnly: true, bypassCache: true }));
+    return structuredClone(value);
+  }
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "visible_rule");
   await ensureProcurementOrderSourceSchemaMysql();
   await ensureSkuInventoryRecipeSchemaMysql();
@@ -30145,7 +30156,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN scoped_order_items scoped_item ON scoped_item.order_item_id = allocation.order_item_id AND scoped_item.order_id = allocation.order_id
       WHERE allocation.status = 'allocated'
     )
-    SELECT o.*, s.name AS shop_name,
+    SELECT ${summaryOnly ? 'STRAIGHT_JOIN ' : ''}o.*, s.name AS shop_name,
       (SELECT COUNT(*) FROM order_items item_count_oi WHERE item_count_oi.order_id = o.id) AS item_count,
       (SELECT COALESCE(SUM(total_oi.quantity), 0) FROM order_items total_oi WHERE total_oi.order_id = o.id) AS total_quantity,
       (SELECT COALESCE(SUM(revenue_oi.sale_price * revenue_oi.quantity), 0) FROM order_items revenue_oi WHERE revenue_oi.order_id = o.id) AS revenue,
@@ -30269,7 +30280,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       olp.printed_at AS printed_at,
       olp.print_batch_id AS print_batch_id,
       olp.print_sequence AS print_sequence,
-      raw.raw_json AS raw_json
+      ${summaryOnly ? "NULL" : "raw.raw_json"} AS raw_json
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
@@ -30441,11 +30452,21 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     LEFT JOIN logistics_fee_rules visible_rule ON visible_rule.id = oi.frozen_logistics_rule_id AND ${billingScope.sql}
     LEFT JOIN order_marks om ON om.order_id = o.id
     LEFT JOIN order_label_prints olp ON olp.order_id = o.id
-    LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
+    ${summaryOnly ? "" : "LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number"}
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
       ${tenantScope ? `AND ${orderTenantPredicateMysql("s", tenantScope)}` : ""}
     GROUP BY o.id
   `, [...cleanIds, ...billingScope.params, ...cleanIds]);
+  // Keep large raw payloads out of GROUP BY temporary rows. Fetch exactly the
+  // same owned source payload after numeric aggregation, before enrichment.
+  if (summaryOnly && rows.length) {
+    const payloads = await mysqlQuery(`SELECT o.id, raw.raw_json
+      FROM orders o JOIN shops s ON s.id=o.shop_id
+      LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
+      WHERE o.id IN (${cleanIds.map(() => "?").join(",")}) AND ${orderTenantPredicateMysql("s", tenantScope)}`, cleanIds);
+    const byOrder = new Map(payloads.map(row => [Number(row.id), row.raw_json]));
+    for (const row of rows) row.raw_json = byOrder.get(Number(row.id)) ?? null;
+  }
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
   return (await enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
 }
@@ -30508,9 +30529,15 @@ async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
   }).sort((a, b) => ordering.get(Number(a.id)) - ordering.get(Number(b.id)));
 }
 
+async function readRequestTenantContextMysql(tenantId = "admin") {
+  return memoRequestRead(`tenant-context:${String(tenantId || "admin").trim()}`, async () => {
+    const id = await resolveShopTenantIdMysql(tenantId);
+    return Object.freeze({ id, defaultTenant: await isDefaultShopTenantMysql(id) });
+  });
+}
+
 async function orderListTenantScopeMysql(tenantId = "admin") {
-  const id = await resolveShopTenantIdMysql(tenantId);
-  const defaultTenant = await isDefaultShopTenantMysql(id);
+  const { id, defaultTenant } = await readRequestTenantContextMysql(tenantId);
   for (const table of ["shops", "sku_mappings", "products", "procurement_requests", "inventory_movements", "product_components", "logistics_fee_rules", "inbound_records", "purchase_orders", "purchase_order_items"]) {
     if (!await mysqlSchemaColumnExists(table, "tenant_id")) {
       throw Object.assign(new Error(`企业订单列表暂不可用：${table}.tenant_id 尚未迁移，无法安全隔离订单及关联数据。`), { statusCode: 503 });
@@ -30551,11 +30578,11 @@ async function assertOrderTaskAccessMysql(scope, options = {}, permissions = ["o
   throwIfAbortedMysql(options.signal);
 }
 
-async function orderTenantCoverageMysql(scope) {
-  return orderProcurementCoverageMysql({
+async function orderTenantCoverageMysql(scope, { queuesOnly = false } = {}) {
+  return cachedOrderRead(`${queuesOnly ? "queues" : "coverage"}:${scope.id}:${scope.defaultTenant ? 1 : 0}`, () => orderProcurementCoverageMysql({
     tenantId: scope.id,
-    includeLegacyTenantNull: scope.defaultTenant, fresh: true
-  });
+    includeLegacyTenantNull: scope.defaultTenant, fresh: true, queuesOnly
+  }));
 }
 
 async function loadOglDispatchMembersMysql(ids, tenantScope) {
@@ -30614,7 +30641,12 @@ async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope =
   const where = [base.where];
   const params = [...base.params];
   addOrderSearchSqlMysql(where, params, query, tenantScope);
-  where.push(orderStatusSqlMysql(String(query.status || "all"), coverage, tenantScope));
+  const status = String(query.status || "all");
+  const reuseEvidence = tenantScope && !String(query.searchQuery || query.search_query || "").trim()
+    && ["awaiting_packaging","awaiting_deliver","ogl_bound","ogl_dispatched","delivering"].includes(status);
+  const evidenceAlias = reuseEvidence ? "ogl_filter_evidence" : null;
+  const joins = reuseEvidence ? orderPagedOglEvidenceJoinMysql(tenantScope, evidenceAlias) : "";
+  where.push(orderStatusSqlMysql(status, coverage, tenantScope, evidenceAlias));
 
   const mark = String(query.markFilter || query.mark_filter || "all");
   if (mark === "quality") {
@@ -30663,7 +30695,7 @@ async function orderFilteredSqlMysql(query, base, coverage = null, tenantScope =
     const transitDays = Number.isFinite(requestedTransitDays) ? Math.min(10, Math.max(1, requestedTransitDays)) : 3;
     where.push(`EXISTS (SELECT 1 FROM order_items overdue_item LEFT JOIN sku_mappings overdue_mapping ON overdue_mapping.shop_id = o.shop_id AND overdue_mapping.ozon_sku = overdue_item.ozon_sku AND overdue_mapping.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("overdue_mapping", tenantScope)}` : ""} JOIN inbound_records overdue_inbound ON overdue_inbound.product_id = overdue_mapping.product_id AND overdue_inbound.status = 'pending_arrival' ${tenantScope ? `AND ${orderTenantPredicateMysql("overdue_inbound", tenantScope)}` : ""} WHERE overdue_item.order_id = o.id AND TIMESTAMPDIFF(HOUR, overdue_inbound.created_at, UTC_TIMESTAMP()) >= ${transitDays * 24})`);
   }
-  return { joins: "", where: where.filter(Boolean).join(" AND "), params };
+  return { joins, where: where.filter(Boolean).join(" AND "), params };
 }
 
 function orderQuickFilterOrderSqlMysql(query = {}, tenantScope = null) {
@@ -30679,10 +30711,10 @@ function orderQuickFilterOrderSqlMysql(query = {}, tenantScope = null) {
   )`;
   const nearDeadline = String(query.nearShipmentDeadline || query.near_shipment_deadline || "") === "1";
   const procurementTransit = String(query.procurementTransitOverdue || query.procurement_transit_overdue || "") === "1";
-  if (nearDeadline && procurementTransit) return `${deadline} ASC, ${oldestInbound} ASC, o.ordered_at DESC`;
-  if (nearDeadline) return `${deadline} ASC, o.ordered_at DESC`;
-  if (procurementTransit) return `${oldestInbound} ASC, o.ordered_at DESC`;
-  return "o.ordered_at DESC";
+  if (nearDeadline && procurementTransit) return `${deadline} ASC, ${oldestInbound} ASC, o.ordered_at DESC, o.id DESC`;
+  if (nearDeadline) return `${deadline} ASC, o.ordered_at DESC, o.id DESC`;
+  if (procurementTransit) return `${oldestInbound} ASC, o.ordered_at DESC, o.id DESC`;
+  return "o.ordered_at DESC, o.id DESC";
 }
 
 function orderProductShippingExistsSqlMysql(methods = []) {
@@ -31049,65 +31081,72 @@ async function billingAiUsageMysql(from, to, scope) {
   };
 }
 
-async function currentInventoryCapitalMysql(scope) {
-  const [localInventory, fbpInventory, inTransit] = await Promise.all([
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(stock.quantity * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
-        COALESCE(SUM(stock.quantity), 0) AS inventory_quantity
-      FROM (
-        SELECT im.product_id, GREATEST(SUM(im.quantity_delta), 0) AS quantity
-        FROM inventory_movements im
-        WHERE im.status = 'posted' AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
-        GROUP BY im.product_id
-      ) stock
-      JOIN products p ON p.id = stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
-      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
-        SELECT pcv.id
-        FROM purchase_cost_versions pcv
-        WHERE pcv.product_id = stock.product_id AND pcv.status = 'active' AND ${orderTenantPredicateMysql("pcv", scope)}
-        ORDER BY pcv.version_no DESC, pcv.id DESC
-        LIMIT 1
-      )
-    `),
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0) * COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)), 0) AS inventory_value,
-        COALESCE(SUM(GREATEST(COALESCE(oss.present, 0), 0)), 0) AS inventory_quantity
-      FROM ozon_stock_snapshots oss
-      JOIN shops owned_shop ON owned_shop.id = oss.shop_id AND ${orderTenantPredicateMysql("owned_shop", scope)}
-      LEFT JOIN sku_mappings sm ON sm.shop_id = oss.shop_id AND sm.ozon_sku = oss.ozon_sku AND sm.active = 1 AND ${orderTenantPredicateMysql("sm", scope)}
-      LEFT JOIN products p ON p.id = COALESCE(oss.product_id, sm.product_id) AND ${orderTenantPredicateMysql("p", scope)}
-      LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
-        SELECT pcv.id
-        FROM purchase_cost_versions pcv
-        WHERE pcv.product_id = p.id AND pcv.status = 'active' AND ${orderTenantPredicateMysql("pcv", scope)}
-        ORDER BY pcv.version_no DESC, pcv.id DESC
-        LIMIT 1
-      )
-      WHERE oss.stock_type = 'fbp_real'
-    `),
-    mysqlQueryOne(`
-      SELECT
-        COALESCE(SUM(quantity), 0) AS inventory_quantity,
-        COALESCE(SUM(amount + shipping_amount), 0) AS inventory_value
-      FROM inbound_records ir
-      WHERE ir.status = 'pending_arrival' AND ${orderTenantPredicateMysql("ir", scope)}
-    `)
-  ]);
-  const localValue = Number(localInventory?.inventory_value || 0);
-  const fbpValue = Number(fbpInventory?.inventory_value || 0);
-  const inTransitValue = Number(inTransit?.inventory_value || 0);
+// Summary and drill-down share these sources so valuation and stock boundaries stay identical.
+function inventoryCapitalSourcesMysql(scope) {
+  const cost = "COALESCE(NULLIF(latest_cost.landed_unit_cost, 0), p.purchase_cost, 0)";
+  const costJoin = `LEFT JOIN purchase_cost_versions latest_cost ON latest_cost.id = (
+    SELECT pcv.id FROM purchase_cost_versions pcv WHERE pcv.product_id=p.id
+      AND pcv.status='active' AND ${orderTenantPredicateMysql("pcv", scope)}
+    ORDER BY pcv.version_no DESC, pcv.id DESC LIMIT 1)`;
+  const costFields = `${cost} AS unit_cost,
+    CASE WHEN COALESCE(latest_cost.landed_unit_cost,0) != 0 THEN 'purchase_version' ELSE 'product_cost' END AS cost_basis,
+    latest_cost.version_no AS cost_version, CASE WHEN ${cost} <= 0 THEN 1 ELSE 0 END AS cost_missing`;
   return {
-    snapshot_basis: "current",
-    local_inventory_quantity: Number(localInventory?.inventory_quantity || 0),
-    local_inventory_value: roundMoneyMysql(localValue),
-    fbp_inventory_quantity: Number(fbpInventory?.inventory_quantity || 0),
-    fbp_inventory_value: roundMoneyMysql(fbpValue),
-    in_transit_quantity: Number(inTransit?.inventory_quantity || 0),
-    in_transit_value: roundMoneyMysql(inTransitValue),
-    inventory_total_value: roundMoneyMysql(localValue + fbpValue + inTransitValue)
+    local: `SELECT p.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      stock.quantity,stock.quantity * ${cost} AS inventory_value,${costFields},
+      stock.updated_at,stock.unclassified_movements,
+      NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
+      FROM (SELECT im.product_id,GREATEST(SUM(im.quantity_delta),0) AS quantity,
+        MAX(im.created_at) AS updated_at,
+        SUM(CASE WHEN COALESCE(im.stock_location,'') != 'LOCAL' THEN 1 ELSE 0 END) AS unclassified_movements
+        FROM inventory_movements im WHERE im.status='posted'
+          AND ${localStockLocationPredicateMysql("im")} AND ${orderTenantPredicateMysql("im", scope)}
+        GROUP BY im.product_id) stock
+      JOIN products p ON p.id=stock.product_id AND ${orderTenantPredicateMysql("p", scope)}
+      ${costJoin} WHERE stock.quantity > 0`,
+    fbp: `SELECT oss.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      GREATEST(COALESCE(oss.present,0),0) AS quantity,
+      GREATEST(COALESCE(oss.present,0),0) * ${cost} AS inventory_value,${costFields},
+      oss.synced_at AS updated_at,0 AS unclassified_movements,
+      owned_shop.name AS shop_name,oss.warehouse_name,oss.ozon_sku,NULL AS order_no,NULL AS tracking_number,NULL AS received_at
+      FROM ozon_stock_snapshots oss
+      JOIN shops owned_shop ON owned_shop.id=oss.shop_id AND ${orderTenantPredicateMysql("owned_shop", scope)}
+      LEFT JOIN sku_mappings sm ON sm.shop_id=oss.shop_id AND sm.ozon_sku=oss.ozon_sku
+        AND sm.active=1 AND ${orderTenantPredicateMysql("sm", scope)}
+      LEFT JOIN products p ON p.id=COALESCE(oss.product_id,sm.product_id) AND ${orderTenantPredicateMysql("p", scope)}
+      ${costJoin} WHERE oss.stock_type='fbp_real' AND oss.present > 0`,
+    transit: `SELECT ir.id AS row_id,p.id AS product_id,p.name AS product_name,p.code,p.inventory_number,
+      ir.quantity,ir.amount + ir.shipping_amount AS inventory_value,
+      CASE WHEN ir.quantity > 0 THEN (ir.amount+ir.shipping_amount)/ir.quantity ELSE NULL END AS unit_cost,
+      'purchase_batch' AS cost_basis,NULL AS cost_version,
+      CASE WHEN ir.amount+ir.shipping_amount <= 0 THEN 1 ELSE 0 END AS cost_missing,
+      ir.updated_at,0 AS unclassified_movements,NULL AS shop_name,NULL AS warehouse_name,NULL AS ozon_sku,
+      po.order_no,ir.tracking_number,ir.received_at
+      FROM inbound_records ir
+      LEFT JOIN products p ON p.id=ir.product_id AND ${orderTenantPredicateMysql("p", scope)}
+      LEFT JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${orderTenantPredicateMysql("po", scope)}
+      WHERE ir.status='pending_arrival' AND ${orderTenantPredicateMysql("ir", scope)}`
   };
+}
+
+async function currentInventoryCapitalMysql(scope) {
+  const sources = inventoryCapitalSourcesMysql(scope);
+  const values = await Promise.all(Object.entries(sources).map(async ([kind, sql]) => {
+    const row = await mysqlQueryOne(`SELECT COALESCE(SUM(quantity),0) AS quantity,
+      COALESCE(SUM(inventory_value),0) AS value,COUNT(*) AS item_count,
+      COALESCE(SUM(cost_missing),0) AS missing_cost_count,
+      COALESCE(SUM(CASE WHEN product_id IS NULL THEN 1 ELSE 0 END),0) AS unmapped_count,
+      COALESCE(SUM(CASE WHEN unclassified_movements > 0 THEN 1 ELSE 0 END),0) AS unclassified_count
+      FROM (${sql}) capital`);
+    return [kind,{quantity:Number(row.quantity),value:Number(row.value),item_count:Number(row.item_count),
+      missing_cost_count:Number(row.missing_cost_count),unmapped_count:Number(row.unmapped_count),unclassified_count:Number(row.unclassified_count)}];
+  }));
+  const categories = Object.fromEntries(values), local = categories.local, fbp = categories.fbp, transit = categories.transit;
+  return { snapshot_basis:'current', categories,
+    local_inventory_quantity:local.quantity,local_inventory_value:roundMoneyMysql(local.value),
+    fbp_inventory_quantity:fbp.quantity,fbp_inventory_value:roundMoneyMysql(fbp.value),
+    in_transit_quantity:transit.quantity,in_transit_value:roundMoneyMysql(transit.value),
+    inventory_total_value:roundMoneyMysql(local.value+fbp.value+transit.value) };
 }
 
 export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admin") {
@@ -31115,6 +31154,33 @@ export async function financeInventoryCapitalMysql(_query = {}, tenantId = "admi
   const scope = await orderListTenantScopeMysql(tenantId);
   await ensureStockLocationSchemaMysql();
   return { ...await currentInventoryCapitalMysql(scope), snapshot_at: new Date().toISOString() };
+}
+
+export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId = "admin") {
+  ensureMysqlCutoverEnabled();
+  const scope = await orderListTenantScopeMysql(tenantId);
+  await ensureStockLocationSchemaMysql();
+  const kind = String(query.kind || 'local'), sources = inventoryCapitalSourcesMysql(scope);
+  if (!Object.hasOwn(sources,kind)) throw Object.assign(new Error('请选择国内仓、FBP仓或采购在途'),{statusCode:400});
+  const page = Math.max(1,Math.min(100000,Math.floor(Number(query.page)||1)));
+  const pageSize = Math.max(1,Math.min(100,Math.floor(Number(query.pageSize)||20)));
+  const keyword = String(query.query || '').trim().slice(0,128), params = [];
+  let where = '';
+  if (keyword) {
+    where = " WHERE CONCAT_WS(' ',product_name,inventory_number,code,ozon_sku,shop_name,warehouse_name,order_no,tracking_number,CAST(row_id AS CHAR)) COLLATE utf8mb4_unicode_ci LIKE ? ESCAPE '='";
+    params.push(`%${keyword.replace(/[=%_]/g,'=$&')}%`);
+  }
+  const source = `FROM (${sources[kind]}) capital${where}`;
+  const [rows, totals, summary] = await Promise.all([
+    mysqlQuery(`SELECT * ${source} ORDER BY inventory_value DESC,quantity DESC,row_id LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]),
+    mysqlQueryOne(`SELECT COUNT(*) AS total,COALESCE(SUM(quantity),0) AS quantity,COALESCE(SUM(inventory_value),0) AS value ${source}`,params),
+    currentInventoryCapitalMysql(scope)
+  ]);
+  return {kind,page,pageSize,total:Number(totals.total),filtered_quantity:Number(totals.quantity),
+    filtered_value:roundMoneyMysql(totals.value),summary,snapshot_at:new Date().toISOString(),
+    rows:rows.map(row=>({...row,product_id:Number(row.product_id)||null,row_id:Number(row.row_id),
+      quantity:Number(row.quantity),unit_cost:row.unit_cost==null?null:Number(row.unit_cost),inventory_value:Number(row.inventory_value),
+      cost_missing:Boolean(Number(row.cost_missing)),unclassified_movements:Number(row.unclassified_movements)}))};
 }
 
 async function monthlyProcurementInventorySummaryMysql(from = "", to = "", scope) {
@@ -31207,8 +31273,9 @@ function withRestrictedOrderIdsMysql(base, ids) {
   };
 }
 
-function orderPagedOglEvidenceJoinMysql(tenantScope) {
+function orderPagedOglEvidenceJoinMysql(tenantScope, alias = "ogl_count_evidence") {
   if (!tenantScope) return "";
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error("Invalid order evidence alias");
   // Aggregate once rather than re-running the same evidence EXISTS in every
   // nested status predicate. Grouping also keeps one result per source order.
   return `LEFT JOIN (
@@ -31228,7 +31295,7 @@ function orderPagedOglEvidenceJoinMysql(tenantScope) {
         AND ogl_count_batch.official_status IN ('observed','created','approved','sync_required','confirm_unknown','mismatch')
       ))
     GROUP BY ogl_count_member.order_id
-  ) ogl_count_evidence ON ogl_count_evidence.order_id = o.id`;
+  ) ${alias} ON ${alias}.order_id = o.id`;
 }
 
 function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
@@ -31247,6 +31314,8 @@ function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
 }
 
 async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
+  const cacheKey = `counts:${tenantScope?.id || "all"}:${orderReadIdentity(coverage)}:${createHash("sha256").update(JSON.stringify([base.where,base.params])).digest("hex")}`;
+  return cachedOrderRead(cacheKey, async () => {
   const evidenceAlias = tenantScope ? "ogl_count_evidence" : null;
   const statusSql = status => status === "unbound" && tenantScope
     ? "unbound_count_evidence.order_id IS NOT NULL"
@@ -31286,6 +31355,25 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
     purchase_in_transit: Number(row?.purchase_in_transit || 0),
     purchase_records_missing: Number(row?.purchase_records_missing || 0)
   };
+  });
+}
+
+// Current-page physical/available balances are independent of full queue counts.
+// Start both reads together and retain the established deferred fallback if
+// a balance cannot be loaded; never substitute a zero for an unknown balance.
+async function orderPageRowsMysql(ids, coverage, tenantId, includeInventoryAvailability = false) {
+  const balances = includeInventoryAvailability && ids.length
+    ? orderInventoryAvailabilityMysql({ orderIds: ids.join(',') }, tenantId).catch(error => {
+      console.warn(`[orders] current-page inventory deferred: ${String(error?.code || error?.name || 'unknown')}`);
+      return null;
+    }) : null;
+  const [rows, facts] = await Promise.all([
+    orderRowsByIdsMysql(ids, coverage, tenantId, { summaryOnly: true }), balances
+  ]);
+  if (!facts) return rows;
+  const byOrder = new Map(facts.rows.map(row => [Number(row.order_id), row.inventory_availability]));
+  return rows.map(row => Array.isArray(byOrder.get(Number(row.id)))
+    ? { ...row, inventory_availability: byOrder.get(Number(row.id)) } : row);
 }
 
 export async function ordersPagedMysql(query = {}, tenantId = "admin") {
@@ -31301,6 +31389,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const includeRows = String(query.includeRows ?? query.include_rows ?? "1") !== "0";
+  const includeInventoryAvailability = String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? "0") === "1";
   const includeCounts = String(query.includeCounts ?? query.include_counts ?? "1") !== "0";
   const includeLogisticsOptions = String(query.includeLogisticsOptions ?? query.include_logistics_options ?? "1") !== "0";
   const [rawBase, optionsBase] = await Promise.all([
@@ -31326,7 +31415,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const [logisticsSummaryRows, coverage] = await Promise.all([
     carrierOnly ? loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
       : reuseLogisticsSummary ? loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null,
-    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope) : null
+    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope, { queuesOnly: !includeRows }) : null
   ]);
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
@@ -31343,12 +31432,13 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   // Pagination must use the active filter, not the all-status tab count.
   // Status counts deliberately omit filters such as the selected status,
   // search, mark, fulfillment type, and print state.
-  const totalPromise = mysqlQueryOne(`
+  const loadFilteredTotal = () => mysqlQueryOne(`
     SELECT COUNT(DISTINCT o.id) AS total
     FROM orders o
     ${filtered.joins}
     WHERE ${filtered.where}
   `, filtered.params);
+  let totalPromise = includeRows ? Promise.resolve(null) : loadFilteredTotal();
   const start = (page - 1) * pageSize;
   let inventoryTotal = null;
   let rows = [];
@@ -31365,10 +31455,10 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
       inventoryTotal = idRows.length;
       const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId);
       const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
-      rows = await orderRowsByIdsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, { summaryOnly: true });
+      rows = await orderPageRowsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, includeInventoryAvailability);
     } else {
       const idRows = await mysqlQuery(`
-        SELECT o.id
+        SELECT o.id, COUNT(*) OVER() AS filtered_total
         FROM orders o
         ${filtered.joins}
         WHERE ${filtered.where}
@@ -31376,10 +31466,14 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
         ORDER BY ${orderQuickFilterOrderSqlMysql(query, tenantScope)}
         LIMIT ? OFFSET ?
       `, [...filtered.params, pageSize, start]);
-      rows = sortPagedOrdersMysql(await orderRowsByIdsMysql(
+      // The window runs after grouping, so the page and its filtered total
+      // come from one statement. An out-of-range page still needs its total.
+      totalPromise = idRows.length && idRows[0].filtered_total != null
+        ? Promise.resolve({ total: idRows[0].filtered_total }) : loadFilteredTotal();
+      rows = sortPagedOrdersMysql(await orderPageRowsMysql(
         idRows.map((row) => row.id),
         needsCoverageForFilter || includeCounts ? coverage : null,
-        tenantId, { summaryOnly: true }
+        tenantId, includeInventoryAvailability
       ), query);
     }
   }

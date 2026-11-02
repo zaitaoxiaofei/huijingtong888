@@ -1,3 +1,4 @@
+import { adminOrderPreloadScript } from './lib/admin-order-preloads.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -23,26 +24,29 @@ async function main() {
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const adminEntry = manifest["frontend/admin/main.js"];
   const globalStyleEntry = manifest["style.css"];
-  const buildStamp = Date.now().toString(36);
 
   if (!adminEntry?.file) {
     throw new Error(text.missingManifest);
   }
 
+  // Match the bundler cascade: component-library CSS first, ERP theme last.
+  // Canonical URLs prevent a later duplicate stylesheet from masking order.
   const styleFiles = [
-    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
-    ...((adminEntry.css || []).filter(Boolean)),
     ...((adminEntry.imports || [])
       .flatMap((key) => manifest[key]?.css || [])
-      .filter(Boolean))
+      .filter(Boolean)),
+    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
+    ...((adminEntry.css || []).filter(Boolean))
   ];
 
   const styleTags = [...new Set(styleFiles)]
-    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}?v=${buildStamp}" />`)
+    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}" />`)
     .join("\n");
-  const modulePreloadTags = (adminEntry.imports || [])
+  // Entry URLs must match imports from route chunks. A second query-string
+  // URL creates a second module instance despite the fingerprinted filename.
+  const modulePreloadTags = [...new Set([adminEntry.file, ...(adminEntry.imports || [])
     .map((key) => manifest[key]?.file)
-    .filter(Boolean)
+    .filter(Boolean)])]
     .map((file) => `    <link rel="modulepreload" href="/vue-apps/${file}" />`)
     .join("\n");
   const html = `<!doctype html>
@@ -65,6 +69,7 @@ async function main() {
     <link rel="icon" type="image/svg+xml" href="/brand/baodan-mark.svg" />
 ${styleTags}
 ${modulePreloadTags}
+    <script>${adminOrderPreloadScript(manifest)}</script>
     <style>
       .admin-static-login-fallback {
         position: fixed;
@@ -267,7 +272,7 @@ ${modulePreloadTags}
         });
       })();
     </script>
-    <script type="module" src="/vue-apps/${adminEntry.file}?v=${buildStamp}"></script>
+    <script type="module" src="/vue-apps/${adminEntry.file}"></script>
   </body>
 </html>
 `;

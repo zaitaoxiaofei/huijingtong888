@@ -13,9 +13,10 @@ test('monthly billing reads only the current enterprise, including every financi
     fixture.useEnvironment();
     globalThis.fetch = async () => { throw Error('External requests forbidden in financial read tests'); };
     ({ closeMysqlPool } = await import('../src/mysql-pool.js'));
-    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql } = await import('../src/services/mysql-cutover.js');
+    const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
     const q = fixture.query;
+    await q('ALTER TABLE products ADD COLUMN inventory_number VARCHAR(64) NULL');
     // Match the runtime component migration required by scoped reads.
     await q('CREATE TABLE product_components(id BIGINT PRIMARY KEY AUTO_INCREMENT,tenant_id BIGINT,product_id BIGINT,component_product_id BIGINT)');
     await q("INSERT INTO tenants(id,slug,name,status) VALUES(1,'default','Default','active'),(2,'a','A','active'),(3,'b','B','active')");
@@ -30,6 +31,7 @@ test('monthly billing reads only the current enterprise, including every financi
       CREATE TABLE ai_variant_lab_batch_items(tenant_id VARCHAR(80),job_no VARCHAR(80),item_no VARCHAR(80),status VARCHAR(32),updated_at DATETIME)`);
     for (const [id, tenant, key, owner] of [[10,null,'admin',1],[11,1,'admin',1],[20,2,'2',2],[30,3,'3',3]]) {
       await q("INSERT INTO products(id,tenant_id,name,code,purchase_cost) VALUES(?,?,?,?,2)", [id,tenant,`Product ${id}`,`P-${id}`]);
+      await q('UPDATE products SET inventory_number=? WHERE id=?',[`STOCK-${id}`,id]);
       await q("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku) VALUES(?,?,?,?,'same-sku')", [id,tenant,id,id]);
       await q("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at,delivered_at) VALUES(?,?,'same-posting','delivered','delivered','2026-10-03','2026-10-04')", [id,id]);
       await q("INSERT INTO order_items(id,order_id,sku_mapping_id,ozon_sku,quantity,sale_price,estimated_profit) VALUES(?,?,?,'same-sku',1,?,?)", [id,id,id,id,id/2]);
@@ -82,6 +84,43 @@ test('monthly billing reads only the current enterprise, including every financi
       const expected=(await monthlyBillingDetailsMysql(range,'2')).selected.procurement_inventory;
       for(const key of ['inventory_total_value','local_inventory_value','fbp_inventory_value','in_transit_value','local_inventory_quantity'])assert.equal(snapshot[key],expected[key],key);
       assert.equal(snapshot.purchase_total_amount,undefined);assert.equal(snapshot.snapshot_basis,'current');assert.ok(snapshot.snapshot_at);
+    });
+    await t.test('capital detail rows reconcile to every category and preserve stock identities',async()=>{
+      for(const [tenant,ids] of [['admin',[10,11]],['2',[20]],['3',[30]]]){
+        const summary=await financeInventoryCapitalMysql({},tenant);
+        for(const kind of ['local','fbp','transit']){
+          const result=await financeInventoryCapitalDetailsMysql({kind,pageSize:100,tenant_id:3},tenant);
+          assert.deepEqual(result.rows.map(r=>r.product_id).sort((a,b)=>a-b),ids);
+          assert.equal(result.rows.reduce((n,r)=>n+r.quantity,0),summary.categories[kind].quantity);
+          assert.equal(result.rows.reduce((n,r)=>n+r.inventory_value,0),summary.categories[kind].value);
+          assert.equal(result.total,ids.length);
+          for(const row of result.rows)assert.equal(row.inventory_number,`STOCK-${row.product_id}`);
+          if(tenant==='2')assert.ok(!JSON.stringify(result).includes('B secret'));
+        }
+      }
+      const search=await financeInventoryCapitalDetailsMysql({kind:'local',query:'STOCK-20'},'2');
+      assert.equal(search.total,1);assert.equal(search.rows[0].product_id,20);
+      assert.equal((await financeInventoryCapitalDetailsMysql({query:'%'},'2')).total,0);
+      assert.equal((await financeInventoryCapitalDetailsMysql({query:'STOCK-30'},'2')).total,0);
+      await assert.rejects(financeInventoryCapitalDetailsMysql({kind:'toString'},'2'),{statusCode:400});
+      const first=await financeInventoryCapitalDetailsMysql({kind:'local',pageSize:1},'admin');
+      const second=await financeInventoryCapitalDetailsMysql({kind:'local',pageSize:1,page:2},'admin');
+      assert.equal(first.total,2);assert.notEqual(first.rows[0].row_id,second.rows[0].row_id);
+    });
+    await t.test('capital uses recorded cost versions, flags missing bindings and historical locations',async()=>{
+      await q("INSERT INTO purchase_cost_versions(tenant_id,product_id,version_no,source_key,landed_unit_cost,status) VALUES(2,20,1,'capital-test',3.125,'active'),(3,20,9,'foreign-cost',900,'active')");
+      await q("INSERT INTO inventory_movements(tenant_id,product_id,source_type,quantity_delta,stock_location,status) VALUES(2,20,'legacy-test',1,'UNKNOWN','posted')");
+      const local=await financeInventoryCapitalDetailsMysql({kind:'local'},'2');
+      assert.equal(local.rows[0].quantity,21);assert.equal(local.rows[0].unit_cost,3.125);assert.equal(local.rows[0].inventory_value,65.625);
+      assert.equal(local.rows[0].cost_basis,'purchase_version');assert.equal(local.rows[0].unclassified_movements,1);
+      await q("INSERT INTO ozon_stock_snapshots(shop_id,ozon_sku,stock_type,present) VALUES(20,'unmapped-a','fbp_real',7)");
+      const fbp=await financeInventoryCapitalDetailsMysql({kind:'fbp'},'2');
+      const unknown=fbp.rows.find(r=>r.ozon_sku==='unmapped-a');
+      assert.equal(unknown.product_id,null);assert.equal(unknown.inventory_number,null);assert.equal(unknown.cost_missing,true);
+      assert.equal(fbp.summary.categories.fbp.unmapped_count,1);assert.equal(fbp.summary.categories.fbp.quantity,27);
+      await q("DELETE FROM purchase_cost_versions WHERE source_key IN ('capital-test','foreign-cost')");
+      await q("DELETE FROM inventory_movements WHERE source_type='legacy-test'");
+      await q("DELETE FROM ozon_stock_snapshots WHERE ozon_sku='unmapped-a'");
     });
     await t.test('annual grouping matches each month including Beijing boundaries, ads and company expenses',async()=>{
       await q("INSERT INTO finance_shop_company_assignments(tenant_id,shop_id,company_id,effective_from) VALUES(2,20,2,'2026-01-01')");

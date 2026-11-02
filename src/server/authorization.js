@@ -89,7 +89,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "finance-center" && isEnterpriseAdmin(session)) {
     const route = parts.slice(2);
     const companyRead = route.length === 1 && route[0] === "companies" && read;
-    const reportRead = route.length === 1 && ["report", "inventory-capital", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
+    const reportRead = route.length === 1 && ["report", "inventory-capital", "inventory-capital-details", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
     const exportRead = route.length === 1 && route[0] === "export" && read;
     const collectionWrite = route.length === 1 && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(route[0]) && method === "POST";
     const expenseDelete = route.length === 2 && route[0] === "expenses" && /^\d+$/.test(String(route[1] || "")) && method === "DELETE";

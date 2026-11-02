@@ -1,12 +1,13 @@
 ﻿<script setup>
-import { computed, ref } from "vue";
+import { computed, defineAsyncComponent, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
-import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
 import InventoryIdentity from './InventoryIdentity.vue';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
+
+const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
 
 const props = defineProps({
   canRemindProcurement: { type: Boolean, default: false },

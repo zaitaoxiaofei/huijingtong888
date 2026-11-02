@@ -117,6 +117,19 @@ test('live count aggregation preserves every tab across OGL/application, physica
         }
       }
     }
+    await t.test('unsearched list filters preserve complete membership while reusing one OGL relation', async () => {
+      for (const tenant of ['admin','2','3']) {
+        const scope = await service.orderListTenantScopeMysql(tenant);
+        const base = await service.orderBaseSqlMysql({},tenant);
+        for (const status of ['awaiting_packaging','awaiting_deliver','ogl_bound','ogl_dispatched','delivering']) {
+          const original = await query(`SELECT o.id FROM orders o WHERE ${base.where} AND ${service.orderStatusSqlMysql(status,coverage,scope)} ORDER BY o.id`,base.params);
+          const filtered = await service.orderFilteredSqlMysql({status},base,coverage,scope);
+          const optimized = await query(`SELECT o.id FROM orders o ${filtered.joins} WHERE ${filtered.where} ORDER BY o.id`,filtered.params);
+          assert.deepEqual(optimized,original,`${tenant}/${status}`);
+          assert.match(filtered.joins,/ogl_filter_evidence/);
+        }
+      }
+    });
     // The same derived evidence also composes with search, print and exact active-tab filtering.
     const scope = await service.orderListTenantScopeMysql('2');
     const base = await service.orderBaseSqlMysql({}, '2');
