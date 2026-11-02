@@ -11,7 +11,7 @@ const router = useRouter();
 const authStore = useAuthStore();
 
 const title = computed(() => route.meta?.title || "手机工作台");
-const canGoBack = computed(() => !["mobile-home", "mobile-orders", "mobile-inventory", "mobile-procurement"].includes(route.name));
+const canGoBack = computed(() => route.name !== "mobile-home");
 
 function setMobileViewportState(enabled) {
   document.documentElement.classList.toggle("admin-mobile-open", enabled);
@@ -19,11 +19,9 @@ function setMobileViewportState(enabled) {
 }
 
 function goBack() {
-  if (window.history.length > 1) {
-    router.back();
-    return;
-  }
-  router.push("/mobile/orders");
+  const previous=window.history.state?.back;
+  if(typeof previous==='string'&&(previous==='/mobile'||previous.startsWith('/mobile/'))){router.back();return;}
+  router.replace('/mobile');
 }
 
 function openDesktop() {

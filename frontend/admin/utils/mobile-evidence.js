@@ -11,3 +11,25 @@ export async function prepareMobilePhoto(file){
  }finally{URL.revokeObjectURL(url);}
 }
 export function purchaseLink(value){const text=String(value||'').trim();if(!text)return '';const match=text.match(/https?:\/\/[^\s<>"，。]+/i);if(!match)throw new Error('采购链接须包含完整的 http 或 https 网址');const url=new URL(match[0]);if(url.username||url.password)throw new Error('采购链接不能包含账号密码');return url.href;}
+
+// A small JPEG fits the existing own-profile avatar field, without granting
+// warehouse staff listing-media privileges or uploading their face to OSS.
+export async function prepareMobileAvatar(file) {
+ validateMobilePhoto(file);
+ const url=URL.createObjectURL(file);
+ try {
+  const image=new Image();
+  await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=()=>reject(new Error('头像无法读取，请换用JPG或PNG图片'));image.src=url;});
+  const side=Math.min(image.naturalWidth,image.naturalHeight);
+  if(!side)throw new Error('头像图片为空');
+  const canvas=document.createElement('canvas');canvas.width=canvas.height=160;
+  const context=canvas.getContext('2d');if(!context)throw new Error('无法处理头像，请重新选择');
+  context.fillStyle='#fff';context.fillRect(0,0,160,160);
+  context.drawImage(image,(image.naturalWidth-side)/2,(image.naturalHeight-side)/2,side,side,0,0,160,160);
+  let result=canvas.toDataURL('image/jpeg',.78);
+  if(result.length>24000)result=canvas.toDataURL('image/jpeg',.45);
+  canvas.width=canvas.height=1;
+  if(!result.startsWith('data:image/jpeg;base64,')||result.length>24000)throw new Error('头像压缩后仍过大，请换一张图片');
+  return result;
+ } finally {URL.revokeObjectURL(url);}
+}
