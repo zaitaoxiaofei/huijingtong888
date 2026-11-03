@@ -119,6 +119,16 @@ function writePrintLoadingPage(printWindow, count) {
   printWindow.document.close();
 }
 
+function writePrintErrorPage(printWindow, title, message) {
+  printWindow.document.open();
+  printWindow.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>面单加载失败</title>
+    <style>body{font-family:system-ui,sans-serif;background:#f8fafc;color:#1f2937;padding:40px}main{max-width:640px;margin:auto;padding:28px;background:white;border:1px solid #fecaca;border-radius:12px}h1{font-size:20px}p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}</style>
+    </head><body><main><h1 id="printErrorTitle"></h1><p id="printErrorMessage"></p><p>本次未进入打印。请关闭此窗口，返回订单页面处理后重试。</p></main></body></html>`);
+  printWindow.document.close();
+  printWindow.document.getElementById("printErrorTitle").textContent = title;
+  printWindow.document.getElementById("printErrorMessage").textContent = message;
+}
+
 function writePrintPreviewPage(printWindow, { url, count }) {
   const title = count > 1 ? "面单打印确认" : "面单打印确认";
   printWindow.document.open();

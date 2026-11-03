@@ -1,6 +1,10 @@
+import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js";
+import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
 import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
 import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
+
+const runOzonLabelRequest = createOzonLabelRequestQueue();
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1041,7 +1045,18 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
   if (!hasRealOzonCredentials(shop)) {
     throw new Error("店铺缺少有效的 Ozon Client ID 或 API Key，无法获取真实面单");
   }
-  return ozonBinaryRequest(shop, "/v2/posting/fbs/package-label", { posting_number: postings }, options);
+  return fetchOzonPackageLabelTask(postings, {
+    signal: options.signal,
+    request: (path, payload) => runOzonLabelRequest(shop.ozon_client_id, () => ozonRequestOnce(shop, path, payload, options), options),
+    download: async fileUrl => {
+      const url = new URL(fileUrl);
+      if (url.protocol !== "https:" || !/(^|\.)(ozonstatic\.(cn|ru|com)|ozone\.ru|ozon\.ru)$/.test(url.hostname)) throw new Error("Ozon 返回了无法识别的面单下载地址");
+      const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000);
+      const response = await fetch(url, { signal, redirect: "error" });
+      if (!response.ok) throw new Error(`Ozon 面单 PDF 下载失败：HTTP ${response.status}`);
+      return Buffer.from(await response.arrayBuffer());
+    }
+  });
 }
 
 export async function fetchOzonFinanceTransactions(shop, options = {}) {
@@ -1522,44 +1537,6 @@ function normalizeOzonArrayPayload(data = {}, keys = []) {
   return [];
 }
 
-async function ozonBinaryRequest(shop, path, payload, options = {}) {
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次请求已取消"));
-  if (options.signal?.aborted) abortFromParent();
-  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 45000);
-  let response;
-  try {
-    response = await fetch(`${OZON_API_BASE}${path}`, {
-      method: "POST",
-      headers: {
-        "Client-Id": String(shop.ozon_client_id),
-        "Api-Key": ozonApiKey(shop),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (options.signal?.aborted) throwIfAborted(options.signal);
-    if (error.name === "AbortError") throw new Error(`Ozon ${path} timeout after 45s`);
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    options.signal?.removeEventListener("abort", abortFromParent);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!response.ok) {
-    const text = buffer.toString("utf8");
-    let message = text;
-    try {
-      const parsed = JSON.parse(text);
-      message = parsed.message || parsed.error || text;
-    } catch {}
-    throw new Error(`Ozon ${path} failed: ${message}`);
-  }
-  return buffer;
-}
 
 function demoPdf(text) {
   const safe = String(text || "Demo PDF").replace(/[()\\]/g, "\\$&").replace(/\r?\n/g, ") Tj T* (");
