@@ -24,12 +24,12 @@ function fixture(get){
  });
  vm.runInContext("let fbpVersion=0,pollTimer,finishPoll;let loadVersion=0;let pendingInitialAction='stocktake';",context);
  vm.runInContext('var fbpReads=0;function loadFbp(){fbpReads++;return Promise.resolve();}',context);
- for(const name of ['stopFbpPoll','load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
+ for(const name of ['notifySaved','stopFbpPoll','load','edit','discardForm','cancelForm','closeForm','save']){const node=nodes.find(n=>n.type==='FunctionDeclaration'&&n.id.name===name);vm.runInContext(script.slice(node.start,node.end),context);}
  return {context,calls,events};
 }
 test('direct update loads only its inventory then defaults to the actual physical count',async()=>{
  const f=fixture();await f.context.load();assert.equal(f.context.form.action_type,'stocktake');assert.equal(f.context.form.stocktake_type,'physical');
- assert.equal(f.context.form.counted_quantity,undefined);assert.equal(f.context.formVisible.value,true);assert.equal(f.calls.length,1);assert.equal(f.context.fbpReads,1);
+ assert.equal(f.context.form.counted_quantity,undefined);assert.equal(f.context.formVisible.value,true);assert.equal(f.calls.length,1);assert.equal(f.context.fbpReads,0);
 });
 test('a failed load can be retried into the same small form with no stale product',async()=>{
  let failed=true;const f=fixture(async()=>{if(failed)throw new Error('offline');return {product:{id:10},revision:'v'}});
@@ -40,7 +40,7 @@ test('saving a direct count closes the controller and refreshes the caller once 
  const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20};
  await f.context.save();assert.equal(f.context.visible.value,false);assert.equal(f.context.formVisible.value,false);
  assert.equal(f.calls.filter(c=>c[0]==='get').length,1);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory/ledger').length,1);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory-workflow/feedback').length,1);
- assert.deepEqual(f.events,[['saved']]);
+ assert.deepEqual(JSON.parse(JSON.stringify(f.events)),[['saved',{productId:10}]]);
 });
 test('cancelling an untouched form closes immediately; cancelling discard preserves entered stock',async()=>{
  const f=fixture();await f.context.load();await f.context.cancelForm();assert.equal(f.context.visible.value,false);assert.equal(f.calls.some(c=>c[0]==='confirm'),false);
@@ -63,7 +63,7 @@ test('physical 20 means 20 actual goods even with historical negative balances',
 test('a notification failure after saving stock does not retry or abandon the successful count',async()=>{
  const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20,request_key:'count-key'};
  const post=f.context.apiClient.post;f.context.apiClient.post=async(url,body)=>{await post(url,body);if(url.endsWith('/feedback'))throw Error('notice offline');return{ok:true};};
- await f.context.save();assert.equal(f.context.visible.value,false);assert.deepEqual(f.events,[['saved']]);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory/ledger').length,1);
+ await f.context.save();assert.equal(f.context.visible.value,false);assert.deepEqual(JSON.parse(JSON.stringify(f.events)),[['saved',{productId:10}]]);assert.equal(f.calls.filter(c=>c[0]==='post'&&c[1]==='/api/inventory/ledger').length,1);
 });
 test('a tenant change while the count response is pending cannot send an old product feedback under the new tenant',async()=>{
  const f=fixture();await f.context.load();f.context.submission.value={action_type:'stocktake',counted_quantity:20};
