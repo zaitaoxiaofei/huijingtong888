@@ -8043,17 +8043,16 @@ export async function markOrderLabelsPrintedMysql(body = {}, userId = null, tena
   const batchId = `print-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const inputOrder = new Map(ids.map((id, index) => [String(id), index + 1]));
   const orderedRows = [...rows].sort((a, b) => (inputOrder.get(String(a.id)) ?? 0) - (inputOrder.get(String(b.id)) ?? 0));
-  for (const row of orderedRows) {
-    await mysqlExecute(`
+  await assertOrderTaskAccessMysql(scope, options, ["packing"]);
+  await mysqlExecute(`
       INSERT INTO order_label_prints (order_id, printed_at, print_batch_id, print_sequence, printed_by_person_id)
-      VALUES (?, CURRENT_TIMESTAMP, ?, ?, ?)
+      VALUES ${orderedRows.map(() => "(?, CURRENT_TIMESTAMP, ?, ?, ?)").join(",")}
       ON DUPLICATE KEY UPDATE
         printed_at = CURRENT_TIMESTAMP,
         print_batch_id = VALUES(print_batch_id),
         print_sequence = VALUES(print_sequence),
         printed_by_person_id = VALUES(printed_by_person_id)
-    `, [row.id, batchId, inputOrder.get(String(row.id)) || null, personId]);
-  }
+    `, orderedRows.flatMap((row) => [row.id, batchId, inputOrder.get(String(row.id)) || null, personId]));
   invalidateOrderReadCache();
   return { ok: true, count: orderedRows.length, print_batch_id: batchId };
 }
@@ -8141,7 +8140,7 @@ async function fetchAndCacheOrderPackageLabelMysql(row, options = {}) {
   const taskOptions = { ...options, session: options.session || row.task_session };
   await assertOrderTaskAccessMysql(scope, taskOptions, ["packing"]);
   const shop = await activeShopForTenantMysql(row.shop_id, scope.id);
-  const buffer = await fetchOzonPackageLabel(shop, [row.posting_number]);
+  const buffer = await fetchOzonPackageLabel(shop, [row.posting_number], { signal: options.signal });
   await assertOrderTaskAccessMysql(scope, taskOptions, ["packing"]);
   await activeShopForTenantMysql(row.shop_id, scope.id);
   if (isDemoPackageLabelBufferMysql(buffer)) throw new Error("Ozon 返回了测试面单，已拒绝缓存");
@@ -8283,30 +8282,34 @@ export async function orderPackageLabelMysql(body = {}, userId = null, tenantId 
   let ozonRequests = 0;
   let cacheHits = 0;
   let cacheMisses = 0;
-  const orderedResults = [];
-  const failures = [];
   const cachedLabels = body.refresh_cache ? new Map() : await loadCachedOrderPackageLabelsMysql(rows);
-  for (const row of rows) {
-    await assertOrderTaskAccessMysql(scope, options, ["packing"]);
-    await activeShopForTenantMysql(row.shop_id, scope.id);
+  const shopIds = [...new Set(rows.map((row) => row.shop_id))];
+  for (const shopId of shopIds) await activeShopForTenantMysql(shopId, scope.id);
+  // Workers return into their input position; completion order must never reorder PDF pages.
+  const results = await mapWithConcurrencyMysql(rows, 3, async (row) => {
+    throwIfAbortedMysql(options.signal);
     const cached = cachedLabels.get(String(row.id));
     if (cached?.buffer?.length && String(cached.posting_number || "") === String(row.posting_number || "")) {
       cacheHits += 1;
-      orderedResults.push({ row, buffer: cached.buffer, cached: true });
-      continue;
+      return { row, buffer: cached.buffer, cached: true };
     }
     cacheMisses += 1;
     try {
       ozonRequests += 1;
-      orderedResults.push({
+      return {
         row,
         buffer: await fetchAndCacheOrderPackageLabelMysql(row, { ...options, tenantId: scope.id }),
         cached: false
-      });
+      };
     } catch (error) {
-      failures.push(orderPackageLabelFailureMysql(row, error));
+      return { failure: orderPackageLabelFailureMysql(row, error) };
     }
-  }
+  });
+  // Recheck current authority after downloads, including the all-cached fast path.
+  await assertOrderTaskAccessMysql(scope, options, ["packing"]);
+  for (const shopId of shopIds) await activeShopForTenantMysql(shopId, scope.id);
+  const orderedResults = results.filter((item) => !item.failure);
+  const failures = results.filter((item) => item.failure).map((item) => item.failure);
   if (!orderedResults.length) {
     const suffix = failures.slice(0, 3).map((item) => item.posting_number || item.id).filter(Boolean).join("、");
     throw new Error(suffix ? `Label generation failed: ${suffix}` : "Label generation failed");
