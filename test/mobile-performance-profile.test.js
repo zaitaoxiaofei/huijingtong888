@@ -5,6 +5,8 @@ import vm from 'node:vm';
 import {parse,compileScript} from '@vue/compiler-sfc';
 import * as vue from 'vue';
 import {renderToString} from '@vue/server-renderer';
+import * as priceReasons from '../src/shared/procurement-price-reason.js';
+import * as evidence from '../frontend/admin/utils/mobile-evidence.js';
 import * as permissions from '../src/shared/permissions.js';
 import * as search from '../src/shared/inventory-search-fields.js';
 import * as orderSearch from '../src/shared/order-search.js';
@@ -34,14 +36,15 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(id.endsWith('mobile-orders-utils.js'))return orderUtils;
   if(id.endsWith('shanghai-date.js'))return shanghai;
   if(id.endsWith('imageCropper.js'))return{withImageToken:x=>x};
-  if(id.endsWith('mobile-evidence.js'))return{};
+  if(id.endsWith('mobile-evidence.js'))return evidence;
+  if(id.endsWith('procurement-price-reason.js'))return priceReasons;
   if(id.endsWith('use-inventory-local-quantities.js'))return{useInventoryLocalQuantities:()=>({rows:vue.ref(new Map()),error:vue.ref('')})};
   if(id.endsWith('MobileDialog.vue'))return{props:['modelValue'],setup(props,{slots}){return()=>props.modelValue?vue.h('section',[slots.default?.(),slots.footer?.()]):null;}};
   if(id.endsWith('.vue')||id.endsWith('.css'))return{};
   throw Error('Unexpected component dependency '+id);
  }
  const module={exports:{}};
- vm.runInNewContext(code,{module,exports:module.exports,require,AbortController,DOMException,URLSearchParams,Date,console,
+ vm.runInNewContext(code,{module,exports:module.exports,require,AbortController,DOMException,URLSearchParams,Date,console,crypto,
  window:{history:h.history,addEventListener(){},removeEventListener(){},setTimeout(fn,ms){const id=setTimeout(fn,ms);h.timers.add(id);return id;},clearTimeout(id){h.timers.delete(id);clearTimeout(id);}},
  clearTimeout(id){h.timers.delete(id);clearTimeout(id);},document:{querySelector(){return{scrollTo(){},scrollTop:0};}}});
  h.definition=module.exports.default;return h;
@@ -116,4 +119,16 @@ test('mobile pagination clamps jumps, preserves page size and blocks requests wh
  const sut=h.definition.setup(props,{expose(){},emit:(event,value)=>events.push({event,...value})});
  sut.move(999);assert.equal(events[0].page,40);assert.equal(events[0].pageSize,20);sut.move(-5);assert.equal(events[1].page,1);
  props.loading=true;sut.move(3);assert.equal(events.length,2);props.loading=false;props.total=null;sut.move(3);assert.equal(events.length,2);
+});
+
+
+test('single-layer mobile purchase adds inventory without discarding entered amounts and retains rejected forms',async()=>{
+ const h=await component('components/mobile/MobilePurchaseDialog.vue',{get:async()=>({rows:[{id:7,name:'Fixture single',component_count:0}],total:1}),post:async()=>{const e=new Error('填写价格变动原因');e.status=400;throw e;}});
+ const sut=h.definition.setup({modelValue:true,initialRows:[]},{expose(){},emit(){}});await vue.nextTick();
+ sut.filters.query='1-7';await sut.search(true);assert.equal(sut.resultsOpen.value,true);assert.match(h.calls.at(-1).path,/includeStock=0/);
+ await sut.choose(sut.results.value[0]);assert.equal(sut.items.value.length,1);assert.equal(sut.resultsOpen.value,false);assert.equal(sut.items.value[0].product_id,7);
+ sut.items.value[0].quantity=3;sut.items.value[0].amount=60;sut.items.value[0].purchase_url='https://detail.1688.com/offer/7.html';
+ await sut.search(true);await sut.choose({id:8,name:'Another single',component_count:0});assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].amount,60);await sut.choose({id:7,name:'Same',component_count:0});assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].quantity,3);
+ sut.items.value[1].amount=20;await sut.save();const post=h.calls.find(c=>c.method==='POST');assert.equal(post.path,'/api/procurement/purchases');assert.equal(post.body.items[0].quantity,3);assert.equal(post.body.items[0].amount,60);assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].amount,60);assert.equal(sut.submitted.value,null);assert.match(sut.error.value,/表单已保留/);
+ sut.items.value[0].anomaly_reason='其他原因';sut.items.value[0].anomaly_note='供应商调价';await sut.save();assert.equal(h.calls.filter(c=>c.method==='POST').length,2);assert.equal(h.calls.at(-1).body.request_key,post.body.request_key);assert.match(h.calls.at(-1).body.items[0].anomaly_reason,/供应商调价/);
 });
