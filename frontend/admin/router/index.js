@@ -142,6 +142,7 @@ export const router = createRouter({
           children: [
             { path: "", redirect: "/inventory/products" },
             { path: "products/:productId", name: "inventory-product-detail", component: () => import('../views/inventory/InventoryProductDetailPage.vue'), meta: { title: '商品库存详情', breadcrumb: ['库存中心','商品库存'] } },
+            { path: "product-requests", name:"inventory-product-requests", component:()=>import('../views/inventory/InventoryProductRequestsPage.vue'),meta:{title:'库存申请',breadcrumb:['库存中心','库存申请']} },
             { path: "products", name: "inventory-products", component: InventoryProductsPage, meta: { title: "商品库存", breadcrumb: ["库存中心", "商品库存"] } },
             { path: "flow-center", redirect: "/inventory/products" },
             { path: "fbp", name: "inventory-fbp", component: InventoryFbpPage, meta: { title: "FBP 库存", breadcrumb: ["库存中心", "FBP 库存"] } },

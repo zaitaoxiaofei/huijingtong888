@@ -62,6 +62,7 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
+  if(path==='/inventory/product-requests')return 'inventory.write';
   if (path === "/mobile/inventory-capital") return "finance";
   if (path === "/finance/reimbursements") return "common";
   if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";

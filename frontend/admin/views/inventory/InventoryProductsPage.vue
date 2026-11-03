@@ -1,4 +1,5 @@
-﻿<script setup>
+<script setup>
+import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
 import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
@@ -16,7 +17,6 @@ import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import ProductCompositionDialog from "../../components/inventory/ProductCompositionDialog.vue";
-import InventoryProductRequestsDialog from "../../components/inventory/InventoryProductRequestsDialog.vue";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
@@ -59,11 +59,7 @@ const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const detailLoading = ref(false);
 const dialogVisible = ref(false);
-const productRequestsVisible = ref(false);
-function refreshAfterProductRequest() {
-  inventoryListCache.clear();
-  return loadPageData();
-}
+const requestSummary=useInventoryRequestSummary();
 
 function loadInventoryDictionaries() {
   if (dictionaryLoaded) return Promise.resolve();
@@ -1895,9 +1891,9 @@ onActivated(() => {
     <InventoryPageToolbar product-search :show-shop="false" :show-date-range="false" :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset">
       <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /></el-select></el-form-item>
       <template #actions>
+        <el-badge v-if="requestSummary.enabled.value" :value="requestSummary.pending.value" :hidden="!requestSummary.pending.value" type="danger" class="inventory-request-entry"><el-button type="primary" plain @click="router.push('/inventory/product-requests')">库存申请</el-button></el-badge>
         <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>
           <el-dropdown-item v-if="canWriteInventory" @click="openCreateDialog">新增库存</el-dropdown-item>
-          <el-dropdown-item v-if="canWriteInventory" @click="productRequestsVisible = true">库存创建申请</el-dropdown-item>
           <el-dropdown-item v-if="canSubmitProcurementRequest" :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-dropdown-item>
           <el-dropdown-item divided @click="openMergeHistoryDialog">合并历史</el-dropdown-item>
           <el-dropdown-item v-if="canWriteInventory" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-dropdown-item>
@@ -2358,7 +2354,6 @@ onActivated(() => {
       />
     </el-dialog>
 
-    <InventoryProductRequestsDialog v-if="productRequestsVisible" :people="state.people" :suppliers="state.suppliers" :logistics-rules="state.logisticsRules" @close="productRequestsVisible = false" @changed="refreshAfterProductRequest" />
 
     <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)" />
     <ProductCreateEditDialog
