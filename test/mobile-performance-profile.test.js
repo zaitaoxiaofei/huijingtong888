@@ -6,6 +6,8 @@ import {parse,compileScript} from '@vue/compiler-sfc';
 import * as vue from 'vue';
 import {renderToString} from '@vue/server-renderer';
 import * as priceReasons from '../src/shared/procurement-price-reason.js';
+import * as stockPolicy from '../src/shared/inventory-workflow.js';
+import * as adjustmentReasons from '../src/inventory-adjustment-reasons.js';
 import * as evidence from '../frontend/admin/utils/mobile-evidence.js';
 import * as permissions from '../src/shared/permissions.js';
 import * as search from '../src/shared/inventory-search-fields.js';
@@ -38,6 +40,8 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(id.endsWith('imageCropper.js'))return{withImageToken:x=>x};
   if(id.endsWith('mobile-evidence.js'))return evidence;
   if(id.endsWith('procurement-price-reason.js'))return priceReasons;
+  if(id.endsWith('inventory-workflow.js'))return stockPolicy;
+  if(id.endsWith('inventory-adjustment-reasons.js'))return adjustmentReasons;
   if(id.endsWith('use-inventory-local-quantities.js'))return{useInventoryLocalQuantities:()=>({rows:vue.ref(new Map()),error:vue.ref('')})};
   if(id.endsWith('MobileDialog.vue'))return{props:['modelValue'],setup(props,{slots}){return()=>props.modelValue?vue.h('section',[slots.default?.(),slots.footer?.()]):null;}};
   if(id.endsWith('.vue')||id.endsWith('.css'))return{};
@@ -131,4 +135,24 @@ test('single-layer mobile purchase adds inventory without discarding entered amo
  await sut.search(true);await sut.choose({id:8,name:'Another single',component_count:0});assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].amount,60);await sut.choose({id:7,name:'Same',component_count:0});assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].quantity,3);
  sut.items.value[1].amount=20;await sut.save();const post=h.calls.find(c=>c.method==='POST');assert.equal(post.path,'/api/procurement/purchases');assert.equal(post.body.items[0].quantity,3);assert.equal(post.body.items[0].amount,60);assert.equal(sut.items.value.length,2);assert.equal(sut.items.value[0].amount,60);assert.equal(sut.submitted.value,null);assert.match(sut.error.value,/表单已保留/);
  sut.items.value[0].anomaly_reason='其他原因';sut.items.value[0].anomaly_note='供应商调价';await sut.save();assert.equal(h.calls.filter(c=>c.method==='POST').length,2);assert.equal(h.calls.at(-1).body.request_key,post.body.request_key);assert.match(h.calls.at(-1).body.items[0].anomaly_reason,/供应商调价/);
+});
+
+
+test('mobile queue stocktakes refresh only the affected product and do not restore stale purchase suggestions',async()=>{
+ const state={product_id:7,physical_recorded:12,supply_plan:{required_purchase:0,optional_purchase:0}};
+ const h=await component('components/mobile/MobileWorkQueue.vue',{get:async path=>path.includes('view=status')?{rows:[state]}:{rows:[{product_id:7,workflow:{physical_recorded:0,supply_plan:{required_purchase:3}}}],total:1,snapshot:{stale:true,calculated_at:'2000-01-01T00:00:00Z'}}});
+ const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='required';await vue.nextTick();await new Promise(setImmediate);const row=sut.rows.value[0];assert.equal(sut.canStocktake(row),true);sut.openStocktake(row);assert.equal(sut.stocktake.product.id,7);await sut.stocktakeSaved({physical_after:12});assert.equal(sut.rows.value.length,0);assert.match(h.calls.at(-1).path,/view=status&product_ids=7&fresh=1/);
+ await sut.load();assert.equal(sut.rows.value.length,0);assert.match(sut.stockFeedback.value,/需求已覆盖/);
+ sut.reset();assert.equal(sut.stocktake.visible,false);assert.equal(sut.stockFeedback.value,'');
+});
+test('pending purchase stocktake leaves batches unreceived and stock actions respect inventory permission',async()=>{
+ const h=await component('components/mobile/MobileWorkQueue.vue');const sut=h.definition.setup({warehouse:false},{expose(){}});sut.tab.value='open';await vue.nextTick();await new Promise(setImmediate);sut.rows.value=[{id:91,product_id:7,product_name:'Physical item',physical_quantity:3}];sut.openStocktake(sut.rows.value[0]);assert.equal(sut.stocktake.product.id,7);const before=h.calls.length;await sut.stocktakeSaved({physical_after:8});assert.equal(h.calls.length,before);assert.equal(sut.rows.value[0].physical_quantity,3);assert.equal(sut.rows.value[0].stocktake_physical,8);
+ assert.equal(sut.canStocktake({component_count:2}),false);assert.equal(sut.canStocktake({review_required:true}),false);
+ const staff=await component('components/mobile/MobileWorkQueue.vue',{auth:{user:{id:3,roles:['packing'],tenant:{id:2,role:'member'}}}});const packing=staff.definition.setup({warehouse:true},{expose(){}});assert.equal(packing.canStocktake({product_id:7}),false);
+});
+
+
+test('stocktake previews and saves a total with a revision, while the server identifies its operator',async()=>{
+ const h=await component('components/mobile/MobileStocktakeDialog.vue',{get:async()=>({revision:'current',physical_estimate:3,open_order_demand:1,fbp_reserved:0,flow_summary:{safety:0},actions:[{id:8,person_name:'Previous operator',created_at:'2026-11-03T01:00:00Z',reason:'Counted'}]}),post:async path=>path.endsWith('/preview')?{physical_before:3,physical_after:9,stocktake_delta:6}:{ok:true,physical_after:9}});
+ const events=[],sut=h.definition.setup({modelValue:true,readOnly:false,product:{id:7}},{expose(){},emit:(event,value)=>events.push({event,value})});await vue.nextTick();await new Promise(setImmediate);assert.equal(sut.lastStocktake.value.person_name,'Previous operator');sut.form.counted_quantity=9;sut.form.reason_code='history_error';await sut.next();assert.equal(sut.preview.value.physical_after,9);await sut.save();const posts=h.calls.filter(c=>c.method==='POST');assert.equal(posts.length,2);assert.equal(posts[1].body.stocktake_type,'physical');assert.equal(posts[1].body.counted_quantity,9);assert.equal(posts[1].body.revision,'current');assert.equal(posts[1].body.person_id,undefined);assert.equal(posts[0].body.request_key,posts[1].body.request_key);assert.ok(events.some(e=>e.event==='saved'));
 });
