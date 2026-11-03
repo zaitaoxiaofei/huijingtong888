@@ -16,7 +16,8 @@ const manager = { personId: 8, name: "库存经理", role: "manager", tenant: { 
 const body = () => ({ request_key: "request-a", name: "旧名称", owner_person_id: 7, image_url: "https://example.com/product.png", purchase_url: "https://example.com/buy", composition_items: [{ component_product_id: 22, quantity: 2 }], structured_naming: { category: "门槛贴纸", accessory: "普通款", colors: ["黑色"], materials: ["PVC"], quantity: 2 } });
 
 function fixture() {
-  let state = { requests: [], products: [], options: [{ type: "accessory", value: "普通款", status: "active" }, { type: "color", value: "黑色", status: "active" }, { type: "material", value: "PVC", status: "active" }] };
+  let state = { requests: [], products: [], notices:[],options: [{ type: "accessory", value: "普通款", status: "active" }, { type: "color", value: "黑色", status: "active" }, { type: "material", value: "PVC", status: "active" }] };
+  let failNotice=false,revoked=false;const emitted=[];
   let failCreate = false, failBind = false, duplicateId = null, tail = Promise.resolve();
   let bindingCalls = 0;
   async function query(sql, args = []) {
@@ -29,8 +30,8 @@ function fixture() {
       else if (sql.includes("WHERE id = ?")) rows = rows.filter(row => row.id === args[0]);
       else {
         let index = 0;
-        if (sql.includes("r.applicant_id = ?")) rows = rows.filter(row => row.applicant_id === args[index++]);
-        if (sql.includes("r.status = ?")) rows = rows.filter(row => row.status === args[index++]);
+        if (sql.includes("r.applicant_id = ?")) {const applicant=args[index++];rows = rows.filter(row => row.applicant_id === applicant);}
+        if (sql.includes("r.status = ?")) {const status=args[index++];rows = rows.filter(row => row.status === status);}
       }
       if (sql.includes("COUNT(*)")) return [{ total: rows.length }];
       return structuredClone(rows);
@@ -73,7 +74,7 @@ function fixture() {
     return { id: product.id };
   }
   const context = vm.createContext({ normalizeVehicleBrand, vehicleBrandAliases, VEHICLE_BRAND_CHINESE,
-    hasPermission, randomUUID: () => "generated-key", mysqlQuery: query, mysqlExecute: execute,
+    hasPermission, authorizeBusinessTaskSession:async session=>revoked?{...session,role:'operations',roles:['operations'],tenant:{...session.tenant,role:'member'}}:session,writeInventoryProductRequestNotices:async(c,t,row)=>{if(failNotice)throw Error('模拟通知保存失败');state.notices.push({id:row.id,status:row.status,revision:row.revision});return[{personId:row.applicant_id}];},publishInventoryProductRequestNotices:(tenant,targets)=>emitted.push({tenant,targets}),randomUUID: () => "generated-key", mysqlQuery: query, mysqlExecute: execute,
     inventoryTenantSql, vehicleCatalogTenantPredicate, resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
     assertInventoryMember: async () => {}, assertInventoryReferences: async () => {}, assertInventoryRecord: async () => {},
     ensureInventoryProductNamingSchema: async () => {}, ensureVehicleCatalogSchema: async () => {}, prepareInventoryProductCreationMysql: async () => {},
@@ -86,7 +87,7 @@ function fixture() {
     }
   });
   vm.runInContext(namingSource + "\n" + serviceSource, context);
-  return { api: context, state: () => state, failCreate: value => { failCreate = value; }, failBind: value => { failBind = value; }, duplicate: value => { duplicateId = value; }, bindingCalls: () => bindingCalls };
+  return { api: context, state: () => state,emitted,failNotice:value=>failNotice=value,revoke:()=>revoked=true,failCreate: value => { failCreate = value; }, failBind: value => { failBind = value; }, duplicate: value => { duplicateId = value; }, bindingCalls: () => bindingCalls };
 }
 
 test("new names save one complete application without creating products or activating options", async () => {
@@ -219,4 +220,24 @@ test("manager permission in a combined role grants actual approval without a nam
   const result = await f.api.reviewInventoryProductRequest(1, {action:"approve", revision:1}, {personId:8,role:"packing",roles:["packing","manager"]});
   assert.equal(result.status,"approved");
   assert.equal(f.state().products.length,1);
+});
+
+test('pending badge counts actual applications and own authorized submissions can be approved directly',async()=>{
+ const f=fixture();await f.api.submitInventoryProductRequest(body(),manager);
+ const second={...body(),request_key:'second-request'};await f.api.submitInventoryProductRequest(second,operator);
+ assert.equal(f.state().requests.length,2);
+ assert.equal((await f.api.inventoryProductRequests({summary:'1'},manager)).pending_count,2);
+ assert.equal((await f.api.inventoryProductRequests({summary:'1'},operator)).pending_count,1);
+ await f.api.reviewInventoryProductRequest(1,{action:'approve',revision:1},manager);
+ assert.equal((await f.api.inventoryProductRequests({summary:'1'},manager)).pending_count,1);
+ assert.equal((await f.api.inventoryProductRequests({summary:'1'},operator)).pending_count,1);
+ assert.equal((await f.api.inventoryProductRequestDetail(2,manager)).can_review,true);
+});
+test('notification failure rolls back creation, and repeated submission or approval does not create extra notices',async()=>{
+ const f=fixture();f.failNotice(true);await assert.rejects(f.api.submitInventoryProductRequest(body(),manager),/通知保存失败/);assert.equal(f.state().requests.length,0);assert.equal(f.emitted.length,0);
+ f.failNotice(false);await f.api.submitInventoryProductRequest(body(),manager);await f.api.submitInventoryProductRequest(body(),manager);assert.equal(f.state().notices.length,1);
+ await f.api.reviewInventoryProductRequest(1,{action:'approve',revision:1},manager);await f.api.reviewInventoryProductRequest(1,{action:'approve',revision:1},manager);assert.equal(f.state().notices.length,2);
+});
+test('a revoked reviewer cannot approve their own pending request with an old manager session',async()=>{
+ const f=fixture();await f.api.submitInventoryProductRequest(body(),manager);f.revoke();await assert.rejects(f.api.reviewInventoryProductRequest(1,{action:'approve',revision:1},manager),/仅库存审批人员/);assert.equal(f.state().requests[0].status,'pending');assert.equal(f.state().products.length,0);
 });

@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElNotification } from "element-plus";
@@ -21,6 +21,7 @@ const APP_UPDATE_DISMISSED_PREFIX = "baodanDismissedAppUpdate";
 const showLoginWelcome = ref(false);
 const loginWelcomeText = "欢迎大卖回归！";
 const loginWelcomeChars = computed(() => Array.from(loginWelcomeText));
+let inventoryRequestNotice=null;
 let updateCheckTimer = 0;
 let initialUpdateCheckTimer = 0;
 let loginWelcomeTimer = 0;
@@ -281,10 +282,15 @@ function openUpdateEventStream() {
       console.warn("parse AI task event failed", error);
     }
   });
-  updateEventSource.addEventListener("system-notification",()=>{
+  updateEventSource.addEventListener("system-notification",(event)=>{
     if(!currentStream())return;
     window.dispatchEvent(new CustomEvent('erp:system-notification',{detail:{scope:currentApiCacheScope()}}));
+    try{const payload=JSON.parse(event.data||'{}');if(payload.type==='inventory_product_request'&&String(payload.route||'').startsWith('/inventory/product-requests?')){
+      inventoryRequestNotice?.close();inventoryRequestNotice=ElNotification({title:payload.title||'库存申请',message:payload.message||'有库存申请待处理',type:'info',duration:7000,onClick:()=>{if(currentStream())void router.push(payload.route);}});
+    }}catch{}
+
   });
+  updateEventSource.addEventListener('inventory-product-request',()=>{if(currentStream())window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed',{detail:{scope:currentApiCacheScope()}}));});
   updateEventSource.addEventListener("sku-order-tracking", (event) => {
     if (!currentStream()) return;
     try {
@@ -340,6 +346,7 @@ function scheduleInitialUpdateCheck() {
 }
 
 function resetUpdateEventStreamForAuthScope() {
+  inventoryRequestNotice?.close();inventoryRequestNotice=null;
   closeUpdateEventStream();
   resetUpdateEventBackoff();
   scheduleInitialUpdateCheck();
@@ -381,6 +388,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  inventoryRequestNotice?.close();inventoryRequestNotice=null;
   window.removeEventListener("app:auth-expired", handleAuthExpired);
   window.removeEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.removeEventListener("storage", handleUpdateStorageChange);
