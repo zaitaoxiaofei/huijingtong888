@@ -13,7 +13,7 @@ import { uploadListingMedia } from "../api/tools/imageCropper";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { membershipDisplay } from "../utils/account-membership.js";
-import { canAccessPage, needsMembershipActivation } from "../../../src/shared/permissions.js";
+import { canAccessPage, needsMembershipActivation,hasPermission } from "../../../src/shared/permissions.js";
 import InventoryModuleTabs from '../components/InventoryModuleTabs.vue';
 import { inventoryModule } from '../constants/inventory-modules.js';
 import AppearanceSettings from "../components/AppearanceSettings.vue";
@@ -48,8 +48,10 @@ const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_passwo
 let mobileViewportQuery = null;
 let notificationRefreshTimer = 0;
 let notificationEventTimer = 0;
+let notificationReadVersion=0;
+const approvingInventoryRequest=ref(null);
 function queueNotificationRefresh(){window.clearTimeout(notificationEventTimer);notificationEventTimer=window.setTimeout(()=>loadNotifications({quiet:true}),250);}
-function resetNotificationsForScope(){notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;queueNotificationRefresh();}
+function resetNotificationsForScope(){approvingInventoryRequest.value=null;notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;queueNotificationRefresh();}
 const notificationDrawerVisible = ref(false);
 const notificationLoading = ref(false);
 const notifications = ref([]);
@@ -263,7 +265,7 @@ watch(exchangeRateDialogRequest, () => {
 }, { immediate: true, flush: "sync" });
 
 async function loadNotifications({ quiet = false } = {}) {
-  const scope = currentApiCacheScope();
+  const scope = currentApiCacheScope(),read=++notificationReadVersion;
   if (!authStore.user?.tenant?.id || authStore.user.tenant.access_allowed === false) {
     notifications.value = [];
     notificationUnread.value = 0;
@@ -275,13 +277,13 @@ async function loadNotifications({ quiet = false } = {}) {
       routeScoped: false,
       noCache: true
     });
-    if (scope !== currentApiCacheScope()) return;
+    if (scope !== currentApiCacheScope()||read!==notificationReadVersion) return;
     notifications.value = result?.rows || [];
     notificationUnread.value = Number(result?.unread || 0);
   } catch (error) {
-    if (!quiet) ElMessage.error(error?.message || "通知加载失败");
+    if (!quiet&&scope===currentApiCacheScope()&&read===notificationReadVersion) ElMessage.error(error?.message || "通知加载失败");
   } finally {
-    if (scope === currentApiCacheScope()) notificationLoading.value = false;
+    if (scope === currentApiCacheScope()&&read===notificationReadVersion) notificationLoading.value = false;
   }
 }
 
@@ -326,12 +328,29 @@ async function resolveNotification(item) {
   await loadNotifications();
 }
 
+async function approveInventoryRequestNotification(item){
+ if(approvingInventoryRequest.value!==null||!hasPermission(authStore.user,'inventory.review'))return;
+ const scope=currentApiCacheScope();approvingInventoryRequest.value=item.id;
+ try{
+  const row=await apiClient.get(`/api/inventory-product-requests/${Number(item.entity_id)}`,{noCache:true,routeScoped:false});
+  if(scope!==currentApiCacheScope())return;
+  if(row.status!=='pending'){ElMessage.info('这条库存申请已处理');await loadNotifications({quiet:true});return;}
+  await ElMessageBox.confirm(`确认通过库存申请 #${row.id}「${row.payload?.name||'库存建品'}」并创建库存？`,'通过库存申请',{confirmButtonText:'通过并创建库存',cancelButtonText:'取消',type:'warning'});
+  if(scope!==currentApiCacheScope())return;
+  const result=await apiClient.put(`/api/inventory-product-requests/${row.id}`,{action:'approve',revision:row.revision});
+  if(scope!==currentApiCacheScope())return;
+  if(result.binding_status==='failed')ElMessage.warning(`库存已创建，订单绑定待重试：${result.binding_error}`);else ElMessage.success('申请已通过，库存已创建');
+  window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed'));await loadNotifications({quiet:true});
+ }catch(error){if(scope===currentApiCacheScope()&&error!=='cancel'&&error!=='close')ElMessage.error(error.message||'审批失败，请点击查看申请核对');}
+ finally{if(scope===currentApiCacheScope())approvingInventoryRequest.value=null;}
+}
+
 function notificationTypeLabel(type) {
-  return ({ daily_procurement: "采购", stock_topup: "库存补足", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
+  return ({ inventory_product_request:"库存申请",inventory_product_request_result:"库存申请",daily_procurement: "采购", stock_topup: "库存补足", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
 }
 
 function notificationActionLabel(item = {}) {
-  const label = ({ daily_procurement: "去采购", stock_topup: "处理库存补足", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
+  const label = ({ inventory_product_request:"查看申请",inventory_product_request_result:"查看申请",daily_procurement: "去采购", stock_topup: "处理库存补足", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
   if (label) return label;
   if (String(item.route || "").startsWith("/inventory/fbp-shortages")) return "查看缺货明细";
   if (String(item.route || "").startsWith("/procurement/workspace")) return "去采购";
@@ -1096,6 +1115,7 @@ onBeforeUnmount(() => {
           <time>{{ shanghaiDateTimeText(item.created_at, { assumeUtcWhenNaive: true }) }}</time>
         </button>
         <div class="notification-card-actions">
+          <el-button v-if="item.notification_type==='inventory_product_request'&&item.status!=='resolved'&&hasPermission(authStore.user,'inventory.review')" link type="success" :loading="approvingInventoryRequest===item.id" :disabled="approvingInventoryRequest!==null" @click.stop="approveInventoryRequestNotification(item)">通过申请</el-button>
           <el-button v-if="item.route" link type="primary" @click.stop="openNotification(item)">{{ notificationActionLabel(item) }}</el-button>
           <el-button v-if="item.status !== 'resolved'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
         </div>

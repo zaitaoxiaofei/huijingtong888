@@ -1569,6 +1569,7 @@ async function submitDialog(options = {}) {
         : await apiClient.post(props.createEndpoint || "/api/products", { ...payload, ...(props.createContext || {}), request_key: requestKey.value });
     }
     if (savedProduct?.request_id) {
+      window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed'));
       invalidateInventoryNamingOptions();
       invalidateInventoryVehicleCatalog();
       if (savedProduct.binding_status === "failed") ElMessage.warning(`库存已创建，订单绑定失败：${savedProduct.binding_error}。请在建品申请中重试绑定。`);
