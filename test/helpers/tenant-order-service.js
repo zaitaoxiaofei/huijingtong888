@@ -101,7 +101,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','orderPageRowsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
-    'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
+    'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','mapWithConcurrencyMysql','trimOrderPostingSuffix',
     'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql','reconcileRemovedPostingItemsMysql',
     ...extraMethods
   ];
