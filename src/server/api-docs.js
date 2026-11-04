@@ -1691,7 +1691,7 @@ const endpoints = [
       requestBody: body(ref("OnlineProductBindRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/online-products/warehouses", "Return Ozon warehouses for a shop.", {
+    endpoint("GET", "/api/online-products/warehouses", "Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.", {
       auth: "authenticated",
       query: [param("shop_id", scalar("number", "Shop identifier."), true)],
       responses: [response(200, "application/json", ref("OnlineProductWarehousesResponse"))]
@@ -2163,6 +2163,15 @@ const endpoints = [
     endpoint("GET", "/api/shops", "Return shop master data.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ShopRecord"), "Shop rows."))]
+    }),
+    endpoint("GET", "/api/shops/ozon-health", "Read credential expiry and scoped sync freshness for active shops in the current enterprise. Requires a freshly verified enterprise owner/admin. No API keys or credential fingerprints are returned. A verified authorization does not prove business data is current.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", arrayOf(scalar("object", "shop_id, status, official expires_at, days_remaining, checked_at, last_verified_at, check_stale, role/method metadata, and per-module sync records (orders/products/stocks/finance). Sync records preserve last_success_at/last_success_coverage when later attempts fail; coverage is a query range, not proof of all historical data. New or rotated keys remain unverified until checked.")))]
+    }),
+    endpoint("POST", "/api/shops/ozon-health", "Probe the selected own active shop through the read-only Ozon roles endpoint. Requires a freshly verified enterprise owner/admin. Repeated checks within one minute are suppressed. Missing expiry, transient failure, expired/revoked keys, unsigned offers and denied permissions remain different states; obsolete in-flight key responses are ignored.", {
+      auth: "authenticated",
+      requestBody: body(objectOf("Select a shop; enterprise identity comes from the session.", [field("shop_id", scalar("number", "Active shop identifier."), true)])),
+      responses: [response(200, "application/json", scalar("object", "The current projected shop health record; same fields as GET /api/shops/ozon-health rows."))]
     }),
     endpoint("POST", "/api/shops", "Create a shop.", {
       auth: "authenticated",

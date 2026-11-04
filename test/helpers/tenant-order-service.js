@@ -106,7 +106,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
@@ -124,7 +124,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     nullableInteger:value=>Number(value)||null,nullableNumber:value=>Number(value)||null,
     normalizeSyncDateTimeMysql:value=>value||'',normalizeShanghaiDateBoundaryMysql:value=>value||'',normalizeMysqlNullableDateTime:value=>value||null,
     chinaDateKeyMysql:value=>String(value||'').slice(0,10),chinaDateSqlMysql:column=>`DATE(${column})`,
-    normalizeFinanceBackfillDateMysql:value=>String(value||'').slice(0,10),dateKeyDaysAgoMysql:()=> '2026-10-01',todayDateKeyMysql:()=> '2026-10-05',
+    normalizeFinanceBackfillDateMysql:value=>value instanceof Date?value.toISOString().slice(0,10):String(value||'').slice(0,10),addDateKeyDaysMysql:(day,count)=>new Date(Date.parse(day+'T00:00:00Z')+count*86400000).toISOString().slice(0,10),dateKeyDaysAgoMysql:()=> '2026-10-01',todayDateKeyMysql:()=> '2026-10-05',
     throwIfAbortedMysql(signal){if(signal?.aborted)throw Error('aborted');},textValueMysql:(...values)=>values.find(Boolean)||'',
     invalidateMasterDataCache(){},invalidateMasterDataCachePrefix(){},
     orderProcurementCoverageMysql:async options=>new Map(),

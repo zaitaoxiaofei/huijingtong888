@@ -1,3 +1,5 @@
+import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
+import { credentialVersion } from './ozon-credential-health.js';
 import { availableLocalCapitalRows, localCapitalTotals } from "./inventory-capital-local.js";
 import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
@@ -7429,6 +7431,8 @@ export async function createShopMysql(body = {}, tenantId = "admin") {
 
 
   invalidateShopCacheMysql();
+  try { await checkOzonHealth(normalizedTenantId, Number(result.insertId)); }
+  catch { console.error('新增店铺授权检查未完成，请在企业店铺重新检查'); }
   return { ok: true, id: Number(result.insertId) };
 }
 
@@ -7481,6 +7485,11 @@ export async function updateShopMysql(id, body = {}, tenantId = "admin") {
 
 
   invalidateShopCacheMysql();
+  const nextCredential = { ozon_client_id: body.ozon_client_id || '', ozon_api_key: payload[6] };
+  if ((body.status || 'active') === 'active' && credentialVersion(existing) !== credentialVersion(nextCredential)) {
+    try { await checkOzonHealth(normalizedTenantId, Number(id)); }
+    catch { console.error('店铺密钥已保存，授权检查未完成，请在企业店铺重新检查'); }
+  }
   return { ok: true };
 }
 
@@ -7571,40 +7580,6 @@ async function stockSyncFiltersMysql(shopId, productId) {
     productIds: rows.map((row) => Number(row.ozon_product_id || 0)).filter(Boolean),
     offerIds: rows.map((row) => row.offer_id).filter(Boolean)
   };
-}
-
-async function fallbackStockRowsFromOnlineProductsMysql(shopId, productId = null) {
-  const params = [Number(shopId)];
-  const productWhere = productId ? "AND sm.product_id = ?" : "";
-  if (productId) params.push(Number(productId));
-  const rows = await mysqlQuery(`
-    SELECT op.*, sm.product_id
-    FROM online_products op
-    LEFT JOIN sku_mappings sm ON sm.shop_id = op.shop_id AND sm.ozon_sku = op.ozon_sku AND sm.active = 1
-    WHERE op.shop_id = ? ${productWhere}
-  `, params);
-  const result = [];
-  for (const row of rows) {
-    const stocks = parseJsonOrNull(row.stocks_json) || [];
-    const list = Array.isArray(stocks) ? stocks : [stocks];
-    if (!list.length) continue;
-    list.forEach((stock, index) => {
-      const warehouseName = String(stock?.warehouse_name || stock?.name || stock?.source || stock?.delivery_schema || stock?.type || "Ozon");
-      result.push({
-        ozon_product_id: row.ozon_product_id || "",
-        offer_id: row.offer_id || "",
-        ozon_sku: row.ozon_sku,
-        warehouse_id: String(stock?.warehouse_id || stock?.source_id || stock?.id || stock?.type || index),
-        warehouse_name: warehouseName,
-        stock_type: classifyStockSnapshotMysql(stock, warehouseName),
-        present: snapshotStockNumberMysql(stock?.present ?? stock?.stock ?? stock?.quantity ?? stock?.available_stock ?? stock?.available),
-        reserved: snapshotStockNumberMysql(stock?.reserved ?? stock?.reserved_stock),
-        available: snapshotStockNumberMysql(stock?.available ?? stock?.free_to_sell_amount ?? stock?.present ?? stock?.stock ?? stock?.quantity),
-        raw_json: JSON.stringify(stock || {})
-      });
-    });
-  }
-  return result;
 }
 
 async function upsertStockSnapshotMysql(shopId, row, { beforeWrite = null } = {}) {
@@ -7841,6 +7816,7 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
     await checkAccess();
     const shop = shops.find(row => Number(row.id) === shopId);
     const targets = mappings.filter(row => Number(row.shop_id) === shopId);
+    const healthStartedAt = new Date().toISOString();
     const key = String(shop?.ozon_api_key || shop?.api_key || shop?.api_key_hint || '').trim();
     try {
       if (!shop || !shop.ozon_client_id || !key || key.startsWith('demo')) throw new Error('该店铺未配置真实Ozon凭据，请在企业店铺配置');
@@ -7878,8 +7854,10 @@ export async function syncInventoryFlowStocksMysql(body = {}, options = {}) {
             snapshotStockNumberMysql(row.present), snapshotStockNumberMysql(row.reserved), snapshotStockNumberMysql(row.available ?? row.present)]);
         }
       });
+      await recordOzonSyncHealth(shop, scope.id, 'stocks', { startedAt: healthStartedAt, success: true, coverage: '指定商品绑定的 FBP 库存' });
       results.push({ shop_id: shopId, shop_name: shop.name, ok: true, fetched: remote.length });
     } catch (error) {
+      if (shop) await recordOzonSyncHealth(shop, scope.id, 'stocks', { startedAt: healthStartedAt, success: false, error, coverage: '指定商品绑定的 FBP 库存' });
       // Credential-bearing provider diagnostics are deliberately not returned.
       results.push({ shop_id: shopId, shop_name: shop?.name || '', ok: false, message: /未配置|缺少货号|未覆盖|仓库分类/.test(error.message) ? error.message : 'Ozon库存请求失败，原快照保留，请稍后重试或检查店铺授权' });
     }
@@ -7901,6 +7879,7 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
   let upserted = 0;
   const errors = [];
   for (const shop of activeShops) {
+    const healthStartedAt = new Date().toISOString();
     try {
       const filters = await stockSyncFiltersMysql(shop.id, productId);
       let rows = await fetchOzonProductStocks(shop, { ...filters, signal: options.signal });
@@ -7910,25 +7889,17 @@ export async function syncOzonStocksMysql(body = {}, options = {}) {
       const actualFbp=new Set(rows.filter(row=>row.stock_type==='fbp_real').map(row=>String(row.ozon_sku)));
       rows.push(...confirmedZeros.filter(row=>!actualFbp.has(row.ozon_sku)));
       if (analytics.errors.length) errors.push(`${shop.name}: stock analytics unavailable (${analytics.errors.join("; ")})`);
+      if (!rows.length) throw new Error('Ozon 未返回可确认库存，原有快照未更新，请核查店铺与商品范围');
       await clearStockSnapshotsForSyncMysql(shop.id, { productId, filters });
-      if (!rows.length) rows = await fallbackStockRowsFromOnlineProductsMysql(shop.id, productId);
       fetched += rows.length;
       for (const row of rows) {
         await upsertStockSnapshotMysql(shop.id, row);
         upserted += 1;
       }
+      await recordOzonSyncHealth(shop, scope.id, 'stocks', { startedAt: healthStartedAt, success: !analytics.errors.length, coverage: productId ? '指定商品库存' : '本次店铺库存范围' });
     } catch (error) {
-      const fallbackRows = await fallbackStockRowsFromOnlineProductsMysql(shop.id, productId);
-      if (fallbackRows.length) {
-        fetched += fallbackRows.length;
-        for (const row of fallbackRows) {
-          await upsertStockSnapshotMysql(shop.id, row);
-          upserted += 1;
-        }
-        errors.push(`${shop.name}: Ozon stock API failed, used local stock cache (${error.message})`);
-      } else {
-        errors.push(`${shop.name}: ${error.message}`);
-      }
+      await recordOzonSyncHealth(shop, scope.id, 'stocks', { startedAt: healthStartedAt, success: false, error, coverage: productId ? '指定商品库存' : '本次店铺库存范围' });
+      errors.push(`${shop.name}: Ozon 库存同步未完整完成，请核对库存快照 (${error.message})`);
     }
   }
   await reclassifyStockSnapshotsMysql(String(scope.id));
@@ -9590,6 +9561,7 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
       upserted: 0,
       error: ""
     };
+    const healthStartedAt = new Date().toISOString();
     try {
       const checkCurrentShop = async () => {
         await checkAccess();
@@ -9683,7 +9655,9 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
         shopResult.archived_reconciled = await reconcileArchivedOnlineProductsMysql(shop.id, archivedRefs, checkCurrentShop);
       }
       await checkCurrentShop();
+      await recordOzonSyncHealth(shop, scope.id, 'products', { startedAt: healthStartedAt, success: true, coverage: syncScope === 'all' ? '店铺全部商品及商品详情价格' : '指定范围商品及详情价格' });
     } catch (error) {
+      await recordOzonSyncHealth(shop, scope.id, 'products', { startedAt: healthStartedAt, success: false, error, coverage: '本次商品拉取范围' });
       if (options.signal?.aborted || [401, 403, 404].includes(Number(error?.statusCode || error?.status))) throw error;
       shopResult.error = error?.message || String(error);
       errors.push(`${shop.name}: ${shopResult.error}`);
@@ -9933,38 +9907,54 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   if (targetShopId && !activeShops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const from = normalizeFinanceBackfillDateMysql(body.from) || dateKeyDaysAgoMysql(30);
   const to = normalizeFinanceBackfillDateMysql(body.to) || todayDateKeyMysql();
-  const dailyFinanceEnabled = Boolean(await getOrderProfitFxPolicy({ query: mysqlQuery }));
   let fetched = 0;
   let upserted = 0;
   let requests = 0;
   const errors = [];
+  const warnings = [];
   const shops = [];
   for (const cachedShop of activeShops) {
     const shop = await activeShopForTenantMysql(cachedShop.id, tenantScope.id);
     await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
     const shopResult = { shop_id: shop.id, shop_name: shop.name, fetched: 0, upserted: 0, requests: 0, normalization_pending: 0 };
+    const healthStartedAt = new Date().toISOString();
+    const healthErrorCount = errors.length;
     try {
+      const checkCurrentShop = async () => {
+        await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+        const current = await activeShopForTenantMysql(shop.id, tenantScope.id);
+        if (current.status !== "active" || String(current.ozon_client_id) !== String(shop.ozon_client_id)
+          || String(current.ozon_api_key || current.api_key_hint || "") !== String(shop.ozon_api_key || shop.api_key_hint || "")) {
+          throw Object.assign(new Error("店铺状态或授权在财务读取期间发生变化，请重新获取本次账单范围"), { code: "OZON_FINANCE_SHOP_CHANGED", statusCode: 409 });
+        }
+        return current;
+      };
       let sourceFrom = from;
-      if (dailyFinanceEnabled) {
-        // Old and new APIs have different operation identities. Do not import
-        // a second representation of a day already held by the legacy API.
-        const legacy = await mysqlQueryOne("SELECT MAX(operation_date) last_legacy_date FROM ozon_finance_items WHERE shop_id = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'", [shop.id]);
-        const legacyDay = legacy?.last_legacy_date ? normalizeFinanceBackfillDateMysql(legacy.last_legacy_date) : "";
-        if (legacyDay && legacyDay >= sourceFrom) sourceFrom = addDateKeyDaysMysql(legacyDay, 1);
+      // Source migration is independent of profit-policy activation. Keep the
+      // existing shop/day overlap guard: legacy and accrual IDs are not aliases.
+      const legacy = await mysqlQueryOne("SELECT MAX(operation_date) last_legacy_date FROM ozon_finance_items WHERE shop_id = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'", [shop.id]);
+      const legacyDay = legacy?.last_legacy_date ? normalizeFinanceBackfillDateMysql(legacy.last_legacy_date) : "";
+      if (legacyDay && legacyDay >= sourceFrom) {
+        sourceFrom = addDateKeyDaysMysql(legacyDay, 1);
+        shopResult.legacy_through = legacyDay;
+        shopResult.note = `旧流水最晚记录日期为 ${legacyDay}，新计提从 ${sourceFrom} 获取；更早日期未用新接口复核，需单独核对跨接口重复`;
+        warnings.push(`${shop.name}: ${shopResult.note}`);
       }
+      shopResult.source_from = sourceFrom;
+      shopResult.status = sourceFrom > to ? "skipped_legacy_range" : "ok";
       const result = sourceFrom > to ? { operations: [], fetched: 0, requests: 0 }
         : await fetchOzonFinanceTransactions(shop, { from: sourceFrom, to, signal: options.signal,
-          source: dailyFinanceEnabled ? "daily_accrual" : "legacy",
-          beforeRequest: async () => { await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);return activeShopForTenantMysql(shop.id, tenantScope.id); } });
+          source: "daily_accrual",
+          beforeRequest: checkCurrentShop });
       shopResult.fetched = Number(result.fetched || 0);
       shopResult.requests = Number(result.requests || 0);
       fetched += shopResult.fetched;
       requests += shopResult.requests;
-      await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+      await checkCurrentShop();
       for (const operation of result.operations || []) {
-        await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+        await checkCurrentShop();
         const write = () => upsertFinanceOperationMysql(shop.id, operation, { shop,
-          assertAuthorized: () => assertOrderTaskAccessMysql(tenantScope, options, ["finance"]) });
+          assertAuthorized: checkCurrentShop });
         if (operation.source_endpoint === "/v1/finance/accrual/by-day") {
           try { shopResult.upserted += await write(); }
           catch (error) {
@@ -9977,17 +9967,20 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
       }
       if (shopResult.normalization_pending) errors.push(`${shop.name}: ${shopResult.normalization_pending} 笔新账单需核对费用类型或金额；已保留原始记录，未作为真实利润结算`);
       upserted += shopResult.upserted;
+      if (shopResult.requests > 0) await recordOzonSyncHealth(shop, tenantScope.id, 'finance', { startedAt: healthStartedAt, success: errors.length === healthErrorCount && shopResult.requests > 0, coverage: `${sourceFrom} 至 ${to}，官方原始账单` });
     } catch (error) {
+      await recordOzonSyncHealth(shop, tenantScope.id, 'finance', { startedAt: healthStartedAt, success: false, error, coverage: `${from} 至 ${to}，官方原始账单` });
+      shopResult.status = "error";
       shopResult.error = error.message;
       errors.push(`${shop.name}: ${error.message}`);
     }
     shops.push(shopResult);
   }
   const status = errors.length ? "partial_error" : "ok";
-  const message = `Raw finance ${from}~${to}; fetched ${fetched}, upserted ${upserted}, requests ${requests}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
+  const message = `Raw finance ${from}~${to}; fetched ${fetched}, upserted ${upserted}, requests ${requests}${warnings.length ? `; ${warnings.join(" | ")}` : ""}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance_raw', ?, ?)", [tenantScope.id, status, message]);
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
-  return { fetched, upserted, requests, from, to, shops, errors, db: "mysql" };
+  return { fetched, upserted, requests, from, to, source_endpoint: "/v1/finance/accrual/by-day", shops, errors, warnings, db: "mysql" };
 }
 
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null, tenantId = "admin", taskOptions = {}, requiredPermissions = ["finance"] } = {}) {
@@ -10150,7 +10143,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
     }
     const newSource = await mysqlQueryOne(`SELECT id FROM ozon_finance_items WHERE shop_id = ?
       AND posting_number IN (?, ?) AND LEFT(operation_id, 15) = 'accrual_by_day:' LIMIT 1`, [row.shop_id, row.posting_number, parentOrderNumberMysql(row)]);
-    if (newSource && itemVersions.every(version => version === "V1")) continue; // Restoring new bills must not recalculate historical V1 orders.
+    if (newSource) continue; // Non-daily profit versions cannot consume the different accrual monetary model.
     if (itemVersions.length !== 1) throw Object.assign(new Error("订单利润公式版本不一致，停止财务入账"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
     const formula = getProfitFormula(itemVersions[0]);
     const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
@@ -10326,7 +10319,7 @@ export async function syncOzonFinanceMysql(body = {}, options = {}) {
   const message = `Fetched ${raw.fetched}, upserted ${raw.upserted}, applied ${applied.items}${raw.errors.length ? `; ${raw.errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance', ?, ?)", [tenantScope.id, status, message]);
   if (raw.errors.length && raw.upserted === 0) throw new Error(raw.errors.join(" | "));
-  return { fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, db: "mysql" };
+  return { fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, warnings: raw.warnings, source_endpoint: raw.source_endpoint, db: "mysql" };
 }
 
 export async function backfillOzonFinanceMysql(body = {}, options = {}) {
@@ -11286,12 +11279,26 @@ async function resolveFreshOzonProductIdForArchiveMysql(shop, online = {}, befor
   return productId;
 }
 
-export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin") {
+export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const shopId = Number(query.shop_id || query.shopId || 0);
   if (!shopId) throw new Error("请选择店铺后再获取 Ozon 仓库");
   const shop = await activeShopForTenantMysql(shopId, tenantId);
-  const warehouses = await fetchOzonWarehouses(shop);
+  const checkCurrentShop = async () => {
+    const current = await activeShopForTenantMysql(shopId, tenantId);
+    if (current.status !== 'active') throw Object.assign(new Error('店铺已停用，仓库读取已停止'), { statusCode: 403 });
+    const key = String(current.ozon_api_key || current.api_key_hint || '').trim();
+    if (!current.ozon_client_id || !key || key.startsWith('demo')) {
+      throw Object.assign(new Error('店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后刷新仓库'), { statusCode: 409 });
+    }
+    if (String(current.ozon_client_id) !== String(shop.ozon_client_id)
+      || String(current.ozon_api_key || current.api_key_hint || '') !== String(shop.ozon_api_key || shop.api_key_hint || '')) {
+      throw Object.assign(new Error('店铺授权已变更，请重新获取完整仓库列表'), { statusCode: 409 });
+    }
+    return current;
+  };
+  await checkCurrentShop();
+  const warehouses = await fetchOzonWarehouses(shop, { signal: options.signal, beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop });
   return {
     shop_id: shopId,
     shop_name: shop.name || "",
@@ -20110,6 +20117,7 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
   for (const cachedShop of activeShops) {
     const shop = await activeShopForTenantMysql(cachedShop.id, tenantScope.id);
     await assertOrderTaskAccessMysql(tenantScope, options);
+    const healthStartedAt = new Date().toISOString();
     try {
       throwIfAbortedMysql(options.signal);
       const postingsByNumber = new Map();
@@ -20169,9 +20177,11 @@ export async function syncDemoOrdersMysql(body = {}, options = {}) {
         shopStats.error = feedErrors.join(" | ");
         errors.push(`${shop.name}: ${shopStats.error}`);
       }
+      await recordOzonSyncHealth(shop, tenantScope.id, 'orders', { startedAt: healthStartedAt, success: !feedErrors.length, coverage: `${fetchFrom || '默认起始'} 至 ${fetchTo || '当前'}，${statuses.length ? '指定状态' : '全部状态'}`, error: feedErrors.length ? new Error(feedErrors.join(' | ')) : null });
       shopResults.push(shopStats);
       invalidateMasterDataCache();
     } catch (error) {
+      await recordOzonSyncHealth(shop, tenantScope.id, 'orders', { startedAt: healthStartedAt, success: false, error, coverage: '本次订单查询范围' });
       const message = `${shop.name}: ${error.message}`;
       errors.push(message);
       shopResults.push({ shop_id: shop.id, shop_name: shop.name, fetched: 0, inserted: 0, updated: 0, inserted_items: 0, requests: 0, ranges: 0, error: error.message });

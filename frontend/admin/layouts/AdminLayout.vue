@@ -1117,7 +1117,7 @@ onBeforeUnmount(() => {
         <div class="notification-card-actions">
           <el-button v-if="item.notification_type==='inventory_product_request'&&item.status!=='resolved'&&hasPermission(authStore.user,'inventory.review')" link type="success" :loading="approvingInventoryRequest===item.id" :disabled="approvingInventoryRequest!==null" @click.stop="approveInventoryRequestNotification(item)">通过申请</el-button>
           <el-button v-if="item.route" link type="primary" @click.stop="openNotification(item)">{{ notificationActionLabel(item) }}</el-button>
-          <el-button v-if="item.status !== 'resolved'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
+          <el-button v-if="item.status !== 'resolved' && item.notification_type !== 'ozon_credential_health'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
         </div>
       </article>
     </div>

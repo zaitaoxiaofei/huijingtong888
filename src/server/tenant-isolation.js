@@ -247,6 +247,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantOnlineProductAction = parts[1] === "online-products" && parts.length === 3 && parts[2] === "action" && verb === "POST";
   if (tenantOnlineProductRead || tenantOnlineProductStockWrite || tenantOnlineProductAction) return { allowed: true };
   const shopCollection = parts[1] === "shops" && parts.length === 2 && ["GET", "POST"].includes(verb);
+  if (parts[1] === "shops" && parts.length === 3 && parts[2] === "ozon-health" && ["GET", "POST"].includes(verb)) return { allowed: true };
   const shopRecord = parts[1] === "shops" && parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
   if (shopCollection || shopRecord) return { allowed: true };
   if (parts[1] === "tenants" && parts[2] === "members" && parts.length === 3 && verb === "GET") return { allowed: true };

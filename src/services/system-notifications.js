@@ -133,6 +133,10 @@ export async function resolveSystemNotification(notificationId, session = {}) {
   const recipientId = personId(session);
   const id = Number(notificationId || 0);
   if (!id) throw new Error("缺少通知 ID");
+  const [credentialNotice] = await mysqlQuery(`SELECT id FROM system_notifications sn
+    WHERE id = ? AND recipient_person_id = ? AND ${inventoryTenantSql(scope, "sn")}
+    AND notification_type = 'ozon_credential_health' AND status != 'resolved'`, [id, recipientId]);
+  if (credentialNotice) throw Object.assign(new Error('请先在企业店铺更新或检查授权，验证通过后系统会自动解除对应告警；可先标记已读'), { statusCode: 409 });
   await mysqlExecute(`
     UPDATE system_notifications sn
     SET status = 'resolved', read_at = COALESCE(read_at, CURRENT_TIMESTAMP), resolved_at = CURRENT_TIMESTAMP
