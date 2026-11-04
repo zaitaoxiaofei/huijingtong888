@@ -35,6 +35,19 @@ test('legacy kit purchases are corrected atomically to owned physical batches wi
    await assert.rejects(legacy.batchUpdateInboundRecordsMysql({records:[{id:ctx.batch.id,status:'approved',receive_quantity:10,purchase_quantity:10}]},2,2),/核对实际采购内容/);
    await assert.rejects(legacy.purchaseBundleContextMysql({id:ctx.batch.id},warehouse),{statusCode:403});await assert.rejects(legacy.purchaseBundleContextMysql({id:ctx.batch.id},foreign),{statusCode:404});
   });
+  await t.test('single total and actual set count create physical batches; retries preserve the same allocation',async()=>{
+   const ctx=await make(),before=await stock();
+   const body={id:ctx.batch.id,revision:ctx.revision,request_key:randomUUID(),mode:'whole',allocation_mode:'total',set_quantity:7,total_amount:110,note:'确认买了7套，总费用110元',allocation_confirmed:true,arrived:false};
+   const saved=await legacy.reviewPurchaseBundleMysql(body,buyer);assert.deepEqual(saved.created.map(r=>r.quantity),[14,7]);
+   const children=await Promise.all(saved.created.map(r=>batch(r.inbound_id)));assert.equal(children.reduce((n,r)=>n+Math.round(Number(r.amount)*10000)+Math.round(Number(r.shipping_amount)*10000),0),1100000);assert.equal(await stock(),before);
+   assert.equal((await legacy.reviewPurchaseBundleMysql(body,buyer)).duplicate,true);
+   await assert.rejects(legacy.reviewPurchaseBundleMysql({...body,total_amount:111},buyer),/相同标识/);
+  });
+  await t.test('single-total partial purchase keeps only selected components and confirms amount corrections',async()=>{
+   const ctx=await make(),before=await stock(),body={id:ctx.batch.id,revision:ctx.revision,request_key:randomUUID(),mode:'parts',allocation_mode:'total',total_amount:35,note:'仅买配件A共7件，总费用35元',items:[{product_id:201,quantity:7,amount:99999}]};
+   await assert.rejects(legacy.reviewPurchaseBundleMysql(body,buyer),/确认金额更正/);
+   body.confirm_amount_change=true;const saved=await legacy.reviewPurchaseBundleMysql(body,buyer);assert.equal(saved.created.length,1);const child=await batch(saved.created[0].inbound_id);assert.equal(Number(child.product_id),201);assert.equal(Number(child.quantity),7);assert.equal(Math.round((Number(child.amount)+Number(child.shipping_amount))*10000),350000);assert.equal(await stock(),before);
+  });
   await t.test('whole kit creates complete physical child batches and conserves total money, date, buyer and tracking',async()=>{
    const ctx=await make(true),body=input(ctx),before=await stock();const saved=await legacy.reviewPurchaseBundleMysql(body,buyer);assert.equal(saved.created.length,2);assert.equal(saved.physical_changed,false);assert.equal((await batch(ctx.batch.id)).status,'cancelled');
    const children=await Promise.all(saved.created.map(c=>batch(c.inbound_id)));assert.deepEqual(children.map(c=>Number(c.quantity)),[20,10]);assert.equal(children.reduce((n,c)=>n+Number(c.amount)+Number(c.shipping_amount),0),110);assert.ok(children.every(c=>c.status==='pending_arrival'&&c.received_at&&c.tracking_number==='TRACK-TEST'&&Number(c.person_id)===1));assert.equal(await stock(),before);
