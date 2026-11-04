@@ -9933,38 +9933,52 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
   if (targetShopId && !activeShops.length) throw Object.assign(new Error("店铺不存在或不属于当前企业"), { statusCode: 404 });
   const from = normalizeFinanceBackfillDateMysql(body.from) || dateKeyDaysAgoMysql(30);
   const to = normalizeFinanceBackfillDateMysql(body.to) || todayDateKeyMysql();
-  const dailyFinanceEnabled = Boolean(await getOrderProfitFxPolicy({ query: mysqlQuery }));
   let fetched = 0;
   let upserted = 0;
   let requests = 0;
   const errors = [];
+  const warnings = [];
   const shops = [];
   for (const cachedShop of activeShops) {
     const shop = await activeShopForTenantMysql(cachedShop.id, tenantScope.id);
     await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
     const shopResult = { shop_id: shop.id, shop_name: shop.name, fetched: 0, upserted: 0, requests: 0, normalization_pending: 0 };
     try {
+      const checkCurrentShop = async () => {
+        await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+        const current = await activeShopForTenantMysql(shop.id, tenantScope.id);
+        if (current.status !== "active" || String(current.ozon_client_id) !== String(shop.ozon_client_id)
+          || String(current.ozon_api_key || current.api_key_hint || "") !== String(shop.ozon_api_key || shop.api_key_hint || "")) {
+          throw Object.assign(new Error("店铺状态或授权在财务读取期间发生变化，请重新获取本次账单范围"), { code: "OZON_FINANCE_SHOP_CHANGED", statusCode: 409 });
+        }
+        return current;
+      };
       let sourceFrom = from;
-      if (dailyFinanceEnabled) {
-        // Old and new APIs have different operation identities. Do not import
-        // a second representation of a day already held by the legacy API.
-        const legacy = await mysqlQueryOne("SELECT MAX(operation_date) last_legacy_date FROM ozon_finance_items WHERE shop_id = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'", [shop.id]);
-        const legacyDay = legacy?.last_legacy_date ? normalizeFinanceBackfillDateMysql(legacy.last_legacy_date) : "";
-        if (legacyDay && legacyDay >= sourceFrom) sourceFrom = addDateKeyDaysMysql(legacyDay, 1);
+      // Source migration is independent of profit-policy activation. Keep the
+      // existing shop/day overlap guard: legacy and accrual IDs are not aliases.
+      const legacy = await mysqlQueryOne("SELECT MAX(operation_date) last_legacy_date FROM ozon_finance_items WHERE shop_id = ? AND LEFT(operation_id, 15) <> 'accrual_by_day:'", [shop.id]);
+      const legacyDay = legacy?.last_legacy_date ? normalizeFinanceBackfillDateMysql(legacy.last_legacy_date) : "";
+      if (legacyDay && legacyDay >= sourceFrom) {
+        sourceFrom = addDateKeyDaysMysql(legacyDay, 1);
+        shopResult.legacy_through = legacyDay;
+        shopResult.note = `旧流水最晚记录日期为 ${legacyDay}，新计提从 ${sourceFrom} 获取；更早日期未用新接口复核，需单独核对跨接口重复`;
+        warnings.push(`${shop.name}: ${shopResult.note}`);
       }
+      shopResult.source_from = sourceFrom;
+      shopResult.status = sourceFrom > to ? "skipped_legacy_range" : "ok";
       const result = sourceFrom > to ? { operations: [], fetched: 0, requests: 0 }
         : await fetchOzonFinanceTransactions(shop, { from: sourceFrom, to, signal: options.signal,
-          source: dailyFinanceEnabled ? "daily_accrual" : "legacy",
-          beforeRequest: async () => { await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);return activeShopForTenantMysql(shop.id, tenantScope.id); } });
+          source: "daily_accrual",
+          beforeRequest: checkCurrentShop });
       shopResult.fetched = Number(result.fetched || 0);
       shopResult.requests = Number(result.requests || 0);
       fetched += shopResult.fetched;
       requests += shopResult.requests;
-      await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+      await checkCurrentShop();
       for (const operation of result.operations || []) {
-        await assertOrderTaskAccessMysql(tenantScope, options, ["finance"]);
+        await checkCurrentShop();
         const write = () => upsertFinanceOperationMysql(shop.id, operation, { shop,
-          assertAuthorized: () => assertOrderTaskAccessMysql(tenantScope, options, ["finance"]) });
+          assertAuthorized: checkCurrentShop });
         if (operation.source_endpoint === "/v1/finance/accrual/by-day") {
           try { shopResult.upserted += await write(); }
           catch (error) {
@@ -9978,16 +9992,17 @@ export async function syncOzonFinanceRawMysql(body = {}, options = {}) {
       if (shopResult.normalization_pending) errors.push(`${shop.name}: ${shopResult.normalization_pending} 笔新账单需核对费用类型或金额；已保留原始记录，未作为真实利润结算`);
       upserted += shopResult.upserted;
     } catch (error) {
+      shopResult.status = "error";
       shopResult.error = error.message;
       errors.push(`${shop.name}: ${error.message}`);
     }
     shops.push(shopResult);
   }
   const status = errors.length ? "partial_error" : "ok";
-  const message = `Raw finance ${from}~${to}; fetched ${fetched}, upserted ${upserted}, requests ${requests}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
+  const message = `Raw finance ${from}~${to}; fetched ${fetched}, upserted ${upserted}, requests ${requests}${warnings.length ? `; ${warnings.join(" | ")}` : ""}${errors.length ? `; ${errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance_raw', ?, ?)", [tenantScope.id, status, message]);
   if (errors.length && upserted === 0) throw new Error(errors.join(" | "));
-  return { fetched, upserted, requests, from, to, shops, errors, db: "mysql" };
+  return { fetched, upserted, requests, from, to, source_endpoint: "/v1/finance/accrual/by-day", shops, errors, warnings, db: "mysql" };
 }
 
 async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedCollectingRates = null, tenantId = "admin", taskOptions = {}, requiredPermissions = ["finance"] } = {}) {
@@ -10150,7 +10165,7 @@ async function applyOzonFinanceToOrdersMysql({ from = "", to = "", estimatedColl
     }
     const newSource = await mysqlQueryOne(`SELECT id FROM ozon_finance_items WHERE shop_id = ?
       AND posting_number IN (?, ?) AND LEFT(operation_id, 15) = 'accrual_by_day:' LIMIT 1`, [row.shop_id, row.posting_number, parentOrderNumberMysql(row)]);
-    if (newSource && itemVersions.every(version => version === "V1")) continue; // Restoring new bills must not recalculate historical V1 orders.
+    if (newSource) continue; // Non-daily profit versions cannot consume the different accrual monetary model.
     if (itemVersions.length !== 1) throw Object.assign(new Error("订单利润公式版本不一致，停止财务入账"), { code: "ORDER_PROFIT_FORMULA_MIXED" });
     const formula = getProfitFormula(itemVersions[0]);
     const { resolveReturnLossCostPolicy, estimateOutcomeReturnLoss } = formula.outcome;
@@ -10326,7 +10341,7 @@ export async function syncOzonFinanceMysql(body = {}, options = {}) {
   const message = `Fetched ${raw.fetched}, upserted ${raw.upserted}, applied ${applied.items}${raw.errors.length ? `; ${raw.errors.join(" | ")}` : ""}`;
   await mysqlExecute("INSERT INTO sync_logs (tenant_id, job, status, message) VALUES (?, 'ozon_finance', ?, ?)", [tenantScope.id, status, message]);
   if (raw.errors.length && raw.upserted === 0) throw new Error(raw.errors.join(" | "));
-  return { fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, db: "mysql" };
+  return { fetched: raw.fetched, upserted: raw.upserted, requests: raw.requests, applied, errors: raw.errors, shops: raw.shops, warnings: raw.warnings, source_endpoint: raw.source_endpoint, db: "mysql" };
 }
 
 export async function backfillOzonFinanceMysql(body = {}, options = {}) {

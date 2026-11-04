@@ -1060,42 +1060,18 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
 }
 
 export async function fetchOzonFinanceTransactions(shop, options = {}) {
+  if (options.source && options.source !== "daily_accrual") {
+    throw Object.assign(new Error("旧版 Ozon 财务流水接口已停用，请使用按日计提账单；不能回退旧接口或把旧新金额直接合并"), { code: "OZON_FINANCE_LEGACY_RETIRED", statusCode: 400 });
+  }
   if (!hasRealOzonCredentials(shop)) {
-    return { operations: [], fetched: 0, requests: 0 };
+    throw Object.assign(new Error("店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后同步财务账单"), { code: "OZON_FINANCE_CREDENTIALS_MISSING", statusCode: 409 });
   }
-  if (options.source === "daily_accrual") {
-    const result = await fetchOzonDailyAccruals(shop, { from: options.from, to: options.to,
-      signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
-      request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions) });
-    return { ...result, operations: result.accruals };
-  }
-  const from = normalizeIsoStart(options.from, 30);
-  const to = normalizeIsoEnd(options.to, new Date());
-  const pageSize = Math.min(Math.max(Number(options.pageSize || 1000), 1), 1000);
-  const operations = [];
-  let page = 1;
-  let requests = 0;
-  while (true) {
-    throwIfAborted(options.signal);
-    const data = await ozonRequest(shop, "/v3/finance/transaction/list", {
-      filter: {
-        date: { from, to },
-        operation_type: [],
-        posting_number: "",
-        transaction_type: "all"
-      },
-      page,
-      page_size: pageSize
-    }, { signal: options.signal, beforeRequest: options.beforeRequest });
-    requests += 1;
-    const result = data.result || {};
-    const batch = result.operations || result.items || [];
-    for (const operation of batch) operations.push(normalizeFinanceOperation(operation));
-    const pageCount = Number(result.page_count || result.pages_count || 0);
-    if (!batch.length || (pageCount && page >= pageCount) || batch.length < pageSize) break;
-    page += 1;
-  }
-  return { operations, fetched: operations.length, requests };
+  const result = await fetchOzonDailyAccruals(shop, {
+    from: options.from || normalizeIsoStart(undefined, 30), to: options.to || normalizeIsoEnd(undefined, new Date()),
+    signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
+    request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions)
+  });
+  return { ...result, operations: result.accruals };
 }
 
 export async function splitOzonPosting(shop, postingNumber, postings, options = {}) {
@@ -1729,36 +1705,6 @@ function classifyStockType(stock = {}, parent = {}) {
 function stockNumber(value) {
   const num = Number(value || 0);
   return Number.isFinite(num) ? Math.max(0, Math.round(num)) : 0;
-}
-
-function normalizeFinanceOperation(item) {
-  const posting = item.posting || item.posting_number || {};
-  const services = Array.isArray(item.services) ? item.services : [];
-  const items = Array.isArray(item.items) ? item.items : [];
-  return {
-    operation_id: String(item.operation_id || item.id || item.operation_number || ""),
-    operation_type: String(item.operation_type || item.type || ""),
-    operation_type_name: String(item.operation_type_name || item.name || ""),
-    operation_date: item.operation_date || item.date || item.created_at || "",
-    posting_number: String(posting.posting_number || posting || ""),
-    order_number: String(posting.order_number || item.order_number || ""),
-    amount: numberFromOzon(item.amount || item.total || 0),
-    accruals_for_sale: numberFromOzon(item.accruals_for_sale || 0),
-    sale_commission: numberFromOzon(item.sale_commission || 0),
-    delivery_charge: numberFromOzon(item.delivery_charge || 0),
-    return_delivery_charge: numberFromOzon(item.return_delivery_charge || 0),
-    currency_code: item.currency_code || item.currency || "",
-    services: services.map((service) => ({
-      name: String(service.name || service.service_name || service.type || ""),
-      price: numberFromOzon(service.price || service.amount || service.value || 0)
-    })),
-    items: items.map((row) => ({
-      sku: String(row.sku || row.ozon_sku || ""),
-      name: String(row.name || ""),
-      quantity: Number(row.quantity || 1)
-    })),
-    raw_json: stringify(item)
-  };
 }
 
 function normalizeOzonProductPrice(item = {}) {
