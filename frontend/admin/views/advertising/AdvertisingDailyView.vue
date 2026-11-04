@@ -19,6 +19,7 @@ const detailVisible = ref(false);
 const profitDetailVisible = ref(false);
 const strategyDialogVisible = ref(false);
 const strategySubmitting = ref(false);
+const strategyResult = ref("");
 const activeTab = ref("dashboard");
 const shops = ref([]);
 const summary = ref({});
@@ -614,6 +615,7 @@ function openProfitDetails(row) {
 }
 
 function openStrategyDialog(row) {
+  strategyResult.value = "";
   currentRow.value = row;
   strategyForm.mode = campaignStrategyMode(row);
   strategyForm.bidRub = Number(row.campaign_bid_rub || 0);
@@ -636,15 +638,27 @@ async function saveStrategySetting() {
   };
   if (!payload.campaign_id) return ElMessage.warning("当前 SKU 缺少广告活动 ID，请先同步 Ozon 广告");
   if (payload.mode === "bid" && payload.bid_rub <= 0) return ElMessage.warning("请输入有效点击出价");
-  if (payload.mode === "targetCir" && payload.target_cir <= 0) return ElMessage.warning("请输入有效目标广告费用份额");
+  if (payload.mode === "targetCir" && (payload.target_cir < 10 || payload.target_cir > 100)) return ElMessage.warning("目标广告费用份额须在 10% 至 100% 之间");
+  await ElMessageBox.confirm("Ozon 官方调价方法可能覆盖活动原有否定词和关键词出价。如果需要保留这些设置，请取消并到 Ozon 后台调整。确认继续保存吗？", "确认广告调价影响", { type: "warning" });
+  if (currentRow.value !== row) return;
+  payload.confirmKeywordReset = true;
+  strategyResult.value = "";
   strategySubmitting.value = true;
   try {
-    await apiClient.post("/api/advertising/campaign/product-setting", payload);
-    ElMessage.success("广告策略参数已提交到 Ozon");
+    const result = await apiClient.post("/api/advertising/campaign/product-setting", payload);
+    if (currentRow.value !== row) return;
+    if (result.ok !== true || result.verified !== true) {
+      strategyResult.value = result.message || "调价尚未回读确认，请先刷新核对，勿连续重复提交";
+      ElMessage.warning(strategyResult.value);
+      return;
+    }
+    ElMessage.success("广告策略参数已回读确认");
     strategyDialogVisible.value = false;
     await loadRows();
   } catch (error) {
-    ElMessage.error(error.message || "广告策略参数更新失败");
+    if (currentRow.value !== row) return;
+    strategyResult.value = `${error.message || "广告策略参数未确认"}；请先刷新核对后再决定是否重试。`;
+    ElMessage.error(strategyResult.value);
   } finally {
     strategySubmitting.value = false;
   }
@@ -1437,6 +1451,7 @@ onMounted(bootstrap);
             <small>{{ campaignStrategyText(currentRow) }} / {{ campaignPlacementText(currentRow) }}</small>
           </div>
         </section>
+        <el-alert v-if="strategyResult" :title="strategyResult" type="warning" :closable="false" show-icon />
         <el-form label-width="132px" class="strategy-form">
           <el-form-item label="调整类型">
             <el-segmented v-model="strategyForm.mode" :options="[{ label: '点击出价', value: 'bid' }, { label: '广告费用份额', value: 'targetCir' }]" />
@@ -1446,7 +1461,7 @@ onMounted(bootstrap);
             <span class="form-suffix">RUB</span>
           </el-form-item>
           <el-form-item v-else label="目标费用份额">
-            <el-input-number v-model="strategyForm.targetCir" :min="0" :precision="1" :step="1" controls-position="right" />
+            <el-input-number v-model="strategyForm.targetCir" :min="10" :max="100" :precision="1" :step="1" controls-position="right" />
             <span class="form-suffix">%</span>
           </el-form-item>
         </el-form>
