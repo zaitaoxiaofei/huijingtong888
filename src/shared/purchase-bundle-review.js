@@ -1,3 +1,4 @@
+import {allocateBundlePurchaseTotal} from './purchase-bundle-total.js';
 import {createHash} from 'node:crypto';
 const fail=message=>Object.assign(new Error(message),{statusCode:409});
 const money=value=>Math.round(Number(value)*10000)/10000;
@@ -12,9 +13,11 @@ export function planPurchaseBundleReview(context,body){
  if(!['whole','parts'].includes(body.mode))throw fail('请选择整套采购或仅采购部分配件');
  if(typeof body.note!=='string'||!body.note.trim()||body.note.length>500)throw fail('请填写与采购凭证一致的核对说明');
 
- if(!Array.isArray(body.items)||!body.items.length||body.items.length>100||new Set(body.items.map(i=>Number(i.product_id))).size!==body.items.length)throw fail('请选择实际采购的配件，每个库存只能登记一次');
+ const simple=body.allocation_mode==='total';
+ const inputItems=simple?allocateBundlePurchaseTotal(context,body):body.items;
+ if(!Array.isArray(inputItems)||!inputItems.length||inputItems.length>100||new Set(inputItems.map(i=>Number(i.product_id))).size!==inputItems.length)throw fail('请选择实际采购的配件，每个库存只能登记一次');
  const ids=new Set(context.components.map(p=>Number(p.product_id)));
- const items=body.items.map(item=>{
+ const items=inputItems.map(item=>{
   const id=Number(item.product_id),quantity=Number(item.quantity),amount=Number(item.amount),shipping=Number(item.shipping_amount||0);
   if(!ids.has(id)||!Number.isSafeInteger(quantity)||quantity<1||quantity>1000000||!Number.isFinite(amount)||amount<=0||!Number.isFinite(shipping)||shipping<0)throw fail('请按最小实物库存填写实际采购件数、货款和运费；不能加入套装外的库存');
   return{product_id:id,quantity,amount:money(amount),shipping_amount:money(shipping)};
@@ -22,8 +25,9 @@ export function planPurchaseBundleReview(context,body){
  const amount=money(items.reduce((n,i)=>n+i.amount,0)),shipping=money(items.reduce((n,i)=>n+i.shipping_amount,0));
  if(body.mode==='whole'){
   if(body.allocation_confirmed!==true)throw fail('请明确确认整套采购的配件成本分摊');
-  if(items.length!==context.components.length||context.components.some(c=>!items.some(i=>i.product_id===Number(c.product_id)&&i.quantity===Number(context.batch.quantity)*Number(c.per_set_quantity))))throw fail('整套采购须完整保留每个配件及对应换算数量');
-  if(Math.abs(amount-Number(context.batch.amount||0))>=0.0001||Math.abs(shipping-Number(context.batch.shipping_amount||0))>=0.0001)throw fail('整套采购分摊后的货款、运费须分别等于原记录，不能增加或减少已付金额');
+  if(items.length!==context.components.length||context.components.some(c=>!items.some(i=>i.product_id===Number(c.product_id)&&i.quantity===Number(simple?body.set_quantity:context.batch.quantity)*Number(c.per_set_quantity))))throw fail('整套采购须完整保留每个配件及对应换算数量');
+  if(simple){if(Math.abs(amount+shipping-Number(context.batch.amount||0)-Number(context.batch.shipping_amount||0))>=0.0001&&body.confirm_amount_change!==true)throw fail('总费用与原记录不同，请确认本次金额更正');}
+  else if(Math.abs(amount-Number(context.batch.amount||0))>=0.0001||Math.abs(shipping-Number(context.batch.shipping_amount||0))>=0.0001)throw fail('整套采购分摊后的货款、运费须分别等于原记录，不能增加或减少已付金额');
   return{mode:'whole',items,amount,shipping_amount:shipping};
  }
  if(Math.abs(amount+shipping-Number(context.batch.amount||0)-Number(context.batch.shipping_amount||0))>=0.0001&&body.confirm_amount_change!==true)throw fail('更正后的总金额与原记录不同，请核对凭证并明确确认金额更正；实际退款请走采购对账');

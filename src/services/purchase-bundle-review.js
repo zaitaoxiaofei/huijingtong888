@@ -49,7 +49,7 @@ export function createPurchaseBundleReview({ledger,query=mysqlQuery,transaction=
   if(!graph.isBundle(batch.product_id))throw fail('此记录已经是最小实物库存，无需核对套装组成');
   const result=contextFor(batch,graph.components(batch.product_id),graph.products.get(Number(batch.product_id)));
   const costs=await query(`SELECT p.id,p.purchase_cost FROM products p WHERE p.id IN (${result.components.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'p')}`,result.components.map(c=>c.product_id));
-  result.components=suggestBundleCostAllocation(batch,result.components,costs);return result;
+  result.components=suggestBundleCostAllocation(batch,result.components,costs).map(part=>({...part,purchase_cost:costs.find(cost=>Number(cost.id)===Number(part.product_id))?.purchase_cost??null}));return result;
  }
  async function review(body,session){
   const current=await authorizeBusinessTaskSession(session);
@@ -63,7 +63,7 @@ export function createPurchaseBundleReview({ledger,query=mysqlQuery,transaction=
   const original=await assertInventoryRecord(scope,'inbound',id,query),graph=await loadInventoryComposition(query,scope);
   const reachable=new Set([Number(original.product_id)]);
   for(let depth=0;depth<12;depth++){let changed=false;for(const e of graph.edges)if(reachable.has(Number(e.product_id))&&!reachable.has(Number(e.component_product_id))){reachable.add(Number(e.component_product_id));changed=true;}if(!changed)break;}
-  const payload={id,revision:body.revision,mode:body.mode,note:String(body.note||'').trim(),arrived:body.arrived===true,allocation_confirmed:body.allocation_confirmed===true,confirm_amount_change:body.confirm_amount_change===true,items:(body.items||[]).map(i=>({product_id:Number(i.product_id),quantity:Number(i.quantity),amount:Number(i.amount),shipping_amount:Number(i.shipping_amount||0)})).sort((a,b)=>a.product_id-b.product_id)};
+  const payload={id,revision:body.revision,mode:body.mode,note:String(body.note||'').trim(),arrived:body.arrived===true,allocation_confirmed:body.allocation_confirmed===true,confirm_amount_change:body.confirm_amount_change===true,...(body.allocation_mode==='total'?{allocation_mode:'total',set_quantity:Number(body.set_quantity),total_amount:Number(body.total_amount)}:{}),items:(body.items||[]).map(i=>body.allocation_mode==='total'?{product_id:Number(i.product_id),quantity:Number(i.quantity)}:{product_id:Number(i.product_id),quantity:Number(i.quantity),amount:Number(i.amount),shipping_amount:Number(i.shipping_amount||0)}).sort((a,b)=>a.product_id-b.product_id)};
   const hash=createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   const result=await transaction(async c=>{
    const q=async(sql,args=[])=>(await c.query(sql,args))[0];
@@ -97,7 +97,7 @@ export function createPurchaseBundleReview({ledger,query=mysqlQuery,transaction=
     }
    }
    const saved={ok:true,mode:plan.mode,inbound_id:id,created,physical_changed:false};
-   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,batch.product_id,current.personId,'purchase_bundle_review',JSON.stringify({request_key:key,hash,source:ctx.batch,content_revision:ctx.content_revision,note:payload.note,result:saved})]);
+   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,batch.product_id,current.personId,'purchase_bundle_review',JSON.stringify({request_key:key,hash,source:ctx.batch,content_revision:ctx.content_revision,note:payload.note,...(body.allocation_mode==='total'?{allocation_mode:'total',total_amount:Number(body.total_amount),set_quantity:body.mode==='whole'?Number(body.set_quantity):null,allocation:plan.items}:{}),result:saved})]);
    return saved;
   });
   invalidateOrderProcurementCoverage({tenantId:scope.id,productIds:[Number(original.product_id),...result.created.map(row=>Number(row.product_id))]});return result;
