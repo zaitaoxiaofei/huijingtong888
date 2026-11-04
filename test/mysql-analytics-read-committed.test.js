@@ -33,7 +33,7 @@ test("analytics snapshot does not lock business rows or leak isolation into the 
     await writer.query("SET SESSION innodb_lock_wait_timeout=1");
     const [[before]] = await snapshot.query("SELECT @@transaction_isolation AS isolation_level");
     const implementation = source.match(/export async function mysqlExecuteReadCommitted[\s\S]*?\n}/)[0].replace("export ", "");
-    const context = vm.createContext({ setTimeout,
+    const context = vm.createContext({ setTimeout, withMysqlBackgroundReadAdmission: operation => operation(),
       getMysqlConnection: async () => snapshot,
       ensureMysqlSessionUtc: async connection => connection.query("SET time_zone='+00:00'"),
       releaseMysqlConnection: connection => { assert.equal(connection, snapshot); releases++; }
