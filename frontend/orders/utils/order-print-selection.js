@@ -13,13 +13,6 @@ export function orderPrintPlan(rows,pageIds=[],includePrinted=false){
  }
  return{orders,ids:orders.filter(row=>row.included).map(row=>row.id),printed:orders.filter(row=>row.printed).length,excluded:orders.filter(row=>!row.eligible).length,...orderSelectionSummary(new Set(orders.map(row=>row.id)),pageIds.map(id=>({id})))};
 }
-export function removePrintedSelection(selected,result){
- if(result?.printed!==true||result?.failed)return new Set(selected);
- const failed=new Set((result.failures||[]).map(row=>Number(row.order_id??row.id)));
- const printed=new Set((result.printed_ids||[]).map(Number).filter(id=>validId(id)&&!failed.has(id)));
- return new Set([...selected].filter(id=>!printed.has(Number(id))));
-}
-
 export function currentPagePreparePlan(rows=[]){
  const eligible=rows.filter(row=>row.availableActions?.prepare===true&&!row.availableActions?.showSplitPrepare);
  return{ids:[...new Set(eligible.map(row=>Number(row.id)).filter(validId))],skipped:rows.length-eligible.length};
