@@ -2427,6 +2427,12 @@ function sortPagedOrdersMysql(rows, query = {}) {
   // have been hydrated for the current page.
   if (quickUrgencySort) return [...rows];
   return [...rows].sort((a, b) => {
+    // Mobile packing groups inventory first, then retains print order within a group.
+    // Desktop printed-history ordering keeps its existing batch precedence.
+    if (mode === "inventory_picking") {
+      const key = orderInventoryPagedSortKeyMysql(a).localeCompare(orderInventoryPagedSortKeyMysql(b), "zh-Hans", { numeric: true });
+      if (key) return key;
+    }
     if (print === "printed") {
       const printedDiff = orderPrintTimestampPagedValueMysql(b) - orderPrintTimestampPagedValueMysql(a);
       if (printedDiff) return printedDiff;
@@ -31484,7 +31490,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   let inventoryTotal = null;
   let rows = [];
   if (includeRows) {
-    if (sortMode === "inventory") {
+    if (sortMode === "inventory" || sortMode === "inventory_picking") {
       const idRows = await mysqlQuery(`
         SELECT o.id
         FROM orders o

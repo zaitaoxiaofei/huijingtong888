@@ -53,14 +53,13 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
  clearTimeout(id){h.timers.delete(id);clearTimeout(id);},document:{querySelector(){return{scrollTo(){},scrollTop:0};}}});
  h.definition=module.exports.default;return h;
 }
-test('mobile orders return rows without counts, can paginate while counts are pending, and discard old-scope results',async()=>{
- let resolveCounts;
- const h=await component('views/mobile/MobileOrdersView.vue',{get:async path=>{const p=new URL(path,'http://fixture').searchParams;if(p.get('includeRows')==='0')return new Promise(resolve=>resolveCounts=resolve);return{rows:[{id:Number(p.get('page'))}],page:Number(p.get('page')),total:100};}});
+test('mobile order packing requests only page rows and ignores stale enterprise responses',async()=>{
+ let resolveOld;
+ const h=await component('views/mobile/MobileOrdersView.vue',{get:async path=>{const p=new URL(path,'http://fixture').searchParams;if(p.get('page')==='3')return new Promise(resolve=>resolveOld=resolve);return{rows:[{id:Number(p.get('page'))}],page:Number(p.get('page')),total:100};}});
  const sut=h.definition.setup({}, {expose(){}});
- await sut.loadOrders();assert.equal(sut.rows.value[0].id,1);assert.equal(h.calls.length,1);assert.match(h.calls[0].path,/includeCounts=0/);
- const counts=sut.loadCounts();await sut.loadOrders({nextPage:2});assert.equal(sut.rows.value[0].id,2);assert.equal(sut.countsLoading.value,true);assert.equal(h.calls.filter(c=>c.path.includes('includeRows=0')).length,1);
- h.scope='B';sut.clearScope();resolveCounts({counts:{unbound:99}});await counts;
- assert.equal(sut.rows.value.length,0);assert.equal(Object.keys(sut.counts.value).length,0);assert.equal(h.timers.size,0);
+ await sut.loadOrders();await sut.loadOrders({nextPage:2});assert.equal(sut.rows.value[0].id,2);assert.ok(h.calls.every(c=>c.path.includes('includeCounts=0')&&c.path.includes('includeLogisticsOptions=0')));
+ const pending=sut.loadOrders({nextPage:3});h.scope='B';sut.clearScope();resolveOld({rows:[{id:99}],total:100});await pending;
+ assert.equal(sut.rows.value.length,0);assert.equal(h.timers.size,0);
 });
 test('procurement opens a lightweight product page, keeps structured filters, and never starts a demand polling loop',async()=>{
  const h=await component('components/mobile/MobileWorkQueue.vue',{get:async path=>path.includes('/alerts')?{rows:[],total:null,snapshot:{refreshing:true}}:{rows:[{id:7,name:'Fixture inventory'}],total:1}});
@@ -163,4 +162,18 @@ test('live stocktake retains zero, rejects invalid quantities and explains incom
 });
 test('stocktake retries an unknown response with the same key, and conflict updates effects without losing input',async()=>{
  let reads=0,attempt=0;const h=await component('components/mobile/MobileStocktakeDialog.vue',{get:async()=>({revision:++reads===1?'old':'new',physical_estimate:reads===1?3:5,open_order_demand:1,fbp_reserved:0,flow_summary:{safety:0}}),post:async()=>{attempt++;const e=new Error('Network unavailable');if(attempt===2)e.status=409;throw e;}}),sut=h.definition.setup({modelValue:true,readOnly:false,product:{id:7}},{expose(){},emit(){}});await vue.nextTick();await new Promise(setImmediate);sut.form.counted_quantity=9;sut.form.reason_code='history_error';await sut.save();const key=sut.submission.value.request_key;await sut.save();assert.equal(h.calls.filter(c=>c.method==='POST')[1].body.request_key,key);assert.equal(sut.submission.value,null);assert.equal(sut.form.counted_quantity,9);assert.equal(sut.data.value.revision,'new');assert.equal(sut.impact.value.stocktake_delta,4);assert.match(sut.error.value,/填写内容已保留/);
+});
+
+test('mobile packing filters survive paging and a detail round-trip without range counts',async()=>{
+ const moves=[],route={query:{status:'awaiting_deliver',page:2,pageSize:50,searchType:'sku',q:'SKU-X',printFilter:'printed',sortMode:'inventory_picking'},params:{}};
+ const h=await component('views/mobile/MobileOrdersView.vue',{route,router:{replace(value){moves.push(value);},push(value){moves.push(value);}},get:async path=>{const p=new URL(path,'http://local').searchParams;return{page:Number(p.get('page')),total:100,rows:[]};}});
+ const sut=h.definition.setup({}, {expose(){}});await sut.changePage({page:2,pageSize:50});
+ const p=new URL(h.calls.at(-1).path,'http://local').searchParams;assert.equal(p.get('sortMode'),'inventory_picking');assert.equal(p.get('printFilter'),'printed');assert.equal(p.get('searchType'),'sku');assert.equal(p.get('searchQuery'),'SKU-X');assert.equal(p.get('includeCounts'),'0');assert.equal(p.get('pageSize'),'50');
+ sut.openDetail({id:7});assert.equal(moves.at(-1),'/mobile/orders/7');assert.equal(moves[0].query.q,'SKU-X');assert.equal(moves[0].query.printFilter,'printed');
+ sut.filters.searchType='order';sut.filters.searchQuery='12345678-1234-1';assert.equal(sut.buildParams().get('searchMatch'),'exact');
+ await sut.resetFilters();assert.equal(sut.filters.searchType,'product');assert.equal(sut.filters.printFilter,'all');assert.equal(sut.filters.sortMode,'inventory_picking');
+});
+test('packing rows keep each SKU inventory, image and quantity together, including missing bindings',()=>{
+ const items=orderUtils.packingItems({skus:'sku-b,sku-a,sku-c',sku_inventory_numbers:'sku-a:1-2||sku-b:2-10',sku_inventory_names:'sku-a:钥匙壳||sku-b:门槛条',sku_images:'sku-a:https://a/img.jpg||sku-b:https://b/img.jpg',sku_quantities:'sku-a:2||sku-b:3||sku-c:1',unbound_skus:'sku-c'});
+ assert.deepEqual(items.map(i=>[i.sku,i.inventoryNumber,i.quantity,i.imageUrl]),[['sku-b','2-10',3,'https://b/img.jpg'],['sku-a','1-2',2,'https://a/img.jpg'],['sku-c','',1,'']]);assert.equal(items[2].unbound,true);assert.equal(orderUtils.manualMarkLabel({mark_type:'issue'}),'有问题');
 });
