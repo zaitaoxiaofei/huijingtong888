@@ -1313,7 +1313,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : displayStateKey === "ogl_bound" ? "已绑定发运单，等待仓库确认实际交运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
+    statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),

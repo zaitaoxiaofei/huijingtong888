@@ -19,13 +19,13 @@ test('marked pending orders stay exclusively waiting; clearing the type releases
    }
   }
   const list=(status,tenant='2')=>service.ordersPagedMysql({status,includeRows:'0',includeLogisticsOptions:'0'},tenant);
-  let result=await list('awaiting_deliver');assert.equal(result.total,2);assert.equal(result.counts.awaiting_deliver,2);assert.equal(result.counts.awaiting_packaging,0);assert.equal(result.counts.ogl_bound,1);assert.equal(result.counts.ogl_dispatched,1);assert.equal(result.counts.delivering,1);assert.equal(result.counts.cancelled,1);
+  let result=await list('awaiting_deliver');assert.equal(result.total,4);assert.equal(result.counts.awaiting_deliver,4);assert.equal(result.counts.awaiting_packaging,0);assert.equal(result.counts.ogl_bound,1);assert.equal(result.counts.ogl_dispatched,1);assert.equal(result.counts.delivering,1);assert.equal(result.counts.cancelled,1);
   assert.equal((await list('awaiting_deliver','3')).total,1,'Foreign marked order stays in its own enterprise');
   await service.updateOrderMarkMysql(2,{mark_type:'',note:'保留备注'},null,'2');
-  result=await list('ogl_bound');assert.equal(result.total,2);assert.equal(result.counts.awaiting_deliver,1);
+  result=await list('ogl_bound');assert.equal(result.total,2);assert.equal(result.counts.awaiting_deliver,4);
   assert.equal((await query('SELECT note FROM order_marks WHERE order_id=2'))[0].note,'保留备注','A note alone must not keep the order held after no mark');
   await service.updateOrderMarkMysql(1,{mark_type:'',note:''},null,'2');
-  result=await list('awaiting_packaging');assert.equal(result.total,1);assert.equal(result.counts.awaiting_deliver,0);
+  result=await list('awaiting_packaging');assert.equal(result.total,1);assert.equal(result.counts.awaiting_deliver,3);
   await assert.rejects(service.updateOrderMarkMysql(7,{mark_type:'',note:''},null,'2'),{statusCode:404});
  }finally{await fixture.cleanup();}
 });
