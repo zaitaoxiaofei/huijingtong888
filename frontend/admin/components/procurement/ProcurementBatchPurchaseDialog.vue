@@ -4,6 +4,7 @@ import {ElMessage,ElMessageBox} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {useAuthStore} from '../../stores/auth.js';
 import {PROCUREMENT_PRICE_REASONS,procurementPriceReason} from '../../../../src/shared/procurement-price-reason.js';
+import {bundlePurchaseItems} from '../../utils/bundle-purchase-items.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
 const Ledger=defineAsyncComponent(()=>import('./ProcurementLedgerDialog.vue'));
 const props=defineProps({modelValue:Boolean,freePurchase:Boolean,initialRows:{type:Array,default:()=>[]}}),emit=defineEmits(['update:modelValue','created']);
@@ -22,8 +23,16 @@ async function add(row){
   const composition=result.rows?.[0];if(!composition?.components?.length)throw new Error('未读取到完整库存组成，请刷新后重试');
   if(items.value.length+composition.components.filter(p=>!items.value.some(i=>i.product_id===Number(p.id))).length>100)return ElMessage.warning('展开后超过100项库存，请分批采购');
   if(!composition.is_bundle){addPhysical(row);return;}
-  for(const part of composition.components)addPhysical({...part,product_id:part.id,product_name:part.name},Number(part.per_set_quantity));
-  ElMessage.info('套装已展开为实物库存，请移除不采购的配件并填写实际件数及货款');
+  const states=[],ids=composition.components.map(p=>Number(p.product_id||p.id));
+  for(let i=0;i<ids.length;i+=20){
+   const result=await apiClient.get(`/api/inventory-workflow?view=status&fresh=1&product_ids=${ids.slice(i,i+20).join(',')}`,{noCache:true});
+   if(disposed||token!==generation||scope!==currentApiCacheScope()||!visible.value)return;
+   states.push(...result.rows||[]);
+  }
+  const parts=bundlePurchaseItems(composition.components,states,{freePurchase:props.freePurchase});
+  if(!parts.length)return ElMessage.info('该套装的子库存现货及采购在途已覆盖需求，无需重复采购');
+  for(const part of parts)addPhysical(part,part.quantity);
+  ElMessage.info(parts.some(p=>p.workflow?.supply_plan?.required_purchase>0||p.workflow?.supply_plan?.optional_purchase>0)?'已按子库存最新缺口加入采购，现货及在途已抵扣':'当前没有缺货，已按一套实物组成加入自由采购，可修改实际数量');
  }catch(e){if(!disposed&&scope===currentApiCacheScope())ElMessage.error(e.message);}
 }
 async function search(){if(!query.value.trim()&&searchMode.value!=='auto')return ElMessage.warning('请先填写完整库存编号、SKU、货号或名称关键词');const token=++searchVersion,scope=currentApiCacheScope();searching.value=true;try{const r=await apiClient.get(`/api/products?${new URLSearchParams({paged:'1',page:'1',pageSize:'20',query:query.value,searchMode:searchMode.value})}`,{noCache:true});if(!disposed&&token===searchVersion&&scope===currentApiCacheScope())results.value=r.rows||[];}catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(token===searchVersion)searching.value=false;}}

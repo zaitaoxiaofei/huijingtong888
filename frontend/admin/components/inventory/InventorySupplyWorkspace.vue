@@ -45,7 +45,7 @@ const DemandDetails=defineAsyncComponent(()=>import('../procurement/ProcurementD
 const emit=defineEmits(['clear-product','purchased']);
 const props=defineProps({entry:{type:String,default:'orders'},initialTask:{type:String,default:''},productId:{type:Number,default:0}});
 const auth=useAuthStore(),loading=ref(false),error=ref(''),rows=ref([]),total=ref(0),meta=ref({}),snapshot=ref({}),checkingProduct=ref(0);
-const filters=reactive({...inventorySearchDefaults(),query:'',scope:'all',task:props.initialTask|| (props.entry==='procurement'?'required':'receiving'),page:1,pageSize:20});
+const filters=reactive({...inventorySearchDefaults(),query:'',scope:'all',task:props.initialTask|| (props.entry==='procurement'?'required':'receiving'),page:1,pageSize:50});
 const canCount=computed(()=>hasPermission(auth.user,'inventory.write'));
 const canReceive=computed(()=>hasPermission(auth.user,'packing')||hasPermission(auth.user,'procurement'));
 const canPurchase=computed(()=>hasPermission(auth.user,'procurement'));
@@ -223,7 +223,7 @@ defineExpose({refresh:load});
    <el-table-column label="未关闭采购" min-width="190"><template #default="{row}"><div v-if="openBatches(row).length" class="supply-open-purchases"><el-button v-for="batch in openBatches(row).slice(0,3)" :key="batch.id" link type="primary" @click="openDetail(row,'batches')">{{batch.order_no||`批次 #${batch.id}`}} · {{batch.quantity}} 件</el-button><small>{{openBatches(row).length}} 个未到货批次，最早已采购 {{age(openBatches(row)[0].purchased_at)??'待核'}} 天</small></div><span v-else>暂无未关闭采购</span></template></el-table-column>
    <el-table-column label="处理" min-width="155" fixed="right"><template #default="{row}"><div class="supply-row-actions"><el-button v-if="canReceive&&row.pending_batches?.length" type="primary" plain @click="openLedger(row,'receive')">验货入库</el-button><el-button v-if="canPurchase" type="primary" :loading="checkingProduct===Number(row.product_id)" :disabled="!!checkingProduct||!inventoryPurchaseReady(plan(row))" @click="openPurchase(row)">登记采购</el-button><el-button v-if="canCount" plain size="small" @click="openLedger(row,'stocktake')">核对实物</el-button><el-dropdown v-if="canReport" trigger="click" @command="openFeedback(row)"><el-button plain size="small">更多</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="report">向采购报缺（不登记已采购）</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></template></el-table-column>
   </el-table>
-  <el-pagination v-if="snapshot.available!==false" v-model:current-page="filters.page" :page-size="filters.pageSize" :total="total" layout="total, prev, pager, next" @current-change="load(false,false,true)"/>
+  <el-pagination v-if="snapshot.available!==false" v-model:current-page="filters.page" v-model:page-size="filters.pageSize" :page-sizes="[20,50,100]" :total="total" layout="total, sizes, prev, pager, next" @size-change="load(true)" @current-change="load(false,false,true)"/>
   </template>
   </template>
   <ForecastDialog v-if="forecastDialog.visible" v-model="forecastDialog.visible" :product-id="forecastDialog.id" :product-name="forecastDialog.name" @created="forecastCreated"/>

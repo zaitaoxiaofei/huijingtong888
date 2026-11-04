@@ -13,7 +13,7 @@ const props=defineProps({productId:{type:Number,default:0},initialAll:Boolean});
 const emit=defineEmits(['saved','navigate']);
 const filters=reactive(inventorySearchDefaults());
 const router=useRouter();
-const auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),all=ref(props.initialAll),loading=ref(false),error=ref('');
+const auth=useAuthStore(),rows=ref([]),total=ref(0),page=ref(1),pageSize=ref(50),all=ref(props.initialAll),loading=ref(false),error=ref('');
 const form=reactive({row:null,action:'',at:null,quantity:0,note:'',busy:false});
 const canConfirm=computed(()=>hasPermission(auth.user,'packing')||hasPermission(auth.user,'inventory.write'));
 let version=0,actionVersion=0,controller;
@@ -21,7 +21,7 @@ const time=v=>v?shanghaiDateTimeText(v,{assumeUtcWhenNaive:true}):'未记录';
 const inputTime=v=>shanghaiDateTimeText(v||new Date(),{assumeUtcWhenNaive:true}).replaceAll('/','-');
 async function load(){
  controller?.abort();controller=new AbortController();const scope=currentApiCacheScope(),token=++version;loading.value=true;error.value='';
- try{const r=await apiClient.get(`/api/inventory-workflow/details?${new URLSearchParams({...filters,node:'fbp-receipts',product_id:props.productId,page:page.value,all:all.value?'1':'0'})}`,{noCache:true,signal:controller.signal});
+ try{const r=await apiClient.get(`/api/inventory-workflow/details?${new URLSearchParams({...filters,node:'fbp-receipts',product_id:props.productId,page:page.value,pageSize:pageSize.value,all:all.value?'1':'0'})}`,{noCache:true,signal:controller.signal});
   if(token===version&&scope===currentApiCacheScope()){rows.value=r.rows||[];total.value=r.total||0;}
  }catch(e){if(token===version&&e.name!=='AbortError')error.value=e.message||'入仓核对读取失败';}finally{if(token===version)loading.value=false;}
 }
@@ -57,7 +57,7 @@ defineExpose({refresh:load});
    <el-table-column label="到仓时间（北京）" min-width="205"><template #default="{row}"><div>预计 {{time(row.expected_arrival_at)}}</div><div>实际 {{time(row.arrival_at)}}</div><el-button v-if="canConfirm" size="small" @click="edit(row,'fbp-expected-time')">修改预计</el-button><el-button v-if="canConfirm" size="small" @click="edit(row,'fbp-arrival-time')">登记到仓</el-button></template></el-table-column>
    <el-table-column label="逐项确认" width="155" fixed="right"><template #default="{row}"><el-button v-if="canConfirm&&row.remaining>0" type="primary" size="small" @click="edit(row,'fbp-receive')">确认本SKU入仓</el-button><span v-else>{{row.remaining?'等待仓库确认':'已确认'}}</span></template></el-table-column>
   </el-table>
-  <el-pagination v-if="total>50" :current-page="page" :page-size="50" :total="total" layout="total,prev,pager,next" @current-change="value=>{page=value;load()}"/>
+  <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[20,50,100]" :total="total" layout="total,sizes,prev,pager,next" @size-change="page=1;load()" @current-change="value=>{page=value;load()}"/>
   <el-dialog v-if="form.row" :model-value="true" :title="form.action==='fbp-receive'?'确认本SKU实收入仓':'登记到仓时间'" width="min(560px,94vw)" append-to-body :close-on-click-modal="false" :show-close="!form.busy" :close-on-press-escape="!form.busy" @close="form.row=null">
    <p>{{form.row.shop_name}} · SKU {{form.row.ozon_sku}}</p>
    <el-alert v-if="form.action==='fbp-receive'" title="请核实此SKU实际入仓数量。系统疑似结果不能代替实收凭证，部分到仓可分次确认。" type="warning" :closable="false"/>

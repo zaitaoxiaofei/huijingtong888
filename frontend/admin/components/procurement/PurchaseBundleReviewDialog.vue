@@ -35,7 +35,8 @@ watch(()=>form.mode,mode=>{if(submitted.value)return;for(const item of items.val
 watch(()=>props.inboundId,load,{immediate:true});onBeforeUnmount(()=>{disposed=true;++version;});
 </script>
 <template>
- <el-dialog v-model="visible" title="核对套装实际采购内容" width="min(1050px,96vw)" append-to-body :close-on-click-modal="false" :show-close="!busy">
+ <el-dialog v-model="visible" title="确认历史套装采购内容" width="min(1050px,96vw)" append-to-body :close-on-click-modal="false" :show-close="!busy">
+ <el-alert title="这是历史上按整套登记的采购记录，需要确认当时实际买到的配件。采购工作台的新采购按缺货子库存登记，无需再次做套装确认。" type="info" :closable="false"/>
   <section v-loading="loading" class="bundle-review">
    <el-alert v-if="error" :title="error" type="error" :closable="false"/>
    <template v-if="context"><p>原批次 #{{inboundId}} · {{context.product.name}} · 原套装数量 {{context.batch.quantity}} · 原货款及运费 ¥{{originalAmount.toFixed(4)}}</p>

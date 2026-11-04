@@ -26,7 +26,7 @@ export function createFbpReceiptReview({query=mysqlQuery}={}) {
   async function records(params, session) {
     const current=await authorizeBusinessTaskSession(session,query);
     if(!hasPermission(current,'inventory.read'))throw Object.assign(new Error('需要本企业库存查看权限'),{statusCode:403});
-    const scope=await resolveInventoryTenantScope(current.tenant.id,query),page=Math.max(1,Number(params.page)||1),id=Number(params.product_id)||0;
+    const scope=await resolveInventoryTenantScope(current.tenant.id,query),page=Math.max(1,Number(params.page)||1),pageSize=[20,50,100].includes(Number(params.pageSize))?Number(params.pageSize):50,id=Number(params.product_id)||0;
     if(id)await assertInventoryRecord(scope,'product',id,query);
     const bindings=id?(await loadProductFbpStocks(query,id,scope)).rows:[];
     const related=[...new Map(bindings.map(row=>[pair(row),row])).values()];
@@ -43,8 +43,8 @@ export function createFbpReceiptReview({query=mysqlQuery}={}) {
       return {rows:[],total:Number(summary?.total||0),pending_quantity:Number(summary?.pending_quantity||0)};
     }
     const rows=await query(`SELECT COUNT(*) OVER() AS total,f.*,p.name AS product_name,p.inventory_number,s.name AS shop_name,
-      CONCAT('/api/products/',p.id,'/image?thumb=1') AS image_url ${fromSql} ORDER BY f.shipped_at,f.id LIMIT 50 OFFSET ?`,[...args,(page-1)*50]);
-    if(!rows.length)return {rows:[],total:0};
+      CONCAT('/api/products/',p.id,'/image?thumb=1') AS image_url ${fromSql} ORDER BY f.shipped_at,f.id LIMIT ? OFFSET ?`,[...args,pageSize,(page-1)*pageSize]);
+    if(!rows.length){const [count]=page>1?await query(`SELECT COUNT(*) AS total ${fromSql}`,args):[{total:0}];return {rows:[],total:Number(count?.total||0)};}
     const productIds=[...new Set(rows.map(r=>Number(r.product_id)))];
     const pairs=[...new Map(rows.map(r=>[pair(r),r])).values()];
     const [events,stocks,settingsRows,overlaps]=await Promise.all([
