@@ -30,26 +30,25 @@ test("only an explicit failed result removes the current operator print batch", 
   assert.match(rollback, /printed\.print_batch_id = \? AND printed\.printed_by_person_id IS NULL AND \$\{orderTenantPredicateMysql\("s", scope\)\}/);
 });
 
-test("print review freezes cross-page selection, excludes printed orders and retains all selections after printing",async()=>{
+test("bulk printing directly includes printed selections across pages and retains selections",async()=>{
  const handlers=pageSource.slice(pageSource.indexOf("function selectedActionOrderIds("),pageSource.indexOf("function handleToolbarMoreAction("));
  const tableRows={value:[{id:3,availableActions:{print:true}},{id:4,availableActions:{print:true},printed_at:'2026-11-01 01:00:00'},{id:5,availableActions:{print:false}}]};
- const selectedRows={value:[{id:1,availableActions:{print:true}},{id:2,availableActions:{print:true}}]},selectedOrderIds={value:new Set([1,2,3,4,5])};
- const printReview={busy:false},calls=[],warnings=[];let result={},scope='a';
- const run=vm.runInNewContext(`${handlers};({bulkPrintSelected,bulkPrintPage,confirmPrintReview})`,{tableRows,selectedRows,selectedOrderIds,printReview,currentApiCacheScope:()=>scope,
- printReviewPlan:{get value(){return orderPrintPlan(printReview.rows,printReview.pageIds,printReview.includePrinted);}},
- orderDetailCache:new Map(),loadOrders:async()=>{},ElMessage:{warning:m=>warnings.push(m),error:m=>warnings.push(m),success(){}},previewOrderLabels:async ids=>{calls.push(Array.from(ids));return result;}});
- run.bulkPrintSelected();assert.equal(calls.length,0,'review precedes PDF generation');
- assert.deepEqual(orderSelectionSummary(selectedOrderIds.value,tableRows.value),{total:5,current:3,other:2});
- const plan=orderPrintPlan(printReview.rows,printReview.pageIds);assert.deepEqual(plan.ids,[1,2,3]);assert.equal(plan.other,2);assert.equal(plan.printed,1);assert.equal(plan.excluded,1);
- result={printed:false,failed:true};await run.confirmPrintReview();assert.deepEqual([...selectedOrderIds.value],[1,2,3,4,5]);
- result={printed:true,printed_ids:[1,3],failures:[{order_id:2}]};await run.confirmPrintReview();assert.deepEqual([...selectedOrderIds.value],[1,2,3,4,5]);
- run.bulkPrintPage();printReview.includePrinted=true;result={printed:true,printed_ids:[3,4]};await run.confirmPrintReview();assert.deepEqual(calls.at(-1),[3,4]);assert.deepEqual([...selectedOrderIds.value],[1,2,3,4,5]);
- run.bulkPrintSelected();scope='b';await run.confirmPrintReview();assert.equal(printReview.visible,false);assert.match(warnings.at(-1),/企业或登录/);
- scope='a';selectedOrderIds.value.clear();run.bulkPrintSelected();assert.match(warnings.at(-1),/请选择/);
- tableRows.value=Array.from({length:81},(_,i)=>({id:i+1,availableActions:{print:true}}));run.bulkPrintPage();assert.match(warnings.at(-1),/80/);
+ const selectedRows={value:[{id:1,availableActions:{print:true}},{id:2,availableActions:{print:true},printed_at:'yesterday'}]},selectedOrderIds={value:new Set([1,2,3,4,5])};
+ const labelPrintBusy={value:false},calls=[],warnings=[],loads=[];let result={},scope='a',reply;
+ const run=vm.runInNewContext(`${handlers};({bulkPrintSelected,bulkPrintPage})`,{tableRows,selectedRows,selectedOrderIds,labelPrintBusy,orderPrintPlan,currentApiCacheScope:()=>scope,
+ orderDetailCache:new Map(),loadOrders:async()=>loads.push(true),ElMessage:{warning:m=>warnings.push(m),error:m=>warnings.push(m),success(){}},previewOrderLabels:async ids=>{calls.push(Array.from(ids));return reply?await reply:result;}});
+ result={printed:true,printed_ids:[1,2,3,4]};await run.bulkPrintSelected();assert.deepEqual(calls[0],[1,2,3,4],'Both printed and unprinted rows go directly to the label page');
+ assert.deepEqual([...selectedOrderIds.value],[1,2,3,4,5]);assert.match(warnings.at(-1),/1 单暂不可打印/);
+ result={printed:false,failed:true};await run.bulkPrintSelected();assert.deepEqual([...selectedOrderIds.value],[1,2,3,4,5]);
+ await run.bulkPrintPage();assert.deepEqual(calls.at(-1),[3,4],'Print page does not include off-page selections');
+ labelPrintBusy.value=true;const count=calls.length;await run.bulkPrintSelected();assert.equal(calls.length,count);labelPrintBusy.value=false;
+ let resolve;reply=new Promise(r=>resolve=r);const pending=run.bulkPrintSelected();const loaded=loads.length;scope='b';selectedOrderIds.value=new Set([99]);resolve({printed:true});await pending;assert.equal(loads.length,loaded);assert.deepEqual([...selectedOrderIds.value],[99],'A late print cannot alter a new enterprise selection');reply=null;
+ selectedOrderIds.value.clear();await run.bulkPrintSelected();assert.match(warnings.at(-1),/请选择/);
+ tableRows.value=Array.from({length:81},(_,i)=>({id:i+1,availableActions:{print:true}}));await run.bulkPrintPage();assert.match(warnings.at(-1),/80/);
+ assert.doesNotMatch(pageSource,/允许重复打印|确认本次打印范围|order-print-review/);
 });
-test("print planning excludes unavailable rows and defaults to avoiding repeat bulk printing",()=>{
- assert.deepEqual(orderPrintPlan([{id:1},{id:2,availableActions:{print:true},printed_at:'now'}],[1,2]).ids,[]);
+test("print planning excludes unavailable rows and includes historical prints without opt-in",()=>{
+ assert.deepEqual(orderPrintPlan([{id:1},{id:2,availableActions:{print:true},printed_at:'now'}],[1,2]).ids,[2]);
  assert.deepEqual(orderSelectionSummary(new Set(),[]),{total:0,current:0,other:0});
 });
 

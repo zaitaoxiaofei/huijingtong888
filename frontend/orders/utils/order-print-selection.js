@@ -4,12 +4,12 @@ export function orderSelectionSummary(selected,pageRows=[]){
  const current=[...ids].filter(id=>page.has(id)).length;
  return{total:ids.size,current,other:ids.size-current};
 }
-export function orderPrintPlan(rows,pageIds=[],includePrinted=false){
+export function orderPrintPlan(rows,pageIds=[]){
  const current=new Set(pageIds.map(Number)),seen=new Set(),orders=[];
  for(const row of rows){const id=Number(row.id);if(!validId(id)||seen.has(id))continue;seen.add(id);
   const printed=Boolean(row.printed_at||row.label_printed_at||row.shipping_label_printed_at||row.printedState||row.isPrinted);
   const eligible=row.availableActions?.print===true;
-  orders.push({...row,id,printed,onPage:current.has(id),included:eligible&&(!printed||includePrinted),eligible});
+  orders.push({...row,id,printed,onPage:current.has(id),included:eligible,eligible});
  }
  return{orders,ids:orders.filter(row=>row.included).map(row=>row.id),printed:orders.filter(row=>row.printed).length,excluded:orders.filter(row=>!row.eligible).length,...orderSelectionSummary(new Set(orders.map(row=>row.id)),pageIds.map(id=>({id})))};
 }
