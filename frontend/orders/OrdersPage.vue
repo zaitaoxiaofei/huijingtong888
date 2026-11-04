@@ -1,6 +1,6 @@
 ﻿<script setup>
 import {orderHasDispatchHold} from "../../src/shared/order-dispatch-hold.js";
-import {orderSelectionSummary,orderPrintPlan,removePrintedSelection,currentPagePreparePlan} from "./utils/order-print-selection.js";
+import {orderSelectionSummary,orderPrintPlan,currentPagePreparePlan} from "./utils/order-print-selection.js";
 import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
 import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
@@ -1755,14 +1755,17 @@ async function confirmPrintReview(){
   if(scope!==currentApiCacheScope()){printReview.visible=false;return ElMessage.warning("企业或登录状态已变化，请重新选择订单");}
   const ids=[...printReviewPlan.value.ids];
   if(!ids.length)return ElMessage.warning("本次没有待打印订单；重打已打印订单请主动勾选允许重复打印");
+  return executeLabelPrint(ids,scope);
+}
+async function executeLabelPrint(ids,scope,options={}){
+  if(printReview.busy)return;
   printReview.busy=true;
   try {
-    const result = await previewOrderLabels(ids);
+    const result = await previewOrderLabels(ids,options);
     if(scope!==currentApiCacheScope())return;
     if(result?.printed){
-      selectedOrderIds.value=removePrintedSelection(selectedOrderIds.value,result);
       printReview.visible=false;
-      ElMessage.success("已记录面单打印时间，并清除已打印成功订单的勾选；失败订单保留");
+      ElMessage.success("已记录面单打印时间，已选订单保持勾选，方便核对和贴单");
     }else if(result?.failed){
       ElMessage.warning("已撤销本批面单的打印记录，勾选保留，可重新打印");
     }
@@ -2049,7 +2052,9 @@ async function prepareSplitChildren() {
 }
 
 async function handlePrintOrder(orderId) {
-  openPrintDialog([orderId]);
+  const id=Number(orderId),row=tableRows.value.find(item=>Number(item.id)===id);
+  if(!Number.isSafeInteger(id)||id<=0||row?.availableActions?.print!==true)return ElMessage.warning("该订单暂不可打印，请同步订单后核对面单状态");
+  return executeLabelPrint([id],currentApiCacheScope(),{autoPrint:true});
 }
 
 async function showQualityRules() {

@@ -231,7 +231,7 @@ function writePrintPreviewPage(printWindow, { url, count }) {
   printWindow.document.close();
 }
 
-function writePrintPreviewPageSafe(printWindow, { url }) {
+function writePrintPreviewPageSafe(printWindow, { url, autoPrint = false }) {
   printWindow.document.open();
   printWindow.document.write(`<!doctype html>
 <html lang="zh-CN">
@@ -327,7 +327,7 @@ function writePrintPreviewPageSafe(printWindow, { url }) {
       <button type="button" id="closePage">&#20851;&#38381;</button>
     </div>
   </header>
-  <iframe id="labelFrame" src="${url}" title="PDF"></iframe>
+  <iframe id="labelFrame" ${autoPrint ? "" : `src="${url}"`} title="PDF"></iframe>
   <div id="printResultMask" class="result-mask">
     <section class="result-dialog" role="dialog" aria-modal="true" aria-labelledby="printResultTitle">
       <button type="button" id="closeResult" class="result-close" aria-label="Close">&times;</button>
@@ -344,8 +344,8 @@ function writePrintPreviewPageSafe(printWindow, { url }) {
   printWindow.document.close();
 }
 
-function waitForPrintConfirmation(printWindow, { url, count, orderIds }) {
-  writePrintPreviewPageSafe(printWindow, { url, count });
+function waitForPrintConfirmation(printWindow, { url, count, orderIds, autoPrint = false }) {
+  writePrintPreviewPageSafe(printWindow, { url, count, autoPrint });
   return new Promise((resolve) => {
     let settled = false;
     let printBatchId = "";
@@ -397,12 +397,18 @@ function waitForPrintConfirmation(printWindow, { url, count, orderIds }) {
         printTriggered = true;
         frame?.contentWindow?.focus();
         frame?.contentWindow?.print();
-        resultMask?.classList.add("visible");
+        if (autoPrint) finish({ printed: true, failed: false });
+        else resultMask?.classList.add("visible");
       } catch (error) {
         printButton.disabled = false;
         printWindow.alert(`记录打印时间失败：${error?.message || "未知错误"}`);
       }
     });
+    if (autoPrint) {
+      const frame = printWindow.document.getElementById("labelFrame");
+      frame.addEventListener("load", () => printButton?.click(), { once: true });
+      frame.src = url;
+    }
   });
 }
 
@@ -472,7 +478,8 @@ export async function previewOrderLabels(orderIds = [], options = {}) {
     const printResult = await waitForPrintConfirmation(printWindow, {
       url,
       count: printedIds.length || ids.length,
-      orderIds: printedIds.length ? printedIds : printIds
+      orderIds: printedIds.length ? printedIds : printIds,
+      autoPrint: options.autoPrint === true && ids.length === 1
     });
     return { ok: true, ...printResult, printed_ids: printedIds.length ? printedIds : printIds, failures: failedLabelsFromHeader(response.headers) };
   } catch (error) {
