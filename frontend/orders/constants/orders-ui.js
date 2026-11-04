@@ -15,7 +15,7 @@ export const STATE_META = {
   all: { label: "全部订单", color: "slate" },
   awaiting_packaging: { label: "等待备货", color: "amber" },
   awaiting_deliver: { label: "等待发运", color: "blue" },
-  ogl_bound: { label: "已绑定待交运", color: "blue" },
+  ogl_bound: { label: "等待发运", color: "blue" },
   ogl_dispatched: { label: "已交运待上网", color: "blue" },
   delivering: { label: "运输中", color: "green" },
   dispute: { label: "有争议", color: "red" },
@@ -45,7 +45,8 @@ export function orderStateKey(row = {}) {
   if (DELIVERING_KEYWORDS.some(value => text.includes(value)) && !AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "delivering";
   if (orderHasDispatchHold(row)) return "awaiting_deliver";
   if (oglDisplayStatus === "awaiting_deliver") return "awaiting_deliver";
-  if (["ogl_bound", "ogl_dispatched"].includes(oglDisplayStatus)) return oglDisplayStatus;
+  if (oglDisplayStatus === "ogl_bound") return "awaiting_deliver";
+  if (oglDisplayStatus === "ogl_dispatched") return oglDisplayStatus;
   if (AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "awaiting_deliver";
   if (DELIVERING_KEYWORDS.some(value => text.includes(value))) return "delivering";
   if (AWAITING_PACKAGING_STATES.some(value => text.includes(value))) return "awaiting_packaging";

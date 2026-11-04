@@ -100,9 +100,8 @@ function writeOrdersMetaCache(filters = {}, counts = {}) {
 const STATUS_TABS = [
   { value: "all", label: "全部订单" },
   { value: "awaiting_packaging", label: "等待备货" },
-  { value: "awaiting_deliver", label: "等待发运" },
-  { value: "ogl_bound", label: "已绑定待交运", title: "已绑定官方发运或系统关联；尚未确认实际交运，不扣本地库存" },
-  { value: "ogl_dispatched", label: "已交运待上网", title: "仓库已确认实际交运，尚未收到平台运输状态" },
+  { value: "awaiting_deliver", label: "等待发运", title: "打印、绑定发运单及实际交运后仍保留，平台进入运输中后移出；已取消、异常和已签收订单除外" },
+  { value: "ogl_dispatched", label: "已交运待上网", title: "仓库已确认实际交运，尚未收到平台运输状态；同时保留在等待发运中" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
@@ -380,7 +379,7 @@ export function useOrdersPage() {
       vm.filters = {
         page: Number(filters.page || 1),
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
-        status: ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
+        status: filters.status === "ogl_bound" ? "awaiting_deliver" : ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),

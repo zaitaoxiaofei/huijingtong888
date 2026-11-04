@@ -31776,9 +31776,9 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
   }
   if (status === "awaiting_deliver") {
-    return `((${awaitingDelivery} OR ${oglBoundStatusSql("o", evidenceAlias, false)} OR ${manualHold})
+    return `((${awaitingDelivery} OR ${oglBoundStatusSql("o", evidenceAlias, null)} OR ${oglDispatchedStatusSql("o", evidenceAlias)} OR ${manualHold})
       AND NOT (${exactTransit})
-      AND NOT (${oglBoundStatusSql("o", evidenceAlias)} AND NOT ${manualHold}) AND NOT ${oglDispatchedStatusSql("o", evidenceAlias)} AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
+      AND NOT ${oglOnlineStatusSql("o", evidenceAlias)} AND NOT ${oglTerminalStatusSql("o", evidenceAlias)}
       AND NOT (${orderStatusSqlMysql("delivered", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("cancelled", null, tenantScope, evidenceAlias)})
       AND NOT (${orderStatusSqlMysql("dispute", null, tenantScope, evidenceAlias)}))`;
