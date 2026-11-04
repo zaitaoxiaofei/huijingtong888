@@ -981,6 +981,7 @@ export class ScheduledJobScheduler {
         mode,
         plannedFor: fromSqlDate(job.next_run_at),
         lastSuccessAt: fromSqlDate(job.last_success_at),
+        createdAt: fromSqlDate(job.created_at),
         intervalMinutes: Number(job.interval_minutes || 0),
         config: parseJson(job.config_json, {})
       })
@@ -1021,6 +1022,7 @@ export class ScheduledJobScheduler {
         mode,
         plannedFor: fromSqlDate(job.next_run_at),
         lastSuccessAt: fromSqlDate(job.last_success_at),
+        createdAt: fromSqlDate(job.created_at),
         intervalMinutes: Number(job.interval_minutes || 0),
         config: parseJson(job.config_json, {})
       });

@@ -624,6 +624,7 @@ setInterval(() => {
 const BACKGROUND_TASK_FOREGROUND_IDLE_MS = Math.max(0, Number(config.backgroundTaskForegroundIdleSeconds || 20)) * 1000;
 const BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS = Math.max(0, Number(config.backgroundCriticalJobMaxDeferralSeconds || 300)) * 1000;
 const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
+  "ozon_credential_health",
   "order_profit_daily_fx_archive",
   "ogl_official_monitor",
   "customer_message_dispatch",
@@ -653,6 +654,14 @@ function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
   const intervalMs = Math.max(0, Number(context?.intervalMinutes || 0)) * 60 * 1000;
   if (Number.isFinite(lastSuccessAt.getTime()) && intervalMs > 0) {
     return Date.now() - (lastSuccessAt.getTime() + intervalMs) >= maxDeferralMs;
+  }
+  if (jobKey === "ozon_credential_health") {
+    // next_run_at moves on every deferral. The persisted registry creation
+    // time preserves the first 60-second startup due date across restarts.
+    const createdAt = new Date(context?.createdAt || "");
+    if (Number.isFinite(createdAt.getTime())) {
+      return Date.now() - (createdAt.getTime() + 60_000) >= maxDeferralMs;
+    }
   }
   const plannedFor = context?.plannedFor instanceof Date
     ? context.plannedFor
@@ -1097,7 +1106,7 @@ const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
 });
 
 const scheduledJobHandlers = {
-  ozon_credential_health: () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId)),
+  ozon_credential_health: withForegroundApiDeferral("ozon_credential_health", () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId))),
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
     dailyFxArchiveFirstDueAt = 0;
     return runOrderProfitDailyFxArchive(orderProfitDailyFxDb);
@@ -1148,10 +1157,11 @@ const scheduledJobHandlers = {
 
 const scheduledJobScheduler = new ScheduledJobScheduler({
   handlers: scheduledJobHandlers,
-  beforeRun: ({ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig }) => backgroundJobDeferral(key, {
+  beforeRun: ({ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig, createdAt }) => backgroundJobDeferral(key, {
     mode,
     plannedFor,
     lastSuccessAt,
+    createdAt,
     intervalMinutes,
     config: jobConfig
   }),
