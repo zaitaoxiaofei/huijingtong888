@@ -2938,7 +2938,7 @@ Bind an online product to an ERP product and owner.
 
 #### `GET /api/online-products/warehouses`
 
-Return Ozon warehouses for a shop.
+Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -4109,6 +4109,24 @@ Return shop master data.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `array<ShopRecord>`
+
+#### `GET /api/shops/ozon-health`
+
+Read credential expiry and scoped sync freshness for active shops in the current enterprise. Requires a freshly verified enterprise owner/admin. No API keys or credential fingerprints are returned. A verified authorization does not prove business data is current.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `POST /api/shops/ozon-health`
+
+Probe the selected own active shop through the read-only Ozon roles endpoint. Requires a freshly verified enterprise owner/admin. Repeated checks within one minute are suppressed. Missing expiry, transient failure, expired/revoked keys, unsigned offers and denied permissions remain different states; obsolete in-flight key responses are ignored.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `POST /api/shops`
 

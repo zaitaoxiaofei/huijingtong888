@@ -81,6 +81,9 @@ export function authorizeApiRequest(req, parts = []) {
   // Ordinary staff need the scoped dictionary; its route projects safe fields.
   // Full authorization details and all writes remain enterprise administration.
   if (resource === "shops" && parts.length === 2 && method === "GET") return { allowed: true };
+  if (resource === "shops" && parts.length === 3 && parts[2] === "ozon-health") {
+    return ["GET", "POST"].includes(method) && isEnterpriseAdmin(session) ? { allowed: true } : deny("仅企业负责人或管理员可以检查店铺授权");
+  }
   if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
     const collection = parts.length === 2 && ["GET", "POST"].includes(method);
     const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);

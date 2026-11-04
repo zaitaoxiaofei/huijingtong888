@@ -1,3 +1,5 @@
+import { createOzonHealthRoutes } from './server/routes/ozonHealth.js';
+import { checkTenantOzonHealth } from './services/ozon-credential-health-mysql.js';
 import { withMysqlWorkload } from "./mysql-workload.js";
 import {createMobileDashboardHandler} from './server/routes/mobileDashboard.js';
 import { ORDER_SPLIT_SCHEMA } from "./services/order-split-schema.js";
@@ -239,6 +241,7 @@ async function resolveDownloadArtifactPath(filename) {
 
 const routeModules = {
   ...createCatalogRoutes({ services, readJson }),
+  ...createOzonHealthRoutes({ readJson }),
   ...createOperationsRoutes({ services, readJson }),
   ...createTeamRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
@@ -844,6 +847,16 @@ const scheduledJobDefinitions = [
     }
   },
   {
+    key: "ozon_credential_health",
+    name: "Ozon 店铺密钥到期与权限巡检",
+    category: "maintenance",
+    priority: "critical",
+    intervalMinutes: 1440,
+    initialDelaySeconds: 60,
+    catchupEnabled: true,
+    maxCatchupRuns: 1
+  },
+  {
     key: "ozon_finance_sync",
     name: "Ozon 财务流水与结算同步",
     category: "finance",
@@ -1084,6 +1097,7 @@ const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
 });
 
 const scheduledJobHandlers = {
+  ozon_credential_health: () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId)),
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
     dailyFxArchiveFirstDueAt = 0;
     return runOrderProfitDailyFxArchive(orderProfitDailyFxDb);

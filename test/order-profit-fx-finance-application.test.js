@@ -145,8 +145,8 @@ test("mixed order pins fail before financial or revision writes", async () => {
   assert.equal(db.projections.length, 0);
 });
 
-test("restoring new accrual bills never recalculates a historical V1 order", async () => {
-  const db = harness({ versions: ["V1"], newSourceForLegacy: true });
+for (const version of ["V1", "V3"]) test(`restoring new accrual bills never recalculates a non-daily ${version} order`, async () => {
+  const db = harness({ versions: [version], newSourceForLegacy: true });
   const result = await db.execute({ tenantId: 81 });
   assert.equal(result.items, 0);
   assert.equal(db.projections.length, 0);

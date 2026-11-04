@@ -106,6 +106,7 @@ const state = reactive({
   productScope: "candidates",
   selectedRowKeys: [],
   removalResult: null,
+  enrollmentResult: null,
   editValues: {},
   productPagers: {
     candidates: createEmptyProductPager(),
@@ -433,6 +434,7 @@ function buildEditValue(row) {
   }
   return {
     action_price: row?.action_price || row?.max_action_price || row?.alert_max_action_price || "",
+    currency: row?.currency || row?.action_price?.currency || "",
     stock: row?.stock ?? row?.min_stock ?? ""
   };
 }
@@ -456,6 +458,7 @@ function resetProducts() {
   state.productScope = "candidates";
   state.selectedRowKeys = [];
   state.removalResult = null;
+  state.enrollmentResult = null;
   state.editValues = {};
 }
 
@@ -800,6 +803,7 @@ async function loadProducts({ scope = "candidates", page = 1, loadBoth = false, 
 
 function openProducts(row) {
   state.removalResult = null;
+  state.enrollmentResult = null;
   state.selectedActionId = String(getActionId(row));
   state.productsModalOpen = true;
   void loadProducts({ loadBoth: true });
@@ -865,13 +869,14 @@ function buildSubmitProducts(rows) {
     return {
       product_id: getProductId(row),
       action_price: values.action_price,
+      currency: values.currency || row?.currency || "",
       stock: values.stock
     };
   });
 }
 
 function hasInvalidSubmitProduct(products) {
-  return products.some((row) => state.mode === "seller" ? !Number(row.sku) : !Number(row.product_id) || !Number(row.action_price));
+  return products.some((row) => state.mode === "seller" ? !Number(row.sku) : !Number(row.product_id) || !Number(row.action_price) || !["RUB", "CNY"].includes(row.currency));
 }
 
 async function submitSelected() {
@@ -882,20 +887,28 @@ async function submitSelected() {
   }
   const products = buildSubmitProducts(rows);
   if (hasInvalidSubmitProduct(products)) {
-    ElMessage.warning(state.mode === "seller" ? "已选商品缺少有效 SKU" : "已选商品必须填写有效活动价");
+    ElMessage.warning(state.mode === "seller" ? "已选商品缺少有效 SKU" : "已选商品必须填写有效活动价且有人民币或卢布币种，请重新拉取缺少币种的商品");
     return;
   }
-  await ElMessageBox.confirm(`即将提交 ${products.length} 个商品到活动「${localizeActionTitle(selectedAction.value)}」，确认继续吗？`, state.productScope === "joined" ? "确认保存活动设置" : "确认加入活动", {
+  const requestScope = `${state.storeId}:${state.mode}:${state.selectedActionId}`;
+  await ElMessageBox.confirm(`即将提交 ${products.length} 个商品到活动「${localizeActionTitle(selectedAction.value)}」，确认继续吗？${state.mode === "official" ? "官方活动使用共享活动限价，可能影响同商品的其他活动。" : ""}`, state.productScope === "joined" ? "确认保存活动设置" : "确认加入活动", {
     type: "warning",
     confirmButtonText: state.productScope === "joined" ? "保存修改" : "加入活动",
     cancelButtonText: "取消"
   });
+  if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+  state.enrollmentResult = null;
   state.submitting = true;
   try {
-    await apiClient.post("/api/ozon/actions/products/add", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products });
-    ElMessage.success(state.productScope === "joined" ? `已保存 ${products.length} 个商品的活动设置` : `已提交 ${products.length} 个商品到活动`);
+    const outcome = await apiClient.post("/api/ozon/actions/products/add", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products, confirmSharedPrice: state.mode === "official" });
+    if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+    state.enrollmentResult = state.mode === "official" ? outcome : null;
+    if (state.mode === "official") ElMessage[outcome.success ? "success" : "warning"](`已确认 ${outcome.count || 0} 个商品，${outcome.failures?.length || 0} 个待核对`);
+    else ElMessage.success(`已提交 ${products.length} 个商品到卖家活动`);
     await loadProducts({ loadBoth: true });
   } catch (error) {
+    if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+    if (state.mode === "official") state.enrollmentResult = { success: false, count: 0, warnings: [], failures: products.map(row => ({ product_id: row.product_id, reason: `本次未确认：${error.message || "请求失败"}；请先刷新核对，勿连续重复提交` })) };
     ElMessage.error(`提交失败：${error.message || "unknown"}`);
   } finally {
     state.submitting = false;
@@ -906,15 +919,24 @@ async function submitSingleProduct(row) {
   const key = getProductKey(row);
   const products = buildSubmitProducts([row]);
   if (hasInvalidSubmitProduct(products)) {
-    ElMessage.warning(state.mode === "seller" ? "当前商品缺少有效 SKU" : "当前商品必须填写有效活动价");
+    ElMessage.warning(state.mode === "seller" ? "当前商品缺少有效 SKU" : "当前商品必须填写有效活动价且有人民币或卢布币种，请重新拉取缺少币种的商品");
     return;
   }
+  const requestScope = `${state.storeId}:${state.mode}:${state.selectedActionId}`;
+  if (state.mode === "official") await ElMessageBox.confirm("官方活动使用共享活动限价，可能影响同商品的其他活动，确认提交吗？", "确认活动设置", { type: "warning" });
+  if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+  state.enrollmentResult = null;
   state.submittingProductKey = key;
   try {
-    await apiClient.post("/api/ozon/actions/products/add", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products });
-    ElMessage.success(state.productScope === "joined" ? "当前商品活动设置已更新" : "当前商品已加入活动");
+    const outcome = await apiClient.post("/api/ozon/actions/products/add", { storeId: state.storeId, mode: state.mode, actionId: state.selectedActionId, products, confirmSharedPrice: state.mode === "official" });
+    if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+    state.enrollmentResult = state.mode === "official" ? outcome : null;
+    if (state.mode === "official") ElMessage[outcome.success ? "success" : "warning"](outcome.success ? "已回读确认当前商品及活动价" : "当前商品报名尚未确认，请查看结果");
+    else ElMessage.success("当前商品已提交到卖家活动");
     await loadProducts({ loadBoth: true });
   } catch (error) {
+    if (requestScope !== `${state.storeId}:${state.mode}:${state.selectedActionId}`) return;
+    if (state.mode === "official") state.enrollmentResult = { success: false, count: 0, warnings: [], failures: products.map(row => ({ product_id: row.product_id, reason: `本次未确认：${error.message || "请求失败"}；请先刷新核对，勿连续重复提交` })) };
     ElMessage.error(`提交失败：${error.message || "unknown"}`);
   } finally {
     state.submittingProductKey = "";
@@ -969,6 +991,7 @@ async function removeSelected() {
   });
   state.submitting = true;
   state.removalResult = null;
+  state.enrollmentResult = null;
   let shouldRefresh = official;
   try {
     const products = rows.map((row) => ({ product_id: getProductId(row), sku: getFirstSku(row) }));
@@ -1388,6 +1411,11 @@ onActivated(() => {
         </div>
 
         <p v-if="state.mode === 'official'" class="product-hint">官方活动支持单条提交，改完一行后可直接点“单条加入”或“单条更新”。</p>
+
+        <el-alert v-if="state.enrollmentResult" :type="state.enrollmentResult.success ? 'success' : 'warning'" :title="`本次报名已确认 ${state.enrollmentResult.count || 0} 个，待核对 ${state.enrollmentResult.failures?.length || 0} 个`" :closable="false" show-icon>
+          <p v-for="item in state.enrollmentResult.failures" :key="item.product_id">商品 {{ item.product_id }}：{{ item.reason }}</p>
+          <p v-for="(warning, index) in state.enrollmentResult.warnings" :key="index">{{ warning }}</p>
+        </el-alert>
 
         <el-alert v-if="state.removalResult" :type="state.removalResult.type" :title="state.removalResult.summary" :closable="false" show-icon>
           <p v-if="state.removalResult.refreshError">{{ state.removalResult.refreshError }}</p>

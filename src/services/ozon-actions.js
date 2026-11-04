@@ -1,3 +1,4 @@
+import { normalizePromotionEnrollment, promotionEnrollmentOutcome } from "./ozon-promotion-enrollment.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
@@ -102,17 +103,6 @@ async function ozonRequest(path, { method = "POST", payload = null, shop, signal
     clearTimeout(timer);
     signal?.removeEventListener("abort", abortFromParent);
   }
-}
-
-function normalizeProductsForOfficialAdd(products = []) {
-  return products
-    .map((item) => ({
-      product_id: Number(item.product_id ?? item.id),
-      action_price: Number(item.action_price),
-      ...(item.stock != null && item.stock !== "" ? { stock: Number(item.stock) } : {})
-    }))
-    .filter((item) => Number.isFinite(item.product_id) && item.product_id > 0 && Number.isFinite(item.action_price) && item.action_price > 0)
-    .slice(0, 1000);
 }
 
 function normalizeProductsForSellerAdd(products = []) {
@@ -279,13 +269,16 @@ export async function addOzonActionProductsMysql(body = {}, options = {}) {
       signal: options.signal
     });
   }
-  const normalized = normalizeProductsForOfficialAdd(products);
-  if (!normalized.length) throw statusError("No valid product/action_price rows");
-  return ozonRequest("/v1/actions/products/activate", {
-    payload: { action_id: Number(body.actionId), products: normalized },
-    shop,
-    signal: options.signal
-  });
+  const payload = normalizePromotionEnrollment(body.actionId, products);
+  if (body.confirmSharedPrice !== true) throw statusError("官方活动使用共享活动限价，可能影响同商品的其他活动；请阅读报名确认提示后提交", 409);
+  const receipt = await ozonRequest("/v1/actions/products/update", { payload, shop, signal: options.signal });
+  let joined = [], verificationError = "";
+  try {
+    const verification = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, payload.action_id, options.signal);
+    if (verification.paginationWarning) throw new Error(verification.paginationWarning);
+    joined = verification.joinedProducts;
+  } catch (error) { verificationError = error.message; }
+  return promotionEnrollmentOutcome(payload.products, receipt, joined, verificationError);
 }
 
 export async function removeOzonActionProductsMysql(body = {}, options = {}) {
