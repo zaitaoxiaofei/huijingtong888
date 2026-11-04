@@ -316,7 +316,7 @@ test("printing today after yesterday's official inclusion keeps bound labels rec
   assert.equal(page.rowDisplayStateKey(unprinted), "awaiting_deliver");
   assert.equal(page.rowAvailableActions(unprinted).print, true);
   const printed = withOglDispatch({ ...order, printed_at: "2026-11-02 01:00:00" }, member);
-  assert.equal(page.rowDisplayStateKey(printed), "ogl_bound");
+  assert.equal(page.rowDisplayStateKey(printed), "awaiting_deliver");
   assert.equal(printed.ogl_dispatch.dispatched, false);
   assert.equal(printed.ogl_dispatch.dispatched_at, null);
   const actions = page.rowAvailableActions(printed);
@@ -324,9 +324,8 @@ test("printing today after yesterday's official inclusion keeps bound labels rec
   assert.equal(actions.print, true);
   assert.equal(actions.prepare, false);
   const rows = [{ ...printed, availableActions: actions }];
-  assert.equal(orderPrintPlan(rows, [101]).ids.length, 0, "reprints still require explicit inclusion");
-  assert.deepEqual(orderPrintPlan(rows, [101], true).ids, [101]);
-  assert.deepEqual(orderPrintPlan(rows, [], true).ids, [101], "off-page selection can be reprinted too");
+  assert.deepEqual(orderPrintPlan(rows, [101]).ids, [101], "reprints are included without an extra confirmation");
+  assert.deepEqual(orderPrintPlan(rows, []).ids, [101], "off-page selection can be reprinted too");
   const handedOver = withOglDispatch({ ...order, printed_at: printed.printed_at }, { ...member, dispatched_at: "2026-11-02 02:00:00" });
   assert.equal(page.rowAvailableActions(handedOver).print, false);
 });
