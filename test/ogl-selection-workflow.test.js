@@ -28,7 +28,7 @@ test('official and system bindings both wait for handover; only physical dispatc
  const member={order_id:1,active_order_id:1,batch_id:7,default_shop_id:20,official_carriage_id:'901',batch_status:'preparing',official_status:'observed',official_member:1};
  for(const official of [1,0]){
   const bound=withOglDispatch(order,{...member,official_member:official});
-  assert.equal(bound.display_status,'ogl_bound');assert.equal(orderStateKey(bound),'ogl_bound');
+  assert.equal(bound.display_status,'awaiting_deliver');assert.equal(orderStateKey(bound),'awaiting_deliver');
   assert.equal(bound.ogl_dispatch.dispatched,false);assert.equal(bound.ogl_dispatch.association_label,official?'Ozon':'系统');
   const handed=withOglDispatch(order,{...member,official_member:official,dispatched_at:'2026-10-31 01:00:00'});
   assert.equal(handed.display_status,'ogl_dispatched');assert.equal(handed.ogl_dispatch.dispatched,true);
