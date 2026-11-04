@@ -25,6 +25,7 @@ let onlineProductSyncPollInFlight = false;
 let productLimitsLoadedShopId = null;
 const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
+let warehouseRequestVersion = 0;
 let dictionaryLoaded = false;
 
 const loading = ref(false);
@@ -38,6 +39,7 @@ const bindSubmitting = ref(false);
 const stockDialogVisible = ref(false);
 const stockSubmitting = ref(false);
 const warehousesLoading = ref(false);
+const warehousesError = ref("");
 const productOptionsLoading = ref(false);
 const productLimitLoading = ref(false);
 
@@ -376,25 +378,38 @@ function selectedShopIdForStock() {
 }
 
 async function loadWarehousesForStock(shopId, force = false) {
+  const version = ++warehouseRequestVersion;
+  const scope = currentApiCacheScope();
+  const isCurrent = () => version === warehouseRequestVersion && scope === currentApiCacheScope() && Number(stockForm.shop_id) === Number(shopId);
   const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
   const normalizedShopId = `${tenantKey}:${String(shopId || "")}`;
-  if (!force && warehouseCacheByShop.has(normalizedShopId)) {
-    state.warehouses = warehouseCacheByShop.get(normalizedShopId);
+  warehousesError.value = "";
+  const cached = warehouseCacheByShop.get(normalizedShopId);
+  if (!force && cached && Date.now() - cached.verifiedAt < 60000) {
+    state.warehouses = cached.rows;
     stockForm.warehouse_id = state.warehouses[0]?.warehouse_id ? String(state.warehouses[0].warehouse_id) : "";
+    warehousesLoading.value = false;
     return;
   }
+  warehouseCacheByShop.delete(normalizedShopId);
+  state.warehouses = [];
+  stockForm.warehouse_id = "";
   warehousesLoading.value = true;
   try {
-    const result = await apiClient.get(`/api/online-products/warehouses?shop_id=${encodeURIComponent(shopId)}`);
-    state.warehouses = Array.isArray(result?.warehouses) ? result.warehouses : [];
-    warehouseCacheByShop.set(normalizedShopId, state.warehouses);
+    const result = await apiClient.get(`/api/online-products/warehouses?shop_id=${encodeURIComponent(shopId)}`, { noCache: true });
+    if (!isCurrent()) return;
+    if (!Array.isArray(result?.warehouses)) throw new Error("仓库响应不完整，请刷新仓库重试");
+    state.warehouses = result.warehouses;
+    warehouseCacheByShop.set(normalizedShopId, { rows: state.warehouses, verifiedAt: Date.now() });
     stockForm.warehouse_id = state.warehouses[0]?.warehouse_id ? String(state.warehouses[0].warehouse_id) : "";
   } catch (error) {
+    if (!isCurrent()) return;
     state.warehouses = [];
     stockForm.warehouse_id = "";
-    ElMessage.error(error.message || "Ozon 仓库加载失败");
+    warehousesError.value = error.message || "Ozon 仓库加载失败，请刷新重试";
+    ElMessage.error(warehousesError.value);
   } finally {
-    warehousesLoading.value = false;
+    if (isCurrent()) warehousesLoading.value = false;
   }
 }
 
@@ -443,6 +458,7 @@ async function openBatchStockDialog() {
 }
 
 async function submitBatchStock() {
+  if (warehousesLoading.value || warehousesError.value) return ElMessage.warning("仓库列表尚未核查完整，请先刷新仓库后重试");
   if (!stockForm.warehouse_id) {
     ElMessage.warning("请选择 Ozon 仓库");
     return;
@@ -785,6 +801,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  warehouseRequestVersion += 1;
   stopOnlineProductSyncPolling();
 });
 
@@ -796,7 +813,12 @@ onActivated(async () => {
   } catch {}
 });
 
-onDeactivated(stopOnlineProductSyncPolling);
+onDeactivated(() => {
+  warehouseRequestVersion += 1;
+  warehousesLoading.value = false;
+  stockDialogVisible.value = false;
+  stopOnlineProductSyncPolling();
+});
 </script>
 
 <template>
@@ -1069,6 +1091,8 @@ onDeactivated(stopOnlineProductSyncPolling);
                 刷新仓库
               </el-button>
             </div>
+            <el-alert v-if="warehousesError" :title="warehousesError" type="error" :closable="false" show-icon />
+            <el-alert v-else-if="!warehousesLoading && !state.warehouses.length" title="Ozon 本次未返回可用的 FBS/rFBS 仓库，请先在卖家后台核查仓库设置，再点击刷新仓库。" type="warning" :closable="false" show-icon />
             <el-select
               v-model="stockForm.warehouse_id"
               filterable
@@ -1123,7 +1147,7 @@ onDeactivated(stopOnlineProductSyncPolling);
       <template #footer>
         <div class="erp-dialog-footer stock-dialog-footer">
           <el-button class="erp-btn erp-btn-secondary" @click="stockDialogVisible = false">取消</el-button>
-          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="stockSubmitting" :disabled="warehousesLoading || !stockForm.warehouse_id" @click="submitBatchStock">
+          <el-button class="erp-btn erp-btn-primary" type="primary" :loading="stockSubmitting" :disabled="warehousesLoading || Boolean(warehousesError) || !stockForm.warehouse_id" @click="submitBatchStock">
             确认更新 {{ state.selectedIds.length }} 个商品
           </el-button>
         </div>

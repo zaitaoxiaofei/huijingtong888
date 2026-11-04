@@ -39,7 +39,7 @@ test("online product stock and shop lookup routes derive scope from the session"
   await routes["POST /api/online-products/action"](req);
   assert.deepEqual(calls, [
     ["limits", { shop_id: "10" }, "42"],
-    ["warehouses", { shop_id: "10" }, "42"],
+    ["warehouses", { shop_id: "10" }, "42", { signal: req._abortSignal }],
     ["stock", { online_product_ids: [10], tenant_id: 99 }, 7, "42"],
     ["action", { online_product_ids: [10], tenant_id: 99 }, 7, "42", { session: req._session, signal: req._abortSignal }]
   ]);

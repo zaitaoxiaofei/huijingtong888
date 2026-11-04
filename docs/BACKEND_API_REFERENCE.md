@@ -2938,7 +2938,7 @@ Bind an online product to an ERP product and owner.
 
 #### `GET /api/online-products/warehouses`
 
-Return Ozon warehouses for a shop.
+Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.
 
 - Auth: `authenticated`
 - Query parameters:

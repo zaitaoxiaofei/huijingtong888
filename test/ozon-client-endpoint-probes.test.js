@@ -20,7 +20,7 @@ const REAL_SHOP = {
   api_key_hint: ""
 };
 
-test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
+test("fetchOzonWarehouses uses the current v2 request and response contract", async (t) => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
@@ -30,12 +30,12 @@ test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), body: JSON.parse(options.body || "{}") });
     return jsonResponse({
-      result: [{
+      warehouses: [{
         warehouse_id: 1001,
         name: "Main warehouse",
         status: "active",
         delivery_schema: "fbs"
-      }]
+      }], has_next: false, cursor: ""
     });
   };
 
@@ -43,6 +43,7 @@ test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
 
   assert.equal(calls.length, 1);
   assert.ok(calls[0].url.endsWith("/v2/warehouse/list"));
+  assert.deepEqual(calls[0].body, { limit: 200, cursor: "" });
   assert.deepEqual(rows.map((item) => item.warehouse_id), ["1001"]);
 });
 

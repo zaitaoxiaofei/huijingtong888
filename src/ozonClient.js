@@ -484,17 +484,35 @@ export async function fetchOzonStockTurnover(shop, options = {}) {
 
 export async function fetchOzonWarehouses(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) return demoWarehouses(shop);
-  const errors = [];
-  for (const path of ["/v2/warehouse/list", "/v1/warehouse/list"]) {
-    try {
-      const data = await ozonRequest(shop, path, {}, options);
-      return normalizeOzonWarehouses(data);
-    } catch (error) {
-      errors.push(`${path}: ${error?.message || error}`);
-      if (options.signal?.aborted) throwIfAborted(options.signal);
+  const path = "/v2/warehouse/list";
+  const warehouses = [], seenIds = new Set(), seenCursors = new Set();
+  let cursor = "";
+  for (let page = 0; page < 100; page += 1) {
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, path, { limit: 200, cursor }, options);
+    await options.afterRequest?.();
+    throwIfAborted(options.signal);
+    if (!Array.isArray(data.warehouses) || typeof data.has_next !== "boolean") {
+      throw new Error("Ozon 仓库响应格式已变化，本次未取得完整仓库列表，请刷新重试或联系维护人员");
     }
+    for (const row of data.warehouses) {
+      const id = String(row?.warehouse_id || "");
+      if (!/^[1-9]\d*$/.test(id) || (typeof row.warehouse_id === "number" && !Number.isSafeInteger(row.warehouse_id))) {
+        throw new Error("Ozon 返回了无法确认编号的仓库，本次列表不可用于更新库存，请重新获取");
+      }
+      if (seenIds.has(id)) throw new Error("Ozon 仓库分页返回重复仓库，本次未能确认完整列表，请重新获取");
+      seenIds.add(id);
+    }
+    warehouses.push(...normalizeOzonWarehouses(data));
+    if (!data.has_next) return warehouses;
+    const nextCursor = data.cursor;
+    if (!data.warehouses.length || typeof nextCursor !== "string" || !nextCursor || nextCursor === cursor || seenCursors.has(nextCursor)) {
+      throw new Error("Ozon 仓库分页未正确推进，本次未取得完整列表，请重新获取");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
   }
-  throw new Error(`Ozon 仓库列表获取失败：${errors.join(" | ")}`);
+  throw new Error("Ozon 仓库分页超过安全上限，本次列表未完成，请联系维护人员核查");
 }
 
 export async function fetchOzonProductPrices(shop, options = {}) {

@@ -11286,12 +11286,26 @@ async function resolveFreshOzonProductIdForArchiveMysql(shop, online = {}, befor
   return productId;
 }
 
-export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin") {
+export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const shopId = Number(query.shop_id || query.shopId || 0);
   if (!shopId) throw new Error("请选择店铺后再获取 Ozon 仓库");
   const shop = await activeShopForTenantMysql(shopId, tenantId);
-  const warehouses = await fetchOzonWarehouses(shop);
+  const checkCurrentShop = async () => {
+    const current = await activeShopForTenantMysql(shopId, tenantId);
+    if (current.status !== 'active') throw Object.assign(new Error('店铺已停用，仓库读取已停止'), { statusCode: 403 });
+    const key = String(current.ozon_api_key || current.api_key_hint || '').trim();
+    if (!current.ozon_client_id || !key || key.startsWith('demo')) {
+      throw Object.assign(new Error('店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后刷新仓库'), { statusCode: 409 });
+    }
+    if (String(current.ozon_client_id) !== String(shop.ozon_client_id)
+      || String(current.ozon_api_key || current.api_key_hint || '') !== String(shop.ozon_api_key || shop.api_key_hint || '')) {
+      throw Object.assign(new Error('店铺授权已变更，请重新获取完整仓库列表'), { statusCode: 409 });
+    }
+    return current;
+  };
+  await checkCurrentShop();
+  const warehouses = await fetchOzonWarehouses(shop, { signal: options.signal, beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop });
   return {
     shop_id: shopId,
     shop_name: shop.name || "",

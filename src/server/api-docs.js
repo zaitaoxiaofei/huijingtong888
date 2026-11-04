@@ -1691,7 +1691,7 @@ const endpoints = [
       requestBody: body(ref("OnlineProductBindRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/online-products/warehouses", "Return Ozon warehouses for a shop.", {
+    endpoint("GET", "/api/online-products/warehouses", "Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.", {
       auth: "authenticated",
       query: [param("shop_id", scalar("number", "Shop identifier."), true)],
       responses: [response(200, "application/json", ref("OnlineProductWarehousesResponse"))]
