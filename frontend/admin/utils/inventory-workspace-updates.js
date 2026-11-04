@@ -11,7 +11,7 @@ export function applyInventoryWorkspaceUpdates(result,updates,criteria){
   const base=(result.rows||[]).find(r=>Number(r.product_id)===id);
   if(!base)continue;
   const next={...base,workflow:update.workflow};
-  for(const task of ['all','required','advisory','incoming','review'])if(meta[task]!=null)meta[task]=Math.max(0,Number(meta[task])+inventoryWorkspacePage([next],{...criteria,task}).total-inventoryWorkspacePage([base],{...criteria,task}).total);
+  for(const task of ['all','required','advisory','fbp-stocking','incoming','review'])if(meta[task]!=null)meta[task]=Math.max(0,Number(meta[task])+inventoryWorkspacePage([next],{...criteria,task}).total-inventoryWorkspacePage([base],{...criteria,task}).total);
   total+=inventoryWorkspacePage([next],criteria).total-inventoryWorkspacePage([base],criteria).total;
  }
  const patched=(result.rows||[]).map(row=>updates.has(Number(row.product_id))?{...row,workflow:updates.get(Number(row.product_id)).workflow}:row);
