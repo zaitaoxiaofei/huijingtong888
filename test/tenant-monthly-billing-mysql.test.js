@@ -16,7 +16,6 @@ test('monthly billing reads only the current enterprise, including every financi
     const { monthlyBillingDetailsMysql, monthlyBillingOrderDetailsMysql, financeInventoryCapitalMysql, financeInventoryCapitalDetailsMysql, prepareInventoryFlowMysql } = await import('../src/services/mysql-cutover.js');
     const { ensureFinanceCenterSchema } = await import('../src/services/finance-center.js');
     const q = fixture.query;
-    await q('ALTER TABLE products ADD COLUMN inventory_number VARCHAR(64) NULL');
     // Match the runtime component migration required by scoped reads.
     await prepareInventoryFlowMysql();
     await q("INSERT INTO tenants(id,slug,name,status) VALUES(1,'default','Default','active'),(2,'a','A','active'),(3,'b','B','active')");

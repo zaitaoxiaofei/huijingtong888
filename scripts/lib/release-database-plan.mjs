@@ -11,6 +11,7 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-subscription-vouchers.mjs",
   "migrate-inventory-flow-center.mjs",
   "migrate-inventory-consumables.mjs",
+  "migrate-inventory-numbering-v2.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
   "migrate-order-profit-calculation-versions.mjs"
 ]);
@@ -50,7 +51,7 @@ export function migrationNeedsApply(filename, report) {
   if (!profitSchema) {
     const mode = filename.includes("-daily-fx.") || filename.includes("-fx-policy.") ? "read_only" : "dry-run";
     if (report.mode !== mode) invalid(`mode must be ${mode}`);
-    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-inventory-consumables.mjs"].includes(filename)
+    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-inventory-consumables.mjs", "migrate-inventory-numbering-v2.mjs"].includes(filename)
       && !boolean(report.ok, "ok")) invalid("inspector refused the schema");
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
@@ -138,6 +139,17 @@ export function migrationNeedsApply(filename, report) {
       const ready = boolean(report.schema_ready, 'schema_ready');
       const missing = boolean(report.schema_would_add_column, 'schema_would_add_column');
       if (ready === missing || report.changes_database !== false || report.reviewed_product_count !== 0 || report.product_flags_changed !== 0) invalid('consumable inspection must describe only compatible additive schema work');
+      return missing;
+    }
+    case "migrate-inventory-numbering-v2.mjs": {
+      const ready = boolean(report.schema_ready, "schema_ready");
+      const missing = boolean(report.schema_would_change, "schema_would_change");
+      const active = boolean(report.active, "active");
+      if (![null, 1, 2].includes(report.numbering_version) || (ready && report.numbering_version === null)
+        || ready === missing || active !== (report.numbering_version === 2) || (active && !ready)
+        || report.changes_database !== false || report.product_numbers_changed !== 0) {
+        invalid("numbering inspection must describe compatible additive schema only, with no number cutover");
+      }
       return missing;
     }
     case "migrate-ai-variant-draft-history-index.mjs": {

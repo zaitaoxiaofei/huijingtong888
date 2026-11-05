@@ -473,6 +473,11 @@ CREATE TABLE IF NOT EXISTS products (
   tenant_id BIGINT UNSIGNED NULL,
   selection_id VARCHAR(128) NULL,
   code VARCHAR(128) NULL,
+  inventory_number VARCHAR(64) NULL,
+  inventory_number_category BIGINT UNSIGNED NULL,
+  inventory_number_brand BIGINT UNSIGNED NULL,
+  inventory_number_sequence BIGINT UNSIGNED NULL,
+  inventory_number_version TINYINT UNSIGNED NOT NULL DEFAULT 1,
   name VARCHAR(255) NOT NULL,
   image_url LONGTEXT NULL,
   detail_image_urls LONGTEXT NULL,
@@ -540,6 +545,8 @@ CREATE TABLE IF NOT EXISTS products (
   supplier_id BIGINT UNSIGNED NULL,
   UNIQUE KEY uk_products_selection_id (selection_id),
   UNIQUE KEY uk_products_code (code),
+  UNIQUE KEY uk_products_inventory_number (inventory_number),
+  UNIQUE KEY uk_products_inventory_number_v2 (inventory_number_category, inventory_number_brand, inventory_number_sequence),
   KEY idx_products_tenant_active_updated (tenant_id, active, updated_at, id),
   KEY idx_products_tenant_owner_active (tenant_id, owner_person_id, active, id),
   KEY idx_products_owner (owner_person_id),
@@ -548,6 +555,43 @@ CREATE TABLE IF NOT EXISTS products (
   KEY idx_products_active_id (active, id),
   KEY idx_products_selection_readiness (active, selection_has_main_image, selection_has_detail_images, selection_has_selling_points)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_number_core_categories_v2 (
+    id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    core_name VARCHAR(255) COLLATE utf8mb4_bin NOT NULL UNIQUE,
+    initial_product_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_number_brands_v2 (
+    id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    brand_key VARCHAR(128) COLLATE utf8mb4_bin NOT NULL UNIQUE,
+    initial_product_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_number_sequences_v2 (
+    category_id BIGINT UNSIGNED NOT NULL,
+    brand_id BIGINT UNSIGNED NOT NULL,
+    last_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (category_id, brand_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_number_aliases (
+    alias_number VARCHAR(64) COLLATE utf8mb4_bin NOT NULL PRIMARY KEY,
+    product_id BIGINT UNSIGNED NOT NULL,
+    tenant_id BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_inventory_number_alias_product (product_id),
+    KEY idx_inventory_number_alias_tenant (tenant_id, product_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS inventory_numbering_state (
+    id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+    version TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT chk_inventory_numbering_state CHECK (id = 1 AND version IN (1, 2))
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS online_products (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

@@ -1,6 +1,6 @@
 import { normalizeVehicleBrand } from '../shared/vehicle-brand.js';
 import { inventoryTenantSql } from './inventory-tenant-scope.js';
-import { inventoryIdentifierSearch, inventoryNamePattern } from './inventory-search.js';
+import { inventoryAliasSearch, inventoryIdentifierSearch, inventoryNamePattern, inventoryNumberQueryMode, searchInventoryRows } from './inventory-search.js';
 
 // Additional product predicates only. Existing page status/date/shop filters still apply.
 export function inventoryProductSearch(query, scope, alias = 'p') {
@@ -37,9 +37,10 @@ export function inventoryProductSearch(query, scope, alias = 'p') {
       if (inventoryType!=='normal') add(`${inventoryType==='single'?'NOT ':''}EXISTS (${components})`);
     }
   }
-  const text = String(query.query || '').trim();
-  if (text && query.searchMode === 'inventory_id') {
-    const match = inventoryIdentifierSearch(text, 'inventory_id');
+  const text = String(query.query || query.search || '').trim();
+  const numberMode = inventoryNumberQueryMode(text, query.searchMode || 'auto');
+  if (text && numberMode) {
+    const match = inventoryIdentifierSearch(text, numberMode);
     add(`${alias}.id IN (${match.sql})`, ...match.params);
   } else if (text && query.searchMode === 'sku') {
     add(`EXISTS (SELECT 1 FROM sku_mappings search_sm JOIN shops search_shop ON search_shop.id=search_sm.shop_id AND ${inventoryTenantSql(scope,'search_shop')}
@@ -56,11 +57,23 @@ export function inventoryProductSearch(query, scope, alias = 'p') {
 export async function filterInventoryProductRows(rows, query, scope, execute) {
   if (!rows.length) return rows;
   const criteria = inventoryProductSearch(query, scope);
-  if (!criteria.sql) return rows;
-  const matched = await execute(`SELECT p.id FROM products p WHERE ${inventoryTenantSql(scope,'p')} AND ${criteria.sql}`, criteria.params);
-  const ids = new Set(matched.map(row=>Number(row.id)));
-  return rows.filter(row=>ids.has(Number(row.product_id)));
+  let result = rows;
+  if (criteria.sql) {
+    const matched = await execute(`SELECT p.id FROM products p WHERE p.active=1 AND ${inventoryTenantSql(scope,'p')} AND ${criteria.sql}`, criteria.params);
+    const ids = new Set(matched.map(row=>Number(row.id)));
+    result = rows.filter(row=>ids.has(Number(row.product_id)));
+  }
+  const text = String(query.query || query.search || '').trim();
+  if (text && (!query.searchMode || query.searchMode === 'auto') && !inventoryNumberQueryMode(text)) {
+    const alias = inventoryAliasSearch(text, 'p', { fuzzy: true });
+    const matched = await execute(`SELECT p.id FROM products p WHERE p.active=1 AND ${inventoryTenantSql(scope,'p')} AND ${alias.sql}`, alias.params);
+    const ids = new Set([...matched.map(row=>Number(row.id)), ...searchInventoryRows(result, text).map(row=>Number(row.product_id))]);
+    result = result.filter(row=>ids.has(Number(row.product_id)));
+  }
+  return result;
 }
-export function inventoryBusinessSearch(query) {
-  return ['inventory_id','sku','name'].includes(query.searchMode) ? { ...query, query: '', search: '', inventorySku: query.searchMode === 'sku' ? String(query.query || query.search || '').trim() : '' } : query;
+export function inventoryBusinessSearch(query, resolvedCachedSearch = false) {
+  const explicitMode = ['inventory_id','inventory_prefix','sku','name'].includes(query.searchMode);
+  return resolvedCachedSearch || explicitMode || inventoryNumberQueryMode(query.query || query.search, query.searchMode || 'auto')
+    ? { ...query, query: '', search: '', inventorySku: query.searchMode === 'sku' ? String(query.query || query.search || '').trim() : explicitMode ? '' : query.inventorySku || '' } : query;
 }

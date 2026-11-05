@@ -19,7 +19,7 @@ const response = (status, mediaType, schema, description = "") => ({ status, med
 const inventorySearchParams = [
   param("query", scalar("string", "Keyword interpreted by searchMode; default auto keeps page-specific business fields"), false),
   param("shopId", scalar("string", "Current-enterprise shop ID, or all"), false),
-  param("searchMode", scalar("string", "auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms"), false),
+  param("searchMode", scalar("string", "auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms"), false),
   ...["inventoryCategory", "productName", "vehicleBrand", "fitmentType", "vehicleModel", "accessoryName", "color", "material", "process"].map(name => param(name, scalar("string", "Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination."), false))
 ];
 

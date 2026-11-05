@@ -17,6 +17,7 @@ Options:
   --reviewed-ai-material-manifest PATH  Apply an explicitly reviewed material ownership manifest
   --reviewed-ai-media-retention-manifest PATH  Reclaim reviewed unused AI media during offline maintenance
   --reviewed-inventory-consumables-manifest PATH  Apply individually reviewed consumable flags
+  --reviewed-inventory-numbering-manifest PATH  Cut over reviewed inventory numbers during explicit maintenance
   --skip-build                Reuse an existing deployment artifact
   --allow-dirty               Emergency override for a dirty/non-release worktree
   --skip-database-init        Do not run the compatible database initializer
@@ -81,6 +82,7 @@ reviewed_identity_manifest=""
 reviewed_ai_material_manifest=""
 reviewed_ai_media_retention_manifest=""
 reviewed_inventory_consumables_manifest=""
+reviewed_inventory_numbering_manifest=""
 skip_build=0
 skip_database_init=0
 skip_database_maintenance=0
@@ -91,7 +93,7 @@ allow_service_interruption=0
 
 while (($#)); do
   case "$1" in
-    --host|--user|--port|--identity-file|--version|--expected-production-commit|--reviewed-identity-manifest|--reviewed-ai-material-manifest|--reviewed-ai-media-retention-manifest|--reviewed-inventory-consumables-manifest)
+    --host|--user|--port|--identity-file|--version|--expected-production-commit|--reviewed-identity-manifest|--reviewed-ai-material-manifest|--reviewed-ai-media-retention-manifest|--reviewed-inventory-consumables-manifest|--reviewed-inventory-numbering-manifest)
       (($# >= 2)) || fail "$1 requires a value"
       case "$1" in
         --host) host="$2" ;;
@@ -104,6 +106,7 @@ while (($#)); do
         --reviewed-ai-material-manifest) reviewed_ai_material_manifest="$2" ;;
         --reviewed-ai-media-retention-manifest) reviewed_ai_media_retention_manifest="$2" ;;
         --reviewed-inventory-consumables-manifest) reviewed_inventory_consumables_manifest="$2" ;;
+        --reviewed-inventory-numbering-manifest) reviewed_inventory_numbering_manifest="$2" ;;
       esac
       shift 2
       ;;
@@ -147,6 +150,7 @@ remote_identity_manifest=""
 remote_ai_material_manifest=""
 remote_ai_media_retention_manifest=""
 remote_inventory_consumables_manifest=""
+remote_inventory_numbering_manifest=""
 if [[ -n "$reviewed_identity_manifest" ]]; then
   [[ -f "$reviewed_identity_manifest" ]] || fail "reviewed identity manifest does not exist"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$reviewed_identity_manifest"
@@ -175,6 +179,14 @@ if [[ -n "$reviewed_inventory_consumables_manifest" ]]; then
   consumables_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
   remote_inventory_consumables_manifest="/tmp/ozon-erp-inventory-consumables-$version-$consumables_token.json"
 fi
+if [[ -n "$reviewed_inventory_numbering_manifest" ]]; then
+  ((allow_service_interruption)) || fail "inventory numbering requires --allow-service-interruption"
+  [[ -f "$reviewed_inventory_numbering_manifest" ]] || fail "reviewed inventory numbering manifest does not exist"
+  node -e 'try { JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); } catch { console.error("Reviewed inventory numbering manifest is not valid JSON."); process.exit(1); }' "$reviewed_inventory_numbering_manifest"
+  reviewed_inventory_numbering_manifest="$(CDPATH= cd -- "$(dirname -- "$reviewed_inventory_numbering_manifest")" && pwd -P)/$(basename -- "$reviewed_inventory_numbering_manifest")"
+  numbering_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
+  remote_inventory_numbering_manifest="/tmp/ozon-erp-inventory-numbering-$version-$numbering_token.json"
+fi
 db_init_flag=1
 ((skip_database_init)) && db_init_flag=0
 if ((skip_database_maintenance && run_database_maintenance)); then fail "choose either run or skip database maintenance"; fi
@@ -182,11 +194,12 @@ db_maintenance_flag=0
 ((run_database_maintenance)) && db_maintenance_flag=1
 ((skip_database_maintenance)) && db_maintenance_flag=0
 activation_command="bash '$remote_script' '$remote_archive' '$version' '$db_init_flag' '$db_maintenance_flag' '$remote_identity_manifest' '$remote_ai_material_manifest' '$allow_service_interruption'"
-if [[ -n "$remote_ai_media_retention_manifest" || -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi
-if [[ -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" ]]; then
+if [[ -n "$remote_ai_media_retention_manifest" || -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_ai_media_retention_manifest'"; fi
+if [[ -n "$expected_production_commit" || -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then
   activation_command+=" '$expected_production_commit'"
 fi
-if [[ -n "$remote_inventory_consumables_manifest" ]]; then activation_command+=" '$remote_inventory_consumables_manifest'"; fi
+if [[ -n "$remote_inventory_consumables_manifest" || -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_inventory_consumables_manifest'"; fi
+if [[ -n "$remote_inventory_numbering_manifest" ]]; then activation_command+=" '$remote_inventory_numbering_manifest'"; fi
 
 if ((dry_run)); then
   printf 'DryRun only: no build, upload, SSH command, database change, release switch, restart, or rollback will run.\n'
@@ -217,7 +230,11 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/ozon-erp-deploy-$version.XXXXXX")"
 material_upload_attempted=0
 retention_upload_attempted=0
 consumables_upload_attempted=0
+numbering_upload_attempted=0
 cleanup() {
+  if ((numbering_upload_attempted)); then
+    ssh "${ssh_options[@]}" "$remote_target" "rm -f -- '$remote_inventory_numbering_manifest'" >/dev/null 2>&1 || printf 'Private inventory numbering manifest cleanup could not be confirmed.\n' >&2
+  fi
   if ((consumables_upload_attempted)); then
     ssh "${ssh_options[@]}" "$remote_target" "rm -f -- '$remote_inventory_consumables_manifest'" >/dev/null 2>&1 || printf 'Private inventory consumables manifest cleanup could not be confirmed.\n' >&2
   fi
@@ -279,6 +296,11 @@ if [[ -n "$reviewed_inventory_consumables_manifest" ]]; then
   consumables_upload_attempted=1
   ssh "${ssh_options[@]}" "$remote_target" "set -Ce; umask 077; : > '$remote_inventory_consumables_manifest'; chmod 600 '$remote_inventory_consumables_manifest'"
   scp "${scp_options[@]}" "$reviewed_inventory_consumables_manifest" "$remote_target:$remote_inventory_consumables_manifest"
+fi
+if [[ -n "$reviewed_inventory_numbering_manifest" ]]; then
+  numbering_upload_attempted=1
+  ssh "${ssh_options[@]}" "$remote_target" "set -Ce; umask 077; : > '$remote_inventory_numbering_manifest'; chmod 600 '$remote_inventory_numbering_manifest'"
+  scp "${scp_options[@]}" "$reviewed_inventory_numbering_manifest" "$remote_target:$remote_inventory_numbering_manifest"
 fi
 
 printf 'Activating release on ECS...\n'

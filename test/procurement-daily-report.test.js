@@ -82,7 +82,7 @@ test("range export applies combined workspace filters with EXISTS and remains un
 test("WeChat summary combines repeated products and separates freight from goods", () => {
   const summary = dailyPurchaseSummary("2026-09-16", rows);
   assert.match(summary, /1 种商品，5 件；货款 ¥50.30，运费 ¥1.20，合计 ¥51.50/);
-  assert.match(summary, /黑色脚垫（2_7）：5 件，货款¥ 50.3 元/);
+  assert.match(summary, /黑色脚垫（2-7）：5 件，货款¥ 50.3 元/);
   assert.match(dailyPurchaseSummary("2026-09-16", []), /当天暂无已确认采购记录/);
   assert.match(dailyPurchaseSummary("2026-09-16", [{ ...rows[0], amount: 0 }]), /1 条货款为零或未填写/);
 });
@@ -98,7 +98,7 @@ test("xlsx round trip retains embedded image, all rows, numeric amounts, Beijing
   const sheet = restored.getWorksheet("每日采购清单");
   assert.equal(sheet.rowCount, 5);
   assert.equal(sheet.getCell("B3").value, "库存号");
-  assert.equal(sheet.getCell("B4").value, "2_7");
+  assert.equal(sheet.getCell("B4").value, "2-7");
   assert.equal(sheet.getImages().length, 2);
   assert.equal(sheet.getCell("D4").value, 2);
   assert.equal(sheet.getCell("E4").value, 20.1);
@@ -122,21 +122,21 @@ test("summary and Excel group categories, sort inventory numbers naturally, and 
   const mixed = [
     { ...rows[0], product_id: 10, inventory_category: "钥匙壳", inventory_number: "1-10", product_name: "钥匙壳 JELAND J6 红色" },
     rows[0],
-    { ...rows[0], product_id: 1, inventory_category: "钥匙壳", inventory_number: "1_1", product_name: "钥匙壳 JELAND J6 蓝色", quantity: 100, amount: 250 },
+    { ...rows[0], product_id: 1, inventory_category: "钥匙壳", inventory_number: "1-1", product_name: "钥匙壳 JELAND J6 蓝色", quantity: 100, amount: 250 },
     { ...rows[0], product_id: 2, inventory_category: "钥匙壳", inventory_number: "1-2", product_name: "钥匙壳 JELAND J6 黑色" },
     rows[1]
   ];
   const text = dailyPurchaseSummary("2026-09-16", mixed);
-  assert.match(text, /【钥匙壳】\n钥匙壳 JELAND J6 蓝色（1_1）：100 件，货款¥ 250 元\n钥匙壳 JELAND J6 黑色（1_2）/);
-  assert.ok(text.indexOf("（1_2）") < text.indexOf("（1_10）"));
+  assert.match(text, /【钥匙壳】\n钥匙壳 JELAND J6 蓝色（1-1）：100 件，货款¥ 250 元\n钥匙壳 JELAND J6 黑色（1-2）/);
+  assert.ok(text.indexOf("（1-2）") < text.indexOf("（1-10）"));
   assert.equal(text.split("【脚垫】").length, 2);
   assert.doesNotMatch(text, /P-007/);
   assert.equal(purchaseInventoryNumber({ product_code: "P-007" }), "未编号");
   const { workbook } = await buildDailyPurchaseWorkbook("2026-09-16", mixed, async () => null);
   const sheet = workbook.getWorksheet("每日采购清单");
   const numbers = sheet.getColumn(2).values.slice(4);
-  const first = numbers.indexOf("1_1");
-  assert.deepEqual(numbers.slice(first, first + 3), ["1_1", "1_2", "1_10"]);
-  assert.equal(numbers.filter((number) => number === "2_7").length, 2);
+  const first = numbers.indexOf("1-1");
+  assert.deepEqual(numbers.slice(first, first + 3), ["1-1", "1-2", "1-10"]);
+  assert.equal(numbers.filter((number) => number === "2-7").length, 2);
   assert.equal(sheet.getCell("B3").value, "库存号");
 });

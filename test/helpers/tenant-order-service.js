@@ -20,6 +20,8 @@ import {getProfitFormula,assertProfitFormulaSupported,usesDailyProfitFx} from '.
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord, assertInventoryReferences } from '../../src/services/inventory-tenant-scope.js';
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from '../../src/services/order-transport-evidence.js';
 import { ORDER_HEATMAP_TENANT_SCHEMA } from '../../src/services/order-heatmap-tenant-schema.js';
+import { inventoryAliasSearch } from '../../src/services/inventory-search.js';
+import { INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS } from '../../src/services/inventory-numbering-v2.js';
 
 const source = readFileSync(new URL('../../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 export function loadOrderHeatmapService(connection, overrides = {}) {
@@ -61,7 +63,7 @@ export async function createOrderFixtureSchema(connection) {
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
-  for (const statement of [ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
+  for (const statement of [ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables, ...INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS]) await connection.query(statement.replaceAll("\\`", "`"));
   const exceptionSnapshot = source.match(/CREATE TABLE IF NOT EXISTS exception_workbench_snapshots[\s\S]*?ENGINE=InnoDB[^\r\n]*/)?.[0];
   if (!exceptionSnapshot) throw new Error('Missing exception snapshot schema');
   await connection.query(exceptionSnapshot);
@@ -88,7 +90,7 @@ export async function createOrderFixtureSchema(connection) {
   await initializeOrderQueryFacts(connection);
 }
 export function loadTenantOrderService(connection, { extraMethods = [], ...overrides }={}) {
-  const analyticsContext=vm.createContext({setTimeout,
+  const analyticsContext=vm.createContext({setTimeout, withMysqlBackgroundReadAdmission: action=>action(),
     getMysqlConnection:async()=>connection,
     ensureMysqlSessionUtc:async()=>{},releaseMysqlConnection:()=>{}});
   const analyticsSql=readFileSync(new URL('../../src/mysql-pool.js',import.meta.url),'utf8')
@@ -108,7 +110,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
   const noop=async()=>{};
   const context=vm.createContext({recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
-    resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
+    resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,inventoryAliasSearch,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
     mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,mysqlExecuteReadCommitted:analyticsContext.mysqlExecuteReadCommitted,
     ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,

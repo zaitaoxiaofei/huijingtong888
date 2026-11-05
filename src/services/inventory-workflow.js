@@ -4,7 +4,7 @@ import { procurementRequestDisplay } from '../shared/procurement-request-display
 import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
 import { createInventoryWorkspaceReader } from './inventory-workspace-reader.js';
 import { inventoryProductSearch } from './inventory-product-search.js';
-import { inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern } from './inventory-search.js';
+import { inventoryAliasSearch,inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern,inventoryNumberQueryMode } from './inventory-search.js';
 import { mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { inventoryWorkflow, INVENTORY_DEMAND_TYPES, procurementDemandType } from '../shared/inventory-workflow.js';
 import { fbpSupplyState,fbpForecastSuggestions } from '../shared/fbp-supply-state.js';
@@ -134,7 +134,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
   async function workspaceProducts(params,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),search=String(params.query||'').trim().slice(0,200),mode=String(params.searchMode||'auto');
     const criteria=inventoryProductSearch({...params,query:mode==='sku'?'':search},scope,'p'),where=criteria.sql?[criteria.sql]:[],args=[...criteria.params];
-    if(search&&(mode==='auto'||mode==='sku')){
+    if(search&&(mode==='auto'||mode==='sku')&&!inventoryNumberQueryMode(search,mode)){
       const exact=mode==='sku'||isInventoryIdentifier(search),operator=exact?'=':"LIKE",text=exact?search:inventoryNamePattern(search),escape=exact?'':" ESCAPE '='";
       const skuSql=`(EXISTS(SELECT 1 FROM sku_mappings m JOIN shops s ON s.id=m.shop_id AND ${inventoryTenantSql(scope,'s')} JOIN products root ON root.id=m.product_id AND ${inventoryTenantSql(scope,'root')}
         WHERE m.active=1 AND ${inventoryTenantSql(scope,'m')} AND (m.ozon_sku ${operator} ?${escape} OR m.offer_id ${operator} ?${escape})
@@ -144,7 +144,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         OR EXISTS(SELECT 1 FROM sku_inventory_recipes r JOIN sku_inventory_recipe_items i ON i.recipe_id=r.id JOIN shops s ON s.id=r.shop_id AND ${inventoryTenantSql(scope,'s')} WHERE r.active=1 AND i.product_id=p.id AND r.ozon_sku ${operator} ?${escape}))`;
       if(mode==='sku'){where.push(skuSql);args.push(text,text,text);}
       else if(exact){const id=inventoryIdentifierSearch(search,'inventory_id');where.push(`(p.id IN (${id.sql}) OR ${skuSql})`);args.push(...id.params,text,text,text);}
-      else{const name=inventoryProductSearch({searchMode:'name',query:search},scope);where.push(`((${name.sql}) OR ${skuSql})`);args.push(...name.params,text,text,text);}
+      else{const name=inventoryProductSearch({searchMode:'name',query:search},scope),numberAlias=inventoryAliasSearch(search,'p',{fuzzy:true});where.push(`((${name.sql}) OR ${skuSql} OR ${numberAlias.sql})`);args.push(...name.params,text,text,text,...numberAlias.params);}
     }
     // Include never-stocked physical products, not a second copy of their virtual parent.
     return query(`SELECT p.id AS product_id,p.name AS product_name,p.inventory_number,p.code AS inventory_id,p.is_accessory,p.updated_at,0 AS component_count FROM products p

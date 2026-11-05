@@ -14,7 +14,7 @@ const props = defineProps({
 const preciseVisible=ref(false);
 const preciseCount=computed(()=>['inventoryCategory','vehicleBrand','vehicleModel','color','accessoryName','material','process','productName'].filter(key=>Array.isArray(props.filters[key])?props.filters[key].length:props.filters[key]).length);
 const emit = defineEmits(["search", "reset"]);
-const searchPlaceholder = computed(() => ({ inventory_id: '完整库存编号，如 1-23', sku: '完整 Ozon SKU 或货号', name: '名称关键词，多个词用空格分隔' }[props.filters.searchMode] || props.queryPlaceholder));
+const searchPlaceholder = computed(() => ({ inventory_id: '完整新号 1-3-1 或旧编号', inventory_prefix: '品名与品牌 1-3，或编号前缀 1-3-1', sku: '完整 Ozon SKU 或货号', name: '名称关键词，多个词用空格分隔' }[props.filters.searchMode] || props.queryPlaceholder));
 const dateRange = computed({
   get: () => props.filters.dateFrom || props.filters.dateTo ? [props.filters.dateFrom, props.filters.dateTo] : [],
   set: value => { props.filters.dateFrom = value?.[0] || ''; props.filters.dateTo = value?.[1] || ''; }
@@ -28,6 +28,7 @@ const dateRange = computed({
         <el-form-item v-if="productSearch && showQuery" label="搜索方式" class="search-mode">
           <el-select v-model="filters.searchMode" aria-label="搜索方式">
             <el-option label="综合搜索" value="auto" /><el-option label="库存编号精确" value="inventory_id" />
+            <el-option label="库存编号前缀" value="inventory_prefix" />
             <el-option label="SKU／货号精确" value="sku" /><el-option label="产品名称模糊" value="name" />
           </el-select>
         </el-form-item>

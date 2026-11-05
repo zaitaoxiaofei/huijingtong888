@@ -1,5 +1,6 @@
 import { mysqlQuery } from "../mysql-pool.js";
 import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
+import { inventoryAliasSearch } from './inventory-search.js';
 
 function dateSql(value) {
   return value.toISOString().slice(0, 19).replace("T", " ");
@@ -75,6 +76,7 @@ export async function procurementDailyReport(query = {}, tenantId = 'admin', que
     where.push(`(
       LOWER(COALESCE(po.order_no, '')) LIKE ? OR LOWER(COALESCE(p.name, '')) LIKE ?
       OR LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?
+      OR ${inventoryAliasSearch(searchText, 'p', { fuzzy: true }).sql}
       OR LOWER(COALESCE(pe.name, '')) LIKE ? OR LOWER(COALESCE(poi.note, po.note, '')) LIKE ?
       OR LOWER(COALESCE(poi.purchase_url, '')) LIKE ?
       OR EXISTS (
@@ -88,7 +90,7 @@ export async function procurementDailyReport(query = {}, tenantId = 'admin', que
             OR LOWER(COALESCE(search_request.purchase_url, '')) LIKE ?)
       )
     )`);
-    params.push(...Array(10).fill(like));
+    params.push(...Array(4).fill(like), ...inventoryAliasSearch(searchText, 'p', { fuzzy: true }).params, ...Array(6).fill(like));
   }
   if (inventoryCategory) { where.push("p.inventory_category = ?"); params.push(inventoryCategory); }
   if (productName) { where.push("p.name LIKE ?"); params.push(`%${productName}%`); }

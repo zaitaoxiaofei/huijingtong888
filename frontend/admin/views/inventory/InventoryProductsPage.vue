@@ -1,4 +1,5 @@
 <script setup>
+import { inventoryNumberTitle } from '../../utils/inventory-number.js';
 import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
 import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
@@ -866,7 +867,7 @@ function applyRouteState() {
     }
     if (state.filters.searchMode === "fuzzy") state.filters.searchMode = "name";
     if (state.filters.searchMode === "exact") state.filters.query = "";
-    if (!["auto", "inventory_id", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
+    if (!["auto", "inventory_id", "inventory_prefix", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
     if (route.query.productId && !state.filters.query) state.filters.query = String(route.query.productId);
   } finally {
     syncingRoute = false;
@@ -1916,7 +1917,7 @@ onActivated(() => {
       >
         <el-table-column v-if="canWriteInventory || canSubmitProcurementRequest" type="selection" width="48" fixed="left" />
         <el-table-column label="库存编号" prop="inventory_number" width="125" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
+          <template #default="{ row }"><strong :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || "待补核心品名" }}</strong></template>
         </el-table-column>
         <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row, $index }">
@@ -1924,7 +1925,7 @@ onActivated(() => {
               <ProductImagePreview :src="inventoryProductImageUrl(row, true)" :preview-list="[inventoryProductImageUrl(row)]" :load-delay="Math.min($index, 12) * 120" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
-                <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
+                <span class="muted-text" :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <div class="product-type-tags">
                   <InventoryCompositionBadge :product="row"/>
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>

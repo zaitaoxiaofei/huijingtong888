@@ -13,7 +13,8 @@ test('mobile printed packing pages keep global inventory order, search, marks an
   const {service,query}=loadTenantOrderService(c,{extraMethods:['sortPagedOrdersMysql','logisticsModeKeyMysql','orderTimestampPagedValueMysql','orderInventoryPagedSortKeyMysql','orderPrintTimestampPagedValueMysql','orderPrintSequencePagedValueMysql']});
   await query("INSERT INTO tenants(id,slug,name,status) VALUES(1,'default','Default','active'),(2,'a','A','active'),(3,'b','B','active')");
   await query("INSERT INTO shops(id,tenant_id,name) VALUES(20,2,'A'),(30,3,'B')");
-  await query("INSERT INTO products(id,tenant_id,name,code,inventory_number) VALUES(20,2,'钥匙壳','P-20','1-2'),(21,2,'门槛条','P-21','2-10'),(30,3,'Secret','P-30','1-2')");
+  await query("INSERT INTO products(id,tenant_id,name,code,inventory_number) VALUES(20,2,'钥匙壳','P-20','1-2-1'),(21,2,'门槛条','P-21','2-2-10'),(30,3,'Secret','P-30','1-3-1')");
+  await query("INSERT INTO inventory_number_aliases(alias_number,product_id,tenant_id) VALUES('1-2',20,2)");
   await query("INSERT INTO sku_mappings(id,tenant_id,shop_id,product_id,ozon_sku) VALUES(20,2,20,20,'KEY-A'),(21,2,20,20,'KEY-B'),(22,2,20,21,'SILL'),(30,3,30,30,'KEY-A')");
   for(let id=1;id<=45;id++){
    const mapping=id%3===0?22:id%2===0?20:21,sku=mapping===22?'SILL':mapping===20?'KEY-A':'KEY-B';
@@ -29,7 +30,7 @@ test('mobile printed packing pages keep global inventory order, search, marks an
   assert.equal(new Set(all.map(r=>Number(r.id))).size,44);assert.ok(all.every(r=>Number(r.id)!==99&&Number(r.id)!==45));
   const numbers=all.map(r=>String(r.sku_inventory_numbers).split(':')[1]);assert.deepEqual(numbers,[...numbers].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})));
   assert.equal(all.find(r=>Number(r.id)===1).mark_note,'暂时缺货，请勿发货');assert.ok(all.every(r=>r.printed_at));
-  const byId=await service.ordersPagedMysql({...filters,searchType:'product',searchQuery:'1-2'},'2');assert.equal(byId.total,30);assert.ok(byId.rows.every(r=>String(r.sku_inventory_numbers).endsWith(':1-2')));
+  const byId=await service.ordersPagedMysql({...filters,searchType:'product',searchQuery:'1-2'},'2');assert.equal(byId.total,30);assert.ok(byId.rows.every(r=>String(r.sku_inventory_numbers).endsWith(':1-2-1')));
   const bySku=await service.ordersPagedMysql({...filters,searchType:'sku',searchQuery:'KEY-B'},'2');assert.ok(bySku.rows.every(r=>r.skus==='KEY-B'));
   const byOrder=await service.ordersPagedMysql({...filters,searchType:'order',searchQuery:'ORDER-1',searchMatch:'exact'},'2');assert.deepEqual(Array.from(byOrder.rows,r=>Number(r.id)),[1]);
   const unprinted=await service.ordersPagedMysql({...filters,printFilter:'unprinted'},'2');assert.deepEqual(Array.from(unprinted.rows,r=>Number(r.id)),[45]);

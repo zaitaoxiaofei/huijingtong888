@@ -136,7 +136,7 @@ test('canonical schema and reviewed consumable migration work on an isolated rea
   try {
     assert.equal((await migrateInventoryConsumables(fixture.connection)).schema_ready, true);
     await fixture.connection.query('ALTER TABLE products DROP COLUMN is_consumable');
-    await fixture.connection.query('ALTER TABLE products ADD COLUMN is_accessory TINYINT(1) NOT NULL DEFAULT 0, ADD COLUMN inventory_number VARCHAR(64) NULL');
+    await fixture.connection.query('ALTER TABLE products ADD COLUMN is_accessory TINYINT(1) NOT NULL DEFAULT 0');
     await fixture.connection.query("INSERT INTO tenants(id, slug, name, status) VALUES (7,'default','test','active'),(8,'customer','other','active')");
     await fixture.connection.query("INSERT INTO products(id,tenant_id,name,code,inventory_number,inventory_category,updated_at) VALUES (1,7,'box','P-TEST-1','60-1','礼盒','2026-11-05'),(2,8,'foreign','P-TEST-2','60-2','礼盒','2026-11-05')");
     assert.equal((await migrateInventoryConsumables(fixture.connection)).schema_ready, false);
