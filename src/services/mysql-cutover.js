@@ -12,6 +12,8 @@ import { mergeDashboardSections } from "../shared/dashboard-sections.js";
 import { captureFbpReceiptBaseline } from './fbp-receipt-review.js';
 import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from './inventory-product-search.js';
 import { createInventoryWorkflowService } from './inventory-workflow.js';
+import { createFbpOpportunityCoverageReader } from './fbp-opportunity-coverage-cache.js';
+import { workflowRevision } from './inventory-workflow-cache.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
 import { readInventoryFlowSummary } from './inventory-flow-summary.js';
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "./customer-message-core-schema.js";
@@ -355,6 +357,15 @@ async function ensureProfitAnalyticsSchemaMysql() {
 
 const STOCK_ALERT_BASE_CACHE_TTL_MS = 5 * 60_000;
 const FBP_OPPORTUNITY_CACHE_TTL_MS = STOCK_ALERT_BASE_CACHE_TTL_MS;
+const readFbpOpportunityCoverageMysql = createFbpOpportunityCoverageReader({
+  // Full tenant mode retains every owned component and shared order, without
+  // repeating the product-ID read or the redundant all-products history OR.
+  load: async scope => {
+    const coverage = await loadOrderProcurementCoverage(mysqlQuery, '', { tenantId: scope.id, includeLegacyTenantNull: scope.isDefault, fresh: true });
+    return { product_availability: coverage.product_availability || new Map() };
+  },
+  revision: workflowRevision
+});
 function invalidateOrderProcurementCoverage(change) {
   invalidateProcurementCoverageCache(change);
   invalidateInventoryProductBalance();
@@ -5261,8 +5272,11 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", opti
   await ensureProductBarcodeLabelCacheReadyMysql();
   await ensureFbpTransferRecordsSchemaMysql();
   await ensureFbpReplenishmentSchemaMysql();
+  const forceRefresh = ["1", "true", "yes", "force"].includes(String(query.refresh || query.forceRefresh || "").toLowerCase());
+  const cacheKey = `fbp-opportunities:base:v2:${scope.id}`;
+  if (forceRefresh) invalidateMasterDataCache(cacheKey);
   const [baseRows, coverage] = await Promise.all([
-    getCachedMasterData(`fbp-opportunities:base:v2:${scope.id}`, async () => {
+    getCachedMasterData(cacheKey, async () => {
     const rows = await mysqlQuery(`
     SELECT
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name,
@@ -5347,7 +5361,7 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", opti
     ]);
       return rows;
     }, FBP_OPPORTUNITY_CACHE_TTL_MS),
-    inventoryScopeCoverageMysql(scope)
+    readFbpOpportunityCoverageMysql(scope, { fresh: forceRefresh })
   ]);
   const availability = coverage.product_availability || new Map();
   const normalizedRows = baseRows.map((row) => normalizeFbpOpportunityRow({
@@ -5900,7 +5914,7 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
   if ([...requestedById.values()].some((item) => !item.orderId || !Number.isInteger(item.finalQty) || item.finalQty < 0)) {
     throw new Error("分配数量必须是非负整数，且每条记录必须属于对应备货单。");
   }
-  return withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     for (const id of itemIds) await assertInventoryRecord(scope, 'fbpItem', id, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     const placeholders = itemIds.map(() => "?").join(",");
     const [rows] = await connection.execute(`
@@ -5956,6 +5970,8 @@ export async function saveFbpReplenishmentInventoryAllocationMysql(body = {}, us
     }
     return { ok: true, inventory_key: requestedKey, available_qty: available, final_qty: total, updated_count: rows.length, updated_by: userId || null };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 async function requireSessionPersonIdMysql(personId, connection = null) {
@@ -6055,6 +6071,7 @@ export async function addFbpReplenishmentItemAdjustmentMysql(body = {}, userId =
     await connection.execute("UPDATE fbp_replenishment_orders SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
     return { procurementRequestId, adjustmentQty: Number(lockedItem.adjustment_qty || 0) + adjustmentQty, finalQty: lockedFinalQty };
   });
+  invalidateOrderProcurementCoverage();
   return { ok: true, order_id: orderId, item_id: itemId, adjustment_qty: result.adjustmentQty, final_qty: result.finalQty, procurement_request_id: result.procurementRequestId };
 }
 
@@ -15180,7 +15197,10 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   }
   });
 
-  if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
+  if (body.composition_items !== undefined || body.components !== undefined) {
+    invalidateOrderProcurementCoverage();
+    invalidateInventoryAlertSalesBindingMysql();
+  }
   if(cycleSettingsChanged)invalidateOrderProcurementCoverage();
   invalidateOrderReadCache();
 
@@ -24696,7 +24716,7 @@ export async function deleteProcurementRequestMysql(id, tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
   await ensureProcurementInboundLinkSchemaMysql();
   const requestId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     await assertInventoryRecord(scope, 'request', requestId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     const request = await mysqlConnectionQueryOne(connection, "SELECT * FROM procurement_requests WHERE id = ? FOR UPDATE", [requestId]);
     if (!request) throw new Error("Procurement request not found");
@@ -24716,6 +24736,8 @@ export async function deleteProcurementRequestMysql(id, tenantId = "admin") {
     await connection.execute("DELETE FROM procurement_requests WHERE id = ?", [requestId]);
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function repairDirectProcurementInboundLinksMysql(options = {}) {
@@ -25247,7 +25269,7 @@ export async function cancelPurchaseOrderMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   const orderId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     await assertPurchaseTreeMysql(connection, scope, orderId);
     await assertInventoryRecord(scope, 'purchase', orderId, (sql, params) => mysqlConnectionQuery(connection, sql, params), { lock: true });
     await connection.execute("UPDATE purchase_orders SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ?", [orderId]);
@@ -25259,6 +25281,8 @@ export async function cancelPurchaseOrderMysql(id, tenantId = "admin") {
     `, [orderId]);
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function updatePurchaseOrderMysql(id, body = {}, tenantId = "admin") {
@@ -25267,7 +25291,7 @@ export async function updatePurchaseOrderMysql(id, body = {}, tenantId = "admin"
   await ensurePurchaseCostVersionSchemaMysql();
   await ensurePurchaseOrderShipmentSchemaMysql();
   const orderId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     await assertPurchaseTreeMysql(connection, scope, orderId);
     const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
     await assertInventoryRecord(scope, 'purchase', orderId, run, { lock: true });
@@ -25340,13 +25364,15 @@ export async function updatePurchaseOrderMysql(id, body = {}, tenantId = "admin"
     }
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function deletePurchaseOrderMysql(id, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await resolveInventoryTenantScope(tenantId);
   const orderId = Number(id);
-  return await withMysqlTransaction(async (connection) => {
+  const result = await withMysqlTransaction(async (connection) => {
     await assertPurchaseTreeMysql(connection, scope, orderId);
     const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
     await assertInventoryRecord(scope, 'purchase', orderId, run, { lock: true });
@@ -25373,6 +25399,8 @@ export async function deletePurchaseOrderMysql(id, tenantId = "admin") {
     await connection.execute("DELETE FROM purchase_orders WHERE id = ?", [orderId]);
     return { ok: true };
   });
+  invalidateOrderProcurementCoverage();
+  return result;
 }
 
 export async function createInboundRecordMysql(body = {}, tenantId = "admin") {
