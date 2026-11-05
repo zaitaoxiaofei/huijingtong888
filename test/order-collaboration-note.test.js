@@ -20,9 +20,11 @@ test('shared collaboration note updates only its order and enterprise while pres
 
 test('shared note invalidates the current enterprise page caches without requesting each order again',()=>{
  const list=new Map([['page1',{}]]),meta=new Map([['counts',{}]]);
- const c=vm.createContext({currentApiCacheScope:()=> 'enterprise-A',ordersListCache:list,ordersMetaCache:meta});
+ const aborted=[],loading={value:true},token={value:7};
+ const c=vm.createContext({currentApiCacheScope:()=> 'enterprise-A',ordersListCache:list,ordersMetaCache:meta,window:{clearTimeout(){}},ordersMetaTimer:0,ordersListAbort:{value:{abort:()=>aborted.push('list')}},ordersInventoryAbort:{value:{abort:()=>aborted.push('inventory')}},ordersMetaAbort:{value:{abort:()=>aborted.push('meta')}},ordersLoadToken:token,ordersMetaRequestKey:{value:'old'},loading,vm:{rows:[]},inventoryRefreshFailed:{value:false},inventoryRefreshNotice:{value:''}});
  const start=composable.indexOf('const handleCollaborationNoteSaved =');vm.runInContext(composable.slice(start,composable.indexOf('window.addEventListener("erp:auth-scope-changed"',start))+'globalThis.handler=handleCollaborationNoteSaved;',c);
- c.handler({detail:{scope:'enterprise-B'}});assert.equal(list.size,1);assert.equal(meta.size,1);
- c.handler({detail:{scope:'enterprise-A'}});assert.equal(list.size,0);assert.equal(meta.size,0);
+ c.handler({detail:{scope:'enterprise-B'}});assert.equal(list.size,1);assert.equal(meta.size,1);assert.deepEqual(aborted,[]);
+ c.handler({detail:{scope:'enterprise-A'}});assert.equal(list.size,0);assert.equal(meta.size,0);assert.deepEqual(aborted,['list','inventory','meta']);assert.equal(token.value,8);assert.equal(loading.value,false);
+ c.vm.rows=[{id:1,inventory_refresh_pending:true}];c.handler({detail:{scope:'enterprise-A'}});assert.equal(c.vm.rows[0].inventory_refresh_pending,true);assert.equal(c.inventoryRefreshFailed.value,true);assert.match(c.inventoryRefreshNotice.value,/重试库存刷新/);
  assert.ok(composable.includes('window.removeEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved)'));
 });

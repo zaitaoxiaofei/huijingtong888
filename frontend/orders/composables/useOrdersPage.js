@@ -448,6 +448,17 @@ export function useOrdersPage() {
   };
   const handleCollaborationNoteSaved = (event) => {
     if (event.detail?.scope !== currentApiCacheScope()) return;
+    window.clearTimeout(ordersMetaTimer);
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    ordersMetaAbort.value?.abort();
+    ordersLoadToken.value += 1;
+    ordersMetaRequestKey.value = '';
+    loading.value = false;
+    if (vm.rows.some(row => row.inventory_refresh_pending)) {
+      inventoryRefreshFailed.value = true;
+      inventoryRefreshNotice.value = '备注已保存，请重试库存刷新核对最新数量。';
+    }
     ordersListCache.clear();
     ordersMetaCache.clear();
   };

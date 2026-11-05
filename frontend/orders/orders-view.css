@@ -486,10 +486,13 @@
 }
 
 .orders-procurement-cell { display: grid; gap: 6px; min-width: 0; }
+.orders-procurement-heading { display: flex; align-items: center; gap: 6px; }
+.orders-procurement-note-edit { display: inline-flex; align-items: center; padding: 1px; border: 0; background: transparent; color: var(--el-text-color-secondary); font-size: 12px; cursor: pointer; }
 .orders-procurement-date-row { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; }
 .orders-procurement-date-row strong { font-size: 13px; font-weight: 500; }
-.orders-procurement-note { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--erp-detail-text-main, #303133); font: inherit; font-size: 12px; line-height: 1.5; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; cursor: pointer; }
-.orders-procurement-note:hover { color: var(--el-color-primary); }
+.orders-procurement-note { display: block; max-width: 100%; padding: 0; border: 0; background: transparent; color: var(--erp-detail-text-main, #303133); font: inherit; font-size: 12px; line-height: 1.5; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.orders-procurement-note.is-editable { cursor: pointer; }
+.orders-procurement-note.is-editable:hover, .orders-procurement-note-edit:hover { color: var(--el-color-primary); }
 .orders-procurement-inline-actions { display: flex; align-items: center; flex-wrap: nowrap; gap: 4px; }
 .orders-procurement-inline-actions .el-button { margin: 0; padding: 4px 6px; height: 24px; min-height: 24px; font-size: 12px; color: var(--el-color-info-dark-2, #64748b); border-color: var(--el-border-color-light); background: var(--el-fill-color-blank); }
 .orders-procurement-inline-actions .el-button:hover { color: var(--el-color-primary); border-color: var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }

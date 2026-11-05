@@ -37,6 +37,7 @@ import "../admin/styles/erp-theme.css";
 
 const ProcurementLedgerDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementLedgerDialog.vue"));
 const HistoricalPurchaseQuickDialog = defineAsyncComponent(() => import("../admin/components/procurement/HistoricalPurchaseQuickDialog.vue"));
+const ProcurementOrderNotesDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementOrderNotesDialog.vue"));
 const OzonCategorySelect = defineAsyncComponent(() => import("../admin/components/listing/OzonCategorySelect.vue"));
 const ProductCompositionDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCompositionDialog.vue"));
 const ProductCreateEditDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCreateEditDialog.vue"));
@@ -46,6 +47,9 @@ const route = useRoute();
 const inventoryAuth = useAuthStore();
 const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
 const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
+const canManageOrderNotes = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
+const canEditProcurementNotes = computed(() => ['packing','procurement','inventory.write'].some(permission => hasPermission(inventoryAuth.user, permission)));
+const procurementOrderNotes = reactive({visible:false,productId:0,orderId:0});
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
@@ -2125,6 +2129,14 @@ async function handleSaveMark(orderId, markType) {
   }
 }
 
+function editProcurementNote(row) {
+  if (canManageOrderNotes.value) return handleSaveMark(Number(row.id), String(row.mark_type || ''));
+  if (!canEditProcurementNotes.value || row.inventory_refresh_pending || row.procurement_coverage?.entered_transport
+    || row.fulfillment_type_key === 'fbp' || row.logisticsSummary?.isFbp || row.procurement_coverage?.stock_location === 'FBP' || !row.procurement_coverage?.needs_fulfillment) return;
+  const productId = Number((row.procurement_coverage.items || []).find(item => Number(item.product_id) > 0)?.product_id || 0);
+  if (productId) Object.assign(procurementOrderNotes, {visible:true,productId,orderId:Number(row.id)});
+}
+
 function handleOrderCollaborationNoteSaved(event) {
   const detail = event.detail || {}, orderId = Number(detail.orderId);
   if (detail.scope !== currentApiCacheScope() || !Number.isSafeInteger(orderId) || orderId <= 0 || typeof detail.note !== 'string') return;
@@ -2807,6 +2819,7 @@ onBeforeUnmount(() => {
 
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
     <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="handleInventoryRowsSaved" />
+    <ProcurementOrderNotesDialog v-if="procurementOrderNotes.visible" v-model="procurementOrderNotes.visible" :product-id="procurementOrderNotes.productId" :order-id="procurementOrderNotes.orderId" />
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
@@ -2868,6 +2881,8 @@ onBeforeUnmount(() => {
       <OrdersTable
         :can-update-inventory="canUpdateInventory"
         :can-remind-procurement="canRemindProcurement"
+        :can-manage-order-notes="canManageOrderNotes"
+        :can-edit-procurement-notes="canEditProcurementNotes"
         :rows="tableRows"
         :mark-options="vm.markOptions"
         :selected-ids="selectedOrderIds"
@@ -2882,6 +2897,7 @@ onBeforeUnmount(() => {
         @split-order="openSplitOrderDialog"
         @print-order="handlePrintOrder"
         @save-mark="handleSaveMark"
+        @edit-procurement-note="editProcurementNote"
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
         @edit-inventory-product="(productId) => openInventoryProductEditor({ id: productId })"
         @open-product-components="openProductCompositionDialog"

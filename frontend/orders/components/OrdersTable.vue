@@ -13,6 +13,8 @@ const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/c
 const props = defineProps({
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
+  canManageOrderNotes: { type: Boolean, default: false },
+  canEditProcurementNotes: { type: Boolean, default: false },
   rows: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
   selectedIds: { type: Object, default: () => new Set() },
@@ -32,6 +34,7 @@ const emit = defineEmits([
   "split-order",
   "print-order",
   "save-mark",
+  "edit-procurement-note",
   "open-bind-product-from-order",
   "edit-inventory-product",
   "open-product-components",
@@ -336,6 +339,11 @@ function procurementDateText(row) {
   return shanghaiDateText(row.procurementState.latestPurchaseAt, { assumeUtcWhenNaive: true }).replaceAll('-', '/');
 }
 function collaborationNote(row) { return String(row.mark_note || '').trim(); }
+function canEditCollaborationNote(row) {
+  return props.canManageOrderNotes || props.canEditProcurementNotes && !row.inventory_refresh_pending && !isFbpOrder(row)
+    && !row.procurement_coverage?.entered_transport && row.procurement_coverage?.needs_fulfillment
+    && (row.procurement_coverage.items || []).some(item => Number(item.product_id) > 0);
+}
 </script>
 
 <template>
@@ -694,6 +702,7 @@ function collaborationNote(row) { return String(row.mark_note || '').trim(); }
       <el-table-column label="采购信息" min-width="240">
         <template #default="{ row }">
           <div class="orders-procurement-cell">
+          <div class="orders-procurement-heading">
           <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">采购覆盖待核对</small>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
           <div v-else-if="row.procurementState?.latestPurchaseAt" class="orders-procurement-date-row orders-procurement-time-cell" title="采购日期为最近一次采购的北京时间；在途天数按最早待收批次的采购时间计算">
@@ -702,7 +711,9 @@ function collaborationNote(row) { return String(row.mark_note || '').trim(); }
             <small v-else-if="hasProcurementIncoming(row)">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
           </div>
           <small v-else class="orders-cell-meta-line">暂无关联采购</small>
-          <button v-if="collaborationNote(row)" type="button" class="orders-procurement-note" :title="collaborationNote(row)" :aria-label="`编辑采购协作备注：${collaborationNote(row)}`" @click="emit('save-mark', row.id, markValue(row))">{{ collaborationNote(row) }}</button>
+          <button v-if="canEditCollaborationNote(row)" type="button" class="orders-procurement-note-edit" :aria-label="`${collaborationNote(row) ? '编辑' : '添加'}采购协作备注`" :title="`${collaborationNote(row) ? '编辑' : '添加'}采购协作备注`" @click="emit('edit-procurement-note', row)"><el-icon><EditPen /></el-icon></button>
+          </div>
+          <component :is="canEditCollaborationNote(row) ? 'button' : 'span'" v-if="collaborationNote(row)" :type="canEditCollaborationNote(row) ? 'button' : undefined" class="orders-procurement-note" :class="{'is-editable':canEditCollaborationNote(row)}" :title="collaborationNote(row)" :aria-label="canEditCollaborationNote(row) ? `编辑采购协作备注：${collaborationNote(row)}` : undefined" @click="canEditCollaborationNote(row) && emit('edit-procurement-note', row)">{{ collaborationNote(row) }}</component>
           <div v-if="!row.inventory_refresh_pending && !isFbpOrder(row)" class="orders-procurement-inline-actions">
             <el-button v-if="canRemindProcurement" size="small" plain @click="openStockTopup(row)">提醒采购</el-button>
             <el-button v-if="row.procurementState?.latestPurchaseAt" size="small" plain @click="emit('view-procurement-details', row)">查看明细</el-button>
