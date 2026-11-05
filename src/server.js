@@ -63,6 +63,9 @@ import { cleanupTransportedOrderLabelCache } from "./services/order-label-cache-
 import { cleanupCollectorHistory } from "./services/collector-history-retention.js";
 import { cleanupListingPublishHistory } from "./services/listing-publish-history-cleanup.js";
 import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
+import { CollectorBrowserPool } from "./services/collector-browser-pool.js";
+import { resolveCollectorBrowserShop } from "./services/collector-browser-pool-access.js";
+import { createCollectorBrowserPoolHandler } from "./server/collector-browser-pool-route.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
@@ -1641,6 +1644,13 @@ function localPluginJson(req, res, payload, status = 200) {
   res.end(body);
 }
 
+const handleCollectorBrowserPoolRoute = createCollectorBrowserPoolHandler({
+  pool: new CollectorBrowserPool(),
+  resolveShop: resolveCollectorBrowserShop,
+  readJson,
+  sendJson: localPluginJson
+});
+
 function safeEqualText(left, right) {
   const leftBuffer = Buffer.from(String(left || ""), "utf8");
   const rightBuffer = Buffer.from(String(right || ""), "utf8");
@@ -1697,6 +1707,8 @@ async function handleLocalPluginRoute(req, res, parts) {
     return localPluginJson(req, res, { success: false, error: scopeError.error, code: scopeError.code }, scopeError.status);
   }
   const tenantId = principal.tenantKey;
+
+  if (await handleCollectorBrowserPoolRoute(req, res, parts, principal)) return true;
 
   if (parts[2] === "plugin" && parts[3] === "status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
