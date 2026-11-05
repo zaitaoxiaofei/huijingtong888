@@ -139,15 +139,20 @@ function dualBackground(options = {}) {
   const stored = { 'pivot-erp-base-url': 'https://wrong.example', 'pivot-erp-tenant-id': 'wrong', 'pivot-erp-local-plugin-token': 'wrong-key' };
   const config = { erpBaseUrl: 'https://erp.hjt888.xyz', tenantId: 'tenant-a', localPluginToken: 'one-key' };
   const saves = [];
-  const event = () => ({ addListener() {}, removeListener() {} });
+  const events = new Map();
+  const event = (name) => ({ addListener(fn) {
+    if (!name) return;
+    const handlers = events.get(name) || [];
+    handlers.push(fn); events.set(name, handlers);
+  }, removeListener() {} });
   const chrome = {
     runtime: { id: 'unified-instance', getManifest: () => ({ version: '1.5.0' }), onMessage: { addListener(fn) { listeners.push(fn); } }, onInstalled: event(), onStartup: event() },
-    storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value) } },
+    storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value) }, onChanged: event('storage') },
     webRequest: { onBeforeSendHeaders: event(), onHeadersReceived: event() },
     action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} },
     alarms: { create() {}, onAlarm: event() },
-    tabs: { query: async () => [], onUpdated: event(), onRemoved: event() },
-    cookies: { getAll: async () => [], getAllCookieStores: async () => [] }
+    tabs: { query: async () => [], onUpdated: event('tabs'), onRemoved: event('removed') },
+    cookies: { getAll: async () => [], getAllCookieStores: async () => [], onChanged: event('cookies') }
   };
   const context = vm.createContext({
     chrome, URL, AbortController,
@@ -163,10 +168,62 @@ function dualBackground(options = {}) {
     vm.runInContext(source, context);
   });
   vm.runInContext(read('background.js'), context);
-  return { context, imports, saves, config, requests, async message(message, sender = { id: 'unified-instance', url: 'chrome-extension://unified-instance/popup.html' }) {
+  return { context, imports, saves, config, requests, events, async message(message, sender = { id: 'unified-instance', url: 'chrome-extension://unified-instance/popup.html' }) {
     return new Promise((resolve) => listeners.forEach((listener) => listener(message, sender, resolve)));
   } };
 }
+
+test('local pool diagnostics and reconnect reply immediately and are restricted to the own popup', async () => {
+  const h = dualBackground();
+  await flush();
+  let wakes = 0;
+  h.context.__wake = () => { wakes++; return new Promise(() => {}); };
+  vm.runInContext('collectorBrowserPool.wake = __wake', h.context);
+  const requestsBefore = h.requests.length;
+  const status = await h.message({ type: 'OZON_ERP_BROWSER_POOL_DIAGNOSTICS' });
+  assert.equal(status.success, true);
+  assert.ok(status.diagnostics);
+  assert.equal(wakes, 0);
+  const reconnect = await h.message({ type: 'OZON_ERP_BROWSER_POOL_RECONNECT' });
+  assert.equal(reconnect.success, true);
+  assert.equal(wakes, 1);
+  assert.equal(h.requests.length, requestsBefore);
+  for (const sender of [
+    { id: 'another-instance', url: 'chrome-extension://unified-instance/popup.html' },
+    { id: 'unified-instance', tab: { id: 7 }, url: 'chrome-extension://unified-instance/popup.html' },
+    { id: 'unified-instance', url: 'https://seller.ozon.ru/app/analytics/graphs' }
+  ]) {
+    const denied = await h.message({ type: 'OZON_ERP_BROWSER_POOL_RECONNECT' }, sender);
+    assert.equal(denied.error, 'PLUGIN_POPUP_REQUIRED');
+  }
+  assert.equal(wakes, 1);
+});
+
+test('Seller page, company cookie and verified connection changes wake registration without navigation', async () => {
+  const h = dualBackground();
+  await flush();
+  let wakes = 0;
+  h.context.__wake = async () => { wakes++; };
+  vm.runInContext('collectorBrowserPool.wake = __wake', h.context);
+  const emit = (name, ...args) => h.events.get(name).forEach((handler) => handler(...args));
+  emit('tabs', 7, { status: 'complete' }, { url: 'https://seller.ozon.ru/app/products' });
+  emit('tabs', 7, { url: 'https://seller.ozon.ru/app/analytics/graphs' }, {});
+  assert.equal(wakes, 2);
+  emit('tabs', 7, { status: 'complete' }, { url: 'https://evil.example/' });
+  emit('cookies', { cookie: { name: 'sc_company_id', domain: '.ozon.ru' } });
+  emit('cookies', { cookie: { name: 'sc_company_id', domain: 'seller.ozon.ru' } });
+  assert.equal(wakes, 4);
+  emit('cookies', { cookie: { name: 'sc_company_id', domain: 'ozon.ru.evil.example' } });
+  emit('cookies', { cookie: { name: 'other', domain: '.ozon.ru' } });
+  for (const key of ['ozon-erp-local-plugin-token', 'ozon-erp-tenant-id', 'ozon-erp-unified-connection-v1']) {
+    emit('storage', { [key]: { newValue: 'fixture' } }, 'local');
+  }
+  assert.equal(wakes, 7);
+  emit('storage', { unrelated: {} }, 'local');
+  emit('storage', { 'ozon-erp-local-plugin-token': {} }, 'sync');
+  assert.equal(wakes, 7);
+  assert.equal(typeof h.context.OzonSellerCookieContext.read, 'function');
+});
 
 test('actual collector and namespaced analytics backgrounds load together and share one key', async () => {
   const h = dualBackground();

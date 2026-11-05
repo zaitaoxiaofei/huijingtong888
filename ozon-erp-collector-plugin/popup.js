@@ -6,6 +6,9 @@ const fields = {
   connectionDetail: document.getElementById('connection-detail'),
   installedVersion: document.getElementById('installed-version'),
   onlineVersion: document.getElementById('online-version'),
+  browserPoolStatus: document.getElementById('browser-pool-status'),
+  browserPoolDetail: document.getElementById('browser-pool-detail'),
+  browserPoolReconnect: document.getElementById('browser-pool-reconnect'),
   collectorTab: document.getElementById('collector-tab'),
   analyticsTab: document.getElementById('analytics-tab'),
   collectorPanel: document.getElementById('collector-panel'),
@@ -53,6 +56,11 @@ let keyRevision = 0;
 let connectionEpoch = 0;
 let connectionRequestId = 0;
 let renderedConnectionRequestId = 0;
+let poolEpoch = 0;
+let poolRequestId = 0;
+let renderedPoolRequestId = 0;
+let readingPool = false;
+let reconnectingPool = false;
 
 function sendRuntimeMessage(message) {
   return new Promise((resolve) => {
@@ -113,6 +121,101 @@ async function refreshConnection() {
     fields.connectionStatus.dataset.state = 'error';
     fields.connectionStatus.textContent = '连接状态未获取';
     fields.connectionDetail.textContent = response?.error || '请稍后重新打开插件。';
+  }
+}
+
+function poolCount(value) {
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+}
+
+function renderBrowserPool(diagnostics = {}) {
+  const phase = String(diagnostics.phase || 'idle');
+  const registered = poolCount(diagnostics.registeredCompanyCount);
+  const server = diagnostics.serverCompanyCount == null ? null : poolCount(diagnostics.serverCompanyCount);
+  const code = /^[A-Z][A-Z0-9_]{0,95}$/.test(String(diagnostics.lastErrorCode || '')) ? diagnostics.lastErrorCode : '';
+  const reasons = {
+    NO_SELLER_TAB: '请打开并登录 Seller 页面后重连。',
+    COOKIE_STORE_UNAVAILABLE: '未读取到 Seller 登录环境，请检查浏览器站点权限后重连。',
+    SELLER_TAB_PERMISSION_DENIED: '请允许插件访问 Seller 页面，再刷新页面后重连。',
+    STORE_IDENTITY_UNAVAILABLE: '尚未识别店铺，请刷新 Seller 分析页后重连。',
+    STORE_CONTEXT_MISMATCH: '页面与登录店铺不一致，请核对 Seller 店铺并刷新后重连。',
+    COLLECTOR_BROWSER_HEARTBEAT_REJECTED: 'ECS 未接受登记，请检查企业连接和店铺归属后重连。',
+    COLLECTOR_BROWSER_SHOP_FORBIDDEN: '此 Seller 店铺不属于当前企业，请切换本企业店铺后重连。',
+    TENANT_PLUGIN_AUTH_REQUIRED: '企业连接未通过，请检查上方密钥连接状态。',
+    COLLECTOR_BROWSER_TIMEOUT: '连接 ECS 超时，请稍后重连。',
+    COLLECTOR_BROWSER_CAPACITY: 'ECS 采集池繁忙，请稍后重连。'
+  };
+  const suppliedError = String(diagnostics.lastError || '').trim();
+  const safeError = /[\u4e00-\u9fff]/.test(suppliedError)
+    && !/(?:[a-z][a-z0-9+.-]*:\/\/|ozp_|cookie|authorization|x-local-plugin-token|[\w-]+\s*=\s*\S+|[A-Za-z0-9_-]{32,})/i.test(suppliedError)
+    ? suppliedError.slice(0, 180) : '';
+  const phaseLabels = { idle: '等待检查', checking: '正在检查', no_seller_tabs: '未打开 Seller', identity_unavailable: '店铺待识别', registration_failed: '登记未通过', registered: '已接入' };
+  const reason = safeError || reasons[code] || (phase === 'no_seller_tabs' ? reasons.NO_SELLER_TAB
+    : phase === 'identity_unavailable' ? reasons.STORE_IDENTITY_UNAVAILABLE
+      : phase === 'registration_failed' ? reasons.COLLECTOR_BROWSER_HEARTBEAT_REJECTED : '');
+  const connected = registered > 0 && ['registered', 'checking'].includes(phase);
+  fields.browserPoolStatus.dataset.state = connected ? 'connected' : reason ? 'error' : 'pending';
+  fields.browserPoolStatus.textContent = connected
+    ? `本机 ${registered} 公司已接入 / 服务端 ${server === null ? '待确认' : `${server} 公司可用`}`
+    : reason || (phase === 'checking' ? '正在检查 Seller 店铺与 ECS 接入' : '正在等待接入检查');
+  const checkedAt = Number(diagnostics.checkedAt);
+  const checkedText = checkedAt > 0 && Number.isFinite(checkedAt) && !Number.isNaN(new Date(checkedAt).getTime())
+    ? new Date(checkedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚未检查';
+  fields.browserPoolDetail.textContent = [
+    `阶段：${phaseLabels[phase] || '状态暂不可用'}`,
+    `本机 Seller 标签 ${poolCount(diagnostics.localTabCount)} 个 · 已核实 ${poolCount(diagnostics.verifiedCompanyCount)} 公司 · 已登记 ${registered} 公司`,
+    `服务端可用：${server === null ? '尚未获取' : `${server} 公司`}`,
+    reason,
+    code ? `诊断码：${code}` : '',
+    `最近检查（北京时间）：${checkedText}`,
+    '可用公司数不代表正在同时执行；多开同一登录环境的标签不会增加独立店铺。'
+  ].filter(Boolean).join('\n');
+}
+
+async function refreshBrowserPool() {
+  if (readingPool || reconnectingPool || savingKey) return;
+  readingPool = true;
+  const epoch = poolEpoch;
+  const connection = connectionEpoch;
+  const requestId = ++poolRequestId;
+  try {
+    const response = await sendRuntimeMessage({ type: 'OZON_ERP_BROWSER_POOL_DIAGNOSTICS' });
+    if (epoch !== poolEpoch || connection !== connectionEpoch || savingKey || requestId < renderedPoolRequestId) return;
+    renderedPoolRequestId = requestId;
+    if (response?.success && response.diagnostics) renderBrowserPool(response.diagnostics);
+    else {
+      fields.browserPoolStatus.dataset.state = 'error';
+      fields.browserPoolStatus.textContent = '本机状态暂未读取，请稍后重连。';
+      fields.browserPoolDetail.textContent = '插件后台暂未响应。可点击重连重新检查，不需要重复填写密钥。';
+    }
+  } finally {
+    readingPool = false;
+  }
+}
+
+async function reconnectBrowserPool() {
+  if (reconnectingPool) return;
+  reconnectingPool = true;
+  fields.browserPoolReconnect.disabled = true;
+  const epoch = ++poolEpoch;
+  const connection = connectionEpoch;
+  try {
+    const response = await sendRuntimeMessage({ type: 'OZON_ERP_BROWSER_POOL_RECONNECT' });
+    if (epoch !== poolEpoch || connection !== connectionEpoch) return;
+    if (response?.success) {
+      if (response.diagnostics) renderBrowserPool(response.diagnostics);
+      else {
+        fields.browserPoolStatus.dataset.state = 'pending';
+        fields.browserPoolStatus.textContent = '已请求重新检查，状态将自动更新。';
+      }
+    } else {
+      fields.browserPoolStatus.dataset.state = 'error';
+      fields.browserPoolStatus.textContent = '重连请求未完成，请稍后重试。';
+    }
+  } finally {
+    reconnectingPool = false;
+    fields.browserPoolReconnect.disabled = false;
   }
 }
 
@@ -314,7 +417,7 @@ async function load() {
   renderTokenWarning();
   fields.injectCards.checked = stored['ozon-erp-inject-cards'] !== false;
   fields.manualSkus.value = stored['ozon-erp-manual-skus'] || '';
-  await Promise.allSettled([restoreManualProgress(), loadPluginUpdateStatus(), refreshOzonAccessButton(), refreshConnection()]);
+  await Promise.allSettled([restoreManualProgress(), loadPluginUpdateStatus(), refreshOzonAccessButton(), refreshConnection(), refreshBrowserPool()]);
   if (!fields.status.textContent) await diagnoseActiveOzonPage();
 }
 
@@ -334,6 +437,7 @@ async function save() {
     const response = await sendRuntimeMessage({ type: 'OZON_UNIFIED_SAVE_KEY', key: submittedKey });
     if (!response?.success) throw new Error(response?.error || '保存失败，请重试');
     renderConnection(response.connection);
+    renderBrowserPool({ phase: 'checking' });
     setSaveFeedback(keyRevision === submittedRevision ? '已保存在本机，连接状态将自动更新。' : '已保存提交的密钥，当前还有未保存修改。');
     renderTokenWarning();
   } catch (error) {
@@ -416,6 +520,7 @@ async function syncManualSkus() {
 fields.save.addEventListener('click', save);
 fields.collectorTab.addEventListener('click', () => selectFeature('collector'));
 fields.analyticsTab.addEventListener('click', () => selectFeature('analytics'));
+fields.browserPoolReconnect.addEventListener('click', reconnectBrowserPool);
 document.getElementById('collect').addEventListener('click', collectActiveTab);
 fields.grantOzonAccess.addEventListener('click', grantOzonAccess);
 document.getElementById('manual-sync').addEventListener('click', syncManualSkus);
@@ -432,4 +537,4 @@ fields.pluginUpdateDownload.addEventListener('click', () => {
   chrome.tabs.create({ url: pluginUpdateDownloadUrl });
 });
 load().catch((error) => setSaveFeedback(error?.message || '读取配置失败，请重试', 'error'));
-setInterval(() => { void refreshConnection(); }, 2000);
+setInterval(() => { void refreshConnection(); void refreshBrowserPool(); }, 2000);

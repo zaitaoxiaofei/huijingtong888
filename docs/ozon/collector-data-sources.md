@@ -1,6 +1,6 @@
 # Storefront collector data sources
 
-Reviewed: 2026-11-05 (Asia/Shanghai).
+Reviewed: 2026-11-06 (Asia/Shanghai).
 
 ## Evidence boundaries
 
@@ -51,7 +51,7 @@ All shop workers call the same endpoint URL. The worker's identity is its verifi
 
 The legacy ECS pool loads saved bindings, distributes SKU indexes modulo binding count, and allows at most six concurrent SKU jobs per batch. Read-only production probes of six active saved bindings on 2026-11-05 succeeded zero times: three ended with 403 and challenge-shaped JSON after 307, and three ended with 401 after 307. Replaying the newest saved cookie in its original order still returned the challenge. An independent service with the same plain HTTP request does not establish a working browser session. A separate official Seller API product-list control succeeded; these are different authentication paths.
 
-The pending 1.4.39 implementation adds an embedded coordinator at `/api/local-plugin/collector-browser-pool` and workers in the product collector plugin. It does not require a separate server, database migration, or new production port. The coordinator receives worker identity and normalized results; browser cookies stay in the browser. Actual Ozon requests use the existing logged-in Seller tab with `credentials: 'include'`.
+The 1.4.39 implementation adds an embedded coordinator at `/api/local-plugin/collector-browser-pool` and workers in the product collector plugin. It does not require a separate server, database migration, or new production port. The coordinator receives worker identity and normalized results; browser cookies stay in the browser. Actual Ozon requests use the existing logged-in Seller tab with `credentials: 'include'`.
 
 Each worker identity includes a persistent installation UUID, cookie store, and live company ID. The page company and Chrome cookie-store company must match before registration and throughout execution. The server resolves the source shop from the verified enterprise and active shop ownership, never a submitted shop ID. Multiple tabs for the same company share one server lock. Multiple Chrome tabs in one cookie store are not independent shop sessions; use genuinely separate logged-in profiles, stores, or computers to supply distinct healthy companies.
 

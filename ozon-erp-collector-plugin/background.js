@@ -1,6 +1,6 @@
 if (typeof importScripts === 'function') {
   try {
-    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'collector-browser-worker.js');
+    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'seller-cookie-context.js', 'collector-browser-worker.js');
   } catch (error) {}
 }
 
@@ -2372,6 +2372,16 @@ async function collectManualDetailSkus(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (['OZON_ERP_BROWSER_POOL_DIAGNOSTICS', 'OZON_ERP_BROWSER_POOL_RECONNECT'].includes(message?.type)) {
+    const popupUrl = chrome.runtime.getURL?.('popup.html') || `chrome-extension://${chrome.runtime.id}/popup.html`;
+    if (sender?.id !== chrome.runtime.id || sender?.tab || sender?.url !== popupUrl) {
+      sendResponse({ success: false, error: 'PLUGIN_POPUP_REQUIRED' });
+      return false;
+    }
+    if (message.type === 'OZON_ERP_BROWSER_POOL_RECONNECT') wakeCollectorBrowserPool();
+    sendResponse({ success: true, diagnostics: collectorBrowserPool?.getDiagnostics() || null });
+    return false;
+  }
   if (message?.type === 'OZON_ERP_SELLER_AUTH_SYNC') {
     const isSellerTab = /^https:\/\/seller\.ozon\.ru\//i.test(String(sender?.tab?.url || ''));
     if (!isSellerTab) {
@@ -2627,7 +2637,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm?.name === 'ozon-erp-collector-browser-worker') {
-    collectorBrowserPool?.wake();
+    wakeCollectorBrowserPool();
     return;
   }
   if (alarm?.name === PLUGIN_UPDATE_ALARM_NAME) {
@@ -2642,6 +2652,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 const collectorBrowserPool = globalThis.OzonCollectorBrowserPool?.create({
   chrome,
   coordination: globalThis.OzonUnifiedRuntime,
+  readCookieContext: (tab, options) => globalThis.OzonSellerCookieContext.read(tab, options),
   getContext: async () => {
     if (globalThis.OzonUnifiedConfig) {
       const config = await globalThis.OzonUnifiedConfig.get();
@@ -2666,4 +2677,29 @@ if (collectorBrowserPool) {
   collectorBrowserPool.start();
   chrome.alarms.create('ozon-erp-collector-browser-worker', { periodInMinutes: 0.5 });
 }
+
+function wakeCollectorBrowserPool() {
+  // Registration runs in the background; popup replies never wait on HTTP or Seller.
+  collectorBrowserPool?.wake().catch(() => {});
+}
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const url = changeInfo?.url || tab?.url || '';
+  if (/^https:\/\/seller\.ozon\.ru\//.test(url) && (changeInfo?.url || changeInfo?.status === 'complete')) {
+    wakeCollectorBrowserPool();
+  }
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (collectorBrowserPool?.getDiagnostics().tabs.some((tab) => tab.tabId === tabId)) wakeCollectorBrowserPool();
+});
+chrome.cookies.onChanged?.addListener(({ cookie }) => {
+  const domain = String(cookie?.domain || '').replace(/^\./, '');
+  if (cookie?.name === 'sc_company_id' && (domain === 'ozon.ru' || domain.endsWith('.ozon.ru'))) {
+    wakeCollectorBrowserPool();
+  }
+});
+chrome.storage.onChanged?.addListener((changes, areaName) => {
+  if (areaName === 'local' && [LOCAL_PLUGIN_TOKEN_STORAGE_KEY, ERP_BASE_URL_STORAGE_KEY,
+    ERP_TENANT_ID_STORAGE_KEY, ERP_TENANT_BASE_URL_STORAGE_KEY, 'ozon-erp-unified-connection-v1']
+    .some((key) => Object.hasOwn(changes, key))) wakeCollectorBrowserPool();
+});
 if (typeof importScripts === 'function') importScripts('analytics/background.js');

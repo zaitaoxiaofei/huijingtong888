@@ -193,3 +193,99 @@ test('manual SKU, current-page collection and permission injection retain their 
   await h.reply('OZON_ERP_INJECT_ACTIVE_OZON_FRONT', { success: true, alreadyLoaded: true }); await granting;
   assert.match(h.elements.status.textContent, /已加载插件脚本/);
 });
+
+test('pool status distinguishes local registrations from server companies without claiming concurrent execution', async () => {
+  const h = harness(); await flush();
+  assert.match(html, /<details id="browser-pool-diagnostics">/);
+  assert.equal((html.match(/type="password"/g) || []).length, 1);
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: {
+    phase: 'registered', localTabCount: 4, verifiedCompanyCount: 2, registeredCompanyCount: 2, serverCompanyCount: 5,
+    checkedAt: Date.UTC(2026, 10, 5, 16, 4, 5), token: 'private-token', cookie: 'private-cookie', rawURL: 'https://private.example/path'
+  } });
+  assert.equal(h.elements['browser-pool-status'].textContent, '本机 2 公司已接入 / 服务端 5 公司可用');
+  assert.equal(h.elements['browser-pool-status'].dataset.state, 'connected');
+  assert.match(h.elements['browser-pool-detail'].textContent, /已核实 2 公司 · 已登记 2 公司/);
+  assert.match(h.elements['browser-pool-detail'].textContent, /北京时间.*2026\/11\/6 00:04:05/);
+  assert.match(h.elements['browser-pool-detail'].textContent, /不代表正在同时执行/);
+  assert.doesNotMatch(h.elements['browser-pool-detail'].textContent, /private/);
+  h.refresh();
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: {
+    phase: 'registered', registeredCompanyCount: 1, serverCompanyCount: null
+  } });
+  assert.match(h.elements['browser-pool-status'].textContent, /本机 1 公司已接入 \/ 服务端 待确认/);
+});
+
+test('pool failures give recovery steps while diagnostics do not expose raw addresses or credentials', async () => {
+  const cases = [
+    [{ phase: 'no_seller_tabs', lastErrorCode: 'NO_SELLER_TAB' }, /打开并登录 Seller/],
+    [{ phase: 'identity_unavailable', lastErrorCode: 'STORE_IDENTITY_UNAVAILABLE' }, /刷新 Seller 分析页/],
+    [{ phase: 'identity_unavailable', lastErrorCode: 'STORE_CONTEXT_MISMATCH' }, /核对 Seller 店铺/],
+    [{ phase: 'identity_unavailable', lastErrorCode: 'SELLER_TAB_PERMISSION_DENIED' }, /允许插件访问 Seller/],
+    [{ phase: 'registration_failed', lastErrorCode: 'COLLECTOR_BROWSER_SHOP_FORBIDDEN' }, /切换本企业店铺/]
+  ];
+  for (const [diagnostics, message] of cases) {
+    const h = harness(); await flush();
+    await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: {
+      ...diagnostics, lastError: '请求 https://private.example/?cookie=secret 失败，ozp_private_key'
+    } });
+    assert.match(h.elements['browser-pool-status'].textContent, message);
+    assert.doesNotMatch(h.elements['browser-pool-detail'].textContent, /private|secret|ozp_/);
+    assert.equal(h.elements['browser-pool-status'].dataset.state, 'error');
+  }
+});
+
+test('pool reads stay single flight and a late timed out snapshot cannot replace a newer result', async () => {
+  const h = harness(); await flush();
+  h.refresh(); h.refresh(); h.refresh(); await flush();
+  assert.equal(h.pending.filter(item => item.message.type === 'OZON_ERP_BROWSER_POOL_DIAGNOSTICS').length, 1);
+  await h.expire('OZON_ERP_BROWSER_POOL_DIAGNOSTICS');
+  assert.match(h.elements['browser-pool-status'].textContent, /暂未读取/);
+  h.refresh(); await flush();
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: { phase: 'no_seller_tabs' } });
+  assert.match(h.elements['browser-pool-status'].textContent, /暂未读取/);
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: {
+    phase: 'registered', registeredCompanyCount: 1, serverCompanyCount: 3
+  } });
+  assert.match(h.elements['browser-pool-status'].textContent, /本机 1 公司已接入 \/ 服务端 3 公司可用/);
+});
+
+test('pool reconnect is a local message that preserves edits and ignores a pre-reconnect snapshot', async () => {
+  const h = harness(); await flush(); h.input('unsaved-enterprise-key');
+  const reconnecting = h.click('browser-pool-reconnect'); await flush();
+  assert.equal(h.elements['browser-pool-reconnect'].disabled, true);
+  const request = h.pending.find(item => item.message.type === 'OZON_ERP_BROWSER_POOL_RECONNECT');
+  assert.deepEqual(Object.keys(request.message), ['type']);
+  await h.reply('OZON_ERP_BROWSER_POOL_RECONNECT', { success: true, diagnostics: {
+    phase: 'registered', registeredCompanyCount: 1, serverCompanyCount: 2
+  } });
+  await reconnecting;
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: { phase: 'no_seller_tabs' } });
+  assert.match(h.elements['browser-pool-status'].textContent, /本机 1 公司已接入/);
+  assert.equal(h.elements['browser-pool-reconnect'].disabled, false);
+  assert.equal(h.elements['local-plugin-token'].value, 'unsaved-enterprise-key');
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.opened.length, 0);
+  assert.equal(h.tabMessages.some(item => /NAVIGATE|REFRESH/.test(item.message.type)), false);
+});
+
+test('pool reconnect timeout restores its button and key saves invalidate old enterprise diagnostics', async () => {
+  const h = harness(); await flush();
+  const reconnecting = h.click('browser-pool-reconnect'); await flush();
+  await h.expire('OZON_ERP_BROWSER_POOL_RECONNECT'); await reconnecting;
+  assert.equal(h.elements['browser-pool-reconnect'].disabled, false);
+  assert.match(h.elements['browser-pool-status'].textContent, /重连请求未完成/);
+  await h.reply('OZON_ERP_BROWSER_POOL_RECONNECT', { success: true, diagnostics: {
+    phase: 'registered', registeredCompanyCount: 9, serverCompanyCount: 9
+  } });
+  assert.doesNotMatch(h.elements['browser-pool-status'].textContent, /9/);
+  h.input('new-key');
+  const saving = h.click('save'); await flush();
+  await h.reply('OZON_ERP_BROWSER_POOL_DIAGNOSTICS', { success: true, diagnostics: {
+    phase: 'registered', registeredCompanyCount: 8, serverCompanyCount: 8
+  } });
+  await h.reply('OZON_UNIFIED_SAVE_KEY', { success: true, connection: { configured: true, connected: false } });
+  await saving;
+  assert.match(h.elements['browser-pool-status'].textContent, /正在检查/);
+  assert.doesNotMatch(h.elements['browser-pool-detail'].textContent, /8 公司/);
+  assert.equal(h.elements['local-plugin-token'].value, 'new-key');
+});

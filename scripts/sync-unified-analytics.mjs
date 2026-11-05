@@ -31,6 +31,113 @@ background = replaceSection(background, 'function setActionBadge(', 'function up
 }
 
 `);
+const legacyCookieInfo = background.slice(background.indexOf('async function getOzonCookieInfo('), background.indexOf('function rememberPluginToken('))
+  .replace('async function getOzonCookieInfo(', 'async function getLegacyOzonCookieInfo(');
+background = replaceSection(background, 'async function getOzonCookieInfo(', 'function rememberPluginToken(', `${legacyCookieInfo}async function getOzonCookieInfo(tab = null) {
+  if (!global.OzonSellerCookieContext?.read) return getLegacyOzonCookieInfo(tab);
+  const pageIdentity = await readSellerPageCompanyId(tab);
+  const context = await global.OzonSellerCookieContext.read(tab, { pageCompanyId: String(pageIdentity.companyId || '').trim() });
+  const conflict = context.code === 'STORE_CONTEXT_MISMATCH';
+  const cookies = conflict ? [] : (Array.isArray(context.cookies) ? context.cookies : []);
+  return {
+    header: cookies.filter(item => item?.name).map(item => \`\${item.name}=\${item.value || ''}\`).join('; '),
+    companyId: conflict ? '' : String(context.companyId || '').trim(),
+    storeId: context.storeId || '',
+    code: context.code || ''
+  };
+}
+
+`);
+background = replaceSection(background, 'async function verifiedSellerStoreIdentity(', 'async function syncPluginStatus(', `async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
+  const cookieInfo = await getOzonCookieInfo(tab);
+  const pageIdentity = await readSellerPageCompanyId(tab);
+  const identity = resolveSellerStoreIdentity(currentSellerCompanyId(tab?.id), cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
+  if (cookieInfo.code === 'STORE_CONTEXT_MISMATCH') {
+    return { ...identity, ok: false, code: 'identity_conflict', companyId: '', error: 'STORE_CONTEXT_MISMATCH cookie_partition' };
+  }
+  return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: \`STORE_CONTEXT_MISMATCH page=\${pageIdentity.error}\` } : identity;
+}
+
+`);
+background = replaceSection(background, 'async function ensureSellerAnalyticsGraphsTab(', 'async function warmSellerAnalyticsPermission(', `function parseSellerNavigationTarget(targetUrl) {
+  let target;
+  try { target = new URL(targetUrl); } catch (error) { throw new Error('SELLER_NAVIGATION_TARGET_NOT_ALLOWED'); }
+  if (target.origin !== 'https://seller.ozon.ru') throw new Error('SELLER_NAVIGATION_TARGET_NOT_ALLOWED');
+  return target;
+}
+
+async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.ru/app/analytics/graphs', preferredTab = null) {
+  parseSellerNavigationTarget(targetUrl);
+  let tab = preferredTab || await findAnySellerTab();
+  if (!tab?.id) tab = await chrome.tabs.create({ url: targetUrl, active: true });
+  if (!tab?.id) {
+    panelState.sellerTab = null;
+    panelState.sellerMissing = true;
+    updateActionBadge();
+    return tab;
+  }
+  const loaded = await navigateSellerTab(tab.id, targetUrl, 'open_analytics');
+  panelState.sellerTab = { id: loaded.id, title: loaded.title || '', url: loaded.url || '' };
+  panelState.sellerMissing = false;
+  updateActionBadge();
+  return loaded;
+}
+
+async function navigateSellerTab(tabId, targetUrl, stage) {
+  try {
+    const target = parseSellerNavigationTarget(targetUrl);
+    const matchesTarget = value => {
+      try {
+        const actual = new URL(value);
+        return actual.origin === target.origin && actual.pathname.replace(/\\/+$/, '') === target.pathname.replace(/\\/+$/, '');
+      } catch (error) { return false; }
+    };
+    const deadline = Date.now() + 15000;
+    let tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+    if (!matchesTarget(tab.pendingUrl) && !(tab.status === 'loading' && matchesTarget(tab.url))) {
+      await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+    }
+    while (Date.now() < deadline) {
+      tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+      await sleep(250);
+    }
+    throw new Error('SELLER_NAVIGATION_TIMEOUT');
+  } catch (error) {
+    const detail = \`SELLER_NAVIGATION_FAILED stage=\${stage} tab=\${tabId}: \${error?.message || error}\`;
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }
+}
+
+`);
+const warmStart = background.indexOf('async function warmSellerAnalyticsPermission(');
+const warmEnd = background.indexOf('async function openSellerAnalyticsGraphsAfterWarmup(', warmStart);
+let warmSource = background.slice(warmStart, warmEnd);
+for (const [timeoutMs, stage] of [[15000, 'warm_analytics'], [20000, 'reload_analytics']]) {
+  const before = `  await waitForTabComplete(tabId, ${timeoutMs});`;
+  if (!warmSource.includes(before)) throw new Error('Analytics warmup wait anchor missing');
+  warmSource = warmSource.replace(before, `  if (!(await waitForTabComplete(tabId, ${timeoutMs}))) {
+    const detail = 'SELLER_NAVIGATION_FAILED stage=${stage} tab=' + tabId + ': SELLER_NAVIGATION_TIMEOUT';
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }`);
+}
+background = replaceSection(background, 'async function warmSellerAnalyticsPermission(', 'async function openSellerAnalyticsGraphsAfterWarmup(', warmSource);
+background = replaceSection(background, 'async function openSellerAnalyticsGraphsAfterWarmup(', 'async function waitForTabComplete(', `async function openSellerAnalyticsGraphsAfterWarmup(tabId, targetUrl) {
+  if (!tabId) return null;
+  const loaded = await navigateSellerTab(tabId, targetUrl, 'open_graphs');
+  panelState.sellerTab = { id: loaded.id, title: loaded.title || '', url: loaded.url || '' };
+  panelState.sellerMissing = false;
+  updateActionBadge();
+  return loaded;
+}
+
+`);
+const completeCheck = "    if (tab.status === 'complete') return true;";
+if (!background.includes(completeCheck)) throw new Error('Analytics tab completion anchor missing');
+background = background.replace(completeCheck, "    if (tab.status === 'complete' && !tab.pendingUrl) return true;");
 background = background.replace("const ERP_BASE_URL_KEY = 'pivot-erp-base-url';\n", '')
   .replace("const ERP_TENANT_ID_KEY = 'pivot-erp-tenant-id';\n", '')
   .replace("const LOCAL_PLUGIN_TOKEN_KEY = 'pivot-erp-local-plugin-token';\n", '')
