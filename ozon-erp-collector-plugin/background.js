@@ -1,6 +1,6 @@
 if (typeof importScripts === 'function') {
   try {
-    importScripts('erp-config.js', 'collector-browser-worker.js');
+    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'collector-browser-worker.js');
   } catch (error) {}
 }
 
@@ -41,10 +41,21 @@ let sellerAuthSyncPromise = null;
 const sellerPoolCooldownUntilByContext = new Map();
 
 function normalizeErpBaseUrl(value) {
-  if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
-    return erpConfig.normalizeErpBaseUrl(value);
+  if (globalThis.OzonUnifiedConfig && String(value || '').trim()) {
+    try {
+      const raw = String(value).trim();
+      const requested = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+      if (requested.origin !== new URL(DEFAULT_ERP_BASE_URL).origin) throw new Error('ERP_ORIGIN_MISMATCH');
+    } catch (error) {
+      throw new Error('统一插件固定连接线上 ERP，请勿指定其他服务地址');
+    }
   }
-  return DEFAULT_ERP_BASE_URL;
+  const normalized = typeof erpConfig.normalizeErpBaseUrl === 'function'
+    ? erpConfig.normalizeErpBaseUrl(value) : DEFAULT_ERP_BASE_URL;
+  if (globalThis.OzonUnifiedConfig && normalized !== DEFAULT_ERP_BASE_URL) {
+    throw new Error('统一插件固定连接线上 ERP，请勿指定其他服务地址');
+  }
+  return normalized;
 }
 
 function normalizeDirectSyncContext(syncContext) {
@@ -56,11 +67,13 @@ function normalizeDirectSyncContext(syncContext) {
 }
 
 async function getErpBaseUrl() {
+  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).erpBaseUrl;
   const stored = await chrome.storage.local.get([ERP_BASE_URL_STORAGE_KEY]);
   return normalizeErpBaseUrl(stored?.[ERP_BASE_URL_STORAGE_KEY] || DEFAULT_ERP_BASE_URL);
 }
 
 async function getLocalPluginToken() {
+  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).localPluginToken;
   const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY]);
   return String(stored?.[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim();
 }
@@ -110,7 +123,9 @@ async function checkPluginUpdateStatus() {
       checkedAt: Date.now()
     }
   });
-  if (plugin?.update_required) {
+  if (globalThis.OzonUnifiedRuntime) {
+    globalThis.OzonUnifiedRuntime.setCollectorBadge({ text: plugin?.update_required ? 'NEW' : '', color: '#d97706' });
+  } else if (plugin?.update_required) {
     chrome.action.setBadgeText({ text: 'NEW' });
     chrome.action.setBadgeBackgroundColor({ color: '#d97706' });
   } else {
@@ -392,6 +407,7 @@ async function getCachedErpTenantId(baseUrl) {
 }
 
 async function cacheErpTenantId(tenantId, baseUrl) {
+  if (globalThis.OzonUnifiedConfig) return;
   const normalizedTenantId = String(tenantId || '').trim();
   if (!normalizedTenantId) return;
   await chrome.storage.local.set({
@@ -420,6 +436,7 @@ async function readTenantIdFromErpTab(tabId) {
 }
 
 async function resolveErpTenantId(baseUrl) {
+  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).tenantId;
   const tab = await findErpBrowserTab(baseUrl);
   if (tab?.id && !isErpLoginTab(tab)) {
     const tenantId = await readTenantIdFromErpTab(tab.id);
@@ -709,10 +726,7 @@ async function reinjectSellerBridge(tabId) {
 }
 
 async function crossTabOzonRequest(message, sender) {
-  const tab = await ensureSellerTab();
-  if (!tab?.id) {
-    return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
-  }
+  const existingTab = await findSellerTab();
   const requestPayload = {
     type: 'OZON_SKU_API_REQUEST',
     requestId: message.requestId,
@@ -721,18 +735,18 @@ async function crossTabOzonRequest(message, sender) {
     variantId: message.variantId,
     sourceTabId: sender?.tab?.id
   };
-  const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
-  if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') {
-    return initialResponse;
-  }
-
-  try {
-    await reinjectSellerBridge(tab.id);
-  } catch (error) {
-    return initialResponse;
-  }
-
-  return await sendMessageToSellerTab(tab.id, requestPayload);
+  const request = async () => {
+    const tab = existingTab || await ensureSellerTab();
+    if (!tab?.id) return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
+    const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
+    if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') return initialResponse;
+    try { await reinjectSellerBridge(tab.id); }
+    catch (error) { return initialResponse; }
+    return sendMessageToSellerTab(tab.id, requestPayload);
+  };
+  if (!globalThis.OzonUnifiedRuntime) return request();
+  try { return await globalThis.OzonUnifiedRuntime.withCollectorTab(existingTab?.id || 'legacy-seller-open', request); }
+  catch (error) { return { success: false, error: error.code || 'SELLER_REQUEST_FAILED', message: error.message }; }
 }
 
 async function crossTabOzonMediaUpload(message, sender) {
@@ -2627,7 +2641,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 const collectorBrowserPool = globalThis.OzonCollectorBrowserPool?.create({
   chrome,
+  coordination: globalThis.OzonUnifiedRuntime,
   getContext: async () => {
+    if (globalThis.OzonUnifiedConfig) {
+      const config = await globalThis.OzonUnifiedConfig.get();
+      return { erpBaseUrl: config.erpBaseUrl, tenantId: config.tenantId, token: config.localPluginToken };
+    }
     const erpBaseUrl = await getErpBaseUrl();
     return { erpBaseUrl, tenantId: await resolveErpTenantId(erpBaseUrl) || 'admin', token: await getLocalPluginToken() };
   },
@@ -2647,3 +2666,4 @@ if (collectorBrowserPool) {
   collectorBrowserPool.start();
   chrome.alarms.create('ozon-erp-collector-browser-worker', { periodInMinutes: 0.5 });
 }
+if (typeof importScripts === 'function') importScripts('analytics/background.js');

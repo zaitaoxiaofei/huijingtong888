@@ -9,36 +9,15 @@
     return String(value || '').trim().replace(/\/+$/, '');
   }
 
-  function ensureAbsoluteUrl(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    if (/^https?:\/\//i.test(raw)) return raw;
-    return `https://${raw.replace(/^\/+/, '')}`;
-  }
-
   function isLocalErpHost(parsed) {
     const hostname = String(parsed?.hostname || '').toLowerCase();
     return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '0.0.0.0' || hostname === '::1' || hostname === '[::1]';
   }
 
-  function normalizeErpBaseUrl(value) {
-    const raw = ensureAbsoluteUrl(value);
-    if (!raw) return DEFAULT_ERP_BASE_URL;
-
-    let parsed = null;
-    try {
-      parsed = new URL(raw);
-    } catch (error) {
-      return DEFAULT_ERP_BASE_URL;
-    }
-    let pathname = trimTrailingSlashes(parsed.pathname || '');
-    if (pathname.endsWith('/api')) {
-      pathname = pathname.slice(0, -4);
-    }
-    parsed.pathname = pathname || '/';
-    parsed.search = '';
-    parsed.hash = '';
-    return trimTrailingSlashes(parsed.toString()) || DEFAULT_ERP_BASE_URL;
+  function normalizeErpBaseUrl() {
+    // The unified package has one connection input: the enterprise key.
+    // Content fallbacks must use the same fixed service as its background.
+    return DEFAULT_ERP_BASE_URL;
   }
 
   function resolveLocalPluginApiBaseUrl(value) {
