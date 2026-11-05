@@ -3,9 +3,10 @@ import test from 'node:test';
 import {readFile} from 'node:fs/promises';
 import {Writable} from 'node:stream';
 import {once} from 'node:events';
+import {fileURLToPath} from 'node:url';
 import {createStaticHandler} from '../src/http/static.js';
 test('mobile install manifest points at the authorized mobile shell and serves valid standalone icons',async()=>{
- const root=new URL('../public/',import.meta.url).pathname;
+ const root=fileURLToPath(new URL('../public/',import.meta.url));
  const manifest=JSON.parse(await readFile(root+'mobile.webmanifest','utf8'));
  assert.equal(manifest.start_url,'/admin.html#/mobile');assert.equal(manifest.display,'standalone');
  for(const icon of manifest.icons){const bytes=await readFile(root+icon.src);assert.equal(bytes.subarray(1,4).toString(),'PNG');const size=Number(icon.sizes.split('x')[0]);assert.equal(bytes.readUInt32BE(16),size);assert.equal(bytes.readUInt32BE(20),size);}

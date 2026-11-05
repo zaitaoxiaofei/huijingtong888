@@ -1,4 +1,25 @@
 import { hasPermission } from './permissions.js';
+import { shanghaiDateKey } from '../shanghai-time.js';
+
+const validCalendarDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+  && Number(value.slice(0, 4)) >= 1000
+  && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+  && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
+
+export function normalizeMobileDashboardDate(query = {}, today = shanghaiDateKey()) {
+  const keys = ['date', 'dateKey', 'date_key'].filter(key => Object.hasOwn(query, key));
+  if (!keys.length) return today;
+  const dates = keys.map(key => typeof query[key] === 'string' ? query[key].trim() : query[key]);
+  if (dates.some(value => !validCalendarDate(value)) || dates.some(value => value !== dates[0])) {
+    throw Object.assign(new Error('查询日期（date）无效，请选择有效的北京时间日期（YYYY-MM-DD）'), { statusCode: 400, code: 'MOBILE_DASHBOARD_DATE_INVALID' });
+  }
+  if (dates[0] > today) throw Object.assign(new Error('查询日期不能晚于北京时间今天，请选择今天或历史日期'), { statusCode: 400, code: 'MOBILE_DASHBOARD_DATE_FUTURE' });
+  return dates[0];
+}
+
+export function mobileDashboardPeriod(date) {
+  return { month_key: date.slice(0, 7), from: `${date.slice(0, 7)}-01`, to: date, timezone: 'Asia/Shanghai' };
+}
 
 // An explicit allow-list: mobile staff responses never contain hidden financial sections.
 export function mobileDashboard(payload = {}, session = {}) {

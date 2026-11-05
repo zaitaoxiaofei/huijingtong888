@@ -74,6 +74,8 @@ const PricingToolView = () => import("../views/tools/PricingToolView.vue");
 const ProfitCalculatorView = () => import("../views/tools/ProfitCalculatorView.vue");
 const MobileAccountView = () => import("../views/mobile/MobileAccountView.vue");
 const MobileHomeView = () => import("../views/mobile/MobileHomeView.vue");
+const MobileFinanceOverviewView = () => import("../views/mobile/MobileFinanceOverviewView.vue");
+const MobileMonthlyBillingView = () => import("../views/mobile/MobileMonthlyBillingView.vue");
 const MobileOrdersView = () => import("../views/mobile/MobileOrdersView.vue");
 const MobileOrderDetailView = () => import("../views/mobile/MobileOrderDetailView.vue");
 const MobileProcurementView = () => import("../views/mobile/MobileProcurementView.vue");
@@ -110,6 +112,8 @@ export const router = createRouter({
       children: [
         { path: "account", name: "mobile-account", component: MobileAccountView, meta: { title: "我的账号", mobile: true } },
         { path: "", name: "mobile-home", component: MobileHomeView, meta: { title: "手机工作台", mobile: true } },
+        { path: "finance", name: "mobile-finance", component: MobileFinanceOverviewView, meta: { title: "经营总览", mobile: true } },
+        { path: "monthly-billing", name: "mobile-monthly-billing", component: MobileMonthlyBillingView, meta: { title: "月度账单", mobile: true } },
         { path: "orders", name: "mobile-orders", component: MobileOrdersView, meta: { title: "手机订单", mobile: true } },
         { path: "orders/:id", name: "mobile-order-detail", component: MobileOrderDetailView, meta: { title: "订单详情", mobile: true } },
         { path: "inventory-capital", name: "mobile-inventory-capital", component: () => import("../views/finance/InventoryCapitalView.vue"), meta: { title: "库存占用", mobile: true } },
