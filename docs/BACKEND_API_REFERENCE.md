@@ -3451,6 +3451,18 @@ Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage 
   - `403` `application/json` -> `ErrorResponse`
   - `404` `application/json` -> `ErrorResponse`
 
+#### `POST /api/inventory-workflow/cancel-demand`
+
+Review a purchasing-only decision for selected current-enterprise FBS order-item/product sources. Fresh procurement duty, product/source locks, observed cancellation_revision and a UUID request key are required. Cancel excludes only the reviewed fixed quantity from actionable purchasing; raw order shortages, sales order status, stock and purchased history remain unchanged. Restore removes only selected prior decisions. All operations audit actor/reason and invalidate workflow snapshots; new orders and increased demand remain actionable. Legacy refresh and later grouped purchase allocation honor the same decisions.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
 #### `POST /api/inventory-workflow/local-safety`
 
 Fresh inventory.write/procurement membership can override only a specific product's local safety. Optional production_days/local_shipping_days update the same product fields used by inventory editing and the effective flow overrides atomically, requiring expected_product_updated_at. Preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.
@@ -3541,7 +3553,7 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
 
 #### `POST /api/inventory-workflow/purchase-arrivals`
 
-Buyer confirms all remaining units in one owned purchased batch arrived, or operation=logistics updates only courier_company/tracking_number (max128 characters each). Logistics requires observed expected_updated_at plus expected_courier_company and expected_tracking_number, validates a real owned purchased batch, and audits old/new values without changing quantities, amounts, receipt state or stock. Fresh procurement duty, owned purchase chain and observed timestamp checked under locks. Sets received_at and audits confirmation; does not approve QC, post inventory or change financial amounts. Partial arrival uses the canonical receipt path to split the remaining batch.
+Buyer confirms the actual arrived quantity in one owned purchased batch; omit quantity for compatible full arrival. Partial confirmation atomically splits arrived quantity from an unarrived remainder with preserved purchase/request links and conserved amounts/freight. Purchase header/item totals do not change and no stock is posted. Same-key replay returns the saved split; changed payload or stale timestamp/expected_quantity rejects. operation=logistics retains its existing courier/tracking-only behavior and observed logistics checks. Fresh procurement duty and owned purchased source are rechecked under locks.
 
 - Auth: `authenticated`
 - Request body: required

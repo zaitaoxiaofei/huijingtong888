@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { supplementLiveProcurementRows } from '../src/services/procurement-live-demand.js';
 import { groupProcurementRequestsMysql } from '../src/services/mysql-procurement-list.js';
+import {inventoryAliasSearch} from '../src/services/inventory-search.js';
 
 const order = (id, product, qty, extra = {}) => ({ order_id: id, needs_fulfillment: true, stock_location: 'LOCAL', posting_number: `ORDER-${id}`, transport_at: '2026-09-27T05:30:00Z', items: [{ order_item_id: id, product_id: product, shortage_quantity: qty }], ...extra });
 test('live gaps without request records appear once per inventory without doubling quantities', () => {
@@ -72,10 +73,10 @@ test('live paging queries products before paging, preserves filters and never wr
   const source = await fs.readFile(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
   const body = source.slice(source.indexOf('async function procurementGroupedPageIdsMysql('), source.indexOf('async function nextPurchaseOrderNoMysql('));
   const calls = [];
-  const page = new Function('mysqlQuery', 'normalizeVehicleBrand', 'resolveInventoryTenantScope', 'inventoryTenantSql', `${body};return procurementGroupedPageIdsMysql;`)(async (sql, params) => {
+  const page = new Function('mysqlQuery', 'normalizeVehicleBrand', 'resolveInventoryTenantScope', 'inventoryTenantSql', 'inventoryAliasSearch', `${body};return procurementGroupedPageIdsMysql;`)(async (sql, params) => {
     calls.push({ sql, params });
     return sql.startsWith('SELECT COUNT') ? [{ total: 28 }] : [{ product_id: 827 }];
-  }, value => value || '', async()=>({id:1,isDefault:true}), (_scope,alias)=>`${alias}.tenant_id = 1`);
+  }, value => value || '', async()=>({id:1,isDefault:true}), (_scope,alias)=>`${alias}.tenant_id = 1`,inventoryAliasSearch);
   const result = await page({ demandType: 'real_order', page: 2, pageSize: 20, query: '1-261', productId: 827 }, [827, 829]);
   assert.equal(result.total, 28);
   assert.deepEqual(result.productIds, [827]);

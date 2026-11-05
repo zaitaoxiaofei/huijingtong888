@@ -143,6 +143,8 @@ import {
   procurementOrderActionClassMysql
 } from "./mysql-procurement-list.js";
 import { supplementLiveProcurementRows } from "./procurement-live-demand.js";
+import {readDemandCancellationEvents} from './procurement-demand-cancellation.js';
+import {activeDemandCancellations,cancelledOrderPurchase} from '../shared/procurement-demand-cancellation.js';
 export { normalizePurchasePlanMysql } from "./mysql-procurement-plan.js";
 export { buildSplitShippingPackagesMysql } from "./mysql-order-shipping-packages.js";
 export {
@@ -17033,6 +17035,7 @@ async function ensurePendingOrderProcurementRequestsMysql(tenantId = "admin", se
       `);
       const rows = await orderProcurementCandidateRowsMysql(null, connection, { allOrders: true, tenantId: scope.id });
       if (!rows.length) return { created_count: 0, marked_count: 0, unresolved_count: 0 };
+      const cancellations=activeDemandCancellations(await readDemandCancellationEvents((sql,args)=>mysqlConnectionQuery(connection,sql,args),scope.id,[...new Set(rows.map(row=>Number(row.product_id)))]));
 
       const personId = Number(sessionPersonId);
       await assertInventoryMember(scope, personId, (sql,params)=>mysqlConnectionQuery(connection,sql,params));
@@ -17051,7 +17054,8 @@ async function ensurePendingOrderProcurementRequestsMysql(tenantId = "admin", se
           handlingType = "incoming_available";
           note = `采购在途可满足：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}`;
         } else if (remainingStock + remainingIncoming < quantity) {
-          const requestQuantity = Math.max(1, quantity - remainingStock - remainingIncoming);
+          const requestQuantity = cancelledOrderPurchase({order_item_id:row.order_item_id,shortage_quantity:Math.max(0,quantity-remainingStock-remainingIncoming)},productId,cancellations).actionable_shortage_quantity;
+          if (!requestQuantity) { unresolvedCount++; continue; }
           const amount = Number(row.purchase_cost || 0) * requestQuantity;
           handlingType = "procurement_request";
           note = `系统按真实订单缺口自动生成：${row.posting_number || row.order_number || row.order_id} / SKU ${row.ozon_sku || ""}${amount > 0 ? "" : "；采购金额待补"}`;
@@ -17315,9 +17319,11 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
   // A shortage is already net of assigned stock and receipts; never subtract
   // product-wide incoming stock from that shortage a second time.
   const queueCoverage = realOrderView ? await inventoryScopeCoverageMysql(scope) : null;
+  const queueProducts=queueCoverage?[...new Set([...queueCoverage.values()].flatMap(order=>order.items.map(item=>Number(item.product_id))))]:[];
+  const demandCancellations=activeDemandCancellations(await readDemandCancellationEvents(mysqlQuery,scope.id,queueProducts));
   const shortageProductIds = queueCoverage ? [...new Set([...queueCoverage.values()]
     .filter(order => order.needs_fulfillment && order.stock_location !== 'FBP')
-    .flatMap(order => order.items.filter(item => item.product_id > 0 && item.shortage_quantity > 0).map(item => item.product_id)))] : null;
+    .flatMap(order => order.items.filter(item => item.product_id > 0 && cancelledOrderPurchase(item,item.product_id,demandCancellations).actionable_shortage_quantity > 0).map(item => item.product_id)))] : null;
   const groupedPage = String(query.grouped || "") === "1"
     ? await procurementGroupedPageIdsMysql(query, shortageProductIds, String(scope.id))
     : null;
@@ -17580,7 +17586,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     for (const item of order.items) {
       if (order.needs_fulfillment && inventoryByProduct.has(item.product_id)) inventoryByProduct.get(item.product_id).order_reserved += Number(item.stock_quantity || 0);
       if (order.needs_fulfillment) operationalByProduct.set(item.product_id,
-        (operationalByProduct.get(item.product_id) || 0) + item.shortage_quantity);
+        (operationalByProduct.get(item.product_id) || 0) + cancelledOrderPurchase(item,item.product_id,demandCancellations).actionable_shortage_quantity);
       if (order.entered_transport) historicalIncomingByProduct.set(item.product_id,
         (historicalIncomingByProduct.get(item.product_id) || 0) + item.missing_receipt_quantity);
       if (order.entered_transport && (item.missing_record_quantity > 0 || order.missing_amount)) {
@@ -17610,7 +17616,7 @@ export async function procurementRequestsMysql(query = {}, tenantId = "admin") {
     row.workflow=workflows.find(w=>w.product_id===Number(row.product_id));
     if(!row.status && row.workflow_candidate) {row.status='pending';row.quantity=0;row.demand_type='warehouse_request';row.request_reason_code='flow_fbp_stock';}
   }
-  const projectedRows = queueCoverage ? supplementLiveProcurementRows(rows, coverage) : rows;
+  const projectedRows = queueCoverage ? supplementLiveProcurementRows(rows, coverage, demandCancellations) : rows;
   const grouped = groupProcurementRequestsMysql(projectedRows, { ...query, page: 1, pageSize: groupedPage.pageSize });
   Object.assign(grouped, { page: groupedPage.page, total: groupedPage.total });
   const negativeProductRows = grouped.rows.filter((row) => Number(row.stock || 0) < 0);
@@ -25220,14 +25226,29 @@ export async function confirmPurchaseOrderMysql(id, body = {}, sessionPersonId =
       INSERT INTO procurement_order_allocations
       (procurement_request_id, order_item_id, order_id, product_id, allocated_quantity, status, created_by_person_id)
       SELECT request.id, request.source_order_item_id, request.source_order_id, request.product_id,
-        LEAST(request.quantity, order_item.quantity), 'allocated', COALESCE(request.person_id, request.created_by_person_id, ?)
+        LEAST(request.quantity, order_item.quantity * COALESCE(recipe_item.quantity, component.quantity, 1)),
+        'allocated', COALESCE(request.person_id, request.created_by_person_id, ?)
       FROM procurement_requests request
       JOIN order_items order_item ON order_item.id = request.source_order_item_id
+      JOIN orders source_order ON source_order.id=order_item.order_id AND source_order.id=request.source_order_id
+      JOIN shops source_shop ON source_shop.id=source_order.shop_id AND ${inventoryTenantSql(scope,'source_shop')}
+      LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id=order_item.sku_mapping_id
+        AND direct_mapping.shop_id=source_order.shop_id AND direct_mapping.active=1 AND ${inventoryTenantSql(scope,'direct_mapping')}
+      LEFT JOIN sku_mappings mapping ON mapping.id=COALESCE(direct_mapping.id,(
+        SELECT MIN(fallback_mapping.id) FROM sku_mappings fallback_mapping
+        WHERE fallback_mapping.shop_id=source_order.shop_id AND fallback_mapping.ozon_sku=order_item.ozon_sku
+          AND fallback_mapping.active=1 AND ${inventoryTenantSql(scope,'fallback_mapping')})) AND ${inventoryTenantSql(scope,'mapping')}
+      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id=source_order.shop_id AND recipe.ozon_sku=order_item.ozon_sku
+        AND recipe.active=1 AND recipe.mode='combo'
+      LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id=recipe.id AND recipe_item.product_id=request.product_id
+      LEFT JOIN product_components component ON component.product_id=mapping.product_id
+        AND component.component_product_id=request.product_id AND recipe.id IS NULL AND ${inventoryTenantSql(scope,'component')}
       WHERE request.purchase_order_id = ?
         AND request.status = 'purchased'
         AND request.purchase_mode = 'shortage_purchase'
         AND request.source_order_id IS NOT NULL
         AND request.source_order_item_id IS NOT NULL
+        AND COALESCE(recipe_item.product_id,component.component_product_id,CASE WHEN recipe.id IS NULL THEN mapping.product_id END)=request.product_id
       ON DUPLICATE KEY UPDATE
         allocated_quantity = VALUES(allocated_quantity), status = 'allocated', released_at = NULL,
         release_reason = NULL, updated_at = CURRENT_TIMESTAMP
@@ -25903,7 +25924,37 @@ export async function recordProcurementPurchaseMysql(body = {}, sessionPersonId 
     }
     const shortageBody = { ...body, items: shortageItems };
     await guard();
-    const sources=workspaceBatch?await mysqlConnectionQuery(connection,`SELECT id,product_id FROM procurement_requests WHERE product_id IN (${shortageItems.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope)} AND status IN('submitted','pending','suggested') AND COALESCE(purchase_mode,'shortage_purchase')='shortage_purchase' ORDER BY id FOR UPDATE`,shortageItems.map(i=>Number(i.product_id))):[];
+    let sources=workspaceBatch?await mysqlConnectionQuery(connection,`SELECT id,product_id,source_order_item_id,quantity FROM procurement_requests WHERE product_id IN (${shortageItems.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope)} AND status IN('submitted','pending','suggested') AND COALESCE(purchase_mode,'shortage_purchase')='shortage_purchase' ORDER BY id FOR UPDATE`,shortageItems.map(i=>Number(i.product_id))):[];
+    if(workspaceBatch){
+      const cancelled=activeDemandCancellations(await readDemandCancellationEvents(inspect,scope.id,shortageItems.map(i=>Number(i.product_id))));
+      const affected=new Set([...cancelled.values()].map(row=>row.product_id));
+      if(affected.size){
+        // A cancelled older order must not consume a newer source's actual purchase
+        // through generic FIFO. Materialize only fresh actionable source gaps;
+        // purchase confirmation still creates the authoritative allocations.
+        const coverage=await loadOrderProcurementCoverage(inspect,'',{fresh:true,productIds:[...affected],tenantId:scope.id});
+        const open=[...coverage.values()].filter(order=>order.needs_fulfillment&&order.stock_location!=='FBP')
+          .flatMap(order=>order.items.map(item=>({...item,source_order_id:order.order_id})));
+        sources=sources.filter(request=>!affected.has(Number(request.product_id))||!request.source_order_item_id
+          || open.some(item=>Number(item.product_id)===Number(request.product_id)&&Number(item.order_item_id)===Number(request.source_order_item_id)
+            &&cancelledOrderPurchase(item,item.product_id,cancelled).actionable_shortage_quantity>0));
+        for(const item of shortageItems.filter(item=>affected.has(Number(item.product_id)))){
+          let remaining=Number(item.quantity);
+          for(const source of open.filter(source=>Number(source.product_id)===Number(item.product_id)&&!source.quantity_needs_review)){
+            const quantity=Math.min(remaining,cancelledOrderPurchase(source,item.product_id,cancelled).actionable_shortage_quantity);
+            if(!quantity)continue;
+            const existing=sources.filter(request=>Number(request.product_id)===Number(item.product_id)&&Number(request.source_order_item_id)===Number(source.order_item_id)).reduce((sum,request)=>sum+Number(request.quantity),0);
+            const missing=Math.max(0,quantity-existing);remaining-=quantity;
+            if(missing){
+              const linked=await createProcurementRequestMysql({...shortageBody,items:[{...item,quantity:missing,amount:0,shipping_amount:0,
+                source_order_id:source.source_order_id,source_order_item_id:source.order_item_id,
+                note:'按未取消的FBS订单缺口登记采购，已取消来源另行处理'}]},sessionPersonId,tenantId,connection);
+              sources.push({id:linked.id,product_id:item.product_id,source_order_item_id:source.order_item_id,quantity:missing});
+            }
+          }
+        }
+      }
+    }
     const missingItems=workspaceBatch?shortageItems.filter(i=>!sources.some(r=>Number(r.product_id)===Number(i.product_id))):shortageItems;
     const created=missingItems.length?await createProcurementRequestMysql({...shortageBody,items:missingItems},sessionPersonId,tenantId,connection):{ids:[]};
     await guard();

@@ -60,6 +60,7 @@ export function inventoryOverview(row) {
       productId: Number(summary.productId || 0),
       skus: [...new Set(summary.skus || [summary.sku])].filter(Boolean),
       name: summary.productName, inventoryNumber: summary.inventoryNumber,
+      compositionKind: inventoryCompositionKind(summary),
       quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
       localAvailable: localSets(summary, products, 'local_available'),
       localPhysical: localSets(summary, products, 'physical_estimate'),
@@ -78,6 +79,16 @@ export function inventoryOverview(row) {
     coveredCount: items.filter(item => item.shortage_quantity === 0 && !item.quantity_needs_review).length,
     review: !!(items.some(item => item.inventory_needs_review) || coverage?.inventory_needs_review || coverage?.quantity_needs_review || coverage?.missing_amount || coverage?.missing_record_quantity > 0)
   };
+}
+
+export function inventoryCompositionKind(summary) {
+  if (summary.unbound || summary.inventoryMode === 'unbound') return 'unknown';
+  const productId = Number(summary.productId || 0);
+  const parts = (summary.pickingItems || []).filter(part => Number(part.product_id) > 0);
+  if (summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || parts.some(part => Number(part.product_id) !== productId)) return 'bundle';
+  const knownCount = summary.componentCount != null && summary.componentCount !== '' && Number(summary.componentCount) === 0;
+  if (productId > 0 && (summary.inventoryMode === 'single' || knownCount || parts.length > 0 && parts.every(part => Number(part.product_id) === productId))) return 'single';
+  return 'unknown';
 }
 
 function localSets(summary, products, field) {

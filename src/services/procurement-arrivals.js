@@ -1,4 +1,6 @@
 import {assertWholeBundleReview} from './purchase-bundle-review.js';
+import {createHash} from 'node:crypto';
+import {planPartialReceipt} from './order-procurement-coverage.js';
 import {loadInventoryComposition} from './inventory-composition.js';
 import {bundleReviewContentRevision} from '../shared/purchase-bundle-review.js';
 import {mysqlQuery,withMysqlTransaction} from '../mysql-pool.js';
@@ -93,23 +95,41 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   if(body.operation==='logistics')return logistics(body,session);
   const id=Number(body.id),note=String(body.note||'').trim(),key=String(body.request_key||'');
   if(!Number.isSafeInteger(id)||id<=0||!note||note.length>500||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(key)||!body.expected_updated_at)throw fail('请选择采购批次，填写到货说明，并重新打开最新记录后确认');
+  const quantity=body.quantity==null?null:Number(body.quantity),expected=body.expected_quantity==null?null:Number(body.expected_quantity);
+  if(quantity!==null&&(!Number.isSafeInteger(quantity)||quantity<1||!Number.isSafeInteger(expected)||expected<1))throw fail('请填写本次实际到货件数（quantity）和原待到货件数（expected_quantity），均须为正整数；采购总数录错请先编辑采购批次');
+  const stamp=v=>new Date(typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v).getTime();
+  const hash=createHash('sha256').update(JSON.stringify({id,note,quantity,expected,updated_at:stamp(body.expected_updated_at)})).digest('hex');
   const result=await transaction(async c=>{
    const q=async(sql,args=[])=>(await c.query(sql,args))[0],current=await authorizeBusinessTaskSession(session,(sql,args)=>q(sql+' FOR UPDATE',args));
    if(!hasPermission(current,'procurement'))throw fail('只有本企业采购岗位可以确认采购到货；仓库请使用验货入库',403);
    const scope=await resolveInventoryTenantScope(current.tenant.id,q),before=await assertInventoryRecord(scope,'inbound',id,q);
    await assertInventoryRecord(scope,'product',Number(before.product_id),q,{lock:true});
    const row=await assertInventoryRecord(scope,'inbound',id,q,{lock:true});if(Number(row.product_id)!==Number(before.product_id))throw fail('批次库存归属已变化，请刷新核对',409);
-   if(row.received_at||row.status==='approved')return{ok:true,duplicate:true};
+   const [prior]=await q("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_arrival' AND JSON_UNQUOTE(JSON_EXTRACT(detail_json,'$.request_key'))=? LIMIT 1 FOR UPDATE",[scope.id,key]);
+   if(prior){const saved=typeof prior.detail_json==='string'?JSON.parse(prior.detail_json):prior.detail_json;if(saved.hash?saved.hash!==hash:Number(saved.inbound_id)!==id||quantity!==null&&quantity!==Number(saved.quantity))throw fail('此到货登记已提交，不能用相同标识修改数量或内容；请刷新批次后重新登记',409);return{...(saved.result||{ok:true}),duplicate:true};}
+   if(row.received_at||row.status==='approved'){if(quantity!==null)throw fail('此批次已到货或入库，请刷新后选择剩余待到货批次',409);return{ok:true,duplicate:true};}
    if(row.status!=='pending_arrival')throw fail('此批次已关闭或取消，请刷新到货记录',409);
    const [purchase]=await q(`SELECT po.id FROM purchase_orders po WHERE po.id=? AND po.purchased_at IS NOT NULL AND po.status NOT IN('cancelled','pending_purchase') AND ${inventoryTenantSql(scope,'po')} FOR UPDATE`,[row.purchase_order_id||0]);
    const [legacy]=purchase?[]:await q(`SELECT id FROM procurement_requests pr WHERE pr.id=? AND pr.product_id=? AND pr.status='purchased' AND ${inventoryTenantSql(scope,'pr')} FOR UPDATE`,[row.procurement_request_id||0,row.product_id]);
    if(!purchase&&!legacy)throw fail('此批次尚未登记真实采购，不能确认到货',409);
    await assertWholeBundleReview(q,scope,row);
-   const stamp=v=>new Date(typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v).getTime();
-   if(stamp(row.updated_at)!==stamp(body.expected_updated_at))throw fail('采购批次已变化，请刷新后重新确认到货',409);
-   await c.execute(`UPDATE inbound_records SET received_at=UTC_TIMESTAMP(),updated_at=UTC_TIMESTAMP() WHERE id=? AND ${inventoryTenantSql(scope)}`,[id]);
-   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,row.product_id,current.personId,'purchase_arrival',JSON.stringify({inbound_id:id,note,request_key:key,quantity:Number(row.quantity)})]);
-   return{ok:true,duplicate:false};
+   if(stamp(row.updated_at)!==stamp(body.expected_updated_at)||expected!==null&&expected!==Number(row.quantity))throw fail('采购批次已变化，请刷新后重新确认到货',409);
+   if(quantity!==null&&quantity>Number(row.quantity))throw fail(`本次到货件数不能超过当前待到货 ${row.quantity} 件；采购总数录错请先更正采购记录`);
+   const plan=planPartialReceipt(row,quantity??Number(row.quantity),Number(row.quantity));
+   let remainingId=null;
+   if(plan.remaining){
+    const [insert]=await c.execute(`INSERT INTO inbound_records
+      (tenant_id,product_id,person_id,quantity,amount,unit_cost,shipping_amount,purchase_url,status,note,
+       purchase_order_id,purchase_order_item_id,procurement_request_id,qc_status,courier_company,tracking_number,created_at)
+      VALUES(?,?,?,?,?,?,?,?,'pending_arrival',?,?,?,?,'pending',?,?,?)`,[
+      scope.id,row.product_id,row.person_id,plan.remaining,plan.remainingAmount,(plan.remainingAmount+plan.remainingShipping)/plan.remaining,plan.remainingShipping,row.purchase_url||'',
+      `${row.note||''}；批次 #${id} 分批到货后剩余 ${plan.remaining} 件待到货`,row.purchase_order_id??null,row.purchase_order_item_id??null,row.procurement_request_id??null,row.courier_company??null,row.tracking_number??null,row.created_at]);
+    remainingId=Number(insert.insertId);
+   }
+   await c.execute(`UPDATE inbound_records SET quantity=?,amount=?,shipping_amount=?,unit_cost=?,received_at=UTC_TIMESTAMP(),updated_at=UTC_TIMESTAMP() WHERE id=? AND ${inventoryTenantSql(scope)}`,[plan.received,plan.amount,plan.shippingAmount,(plan.amount+plan.shippingAmount)/plan.received,id]);
+   const saved={ok:true,duplicate:false,inbound_id:id,quantity:plan.received,remaining_quantity:plan.remaining,remaining_inbound_id:remainingId};
+   await c.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,row.product_id,current.personId,'purchase_arrival',JSON.stringify({inbound_id:id,note,request_key:key,hash,quantity:plan.received,before:{quantity:Number(row.quantity),amount:Number(row.amount),shipping_amount:Number(row.shipping_amount||0)},result:saved})]);
+   return saved;
   });invalidateOrderProcurementCoverage();return result;
  }
  return{list,confirm};

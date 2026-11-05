@@ -68,7 +68,8 @@ const membershipExpiryText = computed(() => membership.value.expiresAt
   : membership.value.active ? "当前会员未设置到期时间" : "激活后即可使用已开放的企业功能");
 const membershipActionLabel = computed(() => !canActivateMembership.value ? "查看会员" : membership.value.active ? "激活 / 续期" : "激活会员");
 
-const activeMenu = computed(() => inventoryModule(route.path)?.tabs[0].path || route.path);
+const activeMenu = computed(() => route.path === "/procurement/workspace" && (route.query.mode === "purchase" || route.query.message_request_id || route.query.review_product_id)
+  ? "procurement-workspace-legacy" : inventoryModule(route.path)?.tabs[0].path || route.path);
 const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
@@ -171,6 +172,15 @@ function rememberIntendedRoute(target) {
 }
 
 function handleMenuSelect(index) {
+  if (index === "procurement-workspace-legacy") {
+    mobileNavigationOpen.value = false;
+    const target = "/procurement/workspace?mode=purchase";
+    if (route.fullPath === target) return;
+    rememberIntendedRoute(target);
+    showRouteSwitching();
+    router.push({ path: "/procurement/workspace", query: { mode: "purchase" } }).catch(() => {});
+    return;
+  }
   const target = String(index || "").trim();
   if (target === "https://www.17track.net/zh-cn") {
     mobileNavigationOpen.value = false;
@@ -856,11 +866,12 @@ onBeforeUnmount(() => {
                 <el-menu-item
                   v-for="child in menu.children"
                   :key="child.key"
-                  :index="child.route"
+                  :index="child.key === 'procurement-workspace-legacy' ? child.key : child.route"
                   @mouseenter="prefetchMenuRoute(child.route)"
                   @focus="prefetchMenuRoute(child.route)"
                 >
                   {{ child.label }}
+                  <el-tag v-if="child.badge" size="small" type="info" effect="plain" class="erp-menu-legacy-badge">{{ child.badge }}</el-tag>
                 </el-menu-item>
               </el-sub-menu>
               <el-menu-item
@@ -1210,6 +1221,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.erp-menu-legacy-badge { margin-left: 8px; }
 .erp-header-left { flex: 1; overflow: hidden; }
 .erp-header-right { flex-shrink: 0; gap: 5px; }
 .erp-quick-tools { display: flex; align-items: center; gap: 3px; padding-right: 8px; margin-right: 3px; border-right: 1px solid var(--erp-border); }

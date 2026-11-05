@@ -2,7 +2,6 @@
 import InventoryCompositionBadge from '../inventory/InventoryCompositionBadge.vue';
 import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
 import {computed,defineAsyncComponent,onBeforeUnmount,reactive,ref,watch} from 'vue';
-import {ElMessage,ElMessageBox} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {useAuthStore} from '../../stores/auth.js';
 import {hasPermission} from '../../../../src/shared/permissions.js';
@@ -23,22 +22,22 @@ const ReceiveDialog=defineAsyncComponent(()=>import('./InventoryReceiveDialog.vu
 const receiving=reactive({visible:false,id:0,batch:0,name:''});
 const Ledger=defineAsyncComponent(()=>import('./ProcurementLedgerDialog.vue'));
 const props=defineProps({status:{type:String,default:'open'},filters:{type:Object,required:true},revision:Number,productId:Number});
-const emit=defineEmits(['changed','summary']),auth=useAuthStore(),rows=ref([]),total=ref(0),loading=ref(false),busy=ref(false),error=ref('');
-const page=ref(1),pageSize=ref(50),ledger=reactive({visible:false,id:0,action:'',batch:0});
+const emit=defineEmits(['changed','summary']),auth=useAuthStore(),rows=ref([]),total=ref(0),loading=ref(false),error=ref('');
+const page=ref(1),pageSize=ref(50),ledger=reactive({visible:false,id:0,action:'',batch:0,tab:'current'});
 const canConfirm=computed(()=>hasPermission(auth.user,'procurement')),canReceive=computed(()=>canConfirm.value||hasPermission(auth.user,'packing'));
 let version=0,disposed=false,controller;
 const time=v=>v?shanghaiDateTimeText(v,{assumeUtcWhenNaive:true}):'未记录';
 const elapsed=v=>{if(!v)return null;const d=typeof v==='string'&&!/[TZ]/.test(v)?v.replace(' ','T')+'Z':v;const n=Date.now()-new Date(d).getTime();return Number.isFinite(n)?Math.max(0,n/86400000):null;};
 async function load(reset=false){selected.value=[];batchTable.value?.clearSelection();if(reset)page.value=1;controller?.abort();controller=new AbortController();const token=++version,scope=currentApiCacheScope();loading.value=true;error.value='';try{const r=await apiClient.get(`/api/inventory-workflow/purchase-arrivals?${new URLSearchParams({...props.filters,scope:'all',status:props.status,page:page.value,pageSize:pageSize.value,...(props.productId?{product_id:props.productId}:{})})}`,{noCache:true,signal:controller.signal});if(!disposed&&token===version&&scope===currentApiCacheScope()){rows.value=r.rows||[];total.value=r.total||0;emit('summary',r.summary||{});}}catch(e){if(token===version&&e.name!=='AbortError')error.value=e.message;}finally{if(token===version)loading.value=false;}}
-function openLedger(row,action=''){if(action==='receive'){Object.assign(receiving,{visible:true,id:Number(row.product_id),batch:Number(row.id),name:row.product_name});return;}Object.assign(ledger,{visible:true,id:Number(row.product_id),action,batch:action==='receive'?Number(row.id):0});}
-async function confirm(row){const scope=currentApiCacheScope();try{const {value}=await ElMessageBox.prompt(`确认剩余 ${row.quantity} 件已经全部到货？确认后进入仓库待验收，本地实物暂不增加。部分到货请先核对实际验收数量。`,'确认采购到货',{inputType:'textarea',inputPlaceholder:'填写到货位置或签收说明',inputValidator:v=>!!String(v||'').trim()&&String(v).length<=500||'请填写1至500字到货说明',confirmButtonText:'确认本批次到货'});if(disposed||scope!==currentApiCacheScope())return;busy.value=true;await apiClient.post('/api/inventory-workflow/purchase-arrivals',{id:row.id,note:String(value).trim(),expected_updated_at:row.updated_at,request_key:crypto.randomUUID()});if(disposed||scope!==currentApiCacheScope())return;ElMessage.success('已到货待验收，本地实物尚未增加');await load();emit('changed');}catch(e){if(!['cancel','close'].includes(e)&&scope===currentApiCacheScope())ElMessage.error(e.message);}finally{busy.value=false;}}
+function openLedger(row,action=''){if(action==='receive'){Object.assign(receiving,{visible:true,id:Number(row.product_id),batch:Number(row.id),name:row.product_name});return;}Object.assign(ledger,{visible:true,id:Number(row.product_id),action,batch:action==='receive'?Number(row.id):0,tab:'current'});}
+function confirm(row){batchAction.rows=[row];batchAction.visible=true;}
 watch(()=>[props.status,props.revision,props.productId],()=>load(true),{immediate:true});onBeforeUnmount(()=>{disposed=true;++version;controller?.abort();});
 </script>
 <template>
  <section class="inventory-batch-queue" :aria-label="status==='open'?'采购待到货批次':'到货待验收批次'">
   <el-alert v-if="error" :title="error+'；保留最近成功记录，请手动刷新重试'" type="error" :closable="false"/>
-  <div class="batch-queue-toolbar"><el-button v-if="status==='open'?canConfirm:canReceive" type="primary" :disabled="!selected.length||loading||busy||!!error" @click="startBatch">{{status==='open'?'批量确认到货':'批量登记入库'}}{{selected.length?`（${selected.length}）`:''}}</el-button><span>勾选本页需要处理的批次；历史整套登记的批次请先确认实际采购配件。</span></div>
-  <el-table ref="batchTable" @selection-change="value=>selected=value" :data="rows" row-key="id" border v-loading="loading||busy" :empty-text="error?'到货记录读取失败，不代表没有待处理批次':'当前筛选没有待处理采购批次'">
+  <div class="batch-queue-toolbar"><el-button v-if="status==='open'?canConfirm:canReceive" type="primary" :disabled="!selected.length||loading||!!error" @click="startBatch">{{status==='open'?'批量确认到货':'批量登记入库'}}{{selected.length?`（${selected.length}）`:''}}</el-button><span>可填写各批次本次实际到货数量，未到部分继续待到货；历史整套登记请先核对实际配件。</span></div>
+  <el-table ref="batchTable" @selection-change="value=>selected=value" :data="rows" row-key="id" border v-loading="loading" :empty-text="error?'到货记录读取失败，不代表没有待处理批次':'当前筛选没有待处理采购批次'">
    <el-table-column v-if="status==='open'?canConfirm:canReceive" type="selection" width="45" :selectable="selectable"/>
    <el-table-column label="最小实物库存" min-width="310"><template #default="{row}"><div v-for="part in row.components||[]" :key="part.product_id" class="batch-product"><ProductImagePreview :src="`/api/products/${part.product_id}/image?thumb=1`" :preview-list="[`/api/products/${part.product_id}/image`]" size="portrait"/><div><b>{{part.name}}</b><small>库存 ID：{{part.inventory_number||part.product_id}} <InventoryCompositionBadge :product="{...part,id:Number(part.product_id),component_count:0}"/></small><el-button plain size="small" @click="openLedger({product_id:part.product_id,id:0})">库存详情</el-button><InventoryProductEditAction :product-id="Number(part.product_id)" @saved="load();emit('changed')"/></div></div><small v-if="row.review_required" class="batch-review-warning">历史按 {{row.quantity}} 套登记 · 待确认实际配件</small><small v-if="row.composition_error">{{row.composition_error}}</small></template></el-table-column>
    <el-table-column label="受影响套装" min-width="220"><template #default="{row}"><InventoryAffectedBundles :bundles="row.affected_bundles||[]" @open="id=>openLedger({product_id:id,id:0})"/><small v-if="row.source_bundle_batch">原套装批次 #{{row.source_bundle_batch.id}} · 已按实物核对</small></template></el-table-column>
@@ -49,11 +48,11 @@ watch(()=>[props.status,props.revision,props.productId],()=>load(true),{immediat
    <el-table-column label="处理" min-width="235"><template #default="{row}"><div class="batch-actions-row"><template v-if="row.review_required"><el-button v-if="canConfirm" type="primary" @click="reviewBundle(row)">确认历史采购内容</el-button><small v-else>待采购核对实际配件后再验收</small></template><template v-else><el-button v-if="status==='open'&&canConfirm" type="primary" @click="confirm(row)">确认到货</el-button><el-button v-if="status==='open'&&canConfirm" plain @click="editBatch(row)">编辑</el-button><el-button v-if="status==='open'&&canConfirm" plain type="danger" @click="editBatch(row,true)">删除</el-button><el-button v-if="status==='arrived'&&canReceive" type="primary" @click="openLedger(row,'receive')">登记入库</el-button><small v-if="status==='open'&&!canConfirm">待采购确认到货</small><small v-if="status==='arrived'&&!canReceive">待仓库验收入库</small></template></div></template></el-table-column>
   </el-table>
   <el-pagination v-model:current-page="page" v-model:page-size="pageSize" :page-sizes="[20,50,100]" :total="total" layout="total,sizes,prev,pager,next" @size-change="load(true)" @current-change="load()"/>
-  <BatchAction v-if="batchAction.visible" v-model="batchAction.visible" :status="status" :rows="batchAction.rows" @changed="load();emit('changed')"/>
+  <BatchAction v-if="batchAction.visible" v-model="batchAction.visible" :status="status" :rows="batchAction.rows" @changed="load();emit('changed')" @correct="row=>{batchAction.visible=false;if(status==='open')editBatch(row);else Object.assign(ledger,{visible:true,id:Number(row.product_id),action:'',batch:0,tab:'purchases'});}"/>
   <BundleReview v-if="bundleReview.visible" v-model="bundleReview.visible" :inbound-id="bundleReview.id" @saved="load();emit('changed')"/>
   <BatchCorrection v-if="correction.visible" v-model="correction.visible" :product-id="correction.productId" :inbound-id="correction.inboundId" :remove="correction.remove" @saved="load();emit('changed')"/>
   <ReceiveDialog v-if="receiving.visible" v-model="receiving.visible" :product-id="receiving.id" :product-name="receiving.name" :inbound-id="receiving.batch" @saved="load();emit('changed')"/>
-  <Ledger v-if="ledger.visible" v-model="ledger.visible" :product-id="ledger.id" :initial-action="ledger.action" :initial-inbound-id="ledger.batch" :stocktake-enabled="hasPermission(auth.user,'inventory.write')" @saved="load();emit('changed')"/>
+  <Ledger v-if="ledger.visible" v-model="ledger.visible" :product-id="ledger.id" :initial-action="ledger.action" :initial-inbound-id="ledger.batch" :initial-tab="ledger.tab" :stocktake-enabled="hasPermission(auth.user,'inventory.write')" @saved="load();emit('changed')"/>
 
  </section>
 </template>

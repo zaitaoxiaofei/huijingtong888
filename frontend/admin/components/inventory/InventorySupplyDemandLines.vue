@@ -1,9 +1,9 @@
 <script setup>
 import {computed} from 'vue';
 import {inventorySupplyLines} from '../../../../src/shared/inventory-supply-lines.js';
-const props=defineProps({workflow:Object,canSync:Boolean,syncing:Boolean,syncError:String});
+const props=defineProps({workflow:Object,group:{type:String,default:'all'},canSync:Boolean,syncing:Boolean,syncError:String});
 const emit=defineEmits(['detail','sync']);
-const lines=computed(()=>inventorySupplyLines(props.workflow));
+const lines=computed(()=>inventorySupplyLines(props.workflow).filter(line=>props.group==='all'||(props.group==='local'?['orders','safety']:['fbp','forecast']).includes(line.key)));
 const quantity=n=>n==null?'待核对':`${Number(n)} 件`;
 function summary(line){
  if(line.quantity==null){if(line.key==='forecast')return props.workflow?.fbp?.sku_count===0?'未绑定SKU':'待同步';if(line.key==='safety'&&props.workflow?.physical_recorded<0)return '需盘点';return '待核实';}
@@ -15,7 +15,7 @@ function summary(line){
 <template>
  <div class="compact-demand-lines">
   <div v-for="line in lines" :key="line.key" :class="['compact-demand-line',`is-${line.status}`]">
-   <el-button link :type="line.status" @click="emit('detail',line.key)">{{line.label}}</el-button>
+   <el-button plain size="small" @click="emit('detail',line.key)">{{line.label}}</el-button>
    <el-popover trigger="hover" placement="top" :width="330">
     <template #reference><span class="compact-demand-quantity">{{summary(line)}}</span></template>
     <p>{{line.label}}：{{quantity(line.target??line.quantity)}}</p>
@@ -27,11 +27,11 @@ function summary(line){
     <p>点击需求名称查看订单、规则或申请明细。</p>
    </el-popover>
    <span v-if="line.purchase>0" :class="['compact-demand-buy',line.required?'required':'optional']">{{line.required?'采购':'建议'}} {{line.purchase}}</span>
-   <el-button v-else-if="line.key==='forecast'&&canSync" link type="primary" :loading="syncing" @click="emit('sync')">{{syncing?'同步中':'同步重算'}}</el-button>
+   <el-button v-else-if="line.key==='forecast'&&canSync" plain size="small" :loading="syncing" @click="emit('sync')">{{syncing?'同步中':'同步重算'}}</el-button>
   </div>
-  <el-tooltip v-if="syncError" :content="syncError"><el-button link type="danger" @click="emit('sync')">同步未完成，点击重试</el-button></el-tooltip>
+  <el-tooltip v-if="syncError&&group!=='local'" :content="syncError"><el-button plain size="small" type="danger" @click="emit('sync')">同步未完成，点击重试</el-button></el-tooltip>
  </div>
 </template>
 <style scoped>
-.compact-demand-lines{display:grid;gap:3px;font-size:12px}.compact-demand-line{display:grid;grid-template-columns:minmax(92px,1fr) auto minmax(70px,auto);align-items:center;gap:9px;min-height:24px;padding:1px 0;border-bottom:1px solid var(--el-border-color-extra-light)}.compact-demand-line>.el-button{justify-self:start;margin:0;padding:1px 0;font-size:12px}.compact-demand-quantity{font-variant-numeric:tabular-nums;cursor:help;white-space:nowrap}.compact-demand-buy{text-align:right;font-size:12px;white-space:nowrap}.required,.is-danger .compact-demand-quantity{color:var(--el-color-danger)}.optional,.is-warning .compact-demand-quantity{color:var(--el-color-warning)}.is-success .compact-demand-quantity{color:var(--el-color-success)}
+.compact-demand-lines{display:grid;gap:8px;font-size:12px}.compact-demand-line{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:8px;min-height:28px}.compact-demand-line>.el-button{justify-self:start;margin:0;font-size:12px}.compact-demand-quantity{font-variant-numeric:tabular-nums;cursor:help;white-space:nowrap}.compact-demand-buy{text-align:right;font-size:12px;white-space:nowrap}.required,.is-danger .compact-demand-quantity{color:var(--el-color-danger)}.optional,.is-warning .compact-demand-quantity{color:var(--el-color-warning)}.is-success .compact-demand-quantity{color:var(--el-color-success)}
 </style>
