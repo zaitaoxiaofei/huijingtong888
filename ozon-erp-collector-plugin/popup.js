@@ -1,6 +1,15 @@
 const fields = {
-  erpBaseUrl: document.getElementById('erp-base-url'),
   localPluginToken: document.getElementById('local-plugin-token'),
+  save: document.getElementById('save'),
+  saveFeedback: document.getElementById('save-feedback'),
+  connectionStatus: document.getElementById('connection-status'),
+  connectionDetail: document.getElementById('connection-detail'),
+  installedVersion: document.getElementById('installed-version'),
+  onlineVersion: document.getElementById('online-version'),
+  collectorTab: document.getElementById('collector-tab'),
+  analyticsTab: document.getElementById('analytics-tab'),
+  collectorPanel: document.getElementById('collector-panel'),
+  analyticsPanel: document.getElementById('analytics-panel'),
   injectCards: document.getElementById('inject-cards'),
   manualSkus: document.getElementById('manual-skus'),
   status: document.getElementById('status'),
@@ -13,13 +22,11 @@ const fields = {
 };
 
 const erpConfig = window.OzonErpCollectorConfig || {};
-const ERP_BASE_URL_STORAGE_KEY = erpConfig.ERP_BASE_URL_STORAGE_KEY || 'ozon-erp-base-url';
 const LOCAL_PLUGIN_TOKEN_STORAGE_KEY = erpConfig.LOCAL_PLUGIN_TOKEN_STORAGE_KEY || 'ozon-erp-local-plugin-token';
 const DEFAULT_LOCAL_PLUGIN_TOKEN = erpConfig.DEFAULT_LOCAL_PLUGIN_TOKEN || '';
 const DEFAULT_ERP_BASE_URL = erpConfig.DEFAULT_ERP_BASE_URL || 'https://erp.hjt888.xyz';
 const SEND_MESSAGE_TIMEOUT_MS = 8000;
 const MANUAL_PROGRESS_STORAGE_KEY = 'ozon-erp-manual-progress';
-const PLUGIN_UPDATE_STATUS_STORAGE_KEY = 'ozon-erp-plugin-update-status';
 const OZON_PERMISSION_ORIGINS = [
   'https://ozon.ru/*',
   'https://www.ozon.ru/*',
@@ -40,12 +47,81 @@ const manualProgressState = {
   items: new Map()
 };
 let pluginUpdateDownloadUrl = '';
+let savingKey = false;
+let requiresKeyEntry = false;
+let keyRevision = 0;
+let connectionEpoch = 0;
+let connectionRequestId = 0;
+let renderedConnectionRequestId = 0;
 
-function normalizeErpBaseUrl(value) {
-  if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
-    return erpConfig.normalizeErpBaseUrl(value);
+function sendRuntimeMessage(message) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(response);
+    };
+    const timer = setTimeout(() => finish({ success: false, error: '插件后台响应超时，请重试' }), SEND_MESSAGE_TIMEOUT_MS);
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        const error = chrome.runtime.lastError;
+        finish(error ? { success: false, error: error.message } : (response || { success: false, error: '插件后台未响应，请重试' }));
+      });
+    } catch (error) {
+      finish({ success: false, error: error?.message || String(error) });
+    }
+  });
+}
+
+function setSaveFeedback(message, tone = '') {
+  fields.saveFeedback.textContent = message;
+  fields.saveFeedback.dataset.tone = tone;
+}
+
+function renderConnection(connection = {}) {
+  requiresKeyEntry = connection.requiresKeyEntry === true;
+  if (requiresKeyEntry) {
+    if (keyRevision === 0) {
+      fields.localPluginToken.value = '';
+      renderTokenWarning();
+    }
+    fields.connectionStatus.dataset.state = 'error';
+    fields.connectionStatus.textContent = '请重新填写密钥';
+    fields.connectionDetail.textContent = connection.lastError || '请从 ERP 企业管理复制密钥并保存。';
+    return;
   }
-  return DEFAULT_ERP_BASE_URL;
+  const state = !connection.configured ? 'empty' : connection.connected ? 'connected' : connection.lastError ? 'error' : 'pending';
+  fields.connectionStatus.dataset.state = state;
+  fields.connectionStatus.textContent = { empty: '未配置密钥', connected: '已连接企业', error: '连接未通过', pending: '正在验证密钥' }[state];
+  fields.connectionDetail.textContent = !connection.configured
+    ? '从 ERP 企业管理复制专属密钥，保存后自动连接。'
+    : connection.connected ? '商品采集和店铺分析共用此密钥。'
+      : connection.lastError || '密钥已保存在本机，正在验证连接。';
+}
+
+async function refreshConnection() {
+  if (savingKey) return;
+  const epoch = connectionEpoch;
+  const requestId = ++connectionRequestId;
+  const response = await sendRuntimeMessage({ type: 'OZON_UNIFIED_GET_CONNECTION' });
+  if (epoch !== connectionEpoch || savingKey || requestId < renderedConnectionRequestId) return;
+  renderedConnectionRequestId = requestId;
+  if (response?.success) renderConnection(response.connection);
+  else {
+    fields.connectionStatus.dataset.state = 'error';
+    fields.connectionStatus.textContent = '连接状态未获取';
+    fields.connectionDetail.textContent = response?.error || '请稍后重新打开插件。';
+  }
+}
+
+function selectFeature(feature) {
+  const analytics = feature === 'analytics';
+  fields.collectorTab.setAttribute('aria-selected', String(!analytics));
+  fields.analyticsTab.setAttribute('aria-selected', String(analytics));
+  fields.collectorPanel.hidden = analytics;
+  fields.analyticsPanel.hidden = !analytics;
 }
 
 function setStatus(text) {
@@ -68,22 +144,24 @@ function renderTokenWarning() {
 }
 
 function renderPluginUpdate(plugin) {
-  const updateRequired = plugin?.update_required === true;
-  fields.pluginUpdateCard.classList.toggle('is-visible', updateRequired);
-  if (!updateRequired) return;
-  pluginUpdateDownloadUrl = String(plugin.download_url || '').trim();
-  fields.pluginUpdateTitle.textContent = plugin.title || '爆单ERP插件有新版本';
-  fields.pluginUpdateMessage.textContent = plugin.message || '请下载最新版爆单ERP插件并重新安装。';
+  fields.onlineVersion.textContent = String(plugin?.version || '暂未获取');
+  const updateAvailable = plugin?.update_available === true || plugin?.update_required === true;
+  fields.pluginUpdateCard.classList.toggle('is-visible', updateAvailable);
+  pluginUpdateDownloadUrl = '';
+  if (!updateAvailable) return;
+  try {
+    const url = new URL(String(plugin.download_url || ''), DEFAULT_ERP_BASE_URL);
+    if (plugin.download_url && ['http:', 'https:'].includes(url.protocol)) pluginUpdateDownloadUrl = url.href;
+  } catch (error) {}
+  fields.pluginUpdateTitle.textContent = plugin.title || '爆单ERP插件可更新';
+  fields.pluginUpdateMessage.textContent = plugin.message || '新版已提供，可按需下载更新。';
   fields.pluginUpdateDownload.disabled = !pluginUpdateDownloadUrl;
 }
 
 async function loadPluginUpdateStatus() {
-  const stored = await chrome.storage.local.get([PLUGIN_UPDATE_STATUS_STORAGE_KEY]);
-  renderPluginUpdate(stored?.[PLUGIN_UPDATE_STATUS_STORAGE_KEY]);
-  chrome.runtime.sendMessage({ type: 'OZON_ERP_CHECK_PLUGIN_UPDATE' }, (response) => {
-    if (chrome.runtime.lastError) return;
-    if (response?.success) renderPluginUpdate(response.plugin);
-  });
+  const response = await sendRuntimeMessage({ type: 'OZON_ERP_CHECK_PLUGIN_UPDATE' });
+  if (response?.success && response.plugin) renderPluginUpdate(response.plugin);
+  else fields.onlineVersion.textContent = '暂未获取';
 }
 
 function resetManualProgress() {
@@ -225,36 +303,46 @@ async function grantOzonAccess() {
 }
 
 async function load() {
+  fields.installedVersion.textContent = chrome.runtime.getManifest()?.version || '未知';
+  const initialKeyRevision = keyRevision;
   const stored = await chrome.storage.local.get([
-    ERP_BASE_URL_STORAGE_KEY,
     LOCAL_PLUGIN_TOKEN_STORAGE_KEY,
     'ozon-erp-inject-cards',
     'ozon-erp-manual-skus'
   ]);
-  const normalizedErpBaseUrl = normalizeErpBaseUrl(stored[ERP_BASE_URL_STORAGE_KEY] || DEFAULT_ERP_BASE_URL);
-  fields.erpBaseUrl.value = normalizedErpBaseUrl;
-  fields.localPluginToken.value = stored[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || '';
+  if (keyRevision === initialKeyRevision && !requiresKeyEntry) fields.localPluginToken.value = stored[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || '';
   renderTokenWarning();
-  if (stored[ERP_BASE_URL_STORAGE_KEY] !== normalizedErpBaseUrl) {
-    await chrome.storage.local.set({ [ERP_BASE_URL_STORAGE_KEY]: normalizedErpBaseUrl });
-  }
   fields.injectCards.checked = stored['ozon-erp-inject-cards'] !== false;
   fields.manualSkus.value = stored['ozon-erp-manual-skus'] || '';
-  await restoreManualProgress();
-  await loadPluginUpdateStatus();
-  await refreshOzonAccessButton();
+  await Promise.allSettled([restoreManualProgress(), loadPluginUpdateStatus(), refreshOzonAccessButton(), refreshConnection()]);
   if (!fields.status.textContent) await diagnoseActiveOzonPage();
 }
 
 async function save() {
-  await chrome.storage.local.set({
-    [ERP_BASE_URL_STORAGE_KEY]: normalizeErpBaseUrl(fields.erpBaseUrl.value.trim()),
-    [LOCAL_PLUGIN_TOKEN_STORAGE_KEY]: fields.localPluginToken.value.trim(),
-    'ozon-erp-inject-cards': fields.injectCards.checked,
-    'ozon-erp-manual-skus': fields.manualSkus.value.trim()
-  });
-  renderTokenWarning();
-  setStatus('配置已保存，刷新 Ozon 页面后生效');
+  if (savingKey) return;
+  savingKey = true;
+  fields.save.disabled = true;
+  connectionEpoch++;
+  const submittedRevision = keyRevision;
+  const submittedKey = fields.localPluginToken.value.trim();
+  setSaveFeedback('正在保存…', 'pending');
+  try {
+    await chrome.storage.local.set({
+      'ozon-erp-inject-cards': fields.injectCards.checked,
+      'ozon-erp-manual-skus': fields.manualSkus.value.trim()
+    });
+    const response = await sendRuntimeMessage({ type: 'OZON_UNIFIED_SAVE_KEY', key: submittedKey });
+    if (!response?.success) throw new Error(response?.error || '保存失败，请重试');
+    renderConnection(response.connection);
+    setSaveFeedback(keyRevision === submittedRevision ? '已保存在本机，连接状态将自动更新。' : '已保存提交的密钥，当前还有未保存修改。');
+    renderTokenWarning();
+  } catch (error) {
+    setSaveFeedback(`保存未完成：${error?.message || String(error)}`, 'error');
+  } finally {
+    connectionEpoch++;
+    savingKey = false;
+    fields.save.disabled = false;
+  }
 }
 
 function parseSkus(value) {
@@ -325,13 +413,23 @@ async function syncManualSkus() {
   manualProgressState.active = false;
 }
 
-document.getElementById('save').addEventListener('click', save);
+fields.save.addEventListener('click', save);
+fields.collectorTab.addEventListener('click', () => selectFeature('collector'));
+fields.analyticsTab.addEventListener('click', () => selectFeature('analytics'));
 document.getElementById('collect').addEventListener('click', collectActiveTab);
 fields.grantOzonAccess.addEventListener('click', grantOzonAccess);
 document.getElementById('manual-sync').addEventListener('click', syncManualSkus);
-fields.localPluginToken.addEventListener('input', renderTokenWarning);
+fields.localPluginToken.addEventListener('input', () => {
+  keyRevision++;
+  renderTokenWarning();
+  setSaveFeedback('密钥有未保存修改。', 'pending');
+});
+fields.injectCards.addEventListener('change', () => {
+  chrome.storage.local.set({ 'ozon-erp-inject-cards': fields.injectCards.checked }).catch((error) => setStatus(error?.message || '显示设置保存失败'));
+});
 fields.pluginUpdateDownload.addEventListener('click', () => {
   if (!pluginUpdateDownloadUrl) return;
   chrome.tabs.create({ url: pluginUpdateDownloadUrl });
 });
-load();
+load().catch((error) => setSaveFeedback(error?.message || '读取配置失败，请重试', 'error'));
+setInterval(() => { void refreshConnection(); }, 2000);

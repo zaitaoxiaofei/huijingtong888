@@ -1091,7 +1091,11 @@
   }
 
   async function withLocalPluginTokenHeader(options = {}) {
-    const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY]);
+    const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY, ERP_BASE_URL_STORAGE_KEY]);
+    const savedBaseUrl = String(stored[ERP_BASE_URL_STORAGE_KEY] || '').trim().replace(/\/+$/, '');
+    if (savedBaseUrl && savedBaseUrl !== DEFAULT_ERP_BASE_URL) {
+      throw new Error('原密钥属于其他 ERP 地址，请在统一插件弹窗重新填写企业密钥');
+    }
     const token = String(stored?.[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim();
     if (!token) return options;
     const headers = options?.headers && typeof options.headers === 'object'

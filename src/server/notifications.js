@@ -5,6 +5,7 @@ const runtimeDir = path.resolve("data");
 const statusFile = path.join(runtimeDir, "global-update-status.json");
 const collectorPluginManifestPath = path.resolve("ozon-erp-collector-plugin", "manifest.json");
 const analyticsPluginManifestPath = path.resolve("pivot-table-master", "manifest.json");
+const collectorPluginCapabilitiesPath = path.resolve("ozon-erp-collector-plugin", "capabilities.json");
 const pddProcurementPluginManifestPath = path.resolve("pdd-procurement-logistics-plugin", "manifest.json");
 function readPluginManifestVersion(manifestPath) {
   try {
@@ -15,12 +16,30 @@ function readPluginManifestVersion(manifestPath) {
     return "0.0.0";
   }
 }
-const defaultPluginVersion = process.env.COLLECTOR_PLUGIN_VERSION || readPluginManifestVersion(collectorPluginManifestPath);
+function hasUnifiedPluginCapabilities() {
+  try {
+    const capabilities = JSON.parse(fs.readFileSync(collectorPluginCapabilitiesPath, "utf8"));
+    return capabilities.collector === true && capabilities.sellerAnalytics === true;
+  } catch { return false; }
+}
+const unifiedPlugin = hasUnifiedPluginCapabilities();
+const collectorPluginManifestVersion = readPluginManifestVersion(collectorPluginManifestPath);
+const defaultPluginVersion = unifiedPlugin ? collectorPluginManifestVersion
+  : process.env.COLLECTOR_PLUGIN_VERSION || collectorPluginManifestVersion;
 const defaultPluginPackageName = `ozon-baodan-erp-plugin-${defaultPluginVersion}.zip`;
 const analyticsPluginManifestVersion = readPluginManifestVersion(analyticsPluginManifestPath);
-const defaultAnalyticsPluginVersion = process.env.ANALYTICS_PLUGIN_VERSION === analyticsPluginManifestVersion
-  ? process.env.ANALYTICS_PLUGIN_VERSION : analyticsPluginManifestVersion;
-const defaultAnalyticsPluginPackageName = `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.zip`;
+const defaultAnalyticsPluginVersion = unifiedPlugin ? defaultPluginVersion
+  : process.env.ANALYTICS_PLUGIN_VERSION === analyticsPluginManifestVersion
+    ? process.env.ANALYTICS_PLUGIN_VERSION : analyticsPluginManifestVersion;
+const defaultAnalyticsPluginPackageName = unifiedPlugin ? defaultPluginPackageName
+  : `ozon-seller-analytics-plugin-${defaultAnalyticsPluginVersion}.zip`;
+const unifiedPluginMetadata = unifiedPlugin ? {
+  unified: true,
+  capabilities: { collector: true, sellerAnalytics: true },
+  version: defaultPluginVersion,
+  package_name: defaultPluginPackageName,
+  download_url: `/downloads/${defaultPluginPackageName}`
+} : {};
 const defaultPddProcurementPluginVersion = process.env.PDD_PROCUREMENT_PLUGIN_VERSION || readPluginManifestVersion(pddProcurementPluginManifestPath);
 const defaultPddProcurementPluginPackageName = `pdd-procurement-logistics-plugin-${defaultPddProcurementPluginVersion}.zip`;
 const updateSubscribers = new Set();
@@ -40,7 +59,8 @@ const defaultStatus = {
     download_url: process.env.COLLECTOR_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultPluginPackageName}`,
     package_name: defaultPluginPackageName,
     mandatory: false,
-    published_at: new Date().toISOString()
+    published_at: new Date().toISOString(),
+    ...unifiedPluginMetadata
   },
   analytics_plugin: {
     version: defaultAnalyticsPluginVersion,
@@ -49,7 +69,8 @@ const defaultStatus = {
     download_url: process.env.ANALYTICS_PLUGIN_DOWNLOAD_URL || `/downloads/${defaultAnalyticsPluginPackageName}`,
     package_name: defaultAnalyticsPluginPackageName,
     mandatory: false,
-    published_at: new Date().toISOString()
+    published_at: new Date().toISOString(),
+    ...unifiedPluginMetadata
   },
   pdd_procurement_plugin: {
     version: defaultPddProcurementPluginVersion,
@@ -118,10 +139,11 @@ function normalizeUpdatePayload(input = {}) {
     plugin: {
       ...defaultStatus.plugin,
       ...plugin,
-      ...normalizePluginUpdatePolicy(plugin, String(plugin.version || defaultStatus.plugin.version).trim()),
+      ...normalizePluginUpdatePolicy(plugin, unifiedPlugin ? defaultPluginVersion : String(plugin.version || defaultStatus.plugin.version).trim()),
       version: String(plugin.version || defaultStatus.plugin.version).trim(),
       download_url: String(plugin.download_url || plugin.downloadUrl || defaultStatus.plugin.download_url).trim(),
-      package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.zip`).trim()
+      package_name: String(plugin.package_name || plugin.packageName || `ozon-baodan-erp-plugin-${plugin.version || defaultStatus.plugin.version}.zip`).trim(),
+      ...unifiedPluginMetadata
     },
     analytics_plugin: {
       ...defaultStatus.analytics_plugin,
@@ -129,7 +151,8 @@ function normalizeUpdatePayload(input = {}) {
       ...normalizePluginUpdatePolicy(analyticsPlugin, defaultAnalyticsPluginVersion),
       version: defaultAnalyticsPluginVersion,
       download_url: defaultStatus.analytics_plugin.download_url,
-      package_name: defaultAnalyticsPluginPackageName
+      package_name: defaultAnalyticsPluginPackageName,
+      ...unifiedPluginMetadata
     },
     pdd_procurement_plugin: {
       ...defaultStatus.pdd_procurement_plugin,

@@ -124,10 +124,23 @@ const contextMenu = ref({
   y: 0
 });
 const pluginUpdates = ref({});
-const pluginDownloadLinks = [
-  { command: "collector", label: "商品采集插件", url: "/downloads/ozon-erp-collector-plugin.rar" },
-  { command: "analytics", label: "店铺分析插件", url: "/downloads/ozon-seller-analytics-plugin.zip" }
-];
+const pluginDownloadRelease = ref(null);
+let pluginDownloadRequest = null;
+const pluginDownloadLinks = computed(() => [{
+  command: "unified",
+  label: `爆单ERP统一插件${pluginDownloadRelease.value?.version ? ` · 最新 v${pluginDownloadRelease.value.version}` : ""}`,
+  url: pluginDownloadRelease.value?.download_url || "/downloads/ozon-baodan-erp-plugin.zip"
+}]);
+
+async function loadPluginDownloadRelease() {
+  if (pluginDownloadRequest) return pluginDownloadRequest;
+  const scope = currentApiCacheScope();
+  pluginDownloadRequest = apiClient.get("/api/system/update-status", { routeScoped: false, noCache: true })
+    .then(status => { if (scope === currentApiCacheScope()) pluginDownloadRelease.value = status?.plugin || null; })
+    .catch(() => {})
+    .finally(() => { pluginDownloadRequest = null; });
+  return pluginDownloadRequest;
+}
 const routeSwitching = ref(false);
 let routeSwitchTimer = 0;
 const prefetchedRoutes = new Set();
@@ -682,7 +695,7 @@ function openPluginDownload() {
 }
 
 function handlePluginDownloadCommand(command) {
-  const item = pluginDownloadLinks.find((link) => link.command === command);
+  const item = pluginDownloadLinks.value.find((link) => link.command === command);
   if (!item?.url) return;
   window.open(item.url, "_blank", "noopener,noreferrer");
 }
@@ -786,6 +799,7 @@ watch([() => authStore.user?.id, () => authStore.user?.tenant?.id, () => authSto
 }, { flush: "sync" });
 
 onMounted(() => {
+  void loadPluginDownloadRelease();
   mobileViewportQuery = window.matchMedia("(max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse)");
   syncMobileViewport(mobileViewportQuery);
   mobileViewportQuery.addEventListener("change", syncMobileViewport);
@@ -914,7 +928,7 @@ onBeforeUnmount(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-dropdown trigger="click" @command="handlePluginDownloadCommand">
+          <el-dropdown trigger="click" @command="handlePluginDownloadCommand" @visible-change="visible => visible && loadPluginDownloadRelease()">
             <el-button circle class="erp-header-icon" aria-label="插件下载" title="插件下载">
               <el-icon><Download /></el-icon>
             </el-button>

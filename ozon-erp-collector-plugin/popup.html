@@ -23,7 +23,9 @@
       }
 
       body {
-        width: 376px;
+        width: 424px;
+        max-height: 600px;
+        overflow-y: auto;
         margin: 0;
         padding: 0;
         font-family: Arial, "Microsoft YaHei", sans-serif;
@@ -380,6 +382,27 @@
         border-color: #b45309;
         background: #b45309;
       }
+
+      [hidden] { display: none !important; }
+      .versions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+      .version { padding: 9px 11px; border: 1px solid var(--soft-line); border-radius: 8px; background: #fff; }
+      .version span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+      .version strong { font-size: 14px; overflow-wrap: anywhere; }
+      .connection-panel { gap: 8px; margin-bottom: 12px; }
+      .key-row { display: grid; grid-template-columns: 1fr 88px; gap: 8px; }
+      .key-row button { height: 34px; font-size: 12px; }
+      .connection-note { min-height: 17px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+      #save-feedback { color: #087443; }
+      #save-feedback:empty { display: none; }
+      #save-feedback[data-tone="error"] { color: #b42318; }
+      #save-feedback[data-tone="pending"] { color: var(--muted); }
+      .status-pill[data-state="pending"], .status-pill[data-state="empty"] { border-color: var(--line); background: var(--soft); color: var(--muted); }
+      .status-pill[data-state="error"] { border-color: #fed7aa; background: #fff7ed; color: #9a3412; }
+      .feature-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; margin-bottom: 12px; border-radius: 9px; background: #e8eef7; }
+      .feature-tabs button { height: 34px; border-color: transparent; background: transparent; color: var(--muted); font-size: 13px; }
+      .feature-tabs button[aria-selected="true"] { color: #175cd3; border-color: #d0def4; background: #fff; box-shadow: 0 1px 3px #1720330d; }
+      #collector-panel .hint { margin: 0; padding: 0; border: 0; box-shadow: none; }
+      #analytics-panel { display: block; width: 100%; height: 430px; border: 1px solid var(--soft-line); border-radius: 8px; background: #f5f7fb; }
     </style>
   </head>
   <body>
@@ -394,33 +417,38 @@
             <span class="brand-char brand-dan brand-dan-3">单</span>
           </span>
         </h1>
-        <span class="status-pill"><span class="status-dot"></span>爆单ERP</span>
+        <span id="connection-status" class="status-pill" data-state="pending" role="status">正在读取连接</span>
       </header>
 
-      <p class="hint">打开 Ozon 前台页面后会自动扫描商品，并查询 ERP 已采集状态；手动 SKU 会按需打开详情页补采。</p>
+      <div class="versions" aria-label="插件版本">
+        <div class="version"><span>已安装版本</span><strong id="installed-version">读取中</strong></div>
+        <div class="version"><span>线上版本</span><strong id="online-version">查询中</strong></div>
+      </div>
 
       <section id="plugin-update-card" class="update-card">
         <strong id="plugin-update-title">爆单ERP插件有新版本</strong>
-        <p id="plugin-update-message">请下载最新版爆单ERP插件并重新安装。</p>
+        <p id="plugin-update-message">有新版可供下载，更新后刷新 Ozon 和 ERP 页面即可使用。</p>
         <button id="plugin-update-download" type="button">下载最新版爆单ERP插件</button>
       </section>
 
-      <section class="panel">
-        <div class="section">
-          <p class="section-title">ERP 配置</p>
-
-          <label>
-            ERP 地址
-            <input id="erp-base-url" type="text" placeholder="https://erp.hjt888.xyz" />
-          </label>
-
-          <label>
-            ERP 回传密钥
-            <input id="local-plugin-token" type="password" autocomplete="off" placeholder="粘贴企业管理中生成的专属令牌" />
-          </label>
-          <div id="token-warning" class="token-warning"></div>
+      <section class="panel connection-panel" aria-label="企业连接">
+        <label for="local-plugin-token">企业专属密钥</label>
+        <div class="key-row">
+          <input id="local-plugin-token" type="password" autocomplete="off" aria-label="企业专属密钥" placeholder="粘贴 ERP 企业管理中的密钥" />
+          <button id="save" type="button">保存密钥</button>
         </div>
+        <p id="connection-detail" class="connection-note">保存密钥后自动连接 ERP。</p>
+        <p id="save-feedback" class="connection-note" role="status" aria-live="polite"></p>
+        <div id="token-warning" class="token-warning"></div>
+      </section>
 
+      <nav class="feature-tabs" role="tablist" aria-label="插件功能">
+        <button id="collector-tab" type="button" role="tab" aria-selected="true" aria-controls="collector-panel">商品采集</button>
+        <button id="analytics-tab" type="button" role="tab" aria-selected="false" aria-controls="analytics-panel">店铺分析</button>
+      </nav>
+
+      <section id="collector-panel" class="panel" role="tabpanel" aria-labelledby="collector-tab">
+        <p class="hint">打开 Ozon 商品页后自动取数；也可采集当前页或输入 SKU 补采。</p>
         <div class="section">
           <p class="section-title">采集任务</p>
 
@@ -434,8 +462,7 @@
           </div>
         </div>
 
-        <div class="actions">
-          <button id="save">保存配置</button>
+        <div class="actions single">
           <button id="collect" class="secondary">采集当前页</button>
         </div>
         <div class="actions single">
@@ -446,6 +473,7 @@
         </div>
         <div id="status"></div>
       </section>
+      <iframe id="analytics-panel" src="analytics/popup.html" title="店铺数据分析" role="tabpanel" aria-labelledby="analytics-tab" loading="lazy" hidden></iframe>
     </main>
     <script src="erp-config.js"></script>
     <script src="popup.js"></script>
