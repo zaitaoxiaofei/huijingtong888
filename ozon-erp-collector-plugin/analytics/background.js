@@ -177,7 +177,7 @@ async function getOzonCookieHeader() {
     .join('; ');
 }
 
-async function getOzonCookieInfo(tab = null) {
+async function getLegacyOzonCookieInfo(tab = null) {
   if (!chrome?.cookies?.getAll) return { header: '', companyId: '' };
   const query = { url: /^https:\/\/seller\.ozon\.ru\//.test(tab?.url || '') ? tab.url : 'https://seller.ozon.ru/' };
   if (tab?.id && chrome.cookies.getAllCookieStores) {
@@ -203,6 +203,20 @@ async function getOzonCookieInfo(tab = null) {
     ''
   ).trim();
   return { header, companyId };
+}
+
+async function getOzonCookieInfo(tab = null) {
+  if (!global.OzonSellerCookieContext?.read) return getLegacyOzonCookieInfo(tab);
+  const pageIdentity = await readSellerPageCompanyId(tab);
+  const context = await global.OzonSellerCookieContext.read(tab, { pageCompanyId: String(pageIdentity.companyId || '').trim() });
+  const conflict = context.code === 'STORE_CONTEXT_MISMATCH';
+  const cookies = conflict ? [] : (Array.isArray(context.cookies) ? context.cookies : []);
+  return {
+    header: cookies.filter(item => item?.name).map(item => `${item.name}=${item.value || ''}`).join('; '),
+    companyId: conflict ? '' : String(context.companyId || '').trim(),
+    storeId: context.storeId || '',
+    code: context.code || ''
+  };
 }
 
 function rememberPluginToken(token) {
@@ -373,6 +387,9 @@ async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
   const cookieInfo = await getOzonCookieInfo(tab);
   const pageIdentity = await readSellerPageCompanyId(tab);
   const identity = resolveSellerStoreIdentity(currentSellerCompanyId(tab?.id), cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
+  if (cookieInfo.code === 'STORE_CONTEXT_MISMATCH') {
+    return { ...identity, ok: false, code: 'identity_conflict', companyId: '', error: 'STORE_CONTEXT_MISMATCH cookie_partition' };
+  }
   return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: `STORE_CONTEXT_MISMATCH page=${pageIdentity.error}` } : identity;
 }
 
@@ -463,7 +480,7 @@ async function bindServerSideAuth(companyId, sellerTab = null, force = false) {
     if (result?.bound && !result?.stale) {
       logPanel(`后端直连授权已验证：${resolvedCompanyId}`, 'success');
     } else {
-      logPanel(`店铺 ${resolvedCompanyId} 的授权信息${result?.bound ? '已保存' : '未绑定'}，但 ECS 直连探测未通过（HTTP ${result?.last_status || '-'}）；不代表浏览器采集失败。`, 'error');
+      logPanel(`店铺 ${resolvedCompanyId} 的授权信息${result?.bound ? '已保存' : '未绑定'}，但 云端直连探测未通过（HTTP ${result?.last_status || '-'}）；不代表浏览器采集失败。`, 'error');
     }
     return result;
   } catch (error) {
@@ -560,7 +577,7 @@ async function probeServerSideAuth(companyId = '', sellerTab = null) {
   if (!response.ok || json?.success === false) throw new Error(json?.error || `HTTP ${response.status}`);
   const result = json?.data || json;
   if (!result?.ok && Number(result?.status) === 403) {
-    logPanel(`ECS 直连探测店铺 ${resolvedCompanyId || '当前店铺'} 被 Ozon 拒绝（HTTP 403）。浏览器采集需单独检查；请核对店铺身份和 Seller 登录状态。`, 'error');
+    logPanel(`云端直连探测店铺 ${resolvedCompanyId || '当前店铺'} 被 Ozon 拒绝（HTTP 403）。浏览器采集需单独检查；请核对店铺身份和 Seller 登录状态。`, 'error');
   } else {
     logPanel(`Auth probe ${result?.ok ? 'OK' : 'FAILED'} HTTP ${result?.status || '-'}`, result?.ok ? 'success' : 'error');
   }
@@ -632,25 +649,51 @@ async function findAnySellerTab(expectedStoreId = preferredSellerStoreId) {
   return tab;
 }
 
+function parseSellerNavigationTarget(targetUrl) {
+  let target;
+  try { target = new URL(targetUrl); } catch (error) { throw new Error('SELLER_NAVIGATION_TARGET_NOT_ALLOWED'); }
+  if (target.origin !== 'https://seller.ozon.ru') throw new Error('SELLER_NAVIGATION_TARGET_NOT_ALLOWED');
+  return target;
+}
+
 async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.ru/app/analytics/graphs', preferredTab = null) {
-  const tab = preferredTab || await findAnySellerTab();
-  if (tab?.id) {
-    if (tab.url !== targetUrl) await navigateSellerTab(tab.id, targetUrl, 'open_analytics');
-    panelState.sellerTab = { id: tab.id, title: tab.title || '', url: targetUrl };
-    panelState.sellerMissing = false;
+  parseSellerNavigationTarget(targetUrl);
+  let tab = preferredTab || await findAnySellerTab();
+  if (!tab?.id) tab = await chrome.tabs.create({ url: targetUrl, active: true });
+  if (!tab?.id) {
+    panelState.sellerTab = null;
+    panelState.sellerMissing = true;
     updateActionBadge();
-    return { ...tab, url: targetUrl };
+    return tab;
   }
-  const created = await chrome.tabs.create({ url: targetUrl, active: true });
-  panelState.sellerTab = created ? { id: created.id, title: created.title || '', url: targetUrl } : null;
-  panelState.sellerMissing = !created?.id;
+  const loaded = await navigateSellerTab(tab.id, targetUrl, 'open_analytics');
+  panelState.sellerTab = { id: loaded.id, title: loaded.title || '', url: loaded.url || '' };
+  panelState.sellerMissing = false;
   updateActionBadge();
-  return created;
+  return loaded;
 }
 
 async function navigateSellerTab(tabId, targetUrl, stage) {
   try {
-    return await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+    const target = parseSellerNavigationTarget(targetUrl);
+    const matchesTarget = value => {
+      try {
+        const actual = new URL(value);
+        return actual.origin === target.origin && actual.pathname.replace(/\/+$/, '') === target.pathname.replace(/\/+$/, '');
+      } catch (error) { return false; }
+    };
+    const deadline = Date.now() + 15000;
+    let tab = await chrome.tabs.get(tabId);
+    if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+    if (!matchesTarget(tab.pendingUrl) && !(tab.status === 'loading' && matchesTarget(tab.url))) {
+      await chrome.tabs.update(tabId, { url: targetUrl, active: true });
+    }
+    while (Date.now() < deadline) {
+      tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+      await sleep(250);
+    }
+    throw new Error('SELLER_NAVIGATION_TIMEOUT');
   } catch (error) {
     const detail = `SELLER_NAVIGATION_FAILED stage=${stage} tab=${tabId}: ${error?.message || error}`;
     logPanel(detail, 'error');
@@ -664,7 +707,11 @@ async function warmSellerAnalyticsPermission(tabId) {
   if (tab.url !== 'https://seller.ozon.ru/app/analytics') {
     await navigateSellerTab(tabId, 'https://seller.ozon.ru/app/analytics', 'warm_analytics');
   }
-  await waitForTabComplete(tabId, 15000);
+  if (!(await waitForTabComplete(tabId, 15000))) {
+    const detail = 'SELLER_NAVIGATION_FAILED stage=warm_analytics tab=' + tabId + ': SELLER_NAVIGATION_TIMEOUT';
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }
   await sleep(1000);
   latestAnalyticsApiByTab.delete(tabId);
   logPanel('销售漏斗页已打开，开始强制刷新以激活分析权限');
@@ -675,20 +722,22 @@ async function warmSellerAnalyticsPermission(tabId) {
     logPanel(detail, 'error');
     throw new Error(detail);
   }
-  await waitForTabComplete(tabId, 20000);
+  if (!(await waitForTabComplete(tabId, 20000))) {
+    const detail = 'SELLER_NAVIGATION_FAILED stage=reload_analytics tab=' + tabId + ': SELLER_NAVIGATION_TIMEOUT';
+    logPanel(detail, 'error');
+    throw new Error(detail);
+  }
   await sleep(2500);
   return { ok: true, status: 'script_ready', url: 'https://seller.ozon.ru/app/analytics', updated_at: Date.now() };
 }
 
 async function openSellerAnalyticsGraphsAfterWarmup(tabId, targetUrl) {
   if (!tabId) return null;
-  const current = await chrome.tabs.get(tabId);
-  const updated = current.url === targetUrl ? current : await navigateSellerTab(tabId, targetUrl, 'open_graphs');
-  await waitForTabComplete(tabId, 15000);
-  panelState.sellerTab = { id: tabId, title: updated?.title || '', url: targetUrl };
+  const loaded = await navigateSellerTab(tabId, targetUrl, 'open_graphs');
+  panelState.sellerTab = { id: loaded.id, title: loaded.title || '', url: loaded.url || '' };
   panelState.sellerMissing = false;
   updateActionBadge();
-  return { ...(updated || {}), id: tabId, url: targetUrl };
+  return loaded;
 }
 
 async function waitForTabComplete(tabId, timeoutMs = 15000) {
@@ -696,7 +745,7 @@ async function waitForTabComplete(tabId, timeoutMs = 15000) {
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) return false;
-    if (tab.status === 'complete') return true;
+    if (tab.status === 'complete' && !tab.pendingUrl) return true;
     await sleep(300);
   }
   return false;

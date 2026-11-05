@@ -4048,13 +4048,18 @@
     const routeDuration = Number(collectionRoute?.durationMs || 0) > 0
       ? `${(Number(collectionRoute.durationMs) / 1000).toFixed(1)}秒`
       : '';
-    const routeIsPool = collectionRoute?.mode === 'pool';
-    const routeText = routeIsPool
-      ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
-      : collectionRoute?.mode === 'browser_fallback'
-        ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
-        : '';
-    const routeTitle = collectionRoute?.warning || (routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
+    const routeIsBrowserPool = collectionRoute?.mode === 'browser_pool';
+    const routeIsPool = routeIsBrowserPool || collectionRoute?.mode === 'pool';
+    const routeText = routeIsBrowserPool
+      ? ['云端调度', collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
+      : collectionRoute?.mode === 'pool'
+        ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
+        : collectionRoute?.mode === 'browser_fallback'
+          ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
+          : '';
+    const routeTitle = collectionRoute?.warning || (routeIsBrowserPool
+      ? `本次由云端调度 ${collectionRoute.shopName || collectionRoute.companyId || '已接入店铺'} 的浏览器完成采集`
+      : routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
     const routeHtml = routeText
       ? `<div class="ozon-erp-collection-route ${routeIsPool ? 'is-pool' : 'is-fallback'}" title="${escapeHtml(routeTitle)}">${escapeHtml(routeText)}</div>`
       : '';
