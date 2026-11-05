@@ -28,10 +28,10 @@
         STORE_IDENTITY_UNAVAILABLE: 'Seller 店铺身份尚未完整识别，请刷新 Seller 分析页后重连',
         STORE_CONTEXT_MISMATCH: 'Seller 页面与 Cookie 店铺身份不一致，请核对当前店铺后重连',
         COLLECTOR_BROWSER_NOT_CONFIGURED: '请先保存当前企业的插件密钥后重连',
-        COLLECTOR_BROWSER_HEARTBEAT_REJECTED: `ECS 拒绝本机登记${status ? `（HTTP ${status}）` : ''}，请检查企业密钥及店铺归属后重连`,
-        COLLECTOR_BROWSER_TIMEOUT: '本机接入 ECS 超时，请检查网络后重连',
+        COLLECTOR_BROWSER_HEARTBEAT_REJECTED: `云端拒绝本机登记${status ? `（HTTP ${status}）` : ''}，请检查企业密钥及店铺归属后重连`,
+        COLLECTOR_BROWSER_TIMEOUT: '本机接入云端超时，请检查网络后重连',
         COLLECTOR_BROWSER_OPERATION_TIMEOUT: '读取 Seller 页面超时，请刷新页面后重连',
-        COLLECTOR_BROWSER_REGISTRATION_FAILED: '本机暂未接入 ECS，请检查网络与企业密钥后重连'
+        COLLECTOR_BROWSER_REGISTRATION_FAILED: '本机暂未接入云端，请检查网络与企业密钥后重连'
       };
       diagnostics.lastErrorCode = Object.hasOwn(messages, code) ? code : 'COLLECTOR_BROWSER_REGISTRATION_FAILED';
       diagnostics.lastError = messages[diagnostics.lastErrorCode];

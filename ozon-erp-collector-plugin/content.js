@@ -4051,14 +4051,14 @@
     const routeIsBrowserPool = collectionRoute?.mode === 'browser_pool';
     const routeIsPool = routeIsBrowserPool || collectionRoute?.mode === 'pool';
     const routeText = routeIsBrowserPool
-      ? ['ECS 调度', collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
+      ? ['云端调度', collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
       : collectionRoute?.mode === 'pool'
         ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
         : collectionRoute?.mode === 'browser_fallback'
           ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
           : '';
     const routeTitle = collectionRoute?.warning || (routeIsBrowserPool
-      ? `本次由 ECS 调度 ${collectionRoute.shopName || collectionRoute.companyId || '已接入店铺'} 的浏览器完成采集`
+      ? `本次由云端调度 ${collectionRoute.shopName || collectionRoute.companyId || '已接入店铺'} 的浏览器完成采集`
       : routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
     const routeHtml = routeText
       ? `<div class="ozon-erp-collection-route ${routeIsPool ? 'is-pool' : 'is-fallback'}" title="${escapeHtml(routeTitle)}">${escapeHtml(routeText)}</div>`

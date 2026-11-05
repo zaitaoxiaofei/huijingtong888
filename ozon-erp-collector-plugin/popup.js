@@ -140,11 +140,11 @@ function renderBrowserPool(diagnostics = {}) {
     SELLER_TAB_PERMISSION_DENIED: '请允许插件访问 Seller 页面，再刷新页面后重连。',
     STORE_IDENTITY_UNAVAILABLE: '尚未识别店铺，请刷新 Seller 分析页后重连。',
     STORE_CONTEXT_MISMATCH: '页面与登录店铺不一致，请核对 Seller 店铺并刷新后重连。',
-    COLLECTOR_BROWSER_HEARTBEAT_REJECTED: 'ECS 未接受登记，请检查企业连接和店铺归属后重连。',
+    COLLECTOR_BROWSER_HEARTBEAT_REJECTED: '云端未接受登记，请检查企业连接和店铺归属后重连。',
     COLLECTOR_BROWSER_SHOP_FORBIDDEN: '此 Seller 店铺不属于当前企业，请切换本企业店铺后重连。',
     TENANT_PLUGIN_AUTH_REQUIRED: '企业连接未通过，请检查上方密钥连接状态。',
-    COLLECTOR_BROWSER_TIMEOUT: '连接 ECS 超时，请稍后重连。',
-    COLLECTOR_BROWSER_CAPACITY: 'ECS 采集池繁忙，请稍后重连。'
+    COLLECTOR_BROWSER_TIMEOUT: '连接云端超时，请稍后重连。',
+    COLLECTOR_BROWSER_CAPACITY: '云端采集池繁忙，请稍后重连。'
   };
   const suppliedError = String(diagnostics.lastError || '').trim();
   const safeError = /[\u4e00-\u9fff]/.test(suppliedError)
@@ -158,7 +158,7 @@ function renderBrowserPool(diagnostics = {}) {
   fields.browserPoolStatus.dataset.state = connected ? 'connected' : reason ? 'error' : 'pending';
   fields.browserPoolStatus.textContent = connected
     ? `本机 ${registered} 公司已接入 / 服务端 ${server === null ? '待确认' : `${server} 公司可用`}`
-    : reason || (phase === 'checking' ? '正在检查 Seller 店铺与 ECS 接入' : '正在等待接入检查');
+    : reason || (phase === 'checking' ? '正在检查 Seller 店铺与云端接入' : '正在等待接入检查');
   const checkedAt = Number(diagnostics.checkedAt);
   const checkedText = checkedAt > 0 && Number.isFinite(checkedAt) && !Number.isNaN(new Date(checkedAt).getTime())
     ? new Date(checkedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '尚未检查';

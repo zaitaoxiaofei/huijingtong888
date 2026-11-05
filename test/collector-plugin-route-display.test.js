@@ -22,12 +22,12 @@ function panelFor(route) {
   return panel.innerHTML;
 }
 
-test('the real card renderer distinguishes ECS browser dispatch, legacy pool and browser fallback', () => {
+test('the real card renderer distinguishes cloud browser dispatch, legacy pool and browser fallback', () => {
   const dispatched = panelFor({ mode: 'browser_pool', shopName: '来源店铺', companyId: '1001', durationMs: 2500 });
   assert.match(dispatched, /class="ozon-erp-collection-route is-pool"/);
-  assert.match(dispatched, />ECS 调度 · 来源店铺 · 2\.5秒</);
-  assert.doesNotMatch(dispatched, /浏览器回退|ECS 直连/);
-  assert.match(panelFor({ mode: 'browser_pool', companyId: '1001' }), />ECS 调度 · 1001</);
+  assert.match(dispatched, />云端调度 · 来源店铺 · 2\.5秒</);
+  assert.doesNotMatch(dispatched, /浏览器回退|ECS|云端直连/);
+  assert.match(panelFor({ mode: 'browser_pool', companyId: '1001' }), />云端调度 · 1001</);
   const legacy = panelFor({ mode: 'pool', workerCount: 3, shopName: '旧号池', durationMs: 1000 });
   assert.match(legacy, /class="ozon-erp-collection-route is-pool"/);
   assert.match(legacy, />号池 3 · 旧号池 · 1\.0秒</);

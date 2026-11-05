@@ -166,6 +166,8 @@ background = background.replace(initialize, `const runPrepareWithoutNavigationGa
 runPrepareRequest = request => global.OzonUnifiedRuntime.withAnalyticsPreparation(() => runPrepareWithoutNavigationGate(request));
 global.OzonUnifiedAnalytics = { loaded: true };
 ${initialize}`);
+// Keep operator-facing infrastructure labels consistent with the unified popup.
+background = background.replaceAll('ECS 直连', '云端直连');
 await fs.mkdir(targetDir, { recursive: true });
 const fetchAdapter = `// Keep remote preparation calls from indefinitely holding the shared Seller tab gate.
 async function fetch(url, options = {}) {

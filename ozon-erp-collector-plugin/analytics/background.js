@@ -480,7 +480,7 @@ async function bindServerSideAuth(companyId, sellerTab = null, force = false) {
     if (result?.bound && !result?.stale) {
       logPanel(`后端直连授权已验证：${resolvedCompanyId}`, 'success');
     } else {
-      logPanel(`店铺 ${resolvedCompanyId} 的授权信息${result?.bound ? '已保存' : '未绑定'}，但 ECS 直连探测未通过（HTTP ${result?.last_status || '-'}）；不代表浏览器采集失败。`, 'error');
+      logPanel(`店铺 ${resolvedCompanyId} 的授权信息${result?.bound ? '已保存' : '未绑定'}，但 云端直连探测未通过（HTTP ${result?.last_status || '-'}）；不代表浏览器采集失败。`, 'error');
     }
     return result;
   } catch (error) {
@@ -577,7 +577,7 @@ async function probeServerSideAuth(companyId = '', sellerTab = null) {
   if (!response.ok || json?.success === false) throw new Error(json?.error || `HTTP ${response.status}`);
   const result = json?.data || json;
   if (!result?.ok && Number(result?.status) === 403) {
-    logPanel(`ECS 直连探测店铺 ${resolvedCompanyId || '当前店铺'} 被 Ozon 拒绝（HTTP 403）。浏览器采集需单独检查；请核对店铺身份和 Seller 登录状态。`, 'error');
+    logPanel(`云端直连探测店铺 ${resolvedCompanyId || '当前店铺'} 被 Ozon 拒绝（HTTP 403）。浏览器采集需单独检查；请核对店铺身份和 Seller 登录状态。`, 'error');
   } else {
     logPanel(`Auth probe ${result?.ok ? 'OK' : 'FAILED'} HTTP ${result?.status || '-'}`, result?.ok ? 'success' : 'error');
   }
