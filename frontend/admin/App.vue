@@ -35,20 +35,28 @@ let updateNotificationKey = "";
 let authExpiredNotification = null;
 
 async function syncAnalyticsPluginUpdate(status = {}) {
+  analyticsPluginUpdateSnapshot = status;
   const target = status?.analytics_plugin || status?.analyticsPlugin || null;
   if (!target?.version) return;
+  const instance = currentAnalyticsPluginIdentity();
+  if (!instance) {
+    requestAnalyticsPluginIdentity();
+    return;
+  }
   try {
-    const pluginStatus = await apiClient.get("/api/db/seller-analytics/plugin-status", {
+    const pluginStatus = await apiClient.get(`/api/db/seller-analytics/plugin-status?plugin_instance_id=${encodeURIComponent(instance.id)}`, {
       routeScoped: false,
       noCache: true
     });
-    const installedVersion = String(pluginStatus?.plugin_version || "").trim();
+    if (currentAnalyticsPluginIdentity() !== instance) return;
+    const installedVersion = instance.version || String(pluginStatus?.plugin_version || "").trim();
     const versionStatus = installedVersion
       ? await apiClient.get(`/api/system/update-status?analytics_plugin_version=${encodeURIComponent(installedVersion)}`, {
         routeScoped: false,
         noCache: true
       })
       : null;
+    if (currentAnalyticsPluginIdentity() !== instance) return;
     const update = versionStatus?.analytics_plugin;
     if (update?.update_available || update?.update_required) {
       window.dispatchEvent(new CustomEvent("app:plugin-update", {
@@ -60,6 +68,37 @@ async function syncAnalyticsPluginUpdate(status = {}) {
   } catch (error) {
     console.warn("check analytics plugin update failed", error);
   }
+}
+
+let analyticsPluginIdentity = null;
+let analyticsPluginUpdateSnapshot = {};
+
+function currentAnalyticsPluginIdentity() {
+  return analyticsPluginIdentity?.scope === currentApiCacheScope() ? analyticsPluginIdentity : null;
+}
+
+function requestAnalyticsPluginIdentity() {
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST" }, window.location.origin);
+}
+
+function handleAnalyticsPluginInstanceMessage(event) {
+  if (event.source !== window || event.origin !== window.location.origin || !authStore.isAuthenticated) return;
+  if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_INSTANCE") return;
+  const id = String(event.data.pluginInstanceId || "").trim();
+  if (!/^[0-9A-Za-z_-]{1,128}$/.test(id)) return;
+  const unified = event.data.capabilities?.collector === true && event.data.capabilities?.sellerAnalytics === true;
+  const previous = currentAnalyticsPluginIdentity();
+  if (previous?.unified && !unified) return;
+  const version = /^\d+(?:\.\d+){0,3}$/.test(String(event.data.pluginVersion || "")) ? String(event.data.pluginVersion) : "";
+  if (previous?.id === id && previous.version === version && previous.unified === unified) return;
+  analyticsPluginIdentity = { id, version, unified, scope: currentApiCacheScope() };
+  void syncAnalyticsPluginUpdate(analyticsPluginUpdateSnapshot);
+}
+
+function resetAnalyticsPluginIdentity() {
+  analyticsPluginIdentity = null;
+  window.dispatchEvent(new CustomEvent("app:plugin-update-clear", { detail: { type: "analytics_plugin" } }));
+  if (authStore.isAuthenticated) requestAnalyticsPluginIdentity();
 }
 
 useGlobalImagePreviewDismiss();
@@ -346,6 +385,7 @@ function scheduleInitialUpdateCheck() {
 }
 
 function resetUpdateEventStreamForAuthScope() {
+  resetAnalyticsPluginIdentity();
   inventoryRequestNotice?.close();inventoryRequestNotice=null;
   closeUpdateEventStream();
   resetUpdateEventBackoff();
@@ -367,10 +407,12 @@ function consumeLoginWelcome() {
 }
 
 onMounted(async () => {
+  window.addEventListener("message", handleAnalyticsPluginInstanceMessage);
   window.addEventListener("app:auth-expired", handleAuthExpired);
   window.addEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.addEventListener("storage", handleUpdateStorageChange);
   await authStore.bootstrap();
+  requestAnalyticsPluginIdentity();
   consumeLoginWelcome();
   scheduleInitialUpdateCheck();
 });
@@ -388,6 +430,8 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  analyticsPluginIdentity = null;
+  window.removeEventListener("message", handleAnalyticsPluginInstanceMessage);
   inventoryRequestNotice?.close();inventoryRequestNotice=null;
   window.removeEventListener("app:auth-expired", handleAuthExpired);
   window.removeEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);

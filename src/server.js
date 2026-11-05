@@ -183,6 +183,10 @@ async function resolveDownloadArtifactPath(filename) {
     error.statusCode = 400;
     throw error;
   }
+  const pluginRelease = globalUpdateStatus().plugin;
+  if (pluginRelease.unified === true && ["ozon-baodan-erp-plugin.zip", "ozon-erp-collector-plugin.zip", "ozon-seller-analytics-plugin.zip"].includes(normalized)) {
+    return resolveDownloadArtifactPath(pluginRelease.package_name);
+  }
   const aliasNames = normalized === "ozon-erp-collector-plugin.zip"
     ? ["ozon-erp-collector-plugin.zip", "ozon-baodan-erp-plugin.zip"]
     : normalized === "ozon-erp-collector-plugin.rar"

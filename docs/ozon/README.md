@@ -11,6 +11,7 @@ This directory records Ozon seller API behavior that affects local sync logic.
 - [customer-message-automation-design.md](./customer-message-automation-design.md): unified Ozon Push webhook, shop matching, delayed customer messages, send records, and safety gates.
 - [promotions.md](./promotions.md): promotion cleanup identity, unified-price compatibility, automatic enrollment, and verification policy.
 - [collector-data-sources.md](./collector-data-sources.md): storefront monthly-sales endpoints, browser-session workers, multi-shop dispatch, and verification boundaries.
+- [unified-plugin.md](./unified-plugin.md): unified product/shop analytics installation, one-key connection, instance ownership, packaging, and compatibility.
 
 ## Stock endpoints
 

@@ -3,7 +3,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { randomUUID } from 'node:crypto';
+import { webcrypto } from 'node:crypto';
 import test from 'node:test';
 import { CollectorBrowserPool } from '../src/services/collector-browser-pool.js';
 import { createCollectorBrowserPoolHandler } from '../src/server/collector-browser-pool-route.js';
@@ -49,11 +49,12 @@ test('actual browser factory and HTTP coordinator on 8788 dispatch two shops and
     { id: 2, company: '1002', url: 'https://seller.ozon.ru/app/analytics/graphs' },
     { id: 3, company: '1001', url: 'https://seller.ozon.ru/app/products' }
   ];
-  const makeBrowser = () => {
+  const makeBrowser = async () => {
     const event = () => ({ addListener() {}, removeListener() {} });
     const chrome = {
       runtime: { id: 'same-extension-id-across-profiles', lastError: null, getManifest: () => ({ version: '1.4.39' }), onMessage: event(), onInstalled: event(), onStartup: event() },
       alarms: { create() {}, onAlarm: event() },
+      webRequest: { onBeforeSendHeaders: event(), onHeadersReceived: event() },
       storage: { local: { get: async () => stored, set: async (value) => Object.assign(stored, value) } },
       tabs: {
         onRemoved: event(), onUpdated: event(), query: async () => tabs,
@@ -87,23 +88,39 @@ test('actual browser factory and HTTP coordinator on 8788 dispatch two shops and
       } }
     };
     const context = vm.createContext({
-      chrome, URL, AbortController, crypto: { randomUUID }, console,
+      chrome, URL, AbortController, crypto: webcrypto, TextEncoder, console,
       setTimeout(callback, delay) { return delay === 0 ? { suppressedStartup: true } : setTimeout(callback, delay === 1000 ? 10 : loseCreateResponse && delay === 15000 ? 30 : delay); },
       clearTimeout(timer) { if (!timer?.suppressedStartup) clearTimeout(timer); },
       fetch: async (url, options) => {
+        if (!url.startsWith(`${base}/api/local-plugin/collector-browser-pool/`)) {
+          assert.ok(url.startsWith(`${base}/api/local-plugin/plugin/status`) || url.startsWith(`${base}/api/local-plugin/seller-analytics/`));
+          return { ok: true, status: 200, json: async () => ({ success: true, data: { connected: true, app: 'ozon-erp', tenantId: 'tenant-a', bound: false, last_status: 403 } }) };
+        }
         assert.ok(url.startsWith(`${base}/api/local-plugin/collector-browser-pool/`));
         received.push({ url, body: options.body ? JSON.parse(options.body) : null });
         return fetch(url, options);
       }
     });
-    context.importScripts = (...files) => files.forEach((file) => vm.runInContext(readFileSync(`ozon-erp-collector-plugin/${file}`, 'utf8'), context));
+    context.chrome = undefined;
+    vm.runInContext(readFileSync('ozon-erp-collector-plugin/unified-config.js', 'utf8'), context);
+    context.chrome = chrome;
+    Object.assign(context.OzonUnifiedConfig, context.OzonUnifiedConfig.create({ chrome, fetchImpl: context.fetch, baseUrl: base }));
+    context.OzonUnifiedConfig.attach();
+    await context.OzonUnifiedConfig.refresh(true);
+    context.importScripts = (...files) => files.forEach((file) => {
+      vm.runInContext(readFileSync(`ozon-erp-collector-plugin/${file}`, 'utf8'), context);
+      if (file === 'erp-config.js') {
+        context.OzonErpCollectorConfig.DEFAULT_ERP_BASE_URL = base;
+        context.OzonErpCollectorConfig.normalizeErpBaseUrl = () => base;
+      }
+    });
     vm.runInContext(readFileSync('ozon-erp-collector-plugin/background.js', 'utf8'), context);
     const client = vm.runInContext('collectorBrowserPool', context);
     client.stop();
     const collect = vm.runInContext('collectSellerOnlySkusToCollectedProducts', context);
     return { client, collect };
   };
-  const first = makeBrowser();
+  const first = await makeBrowser();
   await first.client.tick();
   assert.equal(pool.status('tenant-a').available_workers, 2);
   const originalInstance = await first.client.instanceId();
@@ -119,7 +136,7 @@ test('actual browser factory and HTTP coordinator on 8788 dispatch two shops and
   assert.deepEqual(batchId.skus, ['9001', '9002']);
   assert.equal(progress.filter((item) => !item.partial).length, 0);
   assert.ok(progress.every((item) => item.product.soldCount === 12));
-  const restarted = makeBrowser();
+  const restarted = await makeBrowser();
   assert.equal(await restarted.client.instanceId(), originalInstance);
   await restarted.client.tick();
   assert.equal(ozon.filter((item) => item.type === 'sales').length, 2);

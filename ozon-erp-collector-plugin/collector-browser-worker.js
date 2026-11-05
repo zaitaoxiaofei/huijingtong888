@@ -138,10 +138,10 @@
       }
     }
 
-    async function execute(registeredWorker, task) {
+    async function execute(registeredWorker, task, releaseTab = () => {}) {
       const worker = { ...registeredWorker, tab: { ...registeredWorker.tab }, context: { ...registeredWorker.context } };
       const companyKey = `${worker.context.erpBaseUrl}:${worker.context.tenantId}:${worker.companyId}`;
-      if (activeCompanies.has(companyKey)) return;
+      if (activeCompanies.has(companyKey)) { releaseTab(); return; }
       activeCompanies.add(companyKey);
       const expiresAt = Date.parse(task.lease_expires_at || '');
       const report = async (phase, fields = {}, warnings = [], error = '', status = 0) => {
@@ -192,6 +192,7 @@
         await report('failed', {}, [], code, status).catch(() => {});
       } finally {
         activeCompanies.delete(companyKey);
+        releaseTab();
       }
     }
 
@@ -215,8 +216,18 @@
               worker.heartbeatAt = Date.now();
             }
             if (activeCompanies.has(companyKey)) continue;
-            const response = await api(context, '/claim', { worker_id: worker.id, company_id: worker.companyId });
-            if (response.task) { claimed = true; void execute(worker, response.task); }
+            let releaseTab = deps.coordination ? deps.coordination.tryAcquireCollectorTab(worker.tab.id) : () => {};
+            if (!releaseTab) continue;
+            try {
+              const response = await api(context, '/claim', { worker_id: worker.id, company_id: worker.companyId });
+              if (response.task) {
+                claimed = true;
+                void execute(worker, response.task, releaseTab);
+                releaseTab = null;
+              }
+            } finally {
+              releaseTab?.();
+            }
           } catch (error) {
             if ([401, 403, 409, 429].includes(Number(error?.status))) worker.cooldownUntil = Date.now() + 60000;
           }
