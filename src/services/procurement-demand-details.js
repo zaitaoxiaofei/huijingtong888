@@ -7,6 +7,8 @@ import {loadOrderProcurementCoverage,invalidateOrderProcurementCoverage} from '.
 import {calculateLocalInventorySafety} from './inventory-flow-summary-model.js';
 import {validateFlowSettings,whole} from './inventory-flow-rules.js';
 import {classifyOrderLogistics} from './order-logistics-classification.js';
+import {readDemandCancellationEvents,demandCancellationRevision} from './procurement-demand-cancellation.js';
+import {activeDemandCancellations,cancelledOrderPurchase} from '../shared/procurement-demand-cancellation.js';
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 const parse=v=>typeof v==='string'?JSON.parse(v):v||{};
 
@@ -23,12 +25,13 @@ export function createProcurementDemandDetails({query=mysqlQuery,transaction=wit
   const coverage=await loadOrderProcurementCoverage(query,'',{fresh:true,productId:id,tenantId:scope.id});
   const [state]=await workflow.batch([id],scope.id,{fresh:true,coverage,cache:false});
   const all=[...coverage.values()].flatMap(o=>(o.items||[]).filter(i=>Number(i.product_id)===id).map(i=>({...i,order_id:o.order_id,ordered_at:o.ordered_at,transport_at:o.transport_at,needs_fulfillment:o.needs_fulfillment,entered_transport:o.entered_transport,stock_location:o.stock_location})));
+  const cancellationEvents=await readDemandCancellationEvents(query,scope.id,[id]),cancellations=activeDemandCancellations(cancellationEvents);
   const open=all.filter(i=>i.needs_fulfillment&&i.stock_location!=='FBP'),itemIds=[...new Set(open.map(i=>Number(i.order_item_id)))];
   const metadata=itemIds.length?await query(`SELECT oi.id AS order_item_id,o.id AS order_id,o.posting_number,o.ordered_at,o.status,s.name AS shop_name,oi.ozon_sku,oi.ozon_name,oi.ozon_image_url,om.note AS manual_note,raw.raw_json
     FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id AND ${inventoryTenantSql(scope,'s')}
     LEFT JOIN order_marks om ON om.order_id=o.id LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
     WHERE oi.id IN (${itemIds.map(()=>'?').join(',')})`,itemIds):[];
-  const orders=open.map(i=>{const row=metadata.find(m=>Number(m.order_item_id)===Number(i.order_item_id));if(!row)return null;const {raw_json,...safe}=row;return{...safe,quantity:i.quantity,stock_quantity:i.stock_quantity,incoming_quantity:i.incoming_quantity,shortage_quantity:i.shortage_quantity,logistics:classifyOrderLogistics({raw_json}).logistics_display_name||'物流渠道待核对'};}).filter(Boolean);
+  const orders=open.map(i=>{const row=metadata.find(m=>Number(m.order_item_id)===Number(i.order_item_id));if(!row)return null;const {raw_json,...safe}=row;return{...safe,quantity:i.quantity,stock_quantity:i.stock_quantity,incoming_quantity:i.incoming_quantity,shortage_quantity:i.shortage_quantity,quantity_needs_review:Boolean(i.quantity_needs_review),...cancelledOrderPurchase(i,id,cancellations),logistics:classifyOrderLogistics({raw_json}).logistics_display_name||'物流渠道待核对'};}).filter(Boolean);
   const records=await query('SELECT product_id,settings_json,revision,updated_by,updated_at FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN(0,?)',[scope.id,id]);
   const defaults=parse(records.find(r=>!Number(r.product_id))?.settings_json),own=records.find(r=>Number(r.product_id)===id);
   const settings=validateFlowSettings({...defaults,...parse(own?.settings_json),holidays:defaults.holidays||[]});
@@ -49,6 +52,8 @@ export function createProcurementDemandDetails({query=mysqlQuery,transaction=wit
     WHERE poi.product_id=? AND ${inventoryTenantSql(scope,'poi')} AND po.status NOT IN('cancelled','pending_purchase') AND po.purchased_at IS NOT NULL
     ORDER BY po.purchased_at DESC,poi.id DESC LIMIT 50`,[id,id]);
   return{product:{id,name:product.name,inventory_number:product.inventory_number,updated_at:product.updated_at},state,orders,
+   cancellation_revision:demandCancellationRevision(all.filter(row=>row.stock_location!=='FBP'),cancellations,id),
+   cancellations_history:cancellationEvents.map(event=>({id:event.id,person_name:event.person_name,created_at:event.created_at,...parse(event.detail_json)})),
    purchase_history:{rows:history.map(({record_count,total_purchased,...row})=>row),total:Number(history[0]?.record_count||0),purchased_quantity:Number(history[0]?.total_purchased||0)},
    reports:reports.map(r=>({types:parse(r.detail_json).types,cause:parse(r.detail_json).cause,note:parse(r.detail_json).note,created_at:r.created_at,person_name:r.person_name})),
    safety:{...safety,updated_by_name:people[0]?.name||'',updated_at:own?.updated_at,revision:Number(own?.revision||0),holidays:settings.holidays,override_note:settings.local_safety_override_note},

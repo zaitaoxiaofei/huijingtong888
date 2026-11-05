@@ -21,6 +21,8 @@ import { workflowCache, workflowRevision, inventoryWorkflowChanges } from './inv
 import { hasPermission } from '../shared/permissions.js';
 import { calculateLocalInventorySafety, buildInventoryFlowSummary } from './inventory-flow-summary-model.js';
 import { validateFlowSettings } from './inventory-flow-rules.js';
+import {readDemandCancellationEvents} from './procurement-demand-cancellation.js';
+import {activeDemandCancellations,applyDemandCancellations} from '../shared/procurement-demand-cancellation.js';
 
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 export function createInventoryWorkflowService({ledger,receiveRecords,previewReceipts,query=mysqlQuery,transaction=withMysqlTransaction,forecast=inventoryFlow.detail,broadcast=broadcastGlobalEvent}={}){
@@ -33,7 +35,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
     const missing=ids.filter(id=>fresh||!(workflowCache.get(`${prefix}${scope.id}:${id}`)?.expires>Date.now()));
     if(missing.length){
       const placeholders=missing.map(()=>'?').join(',');
-      const [coverage,settingsRows,incoming,sourceRows,stocktakes,composition]=await Promise.all([
+      const [coverage,settingsRows,incoming,sourceRows,stocktakes,composition,cancellationEvents]=await Promise.all([
         providedCoverage||loadOrderProcurementCoverage(query,'',{productIds:missing,tenantId:scope.id,includeLegacyTenantNull:scope.isDefault,localStateOnly:localOnly}),
         query(`SELECT product_id,settings_json FROM inventory_flow_settings WHERE tenant_id=? AND product_id IN (0,${placeholders})`,[scope.id,...missing]),
         localOnly?Promise.resolve([]):query(`SELECT poi.product_id,SUM(ir.quantity) AS quantity FROM purchase_order_items poi JOIN purchase_orders po ON po.id=poi.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
@@ -44,8 +46,10 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
           JOIN products p ON p.id=a.product_id AND ${inventoryTenantSql(scope,'p')}
           WHERE a.action_type='stocktake' AND a.product_id IN (${placeholders})
           AND NOT EXISTS(SELECT 1 FROM procurement_ledger_actions newer WHERE newer.product_id=a.product_id AND newer.action_type='stocktake' AND newer.id>a.id)`,missing),
-        localOnly?Promise.resolve(null):loadInventoryComposition(query,scope)
+        localOnly?Promise.resolve(null):loadInventoryComposition(query,scope),
+        localOnly?Promise.resolve([]):readDemandCancellationEvents(query,scope.id,missing)
       ]);
+      const cancellations=activeDemandCancellations(cancellationEvents);
       const {requests,applications:applicationRows}=sourceRows;
       const parse=row=>typeof row?.settings_json==='string'?JSON.parse(row.settings_json):row?.settings_json||{};
       const defaults=parse(settingsRows.find(row=>!Number(row.product_id)));
@@ -73,7 +77,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
         const rootIds=[...new Set(open.filter(o=>Number(o.root_product_id)!==id).map(o=>Number(o.root_product_id)).filter(Boolean))];
         const relatedBundles=(composition?.affected(id)||[]).map(bundle=>({...bundle,has_open_demand:rootIds.includes(Number(bundle.id))}));
         for(const item of open){const root=Number(item.root_product_id);if(root&&root!==id&&!relatedBundles.some(b=>Number(b.id)===root))relatedBundles.push({id:root,name:item.root_product_name,inventory_number:item.root_inventory_number,per_set_quantity:Number(item.quantity)/Math.max(1,Number(item.root_quantity)),has_open_demand:true});}
-        const policy={...inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),applications,affected_bundles:relatedBundles};
+        const policy={...applyDemandCancellations(inventoryWorkflow(local,{applications,forecast:fbpForecasts.get(id),requests:requestsByProduct.get(id)||[]}),orders,id,cancellations),applications,affected_bundles:relatedBundles};
         // A local-only snapshot has no procurement-allocation evidence. Expose quantities only.
         const result=localOnly?{product_id:id,physical_recorded:policy.physical_recorded,safety_target:policy.safety_target,order_quantity:local.open_order_demand,locked_quantity:local.fbp_reserved,physical:policy.physical,free:policy.free,order_demand:policy.order_demand,safety:policy.safety,locked:policy.locked}:{...policy,product_id:id};
         values.set(id,result);

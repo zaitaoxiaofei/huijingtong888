@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
 import {procurementDemandDetails} from '../../services/procurement-demand-details.js';
+import {procurementDemandCancellation} from '../../services/procurement-demand-cancellation.js';
 import {procurementArrivals} from '../../services/procurement-arrivals.js';
 import {procurementDemandRequest} from '../../services/procurement-demand-request.js';
 import { createFbpSupplyFeedback } from '../../services/fbp-supply-feedback.js';
@@ -72,6 +73,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/inventory-workflow/purchase-bundle":async req=>services.reviewPurchaseBundle(await readJson(req),req._session),
     "POST /api/inventory-workflow/purchase-arrivals":async req=>procurementArrivals.confirm(await readJson(req),req._session),
     "POST /api/inventory-workflow/demand-request":async req=>procurementDemandRequest(await readJson(req),req._session),
+    "POST /api/inventory-workflow/cancel-demand":async req=>procurementDemandCancellation(await readJson(req),req._session),
     "GET /api/inventory-workflow/alerts": async (req,url)=>{
       const session=await authorizeBusinessTaskSession(req._session);assertBusinessTaskPermission(session,'inventory.read');
       const params=Object.fromEntries(url.searchParams);

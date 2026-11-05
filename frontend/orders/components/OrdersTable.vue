@@ -644,7 +644,7 @@ function procurementTimeText(row) {
             </InventoryIdentity>
             <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
               <div class="inventory-compact-heading">
-                <strong>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
+                <strong><el-tag size="small" type="info" class="inventory-fallback-type">类型待核</el-tag>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
                 <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
               </div>
               <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
@@ -914,6 +914,7 @@ function procurementTimeText(row) {
 .inventory-compact-heading { display: flex; justify-content: space-between; gap: 8px; width: 100%; font-size: inherit; }
 .inventory-compact-heading strong,.inventory-compact-name { font-size: inherit; font-weight: 600; }
 .inventory-compact-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inventory-fallback-type { margin-right: 6px; vertical-align: middle; }
 .inventory-compact-heading span { flex-shrink: 0; font-weight: 600; white-space: nowrap; }
 .inventory-compact-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inventory-compact small { color: #606266; line-height: 1.6; }
