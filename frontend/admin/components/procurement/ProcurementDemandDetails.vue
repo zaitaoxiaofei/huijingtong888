@@ -1,5 +1,5 @@
 <script setup>
-import {computed,onBeforeUnmount,reactive,ref,watch} from 'vue';
+import {computed,defineAsyncComponent,onBeforeUnmount,reactive,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {useAuthStore} from '../../stores/auth.js';
@@ -8,8 +8,11 @@ import {hasPermission} from '../../../../src/shared/permissions.js';
 import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 import {flowLeadDays} from '../../../../src/services/inventory-flow-rules.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
+const OrderNotes=defineAsyncComponent(()=>import('./ProcurementOrderNotesDialog.vue'));
 const props=defineProps({productId:Number,initialTab:{type:String,default:'orders'}}),emit=defineEmits(['changed','track']);
 const auth=useAuthStore(),tab=ref(props.initialTab),data=ref(null),loading=ref(false),error=ref(''),saving=ref(false);
+const editingOrder=ref(0);
+const canNote=computed(()=>['orders.manage','packing','procurement','inventory.write'].some(permission=>hasPermission(auth.user,permission)));
 const form=reactive({system:true,quantity:0,note:'',production:7,shipping:2});let version=0,controller;
 const canEdit=computed(()=>hasPermission(auth.user,'inventory.write')||hasPermission(auth.user,'procurement'));
 const canViewCosts=computed(()=>hasPermission(auth.user,'procurement'));
@@ -32,7 +35,8 @@ async function save(){
  try{await apiClient.post('/api/inventory-workflow/local-safety',{product_id:props.productId,quantity:form.system?null:form.quantity,note:form.note,revision:data.value.safety.revision,production_days:form.production,local_shipping_days:form.shipping,expected_product_updated_at:data.value.product.updated_at});if(scope!==currentApiCacheScope())return;ElMessage.success('本地保障已保存，其他两类真实需求保持独立');await load();emit('changed',data.value?.state);}
  catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{saving.value=false;}
 }
-watch(()=>props.productId,load,{immediate:true});onBeforeUnmount(()=>{version++;controller?.abort();});
+function noteSaved(event){for(const row of data.value?.orders||[])if(Number(row.order_id)===event.orderId)row.manual_note=event.note;}
+watch(()=>props.productId,()=>{editingOrder.value=0;void load();},{immediate:true});onBeforeUnmount(()=>{version++;controller?.abort();});
 </script>
 <template>
  <div v-loading="loading" class="procurement-demand-detail">
@@ -46,7 +50,7 @@ watch(()=>props.productId,load,{immediate:true});onBeforeUnmount(()=>{version++;
      <el-table-column label="订单与店铺" min-width="210"><template #default="{row}"><b>{{row.posting_number}}</b><p>{{row.shop_name}}</p><small>{{row.logistics}}</small></template></el-table-column>
      <el-table-column label="下单时间" min-width="175"><template #default="{row}">{{time(row.ordered_at)}}</template></el-table-column>
      <el-table-column label="货源覆盖" min-width="155"><template #default="{row}">现货 {{row.stock_quantity??0}} 件<p>采购在途 {{row.incoming_quantity??0}} 件</p><strong class="gap">缺 {{row.shortage_quantity??0}} 件</strong></template></el-table-column>
-     <el-table-column label="人工备注" min-width="180"><template #default="{row}">{{row.manual_note||'暂无人工备注'}}</template></el-table-column>
+     <el-table-column label="人工备注" min-width="220"><template #default="{row}"><p v-if="row.manual_note" class="manual-order-note">{{row.manual_note}}</p><el-button v-if="canNote" plain size="small" @click="editingOrder=Number(row.order_id)">{{row.manual_note?'编辑备注':'添加备注'}}</el-button></template></el-table-column>
     </el-table>
    </el-tab-pane>
    <el-tab-pane label="本地保障规则" name="safety">
@@ -80,8 +84,10 @@ watch(()=>props.productId,load,{immediate:true});onBeforeUnmount(()=>{version++;
     <h3>待到货及待验收批次</h3><p>未关闭采购 {{openBatches.length}} 个批次；确认到货后进入“已到货待验收”，验收入库后才增加本地实物。</p><el-table :data="data.batches" border><el-table-column label="采购单" min-width="180"><template #default="{row}">{{row.order_no||`采购批次 #${row.id}`}}</template></el-table-column><el-table-column label="剩余待验收" width="130"><template #default="{row}">{{row.quantity}} 件</template></el-table-column><el-table-column label="采购时间" min-width="180"><template #default="{row}">{{time(row.purchased_at)}}</template></el-table-column><el-table-column label="状态" min-width="160"><template #default="{row}">{{row.received_at?'已到货待验收':'采购未完成 · 待到货'}}</template></el-table-column></el-table></el-tab-pane>
   </el-tabs>
   <div v-if="activeReports.length" class="demand-reports"><h3>本类需求的补充说明</h3><div v-for="(report,index) in activeReports" :key="index"><b>{{PROCUREMENT_GAP_CAUSES[report.cause]||report.cause}}</b> · {{report.person_name||'历史人员待核'}} · {{time(report.created_at)}}<p>{{report.note}}</p></div></div>
+  <OrderNotes v-if="editingOrder" :model-value="true" :product-id="productId" :order-id="editingOrder" @update:model-value="value=>{if(!value)editingOrder=0;}" @saved="noteSaved"/>
  </div>
 </template>
 <style scoped>
+.manual-order-note{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 8px}
 .procurement-demand-detail{min-height:220px}.detail-heading{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-bottom:20px}.order-product{display:flex;gap:12px;align-items:center;min-height:100px}.order-product>div{display:grid;gap:8px}.order-product small{color:var(--el-text-color-secondary)}.gap{color:var(--el-color-danger)}.safety-cycle-fields{display:flex;gap:18px;flex-wrap:wrap}.safety-editor{max-width:620px;margin-top:24px;padding:20px;background:var(--el-fill-color-extra-light);border-radius:8px}
 </style>

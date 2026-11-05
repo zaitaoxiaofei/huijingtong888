@@ -36,9 +36,9 @@ test('purchase queue records 80 of 600 as arrived, receives only 80, and leaves 
   await page.goto('http://localhost:8788/admin.html');await page.getByRole('button',{name:'确认到货',exact:true}).click();
   const arriving=page.getByRole('dialog',{name:'批量确认采购到货',exact:true});await arriving.waitFor();
   await arriving.getByRole('spinbutton',{name:'批次 10 到货数量',exact:true}).fill('80');
-  await arriving.locator('.purchase-quantity-difference .el-select').click();await page.getByRole('option',{name:'分批到货，余量继续待到货',exact:true}).click();
-  await arriving.getByRole('textbox',{name:'批次 10 数量差异原因',exact:true}).fill('本次只收到第一箱80件');
-  await arriving.getByPlaceholder('填写这些批次的到货位置或签收说明').fill('第一箱已送到仓库');
+  assert.equal(await arriving.locator('.purchase-quantity-difference .el-select').count(),0);
+  assert.equal(await arriving.getByRole('textbox',{name:'批次 10 数量差异原因',exact:true}).inputValue(),'');
+  assert.equal(await arriving.getByPlaceholder('到货位置或签收说明（选填）').inputValue(),'');
   await arriving.getByText('本次 80 件，剩余 520 件继续采购待到货；采购总数和金额不变。',{exact:true}).waitFor();
   await fs.mkdir('.verification',{recursive:true});await page.screenshot({path:'.verification/partial-arrival-80-of-600.png',fullPage:true,animations:'disabled'});
   await arriving.getByRole('button',{name:'确认批量到货',exact:true}).click();await arriving.getByText(/已完成 1 \/ 1 项/).waitFor();
@@ -58,7 +58,7 @@ test('purchase queue records 80 of 600 as arrived, receives only 80, and leaves 
   await batch.locator('.purchase-quantity-difference .el-select').click();await page.getByRole('option',{name:'原采购总数录错，先更正采购记录',exact:true}).click();
   await batch.getByRole('button',{name:'核对并更正采购记录',exact:true}).waitFor();const receiptCount=requests.filter(r=>r.path==='/api/inventory-workflow/receipts').length;
   await batch.getByRole('button',{name:'核对数量，查看入库影响',exact:true}).click();await batch.getByText('数量不一致时，请选择分批到货保留余量；采购总数录错请先更正采购记录',{exact:true}).waitFor();assert.equal(requests.filter(r=>r.path==='/api/inventory-workflow/receipts').length,receiptCount);
-  await batch.locator('.purchase-quantity-difference .el-select').click();await page.getByRole('option',{name:'分批到货，余量继续待到货',exact:true}).click();await batch.getByRole('textbox',{name:'批次 12 数量差异原因',exact:true}).fill('后续520件另发');
+  await batch.locator('.purchase-quantity-difference .el-select').click();await page.getByRole('option',{name:'分批到货，余量继续待到货',exact:true}).click();await batch.getByRole('button',{name:'核对数量，查看入库影响',exact:true}).click();await batch.getByText('部分入库请填写未收部分的原因',{exact:true}).waitFor();assert.equal(requests.filter(r=>r.path==='/api/inventory-workflow/receipts').length,receiptCount);await batch.getByRole('textbox',{name:'批次 12 数量差异原因',exact:true}).fill('后续520件另发');
   await batch.getByRole('button',{name:'核对数量，查看入库影响',exact:true}).click();await batch.getByRole('button',{name:'确认批量入库',exact:true}).click();await batch.getByText(/已完成 1 \/ 1 项/).waitFor();await batch.getByRole('button',{name:'关闭',exact:true}).click();
   assert.equal(records.find(r=>r.id===13).quantity,520);assert.equal(records.find(r=>r.id===13).received_at,null);assert.equal(stock,160);assert.deepEqual(errors,[]);
  }finally{await browser?.close();await fs.rm(output,{recursive:true,force:true});}

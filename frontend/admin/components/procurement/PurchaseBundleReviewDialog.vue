@@ -26,7 +26,7 @@ async function save(){
   const input=totalInput();try{allocateBundlePurchaseTotal(context.value,input);}catch(e){return ElMessage.warning(e.message);}
   const summary=form.mode==='whole'?`完整套装 ${input.set_quantity} 套`:`${selected.value.length} 项配件，共 ${selected.value.reduce((n,i)=>n+Number(i.quantity),0)} 件`;
   const correction=changedAmount.value?`原记录总费用 ¥${originalAmount.value.toFixed(4)}，本次改为 ¥${input.total_amount.toFixed(4)}；请确认实际凭证，退款另走采购对账。`:`总费用 ¥${input.total_amount.toFixed(4)}。`;
-  try{await ElMessageBox.confirm(`确认实际购买了${summary}？${correction}费用由系统自动分摊，保存后仍按实收数量验收入库。`,'确认采购内容',{type:'warning',confirmButtonText:'确认保存'});}catch{return;}
+  try{await ElMessageBox.confirm(`确认实际购买了${summary}？${correction}费用由系统自动分摊，保存后仍按实收数量验收入库。`,'核对套装采购内容',{type:'warning',confirmButtonText:'确认保存'});}catch{return;}
   submitted.value={id:props.inboundId,revision:context.value.revision,request_key:requestKey.value,allocation_mode:'total',...input,note:form.note.trim()||`确认实际采购：${summary}，总费用 ${input.total_amount} 元`,arrived:form.arrived,allocation_confirmed:true,confirm_amount_change:changedAmount.value};
  }
  const scope=currentApiCacheScope();busy.value=true;error.value='';
@@ -35,8 +35,9 @@ async function save(){
 watch(()=>props.inboundId,load,{immediate:true});onBeforeUnmount(()=>{disposed=true;++version;});
 </script>
 <template>
- <el-dialog v-model="visible" title="确认历史采购内容" width="min(920px,96vw)" append-to-body :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!busy">
+ <el-dialog v-model="visible" title="核对套装采购内容" width="min(920px,96vw)" append-to-body :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!busy">
   <section v-loading="loading" class="bundle-review">
+   <el-alert title="仅历史按整套登记、尚未明确实际配件的采购批次需要核对；核对完成后才能确认到货或验收入库。" type="info" :closable="false"/>
    <el-alert v-if="error" :title="error" type="error" :closable="false"/>
    <template v-if="context">
     <p>原批次 #{{inboundId}} · {{context.product.name}} · 原登记 {{context.batch.quantity}} 套 · 总费用 ¥{{originalAmount.toFixed(4)}}</p>

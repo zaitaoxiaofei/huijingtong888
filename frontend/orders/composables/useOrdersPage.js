@@ -446,12 +446,30 @@ export function useOrdersPage() {
   const handleAuthStorageChange = (event) => {
     if (["authToken", "baodanAuthUser"].includes(event.key)) ensureOrdersViewScope();
   };
+  const handleCollaborationNoteSaved = (event) => {
+    if (event.detail?.scope !== currentApiCacheScope()) return;
+    window.clearTimeout(ordersMetaTimer);
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    ordersMetaAbort.value?.abort();
+    ordersLoadToken.value += 1;
+    ordersMetaRequestKey.value = '';
+    loading.value = false;
+    if (vm.rows.some(row => row.inventory_refresh_pending)) {
+      inventoryRefreshFailed.value = true;
+      inventoryRefreshNotice.value = '备注已保存，请重试库存刷新核对最新数量。';
+    }
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+  };
   window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
   window.addEventListener("storage", handleAuthStorageChange);
+  window.addEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   onScopeDispose(() => {
     abortOrderReads();
     window.removeEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
     window.removeEventListener("storage", handleAuthStorageChange);
+    window.removeEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   });
 
   async function loadOrdersMeta(filtersSnapshot) {

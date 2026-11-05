@@ -12,11 +12,11 @@ const arriving=computed(()=>props.status==='open'),done=computed(()=>groups.valu
 let version=0,disposed=false,scope='';
 const current=token=>!disposed&&token===version&&scope===currentApiCacheScope()&&visible.value;
 const unit=row=>row.is_bundle?'套':row.components?.[0]?.stock_unit||'件';
-const arrivalNote=row=>[note.value.trim(),row.actual!==Number(row.quantity)?`分批到货，剩余 ${Number(row.quantity)-row.actual} 件继续待到货：${row.reason.trim()}`:''].filter(Boolean).join('；');
+const arrivalNote=row=>[note.value.trim(),row.actual!==Number(row.quantity)?`分批到货，本次 ${row.actual} 件，剩余 ${Number(row.quantity)-row.actual} 件继续待到货`:'',row.reason.trim()].filter(Boolean).join('；');
 const arrivalQuantity=group=>Number(group.result?.quantity??group.rows.reduce((sum,row)=>sum+Number(row.actual),0));
 const arrivalRemaining=group=>Number(group.result?.remaining_quantity??group.rows.reduce((sum,row)=>sum+Number(row.quantity)-Number(row.actual),0));
 function load(){
- ++version;scope=currentApiCacheScope();entries.value=props.rows.map(row=>({...row,actual:Number(row.quantity),reason:'',difference_kind:''}));groups.value=[];note.value='';counting.value=0;error.value='';previewed.value=false;attempted.value=false;
+ ++version;scope=currentApiCacheScope();entries.value=props.rows.map(row=>({...row,actual:Number(row.quantity),reason:'',difference_kind:arriving.value?'partial':''}));groups.value=[];note.value='';counting.value=0;error.value='';previewed.value=false;attempted.value=false;
  if(!entries.value.length||entries.value.some(r=>r.review_required||r.composition_error)){error.value='请选择已核对采购内容的有效批次';return;}
  if(arriving.value){groups.value=entries.value.map(row=>({key:crypto.randomUUID(),name:row.order_no||`采购批次 #${row.id}`,rows:[row],state:'pending',error:''}));return;}
  const byProduct=new Map();for(const row of entries.value){const id=Number(row.product_id);if(!byProduct.has(id))byProduct.set(id,{product_id:id,name:row.product_name||`库存 #${id}`,rows:[],key:crypto.randomUUID(),state:'pending',error:'',preview:null,body:null});byProduct.get(id).rows.push(row);}
@@ -34,10 +34,9 @@ async function preview(){
 }
 async function submit(){
  if(busy.value||finished.value)return;
- if(arriving.value&&(!note.value.trim()||note.value.length>500)){error.value='请填写1至500字到货说明';return;}
+ if(arriving.value&&note.value.length>500){error.value='到货说明不能超过500字';return;}
  if(arriving.value&&!attempted.value){
   if(entries.value.some(r=>!Number.isSafeInteger(r.actual)||r.actual<1||r.actual>Number(r.quantity))){error.value='本次到货件数须为正整数且不超过待到货件数；采购数录错请先更正采购记录';return;}
-  if(entries.value.some(r=>r.actual!==Number(r.quantity)&&(r.difference_kind!=='partial'||!r.reason.trim()))){error.value='部分到货请选择分批到货并填写差异原因；采购总数录错请先更正采购记录';return;}
   if(entries.value.some(r=>arrivalNote(r).length>500)){error.value='到货说明与差异原因合计不能超过500字，请简写后重试';return;}
  }
  if(!arriving.value&&!previewed.value)return;
@@ -56,17 +55,17 @@ onBeforeUnmount(()=>{disposed=true;++version;window.removeEventListener('erp:aut
 <template>
  <el-dialog v-model="visible" :title="arriving?'批量确认采购到货':'批量登记验收入库'" width="min(1080px,96vw)" append-to-body :show-close="!busy" :close-on-click-modal="false" :close-on-press-escape="!busy">
   <section class="purchase-batch-action">
-   <el-alert :title="arriving?'填写各批次本次实际到货数量，仅这部分进入待验收；剩余继续采购待到货，本地库存暂不增加。':'只填写本次验收合格的实收数量，未收部分继续采购待到货；采购总数录错请先按凭证更正采购记录。'" type="info" :closable="false"/>
+   <el-alert :title="arriving?'默认本批次全部到货；填少时自动保留余量继续待到货，无需另选原因。仅本次到货数量进入待验收，本地库存暂不增加。':'只填写本次验收合格的实收数量，未收部分继续采购待到货；采购总数录错请先按凭证更正采购记录。'" type="info" :closable="false"/>
    <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
    <template v-if="!previewed&&!attempted">
     <el-table :data="entries" row-key="id" max-height="420" border>
      <el-table-column label="库存商品" min-width="240"><template #default="{row}"><b>{{row.product_name}}</b><p>库存 ID：{{row.inventory_number||row.product_id}}</p></template></el-table-column>
      <el-table-column label="采购批次" min-width="170"><template #default="{row}">{{row.order_no||'采购批次'}} · #{{row.id}}</template></el-table-column>
      <el-table-column label="待收数量" width="110"><template #default="{row}">{{row.quantity}} {{unit(row)}}</template></el-table-column>
-     <el-table-column :label="arriving?'本次到货':'本次合格实收'" width="160"><template #default="{row}"><el-input-number v-model="row.actual" :min="1" :max="Number(row.quantity)" :precision="0" :disabled="busy" :aria-label="`批次 ${row.id} ${arriving?'到货数量':'实收数量'}`" controls-position="right" @change="error=''"/></template></el-table-column>
-     <el-table-column label="数量差异处理" min-width="290"><template #default="{row}"><PurchaseQuantityDifference v-if="row.actual!==Number(row.quantity)" :row="row" :disabled="busy" :allow-correction="hasPermission(auth.user,'procurement')" @correct="emit('correct',$event)" @change="error=''"/><span v-else>{{arriving?'本批次全部到货':'全部验收合格'}}</span></template></el-table-column>
+     <el-table-column :label="arriving?'本次到货':'本次合格实收'" width="160"><template #default="{row}"><el-input-number v-model="row.actual" :min="1" :max="Number(row.quantity)" :disabled="busy" :aria-label="`批次 ${row.id} ${arriving?'到货数量':'实收数量'}`" controls-position="right" @change="error=''"/></template></el-table-column>
+     <el-table-column label="数量差异处理" min-width="290"><template #default="{row}"><PurchaseQuantityDifference v-if="arriving||row.actual!==Number(row.quantity)" :row="row" :arrival="arriving" :disabled="busy" :allow-correction="hasPermission(auth.user,'procurement')" @correct="emit('correct',$event)" @change="error=''"/><span v-else>全部验收合格</span></template></el-table-column>
     </el-table>
-    <el-input v-if="arriving" v-model="note" type="textarea" maxlength="500" show-word-limit placeholder="填写这些批次的到货位置或签收说明" :disabled="busy" @input="error=''"/>
+    <el-input v-if="arriving" v-model="note" type="textarea" maxlength="500" show-word-limit placeholder="到货位置或签收说明（选填）" :disabled="busy" @input="error=''"/>
    </template>
    <template v-else>
     <p>{{attempted?`已完成 ${done} / ${groups.length} 项；不同库存分别提交，失败项保留在下方，不重复提交已完成项。`:'请核对入库影响，然后确认。未收部分继续保留待处理。'}}</p>
