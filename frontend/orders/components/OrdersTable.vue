@@ -4,6 +4,7 @@ import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/ic
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
+import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
 import InventoryIdentity from './InventoryIdentity.vue';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
@@ -331,6 +332,10 @@ function procurementTimeText(row) {
   const value = row?.procurementState?.latestPurchaseAt;
   return value ? formatDateTime(value, { assumeUtcWhenNaive: true }) : "";
 }
+function procurementDateText(row) {
+  return shanghaiDateText(row.procurementState.latestPurchaseAt, { assumeUtcWhenNaive: true }).replaceAll('-', '/');
+}
+function collaborationNote(row) { return String(row.mark_note || '').trim(); }
 </script>
 
 <template>
@@ -686,31 +691,24 @@ function procurementTimeText(row) {
         </template>
       </el-table-column>
 
-      <el-table-column label="采购信息" min-width="192">
+      <el-table-column label="采购信息" min-width="240">
         <template #default="{ row }">
+          <div class="orders-procurement-cell">
           <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">采购覆盖待核对</small>
-          <div v-else-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
-            <strong>{{ procurementTimeText(row) }}</strong>
-            <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
-            <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">全部入库<template v-if="row.procurementState.latestReceivedAt"> · {{ formatDateTime(row.procurementState.latestReceivedAt, { assumeUtcWhenNaive: true }) }}</template></small>
-            <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
-            <small v-else-if="row.procurementState.purchaseReceiptStatus !== 'received'">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
-            <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
-            <el-button
-              v-if="hasProcurementIncoming(row)"
-              size="small"
-              :type="row.procurementState.overdue ? 'danger' : 'success'"
-              plain
-              :loading="isInboundReceiptPending(row)"
-              :disabled="Number(confirmingInboundRecordId || 0) > 0"
-              @click="emit('confirm-procurement-inbound', row)"
-            >
-              {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}
-            </el-button>
-          </div>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
+          <div v-else-if="row.procurementState?.latestPurchaseAt" class="orders-procurement-date-row orders-procurement-time-cell" title="采购日期为最近一次采购的北京时间；在途天数按最早待收批次的采购时间计算">
+            <strong>{{ procurementDateText(row) }}</strong>
+            <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">已入库</small>
+            <small v-else-if="hasProcurementIncoming(row)">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
+          </div>
           <small v-else class="orders-cell-meta-line">暂无关联采购</small>
-          <el-button v-if="canRemindProcurement && !isFbpOrder(row) && !row.inventory_refresh_pending" link type="warning" size="small" @click="openStockTopup(row)">提醒采购</el-button>
+          <button v-if="collaborationNote(row)" type="button" class="orders-procurement-note" :title="collaborationNote(row)" :aria-label="`编辑采购协作备注：${collaborationNote(row)}`" @click="emit('save-mark', row.id, markValue(row))">{{ collaborationNote(row) }}</button>
+          <div v-if="!row.inventory_refresh_pending && !isFbpOrder(row)" class="orders-procurement-inline-actions">
+            <el-button v-if="canRemindProcurement" size="small" plain @click="openStockTopup(row)">提醒采购</el-button>
+            <el-button v-if="row.procurementState?.latestPurchaseAt" size="small" plain @click="emit('view-procurement-details', row)">查看明细</el-button>
+            <el-button v-if="row.procurementState?.latestPurchaseAt && hasProcurementIncoming(row)" size="small" plain :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}</el-button>
+          </div>
+          </div>
         </template>
       </el-table-column>
 

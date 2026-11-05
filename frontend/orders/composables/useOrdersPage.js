@@ -446,12 +446,19 @@ export function useOrdersPage() {
   const handleAuthStorageChange = (event) => {
     if (["authToken", "baodanAuthUser"].includes(event.key)) ensureOrdersViewScope();
   };
+  const handleCollaborationNoteSaved = (event) => {
+    if (event.detail?.scope !== currentApiCacheScope()) return;
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+  };
   window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
   window.addEventListener("storage", handleAuthStorageChange);
+  window.addEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   onScopeDispose(() => {
     abortOrderReads();
     window.removeEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
     window.removeEventListener("storage", handleAuthStorageChange);
+    window.removeEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   });
 
   async function loadOrdersMeta(filtersSnapshot) {

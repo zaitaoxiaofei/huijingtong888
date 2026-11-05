@@ -885,11 +885,14 @@ function buildProcurementState(row = {}) {
   if (coverage) {
     const allBatches = coverage.batches || [];
     const batches = allBatches.filter(batch => batch.status === 'pending_arrival');
-    const batchTime = (batch) => new Date(batch?.purchased_at || batch?.created_at || 0).getTime() || 0;
-    const first = batches[0] || {};
+    const batchTime = (batch) => {
+      const value = batch?.purchased_at || batch?.created_at;
+      return value ? new Date(typeof value === 'string' && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value.replace(' ', 'T') + 'Z' : value).getTime() || 0 : 0;
+    };
+    const first = [...batches].sort((left, right) => batchTime(left) - batchTime(right))[0] || {};
     const latestBatch = [...allBatches].sort((left, right) => batchTime(right) - batchTime(left))[0] || first;
     const purchases = orderPurchaseDetails(allBatches);
-    const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
+    const days = batchTime(first) ? Math.max(0, Math.floor((Date.now() - batchTime(first)) / 86400000)) : 0;
     return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
       detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
       inTransitDays: days, overdue: !coverage.entered_transport && days > 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
@@ -2122,6 +2125,15 @@ async function handleSaveMark(orderId, markType) {
   }
 }
 
+function handleOrderCollaborationNoteSaved(event) {
+  const detail = event.detail || {}, orderId = Number(detail.orderId);
+  if (detail.scope !== currentApiCacheScope() || !Number.isSafeInteger(orderId) || orderId <= 0 || typeof detail.note !== 'string') return;
+  vm.rows = (vm.rows || []).map(row => Number(row.id) === orderId
+    ? { ...row, mark_note: detail.note.trim(), ...(typeof detail.markType === 'string' ? { mark_type: detail.markType } : {}) }
+    : row);
+  orderDetailCache.delete(orderId);
+}
+
 async function handleOpenOrderProcurement(orderId) {
   const order = tableRows.value.find(row => Number(row.id) === Number(orderId));
   if (order?.procurement_coverage?.quantity_needs_review && !order.procurement_coverage.shortage_quantity) {
@@ -2695,6 +2707,7 @@ watch(() => route.query.orderId, async () => {
 });
 
 onMounted(async () => {
+  window.addEventListener('erp:order-collaboration-note-saved', handleOrderCollaborationNoteSaved);
   // Auxiliary toolbar data must not delay the first order request.
   void Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()])
     .catch(error => console.warn('load order toolbar metadata failed', error));
@@ -2715,6 +2728,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener('erp:order-collaboration-note-saved', handleOrderCollaborationNoteSaved);
   window.clearInterval(latestOrderSyncTimer);
 });
 </script>
