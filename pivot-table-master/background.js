@@ -78,6 +78,9 @@ let prepareSellerTabId = 0;
 let prepareStartedAt = 0;
 let preferredSellerStoreId = '';
 let lastPluginStatusSyncAt = 0;
+let panelRefreshPromise = null;
+let panelRefreshEpoch = 0;
+let panelRefreshTabId = 0;
 const lastAuthBindingSyncAtByCompany = new Map();
 let logPersistTimer = null;
 let logPersistPromise = Promise.resolve();
@@ -363,16 +366,18 @@ async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
   return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: `STORE_CONTEXT_MISMATCH page=${pageIdentity.error}` } : identity;
 }
 
-async function syncPluginStatus(force = false, selectedTab = null) {
+async function syncPluginStatus(force = false, selectedTab = null, panelRefreshValid = null) {
   const now = Date.now();
   if (!force && now - lastPluginStatusSyncAt < PLUGIN_STATUS_SYNC_MIN_INTERVAL_MS) return null;
   lastPluginStatusSyncAt = now;
   const config = await getErpConfig();
   const sellerTab = selectedTab || await findAnySellerTab();
-  setPanelSellerTab(sellerTab);
+  if (panelRefreshValid && !panelRefreshValid()) return null;
+  if (!panelRefreshValid) setPanelSellerTab(sellerTab);
   const identity = await verifiedSellerStoreIdentity(sellerTab);
+  if (panelRefreshValid && !panelRefreshValid()) return null;
   const companyId = identity.companyId;
-  const response = await fetch(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/plugin-status`, {
+  const { response, json } = await fetchPluginStatusJson(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/plugin-status`, {
     method: 'POST',
     headers: localPluginHeaders(config, {
       'Content-Type': 'application/json'
@@ -399,7 +404,7 @@ async function syncPluginStatus(force = false, selectedTab = null) {
       synced_at_ms: now
     })
   });
-  const json = await response.json().catch(() => null);
+  if (panelRefreshValid && !panelRefreshValid()) return null;
   if (!response.ok || json?.success === false) {
     throw new Error(json?.error || `HTTP ${response.status}`);
   }
@@ -1190,15 +1195,25 @@ function rememberSellerAnalyticsApiResult(details) {
   }
 }
 
-async function getPanelStatus() {
-  const config = await getErpConfig();
-  await restorePanelLogsPromise;
-  const stored = await chrome.storage.local.get(POLLING_ENABLED_KEY);
-  panelState.pollingEnabled = stored[POLLING_ENABLED_KEY] === true;
-  await findAnySellerTab();
-  panelState.currentCompanyId = (await verifiedSellerStoreIdentity(panelState.sellerTab)).companyId;
-  await syncPluginStatus().catch(() => {});
-  updateActionBadge();
+async function fetchPluginStatusJson(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const json = await response.json().catch((error) => {
+      if (error?.name === 'AbortError') throw error;
+      return null;
+    });
+    return { response, json };
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('ERP 状态同步超时，请稍后重试');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function panelStatusSnapshot(config) {
   return {
     config,
     state: {
@@ -1209,6 +1224,63 @@ async function getPanelStatus() {
   };
 }
 
+function invalidatePanelRefresh() {
+  panelRefreshEpoch += 1;
+  panelRefreshPromise = null;
+  panelRefreshTabId = 0;
+  panelState.currentCompanyId = '';
+}
+
+function refreshPanelStatusInBackground(force = false) {
+  if (panelRefreshPromise) return;
+  const epoch = panelRefreshEpoch;
+  let expired = false;
+  const timer = setTimeout(() => {
+    if (epoch !== panelRefreshEpoch) return;
+    expired = true;
+    panelState.lastError = 'Ozon 状态读取超时，请稍后刷新';
+    logPanel(panelState.lastError, 'error');
+  }, 15000);
+  const refresh = (async () => {
+    const tabs = await chrome.tabs.query({ url: 'https://seller.ozon.ru/*' });
+    if (expired || epoch !== panelRefreshEpoch) return;
+    const tab = selectSellerTab(tabs, preferredSellerStoreId);
+    panelRefreshTabId = tab?.id || 0;
+    const identity = await verifiedSellerStoreIdentity(tab);
+    if (expired || epoch !== panelRefreshEpoch) return;
+    const currentTabs = await chrome.tabs.query({ url: 'https://seller.ozon.ru/*' });
+    if (expired || epoch !== panelRefreshEpoch) return;
+    const currentTab = selectSellerTab(currentTabs, preferredSellerStoreId);
+    if (currentTab?.id !== tab?.id || currentTab?.url !== tab?.url) return;
+    setPanelSellerTab(tab);
+    panelState.currentCompanyId = identity.companyId;
+    await syncPluginStatus(force, tab, () => !expired && epoch === panelRefreshEpoch);
+    if (!expired && epoch === panelRefreshEpoch && panelState.lastError === 'Ozon 状态读取超时，请稍后刷新') panelState.lastError = '';
+  })();
+  panelRefreshPromise = refresh;
+  void refresh.catch((error) => {
+    if (expired || epoch !== panelRefreshEpoch) return;
+    panelState.lastError = redactDiagnosticMessage(error?.message || String(error));
+    logPanel(panelState.lastError, 'error');
+  }).finally(() => {
+    clearTimeout(timer);
+    // Chrome page probes cannot be cancelled. Keep the flight until the actual
+    // operation settles so popup polling cannot pile up stalled probes.
+    if (panelRefreshPromise === refresh) panelRefreshPromise = null;
+  });
+}
+
+async function getPanelStatus(forceRefresh = false) {
+  const config = await getErpConfig();
+  const stored = await chrome.storage.local.get(POLLING_ENABLED_KEY);
+  panelState.pollingEnabled = stored[POLLING_ENABLED_KEY] === true;
+  updateActionBadge();
+  if (forceRefresh) invalidatePanelRefresh();
+  const snapshot = panelStatusSnapshot(config);
+  refreshPanelStatusInBackground();
+  return snapshot;
+}
+
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     const entry = getOrCreateHeaderEntry(details);
@@ -1217,6 +1289,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     if (details.tabId >= 0 && contextHeaders['x-o3-company-id']) {
       const previousCompanyId = getHeaderValue(latestContextHeadersByTab.get(details.tabId), 'x-o3-company-id');
       latestContextHeadersByTab.set(details.tabId, { ...contextHeaders, updated_at: Date.now() });
+      if (previousCompanyId !== contextHeaders['x-o3-company-id'] && [panelRefreshTabId, panelState.sellerTab?.id].includes(details.tabId)) invalidatePanelRefresh();
       syncPluginStatus(previousCompanyId !== contextHeaders['x-o3-company-id']).catch(() => {});
     }
     entry.updated_at = Date.now();
@@ -1283,7 +1356,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'PIVOT_ERP_PANEL_GET_STATUS') {
-    getPanelStatus().then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
+    getPanelStatus(message.forceRefresh === true).then(sendResponse).catch((error) => sendResponse({ error: error?.message || String(error) }));
     return true;
   }
   if (message?.type === 'PIVOT_ERP_PANEL_GET_DIAGNOSTICS') {
@@ -1300,9 +1373,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message?.type === 'PIVOT_ERP_PANEL_SAVE_CONFIG') {
     saveErpConfig(message.config || {})
-      .then(async () => { await syncPluginStatus(true).catch(() => {}); })
-      .then(() => getPanelStatus())
-      .then(sendResponse)
+      .then((config) => {
+        invalidatePanelRefresh();
+        sendResponse(panelStatusSnapshot(config));
+        refreshPanelStatusInBackground(true);
+      })
       .catch((error) => sendResponse({ error: error?.message || String(error) }));
     return true;
   }
@@ -1382,12 +1457,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     latestContextHeadersByTab.delete(tabId);
     latestAnalyticsApiByTab.delete(tabId);
     latestAnalyticsTableByTab.delete(tabId);
+    if ([panelRefreshTabId, panelState.sellerTab?.id].includes(tabId)) invalidatePanelRefresh();
   }
   void findAnySellerTab();
   void syncPluginStatus().catch(() => {});
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if ([panelRefreshTabId, panelState.sellerTab?.id].includes(tabId)) invalidatePanelRefresh();
   injectedTabs.delete(tabId);
   latestContextHeadersByTab.delete(tabId);
   latestAnalyticsApiByTab.delete(tabId);

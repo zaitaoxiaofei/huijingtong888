@@ -1,6 +1,6 @@
 if (typeof importScripts === 'function') {
   try {
-    importScripts('erp-config.js');
+    importScripts('erp-config.js', 'collector-browser-worker.js');
   } catch (error) {}
 }
 
@@ -38,6 +38,7 @@ const ozonInjectionAttemptAtByTabId = new Map();
 const ozonInjectionBlockedByTabId = new Map();
 let serverPublishMediaSidecarPromise = null;
 let sellerAuthSyncPromise = null;
+const sellerPoolCooldownUntilByContext = new Map();
 
 function normalizeErpBaseUrl(value) {
   if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
@@ -194,12 +195,17 @@ async function fetchLocalPluginJson(pathname, options = {}) {
 }
 
 async function getSellerCookieInfo(tabUrl = 'https://seller.ozon.ru/') {
-  const cookies = await chrome.cookies.getAll({ domain: 'seller.ozon.ru' });
+  let cookieUrl = 'https://seller.ozon.ru/';
+  try {
+    const parsedUrl = new URL(String(tabUrl || cookieUrl));
+    if (parsedUrl.origin === 'https://seller.ozon.ru') cookieUrl = parsedUrl.href;
+  } catch (error) {}
+  const cookies = await chrome.cookies.getAll({ url: cookieUrl });
   const header = cookies.filter((item) => item?.name).map((item) => `${item.name}=${item.value || ''}`).join('; ');
   const preferredNames = ['sc_company_id', 'company_id', 'seller_company_id'];
   let companyId = '';
   for (const name of preferredNames) {
-    const cookie = await chrome.cookies.get({ url: String(tabUrl || 'https://seller.ozon.ru/'), name });
+    const cookie = await chrome.cookies.get({ url: cookieUrl, name });
     if (cookie?.value) { companyId = String(cookie.value).trim(); break; }
   }
   const portableCookies = cookies.filter((item) => item?.name).map((item) => ({
@@ -1526,9 +1532,10 @@ async function requestSellerBridgeDataFromBackground(sku, apiType = 'sales', var
   return response.data;
 }
 
-async function fetchSellerCollectedProductFields(sku) {
+async function fetchSellerCollectedProductFields(sku, options = {}) {
   const normalizedSku = String(sku || '').trim();
   if (!normalizedSku) throw new Error('SKU is required');
+  const requestSeller = options.request || requestSellerBridgeDataFromBackground;
 
   const fields = {};
   const raw = {};
@@ -1537,7 +1544,7 @@ async function fetchSellerCollectedProductFields(sku) {
   let variantApiType = 'variant_v2';
 
   try {
-    const salesResponse = await requestSellerBridgeDataFromBackground(normalizedSku, 'sales');
+    const salesResponse = await requestSeller(normalizedSku, 'sales');
     raw.sales = Array.isArray(salesResponse?.items) && salesResponse.items.length > 0 ? salesResponse.items[0] : null;
     raw.salesMeta = {
       totals: salesResponse?.totals ?? '',
@@ -1554,12 +1561,17 @@ async function fetchSellerCollectedProductFields(sku) {
       warnings.push('seller sales did not return product data');
     }
   } catch (error) {
+    if (options.throwOnRequestError) throw error;
     warnings.push(error?.message || String(error));
+  }
+
+  if (raw.sales && typeof options.onSales === 'function') {
+    await options.onSales({ fields: { ...fields }, raw: { ...raw }, warnings: [...warnings] });
   }
 
   if (!raw.baseInfo) {
     try {
-      raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
+      raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
       const categoryIds = fields.category_ids;
       Object.assign(fields, buildSellerBaseInfoFields(raw.baseInfo));
       if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
@@ -1567,34 +1579,38 @@ async function fetchSellerCollectedProductFields(sku) {
         resolvedVariantId = String(raw.baseInfo?.variants?.[0]?.variant_id || '').trim();
       }
     } catch (error) {
+      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
 
   if (!resolvedVariantId && !raw.baseInfo) {
     try {
-      raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
+      raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
       const categoryIds = fields.category_ids;
       Object.assign(fields, buildSellerBaseInfoFields(raw.baseInfo));
       if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
       resolvedVariantId = String(raw.baseInfo?.variants?.[0]?.variant_id || '').trim();
     } catch (error) {
+      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
 
   if (resolvedVariantId) {
     try {
-      raw.variant = await requestSellerBridgeDataFromBackground(normalizedSku, 'variant_v2', resolvedVariantId);
+      raw.variant = await requestSeller(normalizedSku, 'variant_v2', resolvedVariantId);
       const variantImages = normalizeSellerImages(raw.variant?.item?.images, raw.variant?.images);
       if (variantImages.length === 0 && !raw.baseInfo) {
         try {
-          raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
+          raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
         } catch (error) {
+          if (options.throwOnRequestError) throw error;
           warnings.push(error?.message || String(error));
         }
       }
     } catch (error) {
+      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
       variantApiType = 'variant';
     }
@@ -1604,11 +1620,12 @@ async function fetchSellerCollectedProductFields(sku) {
 
   if (!raw.variant && variantApiType === 'variant') {
     try {
-      const variantResponse = await requestSellerBridgeDataFromBackground(normalizedSku, 'variant');
+      const variantResponse = await requestSeller(normalizedSku, 'variant');
       raw.variant = Array.isArray(variantResponse?.items) && variantResponse.items.length > 0
         ? variantResponse.items[0]
         : null;
     } catch (error) {
+      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
@@ -1948,8 +1965,30 @@ async function emitAutoCollectListProgress(tabId, progress) {
   } catch (error) {}
 }
 
+async function fetchSellerPoolForList(skus) {
+  const erpBaseUrl = await getErpBaseUrl();
+  const token = await getLocalPluginToken();
+  const tenantId = await resolveErpTenantId(erpBaseUrl) || 'admin';
+  const contextKey = JSON.stringify([erpBaseUrl, tenantId, token]);
+  if (Date.now() < Number(sellerPoolCooldownUntilByContext.get(contextKey) || 0)) return null;
+  const response = await fetchLocalPluginJson('/collector-seller-pool/collect', {
+    method: 'POST',
+    body: { skus },
+    timeoutMs: 120000
+  }).catch(() => null);
+  const failedBatch = Array.isArray(response?.results) && response.results.length === skus.length
+    && response.results.length > 0 && new Set(response.results.map((item) => String(item?.sku))).size === skus.length
+    && response.results.every((item) => item?.success === false && skus.includes(String(item.sku)));
+  if (response?.code === 'SELLER_POOL_UNAVAILABLE' || failedBatch) {
+    sellerPoolCooldownUntilByContext.set(contextKey, Date.now() + 60000);
+  } else if (response?.results?.some((item) => item?.success)) {
+    sellerPoolCooldownUntilByContext.delete(contextKey);
+  }
+  return response;
+}
+
 async function collectSellerOnlySkusToCollectedProducts(message, sender = null) {
-  const skus = normalizeManualSkuList(message?.skus || []);
+  let skus = normalizeManualSkuList(message?.skus || []);
   if (skus.length === 0) {
     return { success: false, error: 'AUTO_SKU_REQUIRED', message: 'Missing SKUs for auto collection' };
   }
@@ -1958,13 +1997,20 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
   const baseBySku = normalizeBaseProductMap(message?.baseProducts);
   const sourceTabId = sender?.tab?.id || message?.sourceTabId || null;
   const results = [];
+  const total = skus.length;
+  const browserPreview = !writeToErp && typeof collectorBrowserPool !== 'undefined'
+    ? await collectorBrowserPool?.preview(skus, baseBySku, sourceTabId) : null;
+  if (browserPreview) {
+    results.push(...browserPreview.results);
+    skus = browserPreview.fallbackSkus;
+    if (!skus.length) {
+      const successCount = results.filter((item) => item.success).length;
+      return { success: successCount > 0, total, successCount, failCount: total - successCount, results };
+    }
+  }
   let cursor = 0;
   const concurrency = Math.max(1, Math.min(Number(message?.concurrency || 3), 3));
-  const poolResponse = await fetchLocalPluginJson('/collector-seller-pool/collect', {
-    method: 'POST',
-    body: { skus },
-    timeoutMs: 120000
-  }).catch(() => null);
+  const poolResponse = await fetchSellerPoolForList(skus);
   const poolAttempted = Array.isArray(poolResponse?.results);
   const poolWorkerCount = Number(poolResponse?.worker_count || poolResponse?.data?.worker_count || 0);
   const poolBySku = new Map((poolAttempted ? poolResponse.results : [])
@@ -1996,7 +2042,20 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
       if (poolItem?.success) {
         sellerResult = buildSellerCollectedProductFieldsFromPool(poolItem);
       } else {
-        sellerResult = await fetchSellerCollectedProductFields(sku);
+        sellerResult = await fetchSellerCollectedProductFields(sku, writeToErp ? {} : {
+          onSales: async (salesResult) => {
+            const payload = buildSellerOnlyCollectedProductPayload(sku, salesResult, baseBySku.get(sku));
+            await emitAutoCollectListProgress(sourceTabId, {
+              sku,
+              success: true,
+              partial: true,
+              stage: 'sales',
+              previewOnly: true,
+              product: buildCollectedProductDisplayPayload(payload),
+              collectionRoute
+            });
+          }
+        });
         if (poolWarning) {
           sellerResult.warnings = [`Seller pool fallback: ${poolWarning}`, ...(sellerResult.warnings || [])];
         }
@@ -2059,9 +2118,9 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
   const successCount = results.filter((item) => item.success).length;
   return {
     success: successCount > 0,
-    total: skus.length,
+    total,
     successCount,
-    failCount: skus.length - successCount,
+    failCount: total - successCount,
     results
   };
 }
@@ -2553,6 +2612,10 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm?.name === 'ozon-erp-collector-browser-worker') {
+    collectorBrowserPool?.wake();
+    return;
+  }
   if (alarm?.name === PLUGIN_UPDATE_ALARM_NAME) {
     checkPluginUpdateStatus().catch(() => {});
     return;
@@ -2561,3 +2624,26 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     runServerPublishMediaSidecar().catch(() => {});
   }
 });
+
+const collectorBrowserPool = globalThis.OzonCollectorBrowserPool?.create({
+  chrome,
+  getContext: async () => {
+    const erpBaseUrl = await getErpBaseUrl();
+    return { erpBaseUrl, tenantId: await resolveErpTenantId(erpBaseUrl) || 'admin', token: await getLocalPluginToken() };
+  },
+  collectFields: fetchSellerCollectedProductFields,
+  requestInTab: async (tab, request) => {
+    const message = { type: 'OZON_SKU_API_REQUEST', ...request };
+    const response = await sendMessageToSellerTab(tab.id, message);
+    if (response?.error !== 'TAB_COMMUNICATION_FAILED') return response;
+    await reinjectSellerBridge(tab.id);
+    return sendMessageToSellerTab(tab.id, message);
+  },
+  buildPayload: buildSellerOnlyCollectedProductPayload,
+  buildDisplay: buildCollectedProductDisplayPayload,
+  emit: emitAutoCollectListProgress
+});
+if (collectorBrowserPool) {
+  collectorBrowserPool.start();
+  chrome.alarms.create('ozon-erp-collector-browser-worker', { periodInMinutes: 0.5 });
+}

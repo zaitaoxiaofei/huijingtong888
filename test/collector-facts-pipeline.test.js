@@ -120,7 +120,8 @@ test("collector category pair prefers the ids tail over a conflicting direct fie
 
 test("detail collector saves first and schedules seller fallback backfill asynchronously", () => {
   assert.match(collectorContentSource, /function scheduleSellerFallbackBackfill\(result, options = \{\}\)/);
-  assert.match(collectorContentSource, /const enrichment = result\.sellerFallbackBackfillTask \|\| enrichDetailWithSellerFallback\(result\)/);
+  assert.match(collectorContentSource, /const enrichment = result\.sellerFallbackBackfillTask \|\| enrichDetailWithSellerFallback\(result\);/);
+  assert.match(collectorContentSource, /const backgroundTask = enrichment\s*\.then/);
   assert.match(collectorContentSource, /await persistCollectedResultUpdate\(enriched, options\.requestContext\);/);
   assert.match(collectorContentSource, /const saved = await ensureCollectedSaved\(result\);[\s\S]*?scheduleSellerFallbackBackfill\(result, \{ persist: true \}\);/);
   assert.doesNotMatch(collectorContentSource, /await enrichDetailWithSellerFallback\(result\);\s*const saved = await ensureCollectedSaved\(result\);/);

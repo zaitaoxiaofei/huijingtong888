@@ -2336,7 +2336,7 @@
       row?.productPrice,
       row?.sell_price,
       row?.cardPrice
-    ].map(normalizeListPriceValue).find((item) => item !== '');
+    ].map(normalizeListPriceValue).find((item) => item !== '') ?? '';
     if (existing !== '') return existing;
     const fromNodes = extractListCardPriceFromNodes(priceRoot) || extractListCardPriceFromNodes(card);
     if (fromNodes !== '') return fromNodes;
@@ -4240,7 +4240,7 @@
     const result = Array.isArray(response?.results)
       ? response.results.find((item) => String(item?.sku || '').trim() === normalizedSku)
       : null;
-    if (!result?.success) return;
+    if (!result?.success || result.partial === true) return;
     const collectDate = result.collectDate || (() => {
       const date = new Date();
       const year = date.getFullYear();
@@ -4435,8 +4435,20 @@
 
   async function autoCollectCollectedProductSkus(items, reason = 'auto_scan', options = {}) {
     const sourceItems = Array.isArray(items) ? items : [];
+    const now = Date.now();
+    const previewTtlMs = Number(options.previewTtlMs || 5 * 60 * 1000);
+    const targets = Array.from(new Set(sourceItems
+      .map((item) => String((item && typeof item === 'object' ? item.sku : item) || '').trim())
+      .filter(Boolean))).filter((sku) => {
+      if (state.autoCollectingSkus.has(sku)) return false;
+      if (options.force === true) return true;
+      const fetchedAt = Number(state.previewFetchedAtBySku.get(sku) || 0);
+      return !fetchedAt || now - fetchedAt > previewTtlMs;
+    });
+    if (targets.length === 0) return null;
+    const targetSet = new Set(targets);
     const baseProducts = sourceItems
-      .filter((item) => item && typeof item === 'object')
+      .filter((item) => item && typeof item === 'object' && targetSet.has(String(item.sku || '').trim()))
       .map((item) => ({
         sku: String(item.sku || '').trim(),
         product_id: String(item.product_id || item.productId || item.sku || '').trim(),
@@ -4458,30 +4470,16 @@
         productUrl: item.productUrl || item.productLink || item.url || ''
       }))
       .filter((item) => item.sku);
-    await enrichBaseProductsFromOzonEntrypoint(baseProducts);
-    const baseBySku = new Map(baseProducts.map((item) => [item.sku, item]));
-    const now = Date.now();
-    const previewTtlMs = Number(options.previewTtlMs || 5 * 60 * 1000);
-    const targets = Array.from(
-      new Set(
-        sourceItems
-          .map((item) => String((item && typeof item === 'object' ? item.sku : item) || '').trim())
-          .filter(Boolean)
-      )
-    ).filter((sku) => {
-      if (state.autoCollectingSkus.has(sku)) return false;
-      if (options.force === true) return true;
-      const fetchedAt = Number(state.previewFetchedAtBySku.get(sku) || 0);
-      return !fetchedAt || now - fetchedAt > previewTtlMs;
-    });
-    if (targets.length === 0) return null;
+    const baseBySku = new Map();
+    baseProducts.forEach((item) => { if (!baseBySku.has(item.sku)) baseBySku.set(item.sku, item); });
     targets.forEach((sku) => {
       state.autoCollectingSkus.add(sku);
       state.autoCollectAttemptedSkus.add(sku);
       state.previewFetchedAtBySku.set(sku, now);
     });
-    const requestContext = await resolveLocalPluginRequestContext();
     try {
+      await enrichBaseProductsFromOzonEntrypoint(Array.from(baseBySku.values()));
+      const requestContext = await resolveLocalPluginRequestContext();
       const response = await sendRuntimeMessageCompat({
         type: 'OZON_ERP_AUTO_COLLECT_LIST_SKUS',
         skus: targets,
@@ -4535,6 +4533,22 @@
     const list = Array.isArray(rows) ? rows : [];
     const row = list.find((item) => String(item?.sku || '').trim() === sku);
     if (!row) return null;
+    if (result?.success && result.partial === true) {
+      const salesKeys = new Set(['soldCount', 'soldSum', 'soldSumRub', 'soldSumCny', 'gmvSum', 'salesDynamics', 'salesUpdateDate']);
+      const updates = Object.fromEntries(Object.entries(result.product || {}).filter(([key, value]) => (
+        salesKeys.has(key) && value !== undefined && value !== null && value !== ''
+      )));
+      const product = { ...(row.erpLookup?.product || {}), ...updates };
+      row.erpLookup = {
+        ...(row.erpLookup || {}),
+        status: 'pending',
+        statusText: '补采中',
+        needsRefresh: true,
+        product,
+        collectionRoute: result.collectionRoute || row.erpLookup?.collectionRoute || null
+      };
+      return row;
+    }
     if (result && result.success === undefined) {
       row.erpLookup = {
         ...(row.erpLookup || {}),
@@ -4604,7 +4618,7 @@
     if (!sku) return;
     const row = applyAutoCollectResultToRows(state.listRows, result);
     if (row) renderListRowPanelsBySku(sku);
-    if (pageSku() === sku && result?.success) {
+    if (pageSku() === sku && result?.success && result.partial !== true) {
       applyDetailAutoCollectResult(sku, { results: [result] }, state.lookupCacheBySku.get(sku)?.data || null);
     }
   }

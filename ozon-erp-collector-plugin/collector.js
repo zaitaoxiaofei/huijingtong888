@@ -525,10 +525,19 @@
 
   async function fetchOzonEntrypoint(path, origin = global.location?.origin) {
     const requestUrl = `${origin}/api/entrypoint-api.bx/page/json/v2?url=${encodeURIComponent(path)}`;
-    const response = await fetch(requestUrl, { credentials: 'include' });
-    if (!response.ok) throw new Error(`Ozon entrypoint failed ${response.status}`);
-    const data = await response.json();
-    return { requestUrl, data };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(requestUrl, { credentials: 'include', signal: controller.signal });
+      if (!response.ok) throw new Error(`Ozon entrypoint failed ${response.status}`);
+      const data = await response.json();
+      return { requestUrl, data };
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error('Ozon entrypoint request timed out (15000ms)');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function parseVariantsFromAspects(aspectsState) {

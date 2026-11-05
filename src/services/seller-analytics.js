@@ -1342,7 +1342,8 @@ async function probeCollectorPoolAuth(payload = {}) {
     Cookie: cookie,
     ...normalizeProbeHeaders(payload.headers || payload.request_headers || payload.requestHeaders)
   }
-  const response = await fetch('https://seller.ozon.ru/api/site/seller-analytics/what_to_sell/data/v3', {
+  const cookies = probeCookieMap(cookie)
+  const requestOptions = {
     method: 'POST',
     headers,
     body: stringifyJson({
@@ -1351,13 +1352,58 @@ async function probeCollectorPoolAuth(payload = {}) {
       filter: { stock: 'any_stock', period: 'monthly', categories: [], sku: '' },
       sort: { key: 'sum_gmv_desc' }
     }),
+    redirect: 'manual',
     signal: AbortSignal.timeout(4000)
-  })
+  }
+  let requestUrl = 'https://seller.ozon.ru/api/site/seller-analytics/what_to_sell/data/v3'
+  let response = null
+  let error = ''
+  const visited = new Set()
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    visited.add(requestUrl)
+    requestOptions.headers.Cookie = [...cookies].map(([name, value]) => `${name}=${value}`).join('; ')
+    response = await fetch(requestUrl, requestOptions)
+    applyProbeSetCookies(cookies, response)
+    if (![301, 302, 303, 307, 308].includes(response.status)) break
+    const location = safeString(response.headers.get('location'))
+    if (!location) {
+      error = 'Seller authorization probe received a redirect without a location'
+      break
+    }
+    const nextUrl = new URL(location, requestUrl)
+    if (nextUrl.origin !== 'https://seller.ozon.ru') {
+      error = 'Seller authorization probe refused an external redirect'
+      break
+    }
+    if (/(?:^|\/)(?:login|signin|sign-in|auth|registration)(?:\/|$)/i.test(nextUrl.pathname)) {
+      error = 'Seller authorization probe was redirected to a login page'
+      break
+    }
+    if (visited.has(nextUrl.href) || attempt === 3) {
+      error = 'Seller authorization probe exceeded its redirect limit'
+      break
+    }
+    await response.body?.cancel()
+    requestUrl = nextUrl.href
+  }
+  if (response.ok && !error) {
+    let data = null
+    try {
+      data = await response.json()
+    } catch {}
+    requestOptions.signal.throwIfAborted()
+    if (!Array.isArray(data?.items)) {
+      error = 'Seller authorization probe did not receive a valid analytics response'
+    }
+  } else {
+    await response.body?.cancel()
+  }
   return {
-    ok: response.ok,
+    ok: response.ok && !error,
     status: response.status,
     status_text: response.statusText,
-    company_id: companyId
+    company_id: companyId,
+    error: error || (response.ok ? '' : `Seller authorization probe failed: HTTP ${response.status}`)
   }
 }
 
