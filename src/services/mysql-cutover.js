@@ -1,5 +1,6 @@
 import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
 import { credentialVersion } from './ozon-credential-health.js';
+import { normalizeMobileDashboardDate, mobileDashboardPeriod } from '../shared/mobile-dashboard.js';
 import { availableLocalCapitalRows, localCapitalTotals } from "./inventory-capital-local.js";
 import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
@@ -29756,9 +29757,10 @@ function pendingDashboardPayloadMysql(dateKey) {
 export async function mobileDashboardFinanceMysql(query = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   const scope = await orderListTenantScopeMysql(tenantId);
-  const date = dashboardDateKeyMysql(query), from = date.slice(0, 7) + '-01';
-  const values = await monthlyProcurementInventorySummaryMysql(from, date, scope);
+  const date = normalizeMobileDashboardDate(query), period = mobileDashboardPeriod(date);
+  const values = await monthlyProcurementInventorySummaryMysql(period.from, period.to, scope);
   return { date_key: date, month_purchase_amount: values.purchase_total_amount,
+    period, inventory_basis: 'current', inventory_snapshot_at: new Date().toISOString(),
     inventory_total_value: values.inventory_total_value, local_inventory_value: values.local_inventory_value,
     fbp_inventory_value: values.fbp_inventory_value, in_transit_value: values.in_transit_value };
 }

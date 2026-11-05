@@ -2369,11 +2369,16 @@ Read the safe shared tariff projection for enterprise calculators. Includes enab
 
 #### `GET /api/dashboard`
 
-Return dashboard summary counters and grouped metrics. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. view=mobile-finance requires fresh finance duty and returns current-month actual purchase amount and current local/FBP/in-transit inventory values using existing monthly-billing semantics. Mobile sections load independently; no external sync or historical profit recalculation.
+Return dashboard summary counters and grouped metrics. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. Mobile date/dateKey/date_key must identify the same valid Beijing-calendar day no later than today; invalid or future days return 400 before loading or queuing a snapshot. Daily metrics use the selected day, month metrics accumulate from that month's start through the selected day, and ad_date_key identifies the actual advertising snapshot day. view=mobile-finance requires fresh finance duty and returns actual purchases for that same period plus current local/FBP/in-transit inventory values. Its period contains month_key/from/to/timezone; inventory_basis=current and inventory_snapshot_at identify the current read, not historical end-of-day inventory. Mobile sections load independently; no external sync or historical profit recalculation. Desktop date compatibility remains unchanged.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `view` (`string`, optional): Optional mobile or mobile-finance projection; otherwise the existing desktop dashboard.
+  - `date` (`string`, optional): Selected Beijing business day YYYY-MM-DD, default today. Mobile aliases dateKey/date_key must agree when provided.
+  - `snapshotOnly` (`string`, optional): 1 reads saved/in-progress dashboard data without starting another rebuild.
 - Responses:
   - `200` `application/json` -> `DashboardResponse`
+  - `400` `application/json` -> `object`
 
 #### `GET /api/exchange-rate/current`
 
