@@ -1,4 +1,4 @@
-import { shanghaiDateTimeText } from "./shanghai-date.js";
+import { shanghaiDateKey, shanghaiDateText, shanghaiDateTimeText } from "./shanghai-date.js";
 
 export function purchaseStatusText(status) {
   return { purchased: "采购在途", partial_inbound: "部分入库", inbound_done: "已入库" }[status] || status;
@@ -57,24 +57,28 @@ export function dailyPurchaseSummary(date, rows) {
   ].join("\n");
 }
 
-export async function buildDailyPurchaseWorkbook(date, rows, loadImage) {
+function purchaseReportDays(range, rows) {
+  const { dateFrom, dateTo = dateFrom } = typeof range === "string" ? { dateFrom: range } : range;
+  const start = new Date(`${dateFrom}T00:00:00+08:00`);
+  const end = new Date(`${dateTo}T00:00:00+08:00`);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime())
+    || shanghaiDateKey(start) !== dateFrom || shanghaiDateKey(end) !== dateTo || start > end) {
+    throw new Error("请选择有效的采购时间范围，开始日期不能晚于结束日期");
+  }
+  const days = new Map();
+  for (let at = start.getTime(); at <= end.getTime(); at += 86400000) days.set(shanghaiDateKey(new Date(at)), []);
+  for (const row of rows) {
+    const date = shanghaiDateText(row.purchased_at, { assumeUtcWhenNaive: true });
+    if (!days.has(date)) throw new Error("采购记录的采购时间无效或超出所选范围，请刷新后重新导出");
+    days.get(date).push(row);
+  }
+  return days;
+}
+
+export async function buildDailyPurchaseWorkbook(range, rows, loadImage) {
+  const days = purchaseReportDays(range, rows);
   const { default: ExcelJS } = await import("exceljs");
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet("每日采购清单");
-  sheet.columns = [12, 24, 38, 12, 15, 13, 15, 24, 16, 16, 27, 32].map((width) => ({ width }));
-  sheet.mergeCells("A1:L1");
-  sheet.getCell("A1").value = `${date} 采购清单（北京时间 / 人民币）`;
-  sheet.getCell("A1").font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
-  sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF17365D" } };
-  sheet.getRow(1).height = 32;
-  sheet.mergeCells("A2:L2");
-  sheet.getCell("A2").value = dailyPurchaseSummary(date, rows).split("\n").slice(1).filter((line) => line.startsWith("共采购") || line.startsWith("其中 ")).join("\n");
-  sheet.getCell("A2").alignment = { wrapText: true, vertical: "middle" };
-  sheet.getRow(2).height = 42;
-  sheet.addRow(["库存图片", "库存号", "库存商品", "采购数量", "货款（元）", "运费（元）", "合计（元）", "采购时间（北京）", "采购人", "入库状态", "采购单号", "备注"]);
-  sheet.getRow(3).font = { bold: true };
-  sheet.getRow(3).height = 26;
-  sheet.views = [{ state: "frozen", ySplit: 3 }];
   const images = new Map();
   const pendingIds = [...new Set(rows.map((row) => row.product_id))];
   await Promise.all(Array.from({ length: Math.min(4, pendingIds.length) }, async () => {
@@ -85,32 +89,55 @@ export async function buildDailyPurchaseWorkbook(date, rows, loadImage) {
     }
   }));
   let missingImages = 0;
-  for (const record of groupedPurchaseRows(rows)) {
-    const row = sheet.addRow(["", purchaseInventoryNumber(record), record.product_name || "未命名商品",
-      Number(record.quantity || 0), Number(record.amount || 0), Number(record.shipping_amount || 0),
-      null, shanghaiDateTimeText(record.purchased_at, { assumeUtcWhenNaive: true }),
-      record.person_name || "未记录", purchaseStatusText(record.status), record.purchase_order_no || "", record.note || ""]);
-    row.height = 72;
-    row.getCell(2).numFmt = "@";
-    row.alignment = { vertical: "middle", wrapText: true };
-    row.getCell(7).value = { formula: `E${row.number}+F${row.number}`, result: (Math.round(Number(record.amount || 0) * 100) + Math.round(Number(record.shipping_amount || 0) * 100)) / 100 };
-    for (const col of [5, 6, 7]) row.getCell(col).numFmt = '#,##0.00';
-    const image = images.get(record.product_id);
-    if (image) {
-      const imageId = workbook.addImage({ base64: image, extension: "png" });
-      sheet.addImage(imageId, { tl: { col: 0.15, row: row.number - 1 + 0.06 }, ext: { width: 64, height: 84 }, editAs: "oneCell" });
-    } else {
-      row.getCell(1).value = "图片不可用";
-      missingImages += 1;
+  const summaries = [];
+  for (const [date, records] of days) {
+    const summary = dailyPurchaseSummary(date, records);
+    summaries.push(summary);
+    const sheet = workbook.addWorksheet(date);
+    sheet.columns = [12, 24, 38, 12, 15, 13, 15, 24, 16, 16, 27, 32].map((width) => ({ width }));
+    sheet.mergeCells("A1:L1");
+    sheet.getCell("A1").value = `${date} 采购清单（北京时间 / 人民币）`;
+    sheet.getCell("A1").font = { size: 16, bold: true, color: { argb: "FFFFFFFF" } };
+    sheet.getCell("A1").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF17365D" } };
+    sheet.getRow(1).height = 32;
+    sheet.mergeCells("A2:L2");
+    sheet.getCell("A2").value = summary.split("\n").slice(1).filter((line) => line.startsWith("共采购") || line.startsWith("其中 ")).join("\n");
+    sheet.getCell("A2").alignment = { wrapText: true, vertical: "middle" };
+    sheet.getRow(2).height = 42;
+    sheet.addRow(["库存图片", "库存号", "库存商品", "采购数量", "货款（元）", "运费（元）", "合计（元）", "采购时间（北京）", "采购人", "入库状态", "采购单号", "备注"]);
+    sheet.getRow(3).font = { bold: true };
+    sheet.getRow(3).height = 26;
+    sheet.views = [{ state: "frozen", ySplit: 3 }];
+    for (const record of groupedPurchaseRows(records)) {
+      const row = sheet.addRow(["", purchaseInventoryNumber(record), record.product_name || "未命名商品",
+        Number(record.quantity || 0), Number(record.amount || 0), Number(record.shipping_amount || 0),
+        null, shanghaiDateTimeText(record.purchased_at, { assumeUtcWhenNaive: true }),
+        record.person_name || "未记录", purchaseStatusText(record.status), record.purchase_order_no || "", record.note || ""]);
+      row.height = 72;
+      row.getCell(2).numFmt = "@";
+      row.alignment = { vertical: "middle", wrapText: true };
+      row.getCell(7).value = { formula: `E${row.number}+F${row.number}`, result: (Math.round(Number(record.amount || 0) * 100) + Math.round(Number(record.shipping_amount || 0) * 100)) / 100 };
+      for (const col of [5, 6, 7]) row.getCell(col).numFmt = '#,##0.00';
+      const image = images.get(record.product_id);
+      if (image) {
+        const imageId = workbook.addImage({ base64: image, extension: "png" });
+        sheet.addImage(imageId, { tl: { col: 0.15, row: row.number - 1 + 0.06 }, ext: { width: 64, height: 84 }, editAs: "oneCell" });
+      } else {
+        row.getCell(1).value = "图片不可用";
+        missingImages += 1;
+      }
+    }
+    sheet.autoFilter = { from: "A3", to: `L${Math.max(3, sheet.rowCount)}` };
+    sheet.addRow([]);
+    const heading = sheet.addRow(["微信文字总结（当天）"]);
+    heading.font = { bold: true };
+    sheet.mergeCells(`A${heading.number}:L${heading.number}`);
+    for (const line of summary.split("\n")) {
+      const row = sheet.addRow([line]);
+      sheet.mergeCells(`A${row.number}:L${row.number}`);
+      row.alignment = { vertical: "middle", wrapText: true };
+      row.height = Math.max(30, Math.ceil(line.length / 50) * 22);
     }
   }
-  sheet.autoFilter = { from: "A3", to: `L${Math.max(3, sheet.rowCount)}` };
-  const summary = workbook.addWorksheet("微信文字总结");
-  summary.getColumn(1).width = 110;
-  for (const line of dailyPurchaseSummary(date, rows).split("\n")) {
-    const row = summary.addRow([line]);
-    row.alignment = { vertical: "middle", wrapText: true };
-    row.height = Math.max(30, Math.ceil(line.length / 50) * 22);
-  }
-  return { workbook, missingImages };
+  return { workbook, missingImages, summary: summaries.join("\n\n") };
 }

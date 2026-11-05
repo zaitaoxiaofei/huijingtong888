@@ -1579,7 +1579,7 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
-    <InventorySupplyWorkspace v-if="workMode==='inventory'" entry="procurement" :initial-task="route.query.mode==='arrivals'?'incoming':''" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><el-button plain @click="arrivalRecordsVisible=true">采购批次记录</el-button><el-button plain @click="workMode='purchase'">旧版登记采购</el-button></template></InventorySupplyWorkspace>
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" entry="procurement" :initial-task="route.query.mode==='arrivals'?'incoming':''" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><DailyPurchaseExport /><el-button plain @click="arrivalRecordsVisible=true">采购批次记录</el-button><el-button plain @click="workMode='purchase'">旧版登记采购</el-button></template></InventorySupplyWorkspace>
     <div v-else class="procurement-mode-switch"><el-button @click="workMode='inventory'">返回采购工作平台</el-button><span>旧版登记采购</span></div>
     <el-dialog v-if="arrivalRecordsVisible" v-model="arrivalRecordsVisible" title="采购批次记录" width="95%" append-to-body destroy-on-close><ProcurementArrivalTracker :product-id="Number(route.query.product_id)||0"/></el-dialog>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
