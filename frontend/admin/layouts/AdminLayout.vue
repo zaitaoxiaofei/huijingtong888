@@ -445,6 +445,20 @@ function handleTabClick(key) {
   router.push(tab.route.fullPath).catch(() => {});
 }
 
+function handleProcurementTabCommand(tab, command) {
+  if (tab.route.path !== "/procurement/workspace" || !["workspace", "legacy"].includes(command)) return;
+  const query = { ...tab.route.query };
+  delete query.message_request_id;
+  delete query.review_product_id;
+  delete query.mode;
+  if (command === "legacy") query.mode = "purchase";
+  const target = router.resolve({ path: tab.route.path, query, hash: tab.route.hash });
+  if (target.fullPath === route.fullPath) return;
+  rememberIntendedRoute(target.fullPath);
+  showRouteSwitching();
+  router.push(target.fullPath).catch(() => {});
+}
+
 const WORKBENCH_DRAFT_ROUTES = new Map([
   ["/listing-automation", { label: "商品上架", keyPrefix: "listing-workbench-draft:" }],
   [AI_OPTIMIZATION_V2_ROUTE, { label: "AI 优化新版", keyPrefix: "ozon-ai-optimization-workbench-v2-draft:" }]
@@ -991,9 +1005,40 @@ onBeforeUnmount(() => {
           </el-alert>
 
           <div v-if="!standaloneMode && workspaceTabs.length" class="erp-workspace-tabs" role="tablist" aria-label="Open pages">
+            <template v-for="tab in workspaceTabs" :key="tab.key">
+            <div
+              v-if="tab.route.path === '/procurement/workspace'"
+              class="erp-workspace-tab erp-procurement-tab"
+              :class="{ 'is-active': tab.key === activeTabKey, 'is-pinned': tab.pinned || !tab.closable }"
+              @click="handleTabClick(tab.key)"
+              @contextmenu="openTabContextMenu($event, tab.key)"
+            >
+              <button type="button" class="erp-procurement-tab__select">
+                <span v-if="tab.icon" class="erp-workspace-tab__icon">
+                  <el-icon><component :is="tab.icon" /></el-icon>
+                </span>
+                <span v-else-if="tab.pinned || !tab.closable" class="erp-workspace-tab__pin">
+                  <el-icon><Paperclip /></el-icon>
+                </span>
+                <span class="erp-workspace-tab__label">{{ tab.title }}</span>
+                <span v-if="tab.closable" class="erp-workspace-tab__close" @click.stop="handleTabClose(tab.key)">
+                  <el-icon><Close /></el-icon>
+                </span>
+              </button>
+              <el-dropdown trigger="click" placement="bottom-start" @command="handleProcurementTabCommand(tab, $event)">
+                <button type="button" class="erp-procurement-tab__menu" aria-label="采购工作台更多入口" @click.stop>
+                  <el-icon><ArrowDown /></el-icon>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="workspace">新版采购工作台</el-dropdown-item>
+                    <el-dropdown-item command="legacy">旧版登记采购</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
             <button
-              v-for="tab in workspaceTabs"
-              :key="tab.key"
+              v-else
               type="button"
               class="erp-workspace-tab"
               :class="{ 'is-active': tab.key === activeTabKey, 'is-pinned': tab.pinned || !tab.closable }"
@@ -1015,6 +1060,7 @@ onBeforeUnmount(() => {
                 <el-icon><Close /></el-icon>
               </span>
             </button>
+            </template>
           </div>
 
           <div class="erp-workspace-panels">
@@ -1196,6 +1242,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.erp-procurement-tab { gap: 4px; }
+.erp-procurement-tab__select { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.erp-procurement-tab :deep(.el-dropdown) { display: inline-flex; flex-shrink: 0; color: inherit; }
+.erp-procurement-tab__menu { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; }
+.erp-procurement-tab__menu:hover { background: var(--erp-primary-soft); }
+.erp-procurement-tab__menu .el-icon { font-size: 11px; }
+.erp-procurement-tab__select:focus-visible, .erp-procurement-tab__menu:focus-visible { outline: 2px solid var(--erp-primary); outline-offset: 2px; }
 .erp-header-left { flex: 1; overflow: hidden; }
 .erp-header-right { flex-shrink: 0; gap: 5px; }
 .erp-quick-tools { display: flex; align-items: center; gap: 3px; padding-right: 8px; margin-right: 3px; border-right: 1px solid var(--erp-border); }
