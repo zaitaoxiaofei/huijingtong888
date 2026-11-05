@@ -8,11 +8,51 @@
     const activeCompanies = new Set();
     let instancePromise;
     let tickPromise;
+    let forcedTickPromise;
     let timer;
     let lastScan = 0;
+    let lastScanContext = '';
     let idleDelay = 2500;
     let previewCount = 0;
     let stopped = true;
+    const diagnostics = {
+      phase: 'idle', localTabCount: 0, verifiedCompanyCount: 0, registeredCompanyCount: 0,
+      serverCompanyCount: null, lastErrorCode: '', lastError: '', checkedAt: null, tabs: []
+    };
+
+    function problem(code, status = 0) {
+      const messages = {
+        NO_SELLER_TAB: '未找到 Seller 页面，请打开并登录 Seller 后重连',
+        COOKIE_STORE_UNAVAILABLE: '未找到 Seller 标签页的 Cookie 存储，请刷新 Seller 页面后重连',
+        SELLER_TAB_PERMISSION_DENIED: '无法读取 Seller 页面，请允许插件访问 Seller 站点后重连',
+        STORE_IDENTITY_UNAVAILABLE: 'Seller 店铺身份尚未完整识别，请刷新 Seller 分析页后重连',
+        STORE_CONTEXT_MISMATCH: 'Seller 页面与 Cookie 店铺身份不一致，请核对当前店铺后重连',
+        COLLECTOR_BROWSER_NOT_CONFIGURED: '请先保存当前企业的插件密钥后重连',
+        COLLECTOR_BROWSER_HEARTBEAT_REJECTED: `云端拒绝本机登记${status ? `（HTTP ${status}）` : ''}，请检查企业密钥及店铺归属后重连`,
+        COLLECTOR_BROWSER_TIMEOUT: '本机接入云端超时，请检查网络后重连',
+        COLLECTOR_BROWSER_OPERATION_TIMEOUT: '读取 Seller 页面超时，请刷新页面后重连',
+        COLLECTOR_BROWSER_REGISTRATION_FAILED: '本机暂未接入云端，请检查网络与企业密钥后重连'
+      };
+      diagnostics.lastErrorCode = Object.hasOwn(messages, code) ? code : 'COLLECTOR_BROWSER_REGISTRATION_FAILED';
+      diagnostics.lastError = messages[diagnostics.lastErrorCode];
+    }
+
+    function localErrorCode(error) {
+      if (error?.code === 'COLLECTOR_BROWSER_OPERATION_TIMEOUT') return error.code;
+      return /permission|cannot access|not allowed|host access|denied/i.test(String(error?.message || ''))
+        ? 'SELLER_TAB_PERMISSION_DENIED' : 'STORE_IDENTITY_UNAVAILABLE';
+    }
+
+    function finishDiagnostics(context) {
+      const now = Date.now();
+      const current = [...workers.values()].filter((worker) => contextKey(worker.context) === contextKey(context));
+      diagnostics.verifiedCompanyCount = new Set(current.filter((worker) => worker.verified).map((worker) => worker.companyId)).size;
+      diagnostics.registeredCompanyCount = new Set(current.filter((worker) => worker.verified && worker.heartbeatAt
+        && now - worker.heartbeatAt < 60000 && now >= Number(worker.cooldownUntil || 0)).map((worker) => worker.companyId)).size;
+      diagnostics.phase = diagnostics.registeredCompanyCount ? 'registered' : !diagnostics.localTabCount ? 'no_seller_tabs'
+        : !diagnostics.verifiedCompanyCount ? 'identity_unavailable' : 'registration_failed';
+      diagnostics.checkedAt = now;
+    }
 
     function contextKey(context) {
       return JSON.stringify([context.erpBaseUrl, context.tenantId, context.token]);
@@ -22,7 +62,7 @@
       let deadline;
       try {
         return await Promise.race([promise, new Promise((resolve, reject) => {
-          deadline = setTimeout(() => reject(new Error('Collector browser operation timed out')), ms);
+          deadline = setTimeout(() => reject(Object.assign(new Error('Collector browser operation timed out'), { code: 'COLLECTOR_BROWSER_OPERATION_TIMEOUT' })), ms);
         })]);
       } finally {
         clearTimeout(deadline);
@@ -95,13 +135,20 @@
         }
       }));
       const pageId = String(results?.[0]?.result || '').trim();
-      const cookies = await bounded(chrome.cookies.getAll({ url: tab.url, ...(storeId ? { storeId } : {}) }));
+      if (!pageId) return { ...unavailable, detailCode: 'SELLER_PAGE_IDENTITY_MISSING' };
+      const cookieContext = deps.readCookieContext ? await bounded(deps.readCookieContext(tab, { pageCompanyId: pageId, storeId })) : null;
+      if (cookieContext?.code) return { companyId: '', code: cookieContext.code };
+      if (deps.readCookieContext && (!cookieContext || cookieContext.storeId !== storeId || !Array.isArray(cookieContext.cookies))) {
+        return { companyId: '', code: 'COOKIE_STORE_UNAVAILABLE' };
+      }
+      if (cookieContext?.companyId && String(cookieContext.companyId) !== pageId) return { companyId: '', code: 'STORE_CONTEXT_MISMATCH' };
+      const cookies = cookieContext ? cookieContext.cookies : await bounded(chrome.cookies.getAll({ url: tab.url, ...(storeId ? { storeId } : {}) }));
       const cookieIds = [...new Set(cookies.filter((cookie) => cookie.name === 'sc_company_id').map((cookie) => String(cookie.value || '').trim()).filter(Boolean))];
-      if (!pageId || !cookieIds.length) return unavailable;
+      if (!cookieIds.length) return { ...unavailable, detailCode: 'SELLER_COOKIE_IDENTITY_MISSING' };
       if (cookieIds.length !== 1 || cookieIds[0] !== pageId) return { companyId: '', code: 'STORE_CONTEXT_MISMATCH' };
       return { companyId: pageId, code: '' };
       } catch (error) {
-        return unavailable;
+        return { companyId: '', code: localErrorCode(error) };
       }
     }
 
@@ -111,20 +158,31 @@
         chrome.cookies.getAllCookieStores(), instanceId()
       ]));
       const current = new Set();
+      diagnostics.localTabCount = tabs.length;
+      diagnostics.tabs = [];
+      let firstFailure = '';
       for (const tab of tabs) {
         try {
           const storeId = String(stores.find((store) => store.tabIds?.includes(tab.id))?.id || '');
-          if (!storeId) continue;
-          const companyId = (await identity(tab, storeId)).companyId;
-          if (!companyId) continue;
+          const live = storeId ? await identity(tab, storeId) : { companyId: '', code: 'COOKIE_STORE_UNAVAILABLE' };
+          diagnostics.tabs.push({ tabId: tab.id, code: live.detailCode || live.code || '' });
+          if (!live.companyId) { firstFailure ||= live.code; continue; }
+          const companyId = live.companyId;
           const workerId = `${instance}_${storeId}_${companyId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
           current.add(workerId);
           const previous = workers.get(workerId);
           const sameContext = previous && contextKey(previous.context) === contextKey(context);
-          workers.set(workerId, Object.assign(sameContext ? previous : {}, { id: workerId, tab, storeId, companyId, context }));
-        } catch (error) {}
+          workers.set(workerId, Object.assign(sameContext ? previous : {}, { id: workerId, tab, storeId, companyId, context, verified: true }));
+        } catch (error) {
+          const code = localErrorCode(error);
+          diagnostics.tabs.push({ tabId: tab.id, code });
+          firstFailure ||= code;
+        }
       }
       for (const id of workers.keys()) if (!current.has(id)) workers.delete(id);
+      if (!tabs.length) problem('NO_SELLER_TAB');
+      else if (firstFailure) problem(firstFailure);
+      else { diagnostics.lastErrorCode = ''; diagnostics.lastError = ''; }
     }
 
     async function assertIdentity(worker, task) {
@@ -196,26 +254,55 @@
       }
     }
 
-    async function tick() {
-      if (tickPromise) return tickPromise;
+    async function tick({ force = false } = {}) {
+      if (tickPromise) {
+        if (!force) return tickPromise;
+        if (!forcedTickPromise) forcedTickPromise = tickPromise.then(() => tick({ force: true }))
+          .finally(() => { forcedTickPromise = null; });
+        return forcedTickPromise;
+      }
       tickPromise = (async () => {
-        const context = await deps.getContext();
-        if (!lastScan || Date.now() - lastScan >= 15000) { await scan(context); lastScan = Date.now(); }
+        diagnostics.phase = 'checking';
+        const context = await bounded(deps.getContext());
+        const scope = contextKey(context);
+        const contextChanged = lastScanContext !== scope;
+        if (contextChanged) { diagnostics.serverCompanyCount = null; diagnostics.registeredCompanyCount = 0; }
+        if (force || contextChanged || !lastScan || Date.now() - lastScan >= 15000) {
+          await scan(context); lastScan = Date.now(); lastScanContext = scope;
+        }
+        if (!context.token) {
+          problem('COLLECTOR_BROWSER_NOT_CONFIGURED');
+          diagnostics.registeredCompanyCount = 0;
+          diagnostics.phase = 'registration_failed';
+          diagnostics.checkedAt = Date.now();
+          return;
+        }
         let claimed = false;
         for (const worker of workers.values()) {
-          if (contextKey(worker.context) !== contextKey(context) || Date.now() < Number(worker.cooldownUntil || 0)) continue;
+          if (contextKey(worker.context) !== scope) continue;
+          if (Date.now() < Number(worker.cooldownUntil || 0)) {
+            if (worker.registrationError) problem(worker.registrationError.code, worker.registrationError.status);
+            continue;
+          }
           const companyKey = `${context.erpBaseUrl}:${context.tenantId}:${worker.companyId}`;
+          let stage = 'identity';
           try {
             await assertIdentity(worker, { company_id: worker.companyId });
-            if (!worker.heartbeatAt || Date.now() - worker.heartbeatAt >= 15000) {
-              await api(context, '/heartbeat', {
+            worker.verified = true;
+            if (force || contextChanged || !worker.heartbeatAt || Date.now() - worker.heartbeatAt >= 15000) {
+              stage = 'heartbeat';
+              const response = await api(context, '/heartbeat', {
                 worker_id: worker.id, company_id: worker.companyId, observed_company_id: '',
                 cookie_company_id: worker.companyId, page_company_id: worker.companyId,
                 identity_source: 'page_cookie', plugin_version: chrome.runtime.getManifest().version
               });
               worker.heartbeatAt = Date.now();
+              worker.registrationError = null;
+              const serverCount = response.available_workers ?? response.data?.available_workers;
+              if (Number.isFinite(Number(serverCount)) && serverCount !== null && serverCount !== undefined) diagnostics.serverCompanyCount = Number(serverCount);
             }
             if (activeCompanies.has(companyKey)) continue;
+            stage = 'claim';
             let releaseTab = deps.coordination ? deps.coordination.tryAcquireCollectorTab(worker.tab.id) : () => {};
             if (!releaseTab) continue;
             try {
@@ -230,10 +317,31 @@
             }
           } catch (error) {
             if ([401, 403, 409, 429].includes(Number(error?.status))) worker.cooldownUntil = Date.now() + 60000;
+            if (stage === 'identity') {
+              worker.verified = false;
+              problem(error?.code || localErrorCode(error));
+              const tab = diagnostics.tabs.find((item) => item.tabId === worker.tab.id);
+              if (tab) tab.code = diagnostics.lastErrorCode;
+            } else {
+              worker.heartbeatAt = 0;
+              const code = Number(error?.status) ? 'COLLECTOR_BROWSER_HEARTBEAT_REJECTED'
+                : error?.code === 'COLLECTOR_BROWSER_TIMEOUT' ? error.code : 'COLLECTOR_BROWSER_REGISTRATION_FAILED';
+              worker.registrationError = { code, status: Number(error?.status || 0) };
+              problem(code, worker.registrationError.status);
+            }
           }
         }
+        finishDiagnostics(context);
+        if (diagnostics.registeredCompanyCount && !diagnostics.tabs.some((tab) => tab.code)
+          && ![...workers.values()].some((worker) => worker.registrationError)) {
+          diagnostics.lastErrorCode = ''; diagnostics.lastError = '';
+        }
         idleDelay = claimed || previewCount ? 2500 : Math.min(30000, idleDelay * 2);
-      })().catch(() => {}).finally(() => { tickPromise = null; });
+      })().catch((error) => {
+        problem(error?.code === 'COLLECTOR_BROWSER_OPERATION_TIMEOUT' ? error.code : localErrorCode(error));
+        diagnostics.phase = diagnostics.lastErrorCode === 'SELLER_TAB_PERMISSION_DENIED' ? 'identity_unavailable' : 'registration_failed';
+        diagnostics.checkedAt = Date.now();
+      }).finally(() => { tickPromise = null; });
       return tickPromise;
     }
 
@@ -244,7 +352,7 @@
     }
 
     async function preview(skus, baseBySku, tabId) {
-      const context = await bounded(deps.getContext()).catch(() => null);
+      let context = await bounded(deps.getContext()).catch(() => null);
       if (!context) return null;
       const safelyRejected = (error) => [400, 401, 403, 404, 405, 409, 413, 415, 422, 429].includes(Number(error?.status));
       const unknownSubmission = async () => {
@@ -263,7 +371,9 @@
         if (error?.status !== 409 || error?.code !== 'COLLECTOR_BROWSER_POOL_UNAVAILABLE') return safelyRejected(error) ? null : unknownSubmission();
         // No batch was accepted. Give this browser one bounded registration pass
         // before falling back; never replay a batch with an unknown outcome.
-        await bounded(tick()).catch(() => {});
+        await bounded(tick({ force: true })).catch(() => {});
+        context = await bounded(deps.getContext()).catch(() => null);
+        if (!context) return null;
         try { batch = await api(context, '/batches', { skus }); } catch (retryError) { return safelyRejected(retryError) ? null : unknownSubmission(); }
       }
       if (!batch?.batch_id) return unknownSubmission();
@@ -311,7 +421,13 @@
     return {
       start() { stopped = false; schedule(0); },
       stop() { stopped = true; clearTimeout(timer); },
-      wake() { lastScan = 0; schedule(0); },
+      wake() {
+        lastScan = 0; idleDelay = 2500;
+        const pending = tick({ force: true });
+        if (!stopped) void pending.finally(() => schedule(2500));
+        return pending;
+      },
+      getDiagnostics() { return JSON.parse(JSON.stringify(diagnostics)); },
       tick, preview, instanceId
     };
   }

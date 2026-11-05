@@ -398,6 +398,14 @@
       #save-feedback[data-tone="pending"] { color: var(--muted); }
       .status-pill[data-state="pending"], .status-pill[data-state="empty"] { border-color: var(--line); background: var(--soft); color: var(--muted); }
       .status-pill[data-state="error"] { border-color: #fed7aa; background: #fff7ed; color: #9a3412; }
+      .pool-panel { display: grid; grid-template-columns: minmax(0, 1fr) 48px; align-items: start; gap: 8px; margin-bottom: 12px; padding: 9px 11px; border: 1px solid var(--soft-line); border-radius: 8px; background: #fff; }
+      .pool-panel summary { cursor: pointer; color: #344054; font-size: 12px; line-height: 1.5; }
+      .pool-panel summary strong { margin-right: 5px; }
+      #browser-pool-status { color: var(--muted); overflow-wrap: anywhere; }
+      #browser-pool-status[data-state="connected"] { color: #087443; }
+      #browser-pool-status[data-state="error"] { color: #9a3412; }
+      #browser-pool-detail { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; white-space: pre-line; overflow-wrap: anywhere; }
+      #browser-pool-reconnect { height: 28px; font-size: 12px; }
       .feature-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px; margin-bottom: 12px; border-radius: 9px; background: #e8eef7; }
       .feature-tabs button { height: 34px; border-color: transparent; background: transparent; color: var(--muted); font-size: 13px; }
       .feature-tabs button[aria-selected="true"] { color: #175cd3; border-color: #d0def4; background: #fff; box-shadow: 0 1px 3px #1720330d; }
@@ -440,6 +448,14 @@
         <p id="connection-detail" class="connection-note">保存密钥后自动连接 ERP。</p>
         <p id="save-feedback" class="connection-note" role="status" aria-live="polite"></p>
         <div id="token-warning" class="token-warning"></div>
+      </section>
+
+      <section class="pool-panel" aria-label="云端采集池">
+        <details id="browser-pool-diagnostics">
+          <summary><strong>云端采集池</strong><span id="browser-pool-status" role="status" aria-live="polite">正在读取本机状态</span></summary>
+          <p id="browser-pool-detail">展开后显示接入诊断；可用公司数不代表正在同时执行。</p>
+        </details>
+        <button id="browser-pool-reconnect" class="secondary" type="button">重连</button>
       </section>
 
       <nav class="feature-tabs" role="tablist" aria-label="插件功能">
