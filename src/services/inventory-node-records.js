@@ -6,6 +6,7 @@ import { resolveInventoryTenantScope, assertInventoryRecord, inventoryTenantSql 
 import { hasPermission } from '../shared/permissions.js';
 import { procurementArrivalStage,PROCUREMENT_INSPECTION_HOURS } from '../shared/inventory-procurement-stage.js';
 import { invalidateOrderProcurementCoverage } from './mysql-order-procurement-coverage.js';
+import { invalidateOrderReadCache } from './order-read-cache.js';
 
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
 const pending=['submitted','pending','suggested'];
@@ -106,6 +107,7 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
       const {current,scope}=await access(session,(sql,args)=>q(sql+' FOR SHARE',args));
       const id=Number(body.product_id);await assertInventoryRecord(scope,'product',id,q,{lock:true});
       const action=String(body.action),recordId=Number(body.id),note=String(body.note||'').trim();
+      let collaborationNote;
       if(note.length>1000)throw fail('备注最多1000字');
       if(['fbp-arrival-time','fbp-expected-time'].includes(action)) {
         if(!hasPermission(current,'packing')&&!hasPermission(current,'inventory.write'))throw fail('需要仓库或库存管理岗位权限',403);
@@ -151,15 +153,20 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
         const local=await ledger({product_id:id,include_flow:'local'},scope.id);
         if(!local.orders?.some(r=>Number(r.order_id)===recordId&&r.needs_fulfillment))throw fail('订单不属于此库存的待履约需求，请刷新',409);
         const [old]=await q('SELECT note,mark_type FROM order_marks WHERE order_id=? FOR UPDATE',[recordId]);
+        if(body.preserve_mark===true&&String(old?.note||'')===note)return{ok:true,duplicate:true,note,mark_type:old?.mark_type||''};
         if(String(old?.note||'')!==String(body.expected_note||''))throw fail('其他同事刚修改了备注，请刷新后再保存',409);
-        if(!note)throw fail('请填写需要提醒运营、采购或仓库的备注');
+        if(!note&&!(body.preserve_mark===true&&body.clear_note===true))throw fail('请填写需要提醒运营、采购或仓库的备注');
+        const markType=body.preserve_mark===true?old?.mark_type||'':old?.mark_type||'follow';
         await q(`INSERT INTO order_marks(order_id,mark_type,note,updated_by_person_id,updated_at) VALUES (?,?,?,?,UTC_TIMESTAMP())
-          ON DUPLICATE KEY UPDATE mark_type=VALUES(mark_type),note=VALUES(note),updated_by_person_id=VALUES(updated_by_person_id),updated_at=VALUES(updated_at)`,[recordId,old?.mark_type||'follow',note,current.personId]);
+          ON DUPLICATE KEY UPDATE mark_type=VALUES(mark_type),note=VALUES(note),updated_by_person_id=VALUES(updated_by_person_id),updated_at=VALUES(updated_at)`,[recordId,markType,note,current.personId]);
+        if(body.preserve_mark===true)collaborationNote={note,mark_type:markType};
       }else throw fail('不支持的库存节点操作');
       await q('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES (?,?,?,?,?)',[scope.id,id,current.personId,action,JSON.stringify({record_id:recordId,note})]);
-      return {ok:true};
+      return {ok:true,...collaborationNote};
     });
-    if(body.action==='reject')invalidateOrderProcurementCoverage();return result;
+    if(body.action==='reject')invalidateOrderProcurementCoverage();
+    if(body.action==='order-note')invalidateOrderReadCache();
+    return result;
   }
   return {records,mutate};
 }

@@ -71,6 +71,31 @@ test('node records, approval purchase, receipt markers and order notes preserve 
    r=await service.records({node:'orders',product_id:200},warehouse);assert.equal(r.rows[0].mark_type,'follow');assert.match(r.rows[0].mark_note,/暂缓发货/);assert.equal(r.rows[0].sale_price,undefined);
    await assert.rejects(service.mutate({action:'order-note',product_id:200,id:3000,note:'越权',expected_note:''},operator),{statusCode:404});
   });
+  await t.test('procurement collaboration notes preserve colors, clear explicitly and replay without duplicate audit',async()=>{
+   await q("UPDATE order_marks SET mark_type='quality_check',note='原人工备注' WHERE order_id=2000");
+   const {cachedOrderRead}=await import('../src/services/order-read-cache.js');
+   const readNote=()=>cachedOrderRead('collaboration-node-note:2:2000',async()=>(await q('SELECT note FROM order_marks WHERE order_id=2000'))[0].note);
+   assert.equal(await readNote(),'原人工备注');
+   const body={action:'order-note',product_id:200,id:2000,note:'门槛条去掉部分字体',expected_note:'原人工备注',preserve_mark:true};
+   const count=Number((await q("SELECT COUNT(*) n FROM inventory_flow_events WHERE action='order-note'"))[0].n);
+   const saved=await service.mutate(body,buyer);assert.equal(saved.note,body.note);assert.equal(saved.mark_type,'quality_check');
+   assert.equal(await readNote(),body.note,'committed collaboration note invalidates cached order reads');
+   let [mark]=await q('SELECT note,mark_type FROM order_marks WHERE order_id=2000');
+   assert.equal(mark.note,body.note);assert.equal(mark.mark_type,'quality_check');
+   assert.equal((await service.mutate(body,buyer)).duplicate,true);
+   assert.equal(Number((await q("SELECT COUNT(*) n FROM inventory_flow_events WHERE action='order-note'"))[0].n),count+1);
+   await assert.rejects(service.mutate({...body,note:'过时覆盖'},warehouse),{statusCode:409});
+   await assert.rejects(service.mutate({...body,id:3000},buyer),{statusCode:404});
+   await assert.rejects(service.mutate({...body,note:'禁止',expected_note:body.note},session(6,'technical')),{statusCode:403});
+   await assert.rejects(service.mutate({...body,note:'',expected_note:body.note},buyer),/请填写/);
+   await service.mutate({...body,note:'',expected_note:body.note,clear_note:true},warehouse);
+   [mark]=await q('SELECT note,mark_type FROM order_marks WHERE order_id=2000');
+   assert.equal(mark.note,'');assert.equal(mark.mark_type,'quality_check');
+   await q("UPDATE order_marks SET mark_type='',note='' WHERE order_id=2000");
+   await service.mutate({...body,note:'新人工备注',expected_note:''},buyer);
+   assert.equal((await q('SELECT mark_type FROM order_marks WHERE order_id=2000'))[0].mark_type,'');
+   assert.equal((await q('SELECT COUNT(*) n FROM inventory_movements WHERE product_id=200'))[0].n,0);
+  });
   await t.test('one-day cycles use product settings, reject stale revision and retain enterprise defaults',async()=>{
    const {inventoryFlow}=await import('../src/services/inventory-flow.js');
    const initial=await service.records({node:'safety',product_id:200},operator);assert.equal(initial.revision,0);
