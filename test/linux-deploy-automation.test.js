@@ -82,7 +82,7 @@ async function withWindowsDeployFixture(run) {
       fs.appendFileSync(process.env.OZON_DEPLOY_TEST_TRACE, JSON.stringify({ step: "guard", cwd: process.cwd() }) + "\\n");
       process.exit(Number(process.env.OZON_DEPLOY_TEST_GUARD_EXIT || 0));
     `, "utf8");
-    const execute = async ({ skipInit = false, skipMaintenance = false, runMaintenance = false, skipBuild = true, manifest = false, material = false, retention = false, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
+    const execute = async ({ skipInit = false, skipMaintenance = false, runMaintenance = false, skipBuild = true, manifest = false, material = false, retention = false, consumables = false, expectedProductionCommit = '', consumablesUploadExit = 0, materialUploadExit = 0, activationExit = 0, guardExit = 0, dryRun = false, allowInterruption = false } = {}) => {
       await fsPromises.writeFile(tracePath, "", "utf8");
       return execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
         $ErrorActionPreference = 'Stop'
@@ -106,7 +106,7 @@ async function withWindowsDeployFixture(run) {
         }
         function global:scp {
           Record-DeployStep @{ step = 'upload'; arguments = @($args) }
-          $global:LASTEXITCODE = if ($args[-1] -like '*ozon-erp-ai-material-*') { [int]$env:OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT } else { 0 }
+          $global:LASTEXITCODE = if ($args[-1] -like '*ozon-erp-inventory-consumables-*') { [int]$env:OZON_DEPLOY_TEST_CONSUMABLES_UPLOAD_EXIT } elseif ($args[-1] -like '*ozon-erp-ai-material-*') { [int]$env:OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT } else { 0 }
         }
         function global:ssh {
           Record-DeployStep @{ step = 'ssh'; arguments = @($args) }
@@ -122,6 +122,8 @@ async function withWindowsDeployFixture(run) {
         if ($env:OZON_DEPLOY_TEST_MANIFEST) { $options.ReviewedIdentityManifest = $env:OZON_DEPLOY_TEST_MANIFEST }
         if ($env:OZON_DEPLOY_TEST_MATERIAL) { $options.ReviewedAiMaterialManifest = $env:OZON_DEPLOY_TEST_MATERIAL }
         if ($env:OZON_DEPLOY_TEST_RETENTION) { $options.ReviewedAiMediaRetentionManifest = $env:OZON_DEPLOY_TEST_RETENTION }
+        if ($env:OZON_DEPLOY_TEST_CONSUMABLES) { $options.ReviewedInventoryConsumablesManifest = $env:OZON_DEPLOY_TEST_CONSUMABLES }
+        if ($env:OZON_DEPLOY_TEST_EXPECTED_COMMIT) { $options.ExpectedProductionCommit = $env:OZON_DEPLOY_TEST_EXPECTED_COMMIT }
         if ($env:OZON_DEPLOY_TEST_DRY_RUN -eq '1') { $options.DryRun = $true }
         & $env:OZON_DEPLOY_TEST_SCRIPT @options
       `], {
@@ -140,6 +142,9 @@ async function withWindowsDeployFixture(run) {
           OZON_DEPLOY_TEST_MANIFEST: manifest ? manifestPath : "",
           OZON_DEPLOY_TEST_MATERIAL: material ? materialManifestPath : "",
           OZON_DEPLOY_TEST_RETENTION: retention ? materialManifestPath : "",
+          OZON_DEPLOY_TEST_CONSUMABLES: consumables ? materialManifestPath : "",
+          OZON_DEPLOY_TEST_EXPECTED_COMMIT: expectedProductionCommit,
+          OZON_DEPLOY_TEST_CONSUMABLES_UPLOAD_EXIT: String(consumablesUploadExit),
           OZON_DEPLOY_TEST_MATERIAL_UPLOAD_EXIT: String(materialUploadExit),
           OZON_DEPLOY_TEST_ACTIVATION_EXIT: String(activationExit),
           OZON_DEPLOY_TEST_GUARD_EXIT: String(guardExit),
@@ -153,6 +158,28 @@ async function withWindowsDeployFixture(run) {
     await fsPromises.rm(fixtureDir, { recursive: true, force: true });
   }
 }
+
+test('Windows consumable upload stays private, uses argument ten and keeps production commit in nine', { skip: process.platform !== 'win32' }, async () => {
+  await withWindowsDeployFixture(async ({ execute, trace }) => {
+    for (const expectedProductionCommit of ['', 'a'.repeat(40)]) {
+      const { stdout } = await execute({ consumables: true, expectedProductionCommit });
+      assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
+      const steps = await trace();
+      const activation = steps.find(step => step.step === 'ssh' && step.arguments.at(-1).includes("bash '/tmp/ozon-erp-remote-release.sh'"));
+      assert.match(activation.arguments.at(-1), new RegExp(`'1' '0' '' '' '0' '' '${expectedProductionCommit}' '/tmp/ozon-erp-inventory-consumables-test-release-[a-f0-9]{32}\\.json'$`));
+      const prepare = steps.findIndex(step => step.step === 'ssh' && step.arguments.at(-1).includes('umask 077') && step.arguments.at(-1).includes('inventory-consumables'));
+      const upload = steps.findIndex(step => step.step === 'upload' && step.arguments.at(-1).includes('inventory-consumables'));
+      assert.ok(prepare >= 0 && upload > prepare);
+      assert.ok(steps.some(step => step.step === 'ssh' && /^rm -f -- '.*inventory-consumables/.test(step.arguments.at(-1))));
+    }
+    await assert.rejects(execute({ consumables: true, consumablesUploadExit: 41 }));
+    const failed = await trace();
+    assert.equal(failed.some(step => step.step === 'ssh' && step.arguments.at(-1).includes('&& bash ')), false);
+    assert.ok(failed.some(step => step.step === 'ssh' && /^rm -f -- '.*inventory-consumables/.test(step.arguments.at(-1))));
+    await execute({ consumables: true, dryRun: true });
+    assert.deepEqual(await trace(), []);
+  });
+});
 
 test("AI media retention requires maintenance before upload and passes a private eighth manifest argument", { skip: process.platform !== "win32" }, async () => {
   await withWindowsDeployFixture(async ({ execute, trace }) => {
@@ -330,6 +357,47 @@ const missingGitBash = process.platform === "win32" && !fs.existsSync(bashExecut
 
 const bashPath = value => process.platform === "win32" ? value.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`) : value;
 
+test('real Git Bash consumable client keeps argument ten private and cleans failed uploads', { skip: missingGitBash }, async () => {
+  const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ozon-consumables-client-'));
+  try {
+    const scripts = path.join(fixture, 'deploy', 'linux'), artifacts = path.join(fixture, '.deploy-artifacts', 'fixture-package');
+    await fsPromises.mkdir(scripts, { recursive: true }); await fsPromises.mkdir(artifacts, { recursive: true });
+    const script = path.join(scripts, 'deploy-ecs.sh'), mock = path.join(fixture, 'mock.sh'), trace = path.join(fixture, 'trace.jsonl');
+    const manifest = path.join(fixture, 'reviewed consumables with spaces.json'), key = path.join(fixture, 'key');
+    await fsPromises.writeFile(script, unixClient.replaceAll('\r\n', '\n'));
+    await fsPromises.writeFile(path.join(scripts, 'remote-release.sh'), 'fixture');
+    await fsPromises.writeFile(path.join(artifacts, 'deploy-manifest.json'), '{}');
+    await fsPromises.writeFile(manifest, JSON.stringify({ private_marker: 'CONSUMABLE_CONTENT_MUST_NOT_BE_PRINTED' }));
+    await fsPromises.writeFile(key, 'fixture');
+    await fsPromises.writeFile(mock, `
+record() { node -e 'require("node:fs").appendFileSync(process.env.OZON_DEPLOY_BASH_TRACE, JSON.stringify(process.argv.slice(1))+"\\n")' "$@"; }
+ssh() { record ssh "$@"; return 0; }
+scp() { record scp "$@"; if [[ "$*" == *ozon-erp-inventory-consumables-* ]]; then return "\${OZON_DEPLOY_BASH_UPLOAD_EXIT:-0}"; fi; }
+zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
+`, 'utf8');
+    const execute = async (expected = '', uploadExit = '0') => execFileAsync(bashExecutable, ['--noprofile', '--norc', bashPath(script), '--host', 'deployment.test.invalid', '--version', 'fixture', '--identity-file', bashPath(key), '--reviewed-inventory-consumables-manifest', bashPath(manifest), '--skip-build', '--allow-dirty', ...(expected ? ['--expected-production-commit', expected] : [])], {
+      cwd: fixture, env: { ...process.env, BASH_ENV: bashPath(mock), OZON_DEPLOY_BASH_TRACE: trace, OZON_DEPLOY_BASH_UPLOAD_EXIT: uploadExit }
+    });
+    const calls = async () => (await fsPromises.readFile(trace, 'utf8')).trim().split(/\r?\n/).filter(Boolean).map(JSON.parse);
+    for (const expected of ['', 'a'.repeat(40)]) {
+      await fsPromises.writeFile(trace, '');
+      const { stdout } = await execute(expected);
+      assert.doesNotMatch(stdout, /CONSUMABLE_CONTENT_MUST_NOT_BE_PRINTED/);
+      const steps = await calls();
+      assert.match(steps.find(call => call[0] === 'ssh' && call.at(-1).startsWith('bash ')).at(-1), new RegExp(`'1' '0' '' '' '0' '' '${expected}' '/tmp/ozon-erp-inventory-consumables-fixture-[a-f0-9]{32}\\.json'$`));
+      const prepare = steps.findIndex(call => call[0] === 'ssh' && call.at(-1).includes('umask 077'));
+      const upload = steps.findIndex(call => call[0] === 'scp' && call.at(-1).includes('inventory-consumables'));
+      assert.ok(prepare >= 0 && upload > prepare);
+      assert.match(steps.at(-1).at(-1), /^rm -f -- '.*inventory-consumables/);
+    }
+    await fsPromises.writeFile(trace, '');
+    await assert.rejects(execute('', '41'));
+    const failed = await calls();
+    assert.equal(failed.some(call => call[0] === 'ssh' && call.at(-1).startsWith('bash ')), false);
+    assert.match(failed.at(-1).at(-1), /^rm -f -- '.*inventory-consumables/);
+  } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
+});
+
 test("real Git Bash client forwards material as argument six with an empty identity placeholder and cleans private uploads", { skip: missingGitBash }, async () => {
   const fixture = await fsPromises.mkdtemp(path.join(os.tmpdir(), "ozon-material-client-"));
   try {
@@ -481,7 +549,8 @@ test("material migration is backed up, rechecks after a short stop, skips no-op 
     const hook = remote.slice(hookStart, remote.indexOf('\n# This additive schema', hookStart));
     const rollback = remote.match(/^rollback\(\) \{\r?\n[\s\S]*?^\}\r?\n(?=trap rollback ERR)/m)?.[0];
     const policy = remote.match(/^assert_release_interruption_policy\(\) \{\r?\n[\s\S]*?^\}\r?\n/m)?.[0];
-    assert.ok(gate && early && hook && rollback && policy);
+    const consumablesPreflight = remote.match(/^inventory_consumables_preflight\(\) \{\r?\n[\s\S]*?^\}\r?\n/m)?.[0];
+    assert.ok(gate && early && hook && rollback && policy && consumablesPreflight);
     assert.ok(remote.indexOf("\n  backup_database\n") < hookStart && hookStart < remote.indexOf("\nstart_candidate\n"));
     await fsPromises.mkdir(path.join(fixture, "scripts")); await fsPromises.mkdir(path.join(fixture, "previous"));
     await fsPromises.writeFile(path.join(fixture, "scripts", "migrate-tenant-ai-material-optimization.mjs"), "fixture");
@@ -504,6 +573,7 @@ allow_service_interruption=1
 run_db_maintenance=0
 reviewed_identity_manifest=""
 reviewed_ai_material_manifest="/tmp/ozon-erp-ai-material-fixture.json"
+reviewed_inventory_consumables_manifest=""
 material_change_required=ready
 pending_schema_migrations=""
 plan_database_changes() { :; }
@@ -521,6 +591,7 @@ node() { printf 'apply %s\\n' "$*" >> "$PWD/trace"; return ${scenario === "apply
 wait_for_release() { return 0; }
 ${rollback.replaceAll("\r\n", "\n")}
 ${policy.replaceAll("\r\n", "\n")}
+${consumablesPreflight.replaceAll("\r\n", "\n")}
 trap rollback ERR
 ${early}
 ${gate}

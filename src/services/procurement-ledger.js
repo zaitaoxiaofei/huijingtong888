@@ -388,7 +388,7 @@ export function createProcurementLedgerService(hooks) {
     const scope = await resolveScope(tenantId, run);
     const movementTenantSql = ` AND ${inventoryTenantSql(scope)}`;
     const movementArgs = [productId];
-    const products = await run(`SELECT id, name, code, inventory_number, stock_unit, purchase_cost,
+    const products = await run(`SELECT id, name, code, inventory_number, stock_unit, is_consumable, purchase_cost,
       CASE WHEN COALESCE(image_url, '') != '' THEN CONCAT('/api/products/', id, '/image') ELSE '' END AS image_url
       FROM products WHERE id = ? AND active = 1${movementTenantSql}`, movementArgs);
     if (!products[0]) throw new Error('库存商品不存在或已停用，请重新选择');

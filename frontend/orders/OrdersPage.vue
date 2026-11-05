@@ -306,7 +306,8 @@ const createComponentProductTotal = ref(0);
 const createComponentCategoryOptions = [
   { label: "单品", value: "single" },
   { label: "组合", value: "combo" },
-  { label: "配件", value: "accessory" }
+  { label: "配件", value: "accessory" },
+  { label: "耗材", value: "consumable" }
 ];
 
 const createForm = reactive({
@@ -529,10 +530,12 @@ function inventoryProductBasicLines(row) {
 }
 
 function inventoryProductTypeText(row) {
+  if (Number(row?.is_consumable || 0)) return "耗材库存";
   return Number(row?.is_accessory || 0) ? "配件库存" : "库存产品";
 }
 
 function inventoryProductCategoryText(row) {
+  if (Number(row?.is_consumable || 0)) return "耗材";
   if (Number(row?.is_accessory || 0)) return "配件";
   if (Number(row?.component_count || 0) > 0) return "组合";
   return "单品";

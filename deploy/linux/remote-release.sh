@@ -10,6 +10,7 @@ reviewed_ai_material_manifest="${6:-}"
 allow_service_interruption="${7:-0}"
 reviewed_ai_media_retention_manifest="${8:-}"
 expected_production_commit="${9:-}"
+reviewed_inventory_consumables_manifest="${10:-}"
 material_change_required="ready"
 candidate_warmup_seconds=360
 rollback_warmup_seconds=360
@@ -29,6 +30,9 @@ candidate_pid_file="/tmp/ozon-erp-candidate.pid"
 release_lock_file="/var/lock/ozon-erp-release.lock"
 
 cleanup_material_manifest() {
+  if [[ "${reviewed_inventory_consumables_manifest:-}" =~ ^/tmp/ozon-erp-inventory-consumables-[0-9A-Za-z._-]+\.json$ ]]; then
+    rm -f -- "$reviewed_inventory_consumables_manifest"
+  fi
   if [[ "${reviewed_ai_media_retention_manifest:-}" =~ ^/tmp/ozon-erp-ai-media-retention-[0-9A-Za-z._-]+\.json$ ]]; then
     rm -f -- "$reviewed_ai_media_retention_manifest"
   fi
@@ -39,7 +43,7 @@ cleanup_material_manifest() {
 trap cleanup_material_manifest EXIT
 
 if [[ -z "$archive_path" || -z "$release_version" ]]; then
-  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0] [reviewed-ai-media-retention-manifest]" >&2
+  echo "Usage: remote-release.sh <archive.zip> <version> [run-db-init:1|0] [run-db-maintenance:1|0] [reviewed-identity-manifest] [reviewed-ai-material-manifest] [allow-service-interruption:1|0] [reviewed-ai-media-retention-manifest] [expected-production-commit] [reviewed-inventory-consumables-manifest]" >&2
   exit 2
 fi
 
@@ -80,6 +84,13 @@ if [[ -n "$reviewed_ai_material_manifest" ]]; then
     exit 2
   fi
   chmod 600 "$reviewed_ai_material_manifest"
+fi
+if [[ -n "$reviewed_inventory_consumables_manifest" ]]; then
+  if [[ ! "$reviewed_inventory_consumables_manifest" =~ ^/tmp/ozon-erp-inventory-consumables-[0-9A-Za-z._-]+\.json$ || -L "$reviewed_inventory_consumables_manifest" || ! -f "$reviewed_inventory_consumables_manifest" || ! -s "$reviewed_inventory_consumables_manifest" ]]; then
+    echo "Reviewed inventory consumables manifest must be a private uploaded temporary file." >&2
+    exit 2
+  fi
+  chmod 600 "$reviewed_inventory_consumables_manifest"
 fi
 
 # ECS has one shared current release link and one blue/green candidate port.
@@ -309,7 +320,41 @@ migration_pending() {
   [[ $'\n'"$pending_schema_migrations"$'\n' == *$'\n'"$1"$'\n'* ]]
 }
 
+inventory_consumables_preflight() {
+  if [[ -z "${reviewed_inventory_consumables_manifest:-}" ]]; then return; fi
+  if [[ ! -f "$staging_dir/scripts/migrate-inventory-consumables.mjs" ]]; then
+    echo "Release is missing the reviewed inventory consumables migration." >&2
+    return 1
+  fi
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/migrate-inventory-consumables.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock --manifest="$reviewed_inventory_consumables_manifest" >/dev/null)
+}
+
+apply_reviewed_inventory_consumables() {
+  if [[ -z "${reviewed_inventory_consumables_manifest:-}" ]]; then return; fi
+  # Reviewed product DML must share the existing full, paired and pinned restore
+  # point, even when the additive column was already present before this release.
+  if [[ -z "$release_backup_path" || ! -s "$release_backup_path" || ! -s "${release_backup_path%.sql.gz}.ai-results.jsonl.gz" ]]; then
+    echo "Reviewed consumable changes require the verified full paired release backup." >&2
+    return 1
+  fi
+  inventory_consumables_preflight
+  local audit_dir="$shared_root/maintenance/inventory-consumables/${release_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+  install -d -m 700 "$audit_dir"
+  install -m 600 "$reviewed_inventory_consumables_manifest" "$audit_dir/reviewed.manifest.json"
+  (umask 077; sha256sum "$audit_dir/reviewed.manifest.json" > "$audit_dir/reviewed.manifest.json.sha256")
+  # The migration fsyncs private product before-images before its first UPDATE,
+  # locks the reviewed rows, and refuses changes beyond the independent flag.
+  (umask 077; cd "$staging_dir" && node scripts/migrate-inventory-consumables.mjs --apply --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock --manifest="$audit_dir/reviewed.manifest.json" --backup="$audit_dir/products.before.json" | tee "$audit_dir/result.json")
+}
+
 backup_database() {
+  if [[ -n "${reviewed_inventory_consumables_manifest:-}" && (! -f "$staging_dir/scripts/backup-private-ai-results.mjs" || ! -f "$staging_dir/scripts/prune-release-backups.mjs") ]]; then
+    echo "Reviewed consumable changes require the paired private-result backup and restore-point protection tools." >&2
+    return 1
+  fi
   local backup_dir="$shared_root/backups/identity-releases"
   local backup_path="$backup_dir/pre-release-${release_version}-$(date -u '+%Y%m%dT%H%M%SZ')-$$.sql.gz"
   set -a
@@ -337,7 +382,7 @@ backup_database() {
     (cd "$staging_dir" && node scripts/backup-private-ai-results.mjs --root="$private_results_root" --output="${backup_path%.sql.gz}.ai-results.jsonl.gz")
   fi
   release_backup_path="$backup_path"
-  if [[ "${run_db_maintenance:-0}" == "1" || -n "${reviewed_identity_manifest:-}" || -n "${reviewed_ai_material_manifest:-}" || -n "${reviewed_ai_media_retention_manifest:-}" || "${material_change_required:-ready}" == "change" ]]; then
+  if [[ "${run_db_maintenance:-0}" == "1" || -n "${reviewed_identity_manifest:-}" || -n "${reviewed_ai_material_manifest:-}" || -n "${reviewed_ai_media_retention_manifest:-}" || -n "${reviewed_inventory_consumables_manifest:-}" || "${material_change_required:-ready}" == "change" ]]; then
     (cd "$staging_dir" && node scripts/prune-release-backups.mjs --apply --pin-backup="$backup_path" --reason="reviewed-database-maintenance" --lock-fd=9)
   fi
 }
@@ -390,6 +435,7 @@ elif [[ -n "$reviewed_ai_material_manifest" ]]; then
   exit 1
 fi
 assert_release_interruption_policy
+inventory_consumables_preflight
 plan_database_changes
 if migration_pending migrate-tenant-sku-order-trackers.mjs && [[ "$run_db_maintenance" != "1" ]]; then
   echo "SKU order tracking requires reviewed ownership maintenance before this release can switch. Existing services were left running." >&2
@@ -397,7 +443,7 @@ if migration_pending migrate-tenant-sku-order-trackers.mjs && [[ "$run_db_mainte
 fi
 install_storage_collector
 
-if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "$reviewed_ai_material_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || "$material_change_required" == "change" || -n "$pending_schema_migrations" ]]; then
+if [[ "$run_db_maintenance" == "1" || -n "$reviewed_identity_manifest" || -n "$reviewed_ai_material_manifest" || -n "${reviewed_ai_media_retention_manifest:-}" || -n "${reviewed_inventory_consumables_manifest:-}" || "$material_change_required" == "change" || -n "$pending_schema_migrations" ]]; then
   backup_database
 fi
 if [[ -z "$release_backup_path" ]]; then
@@ -407,7 +453,7 @@ fi
 # Additive performance/reader/credit schemas are installed before candidate
 # readiness even when broad maintenance is skipped. These scripts do not enrol
 # an enterprise, set a price, opt in a writer or repair/delete legacy rows.
-for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs; do
+for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs migrate-inventory-consumables.mjs; do
   if ! migration_pending "$additive_migration"; then continue; fi
   set -a
   source "$env_file"
@@ -586,6 +632,8 @@ if [[ -e "$staging_dir/data/ai-media-retention" || -L "$staging_dir/data/ai-medi
   exit 3
 fi
 ln -s "$shared_root/ai-media-retention" "$staging_dir/data/ai-media-retention"
+
+apply_reviewed_inventory_consumables
 
 if [[ -e "$release_dir" ]]; then
   echo "Release already exists: $release_dir" >&2

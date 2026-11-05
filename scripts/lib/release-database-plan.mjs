@@ -10,6 +10,7 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-enterprise-messages.mjs",
   "migrate-subscription-vouchers.mjs",
   "migrate-inventory-flow-center.mjs",
+  "migrate-inventory-consumables.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
   "migrate-order-profit-calculation-versions.mjs"
 ]);
@@ -49,7 +50,7 @@ export function migrationNeedsApply(filename, report) {
   if (!profitSchema) {
     const mode = filename.includes("-daily-fx.") || filename.includes("-fx-policy.") ? "read_only" : "dry-run";
     if (report.mode !== mode) invalid(`mode must be ${mode}`);
-    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs"].includes(filename)
+    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-inventory-consumables.mjs"].includes(filename)
       && !boolean(report.ok, "ok")) invalid("inspector refused the schema");
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
@@ -132,6 +133,12 @@ export function migrationNeedsApply(filename, report) {
       if (problems.length || missing.some(name => !['inventory_flow_settings','inventory_flow_tasks','inventory_flow_events'].includes(name))) invalid('inventory flow schema is incompatible');
       if (ready !== (missing.length === 0)) invalid('inconsistent inventory flow readiness');
       return !ready;
+    }
+    case "migrate-inventory-consumables.mjs": {
+      const ready = boolean(report.schema_ready, 'schema_ready');
+      const missing = boolean(report.schema_would_add_column, 'schema_would_add_column');
+      if (ready === missing || report.changes_database !== false || report.reviewed_product_count !== 0 || report.product_flags_changed !== 0) invalid('consumable inspection must describe only compatible additive schema work');
+      return missing;
     }
     case "migrate-ai-variant-draft-history-index.mjs": {
       const before = object(report.before, "before");

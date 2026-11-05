@@ -36,6 +36,9 @@ const cases = [
   ["migrate-inventory-flow-center.mjs",
     { mode: "dry-run", changes_database: false, ready: true, missing_tables: [], problems: [] },
     { mode: "dry-run", changes_database: false, ready: false, missing_tables: ["inventory_flow_tasks"], problems: [] }],
+  ["migrate-inventory-consumables.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_add_column: false, reviewed_product_count: 0, product_flags_changed: 0 },
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_add_column: true, reviewed_product_count: 0, product_flags_changed: 0 }],
   ["migrate-ai-variant-draft-history-index.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, ready: true, missing_column: false, missing_index: false } },
     { ok: true, mode: "dry-run", before: { exists: true, ready: false, missing_column: false, missing_index: true } }],
@@ -46,7 +49,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 13);
+  assert.equal(SCHEMA_MIGRATIONS.length, 14);
 });
 
 for (const [filename, ready, pending] of cases) {
@@ -96,6 +99,9 @@ const incompatible = [
   ["migrate-enterprise-messages.mjs", { ready: false, problems: ["column:text"] }],
   ["migrate-enterprise-messages.mjs", { ready: false, account_kind: { exists: true, ready: false } }],
   ["migrate-subscription-vouchers.mjs", { ready: false, problems: ["index:uk_subscription_voucher_hash"] }],
+  ["migrate-inventory-consumables.mjs", { schema_ready: true, schema_would_add_column: true }],
+  ["migrate-inventory-consumables.mjs", { reviewed_product_count: 14 }],
+  ["migrate-inventory-consumables.mjs", { product_flags_changed: 1 }],
   ["migrate-ai-variant-draft-history-index.mjs", { before: { exists: true, ready: true, missing_column: true, missing_index: false } }],
   ["migrate-order-profit-calculation-versions.mjs", { missing_tables: ["orders"] }]
 ];
