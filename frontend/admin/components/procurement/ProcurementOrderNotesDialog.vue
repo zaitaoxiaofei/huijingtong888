@@ -59,7 +59,7 @@ onBeforeUnmount(()=>{disposed=true;++version;controller?.abort();window.removeEv
   <section v-loading="loading" class="procurement-order-notes">
    <p>{{name}} · 当前待履约的关联 FBS 订单。备注同步显示在对应订单的采购信息和标记中，原有标记颜色保留。</p>
    <el-alert v-if="error" type="warning" :closable="false" :title="error"/>
-   <el-button v-if="error&&!rows.length" :disabled="!!saving" @click="load">重新读取</el-button>
+   <el-button v-if="error" :disabled="!!saving" @click="load">重新读取最新备注</el-button>
    <el-table :data="rows" row-key="order_id" border max-height="520" empty-text="当前没有关联的待履约 FBS 订单">
     <el-table-column label="订单 / 店铺" min-width="210"><template #default="{row}"><strong>{{row.posting_number}}</strong><small>{{row.shop_name}}</small></template></el-table-column>
     <el-table-column label="人工协作备注" min-width="360"><template #default="{row}"><el-input v-model="row.draft" type="textarea" :rows="2" maxlength="1000" show-word-limit :disabled="!!saving||!canEdit" :aria-label="`订单 ${row.posting_number} 人工备注`" placeholder="例如：门槛条去掉部分字体，打包前核对"/></template></el-table-column>
