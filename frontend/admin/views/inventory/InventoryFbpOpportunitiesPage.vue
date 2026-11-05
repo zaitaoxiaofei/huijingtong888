@@ -150,6 +150,11 @@ function priorityType(priority) {
   return "info";
 }
 
+function inventoryNameText(row) {
+  if (!(Number(row.product_id) > 0)) return "未绑定库存";
+  return String(row.product_name || "").trim() || "库存名称未填写";
+}
+
 function coverageText(row) {
   if (row.coverage_days === null || row.coverage_days === undefined) {
     return Number(row.fbp_available || 0) > 0 ? "暂无销量" : "未覆盖";
@@ -1244,6 +1249,7 @@ onActivated(() => {
             </button>
           </template>
           <template #default="{ row }">
+            <div class="fbp-cell-title" :title="inventoryNameText(row)">{{ inventoryNameText(row) }}</div>
             <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
             <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
