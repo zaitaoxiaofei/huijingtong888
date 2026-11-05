@@ -39,6 +39,7 @@ export function createCatalogRoutes({ services, readJson }) {
           product: {
             id: created.id,
             code: created.code || "",
+            is_consumable: Number(created.is_consumable || 0) ? 1 : 0,
             name: String(body.name || "").trim(),
             stock_unit: String(body.structured_naming?.stock_unit || body.structuredNaming?.stock_unit || body.stock_unit || "个")
           }

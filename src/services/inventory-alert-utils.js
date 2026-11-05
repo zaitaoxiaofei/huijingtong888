@@ -178,6 +178,7 @@ function flattenFbpRows(rows) {
         product_image_url: product.image_url,
         inventory_id: product.inventory_id,
         inventory_number: product.inventory_number || "",
+        is_consumable: Number(product.is_consumable || 0) ? 1 : 0,
         alert_stock: product.alert_stock,
         local_stock: product.local_stock,
         created_at: product.created_at,

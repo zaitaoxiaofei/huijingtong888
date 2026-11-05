@@ -66,6 +66,22 @@ test("missing explicit database or administrator socket is rejected before execu
   assert.equal(called, false);
 });
 
+test("consumable planning is schema-only and never applies or passes a product manifest", async () => {
+  await fixture(async root => {
+    await fs.writeFile(path.join(root, 'scripts', 'migrate-inventory-consumables.mjs'), 'fixture');
+    const calls = [];
+    const plan = await planReleaseDatabase({ root, database: 'fixture_db', socketPath: path.join(root, 'mysql.sock'),
+      run: async (_executable, args) => {
+        calls.push(args);
+        return { stdout: JSON.stringify(args[0].endsWith('migrate-inventory-consumables.mjs')
+          ? { ok: true, mode: 'dry-run', changes_database: false, schema_ready: false, schema_would_add_column: true, reviewed_product_count: 0, product_flags_changed: 0 }
+          : { mode: 'dry-run', table_exists: true, changes_database: false }) };
+      }, inspectProfit: async () => ({ missing_tables: [] }) });
+    assert.deepEqual(plan.pending_migrations, ['migrate-inventory-consumables.mjs']);
+    assert.ok(calls.every(args => !args.some(value => value === '--apply' || value.startsWith('--manifest') || value.startsWith('--backup'))));
+  });
+});
+
 test("a current-release directory link still executes guarded migration CLI entry points", async () => {
   await fixture(async root => {
     const alias = path.join(root, "current");

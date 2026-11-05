@@ -1889,7 +1889,7 @@ onActivated(() => {
 <template>
   <div class="inventory-page-shell inventory-card">
     <InventoryPageToolbar product-search :show-shop="false" :show-date-range="false" :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset">
-      <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /></el-select></el-form-item>
+      <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /><el-option label="耗材" value="consumable" /></el-select></el-form-item>
       <template #actions>
         <el-badge v-if="requestSummary.enabled.value" :value="requestSummary.pending.value" :hidden="!requestSummary.pending.value" type="danger" class="inventory-request-entry"><el-button type="primary" plain @click="router.push('/inventory/product-requests')">库存申请</el-button></el-badge>
         <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>

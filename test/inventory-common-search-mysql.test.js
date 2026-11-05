@@ -48,6 +48,21 @@ test('inventory pages share exact, structured and tenant-scoped search before pa
         assert.equal(structured.total,1);assert.equal(Number(structured.rows[0][key]),200);
       }
     });
+    await t.test('consumable filters retain accessory roles and cannot cross enterprise scope',async()=>{
+      await q('UPDATE products SET is_consumable=1,is_accessory=1 WHERE id IN (200,300)');
+      try {
+        const consumables=await legacy.productsMysql({paged:'1',inventoryType:'consumable',pageSize:1},2);
+        assert.equal(consumables.total,1);assert.equal(Number(consumables.rows[0].id),200);
+        assert.equal(Number(consumables.rows[0].is_consumable),1);
+        const accessory=await legacy.productsMysql({paged:'1',inventoryType:'accessory',pageSize:1},2);
+        assert.equal(accessory.total,1);assert.equal(Number(accessory.rows[0].id),200);
+        for(const inventoryType of ['normal','single','combo']) {
+          const result=await legacy.productsMysql({paged:'1',inventoryType,pageSize:100},2);
+          assert(result.rows.every(row=>Number(row.id)!==200&&Number(row.id)!==300));
+        }
+        assert.equal((await q('SELECT inventory_number FROM products WHERE id=200'))[0].inventory_number,number);
+      } finally { await q('UPDATE products SET is_consumable=0,is_accessory=0 WHERE id IN (200,300)'); }
+    });
     await t.test('one SKU search never brings back a sibling SKU of the same product',async()=>{
       await q("INSERT INTO sku_mappings(id,tenant_id,product_id,shop_id,ozon_sku,offer_id,active) VALUES(202,2,200,20,'20003','SIBLING',1)");
       const mapped=await legacy.mappingsMysql({paged:'1',searchMode:'sku',query:'20001'},2);

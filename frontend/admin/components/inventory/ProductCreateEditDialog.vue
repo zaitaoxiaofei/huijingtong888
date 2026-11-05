@@ -193,6 +193,7 @@ function createDefaultForm() {
     production_lead_days: null,
     warehouse_logistics_days: null,
     is_accessory: 0,
+    is_consumable: 0,
     composition_items: [],
     product_type: "selection",
     selection_status: "draft"
@@ -270,6 +271,7 @@ function fillFormFromValue(value = {}) {
     production_lead_days: value.production_lead_days == null ? (isInventoryTarget.value ? 7 : null) : Number(value.production_lead_days),
     warehouse_logistics_days: value.warehouse_logistics_days == null ? (isInventoryTarget.value ? 2 : null) : Number(value.warehouse_logistics_days),
     is_accessory: Number(value.is_accessory || 0) ? 1 : 0,
+    is_consumable: Number(value.is_consumable || 0) ? 1 : 0,
     composition_items: Array.isArray(value.composition_items) ? value.composition_items.map(normalizeComponentItem) : [],
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
     selection_status: value.selection_status || (isInventoryTarget.value ? "listed" : "draft")
@@ -1206,6 +1208,7 @@ function removeComponentProduct(productId) {
 }
 
 function productAutoTypeLabel() {
+  if (Number(form.is_consumable || 0)) return "耗材产品";
   return form.composition_items.length ? "组合产品" : "单品产品";
 }
 
@@ -1541,6 +1544,7 @@ async function submitDialog(options = {}) {
       production_lead_days: form.production_lead_days,
       warehouse_logistics_days: form.warehouse_logistics_days,
       is_accessory: Number(form.is_accessory || 0) ? 1 : 0,
+      is_consumable: Number(form.is_consumable || 0) ? 1 : 0,
       composition_items: form.composition_items.map((item) => ({
         component_product_id: Number(item.component_product_id || 0),
         quantity: Number(item.quantity || 1),
@@ -1830,6 +1834,11 @@ function submitAndCreateDraft() {
                     <el-radio-button :value="0">普通商品</el-radio-button>
                     <el-radio-button :value="1">配件商品</el-radio-button>
                   </el-radio-group>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="库存属性">
+                  <el-checkbox v-model="form.is_consumable" :true-value="1" :false-value="0">耗材</el-checkbox>
                 </el-form-item>
               </el-col>
             </el-row>

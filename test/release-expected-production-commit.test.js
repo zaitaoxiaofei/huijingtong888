@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
-test('production changes during upload stop activation after the shared lock and before staging', () => {
-  const source = readFileSync(new URL('../deploy/linux/remote-release.sh', import.meta.url), 'utf8');
+const bash = process.platform === 'win32' ? join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'bin', 'bash.exe') : 'bash';
+test('production changes during upload stop activation after the shared lock and before staging', { skip: process.platform === 'win32' && !existsSync(bash) }, () => {
+  const source = readFileSync(new URL('../deploy/linux/remote-release.sh', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
   const start = source.indexOf('# Check after taking the shared lock:');
   const end = source.indexOf('\nrelease_dir=', start);
   assert.ok(source.indexOf('flock -n 9') < start && start < end);
@@ -15,8 +16,8 @@ test('production changes during upload stop activation after the shared lock and
   try {
     mkdirSync(join(root, 'public'));
     writeFileSync(join(root, 'public/release.json'), JSON.stringify({ commit: 'a'.repeat(40) }));
-    const run = expected => spawnSync('bash', ['-c', 'set -e\ncurrent_link="$1"\nexpected_production_commit="$2"\n' + guard,
-      'guard', root, expected], { encoding: 'utf8', env: { ...process.env, PATH: dirname(process.execPath) + ':' + process.env.PATH } });
+    const run = expected => spawnSync(bash, ['--noprofile', '--norc', '-c', 'set -e\ncurrent_link="$1"\nexpected_production_commit="$2"\n' + guard,
+      'guard', root, expected], { encoding: 'utf8', env: { ...process.env, PATH: dirname(process.execPath) + delimiter + process.env.PATH, BASH_ENV: '' } });
     assert.equal(run('a'.repeat(40)).status, 0);
     const changed = run('b'.repeat(40));
     assert.equal(changed.status, 76);

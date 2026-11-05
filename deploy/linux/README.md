@@ -94,6 +94,24 @@ npm run deploy:ecs:unix -- --version 2026.10.23-reviewed-material --reviewed-ai-
 
 普通发布若检查出素材结构／归属需要变更，或提供了人员身份迁移清单，会在备份、数据库变更和停服前拒绝，并保留原服务。只有明确安排维护窗口并传入 `-AllowServiceInterruption`／`--allow-service-interruption` 时，才执行原有停写流程：完整备份校验后停止旧主服务和旧候选，再次复核任务和清单，应用迁移、预热候选后切换。该开关允许维护窗口内中断服务，不是绕过清单、活跃任务检查或迁移鉴权。没有覆盖所有旧写入路径的业务写门禁时，不能让旧进程继续写入来伪装无停机迁移。代码回滚不等于数据库回滚，原记录继续保留在归属审阅元数据中。已完成历史的原员工后来停用，不会改变仍有完整证据的企业归属；未完成任务仍要求有效操作人。
 
+## 已审核的库存耗材
+
+礼盒、气泡袋、香薰片的耗材标志通过独立清单逐个产品审核，格式和回退方法见 [库存耗材迁移](../../docs/inventory-consumables-migration.md)。清单单独私有上传，不进入发布包：
+
+```powershell
+npm run deploy:ecs -- -Version 2026.11.05-consumables -ExpectedProductionCommit FULL_REVIEWED_PRODUCTION_SHA -ReviewedInventoryConsumablesManifest "C:\安全目录\reviewed-consumables.json"
+```
+
+```bash
+npm run deploy:ecs:unix -- --version 2026.11.05-consumables --expected-production-commit FULL_REVIEWED_PRODUCTION_SHA --reviewed-inventory-consumables-manifest /secure/reviewed-consumables.json
+```
+
+远端第 9 参数仍是预期生产提交，第 10 参数才是耗材清单；缺少前面可选参数时保留空占位。客户端和远端均在退出时清理随机临时文件，上传前即设为 `0600`。预期提交在取得原发布锁后核对，防止构建上传期间覆盖其他发布。
+
+在同一发布锁中先只读核对清单和增量结构；缺少 `products.is_consumable` 会进入现有数据库计划。只要提供耗材清单，即使列已存在，也先创建并校验现有 SQL 与私有 AI 结果配对备份并保护恢复点，再新增缺失的列。随后再次核对清单，将清单及产品前像保存在 `shared/maintenance/inventory-consumables/<version>-<UTC时间>-<PID>/` 私有目录中，事务只写审核产品的耗材标志，最后才预热候选和切换版本。没有清单时不会标记现有产品。
+
+耗材变更不要求广泛 `RunDatabaseMaintenance` 或停旧服务，不修改组件扣减、编号、SKU 绑定、已隐藏商品或已归档核心品名。备份、结构或前值核对失败均阻止候选启动与切换；代码回滚保留兼容的新列及已审核标记，需要撤销标记时另用明确的反向清单，不能恢复整库覆盖期间新增业务。
+
 ## 候选预热与失败回退
 
 普通兼容发布在主服务运行期间预热候选，完整的就绪和版本检查预算为 360 秒；不再使用上次首次素材迁移的 45 秒冷启动限制。安装、只读预检或候选预热失败时，只清理本次候选，不改 `current` 链接、不重启仍在服务的主进程。候选必须同时通过 `/api/ready` 与发布版本检查，之后才能切换链接和重启主进程。

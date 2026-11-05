@@ -527,6 +527,7 @@ CREATE TABLE IF NOT EXISTS products (
   owner_person_id BIGINT UNSIGNED NULL,
   created_by_person_id BIGINT UNSIGNED NULL,
   product_type VARCHAR(32) NOT NULL DEFAULT 'main',
+  is_consumable TINYINT(1) NOT NULL DEFAULT 0,
   parent_product_id BIGINT UNSIGNED NULL,
   accessory_note TEXT NULL,
   selection_status VARCHAR(32) NOT NULL DEFAULT 'draft',

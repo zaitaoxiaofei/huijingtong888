@@ -8,6 +8,8 @@ param(
   [string]$ReviewedIdentityManifest,
   [string]$ReviewedAiMaterialManifest,
   [string]$ReviewedAiMediaRetentionManifest,
+  [string]$ExpectedProductionCommit,
+  [string]$ReviewedInventoryConsumablesManifest,
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
@@ -39,6 +41,8 @@ $remoteAiMaterialManifest = ""
 $resolvedAiMaterialManifest = ""
 $remoteAiMediaRetentionManifest = ""
 $resolvedAiMediaRetentionManifest = ""
+$remoteInventoryConsumablesManifest = ""
+$resolvedInventoryConsumablesManifest = ""
 if ($ReviewedIdentityManifest) {
   $resolvedReviewedManifest = (Resolve-Path -LiteralPath $ReviewedIdentityManifest).Path
   if (-not (Test-Path -LiteralPath $resolvedReviewedManifest -PathType Leaf)) { throw "Reviewed identity manifest must be a file." }
@@ -60,6 +64,13 @@ if ($ReviewedAiMediaRetentionManifest) {
   catch { throw "AI media retention manifest is not valid JSON." }
   $remoteAiMediaRetentionManifest = "/tmp/ozon-erp-ai-media-retention-$Version-$([guid]::NewGuid().ToString('N')).json"
 }
+if ($ReviewedInventoryConsumablesManifest) {
+  $resolvedInventoryConsumablesManifest = (Resolve-Path -LiteralPath $ReviewedInventoryConsumablesManifest).Path
+  if (-not (Test-Path -LiteralPath $resolvedInventoryConsumablesManifest -PathType Leaf)) { throw "Reviewed inventory consumables manifest must be a file." }
+  try { $null = Get-Content -LiteralPath $resolvedInventoryConsumablesManifest -Raw -Encoding UTF8 | ConvertFrom-Json }
+  catch { throw "Reviewed inventory consumables manifest is not valid JSON." }
+  $remoteInventoryConsumablesManifest = "/tmp/ozon-erp-inventory-consumables-$Version-$([guid]::NewGuid().ToString('N')).json"
+}
 
 foreach ($command in @("ssh", "scp", "tar.exe")) {
   if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -68,6 +79,7 @@ foreach ($command in @("ssh", "scp", "tar.exe")) {
 }
 if (-not $EcsHost) { throw "ECS host is required." }
 if ($Version -notmatch '^[0-9A-Za-z._-]+$') { throw "Version contains unsupported characters: $Version" }
+if ($ExpectedProductionCommit -and $ExpectedProductionCommit -notmatch '^[a-f0-9]{40}$') { throw "Expected production commit must be a full Git SHA." }
 
 $sshOptions = @("-p", "$SshPort", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4")
 $scpOptions = @("-P", "$SshPort", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4")
@@ -81,7 +93,9 @@ if ($SkipDatabaseMaintenance -and $RunDatabaseMaintenance) { throw "Choose eithe
 $dbMaintenanceFlag = if ($RunDatabaseMaintenance) { "1" } else { "0" }
 $interruptionFlag = if ($AllowServiceInterruption) { "1" } else { "0" }
 $activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest' '$interruptionFlag'"
-if ($remoteAiMediaRetentionManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }
+if ($remoteAiMediaRetentionManifest -or $ExpectedProductionCommit -or $remoteInventoryConsumablesManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }
+if ($ExpectedProductionCommit -or $remoteInventoryConsumablesManifest) { $activationCommand += " '$ExpectedProductionCommit'" }
+if ($remoteInventoryConsumablesManifest) { $activationCommand += " '$remoteInventoryConsumablesManifest'" }
 
 if ($DryRun) {
   Write-Host "Dry run only."
@@ -151,6 +165,12 @@ if ($resolvedAiMediaRetentionManifest) {
   & scp @scpOptions $resolvedAiMediaRetentionManifest "${remoteTarget}:$remoteAiMediaRetentionManifest"
   if ($LASTEXITCODE -ne 0) { throw "AI media retention manifest upload failed." }
 }
+if ($resolvedInventoryConsumablesManifest) {
+  & ssh @sshOptions $remoteTarget "set -Ce; umask 077; : > '$remoteInventoryConsumablesManifest'; chmod 600 '$remoteInventoryConsumablesManifest'"
+  if ($LASTEXITCODE -ne 0) { throw "Private inventory consumables manifest preparation failed." }
+  & scp @scpOptions $resolvedInventoryConsumablesManifest "${remoteTarget}:$remoteInventoryConsumablesManifest"
+  if ($LASTEXITCODE -ne 0) { throw "Reviewed inventory consumables manifest upload failed." }
+}
 
 $remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && $activationCommand"
 if ($remoteIdentityManifest) {
@@ -159,6 +179,12 @@ if ($remoteIdentityManifest) {
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 } finally {
+  if ($remoteInventoryConsumablesManifest) {
+    try {
+      & ssh @sshOptions $remoteTarget "rm -f -- '$remoteInventoryConsumablesManifest'" 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Private inventory consumables manifest cleanup could not be confirmed." }
+    } catch { Write-Warning "Private inventory consumables manifest cleanup could not be confirmed." }
+  }
   if ($remoteAiMediaRetentionManifest) {
     try { & ssh @sshOptions $remoteTarget "rm -f -- '$remoteAiMediaRetentionManifest'" 2>$null | Out-Null }
     catch { Write-Warning "AI media retention manifest cleanup could not be confirmed." }

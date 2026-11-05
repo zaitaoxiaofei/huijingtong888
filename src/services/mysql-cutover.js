@@ -859,6 +859,7 @@ async function ensureProductCompositionSchemaMysql() {
   const productStatements = [
     "ALTER TABLE products ADD COLUMN stock_unit VARCHAR(32) NOT NULL DEFAULT '个'",
     "ALTER TABLE products ADD COLUMN is_accessory TINYINT(1) NOT NULL DEFAULT 0",
+    "ALTER TABLE products ADD COLUMN is_consumable TINYINT(1) NOT NULL DEFAULT 0",
     "CREATE INDEX idx_products_is_accessory ON products (is_accessory, active)"
   ];
   for (const sql of productStatements) {
@@ -1692,6 +1693,7 @@ function compactProductListRowMysql(row) {
     production_lead_days: row.production_lead_days == null ? null : Number(row.production_lead_days),
     warehouse_logistics_days: row.warehouse_logistics_days == null ? 2 : Number(row.warehouse_logistics_days),
     is_accessory: Number(row.is_accessory || 0) ? 1 : 0,
+    is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
     component_count: Number(row.component_count || 0),
     component_summary: row.component_summary || "",
     component_available: row.component_available == null ? null : Number(row.component_available || 0),
@@ -4360,7 +4362,7 @@ async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
   const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
-      p.inventory_number, p.name AS product_name,
+      p.inventory_number, p.is_consumable, p.name AS product_name,
       p.image_url, p.production_lead_days, p.warehouse_logistics_days, p.created_at, p.updated_at
     FROM products p
     WHERE p.active = 1 AND ${tenantShopPredicateMysql("p", defaultTenant)}
@@ -4376,6 +4378,7 @@ async function stockedInventoryAlertProductsMysql(tenantPk, defaultTenant) {
     product_id: Number(row.product_id),
     inventory_id: row.inventory_id,
     inventory_number: row.inventory_number || "",
+    is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
     product_name: row.product_name || "",
     image_url: compactProductImageUrlForListMysql({ id: row.product_id, image_url: row.image_url, created_at: row.created_at }),
     production_lead_days: row.production_lead_days == null ? 7 : Number(row.production_lead_days),
@@ -4599,7 +4602,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     return result;
   }
   const cacheKey = `stock-alerts:base:v3:${cacheScope}`;
-  const snapshotKey = `alerts-v5-${cacheScope}`;
+  const snapshotKey = `alerts-v6-${cacheScope}`;
   if (forceRefresh) invalidateMasterDataCache(cacheKey);
   const products = await getCachedMasterData(cacheKey, async () => {
     const persistedBase = forceRefresh ? null : await mysqlQueryOne(`
@@ -4621,7 +4624,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     const rows = await mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
-      p.name AS product_name, p.image_url, p.alert_stock, p.created_at,
+      p.name AS product_name, p.is_consumable, p.image_url, p.alert_stock, p.created_at,
       COALESCE(local_stock.local_stock, 0) AS local_stock,
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name, sm.active,
       s.name AS shop_name,
@@ -4709,6 +4712,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
           product_id: productId,
           inventory_id: row.inventory_id,
           inventory_number: row.inventory_number || "",
+          is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
           product_name: row.product_name,
           image_url: compactProductImageUrlForListMysql({
             id: productId,
@@ -4887,7 +4891,7 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null, { operational = false
   const [rows, historyRows, transferRows] = await Promise.all([mysqlQuery(`
     SELECT p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
-      p.name AS product_name, p.image_url, p.alert_stock, p.created_at,
+      p.name AS product_name, p.is_consumable, p.image_url, p.alert_stock, p.created_at,
       COALESCE(local_stock.local_stock, 0) AS local_stock,
       sm.id AS mapping_id, sm.shop_id, sm.ozon_sku, sm.offer_id, sm.display_name, sm.active,
       s.name AS shop_name,
@@ -4985,6 +4989,7 @@ async function loadFbpStockAlertBaseMysql(tenantPk = null, { operational = false
         product_id: productId,
         inventory_id: row.inventory_id,
         inventory_number: row.inventory_number || "",
+        is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
         product_name: row.product_name,
         image_url: compactProductImageUrlForListMysql({
           id: productId,
@@ -5143,6 +5148,7 @@ function normalizeFbpOpportunityRow(row) {
     product_id: row.product_id,
     inventory_id: row.inventory_id || "",
     inventory_number: row.inventory_number || "",
+    is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
     product_name: row.product_name || row.online_name || row.display_name || row.ozon_sku || "",
     online_product_id: row.online_product_id,
     ozon_product_id: row.ozon_product_id || "",
@@ -5263,7 +5269,7 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", opti
       s.name AS shop_name,
       p.id AS product_id,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
-      p.name AS product_name, p.image_url AS product_image_url,
+      p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       COALESCE(op_by_id.id, op_by_sku.id) AS online_product_id,
       COALESCE(op_by_id.ozon_product_id, op_by_sku.ozon_product_id) AS ozon_product_id,
       COALESCE(op_by_id.name, op_by_sku.name) AS online_name,
@@ -5560,7 +5566,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
         COALESCE(NULLIF(current_product.name, ''), i.product_name) AS product_name,
         COALESCE(NULLIF(i.image_url, ''), current_product.image_url) AS image_url,
         CASE WHEN current_product.id IS NULL THEN i.inventory_id WHEN current_product.code LIKE 'P-%' THEN current_product.code ELSE CONCAT('P-', DATE_FORMAT(current_product.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(current_product.id, 3, '0')) END AS inventory_id,
-        current_product.inventory_number AS inventory_number,
+        current_product.inventory_number AS inventory_number, current_product.is_consumable,
         requester.name AS requested_by_name, printer.name AS barcode_printed_by_name
       FROM fbp_replenishment_order_items i
       JOIN fbp_replenishment_orders o ON o.id = i.order_id
@@ -6690,7 +6696,7 @@ export async function fbpTransferRecordsMysql(query = {}, tenantId = "admin") {
   const countRow = await mysqlQueryOne(`SELECT COUNT(*) AS total FROM fbp_transfer_records ftr LEFT JOIN products p ON p.id = ftr.product_id ${whereSql}`, params);
   const rows = await mysqlQuery(`
     SELECT ftr.*,
-      p.name AS product_name, p.image_url AS product_image_url,
+      p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id, p.inventory_number,
       s.name AS shop_name,
       pe.name AS person_name
@@ -7107,7 +7113,7 @@ export async function confirmFbpTransferReceivedMysql(body = {}, userId = null, 
   invalidateFbpPlanningCachesMysql();
   const updated = await mysqlQueryOne(`
     SELECT ftr.*,
-      p.name AS product_name, p.image_url AS product_image_url,
+      p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       CASE WHEN p.code LIKE 'P-%' THEN p.code ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0')) END AS inventory_id,
       s.name AS shop_name,
       pe.name AS person_name
@@ -12095,6 +12101,7 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
       s.name AS shop_name,
       p.code AS product_code,
       p.name AS product_name,
+      p.is_consumable,
       p.image_url AS product_image_url,
       CASE
         WHEN p.code LIKE 'P-%' THEN p.code
@@ -12266,7 +12273,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
     params.push(tenantPk, tenantPk, Number(shopId));
   }
   if (inventoryType === "normal" || inventoryType === "single" || inventoryType === "combo") {
-    where.push("COALESCE(p.is_accessory, 0) = 0");
+    where.push("COALESCE(p.is_accessory, 0) = 0", "COALESCE(p.is_consumable, 0) = 0");
     if (inventoryType === "single") where.push(`NOT EXISTS (SELECT 1 FROM product_components pc_filter
       JOIN products component_filter ON component_filter.id = pc_filter.component_product_id AND ${inventoryTenantSql(scope, 'component_filter')}
       WHERE ${inventoryTenantSql(scope, 'pc_filter')} AND pc_filter.product_id = p.id)`);
@@ -12274,6 +12281,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
       JOIN products component_filter ON component_filter.id = pc_filter.component_product_id AND ${inventoryTenantSql(scope, 'component_filter')}
       WHERE ${inventoryTenantSql(scope, 'pc_filter')} AND pc_filter.product_id = p.id)`);
   } else if (inventoryType === "accessory") where.push("p.is_accessory = 1");
+  else if (inventoryType === "consumable") where.push("p.is_consumable = 1");
 
   const productSearch = inventoryProductSearch({...query,inventoryType:"all"}, scope);
   if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
@@ -12351,7 +12359,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
     supplier.id AS supplier_id, supplier.name AS supplier_name, p.purchase_url, p.source_platform, p.shipping_method,
     p.purchase_cost, p.domestic_shipping, p.handling_fee, p.purchase_quantity,
     p.package_weight_g, p.length_cm, p.width_cm, p.height_cm, p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
-    p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory,
+    p.desired_profit_mode, p.desired_profit_value, p.return_rate, p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory, p.is_consumable,
     p.inventory_category, p.vehicle_brand, p.fitment_type, p.vehicle_model, p.vehicle_models_json,
     p.accessory_name, p.color, p.material, p.surface_process, p.product_quantity, p.package_mode, p.package_contents,
     p.product_type, p.selection_status, p.parent_product_id, p.active, p.created_at, p.updated_at,
@@ -12521,7 +12529,7 @@ export async function productsMysql(query = {}, tenantId = "admin") {
         p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
         p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
         p.desired_profit_mode, p.desired_profit_value, p.return_rate,
-        p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory,
+        p.stock_unit, p.production_lead_days, p.warehouse_logistics_days, p.is_accessory, p.is_consumable,
         p.inventory_category, p.vehicle_brand, p.fitment_type, p.vehicle_model, p.vehicle_models_json,
         p.accessory_name, p.color, p.material, p.surface_process, p.product_quantity, p.package_mode, p.package_contents,
         p.product_type, p.selection_status, p.parent_product_id,
@@ -13865,6 +13873,7 @@ async function tenantInventoryProductDetailMysql(id, query = {}, tenantId) {
   const compositionItems = includeOperations ? await productComponentRowsMysql(Number(id), String(tenantPk)) : [];
   return {
     ...withProductImageEndpointMysql(row, { thumbnail: true }),
+    is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
     structured_naming: {
       category: row.inventory_category || "",
       vehicle_brand: String(row.vehicle_brand || "").replace(/^无品牌$/u, ""),
@@ -13921,7 +13930,7 @@ export async function selectionProductMysql(id, query = {}, tenantId = "admin") 
       p.package_weight_g, p.length_cm, p.width_cm, p.height_cm,
       p.listing_price_rub, p.air_sale_price_rmb, p.exchange_rate,
       p.target_margin, p.desired_profit_mode, p.desired_profit_value, p.advertising_rate, p.return_rate,
-      p.stock_unit, p.is_accessory,
+      p.stock_unit, p.is_accessory, p.is_consumable,
       ${selectionProductTypeExprMysql("p")} AS product_type,
       p.selection_status,
       p.source_selection_id, p.variant_task_id, p.variant_result_id, p.variant_type, p.is_variant_generated, p.material_asset_status,
@@ -13977,6 +13986,7 @@ export async function selectionProductMysql(id, query = {}, tenantId = "admin") 
     ...withProductImageEndpointMysql({
       ...row,
       version_updated_at: normalizeMysqlDateTime(row.updated_at),
+      is_consumable: Number(row.is_consumable || 0) ? 1 : 0,
       structured_naming: {
         category: row.inventory_category || "",
         vehicle_brand: String(row.vehicle_brand || "").replace(/^无品牌$/u, ""),
@@ -14693,7 +14703,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       "purchase_url", "supplier_note", "source_platform", "supplier_id", "shipping_method", "logistics_rule_id", "recommended_shipping_method",
       "purchase_cost", "domestic_shipping", "handling_fee", "purchase_quantity", "package_weight_g", "length_cm", "width_cm", "height_cm",
       "listing_price_rub", "air_sale_price_rmb", "exchange_rate", "target_margin", "desired_profit_mode", "desired_profit_value",
-      "advertising_rate", "return_rate", "stock_unit", "production_lead_days", "warehouse_logistics_days", "is_accessory", "owner_person_id", "created_by_person_id", "product_type", "selection_status",
+      "advertising_rate", "return_rate", "stock_unit", "production_lead_days", "warehouse_logistics_days", "is_accessory", "is_consumable", "owner_person_id", "created_by_person_id", "product_type", "selection_status",
       "source_selection_id", "variant_task_id", "variant_result_id", "variant_type", "is_variant_generated", "material_asset_status"
     ];
     const productValues = [
@@ -14747,6 +14757,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
       normalizeProductionLeadDaysMysql(body.production_lead_days ?? (body.product_type === "selection" ? null : 7)),
       normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days ?? 2),
       Number(body.is_accessory || 0) ? 1 : 0,
+      Number(body.is_consumable || 0) ? 1 : 0,
       ownerPersonId,
       createdByPersonId,
       body.product_type || "main",
@@ -14768,7 +14779,7 @@ export async function createProductMysql(body = {}, transactionConnection = null
     await saveProductComponentsTxMysql(connection, productId, body.composition_items || body.components || [], tenantScoped ? String(tenantPk) : "admin");
     if (logisticsRuleId) await incrementLogisticsRuleUsageMysqlTx(connection, logisticsRuleId, tenantScoped ? String(tenantPk) : "admin");
     const procurement = await maybeCreateProcurementForProductMysql(connection, productId, body, purchasePlan || normalizePurchasePlanMysql(body), String(tenantPk));
-    return { id: productId, code, procurement_request_id: procurement?.id || null };
+    return { id: productId, code, is_consumable: Number(body.is_consumable || 0) ? 1 : 0, procurement_request_id: procurement?.id || null };
   };
   return transactionConnection ? create(transactionConnection) : withMysqlTransaction(create);
 }
@@ -14998,6 +15009,8 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     && await mysqlSchemaColumnExists('inventory_flow_settings','settings_json');
   let cycleSettingsChanged = false;
   let shouldSyncOutbound = false;
+  let savedIsConsumable = 0;
+  let consumableChanged = false;
   await withMysqlTransaction(async (connection) => {
   const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
   await assertInventoryRecord(scope, 'product', productId, run, { lock: true });
@@ -15005,13 +15018,15 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   let creator = null;
   const existing = await mysqlConnectionQueryOne(connection, `
     SELECT id, updated_at, image_url, detail_image_urls, material_asset_status, product_type, selection_status,
-      development_type, vehicle_brand, vehicle_model, vehicle_model_key, created_by_person_id, production_lead_days, warehouse_logistics_days
+      development_type, vehicle_brand, vehicle_model, vehicle_model_key, created_by_person_id, production_lead_days, warehouse_logistics_days, is_consumable
     FROM products
     WHERE id = ? AND active = 1 AND ${scope.predicate().sql}
     FOR UPDATE
   `, tenantScoped ? [productId, tenantPk] : [productId]);
   if (!existing) throw new Error("Product not found or archived");
   assertFreshRecord(body, existing, "商品已被其他用户保存，请刷新后再继续编辑");
+  savedIsConsumable = Number(body.is_consumable === undefined ? existing.is_consumable || 0 : body.is_consumable || 0) ? 1 : 0;
+  consumableChanged = savedIsConsumable !== (Number(existing.is_consumable || 0) ? 1 : 0);
   if (tenantScoped) {
     const ownerPersonId = nullableInteger(body.owner_person_id);
     if (!ownerPersonId) throw Object.assign(new Error("请为选品指定本企业负责人。"), { statusCode: 400 });
@@ -15081,7 +15096,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
       purchase_cost = ?, domestic_shipping = ?, handling_fee = ?, purchase_quantity = ?,
       package_weight_g = ?, length_cm = ?, width_cm = ?, height_cm = ?,
       listing_price_rub = ?, air_sale_price_rmb = ?, exchange_rate = ?, target_margin = ?,
-      desired_profit_mode = ?, desired_profit_value = ?, advertising_rate = ?, return_rate = ?, stock_unit = ?, production_lead_days = ?, warehouse_logistics_days = ?, is_accessory = ?, owner_person_id = ?, created_by_person_id = ?,
+      desired_profit_mode = ?, desired_profit_value = ?, advertising_rate = ?, return_rate = ?, stock_unit = ?, production_lead_days = ?, warehouse_logistics_days = ?, is_accessory = ?, is_consumable = ?, owner_person_id = ?, created_by_person_id = ?,
       product_type = ?, selection_status = ?, material_asset_status = COALESCE(?, material_asset_status), updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND ${scope.predicate().sql}
   `, [
@@ -15133,6 +15148,7 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     normalizeProductionLeadDaysMysql(body.production_lead_days === undefined ? existing.production_lead_days : body.production_lead_days),
     normalizeWarehouseLogisticsDaysMysql(body.warehouse_logistics_days === undefined ? existing.warehouse_logistics_days ?? 2 : body.warehouse_logistics_days),
     Number(body.is_accessory || 0) ? 1 : 0,
+    savedIsConsumable,
     tenantScoped ? nullableInteger(body.owner_person_id) : nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
     tenantScoped ? (creator ? Number(existing.created_by_person_id) : nullableInteger(body.owner_person_id)) : nullableInteger(body.created_by_person_id) || nullableInteger(existing.created_by_person_id) || nullableInteger(body.owner_person_id) || await firstActivePersonIdMysql(),
     nextProductType,
@@ -15153,6 +15169,9 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     shouldSyncOutbound = true;
   }
   if (body.structured_naming || body.structuredNaming) await saveStructuredNamingMysql(productId, body, connection, String(tenantPk));
+  if (consumableChanged && await mysqlSchemaColumnExists("inventory_alert_base_snapshots", "cache_key")) {
+    await connection.execute("DELETE FROM inventory_alert_base_snapshots WHERE cache_key = ?", [`alerts-v6-${tenantPk}`]);
+  }
   });
 
   if (body.composition_items !== undefined || body.components !== undefined) invalidateInventoryAlertSalesBindingMysql();
@@ -15169,7 +15188,11 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
       console.error(`Product ${productId} saved, but outbound synchronization failed:`, error);
     }
   }
-  return { ok: true, outbound_sync: outboundSync, outbound_sync_warning: outboundSyncWarning };
+  if (consumableChanged) {
+    invalidateFbpPlanningCachesMysql();
+    invalidateMasterDataCachePrefix("stock-alerts:inventory-base:");
+  }
+  return { ok: true, is_consumable: savedIsConsumable, outbound_sync: outboundSync, outbound_sync_warning: outboundSyncWarning };
 }
 
 export async function updateProductComponentsMysql(id, body = {}, tenantId = "admin") {
@@ -16361,7 +16384,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
   if (!online) throw new Error("Online product not found");
   const bindSku = String(body.ozon_sku || online.ozon_sku || "").trim();
   const existingMapping = await mysqlQueryOne(`
-    SELECT sm.*, p.id AS active_product_id, p.code, p.name
+    SELECT sm.*, p.id AS active_product_id, p.code, p.name, p.is_consumable
     FROM sku_mappings sm
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 AND ${inventoryTenantSql(scope, 'p')}
     WHERE sm.shop_id = ? AND sm.ozon_sku = ? AND sm.active = 1 AND ${inventoryTenantSql(scope, 'sm')}
@@ -16378,6 +16401,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
     return {
       id: existingMapping.product_id,
       code: existingMapping.code,
+      is_consumable: Number(existingMapping.is_consumable || 0) ? 1 : 0,
       reused: true,
       reason: "sku_already_bound",
       procurement_request_id: null
@@ -16385,7 +16409,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
   }
 
   if (online.product_id) {
-    const product = await mysqlQueryOne(`SELECT id, code FROM products WHERE id = ? AND active = 1 AND ${inventoryTenantSql(scope)}`, [online.product_id]);
+    const product = await mysqlQueryOne(`SELECT id, code, is_consumable FROM products WHERE id = ? AND active = 1 AND ${inventoryTenantSql(scope)}`, [online.product_id]);
     if (product) {
       await bindOnlineProductMysql({
         online_product_id: online.id,
@@ -16397,6 +16421,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
       return {
         id: product.id,
         code: product.code,
+        is_consumable: Number(product.is_consumable || 0) ? 1 : 0,
         reused: true,
         reason: "online_product_already_linked",
         procurement_request_id: null
@@ -16438,6 +16463,7 @@ export async function createProductFromOnlineProductMysql(body = {}, tenantId = 
     return_rate: body.return_rate ?? 0.05,
     stock_unit: body.stock_unit,
     is_accessory: body.is_accessory,
+    is_consumable: body.is_consumable,
     composition_items: body.composition_items || body.components || [],
     owner_person_id: body.owner_person_id || body.person_id,
     product_type: "main",
@@ -16539,7 +16565,7 @@ export async function inventoryCurrentMysql(tenantId = "admin") {
       ic.in_transit_stock,
       ic.last_updated_at,
       COALESCE(fbp_stock.fbp_stock, 0) AS fbp_stock,
-      p.code AS product_code, p.name AS product_name, p.alert_stock
+      p.code AS product_code, p.name AS product_name, p.is_consumable, p.alert_stock
     FROM inventory_current ic
     JOIN products p ON p.id = ic.real_product_id AND ${inventoryTenantSql(scope, 'p')}
     LEFT JOIN (
@@ -16573,7 +16599,7 @@ export async function inboundRecordsMysql(query = {}, tenantId = "admin") {
     ? "COALESCE(ir.approved_at, ir.received_at) DESC, ir.id DESC"
     : "COALESCE(po.purchased_at, ir.created_at) DESC, ir.id DESC";
   const selectSql = `
-    SELECT ir.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
+    SELECT ir.*, p.code AS product_code, p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       p.inventory_number, p.inventory_category,
       pe.name AS person_name, approver.name AS approved_by_person_name, po.order_no AS purchase_order_no, po.purchased_at,
       shipment.platform_order_no AS procurement_platform_order_no, shipment.tracking_number AS procurement_tracking_number,
@@ -22648,7 +22674,7 @@ export async function purchaseOrderDetailMysql(id, tenantId = "admin") {
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS product_code,
-      p.name AS product_name, p.image_url AS product_image_url,
+      p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       COALESCE(skus.skus, '') AS mapped_skus
     FROM purchase_order_items poi
     JOIN products p ON p.id = poi.product_id AND ${inventoryTenantSql(scope, 'p')}
@@ -22797,7 +22823,7 @@ export async function pendingInboundItemsMysql(query = {}, tenantId = "admin") {
         WHEN p.code LIKE 'P-%' THEN p.code
         ELSE CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
       END AS product_code,
-      p.id AS product_id, p.name AS product_name, p.image_url AS product_image_url,
+      p.id AS product_id, p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
       COALESCE(skus.skus, '') AS mapped_skus
     FROM inbound_records ir
     JOIN purchase_order_items poi ON poi.id = ir.purchase_order_item_id AND poi.product_id = ir.product_id AND ${inventoryTenantSql(scope, 'poi')}
@@ -26253,7 +26279,7 @@ export async function inventoryManualOutboundRecordsMysql(query = {}, tenantId =
       WHERE ${whereSql}
     `, whereParams),
     mysqlQuery(`
-      SELECT im.*, p.code AS product_code, p.name AS product_name, p.image_url AS product_image_url,
+      SELECT im.*, p.code AS product_code, p.name AS product_name, p.is_consumable, p.image_url AS product_image_url,
         parent_pc.product_id AS parent_product_id, parent_pc.quantity AS parent_component_quantity,
         s.name AS shop_name, NULL AS owner_name, COALESCE(im.operator, '') AS operator_name
       FROM inventory_movements im
@@ -29725,6 +29751,7 @@ export async function inventoryMysql(query = {}, tenantId = "admin") {
       im.*,
       p.code AS product_code,
       p.name AS product_name,
+      p.is_consumable,
       p.image_url AS product_image_url,
       ${componentDetailSelect}
       s.name AS shop_name,
@@ -29892,7 +29919,7 @@ function outboundRecordsWhereMysql(query = {}, scope) {
 
 function outboundRecordsSelectMysql(whereSql = "", scope) {
   return `
-    SELECT obr.*, op.id AS online_product_id, pe.id AS person_id, p.code AS product_code, p.inventory_number, p.name AS product_name, p.image_url AS product_image_url,
+    SELECT obr.*, op.id AS online_product_id, pe.id AS person_id, p.code AS product_code, p.inventory_number, p.is_consumable, p.name AS product_name, p.image_url AS product_image_url,
       s.name AS shop_name, COALESCE(obr.ozon_sku, op.ozon_sku) AS ozon_sku, pe.name AS person_name,
       COALESCE(op.image_url, op.primary_image, p.image_url, '') AS image_urls,
       oi.id AS order_item_id, 'deducted' AS row_kind,
