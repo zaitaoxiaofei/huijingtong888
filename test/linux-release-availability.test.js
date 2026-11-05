@@ -136,12 +136,13 @@ if wait_for_release 8788 expected-release 1 424242; then exit 92; fi
   });
 });
 
-for (const change of ["material", "identity"]) test(`ordinary release refuses ${change} writer interruption before backup or stop`, { skip }, async () => {
+for (const change of ["material", "identity", "numbering"]) test(`ordinary release refuses ${change} writer interruption before backup or stop`, { skip }, async () => {
   await fixture(async ({ run, trace }) => {
     await assert.rejects(run(`
 allow_service_interruption=0
 material_change_required=${change === "material" ? "change" : "ready"}
 reviewed_identity_manifest=${change === "identity" ? "reviewed.json" : '""'}
+reviewed_inventory_numbering_manifest=${change === "numbering" ? "reviewed.json" : '""'}
 trap rollback ERR
 assert_release_interruption_policy
 trace backup
@@ -160,7 +161,9 @@ assert_release_interruption_policy
 test("writer interruption policy is checked before backup, DDL and all service stops", () => {
   const policy = source.indexOf("\nassert_release_interruption_policy\n");
   assert.ok(policy > source.indexOf('material_change_required="$(material_optimization_preflight)"'));
-  for (const action of ["\n  backup_database\n", "npm run db:init:mysql", "\n  systemctl stop ozon-erp\n"]) assert.ok(policy < source.indexOf(action));
+  for (const action of ["\n  backup_database\n", "npm run db:init:mysql", "\n  systemctl stop ozon-erp\n", "\napply_reviewed_inventory_numbering\n"]) {
+    assert.ok(policy < source.indexOf(action, policy), `${action.trim()} runs after the main interruption policy`);
+  }
   assert.doesNotMatch(source, /material_candidate_warmup_seconds|warmup_seconds=45/);
 });
 

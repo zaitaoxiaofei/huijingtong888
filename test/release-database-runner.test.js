@@ -97,3 +97,19 @@ test("a current-release directory link still executes guarded migration CLI entr
     assert.equal(plan.checked_migrations.length, 2);
   });
 });
+
+test("numbering planning inspects additive schema without a manifest, apply, or writer-stop assertion", async () => {
+  await fixture(async root => {
+    await fs.writeFile(path.join(root, 'scripts', 'migrate-inventory-numbering-v2.mjs'), 'fixture');
+    const calls = [];
+    const plan = await planReleaseDatabase({ root, database: 'fixture_db', socketPath: path.join(root, 'mysql.sock'),
+      run: async (_executable, args) => {
+        calls.push(args);
+        return { stdout: JSON.stringify(args[0].endsWith('migrate-inventory-numbering-v2.mjs')
+          ? { ok: true, mode: 'dry-run', changes_database: false, schema_ready: false, schema_would_change: true, numbering_version: null, active: false, product_numbers_changed: 0 }
+          : { mode: 'dry-run', table_exists: true, changes_database: false }) };
+      }, inspectProfit: async () => ({ missing_tables: [] }) });
+    assert.deepEqual(plan.pending_migrations, ['migrate-inventory-numbering-v2.mjs']);
+    assert(calls.every(args => !args.some(value => value === '--apply' || value === '--writers-stopped' || value.startsWith('--manifest') || value.startsWith('--backup'))));
+  });
+});

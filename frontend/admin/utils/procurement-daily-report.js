@@ -5,7 +5,7 @@ export function purchaseStatusText(status) {
 }
 
 export function purchaseInventoryNumber(row) {
-  return String(row.inventory_number || "").trim().replace(/^(\d+)-(\d+)$/, "$1_$2") || "未编号";
+  return String(row.inventory_number || "").trim().replace(/^(\d+)_(\d+)$/, "$1-$2") || "未编号";
 }
 
 function categoryText(row) {
@@ -91,6 +91,7 @@ export async function buildDailyPurchaseWorkbook(date, rows, loadImage) {
       null, shanghaiDateTimeText(record.purchased_at, { assumeUtcWhenNaive: true }),
       record.person_name || "未记录", purchaseStatusText(record.status), record.purchase_order_no || "", record.note || ""]);
     row.height = 72;
+    row.getCell(2).numFmt = "@";
     row.alignment = { vertical: "middle", wrapText: true };
     row.getCell(7).value = { formula: `E${row.number}+F${row.number}`, result: (Math.round(Number(record.amount || 0) * 100) + Math.round(Number(record.shipping_amount || 0) * 100)) / 100 };
     for (const col of [5, 6, 7]) row.getCell(col).numFmt = '#,##0.00';

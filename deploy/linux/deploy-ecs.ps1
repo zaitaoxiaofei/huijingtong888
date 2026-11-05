@@ -10,6 +10,7 @@ param(
   [string]$ReviewedAiMediaRetentionManifest,
   [string]$ExpectedProductionCommit,
   [string]$ReviewedInventoryConsumablesManifest,
+  [string]$ReviewedInventoryNumberingManifest,
   [switch]$SkipBuild,
   [switch]$SkipDatabaseInit,
   [switch]$SkipDatabaseMaintenance,
@@ -43,6 +44,8 @@ $remoteAiMediaRetentionManifest = ""
 $resolvedAiMediaRetentionManifest = ""
 $remoteInventoryConsumablesManifest = ""
 $resolvedInventoryConsumablesManifest = ""
+$remoteInventoryNumberingManifest = ""
+$resolvedInventoryNumberingManifest = ""
 if ($ReviewedIdentityManifest) {
   $resolvedReviewedManifest = (Resolve-Path -LiteralPath $ReviewedIdentityManifest).Path
   if (-not (Test-Path -LiteralPath $resolvedReviewedManifest -PathType Leaf)) { throw "Reviewed identity manifest must be a file." }
@@ -71,6 +74,14 @@ if ($ReviewedInventoryConsumablesManifest) {
   catch { throw "Reviewed inventory consumables manifest is not valid JSON." }
   $remoteInventoryConsumablesManifest = "/tmp/ozon-erp-inventory-consumables-$Version-$([guid]::NewGuid().ToString('N')).json"
 }
+if ($ReviewedInventoryNumberingManifest) {
+  if (-not $AllowServiceInterruption) { throw "Inventory numbering cutover requires an explicit offline maintenance window." }
+  $resolvedInventoryNumberingManifest = (Resolve-Path -LiteralPath $ReviewedInventoryNumberingManifest).Path
+  if (-not (Test-Path -LiteralPath $resolvedInventoryNumberingManifest -PathType Leaf)) { throw "Reviewed inventory numbering manifest must be a file." }
+  try { $null = Get-Content -LiteralPath $resolvedInventoryNumberingManifest -Raw -Encoding UTF8 | ConvertFrom-Json }
+  catch { throw "Reviewed inventory numbering manifest is not valid JSON." }
+  $remoteInventoryNumberingManifest = "/tmp/ozon-erp-inventory-numbering-$Version-$([guid]::NewGuid().ToString('N')).json"
+}
 
 foreach ($command in @("ssh", "scp", "tar.exe")) {
   if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -93,9 +104,10 @@ if ($SkipDatabaseMaintenance -and $RunDatabaseMaintenance) { throw "Choose eithe
 $dbMaintenanceFlag = if ($RunDatabaseMaintenance) { "1" } else { "0" }
 $interruptionFlag = if ($AllowServiceInterruption) { "1" } else { "0" }
 $activationCommand = "bash '$remoteScript' '$remoteArchive' '$Version' '$dbInitFlag' '$dbMaintenanceFlag' '$remoteIdentityManifest' '$remoteAiMaterialManifest' '$interruptionFlag'"
-if ($remoteAiMediaRetentionManifest -or $ExpectedProductionCommit -or $remoteInventoryConsumablesManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }
-if ($ExpectedProductionCommit -or $remoteInventoryConsumablesManifest) { $activationCommand += " '$ExpectedProductionCommit'" }
-if ($remoteInventoryConsumablesManifest) { $activationCommand += " '$remoteInventoryConsumablesManifest'" }
+if ($remoteAiMediaRetentionManifest -or $ExpectedProductionCommit -or $remoteInventoryConsumablesManifest -or $remoteInventoryNumberingManifest) { $activationCommand += " '$remoteAiMediaRetentionManifest'" }
+if ($ExpectedProductionCommit -or $remoteInventoryConsumablesManifest -or $remoteInventoryNumberingManifest) { $activationCommand += " '$ExpectedProductionCommit'" }
+if ($remoteInventoryConsumablesManifest -or $remoteInventoryNumberingManifest) { $activationCommand += " '$remoteInventoryConsumablesManifest'" }
+if ($remoteInventoryNumberingManifest) { $activationCommand += " '$remoteInventoryNumberingManifest'" }
 
 if ($DryRun) {
   Write-Host "Dry run only."
@@ -171,6 +183,12 @@ if ($resolvedInventoryConsumablesManifest) {
   & scp @scpOptions $resolvedInventoryConsumablesManifest "${remoteTarget}:$remoteInventoryConsumablesManifest"
   if ($LASTEXITCODE -ne 0) { throw "Reviewed inventory consumables manifest upload failed." }
 }
+if ($resolvedInventoryNumberingManifest) {
+  & ssh @sshOptions $remoteTarget "set -Ce; umask 077; : > '$remoteInventoryNumberingManifest'; chmod 600 '$remoteInventoryNumberingManifest'"
+  if ($LASTEXITCODE -ne 0) { throw "Private inventory numbering manifest preparation failed." }
+  & scp @scpOptions $resolvedInventoryNumberingManifest "${remoteTarget}:$remoteInventoryNumberingManifest"
+  if ($LASTEXITCODE -ne 0) { throw "Reviewed inventory numbering manifest upload failed." }
+}
 
 $remoteCommand = "mv /tmp/remote-release.sh '$remoteScript' && chmod 700 '$remoteScript' && $activationCommand"
 if ($remoteIdentityManifest) {
@@ -179,6 +197,12 @@ if ($remoteIdentityManifest) {
 & ssh @sshOptions $remoteTarget $remoteCommand
 if ($LASTEXITCODE -ne 0) { throw "Remote deployment failed with exit code $LASTEXITCODE." }
 } finally {
+  if ($remoteInventoryNumberingManifest) {
+    try {
+      & ssh @sshOptions $remoteTarget "rm -f -- '$remoteInventoryNumberingManifest'" 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) { Write-Warning "Private inventory numbering manifest cleanup could not be confirmed." }
+    } catch { Write-Warning "Private inventory numbering manifest cleanup could not be confirmed." }
+  }
   if ($remoteInventoryConsumablesManifest) {
     try {
       & ssh @sshOptions $remoteTarget "rm -f -- '$remoteInventoryConsumablesManifest'" 2>$null | Out-Null

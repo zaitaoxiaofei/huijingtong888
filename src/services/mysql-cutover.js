@@ -26,7 +26,7 @@ import { authorizeBusinessTaskSession, assertBusinessTaskPermission, restoreBusi
 import { createTenantBackgroundTasks } from "./tenant-background-tasks.js";
 import { customerMessageShopSql, customerMessageTemplateSql, assertCustomerMessageAccess, runCustomerMessageTaskOperation } from './customer-message-tenant-scope.js';
 import { CUSTOMER_MESSAGE_TEMPLATES_SCHEMA } from './customer-message-template-schema.js';
-import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, searchInventoryRows } from "./inventory-search.js";
+import { inventoryAliasSearch, inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern, inventoryNumberQueryMode, searchInventoryRows } from "./inventory-search.js";
 import { ensureInventoryNumberingMysql } from "./inventory-numbering.js";
 import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
 import { propagateListingVariantInventory } from "./listing-variant-inventory.js";
@@ -4475,7 +4475,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     }
     const products = await getCachedMasterData(cacheKey,
       () => loadFbpStockAlertBaseMysql(operationTenantPk, { operational, defaultTenant: operationDefaultTenant }), STOCK_ALERT_BASE_CACHE_TTL_MS);
-    const result = applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query));
+    const result = applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query, true));
     if (!operational || !result.rows.length) return result;
     await ensureSkuInventoryRecipeSchemaMysql();
     await ensureProductCompositionSchemaMysql();
@@ -4570,7 +4570,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
       });
       return { baseRows, salesRows };
     }, 30_000);
-    const result = applyStockAlertQuery(await filterInventoryProductRows(baseRows, query, scope, mysqlQuery), inventoryBusinessSearch(query));
+    const result = applyStockAlertQuery(await filterInventoryProductRows(baseRows, query, scope, mysqlQuery), inventoryBusinessSearch(query, true));
     const pageIds = result.rows.map((row) => Number(row.product_id));
     const pageSkus = await inventoryAlertProductSkusMysql(pageIds, inventoryTenantPk, inventoryDefaultTenant);
     const fullByProduct = new Map();
@@ -4822,7 +4822,7 @@ export async function stockAlertsMysql(query = {}, tenantId = "admin") {
     return prepared;
   }, STOCK_ALERT_BASE_CACHE_TTL_MS);
 
-  return applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query));
+  return applyStockAlertQuery(await filterInventoryProductRows(products, query, scope, mysqlQuery), inventoryBusinessSearch(query, true));
 }
 
 async function loadFbpOperationalHistoryMysql(tenantPk = null, defaultTenant = false) {
@@ -5364,7 +5364,7 @@ export async function fbpOpportunitiesMysql(query = {}, tenantId = "admin", opti
   }));
   const fresh = await authorizeBusinessTaskSession(options.session);
   assertBusinessTaskPermission(fresh, "inventory.read");
-  return applyFbpOpportunityQuery(await filterInventoryProductRows(normalizedRows, query, scope, mysqlQuery), inventoryBusinessSearch(query));
+  return applyFbpOpportunityQuery(await filterInventoryProductRows(normalizedRows, query, scope, mysqlQuery), inventoryBusinessSearch(query, true));
 }
 
 export async function ignoreFbpReplenishmentMysql(body = {}, userId = null, tenantId = "admin") {
@@ -5493,7 +5493,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
          SELECT 1 FROM fbp_replenishment_order_items si
          LEFT JOIN products current_product ON current_product.id = si.product_id AND ${inventoryTenantSql(scope, "current_product")}
          WHERE si.order_id = o.id AND ${itemOwnership("si")}
-           AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR current_product.name LIKE ? OR si.offer_id LIKE ? OR current_product.inventory_number = ? OR current_product.code = ? OR si.inventory_id = ?)
+           AND (si.ozon_sku LIKE ? OR si.product_name LIKE ? OR current_product.name LIKE ? OR si.offer_id LIKE ? OR current_product.inventory_number = ? OR current_product.code = ? OR si.inventory_id = ? OR ${inventoryAliasSearch(text, 'current_product').sql})
        )
       OR EXISTS (
         SELECT 1 FROM people p
@@ -5516,7 +5516,7 @@ export async function fbpReplenishmentOrdersMysql(query = {}, tenantId = "admin"
       )
     )`);
     const pattern = `%${text}%`;
-    if (defaultTenant) params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, pattern, pattern);
+    if (defaultTenant) params.push(pattern, pattern, pattern, pattern, pattern, text, text, text, ...inventoryAliasSearch(text, 'current_product').params, pattern, pattern);
     else params.push(pattern, pattern, pattern, pattern, text);
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -6687,9 +6687,10 @@ export async function fbpTransferRecordsMysql(query = {}, tenantId = "admin") {
     where.push(`(ftr.status = 'draft' OR ${fbpTransferInTransitWhereMysql("ftr")})`);
   }
   if (text) {
-    where.push("(p.name LIKE ? OR ftr.ozon_sku LIKE ? OR ftr.tracking_no LIKE ? OR ftr.box_no LIKE ? OR p.inventory_number = ? OR p.code = ?)");
+    const numberAlias = inventoryAliasSearch(text, 'p');
+    where.push(`(p.name LIKE ? OR ftr.ozon_sku LIKE ? OR ftr.tracking_no LIKE ? OR ftr.box_no LIKE ? OR p.inventory_number = ? OR p.code = ? OR ${numberAlias.sql})`);
     const like = `%${text}%`;
-    params.push(like, like, like, like, text, text);
+    params.push(like, like, like, like, text, text, ...numberAlias.params);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -12080,13 +12081,15 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
     where.push(`(
       LOWER(COALESCE(p.name, '')) LIKE ?
       OR LOWER(COALESCE(p.code, '')) LIKE ?
+      OR LOWER(COALESCE(p.inventory_number, '')) LIKE ?
+      OR ${inventoryAliasSearch(searchText, 'p', { fuzzy: true }).sql}
       OR LOWER(COALESCE(s.name, '')) LIKE ?
       OR LOWER(COALESCE(sm.ozon_sku, '')) LIKE ?
       OR LOWER(COALESCE(sm.offer_id, '')) LIKE ?
       OR LOWER(COALESCE(op.name, '')) LIKE ?
       OR LOWER(COALESCE(pe.name, '')) LIKE ?
     )`);
-    params.push(like, like, like, like, like, like, like);
+    params.push(like, like, like, ...inventoryAliasSearch(searchText, 'p', { fuzzy: true }).params, like, like, like, like, like);
   }
   const productSearch = inventoryProductSearch(query, scope);
   if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
@@ -12247,7 +12250,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
-  const searchMode = ["inventory_id", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
+  const searchMode = ["inventory_id", "inventory_prefix", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
   const categoryText = String(query.category || query.category_name || "").trim().toLowerCase();
   const shopId = String(query.shopId || query.shop_id || "all");
   const inventoryType = String(query.inventoryType || query.inventory_type || "all").trim().toLowerCase();
@@ -12286,8 +12289,9 @@ async function tenantProductsMysql(query = {}, tenantId) {
   const productSearch = inventoryProductSearch({...query,inventoryType:"all"}, scope);
   if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
 
-  if (searchText && !["inventory_id", "sku", "name"].includes(searchMode)) {
+  if (searchText && !["inventory_id", "inventory_prefix", "sku", "name"].includes(searchMode) && !inventoryNumberQueryMode(searchText, searchMode)) {
     const like = `%${searchText}%`;
+    const numberAlias = inventoryAliasSearch(searchText, 'p', { fuzzy: true });
     const skuSearch = `EXISTS (SELECT 1 FROM sku_mappings sm_search
       JOIN shops s_search ON s_search.id = sm_search.shop_id AND ${inventoryTenantSql(scope, 's_search')}
       LEFT JOIN online_products op_search ON op_search.id = sm_search.online_product_id AND op_search.shop_id = sm_search.shop_id
@@ -12295,15 +12299,15 @@ async function tenantProductsMysql(query = {}, tenantId) {
         AND (LOWER(COALESCE(sm_search.ozon_sku, '')) LIKE ? OR LOWER(COALESCE(sm_search.offer_id, '')) LIKE ?
           OR LOWER(COALESCE(op_search.name, '')) LIKE ? OR LOWER(COALESCE(s_search.name, '')) LIKE ?))`;
     if (isInventoryIdentifier(searchText)) {
-      where.push(`(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ? OR ${skuSearch})`);
-      params.push(like, like, like, like, like, like);
+      where.push(`(LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ? OR ${skuSearch} OR ${numberAlias.sql})`);
+      params.push(like, like, like, like, like, like, ...numberAlias.params);
     } else {
       where.push(`(LOWER(COALESCE(p.name, '')) LIKE ? OR LOWER(COALESCE(p.code, '')) LIKE ?
         OR LOWER(COALESCE(p.inventory_number, '')) LIKE ? OR LOWER(COALESCE(pe.name, '')) LIKE ?
         OR LOWER(COALESCE(p.inventory_category, '')) LIKE ? OR ${skuSearch}
         OR EXISTS (SELECT 1 FROM product_name_aliases alias_search WHERE ${inventoryTenantSql(scope, 'alias_search')}
-          AND alias_search.product_id = p.id AND alias_search.active = 1 AND LOWER(alias_search.alias_name) LIKE ?))`);
-      params.push(like, like, like, like, like, like, like, like, like, like);
+          AND alias_search.product_id = p.id AND alias_search.active = 1 AND LOWER(alias_search.alias_name) LIKE ?) OR ${numberAlias.sql})`);
+      params.push(like, like, like, like, like, like, like, like, like, like, ...numberAlias.params);
     }
   }
   if (categoryText) {
@@ -12351,7 +12355,7 @@ async function tenantProductsMysql(query = {}, tenantId) {
     profit_rate: `COALESCE(${estimatedProfitSort} / NULLIF(${salesAmountSort}, 0), 0)`, inventory_value: `(${stockSort}) * (${avgCostSort})`
   };
   const orderSql = sortKey === "product" ? `p.name ${sortDir}, p.id DESC`
-    : sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC`
+    : sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_brand ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC`
       : numericSorts[sortKey] ? `${numericSorts[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
   const fieldsSql = `p.id, p.selection_id, p.code, p.inventory_number, p.name, p.image_url,
     CASE WHEN owner_member.person_id IS NULL THEN NULL ELSE p.owner_person_id END AS owner_person_id,
@@ -12484,8 +12488,8 @@ export async function productsMysql(query = {}, tenantId = "admin") {
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 30), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const searchText = String(query.query || query.search || "").trim().toLowerCase();
-  const searchMode = ["inventory_id", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
-  const identifierOnly = ["inventory_id", "sku"].includes(searchMode) || (searchMode === "auto" && isInventoryIdentifier(searchText));
+  const searchMode = ["inventory_id", "inventory_prefix", "name", "sku"].includes(query.searchMode) ? query.searchMode : "auto";
+  const identifierOnly = ["inventory_id", "inventory_prefix", "sku"].includes(searchMode) || (searchMode === "auto" && isInventoryIdentifier(searchText));
   const searchMatchMode = String(query.matchMode || query.match_mode || "").trim().toLowerCase();
   const categoryText = String(query.category || query.category_name || "").trim().toLowerCase();
   const structuredProductName = String(query.productName || query.product_name || "").trim();
@@ -12520,7 +12524,7 @@ export async function productsMysql(query = {}, tenantId = "admin") {
     profit_rate: "profit_rate",
     inventory_value: "inventory_value"
   };
-  const productSortSql = sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC` : sortSqlMap[sortKey] ? `${sortSqlMap[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
+  const productSortSql = sortKey === "inventory_number" ? `p.inventory_number IS NULL ASC, p.inventory_number_category ${sortDir}, p.inventory_number_brand ${sortDir}, p.inventory_number_sequence ${sortDir}, p.id DESC` : sortSqlMap[sortKey] ? `${sortSqlMap[sortKey]} ${sortDir}, p.id DESC` : "p.id DESC";
   const productListFieldsSql = `
         p.id, p.selection_id, p.code, p.inventory_number, p.name, p.image_url,
         p.owner_person_id, p.created_by_person_id, p.supplier_id,
@@ -13383,6 +13387,8 @@ export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
     where.push(`(
       LOWER(COALESCE(p.name, '')) LIKE ?
       OR LOWER(COALESCE(p.code, '')) LIKE ?
+      OR LOWER(COALESCE(p.inventory_number, '')) LIKE ?
+      OR ${inventoryAliasSearch(searchText, 'p', { fuzzy: true }).sql}
       OR LOWER(COALESCE(p.selection_id, '')) LIKE ?
       OR LOWER(COALESCE(p.purchase_url, '')) LIKE ?
       OR LOWER(COALESCE(pe.name, '')) LIKE ?
@@ -13401,7 +13407,7 @@ export async function hiddenProductsMysql(query = {}, tenantId = "admin") {
           )
       )
     )`);
-    params.push(like, like, like, like, like, like, like, like, like);
+    params.push(like, like, like, ...inventoryAliasSearch(searchText, 'p', { fuzzy: true }).params, like, like, like, like, like, like, like);
   }
   const productSearch = inventoryProductSearch(query, scope);
   if (productSearch.sql) { where.push(productSearch.sql); params.push(...productSearch.params); }
@@ -17703,6 +17709,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
     const like = `%${searchText}%`;
     where.push(`(
       CONCAT_WS(' ', p.name, p.inventory_number) LIKE ?
+      OR ${inventoryAliasSearch(searchText, 'p', { fuzzy: true }).sql}
       OR p.code LIKE ?
       OR pe.name LIKE ?
       OR COALESCE(s.name, ps.name, '') LIKE ?
@@ -17715,7 +17722,7 @@ async function procurementGroupedPageIdsMysql(query = {}, shortageProductIds = n
           AND ${inventoryTenantSql(scope, 'search_sm')}
       )
     )`);
-    params.push(like, like, like, like, like, like);
+    params.push(like, ...inventoryAliasSearch(searchText, 'p', { fuzzy: true }).params, like, like, like, like, like);
   }
   if (Number.isSafeInteger(productId) && productId > 0) {
     where.push("p.id = ?");
@@ -26304,8 +26311,9 @@ export async function inventoryStockDebtsMysql(query = {}, tenantId = "admin") {
   const where = ["stock.ledger_stock < 0", inventoryTenantSql(scope, 'p')];
   const params = [];
   if (search) {
-    where.push("LOWER(CONCAT(COALESCE(p.code, ''), ' ', COALESCE(p.name, ''), ' ', COALESCE(skus.skus, ''))) LIKE ?");
-    params.push(`%${search}%`);
+    const numberAlias = inventoryAliasSearch(search, 'p', { fuzzy: true });
+    where.push(`(LOWER(CONCAT_WS(' ', p.code, p.inventory_number, p.name, skus.skus)) LIKE ? OR ${numberAlias.sql})`);
+    params.push(`%${search}%`, ...numberAlias.params);
   }
   params.push(limit);
   const rows = await mysqlQuery(`
@@ -29730,10 +29738,11 @@ export async function inventoryMysql(query = {}, tenantId = "admin") {
   }
   if (search) {
     where.push(`(
-      p.name LIKE ? OR p.code LIKE ? OR im.note LIKE ? OR im.source_ref LIKE ?
+      p.name LIKE ? OR p.code LIKE ? OR p.inventory_number LIKE ? OR im.note LIKE ? OR im.source_ref LIKE ?
+      OR ${inventoryAliasSearch(search, 'p', { fuzzy: true }).sql}
     )`);
     const like = `%${search}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, like, ...inventoryAliasSearch(search, 'p', { fuzzy: true }).params);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -31226,7 +31235,8 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   if (kind === 'local') {
     const all = await availableLocalInventoryCapitalMysql(scope);
     const keyword = String(query.query || '').trim().slice(0,128).toLocaleLowerCase();
-    const filtered = all.filter(row=>!keyword || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword));
+    const aliasIds = keyword ? new Set((await mysqlQuery(`SELECT p.id FROM products p WHERE ${orderTenantPredicateMysql('p', scope)} AND ${inventoryAliasSearch(keyword, 'p', { fuzzy: true }).sql}`, inventoryAliasSearch(keyword, 'p', { fuzzy: true }).params)).map(row=>Number(row.id))) : new Set();
+    const filtered = all.filter(row=>!keyword || aliasIds.has(Number(row.product_id)) || [row.product_name,row.inventory_number,row.code,row.row_id].filter(v=>v!=null).join(' ').toLocaleLowerCase().includes(keyword));
     const compare = (a,b,key) => a[key]===b[key]?0:a[key]==null?1:b[key]==null?-1:Number(b[key])-Number(a[key]);
     filtered.sort((a,b)=>compare(a,b,'inventory_value')||compare(a,b,'quantity')||Number(a.row_id)-Number(b.row_id));
     const totals = localCapitalTotals(filtered);
@@ -31241,8 +31251,10 @@ export async function financeInventoryCapitalDetailsMysql(query = {}, tenantId =
   const keyword = String(query.query || '').trim().slice(0,128), params = [];
   let where = '';
   if (keyword) {
-    where = " WHERE CONCAT_WS(' ',product_name,inventory_number,code,ozon_sku,shop_name,warehouse_name,order_no,tracking_number,CAST(row_id AS CHAR)) COLLATE utf8mb4_unicode_ci LIKE ? ESCAPE '='";
+    where = ` WHERE (CONCAT_WS(' ',product_name,inventory_number,code,ozon_sku,shop_name,warehouse_name,order_no,tracking_number,CAST(row_id AS CHAR)) COLLATE utf8mb4_unicode_ci LIKE ? ESCAPE '='
+      OR EXISTS (SELECT 1 FROM products alias_product WHERE alias_product.id=capital.product_id AND ${orderTenantPredicateMysql('alias_product', scope)} AND ${inventoryAliasSearch(keyword, 'alias_product', { fuzzy: true }).sql}))`;
     params.push(`%${keyword.replace(/[=%_]/g,'=$&')}%`);
+    params.push(...inventoryAliasSearch(keyword, 'alias_product', { fuzzy: true }).params);
   }
   const source = `FROM (${sources[kind]}) capital${where}`;
   const [rows, totals, summary] = await Promise.all([
@@ -31647,12 +31659,12 @@ function addOrderSearchSqlMysql(where, params, query, tenantScope = null) {
       LEFT JOIN products direct_p ON direct_p.id = direct_sm.product_id AND direct_p.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("direct_p", tenantScope)}` : ""}
       LEFT JOIN products fallback_p ON fallback_p.id = fallback_sm.product_id AND fallback_p.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("fallback_p", tenantScope)}` : ""}
       WHERE oi.order_id = o.id AND (
-        (direct_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(direct_p.name, ''), ' ', COALESCE(direct_p.code, ''), ' ', COALESCE(direct_p.inventory_number, ''), ' ', COALESCE(direct_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
-        OR (fallback_sm.id IS NOT NULL AND LOWER(CONCAT(COALESCE(fallback_p.name, ''), ' ', COALESCE(fallback_p.code, ''), ' ', COALESCE(fallback_p.inventory_number, ''), ' ', COALESCE(fallback_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ?)
+        (direct_sm.id IS NOT NULL AND (LOWER(CONCAT(COALESCE(direct_p.name, ''), ' ', COALESCE(direct_p.code, ''), ' ', COALESCE(direct_p.inventory_number, ''), ' ', COALESCE(direct_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ? OR ${inventoryAliasSearch(text, 'direct_p', { fuzzy: true }).sql}))
+        OR (fallback_sm.id IS NOT NULL AND (LOWER(CONCAT(COALESCE(fallback_p.name, ''), ' ', COALESCE(fallback_p.code, ''), ' ', COALESCE(fallback_p.inventory_number, ''), ' ', COALESCE(fallback_p.selection_id, ''), ' ', oi.ozon_sku)) LIKE ? OR ${inventoryAliasSearch(text, 'fallback_p', { fuzzy: true }).sql}))
         OR (direct_sm.id IS NULL AND fallback_sm.id IS NULL AND LOWER(CONCAT('   ', oi.ozon_sku)) LIKE ?)
       )
     )`);
-    params.push(like, like, like);
+    params.push(like, ...inventoryAliasSearch(text, 'direct_p', { fuzzy: true }).params, like, ...inventoryAliasSearch(text, 'fallback_p', { fuzzy: true }).params, like);
     return;
   }
   if (type === "purchaseTracking") {

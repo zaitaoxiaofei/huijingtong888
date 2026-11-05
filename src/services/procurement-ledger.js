@@ -6,6 +6,7 @@ import { validateInventoryAdjustment } from '../inventory-adjustment-reasons.js'
 import { inferProcurementSources } from './procurement-source-inference.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryReferences, assertInventoryMember } from './inventory-tenant-scope.js';
 import { assertBusinessTaskPermission, restoreBusinessTaskSession } from './business-task-tenant.js';
+import { inventoryAliasSearch } from './inventory-search.js';
 
 export const procurementLedgerSchema = [
   `CREATE TABLE IF NOT EXISTS procurement_ledger_actions (
@@ -460,8 +461,9 @@ export function createProcurementLedgerService(hooks) {
     const page = Math.min(100000, Math.max(1, Math.floor(Number(body.page) || 1)));
     const pageSize = 30;
     const search = String(body.query || '').trim().slice(0, 200);
-    const where = `t.resolved_quantity < t.quantity AND ${inventoryTenantSql(scope, 'p')}${search ? ' AND (p.name LIKE ? OR p.inventory_number LIKE ? OR p.code LIKE ?)' : ''}`;
-    const params = search ? Array(3).fill(`%${search}%`) : [];
+    const numberAlias = inventoryAliasSearch(search, 'p', { fuzzy: true });
+    const where = `t.resolved_quantity < t.quantity AND ${inventoryTenantSql(scope, 'p')}${search ? ` AND (p.name LIKE ? OR p.inventory_number LIKE ? OR p.code LIKE ? OR ${numberAlias.sql})` : ''}`;
+    const params = search ? [...Array(3).fill(`%${search}%`), ...numberAlias.params] : [];
     const [count] = await query(`SELECT COUNT(*) AS total FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id WHERE ${where}`, params);
     const rows = await query(`SELECT t.*, p.name AS product_name, p.inventory_number, p.code, pe.name AS person_name
       FROM procurement_stock_cost_tasks t JOIN products p ON p.id = t.product_id LEFT JOIN people pe ON pe.id = t.person_id AND EXISTS (SELECT 1 FROM tenant_members tm WHERE tm.person_id = pe.id AND tm.tenant_id = ${scope.id} AND tm.active = 1)

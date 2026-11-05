@@ -5,7 +5,7 @@ import {mysqlQuery,withMysqlTransaction} from '../mysql-pool.js';
 import {authorizeBusinessTaskSession} from './business-task-tenant.js';
 import {resolveInventoryTenantScope,assertInventoryRecord,inventoryTenantSql} from './inventory-tenant-scope.js';
 import {inventoryProductSearch} from './inventory-product-search.js';
-import {inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern} from './inventory-search.js';
+import {inventoryAliasSearch,inventoryIdentifierSearch,isInventoryIdentifier,inventoryNamePattern,inventoryNumberQueryMode} from './inventory-search.js';
 import {hasPermission} from '../shared/permissions.js';
 import {invalidateOrderProcurementCoverage} from './mysql-order-procurement-coverage.js';
 const fail=(message,statusCode=400)=>Object.assign(new Error(message),{statusCode});
@@ -31,10 +31,11 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    where.push(allowed.length?`ir.product_id IN (${allowed.map(()=>'?').join(',')})`:'1=0');args.push(...allowed);
   }
   const text=String(params.query||'').trim();
-  if(text&&(!params.searchMode||params.searchMode==='auto')){
+  if(text&&(!params.searchMode||params.searchMode==='auto')&&!inventoryNumberQueryMode(text)){
    const match=isInventoryIdentifier(text)?inventoryIdentifierSearch(text,'inventory_id'):null;
-   const textSql=match?`p.id IN (${match.sql})`:"p.name LIKE ? ESCAPE '='";
-   const matching=await query(`SELECT p.id FROM products p WHERE ${productWhere.map(w=>'('+w+')').join(' AND ')} AND ${textSql}`,[...productArgs,...(match?match.params:[inventoryNamePattern(text)])]);
+   const numberAlias=inventoryAliasSearch(text,'p',{fuzzy:true});
+   const textSql=match?`p.id IN (${match.sql})`:`(p.name LIKE ? ESCAPE '=' OR ${numberAlias.sql})`;
+   const matching=await query(`SELECT p.id FROM products p WHERE ${productWhere.map(w=>'('+w+')').join(' AND ')} AND ${textSql}`,[...productArgs,...(match?match.params:[inventoryNamePattern(text),...numberAlias.params])]);
    const ids=expand(matching.map(p=>Number(p.id)));
    where.push(`(${ids.length?`ir.product_id IN (${ids.map(()=>'?').join(',')})`:'1=0'} OR po.order_no LIKE ? ESCAPE '=')`);args.push(...ids,inventoryNamePattern(text));
   }

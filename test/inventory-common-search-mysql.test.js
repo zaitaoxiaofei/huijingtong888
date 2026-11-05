@@ -35,8 +35,8 @@ test('inventory pages share exact, structured and tenant-scoped search before pa
         assert.equal(criteria.sql.match(/\?/g)?.length||0,criteria.params.length);
       });
     }
-    await t.test('default reads add no search query and preserve page-specific keywords',async()=>{
-      const same=await filterInventoryProductRows(rows,{query:'采购单号'},scope,()=>{throw Error('Unexpected product lookup');});
+    await t.test('empty cached reads add no query and unresolved page keywords remain available',async()=>{
+      const same=await filterInventoryProductRows(rows,{},scope,()=>{throw Error('Unexpected product lookup');});
       assert.equal(same,rows);assert.equal(inventoryBusinessSearch({query:'申请人'}).query,'申请人');
       assert.equal(inventoryBusinessSearch({searchMode:'name',query:'黑色'}).query,'');
     });

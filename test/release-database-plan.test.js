@@ -39,6 +39,9 @@ const cases = [
   ["migrate-inventory-consumables.mjs",
     { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_add_column: false, reviewed_product_count: 0, product_flags_changed: 0 },
     { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_add_column: true, reviewed_product_count: 0, product_flags_changed: 0 }],
+  ["migrate-inventory-numbering-v2.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_change: false, numbering_version: 1, active: false, product_numbers_changed: 0 },
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_change: true, numbering_version: null, active: false, product_numbers_changed: 0 }],
   ["migrate-ai-variant-draft-history-index.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, ready: true, missing_column: false, missing_index: false } },
     { ok: true, mode: "dry-run", before: { exists: true, ready: false, missing_column: false, missing_index: true } }],
@@ -49,7 +52,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 14);
+  assert.equal(SCHEMA_MIGRATIONS.length, 15);
 });
 
 for (const [filename, ready, pending] of cases) {
@@ -102,6 +105,10 @@ const incompatible = [
   ["migrate-inventory-consumables.mjs", { schema_ready: true, schema_would_add_column: true }],
   ["migrate-inventory-consumables.mjs", { reviewed_product_count: 14 }],
   ["migrate-inventory-consumables.mjs", { product_flags_changed: 1 }],
+  ["migrate-inventory-numbering-v2.mjs", { schema_would_change: true }],
+  ["migrate-inventory-numbering-v2.mjs", { product_numbers_changed: 1 }],
+  ["migrate-inventory-numbering-v2.mjs", { numbering_version: 2, active: false }],
+  ["migrate-inventory-numbering-v2.mjs", { numbering_version: null }],
   ["migrate-ai-variant-draft-history-index.mjs", { before: { exists: true, ready: true, missing_column: true, missing_index: false } }],
   ["migrate-order-profit-calculation-versions.mjs", { missing_tables: ["orders"] }]
 ];
@@ -109,6 +116,12 @@ const incompatible = [
 for (const [filename, overrides] of incompatible) test(`${filename} refuses incompatible or contradictory readiness`, () => {
   const [, ready] = cases.find(([name]) => name === filename);
   assert.throws(() => migrationNeedsApply(filename, { ...ready, ...overrides }), { code: "RELEASE_DATABASE_PLAN_INVALID" });
+});
+
+test("numbering schema planning accepts installed V2 without reapplying a cutover", () => {
+  const [, ready] = cases.find(([name]) => name === "migrate-inventory-numbering-v2.mjs");
+  assert.equal(migrationNeedsApply("migrate-inventory-numbering-v2.mjs", { ...ready, numbering_version: 2, active: true }), false);
+  assert.throws(() => migrationNeedsApply("migrate-inventory-numbering-v2.mjs", { ...ready, schema_ready: false, schema_would_change: true, numbering_version: 2, active: false }), { code: "RELEASE_DATABASE_PLAN_INVALID" });
 });
 
 test("truthy strings, false confirmations, duplicate items and activation are refused", () => {

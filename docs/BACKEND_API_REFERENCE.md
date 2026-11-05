@@ -2738,7 +2738,7 @@ Return active product master data. Optional view=inventory is the lean product l
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -2769,7 +2769,7 @@ Return archived or hidden products.
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -2984,7 +2984,7 @@ Return SKU mapping rows.
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -3074,7 +3074,7 @@ Read the existing enterprise FBP replenishment list. An exact orderId never bypa
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -3195,7 +3195,7 @@ Return inventory alert rows and replenishment suggestions.
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -3315,7 +3315,7 @@ Return inbound record rows.
 - Auth: `authenticated`
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -3416,7 +3416,7 @@ Read product warnings from the same four-demand inventory policy; severity filte
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
@@ -3519,7 +3519,7 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
 - Query parameters:
   - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
   - `shopId` (`string`, optional): Current-enterprise shop ID, or all
-  - `searchMode` (`string`, optional): auto preserves page business keyword search; inventory_id and sku are exact; name matches all space-separated terms
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
   - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
   - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
