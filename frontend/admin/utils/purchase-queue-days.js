@@ -9,14 +9,18 @@ export function purchaseQueueBadgeTone(count, overdue=false) {
   return count<=0?'empty':overdue?'overdue':'recent';
 }
 
-export function purchaseQueueDays(days, {status='open', selectedDay='', startDate='', endDate='', now=new Date()}={}) {
-  const indexed=new Map((days||[]).map(day=>[day.date,day]));
-  const today=shanghaiDateKey(now);
-  const anchor=new Date(`${today}T00:00:00+08:00`);
-  for(let offset=0;offset<7;offset++){
-    const date=shanghaiDateKey(new Date(anchor.getTime()-offset*86400000));
-    if((!startDate||date>=startDate)&&(!endDate||date<=endDate)&&!indexed.has(date))indexed.set(date,{date});
+export function purchaseQueueDays(days, {status='open', startDate='', endDate='', now=new Date()}={}) {
+  return (days||[]).filter(day=>Number(day[status])>0&&(!startDate||day.date>=startDate)&&(!endDate||day.date<=endDate))
+    .sort((a,b)=>a.date.localeCompare(b.date))
+    .map(day=>{const [year,month,date]=day.date.split('-');return {...day,count:Number(day[status]),ageDays:purchaseQueueDayAge(day.date,now),monthLabel:`${year}年${Number(month)}月`,dayLabel:`${Number(date)}号`};});
+}
+
+export function purchaseQueueDayGroups(days) {
+  const groups=new Map();
+  for(const day of days){
+    const month=day.date.substring(0,7);
+    if(!groups.has(month))groups.set(month,{month,monthLabel:day.monthLabel,days:[]});
+    groups.get(month).days.push(day);
   }
-  if(/^\d{4}-\d{2}-\d{2}$/.test(selectedDay)&&!indexed.has(selectedDay))indexed.set(selectedDay,{date:selectedDay});
-  return [...indexed.values()].sort((a,b)=>b.date.localeCompare(a.date)).map(day=>({...day,count:Number(day[status]||0),ageDays:purchaseQueueDayAge(day.date,now)}));
+  return [...groups.values()];
 }

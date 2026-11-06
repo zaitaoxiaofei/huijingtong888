@@ -94,14 +94,14 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const stock=()=>q("SELECT COALESCE(SUM(quantity_delta),0) n FROM inventory_movements WHERE tenant_id=2 AND product_id=201 AND status='posted'");
   assert.equal(Number((await stock())[0].n),6);
   const remaining=await service.receipts(201,warehouse);assert.equal(remaining.length,1);assert.equal(Number(remaining[0].quantity),4);
-  await assert.rejects(service.receive(payload,warehouse));assert.equal(Number((await stock())[0].n),6);
+  assert.equal((await service.receive(payload,warehouse)).duplicate,true);assert.equal(Number((await stock())[0].n),6);
   await q("UPDATE tenant_members SET business_roles_json=JSON_ARRAY('analytics') WHERE tenant_id=2 AND person_id=6");
   await assert.rejects(service.receive({...payload,records:[{id:remaining[0].id,quantity:4,expected_quantity:4}]},warehouse),{statusCode:403});
   assert.equal(Number((await stock())[0].n),6);
   await q("UPDATE tenant_members SET business_roles_json=JSON_ARRAY('packing') WHERE tenant_id=2 AND person_id=6");
   const before=await legacy.procurementLedgerMysql({product_id:201},2);
   await legacy.applyProcurementLedgerMysql({action_type:'stocktake',product_id:201,counted_quantity:8,reason_code:'other',reason_note:'Local receipt test count',revision:before.revision,request_key:randomUUID()},2,2);
-  const finalPayload={product_id:201,request_key:randomUUID(),records:[{id:remaining[0].id,quantity:4,expected_quantity:4}]};
+  const finalPayload={product_id:201,receipt_mode:'historical',request_key:randomUUID(),records:[{id:remaining[0].id,quantity:4,expected_quantity:4}]};
   await assert.rejects(service.receive(finalPayload,warehouse),/当前实际在仓总数/);
   await service.receive({...finalPayload,counted_quantity:12},warehouse);
   assert.equal((await legacy.inventoryLedgerMysql({product_id:201},2)).physical_estimate,12,'Actual counted total wins without double adding historical receipts');
@@ -278,7 +278,7 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
  await t.test('workspace shares coverage without changing quantities and invalidates after stock writes',async()=>{
   const ids=(await q('SELECT id FROM products WHERE tenant_id=2')).map(r=>Number(r.id));let scans=0;
   const {mysqlQuery}=await import('../src/mysql-pool.js');
-  const tracked=async(sql,args)=>{if(sql.includes('SELECT o.id AS order_id'))scans++;return mysqlQuery(sql,args);};
+  const tracked=async(sql,args)=>{if(/SELECT\s+(?:STRAIGHT_JOIN\s+)?o\.id AS order_id/.test(sql))scans++;return mysqlQuery(sql,args);};
   const fast=createInventoryWorkflowService({...opts,query:tracked});
   const expected=await service.batch(ids,2,{fresh:true,cache:false});
   const actual=await fast.workspaceStates(ids,2);const quantities=rows=>rows.map(({calculated_at,...row})=>row).sort((a,b)=>a.product_id-b.product_id);assert.deepEqual(quantities(actual),quantities(expected));assert.equal(scans,1);
@@ -303,7 +303,7 @@ test('unified workflow preserves scoped inventory, typed requests, idempotency a
   const orders=Array.from({length:5000},(_,i)=>[20000+i,20,'LOAD-ORDER-'+i,i%3?'awaiting_packaging':'delivered','2026-10-20 00:00:00']);
   await insert('orders','id,shop_id,posting_number,status,ordered_at',orders);
   await insert('order_items','id,order_id,ozon_sku,sku_mapping_id,quantity',orders.map((r,i)=>[r[0],r[0],'LOAD-'+ids[i%ids.length],ids[i%ids.length],i%3+1]));
-  let scans=0,queries=0;const query=async(sql,args)=>{queries++;if(sql.includes('SELECT o.id AS order_id'))scans++;return mysqlQuery(sql,args);};
+  let scans=0,queries=0;const query=async(sql,args)=>{queries++;if(/SELECT\s+(?:STRAIGHT_JOIN\s+)?o\.id AS order_id/.test(sql))scans++;return mysqlQuery(sql,args);};
   const fast=createInventoryWorkflowService({...opts,query});const start=performance.now();const rows=await fast.workspaceStates(ids,2);const elapsed=Math.round(performance.now()-start),before=queries;
   assert.equal(rows.length,681);assert.equal(scans,1);assert.equal(await fast.workspaceStates(ids,2),rows);assert.equal(queries,before);
   const expected=await service.batch(ids.slice(0,10),2,{fresh:true,cache:false});const quantities=values=>values.map(({calculated_at,...row})=>row);

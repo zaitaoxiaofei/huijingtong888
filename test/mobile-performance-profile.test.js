@@ -14,6 +14,8 @@ import * as search from '../src/shared/inventory-search-fields.js';
 import * as orderSearch from '../src/shared/order-search.js';
 import * as orderUtils from '../frontend/admin/views/mobile/mobile-orders-utils.js';
 import * as shanghai from '../frontend/admin/utils/shanghai-date.js';
+import * as purchaseQueue from '../frontend/admin/utils/purchase-queue-days.js';
+import * as purchaseWorkers from '../frontend/admin/utils/purchase-batch-workers.js';
 const owner={id:1,personId:1,name:'Fixture member',username:'fixture',roles:['admin'],tenant:{id:2,role:'owner'}};
 export async function component(file,{inlineTemplate=false,get=async()=>({}),post=async()=>({}),route={query:{},params:{}},auth={user:owner},router={replace(){},push(){},back(){}}}={}){
  const {descriptor}=parse(fs.readFileSync(new URL('../frontend/admin/'+file,import.meta.url),'utf8'));
@@ -37,6 +39,8 @@ export async function component(file,{inlineTemplate=false,get=async()=>({}),pos
   if(id.endsWith('order-search.js'))return orderSearch;
   if(id.endsWith('mobile-orders-utils.js'))return orderUtils;
   if(id.endsWith('shanghai-date.js'))return shanghai;
+  if(id.endsWith('purchase-queue-days.js'))return purchaseQueue;
+  if(id.endsWith('purchase-batch-workers.js'))return purchaseWorkers;
   if(id.endsWith('imageCropper.js'))return{withImageToken:x=>x};
   if(id.endsWith('mobile-evidence.js'))return evidence;
   if(id.endsWith('procurement-price-reason.js'))return priceReasons;

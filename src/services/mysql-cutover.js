@@ -5,6 +5,7 @@ import { availableLocalCapitalRows, localCapitalTotals } from "./inventory-capit
 import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
+import { readNewArrivalReceipt } from './procurement-receipt-idempotency.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
 const ORDER_SPLIT_IMPORT = Symbol("orderSplitImport");
@@ -26035,7 +26036,19 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
   }
   const records = Array.isArray(body.records) ? body.records : [];
   if (!records.length) throw new Error("Please select inbound records to update");
-  const result = await withMysqlTransaction(async (connection) => {
+  const receiptRequest=options.receipt===true?options.receiptRequest:null;
+  const write=async connection=>{
+    if(receiptRequest){
+      const run=(sql,args=[])=>(connection.query(sql,args)).then(([rows])=>rows);
+      // Match the ledger's product -> authority lock order. One keyed receipt
+      // owns exactly one product; the member lock also serializes reused keys
+      // across different products before any shared authority reads.
+      await assertInventoryRecord(scope,'product',receiptRequest.productId,run,{lock:true});
+      await run('SELECT person_id FROM tenant_members WHERE tenant_id=? AND person_id=? LIMIT 1 FOR UPDATE',[scope.id,sessionPersonId]);
+      await guard(connection);
+      const prior=await readNewArrivalReceipt(run,scope.id,sessionPersonId,receiptRequest,{lock:true});
+      if(prior)return prior;
+    }
     const changedPurchaseOrderIds = new Set();
     const ids = [];
     for (const record of records) {
@@ -26062,8 +26075,19 @@ export async function batchUpdateInboundRecordsMysql(body = {}, sessionPersonId 
       await refreshPurchaseOrderStatusMysql(connection, orderId);
     }
     await guard(connection);
-    return { ok: true, count: ids.length, ids };
-  });
+    const saved={ ok: true, count: ids.length, ids };
+    if(receiptRequest)await connection.execute('INSERT INTO inventory_flow_events(tenant_id,product_id,person_id,action,detail_json) VALUES(?,?,?,?,?)',[scope.id,receiptRequest.productId,sessionPersonId,'purchase_receipt',JSON.stringify({request_key:receiptRequest.key,hash:receiptRequest.hash,result:saved})]);
+    return saved;
+  };
+  let result;
+  for(let attempt=0;;attempt++){
+    try{result=await withMysqlTransaction(write);break;}
+    catch(error){
+      // Older receipt paths may still take the authority lock first. Retry only
+      // a complete rolled-back deadlock transaction, with the same request key.
+      if(!receiptRequest||attempt>=2||!(error.code==='ER_LOCK_DEADLOCK'||Number(error.errno)===1213))throw error;
+    }
+  }
   invalidateOrderProcurementCoverage();
   return result;
 }

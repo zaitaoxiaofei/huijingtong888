@@ -3576,7 +3576,7 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
   - `summary_only` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
   - `recent` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
   - `day_mode` (`string`, required): pending opts into purchase-day selection; absent preserves all-day legacy listing
-  - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the latest pending day matching status when day_mode=pending
+  - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the oldest pending day matching status when day_mode=pending; a selected completed date falls back to the oldest remaining date and resets page to 1
   - `start_date` (`string`, required): Optional inclusive Beijing purchase start day YYYY-MM-DD
   - `end_date` (`string`, required): Optional inclusive Beijing purchase end day YYYY-MM-DD
 - Responses:
@@ -3674,7 +3674,7 @@ Read owned-product pending purchased arrival batches without costs. Fresh packin
 
 #### `POST /api/inventory-workflow/receipts`
 
-Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
+Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes and before replay. New-arrival requests with a UUID request_key atomically save a tenant-and-actor-scoped receipt result; identical retries recover lost responses without adding stock twice, while changed product, quantities, reason, evidence or revision under the same key conflict. Legacy requests without a key and historical receipts retain their existing paths. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
 
 - Auth: `authenticated`
 - Request body: required

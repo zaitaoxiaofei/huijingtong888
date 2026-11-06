@@ -28,6 +28,7 @@ const total = ref(0);
 const noteOrder = ref(null);
 const page = ref(1);
 const pageSize = ref(20);
+const printedTime=value=>{const text=shanghaiDateTimeText(value,{assumeUtcWhenNaive:true});return text==='-'?'待核实':text;};
 let version=0,disposed=false,rowController=null;
 let restoreScroll=Number(window.history.state?.mobileOrdersScroll||0);
 const initialPage=Math.max(1,Math.trunc(Number(route.query.page)||1));
@@ -180,6 +181,7 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
           <strong>{{ shortText(row.posting_number || row.order_number) }}</strong>
           <span :class="['mobile-print-badge',{'is-printed':!!row.printed_at}]">{{row.printed_at?'已打印':'未打印'}}</span>
         </div>
+        <p v-if="row.printed_at" class="mobile-order-card__print-time" title="最近一次确认已打印的时间"><span>打印时间（北京）</span><span>{{printedTime(row.printed_at)}}</span></p>
         <div v-for="item in packingItems(row)" :key="item.sku" class="mobile-order-card__body">
           <img v-if="item.imageUrl" :src="item.imageUrl" loading="lazy" decoding="async" width="64" height="84" alt="">
           <div v-else class="mobile-order-card__image-fallback">无图</div>
@@ -213,7 +215,7 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
       <strong>{{noteOrder.posting_number || noteOrder.order_number}}</strong>
       <p>{{noteOrder.shop_name}} · {{manualMarkLabel(noteOrder)}}</p>
       <p class="mobile-order-note-full">{{noteOrder.mark_note || '此标记未填写备注，请与运营确认。'}}</p>
-      <p v-if="noteOrder.printed_at" class="mobile-muted">打印时间 {{shanghaiDateTimeText(noteOrder.printed_at,{assumeUtcWhenNaive:true})}}</p>
+      <p v-if="noteOrder.printed_at" class="mobile-muted">打印时间 {{printedTime(noteOrder.printed_at)}}</p>
       <template #footer><el-button @click="noteOrder=null">关闭</el-button></template>
     </MobileDialog>
   </div>
@@ -410,6 +412,7 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
 .mobile-order-card__identity{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:14px;overflow-wrap:anywhere}
 .mobile-print-badge{flex:none;padding:4px 7px;border-radius:6px;background:var(--erp-detail-surface-alt,#f1f5f9);color:var(--erp-detail-text-regular,#64748b);font-size:12px}
 .mobile-print-badge.is-printed{background:var(--erp-detail-success-bg,#eaf8ee);color:var(--erp-detail-success-text,#167747);font-weight:700}
+.mobile-order-card__print-time{display:flex;flex-wrap:wrap;gap:4px 8px;margin:0;color:var(--erp-detail-text-regular,#64748b);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
 .mobile-order-card__facts strong{font-size:14px;color:var(--erp-detail-primary,#315da8)}
 .mobile-packing-filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) 48px;gap:5px}
 .mobile-order-select{position:relative;display:flex;align-items:center;width:100%;min-width:0;min-height:40px;box-sizing:border-box;padding:4px 20px 4px 8px;border:1px solid var(--el-border-color);border-radius:8px;background:var(--el-bg-color);color:var(--el-text-color-primary);font-size:13px}

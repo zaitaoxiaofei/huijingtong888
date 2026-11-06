@@ -91,7 +91,7 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
     LEFT JOIN purchase_order_items poi ON poi.id=ir.purchase_order_item_id AND poi.product_id=ir.product_id AND poi.purchase_order_id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'poi')}
     LEFT JOIN people buyer ON buyer.id=ir.person_id AND EXISTS(SELECT 1 FROM tenant_members tm WHERE tm.tenant_id=${scope.id} AND tm.person_id=buyer.id AND tm.active=1)
     WHERE ${where.map(w=>'('+w+')').join(' AND ')}`;
-  const page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1))),pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
+  let page=Math.max(1,Math.min(1000000,Math.trunc(Number(params.page)||1)));const pageSize=Math.min(100,Math.max(1,Math.trunc(Number(params.pageSize)||20)));
   const summaryFilter=[...where.filter(w=>!w.startsWith("ir.status=")),"ir.status='pending_arrival'"];
   const summaryJoins=joins.slice(0,joins.indexOf('WHERE '+where.map(w=>'('+w+')').join(' AND ')))+'WHERE '+summaryFilter.map(w=>'('+w+')').join(' AND ');
   const summaryRows=await query(`SELECT ir.id,ir.product_id,ir.quantity,ir.amount,ir.shipping_amount,ir.status,ir.received_at,
@@ -104,15 +104,19 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    const day=byDay.get(date);day.total++;
    for(const target of [summary,day]){target[key]++;if(row.physical_quantity==null)target[key+'_unknown_batches']++;else target[key+'_quantity']+=row.physical_quantity;}
   }
-  const days=[...byDay.values()].sort((a,b)=>b.date.localeCompare(a.date));
-  const selectedDay=dateFilters.day||(dateFilters.grouped?days.find(day=>status==='open'?day.open>0:status==='arrived'?day.arrived>0:day.total>0)?.date||'':'all');
+  const days=[...byDay.values()].sort((a,b)=>dateFilters.grouped?a.date.localeCompare(b.date):b.date.localeCompare(a.date));
+  const pending=day=>status==='open'?day.open>0:status==='arrived'?day.arrived>0:day.total>0;
+  const completedDay=dateFilters.grouped&&['open','arrived'].includes(status)&&dateFilters.day&&dateFilters.day!=='all'&&!pending(byDay.get(dateFilters.day)||emptySummary());
+  const selectedDay=completedDay?days.find(pending)?.date||'':dateFilters.day||(dateFilters.grouped?days.find(pending)?.date||'':'all');
+  if(completedDay)page=1;
   const daySummary=selectedDay&&selectedDay!=='all'?byDay.get(selectedDay)||emptySummary():summary;
   const dateResult={days,selected_day:selectedDay,day_summary:daySummary};
   if(params.summary_only==='1')return{rows:[],total:0,page,pageSize,summary,...dateResult};
   let detailJoins=joins;const detailArgs=[...args];
-  const selectedRange=selectedDay&&selectedDay!=='all'?(dateFilters.dayRange||procurementDayRange(selectedDay)):null;
+  const selectedRange=selectedDay&&selectedDay!=='all'?procurementDayRange(selectedDay):null;
+  const order=dateFilters.grouped?'ASC':'DESC';
   if(selectedRange){detailJoins+=` AND ${purchaseTime}>=? AND ${purchaseTime}<?`;detailArgs.push(...selectedRange);}
-  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${detailJoins} ORDER BY ${purchaseTime} DESC,ir.id DESC LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
+  const [counts,rows]=await Promise.all([query(`SELECT COUNT(*) AS n ${detailJoins}`,detailArgs),query(`SELECT ir.id,ir.product_id,ir.amount,ir.shipping_amount,p.name AS product_name,p.inventory_number,ir.quantity,ir.status,ir.received_at,ir.approved_at,ir.updated_at,ir.note,ir.receipt_images_json,ir.courier_company,ir.tracking_number,po.note AS purchase_note,po.id AS purchase_order_id,po.order_no,${purchaseTime} AS purchased_at,poi.actual_quantity AS ordered_quantity,buyer.name AS buyer_name ${detailJoins} ORDER BY ${purchaseTime} ${order},ir.id ${order} LIMIT ? OFFSET ?`,[...detailArgs,pageSize,(page-1)*pageSize])]);
   return{rows:rows.map(r=>({...project(r),arrival_state:procurementArrivalState(r)})),total:Number(counts[0]?.n)||0,page,pageSize,summary,...dateResult};
  }
  async function logistics(body,session){

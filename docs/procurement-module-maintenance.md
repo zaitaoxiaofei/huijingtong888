@@ -79,6 +79,16 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - The procurement workspace does not confirm inbound. Inbound confirmation belongs to the order module shortcut and the pending-inbound list.
 - The purchase order drawer must always close on explicit close and when switching pages.
 
+## Pending purchase days on desktop and mobile (2026-11-06)
+
+- Both queues opt into `day_mode=pending`: `open` means not yet confirmed arrived, and `arrived` means confirmed arrived but not yet accepted into stock. The mobile acceptance queue does not use the legacy `inspection` filter, which also includes old unarrived purchases.
+- Dates and rows are oldest first, prioritizing the longest waiting purchases. The default date is the oldest date with work in the current queue. Switching search or status reselects that date; explicit date ranges still limit the result. Legacy API callers without day mode keep their all-day, newest-first behavior.
+- Only dates whose current queue has pending batches appear. Finishing the last batch hides that date and selects the oldest remaining date on page 1. It does not delete purchase history or hide remaining work from the other queue. Partial arrival retains the original purchase day for both portions.
+- Month headings such as `2026年11月` appear once per month, with compact `6号` buttons. Accessible labels retain the full date. Positive pending counts for today/yesterday are green; the day before yesterday and earlier are red, based on Beijing calendar days. All-pending is red when any older pending batch remains.
+- Desktop and mobile have explicit page selection and batch actions. Selection is cleared on date, page, search, or status changes; unresolved bundle purchases and composition errors are not selectable. Batch arrival notifies the warehouse without posting stock. Receipt still previews the revision and posts only the accepted quantity, preserving unreceived quantities and per-batch optional photos.
+- Batch retries keep the same request key and payload. Successful groups are not submitted again; failed groups remain visible for retry or refresh. All writes continue through the existing enterprise, duty, stale-state, and idempotency checks.
+- New-arrival receipt UUID keys save the original result in a `purchase_receipt` event in the same transaction as inventory posting. The current tenant and actor must still have receipt permission to replay that result. Identical retries after a lost response return the saved result; changing inventory, records, quantities, reasons, evidence, or observed revision with the same key conflicts. Legacy unkeyed and historical receipt paths remain compatible.
+
 
 ## Historical source reconciliation and inventory corrections
 

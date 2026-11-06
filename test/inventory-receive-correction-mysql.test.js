@@ -104,7 +104,7 @@ test('pending purchase correction and direct receipt preserve money, stock and e
    const preview=await service.previewReceive(input,session(2));assert.equal(preview.requires_count,false);assert.equal(preview.ledger_warning,true);assert.equal(preview.physical_before,-1);assert.equal(preview.physical_after,24);
    await service.receive({...input,expected_revision:preview.revision},session(2));assert.equal(await stock(204),24);
    assert.equal(Number((await q("SELECT quantity_delta FROM inventory_movements WHERE product_id=204 AND source_type='order_outbound'"))[0].quantity_delta),-1);
-   await assert.rejects(service.receive({...input,expected_revision:preview.revision},session(2)));assert.equal(await stock(204),24,'A retried receipt never increments stock twice');
+   assert.equal((await service.receive({...input,expected_revision:preview.revision},session(2))).duplicate,true);assert.equal(await stock(204),24,'A retried receipt returns its committed result without incrementing stock twice');
   });
   await t.test('arrival cards count pending quantities across batches, respecting search and tenant',async()=>{
    const result=await createProcurementArrivals().list({status:'open',summary_only:'1',product_id:200},session());assert.equal(result.summary.open,1);assert.equal(result.summary.open_quantity,6);assert.equal(result.summary.arrived_quantity,0);

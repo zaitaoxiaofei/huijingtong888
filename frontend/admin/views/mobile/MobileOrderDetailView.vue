@@ -6,6 +6,7 @@ import { apiClient, currentApiCacheScope } from "../../utils/api";
 import MobileDialog from '../../components/mobile/MobileDialog.vue';
 import MobilePagination from '../../components/mobile/MobilePagination.vue';
 import MobileStocktakeDialog from '../../components/mobile/MobileStocktakeDialog.vue';
+import MobileOrderProfitDetails from '../../components/mobile/MobileOrderProfitDetails.vue';
 import ProductImagePreview from '../../components/ProductImagePreview.vue';
 import MobileInventorySearch from '../../components/mobile/MobileInventorySearch.vue';
 import {inventorySearchDefaults,appendInventorySearch} from '../../../../src/shared/inventory-search-fields.js';
@@ -43,7 +44,6 @@ const bindingForm = reactive({
 const orderId = computed(() => Number(route.params.id || 0));
 const order = computed(() => detail.value?.order || {});
 const items = computed(() => Array.isArray(detail.value?.items) ? detail.value.items : []);
-const finance = computed(() => detail.value?.finance || {});
 const unboundItems = computed(() => items.value.filter((item) => !item.product_name && !item.product_code));
 const purchasableProducts = computed(() => Array.isArray(procurement.value?.products) ? procurement.value.products : []);
 
@@ -295,29 +295,7 @@ onBeforeUnmount(()=>{disposed=true;resetBindingScope();window.removeEventListene
       </el-button>
     </section>
 
-    <section class="mobile-section">
-      <div class="mobile-section__head">
-        <h2>利润摘要</h2>
-      </div>
-      <div class="mobile-profit-grid">
-        <div>
-          <span>预估利润</span>
-          <strong>{{ money(order.estimated_profit) }}</strong>
-        </div>
-        <div>
-          <span>实际利润</span>
-          <strong>{{ money(order.actual_profit) }}</strong>
-        </div>
-        <div>
-          <span>采购成本</span>
-          <strong>{{ money(order.profit_purchase_cost) }}</strong>
-        </div>
-        <div>
-          <span>服务费</span>
-          <strong>{{ money(order.profit_ozon_service_fee) }}</strong>
-        </div>
-      </div>
-    </section>
+    <MobileOrderProfitDetails v-if="detail" :key="order.id || orderId" :detail="detail" />
 
     <MobileDialog v-model="bindingVisible" title="绑定库存" mode="sheet" class="mobile-bind-dialog" :show-close="!bindingSubmitting" :close-on-press-escape="!bindingSubmitting" destroy-on-close>
       <template #tools>
@@ -549,31 +527,6 @@ onBeforeUnmount(()=>{disposed=true;resetBindingScope();window.removeEventListene
   width: 100%;
   min-height: 42px;
   border-radius: 12px;
-}
-
-.mobile-profit-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.mobile-profit-grid div {
-  display: grid;
-  gap: 4px;
-  padding: 10px;
-  border-radius: 12px;
-  background: var(--erp-detail-surface-alt, #f8fafc);
-}
-
-.mobile-profit-grid span {
-  color: var(--erp-detail-text-regular, #64748b);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.mobile-profit-grid strong {
-  color: var(--erp-detail-text-main, #172033);
-  font-size: 16px;
 }
 
 .mobile-bind-tools{display:grid;gap:8px;min-width:0}.mobile-bind-target{min-width:0;max-width:100%;box-sizing:border-box}.mobile-bind-target{font-size:12px;line-height:1.4;background:var(--el-fill-color-light);border-radius:8px;padding:8px 10px}.mobile-bind-target summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;font-weight:600}.mobile-bind-target[open] summary{white-space:normal}.mobile-bind-source{display:flex;gap:10px;align-items:center;margin-top:8px}.mobile-bind-source>div{min-width:0}.mobile-bind-target small{display:block;margin-top:5px;overflow-wrap:anywhere}.mobile-bind-options{display:grid;gap:10px}.mobile-bind-option{display:grid;grid-template-columns:24px 64px minmax(0,1fr);gap:8px;padding:10px;border:1px solid var(--el-border-color-light);border-radius:12px;background:var(--el-bg-color)}.mobile-bind-option.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.mobile-bind-choice{display:flex;align-items:flex-start;padding-top:12px;min-width:24px;cursor:pointer}.mobile-bind-choice input{width:20px;height:20px;margin:0;accent-color:var(--el-color-primary)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}.mobile-bind-option__text{display:grid;gap:5px;min-width:0;justify-items:start}.mobile-bind-name{border:0;background:none;padding:0;color:var(--el-text-color-primary);font-size:14px;line-height:1.5;font-weight:600;text-align:left;overflow-wrap:anywhere}.mobile-bind-option__text small{font-size:12px;color:var(--el-text-color-secondary);overflow-wrap:anywhere}.mobile-bind-detail{min-height:32px;padding:3px 0;border:0;background:none;color:var(--el-color-primary);font-size:13px}.mobile-bind-empty{display:grid;gap:10px;text-align:center;padding:24px 8px;font-size:14px}.mobile-bind-empty span{font-size:13px;line-height:1.6;color:var(--el-text-color-secondary)}.mobile-bind-confirm{display:grid;gap:8px;width:100%;text-align:left}.mobile-bind-selection{display:flex;align-items:center;gap:8px;min-width:0}.mobile-bind-selection strong{flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mobile-bind-selection button{flex:none;font-size:12px;min-height:44px}.mobile-bind-footer{display:grid;grid-template-columns:1fr 2fr;gap:8px}
