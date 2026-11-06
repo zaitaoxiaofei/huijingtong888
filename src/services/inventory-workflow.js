@@ -1,4 +1,5 @@
 import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
+import {newArrivalReceiptRequest,readNewArrivalReceipt} from './procurement-receipt-idempotency.js';
 import { loadInventoryComposition } from './inventory-composition.js';
 import { procurementRequestDisplay } from '../shared/procurement-request-display.js';
 import { createInventoryDemandSnapshot, limitInventoryDemandQueries } from './inventory-demand-snapshot.js';
@@ -227,9 +228,24 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       requires_count:historical,ledger_warning:Number(reference.physical_before)<0,revision:reference.revision};
   }
   async function receive(body,session){
-    const {current,id,checked,impact,historical}=await prepareReceipt(body,session);
-    const reference=impact.impacts.find(r=>Number(r.product_id)===id);
-    if(body.expected_revision&&reference?.revision!==body.expected_revision)throw fail('库存或采购批次已变化，请返回上一步重新核对入库影响',409);
+    const request=newArrivalReceiptRequest(body);
+    async function replay(){
+      const current=await receiptSession(session),scope=await resolveInventoryTenantScope(current.tenant.id,query);
+      await assertInventoryRecord(scope,'product',request.productId,query);
+      return readNewArrivalReceipt(query,scope.id,current.personId,request);
+    }
+    if(request){const prior=await replay();if(prior)return prior;}
+    let prepared;
+    try{
+      prepared=await prepareReceipt(body,session);
+      const reference=prepared.impact.impacts.find(r=>Number(r.product_id)===prepared.id);
+      if(body.expected_revision&&reference?.revision!==body.expected_revision)throw fail('库存或采购批次已变化，请返回上一步重新核对入库影响',409);
+    }catch(error){
+      // A concurrent identical request may have committed after the initial read.
+      if(request){const prior=await replay();if(prior)return prior;}
+      throw error;
+    }
+    const {current,id,checked,impact,historical}=prepared;
     let payload;
     if(historical){
       const count=Number(body.counted_quantity);
@@ -237,7 +253,7 @@ export function createInventoryWorkflowService({ledger,receiveRecords,previewRec
       const reference=impact.impacts.find(r=>Number(r.product_id)===id);
       payload={request_key:String(body.request_key||''),historical_receipt_groups:[{product_id:id,revision:reference?.revision,counted_quantity:count,receipts:checked}]};
     }else payload={receipt_impact_confirmed:true,records:checked.map(r=>({id:r.id,payload:{...r,status:'approved',qc_status:'approved',receipt_context:'统一库存详情登记入库'}}))};
-    return receiveRecords(payload,current.personId,current.tenant.id,{receipt:true,beforeWrite:async connection=>{await receiptSession(session,connection);const inspect=connection?async(sql,args)=>(await connection.query(sql,args))[0]:query;for(const row of checked)await assertEvidenceOwnership(row.receipt_images_json,current.tenant.id,inspect);}});
+    return receiveRecords(payload,current.personId,current.tenant.id,{receipt:true,...(request?{receiptRequest:request}:{}),beforeWrite:async connection=>{await receiptSession(session,connection);const inspect=connection?async(sql,args)=>(await connection.query(sql,args))[0]:query;for(const row of checked)await assertEvidenceOwnership(row.receipt_images_json,current.tenant.id,inspect);}});
   }
   async function skuDetails(productId,shopId,ozonSku,tenantId){
     const scope=await resolveInventoryTenantScope(tenantId,query),id=Number(productId),shop=Number(shopId),sku=String(ozonSku||'');
