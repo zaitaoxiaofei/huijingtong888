@@ -25,7 +25,7 @@ test('procurement uses the displayed non-FBP ledger, including legacy warehouse 
   const query = async (sql,args=[]) => {
     if(sql.includes('FROM tenants'))return [{id:1,slug:'default'}];
     if(sql.startsWith('SELECT id FROM products'))return db.prepare(sql).all(...args);
-    if (sql.includes('SELECT o.id AS order_id')) return demands.map(row => ({ ...row }));
+    if (/SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql)) return demands.map(row => ({ ...row }));
     if (sql.includes('FROM inventory_movements')) return db.prepare(sql).all(...args);
     return [];
   };

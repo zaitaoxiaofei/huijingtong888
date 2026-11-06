@@ -1441,6 +1441,19 @@ const endpoints = [
       query: [...queryFieldsFromSchema("ProfitFiltersQuery"), param("inventory", scalar("string", "Set to 1 for the inventory sales leaderboard (product/sku dimensions)."), false), param("productId", scalar("integer", "Filter inventory leaderboard details by inventory product ID."), false)],
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
     }),
+    endpoint("GET", "/api/monthly-billing-details", "Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.", {
+      auth: "authenticated; current-enterprise finance authority",
+      query: [
+        ...["year", "fromMonth", "toMonth", "month"].map(name => param(name, scalar("integer", "Calendar year/month selection; the current month ends on Beijing today."), false)),
+        ...["from", "to"].map(name => param(name, scalar("string", "Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days."), false)),
+        param("shopId", scalar("string", "Current-enterprise shop ID or all."), false),
+        param("companyId", scalar("string", "Current-enterprise company ID or all; an unowned company returns 404."), false),
+        param("overviewOnly", scalar("string", "1 selects grouped monthly summaries."), false),
+        param("includeAppendices", scalar("string", "0 omits procurement/current-inventory and AI appendix work; otherwise include the existing appendices. No financial summary fields are removed."), false),
+        param("includeOrders", scalar("string", "1 includes order rows for the selected calendar month; independent of appendix selection."), false)
+      ],
+      responses: [response(200, "application/json", objectOf("Existing months and selected statement; omitted appendices are empty objects, never synthetic zero amounts.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("GET", "/api/profit-reconciliation", "Compare estimated and finance-accrued profit and identify inventory-data risks.", {
       auth: "authenticated",
       query: queryFieldsFromSchema("ProfitFiltersQuery"),

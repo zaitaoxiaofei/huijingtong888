@@ -153,6 +153,7 @@ test('actual receipt transaction keeps a pending remainder and cannot receive th
     return [{ affectedRows: 1, insertId: 6 }];
   } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
+    assertWholeBundleReview: async () => {},
     resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: value => value,
@@ -177,6 +178,7 @@ test('over receipt posts the entered quantity, requires a reason, and records ar
   const statements = [], movements = [];
   const connection = { execute: async (sql, values) => { statements.push({ sql, values }); return [{ affectedRows: 1 }]; } };
   const apply = vm.runInNewContext(block + ';applyInboundRecordUpdateMysql', {
+    assertWholeBundleReview: async () => {},
     resolveInventoryTenantScope: async () => ({id:2}), assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {},
     planPartialReceipt, mysqlConnectionQueryOne: async () => ({ ...row }), assertFreshRecord: () => {},
     resolvePersonIdOrFirstMysql: async () => 1, normalizeMysqlDateTime: () => '2026-10-10 17:00:00',
@@ -225,7 +227,7 @@ test('refresh reloads active orders and removes cancelled demand while retaining
   const statements = [];
   const query = async sql => {
     statements.push(sql);
-    if (sql.includes('SELECT o.id AS order_id')) return refreshed
+    if (/SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql)) return refreshed
       ? [item(1, { needs_fulfillment: 0, entered_transport: 0 }), item(2, { needs_fulfillment: 0, entered_transport: 1 })]
       : [item(), item(2, { needs_fulfillment: 0, entered_transport: 1 })];
     if (sql.includes('FROM tenants')) return [{id:2,slug:'a'}];
@@ -239,7 +241,7 @@ test('refresh reloads active orders and removes cancelled demand while retaining
   const next = await loadOrderProcurementCoverage(query, '');
   assert.equal(next.get(1).shortage_quantity, 0);
   assert.equal(next.get(2).missing_record_quantity, 1);
-  assert.equal(statements.filter(sql => sql.includes('SELECT o.id AS order_id')).length,2, 'tenant snapshots reload all scoped history rather than reusing global demand');
+  assert.equal(statements.filter(sql => /SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql)).length,2, 'tenant snapshots reload all scoped history rather than reusing global demand');
 });
 
 test('FBP sales ignore linked procurement cost/quantity issues and never consume local stock', async () => {

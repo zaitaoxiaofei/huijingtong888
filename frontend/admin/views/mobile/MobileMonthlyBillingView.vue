@@ -24,15 +24,15 @@ function clearScope(){++generation;controller?.abort();bill.value=null;companies
 async function load(){
   const scope=currentApiCacheScope(),token=++generation;controller?.abort();controller=new AbortController();bill.value=null;error.value='';metaError.value='';
   if(!allowed.value){loading.value=false;return;}loading.value=true;
-  const params=new URLSearchParams({year:month.value.slice(0,4),month:month.value.slice(5,7),from:range.value[0],to:range.value[1],companyId:companyId.value,shopId:shopId.value});
-  try{const [details,meta]=await Promise.allSettled([apiClient.get(`/api/monthly-billing-details?${params}`,{noCache:true,signal:controller.signal}),apiClient.get('/api/finance-center/companies',{signal:controller.signal})]);
-    if(disposed||token!==generation||scope!==currentApiCacheScope()||!allowed.value)return;
-    if(details.status==='rejected')throw details.reason;
-    const response=details.value,selected=response.selected||response.months?.find(row=>row.month_key===month.value);
+  const params=new URLSearchParams({year:month.value.slice(0,4),month:month.value.slice(5,7),from:range.value[0],to:range.value[1],companyId:companyId.value,shopId:shopId.value,includeAppendices:'0'});
+  const isCurrent=()=>!disposed&&token===generation&&scope===currentApiCacheScope()&&allowed.value;
+  try{const details=apiClient.get(`/api/monthly-billing-details?${params}`,{noCache:true,signal:controller.signal});
+    apiClient.get('/api/finance-center/companies',{signal:controller.signal}).then(meta=>{if(isCurrent())companies.value=Array.isArray(meta.companies)?meta.companies:[];}).catch(e=>{if(e.name!=='AbortError'&&isCurrent())metaError.value='公司筛选读取失败，已保留当前筛选';});
+    const response=await details;if(!isCurrent())return;
+    const selected=response.selected||response.months?.find(row=>row.month_key===month.value);
     if(!selected?.summary)throw Error('所选月份账单未返回，请刷新重试');
     bill.value=selected;shops.value=Array.isArray(response.shops)?response.shops:[];
-    if(meta.status==='fulfilled')companies.value=Array.isArray(meta.value.companies)?meta.value.companies:[];else metaError.value='公司筛选读取失败，已保留当前筛选';
-  }catch(e){if(e.name!=='AbortError'&&token===generation&&scope===currentApiCacheScope())error.value=e.message||'月度账单读取失败';}
+  }catch(e){if(e.name!=='AbortError'&&isCurrent())error.value=e.message||'月度账单读取失败';}
   finally{if(token===generation)loading.value=false;}
 }
 watch(()=>[route.query.month,route.query.companyId,route.query.shopId,route.query.overviewYear,auth.user?.personId,auth.user?.tenant?.id,allowed.value],()=>{if(navigatingKey&&filterKey(route.query)!==navigatingKey)return;routeFilters();load();},{immediate:true});

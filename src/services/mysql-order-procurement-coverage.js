@@ -58,21 +58,57 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
   // Small product-scoped saves need only their own history. Full queue loads
   // aggregate once; a correlated lookup here avoids aggregating unrelated orders.
   const smallProductScope = localStateOnly || (requestedIds.length > 0 && scopedIds.length <= 32);
-  const transportAt = smallProductScope
+  const localBatchScope = localStateOnly && scopedIds.length > 32;
+  const transportAt = localBatchScope ? 'transport.transport_at' : smallProductScope
     ? `(SELECT MIN(h.last_status_changed_at) FROM order_status_history h WHERE h.order_id = o.id
         AND h.status IN ${transportStatusesSql} AND h.last_status_changed_at IS NOT NULL)`
     : 'NULL';
-  const hasTransportHistory = smallProductScope
+  const hasTransportHistory = localBatchScope ? 'transport.order_id IS NOT NULL' : smallProductScope
     ? `EXISTS (SELECT 1 FROM order_status_history h WHERE h.order_id = o.id AND h.status IN ${transportStatusesSql})`
     : '0';
-  const physicalDispatch = smallProductScope ? oglPhysicalDispatchSql('o') : '0';
+  const physicalDispatch = localBatchScope ? 'physical_dispatch.order_id IS NOT NULL' : smallProductScope ? oglPhysicalDispatchSql('o') : '0';
   if (!fresh && cached && cached.expires > Date.now()) return cached.value;
   if (!fresh && pending) return pending;
   // Used only for local physical/safety display, never a purchase decision.
   const allocationQuery=localStateOnly?async()=>[]:query;
   const end=Date.parse(`${shanghaiDateKey()}T00:00:00+08:00`),start=end-7*86400000;
   const utc=value=>new Date(value).toISOString().slice(0,19).replace('T',' ');
-  const demandQuery=localStateOnly?sql=>query(`SELECT local_demands.* FROM (${sql}) local_demands WHERE local_demands.needs_fulfillment=1 OR (local_demands.entered_transport=1 AND local_demands.transport_at>=? AND local_demands.transport_at<?)`,[utc(start),utc(end)]):query;
+  const needsFulfillmentSql = `CASE WHEN (o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
+    OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))
+    AND LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) NOT REGEXP 'cancel|return|reject|delivered|dispute|arbitration'
+    AND NOT (${physicalDispatch}) THEN 1 ELSE 0 END`;
+  const enteredTransportSql = `CASE WHEN COALESCE(o.cancelled_after_ship, 0) > 0 OR o.delivered_at IS NOT NULL
+    OR (${physicalDispatch})
+    OR LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way)( |$)'
+    OR (LOWER(CONCAT_WS(' ', o.status, o.tracking_stage)) REGEXP 'cancel|return|reject'
+      AND ${hasTransportHistory}) THEN 1 ELSE 0 END`;
+  // Materialize only the relevant order states before expanding SKU recipes.
+  // This keeps the same open/last-seven-days rule without repeating correlated
+  // transport and physical-dispatch lookups for every historical component.
+  const localOrderFactsSql = localBatchScope ? `WITH local_order_facts AS (
+    SELECT o.id, COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS local_transport_at,
+      ${needsFulfillmentSql} AS local_needs_fulfillment, ${enteredTransportSql} AS local_entered_transport
+    FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}
+    LEFT JOIN (
+      SELECT STRAIGHT_JOIN h.order_id, MIN(h.last_status_changed_at) AS transport_at
+      FROM order_status_history h FORCE INDEX (idx_order_history_transport)
+      JOIN orders transport_order ON transport_order.id=h.order_id
+      JOIN shops transport_shop ON transport_shop.id=transport_order.shop_id${tenantScope('transport_shop.tenant_id')}
+      WHERE h.status IN ${transportStatusesSql} GROUP BY h.order_id
+    ) transport ON transport.order_id=o.id
+    LEFT JOIN (
+      SELECT m.order_id FROM ogl_dispatch_members m
+      JOIN ogl_dispatch_batches b ON b.id=m.batch_id AND b.tenant_id=m.tenant_id
+      JOIN orders physical_order ON physical_order.id=m.order_id AND physical_order.id=m.active_order_id AND physical_order.shop_id=m.shop_id
+      JOIN shops physical_shop ON physical_shop.id=physical_order.shop_id${tenantScope('physical_shop.tenant_id')}
+      JOIN tenants physical_tenant ON physical_tenant.id=m.tenant_id
+      WHERE m.dispatched_at IS NOT NULL AND m.withdrawn_at IS NULL
+        AND (physical_shop.tenant_id=m.tenant_id OR (physical_shop.tenant_id IS NULL AND physical_tenant.slug='default'))
+      GROUP BY m.order_id
+    ) physical_dispatch ON physical_dispatch.order_id=o.id
+    HAVING local_needs_fulfillment=1 OR (local_entered_transport=1 AND local_transport_at>=? AND local_transport_at<?)
+  ) ` : '';
+  const demandQuery=localBatchScope?sql=>query(localOrderFactsSql+sql,[utc(start),utc(end)]):localStateOnly?sql=>query(`SELECT local_demands.* FROM (${sql}) local_demands WHERE local_demands.needs_fulfillment=1 OR (local_demands.entered_transport=1 AND local_demands.transport_at>=? AND local_demands.transport_at<?)`,[utc(start),utc(end)]):query;
 
   const version = generation;
   const work = (async () => {
@@ -80,22 +116,14 @@ export async function loadOrderProcurementCoverage(query, openSql, { fresh = fal
       loadDemands(demandQuery, `SELECT STRAIGHT_JOIN o.id AS order_id, oi.id AS order_item_id, o.ordered_at, o.posting_number,
         o.status AS source_order_status, o.tracking_stage AS source_order_tracking_stage,
         o.logistics_status AS source_order_logistics_status,
-        COALESCE(${transportAt}, o.delivered_at, o.ordered_at) AS transport_at,
+        ${localBatchScope ? 'local_facts.local_transport_at' : `COALESCE(${transportAt}, o.delivered_at, o.ordered_at)`} AS transport_at,
         COALESCE(ri.product_id, pc.component_product_id, p.id, 0) AS product_id,
         cp.name AS product_name, cp.stock_unit,p.id AS root_product_id,p.name AS root_product_name,p.inventory_number AS root_inventory_number,oi.quantity AS root_quantity,
         oi.quantity * COALESCE(ri.quantity, pc.quantity, 1) AS quantity,
-        CASE WHEN (o.status IN ('awaiting_packaging','awaiting_approve','acceptance_in_progress','posting_created','posting_acceptance_in_progress','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered','sent_by_seller','posting_ready_for_pickup','posting_transferred_to_courier_service','posting_transferring','posting_in_carriage','posting_transferring_to_delivery')
-          OR o.tracking_stage IN ('awaiting_packaging','awaiting_deliver','awaiting_registration','posting_awaiting_registration','posting_registration_error','posting_registered'))
-          AND LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) NOT REGEXP 'cancel|return|reject|delivered|dispute|arbitration'
-          AND NOT (${physicalDispatch})
-          THEN 1 ELSE 0 END AS needs_fulfillment,
-        CASE WHEN COALESCE(o.cancelled_after_ship, 0) > 0 OR o.delivered_at IS NOT NULL
-          OR (${physicalDispatch})
-          OR LOWER(CONCAT_WS(' ', o.status, o.tracking_stage, o.logistics_status)) REGEXP '(^| )(delivering|delivered|posting_delivered|posting_in_transit|posting_in_customs|posting_sorting|posting_on_way)( |$)'
-          OR (LOWER(CONCAT_WS(' ', o.status, o.tracking_stage)) REGEXP 'cancel|return|reject'
-            AND ${hasTransportHistory}) THEN 1 ELSE 0 END AS entered_transport,
+        ${localBatchScope ? 'local_facts.local_needs_fulfillment' : needsFulfillmentSql} AS needs_fulfillment,
+        ${localBatchScope ? 'local_facts.local_entered_transport' : enteredTransportSql} AS entered_transport,
         COALESCE(raw.query_procurement_location,'LOCAL') AS stock_location
-        ${tenantPk === null ? 'FROM orders o' : `FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}`}
+        ${localBatchScope ? 'FROM local_order_facts local_facts JOIN orders o ON o.id=local_facts.id' : tenantPk === null ? 'FROM orders o' : `FROM shops tenant_shop JOIN orders o ON o.shop_id=tenant_shop.id${tenantScope('tenant_shop.tenant_id')}`}
         JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
         LEFT JOIN sku_mappings direct_mapping ON direct_mapping.id = oi.sku_mapping_id AND direct_mapping.shop_id = o.shop_id AND direct_mapping.active = 1${tenantScope('direct_mapping.tenant_id')}
         LEFT JOIN sku_mappings sm ON sm.id = COALESCE(direct_mapping.id, (
