@@ -23,8 +23,8 @@ test('purchase queue switches real date pages, searches across days and confirms
  const today=shanghaiDateKey(),previous=shanghaiDateKey(new Date(new Date(`${today}T00:00:00+08:00`).getTime()-86400000)),emptyDay=shanghaiDateKey(new Date(new Date(`${today}T00:00:00+08:00`).getTime()-2*86400000));
  const requests=[],writes=[],errors=[];
  const make=(id,day,extra={})=>({id,product_id:200,product_name:`日期物料 ${id}`,inventory_number:'1-3-200',quantity:3,status:'pending_arrival',received_at:null,updated_at:`${day} 01:00:00`,purchased_at:`${day} 01:00:00`,order_no:`PO-${id}`,buyer_name:'演示采购',day,...extra});
- const records=[...Array.from({length:51},(_,i)=>make(i+1,today)),...Array.from({length:21},(_,i)=>make(i+101,previous)),make(901,'2026-01-02',{product_id:901,product_name:'旧日精确物料',inventory_number:'1-3-901',quantity:600}),make(902,'2026-01-02',{review_required:true,is_bundle:true,product_name:'历史待核套装'}),make(903,today,{received_at:`${today} 02:00:00`})];
- const project=row=>({...row,components:[{product_id:row.product_id,name:row.product_name,inventory_number:row.inventory_number,quantity:row.quantity,per_set_quantity:1,stock_unit:'件'}],affected_bundles:[]});
+ const records=[...Array.from({length:51},(_,i)=>make(i+1,today)),...Array.from({length:21},(_,i)=>make(i+101,previous)),make(901,'2026-01-02',{product_id:901,product_name:'旧日精确物料',inventory_number:'1-3-901',quantity:600,order_no:'HISTORY315',source_bundle_batch:{id:1685,product_id:900,purchase_order_id:6,order_no:'006'}}),make(902,'2026-01-02',{review_required:true,is_bundle:true,quantity:20,product_name:'历史待核套装'}),make(903,today,{received_at:`${today} 02:00:00`})];
+ const project=row=>({...row,components:[{product_id:row.product_id,name:row.product_name,inventory_number:row.inventory_number,quantity:row.review_required?row.quantity*2:row.quantity,per_set_quantity:row.review_required?2:1,stock_unit:row.review_required?'个':'件'}],affected_bundles:[]});
  try{
   await build({configFile:false,root:process.cwd(),logLevel:'error',plugins:[vue(),{name:'purchase-days-fixture',resolveId(id){if(id==='virtual:purchase-days')return '\0purchase-days';},load(id){if(id==='\0purchase-days')return `import {createApp,h,ref} from 'vue';import {createPinia} from 'pinia';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import Queue from '/frontend/admin/components/procurement/InventoryPurchaseBatchQueue.vue';import {useAuthStore} from '/frontend/admin/stores/auth.js';import {setAuthToken} from '/frontend/admin/utils/api.js';const pinia=createPinia(),app=createApp({setup(){const status=ref('open'),filters=ref({});return()=>h('div',[h('label',['精确库存编号',h('input',{'aria-label':'精确库存编号',onInput:e=>filters.value={searchMode:'inventory_id',query:e.target.value}})]),h('button',{onClick:()=>status.value='open'},'采购待到货'),h('button',{onClick:()=>status.value='arrived'},'到货待验收'),h(Queue,{status:status.value,filters:filters.value})]);}});app.use(pinia);const auth=useAuthStore();auth.user=${JSON.stringify(demoUser)};localStorage.setItem('baodanAuthUser',JSON.stringify(auth.user));setAuthToken('purchase-days-fixture');app.use(ElementPlus).mount('#app');`;}}],build:{outDir:output,cssCodeSplit:false,rollupOptions:{input:'virtual:purchase-days',output:{entryFileNames:'entry.js'}}}});
   browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?'C:/Program Files/Google/Chrome/Application/chrome.exe':'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),headless:true});
@@ -50,17 +50,23 @@ test('purchase queue switches real date pages, searches across days and confirms
    return route.fulfill({contentType:file.endsWith('.css')?'text/css':'text/javascript',body:await fs.readFile(path.join(output,file))});
   });
   await page.goto('http://localhost:8788/admin.html');
-  await page.getByRole('button',{name:`采购日期 ${today}，51 个批次`,exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:`采购日期 ${today}，51 个批次`,exact:true}).getAttribute('aria-pressed'),'true');
+  const dayTab=date=>page.getByRole('button',{name:new RegExp(`^采购日期 ${date}，`)}),allTab=page.getByRole('button',{name:/^全部待处理/});
+  await dayTab(today).waitFor();
+  assert.equal(await dayTab(today).getAttribute('aria-pressed'),'true');
+  assert.equal(await dayTab(today).locator('.batch-day-count.is-recent').innerText(),'51');assert.equal(await dayTab(previous).locator('.batch-day-count.is-recent').innerText(),'21');
+  assert.equal(await dayTab('2026-01-02').locator('.batch-day-count.is-overdue').innerText(),'2');assert.equal(await dayTab(emptyDay).locator('.batch-day-count.is-empty').innerText(),'0');
+  assert.match(await allTab.getAttribute('aria-label'),/74 个批次，其中前天及更早逾期 2 个批次/);assert.equal(await allTab.locator('.batch-day-count.is-overdue').count(),1);
+  const badgeShape=await dayTab('2026-01-02').locator('.batch-day-count').evaluate(node=>({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height,color:getComputedStyle(node).color}));assert.equal(badgeShape.width,badgeShape.height);assert.equal(badgeShape.color,'rgb(255, 255, 255)');
+  const largeShape=await dayTab(today).locator('.batch-day-count').evaluate(node=>({width:node.getBoundingClientRect().width,height:node.getBoundingClientRect().height}));assert.ok(largeShape.width>largeShape.height);
   await page.getByText(`${today} · 共 51 个批次 · 本页 50 个批次`,{exact:true}).waitFor();
   assert.equal(requests[0].purchase_day,undefined);
   await page.locator('.el-pagination .el-select').click();await page.getByRole('option').filter({hasText:/^20\s*\//}).click();
   await page.getByText(`${today} · 共 51 个批次 · 本页 20 个批次`,{exact:true}).waitFor();await page.locator('.el-pagination .btn-next').click();
   await page.waitForFunction(()=>document.querySelector('.el-pagination .number.is-active')?.textContent==='2');assert.equal(requests.at(-1).purchase_day,today);assert.equal(requests.at(-1).pageSize,'20');
   await page.locator('.inventory-batch-queue .el-table__body-wrapper .el-checkbox').first().click();await page.getByRole('button',{name:'批量确认到货（1）',exact:true}).waitFor();
-  await page.getByRole('button',{name:`采购日期 ${previous}，21 个批次`,exact:true}).click();await page.getByText(`${previous} · 共 21 个批次 · 本页 20 个批次`,{exact:true}).waitFor();
+  await dayTab(previous).click();await page.getByText(`${previous} · 共 21 个批次 · 本页 20 个批次`,{exact:true}).waitFor();assert.equal(await allTab.locator('.batch-day-count.is-overdue').innerText(),'74','selected day and pagination do not hide older pending batches from the summary');
   assert.equal(requests.at(-1).page,'1');assert.equal(await page.getByRole('button',{name:'批量确认到货',exact:true}).isDisabled(),true);
-  await page.getByRole('button',{name:`采购日期 ${emptyDay}，0 个批次`,exact:true}).click();await page.getByText(`${emptyDay} · 共 0 个批次 · 本页 0 个批次`,{exact:true}).waitFor();
+  await dayTab(emptyDay).click();await page.getByText(`${emptyDay} · 共 0 个批次 · 本页 0 个批次`,{exact:true}).waitFor();assert.equal(await dayTab(emptyDay).locator('.batch-day-count.is-empty').count(),1,'a selected old zero day is still neutral');
   await page.getByRole('button',{name:/^全部待处理/}).click();await page.getByText('全部待处理 · 共 74 个批次 · 本页 20 个批次',{exact:true}).waitFor();assert.equal(requests.at(-1).purchase_day,'all');
   // A search resets the chosen day and page so an old matching purchase is immediately visible.
   await page.getByRole('textbox',{name:'精确库存编号',exact:true}).fill('1-3-901');await page.getByText('2026-01-02 · 共 1 个批次 · 本页 1 个批次',{exact:true}).waitFor();assert.equal(requests.at(-1).purchase_day,undefined);assert.equal(requests.at(-1).page,'1');
@@ -71,15 +77,18 @@ test('purchase queue switches real date pages, searches across days and confirms
   await page.getByRole('textbox',{name:'精确库存编号',exact:true}).fill('');await page.getByText(`${today} · 共 51 个批次 · 本页 20 个批次`,{exact:true}).waitFor();
   await page.locator('.inventory-batch-queue .el-table__body-wrapper .el-checkbox').nth(0).click();await page.locator('.inventory-batch-queue .el-table__body-wrapper .el-checkbox').nth(1).click();await page.getByRole('button',{name:'批量确认到货（2）',exact:true}).click();
   await dialog.waitFor();await dialog.getByRole('button',{name:'确认批量到货',exact:true}).click();await dialog.getByText(/已完成 2 \/ 2 项/).waitFor();await dialog.getByRole('button',{name:'关闭',exact:true}).click();assert.equal(writes.length,3);
-  await page.getByRole('button',{name:'采购日期 2026-01-02，2 个批次',exact:true}).click();await page.getByRole('button',{name:'核对套装采购内容',exact:true}).waitFor();
+  await dayTab('2026-01-02').click();await page.getByRole('button',{name:'核对套装采购内容',exact:true}).waitFor();
   const legacy=page.locator('.el-table__body-wrapper tbody tr').filter({hasText:'历史待核套装'});assert.equal(await legacy.getByRole('checkbox').isDisabled(),true);assert.equal(await legacy.getByRole('button',{name:'确认到货',exact:true}).count(),0);
+  await legacy.getByText('原登记 20 套',{exact:true}).waitFor();await legacy.getByText('折算 40 个 · 待核',{exact:true}).waitFor();assert.equal(await legacy.getByText('40 个',{exact:true}).count(),0);
+  const reviewed=page.locator('.el-table__body-wrapper tbody tr').filter({hasText:'旧日精确物料'});await reviewed.getByText('原采购单号 006',{exact:true}).waitFor();await reviewed.getByText('核对生成 HISTORY315',{exact:true}).waitFor();await reviewed.getByText('原批次 #1685 → 当前 #901',{exact:true}).waitFor();
   await fs.mkdir('.verification',{recursive:true});await page.screenshot({path:'.verification/purchase-queue-days-desktop.png',fullPage:true,animations:'disabled'});
   await page.setViewportSize({width:1366,height:900});await page.screenshot({path:'.verification/purchase-queue-days-laptop.png',fullPage:true,animations:'disabled'});
-  await page.getByRole('button',{name:'到货待验收',exact:true}).click();await page.getByText(`${today} · 共 1 个批次 · 本页 1 个批次`,{exact:true}).waitFor();assert.equal(requests.at(-1).purchase_day,undefined);assert.equal(requests.at(-1).status,'arrived');
+  await page.getByRole('button',{name:'到货待验收',exact:true}).click();await page.getByText(`${today} · 共 1 个批次 · 本页 1 个批次`,{exact:true}).waitFor();assert.equal(requests.at(-1).purchase_day,undefined);assert.equal(requests.at(-1).status,'arrived');assert.equal(await allTab.locator('.batch-day-count.is-recent').innerText(),'1');assert.equal(await dayTab('2026-01-02').locator('.batch-day-count.is-empty').innerText(),'0','another queue having old batches does not make this queue overdue');
   await page.getByRole('button',{name:'采购待到货',exact:true}).click();await page.getByText(`${today} · 共 51 个批次 · 本页 20 个批次`,{exact:true}).waitFor();
   await page.getByPlaceholder('采购开始日期').fill('2026-01-01');await page.getByPlaceholder('采购结束日期').fill('2026-01-31');await page.getByPlaceholder('采购结束日期').press('Tab');
   await page.getByText('2026-01-02 · 共 2 个批次 · 本页 2 个批次',{exact:true}).waitFor();assert.equal(requests.at(-1).start_date,'2026-01-01');assert.equal(requests.at(-1).end_date,'2026-01-31');assert.equal(requests.at(-1).purchase_day,undefined);
-  assert.equal(await page.getByRole('button',{name:`采购日期 ${today}，0 个批次`,exact:true}).count(),0);
+  assert.equal(await dayTab(today).count(),0);
+  await page.getByRole('textbox',{name:'精确库存编号',exact:true}).fill('does-not-exist');await page.getByText('没有待处理日期 · 共 0 个批次 · 本页 0 个批次',{exact:true}).waitFor();assert.equal(await allTab.locator('.batch-day-count.is-empty').innerText(),'0');assert.match(await allTab.getAttribute('aria-label'),/0 个批次.*无需提醒/);
   assert.deepEqual(errors,[]);
  }finally{await browser?.close();await fs.rm(output,{recursive:true,force:true});}
 });
