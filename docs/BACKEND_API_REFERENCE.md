@@ -3530,7 +3530,7 @@ Procurement manually reconciles one pending/arrived bundle purchase into minimum
 
 #### `GET /api/inventory-workflow/purchase-arrivals`
 
-Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage; unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
+Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage. source_bundle_batch may include the original purchase_order_id and order_no after database ownership and lineage validation; the row's actual purchase/action IDs stay unchanged. Unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
 
 - Auth: `authenticated`
 - Query parameters:
