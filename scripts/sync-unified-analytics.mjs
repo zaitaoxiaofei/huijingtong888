@@ -43,7 +43,8 @@ background = replaceSection(background, 'async function getOzonCookieInfo(', 'fu
     header: cookies.filter(item => item?.name).map(item => \`\${item.name}=\${item.value || ''}\`).join('; '),
     companyId: conflict ? '' : String(context.companyId || '').trim(),
     storeId: context.storeId || '',
-    code: context.code || ''
+    code: context.code || '',
+    diagnosticCode: context.diagnosticCode || ''
   };
 }
 
