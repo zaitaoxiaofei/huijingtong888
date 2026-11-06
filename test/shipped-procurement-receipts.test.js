@@ -27,7 +27,11 @@ test('uncertain quantities and component quantities do not inherit full batch qu
  const unknown=coverage({requests:[{id:3,product_id:10,quantity:0,status:'purchased'}]});assert.equal(planShippedProcurementReceipts(unknown,[1]).records.length,0);
 });
 test('fresh receipt validation bypasses cached order status',async()=>{
- let shipped=false;const query=async sql=>sql.includes('SELECT o.id AS order_id')?[{...demand(1),entered_transport:shipped?1:0,needs_fulfillment:shipped?0:1}]:[];
+ let shipped=false;const query=async sql=>{
+  if(sql.includes('FROM tenants'))return [{id:2,slug:'customer'}];
+  if(sql.startsWith('SELECT id FROM products'))return [{id:10}];
+  return /SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql)?[{...demand(1),entered_transport:shipped?1:0,needs_fulfillment:shipped?0:1}]:[];
+ };
  await loadOrderProcurementCoverage(query,'',{fresh:true});shipped=true;const c=await loadOrderProcurementCoverage(query,'',{fresh:true});assert.equal(c.get(1).entered_transport,true);
 });
 
@@ -39,10 +43,11 @@ test('confirmation validates before writing and rolls back the whole batch on re
  const c=coverage();c.get(2).batches=c.get(2).batches.map(b=>({...b,id:6}));c.get(2).items[0].receipt_claims=[{batch_id:6,quantity:1}];
  const plan=planShippedProcurementReceipts(c,[1,2]);let writes=[];let fail=true;let invalidated=false;
  const fn=vm.runInNewContext(`${block};confirmShippedProcurementReceiptsMysql`,{
+  resolveInventoryTenantScope:async()=>({id:2}),assertInventoryMember:async()=>{},assertInventoryRecord:async()=>{},
   ensureProcurementLedgerSchema:async()=>{}, mysqlExecute:async()=>{}, ensureMysqlCutoverEnabled(){},ensureInboundRecordTimestampSchemaMysql:async()=>{},ensurePurchaseCostVersionSchemaMysql:async()=>{},
   selectedReceiptOrderIds,planShippedProcurementReceipts,validateShippedReceiptSubmission,
   withMysqlTransaction:async work=>{const before=[...writes];try{return await work({query:async()=>[[]]});}catch(e){writes=before;throw e;}},
-  loadOrderProcurementCoverage:async(q,s,options)=>{assert.equal(options.fresh,true);return c;},
+  inventoryScopeCoverageMysql:async(scope,ids,query)=>{assert.equal(scope.id,2);assert.equal(ids,null);assert.equal(typeof query,'function');return c;},
   applyInboundRecordUpdateMysql:async(connection,id,body)=>{assert.match(body.receipt_context,/人工确认补登/);writes.push(id);if(id===6&&fail)throw new Error('receipt conflict');},
   refreshPurchaseOrderStatusMysql:async()=>{},invalidateOrderProcurementCoverage(){invalidated=true;}
  });

@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { performance } from "node:perf_hooks";
+import { inventoryLocation } from '../src/shared/inventory-fulfillment.js';
+import { createHash } from 'node:crypto';
 
 const legacy = readFileSync(new URL("./fixtures/order-procurement-coverage-calculate-v1.js", import.meta.url), "utf8");
 const current = readFileSync(new URL("../src/services/order-procurement-coverage.js", import.meta.url), "utf8");
 function calculator(source) {
   let dates = 0;
   class CountedDate extends Date { constructor(...args) { super(...args); dates += 1; } }
-  const context = vm.createContext({ Date: CountedDate });
-  vm.runInContext(source.replace(/^export /gm, ""), context);
+  const context = vm.createContext({ Date: CountedDate, inventoryLocation });
+  vm.runInContext(source.replace(/^import[^\n]+\r?\n/gm, '').replace(/^export /gm, ""), context);
   return { run: input => { const started = performance.now(), result = context.calculateOrderProcurementCoverage(input); return { result, ms: performance.now() - started, dates }; } };
 }
 function canonical(value) {
@@ -19,6 +21,20 @@ function canonical(value) {
   if (Array.isArray(value)) return Array.from(value, canonical);
   if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
   return value;
+}
+function assertAllocationEqual(current, previous, input) {
+  // The frozen allocator predates the four additive root-product display fields.
+  // Verify those fields separately, then compare every legacy value and ordering.
+  const roots = new Map(input.demands.map(row => [Number(row.order_item_id), row]));
+  const allocation = Object.assign(structuredClone(current), structuredClone({ ...current }));
+  for (const order of allocation.values()) for (const item of order.items) {
+    const row = roots.get(item.order_item_id);
+    assert.deepEqual([item.root_product_id,item.root_product_name,item.root_inventory_number,item.root_quantity],
+      [Number(row.root_product_id || row.product_id),row.root_product_name || row.product_name || '',row.root_inventory_number || null,Number(row.root_quantity || row.quantity)]);
+    for (const key of ['root_product_id','root_product_name','root_inventory_number','root_quantity']) delete item[key];
+  }
+  const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+  assert.equal(hash(allocation), hash(previous), 'Complete legacy allocation values and FIFO/trace ordering must match');
 }
 function inputFor(count, skewed = false) {
   const product = index => 1 + (skewed && index % 10 ? index % 20 : index % 910);
@@ -50,7 +66,7 @@ test("request-local batch/date indexes preserve exact FIFO, source corrections, 
   input.inbounds[8].created_at = null;
   const before = JSON.stringify(canonical(input));
   const old = calculator(legacy).run(input), next = calculator(current).run(input);
-  assert.deepEqual(canonical(next.result), canonical(old.result));
+  assertAllocationEqual(next.result, old.result, input);
   assert.equal(JSON.stringify(canonical(input)), before, "input rows stay immutable");
 });
 
@@ -58,7 +74,7 @@ test("35k synthetic demands retain identical full output while avoiding repeated
   const input = inputFor(35000, true);
   input.includeTrace = false;
   const old = calculator(legacy).run(input), next = calculator(current).run(input);
-  assert.deepEqual(canonical(next.result), canonical(old.result));
+  assertAllocationEqual(next.result, old.result, input);
   assert.ok(next.dates < old.dates / 2, JSON.stringify({ old: old.dates, next: next.dates }));
   t.diagnostic(`Synthetic 35k demands/1545 batches, hot-product skew: baseline ${old.ms.toFixed(1)}ms/${old.dates} Date constructions; indexed ${next.ms.toFixed(1)}ms/${next.dates}. Exact outputs including batch/trace ordering match; no production speed or SLA claim.`);
 });

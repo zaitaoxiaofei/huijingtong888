@@ -5,8 +5,8 @@ import test from "node:test";
 const serviceSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const monthlyBillingViewSource = readFileSync(new URL("../frontend/admin/views/profit/MonthlyBillingDetailsView.vue", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const returnLossFormulaSource = serviceSource.match(/function returnLossTotalSqlMysql\(\) \{[\s\S]*?\n\}/)?.[0] || "";
-const profitRankingSource = serviceSource.match(/export async function profitRankingMysql\(query = \{\}, tenantId = "admin"\) \{[\s\S]*?\n\}\n\nfunction monthRangeMysql/)?.[0] || "";
-const monthlyBillingPendingSource = serviceSource.match(/async function monthlyBillingPendingByShopMysql\(from = "", to = "", shopId = "", scope\) \{[\s\S]*?\n\}\n\nfunction monthlyBillingOrderSettlementMysql/)?.[0] || "";
+const profitRankingSource = serviceSource.match(/^export async function profitRankingMysql\([^\n]*\) \{[\s\S]*?^\}/m)?.[0] || "";
+const monthlyBillingPendingSource = serviceSource.match(/^async function monthlyBillingPendingByShopMysql\([^\n]*\) \{[\s\S]*?^\}/m)?.[0] || "";
 
 test("profit summary exposes cost and rate fields used by consolidated billing", () => {
   for (const field of [
@@ -66,7 +66,7 @@ test("profit dashboard return loss uses reason-applied costs and settled retaine
 
 test("profit ranking and monthly billing use the same terminal return loss formula", () => {
   assert.match(profitRankingSource, /const returnLossTotal = returnLossTotalSqlMysql\(\);[\s\S]*?AS return_loss/);
-  assert.match(profitRankingSource, /CASE WHEN \$\{outcome\.rejectedUnclaimed\} THEN 1 ELSE 0 END AS rejected_unclaimed/);
+  assert.match(profitRankingSource, /orderReportOutcomeCtesSql\(orderScope, dateFilter\.whereSql\)/);
   assert.match(profitRankingSource, /CASE WHEN outcomes\.rejected_unclaimed = 1 OR outcomes\.after_delivery_return = 1 THEN \$\{returnLossTotal\} ELSE 0 END\), 0\) AS return_loss/);
   assert.doesNotMatch(profitRankingSource, /COALESCE\(SUM\(COALESCE\(opi\.return_loss_cny, oi\.aftersale_loss, 0\)\), 0\) AS return_loss/);
   assert.match(serviceSource, /profitRankingMysql\(\{ dimension: "shop"[\s\S]*?monthlyBillingPendingByShopMysql/);
@@ -87,7 +87,7 @@ test("monthly billing loads order details through paged endpoint", () => {
   assert.match(serviceSource, /export async function monthlyBillingOrderDetailsMysql/);
   assert.match(serviceSource, /pageSize = Math\.min\(Math\.max\(Number\(query\.pageSize \|\| query\.page_size \|\| 50\), 1\), 200\)/);
   assert.match(serviceSource, /includeOrders = \(query\.includeOrders === "1" \|\| query\.include_orders === "1"\)/);
-  assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId, \{ tenantScope \}\)/);
+  assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId, \{ tenantScope, companyId \}\)/);
   assert.match(serviceSource, /monthlyBillingOrderRowsMysql\(range\.from, range\.to, shopId, options\)/);
 });
 
@@ -123,9 +123,9 @@ test("monthly billing separates order consumption from real procurement and inve
   assert.match(serviceSource, /po\.purchased_at >= CONVERT_TZ\(\?, '\+08:00', '\+00:00'\)/);
   assert.match(serviceSource, /purchase_goods_amount: roundMoneyMysql\(goodsAmount\)/);
   assert.match(serviceSource, /purchase_total_amount: roundMoneyMysql\(goodsAmount \+ shippingAmount\)/);
-  assert.match(serviceSource, /local_inventory_value: roundMoneyMysql\(localValue\)/);
-  assert.match(serviceSource, /fbp_inventory_value: roundMoneyMysql\(fbpValue\)/);
-  assert.match(serviceSource, /in_transit_value: roundMoneyMysql\(inTransitValue\)/);
+  assert.match(serviceSource, /local_inventory_value:\s*local\.value==null\?null:roundMoneyMysql\(local\.value\)/);
+  assert.match(serviceSource, /fbp_inventory_value:\s*roundMoneyMysql\(fbp\.value\)/);
+  assert.match(serviceSource, /in_transit_value:\s*roundMoneyMysql\(transit\.value\)/);
   assert.match(serviceSource, /procurement_inventory: procurementInventory/);
   assert.match(monthlyBillingViewSource, /销售消耗采购成本/);
   assert.match(monthlyBillingViewSource, /真实采购支出/);

@@ -16,6 +16,7 @@ import { createInventoryWorkflowService } from './inventory-workflow.js';
 import { createFbpOpportunityCoverageReader } from './fbp-opportunity-coverage-cache.js';
 import { workflowRevision } from './inventory-workflow-cache.js';
 import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "./order-report-query-sql.js";
+import { orderReportOutcomeCtesSql } from './order-report-outcome-sql.js';
 import { readInventoryFlowSummary } from './inventory-flow-summary.js';
 import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "./customer-message-core-schema.js";
 import { normalizeVehicleBrand } from "../shared/vehicle-brand.js";
@@ -27494,18 +27495,7 @@ export async function profitRankingMysql(query = {}, tenantId = "admin", { group
   const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
   const nonEffectiveLoss = terminalOrderLossSqlMysql();
   const returnLossTotal = returnLossTotalSqlMysql();
-  const outcomeCteSql = inventoryMode ? "" : `
-    WITH order_outcomes AS (
-      SELECT
-        o.id,
-        CASE WHEN ${effectiveBusinessSale} THEN 1 ELSE 0 END AS effective_business_sale,
-        CASE WHEN ${outcome.rejectedUnclaimed} THEN 1 ELSE 0 END AS rejected_unclaimed,
-        CASE WHEN ${outcome.afterDeliveryReturn} THEN 1 ELSE 0 END AS after_delivery_return
-      FROM orders o
-      WHERE ${orderScope} ${dateFilter.whereSql}
-      GROUP BY o.id
-    )
-  `;
+  const outcomeCteSql = inventoryMode ? "" : orderReportOutcomeCtesSql(orderScope, dateFilter.whereSql);
   const costFields = inventoryMode ? "COALESCE(SUM(COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0)), 0) AS revenue" : `
       COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN COALESCE(opi.sale_amount_cny, oi.sale_price * oi.quantity, 0) ELSE 0 END), 0) AS revenue,
       COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 THEN CASE
@@ -27954,19 +27944,20 @@ async function monthlyBillingPendingByShopMysql(from = "", to = "", shopId = "",
     where.push("o.shop_id = ?");
     params.push(numericShopId);
   }
-  const outcome = buildOrderOutcomeSql("o", "mysql");
-  const effectiveBusinessSale = `(${outcome.effectiveSale} AND NOT ${outcome.afterDeliveryReturn})`;
+  const outcomeCteSql = orderReportOutcomeCtesSql(where.join(" AND "), dateFilter.whereSql);
   const rows = await mysqlQuery(`
+    ${outcomeCteSql}
     SELECT
       o.shop_id,
-      COALESCE(SUM(CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
-      COUNT(DISTINCT CASE WHEN ${effectiveBusinessSale} AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count
+      COALESCE(SUM(CASE WHEN outcomes.effective_business_sale = 1 AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN COALESCE(opi.net_profit_cny, oi.estimated_profit, 0) ELSE 0 END), 0) AS pending_profit,
+      COUNT(DISTINCT CASE WHEN outcomes.effective_business_sale = 1 AND COALESCE(opi.profit_status, oi.settlement_state, '') != 'accrued' THEN o.id END) AS pending_order_count
     FROM orders o
+    JOIN order_outcomes outcomes ON outcomes.id = o.id
     JOIN order_items oi ON oi.order_id = o.id
     LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
     WHERE 1=1 ${dateFilter.whereSql} ${where.length ? `AND ${where.join(" AND ")}` : ""}
     GROUP BY o.shop_id
-  `, params);
+  `, [...params, ...params]);
   return new Map(rows.map((row) => [String(row.shop_id), row]));
 }
 
@@ -28291,14 +28282,15 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
   const selectedMonth = Math.min(Math.max(Number(query.month || query.selectedMonth || fromMonth), fromMonth), toMonth);
   const shopId = String(query.shopId || query.shop_id || "all");
   const shops = await shopsMysql(tenantId);
+  const includeAppendices = query.includeAppendices !== "0";
   const explicitRange = billingDateRangeMysql(query);
   if (explicitRange) {
     const [ranking, pendingByShop, expenses, procurementInventory, aiUsage] = await Promise.all([
       profitRankingMysql({ dimension: "shop", from: explicitRange.from, to: explicitRange.to, shopId, page: 1, pageSize: 200, sortBy: "profit", sortOrder: "desc", fast: "1" }, tenantId, { companyId }),
       monthlyBillingPendingByShopMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
       monthlyBillingExpensesMysql(explicitRange.from, explicitRange.to, shopId, tenantScope, companyId),
-      monthlyProcurementInventorySummaryMysql(explicitRange.from, explicitRange.to, tenantScope),
-      billingAiUsageMysql(explicitRange.from, explicitRange.to, tenantScope)
+      includeAppendices ? monthlyProcurementInventorySummaryMysql(explicitRange.from, explicitRange.to, tenantScope) : Promise.resolve({}),
+      includeAppendices ? billingAiUsageMysql(explicitRange.from, explicitRange.to, tenantScope) : Promise.resolve({})
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};
@@ -28352,8 +28344,8 @@ export async function monthlyBillingDetailsMysql(query = {}, tenantId = "admin")
       monthlyBillingPendingByShopMysql(range.from, range.to, shopId, tenantScope, companyId),
       monthlyBillingExpensesMysql(range.from, range.to, shopId, tenantScope, companyId),
       includeOrders ? monthlyBillingOrderRowsMysql(range.from, range.to, shopId, { tenantScope, companyId }) : Promise.resolve([]),
-      monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope),
-      billingAiUsageMysql(range.from, range.to, tenantScope)
+      includeAppendices ? monthlyProcurementInventorySummaryMysql(range.from, range.to, tenantScope) : Promise.resolve({}),
+      includeAppendices ? billingAiUsageMysql(range.from, range.to, tenantScope) : Promise.resolve({})
     ]);
     const shopRows = (ranking.rows || []).map((row) => {
       const expense = expenses.byShop.get(String(row.shop_id)) || {};

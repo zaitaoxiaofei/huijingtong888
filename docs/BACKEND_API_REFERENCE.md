@@ -2461,6 +2461,29 @@ Return ranking rows for the selected profit dimension. inventory=1 groups bound 
 - Responses:
   - `200` `application/json` -> `array<object>`
 
+#### `GET /api/monthly-billing-details`
+
+Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Query parameters:
+  - `year` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `fromMonth` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `toMonth` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `month` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `from` (`string`, optional): Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days.
+  - `to` (`string`, optional): Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days.
+  - `shopId` (`string`, optional): Current-enterprise shop ID or all.
+  - `companyId` (`string`, optional): Current-enterprise company ID or all; an unowned company returns 404.
+  - `overviewOnly` (`string`, optional): 1 selects grouped monthly summaries.
+  - `includeAppendices` (`string`, optional): 0 omits procurement/current-inventory and AI appendix work; otherwise include the existing appendices. No financial summary fields are removed.
+  - `includeOrders` (`string`, optional): 1 includes order rows for the selected calendar month; independent of appendix selection.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 #### `GET /api/profit-reconciliation`
 
 Compare estimated and finance-accrued profit and identify inventory-data risks.

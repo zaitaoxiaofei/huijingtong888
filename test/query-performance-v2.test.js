@@ -1,4 +1,5 @@
 import { profitRankingGroupCountSql } from "../src/services/order-report-query-sql.js";
+import { orderReportOutcomeCtesSql } from '../src/services/order-report-outcome-sql.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -47,7 +48,11 @@ test('procurement first paint does not wait for demand reconciliation', async ()
   assert.equal(context.state.rows[0].id, 2);
   assert.equal(context.demandRefreshing.value, false);
   const mount = view.slice(view.indexOf('onMounted(async'), view.indexOf('</script>'));
-  assert.match(mount, /loadRows\(\)/);
+  assert.match(mount, /startPurchaseView\(\)/);
+  const start = view.slice(view.indexOf('async function startPurchaseView'), view.indexOf('watch(workMode'));
+  assert.match(start, /await Promise\.all\(\[loadRows\(\)/);
+  assert.match(start, /void refreshWorkbench\(\)/);
+  assert.doesNotMatch(start, /await refreshWorkbench\(\)/);
   assert.doesNotMatch(mount, /loadRows\(\{ refreshDemand/);
 });
 
@@ -72,7 +77,7 @@ test('late procurement search responses cannot overwrite newer results', async (
 test('profit ranking limits classification to the Beijing date range with matching SQL parameters', async () => {
   const calls = [];
   const context = vm.createContext({
-    ensureMysqlCutoverEnabled() {}, profitRankingGroupCountSql,
+    ensureMysqlCutoverEnabled() {}, profitRankingGroupCountSql, orderReportOutcomeCtesSql,
     orderListTenantScopeMysql: async () => ({id: 2, defaultTenant: false}), orderTenantPredicateMysql: alias => `${alias}.tenant_id = 2`,
     normalizeMysqlDateTime: date => date.toISOString().slice(0, 19).replace('T', ' '),
     buildOrderOutcomeSql: () => ({ effectiveSale: 'TRUE', afterDeliveryReturn: 'FALSE', rejectedUnclaimed: 'FALSE' }),
@@ -137,20 +142,26 @@ test('single-order procurement reconciles only related products but keeps cross-
 test('small product scopes do not aggregate unrelated history and use the covering warehouse index', async () => {
   for (const productIds of [[], [10]]) {
     let demandSql;
+    const statements = [];
     await loadOrderProcurementCoverage(async sql => {
-      if (sql.startsWith('SELECT o.id AS order_id')) demandSql = sql;
+      statements.push(sql);
+      if (/^SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql)) demandSql = sql;
       if (sql.includes('FROM tenants')) return [{id:2,slug:'a'}];
       if (sql.startsWith('SELECT id FROM products')) return [{id:10}];
       return [];
     }, '', { fresh: true, productIds });
-    assert.match(demandSql, /raw FORCE INDEX \(idx_order_query_stock_location\)/);
+    assert.match(demandSql, /raw FORCE INDEX \(idx_order_procurement_location\)/);
+    assert.match(demandSql, /tenant_shop\.tenant_id = 2/);
+    assert.doesNotMatch(demandSql, /tenant_shop\.tenant_id IS NULL/);
     if (productIds.length) {
       assert.doesNotMatch(demandSql, /GROUP BY order_id/);
       assert.match(demandSql, /h\.last_status_changed_at IS NOT NULL/);
       assert.match(demandSql, /EXISTS \(SELECT 1 FROM order_status_history/);
+      assert.match(demandSql, /product_id IN \(10\)/);
+      assert.ok(!statements.some(sql => sql.startsWith('SELECT transport.order_id')));
     } else {
-      assert.match(demandSql, /GROUP BY h\.order_id/);
       assert.doesNotMatch(demandSql, /SELECT MIN\(h\./);
+      assert.ok(statements.some(sql => sql.startsWith('SELECT transport.order_id') && /GROUP BY h\.order_id/.test(sql)));
     }
   }
 });
