@@ -3674,7 +3674,7 @@ Read owned-product pending purchased arrival batches without costs. Fresh packin
 
 #### `POST /api/inventory-workflow/receipts`
 
-Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
+Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes and before replay. New-arrival requests with a UUID request_key atomically save a tenant-and-actor-scoped receipt result; identical retries recover lost responses without adding stock twice, while changed product, quantities, reason, evidence or revision under the same key conflict. Legacy requests without a key and historical receipts retain their existing paths. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
 
 - Auth: `authenticated`
 - Request body: required

@@ -87,6 +87,7 @@ Automatic refresh may cancel and recreate unconfirmed `suggested` real-order req
 - Month headings such as `2026年11月` appear once per month, with compact `6号` buttons. Accessible labels retain the full date. Positive pending counts for today/yesterday are green; the day before yesterday and earlier are red, based on Beijing calendar days. All-pending is red when any older pending batch remains.
 - Desktop and mobile have explicit page selection and batch actions. Selection is cleared on date, page, search, or status changes; unresolved bundle purchases and composition errors are not selectable. Batch arrival notifies the warehouse without posting stock. Receipt still previews the revision and posts only the accepted quantity, preserving unreceived quantities and per-batch optional photos.
 - Batch retries keep the same request key and payload. Successful groups are not submitted again; failed groups remain visible for retry or refresh. All writes continue through the existing enterprise, duty, stale-state, and idempotency checks.
+- New-arrival receipt UUID keys save the original result in a `purchase_receipt` event in the same transaction as inventory posting. The current tenant and actor must still have receipt permission to replay that result. Identical retries after a lost response return the saved result; changing inventory, records, quantities, reasons, evidence, or observed revision with the same key conflicts. Legacy unkeyed and historical receipt paths remain compatible.
 
 
 ## Historical source reconciliation and inventory corrections
