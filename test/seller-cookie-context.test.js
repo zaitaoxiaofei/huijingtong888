@@ -66,3 +66,26 @@ test('stale tab-store assignments and site permission failures never fall back t
   assert.equal(failed.code, 'SELLER_TAB_PERMISSION_DENIED');
   assert.ok(!JSON.stringify(failed).includes('fixture-secret'));
 });
+
+test('optional partition API rejection preserves verified ordinary cookies', async () => {
+  for (const stage of ['key', 'cookies']) {
+    const h = harness({ ordinary: [company('4493649')], key: { topLevelSite: 'https://ozon.ru' } });
+    if (stage === 'key') h.chrome.cookies.getPartitionKey = async () => { throw new Error('unsupported fixture-secret'); };
+    else {
+      const getAll = h.chrome.cookies.getAll;
+      h.chrome.cookies.getAll = async query => { if (query.partitionKey) throw new Error('unsupported fixture-secret'); return getAll(query); };
+    }
+    const result = await h.read(tab, { pageCompanyId: '4493649' });
+    assert.equal(result.companyId, '4493649');
+    assert.equal(result.diagnosticCode, 'COOKIE_PARTITION_UNAVAILABLE');
+    assert.ok(!JSON.stringify(result).includes('fixture-secret'));
+    assert.equal((await h.read(tab, { pageCompanyId: 'other' })).code, 'STORE_CONTEXT_MISMATCH');
+  }
+});
+
+test('supported cookie aliases recover identity but conflicting aliases fail closed', async () => {
+  const h = harness({ ordinary: [{ ...company('4493649'), name: 'company_id' }], noPartitionApi: true });
+  assert.equal((await h.read(tab, { pageCompanyId: '4493649' })).companyId, '4493649');
+  const conflict = harness({ ordinary: [company('4493649'), { ...company('other'), name: 'seller_company_id' }], noPartitionApi: true });
+  assert.equal((await conflict.read(tab)).code, 'STORE_CONTEXT_MISMATCH');
+});

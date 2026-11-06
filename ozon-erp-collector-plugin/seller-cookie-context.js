@@ -17,14 +17,21 @@
         const query = { url: url.href, storeId };
         const unpartitioned = await chrome.cookies.getAll(query);
         let partitioned = [];
+        let partitionCode = '';
         if (chrome.cookies.getPartitionKey) {
-          const details = await chrome.cookies.getPartitionKey({ tabId: tab.id, frameId: 0 });
-          const key = details?.partitionKey;
-          // An empty key selects every partition. Only use the real top-frame key.
-          if (typeof key?.topLevelSite === 'string' && key.topLevelSite) {
-            const partitionKey = { topLevelSite: key.topLevelSite };
-            if (typeof key.hasCrossSiteAncestor === 'boolean') partitionKey.hasCrossSiteAncestor = key.hasCrossSiteAncestor;
-            partitioned = await chrome.cookies.getAll({ ...query, partitionKey });
+          try {
+            const details = await chrome.cookies.getPartitionKey({ tabId: tab.id, frameId: 0 });
+            const key = details?.partitionKey;
+            // An empty key selects every partition. Only use the real top-frame key.
+            if (typeof key?.topLevelSite === 'string' && key.topLevelSite) {
+              const partitionKey = { topLevelSite: key.topLevelSite };
+              if (typeof key.hasCrossSiteAncestor === 'boolean') partitionKey.hasCrossSiteAncestor = key.hasCrossSiteAncestor;
+              partitioned = await chrome.cookies.getAll({ ...query, partitionKey });
+            }
+          } catch (error) {
+            // Optional partition APIs may exist but reject in supported browsers.
+            // Preserve ordinary cookies; page/store checks still apply below.
+            partitionCode = 'COOKIE_PARTITION_UNAVAILABLE';
           }
         }
         const seen = new Set();
@@ -36,13 +43,13 @@
           seen.add(identity);
           return true;
         }).sort((a, b) => String(b.path || '/').length - String(a.path || '/').length);
-        const ids = [...new Set(cookies.filter((cookie) => cookie.name === 'sc_company_id')
+        const ids = [...new Set(cookies.filter((cookie) => ['sc_company_id', 'company_id', 'seller_company_id'].includes(cookie.name))
           .map((cookie) => String(cookie.value || '').trim()).filter(Boolean))];
         const companyId = ids.length === 1 ? ids[0] : '';
         if (ids.length > 1 || (companyId && pageCompanyId && companyId !== String(pageCompanyId).trim())) {
           return unavailable('STORE_CONTEXT_MISMATCH');
         }
-        return { cookies, companyId, storeId, code: '' };
+        return { cookies, companyId, storeId, code: '', diagnosticCode: partitionCode || (companyId ? '' : 'COOKIE_COMPANY_ID_MISSING') };
       } catch (error) {
         return unavailable(/permission|cannot access|not allowed|host access|denied/i.test(String(error?.message || ''))
           ? 'SELLER_TAB_PERMISSION_DENIED' : 'STORE_IDENTITY_UNAVAILABLE');

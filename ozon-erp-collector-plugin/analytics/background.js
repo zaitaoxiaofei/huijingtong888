@@ -215,7 +215,8 @@ async function getOzonCookieInfo(tab = null) {
     header: cookies.filter(item => item?.name).map(item => `${item.name}=${item.value || ''}`).join('; '),
     companyId: conflict ? '' : String(context.companyId || '').trim(),
     storeId: context.storeId || '',
-    code: context.code || ''
+    code: context.code || '',
+    diagnosticCode: context.diagnosticCode || ''
   };
 }
 
@@ -379,7 +380,7 @@ function resolveSellerStoreIdentity(observedCompanyId, cookieCompanyId, expected
   // A live page cookie may recover identity; ERP expectations and old localStorage may not.
   const companyId = observed || page;
   const code = !companyId || !cookie ? 'identity_missing' : companyId !== cookie || (page && page !== cookie) ? 'identity_conflict' : expected && companyId !== expected ? 'store_mismatch' : '';
-  if (code) return { ok: false, code, companyId: '', observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: `STORE_CONTEXT_MISMATCH task=${expected || '-'} observed=${observed || '-'} cookie=${cookie || '-'} page=${page || '-'}` };
+  if (code) return { ok: false, code, companyId: '', observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: `${code === 'identity_missing' ? 'STORE_IDENTITY_MISSING' : 'STORE_CONTEXT_MISMATCH'} task=${expected || '-'} observed=${observed || '-'} cookie_company_id=${cookie || '-'} page=${page || '-'}` };
   return { ok: true, code: 'ready', companyId, observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: '' };
 }
 
@@ -802,7 +803,7 @@ async function waitForSellerAuthContext(tab, request = {}, timeoutMs = AUTH_CONT
     const identity = resolveSellerStoreIdentity(observedCompanyId, cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
     const companyId = identity.companyId;
     if (pageIdentity.error || !identity.ok) {
-      lastError = pageIdentity.error || identity.error;
+      lastError = pageIdentity.error || `${identity.error}${cookieInfo.diagnosticCode || cookieInfo.code ? ` reason=${cookieInfo.diagnosticCode || cookieInfo.code}` : ''}`;
       await sleep(AUTH_CONTEXT_POLL_MS);
       continue;
     }
