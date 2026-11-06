@@ -195,7 +195,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}, in
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
       CASE WHEN o.option_type = 'category'
-        THEN (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category = o.value)
+        THEN (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category COLLATE utf8mb4_unicode_ci = o.value COLLATE utf8mb4_unicode_ci)
         ELSE o.usage_count END AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE (? = '' OR o.option_type = ?)
@@ -309,7 +309,7 @@ export async function deleteInventoryProductNamingOption(id, session = {}) {
   if (!optionId) throw new Error("标准选项不存在");
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value,
-      (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND p.inventory_category = o.value) AS linked_product_count
+      (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND p.inventory_category COLLATE utf8mb4_unicode_ci = o.value COLLATE utf8mb4_unicode_ci) AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE o.id = ? AND o.status <> 'archived' AND ${inventoryTenantSql(tenant, 'o')}
     LIMIT 1
