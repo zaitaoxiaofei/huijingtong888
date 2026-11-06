@@ -1,5 +1,14 @@
 import {shanghaiDateKey} from './shanghai-date.js';
 
+export function purchaseQueueDayAge(date, now=new Date()) {
+  const today=shanghaiDateKey(now);
+  return Math.floor((Date.parse(`${today}T00:00:00+08:00`)-Date.parse(`${date}T00:00:00+08:00`))/86400000);
+}
+
+export function purchaseQueueBadgeTone(count, overdue=false) {
+  return count<=0?'empty':overdue?'overdue':'recent';
+}
+
 export function purchaseQueueDays(days, {status='open', selectedDay='', startDate='', endDate='', now=new Date()}={}) {
   const indexed=new Map((days||[]).map(day=>[day.date,day]));
   const today=shanghaiDateKey(now);
@@ -9,5 +18,5 @@ export function purchaseQueueDays(days, {status='open', selectedDay='', startDat
     if((!startDate||date>=startDate)&&(!endDate||date<=endDate)&&!indexed.has(date))indexed.set(date,{date});
   }
   if(/^\d{4}-\d{2}-\d{2}$/.test(selectedDay)&&!indexed.has(selectedDay))indexed.set(selectedDay,{date:selectedDay});
-  return [...indexed.values()].sort((a,b)=>b.date.localeCompare(a.date)).map(day=>({...day,count:Number(day[status]||0)}));
+  return [...indexed.values()].sort((a,b)=>b.date.localeCompare(a.date)).map(day=>({...day,count:Number(day[status]||0),ageDays:purchaseQueueDayAge(day.date,now)}));
 }
