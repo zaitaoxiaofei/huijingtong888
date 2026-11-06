@@ -227,11 +227,11 @@ export function inventoryNumberTriggerSqlV2(event) {
       DECLARE brand_id BIGINT UNSIGNED DEFAULT NULL;
       DECLARE sequence_no BIGINT UNSIGNED;
       DECLARE conflict_id BIGINT UNSIGNED DEFAULT NULL;
-      DECLARE candidate_number VARCHAR(64);
-      DECLARE core_text VARCHAR(255);
-      DECLARE brand_text VARCHAR(255);
-      DECLARE brand_key_text VARCHAR(128) DEFAULT 'PENDING';
-      DECLARE fitment_text VARCHAR(32);
+      DECLARE candidate_number VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+      DECLARE core_text VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+      DECLARE brand_text VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+      DECLARE brand_key_text VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'PENDING';
+      DECLARE fitment_text VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
       DECLARE raw_brand_present BOOLEAN;
       DECLARE models_valid BOOLEAN;
       DECLARE has_models BOOLEAN;
