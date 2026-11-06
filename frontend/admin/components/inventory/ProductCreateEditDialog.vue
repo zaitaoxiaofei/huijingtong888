@@ -53,14 +53,14 @@ const componentPageSize = 12;
 const componentDirectory = reactive({
   category: "",
   brand: "",
-  fitment_type: "",
   vehicle_model: "",
   accessory: "",
   color: "",
-  quantity: ""
+  material: "",
+  process: ""
 });
 const componentDirectoryOptions = reactive({
-  brand: [], fitment_type: [], vehicle_model: [], accessory: [], color: [], quantity: []
+  brand: [], vehicle_model: [], accessory: [], color: [], material: [], process: []
 });
 const namingOptions = reactive({ category: [], brand: [], accessory: [], color: [], material: [], process: [], quantity: [] });
 const pendingCoreNames = ref([]);
@@ -78,8 +78,7 @@ const WAREHOUSE_LOGISTICS_DAY_OPTIONS = [1, 2, 3, 4, 5];
 
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
-  owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }],
-  purchase_quantity: [{ required: true, message: "请输入采购数量", trigger: "blur" }]
+  owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }]
 };
 
 const form = reactive(createDefaultForm());
@@ -236,7 +235,7 @@ function resetForm() {
   componentOptions.value = [];
   componentDirectoryRows.value = [];
   componentPage.value = 1;
-  Object.assign(componentDirectory, { category: "", brand: "", fitment_type: "", vehicle_model: "", accessory: "", color: "", quantity: "" });
+  Object.assign(componentDirectory, { category: "", brand: "", vehicle_model: "", accessory: "", color: "", material: "", process: "" });
   syncPackagingFee(form);
 }
 
@@ -967,7 +966,7 @@ function uniqueDirectoryValues(field, predicate = () => true, fallbackType = "",
   const counts = new Map();
   const rows = componentDirectoryRows.value.filter(predicate);
   for (const row of rows) {
-    const raw = field === "color" ? String(row[field] || "").split(",") : [String(row[field] || "")];
+    const raw = ["color", "material"].includes(field) ? String(row[field] || "").split(/[，,/、]+/u) : [String(row[field] || "")];
     for (const item of raw) {
       const value = field === "vehicle_brand" ? normalizeComponentBrand(item) : item.trim();
       if (value) counts.set(value, Number(counts.get(value) || 0) + 1);
@@ -991,7 +990,8 @@ const componentDirectoryBrands = computed(() => uniqueDirectoryValues("vehicle_b
   ...componentDirectoryOptions.brand,
   ...vehicleCatalog.value.map((brand) => brand.name)
 ]));
-const componentDirectoryFitments = computed(() => uniqueDirectoryValues("fitment_type", undefined, "", componentDirectoryOptions.fitment_type));
+const componentDirectoryMaterials = computed(() => uniqueDirectoryValues("material", undefined, "material", [...componentDirectoryOptions.material, ...namingOptions.material]));
+const componentDirectoryProcesses = computed(() => uniqueDirectoryValues("surface_process", undefined, "process", [...componentDirectoryOptions.process, ...namingOptions.process]));
 const componentDirectoryModels = computed(() => {
   const selectedBrand = normalizeComponentBrand(componentDirectory.brand);
   const catalogBrand = vehicleCatalog.value.find((brand) => normalizeComponentBrand(brand.name) === selectedBrand);
@@ -1002,7 +1002,6 @@ const componentDirectoryModels = computed(() => {
 });
 const componentDirectoryAccessories = computed(() => uniqueDirectoryValues("accessory_name", undefined, "accessory", componentDirectoryOptions.accessory));
 const componentDirectoryColors = computed(() => uniqueDirectoryValues("color", undefined, "color", componentDirectoryOptions.color));
-const componentDirectoryQuantities = computed(() => uniqueDirectoryValues("product_quantity", undefined, "quantity", componentDirectoryOptions.quantity));
 const pagedComponentOptions = computed(() => componentOptions.value.slice(
   (componentPage.value - 1) * componentPageSize,
   componentPage.value * componentPageSize
@@ -1013,8 +1012,8 @@ function componentFieldMatches(row, field, expected) {
   if (expected === "" || expected === null || expected === undefined) return true;
   const target = (field === "vehicle_brand" ? normalizeComponentBrand(expected) : String(expected || "").trim()).toLowerCase();
   const name = String(row.name || "").toLowerCase();
-  if (field === "color") {
-    const colors = String(row.color || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (["color", "material"].includes(field)) {
+    const colors = String(row[field] || "").split(/[，,/、]+/u).map((value) => value.trim().toLowerCase()).filter(Boolean);
     return colors.includes(target) || (!colors.length && name.includes(target));
   }
   if (field === "quantity") {
@@ -1032,11 +1031,11 @@ function componentFieldMatches(row, field, expected) {
 function componentMatchReasons(row) {
   const fields = [
     ["brand", "vehicle_brand", "品牌"],
-    ["fitment_type", "fitment_type", "适配"],
+    ["material", "material", "材质"],
+    ["process", "surface_process", "工艺"],
     ["vehicle_model", "vehicle_model", "车型"],
     ["accessory", "accessory_name", "款式"],
-    ["color", "color", "颜色"],
-    ["quantity", "quantity", "包装"]
+    ["color", "color", "颜色"]
   ];
   return fields
     .filter(([key, field]) => componentDirectory[key] !== "" && componentFieldMatches(row, field, componentDirectory[key]))
@@ -1078,11 +1077,11 @@ async function searchComponentProducts() {
     Object.assign(componentDirectory, {
       category: componentDirectory.category,
       brand: "",
-      fitment_type: "",
       vehicle_model: "",
       accessory: "",
       color: "",
-      quantity: ""
+      material: "",
+      process: ""
     });
     const rows = [];
     let page = 1;
@@ -1120,12 +1119,11 @@ async function searchComponentProducts() {
 
 async function loadComponentDirectoryOptions() {
   const category = String(componentDirectory.category || "").trim();
-  const types = ["brand", "fitment_type", "vehicle_model", "accessory", "color", "quantity"];
+  const types = ["brand", "vehicle_model", "accessory", "color", "material", "process"];
   const results = await Promise.allSettled(types.map(async (type) => {
     const params = new URLSearchParams({ type });
     if (category) params.set("category", category);
     if (componentDirectory.brand) params.set("brand", normalizeComponentBrand(componentDirectory.brand));
-    if (componentDirectory.fitment_type) params.set("fitment_type", componentDirectory.fitment_type);
     if (componentDirectory.vehicle_model) params.set("vehicle_model", componentDirectory.vehicle_model);
     componentDirectoryOptions[type] = await loadInventoryNamingOptions(params);
   }));
@@ -1137,11 +1135,11 @@ async function loadComponentDirectoryOptions() {
 function filterComponentDirectoryProducts() {
   componentOptions.value = componentDirectoryRows.value
     .filter((row) => componentFieldMatches(row, "vehicle_brand", componentDirectory.brand))
-    .filter((row) => componentFieldMatches(row, "fitment_type", componentDirectory.fitment_type))
+    .filter((row) => componentFieldMatches(row, "material", componentDirectory.material))
+    .filter((row) => componentFieldMatches(row, "surface_process", componentDirectory.process))
     .filter((row) => componentFieldMatches(row, "vehicle_model", componentDirectory.vehicle_model))
     .filter((row) => componentFieldMatches(row, "accessory_name", componentDirectory.accessory))
     .filter((row) => componentFieldMatches(row, "color", componentDirectory.color))
-    .filter((row) => componentFieldMatches(row, "quantity", componentDirectory.quantity))
     .sort((left, right) => (
       componentMatchReasons(right).length - componentMatchReasons(left).length
       || Number(right.stock || 0) - Number(left.stock || 0)
@@ -1155,7 +1153,7 @@ async function handleComponentFilterChange(field = "") {
     componentDirectory.brand = normalizeComponentBrand(componentDirectory.brand);
     componentDirectory.vehicle_model = "";
   }
-  if (["brand", "fitment_type", "vehicle_model"].includes(field)) await loadComponentDirectoryOptions();
+  if (["brand", "vehicle_model"].includes(field)) await loadComponentDirectoryOptions();
   filterComponentDirectoryProducts();
 }
 
@@ -1169,7 +1167,7 @@ function handleComponentCategoryChange(value) {
   componentOptions.value = [];
   componentDirectoryRows.value = [];
   componentPage.value = 1;
-  Object.assign(componentDirectory, { category: "", brand: "", fitment_type: "", vehicle_model: "", accessory: "", color: "", quantity: "" });
+  Object.assign(componentDirectory, { category: "", brand: "", vehicle_model: "", accessory: "", color: "", material: "", process: "" });
 }
 
 function addComponentProduct(row) {
@@ -1862,11 +1860,6 @@ function submitAndCreateDraft() {
                   <el-input-number v-model="form.handling_fee" :min="0" :precision="1" :step="0.1" controls-position="right" @change="manualPackagingFee = true" />
                 </el-form-item>
               </el-col>
-              <el-col :span="8">
-                <el-form-item label="采购数量" prop="purchase_quantity">
-                  <el-input-number v-model="form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" />
-                </el-form-item>
-              </el-col>
               <el-col v-if="isInventoryTarget" :span="8">
                 <el-form-item label="生产周期">
                   <el-select v-model="form.production_lead_days" placeholder="默认 7 天">
@@ -1986,23 +1979,23 @@ function submitAndCreateDraft() {
               >
                 <el-option v-for="item in namingOptions.category" :key="item.id || item.value" :label="item.label || item.value" :value="item.value" />
               </el-select>
-                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="品牌" @change="handleComponentFilterChange('brand')">
+                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="汽车品牌" @change="handleComponentFilterChange('brand')">
                   <el-option v-for="value in componentDirectoryBrands" :key="value" :label="value" :value="value" />
-                </el-select>
-                <el-select v-model="componentDirectory.fitment_type" filterable allow-create default-first-option clearable placeholder="适配" @change="handleComponentFilterChange('fitment_type')">
-                  <el-option v-for="value in componentDirectoryFitments" :key="value" :label="value === 'specific' ? '专用' : '通用'" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="车型" @change="handleComponentFilterChange('vehicle_model')">
                   <el-option v-for="value in componentDirectoryModels" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式/特征" @change="handleComponentFilterChange">
+                <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式" @change="handleComponentFilterChange">
                   <el-option v-for="value in componentDirectoryAccessories" :key="value" :label="value" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.color" filterable allow-create default-first-option clearable placeholder="颜色" @change="handleComponentFilterChange">
                   <el-option v-for="value in componentDirectoryColors" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.quantity" filterable allow-create default-first-option clearable placeholder="包装" @change="handleComponentFilterChange">
-                  <el-option v-for="value in componentDirectoryQuantities" :key="value" :label="`${value}件`" :value="value" />
+                <el-select v-model="componentDirectory.material" filterable clearable placeholder="材质" @change="handleComponentFilterChange">
+                  <el-option v-for="value in componentDirectoryMaterials" :key="value" :label="value" :value="value" />
+                </el-select>
+                <el-select v-model="componentDirectory.process" filterable clearable placeholder="工艺" @change="handleComponentFilterChange">
+                  <el-option v-for="value in componentDirectoryProcesses" :key="value" :label="value" :value="value" />
                 </el-select>
               <el-button @click="requestQuickCreateComponent">快速创建配件</el-button>
             </div>
