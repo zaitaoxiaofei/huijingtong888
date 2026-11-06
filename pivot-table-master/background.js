@@ -359,11 +359,35 @@ function resolveSellerStoreIdentity(observedCompanyId, cookieCompanyId, expected
   return { ok: true, code: 'ready', companyId, observedCompanyId: observed, cookieCompanyId: cookie, pageCompanyId: page, error: '' };
 }
 
+function resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedStoreId = '') {
+  const observed = String(currentSellerCompanyId(tab?.id) || '').trim();
+  const page = String(pageIdentity.companyId || '').trim();
+  const identity = resolveSellerStoreIdentity(observed, cookieInfo.companyId, expectedStoreId, page);
+  if (cookieInfo.code === 'STORE_CONTEXT_MISMATCH') {
+    return { ...identity, ok: false, code: 'identity_conflict', companyId: '', error: 'STORE_CONTEXT_MISMATCH cookie_partition' };
+  }
+  if (pageIdentity.error) return { ...identity, ok: false, code: 'identity_missing', companyId: '', error: `STORE_IDENTITY_MISSING page=${pageIdentity.error}` };
+  if (cookieInfo.companyId || identity.ok) return identity;
+  // Browser requests carry their own session. Missing extension-cookie access
+  // must not block them when fresh, same-tab browser evidence verifies the shop.
+  if (observed && page && observed !== page) {
+    return { ...identity, code: 'identity_conflict', error: `STORE_CONTEXT_MISMATCH observed=${observed} page=${page}` };
+  }
+  if (observed && page && expectedStoreId && page !== String(expectedStoreId).trim()) {
+    return { ...identity, code: 'store_mismatch', error: `STORE_CONTEXT_MISMATCH task=${expectedStoreId} observed=${observed} page=${page}` };
+  }
+  const since = Math.max(Date.now() - 60000, prepareSellerTabId === tab?.id ? prepareStartedAt : 0);
+  const headers = latestContextHeadersByTab.get(tab?.id);
+  if (observed && observed === page && Number(headers?.updated_at || 0) >= since && browserAnalyticsTableReady(tab?.id, page, since)) {
+    return { ...identity, ok: true, code: 'ready', companyId: page, error: '', auth_mode: 'browser_only' };
+  }
+  return { ...identity, error: `${identity.error} reason=${cookieInfo.diagnosticCode || cookieInfo.code || 'BROWSER_EVIDENCE_PENDING'}` };
+}
+
 async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
   const cookieInfo = await getOzonCookieInfo(tab);
   const pageIdentity = await readSellerPageCompanyId(tab);
-  const identity = resolveSellerStoreIdentity(currentSellerCompanyId(tab?.id), cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
-  return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: `STORE_CONTEXT_MISMATCH page=${pageIdentity.error}` } : identity;
+  return resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedStoreId);
 }
 
 async function syncPluginStatus(force = false, selectedTab = null, panelRefreshValid = null) {
@@ -740,12 +764,17 @@ async function waitForSellerAuthContext(tab, request = {}, timeoutMs = AUTH_CONT
     const cookieInfo = await getOzonCookieInfo(tab);
     const observedCompanyId = String(currentSellerCompanyId(tab?.id) || '').trim();
     const pageIdentity = await readSellerPageCompanyId(tab);
-    const identity = resolveSellerStoreIdentity(observedCompanyId, cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
+    const identity = resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedStoreId);
     const companyId = identity.companyId;
     if (pageIdentity.error || !identity.ok) {
-      lastError = pageIdentity.error || `${identity.error}${cookieInfo.diagnosticCode || cookieInfo.code ? ` reason=${cookieInfo.diagnosticCode || cookieInfo.code}` : ''}`;
+      lastError = pageIdentity.error || identity.error;
       await sleep(AUTH_CONTEXT_POLL_MS);
       continue;
+    }
+    if (identity.auth_mode === 'browser_only') {
+      if (request.bind_auth_only) return { success: false, companyId, error: 'SERVER_AUTH_COOKIE_UNAVAILABLE' };
+      logPanel(`店铺 ${companyId} 已由当前页面、请求身份和成功分析接口核实，使用浏览器采集`, 'success');
+      return { success: true, companyId, warning: 'BROWSER_COLLECT_ONLY' };
     }
     if (companyId && cookieInfo.header) {
       try {
