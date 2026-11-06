@@ -33,6 +33,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "ai-credits") return session.tenant?.id && isAiCreditReadRoute(parts, method) ? { allowed: true } : deny();
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
+  if (resource === "product-workflows") return session.tenant?.id && isTenantPilotRoute(path, method) ? require("operations") : deny();
 
   if (resource === "ogl-dispatch") {
     if (!session.tenant?.id || !session.tenant?.slug || !isOglDispatchRoute(parts, method)) return deny("请在有效企业中使用已开放的 OGL 发运操作");

@@ -71,6 +71,8 @@ import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/rout
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
 import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
 import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/routes/aiVariantLab.js";
+import { createProductWorkflowRoutes } from "./server/routes/productWorkflows.js";
+import { startProductWorkflowRunner } from './services/product-workflow-runner.js';
 import { handleAiCreditRoute } from "./server/routes/aiCredits.js";
 import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
@@ -271,6 +273,7 @@ const routeModules = {
   ...createMaterialAssetRoutes({ services, readJson }),
   ...createAiImageRoutes({ readJson }),
   ...createAiVariantLabRoutes({ services, readJson }),
+  ...createProductWorkflowRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
   ...createOnboardingKnowledgeRoutes({ readJson }),
   ...createSystemNotificationRoutes({ services }),
@@ -2506,6 +2509,7 @@ async function recoverAssetVariantJobs() {
 }
 
 async function recoverAiGenerationTasks() {
+  try { await startProductWorkflowRunner(); } catch(error) { console.warn('product workflow recovery skipped:',error.message); }
   try {
     const result = await services.recoverAiGenerationTasksOnStartup?.();
     if (result?.ok) console.log("ai generation task worker recovered");
