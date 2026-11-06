@@ -60,7 +60,19 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
   if(dateFilters.from){where.push(`${purchaseTime}>=?`);args.push(dateFilters.from);}
   if(dateFilters.to){where.push(`${purchaseTime}<?`);args.push(dateFilters.to);}
   const reviews=await query("SELECT detail_json FROM inventory_flow_events WHERE tenant_id=? AND action='purchase_bundle_review' ORDER BY id DESC",[scope.id]);
-  const lineage=new Map();const reviewed=new Map();for(const row of reviews){const v=typeof row.detail_json==='string'?JSON.parse(row.detail_json):row.detail_json;if(v?.result?.mode==='whole'&&!reviewed.has(Number(v.result.inbound_id)))reviewed.set(Number(v.result.inbound_id),v.content_revision);for(const child of v?.result?.created||[])if(!lineage.has(Number(child.inbound_id)))lineage.set(Number(child.inbound_id),{id:Number(v.result.inbound_id),product_id:Number(v.source?.product_id)});}
+  const lineage=new Map();const reviewed=new Map();for(const row of reviews){const v=typeof row.detail_json==='string'?JSON.parse(row.detail_json):row.detail_json;if(v?.result?.mode==='whole'&&!reviewed.has(Number(v.result.inbound_id)))reviewed.set(Number(v.result.inbound_id),v.content_revision);for(const child of v?.result?.created||[])if(!lineage.has(Number(child.inbound_id)))lineage.set(Number(child.inbound_id),{id:Number(v.result.inbound_id),product_id:Number(v.source?.product_id),source_purchase_order_id:Number(v.source?.purchase_order_id)||null,child_product_id:Number(child.product_id),child_purchase_order_id:Number(child.purchase_order_id)});}
+  const sourceIds=[...new Set([...lineage.values()].map(source=>source.id).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  const sourceRows=sourceIds.length?await query(`SELECT source.id,source.product_id,original.id AS purchase_order_id,original.order_no
+    FROM inbound_records source JOIN products source_product ON source_product.id=source.product_id AND ${inventoryTenantSql(scope,'source_product')}
+    LEFT JOIN purchase_orders original ON original.id=source.purchase_order_id AND ${inventoryTenantSql(scope,'original')}
+    WHERE source.id IN (${sourceIds.map(()=>'?').join(',')}) AND ${inventoryTenantSql(scope,'source')}`,sourceIds):[];
+  const sources=new Map(sourceRows.map(source=>[Number(source.id),source]));
+  for(const [id,line] of lineage){
+   const source=sources.get(line.id);
+   if(!source||Number(source.product_id)!==line.product_id){lineage.delete(id);continue;}
+   const validPurchase=source.purchase_order_id!=null&&(!line.source_purchase_order_id||Number(source.purchase_order_id)===line.source_purchase_order_id);
+   line.purchase_order_id=validPurchase?Number(source.purchase_order_id):null;line.order_no=validPurchase?source.order_no:null;
+  }
   const financial=hasPermission(current,'procurement');
   const project=(row,details=true)=>{
    const {amount,shipping_amount,purchase_note,...safe}=row;
@@ -68,7 +80,9 @@ export function createProcurementArrivals({query=mysqlQuery,transaction=withMysq
    try{
     const components=graph.components(Number(row.product_id)).map(part=>({...part,quantity:Number(row.quantity)*Number(part.per_set_quantity)}));
     const bundle=graph.isBundle(row.product_id),needsReview=bundle&&reviewed.get(Number(row.id))!==bundleReviewContentRevision(row,components);
-    return{...safe,source_bundle_batch:lineage.get(Number(row.id))||null,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:!details?[]:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
+    const line=lineage.get(Number(row.id)),sourceBundle=line&&line.child_product_id===Number(row.product_id)&&line.child_purchase_order_id===Number(row.purchase_order_id)
+      ?{id:line.id,product_id:line.product_id,purchase_order_id:line.purchase_order_id,order_no:line.order_no}:null;
+    return{...safe,source_bundle_batch:sourceBundle,components,is_bundle:bundle,review_required:needsReview,physical_quantity:needsReview?null:components.reduce((n,c)=>n+c.quantity,0),affected_bundles:!details?[]:bundle?[{...graph.products.get(Number(row.product_id)),per_set_quantity:1}]:graph.affected(row.product_id)};
    }catch(e){return{...safe,components:[],is_bundle:true,review_required:true,physical_quantity:null,composition_error:e.message,affected_bundles:[]};}
   };
   const joins=`FROM inbound_records ir JOIN products p ON p.id=ir.product_id
