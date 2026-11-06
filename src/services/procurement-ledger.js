@@ -118,10 +118,11 @@ export function planLedgerAction(snapshot, body) {
   if (!reason || reason.length > 1000) throw new Error('请在调整说明中填写真实原因或凭证编号（1～1000 字）');
   const type = String(body.action_type || '');
   const result = { type, reason, quantity: 0, local_delta: 0, target_delta: 0, amount: 0, shipping_amount: 0 };
-  if (type === 'revise_pending_batch') {
+  if (['revise_pending_batch','revise_unreceived_batch'].includes(type)) {
     const batch = snapshot.batches.find(row => Number(row.id) === Number(body.inbound_id));
-    if (!batch || batch.status !== 'pending_arrival' || (batch.received_at && body.allow_arrived_bundle_review !== true)) throw new Error('此批次已到货、入库或关闭，请刷新后使用采购对账；待到货编辑不能改动已收货记录');
+    if (!batch || batch.status !== 'pending_arrival' || (batch.received_at && type!=='revise_unreceived_batch' && body.allow_arrived_bundle_review !== true)) throw new Error('此批次已到货、入库或关闭，请刷新后使用采购对账；待到货编辑不能改动已收货记录');
     const quantity = integer(body.quantity, '修改后待到货数量', 0), amount = money(body.amount), shipping = money(body.shipping_amount || 0);
+    if (type==='revise_unreceived_batch' && quantity<1) throw new Error('验收入库前更正数量必须大于0；误录作废请在采购对账单独处理');
     if (!quantity && (amount || shipping)) throw new Error('删除记录时货款和运费必须为0；实际退货退款请走采购对账');
     const correction = { id: Number(batch.id), quantity, amount, shipping_amount: shipping,
       courier_company: String(body.courier_company || '').trim(), tracking_number: String(body.tracking_number || '').trim() };
@@ -673,7 +674,7 @@ export function createProcurementLedgerService(hooks) {
       await connection.execute('UPDATE procurement_ledger_actions SET result_json = ? WHERE id = ?', [JSON.stringify(response), actionId]);
       return response;
     });
-    if (!existingConnection) hooks.invalidate(['stocktake','record_purchase','revise_pending_batch','receive','receive_and_count'].includes(body.action_type)?{tenantId:affectedTenantId,productIds:[productId]}:undefined);
+    if (!existingConnection) hooks.invalidate(['stocktake','record_purchase','revise_pending_batch','revise_unreceived_batch','receive','receive_and_count'].includes(body.action_type)?{tenantId:affectedTenantId,productIds:[productId]}:undefined);
     return result;
   }
   async function receiveAndCount(body, personId, tenantId = 'admin', options = {}) {
