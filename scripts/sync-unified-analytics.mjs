@@ -49,17 +49,6 @@ background = replaceSection(background, 'async function getOzonCookieInfo(', 'fu
 }
 
 `);
-background = replaceSection(background, 'async function verifiedSellerStoreIdentity(', 'async function syncPluginStatus(', `async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
-  const cookieInfo = await getOzonCookieInfo(tab);
-  const pageIdentity = await readSellerPageCompanyId(tab);
-  const identity = resolveSellerStoreIdentity(currentSellerCompanyId(tab?.id), cookieInfo.companyId, expectedStoreId, pageIdentity.companyId);
-  if (cookieInfo.code === 'STORE_CONTEXT_MISMATCH') {
-    return { ...identity, ok: false, code: 'identity_conflict', companyId: '', error: 'STORE_CONTEXT_MISMATCH cookie_partition' };
-  }
-  return pageIdentity.error ? { ...identity, ok: false, code: 'identity_missing', companyId: '', error: \`STORE_CONTEXT_MISMATCH page=\${pageIdentity.error}\` } : identity;
-}
-
-`);
 background = replaceSection(background, 'async function ensureSellerAnalyticsGraphsTab(', 'async function warmSellerAnalyticsPermission(', `function parseSellerNavigationTarget(targetUrl) {
   let target;
   try { target = new URL(targetUrl); } catch (error) { throw new Error('SELLER_NAVIGATION_TARGET_NOT_ALLOWED'); }

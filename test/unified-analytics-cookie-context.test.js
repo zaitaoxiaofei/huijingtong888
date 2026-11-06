@@ -25,11 +25,11 @@ function harness({ helper, cookies = [], pageCompanies = ['1001'], realHelper = 
       getAll: async query => { calls.push({ type: 'legacy', query }); return query.partitionKey ? partitionedCookies : cookies; }
     }
   };
-  const context = vm.createContext({ chrome, URL, AbortController,
+  const context = vm.createContext({ chrome, URL, URLSearchParams, AbortController,
     OzonUnifiedConfig: { get: async () => ({ erpBaseUrl: 'https://erp.hjt888.xyz', tenantId: 'tenant', localPluginToken: '' }) },
     OzonUnifiedRuntime: { setAnalyticsBadge() {}, withAnalyticsPreparation: run => run() },
     setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
-    fetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true }) })
+    fetch: async (url, options) => { calls.push({ type: 'fetch', url, options }); return { ok: true, status: 200, json: async () => ({ success: true, requests: [{ request_id: 'fixture-request', store_id: '1001' }] }) }; }
   });
   if (helper) context.OzonSellerCookieContext = { read: async (selectedTab, options) => {
     calls.push({ type: 'helper', tab: selectedTab, options });
@@ -42,7 +42,7 @@ function harness({ helper, cookies = [], pageCompanies = ['1001'], realHelper = 
     };
     vm.runInContext(fs.readFileSync('ozon-erp-collector-plugin/seller-cookie-context.js', 'utf8'), context);
   }
-  vm.runInContext(source.replace('})(globalThis);', 'global.__cookieAdapter = { getOzonCookieInfo, verifiedSellerStoreIdentity };\n})(globalThis);'), context);
+  vm.runInContext(source.replace('})(globalThis);', 'global.__cookieAdapter = { getOzonCookieInfo, verifiedSellerStoreIdentity, assertCollectStoreContext, getNextCollectRequests, waitForSellerAuthContext, proof(tabId, observed, company, age = 0, ok = true) { latestContextHeadersByTab.set(tabId, { "x-o3-company-id": observed, updated_at: Date.now() - age }); latestAnalyticsTableByTab.set(tabId, { company_id: company, ok, updated_at: Date.now() - age }); } };\n})(globalThis);'), context);
   return { calls, adapter: context.__cookieAdapter };
 }
 
@@ -127,4 +127,50 @@ test('real generated analytics and shared helper preserve conflicting unpartitio
   const identity = await h.adapter.verifiedSellerStoreIdentity(tab, '1001');
   assert.equal(identity.ok, false);
   assert.equal(identity.code, 'identity_conflict');
+});
+
+
+test('missing extension cookies permit queue claim and store guards only with fresh same-tab browser proof', async () => {
+  const h = harness({ helper: async () => ({ cookies: [], companyId: '', code: 'COOKIE_STORE_UNAVAILABLE' }) });
+  assert.equal((await h.adapter.verifiedSellerStoreIdentity(tab, '1001')).ok, false);
+  h.adapter.proof(tab.id, '1001', '1001');
+  const identity = await h.adapter.verifiedSellerStoreIdentity(tab, '1001');
+  assert.equal(identity.ok, true);
+  assert.equal(identity.auth_mode, 'browser_only');
+  assert.equal(await h.adapter.assertCollectStoreContext('1001', tab), '1001');
+  const requests = await h.adapter.getNextCollectRequests(tab);
+  assert.equal(requests[0].request_id, 'fixture-request');
+  const claim = h.calls.find(x => x.type === 'fetch' && x.url.includes('collect-runs/next'));
+  assert.equal(new URL(claim.url).searchParams.get('store_id'), '1001');
+  assert.ok(!h.calls.some(x => x.type === 'fetch' && /auth-probe|auth-bindings/.test(x.url)));
+  const prepare = await h.adapter.waitForSellerAuthContext(tab, { store_id: '1001' }, 100);
+  assert.equal(prepare.success, true);
+  assert.equal(prepare.warning, 'BROWSER_COLLECT_ONLY');
+  const auth = await h.adapter.waitForSellerAuthContext(tab, { store_id: '1001', bind_auth_only: true }, 100);
+  assert.equal(auth.success, false);
+  assert.equal(auth.error, 'SERVER_AUTH_COOKIE_UNAVAILABLE');
+});
+
+test('browser proof cannot hide conflicts, stale evidence, failed requests, or another tab', async () => {
+  const missing = async () => ({ cookies: [], companyId: '', code: 'COOKIE_COMPANY_ID_MISSING' });
+  for (const proof of [
+    [tab.id, '1001', '1001', 61000],
+    [tab.id, '1001', '1001', 0, false],
+    [tab.id + 1, '1001', '1001'],
+    [tab.id, '', '1001'],
+    [tab.id, '1001', 'other'],
+    [tab.id, 'other', 'other']
+  ]) {
+    const h = harness({ helper: missing }); h.adapter.proof(...proof);
+    assert.equal((await h.adapter.verifiedSellerStoreIdentity(tab, '1001')).ok, false);
+  }
+  const switched = harness({ helper: missing }); switched.adapter.proof(tab.id, '1001', '1001');
+  assert.equal((await switched.adapter.verifiedSellerStoreIdentity(tab, 'other')).code, 'store_mismatch');
+  await assert.rejects(switched.adapter.assertCollectStoreContext('other', tab));
+  const conflict = harness({ helper: async () => ({ cookies: [], companyId: '', code: 'STORE_CONTEXT_MISMATCH' }) });
+  conflict.adapter.proof(tab.id, '1001', '1001');
+  assert.equal((await conflict.adapter.verifiedSellerStoreIdentity(tab, '1001')).code, 'identity_conflict');
+  const changedPage = harness({ helper: missing, pageCompanies: ['1001', 'other'] });
+  changedPage.adapter.proof(tab.id, '1001', '1001');
+  assert.equal((await changedPage.adapter.verifiedSellerStoreIdentity(tab, '1001')).ok, false);
 });
