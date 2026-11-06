@@ -3576,7 +3576,7 @@ Paged current-enterprise actual purchase arrival batches with minimum-unit compo
   - `summary_only` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
   - `recent` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
   - `day_mode` (`string`, required): pending opts into purchase-day selection; absent preserves all-day legacy listing
-  - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the latest pending day matching status when day_mode=pending
+  - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the oldest pending day matching status when day_mode=pending; a selected completed date falls back to the oldest remaining date and resets page to 1
   - `start_date` (`string`, required): Optional inclusive Beijing purchase start day YYYY-MM-DD
   - `end_date` (`string`, required): Optional inclusive Beijing purchase end day YYYY-MM-DD
 - Responses:
