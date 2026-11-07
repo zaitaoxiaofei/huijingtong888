@@ -42,6 +42,17 @@ test('manual-only templates do not require hard-coded AI title or image nodes',(
   const draft=buildWorkflowDraft(definition,variants,{}, {},'manual-run');
   assert.equal(draft.template_payload.editable_payload.variants[1].primary_image,'https://example.test/two.png');
 });
+test('workflow drafts exclude unbound old product facts and nested commercial defaults',()=>{
+  const {definition,variants,outputs}=fixture();definition.deferCommercialInputs=true;
+  const old={dimensions:{length_cm:20,width_cm:10,height_cm:5,weight_g:200},logistics:{spec:'OLD-MODEL'},sku:'OLD-SKU',offer_id:'OLD-OFFER'};
+  const base={...old,editable_payload:{...old,variants:[{dynamic_attributes:{10400:{attribute_id:10400,value:'Limited lifetime warranty'},9048:{attribute_id:9048,value:'OLD-MODEL'}}}]}};
+  const draft=buildWorkflowDraft(definition,variants,outputs,base,'clean-run');
+  for(const target of [draft.template_payload,draft.template_payload.editable_payload])for(const key of Object.keys(old))assert.equal(target[key],undefined,key);
+  for(const row of draft.template_payload.editable_payload.variants){assert.equal(row.dynamic_attributes[10400],undefined);assert.equal(row.dynamic_attributes[9048],undefined);assert.equal(row.price,undefined);}
+  assert.equal(draft.sale_price,0);assert.equal(draft.weight_g,0);
+  assert.deepEqual(draft.template_payload.editable_payload.pending_listing_fields,['售价','包装重量','包装长','包装宽','包装高']);
+  assert.equal(base.editable_payload.variants[0].dynamic_attributes[10400].value,'Limited lifetime warranty');
+});
 test('bindings reject missing outputs, wrong types and invented dictionary choices',()=>{
   const {definition,variants,outputs}=fixture();
   definition.bindings.title.sources=[ref('a','image')];assert.throws(()=>validateWorkflow(definition),/类型/);

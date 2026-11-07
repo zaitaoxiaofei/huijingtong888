@@ -127,7 +127,7 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
       if(node.type==="approval"&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未人工确认`);
     }
     if(definition.bindings) {
-      const mapped=applyWorkflowBindings(definition,variant,result,baseTemplate.editable_payload?.variants?.[0]?.dynamic_attributes||{});
+      const mapped=applyWorkflowBindings(definition,variant,result);
       return {...mapped,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,images_manually_edited:true,image_edit_intent:'manual',workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
     }
     const images=imageNodes.map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
@@ -151,7 +151,7 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
   const editable=clone(baseTemplate.editable_payload||{});
   if(definition.bindings){
     // A category template may have been saved from a different SKU; only explicit bindings carry facts.
-    for(const target of [cleanBase,editable])for(const key of ['source_raw','sourceRaw','attributes','category_attributes','required_attributes','price','price_value','priceValue','sale_price','salePrice','cost_price','costPrice','old_price','oldPrice','min_price','minPrice','weight','weight_g','weightG','length_cm','width_cm','height_cm','length_mm','width_mm','height_mm','depth','width','height'])delete target[key];
+    for(const target of [cleanBase,editable])for(const key of ['source_raw','sourceRaw','attributes','category_attributes','required_attributes','dimensions','logistics','sku','offer_id','price','price_value','priceValue','sale_price','salePrice','cost_price','costPrice','old_price','oldPrice','min_price','minPrice','weight','weight_g','weightG','length_cm','width_cm','height_cm','length_mm','width_mm','height_mm','depth','width','height'])delete target[key];
     cleanBase.attributes=Object.values(rows[0].dynamic_attributes);
     editable.attributes=clone(cleanBase.attributes);
     if(definition.deferCommercialInputs)editable.pending_listing_fields=['售价','包装重量','包装长','包装宽','包装高'];
