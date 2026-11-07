@@ -5,7 +5,7 @@ import {useAuthStore} from '../../stores/auth.js';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
 import {hasPermission} from '../../../../src/shared/permissions.js';
 const Editor=defineAsyncComponent(()=>import('./ProductCreateEditDialog.vue'));
-const props=defineProps({productId:{type:Number,required:true}}),emit=defineEmits(['saved']);
+const props=defineProps({productId:{type:Number,required:true},mobile:Boolean}),emit=defineEmits(['saved']);
 const auth=useAuthStore(),canEdit=computed(()=>hasPermission(auth.user,'inventory.write'));
 const visible=ref(false),busy=ref(false),product=ref(null),editor=ref(null),quick=ref(false),role=ref('included');
 const options=reactive({people:[],suppliers:[],logistics:[]});let version=0,scope='';
@@ -25,6 +25,6 @@ async function addPart(value){const requestScope=scope,token=version;if(requestS
 </script>
 <template>
  <el-button v-if="canEdit" plain size="small" class="inventory-product-edit-action" :loading="busy" @click.stop="open">编辑库存</el-button>
- <Editor v-if="visible" ref="editor" v-model:visible="visible" mode="edit" target="inventory" :edit-product-id="productId" :value="product" :people="options.people" :suppliers="options.suppliers" :logistics-rules="options.logistics" @saved="saved" @quick-create-component="value=>{role=value.role==='gift'?'gift':'included';quick=true;}"/>
- <Editor v-if="quick" v-model:visible="quick" mode="create" target="inventory" :people="options.people" :suppliers="options.suppliers" :logistics-rules="options.logistics" :create-context="{is_accessory:1}" @saved="value=>addPart(value.product)" @existing-selected="addPart"/>
+ <Editor v-if="visible" ref="editor" v-model:visible="visible" mode="edit" target="inventory" :mobile="mobile" :edit-product-id="productId" :value="product" :people="options.people" :suppliers="options.suppliers" :logistics-rules="options.logistics" @saved="saved" @quick-create-component="value=>{role=value.role==='gift'?'gift':'included';quick=true;}"/>
+ <Editor v-if="quick" v-model:visible="quick" mode="create" target="inventory" :mobile="mobile" :people="options.people" :suppliers="options.suppliers" :logistics-rules="options.logistics" :create-context="{is_accessory:1}" @saved="value=>addPart(value.product)" @existing-selected="addPart"/>
 </template>

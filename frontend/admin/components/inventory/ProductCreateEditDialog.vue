@@ -2,7 +2,7 @@
 import { normalizeVehicleBrand, vehicleBrandAliases } from "../../../../src/shared/vehicle-brand.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElDialog, ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { invalidateInventoryNamingOptions, invalidateInventoryVehicleCatalog, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
@@ -13,9 +13,12 @@ import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/i
 import { useAuthStore } from "../../stores/auth";
 import { useRouter } from "vue-router";
 import ProductImagePreview from "../ProductImagePreview.vue";
+import MobileDialog from "../mobile/MobileDialog.vue";
+import InventoryProductHistoryAction from "./InventoryProductHistoryAction.vue";
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
+  mobile: Boolean,
   mode: { type: String, default: "create" },
   target: { type: String, default: "selection" },
   people: { type: Array, default: () => [] },
@@ -1620,28 +1623,35 @@ function submitAndCreateDraft() {
 </script>
 
 <template>
-  <el-dialog
+  <component :is="mobile ? MobileDialog : ElDialog"
     :model-value="visible"
     :title="dialogTitle"
     width="min(1880px, 99vw)"
-    align-center
+    :align-center="!mobile"
     append-to-body
     destroy-on-close
     class="selection-form-dialog erp-centered-dialog"
+    :class="{'selection-form-dialog--mobile':mobile}"
+    :show-close="!mobile || !submitting"
+    :close-on-click-modal="mobile ? false : undefined"
+    :close-on-press-escape="!mobile || !submitting"
+    :before-close="done => { if (!mobile || !submitting) done(); }"
     @closed="formRef?.clearValidate?.()"
     @update:model-value="emit('update:visible', $event)"
   >
     <template #header>
       <div class="inventory-dialog-header">
         <strong>{{ dialogTitle }}</strong>
-        <div class="inventory-dialog-header__actions">
+        <div v-if="!mobile" class="inventory-dialog-header__actions">
+          <InventoryProductHistoryAction v-if="isInventoryTarget && isEditMode" :product-id="Number(editProductId || value?.id)"/>
           <el-tooltip content="关闭弹窗，不保存本次修改" placement="bottom"><el-button class="erp-btn erp-btn-secondary" :disabled="submitting" @click="closeDialog">取消</el-button></el-tooltip>
           <el-tooltip v-if="inventoryRequest?.action !== 'view'" :content="newNamingValues.length || inventoryRequest ? '新名称随完整建品信息提交审核，通过后自动创建库存' : '仅保存库存商品，暂不创建上架草稿'" placement="bottom"><el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting && !creatingDraft" :disabled="submitting" @click="submitDialog">{{ saveButtonText }}</el-button></el-tooltip>
           <el-tooltip v-if="isInventoryTarget && !inventoryRequest" content="保存库存商品并创建关联的上架草稿；如已有相同库存，可直接选用" placement="bottom"><el-button class="erp-btn" type="success" :loading="creatingDraft" :disabled="(submitting && !creatingDraft) || newNamingValues.length > 0" @click="submitAndCreateDraft">建草稿</el-button></el-tooltip>
         </div>
       </div>
     </template>
-    <el-form ref="formRef" :model="form" :rules="formRules" :disabled="inventoryRequest?.action === 'view'" label-width="96px">
+    <p v-if="mobile && isEditMode" class="mobile-inventory-edit-help">此处编辑名称、规格等库存资料；实物盘点、确认到货和验收入库请使用对应入口。</p>
+    <el-form ref="formRef" :model="form" :rules="formRules" :disabled="inventoryRequest?.action === 'view'" :label-width="mobile ? 'auto' : '96px'" :label-position="mobile ? 'top' : 'right'">
       <div class="selection-workbench has-similar-products">
         <div class="selection-workbench-main">
           <div class="form-section standard-naming-section">
@@ -2166,7 +2176,12 @@ function submitAndCreateDraft() {
       </div>
     </el-form>
 
-  </el-dialog>
+    <template v-if="mobile" #footer>
+      <InventoryProductHistoryAction v-if="isInventoryTarget && isEditMode" :product-id="Number(editProductId || value?.id)" mobile/>
+      <el-button :disabled="submitting" @click="closeDialog">取消</el-button>
+      <el-button v-if="inventoryRequest?.action !== 'view'" type="primary" :loading="submitting" :disabled="submitting" @click="submitDialog">{{ saveButtonText }}</el-button>
+    </template>
+  </component>
 </template>
 
 <style scoped>
@@ -2881,4 +2896,33 @@ function submitAndCreateDraft() {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* MobileDialog owns the fixed header/footer and the one scrolling form region. */
+:global(.selection-form-dialog--mobile .inventory-dialog-header) { min-width: 0; padding-right: 0; }
+:global(.selection-form-dialog--mobile .inventory-dialog-header > strong) { font-size: 16px; overflow-wrap: anywhere; }
+:global(.selection-form-dialog--mobile .mobile-inventory-edit-help) { margin: 0 0 12px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary); }
+:global(.selection-form-dialog--mobile .naming-step-heading) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+:global(.selection-form-dialog--mobile .selection-workbench),
+:global(.selection-form-dialog--mobile .selection-workbench-main),
+:global(.selection-form-dialog--mobile .naming-workspace),
+:global(.selection-form-dialog--mobile .component-quick-search),
+:global(.selection-form-dialog--mobile .naming-quantity-row),
+:global(.selection-form-dialog--mobile .color-editor) { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+:global(.selection-form-dialog--mobile .el-row) { display: grid; grid-template-columns: minmax(0, 1fr); margin-left: 0 !important; margin-right: 0 !important; gap: 12px; }
+:global(.selection-form-dialog--mobile .el-col) { grid-column: 1 / -1; width: 100%; max-width: 100%; padding: 0 !important; }
+:global(.selection-form-dialog--mobile .el-form-item),
+:global(.selection-form-dialog--mobile .el-form-item__content),
+:global(.selection-form-dialog--mobile .el-select),
+:global(.selection-form-dialog--mobile .el-input),
+:global(.selection-form-dialog--mobile .form-section) { min-width: 0; max-width: 100%; }
+:global(.selection-form-dialog--mobile .form-section) { padding: 12px; }
+:global(.selection-form-dialog--mobile .el-input__inner),
+:global(.selection-form-dialog--mobile .el-select__placeholder),
+:global(.selection-form-dialog--mobile .el-textarea__inner) { font-size: 16px; }
+:global(.selection-form-dialog--mobile .similar-products-panel) { position: static; max-height: none; overflow: visible; }
+:global(.selection-form-dialog--mobile .core-name-review-head),
+:global(.selection-form-dialog--mobile .core-name-review-item),
+:global(.selection-form-dialog--mobile .component-result-picker) { flex-wrap: wrap; }
+:global(.selection-form-dialog--mobile .core-name-review-list) { grid-template-columns: minmax(0, 1fr); }
+:global(.selection-form-dialog--mobile .selection-preview-row) { grid-template-columns: minmax(0, 1fr); }
 </style>

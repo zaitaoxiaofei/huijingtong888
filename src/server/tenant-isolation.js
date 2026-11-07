@@ -133,6 +133,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "GET") return { allowed: true };
+  if(parts[1]==='products'&&/^\d+$/.test(String(parts[2]||''))&&parts.length===4&&parts[3]==='edit-history'&&verb==='GET')return{allowed:true};
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 4 && parts[3] === "components" && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && parts[2] === "hidden" && parts.length === 3 && verb === "GET") return { allowed: true };
   const tenantProductImageRead = parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && verb === "GET"
