@@ -14,7 +14,7 @@ test("pending core-name applications are restricted to the naming maintainer", (
 });
 
 test("inventory product dialog exposes approve and reject actions to the maintainer", () => {
-  assert.match(dialog, /v-if="canMaintainNamingOptions" class="core-name-review-panel"/);
+  assert.match(dialog, /v-if="canMaintainNamingOptions"[^>]*class="core-name-review-panel"/);
   assert.match(dialog, /核心品名审批/);
   assert.match(dialog, /approveCoreName\(item\)/);
   assert.match(dialog, /rejectCoreName\(item\)/);
