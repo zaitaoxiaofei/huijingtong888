@@ -1,4 +1,3 @@
-import { normalizeAdvertisingBid, executeAdvertisingBid } from "./ozon-advertising-bid.js";
 import { advertisingTenantScope, advertisingTenantSql, advertisingShopSql, assertAdvertisingShop, isAdvertisingBusinessRequest } from './advertising-tenant-context.js';
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { logScheduledJobEvent } from "./scheduled-jobs.js";
@@ -541,31 +540,30 @@ export async function advertisingDailySummaryMysql(query = {}) {
   const scope = await advertisingTenantScope();
   await ensureAdDailySchema();
   const { sql, params, from, to } = buildAdDailyWhere(query, scope);
-  // Aggregate the whole filtered period in SQL; list pagination must never change KPIs.
-  const settled = "ad.source <> 'ozon_performance_pending'";
-  const sums = ["spend_rub", "spend_cny", "impressions", "clicks", "add_to_cart", "orders", "units", "revenue_rub", "revenue_cny"]
-    .map((field) => `COALESCE(SUM(CASE WHEN ${settled} THEN ad.${field} ELSE 0 END), 0) AS ${field}`)
-    .join(",\n      ");
   const rows = await mysqlQuery(`
     SELECT
-      ad.shop_id,
-      MAX(s.name) AS shop_name,
-      COUNT(DISTINCT CASE WHEN ${settled} THEN ad.shop_id END) AS shop_count,
-      COUNT(DISTINCT CASE WHEN ${settled} THEN ad.ozon_sku END) AS sku_count,
-      COUNT(DISTINCT CASE WHEN ${settled} THEN NULLIF(ad.campaign_id, '') END) AS campaign_count,
-      ${sums},
-      COALESCE(MAX(CASE WHEN ${settled} THEN ad.add_to_cart_available ELSE 0 END), 0) AS add_to_cart_available,
-      COUNT(*) AS row_count,
-      SUM(CASE WHEN ${settled} THEN 1 ELSE 0 END) AS settled_rows,
-      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows
+      COUNT(DISTINCT ad.shop_id) AS shop_count,
+      COUNT(DISTINCT ad.ozon_sku) AS sku_count,
+      COUNT(DISTINCT NULLIF(ad.campaign_id, '')) AS campaign_count,
+      COALESCE(SUM(ad.spend_rub), 0) AS spend_rub,
+      COALESCE(SUM(ad.spend_cny), 0) AS spend_cny,
+      COALESCE(SUM(ad.impressions), 0) AS impressions,
+      COALESCE(SUM(ad.clicks), 0) AS clicks,
+      COALESCE(SUM(ad.add_to_cart), 0) AS add_to_cart,
+      COALESCE(MAX(ad.add_to_cart_available), 0) AS add_to_cart_available,
+      COALESCE(SUM(ad.orders), 0) AS orders,
+      COALESCE(SUM(ad.units), 0) AS units,
+      COALESCE(SUM(ad.revenue_rub), 0) AS revenue_rub,
+      COALESCE(SUM(ad.revenue_cny), 0) AS revenue_cny,
+      SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) AS pending_rows,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS data_pending,
+      CASE WHEN SUM(CASE WHEN ad.source = 'ozon_performance_pending' THEN 1 ELSE 0 END) > 0 THEN 'ozon_report_not_ready' ELSE '' END AS data_pending_reason
     FROM ozon_ad_sku_daily ad
     JOIN shops s ON s.id = ad.shop_id
     ${sql}
-    GROUP BY ad.shop_id WITH ROLLUP
   `, params);
   return {
-    ...rowMetrics(rows.find((row) => row.shop_id == null) || {}),
-    shops: rows.filter((row) => row.shop_id != null).map(rowMetrics),
+    ...rowMetrics(rows?.[0] || {}),
     from,
     to,
     metricBasis: advertisingMetricBasis()
@@ -1459,40 +1457,61 @@ export async function updateAdvertisingCampaignProductSettingMysql(body = {}, op
   await ensureAdDailySchema();
   const shop = await resolvePerformanceShop(body);
   options = { ...options, shop_id: shop.id };
-  const setting = normalizeAdvertisingBid(body);
-  const { campaignId, sku, mode, value } = setting;
-  options.beforeRequest = async () => {
-    const current = await resolvePerformanceShop({ shop_id: shop.id });
-    if (String(current.performance_client_id) !== String(shop.performance_client_id)
-      || String(current.performance_client_secret) !== String(shop.performance_client_secret)) {
-      throw new Error("广告授权在调价期间发生变化，请重新同步广告后再操作");
-    }
-  };
+  const campaignId = String(body.campaign_id || body.campaignId || "").trim();
+  const sku = String(body.ozon_sku || body.sku || "").trim();
+  const mode = String(body.mode || "").trim();
+  if (!campaignId || !sku) throw new Error("campaign_id 和 ozon_sku 不能为空");
+  if (!["bid", "targetCir"].includes(mode)) throw new Error("mode 只能是 bid 或 targetCir");
+
   const token = await fetchPerformanceToken({
     clientId: String(shop.performance_client_id || "").trim(),
     clientSecret: String(shop.performance_client_secret || "").trim()
   }, options);
-  const outcome = await executeAdvertisingBid(setting, (path, payload, method) => performanceRequest(path, payload, { ...options, token, method }));
-  const identity = { shop_id: shop.id, campaign_id: campaignId, ozon_sku: sku, mode, value };
-  if (!outcome.ok) return { ...identity, ...outcome };
+  const value = mode === "bid" ? toNumber(body.bid_rub || body.bidRub) : toNumber(body.target_cir || body.targetCir);
+  if (value <= 0) throw new Error(mode === "bid" ? "点击出价必须大于 0" : "目标广告费用份额必须大于 0");
+
+  const product = mode === "bid"
+    ? { sku, bid: String(Math.round(value * 1000000)) }
+    : { sku, targetCir: value };
+  const payload = { products: [product] };
+  let result;
+  try {
+    result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "PUT" });
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (!message.includes("HTTP 405")) throw error;
+    try {
+      result = await performanceRequest(`/api/client/campaign/${campaignId}/v2/products`, payload, { ...options, token, method: "POST" });
+    } catch (fallbackError) {
+      const fallbackMessage = String(fallbackError?.message || "");
+      if (fallbackMessage.includes("HTTP 405")) {
+        throw new Error(
+          mode === "targetCir"
+            ? "Ozon 当前不允许通过 API 修改这个广告活动的目标广告费用份额，请先到 Ozon 后台手动调整。"
+            : "Ozon 当前不允许通过 API 修改这个广告活动的点击出价，请先到 Ozon 后台手动调整。"
+        );
+      }
+      throw fallbackError;
+    }
+  }
 
   await assertAdvertisingShop(shop.id);
   const { from, to } = buildDateRange(body);
   if (mode === "bid") {
     await mysqlExecute(`
       UPDATE ozon_ad_sku_daily
-      SET campaign_bid_rub = ?, updated_at = CURRENT_TIMESTAMP
+      SET campaign_bid_rub = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
     `, [value, Number(shop.id), campaignId, sku, from, to]);
   } else {
     await mysqlExecute(`
       UPDATE ozon_ad_sku_daily
-      SET campaign_target_cir = ?, updated_at = CURRENT_TIMESTAMP
+      SET campaign_target_cir = ?, synced_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE shop_id = ? AND campaign_id = ? AND ozon_sku = ? AND date_key BETWEEN ? AND ?
     `, [value, Number(shop.id), campaignId, sku, from, to]);
   }
 
-  return { ...identity, ...outcome };
+  return { ok: true, shop_id: shop.id, campaign_id: campaignId, ozon_sku: sku, mode, value, result };
 }
 
 export async function applyAdvertisingCampaignProductSettingMysql(body = {}) {
@@ -2681,7 +2700,6 @@ function numericCandidates(value, depth = 0) {
 }
 
 async function performanceRequest(path, payload, options = {}) {
-  if (options.beforeRequest) await options.beforeRequest();
   if (options.shop_id) await assertAdvertisingShop(options.shop_id);
   else await advertisingTenantScope();
   const controller = new AbortController();
@@ -2714,7 +2732,6 @@ async function performanceRequest(path, payload, options = {}) {
     }
     if (options.shop_id) await assertAdvertisingShop(options.shop_id);
     else await advertisingTenantScope();
-    if (options.beforeRequest) await options.beforeRequest();
     return data;
   } catch (error) {
     if (error.name === "AbortError") throw new Error(`Performance API ${path} 请求超时`);

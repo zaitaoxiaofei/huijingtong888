@@ -12,10 +12,6 @@ export function orderInventoryAvailabilityIds(query = {}) {
 // remain owned by the full procurement reconciliation path.
 export async function loadOrderInventoryAvailability({ query, loadBalances }, request = {}, { tenantId = null, defaultTenantId } = {}) {
   const orderIds = orderInventoryAvailabilityIds(request);
-  const changedProductId = request.productId == null ? null : Number(request.productId);
-  if (changedProductId !== null && (!Number.isSafeInteger(changedProductId) || changedProductId <= 0)) {
-    throw Object.assign(new Error("库存商品 ID 无效"), { statusCode: 400 });
-  }
   const defaultTenant = Number(defaultTenantId);
   const tenant = tenantId == null ? null : Number(tenantId);
   if (!Number.isSafeInteger(defaultTenant) || defaultTenant <= 0
@@ -45,7 +41,7 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
   // several tenants. Null ownership is accepted only for the default legacy data.
   const owned = (alias) => `(${alias}.tenant_id = COALESCE(s.tenant_id, ${defaultTenant})
     OR (${alias}.tenant_id IS NULL AND COALESCE(s.tenant_id, ${defaultTenant}) = ${defaultTenant}))`;
-  const products = await query(`SELECT DISTINCT oi.order_id, child.id AS product_id, p.id AS root_product_id,
+  const products = await query(`SELECT DISTINCT oi.order_id, child.id AS product_id,
       COALESCE(s.tenant_id, ${defaultTenant}) AS tenant_id
     FROM order_items oi JOIN orders o ON o.id = oi.order_id
     JOIN shops s ON s.id = o.shop_id
@@ -64,12 +60,8 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
     JOIN products child ON child.id = CASE WHEN recipe.id IS NOT NULL THEN ri.product_id
       WHEN pc.component_product_id IS NOT NULL THEN pc.component_product_id ELSE p.id END
       AND child.active = 1 AND ${owned("child")}
-    WHERE oi.quantity > 0 AND oi.order_id IN (${placeholders})${scope}`, args);
+    WHERE oi.order_id IN (${placeholders})${scope}`, args);
   const productsByOrder = new Map(orderIds.map((id) => [id, new Set()]));
-  const affected = changedProductId === null ? new Set(orderIds) : new Set(products
-    .filter(row => Number(row.product_id) === changedProductId || Number(row.root_product_id) === changedProductId)
-    .map(row => Number(row.order_id)));
-  const affectedOrderIds = orderIds.filter(id => affected.has(id));
   const productsByTenant = new Map();
   for (const row of products) {
     const id = Number(row.order_id), productId = Number(row.product_id);
@@ -78,7 +70,6 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
       throw unavailable("订单库存关联无效，请刷新后重试");
     }
     productsByOrder.get(id).add(productId);
-    if (!affected.has(id)) continue;
     const actualTenant = tenantByOrder.get(id);
     if (!productsByTenant.has(actualTenant)) productsByTenant.set(actualTenant, new Set());
     productsByTenant.get(actualTenant).add(productId);
@@ -103,7 +94,7 @@ export async function loadOrderInventoryAvailability({ query, loadBalances }, re
     }
     factsByTenant.set(actualTenant, facts);
   }
-  return { rows: affectedOrderIds.map((id) => ({
+  return { rows: orderIds.map((id) => ({
     order_id: id,
     inventory_availability: [...productsByOrder.get(id)].sort((a, b) => a - b)
       .map((productId) => factsByTenant.get(tenantByOrder.get(id)).get(productId))

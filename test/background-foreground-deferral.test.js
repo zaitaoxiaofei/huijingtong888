@@ -33,7 +33,7 @@ test("critical background jobs cannot be starved indefinitely by foreground traf
   assert.match(serverSource, /FOREGROUND_DEFERRAL_BOUNDED_JOBS[\s\S]*"advertising_today_sync"/);
   assert.match(serverSource, /criticalJobForegroundDeferralExpired\(jobKey, context\)/);
   assert.match(serverSource, /Date\.now\(\) - plannedFor\.getTime\(\) >= maxDeferralMs/);
-  assert.match(serverSource, /beforeRun: \(\{ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig, createdAt \}\)/);
+  assert.match(serverSource, /beforeRun: \(\{ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig \}\)/);
   assert.match(serverSource, /foregroundApiDeferral\(jobKey, context\) \|\| databasePoolDeferral\(jobKey, context\)/);
 });
 

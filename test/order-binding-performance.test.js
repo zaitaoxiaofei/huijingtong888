@@ -18,8 +18,7 @@ test("combined binding performs outbound sync once and defers historical profit 
   const bindBlock = serviceSource.match(/export async function bindOnlineProductMysql[\s\S]*?\n}\n\nfunction scheduleBindingProfitRecalculationMysql/)?.[0] || "";
   assert.match(bindBlock, /saveSkuInventoryRecipeMysql\([\s\S]*syncOutbound: false/);
   assert.equal((bindBlock.match(/syncOutboundForOpenOrdersMysql\(/g) || []).length, 1);
-  assert.match(bindBlock, /new Set\(\[mappingId/);
-  assert.match(bindBlock, /scheduleBindingProfitRecalculationMysql\(id, normalizedTenantId, options\)/);
+  assert.match(bindBlock, /scheduleBindingProfitRecalculationMysql\(mappingId\)/);
   assert.doesNotMatch(bindBlock, /await recalculateOrderItemsForMappingMysql/);
 });
 

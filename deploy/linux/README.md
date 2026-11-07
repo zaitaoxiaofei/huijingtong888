@@ -94,42 +94,6 @@ npm run deploy:ecs:unix -- --version 2026.10.23-reviewed-material --reviewed-ai-
 
 普通发布若检查出素材结构／归属需要变更，或提供了人员身份迁移清单，会在备份、数据库变更和停服前拒绝，并保留原服务。只有明确安排维护窗口并传入 `-AllowServiceInterruption`／`--allow-service-interruption` 时，才执行原有停写流程：完整备份校验后停止旧主服务和旧候选，再次复核任务和清单，应用迁移、预热候选后切换。该开关允许维护窗口内中断服务，不是绕过清单、活跃任务检查或迁移鉴权。没有覆盖所有旧写入路径的业务写门禁时，不能让旧进程继续写入来伪装无停机迁移。代码回滚不等于数据库回滚，原记录继续保留在归属审阅元数据中。已完成历史的原员工后来停用，不会改变仍有完整证据的企业归属；未完成任务仍要求有效操作人。
 
-## 已审核的库存耗材
-
-礼盒、气泡袋、香薰片的耗材标志通过独立清单逐个产品审核，格式和回退方法见 [库存耗材迁移](../../docs/inventory-consumables-migration.md)。清单单独私有上传，不进入发布包：
-
-```powershell
-npm run deploy:ecs -- -Version 2026.11.05-consumables -ExpectedProductionCommit FULL_REVIEWED_PRODUCTION_SHA -ReviewedInventoryConsumablesManifest "C:\安全目录\reviewed-consumables.json"
-```
-
-```bash
-npm run deploy:ecs:unix -- --version 2026.11.05-consumables --expected-production-commit FULL_REVIEWED_PRODUCTION_SHA --reviewed-inventory-consumables-manifest /secure/reviewed-consumables.json
-```
-
-远端第 9 参数仍是预期生产提交，第 10 参数才是耗材清单；缺少前面可选参数时保留空占位。客户端和远端均在退出时清理随机临时文件，上传前即设为 `0600`。预期提交在取得原发布锁后核对，防止构建上传期间覆盖其他发布。
-
-在同一发布锁中先只读核对清单和增量结构；缺少 `products.is_consumable` 会进入现有数据库计划。只要提供耗材清单，即使列已存在，也先创建并校验现有 SQL 与私有 AI 结果配对备份并保护恢复点，再新增缺失的列。随后再次核对清单，将清单及产品前像保存在 `shared/maintenance/inventory-consumables/<version>-<UTC时间>-<PID>/` 私有目录中，事务只写审核产品的耗材标志，最后才预热候选和切换版本。没有清单时不会标记现有产品。
-
-耗材变更不要求广泛 `RunDatabaseMaintenance` 或停旧服务，不修改组件扣减、编号、SKU 绑定、已隐藏商品或已归档核心品名。备份、结构或前值核对失败均阻止候选启动与切换；代码回滚保留兼容的新列及已审核标记，需要撤销标记时另用明确的反向清单，不能恢复整库覆盖期间新增业务。
-
-## 已审核的三段库存编号
-
-编号 V2 使用冻结的「核心品名号-汽车品牌号-组内序号」，例如 `1-2-17`，不补零。完整产品前值、来源摘要、品名及品牌注册表、旧号别名和分组计数器必须先生成私有清单并审核。清单不进入发布包：
-
-```powershell
-npm run deploy:ecs -- -Version 2026.11.05-inventory-numbering -ExpectedProductionCommit FULL_REVIEWED_PRODUCTION_SHA -ReviewedInventoryNumberingManifest "C:\安全目录\reviewed-inventory-numbering.json" -AllowServiceInterruption
-```
-
-```bash
-npm run deploy:ecs:unix -- --version 2026.11.05-inventory-numbering --expected-production-commit FULL_REVIEWED_PRODUCTION_SHA --reviewed-inventory-numbering-manifest /secure/reviewed-inventory-numbering.json --allow-service-interruption
-```
-
-远端第 9 参数继续是预期生产提交，第 10 参数继续是耗材清单，第 11 参数才是编号清单；客户端保留空占位。编号清单使用随机临时路径，创建时即为 `0600`，客户端和远端退出均清理临时文件。没有显式维护开关会在任何上传或停服前拒绝。普通发布不传清单时，只能安装缺失的增量结构，不改产品编号、状态或发号触发器。
-
-同一发布锁内先在旧服务仍运行时只读核对完整来源与计划，再创建、验证并保护 SQL 与私有 AI 结果的配对恢复点；即使 V2 结构已经齐备也不能省略备份。缺失结构随后通过增量迁移补齐。临近候选启动时停止旧候选和主服务，再次只读核对清单，之后把清单、SHA-256、产品及原触发器前像和迁移报告保存在 `shared/maintenance/inventory-numbering/<version>-<UTC时间>-<PID>/` 私有目录中。迁移 CLI 使用本机 MySQL 管理员 socket，确认停写后安装迁移门禁触发器，并在同一事务内写入新号、别名、注册表、计数器及版本状态。
-
-停服前检查或备份失败保持原服务运行；停服后的前值检查失败恢复原服务且不改号。迁移失败只要存在 `before.json`，必须先执行 `--apply --writers-stopped --recover=/绝对私有路径/before.json` 并确认恢复报告，再允许旧代码重启。恢复读取数据库的实际版本状态：状态 1 恢复原 V1 触发器，状态 2 确保 V2 触发器并保留已提交的新号。恢复失败或报告无法确认时保持旧 writer 停止，必须先检查私有恢复点并恢复匹配触发器，不能直接重启服务。切换已提交后即使候选启动失败，代码回退仍保留 V2 数据和触发器，不自动恢复整库或旧号覆盖期间业务。
-
 ## 候选预热与失败回退
 
 普通兼容发布在主服务运行期间预热候选，完整的就绪和版本检查预算为 360 秒；不再使用上次首次素材迁移的 45 秒冷启动限制。安装、只读预检或候选预热失败时，只清理本次候选，不改 `current` 链接、不重启仍在服务的主进程。候选必须同时通过 `/api/ready` 与发布版本检查，之后才能切换链接和重启主进程。

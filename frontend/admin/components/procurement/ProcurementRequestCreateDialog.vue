@@ -1,21 +1,15 @@
 ﻿<script setup>
-import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import {PROCUREMENT_PRICE_REASONS,procurementPriceReason} from '../../../../src/shared/procurement-price-reason.js';
+import { computed, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import ProductImagePreview from "../ProductImagePreview.vue";
-import { apiClient, currentApiCacheScope } from "../../utils/api.js";
+import { apiClient } from "../../utils/api.js";
 import { useAuthStore } from "../../stores/auth.js";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   initialProductId: { type: [Number, String, null], default: null },
   lockProduct: { type: Boolean, default: false },
-  initialQuantity: { type: Number, default: 1 },
-  sourceOrderContext: { type: Object, default: () => ({}) },
-  sourceRequestIds: { type: Array, default: () => [] },
-  verifyingDemand: Boolean,
-  demandError: String,
-  initialProduct: { type: Object, default: () => null }
+  sourceOrderContext: { type: Object, default: () => ({}) }
 });
 
 const emit = defineEmits(["update:modelValue", "created"]);
@@ -24,8 +18,6 @@ const authStore = useAuthStore();
 const loading = ref(false);
 const submitting = ref(false);
 const productQuery = ref("");
-const productError=ref(''),formTouched=ref(false);
-let loadVersion=0,disposed=false;
 
 const state = reactive({
   products: [],
@@ -38,7 +30,7 @@ const form = reactive(createDefaultForm());
 const candidateProducts = computed(() => state.products.slice(0, 12));
 
 const selectedProduct = computed(() => state.products.find((row) => Number(row.id) === Number(form.product_id)) || null);
-const currentUserPersonId = computed(() => Number(authStore.user?.personId || authStore.user?.id || 0) || null);
+const currentUserPersonId = computed(() => Number(authStore.user?.id || 0) || null);
 const selectedProductEmptyText = computed(() => (
   props.lockProduct ? "正在加载当前库存商品，请稍候。" : "请先在左侧搜索并选择商品。"
 ));
@@ -54,15 +46,12 @@ function createDefaultForm() {
     source_type: "1688",
     supplier_id: "",
     purchase_url: "",
-    anomaly_reason: "",anomaly_note:"",
     note: ""
   };
 }
 
 function resetForm() {
-  formTouched.value=false;
   Object.assign(form, createDefaultForm());
-  if(Number.isSafeInteger(props.initialQuantity)&&props.initialQuantity>0)form.quantity=props.initialQuantity;
   if (props.lockProduct && props.initialProductId) form.product_id = Number(props.initialProductId);
   productQuery.value = "";
 }
@@ -90,53 +79,64 @@ function preferredPersonId() {
   return state.people[0]?.id || null;
 }
 
-function applyProductToForm(row, preserve=false) {
-  if(Number(form.product_id)!==Number(row.id)){form.anomaly_reason="";form.anomaly_note="";}
+function applyProductToForm(row) {
   form.product_id = row.id;
-  if(preserve&&formTouched.value)return;
-  if(!preserve||!form.person_id)form.person_id = preferredPersonId();
-  if(!preserve||!form.supplier_id)form.supplier_id = row.supplier_id || "";
-  if(!preserve||!form.purchase_url)form.purchase_url = row.purchase_url || "";
-  if(!preserve||!form.amount)form.amount = Number(row.purchase_cost || 0);
-  if(!preserve||!form.shipping_amount)form.shipping_amount = Number(row.domestic_shipping || 0);
+  form.person_id = preferredPersonId();
+  form.supplier_id = row.supplier_id || "";
+  form.purchase_url = row.purchase_url || "";
+  form.amount = Number(row.purchase_cost || 0);
+  form.shipping_amount = Number(row.domestic_shipping || 0);
 }
 
-function syncInitialProduct(preserve=false) {
+function syncInitialProduct() {
   if (!props.initialProductId) return;
   const matched = state.products.find((row) => Number(row.id) === Number(props.initialProductId));
   if (!matched) {
     if (props.lockProduct) form.product_id = Number(props.initialProductId);
     return;
   }
-  applyProductToForm(matched,preserve);
+  applyProductToForm(matched);
   productQuery.value = matched.name || matched.inventory_id || matched.code || "";
 }
 
-async function ensureInitialProductLoaded(isCurrent=()=>!disposed&&props.modelValue) {
-  const productId=Number(props.initialProductId||0);if(!productId)return;
-  const result=await apiClient.get(`/api/products/${productId}?includeDetails=0&includeOperations=0`);
-  if(!isCurrent())return;
-  const product=result?.data||result;
-  if(!product?.id)throw Error('当前库存商品未返回，请刷新后重新打开');
-  state.products=[product,...state.products.filter(row=>Number(row.id)!==productId)];
-  syncInitialProduct(true);
+async function ensureInitialProductLoaded() {
+  const productId = Number(props.initialProductId || 0);
+  if (!productId || state.products.some((row) => Number(row.id) === productId)) return;
+  try {
+    const result = await apiClient.get(`/api/products/${productId}`);
+    const product = result?.data || result;
+    if (product?.id) {
+      state.products = [product, ...state.products.filter((row) => Number(row.id) !== productId)];
+    }
+  } catch (error) {
+    if (!props.lockProduct) ElMessage.error(error.message || "加载采购商品失败");
+  }
 }
 
 async function ensureOptionsLoaded() {
-  const token=++loadVersion,scope=currentApiCacheScope(),id=props.initialProductId;
-  const isCurrent=()=>!disposed&&props.modelValue&&token===loadVersion&&id===props.initialProductId&&scope===currentApiCacheScope();
-  loading.value=true;productError.value='';submitting.value=false;
-  if(props.lockProduct&&props.initialProduct?.id)state.products=[{...props.initialProduct}];
-  form.person_id=currentUserPersonId.value;
-  const productTask=(async()=>{
-    if(props.lockProduct&&props.initialProductId){await ensureInitialProductLoaded(isCurrent);return;}
-    const products=await apiClient.get(productsQueryString());if(!isCurrent())return;
-    state.products=Array.isArray(products?.rows)?products.rows:[];
-    if(props.initialProductId)await ensureInitialProductLoaded(isCurrent);
-  })().catch(error=>{if(isCurrent())productError.value=error.message||'采购商品加载失败，请重新打开';}).finally(()=>{if(isCurrent())loading.value=false;});
-  const peopleTask=apiClient.get('/api/people').then(people=>{if(!isCurrent())return;state.people=(Array.isArray(people)?people:people.rows||[]).filter(item=>Number(item.active)!==0);if(!form.person_id||!state.people.some(p=>Number(p.id)===Number(form.person_id)))form.person_id=preferredPersonId();}).catch(error=>{if(isCurrent())ElMessage.error(error.message||'采购人加载失败');});
-  const supplierTask=apiClient.get('/api/suppliers?paged=1&page=1&pageSize=100').then(suppliers=>{if(isCurrent())state.suppliers=Array.isArray(suppliers?.rows)?suppliers.rows:[];}).catch(error=>{if(isCurrent())ElMessage.warning(error.message||'供应商暂未加载，可稍后重新打开');});
-  await Promise.allSettled([productTask,peopleTask,supplierTask]);
+  if (state.products.length && state.people.length) {
+    await ensureInitialProductLoaded();
+    syncInitialProduct();
+    return;
+  }
+  loading.value = true;
+  try {
+    const [products, people, suppliers] = await Promise.all([
+      apiClient.get(productsQueryString()),
+      apiClient.get("/api/people"),
+      apiClient.get("/api/suppliers?paged=1&page=1&pageSize=100")
+    ]);
+    state.products = Array.isArray(products?.rows) ? products.rows : [];
+    state.people = Array.isArray(people) ? people.filter((item) => Number(item.active) !== 0) : [];
+    state.suppliers = Array.isArray(suppliers?.rows) ? suppliers.rows : [];
+    form.person_id = preferredPersonId();
+    await ensureInitialProductLoaded();
+    syncInitialProduct();
+  } catch (error) {
+    ElMessage.error(error.message || "初始化采购表单失败");
+  } finally {
+    loading.value = false;
+  }
 }
 
 function productsQueryString() {
@@ -147,18 +147,20 @@ function productsQueryString() {
 }
 
 async function searchProducts() {
-  const token=++loadVersion,scope=currentApiCacheScope();
-  const isCurrent=()=>!disposed&&props.modelValue&&token===loadVersion&&scope===currentApiCacheScope();
-  loading.value=true;productError.value='';
-  try{const products=await apiClient.get(productsQueryString());if(!isCurrent())return;
-    state.products=Array.isArray(products?.rows)?products.rows:[];
-    if(props.initialProductId)await ensureInitialProductLoaded(isCurrent);
-  }catch(error){if(isCurrent())productError.value=error.message||'搜索商品失败';}
-  finally{if(isCurrent())loading.value=false;}
+  loading.value = true;
+  try {
+    const products = await apiClient.get(productsQueryString());
+    state.products = Array.isArray(products?.rows) ? products.rows : [];
+    await ensureInitialProductLoaded();
+    syncInitialProduct();
+  } catch (error) {
+    ElMessage.error(error.message || "搜索商品失败");
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function submit() {
-  if(submitting.value||loading.value||props.verifyingDemand||props.demandError||productError.value)return;
   if (!form.product_id) {
     ElMessage.warning("请先选择商品");
     return;
@@ -167,22 +169,16 @@ async function submit() {
     ElMessage.warning("请填写实际采购货款；提交即表示已经完成下单");
     return;
   }
-  if(form.anomaly_reason==='其他原因'&&!String(form.anomaly_note||'').trim())return ElMessage.warning('请选择其他原因的具体价格变动说明');
-  const scope=currentApiCacheScope(),token=loadVersion;
   submitting.value = true;
   try {
-    const requestIds=[...new Set(props.sourceRequestIds.map(Number).filter(id=>id>0))];
-    await apiClient.post(requestIds.length?"/api/procurement/purchase-orders/confirm-from-requests":"/api/procurement/purchases", {
-      ...(requestIds.length?{request_ids:requestIds}:{}),
+    await apiClient.post("/api/procurement/purchases", {
       person_id: Number(form.person_id || 0) || null,
       source_type: form.source_type,
       supplier_id: form.supplier_id || null,
       note: form.note,
       items: [{
         ...form,
-        anomaly_reason:procurementPriceReason(form),
         quantity: Number(form.quantity || 1),
-        actual_quantity: Number(form.quantity || 1),
         amount: Number(form.amount || 0),
         shipping_amount: Number(form.shipping_amount || 0),
         person_id: Number(form.person_id || 0) || null,
@@ -192,15 +188,14 @@ async function submit() {
         source_ozon_sku: props.sourceOrderContext?.ozonSku || null
       }]
     });
-    if(disposed||token!==loadVersion||scope!==currentApiCacheScope())return;
     ElMessage.success("采购已登记，商品已进入采购在途");
     emit("created");
     emit("update:modelValue", false);
     resetForm();
   } catch (error) {
-    if(!disposed&&token===loadVersion&&scope===currentApiCacheScope())ElMessage.error(error.payload?.validation?.message || error.message || "创建采购请求失败");
+    ElMessage.error(error.message || "创建采购请求失败");
   } finally {
-    if(token===loadVersion)submitting.value = false;
+    submitting.value = false;
   }
 }
 
@@ -208,13 +203,15 @@ watch(() => props.modelValue, async (visible) => {
   if (visible) {
     resetForm();
     await ensureOptionsLoaded();
-  }else{++loadVersion;loading.value=false;}
-}, { immediate:true });
+  }
+});
 
-watch(() => props.initialProductId, () => {if(props.modelValue)ensureOptionsLoaded();});
-function clearScope(){++loadVersion;state.products=[];state.people=[];state.suppliers=[];resetForm();emit('update:modelValue',false);}
-window.addEventListener('erp:auth-scope-changed',clearScope);
-onBeforeUnmount(()=>{disposed=true;++loadVersion;window.removeEventListener('erp:auth-scope-changed',clearScope);});
+watch(() => props.initialProductId, async () => {
+  if (props.modelValue) {
+    await ensureInitialProductLoaded();
+    syncInitialProduct();
+  }
+});
 
 watch(currentUserPersonId, () => {
   if (props.modelValue) {
@@ -234,8 +231,7 @@ watch(currentUserPersonId, () => {
     @update:model-value="emit('update:modelValue', $event)"
     @closed="resetForm"
   >
-    <el-alert v-if="verifyingDemand||demandError||productError" :type="demandError||productError?'warning':'info'" :closable="false" :title="demandError||productError||'正在核对最新采购需求，可先填写采购信息；核对通过后才能提交'"/>
-    <div class="proc-dialog" :class="{ 'proc-dialog-locked': lockProduct }">
+    <div v-loading="loading" class="proc-dialog" :class="{ 'proc-dialog-locked': lockProduct }">
       <div v-if="!lockProduct" class="proc-dialog-left">
         <div class="dialog-search-head">
           <strong>搜索商品</strong>
@@ -264,7 +260,7 @@ watch(currentUserPersonId, () => {
       </div>
 
       <div class="proc-dialog-right">
-        <div class="selected-product-card" v-loading="loading">
+        <div class="selected-product-card">
           <template v-if="selectedProduct">
             <div class="selected-product-main">
               <ProductImagePreview :src="productImage(selectedProduct)" size="square" />
@@ -293,7 +289,7 @@ watch(currentUserPersonId, () => {
           <span v-else class="muted-text">{{ selectedProductEmptyText }}</span>
         </div>
 
-        <el-form label-width="110px" @input="formTouched=true" @change="formTouched=true">
+        <el-form label-width="110px">
           <div v-if="lockProduct" class="dialog-search-head dialog-locked-head">
             <strong>当前采购商品已确定</strong>
             <span>订单页面已经带入目标商品，这里直接填写采购信息即可。</span>
@@ -330,7 +326,6 @@ watch(currentUserPersonId, () => {
                 </el-select>
               </el-form-item>
             </el-col>
-            <el-col :span="24"><el-form-item label="价格变动原因"><el-select v-model="form.anomaly_reason" clearable placeholder="涨价超10%时必填"><el-option v-for="reason in PROCUREMENT_PRICE_REASONS" :key="reason" :label="reason" :value="reason"/></el-select><el-input v-if="form.anomaly_reason==='其他原因'" v-model="form.anomaly_note" placeholder="请填写具体原因" maxlength="300"/></el-form-item></el-col>
             <el-col :span="12">
               <el-form-item label="货款总额">
                 <el-input-number v-model="form.amount" :min="0" :precision="2" :step="1" controls-position="right" />
@@ -366,7 +361,7 @@ watch(currentUserPersonId, () => {
     <template #footer>
       <div class="erp-dialog-footer">
         <el-button class="erp-btn erp-btn-secondary" @click="emit('update:modelValue', false)">取消</el-button>
-        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" :disabled="loading||verifyingDemand||!!demandError||!!productError" @click="submit">确认已下单并进入在途</el-button>
+        <el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting" @click="submit">确认已下单并进入在途</el-button>
       </div>
     </template>
   </el-dialog>

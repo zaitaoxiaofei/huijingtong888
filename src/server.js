@@ -1,9 +1,3 @@
-import { createOzonHealthRoutes } from './server/routes/ozonHealth.js';
-import { checkTenantOzonHealth } from './services/ozon-credential-health-mysql.js';
-import { withMysqlWorkload } from "./mysql-workload.js";
-import {createMobileDashboardHandler} from './server/routes/mobileDashboard.js';
-import { ORDER_SPLIT_SCHEMA } from "./services/order-split-schema.js";
-import { createFbpSupplyFeedback } from './services/fbp-supply-feedback.js';
 import { hasPermission, isPlatformAdmin } from "./shared/permissions.js";
 import http from "node:http";
 import { Buffer } from "node:buffer";
@@ -19,7 +13,7 @@ import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
 import { listOrderProfitDailyFx } from "./services/order-profit-daily-fx.js";
 import { createExchangeRateToolRoutes } from "./server/routes/exchangeRateTool.js";
 import { ORDER_PROFIT_DAILY_FX_JOB, runOrderProfitDailyFxArchive } from "./services/order-profit-daily-fx-job.js";
-import { backfillInventoryAlertSalesMysql, orderRowsByIdsMysql } from "./services/mysql-cutover.js";
+import { backfillInventoryAlertSalesMysql } from "./services/mysql-cutover.js";
 import { readForm, readJson, isRequestCancelledError } from "./http/request.js";
 import { clearCookie, html, json, notFound, setCookie, text, writeHead } from "./http/response.js";
 import { createStaticHandler } from "./http/static.js";
@@ -31,8 +25,6 @@ import { tenantPluginApiError } from "./server/local-plugin-tenant.js";
 import { pluginTokenTenantIdFromRequest, tenantIdFromRequest } from "./server/tenant-context.js";
 import { createApiDocumentation, renderApiDocumentationMarkdown } from "./server/api-docs.js";
 import { createCatalogRoutes, handleCatalogRestRoute } from "./server/routes/catalog.js";
-import { createInventoryFlowRoutes } from "./server/routes/inventoryFlow.js";
-import { syncInventoryFlowStocksMysql, prepareInventoryFlowMysql } from "./services/mysql-cutover.js";
 import { createOrderRoutes, handleOrderRestRoute } from "./server/routes/orders.js";
 import { createOglDispatchRoutes, handleOglDispatchFileRoute } from "./server/routes/ogl-dispatch.js";
 import { createOglDispatchService } from "./services/ogl-dispatch.js";
@@ -48,7 +40,6 @@ import { withAdvertisingTenant } from "./services/advertising-tenant-context.js"
 import { runCustomerMessageTenantScheduledOperation } from "./services/customer-message-tenant-scope.js";
 import { createFinanceCenterRoutes, handleFinanceCenterRestRoute } from "./server/routes/financeCenter.js";
 import { createPayrollRoutes } from "./server/routes/payroll.js";
-import { createFinanceSubmissionRoutes, handleFinanceSubmissionDownload } from "./server/routes/financeSubmissions.js";
 import { createSellerAnalyticsRoutes, handleSellerAnalyticsRestRoute } from "./server/routes/sellerAnalytics.js";
 import { createOzonActionRoutes } from "./server/routes/ozonActions.js";
 import { createSyncRoutes } from "./server/routes/sync.js";
@@ -60,19 +51,13 @@ import { cleanupAiGenerationTaskHistory } from "./services/ai-generation-tasks.j
 import { createAiMediaRetentionSweep } from "./services/ai-media-retention.js";
 import { ossStorageConfig } from "./services/object-storage.js";
 import { cleanupTransportedOrderLabelCache } from "./services/order-label-cache-cleanup.js";
-import { cleanupCollectorHistory } from "./services/collector-history-retention.js";
 import { cleanupListingPublishHistory } from "./services/listing-publish-history-cleanup.js";
 import { collectSkusWithSellerPool, collectorSellerPoolStatus } from "./services/collector-seller-pool.js";
-import { CollectorBrowserPool } from "./services/collector-browser-pool.js";
-import { resolveCollectorBrowserShop } from "./services/collector-browser-pool-access.js";
-import { createCollectorBrowserPoolHandler } from "./server/collector-browser-pool-route.js";
 import { createAiPromptTemplateRoutes, handleAiPromptTemplateRestRoute } from "./server/routes/aiPromptTemplates.js";
 import { createAiStrategyRoutes, handleAiStrategyRestRoute } from "./server/routes/aiStrategies.js";
 import { createMaterialAssetRoutes, handleMaterialAssetRestRoute } from "./server/routes/materialAssets.js";
 import { createAiImageRoutes, handleAiImageRestRoute } from "./server/routes/aiImageRoutes.js";
 import { createAiVariantLabRoutes, handleAiVariantLabRestRoute } from "./server/routes/aiVariantLab.js";
-import { createProductWorkflowRoutes } from "./server/routes/productWorkflows.js";
-import { startProductWorkflowRunner } from './services/product-workflow-runner.js';
 import { handleAiCreditRoute } from "./server/routes/aiCredits.js";
 import { getAiTaskFile } from "./server/services/ai/aiWorkflowService.js";
 import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/routes/tools/imageCropper.js";
@@ -137,7 +122,6 @@ const orderProfitDailyFxDb = { query: mysqlQuery };
 const oglDispatch = createOglDispatchService({
   transaction: withMysqlTransaction,
   api: oglCarriageClient,
-  loadOrderRows: (ids, tenantId) => orderRowsByIdsMysql(ids, null, String(tenantId)),
   syncPostings: (session, shopId, postingNumbers) => services.syncOzonPostingsByNumber({
     shop_id: shopId, posting_numbers: postingNumbers
   }, { session, tenantId: tenantIdFromRequest({ _session: session }), [OGL_DISPATCH_REFRESH]: true })
@@ -184,10 +168,6 @@ async function resolveDownloadArtifactPath(filename) {
     const error = new Error("Missing download filename");
     error.statusCode = 400;
     throw error;
-  }
-  const pluginRelease = globalUpdateStatus().plugin;
-  if (pluginRelease.unified === true && ["ozon-baodan-erp-plugin.zip", "ozon-erp-collector-plugin.zip", "ozon-seller-analytics-plugin.zip"].includes(normalized)) {
-    return resolveDownloadArtifactPath(pluginRelease.package_name);
   }
   const aliasNames = normalized === "ozon-erp-collector-plugin.zip"
     ? ["ozon-erp-collector-plugin.zip", "ozon-baodan-erp-plugin.zip"]
@@ -250,14 +230,12 @@ async function resolveDownloadArtifactPath(filename) {
 
 const routeModules = {
   ...createCatalogRoutes({ services, readJson }),
-  ...createOzonHealthRoutes({ readJson }),
   ...createOperationsRoutes({ services, readJson }),
   ...createTeamRoutes({ services, readJson }),
   ...createProfitRoutes({ services, readJson }),
   ...createAdvertisingRoutes({ services, readJson }),
   ...createFinanceCenterRoutes({ readJson, services }),
   ...createPayrollRoutes({ readJson }),
-  ...createFinanceSubmissionRoutes({ readJson }),
   ...createSellerAnalyticsRoutes({ services, readJson }),
   ...createOzonActionRoutes({ services, readJson }),
   ...createReviewRoutes({ services, readJson }),
@@ -273,7 +251,6 @@ const routeModules = {
   ...createMaterialAssetRoutes({ services, readJson }),
   ...createAiImageRoutes({ readJson }),
   ...createAiVariantLabRoutes({ services, readJson }),
-  ...createProductWorkflowRoutes({ services, readJson }),
   ...createImageCropperRoutes({ readJson }),
   ...createOnboardingKnowledgeRoutes({ readJson }),
   ...createSystemNotificationRoutes({ services }),
@@ -403,11 +380,7 @@ const routes = {
     const body = await readJson(req);
     return withAiTenantSession(req._session, () => services.chatWithAiProvider(body));
   },
-  "GET /api/dashboard": async (req) => {
-    if (['mobile','mobile-finance'].includes(req.query?.view)) return createMobileDashboardHandler({dashboard:services.dashboard,finance:services.mobileDashboardFinance})(req);
-    const payload = await services.dashboard(req.query || {}, tenantIdFromRequest(req));
-    return dashboardForSession(payload, req._session);
-  },
+  "GET /api/dashboard": async (req) => dashboardForSession(await services.dashboard(req.query || {}, tenantIdFromRequest(req)), req._session),
   "GET /api/scheduled-jobs": (req) => listScheduledJobs(req.query || {}),
   "GET /api/scheduled-job-runs": (req) => scheduledJobRuns(req.query || {}),
   "GET /api/scheduled-job-run-events": (req) => scheduledJobRunEvents(req.query || {}),
@@ -422,7 +395,6 @@ const routes = {
   "GET /api/exchange-rates/daily-archive": (req) => listOrderProfitDailyFx(orderProfitDailyFxDb, req.query || {}),
   ...createExchangeRateToolRoutes({ db: orderProfitDailyFxDb }),
   "GET /api/inventory": (req) => services.inventory(req.query || {}, tenantIdFromRequest(req)),
-  ...createInventoryFlowRoutes({ readJson, syncStocks: syncInventoryFlowStocksMysql, prepare: prepareInventoryFlowMysql }),
   "GET /api/inventory/availability": (req) => services.productInventoryAvailability(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/stock-alerts": (req) => services.stockAlerts(req.query || {}, tenantIdFromRequest(req)),
   "GET /api/fbp-opportunities": (req) => services.fbpOpportunities(req.query || {}, tenantIdFromRequest(req), { session: req._session }),
@@ -453,11 +425,7 @@ const routes = {
   "POST /api/fbp-replenishment-orders/inventory-allocation": async (req) => services.saveFbpReplenishmentInventoryAllocation(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/barcode-printed": async (req) => services.markFbpReplenishmentItemBarcodePrinted(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-replenishment-orders/items/delete": async (req) => services.deleteFbpReplenishmentOrderItem(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
-  "POST /api/fbp-replenishment-orders/status": async req=>{
-    const feedback=createFbpSupplyFeedback(req._session);
-    const result=await services.updateFbpReplenishmentOrderStatus(await readJson(req),req._session?.personId,tenantIdFromRequest(req),{afterSubmit:feedback.afterSubmit});
-    return{...result,feedback:feedback.committed()};
-  },
+  "POST /api/fbp-replenishment-orders/status": async (req) => services.updateFbpReplenishmentOrderStatus(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records": async (req) => services.createFbpTransferRecord(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records/confirm-received": async (req) => services.confirmFbpTransferReceived(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
   "POST /api/fbp-transfer-records/pdf-preview": async (req) => services.previewFbpSupplyPdf(await readJson(req), req._session),
@@ -477,7 +445,7 @@ function logSlowApiRequest({ req, res, url, startedAt }) {
   const query = url.search || "";
   const pool = getMysqlPoolMetrics();
   const memory = process.memoryUsage();
-  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms db_active=${pool.activeConnections}/${pool.connectionLimit} db_foreground=${pool.foregroundActive}/${pool.workloadLimits.foreground} db_background=${pool.backgroundActive}/${pool.workloadLimits.background} db_wait=${pool.lastAcquireWaitMs.toFixed(1)}ms rss_mb=${(memory.rss / 1024 / 1024).toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)}`;
+  const message = `[api-performance] ${req.method} ${url.pathname}${query} status=${status} elapsed=${elapsedMs}ms db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait=${pool.lastAcquireWaitMs.toFixed(1)}ms rss_mb=${(memory.rss / 1024 / 1024).toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)}`;
   console[level](message);
   if (req._timingMarks?.length) {
     const segments = [];
@@ -570,7 +538,7 @@ function withForegroundApiDeferral(jobKey, handler) {
       console.log(`background job ${jobKey} deferred: ${deferred.reason}`);
       return deferred;
     }
-    return withMysqlWorkload('background', () => handler(context));
+    return handler(context);
   };
 }
 
@@ -627,14 +595,13 @@ setInterval(() => {
   const poolPressure = pool.activeConnections >= Math.max(1, pool.connectionLimit - 1);
   const newSlowAcquisitions = pool.slowAcquisitions > lastReportedSlowAcquisitions;
   if (eventLoopLagMs >= 200 || rssMb >= 512 || poolPressure || newSlowAcquisitions) {
-    console.warn(`[runtime-health] event_loop_lag=${eventLoopLagMs}ms rss_mb=${rssMb.toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)} db_active=${pool.activeConnections}/${pool.connectionLimit} db_foreground=${pool.foregroundActive}/${pool.workloadLimits.foreground} db_background=${pool.backgroundActive}/${pool.workloadLimits.background} db_wait_avg=${pool.averageAcquireWaitMs.toFixed(1)}ms db_wait_slow=${pool.slowAcquisitions} foreground=${activeForegroundApiRequests} module_lanes=${backgroundModuleLaneStatus()}`);
+    console.warn(`[runtime-health] event_loop_lag=${eventLoopLagMs}ms rss_mb=${rssMb.toFixed(1)} heap_mb=${(memory.heapUsed / 1024 / 1024).toFixed(1)} db_active=${pool.activeConnections}/${pool.connectionLimit} db_wait_avg=${pool.averageAcquireWaitMs.toFixed(1)}ms db_wait_slow=${pool.slowAcquisitions} foreground=${activeForegroundApiRequests} module_lanes=${backgroundModuleLaneStatus()}`);
   }
   lastReportedSlowAcquisitions = pool.slowAcquisitions;
 }, 30_000).unref();
 const BACKGROUND_TASK_FOREGROUND_IDLE_MS = Math.max(0, Number(config.backgroundTaskForegroundIdleSeconds || 20)) * 1000;
 const BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS = Math.max(0, Number(config.backgroundCriticalJobMaxDeferralSeconds || 300)) * 1000;
 const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set([
-  "ozon_credential_health",
   "order_profit_daily_fx_archive",
   "ogl_official_monitor",
   "customer_message_dispatch",
@@ -664,14 +631,6 @@ function criticalJobForegroundDeferralExpired(jobKey, context = {}) {
   const intervalMs = Math.max(0, Number(context?.intervalMinutes || 0)) * 60 * 1000;
   if (Number.isFinite(lastSuccessAt.getTime()) && intervalMs > 0) {
     return Date.now() - (lastSuccessAt.getTime() + intervalMs) >= maxDeferralMs;
-  }
-  if (jobKey === "ozon_credential_health") {
-    // next_run_at moves on every deferral. The persisted registry creation
-    // time preserves the first 60-second startup due date across restarts.
-    const createdAt = new Date(context?.createdAt || "");
-    if (Number.isFinite(createdAt.getTime())) {
-      return Date.now() - (createdAt.getTime() + 60_000) >= maxDeferralMs;
-    }
   }
   const plannedFor = context?.plannedFor instanceof Date
     ? context.plannedFor
@@ -845,11 +804,6 @@ const scheduledJobDefinitions = [
     }
   },
   {
-    key: "sku_traffic_daily_dispatch", name: "SKU每日流量采集排队及清理", category: "analytics", priority: "normal",
-    intervalMinutes: 60, initialDelaySeconds: 180, catchupEnabled: true, maxCatchupRuns: 1,
-    config: {}
-  },
-  {
     key: "seller_analytics_daily_sync",
     name: "Ozon 店铺分析 7 天同步",
     category: "analytics",
@@ -869,16 +823,6 @@ const scheduledJobDefinitions = [
       shopConcurrency: 3,
       retentionDays: 15
     }
-  },
-  {
-    key: "ozon_credential_health",
-    name: "Ozon 店铺密钥到期与权限巡检",
-    category: "maintenance",
-    priority: "critical",
-    intervalMinutes: 1440,
-    initialDelaySeconds: 60,
-    catchupEnabled: true,
-    maxCatchupRuns: 1
   },
   {
     key: "ozon_finance_sync",
@@ -1040,17 +984,6 @@ const scheduledJobDefinitions = [
     config: { retentionDays: 7, batchSize: 200 }
   },
   {
-    key: "collector_history_cleanup",
-    name: "采集箱三十日留存清理",
-    category: "maintenance",
-    priority: "low",
-    scheduleType: "daily",
-    dailyTime: "04:15",
-    catchupEnabled: true,
-    maxCatchupRuns: 1,
-    config: { batchSize: 500, maxBatches: 20 }
-  },
-  {
     key: "listing_publish_history_cleanup",
     name: "上架任务和发布状态清理",
     category: "maintenance",
@@ -1121,8 +1054,6 @@ const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
 });
 
 const scheduledJobHandlers = {
-  sku_traffic_daily_dispatch: withForegroundApiDeferral("sku_traffic_daily_dispatch", () => services.skuTrafficDailySchedule()),
-  ozon_credential_health: withForegroundApiDeferral("ozon_credential_health", () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId))),
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
     dailyFxArchiveFirstDueAt = 0;
     return runOrderProfitDailyFxArchive(orderProfitDailyFxDb);
@@ -1165,7 +1096,6 @@ const scheduledJobHandlers = {
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
   ai_media_retention_cleanup: withForegroundApiDeferral("ai_media_retention_cleanup", runAiMediaRetentionCleanup),
   transported_order_label_cleanup: withForegroundApiDeferral("transported_order_label_cleanup", (job) => cleanupTransportedOrderLabelCache(job?.config || {})),
-  collector_history_cleanup: withForegroundApiDeferral("collector_history_cleanup", (job) => cleanupCollectorHistory({ ...job?.config, apply: true })),
   listing_publish_history_cleanup: withForegroundApiDeferral("listing_publish_history_cleanup", (job) => cleanupListingPublishHistory(job?.config || {})),
   listing_publish_storage_compaction: withForegroundApiDeferral("listing_publish_storage_compaction", (job) => services.compactListingPublishRecordStorage(job?.config || {})),
   system_monitor_snapshot: withForegroundApiDeferral("system_monitor_snapshot", captureSystemMonitorSnapshot)
@@ -1173,11 +1103,10 @@ const scheduledJobHandlers = {
 
 const scheduledJobScheduler = new ScheduledJobScheduler({
   handlers: scheduledJobHandlers,
-  beforeRun: ({ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig, createdAt }) => backgroundJobDeferral(key, {
+  beforeRun: ({ key, mode, plannedFor, lastSuccessAt, intervalMinutes, config: jobConfig }) => backgroundJobDeferral(key, {
     mode,
     plannedFor,
     lastSuccessAt,
-    createdAt,
     intervalMinutes,
     config: jobConfig
   }),
@@ -1414,7 +1343,6 @@ async function handleRestRoute(req, res, url, parts) {
     return orderRestHandled;
   }
 
-  if (await handleFinanceSubmissionDownload({ req, res, url, parts, writeHead })) return true;
   const financeCenterHandled = await handleFinanceCenterRestRoute({ req, res, url, parts, json, writeHead });
   if (financeCenterHandled !== false) return financeCenterHandled;
 
@@ -1657,13 +1585,6 @@ function localPluginJson(req, res, payload, status = 200) {
   res.end(body);
 }
 
-const handleCollectorBrowserPoolRoute = createCollectorBrowserPoolHandler({
-  pool: new CollectorBrowserPool(),
-  resolveShop: resolveCollectorBrowserShop,
-  readJson,
-  sendJson: localPluginJson
-});
-
 function safeEqualText(left, right) {
   const leftBuffer = Buffer.from(String(left || ""), "utf8");
   const rightBuffer = Buffer.from(String(right || ""), "utf8");
@@ -1721,8 +1642,6 @@ async function handleLocalPluginRoute(req, res, parts) {
   }
   const tenantId = principal.tenantKey;
 
-  if (await handleCollectorBrowserPoolRoute(req, res, parts, principal)) return true;
-
   if (parts[2] === "plugin" && parts[3] === "status" && req.method === "GET") {
     const url = new URL(req.url, `http://${req.headers.host}`);
     return localPluginJson(req, res, {
@@ -1774,7 +1693,7 @@ async function handleLocalPluginRoute(req, res, parts) {
         const index = cursor++;
         const sku = skus[index];
         try {
-          results[index] = { sku, success: true, data: await services.lookupCollectedProductFromPlugin(sku, tenantId, { summary: body.summary === true }) };
+          results[index] = { sku, success: true, data: await services.lookupCollectedProductFromPlugin(sku, tenantId) };
         } catch (error) {
           results[index] = { sku, success: false, error: error?.message || String(error) };
         }
@@ -2416,12 +2335,10 @@ async function prepareRuntimeBeforeListen() {
   try {
     await warmMysqlPool();
     await ensureOglDispatchSchema(mysqlExecute);
-    await mysqlExecute(ORDER_SPLIT_SCHEMA);
     await services.warmCoreInventoryRuntime?.();
     await services.warmTeamTasksRuntime?.();
     await services.ensureListingAutomationSchema?.();
     await assertTenantPilotSchemaReady();
-    await mysqlQuery("SELECT tenant_id,version,payload_json,calculated_at FROM inventory_demand_snapshots LIMIT 0");
     console.log("listing automation schema warmup completed");
     runtimeReadiness.ready = true;
     runtimeReadiness.readyAt = new Date().toISOString();
@@ -2515,7 +2432,6 @@ async function recoverAssetVariantJobs() {
 }
 
 async function recoverAiGenerationTasks() {
-  try { await startProductWorkflowRunner(); } catch(error) { console.warn('product workflow recovery skipped:',error.message); }
   try {
     const result = await services.recoverAiGenerationTasksOnStartup?.();
     if (result?.ok) console.log("ai generation task worker recovered");

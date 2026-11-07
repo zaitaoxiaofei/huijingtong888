@@ -22,12 +22,10 @@ before(async () => {
   await import("element-plus");
   let timer = 0;
   globalThis.window = { location: { hash: "#/orders", pathname: "/admin.html" }, localStorage: storage(), sessionStorage: storage(),
-    addEventListener() {}, dispatchEvent() {}, setTimeout: () => ++timer, clearTimeout() {} };
+    addEventListener() {}, setTimeout: () => ++timer, clearTimeout() {} };
   globalThis.fetch = (url, options) => String(url).startsWith("/api/orders/inventory-availability?")
     ? Promise.resolve(json({ rows: [] })) : fetchHandler(String(url), options);
   server = await createServer({ configFile: false, logLevel: "error", server: { middlewareMode: true, hmr: false }, appType: "custom" });
-  const {createPinia,setActivePinia}=await server.ssrLoadModule("pinia");
-  setActivePinia(createPinia());
   ({ useOrdersPage } = await server.ssrLoadModule("/frontend/orders/composables/useOrdersPage.js"));
 });
 

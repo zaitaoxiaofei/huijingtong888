@@ -9,7 +9,7 @@ function fixture(tenant = { id: 42 }) {
   let scope = "a", resolve, calls = 0;
   const pending = new Promise(done => { resolve = done; });
   const context = vm.createContext({
-    notificationReadVersion:0,authStore: { user: { id: 1, tenant } }, currentApiCacheScope: () => scope,
+    authStore: { user: { id: 1, tenant } }, currentApiCacheScope: () => scope,
     notifications: { value: [{ id: "old" }] }, notificationUnread: { value: 1 },
     notificationLoading: { value: false }, notificationStatus: { value: "all" },
     apiClient: { get() { calls++; return pending; } }, ElMessage: { error(message) { throw new Error(message); } }

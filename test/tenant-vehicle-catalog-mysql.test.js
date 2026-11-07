@@ -147,7 +147,6 @@ test('vehicle catalog, inventory use, draft binding and AI references isolate A/
         listingTenantId: businessTaskTenantKey, row: async (sql, params) => (await all(sql, params))[0], all,
         normalizeDraftRow: row => row, resolveMappedMediaInValue: async value => value
       });
-      vm.runInContext(listingSource.match(/^function normalizeDraftOverviewResponse\([^]*?^}/m)[0],list);
       vm.runInContext(listingSource.match(/^export async function listingDrafts\([^]*?^}/m)[0].replace('export ', ''), list);
       for (const filter of [{ vehicleBrand: 'bprivate' }, { vehicleModel: 'secret' }, { vehicleBrand: 'bprivate', vehicleModel: 'secret' }]) {
         const result = await list.listingDrafts({ paged: '1', lightweight: '1', ...filter }, session(2));
@@ -162,7 +161,7 @@ test('vehicle catalog, inventory use, draft binding and AI references isolate A/
       await query(namingSchema);
       await query('ALTER TABLE inventory_product_naming_options ADD COLUMN reviewed_by_person_id BIGINT NULL, ADD COLUMN reviewed_at DATETIME NULL');
       await query("INSERT INTO inventory_product_naming_options(tenant_id,option_type,value,label,status) VALUES(2,'category','part','part','active'),(2,'accessory','普通款','普通款','active')");
-      const inventory = vm.createContext({ ...context, writeInventoryProductRequestNotices:async()=>[],publishInventoryProductRequestNotices:()=>{},randomUUID: () => 'inventory-vehicle',
+      const inventory = vm.createContext({ ...context, randomUUID: () => 'inventory-vehicle',
         resolveInventoryTenantScope: value => resolveInventoryTenantScope(value, query), inventoryTenantSql,
         assertInventoryMember: (scope, person) => assertInventoryMember(scope, person, query),
         assertInventoryReferences: (scope, body, run = query) => assertInventoryReferences(scope, body, run),

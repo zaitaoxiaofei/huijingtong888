@@ -3,7 +3,6 @@ import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 import { isAiCreditReadRoute } from "./ai-credit-paths.js";
-import { financeSubmissionRoute, canReviewFinance } from "../shared/finance-submissions.js";
 
 const PLATFORM_API_RESOURCES = new Set([
   "platform", "tenants", "people", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -36,8 +35,6 @@ const TENANT_PLUGIN_TOKEN_ROUTES = new Set([
 ]);
 
 const TENANT_SELLER_ANALYTICS_ROUTES = new Set([
-  "GET db/seller-analytics/sku-daily",
-  "POST db/seller-analytics/sku-daily/collect",
   "GET db/seller-analytics/summary",
   "GET db/seller-analytics/metrics",
   "GET db/seller-analytics/analysis",
@@ -72,10 +69,6 @@ function isTenantSellerAnalyticsRoute(path, method) {
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenant = session?.tenant;
-  if (parts[1] === "finance-submissions") {
-    const access = financeSubmissionRoute(parts, String(method).toUpperCase());
-    return tenant?.id && tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : { allowed: false, error: "报销申请路径无效或无权审批" };
-  }
   if (tenant?.id && tenant?.slug && isAiCreditReadRoute(parts, method)) return { allowed: true };
   if (isEnterpriseMessageRoute(parts, String(method).toUpperCase())) return tenant?.id && tenant?.slug ? { allowed: true } : { allowed: false, error: "请先选择有效企业后使用私信" };
   if (isPlatformAdmin(session) && PLATFORM_API_RESOURCES.has(parts[1])) return { allowed: true };
@@ -135,7 +128,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 3 && verb === "GET") return { allowed: true };
-  if(parts[1]==='products'&&/^\d+$/.test(String(parts[2]||''))&&parts.length===4&&parts[3]==='edit-history'&&verb==='GET')return{allowed:true};
   if (parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && parts.length === 4 && parts[3] === "components" && verb === "PUT") return { allowed: true };
   if (parts[1] === "products" && parts[2] === "hidden" && parts.length === 3 && verb === "GET") return { allowed: true };
   const tenantProductImageRead = parts[1] === "products" && /^\d+$/.test(String(parts[2] || "")) && verb === "GET"
@@ -152,9 +144,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantOrderInventoryRead = parts[1] === "orders" && parts.length === 3
     && parts[2] === "inventory-availability" && verb === "GET";
   if (tenantOrderInventoryRead) return { allowed: true };
-  const flowPath = parts.slice(1).join('/');
-  if ((verb === 'GET' && ['inventory-flow', 'inventory-flow/detail', 'inventory-flow/settings', 'inventory-flow/tasks', 'inventory-flow/events', 'inventory-flow/sync-status'].includes(flowPath))
-    || (verb === 'POST' && ['inventory-flow/settings', 'inventory-flow/tasks', 'inventory-flow/task-action', 'inventory-flow/sync'].includes(flowPath))) return { allowed: true };
   const tenantOrderDetailRead = parts[1] === "orders" && parts.length === 3
     && /^\d+$/.test(String(parts[2] || "")) && verb === "GET";
   if (tenantOrderDetailRead) return { allowed: true };
@@ -206,7 +195,7 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantSellerMediaJobs = parts[1] === "listing" && parts[2] === "media" && parts[3] === "ozon-upload-jobs" && parts.length === 4 && ["GET", "POST"].includes(verb);
   if (tenantSellerMediaJobs) return { allowed: true };
   const tenantFinanceRead = parts[1] === "finance-center" && parts.length === 3
-    && ["companies", "report", "inventory-capital", "inventory-capital-details", "expenses", "vouchers", "platform-items", "export"].includes(parts[2]) && verb === "GET";
+    && ["companies", "report", "expenses", "vouchers", "platform-items", "export"].includes(parts[2]) && verb === "GET";
   const tenantFinanceWrite = parts[1] === "finance-center" && parts.length === 3
     && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(parts[2]) && verb === "POST";
   const tenantFinanceExpenseDelete = parts[1] === "finance-center" && parts[2] === "expenses"
@@ -250,7 +239,6 @@ export function tenantIsolationDecision(session, parts = [], method = "GET") {
   const tenantOnlineProductAction = parts[1] === "online-products" && parts.length === 3 && parts[2] === "action" && verb === "POST";
   if (tenantOnlineProductRead || tenantOnlineProductStockWrite || tenantOnlineProductAction) return { allowed: true };
   const shopCollection = parts[1] === "shops" && parts.length === 2 && ["GET", "POST"].includes(verb);
-  if (parts[1] === "shops" && parts.length === 3 && parts[2] === "ozon-health" && ["GET", "POST"].includes(verb)) return { allowed: true };
   const shopRecord = parts[1] === "shops" && parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(verb);
   if (shopCollection || shopRecord) return { allowed: true };
   if (parts[1] === "tenants" && parts[2] === "members" && parts.length === 3 && verb === "GET") return { allowed: true };

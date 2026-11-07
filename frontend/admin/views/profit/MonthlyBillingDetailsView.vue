@@ -8,20 +8,24 @@ import ErpFilterBar from "../../components/ErpFilterBar.vue";
 import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import ErpPeriodSwitcher from "../../components/ErpPeriodSwitcher.vue";
 import { shanghaiDateKey, shanghaiDateText } from "../../utils/shanghai-date.js";
-import { billingDateRange } from "../../utils/billing-period.js";
 import { formatInteger, formatMoney } from "./profit-utils.js";
 
 const route = useRoute();
 const router = useRouter();
 let abortController = null;
 
-function initialDateRange() { return billingDateRange(route.query, shanghaiDateKey()); }
+function initialDateRange() {
+  const today = shanghaiDateKey();
+  const legacyMonth = `${route.query.year || today.slice(0, 4)}-${String(route.query.month || route.query.selectedMonth || today.slice(5, 7)).padStart(2, "0")}`;
+  const lastDay = new Date(Number(legacyMonth.slice(0, 4)), Number(legacyMonth.slice(5, 7)), 0).getDate();
+  const legacyTo = legacyMonth === today.slice(0, 7) ? today : `${legacyMonth}-${String(lastDay).padStart(2, "0")}`;
+  return [String(route.query.from || `${legacyMonth}-01`), String(route.query.to || legacyTo)];
+}
 
 const state = reactive({
   loading: false,
   dateRange: initialDateRange(),
   shopId: String(route.query.shopId || "all"),
-  companyId: String(route.query.companyId || "all"),
   shops: [],
   companies: [],
   assignments: [],
@@ -30,7 +34,6 @@ const state = reactive({
 
 const expenseDialog = ref(false);
 const expenseDrawer = ref(false);
-const capitalDrawer = ref(false);
 const savingExpense = ref(false);
 const expenseForm = reactive({
   id: "",
@@ -84,7 +87,7 @@ const formulaRows = computed(() => {
   const row = selectedSummary.value;
   return [
     { label: "总收益", value: row.revenue, sign: "+", tone: "income" },
-    { label: "采购成本", value: row.purchase_cost, sign: "−", action: "capital" },
+    { label: "采购成本", value: row.purchase_cost, sign: "−" },
     { label: "国内物流", value: row.domestic_shipping_cost, sign: "−" },
     { label: "国际物流", value: row.international_shipping_cost, sign: "−" },
     { label: "包装处理", value: row.packaging_cost, sign: "−" },
@@ -115,7 +118,7 @@ const inventoryCards = computed(() => {
   const row = procurementInventory.value;
   return [
     { label: "当前库存占用总额", value: row.inventory_total_value, quantity: null, total: true },
-    { label: "国内可用库存", value: row.local_inventory_value, quantity: row.local_inventory_quantity },
+    { label: "国内库存", value: row.local_inventory_value, quantity: row.local_inventory_quantity },
     { label: "FBP 库存", value: row.fbp_inventory_value, quantity: row.fbp_inventory_quantity },
     { label: "采购在途", value: row.in_transit_value, quantity: row.in_transit_quantity }
   ];
@@ -139,8 +142,7 @@ function applyBillingFilters() {
       ...route.query,
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: String(state.shopId || "all"),
-      companyId: state.companyId
+      shopId: String(state.shopId || "all")
     }
   });
   loadData();
@@ -153,8 +155,7 @@ function detailRoute(shop = null) {
       tab: "orders",
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: shop?.shop_id ? String(shop.shop_id) : String(state.shopId || "all"),
-      companyId: state.companyId
+      shopId: shop?.shop_id ? String(shop.shop_id) : String(state.shopId || "all")
     }
   };
 }
@@ -164,7 +165,6 @@ function openOrderDetails(shop = null) {
 }
 
 function defaultCompanyId(shopId = "") {
-  if (state.companyId !== "all") return String(state.companyId);
   const assignment = state.assignments.find((item) => String(item.shop_id) === String(shopId || state.shopId));
   return String(assignment?.company_id || state.companies[0]?.id || "");
 }
@@ -258,8 +258,7 @@ async function loadData() {
     const params = new URLSearchParams({
       from: state.dateRange[0],
       to: state.dateRange[1],
-      shopId: String(state.shopId || "all"),
-      companyId: state.companyId
+      shopId: String(state.shopId || "all")
     });
     const [payload, financeMeta] = await Promise.all([
       apiClient.get(`/api/monthly-billing-details?${params.toString()}`, { signal }),
@@ -289,16 +288,14 @@ function handleReset() {
 
 onMounted(loadData);
 watch(
-  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId, route.query.year, route.query.month, route.query.selectedMonth],
-  ([from, to, shopId, companyId], previous) => {
-    if (!previous || route.path !== "/profit/monthly-billing") return;
-    const nextRange = initialDateRange();
-    const nextShopId = String(shopId || "all");
-    const nextCompanyId = String(companyId || "all");
-    if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId && nextCompanyId === state.companyId) return;
+  () => [route.query.from, route.query.to, route.query.shopId],
+  ([from, to, shopId], previous) => {
+    if (!previous) return;
+    const nextRange = [String(from || state.dateRange[0]), String(to || state.dateRange[1])];
+    const nextShopId = String(shopId || state.shopId || "all");
+    if (nextRange[0] === state.dateRange[0] && nextRange[1] === state.dateRange[1] && nextShopId === state.shopId) return;
     state.dateRange = nextRange;
     state.shopId = nextShopId;
-    state.companyId = nextCompanyId;
     loadData();
   }
 );
@@ -308,7 +305,7 @@ onBeforeUnmount(() => abortController?.abort());
 <template>
   <div class="page-stack monthly-billing-page">
     <el-card shadow="never" class="page-card billing-filter-card">
-      <ErpPageHeader title="经营账单" description="汇总所选日期范围的收入、成本与净利润，点击金额项目查看明细。">
+      <ErpPageHeader title="月度经营账单" description="汇总收入、经营成本、结算状态与净利润。">
         <template #actions>
           <ErpFilterBar class="billing-controls">
           <el-form inline class="billing-filters">
@@ -324,7 +321,6 @@ onBeforeUnmount(() => abortController?.abort());
                 style="width: 260px"
               />
             </el-form-item>
-            <el-form-item label="公司"><el-select v-model="state.companyId" filterable style="width:240px"><el-option label="全部公司" value="all" /><el-option v-for="company in state.companies" :key="company.id" :label="company.name" :value="String(company.id)" /></el-select></el-form-item>
             <el-form-item label="店铺">
               <el-select v-model="state.shopId" filterable style="width: 210px">
                 <el-option label="全部店铺" value="all" />
@@ -356,10 +352,7 @@ onBeforeUnmount(() => abortController?.abort());
           <span>净利润已扣除广告、人工账单和工资；待结算为订单结算状态，不重复扣减。</span>
         </div>
         <div class="head-actions">
-          <el-button class="erp-btn erp-btn-secondary" @click="router.push('/finance-center')">返回年度总览</el-button>
-          <el-button class="erp-btn erp-btn-secondary" @click="capitalDrawer = true">采购支出与库存资金</el-button>
           <el-button class="erp-btn erp-btn-secondary" :icon="Plus" @click="openExpense(null, 'other')">补录费用</el-button>
-          <el-button class="erp-btn erp-btn-secondary" @click="router.push({path:'/finance/payroll',query:{month:state.dateRange[0].slice(0,7),companyId:state.companyId,action:'import'}})">补录本月工资</el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :icon="View" @click="openOrderDetails()">订单明细</el-button>
         </div>
       </div>
@@ -389,7 +382,7 @@ onBeforeUnmount(() => abortController?.abort());
             <div v-for="item in formulaRows" :key="item.label" class="formula-row" :class="`is-${item.tone || 'cost'}`">
               <span class="formula-sign">{{ item.sign }}</span>
               <span class="formula-label">{{ item.label }}</span>
-              <button v-if="item.action" type="button" class="detail-link" @click="item.action === 'capital' ? capitalDrawer = true : expenseDrawer = true">明细</button>
+              <button v-if="item.action" type="button" class="detail-link" @click="expenseDrawer = true">明细</button>
               <span v-else class="formula-spacer" />
               <small>占总收益 {{ formatShare(item.value) }}</small>
               <strong>¥{{ formatMoney(item.value) }}</strong>
@@ -433,7 +426,6 @@ onBeforeUnmount(() => abortController?.abort());
       </div>
     </section>
 
-    <el-drawer v-model="capitalDrawer" title="采购支出与库存资金" size="min(100%, 1050px)" destroy-on-close>
     <section v-loading="state.loading" class="capital-section">
       <div class="section-head">
         <div>
@@ -458,13 +450,13 @@ onBeforeUnmount(() => abortController?.abort());
         <div class="capital-panel">
           <div class="capital-panel__title">
             <strong>当前库存占用</strong>
-            <span>国内仓按可用数量计价；单价采用最新采购落地成本，缺失时回退商品采购成本</span>
+            <span>采用最新采购落地成本，缺失时回退商品采购成本</span>
           </div>
           <div class="capital-metric-grid inventory-metric-grid">
             <article v-for="item in inventoryCards" :key="item.label" class="capital-metric" :class="{ 'is-total': item.total }">
               <span>{{ item.label }}</span>
-              <strong>{{ item.value==null?'待核实':`¥${formatMoney(item.value)}` }}</strong>
-              <small>{{ item.total ? '国内可用 + FBP + 在途' : item.quantity==null?'数量待核实':`${formatInteger(item.quantity)} 件` }}</small>
+              <strong>¥{{ formatMoney(item.value) }}</strong>
+              <small>{{ item.quantity == null ? '国内 + FBP + 在途' : `${formatInteger(item.quantity)} 件` }}</small>
             </article>
           </div>
         </div>
@@ -473,8 +465,6 @@ onBeforeUnmount(() => abortController?.abort());
         <template #title>未经过采购确认或平台订单尚未关联到采购单的支出不会进入真实采购金额，请及时在采购工作台补录或关联。</template>
       </el-alert>
     </section>
-
-    </el-drawer>
 
     <section v-loading="state.loading" class="shop-section">
       <div class="section-head">

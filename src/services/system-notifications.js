@@ -1,4 +1,3 @@
-import {PROCUREMENT_TRANSIT_WARNING_HOURS,PROCUREMENT_REQUEST_WARNING_HOURS} from '../shared/inventory-procurement-stage.js';
 import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
 import { authorizeBusinessTaskSession } from './business-task-tenant.js';
 import { effectiveTenantMembershipRole } from './tenant-membership-authority.js';
@@ -133,10 +132,6 @@ export async function resolveSystemNotification(notificationId, session = {}) {
   const recipientId = personId(session);
   const id = Number(notificationId || 0);
   if (!id) throw new Error("缺少通知 ID");
-  const [credentialNotice] = await mysqlQuery(`SELECT id FROM system_notifications sn
-    WHERE id = ? AND recipient_person_id = ? AND ${inventoryTenantSql(scope, "sn")}
-    AND notification_type = 'ozon_credential_health' AND status != 'resolved'`, [id, recipientId]);
-  if (credentialNotice) throw Object.assign(new Error('请先在企业店铺更新或检查授权，验证通过后系统会自动解除对应告警；可先标记已读'), { statusCode: 409 });
   await mysqlExecute(`
     UPDATE system_notifications sn
     SET status = 'resolved', read_at = COALESCE(read_at, CURRENT_TIMESTAMP), resolved_at = CURRENT_TIMESTAMP
@@ -212,33 +207,13 @@ async function generateFbpShortageNotifications(dateKey, scope) {
   return result.created;
 }
 
-async function generateProcurementTimeoutNotifications(dateKey,scope) {
-  const [requests,transit]=await Promise.all([
-    mysqlQuery(`SELECT COUNT(*) AS count FROM procurement_requests pr JOIN products p ON p.id=pr.product_id AND ${inventoryTenantSql(scope,'p')}
-      WHERE ${inventoryTenantSql(scope,'pr')} AND pr.status IN ('submitted','pending','suggested')
-      AND pr.created_at<DATE_SUB(UTC_TIMESTAMP(),INTERVAL ${PROCUREMENT_REQUEST_WARNING_HOURS} HOUR)`),
-    mysqlQuery(`SELECT COUNT(*) AS count FROM inbound_records ir JOIN purchase_orders po ON po.id=ir.purchase_order_id AND ${inventoryTenantSql(scope,'po')}
-      JOIN products p ON p.id=ir.product_id AND ${inventoryTenantSql(scope,'p')}
-      WHERE ${inventoryTenantSql(scope,'ir')} AND ir.status='pending_arrival' AND ir.received_at IS NULL
-      AND po.status NOT IN ('pending_purchase','cancelled') AND po.purchased_at<DATE_SUB(UTC_TIMESTAMP(),INTERVAL ${PROCUREMENT_TRANSIT_WARNING_HOURS} HOUR)`)
-  ]);
-  const pending=Number(requests[0]?.count||0),late=Number(transit[0]?.count||0);
-  if(!pending&&!late)return 0;
-  const recipients=await activePeopleForRoles(['procurement'],scope);
-  const result=await createSystemNotification({tenantId:scope.id,recipientPersonIds:recipients.map(r=>r.id),
-    type:'procurement_timeout',title:'采购跟进超时提醒',content:`${pending}条申请超过24小时未处理，${late}批采购超过2天未确认到货；请核查采购在途，已到货请标记并交仓库验收。`,
-    severity:'warning',route:'/purchase-list',entityType:'procurement',dedupeKey:`procurement-timeout:${dateKey}`});
-  return result.created;
-}
-
 export async function generateOperationalNotifications(tenantId = "admin") {
   const scope = await resolveInventoryTenantScope(tenantId);
   const dateKey = beijingDateKey();
   const counts = await Promise.all([
     generateDailyProcurementNotifications(dateKey, scope),
     generateInboundNotifications(dateKey, scope),
-    generateFbpShortageNotifications(dateKey, scope),
-    generateProcurementTimeoutNotifications(dateKey, scope)
+    generateFbpShortageNotifications(dateKey, scope)
   ]);
   return { ok: true, created: counts.reduce((sum, count) => sum + count, 0), date: dateKey };
 }

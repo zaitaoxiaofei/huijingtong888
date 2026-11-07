@@ -19,7 +19,6 @@ function functions(names, context) {
   // This fixture isolates logistics merging; tenant authorization and actual SQL
   // ownership are exercised by the dedicated tenant and shipping MySQL suites.
   return vm.runInNewContext(`${definitions.join("\n")}\n({${names.join(",")}})`, {
-    recordOzonSyncHealth: async () => {},
     orderListTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
     orderOwnershipTenantScopeMysql: async () => ({ id: 1, defaultTenant: true }),
     assertOrderTaskAccessMysql: async () => {},

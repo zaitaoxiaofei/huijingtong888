@@ -43,28 +43,16 @@ export function inventoryOverview(row) {
     if (fact.available_stock != null && Number.isFinite(Number(fact.available_stock))) item.local_available = Number(fact.available_stock);
     if (fact.physical_stock != null && Number.isFinite(Number(fact.physical_stock))) item.physical_estimate = Number(fact.physical_stock);
   }
-  if (row.inventory_refresh_pending) {
-    for (const item of products.values()) {
-      item.local_available = undefined;
-      item.physical_estimate = undefined;
-      item.stock_quantity = undefined;
-      item.incoming_quantity = undefined;
-      item.shortage_quantity = undefined;
-    }
-  }
   const items = [...products.values()].sort((a, b) => Number(b.shortage_quantity || 0) - Number(a.shortage_quantity || 0));
   return {
     shopId: Number(row.shop_id), skus: (row.fbp_inventory || []).map(stock => String(stock.ozon_sku)),
     parents: (row.inventorySummaries || []).map(summary => ({
       id: summary.inventoryKey || `${summary.productId}-${summary.sku || ''}`,
-      productId: Number(summary.productId || 0),
-      skus: [...new Set(summary.skus || [summary.sku])].filter(Boolean),
       name: summary.productName, inventoryNumber: summary.inventoryNumber,
-      compositionKind: inventoryCompositionKind(summary),
       quantity: summary.quantity, virtual: summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || summary.pickingItems?.some(part => Number(part.product_id) !== Number(summary.productId)),
       localAvailable: localSets(summary, products, 'local_available'),
       localPhysical: localSets(summary, products, 'physical_estimate'),
-      localLedger: row.inventory_refresh_pending ? undefined : summary.stock?.local,
+      localLedger: summary.stock?.local,
       fbpStocks: [...new Set(summary.skus || [summary.sku])].filter(Boolean).map(sku =>
         (row.fbp_inventory || []).find(stock => String(stock.ozon_sku) === String(sku)) || { ozon_sku: sku, present: null, available: null }),
       children: (summary.pickingItems || []).map(part => ({
@@ -79,16 +67,6 @@ export function inventoryOverview(row) {
     coveredCount: items.filter(item => item.shortage_quantity === 0 && !item.quantity_needs_review).length,
     review: !!(items.some(item => item.inventory_needs_review) || coverage?.inventory_needs_review || coverage?.quantity_needs_review || coverage?.missing_amount || coverage?.missing_record_quantity > 0)
   };
-}
-
-export function inventoryCompositionKind(summary) {
-  if (summary.unbound || summary.inventoryMode === 'unbound') return 'unknown';
-  const productId = Number(summary.productId || 0);
-  const parts = (summary.pickingItems || []).filter(part => Number(part.product_id) > 0);
-  if (summary.inventoryMode === 'combo' || Number(summary.componentCount) > 0 || parts.some(part => Number(part.product_id) !== productId)) return 'bundle';
-  const knownCount = summary.componentCount != null && summary.componentCount !== '' && Number(summary.componentCount) === 0;
-  if (productId > 0 && (summary.inventoryMode === 'single' || knownCount || parts.length > 0 && parts.every(part => Number(part.product_id) === productId))) return 'single';
-  return 'unknown';
 }
 
 function localSets(summary, products, field) {

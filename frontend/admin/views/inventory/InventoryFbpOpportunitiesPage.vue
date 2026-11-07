@@ -1,7 +1,5 @@
 <script setup>
-import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
-import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
-import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { InfoFilled } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -13,7 +11,6 @@ import { useAuthStore } from "../../stores/auth.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../../components/procurement/ProcurementLedgerDialog.vue'));
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
@@ -24,11 +21,6 @@ const listRequestGate = createLatestRequestGate();
 let syncingRoute = false;
 let routeReady = false;
 
-const inventoryPlanning=reactive({visible:false,productId:0});
-function openInventoryPlanning(row){
- const id=Number(row.product_id);if(!id)return ElMessage.warning('请先在SKU绑定中关联实际库存商品，再按库存备货');
- Object.assign(inventoryPlanning,{visible:true,productId:id});
-}
 const loading = ref(false);
 const exportLoading = ref(false);
 const supplySyncLoading = ref(false);
@@ -109,7 +101,6 @@ const state = reactive({
   summary: {},
   shops: [],
   filters: {
-    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     priority: "all",
@@ -123,7 +114,6 @@ const state = reactive({
 });
 
 const filterDefaults = {
-  ...inventorySearchDefaults(),
   query: "",
   shopId: "all",
   priority: "all",
@@ -135,7 +125,10 @@ const filterDefaults = {
   pageSize: 20
 };
 
-
+const summaryCards = computed(() => [
+  { label: "推荐", value: integer(state.summary.total) },
+  { label: "建议入库", value: `${integer(state.summary.suggested_total_qty)} 件` }
+]);
 
 const currentSubmitterName = computed(() => authStore.user?.name || authStore.user?.username || "当前登录用户");
 const replenishmentDialogTitle = computed(() => (
@@ -149,11 +142,6 @@ function priorityType(priority) {
   if (priority === "high") return "danger";
   if (priority === "medium") return "warning";
   return "info";
-}
-
-function inventoryNameText(row) {
-  if (!(Number(row.product_id) > 0)) return "未绑定库存";
-  return String(row.product_name || "").trim() || "库存名称未填写";
 }
 
 function coverageText(row) {
@@ -238,7 +226,6 @@ function buildListParams(overrides = {}) {
   });
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
-  appendInventorySearch(params, state.filters);
   return params;
 }
 
@@ -302,7 +289,6 @@ function setSort(sortKey) {
     state.filters.sortDir = "desc";
   }
   state.filters.page = 1;
-  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -325,7 +311,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-
+  manualKeys: ["query", "minSales"],
   isSyncingRoute: () => syncingRoute
 });
 
@@ -343,14 +329,12 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
-  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
-  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -1109,13 +1093,21 @@ async function loadPageData() {
 watch(
   () => route.query,
   async () => {
-    const previous = JSON.stringify(state.filters);
     applyRouteState();
-    if (routeReady && previous !== JSON.stringify(state.filters)) await loadPageData();
+    if (!routeReady) return;
+    await loadPageData();
   },
   { deep: true }
 );
-
+watch(() => [
+  state.filters.shopId,
+  state.filters.priority,
+  state.filters.signal,
+  state.filters.sortKey,
+  state.filters.sortDir,
+  state.filters.page,
+  state.filters.pageSize
+], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
@@ -1129,30 +1121,16 @@ onActivated(() => {
 </script>
 
 <template>
-  <ProcurementLedgerDialog v-if="inventoryPlanning.visible" v-model="inventoryPlanning.visible" :product-id="inventoryPlanning.productId" @saved="loadPageData()"/>
   <div class="inventory-page-shell inventory-card fbp-opportunity-page">
     <InventoryPageToolbar
-      product-search
-      :loading="loading"
       :filters="state.filters"
       :shops="state.shops"
       :show-date-range="false"
+      query-label="机会搜索"
       query-placeholder="完整库存编号 / SKU / Offer / 名称关键词"
       @search="handleSearch"
       @reset="handleReset"
     >
-      <template #actions>
-        <el-button
-          class="erp-btn erp-btn-primary"
-          type="primary"
-          :disabled="!selectedRows.length"
-          :loading="rowActionLoading === 'batch-order'"
-          @click="openSelectedReplenishmentCreateDialog"
-        >
-          创建备货单
-        </el-button>
-        <el-popover trigger="click" placement="bottom-end" :width="380"><template #reference><el-button>更多</el-button></template>
-          <el-form label-position="top" class="fbp-more-filters">
       <el-form-item label="优先级">
         <el-select v-model="state.filters.priority" style="width: 150px">
           <el-option label="全部" value="all" />
@@ -1172,14 +1150,31 @@ onActivated(() => {
       <el-form-item label="30天销量">
         <el-input v-model="state.filters.minSales" placeholder="最低" style="width: 90px" @keyup.enter="handleSearch" />
       </el-form-item>
-            <el-button type="primary" @click="handleSearch">应用筛选</el-button>
-          </el-form>
-          <div class="fbp-more-actions">
-            <el-button @click="openManualSkuDialog">手工添加 SKU</el-button>
-            <el-button @click="openPdfImportDialog">导入PDF</el-button>
-            <el-button :loading="supplySyncLoading" @click="syncOzonSupplyOrders">同步入仓请求</el-button>
-          </div>
-        </el-popover>
+      <template #actions>
+        <el-button class="erp-btn erp-btn-secondary" @click="openManualSkuDialog">
+          手工添加 SKU
+        </el-button>
+        <el-button
+          class="erp-btn erp-btn-primary"
+          type="primary"
+          :disabled="!selectedRows.length"
+          :loading="rowActionLoading === 'batch-order'"
+          @click="openSelectedReplenishmentCreateDialog"
+        >
+          批量创建备货单
+        </el-button>
+        <el-button class="erp-btn erp-btn-secondary" @click="openPdfImportDialog">
+          导入PDF
+        </el-button>
+        <el-button class="erp-btn erp-btn-secondary" :loading="supplySyncLoading" @click="syncOzonSupplyOrders">
+          同步入仓请求
+        </el-button>
+        <div class="fbp-toolbar-summary">
+          <article v-for="card in summaryCards" :key="card.label" class="fbp-toolbar-summary-item">
+            <span>{{ card.label }}</span>
+            <strong>{{ card.value }}</strong>
+          </article>
+        </div>
       </template>
     </InventoryPageToolbar>
 
@@ -1250,9 +1245,7 @@ onActivated(() => {
             </button>
           </template>
           <template #default="{ row }">
-            <div class="fbp-cell-title" :title="inventoryNameText(row)">{{ inventoryNameText(row) }}</div>
             <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
-            <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
             <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
                 <span><strong>本地可发仓</strong><em>{{ integer(localAvailableQty(row)) }}</em></span>
@@ -1372,10 +1365,9 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <div class="fbp-actions-cell">
-              <el-button size="small" type="primary" @click="openInventoryPlanning(row)">同库存一起备货</el-button>
               <el-button
                 size="small"
                 class="fbp-inline-button fbp-inline-button-primary"
@@ -1819,7 +1811,6 @@ onActivated(() => {
 </template>
 
 <style scoped>
-.fbp-more-actions { display:flex;flex-wrap:wrap;gap:8px;margin-top:12px; }.fbp-more-actions .el-button { margin:0; }
 .fbp-opportunity-page {
   display: flex;
   flex-direction: column;

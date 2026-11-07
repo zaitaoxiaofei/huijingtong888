@@ -13,19 +13,12 @@ import { uploadListingMedia } from "../api/tools/imageCropper";
 import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { membershipDisplay } from "../utils/account-membership.js";
-import { canAccessPage, needsMembershipActivation,hasPermission } from "../../../src/shared/permissions.js";
-import InventoryModuleTabs from '../components/InventoryModuleTabs.vue';
-import { inventoryModule } from '../constants/inventory-modules.js';
+import { canAccessPage, needsMembershipActivation } from "../../../src/shared/permissions.js";
 import AppearanceSettings from "../components/AppearanceSettings.vue";
 import BrandLogo from "../components/BrandLogo.vue";
 import HeaderToolIcon from "../components/HeaderToolIcon.vue";
 import { consumeMembershipDialogRequest, membershipDialogRequest } from "../utils/membership-dialog.js";
 import { consumeExchangeRateDialogRequest, exchangeRateDialogRequest } from "../utils/exchange-rate-dialog.js";
-import { usePagedWorkspaceLayout } from "../composables/usePagedWorkspaceLayout.js";
-import "../styles/paged-workspace.css";
-
-const workspacePanel = ref(null);
-usePagedWorkspaceLayout(workspacePanel);
 
 const MembershipView = defineAsyncComponent(() => import("../views/MembershipView.vue"));
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
@@ -47,11 +40,6 @@ const profileAvatarUploading = ref(false);
 const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
 let mobileViewportQuery = null;
 let notificationRefreshTimer = 0;
-let notificationEventTimer = 0;
-let notificationReadVersion=0;
-const approvingInventoryRequest=ref(null);
-function queueNotificationRefresh(){window.clearTimeout(notificationEventTimer);notificationEventTimer=window.setTimeout(()=>loadNotifications({quiet:true}),250);}
-function resetNotificationsForScope(){approvingInventoryRequest.value=null;notifications.value=[];notificationUnread.value=0;notificationDrawerVisible.value=false;queueNotificationRefresh();}
 const notificationDrawerVisible = ref(false);
 const notificationLoading = ref(false);
 const notifications = ref([]);
@@ -68,8 +56,7 @@ const membershipExpiryText = computed(() => membership.value.expiresAt
   : membership.value.active ? "当前会员未设置到期时间" : "激活后即可使用已开放的企业功能");
 const membershipActionLabel = computed(() => !canActivateMembership.value ? "查看会员" : membership.value.active ? "激活 / 续期" : "激活会员");
 
-const activeMenu = computed(() => route.path === "/procurement/workspace" && (route.query.mode === "purchase" || route.query.message_request_id || route.query.review_product_id)
-  ? "procurement-workspace-legacy" : inventoryModule(route.path)?.tabs[0].path || route.path);
+const activeMenu = computed(() => route.path);
 const visibleNavigationMenus = computed(() => navigationMenusForRole(authStore.user));
 const standaloneMode = computed(() => String(route.query.standalone || "") === "1");
 const breadcrumbs = computed(() => route.meta.breadcrumb || ["ERP Admin"]);
@@ -125,23 +112,10 @@ const contextMenu = ref({
   y: 0
 });
 const pluginUpdates = ref({});
-const pluginDownloadRelease = ref(null);
-let pluginDownloadRequest = null;
-const pluginDownloadLinks = computed(() => [{
-  command: "unified",
-  label: `爆单ERP统一插件${pluginDownloadRelease.value?.version ? ` · 最新 v${pluginDownloadRelease.value.version}` : ""}`,
-  url: pluginDownloadRelease.value?.download_url || "/downloads/ozon-baodan-erp-plugin.zip"
-}]);
-
-async function loadPluginDownloadRelease() {
-  if (pluginDownloadRequest) return pluginDownloadRequest;
-  const scope = currentApiCacheScope();
-  pluginDownloadRequest = apiClient.get("/api/system/update-status", { routeScoped: false, noCache: true })
-    .then(status => { if (scope === currentApiCacheScope()) pluginDownloadRelease.value = status?.plugin || null; })
-    .catch(() => {})
-    .finally(() => { pluginDownloadRequest = null; });
-  return pluginDownloadRequest;
-}
+const pluginDownloadLinks = [
+  { command: "collector", label: "商品采集插件", url: "/downloads/ozon-erp-collector-plugin.rar" },
+  { command: "analytics", label: "店铺分析插件", url: "/downloads/ozon-seller-analytics-plugin.zip" }
+];
 const routeSwitching = ref(false);
 let routeSwitchTimer = 0;
 const prefetchedRoutes = new Set();
@@ -172,15 +146,6 @@ function rememberIntendedRoute(target) {
 }
 
 function handleMenuSelect(index) {
-  if (index === "procurement-workspace-legacy") {
-    mobileNavigationOpen.value = false;
-    const target = "/procurement/workspace?mode=purchase";
-    if (route.fullPath === target) return;
-    rememberIntendedRoute(target);
-    showRouteSwitching();
-    router.push({ path: "/procurement/workspace", query: { mode: "purchase" } }).catch(() => {});
-    return;
-  }
   const target = String(index || "").trim();
   if (target === "https://www.17track.net/zh-cn") {
     mobileNavigationOpen.value = false;
@@ -288,7 +253,7 @@ watch(exchangeRateDialogRequest, () => {
 }, { immediate: true, flush: "sync" });
 
 async function loadNotifications({ quiet = false } = {}) {
-  const scope = currentApiCacheScope(),read=++notificationReadVersion;
+  const scope = currentApiCacheScope();
   if (!authStore.user?.tenant?.id || authStore.user.tenant.access_allowed === false) {
     notifications.value = [];
     notificationUnread.value = 0;
@@ -300,13 +265,13 @@ async function loadNotifications({ quiet = false } = {}) {
       routeScoped: false,
       noCache: true
     });
-    if (scope !== currentApiCacheScope()||read!==notificationReadVersion) return;
+    if (scope !== currentApiCacheScope()) return;
     notifications.value = result?.rows || [];
     notificationUnread.value = Number(result?.unread || 0);
   } catch (error) {
-    if (!quiet&&scope===currentApiCacheScope()&&read===notificationReadVersion) ElMessage.error(error?.message || "通知加载失败");
+    if (!quiet) ElMessage.error(error?.message || "通知加载失败");
   } finally {
-    if (scope === currentApiCacheScope()&&read===notificationReadVersion) notificationLoading.value = false;
+    if (scope === currentApiCacheScope()) notificationLoading.value = false;
   }
 }
 
@@ -351,29 +316,12 @@ async function resolveNotification(item) {
   await loadNotifications();
 }
 
-async function approveInventoryRequestNotification(item){
- if(approvingInventoryRequest.value!==null||!hasPermission(authStore.user,'inventory.review'))return;
- const scope=currentApiCacheScope();approvingInventoryRequest.value=item.id;
- try{
-  const row=await apiClient.get(`/api/inventory-product-requests/${Number(item.entity_id)}`,{noCache:true,routeScoped:false});
-  if(scope!==currentApiCacheScope())return;
-  if(row.status!=='pending'){ElMessage.info('这条库存申请已处理');await loadNotifications({quiet:true});return;}
-  await ElMessageBox.confirm(`确认通过库存申请 #${row.id}「${row.payload?.name||'库存建品'}」并创建库存？`,'通过库存申请',{confirmButtonText:'通过并创建库存',cancelButtonText:'取消',type:'warning'});
-  if(scope!==currentApiCacheScope())return;
-  const result=await apiClient.put(`/api/inventory-product-requests/${row.id}`,{action:'approve',revision:row.revision});
-  if(scope!==currentApiCacheScope())return;
-  if(result.binding_status==='failed')ElMessage.warning(`库存已创建，订单绑定待重试：${result.binding_error}`);else ElMessage.success('申请已通过，库存已创建');
-  window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed'));await loadNotifications({quiet:true});
- }catch(error){if(scope===currentApiCacheScope()&&error!=='cancel'&&error!=='close')ElMessage.error(error.message||'审批失败，请点击查看申请核对');}
- finally{if(scope===currentApiCacheScope())approvingInventoryRequest.value=null;}
-}
-
 function notificationTypeLabel(type) {
-  return ({ inventory_product_request:"库存申请",inventory_product_request_result:"库存申请",daily_procurement: "采购", stock_topup: "库存补足", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
+  return ({ daily_procurement: "采购", pending_inbound: "入库", fbp_shortage: "库存" })[type] || "系统";
 }
 
 function notificationActionLabel(item = {}) {
-  const label = ({ inventory_product_request:"查看申请",inventory_product_request_result:"查看申请",daily_procurement: "去采购", stock_topup: "处理库存补足", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
+  const label = ({ daily_procurement: "去采购", pending_inbound: "去入库", fbp_shortage: "查看缺货明细" })[item.notification_type];
   if (label) return label;
   if (String(item.route || "").startsWith("/inventory/fbp-shortages")) return "查看缺货明细";
   if (String(item.route || "").startsWith("/procurement/workspace")) return "去采购";
@@ -705,7 +653,7 @@ function openPluginDownload() {
 }
 
 function handlePluginDownloadCommand(command) {
-  const item = pluginDownloadLinks.value.find((link) => link.command === command);
+  const item = pluginDownloadLinks.find((link) => link.command === command);
   if (!item?.url) return;
   window.open(item.url, "_blank", "noopener,noreferrer");
 }
@@ -809,7 +757,6 @@ watch([() => authStore.user?.id, () => authStore.user?.tenant?.id, () => authSto
 }, { flush: "sync" });
 
 onMounted(() => {
-  void loadPluginDownloadRelease();
   mobileViewportQuery = window.matchMedia("(max-width: 1100px), (max-width: 1366px) and (any-pointer: coarse)");
   syncMobileViewport(mobileViewportQuery);
   mobileViewportQuery.addEventListener("change", syncMobileViewport);
@@ -818,8 +765,6 @@ onMounted(() => {
   window.addEventListener("app:plugin-update", handlePluginUpdate);
   window.addEventListener("app:plugin-update-clear", clearPluginUpdate);
   window.addEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
-  window.addEventListener('erp:system-notification',queueNotificationRefresh);
-  window.addEventListener('erp:auth-scope-changed',resetNotificationsForScope);
   loadNotifications({ quiet: true });
   notificationRefreshTimer = window.setInterval(() => loadNotifications({ quiet: true }), 60000);
 });
@@ -831,9 +776,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("app:plugin-update", handlePluginUpdate);
   window.removeEventListener("app:plugin-update-clear", clearPluginUpdate);
   window.removeEventListener("erp:auth-scope-changed", resetQuickToolsForScope);
-  window.removeEventListener('erp:system-notification',queueNotificationRefresh);
-  window.removeEventListener('erp:auth-scope-changed',resetNotificationsForScope);
-  window.clearTimeout(notificationEventTimer);
   window.clearInterval(notificationRefreshTimer);
   window.clearTimeout(routeSwitchTimer);
 });
@@ -866,12 +808,11 @@ onBeforeUnmount(() => {
                 <el-menu-item
                   v-for="child in menu.children"
                   :key="child.key"
-                  :index="child.key === 'procurement-workspace-legacy' ? child.key : child.route"
+                  :index="child.route"
                   @mouseenter="prefetchMenuRoute(child.route)"
                   @focus="prefetchMenuRoute(child.route)"
                 >
                   {{ child.label }}
-                  <el-tag v-if="child.badge" size="small" type="info" effect="plain" class="erp-menu-legacy-badge">{{ child.badge }}</el-tag>
                 </el-menu-item>
               </el-sub-menu>
               <el-menu-item
@@ -939,7 +880,7 @@ onBeforeUnmount(() => {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-dropdown trigger="click" @command="handlePluginDownloadCommand" @visible-change="visible => visible && loadPluginDownloadRelease()">
+          <el-dropdown trigger="click" @command="handlePluginDownloadCommand">
             <el-button circle class="erp-header-icon" aria-label="插件下载" title="插件下载">
               <el-icon><Download /></el-icon>
             </el-button>
@@ -1047,8 +988,7 @@ onBeforeUnmount(() => {
               <span></span>
               <strong>正在切换页面</strong>
             </div>
-            <InventoryModuleTabs />
-            <div ref="workspacePanel" class="erp-workspace-panel">
+            <div class="erp-workspace-panel">
               <RouterView v-slot="{ Component, route: currentRoute }">
                 <!-- Closing a tab can change activeKey before its route navigation finishes. -->
                 <KeepAlive :max="6">
@@ -1140,9 +1080,8 @@ onBeforeUnmount(() => {
           <time>{{ shanghaiDateTimeText(item.created_at, { assumeUtcWhenNaive: true }) }}</time>
         </button>
         <div class="notification-card-actions">
-          <el-button v-if="item.notification_type==='inventory_product_request'&&item.status!=='resolved'&&hasPermission(authStore.user,'inventory.review')" link type="success" :loading="approvingInventoryRequest===item.id" :disabled="approvingInventoryRequest!==null" @click.stop="approveInventoryRequestNotification(item)">通过申请</el-button>
           <el-button v-if="item.route" link type="primary" @click.stop="openNotification(item)">{{ notificationActionLabel(item) }}</el-button>
-          <el-button v-if="item.status !== 'resolved' && item.notification_type !== 'ozon_credential_health'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
+          <el-button v-if="item.status !== 'resolved'" link type="info" @click.stop="resolveNotification(item)">标记已处理</el-button>
         </div>
       </article>
     </div>
@@ -1221,7 +1160,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.erp-menu-legacy-badge { margin-left: 8px; }
 .erp-header-left { flex: 1; overflow: hidden; }
 .erp-header-right { flex-shrink: 0; gap: 5px; }
 .erp-quick-tools { display: flex; align-items: center; gap: 3px; padding-right: 8px; margin-right: 3px; border-right: 1px solid var(--erp-border); }

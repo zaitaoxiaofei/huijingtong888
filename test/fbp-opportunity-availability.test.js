@@ -45,9 +45,8 @@ test('global ledger projection does not count FBP reservation movements as new s
 });
 
 test('FBP opportunities and future inventory pages share the order coverage availability interface', () => {
-  const start = service.indexOf('export async function fbpOpportunitiesMysql(');
-  const body = service.slice(start, service.indexOf('export async function ignoreFbpReplenishmentMysql(', start));
-  assert.match(body, /readFbpOpportunityCoverageMysql\(scope, \{ fresh: forceRefresh \}\)/);
+  const body = service.slice(service.indexOf('export async function fbpOpportunitiesMysql('), service.indexOf('export async function fbpShortageItemsMysql('));
+  assert.match(body, /orderProcurementCoverageMysql\(\)/);
   assert.doesNotMatch(body, /status NOT IN \('cancelled', 'purchased'\)/);
   assert.match(service, /export async function productInventoryAvailabilityMysql\(/);
   assert.match(server, /GET \/api\/inventory\/availability/);
@@ -57,7 +56,7 @@ test('FBP opportunities and future inventory pages share the order coverage avai
 
 test('availability API resolves a bounded product batch from the order projection', async () => {
   const start = service.indexOf('export async function productInventoryAvailabilityMysql(');
-  const end = service.indexOf('export async function orderInventoryAvailabilityMysql(', start);
+  const end = service.indexOf('export async function orderProcurementBatchesMysql(', start);
   const calls = [];
   const ownershipSql = [];
   const load = new Function('ensureMysqlCutoverEnabled', 'orderProcurementCoverageMysql',

@@ -1,6 +1,6 @@
 if (typeof importScripts === 'function') {
   try {
-    importScripts('erp-config.js', 'unified-config.js', 'unified-runtime.js', 'seller-cookie-context.js', 'collector-browser-worker.js');
+    importScripts('erp-config.js');
   } catch (error) {}
 }
 
@@ -38,24 +38,12 @@ const ozonInjectionAttemptAtByTabId = new Map();
 const ozonInjectionBlockedByTabId = new Map();
 let serverPublishMediaSidecarPromise = null;
 let sellerAuthSyncPromise = null;
-const sellerPoolCooldownUntilByContext = new Map();
 
 function normalizeErpBaseUrl(value) {
-  if (globalThis.OzonUnifiedConfig && String(value || '').trim()) {
-    try {
-      const raw = String(value).trim();
-      const requested = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-      if (requested.origin !== new URL(DEFAULT_ERP_BASE_URL).origin) throw new Error('ERP_ORIGIN_MISMATCH');
-    } catch (error) {
-      throw new Error('统一插件固定连接线上 ERP，请勿指定其他服务地址');
-    }
+  if (typeof erpConfig.normalizeErpBaseUrl === 'function') {
+    return erpConfig.normalizeErpBaseUrl(value);
   }
-  const normalized = typeof erpConfig.normalizeErpBaseUrl === 'function'
-    ? erpConfig.normalizeErpBaseUrl(value) : DEFAULT_ERP_BASE_URL;
-  if (globalThis.OzonUnifiedConfig && normalized !== DEFAULT_ERP_BASE_URL) {
-    throw new Error('统一插件固定连接线上 ERP，请勿指定其他服务地址');
-  }
-  return normalized;
+  return DEFAULT_ERP_BASE_URL;
 }
 
 function normalizeDirectSyncContext(syncContext) {
@@ -67,13 +55,11 @@ function normalizeDirectSyncContext(syncContext) {
 }
 
 async function getErpBaseUrl() {
-  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).erpBaseUrl;
   const stored = await chrome.storage.local.get([ERP_BASE_URL_STORAGE_KEY]);
   return normalizeErpBaseUrl(stored?.[ERP_BASE_URL_STORAGE_KEY] || DEFAULT_ERP_BASE_URL);
 }
 
 async function getLocalPluginToken() {
-  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).localPluginToken;
   const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY]);
   return String(stored?.[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim();
 }
@@ -123,9 +109,7 @@ async function checkPluginUpdateStatus() {
       checkedAt: Date.now()
     }
   });
-  if (globalThis.OzonUnifiedRuntime) {
-    globalThis.OzonUnifiedRuntime.setCollectorBadge({ text: plugin?.update_required ? 'NEW' : '', color: '#d97706' });
-  } else if (plugin?.update_required) {
+  if (plugin?.update_required) {
     chrome.action.setBadgeText({ text: 'NEW' });
     chrome.action.setBadgeBackgroundColor({ color: '#d97706' });
   } else {
@@ -210,17 +194,12 @@ async function fetchLocalPluginJson(pathname, options = {}) {
 }
 
 async function getSellerCookieInfo(tabUrl = 'https://seller.ozon.ru/') {
-  let cookieUrl = 'https://seller.ozon.ru/';
-  try {
-    const parsedUrl = new URL(String(tabUrl || cookieUrl));
-    if (parsedUrl.origin === 'https://seller.ozon.ru') cookieUrl = parsedUrl.href;
-  } catch (error) {}
-  const cookies = await chrome.cookies.getAll({ url: cookieUrl });
+  const cookies = await chrome.cookies.getAll({ domain: 'seller.ozon.ru' });
   const header = cookies.filter((item) => item?.name).map((item) => `${item.name}=${item.value || ''}`).join('; ');
   const preferredNames = ['sc_company_id', 'company_id', 'seller_company_id'];
   let companyId = '';
   for (const name of preferredNames) {
-    const cookie = await chrome.cookies.get({ url: cookieUrl, name });
+    const cookie = await chrome.cookies.get({ url: String(tabUrl || 'https://seller.ozon.ru/'), name });
     if (cookie?.value) { companyId = String(cookie.value).trim(); break; }
   }
   const portableCookies = cookies.filter((item) => item?.name).map((item) => ({
@@ -407,7 +386,6 @@ async function getCachedErpTenantId(baseUrl) {
 }
 
 async function cacheErpTenantId(tenantId, baseUrl) {
-  if (globalThis.OzonUnifiedConfig) return;
   const normalizedTenantId = String(tenantId || '').trim();
   if (!normalizedTenantId) return;
   await chrome.storage.local.set({
@@ -436,7 +414,6 @@ async function readTenantIdFromErpTab(tabId) {
 }
 
 async function resolveErpTenantId(baseUrl) {
-  if (globalThis.OzonUnifiedConfig) return (await globalThis.OzonUnifiedConfig.get()).tenantId;
   const tab = await findErpBrowserTab(baseUrl);
   if (tab?.id && !isErpLoginTab(tab)) {
     const tenantId = await readTenantIdFromErpTab(tab.id);
@@ -578,7 +555,7 @@ async function lookupCollectedProductCaches(skus, syncContext = null) {
   );
   const batch = await fetchLocalPluginJson('/collected-products/lookup-batch', {
     method: 'POST',
-    body: { skus: normalizedSkus, syncContext, summary: true },
+    body: { skus: normalizedSkus, syncContext },
     timeoutMs: 30000
   }).catch(() => null);
   if (batch?.success && Array.isArray(batch.results)) {
@@ -726,7 +703,10 @@ async function reinjectSellerBridge(tabId) {
 }
 
 async function crossTabOzonRequest(message, sender) {
-  const existingTab = await findSellerTab();
+  const tab = await ensureSellerTab();
+  if (!tab?.id) {
+    return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
+  }
   const requestPayload = {
     type: 'OZON_SKU_API_REQUEST',
     requestId: message.requestId,
@@ -735,18 +715,18 @@ async function crossTabOzonRequest(message, sender) {
     variantId: message.variantId,
     sourceTabId: sender?.tab?.id
   };
-  const request = async () => {
-    const tab = existingTab || await ensureSellerTab();
-    if (!tab?.id) return { success: true, hasSellerTab: false, error: 'NO_SELLER_TAB', message: 'Open seller.ozon.ru first' };
-    const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
-    if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') return initialResponse;
-    try { await reinjectSellerBridge(tab.id); }
-    catch (error) { return initialResponse; }
-    return sendMessageToSellerTab(tab.id, requestPayload);
-  };
-  if (!globalThis.OzonUnifiedRuntime) return request();
-  try { return await globalThis.OzonUnifiedRuntime.withCollectorTab(existingTab?.id || 'legacy-seller-open', request); }
-  catch (error) { return { success: false, error: error.code || 'SELLER_REQUEST_FAILED', message: error.message }; }
+  const initialResponse = await sendMessageToSellerTab(tab.id, requestPayload);
+  if (initialResponse?.error !== 'TAB_COMMUNICATION_FAILED') {
+    return initialResponse;
+  }
+
+  try {
+    await reinjectSellerBridge(tab.id);
+  } catch (error) {
+    return initialResponse;
+  }
+
+  return await sendMessageToSellerTab(tab.id, requestPayload);
 }
 
 async function crossTabOzonMediaUpload(message, sender) {
@@ -1546,10 +1526,9 @@ async function requestSellerBridgeDataFromBackground(sku, apiType = 'sales', var
   return response.data;
 }
 
-async function fetchSellerCollectedProductFields(sku, options = {}) {
+async function fetchSellerCollectedProductFields(sku) {
   const normalizedSku = String(sku || '').trim();
   if (!normalizedSku) throw new Error('SKU is required');
-  const requestSeller = options.request || requestSellerBridgeDataFromBackground;
 
   const fields = {};
   const raw = {};
@@ -1558,7 +1537,7 @@ async function fetchSellerCollectedProductFields(sku, options = {}) {
   let variantApiType = 'variant_v2';
 
   try {
-    const salesResponse = await requestSeller(normalizedSku, 'sales');
+    const salesResponse = await requestSellerBridgeDataFromBackground(normalizedSku, 'sales');
     raw.sales = Array.isArray(salesResponse?.items) && salesResponse.items.length > 0 ? salesResponse.items[0] : null;
     raw.salesMeta = {
       totals: salesResponse?.totals ?? '',
@@ -1575,17 +1554,12 @@ async function fetchSellerCollectedProductFields(sku, options = {}) {
       warnings.push('seller sales did not return product data');
     }
   } catch (error) {
-    if (options.throwOnRequestError) throw error;
     warnings.push(error?.message || String(error));
-  }
-
-  if (raw.sales && typeof options.onSales === 'function') {
-    await options.onSales({ fields: { ...fields }, raw: { ...raw }, warnings: [...warnings] });
   }
 
   if (!raw.baseInfo) {
     try {
-      raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
+      raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
       const categoryIds = fields.category_ids;
       Object.assign(fields, buildSellerBaseInfoFields(raw.baseInfo));
       if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
@@ -1593,38 +1567,34 @@ async function fetchSellerCollectedProductFields(sku, options = {}) {
         resolvedVariantId = String(raw.baseInfo?.variants?.[0]?.variant_id || '').trim();
       }
     } catch (error) {
-      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
 
   if (!resolvedVariantId && !raw.baseInfo) {
     try {
-      raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
+      raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
       const categoryIds = fields.category_ids;
       Object.assign(fields, buildSellerBaseInfoFields(raw.baseInfo));
       if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
       resolvedVariantId = String(raw.baseInfo?.variants?.[0]?.variant_id || '').trim();
     } catch (error) {
-      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
 
   if (resolvedVariantId) {
     try {
-      raw.variant = await requestSeller(normalizedSku, 'variant_v2', resolvedVariantId);
+      raw.variant = await requestSellerBridgeDataFromBackground(normalizedSku, 'variant_v2', resolvedVariantId);
       const variantImages = normalizeSellerImages(raw.variant?.item?.images, raw.variant?.images);
       if (variantImages.length === 0 && !raw.baseInfo) {
         try {
-          raw.baseInfo = await requestSeller(normalizedSku, 'search-sku-base');
+          raw.baseInfo = await requestSellerBridgeDataFromBackground(normalizedSku, 'search-sku-base');
         } catch (error) {
-          if (options.throwOnRequestError) throw error;
           warnings.push(error?.message || String(error));
         }
       }
     } catch (error) {
-      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
       variantApiType = 'variant';
     }
@@ -1634,12 +1604,11 @@ async function fetchSellerCollectedProductFields(sku, options = {}) {
 
   if (!raw.variant && variantApiType === 'variant') {
     try {
-      const variantResponse = await requestSeller(normalizedSku, 'variant');
+      const variantResponse = await requestSellerBridgeDataFromBackground(normalizedSku, 'variant');
       raw.variant = Array.isArray(variantResponse?.items) && variantResponse.items.length > 0
         ? variantResponse.items[0]
         : null;
     } catch (error) {
-      if (options.throwOnRequestError) throw error;
       warnings.push(error?.message || String(error));
     }
   }
@@ -1979,30 +1948,8 @@ async function emitAutoCollectListProgress(tabId, progress) {
   } catch (error) {}
 }
 
-async function fetchSellerPoolForList(skus) {
-  const erpBaseUrl = await getErpBaseUrl();
-  const token = await getLocalPluginToken();
-  const tenantId = await resolveErpTenantId(erpBaseUrl) || 'admin';
-  const contextKey = JSON.stringify([erpBaseUrl, tenantId, token]);
-  if (Date.now() < Number(sellerPoolCooldownUntilByContext.get(contextKey) || 0)) return null;
-  const response = await fetchLocalPluginJson('/collector-seller-pool/collect', {
-    method: 'POST',
-    body: { skus },
-    timeoutMs: 120000
-  }).catch(() => null);
-  const failedBatch = Array.isArray(response?.results) && response.results.length === skus.length
-    && response.results.length > 0 && new Set(response.results.map((item) => String(item?.sku))).size === skus.length
-    && response.results.every((item) => item?.success === false && skus.includes(String(item.sku)));
-  if (response?.code === 'SELLER_POOL_UNAVAILABLE' || failedBatch) {
-    sellerPoolCooldownUntilByContext.set(contextKey, Date.now() + 60000);
-  } else if (response?.results?.some((item) => item?.success)) {
-    sellerPoolCooldownUntilByContext.delete(contextKey);
-  }
-  return response;
-}
-
 async function collectSellerOnlySkusToCollectedProducts(message, sender = null) {
-  let skus = normalizeManualSkuList(message?.skus || []);
+  const skus = normalizeManualSkuList(message?.skus || []);
   if (skus.length === 0) {
     return { success: false, error: 'AUTO_SKU_REQUIRED', message: 'Missing SKUs for auto collection' };
   }
@@ -2011,20 +1958,13 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
   const baseBySku = normalizeBaseProductMap(message?.baseProducts);
   const sourceTabId = sender?.tab?.id || message?.sourceTabId || null;
   const results = [];
-  const total = skus.length;
-  const browserPreview = !writeToErp && typeof collectorBrowserPool !== 'undefined'
-    ? await collectorBrowserPool?.preview(skus, baseBySku, sourceTabId) : null;
-  if (browserPreview) {
-    results.push(...browserPreview.results);
-    skus = browserPreview.fallbackSkus;
-    if (!skus.length) {
-      const successCount = results.filter((item) => item.success).length;
-      return { success: successCount > 0, total, successCount, failCount: total - successCount, results };
-    }
-  }
   let cursor = 0;
   const concurrency = Math.max(1, Math.min(Number(message?.concurrency || 3), 3));
-  const poolResponse = await fetchSellerPoolForList(skus);
+  const poolResponse = await fetchLocalPluginJson('/collector-seller-pool/collect', {
+    method: 'POST',
+    body: { skus },
+    timeoutMs: 120000
+  }).catch(() => null);
   const poolAttempted = Array.isArray(poolResponse?.results);
   const poolWorkerCount = Number(poolResponse?.worker_count || poolResponse?.data?.worker_count || 0);
   const poolBySku = new Map((poolAttempted ? poolResponse.results : [])
@@ -2056,20 +1996,7 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
       if (poolItem?.success) {
         sellerResult = buildSellerCollectedProductFieldsFromPool(poolItem);
       } else {
-        sellerResult = await fetchSellerCollectedProductFields(sku, writeToErp ? {} : {
-          onSales: async (salesResult) => {
-            const payload = buildSellerOnlyCollectedProductPayload(sku, salesResult, baseBySku.get(sku));
-            await emitAutoCollectListProgress(sourceTabId, {
-              sku,
-              success: true,
-              partial: true,
-              stage: 'sales',
-              previewOnly: true,
-              product: buildCollectedProductDisplayPayload(payload),
-              collectionRoute
-            });
-          }
-        });
+        sellerResult = await fetchSellerCollectedProductFields(sku);
         if (poolWarning) {
           sellerResult.warnings = [`Seller pool fallback: ${poolWarning}`, ...(sellerResult.warnings || [])];
         }
@@ -2132,9 +2059,9 @@ async function collectSellerOnlySkusToCollectedProducts(message, sender = null) 
   const successCount = results.filter((item) => item.success).length;
   return {
     success: successCount > 0,
-    total,
+    total: skus.length,
     successCount,
-    failCount: total - successCount,
+    failCount: skus.length - successCount,
     results
   };
 }
@@ -2372,16 +2299,6 @@ async function collectManualDetailSkus(message) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (['OZON_ERP_BROWSER_POOL_DIAGNOSTICS', 'OZON_ERP_BROWSER_POOL_RECONNECT'].includes(message?.type)) {
-    const popupUrl = chrome.runtime.getURL?.('popup.html') || `chrome-extension://${chrome.runtime.id}/popup.html`;
-    if (sender?.id !== chrome.runtime.id || sender?.tab || sender?.url !== popupUrl) {
-      sendResponse({ success: false, error: 'PLUGIN_POPUP_REQUIRED' });
-      return false;
-    }
-    if (message.type === 'OZON_ERP_BROWSER_POOL_RECONNECT') wakeCollectorBrowserPool();
-    sendResponse({ success: true, diagnostics: collectorBrowserPool?.getDiagnostics() || null });
-    return false;
-  }
   if (message?.type === 'OZON_ERP_SELLER_AUTH_SYNC') {
     const isSellerTab = /^https:\/\/seller\.ozon\.ru\//i.test(String(sender?.tab?.url || ''));
     if (!isSellerTab) {
@@ -2636,10 +2553,6 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm?.name === 'ozon-erp-collector-browser-worker') {
-    wakeCollectorBrowserPool();
-    return;
-  }
   if (alarm?.name === PLUGIN_UPDATE_ALARM_NAME) {
     checkPluginUpdateStatus().catch(() => {});
     return;
@@ -2648,58 +2561,3 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     runServerPublishMediaSidecar().catch(() => {});
   }
 });
-
-const collectorBrowserPool = globalThis.OzonCollectorBrowserPool?.create({
-  chrome,
-  coordination: globalThis.OzonUnifiedRuntime,
-  readCookieContext: (tab, options) => globalThis.OzonSellerCookieContext.read(tab, options),
-  getContext: async () => {
-    if (globalThis.OzonUnifiedConfig) {
-      const config = await globalThis.OzonUnifiedConfig.get();
-      return { erpBaseUrl: config.erpBaseUrl, tenantId: config.tenantId, token: config.localPluginToken };
-    }
-    const erpBaseUrl = await getErpBaseUrl();
-    return { erpBaseUrl, tenantId: await resolveErpTenantId(erpBaseUrl) || 'admin', token: await getLocalPluginToken() };
-  },
-  collectFields: fetchSellerCollectedProductFields,
-  requestInTab: async (tab, request) => {
-    const message = { type: 'OZON_SKU_API_REQUEST', ...request };
-    const response = await sendMessageToSellerTab(tab.id, message);
-    if (response?.error !== 'TAB_COMMUNICATION_FAILED') return response;
-    await reinjectSellerBridge(tab.id);
-    return sendMessageToSellerTab(tab.id, message);
-  },
-  buildPayload: buildSellerOnlyCollectedProductPayload,
-  buildDisplay: buildCollectedProductDisplayPayload,
-  emit: emitAutoCollectListProgress
-});
-if (collectorBrowserPool) {
-  collectorBrowserPool.start();
-  chrome.alarms.create('ozon-erp-collector-browser-worker', { periodInMinutes: 0.5 });
-}
-
-function wakeCollectorBrowserPool() {
-  // Registration runs in the background; popup replies never wait on HTTP or Seller.
-  collectorBrowserPool?.wake().catch(() => {});
-}
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  const url = changeInfo?.url || tab?.url || '';
-  if (/^https:\/\/seller\.ozon\.ru\//.test(url) && (changeInfo?.url || changeInfo?.status === 'complete')) {
-    wakeCollectorBrowserPool();
-  }
-});
-chrome.tabs.onRemoved.addListener((tabId) => {
-  if (collectorBrowserPool?.getDiagnostics().tabs.some((tab) => tab.tabId === tabId)) wakeCollectorBrowserPool();
-});
-chrome.cookies.onChanged?.addListener(({ cookie }) => {
-  const domain = String(cookie?.domain || '').replace(/^\./, '');
-  if (cookie?.name === 'sc_company_id' && (domain === 'ozon.ru' || domain.endsWith('.ozon.ru'))) {
-    wakeCollectorBrowserPool();
-  }
-});
-chrome.storage.onChanged?.addListener((changes, areaName) => {
-  if (areaName === 'local' && [LOCAL_PLUGIN_TOKEN_STORAGE_KEY, ERP_BASE_URL_STORAGE_KEY,
-    ERP_TENANT_ID_STORAGE_KEY, ERP_TENANT_BASE_URL_STORAGE_KEY, 'ozon-erp-unified-connection-v1']
-    .some((key) => Object.hasOwn(changes, key))) wakeCollectorBrowserPool();
-});
-if (typeof importScripts === 'function') importScripts('analytics/background.js');

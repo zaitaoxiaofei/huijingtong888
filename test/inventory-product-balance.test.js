@@ -1,4 +1,3 @@
-import { currentMysqlWorkload } from "../src/mysql-workload.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -90,7 +89,6 @@ test("企业汇总批量重算、原子写入，并验证租户隔离、组件�
 
 test("完整旧快照先返回并后台刷新，超过九十秒则等待重算", async () => {
   let age = 60;
-  const sourcePriorities = [];
   let releaseSource;
   let refreshes = 0;
   const gate = new Promise((resolve) => { releaseSource = resolve; });
@@ -98,7 +96,6 @@ test("完整旧快照先返回并后台刷新，超过九十秒则等待重算",
     fbp_reserved_qty: 0, physical_stock: 4, available_stock: 4, age_seconds: age };
   const query = async (sql) => {
     if (sql.includes("FROM inventory_product_balance")) return [{ ...row, age_seconds: age }];
-    sourcePriorities.push(currentMysqlWorkload());
     await gate;
     return [];
   };
@@ -109,15 +106,12 @@ test("完整旧快照先返回并后台刷新，超过九十秒则等待重算",
   const first = await loadInventoryProductBalances(query, transaction, 81, false, [8]);
   assert.equal(first.get(8).available_stock, 4, "a complete 60-second snapshot should not block the page");
   assert.equal(refreshes, 0, "background recomputation is still waiting on the source");
-  assert.deepEqual([...new Set(sourcePriorities)], ["background"]);
   releaseSource();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(refreshes, 1);
   age = 91;
-  sourcePriorities.length = 0;
   await loadInventoryProductBalances(query, transaction, 81, false, [8]);
   assert.equal(refreshes, 2, "the hard freshness limit must wait for a new computation");
-  assert.deepEqual([...new Set(sourcePriorities)], ["foreground"]);
 });
 
 test("库存预警使用余额投影且失败时才回退采购覆盖；部署 schema 含企业复合主键", () => {

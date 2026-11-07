@@ -1,17 +1,5 @@
 # Daily finance accruals
 
-## Source migration (2026-11-04)
-
-Raw finance collection always uses `/v1/finance/accrual/types` and `/v1/finance/accrual/by-day`, independently of the profit FX policy. Missing or invalid profit-policy configuration cannot select the retired transaction endpoint. Explicit legacy-source requests and missing real shop credentials fail before HTTP; no empty-success or legacy fallback is supplied.
-
-Existing legacy transactions are retained. Because their identities cannot safely be matched to daily accrual IDs, collection starts after the shop's latest legacy operation date when the requested range overlaps it. Responses expose `source_endpoint`, `warnings`, and per-shop `source_from`, `legacy_through`, `note`, and `status` (`ok`, `skipped_legacy_range`, or `error`). This is a conservative overlap boundary, not proof that earlier days are complete; gaps and corrections there need separate reconciliation. The raw sync log records the warning.
-
-Each provider request and stored operation rechecks the current enterprise permission, active shop and unchanged credentials. Rotation or revocation interrupts collection. Repeated daily imports retain stable identities. Existing writers still require archived FX and reconciled signed money; missing evidence is not replaced by a guessed rate.
-
-Collecting new bills does not activate a profit policy. V1 and V3 orders cannot consume the daily accrual monetary model or be recalculated by its arrival. Existing V2/V4 paths keep their dedicated settlement prerequisites. A completed date range does not establish that every future fee for an order has arrived. No historical deletion, production schema change or bulk profit recalculation is part of this migration.
-
-Validation: mocked provider unit tests plus isolated MySQL tests cover absent/malformed policy, repeat ingestion, legacy overlap, original currency, historical profit, enterprise isolation and key rotation. These are not live-shop acceptance results.
-
 Verified on 2026-10-26 using read-only responses from the official Seller API. No production database writes were part of the contract investigation.
 
 ## Confirmed source and limits of the evidence

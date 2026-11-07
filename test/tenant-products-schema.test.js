@@ -36,12 +36,10 @@ test("product ownership migration is opt-in, leaves legacy ownership unknown, an
 
 test("product relationship tables support tenant-first access without runtime migration", () => {
   const service = read("../src/services/mysql-cutover.js");
-  const identityHistory = read("../src/services/product-edit-history.js");
   const migration = read("../scripts/migrate-tenant-product-relations.mjs");
   const packageJson = read("../package.json");
   assert.match(service, /CREATE TABLE IF NOT EXISTS product_components \([\s\S]*?tenant_id BIGINT UNSIGNED NULL[\s\S]*?idx_product_components_tenant_parent/);
-  assert.match(identityHistory, /CREATE TABLE IF NOT EXISTS product_name_aliases \([\s\S]*?tenant_id BIGINT UNSIGNED NULL[\s\S]*?idx_product_name_alias_tenant_search/);
-  assert.match(service,/await ensureProductNameAliasSchema\(\)/);
+  assert.match(service, /CREATE TABLE IF NOT EXISTS product_name_aliases \([\s\S]*?tenant_id BIGINT UNSIGNED NULL[\s\S]*?idx_product_name_alias_tenant_search/);
   assert.match(migration, /const APPLY = process\.argv\.includes\("--apply"\)/);
   assert.match(migration, /--mysql-admin-socket/);
   assert.match(migration, /relationship tenant follows its product\(s\), treating legacy NULL product ownership as default/);
@@ -224,7 +222,7 @@ test("tenant product creation and editing validate references and keep inventory
   assert.match(createProduct, /incrementLogisticsRuleUsageMysqlTx\(connection, logisticsRuleId, tenantScoped \? String\(tenantPk\) : "admin"\)/);
   assert.match(createProduct, /maybeCreateProcurementForProductMysql\(connection, productId, body,[\s\S]*?String\(tenantPk\)\)/);
   const updateProduct = service.match(/export async function updateProductMysql\([\s\S]*?(?=export async function updateProductComponentsMysql)/)?.[0] || "";
-  assert.match(updateProduct, /updateProductMysql\(id, body = \{\}, tenantId = "admin", options = \{\}\)/);
+  assert.match(updateProduct, /updateProductMysql\(id, body = \{\}, tenantId = "admin"\)/);
   assert.match(updateProduct, /assertInventoryRecord\(scope, 'product', productId, run, \{ lock: true \}\)/);
   assert.match(updateProduct, /assertInventoryReferences\(scope, body, run\)/);
   assert.match(updateProduct, /WHERE id = \? AND active = 1 AND \$\{scope\.predicate\(\)\.sql\}/);
@@ -242,7 +240,7 @@ test("tenant product creation and editing validate references and keep inventory
   assert.match(tenantDetail, /inventoryTenantSql\(sharedRules, 'logistics'\)/);
   assert.match(routes, /services\.createProduct\(payload, null, tenantId\)/);
   assert.match(routes, /services\.selectionProduct\(created\.id, \{ includeDetails: 0 \}, tenantId\)/);
-  assert.match(routes, /services\.updateProduct\(productId, await readProductSaveJson\(readJson, req\), tenantIdFromRequest\(req\), \{session:req\._session\}\)/);
+  assert.match(routes, /services\.updateProduct\(productId, await readProductSaveJson\(readJson, req\), tenantIdFromRequest\(req\)\)/);
   assert.match(routes, /isInventoryCreation[\s\S]*?services\.submitInventoryProductRequest\(payload, req\._session\)/);
   const tenantSelectionList = service.match(/async function tenantSelectionProductsMysql\([\s\S]*?(?=export async function selectionProductsMysql)/)?.[0] || "";
   assert.match(tenantSelectionList, /p\.tenant_id = \?/);

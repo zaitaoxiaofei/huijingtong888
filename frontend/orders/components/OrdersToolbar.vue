@@ -1,9 +1,7 @@
 <script setup>
-import { computed,inject } from "vue";
+import { computed } from "vue";
 import { ArrowDown, Printer, Refresh, Search } from "@element-plus/icons-vue";
 
-import OrderWorkModeSwitch from './OrderWorkModeSwitch.vue';
-const workMode=inject('orders-work-mode',null);
 const props = defineProps({
   filters: { type: Object, default: () => ({}) },
   shops: { type: Array, default: () => [] },
@@ -15,16 +13,11 @@ const props = defineProps({
   syncRunning: { type: Boolean, default: false },
   lastSyncText: { type: String, default: "暂无同步记录" },
   moreActions: { type: Array, default: () => [] },
-  markOptions:{type:Array,default:()=>[]},
-  marking:{type:Boolean,default:false},
   selectedCount: { type: Number, default: 0 },
-  pageRowCount: { type: Number, default: 0 },
-  preparableCount:{type:Number,default:0},canPrepare:{type:Boolean,default:false},
-  preparingPage:{type:Boolean,default:false}
+  pageRowCount: { type: Number, default: 0 }
 });
 
 const emit = defineEmits([
-  "batch-mark",
   "update:filters",
   "submit",
   "sync-incremental",
@@ -33,7 +26,6 @@ const emit = defineEmits([
   "more-action",
   "print-selected",
   "print-page",
-  "prepare-page",
   "open-quality-rules",
   "load-logistics-options"
 ]);
@@ -143,7 +135,10 @@ function handlePrintCommand(command) {
               @input="patchFilters({ searchQuery: $event })"
               @keyup.enter="emit('submit')"
             />
-            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
+          </div>
+
+          <div class="orders-toolbar-last-sync" title="最近一次成功写入订单同步日志的北京时间">
+            最近同步：{{ lastSyncText }}
           </div>
 
           <el-date-picker
@@ -158,55 +153,13 @@ function handlePrintCommand(command) {
           />
 
           <div class="orders-toolbar-actions-main">
-            <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
-              <el-tooltip :content="`最近成功同步：${lastSyncText}（北京时间）。按当前店铺和日期范围校正订单状态或补历史漏单。`" placement="top">
-                <el-button
-                  class="orders-toolbar-btn orders-toolbar-btn-secondary"
-                  type="primary"
-                  plain
-                  :icon="Refresh"
-                  :loading="syncRunning"
-                  :disabled="syncRunning"
-                  @click="emit('sync-full')"
-                >
-                  同步当前范围
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
-                <el-button
-                  class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
-                  :icon="Refresh"
-                  :loading="syncRunning"
-                  :disabled="syncRunning"
-                  @click="emit('sync-incremental')"
-                >
-                  拉取新订单
-                </el-button>
-              </el-tooltip>
-            </div>
-
-
-            <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
-              <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value" :disabled="action.requiresSelection && !selectedCount">
-                    {{ action.label }}
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-
-            <el-tooltip v-if="canPrepare" content="仅备货当前页可备货的FBS订单；跳过FBP及需要单独拆单确认的订单，不使用跨页勾选。" placement="top">
-              <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="preparingPage" :disabled="syncRunning||preparingPage||!preparableCount" @click="emit('prepare-page')">批量备货</el-button>
-            </el-tooltip>
-
+            <el-button class="orders-toolbar-btn orders-toolbar-btn-primary" type="primary" :icon="Search" @click="emit('submit')">查询</el-button>
             <el-dropdown
               class="orders-toolbar-print"
               split-button
               trigger="click"
               :button-props="{ class: 'orders-toolbar-btn orders-toolbar-btn-secondary' }"
-              :disabled="syncRunning || (!pageRowCount && !selectedCount)"
+              :disabled="syncRunning || !pageRowCount"
               @click="emit('print-selected')"
               @command="handlePrintCommand"
             >
@@ -219,28 +172,59 @@ function handlePrintCommand(command) {
               </template>
             </el-dropdown>
 
+            <div class="orders-toolbar-sync-group" aria-label="订单同步操作">
+              <el-tooltip content="只拉各店本地最新订单之后的新单，会忽略上方日期；补历史漏单请用“同步当前范围”。" placement="top">
+                <el-button
+                  class="orders-toolbar-btn orders-toolbar-btn-primary orders-toolbar-action-accent"
+                  :icon="Refresh"
+                  :loading="syncRunning"
+                  :disabled="syncRunning"
+                  @click="emit('sync-incremental')"
+                >
+                  拉取新单
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="按上方店铺和日期范围重新同步，适合补历史漏单、找旧日期订单或校正状态。" placement="top">
+                <el-button
+                  class="orders-toolbar-btn orders-toolbar-btn-secondary"
+                  type="primary"
+                  plain
+                  :icon="Refresh"
+                  :loading="syncRunning"
+                  :disabled="syncRunning"
+                  @click="emit('sync-full')"
+                >
+                  同步当前范围
+                </el-button>
+              </el-tooltip>
+            </div>
+
+            <el-dropdown trigger="click" :disabled="syncRunning" @command="handleCommand">
+              <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">更多操作</el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item v-for="action in moreActions" :key="action.value" :command="action.value" :disabled="action.requiresSelection && !selectedCount">
+                    {{ action.label }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+
             <el-button v-if="syncRunning" class="orders-toolbar-btn orders-toolbar-btn-danger" type="danger" plain @click="emit('cancel-sync')">取消同步</el-button>
           </div>
         </div>
 
         <div class="orders-toolbar-actions-side">
-          <el-dropdown trigger="click" :disabled="!selectedCount||marking" @command="value=>emit('batch-mark',value)">
-            <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :loading="marking" :disabled="!selectedCount||marking">批量标记（{{selectedCount}}）</el-button>
-            <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="option in markOptions" :key="option.value" :command="option.value">{{option.label}}</el-dropdown-item></el-dropdown-menu></template>
-          </el-dropdown>
-          <el-button type="primary" :disabled="!selectedCount" @click="handleCommand('ogl-manual-ship')">关联 OGL 发运并标记已发运</el-button>
           <el-dropdown trigger="click" @command="handleCommand">
             <el-button class="orders-toolbar-btn orders-toolbar-btn-secondary" :icon="ArrowDown">OGL 发运</el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="ogl-quick-bind">今日打印无标记 · 快速绑定</el-dropdown-item>
-                <el-dropdown-item command="ogl-create-batch">组批 / 绑定发运（已选 {{ selectedCount }} 单）</el-dropdown-item>
+                <el-dropdown-item command="ogl-create-batch" :disabled="!selectedCount">创建发运（已选 {{ selectedCount }} 单）</el-dropdown-item>
                 <el-dropdown-item command="ogl-official-carriages">已申请</el-dropdown-item>
                 <el-dropdown-item command="ogl-batch-history">发运历史</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <OrderWorkModeSwitch v-if="workMode" :mode="workMode.mode.value" @change="workMode.mode.value=$event"/>
         </div>
       </div>
     </el-form>

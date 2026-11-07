@@ -27,7 +27,6 @@ import {
 } from "../../api/sellerAnalytics";
 import { apiClient } from "../../utils/api";
 import { getAnalyticsPeriodDateRange } from "../../utils/analytics-date-range";
-import { createCollectionRefreshGate } from "../../utils/seller-analytics-progress";
 import { isSellerAnalyticsStoreMismatch, isSellerAnalyticsValidationReady, waitForSellerAnalyticsPreparation } from "../../utils/seller-analytics-recognition";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 
@@ -243,9 +242,6 @@ const snapshots = ref([]);
 const collectRuns = ref([]);
 const pluginStatus = ref(null);
 const pluginInstanceId = ref("");
-let pluginInstanceUnified = false;
-let pluginInstanceEpoch = 0;
-const pendingPluginStoreChecks = new Set();
 const recognizingPlugin = ref(false);
 const pluginValidation = ref(null);
 const authBindingStatus = ref(null);
@@ -351,9 +347,7 @@ function handleRateSort(sortKey) {
   handleSearch();
 }
 let pollTimer = 0;
-let pollGeneration = 0;
 let pluginPollTimer = 0;
-let lastPluginWakeAt = 0;
 let lastNotifiedRunId = "";
 
 function wait(ms) {
@@ -439,7 +433,7 @@ const collectStatus = computed(() => {
     return {
       tone: "warning",
       title: "正在采集",
-      detail: `${period} · 接口 ${done}/${total} · 已展示 ${totalProductCount.value} 个商品，采集中数据持续更新`
+      detail: `${period} · 已完成 ${done}/${total}`
     };
   }
   if (run.status === "success") {
@@ -901,9 +895,8 @@ async function refreshData(silent = false, options = {}) {
     cacheFilter();
     if (options.refreshMeta !== false) markMetaStale();
     const params = buildAnalysisQueryParams();
-    const queryKey = JSON.stringify(params);
     const nextAnalysis = await getSellerAnalyticsAnalysis(params);
-    if (queryKey !== JSON.stringify(buildAnalysisQueryParams())) return;
+    if (params.store_id !== selectedStoreId.value) return;
     analysis.value = nextAnalysis || analysis.value;
     if (options.refreshMeta !== false) {
       await loadRunsMeta(true);
@@ -958,12 +951,7 @@ async function loadRunsMeta(silent = false) {
 }
 
 async function loadPluginStatus() {
-  const instanceId = pluginInstanceId.value;
-  const epoch = pluginInstanceEpoch;
-  if (!instanceId) return null;
-  const next = await getSellerAnalyticsPluginStatus({ plugin_instance_id: instanceId }).catch(() => null);
-  if (instanceId !== pluginInstanceId.value || epoch !== pluginInstanceEpoch) return null;
-  if (next) pluginStatus.value = next;
+  pluginStatus.value = await getSellerAnalyticsPluginStatus({ plugin_instance_id: pluginInstanceId.value }).catch(() => pluginStatus.value);
   return pluginStatus.value;
 }
 
@@ -1023,17 +1011,13 @@ async function confirmPersistentBrowserLogin() {
 async function loadPluginValidation() {
   const shopId = state.filters.shopId;
   const storeId = selectedStoreId.value;
-  const instanceId = pluginInstanceId.value;
-  const epoch = pluginInstanceEpoch;
-  if (!instanceId) return null;
   const next = await validateSellerAnalyticsPluginStatus({
     shop_id: shopId,
     store_id: storeId,
     company_id: storeId,
     shop_name: selectedShop.value?.name || "",
-    plugin_instance_id: instanceId
+    plugin_instance_id: pluginInstanceId.value
   }).catch(() => null);
-  if (instanceId !== pluginInstanceId.value || epoch !== pluginInstanceEpoch) return null;
   if (shopId === state.filters.shopId && storeId === selectedStoreId.value && next) pluginValidation.value = next;
   return pluginValidation.value;
 }
@@ -1051,7 +1035,7 @@ function handleSearch() {
 
 async function cancelCollectRunAndNotify(runId) {
   await cancelSellerAnalyticsCollectRun(runId);
-  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId, pluginInstanceId: pluginInstanceId.value }, window.location.origin);
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId }, window.location.origin);
 }
 
 async function handleShopChange(nextShopId) {
@@ -1157,47 +1141,34 @@ async function createPluginCollectRun(payload = {}) {
 }
 
 function wakeAnalyticsPlugin() {
-  lastPluginWakeAt = Date.now();
-  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId.value, pluginInstanceId: pluginInstanceId.value }, window.location.origin);
+  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId.value }, window.location.origin);
 }
 
 function checkCurrentShopViaPlugin(expectedStoreId) {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const instanceId = pluginInstanceId.value;
-  const epoch = pluginInstanceEpoch;
-  const unified = pluginInstanceUnified;
   return new Promise((resolve) => {
-    let settled = false;
     const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      pendingPluginStoreChecks.delete(cancel);
       window.removeEventListener("message", onMessage);
       window.clearTimeout(timer);
       resolve(result);
     };
-    const cancel = () => finish(null);
     const onMessage = (event) => {
       if (event.source !== window || event.origin !== window.location.origin) return;
       if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_CHECK_STORE_RESULT" || event.data.requestId !== requestId) return;
-      if (epoch !== pluginInstanceEpoch || instanceId !== pluginInstanceId.value) return finish(null);
-      if ((unified || event.data.pluginInstanceId) && event.data.pluginInstanceId !== instanceId) return;
       finish(event.data.result || null);
     };
     const timer = window.setTimeout(() => finish(null), 10000);
     window.addEventListener("message", onMessage);
-    pendingPluginStoreChecks.add(cancel);
-    window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CHECK_STORE", requestId, expectedStoreId, pluginInstanceId: instanceId }, window.location.origin);
+    window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_CHECK_STORE", requestId, expectedStoreId }, window.location.origin);
   });
 }
 
 async function ensureCollectReady() {
   try {
     if (!(await requireAnalyticsPluginInstance())) return false;
-    const instanceEpoch = pluginInstanceEpoch;
     const expectedStoreId = selectedStoreId.value;
     const storeCheck = await checkCurrentShopViaPlugin(expectedStoreId);
-    if (selectedStoreId.value !== expectedStoreId || instanceEpoch !== pluginInstanceEpoch) return false;
+    if (selectedStoreId.value !== expectedStoreId) return false;
     if (storeCheck && (storeCheck.code === "store_mismatch" || storeCheck.code === "identity_conflict")) {
       prepareFlow.tone = "danger";
       prepareFlow.title = "Ozon 店铺未对齐";
@@ -1206,7 +1177,6 @@ async function ensureCollectReady() {
       return false;
     }
     const currentValidation = storeCheck?.ok ? await loadPluginValidation() : null;
-    if (instanceEpoch !== pluginInstanceEpoch) return false;
     if (isSellerAnalyticsValidationReady(currentValidation, expectedStoreId)) {
       if (selectedStoreId.value !== expectedStoreId) return false;
       prepareFlow.tone = "success";
@@ -1235,7 +1205,7 @@ async function ensureCollectReady() {
         return validation;
       },
       wait,
-      isCurrent: () => selectedStoreId.value === expectedStoreId && instanceEpoch === pluginInstanceEpoch,
+      isCurrent: () => selectedStoreId.value === expectedStoreId,
       onValidation: (validation) => { prepareFlow.detail = validation?.detail || "正在等待插件打开分析页并识别当前店铺。"; }
     });
     if (result.status === "ready") {
@@ -1281,7 +1251,6 @@ async function ensureCollectReady() {
 
 async function bindCurrentShopAuth() {
   if (!(await requireAnalyticsPluginInstance())) return false;
-  const instanceEpoch = pluginInstanceEpoch;
   bindingAuth.value = true;
   prepareFlow.tone = "warning";
   prepareFlow.title = "正在绑定店铺授权";
@@ -1295,15 +1264,13 @@ async function bindCurrentShopAuth() {
       plugin_instance_id: pluginInstanceId.value,
       bind_auth_only: true
     }).catch(() => null);
-    if (instanceEpoch !== pluginInstanceEpoch) return false;
     ElMessage.info("正在打开 Ozon 完成首次授权绑定，请确认当前 Ozon 店铺和 ERP 选择店铺一致");
     const deadline = Date.now() + 120000;
     let validation = null;
-    while (Date.now() < deadline && instanceEpoch === pluginInstanceEpoch) {
+    while (Date.now() < deadline) {
       validation = await loadPluginValidation();
       const binding = await loadAuthBindingStatus();
       await loadPluginStatus();
-      if (instanceEpoch !== pluginInstanceEpoch) return false;
       if (binding?.bound && !binding.stale && String(binding.store_id || binding.company_id || "") === String(selectedStoreId.value || "")) {
         prepareFlow.tone = "success";
         prepareFlow.title = "店铺授权已绑定";
@@ -1336,7 +1303,6 @@ async function bindCurrentShopAuth() {
       prepareFlow.detail = validation?.detail || "正在等待插件回传当前店铺授权，请保持 Ozon 页面打开。";
       await wait(3000);
     }
-    if (instanceEpoch !== pluginInstanceEpoch) return false;
     prepareFlow.tone = "warning";
     prepareFlow.title = "授权绑定未完成";
     prepareFlow.detail = "没有收到当前店铺授权，请确认店铺分析插件已开启，刷新 ERP 和 Ozon 分析页，并检查插件的 ERP 地址与登录令牌后重试。";
@@ -1382,7 +1348,6 @@ async function recognizeCurrentShop() {
   recognizingPlugin.value = true;
   try {
     if (!(await requireAnalyticsPluginInstance())) return;
-    const instanceEpoch = pluginInstanceEpoch;
     const expectedStoreId = selectedStoreId.value;
     prepareFlow.tone = "warning";
     prepareFlow.title = "正在重新识别店铺";
@@ -1394,7 +1359,6 @@ async function recognizeCurrentShop() {
       shop_name: selectedShop.value?.name || "",
       plugin_instance_id: pluginInstanceId.value
     });
-    if (instanceEpoch !== pluginInstanceEpoch) return;
     wakeAnalyticsPlugin();
     const result = await waitForSellerAnalyticsPreparation({
       requestId: queued?.data?.id || queued?.id,
@@ -1405,7 +1369,7 @@ async function recognizeCurrentShop() {
         return validation;
       },
       wait,
-      isCurrent: () => selectedStoreId.value === expectedStoreId && instanceEpoch === pluginInstanceEpoch,
+      isCurrent: () => selectedStoreId.value === expectedStoreId,
       onValidation: (validation) => {
         prepareFlow.detail = validation?.prepare_request?.status === "running"
           ? `插件正在识别 Ozon 店铺，目标店铺 ID：${expectedStoreId}。`
@@ -1933,27 +1897,17 @@ function tableRowClassName({ row }) {
 
 function startPolling() {
   stopPolling();
-  const generation = pollGeneration;
-  const shouldRefresh = createCollectionRefreshGate();
-  let inFlight = false;
   pollTimer = window.setInterval(async () => {
-    if (inFlight || !runningRun.value) return;
-    inFlight = true;
-    const before = {...runningRun.value};
-    try {
-      await loadRunsMeta(true).catch(() => {});
-      if (generation !== pollGeneration) return;
-      const after = collectRuns.value.find(run => run.id === before.id);
-      if (!loading.value && shouldRefresh(before, after)) {
-        await refreshData(true, { refreshMeta: false }).catch(() => {});
-      }
-      if (!runningRun.value) stopPolling();
-    } finally { inFlight = false; }
+    if (!runningRun.value) return;
+    const runningId = runningRun.value.id;
+    await loadRunsMeta(true).catch(() => {});
+    if (!collectRuns.value.some((run) => run.id === runningId && ["pending", "running"].includes(run.status))) {
+      await refreshData(true, { refreshMeta: false }).catch(() => {});
+    }
   }, 5000);
 }
 
 function stopPolling() {
-  pollGeneration += 1;
   window.clearInterval(pollTimer);
   pollTimer = 0;
 }
@@ -1961,7 +1915,6 @@ function stopPolling() {
 function startPluginPolling() {
   stopPluginPolling();
   pluginPollTimer = window.setInterval(() => {
-    if (runningRun.value && Date.now() - lastPluginWakeAt >= 60000) wakeAnalyticsPlugin();
     Promise.all([loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus(), loadBrowserProfileStatus()]).catch(() => {});
   }, 5000);
 }
@@ -1975,17 +1928,8 @@ function handlePluginInstanceMessage(event) {
   if (event.source !== window || event.origin !== window.location.origin) return;
   if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_INSTANCE") return;
   const nextId = String(event.data?.pluginInstanceId || "").trim();
-  if (!/^[0-9A-Za-z_-]{1,128}$/.test(nextId)) return;
-  const unified = event.data.capabilities?.collector === true && event.data.capabilities?.sellerAnalytics === true;
-  if (pluginInstanceUnified && !unified) return;
-  if (pluginInstanceId.value && !unified) return;
-  if (nextId === pluginInstanceId.value && unified === pluginInstanceUnified) return;
-  pluginInstanceEpoch += 1;
-  for (const cancel of [...pendingPluginStoreChecks]) cancel();
+  if (!nextId || pluginInstanceId.value) return;
   pluginInstanceId.value = nextId;
-  pluginInstanceUnified = unified;
-  pluginStatus.value = null;
-  pluginValidation.value = null;
   wakeAnalyticsPlugin();
   Promise.all([loadPluginStatus(), loadPluginValidation()]).catch(() => {});
 }
@@ -1994,7 +1938,7 @@ function requestPluginInstance() {
   window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST" }, window.location.origin);
 }
 
-watch(() => runningRun.value?.id, (id) => { if (id) startPolling(); });
+watch(() => runningRun.value?.id, startPolling);
 watch(latestCurrentPeriodRun, (run, previousRun) => {
   const wasActive = previousRun?.id === run?.id && ["pending", "running"].includes(previousRun?.status);
   if (!run || run.status !== "success" || !wasActive || lastNotifiedRunId === run.id) return;
@@ -2021,8 +1965,6 @@ onMounted(async () => {
   startPluginPolling();
 });
 onBeforeUnmount(() => {
-  pluginInstanceEpoch += 1;
-  for (const cancel of [...pendingPluginStoreChecks]) cancel();
   window.removeEventListener("message", handlePluginInstanceMessage);
   stopPolling();
   stopPluginPolling();
@@ -2121,7 +2063,7 @@ onDeactivated(() => {
           <div><span>数据来源</span><strong>ERP 本地快照</strong><em>刷新不请求 Ozon</em></div>
           <div><span>最新入库</span><strong>{{ latestText || "暂无数据" }}</strong><em>北京时间</em></div>
           <div><span>数据区间</span><strong>{{ runPeriodText(latestCurrentPeriodRun) }}</strong><em>{{ periodHint }}</em></div>
-          <div><span>接口进度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
+          <div><span>完整度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
         </div>
         <div class="seller-sync-assistant__progress">
           <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${prepareFlow.tone}`">

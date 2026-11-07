@@ -1,4 +1,3 @@
-import { adminOrderPreloadScript } from './lib/admin-order-preloads.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -24,29 +23,26 @@ async function main() {
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   const adminEntry = manifest["frontend/admin/main.js"];
   const globalStyleEntry = manifest["style.css"];
+  const buildStamp = Date.now().toString(36);
 
   if (!adminEntry?.file) {
     throw new Error(text.missingManifest);
   }
 
-  // Match the bundler cascade: component-library CSS first, ERP theme last.
-  // Canonical URLs prevent a later duplicate stylesheet from masking order.
   const styleFiles = [
+    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
+    ...((adminEntry.css || []).filter(Boolean)),
     ...((adminEntry.imports || [])
       .flatMap((key) => manifest[key]?.css || [])
-      .filter(Boolean)),
-    ...(globalStyleEntry?.file ? [globalStyleEntry.file] : []),
-    ...((adminEntry.css || []).filter(Boolean))
+      .filter(Boolean))
   ];
 
   const styleTags = [...new Set(styleFiles)]
-    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}" />`)
+    .map((file) => `    <link rel="stylesheet" href="/vue-apps/${file}?v=${buildStamp}" />`)
     .join("\n");
-  // Entry URLs must match imports from route chunks. A second query-string
-  // URL creates a second module instance despite the fingerprinted filename.
-  const modulePreloadTags = [...new Set([adminEntry.file, ...(adminEntry.imports || [])
+  const modulePreloadTags = (adminEntry.imports || [])
     .map((key) => manifest[key]?.file)
-    .filter(Boolean)])]
+    .filter(Boolean)
     .map((file) => `    <link rel="modulepreload" href="/vue-apps/${file}" />`)
     .join("\n");
   const html = `<!doctype html>
@@ -56,12 +52,7 @@ async function main() {
       window.__ERP_BOOT_STARTED_AT = performance && performance.now ? performance.now() : Date.now();
     </script>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <link rel="manifest" href="/mobile.webmanifest" />
-    <link rel="apple-touch-icon" href="/mobile-icon-192.png" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-title" content="爆单ERP" />
-    <meta name="theme-color" content="#2563eb" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>${text.title}</title>
     <meta http-equiv="Cache-Control" content="no-cache, must-revalidate, max-age=0" />
     <meta http-equiv="Pragma" content="no-cache" />
@@ -69,7 +60,6 @@ async function main() {
     <link rel="icon" type="image/svg+xml" href="/brand/baodan-mark.svg" />
 ${styleTags}
 ${modulePreloadTags}
-    <script>${adminOrderPreloadScript(manifest)}</script>
     <style>
       .admin-static-login-fallback {
         position: fixed;
@@ -272,7 +262,7 @@ ${modulePreloadTags}
         });
       })();
     </script>
-    <script type="module" src="/vue-apps/${adminEntry.file}"></script>
+    <script type="module" src="/vue-apps/${adminEntry.file}?v=${buildStamp}"></script>
   </body>
 </html>
 `;

@@ -13,14 +13,14 @@ test("dashboard does not load or render operation todos", () => {
 test("dashboard renders immediately while its snapshot is being prepared", () => {
   assert.doesNotMatch(dashboardViewSource, /v-loading="initialDashboardLoading"/);
   assert.match(dashboardViewSource, /res\?\.snapshot\?\.status === "building"/);
-  assert.match(dashboardServiceSource, /options.snapshot \|\| pendingDashboardPayloadMysql\(dateKey\)/);
-  assert.match(dashboardServiceSource, /dashboardSnapshotProgressMysql.set/);
+  assert.match(dashboardServiceSource, /queueDashboardSnapshotRefreshMysql\(\{ forceRefresh: false, dateKey \}\);\s+return pendingDashboardPayloadMysql\(dateKey\);/);
+  assert.match(dashboardServiceSource, /dashboardSnapshotIsStaleMysql[\s\S]*?queueDashboardSnapshotRefreshMysql\(\{ forceRefresh: true, dateKey \}\)[\s\S]*?status: "building"/);
+  assert.doesNotMatch(dashboardServiceSource, /dashboardSnapshotIsStaleMysql\(snapshot, dateKey\)\) \{\s*return rebuildDashboardSnapshotMysql/);
 });
 
 test("dashboard refresh returns the saved snapshot while rebuilding asynchronously", () => {
-  const handler = dashboardServiceSource.slice(dashboardServiceSource.indexOf("export async function dashboardMysql"), dashboardServiceSource.indexOf("export async function inventoryMysql"));
-  assert.match(handler, /queueDashboardSnapshotRefreshMysql\(\{ forceRefresh, dateKey, tenantId, snapshot \}\)/);
-  assert.doesNotMatch(handler, /await rebuildDashboardSnapshotMysql/);
+  assert.match(dashboardServiceSource, /if \(forceRefresh\) \{[\s\S]*?loadDashboardSnapshotMysql\(dateKey\)[\s\S]*?queueDashboardSnapshotRefreshMysql\(\{ forceRefresh: true, dateKey \}\)/);
+  assert.doesNotMatch(dashboardServiceSource, /if \(forceRefresh\) \{\s*return rebuildDashboardSnapshotMysql/);
 });
 
 test("dashboard survives transient connection failures", () => {

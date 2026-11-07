@@ -1,10 +1,5 @@
 <script setup>
-import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
-import { fbpRouteStatus } from "../../constants/inventory-modules.js";
-import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
-import { computed, defineAsyncComponent, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { computed, inject, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../../stores/auth.js";
 import { apiClient } from "../../utils/api";
@@ -16,16 +11,10 @@ import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
-import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
+import { dateText, integer } from "./inventory-utils.js";
 
-const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../../components/procurement/ProcurementLedgerDialog.vue'));
-const stockFlow=reactive({visible:false,productId:0});
-function openStockFlow(row){const id=Number(row.product_id||row.items?.[0]?.product_id||row.inventory_key);if(!id)return ElMessage.warning('请先关联实际库存商品后核对');Object.assign(stockFlow,{visible:true,productId:id});}
 const authStore = useAuthStore();
-const route = useRoute();
-const router = useRouter();
-const focusedOrderId = computed(() => Number(route.query.orderId || 0));
-const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", computed(()=>fbpRouteStatus(route.query)));
+const sharedReplenishmentStatus = inject("inventoryFbpReplenishmentStatus", ref("applying"));
 const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const exportLoading = ref(false);
@@ -116,7 +105,6 @@ const state = reactive({
   total: 0,
   shops: [],
   filters: {
-    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     status: sharedReplenishmentStatus.value || "applying",
@@ -124,18 +112,7 @@ const state = reactive({
     pageSize: 10
   }
 });
-const searchDefaults = { ...inventorySearchDefaults(), query: '', shopId: 'all' };
-applyFilterQuery(route, state.filters, searchDefaults);
-function syncSearchRoute() {
-  const query = { ...route.query };
-  for (const key of Object.keys(searchDefaults)) {
-    const value = Array.isArray(state.filters[key]) ? state.filters[key].join(',') : String(state.filters[key] || '');
-    query[key] = value && value !== String(searchDefaults[key]) ? value : undefined;
-  }
-  void router.replace({ query });
-}
 const viewMode = ref("operations");
-if (focusedOrderId.value) state.filters.status = "all";
 
 const currentUserId = computed(() => Number(authStore.user?.id || authStore.user?.person_id || 0) || 0);
 function aggregateBatchOrder(orders) {
@@ -796,10 +773,8 @@ function buildParams() {
     status: String(state.filters.status || "all")
   });
   if (viewMode.value === "inventory") params.set("inventory", "1");
-  if (focusedOrderId.value) { params.set("orderId", String(focusedOrderId.value)); params.set("status", "all"); params.set("shopId", "all"); params.delete("query"); return params; }
   const query = String(state.filters.query || "").trim();
   if (query) params.set("query", query);
-  appendInventorySearch(params, state.filters);
   return params;
 }
 
@@ -1196,17 +1171,15 @@ function retryBarcodePrint() {
 
 function handleSearch() {
   state.filters.page = 1;
-  syncSearchRoute();
   loadPageData();
 }
 
 function handleReset() {
-  Object.assign(state.filters, inventorySearchDefaults());
   state.filters.query = "";
   state.filters.shopId = "all";
-  state.filters.status = sharedReplenishmentStatus.value;
+  state.filters.status = "applying";
+  sharedReplenishmentStatus.value = "applying";
   state.filters.page = 1;
-  syncSearchRoute();
   loadPageData();
 }
 
@@ -1221,7 +1194,10 @@ function handlePageSizeChange(size) {
   if (viewMode.value !== 'inventory') loadPageData();
 }
 
-
+watch(() => state.filters.shopId, () => {
+  state.filters.page = 1;
+  loadPageData();
+});
 
 watch(viewMode, () => {
   state.filters.page = 1;
@@ -1235,50 +1211,57 @@ watch(sharedReplenishmentStatus, (status) => {
   loadPageData();
 });
 
-watch(() => route.query, (next, previous) => {
-  const before = JSON.stringify(state.filters);
-  applyFilterQuery(route, state.filters, searchDefaults);
-  if (next.orderId !== previous.orderId || before !== JSON.stringify(state.filters)) {
-    state.filters.page = 1;
-    void loadPageData();
-  }
-}, { deep: true });
 onMounted(loadPageData);
 onActivated(() => void loadPageData());
 </script>
 
 <template>
-  <ProcurementLedgerDialog v-if="stockFlow.visible" v-model="stockFlow.visible" :product-id="stockFlow.productId" @saved="loadPageData()"/>
   <div class="inventory-page-shell inventory-card">
-    <el-alert v-if="focusedOrderId" type="info" :closable="false" class="focused-replenishment-notice">
-      <template #title>当前仅查看库存明细关联的 FBP 备货单 #{{ focusedOrderId }}</template>
-      <el-button link type="primary" @click="router.replace({ query: { ...route.query, orderId: undefined } })">返回全部备货单</el-button>
-    </el-alert>
-    <InventoryPageToolbar :product-search="!focusedOrderId" :filters="state.filters" :shops="state.shops" :loading="loading" :show-date-range="false" :show-query="!focusedOrderId" :show-shop="!focusedOrderId" query-placeholder="单号 / SKU / 产品 / 申请人" @search="handleSearch" @reset="handleReset">
-      <template #actions>
+    <div class="replenishment-command-bar">
+      <div class="replenishment-filter-row">
+        <div class="replenishment-filter-heading">
+          <strong>筛选备货单</strong>
+          <span>按单号、商品或店铺快速定位</span>
+        </div>
+        <div class="replenishment-filter-controls">
           <el-radio-group v-model="viewMode" size="small">
             <el-radio-button value="operations">运营视角</el-radio-button>
             <el-radio-button value="inventory">库存视角</el-radio-button>
           </el-radio-group>
-          <el-popover trigger="click" placement="bottom-end" :width="270"><template #reference><el-button>更多{{ selectedOrderIds.length ? `（已选 ${selectedOrderIds.length}）` : '' }}</el-button></template>
-            <div class="replenishment-more-actions">
-              <el-button v-if="viewMode === 'inventory'" :loading="exportLoading" :disabled="loading" @click="exportInventorySummary">导出库存汇总</el-button>
-              <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">创建关联汇总</el-button>
-              <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
-            </div>
-          </el-popover>
-      </template>
-    </InventoryPageToolbar>
+          <el-button v-if="viewMode === 'inventory'" :loading="exportLoading" :disabled="loading" @click="exportInventorySummary">导出库存汇总</el-button>
+          <div class="replenishment-selection">
+            <span class="selection-count">已选 <strong>{{ selectedOrderIds.length }}</strong> 张</span>
+            <el-button type="primary" :disabled="selectedOrderIds.length < 2" :loading="actionLoadingId === 'link-orders'" @click="linkSelectedOrders">
+              创建关联汇总
+            </el-button>
+          </div>
+          <el-input
+            v-model="state.filters.query"
+            clearable
+            class="replenishment-search"
+            placeholder="搜索单号 / SKU / 产品 / 申请人"
+            @keyup.enter="handleSearch"
+          />
+          <el-select v-model="state.filters.shopId" class="replenishment-shop-select" placeholder="选择店铺">
+            <el-option label="全部店铺" value="all" />
+            <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
+          </el-select>
+          <el-button type="primary" @click="handleSearch">查询</el-button>
+          <el-button @click="handleReset">重置</el-button>
+          <el-button type="warning" plain @click="openProcurementDrafts">FBP 采购草稿</el-button>
+        </div>
+      </div>
+    </div>
 
     <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
       <el-table :data="inventoryPage" v-loading="loading" row-key="inventory_key" border class="erp-data-table replenishment-table">
-        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell warehouse-product"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span><InventoryProductActions :product-id="Number(row.items?.[0]?.product_id)" @saved="loadPageData()"/></div></div></template></el-table-column>
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell warehouse-product"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
         <el-table-column label="本地可用" width="100" align="center"><template #default="{ row }"><el-tooltip content="当前本地账面扣除筛选范围外的待发 FBP 占用，负数按 0 展示；以实盘为准，不含采购在途。"><span>{{ row.local_stock ?? '—' }}</span></el-tooltip></template></el-table-column>
         <el-table-column label="采购在途" width="100" align="center"><template #default="{ row }">{{ row.procurement_incoming ?? '—' }}</template></el-table-column>
         <el-table-column label="FBP 待入仓" width="115" align="center"><template #default="{ row }">{{ row.pending_receipt_qty ?? '—' }}</template></el-table-column>
         <el-table-column label="上次实际发货" width="160" align="center"><template #default="{ row }"><div v-if="row.last_shipped_at">{{ integer(row.last_shipped_qty) }} 件<small class="warehouse-secondary">{{ dateText(row.last_shipped_at) }}</small></div><span v-else>暂无记录</span></template></el-table-column>
         <el-table-column :label="state.filters.status === 'pending_dispatch' ? '本次备货' : '筛选备货合计'" width="155" align="right" class-name="warehouse-quantity"><template #default="{ row }"><strong>{{ integer(row.final_qty) }}</strong> 件<small v-if="row.local_stock !== null && row.pending_dispatch_qty > row.local_stock" class="warehouse-shortage">待发货本地缺 {{ row.pending_dispatch_qty - row.local_stock }} 件</small></template></el-table-column>
-        <el-table-column label="操作" width="295" fixed="right" align="center"><template #default="{ row }"><div class="warehouse-actions"><el-button size="small" type="primary" plain @click="openStockFlow(row)">库存核对与反馈</el-button><el-button size="small" @click="openWarehouseDetail(row)">查看明细</el-button><el-button size="small" type="primary" @click="openGroupPrint(row)">打印标签</el-button><el-button size="small" type="warning" plain @click="createInventoryProcurement(row)">采购申请</el-button></div><small class="warehouse-secondary">标签已确认 {{ row.printed_qty }} / 应打 {{ row.target_labels }}</small></template></el-table-column>
+        <el-table-column label="操作" width="295" fixed="right" align="center"><template #default="{ row }"><div class="warehouse-actions"><el-button size="small" @click="openWarehouseDetail(row)">查看明细</el-button><el-button size="small" type="primary" @click="openGroupPrint(row)">打印标签</el-button><el-button size="small" type="warning" plain @click="createInventoryProcurement(row)">采购申请</el-button></div><small class="warehouse-secondary">标签已确认 {{ row.printed_qty }} / 应打 {{ row.target_labels }}</small></template></el-table-column>
       </el-table>
     </div>
 
@@ -1421,7 +1404,6 @@ onActivated(() => void loadPageData());
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
                 <span v-if="row.order._isBatchSummary" class="batch-source-count">来自 {{ integer(row.source_order_count) }} 张关联原单</span>
-                <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               </div>
             </div>
           </template>
@@ -1451,7 +1433,7 @@ onActivated(() => void loadPageData());
           <template #default="{ row }">
             <div class="metric-stack">
               <strong>本地 {{ integer(row.local_stock) }}</strong>
-              <span>FBS {{ integer(row.fbs_available) }}</span><el-button link type="primary" @click="openStockFlow(row)">核对与反馈</el-button>
+              <span>FBS {{ integer(row.fbs_available) }}</span>
               <span>采购中 {{ integer(row.pending_procurement_qty) }}</span>
             </div>
           </template>
@@ -1858,7 +1840,6 @@ onActivated(() => void loadPageData());
 </template>
 
 <style scoped>
-.replenishment-more-actions { display:flex;flex-direction:column;align-items:stretch;gap:8px; }.replenishment-more-actions .el-button { margin:0; }
 .warehouse-product { display: flex; align-items: center; gap: 12px; min-height: 92px; }
 .warehouse-product .cell-stack { display: flex; flex-direction: column; gap: 8px; }
 .warehouse-product :deep(.erp-image-preview), .warehouse-dialog-header :deep(.erp-image-preview) { width: 64px; height: 84px; flex: 0 0 64px; border-radius: 5px; overflow: hidden; background: var(--erp-detail-surface-alt, #f3f5f8); }

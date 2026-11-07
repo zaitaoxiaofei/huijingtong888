@@ -9,8 +9,7 @@ import path from "node:path";
 import sharp from "sharp";
 import { getMysqlPoolMetrics, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { shanghaiDateKey } from "../shanghai-time.js";
-import { requestPublicMedia } from "../http/public-image-request.js";
-import { downloadListingSourceImage } from "./listing-image-download.js";
+import { requestPublicImage, requestPublicMedia } from "../http/public-image-request.js";
 import {
   createOzonProductBySku,
   fetchOzonCategoryAttributeValues,
@@ -723,7 +722,6 @@ export async function createListingCategoryTemplate(body, session) {
   logAiVariantSavePerf(traceId, "backend.template.ensure_schema", stageStarted);
   stageStarted = Date.now();
   let payload = normalizeTemplatePayload(body);
-  if (body.archive_collector_media === true) payload = await archiveCollectedProductMedia(payload, session);
   logAiVariantSavePerf(traceId, "backend.template.normalize", stageStarted, {
     imageCount: normalizeArray(payload.images).length,
     variantCount: normalizeArray(payload.editable_payload?.variants).length
@@ -919,55 +917,39 @@ function isCollectorMediaSource(value = "") {
   return /^(?:https?:\/\/|data:(?:image|video)\/|\/?uploads\/|\/?public\/uploads\/|\/?api\/)/i.test(String(value || "").trim());
 }
 
-function createCollectorMediaArchiveQueue(limit = 3) {
-  let active = 0;
-  const waiting = [];
-  return async work => {
-    if (active >= limit) await new Promise(resolve => waiting.push(resolve));
-    else active++;
-    try { return await work(); }
-    finally {
-      const next = waiting.shift();
-      if (next) next();
-      else active--;
-    }
-  };
-}
-
-async function archiveCollectorMediaValue(value, metadata, session, urlMap, archive) {
+async function archiveCollectorMediaValue(value, metadata, session, urlMap) {
   if (typeof value === "string") {
     if (!isCollectorMediaSource(value)) return value;
-    if (!archive.pending.has(value)) archive.pending.set(value, archive.run(() => materializeListingMediaUrl(value, {
+    return materializeListingMediaUrl(value, {
       ...metadata,
       force_archive_remote: true,
       require_managed_oss: true,
       storage_prefix: "collector-media"
-    }, session, urlMap)));
-    return archive.pending.get(value);
+    }, session, urlMap);
   }
   if (Array.isArray(value)) {
-    return mapWithConcurrency(value, 3, (item) => archiveCollectorMediaValue(item, metadata, session, urlMap, archive));
+    return mapWithConcurrency(value, 3, (item) => archiveCollectorMediaValue(item, metadata, session, urlMap));
   }
   if (!value || typeof value !== "object") return value;
   const entries = await mapWithConcurrency(Object.entries(value), 3, async ([key, child]) => {
     const shouldArchive = /^(?:url|src|source_url|sourceUrl|path)$/i.test(key) || isCollectorMediaField(key);
     const nextValue = shouldArchive
-      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap, archive)
-      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap, archive);
+      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap)
+      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap);
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
 }
 
-async function archiveCollectedProductMediaValue(value, metadata, session, urlMap, archive) {
+async function archiveCollectedProductMediaValue(value, metadata, session, urlMap) {
   if (Array.isArray(value)) {
-    return mapWithConcurrency(value, 3, (item) => archiveCollectedProductMediaValue(item, metadata, session, urlMap, archive));
+    return mapWithConcurrency(value, 3, (item) => archiveCollectedProductMediaValue(item, metadata, session, urlMap));
   }
   if (!value || typeof value !== "object") return value;
   const entries = await mapWithConcurrency(Object.entries(value), 3, async ([key, child]) => {
     const nextValue = isCollectorMediaField(key)
-      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap, archive)
-      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap, archive);
+      ? await archiveCollectorMediaValue(child, { ...metadata, role: key }, session, urlMap)
+      : await archiveCollectedProductMediaValue(child, metadata, session, urlMap);
     return [key, nextValue];
   });
   return Object.fromEntries(entries);
@@ -986,7 +968,7 @@ async function archiveCollectedProductMedia(product = {}, session = null) {
     source_module: "collector_box",
     source_id: sourceId,
     role: "collector_image"
-  }, session, new Map(), { pending: new Map(), run: createCollectorMediaArchiveQueue() });
+  }, session, new Map());
 }
 
 function collectedNumber(value) {
@@ -1125,10 +1107,6 @@ function buildCollectorBoxQualitySummary(source = {}) {
   if (!title || (sku && title === `Ozon ${sku}`)) issues.push("标题未采集");
   if (!images.length) issues.push("图片未采集");
   if (!categoryName || categoryId.startsWith("frontend:") || categoryName.includes("frontend:")) issues.push("Ozon 类目未识别");
-  const resolution = objectValue(source.category_resolution);
-  if (['missing', 'ambiguous', 'uncached'].includes(resolution.status) && resolution.message) issues.push(resolution.message);
-  const sellerWarning = normalizeArray(source.collection_stages).findLast(stage => stage?.name === 'seller_fallback' && stage.status === 'warning');
-  if (!hasRealCategory && sellerWarning) issues.push('类目后台补采失败，请检查 Ozon 卖家后台登录状态后重新采集，或在商品上架页手动选择类目');
   const normalizedIssues = normalizeCollectorQualityIssues(issues);
   const qualityIssues = hasRealCategory
     ? normalizedIssues.filter((item) => !item.includes("Ozon"))
@@ -1162,19 +1140,25 @@ export function collectedCategoryPairFromIds(source = {}) {
 }
 
 async function enrichCollectedProductCategoryFromIds(product = {}) {
-  const match = await resolveCollectedCategoryFromCache(product);
-  if (!match.category) return { ...product, category_resolution: { status: match.status, message: match.message || '' } };
-  const category = match.category;
-  const categoryName = String(category.path_zh || category.name_zh || category.path_ru || category.name_ru || '').trim();
+  const pair = collectedCategoryPairFromIds(product);
+  if (!pair) return product;
+  const cached = await row(`
+    SELECT *
+    FROM ozon_category_mappings
+    WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+    LIMIT 1
+  `, [pair.descriptionCategoryId, pair.typeId]).catch(() => null);
+  if (!cached) return product;
+  const category = normalizeOzonCategoryRow(cached);
+  const categoryName = String(category.path_zh || category.name_zh || category.path_ru || category.name_ru || "").trim();
   return {
     ...product,
-    category: categoryName || product.category || product.category_name || '',
-    categoryName: categoryName || product.categoryName || '',
-    category_name: categoryName || product.category_name || '',
-    description_category_id: String(category.description_category_id),
-    type_id: String(category.type_id),
-    category_resolved_from: match.source,
-    category_resolution: { status: 'resolved', message: '' }
+    category: categoryName || product.category || product.category_name || "",
+    categoryName: categoryName || product.categoryName || "",
+    category_name: categoryName || product.category_name || "",
+    description_category_id: String(pair.descriptionCategoryId),
+    type_id: String(pair.typeId),
+    category_resolved_from: "category_ids_tail"
   };
 }
 
@@ -1744,39 +1728,26 @@ export function collectedCategoryCandidates(raw = {}, detail = {}, body = {}, fa
   const push = (descriptionCategoryId, typeId, source = "unknown") => {
     const descriptionId = Number(descriptionCategoryId || 0);
     const productTypeId = Number(typeId || 0);
-    if (!Number.isSafeInteger(descriptionId) || descriptionId <= 0 || !Number.isSafeInteger(productTypeId) || productTypeId <= 0) return;
+    if (!descriptionId || !productTypeId) return;
     if (candidates.some((item) => item.descriptionCategoryId === descriptionId && item.typeId === productTypeId)) return;
     candidates.push({ descriptionCategoryId: descriptionId, typeId: productTypeId, source });
   };
   const pushTypeOnly = (typeId, source = "unknown") => {
     const productTypeId = Number(typeId || 0);
-    if (!Number.isSafeInteger(productTypeId) || productTypeId <= 0 || typeOnlyCandidates.some((item) => item.typeId === productTypeId)) return;
+    if (!productTypeId || typeOnlyCandidates.some((item) => item.typeId === productTypeId)) return;
     typeOnlyCandidates.push({ typeId: productTypeId, source });
   };
 
-  const pushKey = (value, source) => {
-    const pair = String(value || '').match(/^(\d+):(\d+)$/);
-    if (pair) push(pair[1], pair[2], source);
-  };
-  push(body.ozon_description_category_id || body.description_category_id || body.descriptionCategoryId, body.ozon_type_id || body.type_id || body.typeId, "request");
-  pushKey(body.ozon_category_id || body.category_id, 'request');
+  push(body.description_category_id || body.descriptionCategoryId, body.type_id || body.typeId, "request");
 
   const factHints = facts && typeof facts === "object" ? objectValue(facts.categoryHints || {}) : {};
   const rawPair = collectedCategoryPairFromIds(raw);
   const factPair = collectedCategoryPairFromIds({ category_ids: factHints.category_ids });
-  push(factHints.description_category_id || factHints.descriptionCategoryId, factHints.type_id || factHints.typeId, 'facts_direct');
-  push(raw.ozon_description_category_id || raw.description_category_id || raw.descriptionCategoryId, raw.ozon_type_id || raw.description_type_dict_value || raw.type_id || raw.typeId, 'raw_direct');
-  pushKey(raw.ozon_category_id || raw.category_id, 'raw_direct');
+  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, "category2_3");
   if (factPair) push(factPair.descriptionCategoryId, factPair.typeId, "facts_category_ids_tail");
   if (rawPair) push(rawPair.descriptionCategoryId, rawPair.typeId, "category_ids_tail");
-  if (raw.category2Id && raw.category3Id) push(raw.category2Id, raw.category3Id, 'category2_3');
-  pushTypeOnly(body.ozon_type_id || body.type_id || body.typeId, 'request_type');
-  pushTypeOnly(factHints.type_id || factHints.typeId, 'facts_type');
-  pushTypeOnly(raw.description_type_dict_value || raw.type_id || raw.typeId, 'raw_type');
-  for (const [ids, source] of [[factHints.category_ids, 'facts_leaf_id'], [raw.category_ids || raw.categoryIds, 'raw_leaf_id']]) {
-    const values = normalizeArray(ids);
-    if (values.length) pushTypeOnly(values[values.length - 1], source);
-  }
+  push(factHints.description_category_id || factHints.descriptionCategoryId, factHints.type_id || factHints.typeId, "facts_direct");
+  push(raw.description_category_id || raw.descriptionCategoryId, raw.type_id || raw.typeId, "raw_direct");
 
   const factProductType = normalizeArray(facts?.attributes)
     .find((item) => Number(item?.attribute_id || item?.id || 0) === 8229);
@@ -1806,51 +1777,60 @@ function collectedProductTypeDictionaryValueId(raw = {}) {
   return Number(firstValue.dictionary_value_id || firstValue.id || firstValue.value_id || 0);
 }
 
-export async function resolveCollectedCategoryFromCache(raw = {}, detail = {}, body = {}, facts = null, read = all) {
-  const { candidates, typeOnlyCandidates } = collectedCategoryCandidates(raw, detail, body, facts);
-  const officialPairs = candidates.filter(candidate => candidate.source !== 'category2_3');
-  for (const candidate of officialPairs.length ? officialPairs : candidates) {
-    const rows = await read(`SELECT * FROM ozon_category_mappings
-      WHERE description_category_id = ? AND type_id = ? AND status = 'active' LIMIT 1`, [candidate.descriptionCategoryId, candidate.typeId]);
-    if (rows[0]) return { status: 'resolved', category: normalizeOzonCategoryRow(rows[0]), source: candidate.source };
-    if (candidate.source === 'request') return { status: 'uncached', candidate, message: '所选类目尚无本地映射，请同步类目后核对属性模板' };
-  }
-  const fullPair = candidates.find(item => item.source !== 'category2_3');
-  if (fullPair) return { status: 'uncached', candidate: fullPair, message: '已采集完整类目 ID，但本地映射未命中，请同步类目后核对属性模板' };
-  for (const candidate of typeOnlyCandidates) {
-    const rows = await read(`SELECT * FROM ozon_category_mappings
-      WHERE type_id = ? AND status = 'active' LIMIT 2`, [candidate.typeId]);
-    if (rows.length === 1) return { status: 'resolved', category: normalizeOzonCategoryRow(rows[0]), source: candidate.source };
-    if (rows.length > 1) return { status: 'ambiguous', message: '末级类目 ID 对应多个上级类目，请在商品上架页选择完整 Ozon 类目后再保存草稿' };
-  }
-  return { status: 'missing', message: '尚未采集到有效 Ozon 类目 ID，请保持卖家后台登录并重新采集；也可在商品上架页手动选择类目' };
-}
-
-async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts = null, session = null) {
+async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts = null) {
   const raw = detail.rawPayload || {};
-  const { categoryText, leafName } = collectedCategoryCandidates(raw, detail, body, facts);
-  const match = await resolveCollectedCategoryFromCache(raw, detail, body, facts);
-  if (match.category) return match.category;
-  if (match.status === 'ambiguous') return { resolution_error: match.message };
-  if (match.candidate) {
-    const candidate = match.candidate;
-    return {
-      description_category_id: String(candidate.descriptionCategoryId), type_id: String(candidate.typeId),
+  const { candidates, typeOnlyCandidates, categoryText, leafName } = collectedCategoryCandidates(raw, detail, body, facts);
+  for (const candidate of candidates) {
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE description_category_id = ? AND type_id = ? AND status = 'active'
+      LIMIT 1
+    `, [candidate.descriptionCategoryId, candidate.typeId]);
+    return cached ? normalizeOzonCategoryRow(cached) : {
+      description_category_id: String(candidate.descriptionCategoryId),
+      type_id: String(candidate.typeId),
       ozon_category_id: `${candidate.descriptionCategoryId}:${candidate.typeId}`,
-      category_name: categoryText || leafName || detail.category_name || '已采集 Ozon 类目',
+      category_name: categoryText || leafName || detail.category_name || "已采集 Ozon 类目",
       source: `collector_fallback:${candidate.source}`
     };
   }
 
+  for (const candidate of typeOnlyCandidates) {
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE type_id = ? AND status = 'active'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `, [candidate.typeId]);
+    if (cached) return { ...normalizeOzonCategoryRow(cached), source: candidate.source };
+  }
+
   if (categoryText || leafName) {
-    const paths = categoryText ? await all(`SELECT * FROM ozon_category_mappings
-      WHERE status = 'active' AND (path_zh = ? OR path_ru = ?) LIMIT 2`, [categoryText, categoryText]) : [];
-    if (paths.length === 1) return normalizeOzonCategoryRow(paths[0]);
-    const name = leafName || categoryText.split('/').pop().trim();
-    const names = await all(`SELECT * FROM ozon_category_mappings
-      WHERE status = 'active' AND (name_zh = ? OR name_ru = ?) LIMIT 2`, [name, name]);
-    if (names.length === 1) return normalizeOzonCategoryRow(names[0]);
-    if (paths.length > 1 || names.length > 1) return { resolution_error: '类目名称对应多个分类，请在商品上架页选择完整 Ozon 类目后保存草稿' };
+    const like = `%${leafName || categoryText.split("/").pop().trim()}%`;
+    const cached = await row(`
+      SELECT *
+      FROM ozon_category_mappings
+      WHERE status = 'active'
+        AND (
+          name_zh = ? OR path_zh = ? OR name_ru = ? OR path_ru = ?
+          OR name_zh LIKE ? OR path_zh LIKE ? OR name_ru LIKE ? OR path_ru LIKE ?
+        )
+      ORDER BY
+        CASE
+          WHEN name_zh = ? THEN 1
+          WHEN name_ru = ? THEN 2
+          WHEN path_zh = ? THEN 3
+          WHEN path_ru = ? THEN 4
+          WHEN path_zh LIKE ? THEN 5
+          WHEN path_ru LIKE ? THEN 6
+          ELSE 9
+        END,
+        updated_at DESC
+      LIMIT 1
+    `, [leafName, categoryText, leafName, categoryText, like, like, like, like, leafName, leafName, categoryText, categoryText, like, like]);
+    if (cached) return normalizeOzonCategoryRow(cached);
   }
 
   const sku = String(detail.sku || raw.sku || "").trim();
@@ -1858,7 +1838,7 @@ async function resolveCollectorBoxListingCategory(detail = {}, body = {}, facts 
   const resolved = await resolveOzonCategoryFromSku({
     sku,
     shop_id: body.shop_id || body.shopId
-  }, session).catch(() => null);
+  }, null).catch(() => null);
   if (resolved?.category) return resolved.category;
   return null;
 }
@@ -1914,8 +1894,7 @@ export async function syncCollectedProductsFromPlugin(products = [], tenantId = 
     };
     const categoryEnrichedProduct = await enrichCollectedProductCategoryFromIds(referencedProduct);
     const initialItem = normalizePluginCollectedProduct(categoryEnrichedProduct, normalizedTenantId);
-    const historicalProduct = await enrichCollectedProductCategoryFromHistory(categoryEnrichedProduct, initialItem, normalizedTenantId);
-    const enrichedProduct = historicalProduct === categoryEnrichedProduct ? historicalProduct : await enrichCollectedProductCategoryFromIds(historicalProduct);
+    const enrichedProduct = await enrichCollectedProductCategoryFromHistory(categoryEnrichedProduct, initialItem, normalizedTenantId);
     const item = normalizePluginCollectedProduct(enrichedProduct, normalizedTenantId);
     if (!item.sku) {
       results.push({ success: false, error: "SKU_REQUIRED", product });
@@ -2009,14 +1988,12 @@ export async function syncCollectedProductsFromPlugin(products = [], tenantId = 
   };
 }
 
-export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin", options = {}) {
-  await ensureCollectorBoxReadSchema();
+export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin") {
+  await ensureListingAutomationSchema();
   const normalizedSku = String(sku || "").trim();
   if (!normalizedSku) return { found: false, needsRefresh: true, error: "SKU_REQUIRED" };
   const detail = await row(`
-    SELECT ${options.summary ? `tenant_id, sku, product_id, title, product_url, image_url, category_name,
-      price, currency, sold_count, view_count, click_rate, conversion_rate, stock_count,
-      commission_rate, collect_date, collected_at, status, selection_product_id, listing_template_id` : '*'}
+    SELECT *
     FROM ozon_plugin_collected_products
     WHERE tenant_id = ? AND sku = ? AND status <> 'deleted'
     ORDER BY collected_at DESC, updated_at DESC
@@ -2032,7 +2009,7 @@ export async function lookupCollectedProductFromPlugin(sku, tenantId = "admin", 
     status: detail.status || "collected",
     selectionProductId: detail.selection_product_id || null,
     listingTemplateId: detail.listing_template_id || null,
-    product: { ...buildPluginCollectedProductPayload(detail), ...(options.summary ? { summary_only: true } : {}) }
+    product: buildPluginCollectedProductPayload(detail)
   };
 }
 
@@ -2327,15 +2304,13 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
   const normalized = await normalizeCollectedListingDraft({ detail, body }, {
     sourceType: "collector_box",
     normalizeEditPayload: normalizeCollectorBoxEditPayload,
-    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts, session).catch(error => ({ resolution_error: error.message || '类目识别失败，请重新采集或手动选择完整类目' })),
+    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts).catch(() => null),
     buildAttributes: (currentEditPayload, currentRaw, currentFacts) => {
       const factAttributes = buildCollectorBoxFactAttributes(currentFacts, currentEditPayload, currentRaw);
       const editAttributes = buildCollectorBoxEditAttributes(currentEditPayload, currentRaw);
       return normalizeAttributes([...factAttributes, ...editAttributes]);
     },
     mergeAttributeDefinitions: (items, descriptionCategoryId, typeId) => mergeCachedCategoryAttributeDefinitions(items, descriptionCategoryId, typeId, {
-      autoSync: body.previewOnly !== true,
-      syncValues: body.previewOnly !== true,
       disableInference: true,
       disableRequiredDefaults: true,
       disableNameMatch: true
@@ -2390,14 +2365,6 @@ export async function createListingTemplateFromCollectorBox(sku, body = {}, sess
     title: editPayload.title || normalized.templatePayload?.title || normalized.payload?.title,
     category_name: editPayload.category_name || normalized.templatePayload?.category_name || normalized.payload?.category_name
   });
-  if (body.previewOnly === true) {
-    // An editor preview is a read response, never a durable template/draft.
-    // The normal template and draft writers still archive and validate all media.
-    const preview = buildTemplatePayloadFromCollectedProduct(normalized.templatePayload);
-    preview.source_raw = compactListingSourceProvenance(preview.source_raw);
-    preview.editable_payload = { ...preview.editable_payload, source_raw: compactListingSourceProvenance(preview.editable_payload?.source_raw) };
-    return { ok: true, preview: true, template: { ...preview, id: null, preview_only: true } };
-  }
   // Collector links are commonly signed or protected by the source CDN. Do not
   // let one reach an editable listing template: archive every image first so
   // the operator always works with a stable managed-media URL.
@@ -2486,7 +2453,7 @@ async function repairCollectorBoxTemplateCategoryDisplay(template = null, detail
     return listingCategoryTemplate(template.id, session);
   }
   const resolved = unresolvedCategory
-    ? await resolveCollectorBoxListingCategory(detail, {}, null, session).catch(() => null)
+    ? await resolveCollectorBoxListingCategory(detail, {}, null).catch(() => null)
     : null;
   const resolvedDescriptionCategoryId = String(resolved?.description_category_id || resolved?.descriptionCategoryId || "").trim();
   const resolvedTypeId = String(resolved?.type_id || resolved?.typeId || "").trim();
@@ -2542,7 +2509,7 @@ export async function collectorBoxMappingDiagnostics(sku, body = {}, session = n
   const normalized = await normalizeCollectedListingDraft({ detail, body }, {
     sourceType: "collector_box",
     normalizeEditPayload: normalizeCollectorBoxEditPayload,
-    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts, session).catch(error => ({ resolution_error: error.message || '类目识别失败，请重新采集或手动选择完整类目' })),
+    resolveCategory: (currentDetail, currentBody, currentFacts) => resolveCollectorBoxListingCategory(currentDetail, currentBody, currentFacts).catch(() => null),
     buildAttributes: (currentEditPayload, currentRaw, currentFacts) => {
       const factAttributes = buildCollectorBoxFactAttributes(currentFacts, currentEditPayload, currentRaw);
       const editAttributes = buildCollectorBoxEditAttributes(currentEditPayload, currentRaw);
@@ -3747,27 +3714,9 @@ async function processListingMediaWatermark(body = {}, session = null) {
   };
   const watermarkPath = await resolveListingShopWatermarkPath(shop);
   const options = listingShopWatermarkOptions(shop);
-  const watermarkSignature = crypto.createHash("sha256")
-    .update(await fs.readFile(watermarkPath)).update(JSON.stringify(options)).digest("hex");
   const results = [];
   for (const [index, image] of images.entries()) {
     await assertAccess();
-    const reusableSource = isManagedOssObjectUrl(image.url, { prefix: "listing-media" })
-      && /\/[a-f0-9]{64}\.[a-z0-9]+(?:$|\?)/i.test(image.url);
-    const cached = reusableSource ? await row(`
-      SELECT *
-      FROM listing_media_assets
-      WHERE tenant_id = ? AND shop_id = ? AND source_path = ? AND status = 'public_ready'
-        AND updated_at >= DATE_SUB(NOW(), INTERVAL 1 DAY)
-        AND JSON_UNQUOTE(JSON_EXTRACT(IF(JSON_VALID(metadata_json), metadata_json, '{}'), '$.watermark_signature')) = ?
-      ORDER BY updated_at DESC, id DESC LIMIT 1
-    `, [listingTenantId(session), shopId, image.url, watermarkSignature]) : null;
-    if (cached && isManagedOssObjectUrl(cached.publish_url, { prefix: "listing-media" })) {
-      await assertAccess();
-      results.push({ url: cached.publish_url, publishUrl: cached.publish_url, previewUrl: cached.preview_url || cached.publish_url,
-        localUrl: cached.preview_url || cached.publish_url, name: cached.original_name, assetId: cached.id, asset: cached, reused: true });
-      continue;
-    }
     const source = await readListingImageBuffer(image.url, session, assertAccess);
     await assertAccess();
     const output = await applyListingWatermark(source.buffer, watermarkPath, options);
@@ -3806,7 +3755,6 @@ async function processListingMediaWatermark(body = {}, session = null) {
       status: publishUrl ? "public_ready" : "local_only",
       metadata: {
         watermark: true,
-        watermark_signature: watermarkSignature,
         sourceUrl: image.url,
         shopId,
         shopName: shop.name || "",
@@ -5001,16 +4949,7 @@ export async function resolveOzonCategoryFromSku(body = {}, session = null) {
   await ensureListingAutomationSchema();
   const sku = String(body.sku || body.ozon_sku || body.ozonSku || body.offer_id || body.offerId || "").trim();
   if (!sku) throw new Error("璇疯緭鍏?Ozon SKU 鎴?offer_id");
-  let matchedShopId = body.shop_id || body.shopId;
-  if (!matchedShopId) {
-    const tenantId = listingTenantId(session);
-    const scope = tenantId === 'admin' ? "(s.tenant_id = (SELECT id FROM tenants WHERE slug = 'default' LIMIT 1) OR s.tenant_id IS NULL)" : 's.tenant_id = ?';
-    const matched = await row(`SELECT op.shop_id FROM online_products op JOIN shops s ON s.id = op.shop_id
-      WHERE ${scope} AND s.status <> 'deleted' AND (op.ozon_sku = ? OR op.ozon_product_id = ? OR op.offer_id = ?)
-      ORDER BY op.synced_at DESC, op.updated_at DESC LIMIT 1`, [...(tenantId === 'admin' ? [] : [tenantId]), sku, sku, sku]);
-    matchedShopId = matched?.shop_id;
-  }
-  const shop = await resolveOzonApiShop(matchedShopId, session);
+  const shop = await resolveOzonApiShop(body.shop_id || body.shopId, session);
   const localProduct = await row(`
     SELECT *
     FROM online_products
@@ -5714,8 +5653,7 @@ async function resolveListingShopWatermarkPath(shop = {}) {
     const stat = await fs.stat(candidate).catch(() => null);
     if (stat?.isFile()) return candidate;
   }
-  const error = new Error(`${shop.name || "目标店铺"}的店铺水印文件不可用（watermark_path），请在店铺设置中重新上传水印。`);
-  error.code = "LISTING_SHOP_WATERMARK_UNAVAILABLE";
+  const error = new Error("璇ュ簵閾鸿繕娌℃湁閰嶇疆鍙敤姘村嵃");
   error.status = 400;
   throw error;
 }
@@ -5748,7 +5686,9 @@ async function readListingImageBuffer(url = "", session = null, beforeRequest) {
     return { buffer, source: privateFile.filePath };
   }
   if (/^https?:\/\//i.test(value)) {
-    return downloadListingSourceImage(value, { beforeRequest });
+    const response = await requestPublicImage(value, { maxBytes: 30 * 1024 * 1024, signal: AbortSignal.timeout(20000), beforeRequest });
+    if (!response?.buffer?.length) throw new Error("Watermark image must be a nonempty public image under 30MB");
+    return { buffer: response.buffer, source: value };
   }
   throw new Error("浠呮敮鎸?listing-media 鏈湴鍥剧墖鎴栧叕缃戝浘鐗?URL");
 }
@@ -7323,8 +7263,7 @@ async function buildShopPublishPayloadForOzon({
   session = null,
   sourceRecordId = 0,
   updateExisting = false,
-  sourceProductId = 0,
-  preparedMediaPolicy = null
+  sourceProductId = 0
 } = {}) {
   const guard = listingPublishExecutionGuards.get(shop);
   if (guard && session) listingPublishExecutionGuards.set(session, guard);
@@ -7333,18 +7272,14 @@ async function buildShopPublishPayloadForOzon({
   await assertListingPublishExecution(shop);
   const defaultedPayload = await applyShopPublishDefaults(textVariantPayload, shop);
   await assertListingPublishExecution(shop);
-  const reusePreparedMedia = preparedMediaPolicy
-    ? Boolean(preparedMediaPolicy.reuse)
-    : shouldReusePreparedShopWatermarkMedia(body, shop);
+  const reusePreparedMedia = shouldReusePreparedShopWatermarkMedia(body, shop);
   const watermarkedPayload = reusePreparedMedia
     ? { ...defaultedPayload, watermark_summary: preparedShopWatermarkSummary(defaultedPayload, shop) }
     : await applyShopWatermarkedImagesToPayload(defaultedPayload, shop, session);
   await assertListingPublishExecution(shop);
   // Asset-variant payloads already contain the generated per-shop tail image.
   // Re-appending the configured template can duplicate it and can reintroduce a stale URL.
-  const skipConfiguredTail = preparedMediaPolicy
-    ? Boolean(preparedMediaPolicy.skipTail)
-    : reusePreparedMedia && !body.skip_publish_watermark && !body.skipPublishWatermark;
+  const skipConfiguredTail = reusePreparedMedia && !body.skip_publish_watermark && !body.skipPublishWatermark;
   const tailImageUrl = skipConfiguredTail ? "" : await resolveShopTailImageUrl(shop, session);
   await assertListingPublishExecution(shop);
   const tailApplied = appendTailImageToPayload(watermarkedPayload, tailImageUrl);
@@ -7834,12 +7769,7 @@ async function assertPublishPayloadMediaReachable(payload = {}, validation = nul
   if (prewarm.total) {
     if (validation) validation.media_prewarm_summary = prewarm;
   }
-  // Two complete public downloads already prove image reachability. A later
-  // one-shot HEAD must not turn that verified image into a spurious failure.
-  const verifiedImages = new Set(normalizeArray(prewarm.image_results).filter((item) => item.ok).map((item) => item.url));
-  const unreachableRemoteMedia = await unreachablePublishMediaUrls(
-    mediaUrls.filter((url) => !verifiedImages.has(String(url || "").trim())), mediaOptions
-  );
+  const unreachableRemoteMedia = await unreachablePublishMediaUrls(mediaUrls, mediaOptions);
   const unavailableRemoteMedia = uniqueStringValues([
     ...normalizeArray(prewarm.failed_urls),
     ...unreachableRemoteMedia
@@ -7892,26 +7822,39 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
     throw error;
   }
 
+  const missingTailShops = [];
+  for (const shop of shops) {
+    const tailImageUrl = await resolveShopTailImageUrl(shop, session);
+    if (!tailImageUrl) missingTailShops.push(shop.name || `搴楅摵${shop.id}`);
+  }
+  if (missingTailShops.length) {
+    validation.warnings.push(`The following shops have no tail image configured, publishing will skip tail image append: ${missingTailShops.join(", ")}`);
+  }
+
   const updateExisting = Boolean(sourceRecordId && shops.length === 1);
   const sourceProductId = await resolveListingSourceProductId(body.template || body, validation.payload);
   const textVariantPolicy = normalizeShopTextVariantPolicy(body.text_variant_policy || body.textVariantPolicy || {}, shops);
   const results = await mapWithConcurrency(shops, LISTING_PUBLISH_SHOP_CONCURRENCY, async (shop) => {
     let recordId = null;
     try {
-      // Persist the validated input before any network-heavy media preparation.
-      // Startup recovery reloads this marker, so a restart cannot skip watermarks.
-      const reuse = shouldReusePreparedShopWatermarkMedia(body, shop);
-      const shopPayload = await prepareSafeShopOfferIds(validation.payload, {
-        shop, sourceRecordId, updateExisting, sourceProductId
-      });
-      shopPayload._listing_preparation = {
+      const {
+        textVariantPayload,
+        watermarkedPayload,
+        tailImageUrl,
+        tailApplied,
+        shopPayload: repairedShopPayload,
+        mediaRepair
+      } = await buildShopPublishPayloadForOzon({
+        basePayload: validation.payload,
+        shop,
         textVariantPolicy,
-        sourceProductId,
-        preparedMediaPolicy: {
-          reuse,
-          skipTail: reuse && !body.skip_publish_watermark && !body.skipPublishWatermark
-        }
-      };
+        body,
+        session,
+        sourceRecordId,
+        updateExisting,
+        sourceProductId
+      });
+      const shopPayload = repairedShopPayload;
       recordId = await preparePublishRecordForSubmit({
         sourceRecordId,
         shop,
@@ -7936,10 +7879,13 @@ export async function publishListingTemplateToOzon(body = {}, session = null) {
         queued: true,
         status: "processing",
         task_id: "",
-        text_variant_summary: null,
-        watermark_summary: null,
-        tail_summary: null,
-        media_repair_summary: { deferred: true },
+        text_variant_summary: textVariantPayload.text_variant_summary || null,
+        watermark_summary: watermarkedPayload.watermark_summary || null,
+        tail_summary: {
+          configured: Boolean(tailImageUrl),
+          appended: Number(tailApplied.appended || 0)
+        },
+        media_repair_summary: mediaRepair,
         ozon_seller_media_summary: {
           replacements: 0,
           jobs: 0,
@@ -9150,7 +9096,6 @@ async function submitPreparedListingPublishRecord({
   let submissionClaimed = false;
   let submissionAttempted = false;
   let receiptSaved = false;
-  let preparationRequestJson = null;
   {
     const loadStartedAt = Date.now();
     const preparedRows = await all(`
@@ -9207,39 +9152,6 @@ async function submitPreparedListingPublishRecord({
   return withAiTenantSession(session, async () => {
   try {
     await assertAccess();
-    const preparation = shopPayload._listing_preparation;
-    if (preparation) {
-      const preparationStartedAt = Date.now();
-      preparationRequestJson = JSON.stringify(shopPayload);
-      const basePayload = { ...shopPayload };
-      delete basePayload._listing_preparation;
-      const prepared = await buildShopPublishPayloadForOzon({
-        basePayload,
-        shop,
-        session,
-        textVariantPolicy: preparation.textVariantPolicy,
-        sourceProductId: preparation.sourceProductId,
-        sourceRecordId: Number(recordId),
-        updateExisting: true,
-        preparedMediaPolicy: preparation.preparedMediaPolicy
-      });
-      await assertAccess();
-      const saved = await run(`UPDATE listing_publish_records
-        SET request_json = ?, list_summary_json = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-          AND status = 'processing' AND COALESCE(task_id, '') = '' AND response_json IS NULL
-          AND request_json = ?`,
-      [JSON.stringify(prepared.shopPayload), JSON.stringify(buildPublishRecordListSummary(prepared.shopPayload)),
-        Number(recordId), tenantId, preparationRequestJson]);
-      if (!Number(saved?.affectedRows || 0)) return { ok: true, reused: true, record_id: Number(recordId) };
-      preparationRequestJson = null;
-      shopPayload = prepared.shopPayload;
-      textVariantSummary = prepared.textVariantPayload.text_variant_summary || null;
-      watermarkSummary = prepared.watermarkedPayload.watermark_summary || null;
-      tailSummary = { configured: Boolean(prepared.tailImageUrl), appended: Number(prepared.tailApplied.appended || 0) };
-      mediaRepairSummary = prepared.mediaRepair;
-      timings.payload_preparation_ms = Date.now() - preparationStartedAt;
-    }
     const mediaRepairStartedAt = Date.now();
     const mediaRepair = await repairOzonPublishPayloadMedia(shopPayload, {
       session,
@@ -9362,11 +9274,10 @@ async function submitPreparedListingPublishRecord({
           error_json = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND created_by_person_id = ? AND shop_id = ?
         AND (response_json <=> ? OR (? <> '' AND task_id = ?))
-        AND (? IS NULL OR request_json = ?)
     `, [Boolean(submissionAttempted || submitResponse), Boolean(submissionAttempted || submitResponse),
       JSON.stringify(errorPayload), Number(recordId), tenantId, Number(session.personId), Number(shop.id),
       receiptSaved && !persistedTaskId ? receiptJson() : pendingReceipt || null,
-      String(persistedTaskId), String(persistedTaskId), preparationRequestJson, preparationRequestJson]).catch(() => null);
+      String(persistedTaskId), String(persistedTaskId)]).catch(() => null);
     return { ok: false, record_id: recordId, task_id: persistedTaskId, error: errorPayload.message, fix_tip: errorPayload.fix_tip || "" };
   }
   });
@@ -10742,9 +10653,7 @@ export async function recoverDirectListingPublishesOnStartup(options = {}) {
       authorizedTenants.set(listingTenantId(session), session);
       const request = parseJson(record.request_json, {});
       const offerId = String(record.offer_id || firstOfferId(request) || "").trim();
-      // A preparation marker proves this snapshot has not been sent to Ozon.
-      // Existing offers may belong to an earlier version of an edited record.
-      const existing = offerId && !request._listing_preparation
+      const existing = offerId
         ? await fetchOzonProductInfoAttributes(record, { offerIds: [offerId], limit: 1 }).catch(() => [])
         : [];
       const detail = normalizeArray(existing)[0] || null;
@@ -11136,23 +11045,6 @@ export async function retryListingPublishRecord(id, body = {}, session = null) {
       status: 409, statusCode: 409, code: "LISTING_PUBLISH_RECONCILIATION_REQUIRED"
     });
   }
-  // Resume source preparation or public-media verification in the background.
-  // A slow network must not turn retrying a media failure into another HTTP 504.
-  const storedRequest = parseJson(record.request_json, {});
-  const retryStoredMedia = !previousTaskId && !body.payload && !body.request
-    && /Public media is not fully downloadable|LISTING_SOURCE_IMAGE_DOWNLOAD_FAILED|source_image_download/.test(String(record.error_json || ""));
-  if (storedRequest._listing_preparation || retryStoredMedia) {
-    const claimed = await run(`UPDATE listing_publish_records
-      SET status = 'processing', error_json = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND COALESCE(tenant_id, 'admin') = ? AND shop_id = ?
-        AND status = 'failed' AND COALESCE(task_id, '') = '' AND response_json IS NULL
-        AND request_json = ?`, [Number(id), tenantId, originalShopId, record.request_json]);
-    if (!Number(claimed?.affectedRows || 0)) throw Object.assign(new Error("发布记录已被其他任务处理，请刷新后重试"), { status: 409 });
-    runBackgroundListingPublish(`retry preparation record ${Number(id)}`, async () => {
-      await submitPreparedListingPublishRecord({ recordId: Number(id) });
-    });
-    return normalizePublishRecordRow(await loadRecord());
-  }
   const payload = normalizeRetryPublishPayload(body.payload || body.request || parseJson(record.request_json, {}));
   if (!normalizeArray(payload.items).length) throw new Error("Publish record has no retryable Ozon payload");
   await assertAccess();
@@ -11396,8 +11288,7 @@ export async function updateListingCategoryTemplate(id, body, session) {
   }
   if (!current) throw new Error("Listing category template not found");
 
-  let payload = normalizeTemplateUpdatePayload(body, current);
-  if (body.archive_collector_media === true) payload = await archiveCollectedProductMedia(payload, session);
+  const payload = normalizeTemplateUpdatePayload(body, current);
   await mysqlExecute(`
     UPDATE listing_category_templates
     SET ozon_category_id = ?, category_name = ?, template_name = ?, required_attributes_json = ?,
@@ -15995,10 +15886,6 @@ async function initializeListingAutomationSchema() {
       UPDATE listing_drafts
       SET development_type = 'copy', vehicle_brand = '', vehicle_model = '', vehicle_model_key = '', updated_at = CURRENT_TIMESTAMP
       WHERE status <> 'deleted'
-        AND NOT (CAST(development_type AS BINARY) <=> _binary'copy'
-          AND CAST(vehicle_brand AS BINARY) <=> _binary''
-          AND CAST(vehicle_model AS BINARY) <=> _binary''
-          AND CAST(vehicle_model_key AS BINARY) <=> _binary'')
         AND (ai_payload_json LIKE '%ai_product_material_optimizer%'
           OR manual_facts_json LIKE '%ai_product_material_optimizer%')
     `).catch(() => null);
@@ -17322,10 +17209,10 @@ async function prewarmPublishMediaUrls(urls = [], options = {}) {
   const imageUrls = remoteUrls.filter((url) => imageUrlSet.has(url) || isLikelyRemoteImageUrl(url));
   const otherUrls = remoteUrls.filter((url) => !imageUrlSet.has(url) && !isLikelyRemoteImageUrl(url));
   const imageReadiness = await verifyRemoteImagesReadyForOzon(imageUrls, {
-    attempts: 5,
+    attempts: 3,
     requiredConsecutiveSuccesses: 2,
-    retryDelayMs: 1000,
-    timeoutMs: 45000,
+    retryDelayMs: 750,
+    timeoutMs: 30000,
     concurrency: Math.min(2, LISTING_PUBLISH_MEDIA_CHECK_CONCURRENCY),
     fetchImpl: async (url, request = {}) => {
       const response = await requestPublicMedia(url, { ...request, maxBytes: 30 * 1024 * 1024, beforeRequest: options.beforeRequest });
@@ -21095,15 +20982,6 @@ export async function bindListingRecordToInventory(body = {}, session = null) {
 
 function buildOzonPublishErrorPayload(error, context = {}) {
   const rawMessage = rawOzonPublishErrorMessage(error);
-  if (error?.code === "LISTING_SHOP_WATERMARK_UNAVAILABLE") return {
-    message: error.message, fix_tip: "请在店铺设置中重新上传该店铺水印后重试原上架记录。",
-    code: "shop_watermark", raw_message: rawMessage, source: "listing_media_preparation", at: new Date().toISOString()
-  };
-  if (error?.code === "LISTING_SOURCE_IMAGE_DOWNLOAD_FAILED") return {
-    message: `${context.shop?.name || "目标店铺"}：${error.message}`,
-    fix_tip: `失败发生在商品原图读取阶段，已尝试 ${Number(error.attempts || 1)} 次。店铺水印不需要重新上传；请检查提示的草稿图片，网络恢复后重试原记录。`,
-    code: "source_image_download", raw_message: rawMessage, source: "listing_media_preparation", at: new Date().toISOString()
-  };
   const classified = classifyOzonPublishError(rawMessage, context);
   return {
     message: localizePublishMessage(classified.message),

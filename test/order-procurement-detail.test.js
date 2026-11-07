@@ -49,16 +49,6 @@ test('fully received purchases retain their procurement information instead of a
   assert.equal(state.purchaseReceiptStatus, 'received');
   assert.equal(state.latestReceivedAt, '2026-09-12T07:42:34Z');
   assert.equal(state.latestPurchaseAt, batch.purchased_at);
-  assert.equal(state.inTransitDays, 0, 'completed receipts do not accumulate transit days');
-});
-
-test('transit age uses the oldest pending purchase date while the displayed purchase date remains the latest', () => {
-  const now=Date.now(),iso=days=>new Date(now-days*86400000).toISOString();
-  const older={...batch,id:10,purchased_at:iso(5),created_at:iso(20)},newer={...batch,id:11,purchased_at:iso(1),created_at:iso(10)};
-  const state=context.buildProcurementState({procurement_coverage:{batches:[newer,older],incoming_quantity:2}});
-  assert.equal(state.inTransitDays,5);
-  assert.equal(state.latestPurchaseAt,newer.purchased_at);
-  assert.equal(state.pendingPurchaseCount,2);
 });
 
 test('partial receipt uses original purchase totals once, even across two receipt batches', () => {

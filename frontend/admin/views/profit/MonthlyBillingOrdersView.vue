@@ -26,7 +26,6 @@ const state = reactive({
   filters: {
     dateRange: [String(route.query.from || `${legacyMonth}-01`), String(route.query.to || legacyTo)],
     shopId: String(route.query.shopId || "all"),
-    companyId: String(route.query.companyId || "all"),
     keyword: String(route.query.keyword || ""),
     outcomeType: String(route.query.outcomeType || ""),
     settlementState: String(route.query.settlementState || ""),
@@ -43,7 +42,6 @@ const outcomeOptions = [
   { label: "全部退货/拒收", value: "returns" },
   { label: "拒收/未取", value: "rejected_unclaimed" },
   { label: "签收后退货", value: "after_delivery_return" },
-  { label: "配送货损", value: "cargo_lost" },
   { label: "取消", value: "cancelled_pre_fulfillment" }
 ];
 
@@ -59,7 +57,6 @@ const outcomeLabels = {
   delivered_signed: "已签收",
   rejected_unclaimed: "拒收/未取",
   after_delivery_return: "签收后退货",
-  cargo_lost: "配送货损/理赔待核",
   cancelled_pre_fulfillment: "取消"
 };
 
@@ -124,7 +121,6 @@ function syncRouteQuery() {
       from: state.filters.dateRange[0],
       to: state.filters.dateRange[1],
       shopId: String(state.filters.shopId || "all"),
-      companyId: state.filters.companyId,
       keyword: state.filters.keyword || undefined,
       outcomeType: state.filters.outcomeType || undefined,
       settlementState: state.filters.settlementState || undefined,
@@ -145,7 +141,6 @@ async function loadRows() {
       from: state.filters.dateRange[0],
       to: state.filters.dateRange[1],
       shopId: String(state.filters.shopId || "all"),
-      companyId: state.filters.companyId,
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize)
     });
@@ -202,11 +197,10 @@ function handlePageSizeChange(size) {
 }
 
 watch(
-  () => [route.query.from, route.query.to, route.query.shopId, route.query.companyId],
+  () => [route.query.from, route.query.to, route.query.shopId],
   () => {
     state.filters.dateRange = [String(route.query.from || state.filters.dateRange[0]), String(route.query.to || state.filters.dateRange[1])];
     state.filters.shopId = String(route.query.shopId || state.filters.shopId || "all");
-    state.filters.companyId = String(route.query.companyId || "all");
   }
 );
 

@@ -50,7 +50,7 @@ test("local plugin exposes batch lookup and seller pool endpoints", () => {
 test("collector plugin prefers backend pool and keeps legacy fallback", () => {
   assert.match(backgroundSource, /collector-seller-pool\/collect/);
   assert.match(backgroundSource, /buildSellerCollectedProductFieldsFromPool/);
-  assert.match(backgroundSource, /fetchSellerCollectedProductFields\(sku,/);
+  assert.match(backgroundSource, /fetchSellerCollectedProductFields\(sku\)/);
   assert.match(backgroundSource, /if \(poolItem\?\.success\)/);
   assert.doesNotMatch(backgroundSource, /if \(poolAttempted && \(!poolItem \|\| !poolItem\.success\)\) \{\s*throw/);
   assert.match(backgroundSource, /Seller pool fallback:/);
@@ -104,8 +104,7 @@ test("new and legacy plugins cannot reactivate a rejected cookie without a real 
 });
 
 test("collector plugin can bind the seller pool without a second extension", () => {
-  assert.match(backgroundSource, /chrome\.cookies\.getAll\(\{ url: cookieUrl \}\)/);
-  assert.match(backgroundSource, /parsedUrl\.origin === 'https:\/\/seller\.ozon\.ru'/);
+  assert.match(backgroundSource, /chrome\.cookies\.getAll\(\{ domain: 'seller\.ozon\.ru' \}\)/);
   assert.match(backgroundSource, /seller-analytics\/plugin-prepare\/next/);
   assert.match(backgroundSource, /seller-analytics\/auth-bindings/);
   assert.match(backgroundSource, /seller-analytics\/auth-probe/);

@@ -1,11 +1,6 @@
-import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js";
-import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
 import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
 import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
-import { ozonStockUpdateReceipts } from "./services/ozon-stock-update.js";
-
-const runOzonLabelRequest = createOzonLabelRequestQueue();
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -53,7 +48,7 @@ export async function fetchOzonPostings(shop, options = {}) {
           barcodes: true,
           financial_data: true
         }
-      }, { signal: params.signal, beforeRequest: params.beforeRequest });
+      }, { signal: params.signal });
       requests += 1;
       const page = Array.isArray(data.postings) ? data : data.result;
       if (!Array.isArray(page?.postings) || typeof page.has_next !== "boolean") {
@@ -216,69 +211,24 @@ export async function fetchOzonProductsByIds(shop, productIds = [], options = {}
 }
 
 export function pendingListingVisibilityFilters() {
-  // ALL is a recall fallback, not a claim that every visibility is stockable.
-  // Final pending filtering uses current stock evidence and excludes archives.
-  return ["ALL", "EMPTY_STOCK", "READY_TO_SUPPLY"];
+  return ["EMPTY_STOCK", "READY_TO_SUPPLY"];
 }
 
 export function filterPendingListingProductsWithoutFbsStock(products = [], stockRows = [], options = {}) {
   const requireSku = options.requireSku !== false;
   const stockKeys = new Set();
-  const zeroStockKeys = new Set();
-  const unknownStockKeys = new Set();
   for (const row of stockRows || []) {
-    const raw = options.requireStockEvidence ? parseJsonMaybe(row.raw_json) || {} : {};
-    if (options.requireStockEvidence && row.stock_type !== "fbp_real" && stockQuantityEvidence(raw).length && !validStockQuantities(raw)) {
-      for (const key of stockMatchKeys(row)) unknownStockKeys.add(key);
-    }
-    if (options.requireStockEvidence && isConfirmedEmptyFbsStockRow(row)) {
-      for (const key of stockMatchKeys(row)) zeroStockKeys.add(key);
-    }
     if (!hasPositiveFbsStock(row)) continue;
     for (const key of stockMatchKeys(row)) stockKeys.add(key);
   }
   return (products || []).filter((product) => (
     !isArchivedOzonProduct(product)
     && (!requireSku || hasUsablePendingListingSku(product))
-    && (!options.requireStockEvidence || !stockMatchKeys(product).some(key => unknownStockKeys.has(key)))
-    && (!options.requireStockEvidence || hasConfirmedZeroFbsStock(product, zeroStockKeys))
     && (
       !stockMatchKeys(product).some((key) => stockKeys.has(key))
       && !hasPositiveProductInfoFbsStock(product)
     )
   ));
-}
-
-function isConfirmedEmptyFbsStockRow(row) {
-  const raw = parseJsonMaybe(row.raw_json) || {};
-  return (row.stock_type === "fbs_virtual" && hasStockQuantityFields(raw) && confirmedZeroStockQuantities(raw))
-    || (Array.isArray(raw.stocks) && raw.stocks.length === 0 && (!stockQuantityEvidence(raw).length || confirmedZeroStockQuantities(raw)));
-}
-
-function stockQuantityEvidence(stock) {
-  return [stock.available, stock.present, stock.stock, stock.quantity, stock.available_stock, stock.free_to_sell_amount]
-    .filter(value => value !== undefined);
-}
-
-function validStockQuantities(stock) {
-  const values = stockQuantityEvidence(stock);
-  return values.length > 0 && values.every(value => ["number", "string"].includes(typeof value)
-    && String(value).trim() !== "" && Number.isFinite(Number(value)) && Number(value) >= 0);
-}
-
-function confirmedZeroStockQuantities(stock) {
-  return validStockQuantities(stock) && stockQuantityEvidence(stock).every(value => Number(value) === 0);
-}
-
-function hasConfirmedZeroFbsStock(product, zeroStockKeys) {
-  if (!product.ozon_product_id && !product.product_id && !product.id && !product.offer_id) return false;
-  const entries = productInfoStockEntries(product, true);
-  if (entries.some(entry => stockQuantityEvidence(entry.stock).length && !validStockQuantities(entry.stock))) return false;
-  if (stockMatchKeys(product).some(key => zeroStockKeys.has(key))) return true;
-  const raw = parseJsonMaybe(product.raw_json) || {};
-  const stocks = parseJsonMaybe(product.stocks_json) ?? raw.stocks;
-  if (stocks && typeof stocks === "object" && stocks.has_stock === false) return true;
-  return entries.some(entry => isProductInfoFbsStock(entry.stock, entry.parent) && confirmedZeroStockQuantities(entry.stock));
 }
 
 function hasUsablePendingListingSku(product = {}) {
@@ -301,9 +251,9 @@ function hasPositiveProductInfoFbsStock(product = {}) {
   return false;
 }
 
-function productInfoStockEntries(product = {}, includeUnknownQuantities = false) {
+function productInfoStockEntries(product = {}) {
   const entries = [];
-  const pushPayload = (payload, parent = {}) => collectProductInfoStockEntries(payload, parent, entries, includeUnknownQuantities);
+  const pushPayload = (payload, parent = {}) => collectProductInfoStockEntries(payload, parent, entries);
   pushPayload(parseJsonMaybe(product.stocks_json), product);
   pushPayload(product.stocks, product);
   pushPayload(product.stock, product);
@@ -320,11 +270,11 @@ function productInfoStockEntries(product = {}, includeUnknownQuantities = false)
   return entries;
 }
 
-function collectProductInfoStockEntries(payload, parent, entries, includeUnknownQuantities = false) {
+function collectProductInfoStockEntries(payload, parent, entries) {
   const value = parseJsonMaybe(payload);
   if (!value) return;
   if (Array.isArray(value)) {
-    for (const item of value) collectProductInfoStockEntries(item, parent, entries, includeUnknownQuantities);
+    for (const item of value) collectProductInfoStockEntries(item, parent, entries);
     return;
   }
   if (typeof value !== "object") return;
@@ -337,9 +287,9 @@ function collectProductInfoStockEntries(payload, parent, entries, includeUnknown
   const nested = value.stocks ?? value.stock ?? value.sources ?? value.warehouses;
   const hasNested = nested && nested !== value;
   if (hasNested) {
-    collectProductInfoStockEntries(nested, nestedParent, entries, includeUnknownQuantities);
+    collectProductInfoStockEntries(nested, nestedParent, entries);
   }
-  if (hasStockQuantityFields(value) || (includeUnknownQuantities && stockQuantityEvidence(value).length) || (!hasNested && hasProductInfoStockFlag(value, parent))) {
+  if (hasStockQuantityFields(value) || (!hasNested && hasProductInfoStockFlag(value, parent))) {
     entries.push({ stock: value, parent });
   }
 }
@@ -423,8 +373,6 @@ export async function fetchOzonProductStocks(shop, options = {}) {
   const chunkRows = await mapOzonConcurrencyResults(filterChunks, options.stockConcurrency || 1, async (filter) => {
     const rows = [];
     let cursor = "";
-    const seenCursors = new Set();
-    let itemCount = 0;
     do {
       throwIfAborted(options.signal);
       const data = await ozonRequest(shop, "/v4/product/info/stocks", {
@@ -434,19 +382,9 @@ export async function fetchOzonProductStocks(shop, options = {}) {
       }, { signal: options.signal, beforeRequest: options.beforeRequest });
       const result = data.result || data;
       await options.afterRequest?.();
-      const items = result.items ?? result.products;
-      if (!Array.isArray(items)) throw new Error("Ozon 库存列表格式已变化，请重新拉取后重试");
-      itemCount += items.length;
+      const items = result.items || result.products || [];
       for (const item of items) rows.push(...normalizeOzonStockItem(item));
-      const total = Number(result.total_items ?? result.total);
-      const next = result.cursor || result.last_id || "";
-      if (!items.length || !next) {
-        if (Number.isFinite(total) && total > itemCount) throw new Error("Ozon 库存分页提前结束，未取得完整库存列表，请重新拉取");
-        break;
-      }
-      if (typeof next !== "string" || next === cursor || seenCursors.has(next)) throw new Error("Ozon 库存列表分页未推进，请稍后重新拉取");
-      seenCursors.add(next);
-      cursor = next;
+      cursor = result.cursor || result.last_id || "";
     } while (cursor);
     return rows;
   });
@@ -542,35 +480,17 @@ export async function fetchOzonStockTurnover(shop, options = {}) {
 
 export async function fetchOzonWarehouses(shop, options = {}) {
   if (!hasRealOzonCredentials(shop)) return demoWarehouses(shop);
-  const path = "/v2/warehouse/list";
-  const warehouses = [], seenIds = new Set(), seenCursors = new Set();
-  let cursor = "";
-  for (let page = 0; page < 100; page += 1) {
-    throwIfAborted(options.signal);
-    const data = await ozonRequest(shop, path, { limit: 200, cursor }, options);
-    await options.afterRequest?.();
-    throwIfAborted(options.signal);
-    if (!Array.isArray(data.warehouses) || typeof data.has_next !== "boolean") {
-      throw new Error("Ozon 仓库响应格式已变化，本次未取得完整仓库列表，请刷新重试或联系维护人员");
+  const errors = [];
+  for (const path of ["/v2/warehouse/list", "/v1/warehouse/list"]) {
+    try {
+      const data = await ozonRequest(shop, path, {}, options);
+      return normalizeOzonWarehouses(data);
+    } catch (error) {
+      errors.push(`${path}: ${error?.message || error}`);
+      if (options.signal?.aborted) throwIfAborted(options.signal);
     }
-    for (const row of data.warehouses) {
-      const id = String(row?.warehouse_id || "");
-      if (!/^[1-9]\d*$/.test(id) || (typeof row.warehouse_id === "number" && !Number.isSafeInteger(row.warehouse_id))) {
-        throw new Error("Ozon 返回了无法确认编号的仓库，本次列表不可用于更新库存，请重新获取");
-      }
-      if (seenIds.has(id)) throw new Error("Ozon 仓库分页返回重复仓库，本次未能确认完整列表，请重新获取");
-      seenIds.add(id);
-    }
-    warehouses.push(...normalizeOzonWarehouses(data));
-    if (!data.has_next) return warehouses;
-    const nextCursor = data.cursor;
-    if (!data.warehouses.length || typeof nextCursor !== "string" || !nextCursor || nextCursor === cursor || seenCursors.has(nextCursor)) {
-      throw new Error("Ozon 仓库分页未正确推进，本次未取得完整列表，请重新获取");
-    }
-    seenCursors.add(nextCursor);
-    cursor = nextCursor;
   }
-  throw new Error("Ozon 仓库分页超过安全上限，本次列表未完成，请联系维护人员核查");
+  throw new Error(`Ozon 仓库列表获取失败：${errors.join(" | ")}`);
 }
 
 export async function fetchOzonProductPrices(shop, options = {}) {
@@ -805,40 +725,14 @@ export async function updateOzonProductStocks(shop, stocks = [], options = {}) {
   const payloadStocks = (stocks || []).map((item) => ({
     offer_id: String(item.offer_id || ""),
     product_id: Number(item.product_id || item.ozon_product_id || 0),
-    stock: Number(item.stock),
+    stock: Math.max(0, Math.round(Number(item.stock || 0))),
     warehouse_id: Number(item.warehouse_id || 0)
-  }));
+  })).filter((item) => item.offer_id || item.product_id);
   if (!payloadStocks.length) throw new Error("缺少需要更新库存的 Ozon 商品");
-  if (payloadStocks.some(item => (!item.offer_id && (!Number.isSafeInteger(item.product_id) || item.product_id <= 0))
-    || !Number.isSafeInteger(item.stock) || item.stock < 0 || !Number.isSafeInteger(item.warehouse_id) || item.warehouse_id <= 0)) {
-    throw new Error("库存更新需要有效商品编号、Ozon 仓库编号和大于等于 0 的整数库存，请检查所选商品及库存数量");
-  }
   if (!hasRealOzonCredentials(shop)) {
     return { result: payloadStocks.map((item) => ({ ...item, updated: true })), demo: true };
   }
-  const result = [];
-  for (const chunk of chunkOzonFilterValues(payloadStocks, 100)) {
-    let response;
-    try {
-      throwIfAborted(options.signal);
-      response = await ozonRequest(shop, "/v2/products/stocks", { stocks: chunk }, options);
-      await options.afterRequest?.();
-    } catch (error) {
-      if (!options.allowPartialResults || options.signal?.aborted || [401, 403, 404, 409].includes(Number(error.statusCode))) {
-        const current = response ? ozonStockUpdateReceipts(chunk, response).map(item => ({ ...item, updated: item.accepted })) : [];
-        error.stockResponse = { result: [...result, ...current] };
-        throw error;
-      }
-      // A later failed request must not erase already accepted batch receipts.
-      response = { result: chunk.map(item => ({ ...item, updated: false, errors: [{ code: "STOCK_REQUEST_FAILED", message: error.message }] })) };
-    }
-    const receipts = ozonStockUpdateReceipts(chunk, response);
-    result.push(...receipts.map(item => ({ ...item, updated: item.accepted })));
-    if (!options.allowPartialResults && receipts.some(item => !item.accepted)) {
-      throw Object.assign(new Error(receipts.filter(item => !item.accepted).map(item => `${item.offer_id || item.product_id}：${item.errors.map(error => error.message).join("；")}`).join("；")), { stockResponse: { result } });
-    }
-  }
-  return { result };
+  return ozonRequest(shop, "/v2/products/stocks", { stocks: payloadStocks }, options);
 }
 
 export async function archiveOzonProducts(shop, productIds = [], options = {}) {
@@ -1147,42 +1041,46 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
   if (!hasRealOzonCredentials(shop)) {
     throw new Error("店铺缺少有效的 Ozon Client ID 或 API Key，无法获取真实面单");
   }
-  return fetchOzonPackageLabelTask(postings, {
-    signal: options.signal,
-    request: (path, payload) => runOzonLabelRequest(shop.ozon_client_id, () => ozonRequestOnce(shop, path, payload, options), options),
-    download: async fileUrl => {
-      const url = new URL(fileUrl);
-      if (url.protocol !== "https:" || !/(^|\.)(ozonstatic\.(cn|ru|com)|ozone\.ru|ozon\.ru)$/.test(url.hostname)) throw new Error("Ozon 返回了无法识别的面单下载地址");
-      const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000);
-      const response = await fetch(url, { signal, redirect: "error" });
-      if (!response.ok) throw new Error(`Ozon 面单 PDF 下载失败：HTTP ${response.status}`);
-      return Buffer.from(await response.arrayBuffer());
-    }
-  });
+  return ozonBinaryRequest(shop, "/v2/posting/fbs/package-label", { posting_number: postings }, options);
 }
 
 export async function fetchOzonFinanceTransactions(shop, options = {}) {
-  if (options.source && options.source !== "daily_accrual") {
-    throw Object.assign(new Error("旧版 Ozon 财务流水接口已停用，请使用按日计提账单；不能回退旧接口或把旧新金额直接合并"), { code: "OZON_FINANCE_LEGACY_RETIRED", statusCode: 400 });
-  }
   if (!hasRealOzonCredentials(shop)) {
-    throw Object.assign(new Error("店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后同步财务账单"), { code: "OZON_FINANCE_CREDENTIALS_MISSING", statusCode: 409 });
+    return { operations: [], fetched: 0, requests: 0 };
   }
-  const result = await fetchOzonDailyAccruals(shop, {
-    from: options.from || normalizeIsoStart(undefined, 30), to: options.to || normalizeIsoEnd(undefined, new Date()),
-    signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
-    request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions)
-  });
-  return { ...result, operations: result.accruals };
-}
-
-export async function splitOzonPosting(shop, postingNumber, postings, options = {}) {
-  if (!hasRealOzonCredentials(shop)) throw Object.assign(new Error("店铺尚未配置有效 Ozon API Key，不能拆单"), { statusCode: 409 });
-  // Splitting is a non-idempotent mutation: a lost response must be reconciled,
-  // never retried automatically through the generic request loop.
-  return ozonRequestOnce(shop, "/v1/posting/fbs/split", {
-    posting_number: String(postingNumber), postings
-  }, options);
+  if (options.source === "daily_accrual") {
+    const result = await fetchOzonDailyAccruals(shop, { from: options.from, to: options.to,
+      signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
+      request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions) });
+    return { ...result, operations: result.accruals };
+  }
+  const from = normalizeIsoStart(options.from, 30);
+  const to = normalizeIsoEnd(options.to, new Date());
+  const pageSize = Math.min(Math.max(Number(options.pageSize || 1000), 1), 1000);
+  const operations = [];
+  let page = 1;
+  let requests = 0;
+  while (true) {
+    throwIfAborted(options.signal);
+    const data = await ozonRequest(shop, "/v3/finance/transaction/list", {
+      filter: {
+        date: { from, to },
+        operation_type: [],
+        posting_number: "",
+        transaction_type: "all"
+      },
+      page,
+      page_size: pageSize
+    }, { signal: options.signal, beforeRequest: options.beforeRequest });
+    requests += 1;
+    const result = data.result || {};
+    const batch = result.operations || result.items || [];
+    for (const operation of batch) operations.push(normalizeFinanceOperation(operation));
+    const pageCount = Number(result.page_count || result.pages_count || 0);
+    if (!batch.length || (pageCount && page >= pageCount) || batch.length < pageSize) break;
+    page += 1;
+  }
+  return { operations, fetched: operations.length, requests };
 }
 
 export async function shipOzonPosting(shop, postingNumber, products = [], options = {}) {
@@ -1436,16 +1334,10 @@ async function fetchOzonProductIdsByVisibility(shop, visibility, options = {}) {
     const data = await ozonRequest(shop, "/v3/product/list", payload, options);
     await options.afterRequest?.();
     const result = data.result || {};
-    const items = result.items;
-    if (!Array.isArray(items)) throw new Error("Ozon 商品列表格式已变化，请重新拉取后重试");
+    const items = result.items || [];
     for (const item of items) {
       const id = item.product_id || item.id;
       if (id) productRefs.push({ id: Number(id), offer_id: item.offer_id, ozon_sku: item.sku });
-    }
-    const total = Number(result.total_items ?? result.total);
-    if (!items.length || !result.last_id) {
-      if (Number.isFinite(total) && total > productRefs.length) throw new Error("Ozon 商品分页提前结束，未取得完整商品列表，请重新拉取");
-      break;
     }
     lastId = result.last_id || "";
     if (lastId && cursors.has(lastId)) throw new Error("Ozon 商品列表返回重复分页游标，请稍后重试");
@@ -1544,12 +1436,8 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
   }
   if (!response.ok) {
     const message = data.message || data.error || text || `Ozon API ${response.status}`;
-    const credentialFailure = /api[ -]?key/i.test(String(message)) && /expired|invalid|not valid/i.test(String(message));
-    const error = new Error(credentialFailure
-      ? `店铺「${shop.name || shop.id}」的 Ozon API Key ${/expired/i.test(String(message)) ? '已过期' : '无效'}。请在「企业店铺 → 编辑 → Ozon API Key」更新并保存；密钥备注不会替换密钥。`
-      : `Ozon ${path} failed: ${message}`);
-    error.statusCode = credentialFailure ? 409 : response.status;
-    if (credentialFailure) error.code = "OZON_API_KEY_INVALID";
+    const error = new Error(`Ozon ${path} failed: ${message}`);
+    error.statusCode = response.status;
     error.path = path;
     error.retryAfterMs = retryAfterMs(response.headers?.get?.("retry-after"));
     throw error;
@@ -1621,6 +1509,44 @@ function normalizeOzonArrayPayload(data = {}, keys = []) {
   return [];
 }
 
+async function ozonBinaryRequest(shop, path, payload, options = {}) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次请求已取消"));
+  if (options.signal?.aborted) abortFromParent();
+  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
+  const timeout = setTimeout(() => controller.abort(), 45000);
+  let response;
+  try {
+    response = await fetch(`${OZON_API_BASE}${path}`, {
+      method: "POST",
+      headers: {
+        "Client-Id": String(shop.ozon_client_id),
+        "Api-Key": ozonApiKey(shop),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (options.signal?.aborted) throwIfAborted(options.signal);
+    if (error.name === "AbortError") throw new Error(`Ozon ${path} timeout after 45s`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abortFromParent);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!response.ok) {
+    const text = buffer.toString("utf8");
+    let message = text;
+    try {
+      const parsed = JSON.parse(text);
+      message = parsed.message || parsed.error || text;
+    } catch {}
+    throw new Error(`Ozon ${path} failed: ${message}`);
+  }
+  return buffer;
+}
 
 function demoPdf(text) {
   const safe = String(text || "Demo PDF").replace(/[()\\]/g, "\\$&").replace(/\r?\n/g, ") Tj T* (");
@@ -1813,6 +1739,36 @@ function classifyStockType(stock = {}, parent = {}) {
 function stockNumber(value) {
   const num = Number(value || 0);
   return Number.isFinite(num) ? Math.max(0, Math.round(num)) : 0;
+}
+
+function normalizeFinanceOperation(item) {
+  const posting = item.posting || item.posting_number || {};
+  const services = Array.isArray(item.services) ? item.services : [];
+  const items = Array.isArray(item.items) ? item.items : [];
+  return {
+    operation_id: String(item.operation_id || item.id || item.operation_number || ""),
+    operation_type: String(item.operation_type || item.type || ""),
+    operation_type_name: String(item.operation_type_name || item.name || ""),
+    operation_date: item.operation_date || item.date || item.created_at || "",
+    posting_number: String(posting.posting_number || posting || ""),
+    order_number: String(posting.order_number || item.order_number || ""),
+    amount: numberFromOzon(item.amount || item.total || 0),
+    accruals_for_sale: numberFromOzon(item.accruals_for_sale || 0),
+    sale_commission: numberFromOzon(item.sale_commission || 0),
+    delivery_charge: numberFromOzon(item.delivery_charge || 0),
+    return_delivery_charge: numberFromOzon(item.return_delivery_charge || 0),
+    currency_code: item.currency_code || item.currency || "",
+    services: services.map((service) => ({
+      name: String(service.name || service.service_name || service.type || ""),
+      price: numberFromOzon(service.price || service.amount || service.value || 0)
+    })),
+    items: items.map((row) => ({
+      sku: String(row.sku || row.ozon_sku || ""),
+      name: String(row.name || ""),
+      quantity: Number(row.quantity || 1)
+    })),
+    raw_json: stringify(item)
+  };
 }
 
 function normalizeOzonProductPrice(item = {}) {

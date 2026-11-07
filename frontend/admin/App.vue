@@ -1,4 +1,4 @@
-<script setup>
+﻿<script setup>
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElNotification } from "element-plus";
@@ -21,7 +21,6 @@ const APP_UPDATE_DISMISSED_PREFIX = "baodanDismissedAppUpdate";
 const showLoginWelcome = ref(false);
 const loginWelcomeText = "欢迎大卖回归！";
 const loginWelcomeChars = computed(() => Array.from(loginWelcomeText));
-let inventoryRequestNotice=null;
 let updateCheckTimer = 0;
 let initialUpdateCheckTimer = 0;
 let loginWelcomeTimer = 0;
@@ -35,28 +34,20 @@ let updateNotificationKey = "";
 let authExpiredNotification = null;
 
 async function syncAnalyticsPluginUpdate(status = {}) {
-  analyticsPluginUpdateSnapshot = status;
   const target = status?.analytics_plugin || status?.analyticsPlugin || null;
   if (!target?.version) return;
-  const instance = currentAnalyticsPluginIdentity();
-  if (!instance) {
-    requestAnalyticsPluginIdentity();
-    return;
-  }
   try {
-    const pluginStatus = await apiClient.get(`/api/db/seller-analytics/plugin-status?plugin_instance_id=${encodeURIComponent(instance.id)}`, {
+    const pluginStatus = await apiClient.get("/api/db/seller-analytics/plugin-status", {
       routeScoped: false,
       noCache: true
     });
-    if (currentAnalyticsPluginIdentity() !== instance) return;
-    const installedVersion = instance.version || String(pluginStatus?.plugin_version || "").trim();
+    const installedVersion = String(pluginStatus?.plugin_version || "").trim();
     const versionStatus = installedVersion
       ? await apiClient.get(`/api/system/update-status?analytics_plugin_version=${encodeURIComponent(installedVersion)}`, {
         routeScoped: false,
         noCache: true
       })
       : null;
-    if (currentAnalyticsPluginIdentity() !== instance) return;
     const update = versionStatus?.analytics_plugin;
     if (update?.update_available || update?.update_required) {
       window.dispatchEvent(new CustomEvent("app:plugin-update", {
@@ -68,37 +59,6 @@ async function syncAnalyticsPluginUpdate(status = {}) {
   } catch (error) {
     console.warn("check analytics plugin update failed", error);
   }
-}
-
-let analyticsPluginIdentity = null;
-let analyticsPluginUpdateSnapshot = {};
-
-function currentAnalyticsPluginIdentity() {
-  return analyticsPluginIdentity?.scope === currentApiCacheScope() ? analyticsPluginIdentity : null;
-}
-
-function requestAnalyticsPluginIdentity() {
-  window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST" }, window.location.origin);
-}
-
-function handleAnalyticsPluginInstanceMessage(event) {
-  if (event.source !== window || event.origin !== window.location.origin || !authStore.isAuthenticated) return;
-  if (event.data?.type !== "BAODAN_ANALYTICS_PLUGIN_INSTANCE") return;
-  const id = String(event.data.pluginInstanceId || "").trim();
-  if (!/^[0-9A-Za-z_-]{1,128}$/.test(id)) return;
-  const unified = event.data.capabilities?.collector === true && event.data.capabilities?.sellerAnalytics === true;
-  const previous = currentAnalyticsPluginIdentity();
-  if (previous?.unified && !unified) return;
-  const version = /^\d+(?:\.\d+){0,3}$/.test(String(event.data.pluginVersion || "")) ? String(event.data.pluginVersion) : "";
-  if (previous?.id === id && previous.version === version && previous.unified === unified) return;
-  analyticsPluginIdentity = { id, version, unified, scope: currentApiCacheScope() };
-  void syncAnalyticsPluginUpdate(analyticsPluginUpdateSnapshot);
-}
-
-function resetAnalyticsPluginIdentity() {
-  analyticsPluginIdentity = null;
-  window.dispatchEvent(new CustomEvent("app:plugin-update-clear", { detail: { type: "analytics_plugin" } }));
-  if (authStore.isAuthenticated) requestAnalyticsPluginIdentity();
 }
 
 useGlobalImagePreviewDismiss();
@@ -321,15 +281,6 @@ function openUpdateEventStream() {
       console.warn("parse AI task event failed", error);
     }
   });
-  updateEventSource.addEventListener("system-notification",(event)=>{
-    if(!currentStream())return;
-    window.dispatchEvent(new CustomEvent('erp:system-notification',{detail:{scope:currentApiCacheScope()}}));
-    try{const payload=JSON.parse(event.data||'{}');if(payload.type==='inventory_product_request'&&String(payload.route||'').startsWith('/inventory/product-requests?')){
-      inventoryRequestNotice?.close();inventoryRequestNotice=ElNotification({title:payload.title||'库存申请',message:payload.message||'有库存申请待处理',type:'info',duration:7000,onClick:()=>{if(currentStream())void router.push(payload.route);}});
-    }}catch{}
-
-  });
-  updateEventSource.addEventListener('inventory-product-request',()=>{if(currentStream())window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed',{detail:{scope:currentApiCacheScope()}}));});
   updateEventSource.addEventListener("sku-order-tracking", (event) => {
     if (!currentStream()) return;
     try {
@@ -385,8 +336,6 @@ function scheduleInitialUpdateCheck() {
 }
 
 function resetUpdateEventStreamForAuthScope() {
-  resetAnalyticsPluginIdentity();
-  inventoryRequestNotice?.close();inventoryRequestNotice=null;
   closeUpdateEventStream();
   resetUpdateEventBackoff();
   scheduleInitialUpdateCheck();
@@ -407,12 +356,10 @@ function consumeLoginWelcome() {
 }
 
 onMounted(async () => {
-  window.addEventListener("message", handleAnalyticsPluginInstanceMessage);
   window.addEventListener("app:auth-expired", handleAuthExpired);
   window.addEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.addEventListener("storage", handleUpdateStorageChange);
   await authStore.bootstrap();
-  requestAnalyticsPluginIdentity();
   consumeLoginWelcome();
   scheduleInitialUpdateCheck();
 });
@@ -430,9 +377,6 @@ watch(
 );
 
 onBeforeUnmount(() => {
-  analyticsPluginIdentity = null;
-  window.removeEventListener("message", handleAnalyticsPluginInstanceMessage);
-  inventoryRequestNotice?.close();inventoryRequestNotice=null;
   window.removeEventListener("app:auth-expired", handleAuthExpired);
   window.removeEventListener("erp:auth-scope-changed", resetUpdateEventStreamForAuthScope);
   window.removeEventListener("storage", handleUpdateStorageChange);

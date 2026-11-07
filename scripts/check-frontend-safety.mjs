@@ -60,8 +60,8 @@ function checkAdminShell() {
     if (!html.includes('<div id="adminApp"></div>')) {
       addFailure("public/admin.html", 1, "missing stable #adminApp mount element");
     }
-    if (!/type="module"\s+src="\/vue-apps\/assets\/admin-view-[A-Za-z0-9_-]+\.js(?:\?v=[^"]+)?"/.test(html)) {
-      addFailure("public/admin.html", 1, "missing fingerprinted admin-view module script");
+    if (!/type="module"\s+src="\/vue-apps\/assets\/admin-view-[^"]+\.js\?v=[^"]+"/.test(html)) {
+      addFailure("public/admin.html", 1, "missing versioned admin-view module script");
     }
     if (html.includes("adminStaticLoginForm") || html.includes("/api/auth/login")) {
       addFailure("public/admin.html", 1, "admin shell must not include a second static login form");

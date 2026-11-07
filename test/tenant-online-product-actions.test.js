@@ -14,7 +14,7 @@ test("online product action audit writes and completion updates remain tenant-bo
   assert.match(helper, /INSERT INTO online_product_actions\s*\(tenant_id, online_product_id,/);
   assert.match(helper, /COALESCE\(tenant_id, 'admin'\) = \?/);
   assert.match(batch, /tenantId: normalizedTenantId/);
-  assert.match(batch, /if \(receipt\?\.accepted\) await finishOnlineProductActionMysql\(actionId, "success", \{ \.\.\.result, item: receipt \}, "", normalizedTenantId\)/);
+  assert.match(batch, /finishOnlineProductActionMysql\(actionId, "success", result, "", normalizedTenantId\)/);
   assert.match(action, /tenantId: normalizedTenantId/);
   assert.match(action, /finishOnlineProductActionMysql\(actionId, "failed", result, result\.error, normalizedTenantId\)/);
 });

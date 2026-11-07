@@ -16,22 +16,20 @@ test("product core fields, composition and structured naming are saved in one tr
   const transactionStart = source.indexOf("await withMysqlTransaction(async (connection)");
   const productUpdate = source.indexOf("await connection.execute(`");
   const componentSave = source.indexOf("await saveProductComponentsTxMysql(connection");
-  const namingSave = source.indexOf("await saveStructuredNamingMysql(productId, body, connection");
-  const transactionEnd = source.indexOf("\n  });", namingSave);
-  const historySave = source.indexOf("await recordProductEdit(run,scope,beforeIdentity,afterIdentity");
+  const namingSave = source.indexOf("await saveStructuredNamingMysql(productId, body, connection)");
+  const transactionEnd = source.indexOf("});", namingSave);
 
   assert.ok(transactionStart >= 0, "product update should open a transaction");
   assert.ok(productUpdate > transactionStart, "product row update should use the transaction connection");
   assert.ok(componentSave > productUpdate, "component save should remain inside the transaction");
   assert.ok(namingSave > componentSave, "structured naming should remain inside the transaction");
-  assert.ok(historySave > namingSave && historySave < transactionEnd, "identity history should use the same transaction after the final name and number are saved");
   assert.ok(transactionEnd > namingSave, "transaction should close after all core saves");
 });
 
 test("outbound synchronization runs after commit and cannot turn a saved product into HTTP 500", () => {
   const source = updateProductSource();
-  const namingSave = source.indexOf("await saveStructuredNamingMysql(productId, body, connection");
-  const transactionEnd = source.indexOf("\n  });", namingSave);
+  const namingSave = source.indexOf("await saveStructuredNamingMysql(productId, body, connection)");
+  const transactionEnd = source.indexOf("});", namingSave);
   const syncStart = source.indexOf("outboundSync = await syncOutboundForOpenOrdersMysql");
   const syncCatch = source.indexOf("outboundSyncWarning =", syncStart);
   const successReturn = source.indexOf("return { ok: true", syncCatch);

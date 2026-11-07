@@ -82,7 +82,7 @@ test("range export applies combined workspace filters with EXISTS and remains un
 test("WeChat summary combines repeated products and separates freight from goods", () => {
   const summary = dailyPurchaseSummary("2026-09-16", rows);
   assert.match(summary, /1 种商品，5 件；货款 ¥50.30，运费 ¥1.20，合计 ¥51.50/);
-  assert.match(summary, /黑色脚垫（2-7）：5 件，货款¥ 50.3 元/);
+  assert.match(summary, /黑色脚垫（2_7）：5 件，货款¥ 50.3 元/);
   assert.match(dailyPurchaseSummary("2026-09-16", []), /当天暂无已确认采购记录/);
   assert.match(dailyPurchaseSummary("2026-09-16", [{ ...rows[0], amount: 0 }]), /1 条货款为零或未填写/);
 });
@@ -95,12 +95,10 @@ test("xlsx round trip retains embedded image, all rows, numeric amounts, Beijing
   assert.equal(missingImages, 0);
   const restored = new ExcelJS.Workbook();
   await restored.xlsx.load(await workbook.xlsx.writeBuffer());
-  const sheet = restored.getWorksheet("2026-09-16");
-  assert.equal(restored.worksheets.length, 1);
-  assert.equal(sheet.autoFilter, "A3:L5");
+  const sheet = restored.getWorksheet("每日采购清单");
+  assert.equal(sheet.rowCount, 5);
   assert.equal(sheet.getCell("B3").value, "库存号");
-  assert.equal(sheet.getCell("B4").value, "2-7");
-  assert.equal(sheet.getCell("B4").numFmt, "@");
+  assert.equal(sheet.getCell("B4").value, "2_7");
   assert.equal(sheet.getImages().length, 2);
   assert.equal(sheet.getCell("D4").value, 2);
   assert.equal(sheet.getCell("E4").value, 20.1);
@@ -108,13 +106,13 @@ test("xlsx round trip retains embedded image, all rows, numeric amounts, Beijing
   assert.match(sheet.getCell("H4").value, /2026\/09\/16 00:00:00/);
   assert.match(sheet.getCell("H5").value, /2026\/09\/16 23:59:59/);
   assert.equal(sheet.getCell("J5").value, "已入库");
-  assert.ok(sheet.getColumn(1).values.some((value) => String(value).includes("合计 ¥51.50")));
+  assert.match(restored.getWorksheet("微信文字总结").getCell("A2").value, /¥51.50/);
 });
 
 test("failed images remain explicit without losing purchase rows or treating product names as formulas", async () => {
   const { workbook, missingImages } = await buildDailyPurchaseWorkbook("2026-09-16", [{ ...rows[0], product_name: '=HYPERLINK("bad")' }], async () => { throw new Error("image unavailable"); });
   assert.equal(missingImages, 1);
-  const sheet = workbook.getWorksheet("2026-09-16");
+  const sheet = workbook.getWorksheet("每日采购清单");
   assert.equal(sheet.getCell("A4").value, "图片不可用");
   assert.equal(sheet.getCell("C4").type, ExcelJS.ValueType.String);
   assert.equal(sheet.getCell("E4").value, 20.1);
@@ -124,78 +122,21 @@ test("summary and Excel group categories, sort inventory numbers naturally, and 
   const mixed = [
     { ...rows[0], product_id: 10, inventory_category: "钥匙壳", inventory_number: "1-10", product_name: "钥匙壳 JELAND J6 红色" },
     rows[0],
-    { ...rows[0], product_id: 1, inventory_category: "钥匙壳", inventory_number: "1-1", product_name: "钥匙壳 JELAND J6 蓝色", quantity: 100, amount: 250 },
+    { ...rows[0], product_id: 1, inventory_category: "钥匙壳", inventory_number: "1_1", product_name: "钥匙壳 JELAND J6 蓝色", quantity: 100, amount: 250 },
     { ...rows[0], product_id: 2, inventory_category: "钥匙壳", inventory_number: "1-2", product_name: "钥匙壳 JELAND J6 黑色" },
     rows[1]
   ];
   const text = dailyPurchaseSummary("2026-09-16", mixed);
-  assert.match(text, /【钥匙壳】\n钥匙壳 JELAND J6 蓝色（1-1）：100 件，货款¥ 250 元\n钥匙壳 JELAND J6 黑色（1-2）/);
-  assert.ok(text.indexOf("（1-2）") < text.indexOf("（1-10）"));
+  assert.match(text, /【钥匙壳】\n钥匙壳 JELAND J6 蓝色（1_1）：100 件，货款¥ 250 元\n钥匙壳 JELAND J6 黑色（1_2）/);
+  assert.ok(text.indexOf("（1_2）") < text.indexOf("（1_10）"));
   assert.equal(text.split("【脚垫】").length, 2);
   assert.doesNotMatch(text, /P-007/);
   assert.equal(purchaseInventoryNumber({ product_code: "P-007" }), "未编号");
   const { workbook } = await buildDailyPurchaseWorkbook("2026-09-16", mixed, async () => null);
-  const sheet = workbook.getWorksheet("2026-09-16");
+  const sheet = workbook.getWorksheet("每日采购清单");
   const numbers = sheet.getColumn(2).values.slice(4);
-  const first = numbers.indexOf("1-1");
-  assert.deepEqual(numbers.slice(first, first + 3), ["1-1", "1-2", "1-10"]);
-  assert.equal(numbers.filter((number) => number === "2-7").length, 2);
+  const first = numbers.indexOf("1_1");
+  assert.deepEqual(numbers.slice(first, first + 3), ["1_1", "1_2", "1_10"]);
+  assert.equal(numbers.filter((number) => number === "2_7").length, 2);
   assert.equal(sheet.getCell("B3").value, "库存号");
-});
-
-test("daily sheets retain text inventory IDs and naturally sort category-brand-sequence numbers", async () => {
-  const mixed = ["1-2-10", "1-2-2", "1-2-1"].map((inventory_number, index) => ({ ...rows[0], id: index + 1, product_id: index + 1, inventory_number }));
-  const { workbook } = await buildDailyPurchaseWorkbook("2026-09-16", mixed, async () => null);
-  const restored = new ExcelJS.Workbook();
-  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
-  const sheet = restored.getWorksheet("2026-09-16");
-  assert.deepEqual([4, 5, 6].map((row) => sheet.getCell(`B${row}`).value), ["1-2-1", "1-2-2", "1-2-10"]);
-  assert.ok([4, 5, 6].every((row) => sheet.getCell(`B${row}`).numFmt === "@"));
-});
-
-test("multi-day workbook separates every Beijing calendar day and preserves empty days, images and per-day summaries", async () => {
-  const records = [
-    ...rows,
-    { ...rows[0], id: 3, quantity: 4, amount: "40.00", shipping_amount: "2.00", purchased_at: "2026-09-16 16:00:00", purchase_order_no: "CG-003" },
-    { ...rows[0], id: 4, quantity: 6, amount: "60.00", shipping_amount: "0.00", purchased_at: "2026-09-20T00:00:00+08:00", purchase_order_no: "CG-004" }
-  ];
-  let loads = 0;
-  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
-  const { workbook, missingImages, summary } = await buildDailyPurchaseWorkbook({ dateFrom: "2026-09-16", dateTo: "2026-09-20" }, records, async () => { loads++; return png; });
-  const restored = new ExcelJS.Workbook();
-  await restored.xlsx.load(await workbook.xlsx.writeBuffer());
-  assert.deepEqual(restored.worksheets.map((sheet) => sheet.name), ["2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19", "2026-09-20"]);
-  assert.equal(loads, 1, "a product image is loaded once across all days");
-  assert.equal(missingImages, 0);
-  const first = restored.getWorksheet("2026-09-16"), second = restored.getWorksheet("2026-09-17"), last = restored.getWorksheet("2026-09-20");
-  assert.equal(first.autoFilter, "A3:L5");
-  assert.equal(first.getImages().length, 2);
-  assert.equal(second.autoFilter, "A3:L4");
-  assert.equal(second.getImages().length, 1);
-  assert.equal(second.getCell("K4").value, "CG-003");
-  assert.equal(second.getCell("H4").value, "2026/09/17 00:00:00");
-  assert.equal(second.getCell("G4").value.result, 42);
-  assert.match(second.getCell("A2").value, /4 件；货款 ¥40.00，运费 ¥2.00，合计 ¥42.00/);
-  assert.equal(last.getCell("K4").value, "CG-004");
-  assert.equal(last.getCell("H4").value, "2026/09/20 00:00:00");
-  for (const date of ["2026-09-18", "2026-09-19"]) {
-    const empty = restored.getWorksheet(date);
-    assert.equal(empty.autoFilter, "A3:L3");
-    assert.equal(empty.getImages().length, 0);
-    assert.match(empty.getCell("A2").value, /0 种商品，0 件/);
-    assert.ok(empty.getColumn(1).values.includes("当天暂无已确认采购记录。"));
-  }
-  assert.equal(summary.match(/【采购清单】/g).length, 5);
-  assert.match(summary, /【采购清单】2026-09-16（北京时间）\n共采购 1 种商品，5 件/);
-  assert.match(summary, /【采购清单】2026-09-17（北京时间）\n共采购 1 种商品，4 件/);
-  assert.match(summary, /【采购清单】2026-09-20（北京时间）\n共采购 1 种商品，6 件/);
-});
-
-test("day splitting rejects invalid ranges or unassignable timestamps instead of losing purchase rows", async () => {
-  for (const range of [{ dateFrom: "2026-02-30" }, { dateFrom: "2026-09-17", dateTo: "2026-09-16" }]) {
-    await assert.rejects(buildDailyPurchaseWorkbook(range, [], async () => null), /有效的采购时间范围/);
-  }
-  for (const purchased_at of [null, "invalid", "2026-09-16 16:00:00"]) {
-    await assert.rejects(buildDailyPurchaseWorkbook("2026-09-16", [{ ...rows[0], purchased_at }], async () => null), /采购时间无效或超出所选范围/);
-  }
 });

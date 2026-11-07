@@ -1,4 +1,3 @@
-import {loadOrderProcurementCoverage,procurementQueueSql} from '../src/services/mysql-order-procurement-coverage.js';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -14,7 +13,7 @@ test("read-only count profiler executes the real isolated coverage and aggregati
   try {
     await createOrderFixtureSchema(f.connection);
     await f.query("CREATE TABLE fbp_replenishment_orders(id BIGINT PRIMARY KEY,shop_id BIGINT,status VARCHAR(32)) ENGINE=InnoDB");
-    await f.query("CREATE TABLE fbp_replenishment_order_items(id BIGINT PRIMARY KEY,order_id BIGINT,shop_id BIGINT,product_id BIGINT,ozon_sku VARCHAR(80),mapping_id BIGINT,approved_qty DECIMAL(18,4)) ENGINE=InnoDB");
+    await f.query("CREATE TABLE fbp_replenishment_order_items(id BIGINT PRIMARY KEY,order_id BIGINT,shop_id BIGINT,product_id BIGINT,approved_qty DECIMAL(18,4)) ENGINE=InnoDB");
     await f.query("CREATE TABLE fbp_replenishment_item_adjustments(item_id BIGINT,adjustment_qty DECIMAL(18,4)) ENGINE=InnoDB");
     await f.query("CREATE TABLE inventory_order_priorities(product_id BIGINT,order_item_id BIGINT,priority INT) ENGINE=InnoDB");
     await f.query("INSERT INTO tenants(id,slug,name) VALUES(1,'default','Default'),(2,'a','Private A')");
@@ -47,16 +46,9 @@ test("read-only count profiler executes the real isolated coverage and aggregati
     await f.query("INSERT INTO procurement_history_sources(action_id,order_item_id,product_id,quantity,inbound_record_id) VALUES(1,1001,4,1,1)");
     await f.query("INSERT INTO inventory_order_priorities(product_id,order_item_id,priority) VALUES(4,1001,5)");
     const cli = fileURLToPath(new URL("../scripts/profile-order-counts-readonly.mjs", import.meta.url));
-    const baseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-read-e672094.js", import.meta.url));
-    const run = async (tenant = "admin") => JSON.parse((await promisify(execFile)(process.execPath, [cli, `--database=${f.database}`, `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`, `--tenant-id=${tenant}`, "--date-from=2026-07-26", "--date-to=2026-10-24", `--compare-coverage-source=${baseline}`, "--explain"], { windowsHide: true, timeout: 30000 })).stdout);
-    await t.test('real full and compact readers preserve every queue for default and customer scopes',async()=>{
-      for(const tenantId of ['admin',2]){
-        const full=await loadOrderProcurementCoverage(f.query,'',{tenantId,fresh:true});
-        const compact=await loadOrderProcurementCoverage(f.query,'',{tenantId,fresh:true,queuesOnly:true});
-        assert.equal(compact.size,0);
-        for(const status of ['pending_purchase','purchase_in_transit','purchase_records_missing'])assert.equal(procurementQueueSql(compact,status),procurementQueueSql(full,status));
-      }
-    });
+    const baseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-read-v1.js", import.meta.url));
+    const algorithmBaseline = fileURLToPath(new URL("./fixtures/order-procurement-coverage-calculate-v1.js", import.meta.url));
+    const run = async (tenant = "admin") => JSON.parse((await promisify(execFile)(process.execPath, [cli, `--database=${f.database}`, `--mysql-admin-socket=${process.env.TENANT_TEST_MYSQL_SOCKET}`, `--tenant-id=${tenant}`, "--date-from=2026-07-26", "--date-to=2026-10-24", `--compare-coverage-source=${baseline}`, `--compare-algorithm-source=${algorithmBaseline}`, "--explain"], { windowsHide: true, timeout: 30000 })).stdout);
     const before = await f.query("SELECT COUNT(*) n FROM inventory_movements");
     const report = await run();
     assert.equal(report.mode, "read-only"); assert.equal(report.initialization_performed, false);
@@ -68,11 +60,12 @@ test("read-only count profiler executes the real isolated coverage and aggregati
     assert.equal(report.comparison.equal_coverage, true, JSON.stringify(report.comparison));
     assert.equal(report.comparison.equal_counts, true);
     assert.ok(report.assembly.every(row => row.algorithm_ms >= 0 && row.input_rows.demands > 0));
+    assert.notEqual(report.comparison.baseline_algorithm_sha256, report.comparison.candidate_algorithm_sha256);
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE-POSTING|OTHER-POSTING|Private inventory|Other private/);
     assert.deepEqual(await f.query("SELECT COUNT(*) n FROM inventory_movements"), before);
     const customer = await run("2");
     assert.equal(customer.counts.all, 1); assert.equal(customer.coverage_orders, 1);
     assert.equal(customer.comparison.equal_coverage, true); assert.equal(customer.comparison.equal_counts, true);
-    t.diagnostic(`Same snapshot, 1,002 owned orders/10k history and partial-receipt/allocation evidence: optimized coverage=${report.coverage_total_ms}ms; release-e672094=${report.comparison.candidate_coverage_ms}ms; complete coverage/property hashes and all counts equal for default and customer.`);
+    t.diagnostic(`Same snapshot, 1,002 owned orders/10k history and partial-receipt/allocation evidence: optimized coverage=${report.coverage_total_ms}ms; v1=${report.comparison.candidate_coverage_ms}ms; complete coverage/property hashes and all counts equal for default and customer.`);
   } finally { await f.cleanup(); }
 });

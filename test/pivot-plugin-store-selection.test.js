@@ -249,10 +249,3 @@ test('cancelled runs stop queued browser requests and discard results already in
   assert.match(bridge, /BAODAN_ANALYTICS_PLUGIN_CANCEL/);
   assert.match(bridge, /PIVOT_ERP_COLLECT_CANCEL/);
 });
-
-test('missing cookie identity is distinct from a confirmed shop conflict', () => {
-  const result = resolveStoreIdentity('4493649', '', '4493649', '4493649');
-  assert.equal(result.code, 'identity_missing');
-  assert.match(result.error, /^STORE_IDENTITY_MISSING/);
-  assert.match(result.error, /page=4493649/);
-});

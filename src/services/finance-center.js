@@ -273,16 +273,15 @@ export async function saveFinanceExpense(body = {}, personId = null, tenantId = 
       if (!shops.length) throw Object.assign(new Error("费用关联店铺不存在或未归属于当前企业的该公司。"), { statusCode: 404 });
     }
     if (body.id) {
-      const existing = await mysqlQuery(`SELECT id, source_type FROM finance_expenses WHERE id=? AND company_id=? ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"} LIMIT 1`, [Number(body.id), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
+      const existing = await mysqlQuery(`SELECT id FROM finance_expenses WHERE id=? AND company_id=? ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"} LIMIT 1`, [Number(body.id), companyId, ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
       if (!existing.length) throw Object.assign(new Error("费用记录不存在或不属于当前企业。"), { statusCode: 404 });
-      if (existing[0].source_type === "finance_submission") throw Object.assign(new Error("该费用来自已通过的报销或工资申请，不能在人工费用中改写，请查看原申请记录。"), { statusCode: 409 });
     }
   }
   const amount = Number(body.original_amount || 0);
   const rate = Number(body.exchange_rate || 1);
   const params = [companyId, body.shop_id ? Number(body.shop_id) : null, String(body.expense_date || "").slice(0, 10), body.category || "other", body.counterparty || null, body.description || null, body.currency_code || "CNY", amount, rate, Number(body.amount_cny ?? amount * rate), body.paid_by || null, body.advanced_by || null, body.is_advance_payment ? 1 : 0, body.payment_reference || null, body.voucher_status || "missing"];
   if (body.id) {
-    await mysqlExecute(`UPDATE finance_expenses SET company_id=?, shop_id=?, expense_date=?, category=?, counterparty=?, description=?, currency_code=?, original_amount=?, exchange_rate=?, amount_cny=?, paid_by=?, advanced_by=?, is_advance_payment=?, payment_reference=?, voucher_status=? WHERE id=? AND (source_type IS NULL OR source_type!='finance_submission') ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"}`, [...params, Number(body.id), ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
+    await mysqlExecute(`UPDATE finance_expenses SET company_id=?, shop_id=?, expense_date=?, category=?, counterparty=?, description=?, currency_code=?, original_amount=?, exchange_rate=?, amount_cny=?, paid_by=?, advanced_by=?, is_advance_payment=?, payment_reference=?, voucher_status=? WHERE id=? ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"}`, [...params, Number(body.id), ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
     return { ok: true, id: Number(body.id) };
   }
   const result = await mysqlExecute(`INSERT INTO finance_expenses (tenant_id, company_id, shop_id, expense_date, category, counterparty, description, currency_code, original_amount, exchange_rate, amount_cny, paid_by, advanced_by, is_advance_payment, payment_reference, voucher_status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [normalizedTenantId, ...params, personId || null]);
@@ -292,11 +291,7 @@ export async function saveFinanceExpense(body = {}, personId = null, tenantId = 
 export async function deleteFinanceExpense(id, tenantId = "admin") {
   await ensureFinanceCenterSchema();
   const normalizedTenantId = normalizedFinanceTenantId(tenantId);
-  const params = [requiredId(id, "费用"), ...(normalizedTenantId == null ? [] : [normalizedTenantId])];
-  const owned = normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?";
-  const [expense] = await mysqlQuery(`SELECT source_type FROM finance_expenses WHERE id=? ${owned} LIMIT 1`, params);
-  if (expense?.source_type === "finance_submission") throw Object.assign(new Error("该费用来自已通过的报销或工资申请，不能单独删除，请查看原申请记录。"), { statusCode: 409 });
-  await mysqlExecute(`DELETE FROM finance_expenses WHERE id=? AND (source_type IS NULL OR source_type!='finance_submission') ${owned}`, params);
+  await mysqlExecute(`DELETE FROM finance_expenses WHERE id=? ${normalizedTenantId == null ? "AND (tenant_id IS NULL OR tenant_id=0)" : "AND tenant_id=?"}`, [requiredId(id, "费用"), ...(normalizedTenantId == null ? [] : [normalizedTenantId])]);
   return { ok: true };
 }
 

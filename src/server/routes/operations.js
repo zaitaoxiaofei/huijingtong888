@@ -1,15 +1,3 @@
-import {createHash} from 'node:crypto';
-import {procurementDemandDetails} from '../../services/procurement-demand-details.js';
-import {procurementDemandCancellation} from '../../services/procurement-demand-cancellation.js';
-import {procurementArrivals} from '../../services/procurement-arrivals.js';
-import {procurementDemandRequest} from '../../services/procurement-demand-request.js';
-import { createFbpSupplyFeedback } from '../../services/fbp-supply-feedback.js';
-import { inventorySupplyFeedback } from '../../services/inventory-supply-feedback.js';
-import { inventoryWorkspacePage } from '../../shared/inventory-workspace.js';
-import { createInventoryNodeRecords } from '../../services/inventory-node-records.js';
-import { createInventoryWorkflowService } from '../../services/inventory-workflow.js';
-import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from '../../services/business-task-tenant.js';
-import { createWarehouseStockTopup } from '../../services/warehouse-stock-topup.js';
 import { hasPermission, isPlatformAdmin, isEnterpriseAdmin } from "../../shared/permissions.js";
 import { tenantIdFromRequest } from "./sellerAnalytics.js";
 import { currentPricingReferenceRate } from "../../services/pricing-reference-rate.js";
@@ -41,8 +29,6 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
   readUnclassifiedCancellationReasons = unclassifiedCancellationReasons, saveCancellationClassification = saveCancellationReasonClassification,
   queryCancellationReview = queryCancellationReviewMysql, cancellationReviewTransaction = cancellationReviewMysqlTransaction }) {
   const customer = handler => (req, ...args) => runCustomerMessageTenantOperation(req._session, () => handler(req, ...args));
-  const nodeRecords=createInventoryNodeRecords({ledger:services.procurementLedger,confirmTransfer:services.confirmFbpTransferReceived});
-  const workflow = createInventoryWorkflowService({ ledger: services.procurementLedger, receiveRecords: services.batchUpdateInboundRecords, previewReceipts: services.previewInboundReceiptImpact });
   return {
     "GET /api/tools/pricing/reference-rate": () => currentPricingReferenceRate(),
     "GET /api/tools/pricing/rfbs-categories": async (req, url) => searchRfbsCategories(await latestRfbsTariff(), url.searchParams.get("keyword"), url.searchParams.get("limit")),
@@ -66,83 +52,6 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "GET /api/procurement/summary": (req) => services.procurementSummary({}, tenantIdFromRequest(req)),
     "GET /api/procurement/daily-report": (req, url) => services.procurementDailyReport(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/requests": (req, url) => services.procurementRequests(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/inventory-workflow/demand-details":(req,url)=>procurementDemandDetails.details(url.searchParams.get('product_id'),req._session),
-    "POST /api/inventory-workflow/local-safety":async req=>procurementDemandDetails.safety(await readJson(req),req._session),
-    "GET /api/inventory-workflow/purchase-arrivals":(req,url)=>procurementArrivals.list(Object.fromEntries(url.searchParams),req._session),
-    "GET /api/inventory-workflow/purchase-bundle":(req,url)=>services.purchaseBundleContext(Object.fromEntries(url.searchParams),req._session),
-    "POST /api/inventory-workflow/purchase-bundle":async req=>services.reviewPurchaseBundle(await readJson(req),req._session),
-    "POST /api/inventory-workflow/purchase-arrivals":async req=>procurementArrivals.confirm(await readJson(req),req._session),
-    "POST /api/inventory-workflow/demand-request":async req=>procurementDemandRequest(await readJson(req),req._session),
-    "POST /api/inventory-workflow/cancel-demand":async req=>procurementDemandCancellation(await readJson(req),req._session),
-    "GET /api/inventory-workflow/alerts": async (req,url)=>{
-      const session=await authorizeBusinessTaskSession(req._session);assertBusinessTaskPermission(session,'inventory.read');
-      const params=Object.fromEntries(url.searchParams);
-      const base=params.view==='workspace'?await workflow.workspaceProducts(params,session.tenant.id):await services.stockAlerts({...params,mode:'inventory-alerts',paged:'0',alertType:'all'},session.tenant.id);
-      const raw=Array.isArray(base)?base:base.rows||[];
-      const ids=[...new Set(raw.map(r=>Number(r.product_id)).filter(id=>id>0))];
-      const cached=params.view==='workspace'?await workflow.workspaceSnapshot(session.tenant.id,{fresh:params.refresh==='1',productIds:ids}):null;
-      const states=cached?.rows||[];
-      if(params.view!=='workspace')for(let i=0;i<ids.length;i+=40)states.push(...await workflow.batch(ids.slice(i,i+40),session.tenant.id,{fresh:params.refresh==='1'}));
-      const byId=new Map(states.map(state=>[state.product_id,state]));
-      const all=(cached&&!cached.snapshot.available?[]:raw).map(row=>{const state=byId.get(Number(row.product_id));return{...row,workflow:state,physical_stock:state?.physical,available_stock:state?.free,open_order_demand_qty:state?.order_demand,suggested_purchase_qty:state?.purchase_quantity};});
-      if(params.view==='workspace'){
-        const result=inventoryWorkspacePage(all,params);
-        const pageIds=result.rows.map(r=>Number(r.product_id));
-        const compact=params.compact==='1';
-        const [batches,feedbacks,sources]=await Promise.all([workflow.workspaceBatches(pageIds,session.tenant.id),compact?Promise.resolve([]):workflow.workspaceFeedback(pageIds,session.tenant.id),compact?Promise.resolve({requests:[],applications:[]}):workflow.workspaceSources(pageIds,session.tenant.id)]);
-        const byProduct=new Map();for(const batch of batches){const id=Number(batch.product_id);if(!byProduct.has(id))byProduct.set(id,[]);byProduct.get(id).push(batch);}
-        return{...result,...(!cached.snapshot.available?{total:null,meta:Object.fromEntries(Object.keys(result.meta).map(k=>[k,null]))}:{}),snapshot:cached.snapshot,rows:result.rows.map(row=>({...row,workflow:{...row.workflow,requests:sources.requests.filter(r=>Number(r.product_id)===Number(row.product_id)),applications:sources.applications.filter(r=>Number(r.product_id)===Number(row.product_id))},pending_batches:byProduct.get(Number(row.product_id))||[],feedbacks:feedbacks.filter(f=>Number(f.product_id)===Number(row.product_id)).slice(0,5)}))};
-      }
-      const status=params.alertType||'all',rows=all.filter(row=>status==='all'||row.workflow?.overall===status);
-      const sortKey=['recent_7d_qty','recent_15d_qty','recent_30d_qty'].includes(params.sortBy)?params.sortBy:'recent_30d_qty';
-      const rank={danger:0,warning:1,unknown:2,opportunity:3,success:4};rows.sort((a,b)=>(rank[a.workflow?.overall]??2)-(rank[b.workflow?.overall]??2)||Number(b[sortKey])-Number(a[sortKey]));
-      const page=Math.max(1,Number(params.page)||1),pageSize=Math.min(100,Math.max(1,Number(params.pageSize)||20));
-      return{rows:rows.slice((page-1)*pageSize,page*pageSize),total:rows.length,page,pageSize,meta:Object.fromEntries(['danger','warning','unknown','opportunity','success'].map(status=>[status,all.filter(row=>row.workflow?.overall===status).length]))};
-    },
-    "GET /api/inventory-workflow": async (req, url) => {
-      const session=await authorizeBusinessTaskSession(req._session);
-      assertBusinessTaskPermission(session,'inventory.read');
-      const ids=[...new Set(String(url.searchParams.get('product_ids') || url.searchParams.get('product_id') || '').split(',').map(Number))];
-      if(!ids.length || ids.length>20 || ids.some(id=>!Number.isSafeInteger(id)||id<=0)) throw Object.assign(new Error('请选择1至20个库存商品'),{statusCode:400});
-      if(url.searchParams.get('view')==='components')return workflow.productComposition(ids,session.tenant.id);
-      if(url.searchParams.get('view')==='local')return {rows:await workflow.localQuantities(ids,session.tenant.id)};
-      if(url.searchParams.get('view')==='sku'){if(ids.length!==1)throw Object.assign(new Error('请选择一个库存商品查看SKU组成'),{statusCode:400});return workflow.skuDetails(ids[0],url.searchParams.get('shop_id'),url.searchParams.get('ozon_sku'),session.tenant.id);}
-      if(url.searchParams.get('view')==='requests')return {rows:await Promise.all(ids.map(id=>workflow.requests(id,session.tenant.id)))};
-      if(url.searchParams.get('view')==='status')return {rows:await workflow.batch(ids,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'})};
-      const rows=[];
-      for(let i=0;i<ids.length;i+=2) rows.push(...await Promise.all(ids.slice(i,i+2).map(id=>workflow.read(id,session.tenant.id,{fresh:url.searchParams.get('fresh')==='1'}))));
-      return { rows };
-    },
-    "GET /api/inventory-workflow/details": (req,url)=>nodeRecords.records(Object.fromEntries(url.searchParams),req._session),
-    "POST /api/inventory-workflow/node-action": async req=>nodeRecords.mutate(await readJson(req),req._session),
-    "GET /api/inventory-workflow/receipts": async (req,url)=>({rows:await workflow.receipts(url.searchParams.get('product_id'),req._session)}),
-    "GET /api/inventory-workflow/receipts/context": (req,url)=>workflow.receiptContext(url.searchParams.get('product_id'),req._session),
-    "POST /api/inventory-workflow/receipts/preview": async req=>workflow.previewReceive(await readJson(req),req._session),
-    "POST /api/inventory-workflow/receipts": async req=>workflow.receive(await readJson(req),req._session),
-    "POST /api/inventory-workflow/fbp": async req => {
-      const session=await authorizeBusinessTaskSession(req._session);
-      assertBusinessTaskPermission(session,'inventory.write');
-      const body=await readJson(req);
-      const productId=Number(body.product_id);
-      const state=await workflow.read(productId,session.tenant.id,{fresh:true});
-      const selected=Array.isArray(body.rows)?body.rows:[];
-      if(!selected.length || selected.length>100) throw Object.assign(new Error('请选择1至100个已绑定的SKU'),{statusCode:400});
-      const seen=new Set();
-      const rows=selected.map(row=>{
-        const key=`${Number(row.shop_id)}:${String(row.ozon_sku)}`;
-        const sku=state.skus.find(s=>s.shop_id===Number(row.shop_id)&&s.ozon_sku===String(row.ozon_sku));
-        if(!sku?.mapping_id || seen.has(key) || !Number.isSafeInteger(Number(row.quantity)) || Number(row.quantity)<1 || Number(row.quantity)>1000000) throw Object.assign(new Error('SKU绑定或件数无效，请先核对绑定；一个SKU只能提交一次'),{statusCode:400});
-        seen.add(key); return {...sku,requested_qty:Number(row.quantity)};
-      });
-      const forecastConfirmation=body.forecast_confirmation===true;
-      if(forecastConfirmation&&(body.submit!==true||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(String(body.request_key||''))))throw Object.assign(new Error('请正式确认FBP预测申请，并保留有效提交标识重试'),{statusCode:400});
-      const confirmation=forecastConfirmation?{key:body.request_key,hash:createHash('sha256').update(JSON.stringify({productId,note:String(body.note||'').slice(0,500),rows:rows.map(r=>({shop_id:r.shop_id,ozon_sku:r.ozon_sku,requested_qty:r.requested_qty})).sort((a,b)=>`${a.shop_id}:${a.ozon_sku}`.localeCompare(`${b.shop_id}:${b.ozon_sku}`))})).digest('hex')}:null;
-      const feedback=createFbpSupplyFeedback(session);
-      const result=await services.createFbpReplenishmentOrders({rows,note:String(body.note||'').slice(0,500)},session.personId,session.tenant.id,{workflow:true,submit:body.submit===true,forecastConfirmation:confirmation,afterSubmit:connection=>feedback.afterSubmit(connection,rows)});
-      return{...result,feedback:feedback.committed()};
-    },
-    "POST /api/inventory-workflow/feedback": async req=>{const body=await readJson(req);return inventorySupplyFeedback(body,req._session,{automatic:body.automatic===true});},
-    "POST /api/inventory-workflow/requests": async req => workflow.submit(await readJson(req),req._session),
     "GET /api/procurement/ledger": (req, url) => services.procurementLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory/ledger": (req, url) => services.inventoryLedger(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/procurement/stock-cost-tasks": (req, url) => services.procurementStockCostTasks(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
@@ -190,7 +99,6 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/people": async (req) => services.createPerson(await readJson(req)) || { ok: true },
     "POST /api/shops": async (req) => services.createShop(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
     "POST /api/procurement/requests": async (req) => services.createProcurementRequest(await readJson(req), req._session?.personId, tenantIdFromRequest(req)) || { ok: true },
-    "POST /api/procurement/stock-topups": async req => createWarehouseStockTopup(await readJson(req), req._session),
     "POST /api/procurement/warehouse-requests": async (req) => services.createWarehouseProcurementRequests(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/purchases": async (req) => services.recordProcurementPurchase(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/pdd-logistics/sync": async (req) => services.syncPddProcurementLogistics(await readJson(req), tenantIdFromRequest(req)),
@@ -200,7 +108,7 @@ export function createOperationsRoutes({ services, readJson, readBusinessLogisti
     "POST /api/procurement/reconciliation/auto-match": async (req) => services.autoMatchProcurementPayments(tenantIdFromRequest(req)),
     "POST /api/procurement/reconciliation/apply-costs": async (req) => services.applyProcurementActualCosts(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/procurement/purchase-orders/confirm-from-requests-async": async (req) => services.startConfirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req), req._session),
-    "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req), null, {session:req._session}),
+    "POST /api/procurement/purchase-orders/confirm-from-requests": async (req) => services.confirmProcurementRequestsPurchased(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
     "POST /api/procurement/refresh-demand": (req) => services.refreshProcurementDemand(tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/procurement/purchase-orders": async (req) => services.mergeProcurementRequests(await readJson(req), req._session?.personId, null, tenantIdFromRequest(req)),
     "POST /api/procurement/cost-versions/backfill": async (req) => services.initializePurchaseCostBackfill(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),

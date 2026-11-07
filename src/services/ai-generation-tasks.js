@@ -1,4 +1,3 @@
-import { generateProductWorkflowText } from './product-workflow-text.js';
 import { createHash, randomUUID } from "node:crypto";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { ensureAssetVariantImagePublishUrl, generateAssetVariantVideoFromImage, generateListingVariantMediaFromImage } from "./asset-variant-engine.js";
@@ -434,7 +433,7 @@ async function runTaskHandler(fieldKey, input) {
     const output = await generateImages(input);
     return persistGeneratedImageOutput(output, input, fieldKey);
   }
-  if (fieldKey === "commerceCopy") return input.workflowOutput ? generateProductWorkflowText(input) : generateCommerceCopy(input);
+  if (fieldKey === "commerceCopy") return generateCommerceCopy(input);
   if (["title", "tags", "description"].includes(fieldKey)) return generateTextFieldOutput(fieldKey, input);
   if (fieldKey === "richText") return generateRichTextOutput(input);
   if (fieldKey === "video") {
@@ -897,11 +896,7 @@ function normalizeTaskPayloads(body = {}) {
 }
 
 function compactAiGenerationTaskInput(input = {}, fieldKey = "") {
-  if (fieldKey === "commerceCopy") {
-    const value=pruneEmpty(input);
-    if(input.workflowOutput&&Buffer.byteLength(JSON.stringify(value),'utf8')>MAX_TASK_INPUT_JSON_BYTES)throw Object.assign(new Error('文本节点的输入材料过大，请减少引用字段或缩短资料后重新提交'),{status:400});
-    return fitJsonBytes(value, MAX_TASK_INPUT_JSON_BYTES);
-  }
+  if (fieldKey === "commerceCopy") return fitJsonBytes(pruneEmpty(input), MAX_TASK_INPUT_JSON_BYTES);
   const sourceContext = input.sourceContext || input.source_context || {};
   const row = input.row || {};
   let compact = {
@@ -1051,8 +1046,6 @@ function fitJsonBytes(value, maxBytes) {
   json = JSON.stringify(pruneEmpty(trimmed));
   if (Buffer.byteLength(json, "utf8") <= maxBytes) return pruneEmpty(trimmed);
   return pruneEmpty({
-    workflowOutput: value.workflowOutput,
-    workflowNodeLabel: value.workflowNodeLabel,
     finalPrompt: value.finalPrompt,
     ratio: value.ratio,
     imageCount: value.imageCount,

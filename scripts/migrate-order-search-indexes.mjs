@@ -1,8 +1,6 @@
 import mysql from "mysql2/promise";
 import { ORDER_SEARCH_INDEX, inspectOrderSearchIndex, ensureOrderSearchIndex } from "../src/services/order-search-indexes.js";
 
-import { inspectProcurementQueryFacts, ensureProcurementQueryFacts } from "../src/services/order-procurement-query-facts.js";
-
 const apply = process.argv.includes("--apply");
 const socketPath = process.argv.find(value => value.startsWith("--mysql-admin-socket="))?.slice("--mysql-admin-socket=".length);
 const database = process.argv.find(value => value.startsWith("--database="))?.slice("--database=".length);
@@ -19,13 +17,11 @@ try {
   if (!apply) {
     const before = await inspectOrderSearchIndex(connection);
     if (before.present && !before.valid) throw new Error("Existing order search index has an unexpected definition");
-    const procurement_facts = await inspectProcurementQueryFacts(connection);
-    if (!procurement_facts.compatible) throw Error("Existing procurement query facts have an unexpected definition");
-    console.log(JSON.stringify({ ok: true, mode: "dry-run", changes_database: false, index: ORDER_SEARCH_INDEX, before, procurement_facts }));
+    console.log(JSON.stringify({ ok: true, mode: "dry-run", changes_database: false, index: ORDER_SEARCH_INDEX, before }));
   } else {
     const [[lock]] = await connection.query("SELECT GET_LOCK('order_search_indexes_v1', 30) AS acquired");
     if (Number(lock.acquired) !== 1) throw new Error("Order search index migration lock unavailable");
-    try { console.log(JSON.stringify({ ok: true, mode: "apply", index: ORDER_SEARCH_INDEX, ...await ensureOrderSearchIndex(connection), procurement_facts: await ensureProcurementQueryFacts(connection) })); }
+    try { console.log(JSON.stringify({ ok: true, mode: "apply", index: ORDER_SEARCH_INDEX, ...await ensureOrderSearchIndex(connection) })); }
     finally { await connection.query("SELECT RELEASE_LOCK('order_search_indexes_v1')"); }
   }
 } finally { await connection.end(); }

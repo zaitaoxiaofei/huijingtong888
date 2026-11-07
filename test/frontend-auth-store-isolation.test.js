@@ -200,15 +200,3 @@ test("first bootstrap adopts canonical identity and finishes after its own cache
   assert.equal(h.store.bootstrapped.value, true);
   assert.equal(h.timers.size, 0);
 });
-
-test('own profile updates canonical user and cached name without changing identity or tenant rights',async()=>{
- const h=harness();h.login(1);const before=h.api.currentApiCacheScope();
- const result=h.store.updateProfile({name:'Updated fixture',avatar_url:'data:image/jpeg;base64,dGVzdA=='});
- assert.equal(h.calls[0].options.method,'PUT');assert.equal(h.calls[0].url,'/api/auth/profile');
- h.respond(0,{...person(1),name:'Updated fixture',avatar_url:'data:image/jpeg;base64,dGVzdA=='});await result;
- assert.equal(h.store.user.value.name,'Updated fixture');assert.equal(h.cachedUser().name,'Updated fixture');assert.equal(h.api.currentApiCacheScope(),before);assert.equal(h.cachedUser().tenant.id,1);
-});
-test('profile response from the previous account cannot replace the new login or its cached avatar',async()=>{
- const h=harness();h.login(1);const saving=h.store.updateProfile({name:'Previous fixture'});h.login(2);h.respond(0,{...person(1),name:'Previous fixture'});
- await assert.rejects(saving,{name:'AbortError'});assert.equal(h.cachedUser().id,2);assert.equal(h.store.user.value.id,2);
-});

@@ -17,8 +17,6 @@ import { tenantIdFromRequest } from "../tenant-context.js";
 export function createFinanceCenterRoutes({ readJson, services }) {
   return {
     "GET /api/finance-center/companies": (req) => financeCompanies(tenantIdFromRequest(req)),
-    "GET /api/finance-center/inventory-capital-details": (req, url) => services.financeInventoryCapitalDetails(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/finance-center/inventory-capital": (req, url) => services.financeInventoryCapital(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "POST /api/finance-center/companies": async (req) => saveFinanceCompany(await readJson(req), tenantIdFromRequest(req)),
     "POST /api/finance-center/shop-assignments": async (req) => saveShopCompanyAssignment(await readJson(req), tenantIdFromRequest(req)),
     "GET /api/finance-center/report": (req, url) => financeMonthlyReport(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),

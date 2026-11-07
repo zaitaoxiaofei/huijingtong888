@@ -13,7 +13,7 @@ function toggle(id) {
   <div class="inventory-identities">
     <section v-for="parent in parents" :key="parent.id" class="inventory-identity">
       <div class="inventory-identity-header">
-        <div class="inventory-parent-id"><el-tag size="small" :type="parent.compositionKind === 'bundle' ? 'danger' : parent.compositionKind === 'single' ? 'success' : 'info'" :effect="parent.compositionKind === 'unknown' ? 'light' : 'dark'" class="inventory-type-badge">{{ parent.compositionKind === 'bundle' ? '套装' : parent.compositionKind === 'single' ? '单件' : '类型待核' }}</el-tag><strong class="inventory-parent-number" :title="`${parent.virtual ? '虚拟库存' : '库存'} ID：${parent.inventoryNumber || '待核对'}`">{{ parent.virtual ? '虚拟库存' : '库存' }} ID：{{ parent.inventoryNumber || '待核对' }}</strong></div>
+        <strong class="inventory-parent-number" :title="`${parent.virtual ? '虚拟库存' : '库存'} ID：${parent.inventoryNumber || '待核对'}`">{{ parent.virtual ? '虚拟库存' : '库存' }} ID：{{ parent.inventoryNumber || '待核对' }}</strong>
         <span class="inventory-parent-quantity">本单 {{ parent.quantity ?? '待核' }} {{ parent.virtual ? '套' : '件' }}</span>
       </div>
       <strong class="inventory-parent-name" :title="parent.name">{{ parent.name || '库存名称待核对' }}</strong>
@@ -35,16 +35,13 @@ function toggle(id) {
         <small v-if="!parent.children.length">子产品组成待核对，请查看库存明细</small>
         <el-button v-if="parent.children.length > 2" link type="primary" size="small" @click="toggle(parent.id)">{{ expanded.has(parent.id) ? '收起子产品' : `展开其余 ${parent.children.length - 2} 项` }}</el-button>
       </div>
-      <slot name="actions" :parent="parent" />
     </section>
   </div>
 </template>
 <style scoped>
 .inventory-identities,.inventory-identity { display:flex;flex-direction:column;gap:4px;width:100%;min-width:0;font-size:inherit; }
 .inventory-identity + .inventory-identity { border-top:1px solid var(--erp-border-light, #ebeef5);padding-top:8px; }
-.inventory-identity-header { display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;line-height:1.5; }
-.inventory-parent-id { display:flex;align-items:center;gap:6px;min-width:0; }
-.inventory-type-badge { flex-shrink:0; }
+.inventory-identity-header { display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0;line-height:1.5; }
 .inventory-parent-number,.inventory-parent-name { font-size:inherit;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.5; }
 .inventory-parent-number { min-width:0; }
 .inventory-parent-quantity { flex-shrink:0;font-size:inherit;font-weight:600;white-space:nowrap; }

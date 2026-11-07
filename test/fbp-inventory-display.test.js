@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { loadOrderFbpStocks, loadProductFbpStocks, summarizeFbpInventory } from '../src/services/fbp-inventory-display.js';
+import { loadOrderFbpStocks, loadProductFbpStocks } from '../src/services/fbp-inventory-display.js';
 import { calculateOrderProcurementCoverage } from '../src/services/order-procurement-coverage.js';
 
 test('FBP demand cannot consume local availability; FBS and approved FBP reservations do', () => {
@@ -20,13 +20,12 @@ function fixture() {
     CREATE TABLE product_components(product_id INTEGER, component_product_id INTEGER, quantity INTEGER);
     CREATE TABLE sku_inventory_recipes(id INTEGER, shop_id INTEGER, ozon_sku TEXT, active INTEGER);
     CREATE TABLE sku_inventory_recipe_items(recipe_id INTEGER, product_id INTEGER, quantity INTEGER);
-    CREATE TABLE online_products(shop_id INTEGER, ozon_sku TEXT, name TEXT, offer_id TEXT, primary_image TEXT, image_url TEXT);
+    CREATE TABLE online_products(shop_id INTEGER, ozon_sku TEXT, name TEXT, offer_id TEXT);
     CREATE TABLE ozon_stock_snapshots(id INTEGER, shop_id INTEGER, ozon_sku TEXT, warehouse_id TEXT, warehouse_name TEXT, stock_type TEXT, present INTEGER, available INTEGER, reserved INTEGER, synced_at TEXT);
     CREATE TABLE orders(id INTEGER, shop_id INTEGER);
     CREATE TABLE order_items(order_id INTEGER, ozon_sku TEXT);
     INSERT INTO shops VALUES(1,'A店'),(2,'B店');
     INSERT INTO sku_mappings VALUES(1,1,'ONE',10,1),(2,1,'TWO',20,1),(3,2,'ONE',10,1),(4,1,'MISSING',10,1),(5,1,'ONE',10,1);
-    ALTER TABLE sku_mappings ADD COLUMN offer_id TEXT;
     INSERT INTO product_components VALUES(20,10,2);
     INSERT INTO ozon_stock_snapshots VALUES
       (1,1,'ONE','W1','仓一','fbp_real',5,4,1,'2026-09-28 01:00:00'),
@@ -46,8 +45,6 @@ test('FBP inventory uses shop/SKU/warehouse and converts each package before sum
     const data = await loadProductFbpStocks(f.query, 10);
     assert.equal(data.present, 20); // A single 5+2, A double 3*2, B single 7
     assert.equal(data.available, 18);
-    assert.equal(data.synced_at, '2026-09-28 01:00:00');
-    assert.equal(data.missing_skus, 1);
     assert.equal(data.incomplete, true);
     assert.equal(data.rows.length, 5, 'duplicate mappings do not duplicate snapshots');
     assert.equal(data.rows.find(row => row.ozon_sku === 'MISSING').present, null);
@@ -81,17 +78,4 @@ test('order stock is fetched in one page-scoped read, distinguishes missing from
     assert.equal((await loadOrderFbpStocks(f.query, [])).size, 0);
     assert.equal(f.calls.length, 1);
   } finally { f.db.close(); }
-});
-
-
-test('FBP total freshness is the oldest snapshot; missing and known zero remain distinct', () => {
-  const mappings = ['ZERO','RESERVED','UNKNOWN'].map(ozon_sku => ({ shop_id: 1, ozon_sku, per_set_quantity: 2 }));
-  const stock = (ozon_sku, present, available, reserved, synced_at) => ({ shop_id: 1, ozon_sku, present, available, reserved, synced_at });
-  const data = summarizeFbpInventory(mappings, [stock('ZERO',0,0,0,'2026-10-29 01:00:00'), stock('RESERVED',3,0,3,'2026-10-28 01:00:00')]);
-  assert.equal(data.present, 6);
-  assert.equal(data.available, 0);
-  assert.equal(data.synced_at, '2026-10-28 01:00:00');
-  assert.equal(data.incomplete, true);
-  assert.equal(data.rows.find(row => row.ozon_sku === 'UNKNOWN').present, null);
-  assert.equal(data.rows.find(row => row.ozon_sku === 'ZERO').present, 0);
 });
