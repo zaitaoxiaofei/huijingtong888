@@ -101,7 +101,7 @@ export async function productWorkflowAction(body,session) {
         }
       }else if(body.action==='save-copy'&&node.type==='copy'&&state?.text) {
         const text=body.text;
-        if(!text||typeof text!=='object'||Array.isArray(text)||Object.keys(text).some(key=>!['title','tags','description'].includes(key))||('tags'in text&&(!Array.isArray(text.tags)||text.tags.some(x=>typeof x!=='string')))||['title','description'].some(key=>key in text&&typeof text[key]!=='string')||JSON.stringify(text).length>40000)throw workflowError('文案格式无效');
+        if(!text||typeof text!=='object'||Array.isArray(text)||Object.keys(text).some(key=>!['title','tags','description','text'].includes(key))||('tags'in text&&(!Array.isArray(text.tags)||text.tags.some(x=>typeof x!=='string')))||['title','description','text'].some(key=>key in text&&typeof text[key]!=='string')||JSON.stringify(text).length>40000)throw workflowError('文案格式无效');
         const retained={...state,text,approved:false};invalidateWorkflowResults(payload,variant.id,node.id);results[node.id]=retained;
       }else if(body.action==='retry') {
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');

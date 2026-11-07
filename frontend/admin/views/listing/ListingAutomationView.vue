@@ -608,6 +608,10 @@ async function applyListingDraftFromRoute(routeDraft = null) {
       fillTemplateEditor(template, { safeOpen: true });
     }
   }
+  const workflowShops = draft.template_payload?.editable_payload?.workflow_target_shop_ids;
+  if (Array.isArray(workflowShops)) {
+    draftForm.shop_ids = state.shops.filter(shop => shop.status !== "deleted" && workflowShops.some(id => String(id) === String(shop.id))).map(shop => shop.id);
+  }
   await hydrateLoadedCategorySchema();
   templateEditor.weight_g = Number(draft.weight_g || templateEditor.weight_g || 0);
   Object.assign(draftForm, {

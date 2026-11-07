@@ -24,6 +24,8 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     return (await query(`SELECT id, name, revision, kind,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) AS draft_id,
       JSON_LENGTH(JSON_EXTRACT(payload_json, '$.variants')) AS variant_count,
+      JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].label')) AS product_label,
+      JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.productionMode')) AS production_mode,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) AS category_name
       FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision)}));
   }
@@ -55,9 +57,11 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       if(!result.affectedRows)throw Object.assign(new Error("记录已被其他页面修改，请重新打开后继续"),{status:409});
       return {...previous,payload,revision:previous.revision+1};
     }
-    const id=randomUUID();
+    if(body.creationId&&(kind!=="run"||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.creationId)))throw workflowError("生产提交标识无效，请重新打开生产窗口");
+    const id=body.creationId||randomUUID();
     if(kind==="run" && (payload.draftId || payload.draftImportStatus))throw workflowError("新任务不能指定已有草稿或导入状态");
-    await execute("INSERT INTO product_workflow_documents (id, tenant_id, kind, name, payload_json, created_by) VALUES (?, ?, ?, ?, ?, ?)",[id,tenant,kind,name,serialized,actor.personId]);
+    try{await execute("INSERT INTO product_workflow_documents (id, tenant_id, kind, name, payload_json, created_by) VALUES (?, ?, ?, ?, ?, ?)",[id,tenant,kind,name,serialized,actor.personId]);}
+    catch(error){if(body.creationId&&error.code==='ER_DUP_ENTRY')return get(kind,id,session);throw error;}
     return {id,kind,name,payload,revision:1};
   }
   return {list,get,save,scope};

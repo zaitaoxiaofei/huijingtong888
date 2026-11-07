@@ -1,3 +1,4 @@
+import { validateWorkflowBindings, applyWorkflowBindings } from './product-workflow-bindings.js';
 import { attributeSelectedValues, readableWorkflowValue } from './product-workflow-inputs.js';
 // Portable workflow format. Node types and dependencies are independent of product category.
 export const WORKFLOW_TYPES = {
@@ -24,13 +25,20 @@ export function validateWorkflow(value) {
     if (node.type === "price" && (!Number.isFinite(Number(node.value)) || Number(node.value) <= 0)) throw workflowError(`${node.label}请填写大于零的卢布售价`);
     if (node.type === "package" && ["weight", "length", "width", "height"].some(k => !Number.isFinite(Number(node[k])) || Number(node[k]) <= 0)) throw workflowError(`${node.label}请填写大于零的克重和厘米尺寸`);
     if (node.type === "listing" && !Number.isSafeInteger(Number(node.templateId))) throw workflowError(`${node.label}的类目模板标识无效`);
-    if(node.type==="copy"&&!["bundle","title","tags","description"].includes(node.target))throw workflowError(`${node.label}的文案输出类型无效`);
+    if(node.type==="copy"&&!["bundle","title","tags","description","text"].includes(node.target))throw workflowError(`${node.label}的文案输出类型无效`);
+    if(node.valueSource&&!['engineer','user','generated'].includes(node.valueSource))throw workflowError(`${node.label}的值来源无效`);
+    if(node.valueSource==='generated'&&(node.type!=='attribute'||node.dictionaryId||!['title','tags','description','richContent'].includes(node.generatedTarget)))throw workflowError(`${node.label}请选择有效的生成结果映射；字典属性须从类目选项中填写`);
+    if(node.fallbackInput&&(!seen.has(node.fallbackInput)||seen.get(node.fallbackInput).type!=='images'||node.type!=='images'))throw workflowError(`${node.label}的图片复用来源无效`);
+    if(node.referenceSlots)for(const [id,slots] of Object.entries(node.referenceSlots)){
+      const source=seen.get(id);if(!node.inputs.includes(id)||source?.type!=='images'||!Array.isArray(slots)||!slots.length||slots.some(index=>!Number.isInteger(index)||index<0||index>=source.count))throw workflowError(`${node.label}的参考图片槽位无效，请重新选择`);
+    }
     if(node.scope&&!['shared','variant'].includes(node.scope))throw workflowError(`${node.label}的填写范围无效`);
     if(node.type==='attribute'&&(!Number.isSafeInteger(Number(node.attributeId))||Number(node.attributeId)<=0))throw workflowError(`${node.label}缺少有效的类目属性标识`);
     seen.set(node.id, node);
   }
   if (value.nodes.filter(n => n.type === "listing").length !== 1) throw workflowError("工作流需要且只能有一个类目模板节点");
   for (const type of ["price", "package"]) if (value.nodes.filter(n => n.type === type).length > 1) throw workflowError(`${WORKFLOW_TYPES[type]}节点只能有一个`);
+  if(value.bindings){validateWorkflowBindings(value);return clone(value);}
   if (!value.nodes.some(n => n.type === "image" && n.role === "main") || value.nodes.filter(n => n.type === "image" && n.role === "main").length !== 1) throw workflowError("工作流需要且只能有一个主图生成节点");
   if (!value.nodes.some(n => n.type === "copy")) throw workflowError("工作流需要文案生成节点");
   return clone(value);
@@ -68,7 +76,7 @@ export function validateWorkflowVariants(definition, variants) {
     keys.add(variant.id);
     for (const node of definition.nodes) {
       const input=variant.values?.[node.id];
-      if (["field","attribute"].includes(node.type) && node.required && (!String(input ?? "").trim()||Array.isArray(input)&&!input.length)) throw workflowError(`${variant.label}缺少“${node.label}”，请在商品公共资料或变体材料区填写`);
+      if (["field","attribute"].includes(node.type) && node.valueSource!=="generated" && node.required && (!String(input ?? "").trim()||Array.isArray(input)&&!input.length)) throw workflowError(`${variant.label}缺少“${node.label}”，请在商品公共资料或变体材料区填写`);
       if(node.type==='attribute')attributeSelectedValues(node,input);
       if (node.type === "images") {
         if (!Array.isArray(input) || input.length > node.count) throw workflowError(`${variant.label}的“${node.label}”图片数量无效`);
@@ -87,8 +95,8 @@ export function workflowInputContext(definition, variant, node, results) {
   function visit(id) {
     if(visited.has(id)) return; visited.add(id);
     const source=byId.get(id);
-    if(["field","attribute"].includes(source.type)) facts[source.label]=readableWorkflowValue(source,variant.values[id]);
-    else if(source.type==="images") (variant.values[id]||[]).forEach((url,i)=>{if(url)refs.push({url,role:source.referenceRole,label:source.slots[i]});});
+    if(["field","attribute"].includes(source.type)) {if(source.valueSource!=="generated")facts[source.label]=readableWorkflowValue(source,variant.values[id]);}
+    else if(source.type==="images") (variant.values[id]||[]).forEach((url,i)=>{if(url&&(!node.referenceSlots?.[source.id]||node.referenceSlots[source.id].includes(i)))refs.push({url,role:source.referenceRole,label:source.slots[i]});});
     else if(source.type==="image") {
       if(!results[id]?.url) throw workflowError(`请先完成“${source.label}”`);
       refs.push({url:results[id].url,role:"approved_visual",label:source.label});
@@ -114,8 +122,13 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
   const rows=variants.map((variant,i)=>{
     const result=outputs[variant.id]||{};
     for(const node of definition.nodes.filter(n=>["image","copy","approval"].includes(n.type))){
+      if(["image","copy"].includes(node.type)&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未检查通过`);
       workflowInputContext(definition,variant,node,result);
       if(node.type==="approval"&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未人工确认`);
+    }
+    if(definition.bindings) {
+      const mapped=applyWorkflowBindings(definition,variant,result,baseTemplate.editable_payload?.variants?.[0]?.dynamic_attributes||{});
+      return {...mapped,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,images_manually_edited:true,image_edit_intent:'manual',workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
     }
     const images=imageNodes.map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
     const copy={};
@@ -124,15 +137,26 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
     const dimensions=pack?{weight:Number(pack.weight),weight_g:Number(pack.weight),depth:Number(pack.length)*10,width:Number(pack.width)*10,height:Number(pack.height)*10,length_mm:Number(pack.length)*10,width_mm:Number(pack.width)*10,height_mm:Number(pack.height)*10,weight_unit:"g",dimension_unit:"mm"}:{};
     const attributes=(baseTemplate.editable_payload?.variants?.[0]?.dynamic_attributes)||{};
     const dynamic_attributes=clone(attributes);
+    if(definition.richContentEnabled===false)delete dynamic_attributes[11254];
+    const richContent=JSON.stringify({content:[{widgetName:"raShowcase",type:"billboard",blocks:[{imgLink:"",img:{src:images[0],srcMobile:images[0],alt:copy.title,position:"width_full",positionMobile:"width_full",widthMobile:1024,heightMobile:1536},title:{items:[{type:"text",content:copy.title}],size:"size4",align:"left",color:"color1"},text:{items:[{type:"text",content:copy.description}],size:"size2",align:"left",color:"color1"}}]}],version:0.3});
     for(const node of definition.nodes.filter(n=>n.type==='attribute')) {
-      const values=attributeSelectedValues(node,variant.values[node.id]);
+      const generated={...copy,tags:copy.tags.join(" "),richContent};
+      const values=attributeSelectedValues(node,node.valueSource==='generated'?generated[node.generatedTarget]:variant.values[node.id]);
       dynamic_attributes[node.attributeId]={attribute_id:Number(node.attributeId),name:node.label,dictionary_id:Number(node.dictionaryId||0),values,selected_values:values,value:node.multiple?values.map(x=>x.dictionary_value_id||x.value):values[0]?.dictionary_value_id||values[0]?.value||''};
     }
-    for(const [id,value] of [[4191,copy.description],[23171,copy.tags.join(" ")]])dynamic_attributes[id]={attribute_id:id,values:[{value}],selected_values:[{value}],value};
-    return {...dimensions,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,title:copy.title,name:copy.title,description:copy.description,tags:copy.tags,hashtags:copy.tags,main_tags:copy.tags,dynamic_attributes,images:images.map((url,index)=>({url,role:index?"detail":"main",sort_order:index+1})),primary_image:images[0],images_manually_edited:true,image_edit_intent:"manual",...(price?{price:String(price.value),price_value:String(price.value)}:{}),workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
+    for(const [id,value] of [[4191,copy.description],[23171,copy.tags.join(" ")],...(definition.richContentEnabled!==false?[[11254,richContent]]:[])]){if(!definition.nodes.some(n=>n.type==='attribute'&&Number(n.attributeId)===id))dynamic_attributes[id]={attribute_id:id,values:[{value}],selected_values:[{value}],value};}
+    return {...dimensions,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,title:copy.title,name:copy.title,description:copy.description,...(definition.richContentEnabled!==false?{rich_content_json:richContent,rich_content:richContent}:{}),tags:copy.tags,hashtags:copy.tags,main_tags:copy.tags,dynamic_attributes,images:images.map((url,index)=>({url,role:index?"detail":"main",sort_order:index+1})),primary_image:images[0],images_manually_edited:true,image_edit_intent:"manual",...(price?{price:String(price.value),price_value:String(price.value)}:{}),workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
   });
+  const cleanBase=clone(baseTemplate);
   const editable=clone(baseTemplate.editable_payload||{});
+  if(definition.bindings){
+    // A category template may have been saved from a different SKU; only explicit bindings carry facts.
+    for(const target of [cleanBase,editable])for(const key of ['source_raw','sourceRaw','attributes','category_attributes','required_attributes','price','price_value','priceValue','sale_price','salePrice','cost_price','costPrice','old_price','oldPrice','min_price','minPrice','weight','weight_g','weightG','length_cm','width_cm','height_cm','length_mm','width_mm','height_mm','depth','width','height'])delete target[key];
+    cleanBase.attributes=Object.values(rows[0].dynamic_attributes);
+    editable.attributes=clone(cleanBase.attributes);
+    if(definition.deferCommercialInputs)editable.pending_listing_fields=['售价','包装重量','包装长','包装宽','包装高'];
+  }
   // Never inherit image sets or variant identity from the category template.
-  const payload={...clone(baseTemplate),title:rows[0].title,description:rows[0].description,images:rows[0].images,editable_payload:{...editable,title:rows[0].title,description:rows[0].description,tags:rows[0].tags,images:rows[0].images,variants:rows}};
-  return {template_id:Number(listNode.templateId),product_name:rows[0].title,internal_code:`WF-${runId}`,template_payload:payload,source_images:rows[0].images.map(x=>x.url),sale_price:Number(price?.value||0),...(pack?{weight_g:Number(pack.weight),length_cm:Number(pack.length),width_cm:Number(pack.width),height_cm:Number(pack.height)}:{}),development_type:"new",ai_payload:{source:"product_workflow",workflow_run_id:runId,definition:clone(definition)},manual_facts:{workflow_run_id:runId,variants:clone(variants)}};
+  const payload={...cleanBase,title:rows[0].title,description:rows[0].description,images:rows[0].images,editable_payload:{...editable,title:rows[0].title,description:rows[0].description,rich_content_json:rows[0].rich_content_json||"",rich_content:rows[0].rich_content||"",tags:rows[0].tags,workflow_target_shop_ids:clone(definition.shopIds||[]),images:rows[0].images,variants:rows}};
+  return {template_id:Number(listNode.templateId),product_name:rows[0].title,internal_code:`WF-${runId}`,template_payload:payload,source_images:rows[0].images.map(x=>x.url),sale_price:Number(rows[0].price||price?.value||0),...(definition.bindings?{weight_g:Number(rows[0].weight_g||0),length_cm:Number(rows[0].length_mm||0)/10,width_cm:Number(rows[0].width_mm||0)/10,height_cm:Number(rows[0].height_mm||0)/10}:{}),...(pack?{weight_g:Number(pack.weight),length_cm:Number(pack.length),width_cm:Number(pack.width),height_cm:Number(pack.height)}:{}),development_type:"new",ai_payload:{source:"product_workflow",workflow_run_id:runId,definition:clone(definition)},manual_facts:{workflow_run_id:runId,variants:clone(variants)}};
 }

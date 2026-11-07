@@ -2,12 +2,16 @@
 const clone=value=>JSON.parse(JSON.stringify(value));
 export const isWorkflowInput=node=>['field','attribute','images'].includes(node.type);
 export function workflowDefault(node) {
-  return node.type==='images'?Array(node.count).fill(''):clone(node.defaultValue??(node.multiple?[]:''));
+  return node.type==='images'?(Array.isArray(node.defaultValue)?clone(node.defaultValue):Array(node.count).fill('')):clone(node.defaultValue??(node.multiple?[]:''));
 }
 export function expandWorkflowVariants(definition,variants,shared={}) {
-  return variants.map(variant=>({...clone(variant),values:Object.fromEntries(definition.nodes.filter(isWorkflowInput).map(node=>[
-    node.id,node.scope==='shared'?(shared[node.id]??variant.values?.[node.id]??workflowDefault(node)):(variant.values?.[node.id]??workflowDefault(node))
-  ]))}));
+  return variants.map(variant=>{
+    const values=Object.fromEntries(definition.nodes.filter(isWorkflowInput).map(node=>[
+      node.id,node.valueSource==='engineer'?workflowDefault(node):node.scope==='shared'?(shared[node.id]??variant.values?.[node.id]??workflowDefault(node)):(variant.values?.[node.id]??workflowDefault(node))
+    ]));
+    for(const node of definition.nodes.filter(n=>n.type==='images'&&n.fallbackInput))if(!values[node.id]?.some(Boolean))values[node.id]=clone(values[node.fallbackInput]||[]);
+    return {...clone(variant),values};
+  });
 }
 export function categoryAttributeNodes(template,schema=[]) {
   const editable=template.editable_payload||{};
@@ -26,7 +30,7 @@ export function categoryAttributeNodes(template,schema=[]) {
     merged.set(id,{
       id:`attr_${id}`,type:'attribute',attributeId:id,dictionaryId,multiple,
       label:item.name_zh||item.nameZh||previous.name_zh||item.name||previous.name||`属性 ${id}`,
-      help:item.description||item.hint||'',required:Boolean(item.is_required||item.required||previous.required),scope:'variant',inputs:[],
+      help:item.description||item.hint||'',platformRequired:Boolean(item.is_required||item.required||previous.required),required:false,valueSource:'user',scope:'variant',inputs:[],
       defaultValue:dictionaryId?(multiple?ids:ids[0]||''):(previous.value??''),
       options:dictionaryId?[...new Map([...(item.values||[]),...selected].filter(x=>Number(x.dictionary_value_id||x.id)).map(x=>[Number(x.dictionary_value_id||x.id),{id:Number(x.dictionary_value_id||x.id),label:x.display_value_zh||x.value_zh||x.name_zh||x.label||x.value||x.name||''}])).values()]:[]
     });

@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { execFileSync } from "node:child_process";
 
 const rootDir = process.cwd();
 const envPath = path.resolve(rootDir, ".env");
@@ -36,6 +37,19 @@ function parseEnvFile(text = "") {
     values[key] = value;
   }
   return { values, invalidLines };
+}
+
+// Builds do not need to copy production credentials onto the build machine.
+// In explicit SSH mode, validate the active production environment in place and return only names/status.
+const remoteTarget=process.env.OZON_DEPLOY_PREFLIGHT_SSH_TARGET;
+if(remoteTarget){
+  if(!/^[a-zA-Z0-9_@.:-]+$/.test(remoteTarget)||remoteTarget.startsWith('-'))throw new Error('Invalid preflight SSH target');
+  const identity=process.env.OZON_DEPLOY_PREFLIGHT_SSH_IDENTITY;
+  if(!identity)throw new Error('Remote preflight requires an explicit SSH identity');
+  const python='import os,sys; keys='+JSON.stringify(requiredKeys)+'; missing=[k for k in keys if not os.environ.get(k, "").strip()]; print("[deploy-preflight] Remote missing keys: "+", ".join(missing) if missing else "[deploy-preflight] Remote environment checks passed"); sys.exit(1 if missing else 0)';
+  const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
+  execFileSync('ssh',['-o','BatchMode=yes','-i',identity,remoteTarget,'set -a; . /etc/ozon-erp/ozon-erp.env; set +a; python3 -c '+quote(python)],{stdio:'inherit',timeout:30000});
+  process.exit(0);
 }
 
 let envText = "";
