@@ -1,4 +1,5 @@
 <script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useAuthStore } from "../../stores/auth.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
@@ -711,6 +712,7 @@ onMounted(async () => {
                   <span>库存 ID：{{ row.inventory_number || row.product_code || "-" }}</span>
                   <span>核心品名：{{ row.inventory_category || "未分类" }}</span>
                   <span>SKU：{{ row.mapped_skus || "未绑定 SKU" }}</span>
+                  <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
                 </div>
               </div>
             </template>

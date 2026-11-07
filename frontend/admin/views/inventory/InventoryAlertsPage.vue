@@ -1,4 +1,5 @@
 ﻿<script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -464,6 +465,7 @@ onMounted(async () => {
             <div class="cell-stack alert-identity">
               <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_id }}</span>
+              <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
             </div>
           </template>
         </el-table-column>
@@ -533,6 +535,7 @@ onMounted(async () => {
             <div class="cell-stack">
               <strong>{{ row.product_name || "未绑定库存" }}</strong>
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
+              <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               <el-tooltip content="本地库存由关联的多个店铺 SKU 共享，不是当前 SKU 独占量" placement="top">
                 <span class="muted-text">共享实物 {{ sharedStockText(row.local_physical_stock) }} · 可用 {{ sharedStockText(row.local_available_stock) }}</span>
               </el-tooltip>

@@ -1,4 +1,5 @@
 <script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
@@ -242,6 +243,7 @@ onMounted(()=>{restoreReceivingFilters(route.query,state.filters,'approved');loa
                   <span>SKU：{{ productSkuText(row) }}</span>
                   <span>采购单号：{{ row.purchase_order_no || "-" }}</span>
                   <span>入库记录 ID：{{ row.id }}</span>
+                  <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
                 </div>
               </div>
             </template>

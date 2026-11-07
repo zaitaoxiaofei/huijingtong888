@@ -1,4 +1,5 @@
 <script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { fbpRouteStatus } from "../../constants/inventory-modules.js";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
@@ -1271,7 +1272,7 @@ onActivated(() => void loadPageData());
 
     <div v-if="viewMode === 'inventory'" class="inventory-table-wrap replenishment-table-wrap">
       <el-table :data="inventoryPage" v-loading="loading" row-key="inventory_key" border class="erp-data-table replenishment-table">
-        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell warehouse-product"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span></div></div></template></el-table-column>
+        <el-table-column label="库存" min-width="300"><template #default="{ row }"><div class="product-cell warehouse-product"><ProductImagePreview :src="row.image_url" /><div class="cell-stack"><strong>{{ row.product_name }}</strong><span class="inventory-id-display">库存 ID：{{ row.inventory_id }}</span><InventoryProductActions :product-id="Number(row.items?.[0]?.product_id)" @saved="loadPageData()"/></div></div></template></el-table-column>
         <el-table-column label="本地可用" width="100" align="center"><template #default="{ row }"><el-tooltip content="当前本地账面扣除筛选范围外的待发 FBP 占用，负数按 0 展示；以实盘为准，不含采购在途。"><span>{{ row.local_stock ?? '—' }}</span></el-tooltip></template></el-table-column>
         <el-table-column label="采购在途" width="100" align="center"><template #default="{ row }">{{ row.procurement_incoming ?? '—' }}</template></el-table-column>
         <el-table-column label="FBP 待入仓" width="115" align="center"><template #default="{ row }">{{ row.pending_receipt_qty ?? '—' }}</template></el-table-column>
@@ -1420,6 +1421,7 @@ onActivated(() => void loadPageData());
                 <span class="muted-text">SKU {{ row.ozon_sku || "-" }}</span>
                 <span class="muted-text">Offer {{ row.offer_id || "-" }}</span>
                 <span v-if="row.order._isBatchSummary" class="batch-source-count">来自 {{ integer(row.source_order_count) }} 张关联原单</span>
+                <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               </div>
             </div>
           </template>

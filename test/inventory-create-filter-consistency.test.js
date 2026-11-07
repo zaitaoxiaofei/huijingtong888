@@ -17,7 +17,7 @@ test('child product material filters match individual structured materials and r
   assert.equal(matches({material:'皮革'}, 'material', ''), true);
 });
 test('create product filters expose identity and specification fields without obsolete fitment or packaging inputs', () => {
-  const section = source.slice(source.indexOf('<div class="form-section composition-section">'), source.indexOf('<div v-if="componentDirectoryRows.length"'));
+  const section = source.slice(source.indexOf('class="form-section composition-section"'), source.indexOf('<div v-if="componentDirectoryRows.length"'));
   for (const field of ['category','brand','vehicle_model','accessory','color','material','process']) assert.ok(section.includes(`componentDirectory.${field}`));
   for (const field of ['fitment_type','quantity']) assert.ok(!section.includes(`v-model="componentDirectory.${field}"`));
   assert.ok(!source.includes('label="采购数量"'));

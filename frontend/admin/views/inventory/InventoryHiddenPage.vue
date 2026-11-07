@@ -12,6 +12,7 @@ import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import InventoryProductHistoryAction from "../../components/inventory/InventoryProductHistoryAction.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
@@ -166,6 +167,7 @@ onMounted(async () => {
                 <strong>{{ row.name }}</strong>
                 <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
+                <InventoryProductHistoryAction :product-id="Number(row.id)"/>
               </div>
             </div>
           </template>

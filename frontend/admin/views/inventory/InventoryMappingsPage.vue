@@ -1,4 +1,5 @@
 ﻿<script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -311,6 +312,7 @@ onMounted(async () => {
                 <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
                 <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_code || "-" }}</span>
                 <span class="muted-text">已绑定 {{ productBindingCount(row) }} 个 SKU</span>
+                <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               </div>
             </div>
           </template>

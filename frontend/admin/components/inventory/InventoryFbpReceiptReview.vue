@@ -7,6 +7,7 @@ import {useAuthStore} from '../../stores/auth.js';
 import {hasPermission} from '../../../../src/shared/permissions.js';
 import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 import InventoryPageToolbar from './InventoryPageToolbar.vue';
+import InventoryProductActions from './InventoryProductActions.vue';
 import {inventorySearchDefaults} from '../../../../src/shared/inventory-search-fields.js';
 import ProductImagePreview from '../ProductImagePreview.vue';
 const props=defineProps({productId:{type:Number,default:0},initialAll:Boolean});
@@ -49,7 +50,7 @@ defineExpose({refresh:load});
   <div class="receipt-tools"><span>系统仅提示疑似入仓；须由仓库逐SKU核实，数量按SKU发仓记录计，不拆成子产品。确认沿用原发仓记录，不再扣本地库存，也不覆盖官方快照。</span><el-button @click="all=!all;page=1;load()">{{all?'只看待确认':'查看全部记录'}}</el-button><el-button :loading="loading" @click="load">刷新核对</el-button></div>
   <el-alert v-if="error" :title="error" type="error" :closable="false"/>
   <el-table v-loading="loading" :data="rows" max-height="650" empty-text="暂无待确认的FBP发仓明细" :row-class-name="({row})=>row.overdue&&!row.suspected?'receipt-overdue':''">
-   <el-table-column label="库存商品" min-width="240"><template #default="{row}"><div class="receipt-product"><ProductImagePreview :src="row.image_url"/><div><strong>{{row.product_name}}</strong><small>库存 {{row.inventory_number}} · 记录 #{{row.id}}</small></div></div></template></el-table-column>
+   <el-table-column label="库存商品" min-width="240"><template #default="{row}"><div class="receipt-product"><ProductImagePreview :src="row.image_url"/><div><strong>{{row.product_name}}</strong><small>库存 {{row.inventory_number}} · 记录 #{{row.id}}</small><InventoryProductActions :product-id="Number(row.product_id)" @saved="load()"/></div></div></template></el-table-column>
    <el-table-column label="备货单／店铺／SKU" min-width="205"><template #default="{row}"><div>{{row.order_no||'手工发仓'}}</div><el-button v-if="row.order_id" size="small" @click="openApplication(row)">打开备货单</el-button><small>{{row.shop_name}}</small><strong>{{row.ozon_sku}}</strong></template></el-table-column>
    <el-table-column label="发出／已确认／待确认" min-width="160"><template #default="{row}">{{row.quantity}} / {{row.listed_quantity}} / {{row.remaining}}</template></el-table-column>
    <el-table-column label="入仓核对" min-width="220"><template #default="{row}"><el-popover trigger="hover" width="370"><template #reference><el-tag :type="!row.remaining?'success':row.suspected?'warning':row.overdue?'danger':'info'">{{row.review_label}}</el-tag></template><p>对比基准 {{row.baseline_present??'缺失'}} → 当前实物 {{row.official_present??'未同步'}}</p><p>同期已记录FBP出库 {{row.recorded_consumption??'待核'}}；推测补入 {{row.inferred_arrival??'待核'}}。</p><p>{{time(row.baseline_at)}} 至 {{time(row.official_synced_at)}}（北京）</p><p>退货、调账、多批同SKU到仓均可能影响判断。此证据只供逐项核对，不自动确认。</p></el-popover><small v-if="row.overlapping_batches>1">同SKU有 {{row.overlapping_batches}} 批在途，库存增长不能直接归属本批</small><small v-if="row.sibling_received&&row.remaining">同备货单已有其他SKU确认入仓</small><small v-if="row.overdue">已超过预计到仓时间，请核查物流、仓库签收或上架情况</small></template></el-table-column>
