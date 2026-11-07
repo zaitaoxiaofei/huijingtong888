@@ -1650,7 +1650,7 @@ function submitAndCreateDraft() {
         </div>
       </div>
     </template>
-    <p v-if="mobile && isEditMode" class="mobile-inventory-edit-help">此处编辑名称、规格等库存资料，不修改当前实物数量或采购待收数量。</p>
+    <p v-if="mobile && isEditMode" class="mobile-inventory-edit-help">此处编辑名称、规格等库存资料；实物盘点、确认到货和验收入库请使用对应入口。</p>
     <el-form ref="formRef" :model="form" :rules="formRules" :disabled="inventoryRequest?.action === 'view'" :label-width="mobile ? 'auto' : '96px'" :label-position="mobile ? 'top' : 'right'">
       <div class="selection-workbench has-similar-products">
         <div class="selection-workbench-main">

@@ -1638,6 +1638,12 @@ const endpoints = [
       pathParams: [param("id", scalar("number", "Product identifier."))],
       responses: [response(200, "application/json", ref("ProductRecord")), response(404, "application/json", ref("ErrorResponse"))]
     }),
+    endpoint("GET", "/api/products/:id/edit-history", "Read current-enterprise inventory identity edit versions and independently retained old inventory numbers/names. Requires fresh inventory.read membership and product ownership. Snapshot fields are allowlisted identity/specification and stable component references; no prices, supplier details, private notes or order data. Ordinary inventory saves and core-name edits record before/after in the same transaction as the edit. Historical aliases are retention evidence, not reconstructed full versions or paired old identities.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Stable product identifier."))],
+      query: [param("page", scalar("number", "One-based history page; maximum 1000000."), false), param("pageSize", scalar("number", "Positive page size, capped at 100; default 20."), false)],
+      responses: [response(200, "application/json", scalar("object", "product_id,current identity,number_aliases[{number,recorded_at}],name_aliases[{name,type,active,recorded_at}],rows[{id,recorded_at,actor,source,source_label,before,after,changed_fields,unavailable}],total,page,pageSize,history_complete=false,history_notice. Dates are storage timestamps rendered in Beijing time by the UI; alias recorded_at means retention time, not a proven original edit time.")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
     endpoint("GET", "/api/products/:id/image", "Return the stored product image binary.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Product identifier."))],
@@ -1658,7 +1664,7 @@ const endpoints = [
       requestBody: body(ref("ProductMutationRequest")),
       responses: [response(200, "application/json", ref("ProductCreateResponse"))]
     }),
-    endpoint("PUT", "/api/products/:id", "Update a product in place.", {
+    endpoint("PUT", "/api/products/:id", "Update a product in place. Inventory identity changes append a product_edit before/after event and preserve a changed old name as an existing search alias in the same transaction; generated inventory numbers are read after their normal numbering triggers. Stable product IDs and SKU/purchase references remain unchanged. No-op identity saves do not append an empty identity version.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Product identifier."))],
       requestBody: body(ref("ProductMutationRequest")),

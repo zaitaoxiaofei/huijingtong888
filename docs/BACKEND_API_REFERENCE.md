@@ -2821,6 +2821,21 @@ Return one product with full computed detail.
   - `200` `application/json` -> `ProductRecord`
   - `404` `application/json` -> `ErrorResponse`
 
+#### `GET /api/products/:id/edit-history`
+
+Read current-enterprise inventory identity edit versions and independently retained old inventory numbers/names. Requires fresh inventory.read membership and product ownership. Snapshot fields are allowlisted identity/specification and stable component references; no prices, supplier details, private notes or order data. Ordinary inventory saves and core-name edits record before/after in the same transaction as the edit. Historical aliases are retention evidence, not reconstructed full versions or paired old identities.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Stable product identifier.
+- Query parameters:
+  - `page` (`number`, optional): One-based history page; maximum 1000000.
+  - `pageSize` (`number`, optional): Positive page size, capped at 100; default 20.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 #### `GET /api/products/:id/image`
 
 Return the stored product image binary.
@@ -2864,7 +2879,7 @@ Create a new product and return the enriched detail row.
 
 #### `PUT /api/products/:id`
 
-Update a product in place.
+Update a product in place. Inventory identity changes append a product_edit before/after event and preserve a changed old name as an existing search alias in the same transaction; generated inventory numbers are read after their normal numbering triggers. Stable product IDs and SKU/purchase references remain unchanged. No-op identity saves do not append an empty identity version.
 
 - Auth: `authenticated`
 - Path parameters:

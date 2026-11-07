@@ -5,6 +5,7 @@ import { useAuthStore } from '../../stores/auth.js';
 import { hasPermission } from '../../../../src/shared/permissions.js';
 import InventoryCompositionBadge from '../inventory/InventoryCompositionBadge.vue';
 import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
+import InventoryProductHistoryAction from '../inventory/InventoryProductHistoryAction.vue';
 import InventoryWorkflowPanel from './InventoryWorkflowPanel.vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient, currentApiCacheScope } from '../../utils/api.js';
@@ -413,6 +414,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
           <small v-if="orderOverview && orderLabel" class="ledger-order-context" :title="orderLabel">{{ orderLabel }}</small>
         </div>
         <div class="ledger-top-actions"><el-button v-if="orderOverview" @click="showOrderBreakdown=!showOrderBreakdown">本单商品与分配（{{orderItems.length}}）</el-button>
+          <InventoryProductHistoryAction v-if="data&&!loading" :product-id="Number(productId)"/>
           <el-button v-if="stocktakeEnabled" type="primary" plain :disabled="!data || loading" @click="edit('stocktake')">更新本地库存</el-button>
           <el-button v-if="!inventoryOnly" :disabled="!data || loading" @click="edit('convert')">库存转换</el-button>
           <el-dropdown v-if="!inventoryOnly" @command="moreAction"><el-button>更多操作</el-button><template #dropdown><el-dropdown-menu>
