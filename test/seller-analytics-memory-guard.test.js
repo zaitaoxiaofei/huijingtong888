@@ -17,7 +17,7 @@ test("seller analytics does not retain raw metric payloads in product caches", (
   assert.match(service, /setInterval\(pruneExpiredAnalyticsCaches, 60 \* 1000\)\.unref\(\)/);
 });
 
-test("active collection polling refreshes analysis only after the run finishes", () => {
+test("active collection polling keeps lightweight progress and bounded partial refreshes", () => {
   const polling = view.slice(view.indexOf("function startPolling"), view.indexOf("function stopPolling"));
   assert.match(polling, /loadRunsMeta\(true\)/);
   assert.match(polling, /refreshData\(true, \{ refreshMeta: false \}\)/);

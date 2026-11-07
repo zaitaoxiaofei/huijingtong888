@@ -82,7 +82,7 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   });
   await t.test('queue reuses pending days and limits backlog to three days per shop',async()=>{
    await execute('DELETE FROM seller_sku_traffic_days WHERE tenant_id=?',['admin']);const runs=new Map();let calls=0;
-   const deps={createRun:async(body,key)=>{calls++;assert.equal(key,'admin');assert.equal(body.date_from,body.date_to);assert.equal(body.daily_traffic,true);const run={id:'queued-'+calls,status:'pending'};runs.set(run.id,run);return run;},loadRun:async id=>runs.get(id)};
+   const deps={createRun:async(body,key)=>{calls++;assert.equal(key,'admin');assert.equal(body.date_from,body.date_to);assert.equal(body.daily_traffic,true);assert.equal(body.limit,30);const run={id:'queued-'+calls,status:'pending'};runs.set(run.id,run);return run;},loadRun:async id=>runs.get(id)};
    const first=await service.queue({shop_id:11},'admin',deps);assert.equal(first.queued.length,3);
    const next=await service.queue({shop_id:11},'admin',deps);assert.equal(next.queued.length,0);assert.equal(next.waiting.length,3);assert.equal(calls,3);
    await assert.rejects(service.queue({date:'2000-01-01'},'admin',deps),/最近15/);

@@ -112,7 +112,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
         });
         if(!reserved)continue;
         try{
-          const run=await createRun({daily_traffic:true,period_key:'custom',date_from:day,date_to:day,store_id:String(shop.store_id),company_id:String(shop.store_id),source_keys:['all_metrics'],full_store:true,auto_all_pages:true,limit:100,max_pages:500},key);
+          const run=await createRun({daily_traffic:true,period_key:'custom',date_from:day,date_to:day,store_id:String(shop.store_id),company_id:String(shop.store_id),source_keys:['all_metrics'],full_store:true,auto_all_pages:true,limit:30,max_pages:500},key);
           await execute('UPDATE seller_sku_traffic_days SET run_id=? WHERE tenant_id=? AND shop_id=? AND date_key=? AND run_id=?',[run.id,key,shop.id,day,reservation]);
           result.queued.push({shop_id:shop.id,shop_name:shop.name,day,run_id:run.id});added++;
         }catch(e){await execute("UPDATE seller_sku_traffic_days SET status='failed',message=? WHERE tenant_id=? AND shop_id=? AND date_key=? AND run_id=?",[String(e.message).slice(0,512),key,shop.id,day,reservation]);throw e;}
