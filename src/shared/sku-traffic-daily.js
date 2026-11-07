@@ -44,7 +44,8 @@ export function normalizeDailyTrafficMetric(row) {
   const metrics = raw?.metrics || raw?.metric || raw || {};
   const result = {sku};
   for (const [key,label] of SKU_TRAFFIC_METRICS) {
-    const value = metrics[key];
+    const responseKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+    const value = Object.hasOwn(metrics, key) ? metrics[key] : metrics[responseKey];
     if (value === null || value === undefined || value === '') { result[key] = null; continue; }
     const rawValue = typeof value === 'object' ? value.value : value;
     if (typeof value === 'object' && Object.hasOwn(value, 'value') && (rawValue === null || rawValue === '')) { result[key] = null; continue; }
