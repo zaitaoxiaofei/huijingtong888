@@ -71,3 +71,18 @@ test("image readiness reports URLs that never become fully downloadable", async 
   assert.deepEqual(result.failedUrls, [url]);
   assert.equal(result.results[0].attempts, 3);
 });
+
+test("all shops share the full-download connection limit", async () => {
+  let active = 0, peak = 0;
+  const fetchImpl = async () => {
+    active++;
+    peak = Math.max(peak, active);
+    return { ok: true, status: 200, headers: new Headers({ "content-type": "image/png", "content-length": "1" }),
+      arrayBuffer: async () => { await new Promise(resolve => setTimeout(resolve, 5)); active--; return new Uint8Array(1); } };
+  };
+  const shops = await Promise.all(Array.from({ length: 6 }, (_, index) => verifyRemoteImagesReadyForOzon([`https://example.com/shop-${index}.png`], {
+    attempts: 2, requiredConsecutiveSuccesses: 2, retryDelayMs: 0, waitImpl: async () => {}, fetchImpl
+  })));
+  assert.equal(peak, 2);
+  assert.ok(shops.every(shop => shop.ok === 1));
+});

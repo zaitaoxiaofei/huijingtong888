@@ -52,7 +52,7 @@ export async function orderInventoryPickingMysql(orderIds, tenantId = "admin") {
     JOIN products child ON child.id = COALESCE(ri.product_id, pc.component_product_id) AND ${scope("child")}
     WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")})
       AND EXISTS (SELECT 1 FROM shops tenant_shop WHERE tenant_shop.id = o.shop_id AND ${scope("tenant_shop")})
-    ORDER BY oi.id, child.inventory_number_category, child.inventory_number_sequence
+    ORDER BY oi.id, child.inventory_number_category, child.inventory_number_brand, child.inventory_number_sequence
   `, orderIds);
   return groupInventoryPickingRows(rows);
 }

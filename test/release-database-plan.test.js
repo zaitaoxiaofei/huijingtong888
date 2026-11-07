@@ -3,6 +3,9 @@ import test from "node:test";
 import { SCHEMA_MIGRATIONS, migrationNeedsApply } from "../scripts/lib/release-database-plan.mjs";
 
 const cases = [
+  ["migrate-sku-traffic-daily.mjs",
+    {ok:true,mode:"dry-run",changes_database:false,ready:true,missing_tables:[],problems:[]},
+    {ok:true,mode:"dry-run",changes_database:false,ready:false,missing_tables:["seller_sku_traffic_daily","seller_sku_traffic_days"],problems:[]}],
   ["migrate-order-search-indexes.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, present: true, valid: true } },
     { ok: true, mode: "dry-run", before: { exists: true, present: false, valid: false } }],
@@ -33,6 +36,15 @@ const cases = [
   ["migrate-subscription-vouchers.mjs",
     { mode: "dry-run", changes_database: false, exists: true, ready: true, problems: [] },
     { mode: "dry-run", changes_database: false, exists: false, ready: false, problems: ["table:tenant_subscription_vouchers"] }],
+  ["migrate-inventory-flow-center.mjs",
+    { mode: "dry-run", changes_database: false, ready: true, missing_tables: [], problems: [] },
+    { mode: "dry-run", changes_database: false, ready: false, missing_tables: ["inventory_flow_tasks"], problems: [] }],
+  ["migrate-inventory-consumables.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_add_column: false, reviewed_product_count: 0, product_flags_changed: 0 },
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_add_column: true, reviewed_product_count: 0, product_flags_changed: 0 }],
+  ["migrate-inventory-numbering-v2.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_change: false, numbering_version: 1, active: false, product_numbers_changed: 0 },
+    { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_change: true, numbering_version: null, active: false, product_numbers_changed: 0 }],
   ["migrate-ai-variant-draft-history-index.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, ready: true, missing_column: false, missing_index: false } },
     { ok: true, mode: "dry-run", before: { exists: true, ready: false, missing_column: false, missing_index: true } }],
@@ -43,7 +55,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 12);
+  assert.equal(SCHEMA_MIGRATIONS.length, 16);
 });
 
 for (const [filename, ready, pending] of cases) {
@@ -85,6 +97,8 @@ test("message table creation and account-kind column preparation are separate pe
 });
 
 const incompatible = [
+  ["migrate-sku-traffic-daily.mjs", {ready:false,missing_tables:[],problems:[]}],
+  ["migrate-sku-traffic-daily.mjs", {ready:false,missing_tables:["orders"],problems:[]}],
   ["migrate-order-search-indexes.mjs", { before: { exists: true, present: true, valid: false } }],
   ["migrate-ai-credits.mjs", { ok: false, incompatible_tables: [{ table: "ai_credit_accounts", reasons: ["money column"] }] }],
   ["migrate-order-profit-daily-fx.mjs", { schema: { available: true, compatible: false } }],
@@ -93,6 +107,13 @@ const incompatible = [
   ["migrate-enterprise-messages.mjs", { ready: false, problems: ["column:text"] }],
   ["migrate-enterprise-messages.mjs", { ready: false, account_kind: { exists: true, ready: false } }],
   ["migrate-subscription-vouchers.mjs", { ready: false, problems: ["index:uk_subscription_voucher_hash"] }],
+  ["migrate-inventory-consumables.mjs", { schema_ready: true, schema_would_add_column: true }],
+  ["migrate-inventory-consumables.mjs", { reviewed_product_count: 14 }],
+  ["migrate-inventory-consumables.mjs", { product_flags_changed: 1 }],
+  ["migrate-inventory-numbering-v2.mjs", { schema_would_change: true }],
+  ["migrate-inventory-numbering-v2.mjs", { product_numbers_changed: 1 }],
+  ["migrate-inventory-numbering-v2.mjs", { numbering_version: 2, active: false }],
+  ["migrate-inventory-numbering-v2.mjs", { numbering_version: null }],
   ["migrate-ai-variant-draft-history-index.mjs", { before: { exists: true, ready: true, missing_column: true, missing_index: false } }],
   ["migrate-order-profit-calculation-versions.mjs", { missing_tables: ["orders"] }]
 ];
@@ -100,6 +121,12 @@ const incompatible = [
 for (const [filename, overrides] of incompatible) test(`${filename} refuses incompatible or contradictory readiness`, () => {
   const [, ready] = cases.find(([name]) => name === filename);
   assert.throws(() => migrationNeedsApply(filename, { ...ready, ...overrides }), { code: "RELEASE_DATABASE_PLAN_INVALID" });
+});
+
+test("numbering schema planning accepts installed V2 without reapplying a cutover", () => {
+  const [, ready] = cases.find(([name]) => name === "migrate-inventory-numbering-v2.mjs");
+  assert.equal(migrationNeedsApply("migrate-inventory-numbering-v2.mjs", { ...ready, numbering_version: 2, active: true }), false);
+  assert.throws(() => migrationNeedsApply("migrate-inventory-numbering-v2.mjs", { ...ready, schema_ready: false, schema_would_change: true, numbering_version: 2, active: false }), { code: "RELEASE_DATABASE_PLAN_INVALID" });
 });
 
 test("truthy strings, false confirmations, duplicate items and activation are refused", () => {
@@ -120,4 +147,13 @@ test("classification leaves the inspected schema facts unchanged", () => {
     migrationNeedsApply(filename, report);
     assert.deepEqual(report, before);
   }
+});
+
+test('indexed procurement facts are planned even when the existing order search index is ready', () => {
+  const report = { ok: true, mode: 'dry-run', changes_database: false,
+    before: { exists: true, present: true, valid: true },
+    procurement_facts: { exists: true, ready: false, compatible: true } };
+  assert.equal(migrationNeedsApply('migrate-order-search-indexes.mjs', report), true);
+  assert.equal(migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: true } }), false);
+  assert.throws(() => migrationNeedsApply('migrate-order-search-indexes.mjs', { ...report, procurement_facts: { exists: true, ready: true, compatible: false } }), /incompatible/);
 });

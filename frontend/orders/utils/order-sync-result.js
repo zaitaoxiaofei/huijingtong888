@@ -9,3 +9,10 @@ export function summarizeOrderSyncResult(result = {}) {
     failureReason: firstError.length > 120 ? `${firstError.slice(0, 120)}…` : firstError
   };
 }
+
+// A complete posting number can be fetched even if no local child row exists.
+export function exactPostingNumbers(searchType, value) {
+  if (searchType !== 'order') return [];
+  const numbers = [...new Set(String(value || '').trim().split(/[\s,;，；]+/).filter(Boolean))];
+  return numbers.length && numbers.length <= 20 && numbers.every(number => /^\d+-\d+-\d+$/.test(number)) ? numbers : [];
+}

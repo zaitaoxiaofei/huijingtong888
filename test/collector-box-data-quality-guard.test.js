@@ -93,13 +93,13 @@ test("collector-box accepts collected official category pairs before local cache
   const resolverStart = serviceSource.indexOf("async function resolveCollectorBoxListingCategory");
   const resolverEnd = serviceSource.indexOf("export async function saveListingCollectedProductDetail", resolverStart);
   const resolverSource = serviceSource.slice(resolverStart, resolverEnd);
-  assert.match(resolverSource, /return cached \? normalizeOzonCategoryRow\(cached\) : \{/);
+  assert.match(resolverSource, /if \(match\.category\) return match\.category/);
   assert.doesNotMatch(resolverSource, /if \(!cached[^\n]+continue;/);
 });
 
 test("collector-box reused unresolved category templates are upgraded from collected category ids", () => {
   assert.match(serviceSource, /async function repairCollectorBoxTemplateCategoryDisplay/);
-  assert.match(serviceSource, /await resolveCollectorBoxListingCategory\(detail, \{\}, null\)/);
+  assert.match(serviceSource, /await resolveCollectorBoxListingCategory\(detail, \{\}, null, session\)/);
   assert.match(serviceSource, /categoryId\.startsWith\("pending:"\)/);
   assert.match(serviceSource, /const nextCategoryId = resolvedDescriptionCategoryId && resolvedTypeId/);
   assert.match(serviceSource, /SET ozon_category_id = \?, category_name = \?, editable_payload_json = \?, updated_at = CURRENT_TIMESTAMP/);

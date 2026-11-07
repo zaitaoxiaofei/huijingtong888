@@ -57,9 +57,10 @@ test("orders page exposes split-package preparation without replacing normal pre
   const table = await readFile(new URL("../frontend/orders/components/OrdersTable.vue", import.meta.url), "utf8");
   const client = await readFile(new URL("../frontend/orders/services/orders-service.js", import.meta.url), "utf8");
   assert.match(table, />\s*备货\s*</);
-  assert.match(table, /拆分备货/);
+  assert.match(table, /拆单/);
   assert.match(table, /已备货，不能拆分/);
-  assert.match(page, /拆分包裹并备货/);
+  assert.match(page, /确认拆单，不备货/);
+  assert.match(page, /确认所选子单备货/);
   assert.match(page, /splitOrderValidation/);
-  assert.match(client, /order_ids: \[id\], packages/);
+  assert.match(client, /api\/orders\/split/);
 });

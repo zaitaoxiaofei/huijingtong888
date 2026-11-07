@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
-import { getProfitFormula } from "../src/services/profit-formulas/registry.js";
+import { getProfitFormula, usesDailyProfitFx } from "../src/services/profit-formulas/registry.js";
 
 const backend = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const inventoryView = readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
@@ -64,7 +64,7 @@ test("pre-fulfillment cancellations keep only actual parent acquiring fee", () =
   assert.match(backend, /parent_ofi\.posting_number = COALESCE\(NULLIF\(o\.order_number, ''\), REGEXP_REPLACE\(o\.posting_number, '-\[0-9\]\+\$', ''\)\)/);
   assert.match(backend, /const purchaseCost = cancelOnlyCollectingFee \|\| \(returnPolicy && !returnPolicy\.purchase\) \? 0 : rawPurchaseCost;/);
   assert.match(backend, /if \(cancelOnlyCollectingFee \|\| \(returnPolicy && !returnPolicy\.commission\)\) commissionFeeCny = 0;/);
-  assert.match(backend, /const advertisingCost = cancelOnlyCollectingFee \? 0 : Number\(item\.advertising_cost_cny \|\| 0\);/);
+  assert.match(backend, /const advertisingCost = cancelOnlyCollectingFee \|\| orderOutcome === "cargo_lost" \? 0 : Number\(item\.advertising_cost_cny \|\| 0\);/);
   assert.match(backend, /Number\(financeRow\.derived_from_parent_posting \|\| 0\) === 1/);
   assert.match(backend, /ozonFinanceCategoryMysql\(financeRow\) === "collecting_fee"/);
   assert.match(backend, /cancelOnlyCollectingFee \? parentAllocatedCollectingFee : Number\(categoryTotals\.collecting_fee \|\| 0\)/);
@@ -134,11 +134,12 @@ function profitSaveFixture({ existing = null, packagingFee = 0.5 } = {}) {
   const saveSource = backend.match(/async function saveProfitItemMysql[\s\S]*?\r?\n}/)?.[0];
   assert.ok(saveSource);
   const save = runInNewContext(`(${saveSource})`, {
+    usesDailyProfitFx,
     getProfitFormula: (version) => { requestedVersions.push(version); return getProfitFormula(version); },
     profitCalculationDatabase: (passed) => { assert.equal(passed, connection); return db; },
     mysqlQueryOne: () => assert.fail("must use the supplied transaction for reads"),
     mysqlExecute: () => assert.fail("must use the supplied transaction for writes"),
-    isTerminalNoRevenueOutcomeMysql: (outcome) => ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome),
+    isTerminalNoRevenueOutcomeMysql: (outcome) => ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(outcome),
     packagingFeeForSaleAmountMysql: async () => packagingFee,
     estimateOrderItemReturnLossMysql: async ({ order }) => {
       assert.equal(getProfitFormula("V1").outcome.classifyOrderOutcome(order), "active");
@@ -167,6 +168,18 @@ test("the actual MySQL profit-save function uses the pinned V1 formula and suppl
   });
 });
 
+test("V3 cargo estimate excludes withdrawal fee, commission and freight without counting cost twice", async () => {
+  const fixture = profitSaveFixture();
+  await fixture.save({ order: { status: 'cancelled', cancelled_after_ship: 1, cancel_reason_id: 809 },
+    estimated: { formulaVersion: 'V3', freight: 30, commission: 12, paymentFee: 2, withdrawalFee: 0.8 } });
+  const write = fixture.writes[0];
+  assert.equal(write.sale_amount_cny, 0);
+  assert.equal(write.purchase_cost_cny, 16);
+  assert.equal(write.other_fee_cny, 2);
+  assert.equal(write.net_profit_cny, -18);
+  for (const field of ['domestic_shipping_cny','international_shipping_cny','packaging_cost_cny','commission_fee_cny','ozon_service_fee_cny','return_loss_cny']) assert.equal(write[field],0);
+});
+
 test("profit-save protects a locked settled zero from estimated overwrite", async () => {
   const fixture = profitSaveFixture({ existing: { is_locked: 1, profit_status: "accrued", net_profit_cny: 0 } });
   await fixture.save();
@@ -183,6 +196,7 @@ test("recalculation retains locked zero net profit even without full finance agg
   };
   const source = backend.match(/async function persistRecalculatedItemMysql[\s\S]*?\r?\n}/)?.[0];
   const persist = runInNewContext(`(${source})`, {
+    usesDailyProfitFx,
     withVersionedOrderProfitWrite: async (id, options, project) => {
       assert.equal(id, 101);
       assert.equal(options.layer, "estimate");
@@ -224,7 +238,7 @@ test("profit-save components are deducted once for pre-fulfillment cancellation 
 
 test("profit-save rejects unsupported formulas before touching the profit projection", async () => {
   const fixture = profitSaveFixture();
-  await assert.rejects(fixture.save({ estimated: { formulaVersion: "V3" } }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
+  await assert.rejects(fixture.save({ estimated: { formulaVersion: "V99" } }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
   assert.equal(fixture.queries(), 0);
   assert.deepEqual(fixture.writes, []);
 });

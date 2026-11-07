@@ -21,7 +21,7 @@ export function createSyncRoutes({ services, readJson, syncExceptionWorkbenchOrd
   const startOrders = async (req, mode) => {
     const body = await readJson(req);
     return tasks.start(req._session, "orders", async ({ session, signal, onProgress }) => {
-      const sync = mode === "incremental" ? services.syncOzonIncrementalOrders : services.syncDemoOrders;
+      const sync = Array.isArray(body.posting_numbers) && body.posting_numbers.length ? services.syncOzonPostingsByNumber : mode === "incremental" ? services.syncOzonIncrementalOrders : services.syncDemoOrders;
       return sync(body, { session, tenantId: tenantIdFromRequest({ _session: session }), signal, onProgress });
     }, { mode });
   };

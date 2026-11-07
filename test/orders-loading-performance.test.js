@@ -18,6 +18,8 @@ function listHarness() {
   const context = vm.createContext({
     AbortController, URLSearchParams, console,
     window: { clearTimeout() {}, setTimeout(fn) { timers.push(fn); return timers.length; } },
+    inventoryRefreshNotice: { value: '' }, inventoryRefreshFailed: { value: false }, ordersInventoryAbort: { value: null },
+    logisticsOptionsCache: new Map(), loadPageInventory: async () => {},
     ordersMetaTimer: 0, ordersMetaCacheKey: () => 'same-filter',
     ensureOrdersViewScope: () => 1, currentOrdersCacheScope: () => 1,
     ordersMetaCache: new Map(), ordersListCache: new Map(),
@@ -78,7 +80,7 @@ test('purchase save waits for persistence but not the following list refresh', a
   let refreshed = false;
   const messages = [];
   const context = vm.createContext({
-    orderProcurementDialog: { orderId: 1, selectedItemIds: [2], visible: true, submitting: false },
+    orderProcurementDialog: { orderId: 1, selectedItemIds: [2], visible: true, submitting: false, trackingNumber: '', platformOrderNo: '' },
     validateProcurementPurchaseInputs: async () => true,
     procurementPurchasePayload: () => [],
     createOrderProcurementRequests: () => write.promise,
@@ -120,6 +122,10 @@ test('purchase price checks remain mandatory unless an exception reason is suppl
     };
     const context = vm.createContext({
       ensureMysqlCutoverEnabled() {}, ensurePurchaseCostVersionSchemaMysql: async () => {},
+      resolveInventoryTenantScope: async () => ({ id: 1, isDefault: true }),
+      ensurePurchaseOrderShipmentSchemaMysql: async () => {}, assertPurchaseTreeMysql: async () => {},
+      assertInventoryMember: async () => {}, assertInventoryReferences: async () => {}, assertInventoryRecord: async () => {},
+      savePurchaseOrderShipmentsMysql: async () => {},
       withMysqlTransaction: fn => fn(connection),
       mysqlConnectionQueryOne: async (_connection, sql) => sql.includes('purchase_orders') ? { status: 'pending_purchase' } : null,
       requireSessionPersonIdMysql: async () => 1,

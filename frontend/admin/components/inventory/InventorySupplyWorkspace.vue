@@ -1,0 +1,261 @@
+<script setup>
+import {computed,defineAsyncComponent,onActivated,onBeforeUnmount,onDeactivated,onMounted,reactive,ref,watch} from 'vue';
+import {ElMessage} from 'element-plus';
+import {Box,Document,ShoppingCart,Van,Warning} from '@element-plus/icons-vue';
+import {useAuthStore} from '../../stores/auth.js';
+import {apiClient,currentApiCacheScope} from '../../utils/api.js';
+import {PROCUREMENT_GAP_CAUSES,PROCUREMENT_GAP_FIELDS} from '../../../../src/shared/procurement-demand-types.js';
+import {procurementDemandType} from '../../../../src/shared/inventory-workflow.js';
+import {hasPermission} from '../../../../src/shared/permissions.js';
+import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
+import InventoryCompositionBadge from './InventoryCompositionBadge.vue';
+import InventoryProductActions from './InventoryProductActions.vue';
+import InventoryPageToolbar from './InventoryPageToolbar.vue';
+import InventorySupplyDemandLines from './InventorySupplyDemandLines.vue';
+import InventoryAffectedBundles from './InventoryAffectedBundles.vue';
+import {synchronizeInventoryFbp} from '../../utils/inventory-fbp-sync.js';
+import {applyInventoryWorkspaceUpdates} from '../../utils/inventory-workspace-updates.js';
+import {createInventoryWorkspacePageCache} from '../../utils/inventory-workspace-pages.js';
+import {inventoryPurchaseQuantity,inventoryPurchaseReady} from '../../../../src/shared/inventory-supply-plan.js';
+import {inventorySupplyLines} from '../../../../src/shared/inventory-supply-lines.js';
+import {inventoryWorkspacePage} from '../../../../src/shared/inventory-workspace.js';
+import {inventorySearchDefaults} from '../../../../src/shared/inventory-search-fields.js';
+import ProductImagePreview from '../ProductImagePreview.vue';
+const InventoryFbpReceiptReview=defineAsyncComponent(()=>import('./InventoryFbpReceiptReview.vue'));
+const workspaceTab=ref('stock');
+const ReceiveDialog=defineAsyncComponent(()=>import('../procurement/InventoryReceiveDialog.vue'));
+const receiving=reactive({visible:false,id:0,name:''});
+const ProcurementLedgerDialog=defineAsyncComponent(()=>import('../procurement/ProcurementLedgerDialog.vue'));
+const ProcurementRequestCreateDialog=defineAsyncComponent(()=>import('../procurement/ProcurementRequestCreateDialog.vue'));
+const BatchPurchase=defineAsyncComponent(()=>import('../procurement/ProcurementBatchPurchaseDialog.vue'));
+const BatchQueue=defineAsyncComponent(()=>import('../procurement/InventoryPurchaseBatchQueue.vue'));
+const ForecastDialog=defineAsyncComponent(()=>import('../procurement/InventoryFbpForecastDialog.vue'));
+const ForecastDetails=defineAsyncComponent(()=>import('../procurement/InventoryFbpForecastDetails.vue'));
+const forecastDialog=reactive({visible:false,id:0,name:''});
+const fbpSyncing=reactive({}),fbpSyncErrors=reactive({});
+async function retryFbp(row){
+ const id=Number(row.product_id),scope=currentApiCacheScope();if(fbpSyncing[id]||!canFbp.value)return;fbpSyncing[id]=true;fbpSyncErrors[id]='';
+ const current=()=>!disposed&&active&&scope===currentApiCacheScope();
+ try{await synchronizeInventoryFbp(apiClient,id,{isCurrent:current});if(current()){await refreshPurchased([id]);ElMessage.success('官方库存已同步，FBP预测已重新核算');}}
+ catch(e){if(current()&&e.name!=='AbortError'){fbpSyncErrors[id]=e.message;ElMessage.error(e.message);await refreshPurchased([id]);}}
+ finally{if(scope===currentApiCacheScope())fbpSyncing[id]=false;}
+}
+
+const DemandDetails=defineAsyncComponent(()=>import('../procurement/ProcurementDemandDetails.vue'));
+const CancellationDialog=defineAsyncComponent(()=>import('../procurement/ProcurementDemandCancellationDialog.vue'));
+const OrderNotes=defineAsyncComponent(()=>import('../procurement/ProcurementOrderNotesDialog.vue'));
+const notesProduct=ref(0);
+const cancellation=reactive({visible:false,productId:0});
+function openCancellation(row){cancellation.productId=Number(row.product_id);cancellation.visible=true;}
+async function cancellationSaved(result){cancellation.visible=false;applyDetail(result.state);await refreshPurchased([Number(result.product_id)]);}
+const emit=defineEmits(['clear-product','purchased']);
+const props=defineProps({entry:{type:String,default:'orders'},initialTask:{type:String,default:''},productId:{type:Number,default:0}});
+const auth=useAuthStore(),loading=ref(false),error=ref(''),rows=ref([]),total=ref(0),meta=ref({}),snapshot=ref({}),checkingProduct=ref(0);
+const filters=reactive({...inventorySearchDefaults(),query:'',scope:'all',task:props.initialTask|| (props.entry==='procurement'?'required':'receiving'),page:1,pageSize:50});
+const canCount=computed(()=>hasPermission(auth.user,'inventory.write'));
+const canReceive=computed(()=>hasPermission(auth.user,'packing')||hasPermission(auth.user,'procurement'));
+const canPurchase=computed(()=>hasPermission(auth.user,'procurement'));
+const canFbp=computed(()=>hasPermission(auth.user,'inventory.write'));
+const canReport=computed(()=>canCount.value||canReceive.value);
+const ledger=reactive({visible:false,productId:0,action:''}),purchase=reactive({visible:false,row:null,error:''});
+const feedback=reactive({visible:false,row:null,note:'',key:'',busy:false,loading:false,types:[],cause:'physical_shortage',plan:{}});
+const freePurchase=ref(false);
+function startFreePurchase(){freePurchase.value=true;batchRows.value=[];batchVisible.value=true;}
+const supplyTable=ref(null),selected=ref([]),batchVisible=ref(false),batchRows=ref([]),batchCounts=ref({}),readAt=ref(''),batchRevision=ref(0);
+const fbpReceiptCount=ref(null);
+const pageCache=createInventoryWorkspacePageCache();
+let warmRequest=null,warmController,countsKey='',countsAt=0,countsVersion=0;
+function clearPages(){pageCache.clear();warmController?.abort();warmRequest=null;}
+const isBatch=computed(()=>['incoming','receiving'].includes(filters.task));
+const isFbpSuggestions=computed(()=>filters.task==='fbp-stocking');
+const detail=reactive({visible:false,productId:0,tab:'orders'});
+const demandTypes=[{key:'real_order',label:'FBS订单需求'},{key:'local_safety',label:'本地保障需求'},{key:'fbp_stock',label:'FBP正式备货申请'},{key:'fbp_forecast',label:'FBP预测预警建议'}];
+const openBatches=row=>(row.pending_batches||[]).filter(b=>!b.received_at);
+const inspectionBatches=row=>(row.pending_batches||[]).filter(b=>b.received_at);
+const batchQuantity=batches=>batches.reduce((sum,batch)=>sum+Number(batch.quantity||0),0);
+function openDetail(row,tab){Object.assign(detail,{visible:true,productId:Number(row.product_id),tab});}
+function applyDetail(state){clearPages();hasUpdates.value=true;if(state){rememberUpdates([state]);applyPage({rows:rows.value,total:total.value,meta:meta.value,snapshot:snapshot.value});}}
+async function purchased(){const id=Number(purchase.row.product_id);purchase.visible=false;await refreshPurchased([id]);emit('purchased',{productId:id});}
+async function forecastCreated(){const id=forecastDialog.id;forecastDialog.visible=false;await refreshPurchased([id]);}
+const taskDefinitions=[{key:'required',label:'必须采购',hint:'FBS订单／正式FBP申请',icon:Document},{key:'advisory',label:'保障补货',hint:'扣除现货及在途后需采购',icon:Warning},{key:'fbp-stocking',label:'FBP备货建议',hint:'预测备货 / 本地发仓建议',icon:Box},{key:'incoming',label:'采购待到货',hint:'采购确认签收',icon:Van},{key:'receiving',label:'到货待验收',hint:'仓库核对数量并入库',icon:Box},{key:'fbp-receipts',label:'FBP到货验收',hint:'发往FBP的SKU逐项核对',icon:Box}];
+const tasks=computed(()=>{const order=props.entry==='procurement'?['required','advisory','incoming','receiving','fbp-stocking','fbp-receipts']:['receiving','fbp-stocking','fbp-receipts','incoming','required','advisory'];return order.map(key=>taskDefinitions.find(task=>task.key===key));});
+let version=0,controller,disposed=false,active=true,snapshotTimer=null,snapshotAttempts=0;
+const liveUpdates=new Map();
+function stopSnapshotPoll(){clearTimeout(snapshotTimer);snapshotTimer=null;}
+function pollSnapshot(result,scope,token){
+ if(!result.snapshot?.refreshing||result.snapshot?.error||snapshotAttempts>=150)return;
+ snapshotAttempts++;snapshotTimer=setTimeout(()=>{snapshotTimer=null;if(!disposed&&active&&token===version&&scope===currentApiCacheScope())void load(false,false,false,true);},2000);
+}
+async function stockSaved(id){await refreshPurchased([Number(id)]);if(!disposed&&active)void load(false,false,false,true);}
+const hasUpdates=ref(false);
+function queueRefresh(){clearPages();hasUpdates.value=true;}
+const units=n=>n==null?'待核对':`${Number(n)} 件`;
+const plan=row=>row.workflow?.supply_plan||{};
+const demandLines=row=>inventorySupplyLines(row.workflow);
+const forecastPendingLabel=row=>row.workflow?.fbp?.sku_count===0?'未绑定可核算SKU':row.workflow?.fbp?.missing_stock_count>0?`${row.workflow.fbp.missing_stock_count} 个SKU库存未同步`:row.workflow?.fbp?.unknown_reason||'FBP预测待核实';
+const purchaseRequestIds=row=>(row?.workflow?.requests||[]).filter(r=>{const type=procurementDemandType(r),p=plan(row);return p.required_purchase>0?(type==='real_order'&&p.required_fbs>0)||(type==='fbp_stock'&&p.required_fbp>0):(type==='local_safety'&&p.optional_local>0)||(type==='fbp_forecast'&&p.optional_fbp>0);}).map(r=>r.id);
+function taskCount(key){if(key==='fbp-receipts')return fbpReceiptCount.value??'—';return key==='incoming'?batchCounts.value.open??'—':key==='receiving'?batchCounts.value.arrived??'—':meta.value[key]??'—';}
+function taskHint(task){if(task.key==='incoming')return `${batchCounts.value.open_quantity??'—'} 件待到货${batchCounts.value.open_unknown_batches?` · ${batchCounts.value.open_unknown_batches}批待核对`:''}`;if(task.key==='receiving')return `${batchCounts.value.arrived_quantity??'—'} 件待验收${batchCounts.value.arrived_unknown_batches?` · ${batchCounts.value.arrived_unknown_batches}批待核对`:''}`;return task.hint;}
+function switchTask(key){if(key==='fbp-receipts'){stopSnapshotPoll();++version;controller?.abort();loading.value=false;workspaceTab.value='fbp';void loadBatchCounts();return;}workspaceTab.value='stock';filters.task=key;selected.value=[];if(['incoming','receiving','fbp-stocking'].includes(key))filters.scope='all';void load(true);}
+async function startBatch(){
+ freePurchase.value=false;
+ if(checkingProduct.value)return;
+ if(!selected.value.length){batchRows.value=[];batchVisible.value=true;return;}
+ if(selected.value.length>100)return ElMessage.warning('一次最多登记100项库存，请分批选择');
+ const scope=currentApiCacheScope(),chosen=[...selected.value];checkingProduct.value=-1;
+ try{const fresh=[];for(let i=0;i<chosen.length;i+=20){const result=await apiClient.get(`/api/inventory-workflow?view=status&fresh=1&product_ids=${chosen.slice(i,i+20).map(r=>r.product_id).join(',')}`,{noCache:true});fresh.push(...result.rows||[]);}
+  if(disposed||!active||scope!==currentApiCacheScope())return;
+  const unknown=fresh.find(r=>inventoryPurchaseQuantity(r.supply_plan)===null);if(unknown)return ElMessage.warning('部分库存数量尚未核实，请先核对实物再登记采购');
+  batchRows.value=chosen.map(row=>({...row,workflow:fresh.find(r=>Number(r.product_id)===Number(row.product_id))})).filter(row=>plan(row).required_purchase>0||plan(row).optional_purchase>0);
+  if(!batchRows.value.length)return ElMessage.info('所选库存最新货源已覆盖需求，无需重复采购');batchVisible.value=true;
+ }catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{checkingProduct.value=0;}
+}
+async function refreshPurchased(ids){
+ const scope=currentApiCacheScope();clearPages();countsAt=0;hasUpdates.value=true;supplyTable.value?.clearSelection();selected.value=[];
+ try{const fresh=[];for(let i=0;i<ids.length;i+=20){const result=await apiClient.get(`/api/inventory-workflow?view=status&fresh=1&product_ids=${ids.slice(i,i+20).join(',')}`,{noCache:true});fresh.push(...result.rows||[]);}if(disposed||!active||scope!==currentApiCacheScope())return;
+  rememberUpdates(fresh);applyPage({rows:rows.value,total:total.value,meta:meta.value,snapshot:{...snapshot.value,stale:true}});readAt.value=new Date().toISOString();await loadBatchCounts();
+
+ }catch(e){if(scope===currentApiCacheScope())ElMessage.warning('操作已保存，外侧最新库存暂未读取，请点击刷新库存需求；不会撤销已保存的实物数');}
+}
+async function batchPurchased(result){const ids=result.product_ids||batchRows.value.map(r=>Number(r.product_id));batchVisible.value=false;await refreshPurchased(ids);emit('purchased',{productIds:ids});}
+async function loadBatchCounts(signal){
+ const scope=currentApiCacheScope(),{page,task,...criteria}=filters;
+ const key=JSON.stringify([scope,criteria,props.productId]);
+ if(key===countsKey&&Date.now()-countsAt<20000)return;
+ const token=++countsVersion,isCurrent=()=>!disposed&&active&&scope===currentApiCacheScope()&&token===countsVersion;
+ if(key!==countsKey){batchCounts.value={};fbpReceiptCount.value=null;}
+ const qs=new URLSearchParams({...criteria,...(props.productId?{product_id:props.productId}:{})});
+ const requests=[
+  apiClient.get(`/api/inventory-workflow/purchase-arrivals?${qs}&status=open&summary_only=1`,{noCache:true,signal}).then(r=>{if(isCurrent())batchCounts.value=r.summary||{};}),
+  apiClient.get(`/api/inventory-workflow/details?${qs}&node=fbp-receipts&summary_only=1`,{noCache:true,signal}).then(r=>{if(isCurrent())fbpReceiptCount.value=r.total??null;})
+ ];
+ const results=await Promise.allSettled(requests);
+ if(!signal?.aborted&&isCurrent()&&results.every(r=>r.status==='fulfilled')){countsKey=key;countsAt=Date.now();}
+}
+function workspaceUrl(page=filters.page){return `/api/inventory-workflow/alerts?${new URLSearchParams({...filters,page,view:'workspace',compact:'1',...(props.productId?{product_id:props.productId}:{})})}`;}
+function rememberUpdates(states){for(const state of states){const id=Number(state.product_id),before=rows.value.find(row=>Number(row.product_id)===id);if(before)liveUpdates.set(id,{workflow:state});}}
+function applyPage(result){if(snapshot.value.refreshing&&!result.snapshot?.refreshing)clearPages();result=applyInventoryWorkspaceUpdates(result,liveUpdates,{...filters,product_id:props.productId||undefined});rows.value=result.rows||[];total.value=result.total||0;meta.value=result.meta||{};snapshot.value=result.snapshot||{};readAt.value=new Date().toISOString();batchRevision.value++;}
+function warmNextPage(result,scope,token){
+ if(result.snapshot?.refreshing||disposed||!active||token!==version||filters.page*filters.pageSize>=Number(result.total||0)||isBatch.value)return;
+ const url=workspaceUrl(Number(filters.page)+1);
+ if(pageCache.get(scope,url)||warmRequest?.url===url)return;
+ warmController?.abort();warmController=new AbortController();
+ const pending={url};warmRequest=pending;
+ pending.promise=apiClient.get(url,{noCache:true,signal:warmController.signal}).then(r=>{if(!disposed&&active&&scope===currentApiCacheScope()&&token===version)pageCache.set(scope,url,r);return r;}).catch(()=>null).finally(()=>{if(warmRequest===pending)warmRequest=null;});
+}
+async function load(reset=false,fresh=false,fromPage=false,background=false){
+ stopSnapshotPoll();if(!background)snapshotAttempts=0;
+ // Actual purchase batches do not depend on demand forecasting. Their child
+ // queue reads immediately and supplies its own counts; no alert scan/poll.
+ if(isBatch.value){void loadBatchCounts();++version;controller?.abort();loading.value=false;error.value='';readAt.value=new Date().toISOString();batchRevision.value++;return;}
+ if(reset){filters.page=1;supplyTable.value?.clearSelection();selected.value=[];}
+ if(fresh||!background&&(!fromPage||hasUpdates.value)){clearPages();countsAt=0;}
+ hasUpdates.value=false;controller?.abort();controller=new AbortController();const token=++version,scope=currentApiCacheScope(),url=workspaceUrl();error.value='';
+ const cached=fromPage?pageCache.get(scope,url):null;
+ loading.value=!cached&&!background;
+ try{
+  let result=cached;
+  if(!result&&warmRequest?.url===url)result=await warmRequest.promise;
+  if(!result)result=await apiClient.get(url+(fresh?'&refresh=1':''),{noCache:true,signal:controller.signal});
+  if(!disposed&&active&&token===version&&scope===currentApiCacheScope()){pageCache.set(scope,url,result);applyPage(result);if(!background)void loadBatchCounts(controller.signal);warmNextPage(result,scope,token);pollSnapshot(result,scope,token);}
+ }catch(e){if(token===version&&e.name!=='AbortError'){error.value=e.message||'库存需求暂不可用';}}
+ finally{if(token===version)loading.value=false;}
+}
+
+function resetScope(){cancellation.visible=false;stopSnapshotPoll();liveUpdates.clear();++countsVersion;clearPages();countsKey='';countsAt=0;fbpReceiptCount.value=null;snapshot.value={};batchCounts.value={};readAt.value='';selected.value=[];batchVisible.value=false;forecastDialog.visible=false;checkingProduct.value=0;++version;controller?.abort();Object.assign(filters,inventorySearchDefaults());filters.query='';filters.scope='all';filters.task=props.initialTask||(props.entry==='procurement'?'required':'receiving');workspaceTab.value='stock';if(props.productId)emit('clear-product');rows.value=[];meta.value={};total.value=0;loading.value=false;detail.visible=false;ledger.visible=false;receiving.visible=false;ledger.productId=0;purchase.visible=false;purchase.row=null;feedback.visible=false;feedback.row=null;if(active)void load(true);}
+function openLedger(row,action=''){if(action==='receive'){Object.assign(receiving,{visible:true,id:Number(row.product_id),name:row.product_name});return;}Object.assign(ledger,{visible:true,productId:Number(row.product_id),action});}
+let purchaseVersion=0,purchaseController;
+watch(()=>purchase.visible,value=>{if(!value){++purchaseVersion;purchaseController?.abort();checkingProduct.value=0;}});
+async function openPurchase(row){
+ if(checkingProduct.value===-1)return;
+ purchaseController?.abort();purchaseController=new AbortController();const token=++purchaseVersion;
+ const scope=currentApiCacheScope(),id=Number(row.product_id);checkingProduct.value=id;
+ Object.assign(purchase,{row,error:'',visible:true});
+ try{const result=await apiClient.get(`/api/inventory-workflow?view=status&product_id=${id}&fresh=1`,{noCache:true,signal:purchaseController.signal});
+  if(disposed||!active||token!==purchaseVersion||!purchase.visible||scope!==currentApiCacheScope())return;
+  const current=result.rows?.find(r=>Number(r.product_id)===id);
+  if(!current?.supply_plan||inventoryPurchaseQuantity(current.supply_plan)===null){purchase.error='本次尚无可确认的采购数量，请核对对应需求；不会将未知数量当零';return;}
+  if(!(current.supply_plan.required_purchase>0||current.supply_plan.optional_purchase>0)){purchase.error='最新货源已覆盖需求，无需重复采购，请返回刷新列表';return;}
+  purchase.row={...row,workflow:current};
+ }catch(e){if(token===purchaseVersion&&e.name!=='AbortError'&&scope===currentApiCacheScope())purchase.error=e.message||'核对最新采购需求失败，请重新打开重试';}
+ finally{if(token===purchaseVersion&&scope===currentApiCacheScope())checkingProduct.value=0;}
+}
+async function openFeedback(row){
+ Object.assign(feedback,{visible:true,row,note:'',key:crypto.randomUUID(),busy:false,loading:true,types:[],cause:'physical_shortage',plan:{}});
+ const scope=currentApiCacheScope(),key=feedback.key;
+ try{const result=await apiClient.get(`/api/inventory-workflow?view=status&product_id=${row.product_id}&fresh=1`,{noCache:true});if(scope!==currentApiCacheScope()||key!==feedback.key)return;feedback.plan=result.rows?.[0]?.supply_plan||{};feedback.types=demandTypes.filter(t=>feedback.plan[PROCUREMENT_GAP_FIELDS[t.key]]>0).map(t=>t.key);}
+ catch(e){if(scope===currentApiCacheScope()&&key===feedback.key)ElMessage.error(e.message);}finally{if(key===feedback.key)feedback.loading=false;}
+}
+async function sendFeedback(){
+ if(!feedback.types.length||!feedback.note.trim())return ElMessage.warning('请选择实际缺口需求并填写具体成因');
+ const scope=currentApiCacheScope(),key=feedback.key;feedback.busy=true;
+ try{const result=await apiClient.post('/api/inventory-workflow/demand-request',{product_id:Number(feedback.row.product_id),demand_types:feedback.types,cause:feedback.cause,note:feedback.note,request_key:key});
+  if(scope!==currentApiCacheScope()||key!==feedback.key)return;ElMessage.success(`已处理 ${result.requests?.length||0} 类采购需求并通知采购；已有需求关联说明，不重复增加数量`);feedback.visible=false;hasUpdates.value=true;
+ }catch(e){if(scope===currentApiCacheScope())ElMessage.error(e.message);}finally{if(key===feedback.key)feedback.busy=false;}
+}
+
+onMounted(()=>{window.addEventListener('erp:auth-scope-changed',resetScope);window.addEventListener('erp:system-notification',queueRefresh);});
+onActivated(()=>{active=true;if(snapshot.value.refreshing||hasUpdates.value)void load();});
+onDeactivated(()=>{cancellation.visible=false;stopSnapshotPoll();++countsVersion;clearPages();active=false;detail.visible=false;ledger.visible=false;receiving.visible=false;purchase.visible=false;feedback.visible=false;batchVisible.value=false;forecastDialog.visible=false;++version;controller?.abort();loading.value=false;});
+onBeforeUnmount(()=>{stopSnapshotPoll();liveUpdates.clear();++countsVersion;clearPages();disposed=true;++version;controller?.abort();window.removeEventListener('erp:auth-scope-changed',resetScope);window.removeEventListener('erp:system-notification',queueRefresh);});
+watch(()=>props.initialTask,value=>switchTask(value||(props.entry==='procurement'?'required':'receiving')));
+watch(()=>props.productId,()=>load(true),{immediate:true});
+defineExpose({refresh:load});
+</script>
+<template>
+ <section class="supply-workspace" :aria-label="entry==='procurement'?'库存采购需求':'库存管理模式'">
+  <div class="supply-heading-actions"><slot name="heading-actions"/></div>
+  <div class="supply-task-cards"><button v-for="task in tasks" :key="task.key" :data-task="task.key" :class="['supply-task',`is-${task.key}`,{'is-active':(workspaceTab==='fbp'?'fbp-receipts':filters.task)===task.key}]" @click="switchTask(task.key)"><component :is="task.icon"/><div><span>{{task.label}}</span><strong>{{taskCount(task.key)}}<span class="supply-task-unit">{{['incoming','receiving','fbp-receipts'].includes(task.key)?'个批次':'项库存'}}</span></strong><small>{{taskHint(task)}}</small></div></button></div>
+  <template v-if="workspaceTab==='fbp'"><InventoryFbpReceiptReview :product-id="productId" @saved="queueRefresh();countsAt=0;loadBatchCounts()"/></template>
+  <template v-else>
+  <InventoryPageToolbar :filters="filters" product-search compact-search :show-shop="false" :show-date-range="false" :loading="loading" @search="load(true)" @reset="Object.assign(filters,inventorySearchDefaults(),{query:'',scope:'all'});load(true)">
+   <el-form-item label="库存范围"><el-select v-model="filters.scope" aria-label="库存范围" @change="load(true)"><el-option value="all" label="全部库存"/><el-option v-if="!isBatch" value="orders" label="FBS订单关联库存"/></el-select></el-form-item>
+   <template #right><span class="supply-read-time" :title="'读取时间：'+(readAt?shanghaiDateTimeText(readAt):'未读取')">读取 {{readAt?shanghaiDateTimeText(readAt):'尚未读取'}}<small v-if="!isBatch">核算 {{snapshot.calculated_at?shanghaiDateTimeText(snapshot.calculated_at):'尚未完成'}}</small></span><el-button :loading="loading" @click="load(false,true)">{{isBatch?'刷新采购批次':hasUpdates?'有新变化 · 刷新库存需求':'刷新库存需求'}}</el-button><el-button v-if="!isBatch" :disabled="snapshot.refreshing" @click="load(false,true)">重新核算</el-button><div class="supply-context-actions"><el-button v-if="canPurchase&&!isBatch&&!isFbpSuggestions" type="primary" plain :disabled="!!checkingProduct" @click="startFreePurchase">自由采购</el-button><el-button v-if="canPurchase&&!isBatch&&!isFbpSuggestions" type="primary" :disabled="!!checkingProduct" :loading="checkingProduct===-1" @click="startBatch">批量登记采购{{selected.length?`（${selected.length}）`:''}}</el-button><slot v-if="canPurchase&&!isBatch&&!isFbpSuggestions" name="purchase-actions"/><el-button v-if="canPurchase" plain size="small" :type="filters.task==='cancelled'?'primary':'default'" @click="switchTask('cancelled')">已取消采购 {{meta.cancelled??'—'}}</el-button><el-button plain size="small" @click="switchTask('review')">库存异常 / 资料待核实 {{meta.review??'—'}}</el-button><el-button v-if="!isBatch" plain size="small" @click="switchTask('all')">查看全部库存</el-button><el-button v-if="productId" size="small" @click="emit('clear-product')">返回全部库存</el-button></div></template>
+  </InventoryPageToolbar>
+
+
+  <el-alert v-if="!isBatch&&(snapshot.error||snapshot.refreshing||snapshot.available===false)" :type="snapshot.error?'warning':'info'" :closable="false" :title="snapshot.error|| (snapshot.available===false?'尚无成功核算结果，暂不能判断是否缺货':'后台正在核对最新需求，完成后自动更新；已保存的库存会先同步')"/>
+  <BatchQueue v-if="isBatch" :status="filters.task==='incoming'?'open':'arrived'" :filters="filters" :revision="batchRevision" :product-id="productId" @summary="value=>batchCounts=value" @changed="hasUpdates=true;countsAt=0;loadBatchCounts()"/>
+  <template v-else>
+  <p v-if="isFbpSuggestions" class="supply-policy-hint">这里展示尚未转成正式申请的FBP预测备货建议。先使用本地现货及采购在途，只有剩余货源缺口才需新增采购；确认后创建正式FBP备货申请。</p>
+  <p v-else class="supply-policy-hint">必须采购与保障补货分开处理；现货和采购在途只抵扣一次。缺口是待补数量，采购建议是扣除可用货源后的净数量；FBP实物独立核对，不抵扣本地订单。同一预测转申请后不重复计算。</p>
+  <el-alert v-if="error" :title="error+'。'+(rows.length?'当前保留上次成功结果，请刷新后再核对需求':'未能读取采购需求，不代表没有缺货')" type="error" :closable="false" show-icon/>
+  <el-table ref="supplyTable" @selection-change="value=>selected=value" v-loading="loading" :data="rows" row-key="product_id" class="supply-table" :empty-text="snapshot.available===false&&!snapshot.refreshing?'尚无成功核算结果，请重新核算；不代表没有采购需求':snapshot.refreshing?'后台正在核对需求，请稍候；暂不可判断为零缺口':snapshot.incomplete?'有新库存尚待核算，请稍候或重新核算':error?'库存需求加载失败，请重试；这不代表没有采购需求':loading?'正在核对库存需求，请稍候':'当前筛选没有待处理库存，可切换其他任务或查看全部'" border>
+
+   <el-table-column v-if="canPurchase&&!isFbpSuggestions" type="selection" reserve-selection width="45" :selectable="row=>inventoryPurchaseReady(plan(row))"/>
+   <el-table-column label="库存商品" min-width="270"><template #default="{row}"><div class="supply-product"><ProductImagePreview :src="`/api/products/${row.product_id}/image?thumb=1`" :preview-list="[`/api/products/${row.product_id}/image`]" size="portrait"/><div><strong>{{row.product_name}}</strong><span>库存 ID：{{row.inventory_number||row.product_id}} <InventoryCompositionBadge :product="{...row,id:Number(row.product_id),name:row.product_name}"/></span><div class="supply-identity-actions"><el-button plain size="small" @click="openLedger(row)">库存详情</el-button><InventoryProductActions :product-id="Number(row.product_id)" @saved="clearPages();load()"/><el-button v-if="canReport" plain size="small" @click="notesProduct=Number(row.product_id)">订单备注</el-button></div></div></div></template></el-table-column>
+   <el-table-column label="受影响套装" min-width="215"><template #default="{row}"><InventoryAffectedBundles :bundles="row.workflow?.affected_bundles||[]" @open="id=>openLedger({product_id:id})"/></template></el-table-column>
+   <el-table-column label="本地 / FBP库存" min-width="185"><template #default="{row}"><div class="supply-quantities supply-stock-facts"><span><span>本地实物</span><b>{{row.workflow?.physical_recorded<0?'需盘点':units(row.workflow?.physical_recorded??row.workflow?.physical)}}</b></span><small v-if="row.workflow?.local_evidence?.last_counted_quantity!=null">上次核对 {{row.workflow.local_evidence.last_counted_quantity}} 件 · {{shanghaiDateTimeText(row.workflow.local_evidence.last_counted_at).slice(5,16)}}</small><el-tooltip v-if="row.workflow?.physical_recorded<0" content="账面为历史流水推算；待发FBS需求单独统计，不把负账面再次加进采购量。请核对盘点后的出库或补录记录。"><span class="supply-review-reason">账面 {{row.workflow.physical_recorded}} 件 · 核对差异</span></el-tooltip><span><el-button plain size="small" @click="openDetail(row,'forecast')">FBP实物</el-button><b>{{row.workflow?.fbp?.physical!=null?units(row.workflow.fbp.physical):row.workflow?.fbp?.sku_count===0?'未绑定SKU':'待同步'}}</b></span><small v-if="row.workflow?.locked>0">本地发仓锁定 {{units(row.workflow.locked)}}</small></div></template></el-table-column>
+   <el-table-column label="采购在途" min-width="150"><template #default="{row}"><div class="supply-quantities"><b>{{units(row.workflow?.incoming)}}</b><small>含已到货待验收货源</small><el-button plain size="small" @click="openDetail(row,'batches')">采购批次</el-button></div></template></el-table-column>
+   <el-table-column label="需求缺口 / 采购量">
+    <el-table-column label="本地仓库需求" min-width="260"><template #default="{row}"><InventorySupplyDemandLines group="local" :workflow="row.workflow" @detail="openDetail(row,$event)"/></template></el-table-column>
+    <el-table-column label="FBP需求" min-width="280"><template #default="{row}"><InventorySupplyDemandLines group="fbp" :workflow="row.workflow" :can-sync="canFbp" :syncing="!!fbpSyncing[row.product_id]" :sync-error="fbpSyncErrors[row.product_id]" @detail="openDetail(row,$event)" @sync="retryFbp(row)"/><el-button v-if="canFbp&&!isFbpSuggestions&&plan(row).fbp_forecast_quantity>0" plain size="small" @click="Object.assign(forecastDialog,{visible:true,id:Number(row.product_id),name:row.product_name})">创建FBP申请</el-button></template></el-table-column>
+   </el-table-column>
+   <el-table-column :label="isFbpSuggestions?'FBP备货建议':'本次采购建议'" min-width="190"><template #default="{row}"><div v-if="isFbpSuggestions" class="supply-purchase-summary"><strong>建议备货 {{units(plan(row).fbp_forecast_quantity)}}</strong><span>本地现货覆盖 {{units(plan(row).forecast_ready_stock)}}</span><span>采购在途覆盖 {{units(plan(row).forecast_waiting_incoming)}}</span><b v-if="plan(row).optional_fbp>0">仍需采购 {{units(plan(row).optional_fbp)}}</b><small v-else-if="plan(row).optional_fbp===0">货源已覆盖，无需新增采购</small><small v-else>本地货源待核实</small></div><div v-else class="supply-purchase-summary"><b :class="{'is-required':plan(row).required_purchase>0}">必须采购 {{units(plan(row).required_purchase)}}</b><span>可选保障补货 {{units(plan(row).optional_purchase)}}</span><strong>建议总采购 {{inventoryPurchaseQuantity(plan(row))==null?'待核对':units(inventoryPurchaseQuantity(plan(row)))}}</strong><small v-if="plan(row).cancelled_fbs>0" class="supply-cancelled-warning">本次已取消 {{plan(row).cancelled_fbs}} 件；订单缺货仍待处理</small><small v-if="plan(row).known">已抵扣本地实物及采购在途</small><small v-else-if="row.workflow?.purchase_partial">先采购已确认的订单缺口</small><small v-else>{{row.workflow?.review_reasons?.join('；')||'本地账面待核实，不能按零缺口处理'}}</small><small v-if="!plan(row).fbp_forecast_known">FBP尚待同步核实</small></div></template></el-table-column>
+   <el-table-column label="待到货 / 待验收" min-width="195"><template #default="{row}"><div v-if="row.pending_batches?.length" class="supply-open-purchases"><el-button v-if="openBatches(row).length" plain size="small" @click="openDetail(row,'batches')">待到货 {{openBatches(row).length}} 批 · {{batchQuantity(openBatches(row))}} 件</el-button><el-button v-if="inspectionBatches(row).length" plain size="small" @click="openDetail(row,'batches')">待验收 {{inspectionBatches(row).length}} 批 · {{batchQuantity(inspectionBatches(row))}} 件</el-button><small>均已下单，无需重复采购</small></div><span v-else>暂无待收货采购</span></template></el-table-column>
+   <el-table-column label="处理" min-width="205" fixed="right"><template #default="{row}"><div class="supply-row-actions"><el-button v-if="isFbpSuggestions&&canFbp" plain size="small" @click="Object.assign(forecastDialog,{visible:true,id:Number(row.product_id),name:row.product_name})">创建FBP备货申请</el-button><el-button v-if="entry!=='procurement'&&canReceive&&row.pending_batches?.length" plain size="small" @click="openLedger(row,'receive')">验货入库</el-button><el-button v-if="canPurchase&&!isFbpSuggestions" plain size="small" type="primary" :loading="checkingProduct===Number(row.product_id)" :disabled="!!checkingProduct||!inventoryPurchaseReady(plan(row))" @click="openPurchase(row)">登记采购</el-button><el-button v-if="canCount" plain size="small" @click="openLedger(row,'stocktake')">核对实物</el-button><el-button v-if="canPurchase&&!isFbpSuggestions" plain size="small" @click="plan(row).order_quantity>0||plan(row).cancelled_fbs>0?openCancellation(row):openDetail(row,plan(row).required_fbp>0?'fbp':'safety')">{{plan(row).cancelled_fbs>0?'恢复采购':plan(row).order_quantity>0?'取消采购':'调整需求'}}</el-button><el-button v-if="canReport&&!canPurchase&&!isFbpSuggestions" plain size="small" @click="openFeedback(row)">反馈缺口</el-button></div></template></el-table-column>
+  </el-table>
+  <el-pagination v-if="snapshot.available!==false" v-model:current-page="filters.page" v-model:page-size="filters.pageSize" :page-sizes="[20,50,100]" :total="total" layout="total, sizes, prev, pager, next" @size-change="load(true)" @current-change="load(false,false,true)"/>
+  </template>
+  </template>
+  <ForecastDialog v-if="forecastDialog.visible" v-model="forecastDialog.visible" :product-id="forecastDialog.id" :product-name="forecastDialog.name" @created="forecastCreated"/>
+  <BatchPurchase v-if="batchVisible" v-model="batchVisible" :initial-rows="batchRows" :free-purchase="freePurchase" @created="batchPurchased"/>
+  <ReceiveDialog v-if="receiving.visible" v-model="receiving.visible" :product-id="receiving.id" :product-name="receiving.name" @saved="stockSaved(receiving.id)"/>
+  <ProcurementLedgerDialog v-if="ledger.visible" v-model="ledger.visible" :product-id="ledger.productId" :initial-action="ledger.action" :stocktake-enabled="canCount" @saved="stockSaved(ledger.productId)"/>
+  <ProcurementRequestCreateDialog v-if="purchase.visible" v-model="purchase.visible" :initial-product-id="purchase.row.product_id" :initial-quantity="Math.max(1,Number(plan(purchase.row).required_purchase||0)+Number(plan(purchase.row).optional_purchase||0))" :source-request-ids="purchaseRequestIds(purchase.row)" :verifying-demand="checkingProduct===Number(purchase.row.product_id)" :demand-error="purchase.error" :initial-product="{id:Number(purchase.row.product_id),name:purchase.row.product_name,inventory_id:purchase.row.inventory_number,image_url:`/api/products/${purchase.row.product_id}/image?thumb=1`}" lock-product @created="purchased"/>
+  <el-drawer v-if="detail.visible" v-model="detail.visible" title="库存采购需求明细" size="min(1200px,96vw)" append-to-body destroy-on-close><ForecastDetails v-if="detail.tab==='forecast'" :product-id="detail.productId" @changed="applyDetail" @create="Object.assign(forecastDialog,{visible:true,id:detail.productId,name:rows.find(r=>Number(r.product_id)===Number(detail.productId))?.product_name||''})"/><DemandDetails v-else :product-id="detail.productId" :initial-tab="detail.tab" @changed="applyDetail"/><template #footer><el-button v-if="canReport" plain size="small" @click="detail.visible=false;openFeedback({product_id:detail.productId,product_name:rows.find(r=>Number(r.product_id)===Number(detail.productId))?.product_name||''})">向采购反馈缺口</el-button><el-button @click="detail.visible=false">关闭</el-button></template></el-drawer>
+  <CancellationDialog v-if="cancellation.visible" v-model="cancellation.visible" :product-id="cancellation.productId" @changed="cancellationSaved" @detail="openDetail({product_id:cancellation.productId},$event)"/>
+  <OrderNotes v-if="notesProduct" :model-value="true" :product-id="notesProduct" @update:model-value="value=>{if(!value)notesProduct=0;}"/>
+  <el-dialog v-if="feedback.visible" v-model="feedback.visible" title="向采购反馈缺口" width="min(650px,94vw)" append-to-body :close-on-click-modal="false" :show-close="!feedback.busy">
+   <div v-loading="feedback.loading"><h3>{{feedback.row.product_name}}</h3><p>需求来源分为四类；按当前未被现货及采购在途覆盖的缺口创建，不重复叠加采购数量。</p><el-form label-position="top"><el-form-item label="需求来源"><el-checkbox-group v-model="feedback.types"><el-checkbox v-for="type in demandTypes" :key="type.key" :value="type.key" :disabled="!(feedback.plan[PROCUREMENT_GAP_FIELDS[type.key]]>0)">{{type.label}} {{units(feedback.plan[PROCUREMENT_GAP_FIELDS[type.key]])}}</el-checkbox></el-checkbox-group></el-form-item><el-form-item label="缺口成因"><el-select v-model="feedback.cause"><el-option v-for="(label,key) in PROCUREMENT_GAP_CAUSES" :key="key" :value="key" :label="label"/></el-select></el-form-item><el-alert v-if="feedback.cause==='physical_mismatch'" title="请先盘点并更新本地实物，再按系统识别出的四类缺口创建需求。" type="info" :closable="false"/><el-button v-if="feedback.cause==='physical_mismatch'&&canCount" link type="primary" @click="feedback.visible=false;openLedger(feedback.row,'stocktake')">先核对本地实物</el-button><el-form-item label="具体说明（必填）"><el-input v-model="feedback.note" type="textarea" :rows="3" maxlength="300" show-word-limit placeholder="例如：原记录30件，盘点仅3件，导致已提交的FBP申请缺货"/></el-form-item></el-form></div>
+   <template #footer><el-button :disabled="feedback.busy" @click="feedback.visible=false">取消</el-button><el-button type="primary" :loading="feedback.busy" :disabled="feedback.loading||!feedback.types.length" @click="sendFeedback">提交缺口并通知采购</el-button></template>
+  </el-dialog>
+ </section>
+</template>
+<style scoped>
+.supply-cancelled-warning{color:var(--el-color-warning);line-height:1.5}.supply-purchase-summary{display:grid;gap:4px;justify-items:start}.supply-purchase-summary strong{color:var(--el-color-primary)}.supply-purchase-summary small{font-size:12px;color:var(--el-text-color-secondary)}.supply-purchase-summary .is-required{color:var(--el-color-danger)}.supply-read-time{display:grid;gap:2px;font-size:11px;color:var(--el-text-color-secondary);white-space:nowrap}.supply-review-reason{color:var(--el-color-warning);line-height:1.5}.supply-context-actions{display:flex;gap:8px;flex-wrap:wrap}.supply-context-actions .el-button{margin:0}.supply-open-purchases{display:grid;gap:8px}.supply-open-purchases .el-button{justify-content:flex-start;margin:0}.supply-open-purchases small{color:var(--el-text-color-secondary)}.supply-workspace{display:grid;gap:12px;min-width:0;color:var(--el-text-color-primary)}.supply-heading{display:flex;justify-content:space-between;align-items:center;gap:16px}.supply-policy-hint{font-size:12px;color:var(--el-text-color-secondary);margin:0}.supply-workspace :deep(.inventory-search-actions){flex-shrink:0}.supply-workspace :deep(.inventory-toolbar-right){flex-wrap:wrap;justify-content:flex-end;white-space:normal}.supply-heading-actions{display:flex;gap:8px;flex-wrap:wrap}.supply-heading h2{margin:0;font-size:20px}.supply-heading p{margin:7px 0 0;font-size:13px;color:var(--el-text-color-secondary)}.supply-task-cards{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px}.supply-task{display:flex;gap:15px;align-items:center;text-align:left;border:1px solid var(--el-border-color-lighter);border-radius:8px;background:var(--el-bg-color-overlay);color:var(--el-text-color-primary);padding:10px 14px;cursor:pointer;font:inherit}.supply-task>svg{width:22px;height:22px;color:var(--el-color-primary)}.supply-task>div{display:grid;grid-template-columns:1fr auto;gap:6px;width:100%}.supply-task strong{font-size:21px}.supply-task-unit{font-size:11px;font-weight:normal;margin-left:5px;color:var(--el-text-color-secondary)}.supply-task small{grid-column:1/-1;color:var(--el-text-color-secondary);font-size:11px}.supply-task.is-required>svg{color:var(--el-color-danger)}.supply-task.is-advisory>svg{color:var(--el-color-warning)}.supply-task.is-active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.supply-filters{display:flex;align-items:center;flex-wrap:wrap;gap:10px}.supply-filters>.el-input{width:260px}.supply-filters>.el-select{width:240px}.supply-filters>span{font-size:12px;color:var(--el-text-color-secondary);margin-left:auto}.supply-product{display:flex;align-items:center;gap:12px;min-height:92px}.supply-product>div{display:grid;gap:7px;line-height:1.5}.supply-product span{font-size:12px;color:var(--el-text-color-secondary)}.supply-product strong{font-size:13px}.supply-product .el-button{justify-self:start;margin:0}.supply-quantities{display:grid;gap:5px;justify-items:start;font-size:12px}.supply-quantities b{display:block;margin-top:3px;font-size:14px}.supply-demand-lines{display:grid;gap:10px;font-size:12px}.supply-demand-line{display:grid;gap:4px;padding-bottom:7px;border-bottom:1px solid var(--el-border-color-lighter)}.supply-demand-line>span{display:flex;justify-content:space-between;gap:12px}.supply-demand-line small{line-height:1.5}.supply-stock-facts{width:100%}.supply-stock-facts>span{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%}.supply-stock-facts b{margin:0}.supply-demand-lines strong{font-weight:500}.supply-demand-lines .is-danger strong{color:var(--el-color-danger)}.supply-demand-lines .is-warning strong{color:var(--el-color-warning)}.supply-demand-lines .is-success strong{color:var(--el-color-success)}.supply-demand-lines .is-info strong{color:var(--el-text-color-secondary)}.supply-source-button{justify-self:start;margin:0;padding:0;font-size:12px}.supply-demand-lines small{color:var(--el-text-color-secondary)}.supply-age{font-size:12px;margin:10px 0 0}.supply-age small{display:block;color:var(--el-text-color-secondary);margin-top:5px}.supply-row-actions{display:flex;flex-wrap:wrap;gap:8px}.supply-row-actions .el-button{margin:0}.supply-evidence{padding:18px 28px;display:grid;grid-template-columns:1fr 1fr;gap:24px;font-size:12px;background:var(--el-fill-color-extra-light)}.supply-evidence p{color:var(--el-text-color-secondary)}.source-line{display:flex;flex-wrap:wrap;gap:10px;padding:10px 0;border-bottom:1px solid var(--el-border-color-lighter)}.supply-feedback-history{grid-column:1/-1}.source-line small{color:var(--el-text-color-secondary)}.supply-workspace>.el-pagination{justify-content:flex-end}@media(max-width:900px){.supply-task-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.supply-evidence{grid-template-columns:1fr}.supply-filters>span{margin-left:0}}@media(max-width:500px){.supply-heading{align-items:flex-start}.supply-task{padding:12px;gap:8px}.supply-task small{line-height:1.5}.supply-filters>.el-input,.supply-filters>.el-select{width:100%}}
+</style>
+
+<style scoped>
+.supply-identity-actions{display:flex;gap:6px;flex-wrap:wrap}.supply-identity-actions .el-button{margin:0}
+</style>

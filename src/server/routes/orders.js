@@ -57,6 +57,10 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
       : { batches: [], items: [] });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "split") {
+    return json(res, await services.splitOrder({order_id:Number(parts[2]),action:"inspect"},req._session?.personId,tenantIdFromRequest(req),{session:req._session}));
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2]) {
     const detail = await services.orderDetail(Number(parts[2]), tenantIdFromRequest(req));
     if (detail && !detail.profit_detail_snapshot) {
@@ -99,6 +103,10 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "package-label-print-failed") {
     return json(res, await services.removeFailedOrderLabelPrintBatch(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "split") {
+    return json(res, await services.splitOrder(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] === "ship") {

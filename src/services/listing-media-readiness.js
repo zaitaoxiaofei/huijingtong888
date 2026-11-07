@@ -22,7 +22,27 @@ export function isLikelyRemoteImageUrl(url = "") {
   return IMAGE_PATH_PATTERN.test(String(url || "").trim());
 }
 
-export async function downloadRemoteImageForOzon(url, {
+// This limit is shared by all shops, rather than two new full downloads per
+// publish worker competing for the same ECS public connection.
+let activeReadinessDownloads = 0;
+const pendingReadinessDownloads = [];
+async function withReadinessDownloadSlot(worker) {
+  if (activeReadinessDownloads >= 2) await new Promise((resolve) => pendingReadinessDownloads.push(resolve));
+  else activeReadinessDownloads += 1;
+  try {
+    return await worker();
+  } finally {
+    const next = pendingReadinessDownloads.shift();
+    if (next) next();
+    else activeReadinessDownloads -= 1;
+  }
+}
+
+export async function downloadRemoteImageForOzon(url, options = {}) {
+  return withReadinessDownloadSlot(() => downloadRemoteImageForOzonOnce(url, options));
+}
+
+async function downloadRemoteImageForOzonOnce(url, {
   fetchImpl = fetch,
   timeoutMs = 30000
 } = {}) {
@@ -86,7 +106,7 @@ export async function downloadRemoteImageForOzon(url, {
       ok: false,
       url,
       status: 0,
-      error: error?.name === "TimeoutError" ? "timeout" : (error?.message || String(error)),
+      error: /TimeoutError|AbortError/.test(error?.name || "") || error?.code === "ABORT_ERR" ? "timeout" : (error?.message || String(error)),
       elapsedMs: Date.now() - startedAt
     };
   }

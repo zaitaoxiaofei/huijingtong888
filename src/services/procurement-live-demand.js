@@ -1,5 +1,6 @@
 // Read-only projections: a missing request must not hide an order's actual shortage.
-export function supplementLiveProcurementRows(rows, coverage) {
+import {cancelledOrderPurchase} from '../shared/procurement-demand-cancellation.js';
+export function supplementLiveProcurementRows(rows, coverage, cancellations = new Map()) {
   const metadata = new Map(rows.map(row => [Number(row.product_id), row]));
   const actionable = new Set(rows.filter(row => ['pending', 'suggested', 'submitted'].includes(row.status)
     && !['purchased', 'partial_inbound', 'inbound_done'].includes(row.purchase_order_status)
@@ -9,7 +10,8 @@ export function supplementLiveProcurementRows(rows, coverage) {
     if (!order.needs_fulfillment || order.stock_location === 'FBP') continue;
     for (const item of order.items) {
       const productId = Number(item.product_id);
-      if (!(item.shortage_quantity > 0) || !metadata.has(productId) || actionable.has(productId)) continue;
+      const quantity = cancelledOrderPurchase(item,productId,cancellations).actionable_shortage_quantity;
+      if (!(quantity > 0) || !metadata.has(productId) || actionable.has(productId)) continue;
       const product = metadata.get(productId);
       extra.push({ ...product, id: 0, product_id: productId, status: 'suggested', demand_type: 'real_order',
         purchase_order_id: null, purchase_order_status: '', person_id: null, person_name: '',
@@ -19,7 +21,7 @@ export function supplementLiveProcurementRows(rows, coverage) {
         source_order_tracking_stage: order.source_order_tracking_stage,
         source_order_logistics_status: order.source_order_logistics_status,
         operational_needs_fulfillment: true,
-        quantity: item.shortage_quantity, amount: 0, shipping_amount: 0,
+        quantity, amount: 0, shipping_amount: 0,
         created_at: order.transport_at, updated_at: order.transport_at, live_order_demand: true });
     }
   }

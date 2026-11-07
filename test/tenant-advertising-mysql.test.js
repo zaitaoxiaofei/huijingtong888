@@ -37,6 +37,34 @@ test('advertising reads, imports and remote mutations use current enterprise', {
         assert.equal((await service.advertisingDailyMysql({ ...range, shop_id: id === 2 ? 30 : 20 })).total, 0);
       });
     });
+    await t.test('period and shop totals ignore list pagination and exclude pending report amounts', async () => {
+      await scoped(2, async () => {
+        await service.upsertAdvertisingDailyRowsMysql({ rows: [
+          { shop_id: 20, date_key: '2026-10-03', ozon_sku: 'second-sku', campaign_id: 'other', spend_rub: 50, revenue_rub: 300, impressions: 100, clicks: 10, orders: 2 },
+          { shop_id: 20, date_key: '2026-10-03', ozon_sku: 'pending-sku', campaign_id: 'pending', source: 'ozon_performance_pending', spend_rub: 9999, revenue_rub: 99999 }
+        ] });
+        const first = await service.advertisingDailySummaryMysql({ ...range, page: 1, pageSize: 1 });
+        const second = await service.advertisingDailySummaryMysql({ ...range, page: 2, pageSize: 1 });
+        assert.deepEqual(second, first);
+        assert.equal(first.spend_rub, 250);
+        assert.equal(first.revenue_rub, 2300);
+        assert.equal(first.roas, 9.2);
+        assert.equal(first.pending_rows, 1);
+        assert.equal(Number(first.settled_rows), 2);
+        assert.equal(first.shops.length, 1);
+        assert.equal(Number(first.shops[0].shop_id), 20);
+        assert.equal(first.shops[0].spend_rub, 250);
+        assert.equal((await service.advertisingDailySummaryMysql({ ...range, keyword: 'second-sku' })).spend_rub, 50);
+        assert.equal((await service.advertisingDailySummaryMysql({ ...range, from: '2026-10-03', to: '2026-10-03' })).spend_rub, 50);
+        assert.equal((await service.advertisingDailySummaryMysql({ ...range, shop_id: 30 })).spend_rub, 0);
+        const empty = await service.advertisingDailySummaryMysql({ from: '2026-09-01', to: '2026-09-01' });
+        assert.equal(empty.spend_rub, 0);
+        assert.equal(empty.roas, 0);
+        assert.deepEqual(empty.shops, []);
+        // Keep subsequent cross-tenant mutation checks on the original fixture.
+        await query("DELETE FROM ozon_ad_sku_daily WHERE shop_id=20 AND date_key='2026-10-03'");
+      });
+    });
     await t.test('mixed imports and foreign product references fail before any own or foreign row changes', async () => {
       const before = await query('SELECT SUM(spend_rub) total FROM ozon_ad_sku_daily');
       await assert.rejects(scoped(2, () => service.upsertAdvertisingDailyRowsMysql({ tenant_id: 3, rows: [

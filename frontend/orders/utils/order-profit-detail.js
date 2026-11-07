@@ -61,7 +61,7 @@ function itemSaleAmount(item) {
 
 function orderSaleAmount(rows = [], order = {}, financeRows = []) {
   const outcome = String(order.outcome_type || "");
-  if (outcome === "cancelled_pre_fulfillment") return 0;
+  if (["cancelled_pre_fulfillment", "cargo_lost"].includes(outcome)) return 0;
   if (["rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
     return hasFinanceSaleAccrual(financeRows) ? sumRows(rows, (item) => positiveAmount(item.sale_amount_cny)) : 0;
   }
@@ -93,7 +93,7 @@ function itemActualDomesticShipping(item) {
 }
 
 function isTerminalNoOriginalRevenue(order = {}) {
-  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(order.outcome_type || "").trim());
+  return ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(order.outcome_type || "").trim());
 }
 
 function terminalLossPolicy(order = {}) {
@@ -101,6 +101,9 @@ function terminalLossPolicy(order = {}) {
   const profile = String(order.loss_profile_code || "").trim().toLowerCase();
   if (outcome === "cancelled_pre_fulfillment") {
     return { purchase: false, domestic: false, international: false, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: false };
+  }
+  if (outcome === "cargo_lost" || profile === "cargo_purchase_collecting") {
+    return { purchase: true, domestic: false, international: false, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: false };
   }
   if (profile === "purchase_collecting") {
     return { purchase: true, domestic: false, international: true, packaging: false, commission: false, service: false, collecting: true, aftersaleFinance: true };
@@ -157,7 +160,7 @@ function hasFinanceSaleAccrual(finance = []) {
 
 function hasRequiredFinanceBasis(finance = [], order = {}) {
   const outcome = String(order.outcome_type || "");
-  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(outcome)) return true;
+  if (["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(outcome)) return true;
   return hasFinanceSaleAccrual(finance) && finance.some((row) => financeCategory(row) === "commission");
 }
 

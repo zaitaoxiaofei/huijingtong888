@@ -93,7 +93,7 @@ test("V1 and daily FX V2 dispatch explicitly while legacy repair refuses V2", ()
   assert.equal(assertProfitFormulaSupported("V2", { operation: "finance" }), "V2");
   assert.equal(assertProfitFormulaSupported("V2", { operation: "aftersale" }), "V2");
   assert.throws(() => assertProfitFormulaSupported("V2", { operation: "historical_repair" }), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
-  for (const version of ["V3", "latest", "", null]) {
+  for (const version of ["V99", "latest", "", null]) {
     assert.throws(() => getProfitFormula(version), { code: "UNSUPPORTED_PROFIT_FORMULA_VERSION" });
     assert.throws(() => assertProfitFormulaSupported(version, { operation: "aftersale" }));
   }
@@ -207,7 +207,7 @@ test("baseline saves exact existing monetary and lock values without inventing h
 
 test("unsupported pinned versions fail before projection, and a projection failure rolls back revision and pointer", async () => {
   const db = memoryDatabase();
-  await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V3", project: () => assert.fail("must not project") })), /Unsupported profit formula/);
+  await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V99", project: () => assert.fail("must not project") })), /Unsupported profit formula/);
   await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, formulaVersion: "V2", project: () => assert.fail("must not upgrade") })), /explicit supported version migration/);
   assert.equal(db.revisions().length, 0);
   await assert.rejects(db.transaction((connection) => recordOrderProfitCalculation(connection, { ...calculation, project: async ({ connection }) => {
@@ -223,7 +223,7 @@ test("lookup requires ownership and never falls back from a corrupt existing pin
   await assert.rejects(getPinnedProfitFormulaVersion({ query }, 101), /ownership/);
   assert.equal(await getPinnedProfitFormulaVersion({ query, tenantId: 7 }, 101), "V1");
   await db.transaction((connection) => recordOrderProfitCalculation(connection, calculation));
-  db.states().get("7:101").formula_version = "V3";
+  db.states().get("7:101").formula_version = "V99";
   await assert.rejects(getPinnedProfitFormulaVersion({ query, tenantId: 7 }, 101), /Unsupported profit formula/);
   assert.equal(await getPinnedProfitFormulaVersion({ query, tenantId: 8 }, 101), "V1");
   assert.equal(profitCalculationTenantKey(null), "admin");

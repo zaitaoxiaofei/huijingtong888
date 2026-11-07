@@ -28,6 +28,152 @@ Enforcement:
 
 ## Schemas
 
+### InventorySupplyPlan
+
+One physical supply pool for required FBS/formal FBP and optional local/FBP safety procurement. Existing FBP locks remain protected and each inbound unit is used once. Planning does not reserve, receive or purchase stock.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `known` | `boolean` | Yes | Physical, local safety and application evidence are complete |
+| `required_purchase` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_purchase` | `number` | No | Sum of verified optional requirements; consult fbp_forecast_known before treating this as a complete FBP forecast |
+| `required_fbs` | `number` | No | Physical units; unknown is null, never zero |
+| `required_fbp` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_local` | `number` | No | Physical units; unknown is null, never zero |
+| `optional_fbp` | `number` | No | Physical units; unknown is null, never zero |
+| `fbs_waiting_incoming` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_waiting_incoming` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_ready_stock` | `number` | No | Physical units; unknown is null, never zero |
+| `submitted_fbp_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `unbacked_fbp_locks` | `number` | No | Physical units; unknown is null, never zero |
+| `order_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `locked_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_forecast_quantity` | `number` | No | Physical units; unknown is null, never zero |
+| `required_fbp_physical_gap` | `number` | No | Physical units; unknown is null, never zero |
+| `forecast_fbp_physical_gap` | `number` | No | Physical units; unknown is null, never zero |
+| `fbp_forecast_known` | `boolean` | No | All bound official FBP snapshots and safety targets are verified; formal applications can still be required while the forecast is unknown |
+
+### InventoryWorkflowDemand
+
+Four physical-unit procurement purposes: real_order, local_safety, fbp_stock, fbp_forecast. Required FBS/formal FBP take precedence over optional safety targets; requests are reminders, never additional physical allocation.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `key` | `string` | Yes | real_order | local_safety | fbp_stock | fbp_forecast |
+| `label` | `string` | Yes | Business purpose |
+| `priority` | `number` | Yes | 1 through 4 |
+| `process_status` | `string` | No | Optional request_submitted, pending_review or draft; separate from supply colour |
+| `advisory_status` | `string` | No | Optional FBP opportunity/warning advisory; never reserves or purchases stock |
+| `status` | `string` | Yes | danger | warning | success | opportunity | unknown |
+| `physical_gap` | `number` | No | Dispatchable physical shortage; null when unknown |
+| `purchase_quantity` | `number` | No | Net additional purchase requirement after scoped inbound allocation; null when unknown |
+| `required_purchase_quantity` | `number` | No | Required FBS or formal FBP uncovered units |
+| `optional_purchase_quantity` | `number` | No | Optional local or FBP safety uncovered units |
+| `submitted_quantity` | `number` | No | Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand |
+| `requests` | `array<object>` | No | Source requests |
+
+### FbpSupplyState
+
+FBP sellable-stock safety loop. Official available already excludes platform reservations; transfer receipts never directly increase it. SKU units expand to physical inventory units once.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `known` | `boolean` | Yes | All bound SKU snapshots and targets are known |
+| `status` | `string` | Yes | unknown | warning | in_transit | success |
+| `available` | `number` | No | Physical units; null until verified |
+| `safety` | `number` | No | Physical units; null until verified |
+| `shortage` | `number` | No | Physical units; null until verified |
+| `in_transit` | `number` | No | Physical units; null until verified |
+| `committed` | `number` | No | Physical units; null until verified |
+| `replenish_quantity` | `number` | No | Physical units; null until verified |
+| `rows` | `array<object>` | No | Independent per-SKU shortages, never netted across shops |
+
+### InventoryWorkflow
+
+Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations. Verified FBP safety shortages and submitted applications share one per-SKU requirement; approved stock and transit cover it before procurement.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `product_id` | `number` | Yes | Owned inventory product ID |
+| `overall` | `string` | Yes | Worst demand/advisory status |
+| `stock_status` | `string` | No | Supply sufficiency only; pending approvals never make surplus stock yellow |
+| `demands` | `array<InventoryWorkflowDemand>` | Yes | Four purposes; FBS and formal FBP required, local safety and unconfirmed FBP forecasts optional yellow |
+| `fbp` | `FbpSupplyState` | No |  |
+| `supply_plan` | `InventorySupplyPlan` | No |  |
+| `local_stock_status` | `string` | No | Local supply colour, independent of the FBP safety alert |
+| `forecast` | `object` | No | Optional current-enterprise SKU projection for the detail UI; absent from lean first paint |
+| `physical` | `number` | No | Physical units, nullable when unknown |
+| `order_demand` | `number` | No | Physical units, nullable when unknown |
+| `safety` | `number` | No | Physical units, nullable when unknown |
+| `locked` | `number` | No | Physical units, nullable when unknown |
+| `free` | `number` | No | Physical units, nullable when unknown |
+| `purchase_quantity` | `number` | No | Physical units, nullable when unknown |
+| `requested` | `number` | No | Named physical quantity or coverage days |
+| `incoming` | `number` | No | Named physical quantity or coverage days |
+| `local_days` | `number` | No | Named physical quantity or coverage days |
+| `fbp_days` | `number` | No | Named physical quantity or coverage days |
+| `incoming_note` | `string` | No | Inbound arrival/dispatch warning |
+| `calculated_at` | `string` | No | Calculation time |
+| `requests` | `array<object>` | No | Available for full detail; light status may omit |
+| `applications` | `array<object>` | No | Available for full detail; light status may omit |
+| `purchases` | `array<object>` | No | Available for full detail; light status may omit |
+| `batches` | `array<object>` | No | Available for full detail; light status may omit |
+| `skus` | `array<object>` | No | Available for full detail; light status may omit |
+| `opportunities` | `array<object>` | No | Available for full detail; light status may omit |
+| `transfers` | `array<object>` | No | Available for full detail; light status may omit |
+| `fbp_forecast_suggestions` | `array<object>` | No | Available for full detail; light status may omit |
+| `settings` | `object` | No | Current effective replenishment settings |
+| `forecast_error` | `string` | No | Advisory forecast unavailable; core ledger remains usable |
+
+### InventoryFlowSummary
+
+Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `physical` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `order_demand` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `locked` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `safety` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `free` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `unoccupied` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `protection_gap` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `incoming` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `incoming_assigned` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `order_shortage` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `requested` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `local_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `fbp_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `consumed_7d` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `daily_consumption` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `estimated_dates` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `production_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `local_shipping_days` | `number` | No | Physical units or named coverage days; nullable when unknown. |
+| `applications_pending` | `boolean` | No | Local-first response has not loaded FBP applications yet; requested is null, not zero. |
+| `consumption_from` | `string` | No | Inclusive UTC start of the seven complete Beijing days. |
+| `consumption_to` | `string` | No | Exclusive UTC end of the consumption window. |
+| `unavailable` | `boolean` | No | Optional summary could not be loaded. |
+| `message` | `string` | No | Non-sensitive recovery guidance when unavailable. |
+| `safety_status` | `string` | No | Forecast completeness and interpretation. |
+| `orders` | `array<object>` | No | Current open orders, without finance fields. |
+| `applications` | `array<object>` | No | Active FBP requests and reservations; request quantity is not deducted again. |
+| `transfers` | `array<object>` | No | Read-only receipt evidence; never updates official available |
+| `purchases` | `array<object>` | No | Nonfinancial pending-purchase summary. |
+| `safety_rows` | `array<object>` | No | Per-SKU forecast basis. |
+| `calculated_at` | `string` | No | UTC calculation time; UI formats Beijing time. |
+
+### InventoryLedgerFlowResponse
+
+Existing ledger fields plus an optional shared flow summary. Inventory-only ledger retains its financial-field allowlist; procurement ledger retains its existing duty requirements.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `flow_summary` | `InventoryFlowSummary` | No | Present for include_flow=1 or local; local omits FBP-dependent work. |
+| `product_id` | `number` | No | Only for view=fbp, the requested scoped product. |
+| `fbp_inventory` | `object` | No | Official cached snapshot rows/present/available/incomplete; null or omitted before deferred read. |
+| `applications` | `array<object>` | No | Only for view=fbp. |
+| `requested` | `number` | No | Total active FBP requested physical units, only for view=fbp. |
+
 ### EnterpriseMessagePeer
 
 Active person in the authenticated enterprise. No global account roster.
@@ -1602,6 +1748,58 @@ Resolved AI strategy plan with strategy modules and optional selected bundle.
 
 ## Endpoints
 
+### Collector editor and cache
+
+#### `POST /api/listing/collector-box/{sku}/create-listing-template`
+
+Prepare a current-enterprise collected product. previewOnly returns an ephemeral editor response without archiving media or writing a template; normal calls still archive all media before persistence.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `sku` (`string`, required): Current-enterprise collected SKU
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/listing/templates`
+
+Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `502` `application/json` -> `ErrorResponse`
+
+#### `PUT /api/listing/templates/{id}`
+
+Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Owned template ID
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `502` `application/json` -> `ErrorResponse`
+
+#### `POST /api/local-plugin/collected-products/lookup-batch`
+
+Look up current-enterprise collected product previews. Optional summary mode avoids reading raw JSON; missing summary preserves older plugin behavior.
+
+- Auth: `local-plugin`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 ### Docs
 
 #### `GET /api/docs`
@@ -2092,6 +2290,36 @@ Read a tail image owned by the current enterprise. Other media, generation, jobs
   - `200` `image/*` -> `binary`
   - `404` `application/json` -> `ErrorResponse`
 
+### SKU Daily Traffic
+
+#### `GET /api/db/seller-analytics/sku-daily`
+
+Read current-enterprise daily SKU traffic for the last 15 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `shop_id` (`string`, optional): Owned shop ID or all
+  - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to yesterday
+  - `query` (`string`, optional): SKU, offer or name
+  - `page` (`number`, optional): 1-based page
+  - `pageSize` (`number`, optional): At most 100
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/db/seller-analytics/sku-daily/collect`
+
+Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 15 report dates.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 ### Enterprise Plugin Credentials
 
 #### `GET /api/tenants/plugin-token`
@@ -2171,11 +2399,16 @@ Read the safe shared tariff projection for enterprise calculators. Includes enab
 
 #### `GET /api/dashboard`
 
-Return dashboard summary counters and grouped metrics.
+Return dashboard summary counters and grouped metrics. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. Mobile date/dateKey/date_key must identify the same valid Beijing-calendar day no later than today; invalid or future days return 400 before loading or queuing a snapshot. Daily metrics use the selected day, month metrics accumulate from that month's start through the selected day, and ad_date_key identifies the actual advertising snapshot day. view=mobile-finance requires fresh finance duty and returns actual purchases for that same period plus current local/FBP/in-transit inventory values. Its period contains month_key/from/to/timezone; inventory_basis=current and inventory_snapshot_at identify the current read, not historical end-of-day inventory. Mobile sections load independently; no external sync or historical profit recalculation. Desktop date compatibility remains unchanged.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `view` (`string`, optional): Optional mobile or mobile-finance projection; otherwise the existing desktop dashboard.
+  - `date` (`string`, optional): Selected Beijing business day YYYY-MM-DD, default today. Mobile aliases dateKey/date_key must agree when provided.
+  - `snapshotOnly` (`string`, optional): 1 reads saved/in-progress dashboard data without starting another rebuild.
 - Responses:
   - `200` `application/json` -> `DashboardResponse`
+  - `400` `application/json` -> `object`
 
 #### `GET /api/exchange-rate/current`
 
@@ -2241,7 +2474,7 @@ Create a new manual exchange-rate record.
 
 #### `GET /api/profit-ranking`
 
-Return ranking rows for the selected profit dimension.
+Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination. Inventory mode reads only sales aggregates, skips profit/fee and advertising report calculations; only the requested page is returned.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -2253,8 +2486,33 @@ Return ranking rows for the selected profit dimension.
   - `metric` (`string`, optional): Optional metric selector.
   - `page` (`number`, optional): Optional page number.
   - `pageSize` (`number`, optional): Optional page size.
+  - `inventory` (`string`, optional): Set to 1 for the inventory sales leaderboard (product/sku dimensions).
+  - `productId` (`integer`, optional): Filter inventory leaderboard details by inventory product ID.
 - Responses:
   - `200` `application/json` -> `array<object>`
+
+#### `GET /api/monthly-billing-details`
+
+Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.
+
+- Auth: `authenticated; current-enterprise finance authority`
+- Query parameters:
+  - `year` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `fromMonth` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `toMonth` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `month` (`integer`, optional): Calendar year/month selection; the current month ends on Beijing today.
+  - `from` (`string`, optional): Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days.
+  - `to` (`string`, optional): Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days.
+  - `shopId` (`string`, optional): Current-enterprise shop ID or all.
+  - `companyId` (`string`, optional): Current-enterprise company ID or all; an unowned company returns 404.
+  - `overviewOnly` (`string`, optional): 1 selects grouped monthly summaries.
+  - `includeAppendices` (`string`, optional): 0 omits procurement/current-inventory and AI appendix work; otherwise include the existing appendices. No financial summary fields are removed.
+  - `includeOrders` (`string`, optional): 1 includes order rows for the selected calendar month; independent of appendix selection.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
 
 #### `GET /api/profit-reconciliation`
 
@@ -2462,6 +2720,26 @@ Remove the current operator's failed label-print batch.
 - Responses:
   - `200` `application/json` -> `object`
 
+#### `GET /api/orders/:id/split`
+
+Read the owned order's unfinished split operation so reopening the dialog resumes reconciliation instead of sending another split.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Order identifier.
+- Responses:
+  - `200` `application/json` -> `object|null`
+
+#### `POST /api/orders/split`
+
+Split one owned FBS posting without preparing or dispatching. The UUID request key prevents duplicate upstream mutations; reconciliation repeats reads only. Official child details are imported before ok=true; the operator separately confirms preparation through orders/ship.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `POST /api/orders/ship`
 
 Submit shipment confirmation to Ozon for selected orders.
@@ -2512,9 +2790,24 @@ Replace order quality-check prefix rules in bulk.
 
 #### `GET /api/products`
 
-Return active product master data with inventory and profit metrics.
+Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `view` (`string`, optional): inventory for lean inventory list; omitted preserves other product consumers
+  - `includeStock` (`string`, optional): 0 returns list metadata immediately; quantities are nullable and loaded separately by view=local
 - Responses:
   - `200` `application/json` -> `array<ProductRecord>`
 
@@ -2531,6 +2824,19 @@ Return selection-facing product records.
 Return archived or hidden products.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `array<ProductRecord>`
 
@@ -2543,6 +2849,21 @@ Return one product with full computed detail.
   - `id` (`number`, required): Product identifier.
 - Responses:
   - `200` `application/json` -> `ProductRecord`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `GET /api/products/:id/edit-history`
+
+Read current-enterprise inventory identity edit versions and independently retained old inventory numbers/names. Requires fresh inventory.read membership and product ownership. Snapshot fields are allowlisted identity/specification and stable component references; no prices, supplier details, private notes or order data. Ordinary inventory saves and core-name edits record before/after in the same transaction as the edit. Historical aliases are retention evidence, not reconstructed full versions or paired old identities.
+
+- Auth: `authenticated`
+- Path parameters:
+  - `id` (`number`, required): Stable product identifier.
+- Query parameters:
+  - `page` (`number`, optional): One-based history page; maximum 1000000.
+  - `pageSize` (`number`, optional): Positive page size, capped at 100; default 20.
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
   - `404` `application/json` -> `ErrorResponse`
 
 #### `GET /api/products/:id/image`
@@ -2588,7 +2909,7 @@ Create a new product and return the enriched detail row.
 
 #### `PUT /api/products/:id`
 
-Update a product in place.
+Update a product in place. Inventory identity changes append a product_edit before/after event and preserve a changed old name as an existing search alias in the same transaction; generated inventory numbers are read after their normal numbering triggers. Stable product IDs and SKU/purchase references remain unchanged. No-op identity saves do not append an empty identity version.
 
 - Auth: `authenticated`
 - Path parameters:
@@ -2690,7 +3011,7 @@ Bind an online product to an ERP product and owner.
 
 #### `GET /api/online-products/warehouses`
 
-Return Ozon warehouses for a shop.
+Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.
 
 - Auth: `authenticated`
 - Query parameters:
@@ -2733,6 +3054,19 @@ Create a new ERP product from an online product.
 Return SKU mapping rows.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `array<SkuMappingRecord>`
 
@@ -2770,6 +3104,154 @@ Fetch a remote image through the backend with response validation.
 
 ### Inventory
 
+#### `GET /api/inventory/ledger`
+
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
+  - `include_flow` (`string`, optional): 1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast.
+  - `view` (`string`, optional): fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request.
+- Responses:
+  - `200` `application/json` -> `InventoryLedgerFlowResponse`
+
+#### `GET /api/procurement/ledger`
+
+Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Current-enterprise physical inventory product ID.
+  - `include_flow` (`string`, optional): 1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast.
+  - `view` (`string`, optional): fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request.
+- Responses:
+  - `200` `application/json` -> `InventoryLedgerFlowResponse`
+
+#### `POST /api/fbp-replenishment-orders/status`
+
+Run the existing enterprise FBP status writer. A new transition into pending_review resolves physical SKU components and writes supply-gap notifications in the same transaction; repeated pending status does not notify again. Existing review, reserve, shipment and receipt accounting remain in the canonical writer.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `GET /api/fbp-replenishment-orders`
+
+Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `orderId` (`number`, optional): Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page.
+  - `status` (`string`, optional): Existing workflow status filter; all for a deep link.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow`
+
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/detail`
+
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/settings`
+
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/tasks`
+
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/events`
+
+Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-flow/sync-status`
+
+Poll the current enterprise/product FBP synchronization task. Requires inventory.write. Task results are isolated by enterprise and product; missing or restarted tasks do not imply zero stock.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Positive inventory product ID.
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/settings`
+
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/tasks`
+
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/task-action`
+
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-flow/sync`
+
+Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+
 #### `GET /api/inventory`
 
 Return inventory overview rows.
@@ -2783,6 +3265,19 @@ Return inventory overview rows.
 Return inventory alert rows and replenishment suggestions.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
 - Responses:
   - `200` `application/json` -> `StockAlertsResponse`
 
@@ -2891,6 +3386,23 @@ Create a positive manual adjustment to clear historical negative stock debt.
 Return inbound record rows.
 
 - Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `status` (`string`, optional): pending_arrival for pending receipts, approved for received records; legacy all remains supported
+  - `demandType` (`string`, optional): all | real_order | local_safety | fbp_stock | fbp_forecast; inventory_warning retained for older callers
+  - `inventoryType` (`string`, optional): all | single | accessory | combo
+  - `productId` (`number`, optional): Optional owned product context
+  - `paged` (`string`, optional): 1 for rows/total/page/pageSize, all predicates apply before paging
 - Responses:
   - `200` `application/json` -> `array<InboundRecord>`
 
@@ -2951,6 +3463,297 @@ Return procurement request rows.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `array<ProcurementRequestRecord>`
+
+#### `GET /api/inventory-workflow`
+
+Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_ids` (`string`, optional): 1–20 comma-separated owned product IDs; alternatively product_id
+  - `product_id` (`number`, optional): Single owned product ID
+  - `view` (`string`, optional): local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; components for owned minimum physical inventory composition and related bundles; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details
+  - `shop_id` (`number`, optional): Current-enterprise shop for view=sku
+  - `ozon_sku` (`string`, optional): Bound SKU for view=sku
+  - `fresh` (`string`, optional): 1 bypasses the short-lived tenant/product cache
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/alerts`
+
+Read product warnings from the same four-demand inventory policy; severity filtering occurs before paging. view=workspace immediately reads a persisted enterprise demand snapshot and current-page nonfinancial sources. It never waits for history/forecast rebuilding: first use returns snapshot.available=false and null total/task counts while warming; stale successful results remain visible. Background work is serialized and limited to two SQL queries, automatically coalesced to once/minute per active enterprise and periodically renewed after five minutes. refresh=1 queues manual reconciliation, sharing active jobs; a write during an older manual job schedules one follow-up. Poll only while snapshot.refreshing; business writes do not use snapshots. Errors retain last success, personnel details are loaded freshly, and inventory_demand_snapshots must be initialized before readiness. Current inventory.read membership required.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `view` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data
+  - `scope` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data
+  - `task` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data
+  - `product_id` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data
+  - `compact` (`string`, optional): view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data
+  - `alertType` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `sortBy` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `refresh` (`string`, optional): Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1
+  - `page` (`number`, optional): Page index or page size, maximum100
+  - `pageSize` (`number`, optional): Page index or page size, maximum100
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `GET /api/inventory-workflow/demand-details`
+
+Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; active and historical FBP applications expanded through current SKU recipes/components with original SKU quantities; historical binding_status=changed_or_missing retains owned shop/product provenance after SKU rebinding, while active requests still require the current mapping chain; pending batches plus recent50 actual purchase records and all-record totals. Purchase amount/unit_cost are returned only to procurement members; packing sees nonfinancial quantities. No remote Ozon calls.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `product_id` (`number`, required): Owned physical inventory product
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/cancel-demand`
+
+Review a purchasing-only decision for selected current-enterprise FBS order-item/product sources. Fresh procurement duty, product/source locks, observed cancellation_revision and a UUID request key are required. Cancel excludes only the reviewed fixed quantity from actionable purchasing; raw order shortages, sales order status, stock and purchased history remain unchanged. Restore removes only selected prior decisions. All operations audit actor/reason and invalidate workflow snapshots; new orders and increased demand remain actionable. Legacy refresh and later grouped purchase allocation honor the same decisions.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/local-safety`
+
+Fresh inventory.write/procurement membership can override only a specific product's local safety. Optional production_days/local_shipping_days update the same product fields used by inventory editing and the effective flow overrides atomically, requiring expected_product_updated_at. Preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/procurement/purchases`
+
+Canonical actual purchase registration. Optional workspace_batch=true enables a 1..100 distinct-product shortage-purchase table: positive integer quantities and actual goods amounts, nonnegative shipping; fresh procurement duty and tenant ownership for all references. Reuses open requests for selected products and creates requests only for products without one. All products, costs and inbound batches commit atomically. A UUID request_key is mandatory for workspace batches; serialized retry identity and audited payload hash return the original purchase order on identical retries, changed payload returns409. Does not post local stock. Existing non-batch purchase modes retain their existing behavior.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/demand-request`
+
+Create or reuse real procurement requests for four demand purposes (FBS real orders and formal FBP applications required; local safety and unconfirmed FBP forecasts optional yellow). Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/purchase-bundle`
+
+Read a current-enterprise purchased bundle batch, observed revision, minimum physical components and proposed cost allocation. Procurement duty required; financial values are not part of the nonfinancial arrivals list. Missing component costs remain unknown.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `id` (`number`, required): Owned purchased inbound batch
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/purchase-bundle`
+
+Procurement manually reconciles one pending/arrived bundle purchase into minimum-unit purchased batches. Whole mode requires every component at the saved composition ratio and explicit cost-allocation confirmation; goods/freight totals each stay equal to the source. Parts mode records only selected actually purchased components, with explicit confirmation if correcting the paid amount. Canonical ledger actions retire only the source pending quantity and create the chosen physical batches atomically; no stock is received. Source, buyer/date/logistics, actor and lineage remain audited. Fresh duty, ownership, observed source/BOM revision, product locks and retry identity are checked; approved/cancelled history is protected.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/purchase-arrivals`
+
+Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage. source_bundle_batch may include the original purchase_order_id and order_no after database ownership and lineage validation; the row's actual purchase/action IDs stay unchanged. Unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `query` (`string`, optional): Keyword interpreted by searchMode; default auto keeps page-specific business fields
+  - `shopId` (`string`, optional): Current-enterprise shop ID, or all
+  - `searchMode` (`string`, optional): auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms
+  - `inventoryCategory` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `productName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleBrand` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `fitmentType` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `vehicleModel` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `accessoryName` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `color` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `material` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `process` (`string`, optional): Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination.
+  - `status` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `product_id` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `page` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `pageSize` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `summary_only` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `recent` (`string`, optional): open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details
+  - `day_mode` (`string`, required): pending opts into purchase-day selection; absent preserves all-day legacy listing
+  - `purchase_day` (`string`, required): YYYY-MM-DD in Beijing time or all; defaults to the oldest pending day matching status when day_mode=pending; a selected completed date falls back to the oldest remaining date and resets page to 1
+  - `start_date` (`string`, required): Optional inclusive Beijing purchase start day YYYY-MM-DD
+  - `end_date` (`string`, required): Optional inclusive Beijing purchase end day YYYY-MM-DD
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/purchase-arrivals`
+
+Buyer confirms the actual arrived quantity in one owned purchased batch; omit quantity for compatible full arrival. Partial confirmation atomically splits arrived quantity from an unarrived remainder with preserved purchase/request links and conserved amounts/freight. Purchase header/item totals do not change and no stock is posted. Same-key replay returns the saved split; changed payload or stale timestamp/expected_quantity rejects. operation=logistics retains its existing courier/tracking-only behavior and observed logistics checks. Fresh procurement duty and owned purchased source are rechecked under locks.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/feedback`
+
+Fresh current-enterprise packing, inventory.write or procurement membership can report stock discrepancies. Recomputes the inventory supply plan and atomically notifies active scoped administrators/procurement/operations. Feedback is a notification and does not add another procurement quantity, mutate stock or change costs. FBP submission can include this notification in its existing transaction; stocktake already committed is never retried just because notification failed.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/requests`
+
+Any active current-enterprise member may propose one of four purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. fbp_stock requires a submitted/approved application; fbp_forecast remains an optional yellow suggestion and requires a verified net prediction shortage after pending requests, stock and transit; FBS requires a matching unfulfilled local order.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/details`
+
+Lazy, owned-product node records for requests, purchase-confirm, incoming, receiving, orders, safety, composition or fbp-receipts. composition exposes only owned child image/name/inventory code/quantity and flags incomplete links. fbp-receipts supports summary_only=1 for scoped total/pending_quantity without evidence-history reads, or pages owned transfers, snapshot-change plus recorded FBP outbound evidence, due times and manual receipt state; it never confirms automatically. Fresh inventory.read membership; amounts are returned only with procurement permission. Requests/history default to three months while unfinished work remains visible; all=1 includes older history with 50-row pagination. Incoming warns strictly after48h; receiving includes actual arrival or elapsed72h without approving receipt. Orders expose scoped FBS image, shop, shipping and shared mark only. Safety returns effective cycle rules and optimistic revision.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/node-action`
+
+Fresh membership and per-action duty checked inside transaction. arrived/transit-check require packing or procurement; arrived records received_at but never changes status, money or stock. reject requires procurement and nonempty reason, cancels only an unpurchased request and records rejected approval. order-note requires orders.manage, packing, procurement or inventory.write, verifies selected product consumes this open order, preserves existing mark type and conflicts on stale expected_note. All changes append inventory_flow_events. Approval with purchase uses the existing confirm-from-requests writer, not this route. fbp-arrival-time/fbp-expected-time require packing or inventory.write and optimistic transfer/arrival state; they audit dates without posting stock. fbp-receive rechecks the fresh duty inside the canonical confirm-received transaction, requires an integer quantity and expected_listed_quantity, preserves official stock, and records the confirming operator.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/receipts/context`
+
+Read pending purchased batches and independent local physical/available quantities for direct receipt entry. Fresh packing/procurement duty; tenant ownership; no prices or FBP calls.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/receipts/preview`
+
+Validate selected quantities through the canonical receipt impact preview. Read-only: returns requires_count, revision, quantity, physical_before/after and available_before/after. Mobile records may include courier_company/tracking_number and up to six receipt_images_json URLs; only owned image attachments are accepted. Historical count is never guessed; missing count leaves after values unknown. No cost fields or stock writes.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `GET /api/inventory-workflow/receipts`
+
+Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `object`
+
+#### `POST /api/inventory-workflow/receipts`
+
+Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes and before replay. New-arrival requests with a UUID request_key atomically save a tenant-and-actor-scoped receipt result; identical retries recover lost responses without adding stock twice, while changed product, quantities, reason, evidence or revision under the same key conflict. Legacy requests without a key and historical receipts retain their existing paths. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
+
+#### `POST /api/inventory-workflow/fbp`
+
+Create or update the existing FBP replenishment draft for owned bound shop SKUs. Optional forecast_confirmation=true plus UUID request_key and submit=true creates independent confirmed orders without overwriting same-day requests or submitting unselected existing draft SKUs. Identical retries return the original orders; changed contents with the same key return409. Unpurchased flow_fbp_forecast reminders are capped to the remaining net forecast in the same transaction; purchased records are preserved. Forecast and formal demand do not double count; optionally submit in the same canonical transaction with supply-gap notifications for active enterprise procurement/operations. All SKU quantities share one physical inventory pool; unselected related SKUs are not created. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+
+#### `POST /api/procurement/stock-topups`
+
+Warehouse inventory topup reminder: atomically create a submitted warehouse request and unread notifications for active current-enterprise owners/admins and procurement staff. Requires current packing or inventory.write duty. Does not change stock or duplicate real-order demand. No tenant/actor selector is accepted.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+  - `409` `application/json` -> `ErrorResponse`
 
 #### `POST /api/procurement/requests`
 
@@ -3248,7 +4051,7 @@ Create a team planning task.
 
 #### `POST /api/team/attachments`
 
-Upload an attachment for a product-development candidate.
+Upload an enterprise-private attachment for team work, mobile procurement evidence or receipt photos. Canonical procurement and receipt writers recheck ownership before attaching images.
 
 - Auth: `authenticated`
 - Request body: required
@@ -3395,6 +4198,24 @@ Return shop master data.
 - Auth: `authenticated`
 - Responses:
   - `200` `application/json` -> `array<ShopRecord>`
+
+#### `GET /api/shops/ozon-health`
+
+Read credential expiry and scoped sync freshness for active shops in the current enterprise. Requires a freshly verified enterprise owner/admin. No API keys or credential fingerprints are returned. A verified authorization does not prove business data is current.
+
+- Auth: `authenticated`
+- Responses:
+  - `200` `application/json` -> `array<object>`
+
+#### `POST /api/shops/ozon-health`
+
+Probe the selected own active shop through the read-only Ozon roles endpoint. Requires a freshly verified enterprise owner/admin. Repeated checks within one minute are suppressed. Missing expiry, transient failure, expired/revoked keys, unsigned offers and denied permissions remain different states; obsolete in-flight key responses are ignored.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
 
 #### `POST /api/shops`
 

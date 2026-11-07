@@ -3,6 +3,7 @@ import test from 'node:test';
 import mysql from 'mysql2/promise';
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { createOglDispatchService } from '../src/services/ogl-dispatch.js';
+import { oglPhysicalDispatchSql } from '../src/services/ogl-dispatch-state.js';
 
 test('mixed OGL bags keep original-shop official evidence, local membership and confirmation authority separate', {
   skip: !process.env.TENANT_TEST_MYSQL_SOCKET && 'Requires independent socket-only MySQL', timeout: 120000
@@ -312,6 +313,112 @@ test('mixed OGL bags keep original-shop official evidence, local membership and 
       assert.equal((await service.detail(session(2), batchId)).batch.official_status, 'observed');
       assert.ok((await memberEvidence(batchId)).every(row => row.dispatched_at === null));
       assert.deepEqual(await foreignEvidence(), foreignBefore);
+    });
+    const observed = async () => {
+      await query('DELETE FROM order_marks WHERE order_id IN (1,2)');
+      await begin();
+      for(const table of ['ogl_dispatch_events','ogl_dispatch_official_locks','ogl_dispatch_members','ogl_dispatch_batches'])await query(`DELETE FROM ${table} WHERE tenant_id=2`);
+      await query('DELETE FROM order_marks WHERE order_id IN (1,2)');
+      state.discover=true;state.remoteStatus='formed';state.count=2;
+      await service.discover(session(2),{date:'2026-10-23',shop_id:20});
+      const [batch]=await query('SELECT id FROM ogl_dispatch_batches WHERE tenant_id=2 AND official_carriage_id=901');
+      return Number(batch.id);
+    };
+    await t.test('existing official application accepts same-enterprise system members, survives synchronization and only explicit handover supplies stock evidence',async()=>{
+      const batchId=await observed();
+      const payload={batch_id:batchId,action:'bind-orders',order_ids:[1,2],client_request_id:'manual-bind-two-orders'};
+      const beforeCalls=calls.length;
+      await Promise.all([service.action(session(2),payload),service.action(session(2),payload)]);
+      const common=await service.action(session(2),{batch_id:batchId,action:'assign-tracking',order_ids:[1,2],tracking_number:'COMMON-001',cargo_type:'normal'});
+      assert.ok(common.members.every(row=>row.tracking_assignment.tracking_number==='COMMON-001'));
+      await service.action(session(2),{batch_id:batchId,action:'assign-tracking',order_ids:[2],tracking_number:'SPECIAL-002',cargo_type:'special'});
+      const assigned=await service.detail(session(2),batchId);
+      assert.deepEqual(assigned.members.map(row=>[row.tracking_assignment.tracking_number,row.tracking_assignment.cargo_type]),[['COMMON-001','normal'],['SPECIAL-002','special']]);
+      let members=await memberEvidence(batchId);
+      assert.deepEqual(members.map(row=>[row.order_id,row.official_member]),[[1,1],[2,0]]);
+      assert.ok(members.every(row=>row.dispatched_at===null));
+      assert.equal((await query("SELECT COUNT(*) AS n FROM ogl_dispatch_events WHERE tenant_id=2 AND batch_id=? AND action='bind-orders'",[batchId]))[0].n,1);
+      assert.ok(calls.slice(beforeCalls).every(row=>!['/v1/carriage/create','/v1/carriage/set-postings','/v1/carriage/approve'].includes(row.path)));
+      let proof=await query(`SELECT o.id,${oglPhysicalDispatchSql()} AS consumed FROM orders o WHERE o.id IN (1,2)`);
+      assert.ok(proof.every(row=>Number(row.consumed)===0),'binding does not release local physical stock');
+      await service.discover(session(2),{date:'2026-10-23',shop_id:20});
+      members=await memberEvidence(batchId);assert.equal(members.length,2);assert.ok(members.every(row=>row.active_order_id===undefined&&row.dispatched_at===null));
+      const [system]=await query('SELECT active_order_id,withdrawn_at FROM ogl_dispatch_members WHERE tenant_id=2 AND order_id=2');assert.equal(system.active_order_id,2);assert.equal(system.withdrawn_at,null);
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[1,2]}),/接管/);
+      await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+      await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[1,2]});
+      members=await memberEvidence(batchId);assert.ok(members.every(row=>row.dispatched_at));
+      await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[1,2]});
+      assert.deepEqual(await memberEvidence(batchId),members,'repeated confirmation cannot dispatch twice');
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'assign-tracking',order_ids:[2],tracking_number:'LATE-003',cargo_type:'normal'}),/不能重新分配/);
+      assert.equal((await service.detail(session(2),batchId)).members.find(row=>row.order_id===2).tracking_assignment.tracking_number,'SPECIAL-002');
+      proof=await query(`SELECT o.id,${oglPhysicalDispatchSql()} AS consumed FROM orders o WHERE o.id IN (1,2)`);assert.ok(proof.every(row=>Number(row.consumed)===1));
+      assert.deepEqual(await foreignEvidence(),foreignBefore);
+    });
+    await t.test('historical received and closed batches accept acknowledged other-shop supplements without inventing handover',async()=>{
+      for(const status of ['received','closed']){
+        const batchId=await observed();
+        await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+        await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[1]});
+        const old=(await memberEvidence(batchId)).find(row=>row.order_id===1);
+        state.remoteStatus=status;
+        if(status==='closed')await query("UPDATE ogl_dispatch_batches SET status='closed' WHERE tenant_id=2 AND id=?",[batchId]);
+        const payload={batch_id:batchId,action:'bind-orders',order_ids:[2],client_request_id:`historical-${status}-other`};
+        await assert.rejects(service.action(session(2),payload),error=>error.code==='OGL_HISTORICAL_CONFIRMATION_REQUIRED');
+        await assert.rejects(service.action(session(2),{...payload,confirm_historical_binding:true}),/核对说明/);
+        const offset=calls.length;
+        const bound=await service.action(session(2),{...payload,confirm_historical_binding:true,historical_binding_note:'核实当时同批发出，等待仓库复核'});
+        assert.equal(bound.batch.status,'tracking');
+        const rows=await memberEvidence(batchId);
+        assert.deepEqual(rows.find(row=>row.order_id===1),old,'old dispatch evidence must remain unchanged');
+        assert.equal(rows.find(row=>row.order_id===2).dispatched_at,null);
+        assert.equal(rows.find(row=>row.order_id===2).official_member,0);
+        assert.ok(calls.slice(offset).every(row=>!['/v1/carriage/create','/v1/carriage/set-postings','/v1/carriage/approve'].includes(row.path)));
+        await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),/接管/);
+        await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+        await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]});
+        assert.ok((await memberEvidence(batchId)).find(row=>row.order_id===2).dispatched_at);
+        assert.deepEqual((await memberEvidence(batchId)).find(row=>row.order_id===1),old);
+        assert.deepEqual(await foreignEvidence(),foreignBefore);
+      }
+    });
+    await t.test('manual marks block handover until cleared; note review remains current and notes are preserved',async()=>{
+      const batchId=await observed();
+      await query("INSERT INTO order_marks(order_id,mark_type,note) VALUES(2,'manual_check','warehouse inspected')");
+      const payload={batch_id:batchId,action:'bind-orders',order_ids:[2],client_request_id:'review-first-operation'};
+      await assert.rejects(service.action(session(2),payload),/复核/);
+      let preview=await service.preview(session(2),{order_ids:[2],batch_id:batchId});let signature=preview.eligible[0].review_signature;
+      await service.action(session(2),{...payload,reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'人工确认可以发运'});
+      await query("UPDATE order_marks SET note='changed: hold delivery' WHERE order_id=2");
+      await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),e=>e.code==='OGL_ORDER_MARK_HOLD');
+      await assert.rejects(service.action(session(2),{...payload,client_request_id:'review-second-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'old proof'}),/复核/);
+      preview=await service.preview(session(2),{order_ids:[2],batch_id:batchId});signature=preview.eligible[0].review_signature;
+      await service.action(session(2),{...payload,client_request_id:'review-second-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'已重新核对'});
+      await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]}),e=>e.code==='OGL_ORDER_MARK_HOLD','Review proof cannot bypass an active manual mark');
+      await query("UPDATE order_marks SET mark_type='' WHERE order_id=2");
+      preview=await service.preview(session(2),{order_ids:[2],batch_id:batchId});signature=preview.eligible[0].review_signature;
+      await service.action(session(2),{...payload,client_request_id:'review-cleared-operation',reviewed_order_ids:[2],review_signatures:{2:signature},review_note:'已取消标记，保留核对备注'});
+      await service.action(session(2),{batch_id:batchId,action:'official-adopt',container_count:2});
+      await service.action(session(2),{batch_id:batchId,action:'dispatch',order_ids:[2]});
+      assert.equal((await query('SELECT note FROM order_marks WHERE order_id=2'))[0].note,'changed: hold delivery','dispatch does not erase notes');
+      assert.ok((await memberEvidence(batchId)).find(row=>row.order_id===2).dispatched_at);
+    });
+    await t.test('printed-date candidates use Beijing boundaries and owned scopes; binding refuses foreign orders and an unlisted own posting',async()=>{
+      const batchId=await observed();
+      await query("UPDATE order_label_prints SET printed_at=CASE WHEN order_id=1 THEN '2026-10-22 16:00:00' ELSE '2026-10-23 15:59:59' END WHERE order_id IN (1,2,3)");
+      const result=await service.candidates(session(2),{printed_from:'2026-10-23',printed_to:'2026-10-23',batch_id:batchId});
+      assert.equal(result.total,2);assert.deepEqual(result.eligible.map(row=>Number(row.id)).sort(),[1,2]);
+      assert.equal((await service.candidates(session(2),{printed_from:'2026-10-22',printed_to:'2026-10-22',batch_id:batchId})).total,0);
+      await assert.rejects(service.candidates(session(2),{shop_id:30}),/不属于/);
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'bind-orders',order_ids:[3],client_request_id:'foreign-bind-attempt'}),/不能绑定/);
+      await query("INSERT INTO orders(id,shop_id,posting_number,status,ordered_at) VALUES(4,20,'NOT-IN-OZON','awaiting_deliver','2026-10-23 01:00:00')");
+      await query('INSERT INTO order_label_prints(order_id) VALUES(4)');
+      await query("INSERT INTO ozon_orders_raw(store_id,posting_number,status,raw_json) VALUES(20,'NOT-IN-OZON','awaiting_deliver',?)",[JSON.stringify({delivery_method:{id:77,name:'OGL pickup'}})]);
+      await assert.rejects(service.action(session(2),{batch_id:batchId,action:'bind-orders',order_ids:[4],client_request_id:'unlisted-own-posting'}),/未被 Ozon/);
+      assert.equal((await memberEvidence(batchId)).length,1);
+      assert.deepEqual(await foreignEvidence(),foreignBefore);
     });
   } finally { await pool.end(); await fixture.cleanup(); }
 });

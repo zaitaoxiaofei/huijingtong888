@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { inventoryOverview } from '../frontend/orders/utils/inventory-overview.js';
+import { inventoryOverview, inventoryCompositionKind } from '../frontend/orders/utils/inventory-overview.js';
 
 test('FBP SKU counts remain separate and local kit capacity uses the limiting free component', () => {
   const row = { shop_id: 1, inventorySummaries: [{ productId: 10, sku: 'A', skus: ['A','B'], quantity: 3, componentCount: 2,
@@ -92,4 +92,19 @@ test('negative physical facts remain pending review instead of claiming zero phy
   assert.equal(view.parents[0].localPhysical, null);
   assert.equal(view.parents[0].localAvailable, 0);
   assert.equal(view.active, false);
+});
+
+test('order inventory type badges use mapping and composition facts, keeping missing facts unknown', () => {
+  assert.equal(inventoryCompositionKind({ productId: 10, inventoryMode: 'single', componentCount: 2 }), 'bundle');
+  assert.equal(inventoryCompositionKind({ productId: 0, inventoryMode: 'combo' }), 'bundle');
+  assert.equal(inventoryCompositionKind({ productId: 10, pickingItems: [{ product_id: 11 }] }), 'bundle');
+  assert.equal(inventoryCompositionKind({ productId: 10, inventoryMode: 'single', productName: '六件套礼盒' }), 'single');
+  assert.equal(inventoryCompositionKind({ productId: 10, componentCount: 0, productName: '两盒装' }), 'single');
+  assert.equal(inventoryCompositionKind({ productId: 10, productName: '单件库存' }), 'unknown');
+  assert.equal(inventoryCompositionKind({ productId: 0, inventoryMode: 'single', componentCount: 0 }), 'unknown');
+  assert.equal(inventoryCompositionKind({ productId: 10, inventoryMode: 'unbound', componentCount: 0 }), 'unknown');
+  const view = inventoryOverview({ inventorySummaries: [{ productId: 10, inventoryMode: 'single', componentCount: 0, quantity: 4 }] });
+  assert.equal(view.parents[0].compositionKind, 'single');
+  assert.equal(view.parents[0].quantity, 4);
+  assert.equal(view.items[0].quantity, 4, 'badge classification does not change actual consumption');
 });

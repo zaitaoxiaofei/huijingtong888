@@ -1,16 +1,29 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, reactive, ref, watch } from "vue";
+import {markProcurementPriceException} from '../../../../src/shared/procurement-price-reason.js';
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, UploadFilled } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
 const router = useRouter();
+const ProcurementArrivalTracker=defineAsyncComponent(()=>import('../../components/procurement/ProcurementArrivalTracker.vue'));
+const arrivalRecordsVisible=ref(false);
+const InventorySupplyWorkspace=defineAsyncComponent(()=>import('../../components/inventory/InventorySupplyWorkspace.vue'));
+const workMode=computed({get:()=>route.query.mode==='purchase'||route.query.message_request_id||route.query.review_product_id?'purchase':'inventory',set:value=>router.replace({query:{...route.query,mode:value==='purchase'?'purchase':undefined,message_request_id:undefined,review_product_id:undefined}})});
+let legacyStarted=false;
+async function startPurchaseView(){
+ if(legacyStarted)return loadRows();legacyStarted=true;
+ await Promise.all([loadRows(),loadOptions().then(resetCreateForm).catch(error=>ElMessage.error(error.message||'采购基础资料加载失败'))]);
+ void refreshWorkbench();
+}
+watch(workMode,value=>{if(value==='purchase')void startPurchaseView();});
 import { apiClient, currentApiCacheScope } from "../../utils/api.js";
 import { uploadListingMedia, uploadTeamAttachment, withImageToken } from "../../api/tools/imageCropper.js";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date.js";
+import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth.js";
+import InventoryWorkflowStatus from '../../components/inventory/InventoryWorkflowStatus.vue';
 import ErpFilterBar from "../../components/ErpFilterBar.vue";
-import ErpPageHeader from "../../components/ErpPageHeader.vue";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import DailyPurchaseExport from "../../components/procurement/DailyPurchaseExport.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
@@ -21,6 +34,7 @@ import { buildShortInventoryName } from "../../utils/inventory-similarity.js";
 import { openEnterpriseMessage } from "../../utils/enterprise-messages.js";
 
 const authStore = useAuthStore();
+const canUpdateInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const loading = ref(false);
 const demandRefreshing = ref(false);
 let rowsController;
@@ -78,9 +92,10 @@ const confirmingGroupKey = ref("");
 const uploadingReceipt = ref(false);
 const imageSearchingId = ref(0);
 const ledgerVisible = ref(false);
+const ledgerInitialAction = ref("");
 const ledgerProductId = ref(0);
 const ledgerInitialTab = ref('current');
-function openLedger(row = {}, tab = 'current') { ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
+function openLedger(row = {}, tab = 'current', action = '') { ledgerInitialAction.value = action; ledgerProductId.value = Number(row.product_id || 0); ledgerInitialTab.value = tab; ledgerVisible.value = true; }
 const costTasksVisible = ref(false);
 const costTasksLoading = ref(false);
 const costTasks = reactive({ rows: [], total: 0, page: 1, query: '' });
@@ -96,10 +111,13 @@ async function loadCostTasks(page = 1) {
   finally { if (version === costTasksVersion) costTasksLoading.value = false; }
 }
 function openCostTasks() { costTasksVisible.value = true; loadCostTasks(); }
-function suggestionReasonTagType(type) {
-  return ({ real_order: "danger", warehouse_request: "success", inventory_warning: "warning", advance_stock: "info" })[type] || "info";
+const warehouseReasonLabels = { flow_real_order: "FBS真实订单需求", flow_local_safety: "本地安全保障需求", flow_fbp_stock: "FBP正式备货申请", flow_fbp_forecast: "FBP预测预警建议（可暂缓）", inventory_stock_topup: "库存补足", accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
+function purchaseTypeLabel(row) {
+  if(row.workflow)return row.primary_suggestion_reason?.label || '供货已满足／申请待核对';
+  if (row.primary_suggestion_reason?.type === 'real_order' || Number(row.real_order_shortage) > 0) return '真实订单需求';
+  if (row.requests?.some(request => request.request_reason_code === 'inventory_stock_topup')) return '库存补足';
+  return row.primary_suggestion_reason?.label || ({ real_order: '真实订单需求', warehouse_request: '仓库采购申请', advance_stock: '提前采购' })[row.demand_types?.[0]] || '采购需求';
 }
-const warehouseReasonLabels = { accessory_shortage: "配件不足", hot_product_replenishment: "热门产品备货不足", shipping_shortage: "订单发货缺货", safety_stock_shortage: "安全库存不足", seasonal_replenishment: "季节性备货", fbp_stock_shortage: "FBP 备货缺货", other: "其他" };
 function warehouseRequestDetails(row = {}) {
   return (row.requests || []).filter((request) => request.demand_type === "warehouse_request").map((request) => ({
     text: `${request.person_name || "仓库"}：${warehouseReasonLabels[request.request_reason_code] || "其他"}${request.request_reason_note ? `（${request.request_reason_note}）` : ""}`,
@@ -175,7 +193,14 @@ const state = reactive({
   people: [],
   suppliers: [],
   suggestions: [],
-  filters: { query: "", demandType: "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
+  filters: { query: "", demandType: ["all", "real_order", "local_safety", "fbp_stock", "fbp_forecast", "advance_stock", "warehouse_request"].includes(route.query.demandType) ? route.query.demandType : "all", bindingStatus: "all", personId: "all", supplierId: "all", sourceType: "all", inventoryCategory: "", productName: "", vehicleBrand: "", vehicleModel: [], accessoryName: "", color: "", material: [], process: "", page: 1, pageSize: 20 }
+});
+
+watch(() => route.query.demandType, value => {
+  if (["all", "real_order", "local_safety", "fbp_stock", "fbp_forecast", "advance_stock", "warehouse_request"].includes(value) && value !== state.filters.demandType) {
+    state.filters.demandType = value;
+    handleSearch();
+  }
 });
 
 const createForm = reactive(defaultCreateForm());
@@ -436,7 +461,7 @@ async function handleQuickComponentExistingSelected(row) {
 
 function realOrderRows(row) {
   return (row.requests || [])
-    .filter((item) => Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0))
+    .filter((item) => item.demand_type !== 'warehouse_request' && (Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0)))
     .sort((a, b) => new Date(b.source_order_ordered_at || 0).getTime() - new Date(a.source_order_ordered_at || 0).getTime());
 }
 
@@ -622,6 +647,8 @@ async function openBulkPurchase() {
         Object.assign(row, fresh);
       }
     }
+    const covered = selectedDemandRows.value.find(row => !(Number(row.suggested_purchase_qty) > 0));
+    if (covered) throw new Error(`${covered.product_name} 的需求已被覆盖或尚未核实，请刷新后重新选择；额外采购可使用自由采购`);
     const expandedItems = [];
     const coveredComponents = [];
     for (const row of selectedDemandRows.value) {
@@ -1063,7 +1090,9 @@ async function saveBulkPurchase() {
     selectedDemandRows.value = [];
     await loadRows();
   } catch (error) {
-    ElMessage.error(error.message || "批量采购保存失败");
+    const index=markProcurementPriceException(error,bulkItems.value);
+    if(index>=0)bulkPage.value=Math.floor(index/bulkPageSize.value)+1;
+    ElMessage.error(index>=0?`${bulkItems.value[index].product_name}：${error.payload.validation.message}；请补充本项原因后再次提交`:error.message || "批量采购保存失败");
   } finally {
     bulkSaving.value = false;
   }
@@ -1483,7 +1512,9 @@ async function submitCreate() {
     createVisible.value = false;
     await loadRows();
   } catch (error) {
-    ElMessage.error(error.message || "创建采购失败");
+    const index=markProcurementPriceException(error,createForm.items);
+    if(index>=0)activeItemIndex.value=index;
+    ElMessage.error(index>=0?`${createForm.items[index].product_name||createForm.items[index].raw_name}：${error.payload.validation.message}；请补充本项原因后再次提交`:error.message || "创建采购失败");
   } finally {
     submitting.value = false;
   }
@@ -1538,11 +1569,7 @@ async function saveBinding() {
 
 onMounted(async () => {
   window.addEventListener("erp:auth-scope-changed", resetMessageRequest);
-  await Promise.all([
-    loadRows(),
-    loadOptions().then(resetCreateForm).catch((error) => ElMessage.error(error.message || "采购基础资料加载失败"))
-  ]);
-  void refreshWorkbench();
+  if(workMode.value==='purchase')await startPurchaseView();
   if (Number(route.query.review_product_id) > 0) {
     await openOrderHistory({ product_id: Number(route.query.review_product_id), product_name: `核对订单 ${route.query.review_order_no || ''} 的库存来源` });
     if (orderHistoryTabs.value.some(tab => tab.key === 'missing' && tab.rows.length)) orderHistoryActiveTab.value = 'missing';
@@ -1552,6 +1579,9 @@ onMounted(async () => {
 
 <template>
   <div class="page-stack procurement-workspace">
+    <InventorySupplyWorkspace v-if="workMode==='inventory'" entry="procurement" :initial-task="route.query.mode==='arrivals'?'incoming':''" :product-id="Number(route.query.product_id)||0" @clear-product="router.replace({query:{...route.query,product_id:undefined}})"><template #heading-actions><el-button plain @click="arrivalRecordsVisible=true">采购批次记录</el-button></template><template #purchase-actions><DailyPurchaseExport /></template></InventorySupplyWorkspace>
+    <div v-else class="procurement-mode-switch"><el-button @click="workMode='inventory'">返回采购工作平台</el-button><span>旧版登记采购</span></div>
+    <el-dialog v-if="arrivalRecordsVisible" v-model="arrivalRecordsVisible" title="采购批次记录" width="95%" append-to-body destroy-on-close><ProcurementArrivalTracker :product-id="Number(route.query.product_id)||0"/></el-dialog>
     <el-dialog v-if="messageRequestVisible" v-model="messageRequestVisible" title="私信关联的采购需求" width="min(620px, 94vw)" append-to-body destroy-on-close @close="closeMessageRequest">
       <div v-loading="messageRequestLoading" style="min-height: 100px">
         <el-alert v-if="messageRequestError" :title="messageRequestError" type="error" :closable="false" show-icon />
@@ -1567,16 +1597,7 @@ onMounted(async () => {
       </div>
       <template #footer><el-button @click="messageRequestVisible = false">关闭</el-button></template>
     </el-dialog>
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
-    <ErpPageHeader title="采购工作台" description="系统自动汇总采购需求；采购人员按供应商集中下单，不再逐个订单处理。">
-      <template #actions>
-        <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
-        <el-button type="primary" plain @click="openCreate">＋ 自由采购</el-button>
-        <DailyPurchaseExport :filters="state.filters" />
-        <el-button class="erp-btn erp-btn-secondary" :loading="demandRefreshing" @click="refreshWorkbench">{{ demandRefreshing ? '需求更新中' : '刷新' }}</el-button>
-      </template>
-    </ErpPageHeader>
-
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-tab="ledgerInitialTab" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" @saved="loadRows(); costTasksVisible && loadCostTasks(costTasks.page); orderHistoryVisible && openOrderHistory(orderHistoryProduct)" />
     <el-dialog v-if="costTasksVisible" v-model="costTasksVisible" title="盘点现货成本待核" width="min(1200px, 96vw)" destroy-on-close>
       <el-alert type="info" :closable="false" title="库管已清点实物，这里只核对采购成本，不是真实采购需求。已有采购请关联；漏记的才补录，不会重复增加现货。" />
       <div class="row-actions"><el-input v-model="costTasks.query" placeholder="库存名称／库存号" clearable @keyup.enter="loadCostTasks()" /><el-button :loading="costTasksLoading" @click="loadCostTasks()">查询</el-button></div>
@@ -1590,37 +1611,30 @@ onMounted(async () => {
       </el-table>
       <el-pagination :current-page="costTasks.page" :page-size="30" :total="costTasks.total" layout="total, prev, pager, next" @current-change="loadCostTasks" />
     </el-dialog>
-    <el-card shadow="never" class="page-card">
+    <el-card v-show="workMode==='purchase'" shadow="never" class="page-card">
       <ErpFilterBar>
         <el-form inline>
-          <el-form-item label="关键词">
-            <el-input v-model="state.filters.query" placeholder="商品 / 供应商 / 链接 / 负责人" clearable @keyup.enter="handleSearch" />
-          </el-form-item>
           <el-form-item label="需求类型">
             <el-select v-model="state.filters.demandType" filterable style="width: 150px" @change="handleSearch">
               <el-option label="全部待采购" value="all" />
-              <el-option label="真实订单采购" value="real_order" />
-              <el-option label="提前采购" value="advance_stock" />
-              <el-option label="库存采购申请" value="warehouse_request" />
+              <el-option label="FBS真实订单需求" value="real_order" />
+              <el-option label="本地安全保障需求" value="local_safety" />
+              <el-option label="FBP正式备货申请" value="fbp_stock" /><el-option label="FBP预测预警建议" value="fbp_forecast" />
             </el-select>
           </el-form-item>
-          <el-form-item label="库存绑定">
-            <el-select v-model="state.filters.bindingStatus" filterable style="width: 130px" @change="handleSearch">
-              <el-option label="全部" value="all" />
-              <el-option label="待绑定" value="unbound" />
-              <el-option label="已绑定" value="bound" />
+          <el-form-item label="关键词">
+            <el-input v-model="state.filters.query" placeholder="商品 / 供应商 / 链接 / 负责人" clearable @keyup.enter="handleSearch" />
+          </el-form-item>
+          <el-form-item label="供应商">
+            <el-select v-model="state.filters.supplierId" filterable clearable style="width: 160px" placeholder="全部供应商" @change="handleSearch">
+              <el-option label="全部供应商" value="all" />
+              <el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" />
             </el-select>
           </el-form-item>
           <el-form-item label="采购负责人">
             <el-select v-model="state.filters.personId" filterable style="width: 150px" @change="handleSearch">
               <el-option label="全部" value="all" />
               <el-option v-for="person in state.people" :key="person.id" :label="person.name" :value="String(person.id)" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="供应商">
-            <el-select v-model="state.filters.supplierId" filterable clearable style="width: 160px" placeholder="全部供应商" @change="handleSearch">
-              <el-option label="全部供应商" value="all" />
-              <el-option v-for="supplier in state.suppliers" :key="supplier.id" :label="supplier.name" :value="String(supplier.id)" />
             </el-select>
           </el-form-item>
           <el-form-item label="采购平台">
@@ -1638,19 +1652,14 @@ onMounted(async () => {
         <template #actions>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="handleReset">重置</el-button>
+          <DailyPurchaseExport :filters="state.filters" />
+          <el-button type="primary" :disabled="!selectedDemandRows.length" @click="openBulkPurchase">采购选中（{{ selectedDemandRows.length }}）</el-button>
+          <el-button type="primary" plain @click="openCreate">＋ 自由采购</el-button>
         </template>
       </ErpFilterBar>
 
-      <InventoryStructuredSearch
-        compact
-        class="procurement-structured-search"
-        :model-value="state.filters"
-        @update:model-value="Object.assign(state.filters, $event)"
-        @change="handleSearch"
-      />
-
       <el-table v-loading="loading" :data="state.rows" row-key="product_id" border height="calc(100vh - 350px)" class="demand-table" @selection-change="handleDemandSelection">
-        <el-table-column type="selection" width="48" fixed="left" />
+        <el-table-column type="selection" width="48" fixed="left" :selectable="row => Number(row.suggested_purchase_qty) > 0" />
         <el-table-column label="库存商品" min-width="340" fixed="left">
           <template #default="{ row }">
             <div class="demand-product-card">
@@ -1659,13 +1668,14 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="采购建议" min-width="210">
+        <el-table-column label="采购需求" min-width="230">
           <template #default="{ row }">
             <div class="purchase-suggestion">
-              <div class="purchase-suggestion-main">
-                <strong class="suggested-qty">建议采购 {{ Number(row.primary_suggested_purchase_qty || row.suggested_purchase_qty || row.total_quantity || 0) }} 件</strong>
-                <el-tag v-if="row.primary_suggestion_reason" size="small" effect="plain" :type="suggestionReasonTagType(row.primary_suggestion_reason.type)">{{ row.primary_suggestion_reason.label }}</el-tag>
-              </div>
+              <div class="purchase-demand-heading"><InventoryWorkflowStatus v-if="row.workflow" :state="row.workflow" /><strong>{{ purchaseTypeLabel(row) }}</strong><span>{{ Number(row.primary_suggested_purchase_qty || row.suggested_purchase_qty || row.total_quantity || 0) }}<small> 件</small></span></div>
+              <el-popover v-if="warehouseRequestDetails(row).length" placement="right-start" :width="420" trigger="click">
+                <template #reference><el-button link type="primary">查看仓库申请（{{ warehouseRequestDetails(row).length }}）</el-button></template>
+                <div v-for="detail in warehouseRequestDetails(row)" :key="detail.id" class="warehouse-request-detail"><span>{{ detail.text }} · {{ detail.request.quantity }} 件</span><el-button link type="danger" @click="rejectWarehouseRequest(detail.request)">拒绝申请</el-button></div>
+              </el-popover>
               <el-popover v-if="realOrderRows(row).length" placement="right-start" :width="620" trigger="click">
                 <template #reference><el-button link type="primary">查看 {{ realOrderRows(row).length }} 个关联订单 ▾</el-button></template>
                 <div class="source-order-list">
@@ -1680,28 +1690,9 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column label="近期销量" min-width="190" align="center">
-          <template #default="{ row }"><div class="sales-summary"><strong>30天 {{ Number(row.recent_30d_qty || 0) }}</strong><span>近7天 {{ Number(row.recent_7d_qty || 0) }}</span><small>三周 {{ row.week3_qty || 0 }} → {{ row.week2_qty || 0 }} → {{ row.week1_qty || 0 }}</small></div></template>
+          <template #default="{ row }"><div class="sales-summary"><strong>30天 {{ Number(row.recent_30d_qty || 0) }}</strong><small>三周 {{ row.week3_qty || 0 }} → {{ row.week2_qty || 0 }} → {{ row.week1_qty || 0 }}</small></div></template>
         </el-table-column>
-        <el-table-column label="需求原因" min-width="250">
-          <template #default="{ row }">
-            <p class="demand-reason">{{ row.demand_reason }}</p><div v-for="detail in warehouseRequestDetails(row)" :key="detail.id" class="warehouse-request-detail"><small class="demand-reason">{{ detail.text }}</small><el-button link type="danger" @click="rejectWarehouseRequest(detail.request)">拒绝申请</el-button></div>
-          </template>
-        </el-table-column>
-        <el-table-column label="库存状态" min-width="250" align="center">
-          <template #default="{ row }">
-            <div class="inventory-metrics">
-              <div><span>现货推算</span><strong>{{ row.physical_stock_estimate == null ? '待核' : Math.max(0, row.physical_stock_estimate) }}</strong></div>
-              <div><span>未占用现货</span><strong>{{ row.unreserved_stock_estimate ?? '待核' }}</strong></div>
-              <div><span>订单现货覆盖</span><strong>{{ row.order_stock_reserved ?? '待核' }}</strong></div>
-              <div><span>FBP 待发占用</span><strong>{{ row.fbp_reserved ?? '待核' }}</strong></div>
-              <div><span>采购在途</span><strong>{{ Number(row.incoming_stock || 0) }}</strong></div>
-              <div><span>FBP调拨在途</span><strong>{{ Number(row.fbp_transfer_in_transit_qty || 0) }}</strong></div>
-              <div><span>FBP库存</span><strong>{{ Number(row.fbp_available || 0) }}</strong></div>
-            </div>
-            <small>现货以盘点为准；采购在途未计入现货</small>
-            <div class="row-actions"><el-button size="small" type="primary" plain @click="openLedger(row)">库存明细／盘点</el-button><el-button size="small" plain @click="openLedger(row, 'purchases')">核对采购成本</el-button></div>
-          </template>
-        </el-table-column>
+        <el-table-column label="库存" min-width="125" align="center"><template #default="{ row }"><el-button type="primary" plain size="small" @click="openLedger(row)">库存明细</el-button></template></el-table-column>
         <el-table-column label="历史订单" min-width="220" align="center">
           <template #default="{ row }"><div class="order-history-summary"><span>出单数 <strong>{{ Number(row.historical_total_order_count || 0) }}</strong></span><span>取消 <strong class="history-cancelled">{{ Number(row.historical_cancelled_quantity || 0) }}</strong></span><span>退货 <strong class="history-returned">{{ Number(row.historical_returned_quantity || 0) }}</strong></span><el-button link type="primary" @click="openOrderHistory(row)">查看明细</el-button></div></template>
         </el-table-column>
@@ -1744,7 +1735,7 @@ onMounted(async () => {
         <el-table-column label="采购依据与库存流水" min-width="620"><template #default="{ row }"><div class="purchase-basis"><div class="purchase-basis-head"><strong class="purchase-basis-title">{{ row.purchase_basis }}</strong><el-button link type="primary" @click="openOrderHistory(row.source_row || row)">历史订单明细</el-button></div><div class="history-ledger"><span><em>业务记录</em><span>有效订单 <strong>{{ Number(row.historical_order_count || 0) }} 单 / {{ Number(row.historical_outbound_quantity || 0) }} 件</strong> · 已记录采购 <strong>{{ Number(row.historical_purchased_quantity || 0) }} 件</strong></span></span><span><em>本地流水</em><span>采购入库 <strong class="ledger-positive">+{{ Number(row.historical_purchase_inbound_quantity || 0) }}</strong> · 订单退回 <strong class="ledger-positive">+{{ Number(row.historical_return_in_quantity || 0) }}</strong> · 订单出库 <strong class="ledger-negative">-{{ Number(row.historical_inventory_order_outbound_quantity || 0) }}</strong> · 转FBP <strong class="ledger-negative">-{{ Number(row.historical_fbp_transfer_outbound_quantity || 0) }}</strong><template v-if="Number(row.historical_other_inventory_quantity || 0)"> · 其他 <strong>{{ Number(row.historical_other_inventory_quantity) > 0 ? '+' : '' }}{{ Number(row.historical_other_inventory_quantity) }}</strong></template></span></span><span><em>当前供给</em><span>现货 <strong>{{ Number(row.current_stock ?? row.source_row?.stock ?? 0) }} 件</strong> · 采购在途 <strong>{{ Number(row.source_row?.incoming_stock || 0) }} 件</strong> · FBP在途 <strong>{{ Number(row.source_row?.fbp_transfer_in_transit_qty || 0) }} 件</strong></span></span><span v-if="historicalDebt(row)" class="history-debt">历史库存待核 <strong>{{ historicalDebt(row) }} 件</strong><small>单独核对，不计本次采购</small></span><span v-else class="history-surplus">剩余总供给 <strong>{{ remainingSupply(row) }} 件</strong></span></div></div></template></el-table-column>
         <el-table-column label="处理类型" width="240"><template #default="{ row }"><div class="bulk-purchase-mode"><el-select v-model="row.purchase_mode"><el-option v-for="option in purchaseModeOptions" :key="option.value" :label="option.label" :value="option.value"><span :title="option.description">{{ option.label }}</span></el-option></el-select><small :title="purchaseModeDescription(row.purchase_mode)">{{ purchaseModeDescription(row.purchase_mode) }}</small></div></template></el-table-column>
         <el-table-column label="本次录入" width="290"><template #default="{ row }"><div class="purchase-entry-fields"><label><span>{{ purchaseQuantityLabel(row.purchase_mode) }}</span><el-input-number v-model="row.quantity" class="bulk-number-input" :min="row.purchase_mode === 'inventory_update' ? 0 : 1" :precision="0" controls-position="right" /></label><label><span>{{ purchaseAmountLabel(row.purchase_mode) }}</span><el-input v-model="row.amount" class="plain-money-input" inputmode="decimal" @blur="normalizeBulkMoney(row, 'amount')"><template #prefix>¥</template></el-input></label><label v-if="row.purchase_mode !== 'inventory_update'"><span>运费</span><el-input v-model="row.shipping_amount" class="plain-money-input" inputmode="decimal" @blur="normalizeBulkMoney(row, 'shipping_amount')"><template #prefix>¥</template></el-input></label></div></template></el-table-column>
-        <el-table-column label="价格对比" width="230"><template #default="{ row }"><div class="price-comparison"><span>历史均价 <strong>{{ Number(row.historical_unit_cost || 0) > 0 ? `¥${Number(row.historical_unit_cost).toFixed(2)}` : '暂无' }}</strong></span><el-button link type="primary" @click="openPurchaseHistory(row)">查看 {{ Number(row.historical_purchase_count || 0) }} 笔采购明细</el-button><span>本次均价 <strong>¥{{ currentBulkUnitCost(row).toFixed(2) }}</strong></span><em v-if="bulkPriceChange(row) !== null" :class="bulkPriceChange(row) > 0 ? 'price-up' : 'price-down'">{{ bulkPriceChange(row) > 0 ? '贵' : '便宜' }} {{ Math.abs(bulkPriceChange(row) * 100).toFixed(1) }}%</em><template v-if="bulkPriceChange(row) > 0.1"><el-select v-model="row.anomaly_reason" placeholder="请选择涨价原因" size="small" class="price-reason"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select><el-input v-if="row.anomaly_reason === '其他原因'" v-model="row.anomaly_note" placeholder="请说明原因" size="small" /></template></div></template></el-table-column>
+        <el-table-column label="价格对比" width="230"><template #default="{ row }"><div class="price-comparison"><span>历史均价 <strong>{{ Number(row.historical_unit_cost || 0) > 0 ? `¥${Number(row.historical_unit_cost).toFixed(2)}` : '暂无' }}</strong></span><el-button link type="primary" @click="openPurchaseHistory(row)">查看 {{ Number(row.historical_purchase_count || 0) }} 笔采购明细</el-button><span>本次均价 <strong>¥{{ currentBulkUnitCost(row).toFixed(2) }}</strong></span><em v-if="bulkPriceChange(row) !== null" :class="bulkPriceChange(row) > 0 ? 'price-up' : 'price-down'">{{ bulkPriceChange(row) > 0 ? '贵' : '便宜' }} {{ Math.abs(bulkPriceChange(row) * 100).toFixed(1) }}%</em><template v-if="bulkPriceChange(row) > 0.1 || row.price_confirmation_required"><el-select v-model="row.anomaly_reason" placeholder="请选择涨价原因" size="small" class="price-reason"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select><el-input v-if="row.anomaly_reason === '其他原因'" v-model="row.anomaly_note" placeholder="请说明原因" size="small" /></template></div></template></el-table-column>
         <el-table-column label="货源与操作" width="160" align="center"><template #default="{ row }"><div class="bulk-link-actions"><el-button type="primary" :disabled="!row.purchase_url" @click="openBulkPurchaseUrl(row)">打开货源</el-button><el-button plain @click="openBulkLinkEditor(row)">{{ row.purchase_url ? '修改链接' : '添加链接' }}</el-button><el-button link type="danger" @click="removeBulkItem(row)">移出本次采购</el-button></div></template></el-table-column>
       </el-table>
       <div class="bulk-pagination"><span>本页 {{ pagedBulkItems.length }} 条，共 {{ bulkItems.length }} 个库存商品</span><el-pagination v-model:current-page="bulkPage" v-model:page-size="bulkPageSize" background layout="prev, pager, next" :total="bulkItems.length" /></div>
@@ -1898,7 +1889,7 @@ onMounted(async () => {
                 <span>本次单价 <strong>¥{{ currentFreePurchaseUnitCost(activeItem).toFixed(2) }}/件</strong></span>
                 <em v-if="freePurchasePriceChange(activeItem) !== null">{{ freePurchasePriceChange(activeItem) >= 0 ? '上涨' : '下降' }} {{ Math.abs(freePurchasePriceChange(activeItem) * 100).toFixed(1) }}%</em>
               </div>
-              <div v-if="activeItem.purchase_mode !== 'inventory_update' && freePurchasePriceChange(activeItem) > 0.1" class="free-purchase-price-reason">
+              <div v-if="activeItem.purchase_mode !== 'inventory_update' && (freePurchasePriceChange(activeItem) > 0.1 || activeItem.price_confirmation_required)" class="free-purchase-price-reason">
                 <div><strong>单价超过历史均价 10%</strong><span>选择原因后可以正常提交，并保留价格审计记录。</span></div>
                 <el-select v-model="activeItem.anomaly_reason" placeholder="请选择价格异常原因"><el-option v-for="reason in priceAnomalyReasons" :key="reason" :label="reason" :value="reason" /></el-select>
                 <el-input v-if="activeItem.anomaly_reason === '其他原因'" v-model="activeItem.anomaly_note" placeholder="请填写具体原因" maxlength="120" show-word-limit />
@@ -1979,6 +1970,14 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.purchase-demand-heading { display:flex;flex-direction:column;gap:6px;padding:4px 0 8px; }
+.purchase-demand-heading > strong { font-size:16px; }
+.purchase-demand-heading > span { font-size:24px;font-weight:600;font-variant-numeric:tabular-nums; }
+.purchase-demand-heading small { font-size:13px;font-weight:400; }
+.procurement-workspace :deep(.erp-filter-bar) { flex-wrap:wrap;align-items:flex-start;justify-content:flex-start; }
+.procurement-workspace :deep(.erp-filter-bar__filters) { flex:1 1 750px; }
+.procurement-workspace :deep(.erp-filter-bar__actions) { margin-left:auto;flex-wrap:wrap;justify-content:flex-end; }
+
 .product-cell,.section-head,.item-list-head,.dialog-summary{display:flex;align-items:center;justify-content:space-between;gap:12px}.product-cell{justify-content:flex-start}.muted-text,.suggestion-card span,.item-card span,.section-head p{color:var(--erp-text-secondary);font-size:12px}.binding-name{margin-top:6px}.create-layout{display:grid;grid-template-columns:220px minmax(0,1fr) 310px;gap:16px;min-height:430px}.item-list,.item-editor,.suggestion-panel{padding:14px;border:1px solid var(--erp-border);border-radius:16px;background:var(--erp-detail-surface, #fff)}.item-list,.suggestion-panel{display:flex;flex-direction:column;gap:10px}.item-card,.suggestion-card{border:1px solid var(--erp-border);border-radius:12px;background:var(--erp-detail-surface, #fff);text-align:left;cursor:pointer}.item-card{display:flex;justify-content:space-between;align-items:center;padding:12px}.item-card div,.suggestion-card div{display:grid;gap:4px}.item-card.active{border-color:var(--el-color-primary);background:var(--el-color-primary-light-9)}.suggestion-card{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;padding:10px}.suggestion-card:hover{border-color:var(--el-color-primary)}.selected-binding{margin:8px 0 12px;padding:10px 12px;border-radius:10px;background:var(--el-color-success-light-9);color:var(--el-color-success-dark-2)}.quick-inventory-search{display:grid;gap:8px}.quick-inventory-results{display:grid;gap:8px;max-height:230px;overflow:auto}.section-head p{margin:3px 0 0;font-weight:400}.create-note{margin-top:16px}.bind-suggestions{display:grid;grid-template-columns:1fr 1fr;gap:10px;max-height:360px;overflow:auto}.dialog-summary{width:100%}@media(max-width:1100px){.create-layout{grid-template-columns:190px 1fr}.suggestion-panel{grid-column:1/-1}.bind-suggestions{grid-template-columns:1fr}}
 .quick-inventory-image-upload{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.quick-inventory-image-upload :deep(.erp-image-preview){width:42px;height:42px}.quick-inventory-image-upload span{color:var(--erp-text-secondary);font-size:12px}
 .free-purchase-name-preview{display:grid;gap:4px;max-width:920px;margin:0 auto 10px;padding:11px 14px;border:1px solid var(--el-color-primary-light-5);border-radius:10px;background:var(--el-color-primary-light-9)}.free-purchase-name-preview.is-bound{grid-template-columns:48px minmax(0,1fr);align-items:center}.free-purchase-name-preview>div{display:grid;gap:3px}.free-purchase-name-preview span,.free-purchase-name-preview small{color:var(--erp-text-secondary);font-size:12px}.free-purchase-name-preview strong{color:var(--erp-text-main);font-size:15px;line-height:1.5}.free-purchase-name-preview :deep(.erp-image-preview--portrait){width:42px;min-width:42px;max-width:42px;height:56px;min-height:56px;max-height:56px;flex-basis:42px}.free-purchase-structured-name{max-width:980px;margin:0 auto 10px}.bound-inventory-specs{display:flex;max-width:920px;margin:0 auto 12px;overflow:hidden;border:1px solid var(--erp-detail-border-light, #e4eaf2);border-radius:9px;background:var(--erp-detail-surface, #fff)}.bound-inventory-specs span{display:grid;flex:1 1 auto;gap:2px;min-width:92px;padding:8px 11px;border-right:1px solid var(--erp-detail-border-light, #edf1f6);color:var(--erp-detail-text-regular, #344054);font-size:12px}.bound-inventory-specs span:last-child{border-right:0}.bound-inventory-specs em{color:var(--erp-detail-text-secondary, #8a96a8);font-size:11px;font-style:normal}.free-purchase-core-panel{max-width:920px;margin:0 auto 12px;padding:16px 18px 8px;border:1px solid var(--el-color-primary-light-5);border-radius:14px;background:var(--erp-detail-surface, #fff);box-shadow:0 8px 24px rgba(31,82,132,.08)}.free-purchase-core-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:12px}.free-purchase-core-head>div{display:grid;gap:3px}.free-purchase-core-head strong{color:var(--erp-detail-text-regular, #1f2d42);font-size:16px}.free-purchase-core-head span{color:var(--erp-detail-text-secondary, #8a96a8);font-size:12px}.free-purchase-core-head>b{color:var(--el-color-primary);font-size:20px;font-variant-numeric:tabular-nums}.free-purchase-core-fields :deep(.el-form-item){margin-bottom:12px}.free-purchase-price-summary{display:flex;align-items:center;justify-content:center;gap:24px;margin:0 0 12px;padding:9px 12px;border-radius:9px;background:var(--erp-detail-surface-alt, #f5f8fc);color:var(--erp-detail-text-secondary, #667085);font-size:12px}.free-purchase-price-summary span{display:flex;gap:6px}.free-purchase-price-summary strong{color:var(--erp-detail-text-regular, #344054)}.free-purchase-price-summary em{padding:2px 8px;border-radius:12px;background:var(--el-color-success-light-9);color:var(--erp-success-text);font-style:normal}.free-purchase-price-summary.is-anomaly{background:var(--el-color-danger-light-9)}.free-purchase-price-summary.is-anomaly em{background:var(--erp-detail-surface, #fff);color:var(--erp-danger-text)}.free-purchase-price-reason{display:grid;grid-template-columns:minmax(180px,1fr) minmax(210px,280px);gap:10px 14px;align-items:center;margin:0 0 14px;padding:12px 14px;border:1px solid var(--el-color-danger-light-5);border-radius:10px;background:var(--el-color-danger-light-9)}.free-purchase-price-reason>div{display:grid;gap:3px}.free-purchase-price-reason strong{color:var(--erp-danger-text);font-size:13px}.free-purchase-price-reason span{color:var(--erp-detail-danger-text, #8a5b5f);font-size:12px}.free-purchase-price-reason>.el-input{grid-column:2}.free-purchase-price-optional{display:grid;grid-template-columns:minmax(170px,1fr) minmax(220px,300px);align-items:center;gap:8px 14px;margin:0 0 12px;padding:8px 0;border-top:1px dashed var(--erp-detail-border-light, #e4eaf2);color:var(--erp-detail-text-secondary, #8a96a8);font-size:12px}.free-purchase-price-optional>.el-input{grid-column:2}.free-purchase-dialog .item-editor{background:var(--erp-detail-surface-alt, #f8fafc)}.free-purchase-dialog .item-editor>.section-head{margin-bottom:10px}
@@ -2012,4 +2011,8 @@ onMounted(async () => {
 @media(max-width:1300px){.free-purchase-dialog .create-layout{grid-template-columns:190px minmax(0,1fr)}.free-purchase-dialog .suggestion-panel{grid-column:1/-1}}
 @media(max-width:760px){.bound-inventory-specs{flex-wrap:wrap}.bound-inventory-specs span{flex:1 1 45%}.free-purchase-price-reason,.free-purchase-price-optional{grid-template-columns:1fr}.free-purchase-price-reason>.el-input,.free-purchase-price-optional>.el-input{grid-column:1}.free-purchase-price-summary{align-items:flex-start;flex-direction:column;gap:6px}}
 @media(max-width:720px){.free-purchase-name-preview{grid-template-columns:42px minmax(0,1fr) auto}.quick-inventory-scroll{min-height:260px;max-height:420px}}
+</style>
+
+<style scoped>
+.procurement-mode-switch{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:14px 18px;background:var(--el-bg-color-overlay);border:1px solid var(--el-border-color-lighter);border-radius:12px}.procurement-mode-switch>span{font-size:12px;color:var(--el-text-color-secondary)}
 </style>

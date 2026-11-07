@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {runPurchaseBatchGroups} from '../frontend/admin/utils/purchase-batch-workers.js';
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('different stocks overlap, two requests maximum, same-stock batches remain ordered',async()=>{let active=0,max=0;const stock=new Set(),order=[];const groups=[{id:1,product_id:1},{id:2,product_id:1},{id:3,product_id:2},{id:4,product_id:3}];await runPurchaseBatchGroups(groups,async g=>{assert.ok(!stock.has(g.product_id));stock.add(g.product_id);max=Math.max(max,++active);await tick();order.push(g.id);--active;stock.delete(g.product_id);});assert.equal(max,2);assert.ok(order.indexOf(1)<order.indexOf(2));assert.equal(order.length,4);});
+test('scope cancellation stops queued work and waits for already started operations',async()=>{let current=true,completed=0;const started=[];await runPurchaseBatchGroups([1,2,3,4].map(product_id=>({product_id})),async g=>{started.push(g.product_id);await tick();current=false;completed++;},{isCurrent:()=>current});assert.deepEqual(started,[1,2]);assert.equal(completed,2);});
+test('preview errors settle other running operations before exposing retry',async()=>{let completed=false;await assert.rejects(runPurchaseBatchGroups([{product_id:1},{product_id:2}],async g=>{if(g.product_id===1)throw Error('preview failed');await tick();completed=true;}),/preview failed/);assert.equal(completed,true);});
+test('receipt submit retries only failures using the identical saved payload and key',async()=>{const ref=value=>({value}),groups=ref([1,2,3].map(product_id=>({product_id,state:'pending',rows:[{}],body:{product_id,request_key:'stable-'+product_id}})));const calls=[],events=[];let fail=true;
+ const c=vm.createContext({runPurchaseBatchGroups,correcting:ref(false),correction:{visible:false},busy:ref(false),finished:ref(false),arriving:ref(false),previewed:ref(true),attempted:ref(false),processed:ref(0),error:ref(''),version:1,current:()=>true,groups,done:{get value(){return groups.value.filter(g=>g.state==='done').length;}},emit:e=>events.push(e),apiClient:{post:async(url,body)=>{calls.push(body);await tick();if(body.product_id===2&&fail)throw Error('temporary');return{ok:true};}}});
+ const source=fs.readFileSync(new URL('../frontend/admin/components/procurement/PurchaseBatchActionDialog.vue',import.meta.url),'utf8');vm.runInContext(source.slice(source.indexOf('async function submit('),source.indexOf('function scopeChanged(')),c);
+ await c.submit();assert.equal(c.done.value,2);assert.equal(c.processed.value,3);fail=false;await c.submit();assert.equal(c.done.value,3);assert.equal(calls.length,4);assert.equal(calls[1],calls[3]);assert.deepEqual(events,['changed','changed']);
+});

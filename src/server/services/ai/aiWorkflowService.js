@@ -1,3 +1,4 @@
+import { resolveWorkflowImageRuntime } from "../../../services/ai-image-runtime-selection.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import fsSync, { createReadStream } from "node:fs";
@@ -68,7 +69,8 @@ export async function generateImages(payload = {}, { creditRuntime } = {}) {
     validateInput: validateCreditedImageInput, runtime: creditRuntime
   });
   if (credited.handled) return credited.result;
-  return generateImagesInternal(payload);
+  const imageRuntimeConfig=await resolveWorkflowImageRuntime(payload,aiImageRuntimePoolConfig);
+  return generateImagesInternal({...payload,imageRuntimeConfig});
 }
 
 async function validateCreditedImageInput(payload) {

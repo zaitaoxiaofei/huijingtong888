@@ -61,7 +61,7 @@ test("paging, counts, derived coverage, logistics cache and picking all keep an 
   const picking = read("../src/services/order-inventory-picking.js");
   const fn = name => service.match(new RegExp('^(?:export )?(?:async )?function '+name+'\\([^]*?^}', 'm'))?.[0] || '';
   assert.match(fn('orderBaseSqlMysql'), /orderTenantPredicateMysql\("tenant_shop", tenantScope\)/);
-  assert.match(fn('ordersPagedMysql'), /await orderTenantCoverageMysql\(tenantScope\)/);
+  assert.match(fn('ordersPagedMysql'), /orderTenantCoverageMysql\(tenantScope\)/);
   assert.doesNotMatch(fn('ordersPagedMysql'), /const includeCounts = !tenantScope/);
   assert.match(fn('orderTenantCoverageMysql'), /tenantId: scope\.id/);
   assert.match(fn('orderTenantCoverageMysql'), /includeLegacyTenantNull: scope\.defaultTenant, fresh: true/);

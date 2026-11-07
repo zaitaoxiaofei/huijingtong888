@@ -1,3 +1,8 @@
+import {skuTrafficDaily} from './sku-traffic-daily.js';
+import {queueSkuTrafficDaily,queueAllSkuTrafficDaily} from './seller-analytics.js';
+import { withRequestReadCache } from './request-read-cache.js';
+import {productEditHistory} from './product-edit-history.js';
+import { withMysqlWorkload, withMysqlInteractiveRead } from "../mysql-workload.js";
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
 import { bindListingDrafts, listingDraftBindingOptions, listingDraftBindings } from "./listing-draft-bindings.js";
 import { procurementDailyReport } from "./procurement-daily-report.js";
@@ -339,6 +344,7 @@ import {
   createSupplierMysql,
   currentExchangeRateMysql,
   dashboardMysql,
+  mobileDashboardFinanceMysql,
   directInboundProcurementRequestsMysql,
   deleteInboundRecordMysql,
   deleteInventoryMovementMysql,
@@ -395,6 +401,8 @@ import {
   outboundRecordsMysql,
   ozonFinanceSummaryMysql,
   monthlyBillingDetailsMysql,
+  financeInventoryCapitalMysql,
+  financeInventoryCapitalDetailsMysql,
   monthlyBillingOrderDetailsMysql,
   performOnlineProductActionMysql,
   packagingFeeRuleChangesMysql,
@@ -416,6 +424,8 @@ import {
   productsMysql,
   procurementProductOrderHistoryMysql,
   procurementLedgerMysql,
+  purchaseBundleContextMysql,
+  reviewPurchaseBundleMysql,
   inventoryLedgerMysql,
   previewInventoryStocktakeMysql,
   applyInventoryStocktakeMysql,
@@ -529,6 +539,7 @@ import {
   userPreferenceMysql,
   updateSupplierMysql,
   shipOrdersMysql,
+  splitOrderMysql,
   warmCoreInventoryRuntimeMysql
 } from "./mysql-cutover.js";
 import { hashPassword, validatePasswordStrength } from "../auth-password.js";
@@ -893,6 +904,7 @@ export const mysqlRuntimeServices = {
   onlineProductLimits: onlineProductLimitsMysql,
   onlineProductWarehouses: onlineProductWarehousesMysql,
   productMergeHistory: productMergeHistoryMysql,
+  productEditHistory,
   orderCancellationRules: orderCancellationRulesMysql,
   orderDetail: orderDetailMysql,
   orderProcurementBatches: orderProcurementBatchesMysql,
@@ -908,7 +920,18 @@ export const mysqlRuntimeServices = {
   orderCarHeatmapSkus: orderCarHeatmapSkusMysql,
   orderCarHeatmapUnmatched: orderCarHeatmapUnmatchedMysql,
   orders: ordersMysql,
-  ordersPaged: ordersPagedMysql,
+  ordersPaged: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
+    String(query.includeRows ?? query.include_rows ?? '1') === '0' ? 'background' : 'foreground',
+    () => {
+      // Inline balances may await a cache refresh already running in the background.
+      const needsBackgroundResult = String(query.includeRows ?? query.include_rows ?? '1') === '0'
+        || String(query.includeCounts ?? query.include_counts ?? '1') !== '0'
+        || ['pending_purchase', 'purchase_in_transit', 'purchase_records_missing'].includes(String(query.status || 'all'))
+        || String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? '0') === '1';
+      return needsBackgroundResult ? ordersPagedMysql(query, tenantId)
+        : withMysqlInteractiveRead(() => ordersPagedMysql(query, tenantId));
+    }
+  )),
   outboundRecords: outboundRecordsMysql,
   packagingFeeRule: packagingFeeRuleMysql,
   packagingFeeRuleChanges: packagingFeeRuleChangesMysql,
@@ -922,6 +945,8 @@ export const mysqlRuntimeServices = {
   products: productsMysql,
   procurementProductOrderHistory: procurementProductOrderHistoryMysql,
   procurementLedger: procurementLedgerMysql,
+  purchaseBundleContext: purchaseBundleContextMysql,
+  reviewPurchaseBundle: reviewPurchaseBundleMysql,
   inventoryLedger: inventoryLedgerMysql,
   previewInventoryStocktake: previewInventoryStocktakeMysql,
   applyInventoryStocktake: applyInventoryStocktakeMysql,
@@ -965,6 +990,9 @@ export const mysqlRuntimeServices = {
   reviewCenter: reviewCenterMysql,
   reviewComments: reviewCommentsMysql,
   reviewReplyTemplates: reviewReplyTemplatesMysql,
+  skuTrafficDailyRead: (body = {},tenantId) => skuTrafficDaily.read(body,tenantId),
+  skuTrafficDailyQueue: queueSkuTrafficDaily,
+  skuTrafficDailySchedule: queueAllSkuTrafficDaily,
   sellerAnalyticsAnalysis: (query = {}, tenantId = "admin") => getAnalysis(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCollectRuns: (query = {}, tenantId = "admin") => listCollectRuns(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCreateCollectRun: (body = {}, tenantId = "admin") => createCollectRun(sellerAnalyticsDb, body, tenantId),
@@ -1032,7 +1060,10 @@ export const mysqlRuntimeServices = {
   ensureProcurementWorkspaceSchema: ensureProcurementWorkspaceSchemaMysql,
   fbpOpportunities: fbpOpportunitiesMysql,
   productInventoryAvailability: productInventoryAvailabilityMysql,
-  orderInventoryAvailability: orderInventoryAvailabilityMysql,
+  orderInventoryAvailability: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
+    'foreground',
+    () => orderInventoryAvailabilityMysql(query, tenantId)
+  )),
   updateInventoryProductLeadTimes: updateInventoryProductLeadTimesMysql,
   fbpReplenishmentOrders: fbpReplenishmentOrdersMysql,
   fbpTransferRecords: fbpTransferRecordsMysql,
@@ -1107,6 +1138,7 @@ export const mysqlRuntimeServices = {
   cleanupHistoricalUnconfirmedActualProfit: cleanupHistoricalUnconfirmedActualProfitMysql,
   commitProductCsvImport: commitProductCsvImportMysql,
   dashboard: dashboardMysql,
+  mobileDashboardFinance: mobileDashboardFinanceMysql,
   ensureProductBarcodeLabelCacheReady: ensureProductBarcodeLabelCacheReadyMysql,
   exceptionWorkbenchSyncWindow: exceptionWorkbenchSyncWindowMysql,
   historicalProfitReview: historicalProfitReviewMysql,
@@ -1115,6 +1147,8 @@ export const mysqlRuntimeServices = {
   markOrderLabelsPrinted: markOrderLabelsPrintedMysql,
   removeFailedOrderLabelPrintBatch: removeFailedOrderLabelPrintBatchMysql,
   monthlyBillingDetails: monthlyBillingDetailsMysql,
+  financeInventoryCapital: financeInventoryCapitalMysql,
+  financeInventoryCapitalDetails: financeInventoryCapitalDetailsMysql,
   monthlyBillingOrders: monthlyBillingOrderDetailsMysql,
   orderPackageLabel: orderPackageLabelMysql,
   productBarcodeLabel: productBarcodeLabelMysql,
@@ -1151,6 +1185,7 @@ export const mysqlRuntimeServices = {
   deleteListingPublishRecord,
   refreshOzonCategoryCache,
   shipOrders: shipOrdersMysql,
+  splitOrder: splitOrderMysql,
   syncDemoOrders: syncDemoOrdersMysql,
   latestOrderSyncStatus: latestOrderSyncStatusMysql,
   syncCustomerChats: syncCustomerChatsMysql,

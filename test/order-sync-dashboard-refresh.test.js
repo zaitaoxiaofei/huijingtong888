@@ -10,7 +10,7 @@ const envExampleSource = readFileSync(new URL("../.env.example", import.meta.url
 test("scheduled order sync refreshes the dashboard snapshot before it succeeds", () => {
   const handler = serverSource.match(/async function runBackgroundOrderStatusSync\(\)[\s\S]*?\n}\n\nasync function runBackgroundCancelledOrderSync/)?.[0] || "";
 
-  assert.match(handler, /await services\.syncOzonIncrementalOrders\([\s\S]*?await services\.refreshDashboardSnapshot\(\{ forceRefresh: true }\)/);
+  assert.match(handler, /await runTenantScheduledWork\(tenantId => services\.syncOzonIncrementalOrders\([\s\S]*?await runTenantScheduledWork\(tenantId => services\.refreshDashboardSnapshot\(\{ forceRefresh: true }, tenantId\)/);
   assert.match(handler, /dashboard_refresh:/);
 });
 

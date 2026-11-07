@@ -2,6 +2,8 @@ import { normalizeVehicleBrand, vehicleBrandAliases } from "../shared/vehicle-br
 import { hasPermission } from "../shared/permissions.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { resolveInventoryTenantScope, inventoryTenantSql } from './inventory-tenant-scope.js';
+import {authorizeBusinessTaskSession} from './business-task-tenant.js';
+import {ensureProductNameAliasSchema,readProductIdentity,recordProductEdit} from './product-edit-history.js';
 
 let schemaReady = false;
 let productCoreNameSchemaReady = false;
@@ -195,7 +197,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}, in
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value, o.label, o.status, o.usage_count,
       CASE WHEN o.option_type = 'category'
-        THEN (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category = o.value)
+        THEN (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND ${bindableInventoryProductPredicate("p")} AND p.inventory_category COLLATE utf8mb4_unicode_ci = o.value COLLATE utf8mb4_unicode_ci)
         ELSE o.usage_count END AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE (? = '' OR o.option_type = ?)
@@ -236,12 +238,20 @@ export async function createInventoryProductNamingOption(body = {}, session = {}
 export async function updateInventoryProductNamingOption(id, body = {}, session = {}) {
   await ensureSchema();
   await ensureProductCoreNameSchema();
+  await ensureProductNameAliasSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以审核或修改标准选项");
   const optionId = Number(id);
   if (!optionId) throw new Error("标准选项不存在");
 
   return withMysqlTransaction(async (connection) => {
+    const run=async(sql,args=[]) => (await connection.query(sql,args))[0];
+    async function currentActor(lock=false){
+      const current=await authorizeBusinessTaskSession(session,lock?(sql,args)=>run(`${sql} FOR SHARE`,args):run);
+      if(Number(current.tenant.id)!==tenant.id||!isNamingMaintainer(current))throw Object.assign(new Error('当前企业岗位已无权修改标准选项'),{statusCode:403});
+      return current;
+    }
+    let current=await currentActor();
     const [options] = await connection.query(`
       SELECT id, option_type, value, label
       FROM inventory_product_naming_options
@@ -264,6 +274,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
     if (duplicates.length) throw new Error(`标准选项“${nextValue}”已存在`);
 
     if (option.option_type === "brand") {
+      current=await currentActor(true);
       await connection.execute(`
         UPDATE inventory_product_naming_options
         SET value = ?, label = ?, status = 'active', reviewed_by_person_id = ?, reviewed_at = CURRENT_TIMESTAMP,
@@ -280,6 +291,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
       WHERE active = 1 AND inventory_category = ? AND ${inventoryTenantSql(tenant)}
       FOR UPDATE
     `, [option.value]);
+    current=await currentActor(true);
 
     await connection.execute(`
       UPDATE inventory_product_naming_options
@@ -289,11 +301,14 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
     `, [nextValue, nextValue, Number(session?.personId || 0) || null, clean(body.review_note || body.reviewNote, 500), optionId]);
 
     for (const product of products) {
+      const before=await readProductIdentity(run,tenant,Number(product.id));
       await connection.execute(`
         UPDATE products
         SET inventory_category = ?, name = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `, [nextValue, buildProductName(product, nextValue), product.id]);
+      const after=await readProductIdentity(run,tenant,Number(product.id));
+      await recordProductEdit(run,tenant,before,after,{personId:current.personId,source:'core_name_edit'});
     }
 
     return { ok: true, id: optionId, value: nextValue, label: nextValue, affected_products: products.length };
@@ -309,7 +324,7 @@ export async function deleteInventoryProductNamingOption(id, session = {}) {
   if (!optionId) throw new Error("标准选项不存在");
   const rows = await mysqlQuery(`
     SELECT o.id, o.option_type, o.value,
-      (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND p.inventory_category = o.value) AS linked_product_count
+      (SELECT COUNT(*) FROM products p WHERE ${inventoryTenantSql(tenant, 'p')} AND p.active = 1 AND p.inventory_category COLLATE utf8mb4_unicode_ci = o.value COLLATE utf8mb4_unicode_ci) AS linked_product_count
     FROM inventory_product_naming_options o
     WHERE o.id = ? AND o.status <> 'archived' AND ${inventoryTenantSql(tenant, 'o')}
     LIMIT 1

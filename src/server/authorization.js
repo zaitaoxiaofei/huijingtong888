@@ -3,6 +3,7 @@ import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
 import { isAiCreditReadRoute } from "./ai-credit-paths.js";
+import { financeSubmissionRoute, canReviewFinance } from "../shared/finance-submissions.js";
 
 const PLATFORM_MANAGEMENT_RESOURCES = new Set([
   "platform", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules",
@@ -19,6 +20,10 @@ export function authorizeApiRequest(req, parts = []) {
   const session = req._session;
   if (!session) return deny("未登录");
   if (parts[0] !== "api") return { allowed: true };
+  if (parts[1] === "finance-submissions") {
+    const access = financeSubmissionRoute(parts, String(req.method || "GET").toUpperCase());
+    return session.tenant?.id && session.tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : deny();
+  }
   if (isEnterpriseMessageRoute(parts, String(req.method || "GET").toUpperCase())) return session.tenant?.id ? { allowed: true } : deny("请先选择有效企业后使用私信");
   if (isPlatformAdmin(session)) return { allowed: true };
   if (!getRoles(session).length && !isEnterpriseAdmin(session)) return deny();
@@ -28,6 +33,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "ai-credits") return session.tenant?.id && isAiCreditReadRoute(parts, method) ? { allowed: true } : deny();
   const path = parts.slice(1).join("/");
   const require = (...permissions) => permissions.some(permission => hasPermission(session, permission)) ? { allowed: true } : deny();
+  if (resource === "product-workflows") return session.tenant?.id && isTenantPilotRoute(path, method) ? require("operations") : deny();
 
   if (resource === "ogl-dispatch") {
     if (!session.tenant?.id || !session.tenant?.slug || !isOglDispatchRoute(parts, method)) return deny("请在有效企业中使用已开放的 OGL 发运操作");
@@ -76,6 +82,9 @@ export function authorizeApiRequest(req, parts = []) {
   // Ordinary staff need the scoped dictionary; its route projects safe fields.
   // Full authorization details and all writes remain enterprise administration.
   if (resource === "shops" && parts.length === 2 && method === "GET") return { allowed: true };
+  if (resource === "shops" && parts.length === 3 && parts[2] === "ozon-health") {
+    return ["GET", "POST"].includes(method) && isEnterpriseAdmin(session) ? { allowed: true } : deny("仅企业负责人或管理员可以检查店铺授权");
+  }
   if (resource === "shops" && ["owner", "admin"].includes(session.tenant?.role)) {
     const collection = parts.length === 2 && ["GET", "POST"].includes(method);
     const record = parts.length === 3 && /^\d+$/.test(String(parts[2] || "")) && ["PUT", "DELETE"].includes(method);
@@ -84,7 +93,7 @@ export function authorizeApiRequest(req, parts = []) {
   if (resource === "finance-center" && isEnterpriseAdmin(session)) {
     const route = parts.slice(2);
     const companyRead = route.length === 1 && route[0] === "companies" && read;
-    const reportRead = route.length === 1 && ["report", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
+    const reportRead = route.length === 1 && ["report", "inventory-capital", "inventory-capital-details", "expenses", "vouchers", "platform-items"].includes(route[0]) && read;
     const exportRead = route.length === 1 && route[0] === "export" && read;
     const collectionWrite = route.length === 1 && ["companies", "shop-assignments", "expenses", "vouchers", "voucher-attachments", "close"].includes(route[0]) && method === "POST";
     const expenseDelete = route.length === 2 && route[0] === "expenses" && /^\d+$/.test(String(route[1] || "")) && method === "DELETE";
@@ -118,6 +127,26 @@ export function authorizeApiRequest(req, parts = []) {
   if (read && ["dashboard", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules", "order-quality-rules"].includes(resource)) return { allowed: true };
   if (read && ["system/info", "system/update-status", "db/seller-analytics/plugin-status"].includes(path)) return { allowed: true };
   if (read && path === "settings/packaging-fee-rule") return require("inventory.read");
+  if (resource === "inventory-workflow") {
+    if(read&&['inventory-workflow/demand-details','inventory-workflow/purchase-arrivals'].includes(path))return require('inventory.read');
+    if(method==='POST'&&path==='inventory-workflow/local-safety')return require('inventory.write','procurement');
+    if(method==='POST'&&path==='inventory-workflow/purchase-arrivals')return require('procurement');
+    if(method==='POST'&&path==='inventory-workflow/cancel-demand')return require('procurement');
+    if(method==='POST'&&path==='inventory-workflow/demand-request')return require('packing','inventory.write','procurement');
+    if(method==='POST'&&path==='inventory-workflow/node-action')return require('packing','inventory.write','procurement','orders.manage');
+    if(method==='POST'&&path==='inventory-workflow/feedback')return require('packing','inventory.write','procurement');
+    if (method==='POST' && path==='inventory-workflow/fbp') return require('inventory.write');
+    if ((method==='GET'&&path==='inventory-workflow/receipts/context')||(method==='POST'&&path==='inventory-workflow/receipts/preview'))return require('packing','procurement');
+    if (path === 'inventory-workflow/receipts' && ['GET','POST'].includes(method)) return require('packing','procurement');
+    if (read && ['inventory-workflow','inventory-workflow/alerts','inventory-workflow/details'].includes(path)) return require('inventory.read');
+    if (method === 'POST' && path === 'inventory-workflow/requests') return req._session?.tenant?.id ? {allowed:true} : deny('请先选择有效企业');
+    return deny();
+  }
+  if (resource === "inventory-flow") {
+    if (read) return require("inventory.read");
+    if (parts[2] === "task-action") return require("inventory.write", "packing");
+    return require("inventory.write");
+  }
   if (["finance-center", "payroll", "profits", "monthly-billing-details", "monthly-billing-orders", "ozon-finance", "profit-reconciliation", "profit-snapshots", "pending-settlement-costs", "settings", "people", "shops", "exchange-rate", "exchange-rates", "logistics-rules", "stock-warehouse-rules", "order-cancellation-rules"].includes(resource)) return deny("仅管理员可以访问财务、人员授权或修改基础配置");
   if (["ai-provider/chat", "ai-provider/stream"].includes(path)) return require("operations", "technical");
   if (["ai-provider", "scheduled-jobs", "scheduled-job-runs", "scheduled-job-run-events", "system-monitoring", "system", "docs"].includes(resource)) return require("technical");
@@ -131,6 +160,7 @@ export function authorizeApiRequest(req, parts = []) {
     if (parts[3] === "procurement-requests") return require("procurement");
     return require("orders.manage");
   }
+  if (method === "POST" && path === "procurement/stock-topups") return require("packing", "inventory.write");
   if (resource === "procurement" && method === "POST" && parts[2] === "warehouse-requests") return require("procurement.request.submit");
   if (resource === "print" || resource === "outbound-records") return require("packing");
   if (["procurement", "inbound-records"].includes(resource)) return require("procurement");

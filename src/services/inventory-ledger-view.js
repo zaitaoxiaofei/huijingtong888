@@ -10,7 +10,9 @@ export function inventoryStocktakeBody(body = {}) {
 
 export function inventoryLedgerView(value = {}) {
   return {
-    product: pick(value.product, ['id', 'name', 'code', 'inventory_number', 'stock_unit', 'image_url']),
+    fulfillment_summary:value.fulfillment_summary,
+    flow_summary: value.flow_summary,
+    product: pick(value.product, ['id', 'name', 'code', 'inventory_number', 'stock_unit', 'is_consumable', 'image_url']),
     ...pick(value, ['revision', 'local_stock', 'physical_estimate', 'open_order_deducted', 'available_estimate',
       'open_order_demand', 'fbp_reserved', 'current_stock_reserved', 'incoming_quantity', 'current_incoming',
       'current_shortage', 'stocktake_id', 'last_stocktake_at']),

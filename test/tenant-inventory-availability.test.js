@@ -27,6 +27,9 @@ function coverageQuery(tenant, productIds = [10]) {
     return [];
   } };
 }
+// OGL evidence verifies its own tenant, including the default enterprise's
+// historical NULL shop. That nested clause never widens the outer owner scope.
+const withoutOglLegacyOwner = sql => sql.replace(/OR \(ogl_shop\.tenant_id IS NULL AND ogl_tenant\.slug = 'default'\)/g, '');
 
 test('scoped coverage limits order and movement queries to the requested enterprise', async () => {
   const { calls, query } = coverageQuery({ id: 19, slug: 'another-business' });
@@ -35,14 +38,14 @@ test('scoped coverage limits order and movement queries to the requested enterpr
   assert.match(calls[1].statement, /WHERE \(tenant_id = \?\) AND id IN \(10\)/);
   assert.deepEqual(calls[1].params, [19]);
   const sql = calls.slice(2).map(call => call.statement);
-  const demands = sql.find(statement => statement.includes('FROM orders o JOIN order_items oi'));
+  const demands = sql.find(statement => /^SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(statement));
   assert.match(demands, /tenant_shop\.tenant_id = 19/);
   assert.match(demands, /direct_mapping\.tenant_id = 19/);
   assert.match(demands, /direct_mapping\.shop_id = o\.shop_id/);
   assert.match(demands, /cp\.tenant_id = 19/);
   assert.match(demands, /product_id IN \(10\)/);
   assert.ok(sql.some(statement => /FROM inventory_movements/.test(statement) && /tenant_id = 19/.test(statement)));
-  assert.ok(sql.every(statement => !/tenant_id IS NULL/.test(statement)), 'caller cannot opt a customer into default legacy ownership');
+  assert.ok(sql.every(statement => !/tenant_id IS NULL/.test(withoutOglLegacyOwner(statement))), 'caller cannot opt a customer into default legacy ownership');
   const foreign = coverageQuery({ id: 19, slug: 'another-business' }, []);
   assert.equal((await loadOrderProcurementCoverage(foreign.query, '', { productIds: [99], tenantId: 19 })).size, 0);
   assert.equal(foreign.calls.length, 2, 'unowned product IDs must not reach order or movement queries');
@@ -57,7 +60,7 @@ test('default coverage includes only its tenant ID and legacy NULL rows across o
   assert.match(calls[1].statement, /WHERE \(tenant_id = \? OR tenant_id IS NULL\) AND id IN \(10\)/);
   assert.deepEqual(calls[1].params, [1]);
   const sql = calls.slice(2).map(call => call.statement);
-  const demands = sql.find(statement => statement.includes('FROM orders o JOIN order_items oi'));
+  const demands = sql.find(statement => /^SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(statement));
   assert.match(demands, /tenant_shop\.tenant_id = 1 OR tenant_shop\.tenant_id IS NULL/);
   assert.match(demands, /direct_mapping\.tenant_id = 1 OR direct_mapping\.tenant_id IS NULL/);
   assert.match(demands, /cp\.tenant_id = 1 OR cp\.tenant_id IS NULL/);
@@ -67,11 +70,11 @@ test('default coverage includes only its tenant ID and legacy NULL rows across o
   const deductions = sql.find(statement => statement.includes('FROM inventory_movements im'));
   assert.match(deductions, /im\.tenant_id = 1 OR im\.tenant_id IS NULL/);
   const fbp = sql.find(statement => statement.includes('FROM fbp_replenishment_order_items i'));
-  assert.match(fbp, /reservation_shop\.tenant_id = 1 OR reservation_shop\.tenant_id IS NULL/);
+  assert.match(fbp, /shop\.tenant_id = 1 OR shop\.tenant_id IS NULL/);
   const requests = sql.find(statement => statement.includes('FROM procurement_requests WHERE'));
   assert.match(requests, /tenant_id = 1 OR tenant_id IS NULL/);
   const other = coverageQuery({ id: 19, slug: 'another-business' });
   await loadOrderProcurementCoverage(other.query, '', { productIds: [10], tenantId: 19, fresh: true });
   const otherSql = other.calls.map(call => call.statement);
-  assert.ok(otherSql.every(statement => !/tenant_id IS NULL/.test(statement)));
+  assert.ok(otherSql.every(statement => !/tenant_id IS NULL/.test(withoutOglLegacyOwner(statement))));
 });

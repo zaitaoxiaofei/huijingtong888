@@ -1,7 +1,7 @@
 import { orderProfitFxBusinessDate, ORDER_PROFIT_DAILY_FX_SOURCE } from "./order-profit-daily-fx.js";
 import { dailyFxQuery } from "./order-profit-daily-fx-schema.js";
 import { validateDailyFxSnapshot } from "./profit-formulas/v2/fx.js";
-import { classifyOrderOutcome } from "./profit-formulas/v2/order-outcome.js";
+import { getProfitFormula, usesDailyProfitFx } from "./profit-formulas/registry.js";
 
 const fail = (code, message, statusCode = 400) => Object.assign(new Error(message), { code, statusCode });
 const parse = value => { try { return typeof value === "string" ? JSON.parse(value) : value; } catch { return null; } };
@@ -116,13 +116,13 @@ async function monthImpact(db, scope, today, currentRate) {
     const signed = row.signed_business_date || (row.delivered_at ? orderProfitFxBusinessDate(row.delivered_at) : null);
     const isCurrentSigned = signed && signed >= from && signed < toExclusive;
     const bucket = isCurrentSigned ? realized : open;
-    if (row.formula_version === "V1" || Number(row.legacy_baseline || 0)) {
+    if (["V1", "V3"].includes(row.formula_version) || Number(row.legacy_baseline || 0)) {
       excluded.legacy_items++;bucket.excluded_items++;reason(bucket, "LEGACY_FX_BASELINE_UNAVAILABLE");continue;
     }
-    if (row.formula_version !== "V2") {
+    if (!usesDailyProfitFx(row.formula_version)) {
       excluded.unversioned_items++;bucket.excluded_items++;reason(bucket, "PROFIT_FORMULA_VERSION_UNKNOWN");continue;
     }
-    const outcome = classifyOrderOutcome(row);
+    const outcome = getProfitFormula(row.formula_version).outcome.classifyOrderOutcome(row);
     if (!isCurrentSigned && (signed || outcome !== "active")) {
       if (signed) { excluded.outside_month_items++;continue; }
       excluded.terminal_unsigned_items++;open.excluded_items++;reason(open, "TERMINAL_UNSIGNED_EXCLUDED");continue;

@@ -1,3 +1,4 @@
+import {orderHasDispatchHold} from '../../../src/shared/order-dispatch-hold.js';
 export const SEARCH_TYPE_OPTIONS = [
   { value: "order", label: "订单号" },
   { value: "sku", label: "SKU" },
@@ -14,7 +15,8 @@ export const STATE_META = {
   all: { label: "全部订单", color: "slate" },
   awaiting_packaging: { label: "等待备货", color: "amber" },
   awaiting_deliver: { label: "等待发运", color: "blue" },
-  ogl_dispatched: { label: "已发运", color: "blue" },
+  ogl_bound: { label: "等待发运", color: "blue" },
+  ogl_dispatched: { label: "已交运待上网", color: "blue" },
   delivering: { label: "运输中", color: "green" },
   dispute: { label: "有争议", color: "red" },
   delivered: { label: "已签收", color: "green" },
@@ -41,7 +43,10 @@ export function orderStateKey(row = {}) {
   const oglDisplayStatus = row?.ogl_dispatch?.dispatched === true || row?.ogl_dispatch?.tracking === true ? String(row?.display_status || "") : "";
   if (["delivering", "delivered", "cancelled", "dispute"].includes(oglDisplayStatus)) return oglDisplayStatus;
   if (DELIVERING_KEYWORDS.some(value => text.includes(value)) && !AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "delivering";
-  if (oglDisplayStatus === "ogl_dispatched") return "ogl_dispatched";
+  if (orderHasDispatchHold(row)) return "awaiting_deliver";
+  if (oglDisplayStatus === "awaiting_deliver") return "awaiting_deliver";
+  if (oglDisplayStatus === "ogl_bound") return "awaiting_deliver";
+  if (oglDisplayStatus === "ogl_dispatched") return oglDisplayStatus;
   if (AWAITING_DELIVER_STATES.some(value => text.includes(value))) return "awaiting_deliver";
   if (DELIVERING_KEYWORDS.some(value => text.includes(value))) return "delivering";
   if (AWAITING_PACKAGING_STATES.some(value => text.includes(value))) return "awaiting_packaging";

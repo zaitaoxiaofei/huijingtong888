@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { inventoryProductSearch } from '../src/services/inventory-product-search.js';
 
 const service = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 const inventoryPage = readFileSync(new URL("../frontend/admin/views/inventory/InventoryProductsPage.vue", import.meta.url), "utf8");
@@ -11,6 +12,7 @@ const namingService = readFileSync(new URL("../src/services/inventory-product-na
 const listingService = readFileSync(new URL("../src/services/listing-automation.js", import.meta.url), "utf8");
 const listingRoutes = readFileSync(new URL("../src/server/routes/listingAutomation.js", import.meta.url), "utf8");
 const productDialog = readFileSync(new URL("../frontend/admin/components/inventory/ProductCreateEditDialog.vue", import.meta.url), "utf8");
+const toolbar = readFileSync(new URL('../frontend/admin/components/inventory/InventoryPageToolbar.vue', import.meta.url), 'utf8');
 
 test("product API combines structured inventory filters", () => {
   for (const field of ["inventoryCategory", "productName", "vehicleBrand", "vehicleModel", "accessoryName", "color", "material", "process"]) {
@@ -23,11 +25,11 @@ test("product API combines structured inventory filters", () => {
 });
 
 test("inventory exposes dedicated modes and preserves structured order binding", () => {
-  for (const source of [inventoryPage, ordersPage]) {
-    assert.match(source, /InventoryStructuredSearch/);
-    assert.match(source, /模糊搜索/);
-    assert.match(source, /精确搜索/);
-  }
+  assert.match(inventoryPage, /InventoryPageToolbar/);
+  for(const mode of ['inventory_id','inventory_prefix','auto','sku','name']) assert.ok(toolbar.includes(`value="${mode}"`));
+  assert.match(ordersPage, /InventoryStructuredSearch/);
+  assert.match(ordersPage, /模糊搜索/);
+  assert.match(ordersPage, /精确搜索/);
   assert.match(inventoryPage, /searchMode:\s*"inventory_id"/);
   assert.match(ordersPage, /bindProductSearchMode = ref\("exact"\)/);
 });
@@ -64,13 +66,15 @@ test("structured search reuses controlled naming options and the AI vehicle cata
 
 test("structured vehicle brand normalization removes legacy separators before exact matching", () => {
   const normalizedQueryPattern = /normalizeVehicleBrand\(query\.vehicleBrand \|\| query\.vehicle_brand, \{ strict: false \}\)/;
-  for (const name of ['tenantProductsMysql','productsMysql','inboundRecordsWhereMysql','procurementGroupedPageIdsMysql']) {
+  for (const name of ['tenantProductsMysql','inboundRecordsWhereMysql','procurementGroupedPageIdsMysql']) {
     const start=service.search(new RegExp(`^(?:export )?(?:async )?function ${name}\\(`,'m'));
     assert.ok(start>=0,`${name} remains available`);
     const rest=service.slice(start+1);
     const next=rest.search(/^(?:export )?(?:async )?function \w+\(/m);
-    assert.match(next<0?rest:rest.slice(0,next),normalizedQueryPattern,`${name} normalizes legacy brand separators`);
+    const body=next<0?rest:rest.slice(0,next);
+    assert.ok(normalizedQueryPattern.test(body)||body.includes('inventoryProductSearch('),`${name} normalizes brand directly or through shared product criteria`);
   }
+  assert.deepEqual(inventoryProductSearch({vehicle_brand:'特耐 | TENET'},{id:2,isDefault:false}).params,['TENET']);
   assert.match(namingService, /normalizeVehicleBrand\(query\.brand, \{ strict: false \}\)/);
 });
 

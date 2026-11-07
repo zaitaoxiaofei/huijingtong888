@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {build} from 'vite';
+import vue from '@vitejs/plugin-vue';
+import {chromium} from 'playwright-core';
+
+test('compact procurement cells preserve notes, day dates, inline actions and FBP/receipt boundaries in normal and printed orders',{skip:process.env.RUN_TASK_BROWSER_TESTS!=='1',timeout:120000},async()=>{
+ const output=await fs.mkdtemp(path.join(os.tmpdir(),'order-procurement-cell-'));let browser;
+ const common={shop_id:1,shop_name:'验证店铺',statusLabel:'等待发货',productDisplayRows:[],logisticsSummary:{deliveryMethodLabel:'FBS',serviceClass:'OGL',transportMode:'陆运'},profitSummary:{},availableActions:{showPrint:true,print:true},unboundItems:[],cancelCategoryText:'--',cancelReasonText:'--',procurement_coverage:{needs_fulfillment:true,stock_location:'LOCAL',items:[{product_id:10}]},inventorySummaries:[{productId:10,sku:'SKU-10',inventoryNumber:'2-10',productName:'门槛条',quantity:1,componentCount:0,inventoryMode:'single'}]};
+ const state={latestPurchaseAt:'2026-11-05 17:00:00',hasOrderIncoming:true,pendingPurchaseCount:1,inTransitDays:3,inboundRecordId:10,inboundDetails:{purchaseOrderNo:'DO-NOT-SHOW-PO'},purchase_note:'自动采购审计，不是人工备注'};
+ const rows=[
+  {id:1,mark_type:'quality',mark_note:'门槛条去部分字体\n到货请核对',procurementState:{...state}},
+  {id:2,mark_type:'urgent',mark_note:'尚未采购，先确认定制字体',procurementState:{}},
+  {id:3,mark_note:'FBP人工协作说明',fulfillment_type_key:'fbp',logisticsSummary:{isFbp:true,deliveryMethodLabel:'FBP',methodLabel:'FBP',warehouse:'珲春仓'},procurementState:{...state}},
+  {id:4,mark_note:'',procurementState:{...state,hasOrderIncoming:false,purchaseReceiptStatus:'received',inTransitDays:999,latestReceivedAt:'2026-11-06 12:00:00'}},
+  {id:5,mark_note:' ',procurementState:{...state,pendingPurchaseCount:3,inTransitDays:5}},
+  {id:6,mark_note:'已保存的人工备注',inventory_refresh_pending:true,procurementState:{...state}},
+  {id:7,mark_note:'历史货源待核',procurement_coverage:{entered_transport:true},procurementState:{...state}},
+  {id:8,mark_note:'',procurement_coverage:{needs_fulfillment:true,items:[]},procurementState:{}}
+ ].map(row=>({...common,posting_number:'CELL-ORDER-'+row.id,orderTitleParts:[{text:'CELL-ORDER-'+row.id}],...row}));
+ try{
+  await build({configFile:false,root:process.cwd(),logLevel:'error',plugins:[vue(),{name:'procurement-cell-fixture',enforce:'pre',resolveId(id,importer){if(id==='virtual:procurement-cell')return '\0procurement-cell';if(id.endsWith('/procurement/ProcurementLedgerDialog.vue'))return '\0procurement-ledger-spy';},load(id){
+   if(id==='\0procurement-ledger-spy')return `import {h} from 'vue';export default{props:['modelValue','orderId','productId','initialAction'],emits:['update:modelValue'],setup(props,{emit}){window.actionEvents.push({type:'remind',id:props.orderId,productId:props.productId,action:props.initialAction});return()=>h('div',{role:'dialog','aria-label':'采购提醒入口'},[h('p','采购提醒'),h('button',{onClick:()=>emit('update:modelValue',false)},'关闭提醒')]);}};`;
+   if(id==='\0procurement-cell')return `import {createApp,h,ref} from 'vue';import ElementPlus from 'element-plus';import 'element-plus/dist/index.css';import '/frontend/admin/styles/index.css';import '/frontend/orders/orders-view.css';import Table from '/frontend/orders/components/OrdersTable.vue';window.actionEvents=[];const rows=${JSON.stringify(rows)};createApp({setup(){const printed=ref(false),busy=ref(0),canRemind=ref(true),canManage=ref(true),canEditNotes=ref(false);window.cellControls={busy,canRemind,canManage,canEditNotes};return()=>h('section',[h('button',{onClick:()=>printed.value=!printed.value},printed.value?'返回普通订单':'查看打印状态'),h('h3',printed.value?'打印状态采购信息':'普通订单采购信息'),h(Table,{rows:rows.map(row=>({...row,printedState:printed.value,printed_at:printed.value?'2026-11-06 01:00:00':null})),canRemindProcurement:canRemind.value,canManageOrderNotes:canManage.value,canEditProcurementNotes:canEditNotes.value,confirmingInboundRecordId:busy.value,tableHeight:1150,onViewProcurementDetails:row=>window.actionEvents.push({type:'details',id:row.id}),onConfirmProcurementInbound:row=>window.actionEvents.push({type:'receive',id:row.id}),onEditProcurementNote:row=>window.actionEvents.push({type:'note',id:row.id,markType:row.mark_type}),onPrintOrder:id=>window.actionEvents.push({type:'print',id})})]);}}).use(ElementPlus).mount('#app');`;
+  }}],build:{outDir:output,cssCodeSplit:false,rollupOptions:{input:'virtual:procurement-cell',output:{entryFileNames:'entry.js'}}}});
+  browser=await chromium.launch({executablePath:process.env.CHROME_PATH||(process.platform==='win32'?'C:/Program Files/Google/Chrome/Application/chrome.exe':'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),headless:true});
+  const page=await browser.newPage({viewport:{width:2100,height:1400}}),errors=[],requests=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.route('http://localhost:8788/**',async route=>{const url=new URL(route.request().url());if(url.pathname.startsWith('/api/')){requests.push(url.pathname);return route.fulfill({json:{rows:[]}});}if(url.pathname==='/admin.html')return route.fulfill({contentType:'text/html',body:'<html><head><meta charset="utf-8"><link rel="stylesheet" href="/style.css"><style>body{font-family:Arial,sans-serif;margin:20px}</style></head><body><div id="app"></div><script type="module" src="/entry.js"></script></body></html>'});const file=url.pathname==='/style.css'?path.join('assets',(await fs.readdir(path.join(output,'assets'))).find(n=>n.endsWith('.css'))):url.pathname.slice(1);return route.fulfill({contentType:file.endsWith('.css')?'text/css':'text/javascript',body:await fs.readFile(path.join(output,file))});});
+  await page.goto('http://localhost:8788/admin.html');const tableRows=page.locator('.el-table__body-wrapper tbody tr'),cell=index=>tableRows.nth(index).locator('.orders-procurement-cell');
+  async function verify(){
+   await cell(0).getByText('2026/11/06',{exact:true}).waitFor();await cell(0).getByText('在途 3 天',{exact:true}).waitFor();assert.equal(await cell(0).locator('.orders-procurement-note').innerText(),'门槛条去部分字体\n到货请核对');assert.equal(await cell(0).locator('.orders-procurement-note').evaluate(node=>getComputedStyle(node).whiteSpace),'pre-wrap');
+   assert.equal(await cell(1).locator('.orders-procurement-note').innerText(),'尚未采购，先确认定制字体');assert.equal(await cell(1).getByRole('button',{name:'查看明细',exact:true}).count(),0);
+   await cell(2).getByText('官方仓履约，无需采购',{exact:true}).waitFor();assert.equal(await cell(2).locator('.orders-procurement-inline-actions').count(),0);await tableRows.nth(2).getByText('仓库: 珲春仓',{exact:true}).waitFor();
+   await cell(3).getByText('已入库',{exact:true}).waitFor();assert.equal((await cell(3).innerText()).includes('999'),false);assert.equal(await cell(3).getByRole('button',{name:'登记入库',exact:true}).count(),0);
+   await cell(4).getByText('在途 5 天',{exact:true}).waitFor();assert.equal(await cell(4).locator('.orders-procurement-note').count(),0);assert.doesNotMatch(await cell(4).innerText(),/笔|采购单/);
+   await cell(5).getByText('采购覆盖待核对',{exact:true}).waitFor();assert.equal(await cell(5).locator('.orders-procurement-note').innerText(),'已保存的人工备注');assert.equal(await cell(5).locator('.orders-procurement-inline-actions').count(),0);
+   await cell(6).getByRole('button',{name:'核对库存来源',exact:true}).waitFor();assert.equal(await cell(7).locator('.orders-procurement-note').count(),0);
+   for(let i=0;i<8;i++)assert.doesNotMatch(await cell(i).innerText(),/DO-NOT-SHOW-PO|17:00:00|自动采购审计/);
+   await page.locator('.el-table__body-wrapper .el-scrollbar__wrap').evaluate(node=>{node.scrollLeft=node.scrollWidth;});await page.waitForTimeout(100);
+   const buttons=cell(0).locator('.orders-procurement-inline-actions .el-button'),boxes=await buttons.evaluateAll(nodes=>nodes.map(n=>({y:n.getBoundingClientRect().y,height:n.getBoundingClientRect().height})));assert.equal(boxes.length,3);assert.ok(Math.max(...boxes.map(b=>b.y))-Math.min(...boxes.map(b=>b.y))<1);assert.ok(boxes.every(b=>b.height<=24));
+  }
+  await verify();await fs.mkdir('.verification',{recursive:true});await page.screenshot({path:'.verification/order-procurement-cell-normal.png',fullPage:true,animations:'disabled'});
+  await cell(0).getByRole('button',{name:'查看明细',exact:true}).click();await cell(0).getByRole('button',{name:'登记入库',exact:true}).click();await cell(6).getByRole('button',{name:'核对库存来源',exact:true}).click();await cell(0).locator('.orders-procurement-note').click();await cell(0).getByRole('button',{name:'提醒采购',exact:true}).click();await page.waitForTimeout(100);assert.deepEqual(errors,[],JSON.stringify(await page.evaluate(()=>window.actionEvents)));await page.getByRole('dialog',{name:'采购提醒入口',exact:true}).waitFor();await page.getByRole('button',{name:'关闭提醒',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.actionEvents),[{type:'details',id:1},{type:'receive',id:1},{type:'receive',id:7},{type:'note',id:1,markType:'quality'},{type:'remind',id:1,productId:10,action:'procurement'}]);
+  await page.evaluate(()=>window.cellControls.busy.value=10);assert.equal(await cell(0).getByRole('button',{name:'登记入库',exact:true}).isDisabled(),true);assert.equal(await cell(4).getByRole('button',{name:'登记入库',exact:true}).isDisabled(),true);await page.evaluate(()=>{window.cellControls.busy.value=0;window.cellControls.canRemind.value=false;});assert.equal(await cell(0).getByRole('button',{name:'提醒采购',exact:true}).count(),0);await page.evaluate(()=>window.cellControls.canRemind.value=true);
+  await page.getByRole('button',{name:'查看打印状态',exact:true}).click();await tableRows.nth(0).getByText('已打印',{exact:true}).waitFor();await verify();await page.screenshot({path:'.verification/order-procurement-cell-printed.png',fullPage:true,animations:'disabled'});await tableRows.nth(0).getByRole('button',{name:'打印标签',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.actionEvents.at(-1)),{type:'print',id:1});
+  await page.evaluate(()=>{window.cellControls.canManage.value=false;window.cellControls.canEditNotes.value=true;});
+  assert.equal(await cell(0).getByRole('button',{name:'编辑采购协作备注',exact:true}).count(),1);assert.equal(await cell(1).getByRole('button',{name:'编辑采购协作备注',exact:true}).count(),1);
+  for(const index of [2,5,6,7]){assert.equal(await cell(index).locator('.orders-procurement-note-edit').count(),0);assert.equal(await cell(index).locator('.orders-procurement-note.is-editable').count(),0);}
+  await cell(4).getByRole('button',{name:'添加采购协作备注',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.actionEvents.at(-1)),{type:'note',id:5,markType:undefined});assert.equal(await cell(4).locator('.orders-procurement-note').count(),0);assert.equal(await cell(0).locator('.orders-procurement-inline-actions .el-button').count(),3);assert.deepEqual(errors,[]);assert.deepEqual(requests,[]);
+ }finally{await browser?.close();await fs.rm(output,{recursive:true,force:true});}
+});

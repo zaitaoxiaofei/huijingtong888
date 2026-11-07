@@ -16,7 +16,65 @@ const body = (schema, required = true, description = "") => ({ required, descrip
 const param = (name, schema, required = true) => ({ name, required, ...schema });
 const response = (status, mediaType, schema, description = "") => ({ status, mediaType, schema, description });
 
+const inventorySearchParams = [
+  param("query", scalar("string", "Keyword interpreted by searchMode; default auto keeps page-specific business fields"), false),
+  param("shopId", scalar("string", "Current-enterprise shop ID, or all"), false),
+  param("searchMode", scalar("string", "auto preserves page business keyword search, complete two/three-part numbers are exact and 1-3- is a current-number prefix; inventory_id accepts exact current/legacy numbers; inventory_prefix accepts 1-3 or 1-3- for a category/brand and 1-3-1 for a serial prefix; sku is exact; name matches all space-separated terms"), false),
+  ...["inventoryCategory", "productName", "vehicleBrand", "fitmentType", "vehicleModel", "accessoryName", "color", "material", "process"].map(name => param(name, scalar("string", "Shared current-enterprise product filter; vehicleModel/material accept comma-separated alternatives. Different fields intersect before pagination."), false))
+];
+
 const schemas = {
+  InventorySupplyPlan: objectOf("One physical supply pool for required FBS/formal FBP and optional local/FBP safety procurement. Existing FBP locks remain protected and each inbound unit is used once. Planning does not reserve, receive or purchase stock.",[
+    field("known",scalar("boolean","Physical, local safety and application evidence are complete"),true),
+    ...["required_purchase","optional_purchase","required_fbs","required_fbp","optional_local","optional_fbp","fbs_waiting_incoming","fbp_waiting_incoming","fbp_ready_stock","submitted_fbp_quantity","unbacked_fbp_locks","order_quantity","locked_quantity","fbp_forecast_quantity","required_fbp_physical_gap","forecast_fbp_physical_gap"].map(name=>field(name,scalar("number",name==="optional_purchase"?"Sum of verified optional requirements; consult fbp_forecast_known before treating this as a complete FBP forecast":"Physical units; unknown is null, never zero",{nullable:true}))),
+    field("fbp_forecast_known",scalar("boolean","All bound official FBP snapshots and safety targets are verified; formal applications can still be required while the forecast is unknown"))
+  ]),
+  InventoryWorkflowDemand: objectOf("Four physical-unit procurement purposes: real_order, local_safety, fbp_stock, fbp_forecast. Required FBS/formal FBP take precedence over optional safety targets; requests are reminders, never additional physical allocation.", [
+    field("key", scalar("string", "real_order | local_safety | fbp_stock | fbp_forecast"), true), field("label", scalar("string", "Business purpose"), true),
+    field("priority", scalar("number", "1 through 4"), true), field("process_status",scalar("string","Optional request_submitted, pending_review or draft; separate from supply colour")),field("advisory_status",scalar("string","Optional FBP opportunity/warning advisory; never reserves or purchases stock")), field("status", scalar("string", "danger | warning | success | opportunity | unknown"), true),
+    field("physical_gap", scalar("number", "Dispatchable physical shortage; null when unknown", {nullable:true})),
+    field("purchase_quantity", scalar("number", "Net additional purchase requirement after scoped inbound allocation; null when unknown", {nullable:true})),
+    field("required_purchase_quantity",scalar("number","Required FBS or formal FBP uncovered units")),field("optional_purchase_quantity",scalar("number","Optional local or FBP safety uncovered units")),
+    field("submitted_quantity", scalar("number", "Largest outstanding reminder for this same product purpose; reminders are not summed as separate demand")),
+    field("requests", arrayOf(scalar("object", "Current-enterprise outstanding request metadata"), "Source requests"))
+  ]),
+  FbpSupplyState: objectOf("FBP sellable-stock safety loop. Official available already excludes platform reservations; transfer receipts never directly increase it. SKU units expand to physical inventory units once.", [
+    field("known",scalar("boolean","All bound SKU snapshots and targets are known"),true),field("status",scalar("string","unknown | warning | in_transit | success"),true),
+    ...["available","safety","shortage","in_transit","committed","replenish_quantity"].map(name=>field(name,scalar("number","Physical units; null until verified",{nullable:true}))),
+    field("rows",arrayOf(scalar("object","Per shop/SKU available, fbp_target, in_transit, committed_qty and replenish_quantity in SKU sets; per_set_quantity converts to physical units"),"Independent per-SKU shortages, never netted across shops"))
+  ]),
+  InventoryWorkflow: objectOf("Current-enterprise common inventory policy, no purchase costs. Pending inbound never adds physical stock. Draft FBP opportunities do not create purchase obligations. Verified FBP safety shortages and submitted applications share one per-SKU requirement; approved stock and transit cover it before procurement.", [
+    field("product_id", scalar("number", "Owned inventory product ID"), true), field("overall",scalar("string","Worst demand/advisory status"),true),field("stock_status",scalar("string","Supply sufficiency only; pending approvals never make surplus stock yellow")),
+    field("demands",arrayOf(ref("InventoryWorkflowDemand"),"Four purposes; FBS and formal FBP required, local safety and unconfirmed FBP forecasts optional yellow"),true),
+    field("fbp",ref("FbpSupplyState")),field("supply_plan",ref("InventorySupplyPlan")),field("local_stock_status",scalar("string","Local supply colour, independent of the FBP safety alert")),field("forecast",scalar("object","Optional current-enterprise SKU projection for the detail UI; absent from lean first paint")),
+    ...["physical","order_demand","safety","locked","free","purchase_quantity"].map(name=>field(name,scalar("number","Physical units, nullable when unknown",{nullable:true}))),
+    ...["requested","incoming","local_days","fbp_days"].map(name=>field(name,scalar("number","Named physical quantity or coverage days"))),
+    field("incoming_note",scalar("string","Inbound arrival/dispatch warning")), field("calculated_at",scalar("string","Calculation time")),
+    ...["requests","applications","purchases","batches","skus","opportunities","transfers","fbp_forecast_suggestions"].map(name=>field(name,arrayOf(scalar("object","Scoped nonfinancial metadata"),"Available for full detail; light status may omit"))),
+    field("settings",scalar("object","Current effective replenishment settings")),field("forecast_error",scalar("string","Advisory forecast unavailable; core ledger remains usable"))
+  ]),
+  InventoryFlowSummary: objectOf("Shared read-only inventory flow. Optional forecast failure returns unavailable/message while existing ledger fields remain usable. Unknown quantities are null, never implied zero; incoming is not physical stock.", [
+    ...["physical", "order_demand", "locked", "safety", "free", "unoccupied", "protection_gap", "incoming", "incoming_assigned", "order_shortage", "requested", "local_days", "fbp_days", "consumed_7d", "daily_consumption", "estimated_dates", "production_days", "local_shipping_days"].map(name => field(name, scalar("number", "Physical units or named coverage days; nullable when unknown.", { nullable: true }))),
+    field("applications_pending", scalar("boolean", "Local-first response has not loaded FBP applications yet; requested is null, not zero.")),
+    field("consumption_from", scalar("string", "Inclusive UTC start of the seven complete Beijing days.")),
+    field("consumption_to", scalar("string", "Exclusive UTC end of the consumption window.")),
+    field("unavailable", scalar("boolean", "Optional summary could not be loaded.")),
+    field("message", scalar("string", "Non-sensitive recovery guidance when unavailable.")),
+    field("safety_status", scalar("string", "Forecast completeness and interpretation.")),
+    field("orders", arrayOf(scalar("object", "Current-enterprise order_id/order_item_id, shop_id/shop_name, posting_number, status, ordered_at and physical-unit quantity/stock_quantity/incoming_quantity/shortage_quantity."), "Current open orders, without finance fields.")),
+    field("applications", arrayOf(scalar("object", "Current-enterprise order_id/order_no/status/created_at, item_id/shop_id/shop_name/ozon_sku/product_id, applicant_name/reviewer_name, requested_qty/final_qty in SKU units, per_set_quantity and requested_quantity/locked_quantity in physical units."), "Active FBP requests and reservations; request quantity is not deducted again.")),
+    field("transfers",arrayOf(scalar("object","Latest 300 owned transfer records: SKU-unit quantity/listed_quantity, physical confirmed_quantity/remaining_quantity, shop/SKU, source order_id and timestamps; no costs"),"Read-only receipt evidence; never updates official available")),
+    field("purchases", arrayOf(scalar("object", "Only id, order_no, person_name, purchased_at and pending_quantity; no prices, costs, supplier or purchase URL."), "Nonfinancial pending-purchase summary.")),
+    field("safety_rows", arrayOf(scalar("object", "shop_id/shop_name/ozon_sku, per_set_quantity, daily_sales/local_daily_sales/coverage_days, official available/synced_at and status."), "Per-SKU forecast basis.")),
+    field("calculated_at", scalar("string", "UTC calculation time; UI formats Beijing time."))
+  ]),
+  InventoryLedgerFlowResponse: objectOf("Existing ledger fields plus an optional shared flow summary. Inventory-only ledger retains its financial-field allowlist; procurement ledger retains its existing duty requirements.", [
+    field("flow_summary", ref("InventoryFlowSummary", "Present for include_flow=1 or local; local omits FBP-dependent work.")),
+    field("product_id", scalar("number", "Only for view=fbp, the requested scoped product.")),
+    field("fbp_inventory", scalar("object", "Official cached snapshot rows/present/available/incomplete; null or omitted before deferred read.")),
+    field("applications", arrayOf(scalar("object", "Same scoped FBP application fields as InventoryFlowSummary."), "Only for view=fbp.")),
+    field("requested", scalar("number", "Total active FBP requested physical units, only for view=fbp."))
+  ], { additionalProperties: true }),
   EnterpriseMessagePeer: objectOf("Active person in the authenticated enterprise. No global account roster.", [
     field("id", scalar("number", "Person ID."), true), field("name", scalar("string", "Display name."), true),
     field("username", scalar("string", "Login name.")), field("avatar_url", scalar("string", "Avatar URL."))
@@ -1055,6 +1113,22 @@ const changePolicy = {
 };
 
 const endpoints = [
+  section("Collector editor and cache", [
+    endpoint("POST", "/api/listing/collector-box/{sku}/create-listing-template", "Prepare a current-enterprise collected product. previewOnly returns an ephemeral editor response without archiving media or writing a template; normal calls still archive all media before persistence.", {
+      auth: "authenticated", pathParams: [param("sku", scalar("string", "Current-enterprise collected SKU"))],
+      requestBody: body(objectOf("Collector editor options", [field("previewOnly",scalar("boolean","Optional; default false. Preview has no persistent template ID.")),field("openMode",scalar("string","listing_editor permits manual completion of missing fields.")),field("allowIncomplete",scalar("boolean","Allows manual editing; does not relax media persistence."))])),
+      responses: [response(200,"application/json",objectOf("Prepared editor",[field("ok",scalar("boolean"),true),field("preview",scalar("boolean","True only for a nonpersistent preview")),field("template",scalar("object","Template data; preview returns id=null and preview_only=true"),true)])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    ...["POST","PUT"].map(method=>endpoint(method,method==="POST"?"/api/listing/templates":"/api/listing/templates/{id}","Create/update an owned listing template. Collector editor writes set archive_collector_media; media failure prevents persistence.",{
+      auth:"authenticated",...(method==="PUT"?{pathParams:[param("id",scalar("number","Owned template ID"))]}:{}),
+      requestBody:body(objectOf("Template with editable payload",[field("archive_collector_media",scalar("boolean","Archive selected collector media to managed OSS before writing; default false for existing callers."))])),
+      responses:[response(200,"application/json",scalar("object","Saved template")),response(403,"application/json",ref("ErrorResponse")),response(502,"application/json",ref("ErrorResponse"))]
+    })),
+    endpoint("POST","/api/local-plugin/collected-products/lookup-batch","Look up current-enterprise collected product previews. Optional summary mode avoids reading raw JSON; missing summary preserves older plugin behavior.",{
+      auth:"local-plugin",requestBody:body(objectOf("Batch lookup",[field("skus",arrayOf(scalar("string"),"At most 120 SKUs"),true),field("summary",scalar("boolean","When true product contains summary_only=true and omits raw attributes/variants/media arrays."))])),
+      responses:[response(200,"application/json",scalar("object","Ordered per-SKU lookup results"))]
+    })
+  ]),
   section("Docs", [
     endpoint("GET", "/api/docs", "Return the machine-readable API catalog.", {
       auth: "authenticated",
@@ -1273,6 +1347,16 @@ const endpoints = [
       responses: [response(200, "image/*", scalar("binary", "Authorized tail image.")), response(404, "application/json", ref("ErrorResponse"))]
     })
   ]),
+  section("SKU Daily Traffic", [
+    endpoint("GET", "/api/db/seller-analytics/sku-daily", "Read current-enterprise daily SKU traffic for the last 15 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.", {
+      query: [param("shop_id", scalar("string", "Owned shop ID or all"), false), param("date", scalar("string", "Complete report day YYYY-MM-DD; defaults to yesterday"), false), param("query", scalar("string", "SKU, offer or name"), false), param("page", scalar("number", "1-based page"), false), param("pageSize", scalar("number", "At most 100"), false)],
+      responses: [response(200, "application/json", scalar("object", "Paged SKU rows, 15-day series, shops and per-day coverage including pending/partial failures")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/db/seller-analytics/sku-daily/collect", "Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 15 report dates.", {
+      requestBody: body(objectOf("Current-enterprise queue request", [field("shop_id", scalar("string", "Owned shop ID or all")), field("date", scalar("string", "Optional single complete day in the retained window"))])),
+      responses: [response(200, "application/json", scalar("object", "Queued and already waiting shop/day identifiers")), response(400, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
   section("Enterprise Plugin Credentials", [
     endpoint("GET", "/api/tenants/plugin-token", "Read credential status for the active enterprise. Requires an enterprise owner/admin or platform administrator.", {
       query: [param("tenant_id", scalar("number", "Target enterprise ID; non-platform users cannot select another enterprise."), false)],
@@ -1301,9 +1385,14 @@ const endpoints = [
     })
   ]),
   section("Dashboard And Profit", [
-    endpoint("GET", "/api/dashboard", "Return dashboard summary counters and grouped metrics.", {
+    endpoint("GET", "/api/dashboard", "Return dashboard summary counters and grouped metrics. Optional view=mobile returns a fresh-member, explicit mobile metric allow-list; staff never receive profit/cost sections. Mobile date/dateKey/date_key must identify the same valid Beijing-calendar day no later than today; invalid or future days return 400 before loading or queuing a snapshot. Daily metrics use the selected day, month metrics accumulate from that month's start through the selected day, and ad_date_key identifies the actual advertising snapshot day. view=mobile-finance requires fresh finance duty and returns actual purchases for that same period plus current local/FBP/in-transit inventory values. Its period contains month_key/from/to/timezone; inventory_basis=current and inventory_snapshot_at identify the current read, not historical end-of-day inventory. Mobile sections load independently; no external sync or historical profit recalculation. Desktop date compatibility remains unchanged.", {
       auth: "authenticated",
-      responses: [response(200, "application/json", ref("DashboardResponse"))]
+      query: [
+        param("view", scalar("string", "Optional mobile or mobile-finance projection; otherwise the existing desktop dashboard."), false),
+        param("date", scalar("string", "Selected Beijing business day YYYY-MM-DD, default today. Mobile aliases dateKey/date_key must agree when provided.", { format: "date" }), false),
+        param("snapshotOnly", scalar("string", "1 reads saved/in-progress dashboard data without starting another rebuild."), false)
+      ],
+      responses: [response(200, "application/json", ref("DashboardResponse")), response(400, "application/json", objectOf("Invalid or future mobile date; error message and code identify the required date input."))]
     }),
     endpoint("GET", "/api/exchange-rate/current", "Return the latest effective CNY to RUB exchange rate.", {
       auth: "authenticated",
@@ -1357,10 +1446,23 @@ const endpoints = [
       requestBody: body(ref("ExchangeRateUpdateRequest")),
       responses: [response(200, "application/json", ref("ExchangeRate"))]
     }),
-    endpoint("GET", "/api/profit-ranking", "Return ranking rows for the selected profit dimension.", {
+    endpoint("GET", "/api/profit-ranking", "Return ranking rows for the selected profit dimension. inventory=1 groups bound inventory products or their shop/SKU detail, using effective sales and stable pagination. Inventory mode reads only sales aggregates, skips profit/fee and advertising report calculations; only the requested page is returned.", {
       auth: "authenticated",
-      query: queryFieldsFromSchema("ProfitFiltersQuery"),
+      query: [...queryFieldsFromSchema("ProfitFiltersQuery"), param("inventory", scalar("string", "Set to 1 for the inventory sales leaderboard (product/sku dimensions)."), false), param("productId", scalar("integer", "Filter inventory leaderboard details by inventory product ID."), false)],
       responses: [response(200, "application/json", arrayOf(scalar("object", "Profit ranking row."), "Ranking rows."))]
+    }),
+    endpoint("GET", "/api/monthly-billing-details", "Read the current enterprise's operating overview or monthly statement with existing profit, expense and salary accounting. overviewOnly=1 groups the requested months without inventory or AI appendices. includeAppendices=0 also skips procurement/current-inventory and AI appendix reads for a statement, returning procurement_inventory={} and ai_usage={} while preserving summary, shops, expenses, shared_expenses and orders. Omitted includeAppendices retains the full existing response. Company ownership and finance authority are checked before reading either projection; query tenant selectors never replace the session enterprise.", {
+      auth: "authenticated; current-enterprise finance authority",
+      query: [
+        ...["year", "fromMonth", "toMonth", "month"].map(name => param(name, scalar("integer", "Calendar year/month selection; the current month ends on Beijing today."), false)),
+        ...["from", "to"].map(name => param(name, scalar("string", "Inclusive Beijing-calendar YYYY-MM-DD; a valid pair selects an explicit statement range of at most 366 days."), false)),
+        param("shopId", scalar("string", "Current-enterprise shop ID or all."), false),
+        param("companyId", scalar("string", "Current-enterprise company ID or all; an unowned company returns 404."), false),
+        param("overviewOnly", scalar("string", "1 selects grouped monthly summaries."), false),
+        param("includeAppendices", scalar("string", "0 omits procurement/current-inventory and AI appendix work; otherwise include the existing appendices. No financial summary fields are removed."), false),
+        param("includeOrders", scalar("string", "1 includes order rows for the selected calendar month; independent of appendix selection."), false)
+      ],
+      responses: [response(200, "application/json", objectOf("Existing months and selected statement; omitted appendices are empty objects, never synthetic zero amounts.")), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
     }),
     endpoint("GET", "/api/profit-reconciliation", "Compare estimated and finance-accrued profit and identify inventory-data risks.", {
       auth: "authenticated",
@@ -1495,6 +1597,15 @@ const endpoints = [
       requestBody: body(scalar("object", "Print batch identifier returned by the printed endpoint.")),
       responses: [response(200, "application/json", scalar("object", "Mutation result with removed count."))]
     }),
+    endpoint("GET", "/api/orders/:id/split", "Read the owned order's unfinished split operation so reopening the dialog resumes reconciliation instead of sending another split.", {
+      auth: "authenticated", pathParams: [param("id", scalar("number", "Order identifier."))],
+      responses: [response(200, "application/json", scalar("object|null", "Saved request key, allocation and original items; never credentials."))]
+    }),
+    endpoint("POST", "/api/orders/split", "Split one owned FBS posting without preparing or dispatching. The UUID request key prevents duplicate upstream mutations; reconciliation repeats reads only. Official child details are imported before ok=true; the operator separately confirms preparation through orders/ship.", {
+      auth: "authenticated",
+      requestBody: body(scalar("object", "order_id, packages of order_item_id/quantity, client_request_id; optional action=reconcile.")),
+      responses: [response(200, "application/json", scalar("object", "split_confirmed, prepared=false, orders, posting_numbers and optional sync_pending/error."))]
+    }),
     endpoint("POST", "/api/orders/ship", "Submit shipment confirmation to Ozon for selected orders.", {
       auth: "authenticated",
       requestBody: body(ref("ShipOrdersRequest")),
@@ -1520,22 +1631,28 @@ const endpoints = [
     })
   ]),
   section("Catalog", [
-    endpoint("GET", "/api/products", "Return active product master data with inventory and profit metrics.", {
-      auth: "authenticated",
-      responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows."))]
+    endpoint("GET", "/api/products", "Return active product master data. Optional view=inventory is the lean product list: omit inbound/profit work and include physical_stock, nullable workflow_free from the shared safety policy, and nullable fbp_stock_known from all effective SKU/component bindings.", {
+      auth: "authenticated",query:[...inventorySearchParams,param("view",scalar("string","inventory for lean inventory list; omitted preserves other product consumers"),false),param("includeStock",scalar("string","0 returns list metadata immediately; quantities are nullable and loaded separately by view=local"),false)],
+      responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Product rows; paged=1 returns rows/total/page/pageSize."))]
     }),
     endpoint("GET", "/api/products/selection", "Return selection-facing product records.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Selection product rows."))]
     }),
     endpoint("GET", "/api/products/hidden", "Return archived or hidden products.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", arrayOf(ref("ProductRecord"), "Hidden product rows."))]
     }),
     endpoint("GET", "/api/products/:id", "Return one product with full computed detail.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Product identifier."))],
       responses: [response(200, "application/json", ref("ProductRecord")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/products/:id/edit-history", "Read current-enterprise inventory identity edit versions and independently retained old inventory numbers/names. Requires fresh inventory.read membership and product ownership. Snapshot fields are allowlisted identity/specification and stable component references; no prices, supplier details, private notes or order data. Ordinary inventory saves and core-name edits record before/after in the same transaction as the edit. Historical aliases are retention evidence, not reconstructed full versions or paired old identities.", {
+      auth: "authenticated",
+      pathParams: [param("id", scalar("number", "Stable product identifier."))],
+      query: [param("page", scalar("number", "One-based history page; maximum 1000000."), false), param("pageSize", scalar("number", "Positive page size, capped at 100; default 20."), false)],
+      responses: [response(200, "application/json", scalar("object", "product_id,current identity,number_aliases[{number,recorded_at}],name_aliases[{name,type,active,recorded_at}],rows[{id,recorded_at,actor,source,source_label,before,after,changed_fields,unavailable}],total,page,pageSize,history_complete=false,history_notice. Dates are storage timestamps rendered in Beijing time by the UI; alias recorded_at means retention time, not a proven original edit time.")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
     }),
     endpoint("GET", "/api/products/:id/image", "Return the stored product image binary.", {
       auth: "authenticated",
@@ -1557,7 +1674,7 @@ const endpoints = [
       requestBody: body(ref("ProductMutationRequest")),
       responses: [response(200, "application/json", ref("ProductCreateResponse"))]
     }),
-    endpoint("PUT", "/api/products/:id", "Update a product in place.", {
+    endpoint("PUT", "/api/products/:id", "Update a product in place. Inventory identity changes append a product_edit before/after event and preserve a changed old name as an existing search alias in the same transaction; generated inventory numbers are read after their normal numbering triggers. Stable product IDs and SKU/purchase references remain unchanged. No-op identity saves do not append an empty identity version.", {
       auth: "authenticated",
       pathParams: [param("id", scalar("number", "Product identifier."))],
       requestBody: body(ref("ProductMutationRequest")),
@@ -1608,7 +1725,7 @@ const endpoints = [
       requestBody: body(ref("OnlineProductBindRequest")),
       responses: [response(200, "application/json", ref("MutationOk"))]
     }),
-    endpoint("GET", "/api/online-products/warehouses", "Return Ozon warehouses for a shop.", {
+    endpoint("GET", "/api/online-products/warehouses", "Return a complete current-enterprise active shop FBS/rFBS warehouse list from v2 (limit 200 and cursor/has_next pagination). Missing credentials, changed shop identity, invalid response shapes, incomplete pagination or cancellation fail the read without returning partial warehouses; no retired v1 fallback or warehouse identity rewrite. This lookup does not read FBO/FBP physical stock.", {
       auth: "authenticated",
       query: [param("shop_id", scalar("number", "Shop identifier."), true)],
       responses: [response(200, "application/json", ref("OnlineProductWarehousesResponse"))]
@@ -1629,7 +1746,7 @@ const endpoints = [
       responses: [response(200, "application/json", scalar("object", "Created product linkage result."))]
     }),
     endpoint("GET", "/api/mappings", "Return SKU mapping rows.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", arrayOf(ref("SkuMappingRecord"), "SKU mapping rows."))]
     }),
     endpoint("PUT", "/api/mappings/:id", "Update an existing SKU mapping.", {
@@ -1650,12 +1767,37 @@ const endpoints = [
     })
   ]),
   section("Inventory", [
+    ...["/api/inventory/ledger", "/api/procurement/ledger"].map(path => endpoint("GET", path, "Read current enterprise inventory detail, optionally with the shared read-only flow graph. fulfillment_summary separates FBS/FBP pending order_count and physical-product quantity; local stock/available/stocktake exclude FBP/FBO/OGR orders. fbp_reserved is unshipped local allocation to FBP, not FBP customer orders. Official FBP stock is loaded independently via view=fbp, with incomplete data explicit. Existing write/revision behavior is unchanged.", {
+      auth: "authenticated",
+      query: [param("product_id", scalar("number", "Current-enterprise physical inventory product ID.")), param("include_flow", scalar("string", "1 includes the shared summary; local includes local safety from seven complete Beijing days' actual FBS shipments, without FBP snapshots/applications. Omitted requests do not forecast."), false), param("view", scalar("string", "fbp returns only cached official FBP stock and scoped applications, without loading the ledger or local forecast. No automatic Ozon request."), false)],
+      responses: [response(200, "application/json", ref("InventoryLedgerFlowResponse"))]
+    })),
+    endpoint("POST", "/api/fbp-replenishment-orders/status", "Run the existing enterprise FBP status writer. A new transition into pending_review resolves physical SKU components and writes supply-gap notifications in the same transaction; repeated pending status does not notify again. Existing review, reserve, shipment and receipt accounting remain in the canonical writer.",{
+      auth:"authenticated",requestBody:body(objectOf("FBP status transition",[field("id",scalar("number","Owned FBP order ID; order_id/orderId aliases remain supported"),true),field("status",scalar("string","draft | pending_review | approved | rejected | sent | ozon_created | completed | cancelled"),true),field("note",scalar("string","Existing optional business note"))])),
+      responses:[response(200,"application/json",objectOf("Canonical status result",[field("ok",scalar("boolean","Committed")),field("id",scalar("number","Order ID")),field("status",scalar("string","Current status")),field("feedback",scalar("object","Committed notification count and affected physical product IDs; no stock changes from feedback itself"))])),response(403,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/fbp-replenishment-orders", "Read the existing enterprise FBP replenishment list. An exact orderId never bypasses enterprise ownership, status or other list filters.", {
+      auth: "authenticated",
+      query: [...inventorySearchParams,param("orderId", scalar("number", "Optional positive integer for an exact request deep link; invalid IDs return 400, foreign IDs return an empty page."), false), param("status", scalar("string", "Existing workflow status filter; all for a deep link."), false)],
+      responses: [response(200, "application/json", scalar("object", "Existing paged rows/total/page/pageSize response."))]
+    }),
+    ...["", "/detail", "/settings", "/tasks", "/events"].map(suffix => endpoint("GET", `/api/inventory-flow${suffix}`, "Read the authenticated enterprise's retained inventory-flow compatibility service (the independent UI tab is retired). Detail requires product_id; list accepts query/page/pageSize (max 30). Tasks and audit are bounded to 100/200 records.", {
+      auth: "authenticated", responses: [response(200, "application/json", scalar("object", "Enterprise-scoped flow center data; unknown official stock remains null."))]
+    })),
+    endpoint("GET", "/api/inventory-flow/sync-status", "Poll the current enterprise/product FBP synchronization task. Requires inventory.write. Task results are isolated by enterprise and product; missing or restarted tasks do not imply zero stock.", {
+      auth: "authenticated", query: [param("product_id", scalar("number", "Positive inventory product ID."), true)],
+      responses: [response(200, "application/json", scalar("object", "task_id/running/result/error; completed result contains per-shop success and failure."))]
+    }),
+    ...["settings", "tasks", "task-action", "sync"].map(action => endpoint("POST", `/api/inventory-flow/${action}`, "Retained compatibility workflow writes; the retired independent tab has no navigation entry. Settings use product_id/revision/settings; tasks use stable request_key/items(mapping_id,quantity); actions use order_id/revision/action; sync requires product_id and never substitutes cached stock. With background=true it immediately returns task_id/running, coalesces running tasks per enterprise/product, and is polled via sync-status. Without background it retains the synchronous response. Warehouse actions require packing permission.", {
+      auth: "authenticated", requestBody: body(scalar("object", "See docs/inventory-flow-center.md. Action is edit, lock, ship, receive or correct; receipt/correction require transfer_id and quantity. Corrections require a verified reason.")),
+      responses: [response(200, "application/json", scalar("object", "Operation result. Sync reports per-shop success and failure."))]
+    })),
     endpoint("GET", "/api/inventory", "Return inventory overview rows.", {
       auth: "authenticated",
       responses: [response(200, "application/json", ref("InventorySnapshot"))]
     }),
     endpoint("GET", "/api/stock-alerts", "Return inventory alert rows and replenishment suggestions.", {
-      auth: "authenticated",
+      auth: "authenticated", query: inventorySearchParams,
       responses: [response(200, "application/json", ref("StockAlertsResponse"))]
     }),
     endpoint("GET", "/api/stock-warehouse-rules", "Return stock warehouse classification rules.", {
@@ -1714,6 +1856,12 @@ const endpoints = [
     }),
     endpoint("GET", "/api/inbound-records", "Return inbound record rows.", {
       auth: "authenticated",
+      query: [...inventorySearchParams.filter(item=>item.name!=="shopId"),
+        param("status",scalar("string","pending_arrival for pending receipts, approved for received records; legacy all remains supported"),false),
+        param("demandType",scalar("string","all | real_order | local_safety | fbp_stock | fbp_forecast; inventory_warning retained for older callers"),false),
+        param("inventoryType",scalar("string","all | single | accessory | combo"),false),
+        param("productId",scalar("number","Optional owned product context"),false),
+        param("paged",scalar("string","1 for rows/total/page/pageSize, all predicates apply before paging"),false)],
       responses: [response(200, "application/json", arrayOf(ref("InboundRecord"), "Inbound rows."))]
     }),
     endpoint("POST", "/api/inbound-records", "Create an inbound record.", {
@@ -1745,6 +1893,87 @@ const endpoints = [
     endpoint("GET", "/api/procurement/requests", "Return procurement request rows.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ProcurementRequestRecord"), "Procurement request rows."))]
+    }),
+    endpoint("GET", "/api/inventory-workflow", "Read the shared current-enterprise inventory policy. Fresh inventory.read membership is required; product ownership is checked before cache access. Local/core details and official FBP sync remain separate.", {
+      auth:"authenticated", query:[param("product_ids",scalar("string","1–20 comma-separated owned product IDs; alternatively product_id"),false),param("product_id",scalar("number","Single owned product ID"),false),param("view",scalar("string","local for current-page physical/free/FBP quantities without procurement allocation; status for batched demand; components for owned minimum physical inventory composition and related bundles; requests for nonfinancial request metadata without ledger/forecast reads; sku for one bound SKU composition (requires shop_id, ozon_sku); omitted for full details"),false),param("shop_id",scalar("number","Current-enterprise shop for view=sku"),false),param("ozon_sku",scalar("string","Bound SKU for view=sku"),false),param("fresh",scalar("string","1 bypasses the short-lived tenant/product cache"),false)],
+      responses:[response(200,"application/json",objectOf("Workflow result",[field("rows",arrayOf(ref("InventoryWorkflow"),"Requested products or requests-only metadata; omitted for view=sku")),field("source",scalar("string","view=sku: direct | bundle | recipe")),field("root",scalar("object","Owned root inventory identity")),field("components",arrayOf(scalar("object","Owned inventory product_id, name, inventory_number, quantity, stock_unit, image_url and current marker"),"view=sku: every component of the current effective binding"))])),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/alerts", "Read product warnings from the same four-demand inventory policy; severity filtering occurs before paging. view=workspace immediately reads a persisted enterprise demand snapshot and current-page nonfinancial sources. It never waits for history/forecast rebuilding: first use returns snapshot.available=false and null total/task counts while warming; stale successful results remain visible. Background work is serialized and limited to two SQL queries, automatically coalesced to once/minute per active enterprise and periodically renewed after five minutes. refresh=1 queues manual reconciliation, sharing active jobs; a write during an older manual job schedules one follow-up. Poll only while snapshot.refreshing; business writes do not use snapshots. Errors retain last success, personnel details are loaded freshly, and inventory_demand_snapshots must be initialized before readiness. Current inventory.read membership required.", {
+      auth:"authenticated", query:[...inventorySearchParams,...['view','scope','task','product_id','compact'].map(name=>param(name,scalar("string","view=workspace uses all owned physical inventory including never-stocked items; scope=orders limits to active FBS demand; task=required|advisory|fbp-stocking|incoming|review|all; fbp-stocking lists unsubmitted forecast stocking suggestions independently of net purchasing gaps; product_id focuses one owned inventory; compact=1 omits current-page request/application identities and feedback while preserving pending purchase batches; purchase actions still recheck live data"),false)),...['alertType','sortBy','refresh'].map(name=>param(name,scalar("string","Search; shared status; recent_7d_qty/recent_15d_qty/recent_30d_qty; refresh=1"),false)),...['page','pageSize'].map(name=>param(name,scalar("number","Page index or page size, maximum100"),false))],
+      responses:[response(200,"application/json",objectOf("Paged shared warnings",[field("rows",arrayOf(scalar("object","Product row with workflow InventoryWorkflow. Workspace rows also include nonfinancial application/request submitters, purchased pending_batches and deduplicated recent stock feedback"),"Filtered products")),field("total",scalar("number","Filtered count; null while workspace has no successful snapshot",{nullable:true})),field("meta",scalar("object","Counts by shared status, or workspace task counts for required/advisory/incoming/review/all; advisory also includes unconfirmed FBP replenishment forecasts whose purchases can already be covered by local stock, to let operations create a transfer application; required and advisory are exclusive (advisory requires known stock, zero required gap and positive optional gap); incoming/review retain legacy product counts, while the UI uses purchase-arrivals summaries for actual batch queues; values null while warming")),field("snapshot",scalar("object","Workspace only: status ready/updating/warming/stale/error, available, incomplete, calculated_at, stale, refreshing, and safe error text. Null/unknown inputs remain unknown."))]))]
+    }),
+    endpoint("GET","/api/inventory-workflow/demand-details","Lazy current-enterprise stock demand detail. Reads canonical fresh FBS coverage with scoped order image, shop, channel, Beijing-display timestamps and manual marks; local safety recommendation, override and revision; active and historical FBP applications expanded through current SKU recipes/components with original SKU quantities; historical binding_status=changed_or_missing retains owned shop/product provenance after SKU rebinding, while active requests still require the current mapping chain; pending batches plus recent50 actual purchase records and all-record totals. Purchase amount/unit_cost are returned only to procurement members; packing sees nonfinancial quantities. No remote Ozon calls.",{
+      auth:"authenticated",query:[param("product_id",scalar("number","Owned physical inventory product"))],responses:[response(200,"application/json",scalar("object","product (with updated_at), state, orders with factual shortage/actionable_shortage_quantity/cancellation audit, cancellation_revision, cancellations_history, safety, applications, requests, batches, purchase_history, reports")),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/inventory-workflow/cancel-demand","Review a purchasing-only decision for selected current-enterprise FBS order-item/product sources. Fresh procurement duty, product/source locks, observed cancellation_revision and a UUID request key are required. Cancel excludes only the reviewed fixed quantity from actionable purchasing; raw order shortages, sales order status, stock and purchased history remain unchanged. Restore removes only selected prior decisions. All operations audit actor/reason and invalidate workflow snapshots; new orders and increased demand remain actionable. Legacy refresh and later grouped purchase allocation honor the same decisions.",{
+      auth:"authenticated",requestBody:body(objectOf("Source-specific purchase decision",[field("product_id",scalar("number","Owned physical inventory product"),true),field("order_item_ids",arrayOf(scalar("number","Owned FBS source item"),"1..100 unique source IDs"),true),field("operation",scalar("string","cancel (default) or restore")),field("cause",scalar("string","replacement, supplier_out_of_stock, already_handled or other"),true),field("note",scalar("string","1..300 character business explanation"),true),field("expected_revision",scalar("string","cancellation_revision from fresh demand-details"),true),field("request_key",scalar("string","UUID retained across identical retries"),true)])),responses:[response(200,"application/json",scalar("object","ok, duplicate, product_id, operation, sources, event_id, state; refresh_needed if committed state readback is unavailable")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/inventory-workflow/local-safety","Fresh inventory.write/procurement membership can override only a specific product's local safety. Optional production_days/local_shipping_days update the same product fields used by inventory editing and the effective flow overrides atomically, requiring expected_product_updated_at. Preserves other settings, checks revision and audits author/reason; null restores automatic recommendation. FBS actual orders and formal FBP requests remain independent. Invalidates shared policy caches.",{
+      auth:"authenticated",requestBody:body(objectOf("Manual local safety",[field("product_id",scalar("number","Owned product"),true),field("quantity",scalar("number","Integer0..1000000, null restores auto",{nullable:true}),true),field("revision",scalar("number","Observed product-settings revision; absent row=0"),true),field("note",scalar("string","Required for a manual override; up to500 characters")),field("production_days",scalar("number","Optional paired cycle update:1,2,3,5,7,10,15,30 days")),field("local_shipping_days",scalar("number","Paired local transport cycle:1..5 days")),field("expected_product_updated_at",scalar("string","Observed product updated_at required for cycle updates"))])),responses:[response(200,"application/json",scalar("object","ok, quantity")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/procurement/purchases","Canonical actual purchase registration. Optional workspace_batch=true enables a 1..100 distinct-product shortage-purchase table: positive integer quantities and actual goods amounts, nonnegative shipping; fresh procurement duty and tenant ownership for all references. Reuses open requests for selected products and creates requests only for products without one. All products, costs and inbound batches commit atomically. A UUID request_key is mandatory for workspace batches; serialized retry identity and audited payload hash return the original purchase order on identical retries, changed payload returns409. Does not post local stock. Existing non-batch purchase modes retain their existing behavior.",{
+      auth:"authenticated",requestBody:body(objectOf("Actual purchase registration",[field("workspace_batch",scalar("boolean","Optional strict inventory workspace batch mode")),field("request_key",scalar("string","UUID retained across identical workspace batch retries")),field("person_id",scalar("number","Owned procurement responsible person")),field("source_type",scalar("string","Purchase platform")),field("note",scalar("string","Purchase note")),field("items",arrayOf(scalar("object","product_id,quantity,actual_quantity,amount,shipping_amount,purchase_url,note,purchase_mode=shortage_purchase; 1..100 distinct products for workspace batch"),"Actual purchase items"),true)])),responses:[response(200,"application/json",scalar("object","ok,purchase_order_id,purchase_order_no,stage,duplicate(optional)")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/inventory-workflow/demand-request","Create or reuse real procurement requests for four demand purposes (FBS real orders and formal FBP applications required; local safety and unconfirmed FBP forecasts optional yellow). Fresh packing/inventory.write/procurement membership, product lock and canonical current net gaps required. Existing submitted typed quantities are linked and only uncovered increments create new requests; no-gap selected types roll back the entire operation. Cause/notes remain separate from demand type. Retry identity and audit are transactional; notifies scoped buyers after creating/linking, never posts stock/cost movements.",{
+      auth:"authenticated",requestBody:body(objectOf("Typed procurement demand",[field("product_id",scalar("number","Owned product"),true),field("demand_types",arrayOf(scalar("string","Purpose",{enum:["real_order","local_safety","fbp_stock","fbp_forecast"]}),"Selected types"),true),field("cause",scalar("string","physical_shortage | physical_mismatch | late_delivery | changed_demand | other"),true),field("note",scalar("string","1–300 characters"),true),field("request_key",scalar("string","UUID, retained for identical retries"),true)])),responses:[response(200,"application/json",scalar("object","ok, duplicate, requests[{id,type,quantity,created_quantity,linked_quantity}]")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET","/api/inventory-workflow/purchase-bundle","Read a current-enterprise purchased bundle batch, observed revision, minimum physical components and proposed cost allocation. Procurement duty required; financial values are not part of the nonfinancial arrivals list. Missing component costs remain unknown.",{
+      auth:"authenticated",query:[param("id",scalar("number","Owned purchased inbound batch"),true)],responses:[response(200,"application/json",scalar("object","batch,product,components,revision,content_revision")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/inventory-workflow/purchase-bundle","Procurement manually reconciles one pending/arrived bundle purchase into minimum-unit purchased batches. Whole mode requires every component at the saved composition ratio and explicit cost-allocation confirmation; goods/freight totals each stay equal to the source. Parts mode records only selected actually purchased components, with explicit confirmation if correcting the paid amount. Canonical ledger actions retire only the source pending quantity and create the chosen physical batches atomically; no stock is received. Source, buyer/date/logistics, actor and lineage remain audited. Fresh duty, ownership, observed source/BOM revision, product locks and retry identity are checked; approved/cancelled history is protected.",{
+      auth:"authenticated",requestBody:body(scalar("object","id,revision,request_key UUID,mode whole|parts,note,items[{product_id,quantity,amount,shipping_amount}],allocation_confirmed,confirm_amount_change,arrived")),responses:[response(200,"application/json",scalar("object","ok,duplicate,mode,inbound_id,created,physical_changed=false")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET","/api/inventory-workflow/purchase-arrivals","Paged current-enterprise actual purchase arrival batches with minimum-unit component identities, related bundles and source lineage. source_bundle_batch may include the original purchase_order_id and order_no after database ownership and lineage validation; the row's actual purchase/action IDs stay unchanged. Unresolved legacy bundle totals are flagged rather than counted as known units. A bundle must be manually reconciled before arrival or receipt, including multiple purchases of the same inventory. Reads nonfinancial product, buyer, quantity, purchase/arrival/receipt time and logistics fields. open means pending_arrival and no received_at; arrived remains pending QC; approved is received. Warehouse approval or buyer arrival closes open tracking.",{
+      auth:"authenticated",query:[...inventorySearchParams,...['status','product_id','page','pageSize','summary_only','recent'].map(name=>param(name,scalar("string","open|arrived|inspection|received|all; inspection includes arrived or purchased at least72 hours ago; recent=1 keeps pending batches plus last3 months; amounts and purchase_note only for procurement duty; receipt photo URLs are enterprise-private; owned product; page; maximum100 rows; summary_only=1 reads filtered open/arrived batch counts without row details"),false)),param("day_mode",scalar("string","pending opts into purchase-day selection; absent preserves all-day legacy listing")),param("purchase_day",scalar("string","YYYY-MM-DD in Beijing time or all; defaults to the oldest pending day matching status when day_mode=pending; a selected completed date falls back to the oldest remaining date and resets page to 1")),param("start_date",scalar("string","Optional inclusive Beijing purchase start day YYYY-MM-DD")),param("end_date",scalar("string","Optional inclusive Beijing purchase end day YYYY-MM-DD"))],responses:[response(200,"application/json",scalar("object","rows,total,page,pageSize,summary:{open,arrived,open_quantity,arrived_quantity}; summary ignores selected status/day/page but retains product/search/tenant/date-range filters. days contains all matching pending purchase dates with open/arrived batch counts, known physical quantities and unknown-batch counts, independent of pagination; selected_day and day_summary identify the current day. Partial batches retain their original purchase date. Pending day-mode rows and dates are oldest-first; legacy listing order stays newest-first.")),response(403,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST","/api/inventory-workflow/purchase-arrivals","Buyer confirms the actual arrived quantity in one owned purchased batch; omit quantity for compatible full arrival. Partial confirmation atomically splits arrived quantity from an unarrived remainder with preserved purchase/request links and conserved amounts/freight. Purchase header/item totals do not change and no stock is posted. Same-key replay returns the saved split; changed payload or stale timestamp/expected_quantity rejects. operation=logistics retains its existing courier/tracking-only behavior and observed logistics checks. Fresh procurement duty and owned purchased source are rechecked under locks.",{
+      auth:"authenticated",requestBody:body(objectOf("Arrival confirmation",[field("operation",scalar("string","Optional logistics; omitted confirms arrival")),field("courier_company",scalar("string","Logistics only, max128")),field("tracking_number",scalar("string","Logistics only, max128")),field("expected_courier_company",scalar("string","Observed logistics value, empty if absent")),field("expected_tracking_number",scalar("string","Observed tracking value, empty if absent")),field("id",scalar("number","Owned pending inbound batch"),true),field("quantity",scalar("number","Optional positive integer actual arrived units, no greater than current remaining quantity")),field("expected_quantity",scalar("number","Required observed remaining units when quantity is provided")),field("expected_updated_at",scalar("string","Observed updated_at"),true),field("note",scalar("string","Optional arrival remark, maximum500 characters; blank accepted. Actor, time and actual/remaining quantities are still audited automatically.")),field("request_key",scalar("string","UUID"),true)])),responses:[response(200,"application/json",scalar("object","ok,duplicate,inbound_id,quantity,remaining_quantity,remaining_inbound_id for arrival confirmation")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/feedback", "Fresh current-enterprise packing, inventory.write or procurement membership can report stock discrepancies. Recomputes the inventory supply plan and atomically notifies active scoped administrators/procurement/operations. Feedback is a notification and does not add another procurement quantity, mutate stock or change costs. FBP submission can include this notification in its existing transaction; stocktake already committed is never retried just because notification failed.",{
+      auth:"authenticated",requestBody:body(objectOf("Inventory feedback",[field("product_id",scalar("number","Owned physical inventory product"),true),field("request_key",scalar("string","UUID retained for retry; changed note/product with the same key returns409"),true),field("note",scalar("string","Business explanation, 1–500 characters"),true),field("automatic",scalar("boolean","Skip a no-gap notification after a saved inventory adjustment; unknown quantities remain explicitly unverified"))])),
+      responses:[response(200,"application/json",objectOf("Committed feedback",[field("ok",scalar("boolean","Committed or no uncovered gap")),field("duplicate",scalar("boolean","Previously committed")),field("notified",scalar("number","Recipients written this attempt")),field("required_purchase",scalar("number","Current required physical units, null when unverified",{nullable:true}))])),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/requests", "Any active current-enterprise member may propose one of four purchase purposes. Creates a submitted request and scoped administrator/procurement notifications atomically. No stock/inbound changes. fbp_stock requires a submitted/approved application; fbp_forecast remains an optional yellow suggestion and requires a verified net prediction shortage after pending requests, stock and transit; FBS requires a matching unfulfilled local order.", {
+      auth:"authenticated",requestBody:body(objectOf("Typed procurement reminder",[
+        field("product_id",scalar("number","Owned physical product"),true),field("demand_type",scalar("string","real_order | local_safety | fbp_stock | fbp_forecast"),true),field("quantity",scalar("number","Integer physical units 1..1000000"),true),field("request_key",scalar("string","UUID retained across retries, modified payload returns409"),true),field("order_id",scalar("number","Optional owned unfulfilled order for real_order")),field("note",scalar("string","Explanation, maximum500 characters"))
+      ])),responses:[response(200,"application/json",objectOf("Committed reminder",[field("ok",scalar("boolean","Committed")),field("id",scalar("number","Request ID")),field("duplicate",scalar("boolean","Previously committed")),field("notified",scalar("number","Notifications written this attempt"))])),response(400,"application/json",ref("ErrorResponse")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/details", "Lazy, owned-product node records for requests, purchase-confirm, incoming, receiving, orders, safety, composition or fbp-receipts. composition exposes only owned child image/name/inventory code/quantity and flags incomplete links. fbp-receipts supports summary_only=1 for scoped total/pending_quantity without evidence-history reads, or pages owned transfers, snapshot-change plus recorded FBP outbound evidence, due times and manual receipt state; it never confirms automatically. Fresh inventory.read membership; amounts are returned only with procurement permission. Requests/history default to three months while unfinished work remains visible; all=1 includes older history with 50-row pagination. Incoming warns strictly after48h; receiving includes actual arrival or elapsed72h without approving receipt. Orders expose scoped FBS image, shop, shipping and shared mark only. Safety returns effective cycle rules and optimistic revision.", {
+      auth:"authenticated",queryParams:[param("product_id",scalar("number","Owned physical product")),param("node",scalar("string","requests | purchase-confirm | incoming | receiving | orders | safety | composition | fbp-receipts")),param("summary_only",scalar("string","fbp-receipts only: 1 returns owned pending batch count and quantity without per-SKU evidence history"),false),param("all",scalar("string","1 includes older history"),false),param("page",scalar("number","Positive page, 50 rows"),false)],
+      responses:[response(200,"application/json",scalar("object","Node-specific scoped rows, total and financial flag, or effective settings/revision/product cycle defaults")),response(403,"application/json",ref("ErrorResponse")),response(404,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/node-action", "Fresh membership and per-action duty checked inside transaction. arrived/transit-check require packing or procurement; arrived records received_at but never changes status, money or stock. reject requires procurement and nonempty reason, cancels only an unpurchased request and records rejected approval. order-note requires orders.manage, packing, procurement or inventory.write, verifies selected product consumes this open order, preserves existing mark type and conflicts on stale expected_note. All changes append inventory_flow_events. Approval with purchase uses the existing confirm-from-requests writer, not this route. fbp-arrival-time/fbp-expected-time require packing or inventory.write and optimistic transfer/arrival state; they audit dates without posting stock. fbp-receive rechecks the fresh duty inside the canonical confirm-received transaction, requires an integer quantity and expected_listed_quantity, preserves official stock, and records the confirming operator.", {
+      auth:"authenticated",requestBody:body(objectOf("Node action",[field("product_id",scalar("number","Owned product"),true),field("id",scalar("number","Inbound/request/order ID selected by action"),true),field("action",scalar("string","arrived | transit-check | reject | order-note"),true),field("note",scalar("string","Maximum1000 chars; rejection/note actions require nonempty explanation unless collaboration-note clearing is explicitly requested")),field("expected_note",scalar("string","Current order mark note for optimistic concurrency")),field("preserve_mark",scalar("boolean","order-note only: preserve the locked current mark type, including an empty type; unchanged note returns duplicate without another event. Successful writes return note and mark_type.")),field("clear_note",scalar("boolean","order-note only: true together with preserve_mark=true explicitly permits clearing the observed note; tenant, product/order association, duty and stale-note checks still apply"))])),responses:[response(200,"application/json",scalar("object","Committed action, duplicate arrival or unchanged collaboration note can return duplicate=true")),response(400,"application/json",ref("ErrorResponse")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/receipts/context", "Read pending purchased batches and independent local physical/available quantities for direct receipt entry. Fresh packing/procurement duty; tenant ownership; no prices or FBP calls.", {
+      auth:"authenticated",queryParams:[param("product_id",scalar("number","Owned product"))],responses:[response(200,"application/json",scalar("object","rows, physical and available; unknown quantities remain null")),response(403,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/receipts/preview", "Validate selected quantities through the canonical receipt impact preview. Read-only: returns requires_count, revision, quantity, physical_before/after and available_before/after. Mobile records may include courier_company/tracking_number and up to six receipt_images_json URLs; only owned image attachments are accepted. Historical count is never guessed; missing count leaves after values unknown. No cost fields or stock writes.", {
+      auth:"authenticated",requestBody:body(scalar("object","product_id, records with id/quantity/expected_quantity/reason; optional counted_quantity, courier_company, tracking_number and receipt_images_json per record")),responses:[response(200,"application/json",scalar("object","Receipt impact without money")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("GET", "/api/inventory-workflow/receipts", "Read owned-product pending purchased arrival batches without costs. Fresh packing or procurement duty required.", {
+      auth:"authenticated",queryParams:[param("product_id",scalar("number","Owned product"))],responses:[response(200,"application/json",objectOf("Pending batches",[field("rows",arrayOf(objectOf("Arrival batch",[field("id",scalar("number","Inbound record ID")),field("quantity",scalar("number","Pending units")),field("updated_at",scalar("string","Optimistic revision")),field("order_no",scalar("string","Purchase number"))]),"Batches"))]))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/receipts", "Register only actual QC-passed quantity through the existing receipt writer, preserving unreceived remainder. Fresh packing/procurement is rechecked before writes and before replay. New-arrival requests with a UUID request_key atomically save a tenant-and-actor-scoped receipt result; identical retries recover lost responses without adding stock twice, while changed product, quantities, reason, evidence or revision under the same key conflict. Legacy requests without a key and historical receipts retain their existing paths. Historical stocktake/outbound or negative physical balance requires current physical count and uses the canonical receipt-and-count transaction.", {
+      auth:"authenticated",requestBody:body(objectOf("Scoped receipt",[field("product_id",scalar("number","Owned product"),true),field("request_key",scalar("string","Stable receipt/count request UUID"),true),field("expected_revision",scalar("string","Revision from receipt preview; changed evidence rejects confirmation")),field("counted_quantity",scalar("number","Current total physical units including this arrival; required when historical impact detected")),field("records",arrayOf(objectOf("Actual receipt",[field("id",scalar("number","Pending batch ID"),true),field("quantity",scalar("number","QC-passed positive integer units"),true),field("expected_quantity",scalar("number","Observed pending quantity; stale value rejects"),true),field("reason",scalar("string","Required for partial receipt")),field("note",scalar("string","Optional explanation")),field("receipt_images_json",arrayOf(scalar("string","Owned team image URL"),"Up to six image attachments")),field("tracking_number",scalar("string","Optional tracking number, maximum128 characters")),field("courier_company",scalar("string","Optional courier, maximum128 characters"))]),"1–100 unique batches"),true)])),responses:[response(200,"application/json",scalar("object","Canonical receipt result")),response(403,"application/json",ref("ErrorResponse")),response(409,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/inventory-workflow/fbp", "Create or update the existing FBP replenishment draft for owned bound shop SKUs. Optional forecast_confirmation=true plus UUID request_key and submit=true creates independent confirmed orders without overwriting same-day requests or submitting unselected existing draft SKUs. Identical retries return the original orders; changed contents with the same key return409. Unpurchased flow_fbp_forecast reminders are capped to the remaining net forecast in the same transaction; purchased records are preserved. Forecast and formal demand do not double count; optionally submit in the same canonical transaction with supply-gap notifications for active enterprise procurement/operations. All SKU quantities share one physical inventory pool; unselected related SKUs are not created. Fresh inventory.write membership required. Draft/submission do not lock or deduct physical stock; warehouse approval/shipment remain separate.", {
+      auth:"authenticated",requestBody:body(objectOf("FBP application",[field("product_id",scalar("number","Owned physical product"),true),field("submit",scalar("boolean","true submits; false saves draft")),field("forecast_confirmation",scalar("boolean","Optional dedicated prediction confirmation, requires submit=true")),field("request_key",scalar("string","Required UUID for forecast_confirmation; keep across retries")),field("note",scalar("string","Up to500 characters")),field("rows",arrayOf(objectOf("Bound SKU",[field("shop_id",scalar("number","Owned shop"),true),field("ozon_sku",scalar("string","Current bound SKU"),true),field("quantity",scalar("number","Integer SKU sets 1..1000000; converted to physical pieces by recipe"),true)]),"1–100 unique shop/SKU rows"),true)])),responses:[response(200,"application/json",scalar("object","Canonical FBP create/update result")),response(400,"application/json",ref("ErrorResponse")),response(403,"application/json",ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/procurement/stock-topups", "Warehouse inventory topup reminder: atomically create a submitted warehouse request and unread notifications for active current-enterprise owners/admins and procurement staff. Requires current packing or inventory.write duty. Does not change stock or duplicate real-order demand. No tenant/actor selector is accepted.", {
+      auth: "authenticated",
+      requestBody: body(objectOf("Order-linked warehouse reminder", [
+        field("order_id", scalar("number", "Current-enterprise local-fulfillment order ID."), true),
+        field("product_id", scalar("number", "Physical inventory product bound to that order."), true),
+        field("quantity", scalar("number", "Integer physical units, 1 through 1000000."), true),
+        field("request_key", scalar("string", "UUID retained across network retries; changed payload with the same key returns 409."), true),
+        field("note", scalar("string", "Optional warehouse explanation, at most 500 characters."))
+      ])),
+      responses: [response(200, "application/json", objectOf("Persisted application and recipient notification outcome", [
+        field("ok", scalar("boolean", "Committed successfully.")), field("id", scalar("number", "Procurement request ID.")),
+        field("duplicate", scalar("boolean", "Already committed; no duplicate request or notification.")),
+        field("notified", scalar("number", "Notifications created in this attempt; zero on retry."))
+      ])), response(400, "application/json", ref("ErrorResponse")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse")), response(409, "application/json", ref("ErrorResponse"))]
     }),
     endpoint("POST", "/api/procurement/requests", "Create a procurement request.", {
       auth: "authenticated",
@@ -1897,7 +2126,7 @@ const endpoints = [
       requestBody: body(ref("TeamTaskMutationRequest")),
       responses: [response(200, "application/json", ref("IdResponse"))]
     }),
-    endpoint("POST", "/api/team/attachments", "Upload an attachment for a product-development candidate.", {
+    endpoint("POST", "/api/team/attachments", "Upload an enterprise-private attachment for team work, mobile procurement evidence or receipt photos. Canonical procurement and receipt writers recheck ownership before attaching images.", {
       auth: "authenticated",
       requestBody: body(scalar("object", "multipart/form-data with file field. Supports Excel, Word, PDF, CSV, TXT, PPT and ZIP.")),
       responses: [response(200, "application/json", scalar("object", "Uploaded attachment metadata including url, name, size and contentType."))]
@@ -1971,6 +2200,15 @@ const endpoints = [
     endpoint("GET", "/api/shops", "Return shop master data.", {
       auth: "authenticated",
       responses: [response(200, "application/json", arrayOf(ref("ShopRecord"), "Shop rows."))]
+    }),
+    endpoint("GET", "/api/shops/ozon-health", "Read credential expiry and scoped sync freshness for active shops in the current enterprise. Requires a freshly verified enterprise owner/admin. No API keys or credential fingerprints are returned. A verified authorization does not prove business data is current.", {
+      auth: "authenticated",
+      responses: [response(200, "application/json", arrayOf(scalar("object", "shop_id, status, official expires_at, days_remaining, checked_at, last_verified_at, check_stale, role/method metadata, and per-module sync records (orders/products/stocks/finance). Sync records preserve last_success_at/last_success_coverage when later attempts fail; coverage is a query range, not proof of all historical data. New or rotated keys remain unverified until checked.")))]
+    }),
+    endpoint("POST", "/api/shops/ozon-health", "Probe the selected own active shop through the read-only Ozon roles endpoint. Requires a freshly verified enterprise owner/admin. Repeated checks within one minute are suppressed. Missing expiry, transient failure, expired/revoked keys, unsigned offers and denied permissions remain different states; obsolete in-flight key responses are ignored.", {
+      auth: "authenticated",
+      requestBody: body(objectOf("Select a shop; enterprise identity comes from the session.", [field("shop_id", scalar("number", "Active shop identifier."), true)])),
+      responses: [response(200, "application/json", scalar("object", "The current projected shop health record; same fields as GET /api/shops/ozon-health rows."))]
     }),
     endpoint("POST", "/api/shops", "Create a shop.", {
       auth: "authenticated",

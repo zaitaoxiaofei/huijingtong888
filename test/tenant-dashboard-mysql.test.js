@@ -71,6 +71,23 @@ test("actual dashboard queries and persisted snapshots isolate A/B/default", {
         assert.deepEqual((await service.orderExceptionsMysql(tenant)).map(row => Number(row.store_id)),[id*10]);
       }
     });
+    await t.test("normal visits refresh newly landed orders while polling only reads progress/snapshots", async () => {
+      await query("INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,ordered_at) VALUES(21,20,'new-a','delivered','delivered','2026-10-02 05:00:00')");
+      await query("INSERT INTO order_items(id,order_id,ozon_sku,quantity,sale_price,estimated_profit) VALUES(21,21,'new-sku',1,50,5)");
+      const initial = await service.dashboardMysql({ date_key: "2026-10-02" }, "2");
+      assert.equal(initial.snapshot.status, "building");
+      let current = initial;
+      for (let i = 0; i < 200 && current.snapshot.status === "building"; i++) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        current = await service.dashboardMysql({ date_key: "2026-10-02", snapshotOnly: "1" }, "2");
+      }
+      assert.equal(current.snapshot.status, "snapshot");
+      assert.equal(current.commerce.today.effective_orders, 2);
+      assert.equal(current.commerce.today.effective_revenue, 250);
+      const other = await service.dashboardMysql({ date_key: "2026-10-02", snapshotOnly: "1" }, "3");
+      assert.equal(other.commerce.today.effective_orders, 1);
+      assert.equal(other.commerce.today.effective_revenue, 300);
+    });
   } finally {
     await closeMysqlPool();
     await fixture.cleanup();

@@ -1,4 +1,5 @@
 ﻿<script setup>
+import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, onMounted, reactive, ref, watch } from "vue";
@@ -11,6 +12,7 @@ import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
+import InventoryProductHistoryAction from "../../components/inventory/InventoryProductHistoryAction.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
 const route = useRoute();
@@ -26,6 +28,7 @@ const state = reactive({
   total: 0,
   shops: [],
   filters: {
+    ...inventorySearchDefaults(),
     query: "",
     shopId: "all",
     dateFrom: "",
@@ -36,6 +39,7 @@ const state = reactive({
 });
 
 const filterDefaults = {
+  ...inventorySearchDefaults(),
   query: "",
   shopId: "all",
   dateFrom: "",
@@ -50,7 +54,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-  manualKeys: ["query"],
+
   isSyncingRoute: () => syncingRoute
 });
 
@@ -77,12 +81,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -110,6 +116,7 @@ async function loadPageData() {
     });
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
+    appendInventorySearch(params, state.filters);
     const requests = [apiClient.get(`/api/products/hidden?${params.toString()}`), loadShopDictionary()];
     const [rows, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
@@ -124,8 +131,12 @@ async function loadPageData() {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
-watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
+watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
+  applyRouteState();
+  if (previous !== JSON.stringify(state.filters)) void loadPageData();
+}, { deep: true });
+
 
 onMounted(async () => {
   applyRouteState();
@@ -136,9 +147,11 @@ onMounted(async () => {
 <template>
   <div class="inventory-page-shell inventory-card">
     <InventoryPageToolbar
+      date-label="商品更新时间"
+      product-search
+      :loading="loading"
       :filters="state.filters"
       :shops="state.shops"
-      query-label="隐藏产品搜索"
       query-placeholder="产品名称 / 库存ID / 负责人"
       @search="handleSearch"
       @reset="handleReset"
@@ -154,6 +167,7 @@ onMounted(async () => {
                 <strong>{{ row.name }}</strong>
                 <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
+                <InventoryProductHistoryAction :product-id="Number(row.id)"/>
               </div>
             </div>
           </template>

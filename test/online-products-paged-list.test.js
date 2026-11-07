@@ -28,7 +28,7 @@ test("pending listing pull uses bounded parallel detail reads and writes", () =>
   assert.match(mysqlCutoverSource, /visibilityConcurrency: 5/);
   assert.match(mysqlCutoverSource, /detailConcurrency: 5/);
   assert.match(mysqlCutoverSource, /filterPendingListingProductsWithoutFbsStock\(refs, stockRows, \{ requireSku: false \}\)/);
-  assert.match(mysqlCutoverSource, /items = filterPendingListingProductsWithoutFbsStock\(detailedItems, stockRows\)/);
+  assert.match(mysqlCutoverSource, /items = filterPendingListingProductsWithoutFbsStock\(detailedItems, stockRows, \{ requireSku: false, requireStockEvidence: true \}\)/);
   assert.match(mysqlCutoverSource, /mapWithConcurrencyMysql\(matchingItems, 2/);
   assert.match(mysqlCutoverSource, /const stockRows = productIds.length \? await fetchOzonProductStocks/);
 });

@@ -4,6 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 import { DatabaseSync } from "node:sqlite";
 import { orderStateKey, STATE_META } from "../frontend/orders/constants/orders-ui.js";
+import { withOglDispatch } from "../src/services/ogl-dispatch-state.js";
+import { orderPrintPlan } from "../frontend/orders/utils/order-print-selection.js";
 import { classifyOrderLogistics } from "../src/services/order-logistics-classification.js";
 
 const mysqlSource = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
@@ -83,13 +85,13 @@ test("acceptance display and optimistic counts cannot regress transit or termina
 
 test("OGL applications awaiting physical handover preserve ready Ozon labels without enabling preparation", () => {
   const page = loadFunctions(pageSource, ["rowDisplayStateKey", "rowAvailableActions"]);
-  for (const platform of [...acceptanceRows, { status: "awaiting_deliver" }]) {
+  for (const display_status of ["ogl_bound", "ogl_dispatched"]) for (const platform of [...acceptanceRows, { status: "awaiting_deliver" }]) {
     const pending = {
-      ...platform, display_status: "ogl_dispatched", total_quantity: 2,
+      ...platform, display_status, total_quantity: 2,
       ogl_dispatch: { tracking: true, applied: true, dispatched: false, dispatched_at: null, stage: "applied" },
       ozon_available_actions: ["label_download"], availableActions: { prepare: true, print: true, purchase: true }
     };
-    assert.equal(page.rowDisplayStateKey(pending), "ogl_dispatched");
+    assert.equal(page.rowDisplayStateKey(pending), display_status);
     const actions = page.rowAvailableActions(pending);
     assert.equal(actions.showPrint, true, JSON.stringify(platform));
     assert.equal(actions.print, true, JSON.stringify(platform));
@@ -167,13 +169,14 @@ test("order list enrichment exposes label permissions without exposing the raw p
 
 test("SQL filters put registration in the same tab as the frontend without rewriting stored status", () => {
   const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
-    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+    oglBoundStatusSql: () => "0", oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
   });
   const db = new DatabaseSync(":memory:");
   registerStatusSqlFunctions(db);
   try {
-    db.exec("CREATE TABLE orders (status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
-    const insert = db.prepare("INSERT INTO orders VALUES (?, ?, '', '')");
+    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT, delivered_at TEXT, cancelled_after_ship INTEGER DEFAULT 0)");
+    db.exec("CREATE TABLE order_marks (order_id INTEGER PRIMARY KEY, mark_type TEXT)");
+    const insert = db.prepare("INSERT INTO orders(status,tracking_stage,logistics_status,tracking_number) VALUES (?, ?, '', '')");
     for (const row of registrationRows) insert.run(row.status, row.tracking_stage);
     for (const row of acceptanceRows) insert.run(row.status, row.tracking_stage);
     insert.run("awaiting_packaging", "posting_created");
@@ -187,7 +190,7 @@ test("SQL filters put registration in the same tab as the frontend without rewri
 
 test("SQL and frontend give exact transit facts priority over stale acceptance without reading tracking numbers", () => {
   const { orderStatusSqlMysql } = loadFunctions(mysqlSource, ["orderStatusSqlMysql"], {
-    oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
+    oglBoundStatusSql: () => "0", oglDispatchedStatusSql: () => "0", oglOnlineStatusSql: () => "0", oglTerminalStatusSql: () => "0", oglPhysicalDispatchSql: () => "0"
   });
   const transit = ["delivering", "posting_in_transit", "posting_in_customs", "posting_sorting", "posting_on_way", "posting_on_way_to_city", "posting_in_courier_service", "posting_in_pickup_point"];
   const rows = transit.flatMap(value => ["status", "tracking_stage", "logistics_status"].map(field => ({
@@ -202,8 +205,9 @@ test("SQL and frontend give exact transit facts priority over stale acceptance w
   const db = new DatabaseSync(":memory:");
   registerStatusSqlFunctions(db);
   try {
-    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT)");
-    const insert = db.prepare("INSERT INTO orders VALUES (?, ?, ?, ?, ?)");
+    db.exec("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT, tracking_stage TEXT, logistics_status TEXT, tracking_number TEXT, delivered_at TEXT, cancelled_after_ship INTEGER DEFAULT 0)");
+    db.exec("CREATE TABLE order_marks (order_id INTEGER PRIMARY KEY, mark_type TEXT)");
+    const insert = db.prepare("INSERT INTO orders(id,status,tracking_stage,logistics_status,tracking_number) VALUES (?, ?, ?, ?, ?)");
     const waiting = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("awaiting_deliver")}`);
     const delivering = db.prepare(`SELECT id FROM orders o WHERE id=? AND ${orderStatusSqlMysql("delivering")}`);
     for (const [index, row] of rows.entries()) {
@@ -257,7 +261,7 @@ test("clicking prepare on a stale row reconciles registration without submitting
     orderTenantPredicateMysql: () => "1 = 1",
     assertOrderBatchOwnershipMysql: (rows, ids) => assert.equal(rows.length, ids.length),
     activeShopForTenantMysql: async id => ({ id, tenant_id: 1, name: "Fixture shop" }),
-    mysqlQuery: async (sql) => sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
+    mysqlQuery: async (sql) => sql.includes("order_split_operations") ? [] : sql.includes("FROM orders o") ? [order] : [{ id: 11, quantity: 1, order_product_id: 101 }],
     mysqlQueryOne: async () => ({ raw_json: "{}" }),
     mysqlExecute: async (sql, params) => { writes.push({ sql, params }); },
     markInventoryAlertSkuDailyDirtyMysql: async () => {},
@@ -292,4 +296,36 @@ test('FBP order actions disable procurement even when the API previously permitt
     }
     assert.equal(page.rowAvailableActions({ status, fulfillment_type_key: 'fbs' }).showPurchase, true);
   }
+});
+
+ test("officially included unprinted orders keep the waiting label and print actions", () => {
+  const page = loadFunctions(pageSource, ["rowStateLabel", "rowDisplayStateKey", "rowAvailableActions"], { STATE_META });
+  const row={status:'sent_by_seller',display_status:'awaiting_deliver',printed_at:null,ogl_dispatch:{tracking:true,bound:true,awaiting_print:true,dispatched:false}};
+  assert.equal(page.rowStateLabel(row),'等待发运');
+  assert.equal(page.rowAvailableActions(row).showPrint,true);
+  assert.equal(page.rowAvailableActions(row).print,true);
+  assert.equal(page.rowAvailableActions(row).prepare,false);
+ });
+
+
+test("printing today after yesterday's official inclusion keeps bound labels recoverable for single and batch reprints", () => {
+  const page = loadFunctions(pageSource, ["rowDisplayStateKey", "rowAvailableActions"]);
+  const order = { id: 101, shop_id: 1, status: "awaiting_deliver", logistics_carrier: "ogl", fulfillment_type_key: "fbs", ozon_available_actions: ["label_download_small"] };
+  const member = { order_id: 101, active_order_id: 101, batch_id: 10, default_shop_id: 1, official_carriage_id: "901", official_status: "observed", official_member: 1, batch_status: "preparing", created_at: "2026-11-01 01:00:00" };
+  const unprinted = withOglDispatch(order, member);
+  assert.equal(page.rowDisplayStateKey(unprinted), "awaiting_deliver");
+  assert.equal(page.rowAvailableActions(unprinted).print, true);
+  const printed = withOglDispatch({ ...order, printed_at: "2026-11-02 01:00:00" }, member);
+  assert.equal(page.rowDisplayStateKey(printed), "awaiting_deliver");
+  assert.equal(printed.ogl_dispatch.dispatched, false);
+  assert.equal(printed.ogl_dispatch.dispatched_at, null);
+  const actions = page.rowAvailableActions(printed);
+  assert.equal(actions.showPrint, true);
+  assert.equal(actions.print, true);
+  assert.equal(actions.prepare, false);
+  const rows = [{ ...printed, availableActions: actions }];
+  assert.deepEqual(orderPrintPlan(rows, [101]).ids, [101], "reprints are included without an extra confirmation");
+  assert.deepEqual(orderPrintPlan(rows, []).ids, [101], "off-page selection can be reprinted too");
+  const handedOver = withOglDispatch({ ...order, printed_at: printed.printed_at }, { ...member, dispatched_at: "2026-11-02 02:00:00" });
+  assert.equal(page.rowAvailableActions(handedOver).print, false);
 });
