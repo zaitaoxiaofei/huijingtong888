@@ -5,6 +5,7 @@ import { availableLocalCapitalRows, localCapitalTotals } from "./inventory-capit
 import { memoRequestRead } from './request-read-cache.js';
 import { cachedOrderRead, invalidateOrderReadCache, orderReadIdentity } from "./order-read-cache.js";
 import { mobilePurchaseEvidence } from './procurement-evidence.js';
+import {ensureProductNameAliasSchema,readProductIdentity,recordProductEdit} from './product-edit-history.js';
 import { readNewArrivalReceipt } from './procurement-receipt-idempotency.js';
 import {confirmedFbpZeroSnapshots} from '../shared/fbp-zero-snapshots.js';
 import {createPurchaseBundleReview,assertWholeBundleReview} from './purchase-bundle-review.js';
@@ -12179,22 +12180,7 @@ export async function mappingsMysql(query = {}, tenantId = "admin") {
 }
 
 async function ensureInventoryProductSearchSchemaMysql() {
-  await mysqlExecute(`
-    CREATE TABLE IF NOT EXISTS product_name_aliases (
-      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-      tenant_id BIGINT UNSIGNED NULL,
-      product_id BIGINT UNSIGNED NOT NULL,
-      alias_name VARCHAR(500) NOT NULL,
-      alias_type VARCHAR(32) NOT NULL DEFAULT 'previous_name',
-      active TINYINT(1) NOT NULL DEFAULT 1,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_product_name_alias (product_id, alias_name),
-      KEY idx_product_name_alias_tenant_search (tenant_id, product_id, active, alias_name(191)),
-      KEY idx_product_name_alias_search (product_id, active, alias_name(191)),
-      CONSTRAINT fk_product_name_alias_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-  `);
+  await ensureProductNameAliasSchema();
   await ensureMysqlColumns("products", ["CREATE INDEX idx_products_inventory_search_created ON products (created_at)"]);
 }
 
@@ -15018,15 +15004,23 @@ export async function commitProductCsvImportMysql(body = {}, sessionPersonId = n
   return result;
 }
 
-export async function updateProductMysql(id, body = {}, tenantId = "admin") {
+export async function updateProductMysql(id, body = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   await ensureSelectionCreativeSchemaMysql();
   await ensureProductCompositionSchemaMysql();
   await ensureProductNamingSchemaMysql();
+  await ensureProductNameAliasSchema();
   const productId = Number(id);
   const scope = await resolveInventoryTenantScope(tenantId);
   const tenantScoped = true;
   const tenantPk = scope.id;
+  async function auditActor(connection){
+    if(!options.session)return null;
+    const current=await authorizeBusinessTaskSession(options.session,connection?async(sql,args)=>mysqlConnectionQuery(connection,`${sql} FOR SHARE`,args):undefined);
+    if(Number(current.tenant.id)!==scope.id||!hasPermission(current,'inventory.write'))throw Object.assign(new Error('当前企业岗位已无权编辑库存资料'),{statusCode:403});
+    return current.personId;
+  }
+  await auditActor();
   if (tenantScoped) {
     const ownershipTables = ["products", "suppliers", "logistics_fee_rules"];
     const missing = (await Promise.all(ownershipTables.map(async (table) => ({ table, exists: await mysqlSchemaColumnExists(table, "tenant_id") }))))
@@ -15041,7 +15035,9 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
   let consumableChanged = false;
   await withMysqlTransaction(async (connection) => {
   const run = (sql, params) => mysqlConnectionQuery(connection, sql, params);
-  await assertInventoryRecord(scope, 'product', productId, run, { lock: true });
+  const lockedProduct=await assertInventoryRecord(scope, 'product', productId, run, { lock: true });
+  const personId=await auditActor(connection);
+  const beforeIdentity=await readProductIdentity(run,scope,productId,lockedProduct);
   await assertInventoryReferences(scope, body, run);
   let creator = null;
   const existing = await mysqlConnectionQueryOne(connection, `
@@ -15197,6 +15193,8 @@ export async function updateProductMysql(id, body = {}, tenantId = "admin") {
     shouldSyncOutbound = true;
   }
   if (body.structured_naming || body.structuredNaming) await saveStructuredNamingMysql(productId, body, connection, String(tenantPk));
+  const afterIdentity=await readProductIdentity(run,scope,productId);
+  await recordProductEdit(run,scope,beforeIdentity,afterIdentity,{personId,source:'catalog_edit'});
   if (consumableChanged && await mysqlSchemaColumnExists("inventory_alert_base_snapshots", "cache_key")) {
     await connection.execute("DELETE FROM inventory_alert_base_snapshots WHERE cache_key = ?", [`alerts-v6-${tenantPk}`]);
   }

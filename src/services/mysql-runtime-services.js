@@ -1,4 +1,5 @@
 import { withRequestReadCache } from './request-read-cache.js';
+import {productEditHistory} from './product-edit-history.js';
 import { withMysqlWorkload, withMysqlInteractiveRead } from "../mysql-workload.js";
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
 import { bindListingDrafts, listingDraftBindingOptions, listingDraftBindings } from "./listing-draft-bindings.js";
@@ -901,6 +902,7 @@ export const mysqlRuntimeServices = {
   onlineProductLimits: onlineProductLimitsMysql,
   onlineProductWarehouses: onlineProductWarehousesMysql,
   productMergeHistory: productMergeHistoryMysql,
+  productEditHistory,
   orderCancellationRules: orderCancellationRulesMysql,
   orderDetail: orderDetailMysql,
   orderProcurementBatches: orderProcurementBatchesMysql,

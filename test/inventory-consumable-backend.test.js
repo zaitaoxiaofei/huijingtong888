@@ -15,6 +15,7 @@ const nullableInteger = value => value == null || value === '' ? null : Number(v
 function commonContext(extra = {}) {
   return vm.createContext({
     ensureMysqlCutoverEnabled() {}, ensureSelectionCreativeSchemaMysql: async () => {}, ensureProductCompositionSchemaMysql: async () => {}, ensureProductNamingSchemaMysql: async () => {}, ensureStockLocationSchemaMysql: async () => {},
+    ensureProductNameAliasSchema:async()=>{},readProductIdentity:async(_q,_s,id)=>({id}),recordProductEdit:async()=>{},
     resolveInventoryTenantScope: async () => scope, mysqlSchemaColumnExists: async () => true,
     inventoryTenantSql: (_scope, alias = '') => `${alias ? alias + '.' : ''}tenant_id = 2`,
     assertInventoryRecord: async () => {}, assertInventoryReferences: async () => {}, assertFreshRecord() {},
