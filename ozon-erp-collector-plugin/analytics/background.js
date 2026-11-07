@@ -62,6 +62,9 @@ const cancelledCollectRunIds = new Set();
 const latestContextHeadersByTab = new Map();
 const latestAnalyticsApiByTab = new Map();
 const latestAnalyticsTableByTab = new Map();
+const activeBrowserProofByTab = new Map();
+const activeBrowserProbeByTab = new Map();
+const browserProbeAttemptAt = new Map();
 const PLUGIN_STATUS_SYNC_MIN_INTERVAL_MS = 30000;
 const AUTH_BINDING_SYNC_MIN_INTERVAL_MS = 300000;
 const panelState = {
@@ -356,6 +359,7 @@ async function readSellerPageCompanyId(tab) {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [0] },
+      injectImmediately: true,
       func: () => {
         try {
           const match = document.cookie.match(/(?:^|;\s*)sc_company_id=([^;]+)/);
@@ -398,11 +402,15 @@ function resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedSto
   if (observed && page && observed !== page) {
     return { ...identity, code: 'identity_conflict', error: `STORE_CONTEXT_MISMATCH observed=${observed} page=${page}` };
   }
-  if (observed && page && expectedStoreId && page !== String(expectedStoreId).trim()) {
+  if (page && expectedStoreId && page !== String(expectedStoreId).trim()) {
     return { ...identity, code: 'store_mismatch', error: `STORE_CONTEXT_MISMATCH task=${expectedStoreId} observed=${observed} page=${page}` };
   }
   const since = Math.max(Date.now() - 60000, prepareSellerTabId === tab?.id ? prepareStartedAt : 0);
   const headers = latestContextHeadersByTab.get(tab?.id);
+  const activeProof = activeBrowserProofByTab.get(tab?.id);
+  if (page && activeProof?.company_id === page && activeProof.updated_at >= since) {
+    return { ...identity, ok: true, code: 'ready', companyId: page, error: '', auth_mode: 'browser_only' };
+  }
   if (observed && observed === page && Number(headers?.updated_at || 0) >= since && browserAnalyticsTableReady(tab?.id, page, since)) {
     return { ...identity, ok: true, code: 'ready', companyId: page, error: '', auth_mode: 'browser_only' };
   }
@@ -412,7 +420,50 @@ function resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedSto
 async function verifiedSellerStoreIdentity(tab, expectedStoreId = '') {
   const cookieInfo = await getOzonCookieInfo(tab);
   const pageIdentity = await readSellerPageCompanyId(tab);
-  return resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedStoreId);
+  let identity = resolveBrowserSellerIdentity(tab, cookieInfo, pageIdentity, expectedStoreId);
+  const companyId = String(pageIdentity.companyId || '').trim();
+  if (!identity.ok && identity.code === 'identity_missing' && !pageIdentity.error && companyId &&
+      (!expectedStoreId || companyId === String(expectedStoreId).trim()) &&
+      /^https:\/\/seller\.ozon\.ru\/app\/analytics(?:[/?#]|$)/.test(tab?.url || '')) {
+    await verifyActiveBrowserStore(tab, companyId);
+    const currentPage = await readSellerPageCompanyId(tab);
+    identity = resolveBrowserSellerIdentity(tab, cookieInfo, currentPage, expectedStoreId);
+  }
+  return identity;
+}
+
+async function verifyActiveBrowserStore(tab, companyId) {
+  const key = `${tab.id}:${companyId}`;
+  if (activeBrowserProbeByTab.has(key)) return activeBrowserProbeByTab.get(key);
+  if (Date.now() - Number(browserProbeAttemptAt.get(key) || 0) < 10000) return false;
+  browserProbeAttemptAt.set(key, Date.now());
+  const pending = (async () => {
+    try {
+      const day = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(Date.now() - 86400000));
+      const period = {date_from:day,date_to:day};
+      const result = await runCollectRequestInSellerTab({
+        store_id:companyId, company_id:companyId, source_key:'all_metrics', endpoint_type:'by_sku',
+        request_url:'https://seller.ozon.ru/api/site/seller-analytics/charts/v3/table/by_sku', request_method:'POST',
+        request_headers:{'Content-Type':'application/json','X-O3-Company-Id':companyId},
+        request_body:{current_period:period,previous_period:period,filters:{desc_type_ids:[],category_3_ids:[],category_2_ids:[]},metrics:['total_views'],limit:'1',offset:'0',sort:{key:'total_views_sort',order:'desc'}}
+      }, tab);
+      let body = result.response_body;
+      if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = null; } }
+      const currentPage = await readSellerPageCompanyId(tab);
+      if (result.success !== true || Number(result.response_status) !== 200 ||
+          String(result.current_company_id || '') !== companyId || currentPage.error || currentPage.companyId !== companyId ||
+          !(Array.isArray(body?.items) || Array.isArray(body?.result?.items))) {
+        logPanel(`店铺 ${companyId} 浏览器只读验证未通过：HTTP ${Number(result.response_status) || '-'}；返回店铺 ${String(result.current_company_id || '-')}`, 'error');
+        return false;
+      }
+      activeBrowserProofByTab.set(tab.id, {company_id:companyId,updated_at:Date.now()});
+      logPanel(`店铺 ${companyId} 浏览器只读分析请求已验证；扩展 Cookie 不可读时使用当前页面会话采集`, 'success');
+      return true;
+    } catch (error) { logPanel(`店铺 ${companyId} 浏览器只读验证失败：页面消息通道或分析请求不可用`, 'error'); return false; }
+    finally { activeBrowserProbeByTab.delete(key); }
+  })();
+  activeBrowserProbeByTab.set(key, pending);
+  return pending;
 }
 
 async function syncPluginStatus(force = false, selectedTab = null, panelRefreshValid = null) {
@@ -695,6 +746,25 @@ async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.r
   return loaded;
 }
 
+async function sellerDocumentReady(tab, targetUrl, notBefore = 0) {
+  if (!tab?.id || tab.pendingUrl) return false;
+  try {
+    const target = parseSellerNavigationTarget(targetUrl);
+    const actual = new URL(tab.url);
+    if (actual.origin !== target.origin || actual.pathname.replace(/\/+$/, '') !== target.pathname.replace(/\/+$/, '')) return false;
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [0] },
+      injectImmediately: true,
+      args: [target.origin, target.pathname.replace(/\/+$/, ''), notBefore],
+      func: (origin, pathname, since) => ({
+        ready: location.origin === origin && location.pathname.replace(/\/+$/, '') === pathname &&
+          ['interactive', 'complete'].includes(document.readyState) && performance.timeOrigin >= since
+      })
+    });
+    return result?.[0]?.result?.ready === true;
+  } catch (error) { return false; }
+}
+
 async function navigateSellerTab(tabId, targetUrl, stage) {
   try {
     const target = parseSellerNavigationTarget(targetUrl);
@@ -706,16 +776,16 @@ async function navigateSellerTab(tabId, targetUrl, stage) {
     };
     const deadline = Date.now() + 15000;
     let tab = await chrome.tabs.get(tabId);
-    if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+    if (!tab.pendingUrl && matchesTarget(tab.url) && (tab.status === 'complete' || await sellerDocumentReady(tab, targetUrl))) return tab;
     if (!matchesTarget(tab.pendingUrl) && !(tab.status === 'loading' && matchesTarget(tab.url))) {
       await chrome.tabs.update(tabId, { url: targetUrl, active: true });
     }
     while (Date.now() < deadline) {
       tab = await chrome.tabs.get(tabId);
-      if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+      if (!tab.pendingUrl && matchesTarget(tab.url) && (tab.status === 'complete' || await sellerDocumentReady(tab, targetUrl))) return tab;
       await sleep(250);
     }
-    throw new Error('SELLER_NAVIGATION_TIMEOUT');
+    throw new Error('SELLER_NAVIGATION_TIMEOUT state=' + (tab?.status || '-') + ' path=' + (() => { try { return new URL(tab.url).pathname; } catch { return '-'; } })());
   } catch (error) {
     const detail = `SELLER_NAVIGATION_FAILED stage=${stage} tab=${tabId}: ${error?.message || error}`;
     logPanel(detail, 'error');
@@ -736,15 +806,17 @@ async function warmSellerAnalyticsPermission(tabId) {
   }
   await sleep(1000);
   latestAnalyticsApiByTab.delete(tabId);
+  let reloadStartedAt = 0;
   logPanel('销售漏斗页已打开，开始强制刷新以激活分析权限');
   try {
+    reloadStartedAt = Date.now();
     await chrome.tabs.reload(tabId, { bypassCache: true });
   } catch (error) {
     const detail = `SELLER_NAVIGATION_FAILED stage=reload_analytics tab=${tabId}: ${error?.message || error}`;
     logPanel(detail, 'error');
     throw new Error(detail);
   }
-  if (!(await waitForTabComplete(tabId, 20000))) {
+  if (!(await waitForTabComplete(tabId, 20000, reloadStartedAt))) {
     const detail = 'SELLER_NAVIGATION_FAILED stage=reload_analytics tab=' + tabId + ': SELLER_NAVIGATION_TIMEOUT';
     logPanel(detail, 'error');
     throw new Error(detail);
@@ -762,13 +834,13 @@ async function openSellerAnalyticsGraphsAfterWarmup(tabId, targetUrl) {
   return loaded;
 }
 
-async function waitForTabComplete(tabId, timeoutMs = 15000) {
+async function waitForTabComplete(tabId, timeoutMs = 15000, notBefore = 0) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const tab = await chrome.tabs.get(tabId).catch(() => null);
     if (!tab?.id) return false;
-    if (tab.status === 'complete' && !tab.pendingUrl) return true;
-    await sleep(300);
+    if (!tab.pendingUrl && (notBefore === 0 && tab.status === 'complete' || await sellerDocumentReady(tab, tab.url, notBefore))) return true;
+    await sleep(250);
   }
   return false;
 }
@@ -930,6 +1002,7 @@ async function runPrepareRequest(request) {
   if (existingTab?.id) {
     latestContextHeadersByTab.delete(existingTab.id);
     latestAnalyticsTableByTab.delete(existingTab.id);
+    activeBrowserProofByTab.delete(existingTab.id);
   }
   let tab = await ensureSellerAnalyticsGraphsTab('https://seller.ozon.ru/app/analytics', existingTab);
   if (!tab?.id) return { success: false, error: 'SELLER_TAB_OPEN_FAILED' };
@@ -965,11 +1038,13 @@ async function ensureRelayInjected(tabId) {
   if (injectedTabs.has(tabId)) return;
   await chrome.scripting.executeScript({
     target: { tabId },
+    injectImmediately: true,
     files: ['analytics/content/erp-relay-page.js'],
     world: 'MAIN'
   });
   await chrome.scripting.executeScript({
     target: { tabId },
+    injectImmediately: true,
     files: ['analytics/content/erp-relay-bridge.js']
   });
   injectedTabs.add(tabId);
@@ -1535,6 +1610,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     latestContextHeadersByTab.delete(tabId);
     latestAnalyticsApiByTab.delete(tabId);
     latestAnalyticsTableByTab.delete(tabId);
+    activeBrowserProofByTab.delete(tabId);
     if ([panelRefreshTabId, panelState.sellerTab?.id].includes(tabId)) invalidatePanelRefresh();
   }
   void findAnySellerTab();
@@ -1547,6 +1623,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   latestContextHeadersByTab.delete(tabId);
   latestAnalyticsApiByTab.delete(tabId);
   latestAnalyticsTableByTab.delete(tabId);
+  activeBrowserProofByTab.delete(tabId);
   if (prepareSellerTabId === tabId) prepareSellerTabId = 0;
   void findAnySellerTab();
   void syncPluginStatus(true).catch(() => {});

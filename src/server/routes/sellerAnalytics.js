@@ -18,6 +18,8 @@ async function payloadFromRequest(req, readJson) {
 
 export function createSellerAnalyticsRoutes({ services, readJson }) {
   return {
+    "GET /api/db/seller-analytics/sku-daily": (req,url) => services.skuTrafficDailyRead(queryFromUrl(url),tenantIdFromRequest(req)),
+    "POST /api/db/seller-analytics/sku-daily/collect": async req => ({success:true,data:await services.skuTrafficDailyQueue(await payloadFromRequest(req,readJson),tenantIdFromRequest(req))}),
     "GET /api/db/seller-analytics/summary": (req) => services.sellerAnalyticsSummary(tenantIdFromRequest(req)),
     "GET /api/db/seller-analytics/metrics": (req, url) => services.sellerAnalyticsMetrics(queryFromUrl(url), tenantIdFromRequest(req)),
     "GET /api/db/seller-analytics/analysis": (req, url) => services.sellerAnalyticsAnalysis(queryFromUrl(url), tenantIdFromRequest(req)),

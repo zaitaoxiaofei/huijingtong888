@@ -73,6 +73,25 @@ async function ensureSellerAnalyticsGraphsTab(targetUrl = 'https://seller.ozon.r
   return loaded;
 }
 
+async function sellerDocumentReady(tab, targetUrl, notBefore = 0) {
+  if (!tab?.id || tab.pendingUrl) return false;
+  try {
+    const target = parseSellerNavigationTarget(targetUrl);
+    const actual = new URL(tab.url);
+    if (actual.origin !== target.origin || actual.pathname.replace(/\\/+$/, '') !== target.pathname.replace(/\\/+$/, '')) return false;
+    const result = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [0] },
+      injectImmediately: true,
+      args: [target.origin, target.pathname.replace(/\\/+$/, ''), notBefore],
+      func: (origin, pathname, since) => ({
+        ready: location.origin === origin && location.pathname.replace(/\\/+$/, '') === pathname &&
+          ['interactive', 'complete'].includes(document.readyState) && performance.timeOrigin >= since
+      })
+    });
+    return result?.[0]?.result?.ready === true;
+  } catch (error) { return false; }
+}
+
 async function navigateSellerTab(tabId, targetUrl, stage) {
   try {
     const target = parseSellerNavigationTarget(targetUrl);
@@ -84,16 +103,16 @@ async function navigateSellerTab(tabId, targetUrl, stage) {
     };
     const deadline = Date.now() + 15000;
     let tab = await chrome.tabs.get(tabId);
-    if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+    if (!tab.pendingUrl && matchesTarget(tab.url) && (tab.status === 'complete' || await sellerDocumentReady(tab, targetUrl))) return tab;
     if (!matchesTarget(tab.pendingUrl) && !(tab.status === 'loading' && matchesTarget(tab.url))) {
       await chrome.tabs.update(tabId, { url: targetUrl, active: true });
     }
     while (Date.now() < deadline) {
       tab = await chrome.tabs.get(tabId);
-      if (tab.status === 'complete' && !tab.pendingUrl && matchesTarget(tab.url)) return tab;
+      if (!tab.pendingUrl && matchesTarget(tab.url) && (tab.status === 'complete' || await sellerDocumentReady(tab, targetUrl))) return tab;
       await sleep(250);
     }
-    throw new Error('SELLER_NAVIGATION_TIMEOUT');
+    throw new Error('SELLER_NAVIGATION_TIMEOUT state=' + (tab?.status || '-') + ' path=' + (() => { try { return new URL(tab.url).pathname; } catch { return '-'; } })());
   } catch (error) {
     const detail = \`SELLER_NAVIGATION_FAILED stage=\${stage} tab=\${tabId}: \${error?.message || error}\`;
     logPanel(detail, 'error');
@@ -125,9 +144,21 @@ background = replaceSection(background, 'async function openSellerAnalyticsGraph
 }
 
 `);
-const completeCheck = "    if (tab.status === 'complete') return true;";
-if (!background.includes(completeCheck)) throw new Error('Analytics tab completion anchor missing');
-background = background.replace(completeCheck, "    if (tab.status === 'complete' && !tab.pendingUrl) return true;");
+background = replaceSection(background, 'async function waitForTabComplete(', 'function expectedStoreIdFromPrepare(', `async function waitForTabComplete(tabId, timeoutMs = 15000, notBefore = 0) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab?.id) return false;
+    if (!tab.pendingUrl && (notBefore === 0 && tab.status === 'complete' || await sellerDocumentReady(tab, tab.url, notBefore))) return true;
+    await sleep(250);
+  }
+  return false;
+}
+
+`);
+background = background.replace('    await chrome.tabs.reload(tabId, { bypassCache: true });', '    reloadStartedAt = Date.now();\n    await chrome.tabs.reload(tabId, { bypassCache: true });')
+  .replace("  logPanel('销售漏斗页已打开，开始强制刷新以激活分析权限');", "  let reloadStartedAt = 0;\n  logPanel('销售漏斗页已打开，开始强制刷新以激活分析权限');")
+  .replace('await waitForTabComplete(tabId, 20000)', 'await waitForTabComplete(tabId, 20000, reloadStartedAt)');
 background = background.replace("const ERP_BASE_URL_KEY = 'pivot-erp-base-url';\n", '')
   .replace("const ERP_TENANT_ID_KEY = 'pivot-erp-tenant-id';\n", '')
   .replace("const LOCAL_PLUGIN_TOKEN_KEY = 'pivot-erp-local-plugin-token';\n", '')

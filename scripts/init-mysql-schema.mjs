@@ -1,3 +1,4 @@
+import {SKU_TRAFFIC_DAILY_SCHEMA} from '../src/services/sku-traffic-daily-schema.js';
 import { ORDER_SPLIT_SCHEMA } from "../src/services/order-split-schema.js";
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
 import { INVENTORY_FLOW_SCHEMA } from "../src/services/inventory-flow-schema.js";
@@ -19,6 +20,7 @@ import { SKU_ORDER_TRACKERS_SCHEMA } from "../src/services/sku-order-tracking-sc
 import { FINANCE_SUBMISSIONS_SCHEMA } from "../src/services/finance-submissions-schema.js";
 
 const mysqlSchemaSql = `
+${SKU_TRAFFIC_DAILY_SCHEMA.join(";\n")};
 ${ORDER_SPLIT_SCHEMA};
 ${INVENTORY_FLOW_SCHEMA.join(";\n")};
 ${ORDER_PROFIT_CALCULATION_SCHEMA.join(";\n")};

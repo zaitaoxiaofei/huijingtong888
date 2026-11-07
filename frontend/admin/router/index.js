@@ -190,6 +190,7 @@ export const router = createRouter({
         { path: "selection", name: "selection", component: SelectionView, meta: { title: "选品池", breadcrumb: ["商品运营", "选品池"], tabKey: "workbench" } },
         { path: "finance/inventory-capital", name: "inventory-capital", component: () => import("../views/finance/InventoryCapitalView.vue"), meta: { title: "库存占用", breadcrumb: ["库存", "库存占用"] } },
         { path: "profit", redirect: "/profit/monthly-billing" },
+        { path: "sku-traffic-monitor", name: "sku-traffic-monitor", component: () => import("../views/analytics/SkuTrafficMonitorView.vue"), meta: { title: "SKU流量监控", breadcrumb: ["数据分析", "SKU流量监控"] } },
         { path: "seller-analytics", name: "seller-analytics", component: SellerAnalyticsView, meta: { title: "数据分析", breadcrumb: ["数据看板", "数据分析"] } },
         { path: "order-car-heatmap", name: "order-car-heatmap", component: OrderCarHeatmapView, meta: { title: "车型机会", breadcrumb: ["数据看板", "车型机会"] } },
         { path: "profit/aftersales", redirect: (to) => ({ path: "/profit/monthly-billing", query: { ...to.query, tab: "aftersales" } }) },

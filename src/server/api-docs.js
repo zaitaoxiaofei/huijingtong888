@@ -1347,6 +1347,16 @@ const endpoints = [
       responses: [response(200, "image/*", scalar("binary", "Authorized tail image.")), response(404, "application/json", ref("ErrorResponse"))]
     })
   ]),
+  section("SKU Daily Traffic", [
+    endpoint("GET", "/api/db/seller-analytics/sku-daily", "Read current-enterprise daily SKU traffic for the last 15 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.", {
+      query: [param("shop_id", scalar("string", "Owned shop ID or all"), false), param("date", scalar("string", "Complete report day YYYY-MM-DD; defaults to yesterday"), false), param("query", scalar("string", "SKU, offer or name"), false), param("page", scalar("number", "1-based page"), false), param("pageSize", scalar("number", "At most 100"), false)],
+      responses: [response(200, "application/json", scalar("object", "Paged SKU rows, 15-day series, shops and per-day coverage including pending/partial failures")), response(403, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    }),
+    endpoint("POST", "/api/db/seller-analytics/sku-daily/collect", "Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 15 report dates.", {
+      requestBody: body(objectOf("Current-enterprise queue request", [field("shop_id", scalar("string", "Owned shop ID or all")), field("date", scalar("string", "Optional single complete day in the retained window"))])),
+      responses: [response(200, "application/json", scalar("object", "Queued and already waiting shop/day identifiers")), response(400, "application/json", ref("ErrorResponse")), response(404, "application/json", ref("ErrorResponse"))]
+    })
+  ]),
   section("Enterprise Plugin Credentials", [
     endpoint("GET", "/api/tenants/plugin-token", "Read credential status for the active enterprise. Requires an enterprise owner/admin or platform administrator.", {
       query: [param("tenant_id", scalar("number", "Target enterprise ID; non-platform users cannot select another enterprise."), false)],

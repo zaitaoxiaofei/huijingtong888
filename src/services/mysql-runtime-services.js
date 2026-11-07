@@ -1,3 +1,5 @@
+import {skuTrafficDaily} from './sku-traffic-daily.js';
+import {queueSkuTrafficDaily,queueAllSkuTrafficDaily} from './seller-analytics.js';
 import { withRequestReadCache } from './request-read-cache.js';
 import {productEditHistory} from './product-edit-history.js';
 import { withMysqlWorkload, withMysqlInteractiveRead } from "../mysql-workload.js";
@@ -988,6 +990,9 @@ export const mysqlRuntimeServices = {
   reviewCenter: reviewCenterMysql,
   reviewComments: reviewCommentsMysql,
   reviewReplyTemplates: reviewReplyTemplatesMysql,
+  skuTrafficDailyRead: (body = {},tenantId) => skuTrafficDaily.read(body,tenantId),
+  skuTrafficDailyQueue: queueSkuTrafficDaily,
+  skuTrafficDailySchedule: queueAllSkuTrafficDaily,
   sellerAnalyticsAnalysis: (query = {}, tenantId = "admin") => getAnalysis(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCollectRuns: (query = {}, tenantId = "admin") => listCollectRuns(sellerAnalyticsDb, query, tenantId),
   sellerAnalyticsCreateCollectRun: (body = {}, tenantId = "admin") => createCollectRun(sellerAnalyticsDb, body, tenantId),

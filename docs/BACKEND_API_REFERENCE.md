@@ -2290,6 +2290,36 @@ Read a tail image owned by the current enterprise. Other media, generation, jobs
   - `200` `image/*` -> `binary`
   - `404` `application/json` -> `ErrorResponse`
 
+### SKU Daily Traffic
+
+#### `GET /api/db/seller-analytics/sku-daily`
+
+Read current-enterprise daily SKU traffic for the last 15 complete report dates. Missing data stays null. Product metadata is reused from online products; counts distinguish PDP views from clicks and ordered units from order counts.
+
+- Auth: `authenticated`
+- Query parameters:
+  - `shop_id` (`string`, optional): Owned shop ID or all
+  - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to yesterday
+  - `query` (`string`, optional): SKU, offer or name
+  - `page` (`number`, optional): 1-based page
+  - `pageSize` (`number`, optional): At most 100
+- Responses:
+  - `200` `application/json` -> `object`
+  - `403` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
+#### `POST /api/db/seller-analytics/sku-daily/collect`
+
+Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 15 report dates.
+
+- Auth: `authenticated`
+- Request body: required
+  - Schema: `object`
+- Responses:
+  - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
+  - `404` `application/json` -> `ErrorResponse`
+
 ### Enterprise Plugin Credentials
 
 #### `GET /api/tenants/plugin-token`
