@@ -1,5 +1,3 @@
-import {skuTrafficDaily} from './sku-traffic-daily.js';
-import {dailyTrafficCoverage, SKU_TRAFFIC_METRICS} from '../shared/sku-traffic-daily.js';
 import crypto from "node:crypto";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import {
@@ -1015,7 +1013,6 @@ function getSnapshotEndpointType(row) {
 }
 
 function snapshotsMatchCollectedPageScope(current, candidate) {
-  if (current?.source === 'sku-traffic-daily-stage' || candidate?.source === 'sku-traffic-daily-stage') return false
   if (!current || !candidate || current.id === candidate.id) return false
   if (safeString(current.tenant_id) !== safeString(candidate.tenant_id)) return false
   if (safeString(current.store_id) !== safeString(candidate.store_id)) return false
@@ -1345,8 +1342,7 @@ async function probeCollectorPoolAuth(payload = {}) {
     Cookie: cookie,
     ...normalizeProbeHeaders(payload.headers || payload.request_headers || payload.requestHeaders)
   }
-  const cookies = probeCookieMap(cookie)
-  const requestOptions = {
+  const response = await fetch('https://seller.ozon.ru/api/site/seller-analytics/what_to_sell/data/v3', {
     method: 'POST',
     headers,
     body: stringifyJson({
@@ -1355,58 +1351,13 @@ async function probeCollectorPoolAuth(payload = {}) {
       filter: { stock: 'any_stock', period: 'monthly', categories: [], sku: '' },
       sort: { key: 'sum_gmv_desc' }
     }),
-    redirect: 'manual',
     signal: AbortSignal.timeout(4000)
-  }
-  let requestUrl = 'https://seller.ozon.ru/api/site/seller-analytics/what_to_sell/data/v3'
-  let response = null
-  let error = ''
-  const visited = new Set()
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    visited.add(requestUrl)
-    requestOptions.headers.Cookie = [...cookies].map(([name, value]) => `${name}=${value}`).join('; ')
-    response = await fetch(requestUrl, requestOptions)
-    applyProbeSetCookies(cookies, response)
-    if (![301, 302, 303, 307, 308].includes(response.status)) break
-    const location = safeString(response.headers.get('location'))
-    if (!location) {
-      error = 'Seller authorization probe received a redirect without a location'
-      break
-    }
-    const nextUrl = new URL(location, requestUrl)
-    if (nextUrl.origin !== 'https://seller.ozon.ru') {
-      error = 'Seller authorization probe refused an external redirect'
-      break
-    }
-    if (/(?:^|\/)(?:login|signin|sign-in|auth|registration)(?:\/|$)/i.test(nextUrl.pathname)) {
-      error = 'Seller authorization probe was redirected to a login page'
-      break
-    }
-    if (visited.has(nextUrl.href) || attempt === 3) {
-      error = 'Seller authorization probe exceeded its redirect limit'
-      break
-    }
-    await response.body?.cancel()
-    requestUrl = nextUrl.href
-  }
-  if (response.ok && !error) {
-    let data = null
-    try {
-      data = await response.json()
-    } catch {}
-    requestOptions.signal.throwIfAborted()
-    if (!Array.isArray(data?.items)) {
-      error = 'Seller authorization probe did not receive a valid analytics response'
-    }
-  } else {
-    await response.body?.cancel()
-  }
+  })
   return {
-    ok: response.ok && !error,
+    ok: response.ok,
     status: response.status,
     status_text: response.statusText,
-    company_id: companyId,
-    error: error || (response.ok ? '' : `Seller authorization probe failed: HTTP ${response.status}`)
+    company_id: companyId
   }
 }
 
@@ -1708,17 +1659,11 @@ async function saveCollectRunQueueRows(run) {
   })
 }
 
-async function syncCollectRunQueueRows(run, { requests = run.requests || [], insertRequests = requests, preserveClaims = false } = {}) {
-  await saveCollectRunQueueRows({ ...run, requests: insertRequests })
+async function syncCollectRunQueueRows(run) {
+  await saveCollectRunQueueRows(run)
   await withMysqlTransaction(async (connection) => {
-    for (const request of requests) {
-      if (preserveClaims) {
-        await executeSellerAnalyticsSql(connection, `
-          UPDATE seller_analytics_collect_requests
-          SET status=?, finished_at=?, updated_at=NOW()
-          WHERE id=? AND run_id=?
-        `, [request.status || 'pending', mysqlDateValue(request.finished_at), request.id, run.id])
-      } else await executeSellerAnalyticsSql(connection, `
+    for (const request of run.requests || []) {
+      await executeSellerAnalyticsSql(connection, `
         UPDATE seller_analytics_collect_requests
         SET status=?, attempts=?, claimed_at=?, finished_at=?, updated_at=NOW()
         WHERE id=? AND run_id=?
@@ -1734,15 +1679,6 @@ async function syncCollectRunQueueRows(run, { requests = run.requests || [], ins
 async function executeSellerAnalyticsSql(connection, sql, params = []) {
   if (typeof connection.execute === 'function') return connection.execute(sql, params)
   return connection.query(sql, params)
-}
-
-async function syncFinishedCollectRequest(run, request) {
-  const children = (run.requests || []).filter((item) => item.parent_request_id === request.id)
-  await syncCollectRunQueueRows(run, {
-    requests: [request],
-    insertRequests: [request, ...children],
-    preserveClaims: true
-  })
 }
 
 async function loadCollectRunState(db, id, tenantId = 'admin') {
@@ -1800,8 +1736,8 @@ function summarizeCollectRun(run = {}) {
 }
 
 function buildCollectRequestBody(sourceKey, endpointType, period, pageIndex = 0, limit = DEFAULT_PAGE_LIMIT) {
-  const metrics = period.daily_traffic ? SKU_TRAFFIC_METRICS.map(([key]) => key) : SOURCE_METRICS[sourceKey] || []
-  const sortKey = period.daily_traffic ? 'total_views_sort' : sourceKey === 'search'
+  const metrics = SOURCE_METRICS[sourceKey] || []
+  const sortKey = sourceKey === 'search'
     ? 'search_views_sort'
     : sourceKey === 'need_promotion'
       ? 'total_views_sort'
@@ -2228,7 +2164,6 @@ function appendNextAutoPageRequest(run, request, payload) {
   const nextPageIndex = pageIndex + 1
   const nextOffset = nextPageIndex * limit
   if (nextOffset >= SELLER_ANALYTICS_MAX_OFFSET) {
-    request.auto_stop_code = 'source_offset_cap'
     request.auto_stop_reason = `已达到 Ozon 分析接口最大偏移量 ${SELLER_ANALYTICS_MAX_OFFSET}`
     return false
   }
@@ -2266,7 +2201,7 @@ function appendNextAutoPageRequest(run, request, payload) {
 async function createCollectRun(db, payload = {}, tenantId = 'admin') {
   collectBatchEmptyAt.delete(safeString(tenantId) || 'admin')
   return withCollectRunStateLock(tenantId, async () => {
-    const period = {...resolveCollectPeriod(payload),daily_traffic:payload.daily_traffic === true}
+    const period = resolveCollectPeriod(payload)
     const requests = buildCollectRequests(payload, period)
     const storeId = safeString(payload.store_id || payload.storeId || payload.shop_id || payload.shopId || payload.company_id || payload.companyId) || null
     if (requests.length === 0) {
@@ -2275,7 +2210,7 @@ async function createCollectRun(db, payload = {}, tenantId = 'admin') {
       throw error
     }
     const activeRuns = await listCollectRuns(db, { limit: 100 }, tenantId)
-    const matchingRun = activeRuns.find((run) => Boolean(run.daily_traffic) === Boolean(payload.daily_traffic) && collectRunMatchesRequest(run, period, requests, storeId))
+    const matchingRun = activeRuns.find((run) => collectRunMatchesRequest(run, period, requests, storeId))
     if (matchingRun) return { ...matchingRun, reused: true }
     const now = new Date().toISOString()
     const run = {
@@ -2284,7 +2219,6 @@ async function createCollectRun(db, payload = {}, tenantId = 'admin') {
       store_id: storeId,
       status: 'pending',
       period_key: period.periodKey,
-      daily_traffic: payload.daily_traffic === true,
       current_period: period.current_period,
       previous_period: period.previous_period,
       request_count: requests.length,
@@ -2630,25 +2564,7 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     if (run.status === 'cancelled' || request.status === 'cancelled') {
       return { run, request, snapshot: null, metricCount: 0, ignored: true, reason: 'collect_run_cancelled' }
     }
-    if (request.status === 'success') {
-      if (db === sellerAnalyticsDb) {
-        await syncFinishedCollectRequest(run, request)
-        if (run.daily_traffic && run.status === 'success') await publishSkuTrafficDailyRun(run, tenantId)
-      }
-      return { run, request, snapshot: null, metricCount: 0 }
-    }
-    if (run.daily_traffic && payload.success !== false && request.endpoint_type === 'by_sku') {
-      const body=parseJson(payload.response_body || payload.responseBody || payload.data,null)
-      if ((!Array.isArray(body?.items) && !Array.isArray(body?.result?.items)) || Number(payload.response_status || payload.responseStatus || 200) >= 400) {
-        payload={...payload,success:false,error:'每日SKU响应格式或HTTP状态异常，不当作空日；请检查分析接口后补采'}
-      }
-    }
-    if (run.daily_traffic && payload.success !== false) {
-      const observed=parseJson(payload.request_body || payload.requestBody,null)?.current_period
-      if (observed && (observed.date_from !== run.current_period.date_from || observed.date_to !== run.current_period.date_to)) {
-        payload={...payload,success:false,error:'插件实际请求日期与每日任务不一致，未发布日数据，请重新补采'}
-      }
-    }
+    if (request.status === 'success') return { run, request, snapshot: null, metricCount: 0 }
     const success = payload.success !== false
     let snapshotResult = null
     if (success) {
@@ -2673,8 +2589,7 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
       }
       snapshotResult = await saveSnapshot(db, {
         store_id: runStoreId || null,
-        source: run.daily_traffic ? 'sku-traffic-daily-stage' : 'pivot-table-master-controlled',
-        daily_traffic: run.daily_traffic === true,
+        source: 'pivot-table-master-controlled',
         source_button_label: request.source_label,
         source_button_key: request.source_key,
         source_context: {
@@ -2696,12 +2611,8 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
         page_url: payload.page_url || payload.pageUrl
       }, tenantId)
       request.status = 'success'
-      request.snapshot_id = snapshotResult.snapshot.id
-      request.returned_count = responseItemCount(payload.response_body || payload.responseBody || payload.data)
-      const responsePage=parseJson(payload.response_body || payload.responseBody || payload.data,{})
-      request.reported_has_more=responsePage.has_more === true || responsePage.result?.has_more === true
       appendNextAutoPageRequest(run, request, payload)
-      if (!run.daily_traffic) appendAbcAnalysisRequest(run, request, payload)
+      appendAbcAnalysisRequest(run, request, payload)
     } else {
       request.status = 'failed'
       request.error_message = safeString(payload.error || payload.message || '采集失败')
@@ -2713,17 +2624,9 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     run.status = doneCount >= Number(run.request_count || 0) ? (run.failed_count > 0 ? 'failed' : 'success') : 'running'
     run.updated_at = new Date().toISOString()
     await saveCollectRunState(db, run)
-    if (db === sellerAnalyticsDb) {
-      // Batch claims live in SQL. Other canonical requests can still say pending;
-      // syncing them here would revoke active leases and requeue completed pages.
-      await syncFinishedCollectRequest(run, request)
-    }
+    if (db === sellerAnalyticsDb) await syncCollectRunQueueRows(run)
     let operationTodos = null
-    if (db === sellerAnalyticsDb && run.daily_traffic && ['success', 'failed'].includes(run.status)) {
-      if (run.status === 'success') await publishSkuTrafficDailyRun(run, tenantId)
-      else await skuTrafficDaily.mark(run, tenantId, 'failed', '采集失败，保留上次成功数据，等待补采')
-    }
-    if (run.status === 'success' && !run.daily_traffic) {
+    if (run.status === 'success') {
       operationTodos = await refreshOperationTodos(db, {
         period_key: run.period_key,
         date_from: run.current_period?.date_from,
@@ -3151,10 +3054,10 @@ async function saveSnapshot(db, payload = {}, tenantId = 'admin') {
     captured_at: capturedAt,
     raw_data: null
   }
-  if (!payload.daily_traffic) await deleteOlderCollectedPageSnapshots(db, snapshot)
+  await deleteOlderCollectedPageSnapshots(db, snapshot)
   await snapshotRepo.save(snapshot)
 
-  const rows = (payload.daily_traffic ? [] : collectMetricRows(responseBody))
+  const rows = collectMetricRows(responseBody)
     .map((row) =>
       normalizeMetricRow(row, {
         tenantId,
@@ -3167,9 +3070,9 @@ async function saveSnapshot(db, payload = {}, tenantId = 'admin') {
     )
     .filter(Boolean)
 
-  if (rows.length > 0 && !payload.daily_traffic) await metricRepo.save(rows)
+  if (rows.length > 0) await metricRepo.save(rows)
   clearAnalysisCache(tenantId)
-  return { snapshot, metricCount: payload.daily_traffic ? getResponseItems(responseBody).length : rows.length }
+  return { snapshot, metricCount: rows.length }
 }
 
 function decorateSnapshot(row) {
@@ -4835,50 +4738,6 @@ async function getSummary(db, tenantId = 'admin') {
     productCount: skuSet.size,
     latestCapturedAt: snapshots[0]?.captured_at || null
   }
-}
-
-export async function publishSkuTrafficDailyRun(run, tenantId = 'admin') {
-  const coverage = dailyTrafficCoverage(run,{allowPartial:true})
-  if (!coverage.ok) return skuTrafficDaily.publish(run, tenantId, [])
-  try {
-    const rows = []
-    for (const id of coverage.snapshotIds) {
-      const [snapshot] = await mysqlQuery('SELECT id,store_id,source,source_context,request_body,response_body FROM seller_analytics_snapshots WHERE tenant_id=? AND id=?', [tenantId,id])
-      const context = parseJson(snapshot?.source_context,{})
-      const period = parseJson(snapshot?.request_body,{})?.current_period
-      if (!snapshot || snapshot.source !== 'sku-traffic-daily-stage' || String(snapshot.store_id) !== String(run.store_id) || context.collection_run_id !== run.id || period?.date_from !== coverage.day || period?.date_to !== coverage.day) throw new Error('日数据临时页已过期或来源不一致，请重新补采')
-      for (const item of getResponseItems(parseJson(snapshot.response_body,{}))) {
-        const normalized = normalizeMetricRow(item,{})
-        if (!normalized) throw new Error('临时页包含无法识别的SKU记录，请检查接口字段')
-        rows.push(normalized)
-      }
-    }
-    return await skuTrafficDaily.publish(run,tenantId,rows)
-  } catch (e) {
-    await skuTrafficDaily.mark(run,tenantId,'partial',e.message)
-    return {published:false,error:e.message}
-  }
-}
-
-export async function queueSkuTrafficDaily(body = {}, tenantId = 'admin') {
-  return skuTrafficDaily.queue(body,tenantId,{
-    createRun:(payload,key)=>createCollectRun(sellerAnalyticsDb,payload,key),
-    loadRun:(id,key)=>loadCollectRunState(sellerAnalyticsDb,id,key),
-    publishRun:publishSkuTrafficDailyRun
-  })
-}
-
-export async function queueAllSkuTrafficDaily() {
-  await ensureSellerAnalyticsSchema()
-  const tenants = await mysqlQuery("SELECT id,slug FROM tenants WHERE status='active' AND subscription_status IN ('active','trial') AND (subscription_expires_at IS NULL OR subscription_expires_at>UTC_TIMESTAMP()) ORDER BY id")
-  const results=[]
-  for (const tenant of tenants) {
-    const key=tenant.slug==='default'?'admin':String(tenant.id)
-    try {const result=await queueSkuTrafficDaily({},key);results.push({tenant_id:tenant.id,queued:result.queued.length,waiting:result.waiting.length})}
-    catch(e){results.push({tenant_id:tenant.id,error:e.message})}
-  }
-  const cleanup=await skuTrafficDaily.cleanup()
-  return {status:results.some(r=>r.error)?'partial':'success',queued:results.reduce((n,r)=>n+(r.queued||0),0),results,cleanup,meaning:'任务排队成功不等于数据已采集；插件在线后执行'}
 }
 
 export {

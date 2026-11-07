@@ -164,10 +164,8 @@ function clearGetCacheForMutation(url = "") {
   }
 }
 
-function notifyGetCacheMutation(url = "", body = null) {
+function notifyGetCacheMutation(url = "") {
   const path = String(url || "").split("?")[0];
-  const product=path.match(/^\/api\/products\/(\d+)$/);
-  if(product&&body&&Object.prototype.hasOwnProperty.call(body,'image_url'))window.dispatchEvent(new CustomEvent('erp:product-image-changed',{detail:{productId:Number(product[1])}}));
   if (path === "/api/shops" || path.startsWith("/api/shops/")) {
     window.dispatchEvent(new CustomEvent("erp:shops-changed"));
     try {
@@ -399,7 +397,7 @@ export const apiClient = {
       body: body == null ? undefined : JSON.stringify(body),
       ...options
     }).then((data) => {
-      notifyGetCacheMutation(url, body);
+      notifyGetCacheMutation(url);
       return data;
     });
   },
@@ -410,7 +408,7 @@ export const apiClient = {
       body: body == null ? undefined : JSON.stringify(body),
       ...options
     }).then((data) => {
-      notifyGetCacheMutation(url, body);
+      notifyGetCacheMutation(url);
       return data;
     });
   },

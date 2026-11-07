@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../src/services/mysql-cutover.js', import.m
 function definition(name) {
   return source.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`))[0];
 }
-const sorting = ['orderPageRowsMysql', 'logisticsModeKeyMysql', 'orderTimestampPagedValueMysql', 'orderInventoryPagedSortKeyMysql',
+const sorting = ['logisticsModeKeyMysql', 'orderTimestampPagedValueMysql', 'orderInventoryPagedSortKeyMysql',
   'sortPagedOrdersMysql', 'orderPrintTimestampPagedValueMysql', 'orderPrintSequencePagedValueMysql',
   'orderQuickFilterOrderSqlMysql'].map(definition).join('\n');
 
@@ -20,7 +20,7 @@ test('inventory pagination loads details only for the globally sorted page, incl
     ordered_at: `2026-09-${String(index % 9 + 1).padStart(2, '0')} 00:00:00`,
     printed_at: '2026-09-10 00:00:00', print_batch_id: `batch-${index % 4}`, print_sequence: index % 7
   }));
-  for (const sortMode of ['inventory','inventory_picking']) for (const printFilter of ['all', 'printed', 'unprinted']) {
+  for (const printFilter of ['all', 'printed', 'unprinted']) {
     for (const page of [1, 2, 13, 14]) {
       let loadedIds, coverageCalls = 0;
       const context = vm.createContext({
@@ -40,7 +40,7 @@ test('inventory pagination loads details only for the globally sorted page, incl
         orderLogisticsCarrierOptionsMysql: () => []
       });
       vm.runInContext(sorting + '\n' + definition('ordersPagedMysql'), context);
-      const query = { page, pageSize: 20, status: 'awaiting_deliver', fulfillmentType: 'fbs', sortMode, printFilter, includeCounts: '0', includeLogisticsOptions: '0' };
+      const query = { page, pageSize: 20, status: 'awaiting_deliver', fulfillmentType: 'fbs', sortMode: 'inventory', printFilter, includeCounts: '0', includeLogisticsOptions: '0' };
       const expected = Array.from(context.sortPagedOrdersMysql(candidates, query)).slice((page - 1) * 20, page * 20).map(row => row.id);
       const result = await context.ordersPagedMysql(query);
       assert.deepEqual(loadedIds, expected);
@@ -68,18 +68,4 @@ test('lightweight inventory rows retain raw/nested logistics fallback and input 
   assert.equal(rows[1].warehouse_name, 'LOCAL');
   assert.equal(rows[2].delivery_method_name, 'FBP');
   assert.ok(rows.every(row => row.raw_json === undefined));
-});
-
-test('mobile picking order keeps numeric inventory groups ahead of print dates and FBP, across pages',async()=>{
- const context=vm.createContext({});vm.runInContext(sorting,context);
- const rows=[
-  {id:1,inventory_ids:'2-1',ordered_at:'2026-11-04',printed_at:'2026-11-04'},
-  {id:2,inventory_ids:'1-10',ordered_at:'2026-11-03',printed_at:'2026-11-03'},
-  {id:3,inventory_ids:'1-2',ordered_at:'2026-11-02',printed_at:'2026-11-01'},
-  {id:4,inventory_ids:'1-2',ordered_at:'2026-11-01',printed_at:'2026-11-02'},
-  {id:5,inventory_ids:'1-1',warehouse_name:'Hun Chun',ordered_at:'2026-11-04',printed_at:'2026-11-04'}
- ];
- assert.deepEqual(Array.from(context.sortPagedOrdersMysql(rows,{sortMode:'inventory_picking',printFilter:'printed'}),r=>r.id),[4,3,2,1,5]);
- // Desktop printed records still prioritize the latest print batch.
- assert.equal(context.sortPagedOrdersMysql(rows,{sortMode:'inventory',printFilter:'printed'})[0].id,1);
 });

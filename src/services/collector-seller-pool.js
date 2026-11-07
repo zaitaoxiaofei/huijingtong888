@@ -162,6 +162,7 @@ async function loadBindings(tenantId = "admin") {
   `, [tenantId, AUTH_BINDING_PREFIX]);
   return rows.map((row) => {
     const stored = parseJson(row.value);
+    const lastActiveAt = stored.last_ok_at || stored.updated_at || stored.bound_at;
     const lastStatus = Number(stored.last_status || 0);
     return {
       ...stored,
@@ -170,7 +171,7 @@ async function loadBindings(tenantId = "admin") {
       shop_name: text(row.shop_name),
       company_id: text(stored.company_id || stored.store_id || row.ozon_client_id),
       headers: parseJson(stored.headers),
-      stale: [401, 403].includes(lastStatus) || !text(stored.last_ok_at)
+      stale: [401, 403].includes(lastStatus) || !lastActiveAt
     };
   }).filter((binding) => binding.cookie && binding.company_id && !binding.stale);
 }
@@ -233,7 +234,6 @@ async function collectSku(binding, sku) {
     } catch (error) {
       warnings.push(errorText(error));
       if ([401, 403].includes(Number(error?.status || 0))) throw error;
-      if (Number(error?.status || 0) === 429) throw error;
     }
   }
   raw.variantId = variantId;
@@ -298,13 +298,7 @@ export async function collectSkusWithSellerPool(skus = [], tenantId = "admin") {
     bindingTails.set(key, previous.then(() => current));
     await previous;
     try {
-      if (disabledBindings.has(key)) return null;
       return await task();
-    } catch (error) {
-      const status = Number(error?.status || 0);
-      if ([401, 403].includes(status)) disabledBindings.add(binding.company_id);
-      if (status === 429) disabledBindings.add(binding.company_id);
-      throw error;
     } finally {
       release();
     }
@@ -322,7 +316,6 @@ export async function collectSkusWithSellerPool(skus = [], tenantId = "admin") {
         const startedAt = Date.now();
         try {
           const collected = await withBindingLock(binding, () => collectSku(binding, sku));
-          if (!collected) continue;
           lastResult = {
             ...collected,
             source_shop_id: binding.shop_id,
@@ -348,8 +341,10 @@ export async function collectSkusWithSellerPool(skus = [], tenantId = "admin") {
             duration_ms: Date.now() - startedAt
           };
           if ([401, 403].includes(status)) {
+            disabledBindings.add(binding.company_id);
             await invalidateBinding(binding, tenantId, status, lastResult.error).catch(() => {});
           }
+          if (status === 429) disabledBindings.add(binding.company_id);
         }
       }
       if (!results[index]) results[index] = lastResult || { sku, success: false, error: "No usable seller pool binding" };

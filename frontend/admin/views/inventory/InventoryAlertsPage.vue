@@ -1,6 +1,4 @@
 ﻿<script setup>
-import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
-import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -14,7 +12,6 @@ import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
-import InventoryWorkflowStatus from "../../components/inventory/InventoryWorkflowStatus.vue";
 import WarehouseProcurementRequestDialog from "../../components/procurement/WarehouseProcurementRequestDialog.vue";
 import { applyFilterQuery, dateText, integer } from "./inventory-utils.js";
 
@@ -38,7 +35,7 @@ const editingLeadProductId = ref(0);
 const editingLeadRow = ref(null);
 const leadSavingProductId = ref(0);
 const leadForm = reactive({ production_lead_days: 7, warehouse_logistics_days: 2, expected_production_lead_days: 7, expected_warehouse_logistics_days: 2 });
-const productionLeadOptions = [1, 2, 3, 5, 7, 10, 15, 30];
+const productionLeadOptions = [3, 5, 7, 10, 15, 30];
 const logisticsDayOptions = [1, 2, 3, 4, 5];
 const state = reactive({
   rows: [],
@@ -46,7 +43,6 @@ const state = reactive({
   meta: {},
   shops: [],
   filters: {
-    ...inventorySearchDefaults(),
     view: "inventory",
     alertType: "all",
     sortBy: "recent_30d_qty",
@@ -61,7 +57,6 @@ const state = reactive({
 });
 
 const filterDefaults = {
-  ...inventorySearchDefaults(),
   view: "inventory",
   alertType: "all",
   sortBy: "recent_30d_qty",
@@ -77,10 +72,13 @@ const filterDefaults = {
 const pagedRows = computed(() => state.rows);
 const inventoryView = computed(() => state.filters.view !== "sku");
 const canEditInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
-const canSubmitRequest = computed(() => Boolean(authStore.user?.tenant?.id));
+const canSubmitRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
 const inventoryAlertFilters = [
- {value:"all",label:"全部"},{value:"danger",label:"供货不足"},{value:"warning",label:"待处理"},
- {value:"success",label:"供货充足"},{value:"opportunity",label:"备货机会"},{value:"unknown",label:"待核对"}
+  { value: "all", label: "全部" },
+  { value: "out_of_stock", label: "断货" },
+  { value: "low_stock", label: "缺货" },
+  { value: "in_transit", label: "采购在途" },
+  { value: "healthy", label: "库存健康" }
 ];
 const inventorySortOptions = [
   { value: "recent_30d_qty", label: "近 30 天消耗" },
@@ -97,7 +95,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
   router,
   filters: state.filters,
   defaults: filterDefaults,
-
+  manualKeys: ["query"],
   isSyncingRoute: () => syncingRoute
 });
 
@@ -145,7 +143,7 @@ function applyRouteState() {
   syncingRoute = true;
   try {
     applyFilterQuery(route, state.filters, filterDefaults);
-    if (!inventoryAlertFilters.some(option=>option.value===state.filters.alertType)) state.filters.alertType="all";
+    if (state.filters.alertType === "lead_time_missing") state.filters.alertType = "all";
     if (!inventorySortOptions.some((option) => option.value === state.filters.sortBy)) state.filters.sortBy = "recent_30d_qty";
     if (!fbpFocusOptions.some((option) => option.value === state.filters.fbpFocus)) state.filters.fbpFocus = "replenishment";
   } finally {
@@ -269,7 +267,14 @@ async function saveLeadTimes(row) {
 }
 
 function openWarehouseRequest(row) {
-  openInventoryDetails(row, 'procurement');
+  requestProducts.value = [{
+    id: row.product_id,
+    name: row.product_name,
+    inventory_number: row.inventory_number || row.inventory_id,
+    image_url: row.image_url,
+    suggested_purchase_qty: Math.max(1, Number(row.suggested_purchase_qty || 0))
+  }];
+  requestDialogVisible.value = true;
 }
 
 function changeAlertType(value) {
@@ -381,11 +386,12 @@ async function loadPageData({ refresh = false } = {}) {
     if (inventoryView.value) params.set("sortBy", state.filters.sortBy);
     else params.set("fbpFocus", state.filters.fbpFocus);
     if (refresh) params.set("refresh", "1");
-    params.set("shopId", String(state.filters.shopId || "all"));
+    if (!inventoryView.value) {
+      params.set("shopId", String(state.filters.shopId || "all"));
+    }
     const query = String(state.filters.query || "").trim();
     if (query) params.set("query", query);
-    appendInventorySearch(params, state.filters);
-    const requests = [apiClient.get(`${inventoryView.value?"/api/inventory-workflow/alerts":"/api/stock-alerts"}?${params.toString()}`), loadShopDictionary()];
+    const requests = [apiClient.get(`/api/stock-alerts?${params.toString()}`), inventoryView.value ? Promise.resolve(state.shops) : loadShopDictionary()];
     const [payload, shops] = await Promise.all(requests);
     if (!listRequestGate.isLatest(requestToken)) return;
     state.rows = Array.isArray(payload?.rows) ? payload.rows : [];
@@ -404,7 +410,6 @@ async function loadPageData({ refresh = false } = {}) {
 }
 
 watch(() => route.query, () => {
-  const previous = JSON.stringify(state.filters);
   const previousView = state.filters.view;
   applyRouteState();
   if (previousView !== state.filters.view) {
@@ -412,9 +417,9 @@ watch(() => route.query, () => {
     state.filters.page = 1;
     syncRouteQuery("manual");
     loadPageData();
-  } else if (previous !== JSON.stringify(state.filters)) void loadPageData();
+  }
 }, { deep: true });
-
+watch(() => [state.filters.shopId, state.filters.dateFrom, state.filters.dateTo, state.filters.page, state.filters.pageSize], syncRouteQuery);
 
 onMounted(async () => {
   applyRouteState();
@@ -425,12 +430,12 @@ onMounted(async () => {
 <template>
   <div class="inventory-page-shell inventory-card">
     <InventoryPageToolbar
-      product-search
-      :loading="loading"
       class="alert-toolbar"
       :filters="state.filters"
       :shops="state.shops"
+      :show-shop="!inventoryView"
       :show-date-range="false"
+      :query-label="inventoryView ? '' : 'FBP SKU 搜索'"
       :query-placeholder="inventoryView ? '库存编号 / 名称 / 店铺 / 线上 SKU' : '库存编号 / SKU / Offer / 名称关键词'"
       @search="handleSearch"
       @reset="handleReset"
@@ -452,7 +457,6 @@ onMounted(async () => {
       <el-select v-else v-model="state.filters.fbpFocus" class="alert-sort-select" aria-label="FBP SKU 备货筛选" size="small" @change="changeFbpFocus">
         <el-option v-for="option in fbpFocusOptions" :key="option.value" :label="option.label" :value="option.value" />
       </el-select>
-      <template #actions><el-radio-group :model-value="inventoryView ? 'inventory' : 'sku'" size="small" @change="view=>router.replace({query:{...route.query,view:view==='sku'?'sku':undefined,alertType:undefined,page:undefined}})"><el-radio-button value="inventory">库存视角</el-radio-button><el-radio-button value="sku">FBP SKU视角</el-radio-button></el-radio-group></template>
     </InventoryPageToolbar>
 
     <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存预警表格" tabindex="0">
@@ -465,7 +469,6 @@ onMounted(async () => {
             <div class="cell-stack alert-identity">
               <ProductTitleLink :title="row.product_name || '-'" :lines="2" />
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || row.product_id }}</span>
-              <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
             </div>
           </template>
         </el-table-column>
@@ -481,14 +484,17 @@ onMounted(async () => {
         <el-table-column label="库存分析" min-width="460">
           <template #default="{ row }">
             <div class="alert-analysis">
-              <div class="alert-analysis-status"><InventoryWorkflowStatus :state="row.workflow" /></div>
+              <div class="alert-analysis-status">
+                <el-tag :type="inventoryAlertTagType(row)" size="small">{{ inventoryAlertLabel(row) }}</el-tag>
+                <span :class="{ 'danger-text': row.alert_type === 'out_of_stock' && !Number(row.incoming_stock) }">预警缺口 <strong class="alert-metric-value">{{ integer(inventoryAlertGap(row)) }} 件</strong></span>
+              </div>
               <div class="alert-analysis-grid">
-                <div><span>可用库存</span><strong>{{ sharedStockText(row.workflow?.free) }}</strong></div>
-                <div><span>本地实物</span><strong>{{ sharedStockText(row.workflow?.physical) }}</strong></div>
-                <div><span>订单占用</span><strong>{{ sharedStockText(row.workflow?.order_demand) }}</strong></div>
-                <div><span>安全保障</span><strong>{{ sharedStockText(row.workflow?.safety) }}</strong></div>
-                <div><span>采购在途</span><strong>{{ sharedStockText(row.workflow?.incoming) }}</strong></div>
-                <div><span>仍需采购</span><strong>{{ sharedStockText(row.workflow?.purchase_quantity) }}</strong></div>
+                <div><span>剩余可用</span><strong class="alert-metric-value">{{ integer(row.available_stock) }} 件</strong></div>
+                <div><span>本地实物</span><strong class="alert-metric-value">{{ integer(row.physical_stock) }} 件</strong></div>
+                <div><span>订单待履约占用</span><strong class="alert-metric-value">{{ integer(row.open_order_demand_qty) }} 件</strong></div>
+                <div><span>预警线</span><strong class="alert-metric-value">{{ integer(row.alert_quantity) }} 件</strong></div>
+                <div><span>采购在途</span><strong class="alert-metric-value">{{ integer(row.incoming_stock) }} 件</strong></div>
+                <div><span>仍需采购</span><strong class="alert-metric-value">{{ integer(row.suggested_purchase_qty) }} 件</strong></div>
               </div>
             </div>
           </template>
@@ -508,7 +514,7 @@ onMounted(async () => {
           <template #default="{ row }">
             <div class="cell-stack alert-row-actions">
               <el-button v-if="canEditInventory" size="small" type="primary" plain @click="openInventoryDetails(row, 'stocktake')">更新本地库存</el-button>
-              <el-button v-if="canSubmitRequest" size="small" type="warning" plain @click="openWarehouseRequest(row)">提交采购需求</el-button>
+              <el-button v-if="canSubmitRequest" size="small" type="warning" plain :disabled="row.suggested_purchase_qty <= 0" @click="openWarehouseRequest(row)">提交采购需求</el-button>
               <el-button size="small" @click="openInventoryDetails(row)">查看明细</el-button>
             </div>
           </template>
@@ -535,7 +541,6 @@ onMounted(async () => {
             <div class="cell-stack">
               <strong>{{ row.product_name || "未绑定库存" }}</strong>
               <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
-              <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               <el-tooltip content="本地库存由关联的多个店铺 SKU 共享，不是当前 SKU 独占量" placement="top">
                 <span class="muted-text">共享实物 {{ sharedStockText(row.local_physical_stock) }} · 可用 {{ sharedStockText(row.local_available_stock) }}</span>
               </el-tooltip>

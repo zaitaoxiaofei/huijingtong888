@@ -133,9 +133,9 @@ test("seller analytics cancels active old-shop runs before a confirmed switch", 
   assert.match(api, /collect-runs\/\$\{encodeURIComponent\(id\)\}\/cancel/);
   assert.match(source, /@change="handleShopChange"/);
   assert.match(source, /async function handleShopChange\([\s\S]*?getSellerAnalyticsCollectRuns\(\{ store_id: previousStoreId[\s\S]*?ElMessageBox\.confirm[\s\S]*?cancelCollectRunAndNotify\(run\.id\)/);
-  assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId, pluginInstanceId: pluginInstanceId\.value \}, window\.location\.origin\)/);
+  assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_CANCEL", runId \}, window\.location\.origin\)/);
   assert.match(source, /@click="cancelCurrentRun"/);
-  assert.match(source, /window\.postMessage\(\{ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId\.value, pluginInstanceId: pluginInstanceId\.value \}, window\.location\.origin\)/);
+  assert.match(source, /BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId\.value/);
 });
 
 test("failed-batch retry targets selected failed requests without promising per-SKU remote collection", () => {

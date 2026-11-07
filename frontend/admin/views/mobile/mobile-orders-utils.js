@@ -1,4 +1,3 @@
-import {buildProductDisplayRows} from "../../../orders/utils/order-display.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey } from "../../utils/shanghai-date.js";
 
 export const MOBILE_STATUS_OPTIONS = [
@@ -69,12 +68,4 @@ export function procurementLabel(row = {}) {
 
 export function unboundSkus(row = {}) {
   return splitCsv(row.unbound_skus);
-}
-
-// Same SKU-to-inventory rows as desktop; never pair independent CSV lists by index.
-export function packingItems(row = {}) {
-  return buildProductDisplayRows(row);
-}
-export function manualMarkLabel(row = {}) {
-  return ({quality:'质检单',urgent:'紧急订单',follow:'待跟进',issue:'有问题',solved:'已解决',vip:'重要客户',special:'特殊处理',other:'其他'})[row.mark_type] || '人工备注';
 }

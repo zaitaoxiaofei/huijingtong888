@@ -1,5 +1,4 @@
 <script setup>
-import { mergeDashboardSections } from "../../../src/shared/dashboard-sections.js";
 import { hasPermission } from "../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -24,8 +23,7 @@ import {
   Truck,
   Zap
 } from "lucide-vue-next";
-import { apiClient, currentApiCacheScope } from "../utils/api";
-import DashboardInventoryRanking from "../components/DashboardInventoryRanking.vue";
+import { apiClient } from "../utils/api";
 import { openAiProductMaterialOptimizerWindow, openAiVariantLabWindow } from "../utils/ai-variant-lab-window";
 import { shanghaiDateKey } from "../utils/shanghai-date.js";
 import DailyExchangeRateCard from "../components/DailyExchangeRateCard.vue";
@@ -38,14 +36,9 @@ const loading = ref(false);
 const refreshing = ref(false);
 const snapshotBuilding = ref(false);
 const hasDashboardLoaded = ref(false);
-const shopLimitsLoading = ref(false);
-const topInventoryLoading = ref(false);
-let overviewRequestSeq = 0;
+const overviewPanelsLoading = ref(false);
 const shopProductLimits = ref([]);
-const topInventoryRows = ref([]);
-const topInventoryError = ref("");
-const topInventoryHasMore = ref(false);
-let rankingRequestSeq = 0;
+const topSkus = ref([]);
 const selectedDate = ref(/^\d{4}-\d{2}-\d{2}$/.test(String(route.query.date || "")) ? String(route.query.date) : shanghaiDateKey());
 let dashboardSnapshotRefreshTimer = null;
 let dashboardSnapshotRefreshAttempts = 0;
@@ -168,7 +161,26 @@ async function getDashboardWithRetry(url, options = {}, retries = 2) {
 }
 
 function mergeDashboardPayload(payload) {
-  dashboard.value = mergeDashboardSections(dashboard.value, payload || {});
+  dashboard.value = {
+    ...dashboard.value,
+    ...(payload || {}),
+    summary: {
+      ...dashboard.value.summary,
+      ...(payload?.summary || {})
+    },
+    commerce: {
+      ...dashboard.value.commerce,
+      ...(payload?.commerce || {}),
+      advertising: {
+        ...dashboard.value.commerce.advertising,
+        ...(payload?.commerce?.advertising || {})
+      }
+    },
+    alerts: {
+      ...dashboard.value.alerts,
+      ...(payload?.alerts || {})
+    }
+  };
 }
 
 async function applyDashboardDate(value) {
@@ -182,9 +194,7 @@ async function applyDashboardDate(value) {
     commerce: { today: {}, yesterday: {}, advertising: { today: {}, yesterday: {}, month: {} } },
     alerts: { fbp: [], fbs: [], procurement: [] }
   };
-  topInventoryRows.value = [];
-  topInventoryHasMore.value = false;
-  topInventoryError.value = "";
+  topSkus.value = [];
   clearDashboardSnapshotReload();
   dashboardSnapshotRefreshAttempts = 0;
   await router.replace({ path: route.path, query: { ...route.query, date: next } });
@@ -250,6 +260,10 @@ function ratioText(value) {
 
 function limitBarWidth(value) {
   return `${Math.max(3, (Number(value || 0) / maxAvailableLimit.value) * 100)}%`;
+}
+
+function skuImageList(row) {
+  return row?.image_url ? [row.image_url] : [];
 }
 
 function firstMetricNumber(...values) {
@@ -926,7 +940,6 @@ const dashboardInsightCards = computed(() => [
 ]);
 
 async function loadDashboard(options = {}) {
-  const scope = currentApiCacheScope();
   const requestSeq = ++dashboardRequestSeq;
   const dateKey = String(options?.dateKey || selectedDate.value).slice(0, 10);
   const forceRefresh = options === true || options?.refresh === true;
@@ -938,7 +951,7 @@ async function loadDashboard(options = {}) {
       hasDashboardLoaded.value = true;
     }
   }
-
+  if (!snapshotOnly) loadOverviewPanels(dateKey);
   if (!snapshotOnly) dashboardSnapshotRefreshAttempts = 0;
   const showInitialLoading = !hasDashboardLoaded.value;
   if (showInitialLoading) {
@@ -957,13 +970,12 @@ async function loadDashboard(options = {}) {
       ...(forceRefresh ? { noCache: true, cache: "no-store" } : {}),
       routeScoped: false
     });
-    if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
+    if (requestSeq !== dashboardRequestSeq || dateKey !== selectedDate.value) return;
     snapshotBuilding.value = res?.snapshot?.status === "building";
     mergeDashboardPayload(res);
-    if (res?.snapshot?.status === "partial") ElMessage.warning("部分首页指标暂未更新，请稍后刷新");
     hasDashboardLoaded.value = true;
-    if (["fresh", "snapshot"].includes(res?.snapshot?.status)) writeDashboardSessionCache(dateKey, res);
-    if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 60) {
+    if (res?.snapshot?.status !== "building") writeDashboardSessionCache(dateKey, res);
+    if (res?.snapshot?.status === "building" && dashboardSnapshotRefreshAttempts < 20) {
       dashboardSnapshotRefreshAttempts += 1;
       scheduleDashboardSnapshotReload(1500);
     } else if (!forceRefresh && !snapshotOnly) {
@@ -972,15 +984,14 @@ async function loadDashboard(options = {}) {
     }
   } catch (error) {
     console.error(error);
-    if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 60) {
+    if (requestSeq === dashboardRequestSeq && !forceRefresh && dashboardSnapshotRefreshAttempts < 20) {
       dashboardSnapshotRefreshAttempts += 1;
       scheduleDashboardSnapshotReload(Math.min(1500 * dashboardSnapshotRefreshAttempts, 6000));
     }
     if (hasDashboardLoaded.value || (!showInitialLoading && !forceRefresh)) return;
     ElMessage.error("首页摘要加载失败");
   } finally {
-    if (requestSeq !== dashboardRequestSeq || scope !== currentApiCacheScope()) return;
-    if (!snapshotOnly) loadOverviewPanels(dateKey);
+    if (requestSeq !== dashboardRequestSeq) return;
     if (showInitialLoading) {
       loading.value = false;
     } else {
@@ -989,54 +1000,38 @@ async function loadDashboard(options = {}) {
   }
 }
 
-async function loadTopInventory(dateKey = selectedDate.value) {
-  const scope = currentApiCacheScope();
-  const requestSeq = ++rankingRequestSeq;
-  topInventoryError.value = "";
-  topInventoryLoading.value = true;
-  const params = new URLSearchParams({ dimension: "product", inventory: "1", from: dateKey, to: dateKey,
-    page: "1", pageSize: "15", sortBy: "revenue", sortOrder: "desc", fast: "1" });
-  try {
-    const result = await getDashboardWithRetry(`/api/profit-ranking?${params}`, { noCache: true, routeScoped: false });
-    if (requestSeq !== rankingRequestSeq || dateKey !== selectedDate.value || scope !== currentApiCacheScope()) return;
-    topInventoryRows.value = Array.isArray(result?.rows) ? result.rows : [];
-    topInventoryHasMore.value = Number(result?.total) > 15;
-  } catch (error) {
-    if (requestSeq === rankingRequestSeq && scope === currentApiCacheScope()) {
-      topInventoryError.value = error?.message || "库存榜单读取失败，请重试";
-    }
-  } finally {
-    if (requestSeq === rankingRequestSeq) topInventoryLoading.value = false;
-  }
-}
-
-function clearInventoryRanking() {
-  ++rankingRequestSeq;
-  topInventoryRows.value = [];
-  topInventoryHasMore.value = false;
-  topInventoryError.value = "";
-}
-
 async function loadOverviewPanels(dateKey = selectedDate.value) {
-  const requestSeq = ++overviewRequestSeq;
-  const scope = currentApiCacheScope();
-  const isCurrent = () => requestSeq === overviewRequestSeq && dateKey === selectedDate.value && scope === currentApiCacheScope();
-  shopLimitsLoading.value = true;
-  const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
-    if (!isCurrent()) return;
-    shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
-  }).finally(() => {
-    if (isCurrent()) shopLimitsLoading.value = false;
-  });
-  const rankingRequest = loadTopInventory(dateKey);
-  const fbpOpportunityRequest = getDashboardWithRetry("/api/fbp-opportunities?page=1&pageSize=1", { routeScoped: false }).then((result) => {
-    if (!isCurrent()) return;
-    dashboard.value.summary = {
-      ...dashboard.value.summary,
-      fbp_opportunities: result?.summary || {}
-    };
-  });
-  await Promise.allSettled([limitsRequest, rankingRequest, fbpOpportunityRequest]);
+  overviewPanelsLoading.value = true;
+  try {
+    const rankingParams = new URLSearchParams({
+      dimension: "sku",
+      from: dateKey,
+      to: dateKey,
+      page: "1",
+      pageSize: "10",
+      sortBy: "revenue",
+      sortOrder: "desc",
+      fast: "1"
+    });
+    const limitsRequest = getDashboardWithRetry("/api/online-products/limits", { noCache: true, routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      shopProductLimits.value = Array.isArray(result?.rows) ? result.rows : [];
+    });
+    const rankingRequest = getDashboardWithRetry(`/api/profit-ranking?${rankingParams.toString()}`, { routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      topSkus.value = Array.isArray(result?.rows) ? result.rows.slice(0, 10) : [];
+    });
+    const fbpOpportunityRequest = getDashboardWithRetry("/api/fbp-opportunities?page=1&pageSize=1", { routeScoped: false }).then((result) => {
+      if (dateKey !== selectedDate.value) return;
+      dashboard.value.summary = {
+        ...dashboard.value.summary,
+        fbp_opportunities: result?.summary || {}
+      };
+    });
+    await Promise.allSettled([limitsRequest, rankingRequest, fbpOpportunityRequest]);
+  } finally {
+    if (dateKey === selectedDate.value) overviewPanelsLoading.value = false;
+  }
 }
 
 function scheduleDashboardSnapshotReload(delay = 2500) {
@@ -1052,15 +1047,10 @@ function refreshDashboard() {
 }
 
 onMounted(() => {
-  window.addEventListener("erp:auth-scope-changed", clearInventoryRanking);
   loadDashboard();
 });
 
 onBeforeUnmount(() => {
-  ++rankingRequestSeq;
-  ++overviewRequestSeq;
-  ++dashboardRequestSeq;
-  window.removeEventListener("erp:auth-scope-changed", clearInventoryRanking);
   clearDashboardSnapshotReload();
 });
 </script>
@@ -1515,11 +1505,40 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="dashboard-overview-grid">
-          <DashboardInventoryRanking
-            :rows="topInventoryRows" :date="selectedDate" :date-text="selectedDateText"
-            :loading="topInventoryLoading" :error="topInventoryError" :has-more="topInventoryHasMore"
-            @retry="loadTopInventory()"
-          />
+          <section class="overview-panel top-sku-panel">
+            <div class="overview-panel-heading">
+              <div>
+                <span>Top Products</span>
+                <h2>Top 10 SKU</h2>
+              </div>
+              <small>{{ selectedDateText }} · 按销售额排序</small>
+            </div>
+            <div v-if="topSkus.length" class="top-sku-list">
+              <article v-for="(row, index) in topSkus" :key="`${row.shop_id}-${row.ozon_sku}`" class="top-sku-item">
+                <b class="sku-rank">{{ index + 1 }}</b>
+                <el-image
+                  class="sku-image"
+                  :src="row.image_url"
+                  fit="cover"
+                  :preview-src-list="skuImageList(row)"
+                  :initial-index="0"
+                  preview-teleported
+                >
+                  <template #error><span>无图</span></template>
+                </el-image>
+                <div class="sku-copy">
+                  <strong :title="row.product_name || row.ozon_sku">{{ row.product_name || row.ozon_sku || "未命名商品" }}</strong>
+                  <small>{{ row.shop_name }} · SKU {{ row.ozon_sku || "--" }}</small>
+                </div>
+                <div class="sku-sales">
+                  <span>销量<strong>{{ numberText(row.item_quantity) }} 件</strong></span>
+                  <span>销售额<strong>{{ metricMoney(row.revenue) }}</strong></span>
+                </div>
+              </article>
+            </div>
+            <el-skeleton v-else-if="overviewPanelsLoading" :rows="6" animated />
+            <el-empty v-else description="所选日期暂无 SKU 销售数据" :image-size="72" />
+          </section>
 
           <section class="overview-panel shop-limit-panel">
             <div class="overview-panel-heading">
@@ -1548,7 +1567,7 @@ onBeforeUnmount(() => {
                 </div>
               </article>
             </div>
-            <el-skeleton v-else-if="shopLimitsLoading" :rows="5" animated />
+            <el-skeleton v-else-if="overviewPanelsLoading" :rows="5" animated />
             <el-empty v-else description="暂无店铺额度数据" :image-size="72" />
           </section>
         </div>
@@ -1811,6 +1830,99 @@ button {
   color: var(--dashboard-theme-link, #1d4ed8);
   font-size: 18px;
   text-align: right;
+}
+
+.top-sku-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(5, auto);
+  grid-auto-flow: column;
+  gap: 10px;
+}
+
+.top-sku-item {
+  display: grid;
+  grid-template-columns: 28px 64px minmax(0, 1fr) 88px;
+  align-items: center;
+  gap: 12px;
+  min-height: 84px;
+  padding: 6px 12px;
+  border: 1px solid var(--dashboard-theme-border-light, #edf1f7);
+  border-radius: 14px;
+  background: var(--dashboard-theme-surface-alt, #fbfcfe);
+  box-sizing: content-box;
+}
+
+.sku-rank {
+  color: var(--dashboard-theme-text-placeholder, #94a3b8);
+  font-size: 15px;
+  text-align: center;
+}
+
+.top-sku-item:nth-child(-n + 3) .sku-rank {
+  color: var(--dashboard-theme-link, #2563eb);
+  font-size: 20px;
+}
+
+.sku-image {
+  width: 64px;
+  height: 84px;
+  border-radius: 10px;
+  background: var(--dashboard-theme-muted-bg, #eef2f7);
+}
+
+.sku-image :deep(.el-image__error) {
+  color: var(--dashboard-theme-text-placeholder, #94a3b8);
+  font-size: 12px;
+}
+
+.sku-copy {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.sku-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sku-copy strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--dashboard-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.sku-copy small {
+  color: var(--dashboard-muted);
+  font-size: 12px;
+}
+
+.sku-sales {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--dashboard-theme-border, #e5eaf2);
+}
+
+.sku-sales span {
+  display: grid;
+  gap: 3px;
+  color: var(--dashboard-muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.sku-sales strong {
+  color: var(--dashboard-text);
+  font-size: 14px;
 }
 
 .ai-floating-entry {
@@ -3600,6 +3712,11 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .top-sku-list {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    grid-auto-flow: row;
+  }
 }
 
 @media (max-width: 640px) {
@@ -3647,6 +3764,23 @@ button {
 
   .overview-panel-heading small {
     text-align: left;
+  }
+
+  .top-sku-item {
+    grid-template-columns: 24px 54px minmax(0, 1fr) 76px;
+    gap: 9px;
+    min-height: 72px;
+    padding-inline: 8px;
+  }
+
+  .sku-image {
+    width: 54px;
+    height: 72px;
+  }
+
+  .sku-sales {
+    gap: 8px;
+    padding-left: 8px;
   }
 
   .operating-card {

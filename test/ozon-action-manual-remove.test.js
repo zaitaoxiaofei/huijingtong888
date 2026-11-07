@@ -76,17 +76,16 @@ test("manual promotion removal verifies current-shop products and confirmed offi
       assertNoWrite();
     };
 
-    await t.test("manual removal uses v2 Money even when legacy methods remain available", async () => {
+    await t.test("legacy shops retain v1 removal with per-product official confirmation", async () => {
       await configure({ unified: false });
       const result = await remove();
       assert.equal(result.success, true);
-      assert.equal(result.apiVersion, "v2");
+      assert.equal(result.apiVersion, "v1");
       assert.equal(result.count, 1);
       assert.deepEqual(result.removedProductIds, [501]);
       assert.deepEqual(result.failedProductIds, []);
       assert.deepEqual(result.result.product_ids, [501]);
-      assert.deepEqual(requests.filter(isWrite).map(row => row.endpoint), ["/v1/actions/products/update"]);
-      assert.ok(!requests.some(row => ["/v1/actions/products", "/v1/actions/products/deactivate"].includes(row.endpoint)));
+      assert.deepEqual(requests.filter(isWrite).map(row => row.endpoint), ["/v1/actions/products/deactivate"]);
     });
 
     await t.test("unified manual removal accepts SELLER rows and uses official Money rather than submitted metadata", async () => {
@@ -102,12 +101,13 @@ test("manual promotion removal verifies current-shop products and confirmed offi
       assert.ok(requests.some(row => row.endpoint === "/v2/actions/products"));
     });
 
-    await t.test("retired legacy methods returning 404 cannot block the v2 manual exit path", async () => {
+    await t.test("a shop allowing legacy reads but refusing legacy deletion is reread with v2 Money before retrying", async () => {
       await configure();
       let exited = false;
       respond = async request => {
         if (request.endpoint === "/v1/actions") return { result: [{ id: 123, action_type: "ELASTIC_BOOSTING" }] };
-        if (["/v1/actions/products", "/v1/actions/products/deactivate"].includes(request.endpoint)) return { __status: 404, message: "Retired fixture method" };
+        if (request.endpoint === "/v1/actions/products") return { result: { products: [{ id: 501, add_mode: "MANUAL", action_price: 1, price: 2 }], total: 1, last_id: "" } };
+        if (request.endpoint === "/v1/actions/products/deactivate") return { __status: 400, message: "the method is blocked due to unified price logic" };
         if (request.endpoint === "/v2/actions/products") return { products: exited ? [] : [joined(501, { action_price: money("70.00"), min_seller_price: money("75.00") })], total: exited ? 0 : 1, last_id: "" };
         if (request.endpoint === "/v1/actions/products/update") {
           assert.deepEqual(request.body.products, [{ product_id: 501, action_price: money("75.00") }]);
@@ -120,8 +120,7 @@ test("manual promotion removal verifies current-shop products and confirmed offi
       assert.equal(result.success, true);
       assert.equal(result.apiVersion, "v2");
       assert.deepEqual(result.removedProductIds, [501]);
-      assert.deepEqual(requests.filter(isWrite).map(row => row.endpoint), ["/v1/actions/products/update"]);
-      assert.ok(!requests.some(row => ["/v1/actions/products", "/v1/actions/products/deactivate"].includes(row.endpoint)));
+      assert.deepEqual(requests.filter(isWrite).map(row => row.endpoint), ["/v1/actions/products/deactivate", "/v1/actions/products/update"]);
       const freshRead = requests.findIndex(row => row.endpoint === "/v2/actions/products");
       const priceWrite = requests.findIndex(row => row.endpoint === "/v1/actions/products/update");
       assert.ok(freshRead >= 0 && freshRead < priceWrite);

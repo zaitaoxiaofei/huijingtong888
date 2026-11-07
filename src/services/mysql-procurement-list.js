@@ -86,7 +86,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
   const purchaseableRows = rows.filter((item) => {
     const rowStatus = String(item.status || "");
     const orderStatus = String(item.purchase_order_status || "");
-    const realOrderRequest = item.demand_type !== 'warehouse_request' && (Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0));
+    const realOrderRequest = Number(item.source_order_id || 0) || Number(item.source_order_item_id || 0);
     const missingRealOrderSource = String(item.demand_type || "") === "real_order" && !realOrderRequest;
     return ["pending", "suggested", "submitted"].includes(rowStatus)
       && !["purchased", "partial_inbound", "inbound_done"].includes(orderStatus)
@@ -102,7 +102,6 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     if (!grouped.has(productId)) {
       grouped.set(productId, {
         product_id: productId,
-        workflow: row.workflow, workflow_candidate: row.workflow_candidate,
         product_name: row.product_name || "",
         product_code: row.product_code || "",
         product_image_url: row.product_image_url || row.image_url || "",
@@ -171,7 +170,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
     if (row.all_order_demand_quantity != null) {
       target.all_order_demand_quantity = Math.max(Number(target.all_order_demand_quantity || 0), Number(row.all_order_demand_quantity || 0));
     }
-    if (row.demand_type !== 'warehouse_request' && (Number(row.source_order_id || 0) || Number(row.source_order_item_id || 0))) {
+    if (Number(row.source_order_id || 0) || Number(row.source_order_item_id || 0)) {
       target.order_request_count += 1;
       target.order_demand_quantity += Number(row.quantity || 0);
     }
@@ -215,8 +214,7 @@ export function groupProcurementRequestsMysql(rows = [], query = {}) {
       ].some((item) => String(item || "").toLowerCase().includes(searchText));
     })
     .sort((a, b) => (
-      Number(Number(b.real_order_shortage || 0) > 0) - Number(Number(a.real_order_shortage || 0) > 0)
-      || procurementTimeValueMysql(b.latest_created_at) - procurementTimeValueMysql(a.latest_created_at)
+      procurementTimeValueMysql(b.latest_created_at) - procurementTimeValueMysql(a.latest_created_at)
       || Number(b.product_id || 0) - Number(a.product_id || 0)
     ));
 
@@ -357,20 +355,6 @@ function addProcurementDecisionMysql(row, query = {}) {
   row.procurement_required = realOrderOnlyView
     ? realOrderShortage > 0
     : Boolean(row.automation_exceptions?.length) || !onlyRealOrderRequests || realOrderShortage > 0;
-  if(row.workflow) {
-    const requestedType=String(query.demandType||query.demand_type||'all');
-    const relevant=row.workflow.demands.filter(d=>!['real_order','local_safety','fbp_stock'].includes(requestedType)||d.key===requestedType);
-    row.suggestion_reasons=relevant.filter(d=>Number(d.purchase_quantity)>0||Number(d.submitted_quantity)>0).map(d=>({type:d.key,label:d.label,quantity:Number(d.purchase_quantity)||0,submitted_quantity:Number(d.submitted_quantity)||0,text:`${d.label}：当前建议 ${d.purchase_quantity??'待核对'} 件；已提交 ${d.submitted_quantity} 件`}));
-    row.primary_suggestion_reason=row.suggestion_reasons[0]||null;
-    row.suggested_purchase_qty=row.suggestion_reasons.reduce((sum,r)=>sum+r.quantity,0);
-    row.primary_suggested_purchase_qty=row.suggested_purchase_qty;
-    row.total_quantity=row.suggested_purchase_qty;
-    row.safety_stock_shortage=row.workflow.demands.find(d=>d.key==='local_safety').purchase_quantity;
-    row.target_days=row.workflow.local_days;
-    row.procurement_required=Boolean(row.automation_exceptions?.length)||row.suggestion_reasons.length>0||!!row.workflow_candidate;
-    row.demand_reason=row.suggestion_reasons.map(r=>r.text).join('；')||'当前供货充足，历史差异单独核对';
-    return row;
-  }
   if (row.automation_exceptions?.length) {
     row.demand_reason = `采购异常：${row.automation_exceptions.join("；")}`;
     return row;

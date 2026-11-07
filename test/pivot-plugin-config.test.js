@@ -14,7 +14,7 @@ test("seller analytics polling stays low frequency and avoids forced status sync
   assert.match(source, /const PREPARE_POLL_INTERVAL_MS = 60000/);
   assert.match(source, /const PLUGIN_STATUS_SYNC_MIN_INTERVAL_MS = 30000/);
   assert.match(source, /const AUTH_BINDING_SYNC_MIN_INTERVAL_MS = 300000/);
-  assert.match(source, /refreshPanelStatusInBackground\(\)/);
+  assert.match(source, /await syncPluginStatus\(\)\.catch/);
   const nextRequestsSource = source.match(/async function getNextCollectRequests\([^)]*\)[\s\S]*?async function getNextPrepareRequest/)?.[0] || "";
   assert.doesNotMatch(nextRequestsSource, /syncPluginStatus\(true\)/);
 });

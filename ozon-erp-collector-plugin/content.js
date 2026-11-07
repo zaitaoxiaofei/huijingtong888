@@ -439,7 +439,6 @@
 
   function canReuseCollectedDetail(detail) {
     if (!(detail?.savedCollectionId || detail?.collectionId)) return false;
-    if (detail?.cachedProductLookup?.product?.summary_only || detail?.summary_only) return false;
     const source = String(detail?.cachedProductLookup?.product?.data_source || detail?.data_source || '').trim();
     if (source === 'ozon_plugin_fast_add_to_box') return false;
     if (detail?.cachedProductLookup?.needsRefresh === false) return true;
@@ -957,25 +956,23 @@
       const sellerResultBySku = {};
       const sellerPatchBySku = {};
       const maxVariantSellerFetch = 30;
-      const skus = candidateSkus.slice(0, maxVariantSellerFetch);
-      let cursor = 0;
-      await Promise.all(Array.from({ length: Math.min(3, skus.length) }, async () => {
-        while (cursor < skus.length) {
-          const sku = skus[cursor++];
-          try {
-            const currentSellerResult = await collector.fetchSellerFallbackData(sku);
-            if (currentSellerResult?.fields && Object.keys(currentSellerResult.fields).length > 0) {
-              sellerResultBySku[sku] = currentSellerResult;
-              sellerPatchBySku[sku] = buildSellerCategoryPatch(currentSellerResult);
-            } else errors.push(`${sku}: seller 未返回可用字段`);
-          } catch (error) {
-            errors.push(`${sku}: ${error?.message || String(error)}`);
+      for (const sku of candidateSkus.slice(0, maxVariantSellerFetch)) {
+        try {
+          const currentSellerResult = await collector.fetchSellerFallbackData(sku);
+          if (currentSellerResult?.fields && Object.keys(currentSellerResult.fields).length > 0) {
+            sellerResultBySku[sku] = currentSellerResult;
+            sellerPatchBySku[sku] = buildSellerCategoryPatch(currentSellerResult);
+            if (!sellerResult) {
+              sellerResult = currentSellerResult;
+              requestedSku = sku;
+            }
+            continue;
           }
+          errors.push(`${sku}: seller 未返回可用字段`);
+        } catch (error) {
+          errors.push(`${sku}: ${error?.message || String(error)}`);
         }
-      }));
-      // Completion order must never choose another variant as the root product.
-      requestedSku = skus.find(sku => sellerResultBySku[sku]) || '';
-      sellerResult = sellerResultBySku[requestedSku] || null;
+      }
       if (!sellerResult?.fields || Object.keys(sellerResult.fields).length === 0) {
         throw new Error(errors[0] || 'seller 兜底未返回可用商品数据');
       }
@@ -1091,11 +1088,7 @@
   }
 
   async function withLocalPluginTokenHeader(options = {}) {
-    const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY, ERP_BASE_URL_STORAGE_KEY]);
-    const savedBaseUrl = String(stored[ERP_BASE_URL_STORAGE_KEY] || '').trim().replace(/\/+$/, '');
-    if (savedBaseUrl && savedBaseUrl !== DEFAULT_ERP_BASE_URL) {
-      throw new Error('原密钥属于其他 ERP 地址，请在统一插件弹窗重新填写企业密钥');
-    }
+    const stored = await chrome.storage.local.get([LOCAL_PLUGIN_TOKEN_STORAGE_KEY]);
     const token = String(stored?.[LOCAL_PLUGIN_TOKEN_STORAGE_KEY] || DEFAULT_LOCAL_PLUGIN_TOKEN).trim();
     if (!token) return options;
     const headers = options?.headers && typeof options.headers === 'object'
@@ -1343,7 +1336,6 @@
   async function persistCollectedResultUpdate(result, requestContext = null) {
     if (!result || typeof result !== 'object') return null;
     const sourcePayload = buildCollectedProductListPayload(result);
-    if (result.collectorBoxDataSource) sourcePayload.data_source = result.collectorBoxDataSource;
     const normalizedCollectionId = String(result.savedCollectionId || result.collectionId || sourcePayload.collectionId || '').trim();
     if (normalizedCollectionId) sourcePayload.collectionId = normalizedCollectionId;
     const saved = await syncCollectedProductToCollectorBox(sourcePayload, requestContext || await resolveLocalPluginRequestContext());
@@ -1356,18 +1348,15 @@
   function scheduleSellerFallbackBackfill(result, options = {}) {
     if (!result || typeof result !== 'object') return Promise.resolve(null);
     const shouldPersist = options.persist !== false;
-    const enrichment = result.sellerFallbackBackfillTask || enrichDetailWithSellerFallback(result);
-    const backgroundTask = enrichment
+    const backgroundTask = enrichDetailWithSellerFallback(result)
       .then(async (enriched) => {
         if (!shouldPersist) return enriched;
         try {
-          await persistCollectedResultUpdate(enriched, options.requestContext);
-          delete enriched.sellerFallbackPersistError;
+          await persistCollectedResultUpdate(enriched);
         } catch (error) {
           const stages = Array.isArray(enriched?.stages) ? enriched.stages : [];
           stages.push({ name: 'seller_fallback_persist', status: 'warning', detail: error?.message || String(error), at: new Date().toISOString() });
           enriched.stages = stages;
-          enriched.sellerFallbackPersistError = true;
         }
         return enriched;
       })
@@ -1776,8 +1765,6 @@
       description_category_id: descriptionCategoryId,
       new_description_category_id: pickValue(['new_description_category_id', 'newDescriptionCategoryId']),
       type_id: typeId,
-      collection_stages: Array.isArray(result?.stages) ? result.stages.map(stage => ({ name: stage.name, status: stage.status, detail: String(stage.detail || '').slice(0, 300), at: stage.at })) : [],
-      plugin_version: typeof chrome !== 'undefined' ? chrome.runtime?.getManifest?.().version || '' : '',
       sellerEnrichment: result?.sellerEnrichment || result?.normalized?.sellerEnrichment || null,
       sellerFallback: result?.sellerFallback || result?.normalized?.sellerFallback || null,
       sellerVariantBySku: result?.sellerVariantBySku || result?.normalized?.sellerVariantBySku || null,
@@ -2027,8 +2014,6 @@
       'hashtags',
       'attributes',
       'sellerFallback',
-      'collection_stages',
-      'plugin_version',
       'sellerVariantBySku',
       'variantSellerFallbacks',
       'variants',
@@ -2071,7 +2056,6 @@
       throw new Error(`Collected SKU mismatch: expected ${normalizedExpectedSku}, got ${payload.sku}`);
     }
     payload.data_source = 'ozon_plugin_detail_add_to_box';
-    result.collectorBoxDataSource = payload.data_source;
     return { result, payload };
   }
 
@@ -2340,7 +2324,7 @@
       row?.productPrice,
       row?.sell_price,
       row?.cardPrice
-    ].map(normalizeListPriceValue).find((item) => item !== '') ?? '';
+    ].map(normalizeListPriceValue).find((item) => item !== '');
     if (existing !== '') return existing;
     const fromNodes = extractListCardPriceFromNodes(priceRoot) || extractListCardPriceFromNodes(card);
     if (fromNodes !== '') return fromNodes;
@@ -3948,22 +3932,9 @@
       const cacheData = refreshCollectorBoxCacheAfterSync(sku, payload, 'full_detail_collect');
       result.savedCollectionId = saved.collectionId || payload.collectionId || payload.sku || sku;
       result.collectionId = result.savedCollectionId;
-      // Reuse the in-flight seller request, but attach persistence only after the
-      // initial record exists. Keep the original enterprise context for the write.
-      scheduleSellerFallbackBackfill(result, { persist: true, requestContext }).then(enriched => {
-        if (!enriched || pageSku() !== sku) return;
-        const updated = buildCollectedProductListPayload(enriched);
-        const nextCache = enriched.sellerFallbackPersistError ? state.lookupCacheBySku.get(sku)?.data : refreshCollectorBoxCacheAfterSync(sku, updated, 'seller_category_backfill');
-        const category = deriveCollectedCategoryMeta(enriched);
-        const hasPair = Boolean(category.description_category_id && category.type_id);
-        const status = enriched.sellerFallbackPersistError
-          ? '详情已保存，但类目回写失败，请重新采集'
-          : hasPair ? '类目补采已回传，请到采集箱核对后处理草稿' : '详情已保存，类目未补齐；请确认卖家后台登录后重采，或在上架页选择类目';
-        renderDetailProductPanel(buildDetailDisplayRow(sku, status, enriched, nextCache));
-      });
       const variantCount = payload.editorVariants?.length || payload.variants?.length || 1;
       const imageCount = Array.isArray(payload.images) ? payload.images.length : 0;
-      renderDetailProductPanel(buildDetailDisplayRow(sku, `采集完成：${variantCount} 个变体、${imageCount} 张图片；类目后台核实中`, result, cacheData));
+      renderDetailProductPanel(buildDetailDisplayRow(sku, `采集完成：${variantCount} 个变体、${imageCount} 张图片`, result, cacheData));
       if (options.openCollectorBox !== false) {
         await openCollectorBox(sku);
       }
@@ -4048,18 +4019,13 @@
     const routeDuration = Number(collectionRoute?.durationMs || 0) > 0
       ? `${(Number(collectionRoute.durationMs) / 1000).toFixed(1)}秒`
       : '';
-    const routeIsBrowserPool = collectionRoute?.mode === 'browser_pool';
-    const routeIsPool = routeIsBrowserPool || collectionRoute?.mode === 'pool';
-    const routeText = routeIsBrowserPool
-      ? ['云端调度', collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
-      : collectionRoute?.mode === 'pool'
-        ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
-        : collectionRoute?.mode === 'browser_fallback'
-          ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
-          : '';
-    const routeTitle = collectionRoute?.warning || (routeIsBrowserPool
-      ? `本次由云端调度 ${collectionRoute.shopName || collectionRoute.companyId || '已接入店铺'} 的浏览器完成采集`
-      : routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
+    const routeIsPool = collectionRoute?.mode === 'pool';
+    const routeText = routeIsPool
+      ? [`号池 ${collectionRoute.workerCount || 1}`, collectionRoute.shopName || collectionRoute.companyId, routeDuration].filter(Boolean).join(' · ')
+      : collectionRoute?.mode === 'browser_fallback'
+        ? [`浏览器回退`, collectionRoute.workerCount ? `号池 ${collectionRoute.workerCount}` : '', collectionRoute.status ? `HTTP ${collectionRoute.status}` : '', routeDuration].filter(Boolean).join(' · ')
+        : '';
+    const routeTitle = collectionRoute?.warning || (routeIsPool ? `本次由 ${collectionRoute.shopName || collectionRoute.companyId || '号池店铺'} 完成采集` : '');
     const routeHtml = routeText
       ? `<div class="ozon-erp-collection-route ${routeIsPool ? 'is-pool' : 'is-fallback'}" title="${escapeHtml(routeTitle)}">${escapeHtml(routeText)}</div>`
       : '';
@@ -4249,7 +4215,7 @@
     const result = Array.isArray(response?.results)
       ? response.results.find((item) => String(item?.sku || '').trim() === normalizedSku)
       : null;
-    if (!result?.success || result.partial === true) return;
+    if (!result?.success) return;
     const collectDate = result.collectDate || (() => {
       const date = new Date();
       const year = date.getFullYear();
@@ -4444,20 +4410,8 @@
 
   async function autoCollectCollectedProductSkus(items, reason = 'auto_scan', options = {}) {
     const sourceItems = Array.isArray(items) ? items : [];
-    const now = Date.now();
-    const previewTtlMs = Number(options.previewTtlMs || 5 * 60 * 1000);
-    const targets = Array.from(new Set(sourceItems
-      .map((item) => String((item && typeof item === 'object' ? item.sku : item) || '').trim())
-      .filter(Boolean))).filter((sku) => {
-      if (state.autoCollectingSkus.has(sku)) return false;
-      if (options.force === true) return true;
-      const fetchedAt = Number(state.previewFetchedAtBySku.get(sku) || 0);
-      return !fetchedAt || now - fetchedAt > previewTtlMs;
-    });
-    if (targets.length === 0) return null;
-    const targetSet = new Set(targets);
     const baseProducts = sourceItems
-      .filter((item) => item && typeof item === 'object' && targetSet.has(String(item.sku || '').trim()))
+      .filter((item) => item && typeof item === 'object')
       .map((item) => ({
         sku: String(item.sku || '').trim(),
         product_id: String(item.product_id || item.productId || item.sku || '').trim(),
@@ -4479,16 +4433,30 @@
         productUrl: item.productUrl || item.productLink || item.url || ''
       }))
       .filter((item) => item.sku);
-    const baseBySku = new Map();
-    baseProducts.forEach((item) => { if (!baseBySku.has(item.sku)) baseBySku.set(item.sku, item); });
+    await enrichBaseProductsFromOzonEntrypoint(baseProducts);
+    const baseBySku = new Map(baseProducts.map((item) => [item.sku, item]));
+    const now = Date.now();
+    const previewTtlMs = Number(options.previewTtlMs || 5 * 60 * 1000);
+    const targets = Array.from(
+      new Set(
+        sourceItems
+          .map((item) => String((item && typeof item === 'object' ? item.sku : item) || '').trim())
+          .filter(Boolean)
+      )
+    ).filter((sku) => {
+      if (state.autoCollectingSkus.has(sku)) return false;
+      if (options.force === true) return true;
+      const fetchedAt = Number(state.previewFetchedAtBySku.get(sku) || 0);
+      return !fetchedAt || now - fetchedAt > previewTtlMs;
+    });
+    if (targets.length === 0) return null;
     targets.forEach((sku) => {
       state.autoCollectingSkus.add(sku);
       state.autoCollectAttemptedSkus.add(sku);
       state.previewFetchedAtBySku.set(sku, now);
     });
+    const requestContext = await resolveLocalPluginRequestContext();
     try {
-      await enrichBaseProductsFromOzonEntrypoint(Array.from(baseBySku.values()));
-      const requestContext = await resolveLocalPluginRequestContext();
       const response = await sendRuntimeMessageCompat({
         type: 'OZON_ERP_AUTO_COLLECT_LIST_SKUS',
         skus: targets,
@@ -4542,22 +4510,6 @@
     const list = Array.isArray(rows) ? rows : [];
     const row = list.find((item) => String(item?.sku || '').trim() === sku);
     if (!row) return null;
-    if (result?.success && result.partial === true) {
-      const salesKeys = new Set(['soldCount', 'soldSum', 'soldSumRub', 'soldSumCny', 'gmvSum', 'salesDynamics', 'salesUpdateDate']);
-      const updates = Object.fromEntries(Object.entries(result.product || {}).filter(([key, value]) => (
-        salesKeys.has(key) && value !== undefined && value !== null && value !== ''
-      )));
-      const product = { ...(row.erpLookup?.product || {}), ...updates };
-      row.erpLookup = {
-        ...(row.erpLookup || {}),
-        status: 'pending',
-        statusText: '补采中',
-        needsRefresh: true,
-        product,
-        collectionRoute: result.collectionRoute || row.erpLookup?.collectionRoute || null
-      };
-      return row;
-    }
     if (result && result.success === undefined) {
       row.erpLookup = {
         ...(row.erpLookup || {}),
@@ -4627,7 +4579,7 @@
     if (!sku) return;
     const row = applyAutoCollectResultToRows(state.listRows, result);
     if (row) renderListRowPanelsBySku(sku);
-    if (pageSku() === sku && result?.success && result.partial !== true) {
+    if (pageSku() === sku && result?.success) {
       applyDetailAutoCollectResult(sku, { results: [result] }, state.lookupCacheBySku.get(sku)?.data || null);
     }
   }

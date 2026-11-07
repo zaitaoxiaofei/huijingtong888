@@ -19,7 +19,7 @@ const emit = defineEmits([
   "change-fulfillment-type",
   "change-print-view",
   "change-mark-filter",
-  "configure-status-tabs", "review-selection"
+  "configure-status-tabs"
 ]);
 
 const visibleMarkFilters = computed(() => [
@@ -40,7 +40,6 @@ function tabTone(value) {
     all: "slate",
     awaiting_packaging: "amber",
     awaiting_deliver: "blue",
-    ogl_bound: "blue",
     ogl_dispatched: "blue",
     delivering: "green",
     dispute: "red",
@@ -124,7 +123,7 @@ function tabTone(value) {
               <el-icon><Sort /></el-icon>
             </button>
           </el-tooltip>
-          <button type="button" class="orders-selected-count" :class="{ active: selectedCount > 0 }" aria-label="查看跨页已选订单" @click="emit('review-selection')">已选 {{ selectedCount }}</button>
+          <span class="orders-selected-count" :class="{ active: selectedCount > 0 }">已选 {{ selectedCount }}</span>
         </div>
       </div>
     </div>

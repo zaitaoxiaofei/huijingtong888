@@ -4,14 +4,9 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { searchInventoryRows, inventoryIdentifierSearch, isInventoryIdentifier } from "../src/services/inventory-search.js";
 import { applyStockAlertQuery } from "../src/services/inventory-alert-utils.js";
-import { inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch } from '../src/services/inventory-product-search.js';
-import { inventoryTenantSql } from '../src/services/inventory-tenant-scope.js';
 import { normalizeFbpReplenishmentItem, normalizeFbpTransferRecord } from "../src/services/mysql-fbp-normalizers.js";
 
 const source = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
-const scope = { id: 1, isDefault: true, predicate: alias => ({ sql: inventoryTenantSql({id:1,isDefault:true}, alias), params: [1] }) };
-const tenantFixture = { resolveInventoryTenantScope: async () => scope, mysqlSchemaColumnExists: async () => true,
-  inventoryTenantSql, inventoryProductSearch, filterInventoryProductRows, inventoryBusinessSearch };
 const products = [2, 23].map((id) => ({
   product_id: id, inventory_number: `1-${id}`, inventory_id: `P-20260916-010000-0${id}`,
   product_name: "黑色 汽车 钥匙壳", alert_level: "danger", created_at: "2026-09-16",
@@ -74,13 +69,11 @@ test("warm alerts read and parse the persisted snapshot only once", async () => 
   let reads = 0;
   let cached;
   const context = vm.createContext({
-    ...tenantFixture,
     ensureMysqlCutoverEnabled() {}, ensureProductNamingSchemaMysql: async () => {},
     ensureOzonStockStorageSchemaMysql: async () => {}, ensureStockLocationSchemaMysql: async () => {},
     ensureProfitAnalyticsSchemaMysql: async () => {},
     getCachedMasterData: async (key, loader) => cached ||= await loader(),
-    mysqlQueryOne: async (sql, params) => { reads++; assert.match(sql, /cache_key = \?/); assert.equal(params[0], "alerts-v6-1"); return { payload_json: JSON.stringify(products) }; },
-    mysqlQuery: async (sql, params) => products.filter(p=>params.includes(p.inventory_number)).map(p=>({id:p.product_id})),
+    mysqlQueryOne: async (sql, params) => { reads++; assert.match(sql, /cache_key = \?/); assert.equal(params[0], "alerts-v5-admin"); return { payload_json: JSON.stringify(products) }; },
     parseJsonFallback: JSON.parse, STOCK_ALERT_BASE_CACHE_TTL_MS: 30000, applyStockAlertQuery
   });
   const start = source.indexOf("export async function stockAlertsMysql");
@@ -94,7 +87,6 @@ test("mapping and hidden-stock number searches use identifier lookup SQL", async
   for (const [name, next] of [["mappingsMysql", "async function ensureInventoryProductSearchSchemaMysql"], ["hiddenProductsMysql", "export async function selectionProductsMysql"]]) {
     const queries = [];
     const context = vm.createContext({
-      ...tenantFixture, ensureMysqlColumns: async () => {},
       ensureMysqlCutoverEnabled() {}, ensureProductNamingSchemaMysql: async () => {},
       inventoryIdentifierSearch, isInventoryIdentifier, withProductImageEndpointMysql: (row) => row,
       mysqlQuery: async (sql, params) => { queries.push({ sql, params }); return []; },
@@ -113,22 +105,17 @@ test("mapping and hidden-stock number searches use identifier lookup SQL", async
 });
 
 test("sorted inventory starts count and page queries together without unused FBP aggregation", { timeout: 1000 }, async () => {
-  let releaseCount;
+  let releasePage;
   const queries = [];
   const context = vm.createContext({
-    ...tenantFixture,
     ensureMysqlCutoverEnabled() {}, ensureProductCompositionSchemaMysql: async () => {},
     ensureProductNamingSchemaMysql: async () => {}, ensureStockLocationSchemaMysql: async () => {},
-    ensureFbpTransferRecordsSchemaMysql: async () => {}, ensureFbpReplenishmentSchemaMysql: async () => {},
     normalizeVehicleBrand: () => "",
     inventoryProductPredicateMysql: () => "1=1", inventoryProductSearchTermsMysql: () => [],
     isInventoryIdentifier, localStockLocationPredicateMysql: () => "stock_location = 'LOCAL'",
-    fbpTransferInTransitWhereMysql: alias => `${alias}.status = 'in_transit'`,
-    mysqlQuery: async (sql) => { queries.push(sql); assert.equal(typeof releaseCount,'function'); releaseCount({total:0}); return []; },
-    mysqlQueryOne: (sql) => { queries.push(sql); return new Promise(resolve=>{releaseCount=resolve;}); }
+    mysqlQuery: (sql) => { queries.push(sql); return new Promise((resolve) => { releasePage = resolve; }); },
+    mysqlQueryOne: async (sql) => { queries.push(sql); releasePage([]); return { total: 0 }; }
   });
-  const tenantStart=source.indexOf('async function tenantProductsMysql');
-  vm.runInContext(source.slice(tenantStart,source.indexOf('export async function productsMysql',tenantStart)),context);
   const start = source.indexOf("export async function productsMysql");
   vm.runInContext(source.slice(start, source.indexOf("export async function hiddenProductsMysql", start)).replace("export ", ""), context);
   const result = await context.productsMysql({ paged: "1", sortKey: "stock" });

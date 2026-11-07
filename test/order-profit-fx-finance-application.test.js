@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
-import { getProfitFormula, usesDailyProfitFx } from "../src/services/profit-formulas/registry.js";
+import { getProfitFormula } from "../src/services/profit-formulas/registry.js";
 import { readOrderFxFinanceRows } from "../src/services/order-profit-fx-finance.js";
 import { fxSettlementInputFingerprint, planOrderFxSettlement } from "../src/services/order-profit-fx-settlement.js";
 
@@ -12,11 +12,10 @@ const end = source.indexOf("export async function syncOzonFinanceMysql(", start)
 const applySource = source.slice(start, end);
 const daily = (id, day, rate) => ({ id, business_date: day, source_date: day, source: "cbr", rate, currency_from: "CNY", currency_to: "RUB" });
 
-function harness({ currency = "RUB", status = "delivered", versions = ["V2"], concurrentChange = null, newSourceForLegacy = false, cancelReasonId = 0 } = {}) {
+function harness({ currency = "RUB", status = "delivered", versions = ["V2"], concurrentChange = null, newSourceForLegacy = false } = {}) {
   const writes = [], projections = [], refreshes = [], sqlReads = [];
   const order = { order_id: 42, shop_id: 9, posting_number: "123-1", order_number: "123", order_status: status,
-    ordered_at: "2026-10-26T00:00:00Z", delivered_at: status === "delivered" ? "2026-10-28T00:00:00Z" : null,
-    ...(cancelReasonId ? { cancel_reason_id: cancelReasonId, cancelled_after_ship: 1 } : {}) };
+    ordered_at: "2026-10-26T00:00:00Z", delivered_at: status === "delivered" ? "2026-10-28T00:00:00Z" : null };
   const items = versions.map((formula_version, index) => ({ id: 7 + index, formula_version, profit_tenant_key: "81", ozon_sku: String(100 + index),
     quantity: 1, purchase_cost_cny: 20, domestic_shipping_cny: 2, advertising_cost_cny: 0 }));
   const finance = [
@@ -32,7 +31,7 @@ function harness({ currency = "RUB", status = "delivered", versions = ["V2"], co
     orderOwnershipTenantScopeMysql: async () => ({ id: 81 }), assertOrderTaskAccessMysql: async () => {},
     normalizeSyncDateMysql: value => value,
     orderTenantPredicateMysql: alias => `${alias}.tenant_id = 81`,
-    getProfitFormula, usesDailyProfitFx, readOrderFxFinanceRows, planOrderFxSettlement, fxSettlementInputFingerprint,
+    getProfitFormula, readOrderFxFinanceRows, planOrderFxSettlement, fxSettlementInputFingerprint,
     parentOrderNumberMysql: () => "123", mysqlQueryOne: async () => newSourceForLegacy ? { id: 91 } : null,
     readOrderProfitFxState: async (_db, tenantId, orderId) => { assert.equal(tenantId, "81"); assert.equal(orderId, 42); return fxState; },
     mysqlQuery: async (sql, params) => {
@@ -72,7 +71,7 @@ function harness({ currency = "RUB", status = "delivered", versions = ["V2"], co
     packagingFeeForSaleAmountMysql: async () => 3,
     withVersionedOrderProfitWrite: async (id, options, project) => {
       projections.push({ id, options });
-      await project({ connection: {}, formulaVersion: items.find(item => item.id === id).formula_version, db: { query: context.mysqlQuery, execute: async (sql, params) => { writes.push({ sql, params }); return {}; } } });
+      await project({ connection: {}, formulaVersion: "V2", db: { query: context.mysqlQuery, execute: async (sql, params) => { writes.push({ sql, params }); return {}; } } });
     },
     lockProfitItemMysql: async (id, reason) => { writes.push({ lock: id, reason }); },
     refreshOrderProfitDetailSnapshotsMysql: async input => { refreshes.push(input); }
@@ -93,30 +92,6 @@ test("real finance application dispatches V2, preserves original estimate and re
   assert.equal(itemWrite.params[1], 39);
   assert.doesNotMatch(itemWrite.sql, /estimated_profit\s*=/);
   assert.equal(db.refreshes.length, 1);
-});
-
-test("V4 finance treats reviewed non-shipment as cancellation and retains only billed acquiring", async () => {
-  const db = harness({ versions: ['V4'], status: 'cancelled', cancelReasonId: 686 });
-  const result = await db.execute({ tenantId: 81, orderIds: [42] });
-  assert.equal(result.items, 1);
-  assert.equal(db.projections[0].options.inputs.outcome, 'cancelled_pre_fulfillment');
-  const write = db.writes.find(row => row.sql?.includes('INSERT INTO order_profit_items'));
-  assert.equal(write.params[1], 0);
-  for (const index of [2,3,4,5,6,8,9,10]) assert.equal(write.params[index],0);
-  assert.equal(write.params[11], 0.8);
-  assert.equal(write.params[13], -0.8);
-});
-
-test("V4 cargo-loss finance counts goods and acquiring once, excluding commission and every freight", async () => {
-  const db = harness({ versions: ['V4'], status: 'cancelled', cancelReasonId: 809 });
-  await db.execute({ tenantId: 81, orderIds: [42] });
-  assert.equal(db.projections[0].options.inputs.outcome, 'cargo_lost');
-  const write = db.writes.find(row => row.sql?.includes('INSERT INTO order_profit_items'));
-  assert.equal(write.params[1], 0);
-  assert.equal(write.params[2], 20);
-  for (const index of [3,4,5,6,7,8,9,10]) assert.equal(write.params[index],0);
-  assert.equal(write.params[11],0.8);
-  assert.equal(write.params[13],-20.8);
 });
 
 test("unknown actual finance currency keeps the current profit projection untouched and exposes a pending reason", async () => {
@@ -145,8 +120,8 @@ test("mixed order pins fail before financial or revision writes", async () => {
   assert.equal(db.projections.length, 0);
 });
 
-for (const version of ["V1", "V3"]) test(`restoring new accrual bills never recalculates a non-daily ${version} order`, async () => {
-  const db = harness({ versions: [version], newSourceForLegacy: true });
+test("restoring new accrual bills never recalculates a historical V1 order", async () => {
+  const db = harness({ versions: ["V1"], newSourceForLegacy: true });
   const result = await db.execute({ tenantId: 81 });
   assert.equal(result.items, 0);
   assert.equal(db.projections.length, 0);

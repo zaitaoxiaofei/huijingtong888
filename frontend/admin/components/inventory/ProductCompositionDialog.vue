@@ -37,8 +37,7 @@ let optionRequestSeq = 0;
 const inventoryTypeTabs = [
   { label: "单品", value: "single" },
   { label: "套装", value: "combo" },
-  { label: "配件", value: "accessory" },
-  { label: "耗材", value: "consumable" }
+  { label: "配件", value: "accessory" }
 ];
 
 const parentProduct = computed(() => detailProduct.value || props.product || {});
@@ -98,13 +97,11 @@ function productLocalStock(row = {}) {
 }
 
 function productTypeLabel(row = {}) {
-  if (Number(row.is_consumable || 0)) return "耗材";
   if (Number(row.component_count || 0) > 0) return "套装";
   return Number(row.is_accessory || 0) ? "配件" : "单品";
 }
 
 function productTypeTag(row = {}) {
-  if (Number(row.is_consumable || 0)) return "primary";
   if (Number(row.component_count || 0) > 0) return "warning";
   return Number(row.is_accessory || 0) ? "success" : "info";
 }
@@ -304,8 +301,8 @@ watch(
     <template #header>
       <div class="composition-dialog-title">
         <span>{{ readOnly ? "查看子产品" : "添加子产品" }}</span>
-        <el-tag :type="productTypeTag({ ...parentProduct, component_count: componentCount })" effect="light">
-          {{ productTypeLabel({ ...parentProduct, component_count: componentCount }) }}
+        <el-tag :type="componentCount ? 'warning' : productTypeTag(parentProduct)" effect="light">
+          {{ componentCount ? "套装" : productTypeLabel(parentProduct) }}
         </el-tag>
       </div>
     </template>

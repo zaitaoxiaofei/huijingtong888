@@ -123,26 +123,21 @@ test("analytics plugin frontend forwards server compatibility flags and clears u
   ]) {
     const events = [];
     const calls = [];
-    const page = { location: { origin: "https://erp.test" }, postMessage() {}, dispatchEvent: (event) => events.push(event) };
-    const frontend = new Function("apiClient", "window", "CustomEvent", "currentApiCacheScope", "authStore", `${syncSource}; return {syncAnalyticsPluginUpdate,handleAnalyticsPluginInstanceMessage};`)(
+    const sync = new Function("apiClient", "window", "CustomEvent", `${syncSource}; return syncAnalyticsPluginUpdate;`)(
       { get: async (url) => {
         calls.push(url);
         return url.includes("plugin-status") ? { plugin_version: installedVersion } : {
           analytics_plugin: { version: "1.0.30", update_available: updateAvailable, update_required: updateRequired, mandatory: updateRequired }
         };
       } },
-      page,
-      class { constructor(type, { detail }) { this.type = type; this.detail = detail; } },
-      () => "fixture-scope", { isAuthenticated: true }
+      { dispatchEvent: (event) => events.push(event) },
+      class { constructor(type, { detail }) { this.type = type; this.detail = detail; } }
     );
-    frontend.handleAnalyticsPluginInstanceMessage({ source: page, origin: page.location.origin,
-      data: { type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE", pluginInstanceId: "current-instance", pluginVersion: installedVersion } });
-    await frontend.syncAnalyticsPluginUpdate({ analytics_plugin: { version: "1.0.30" } });
+    await sync({ analytics_plugin: { version: "1.0.30" } });
     assert.equal(events.length, 1);
     assert.equal(events[0].type, updateAvailable ? "app:plugin-update" : "app:plugin-update-clear");
     if (updateAvailable) assert.equal(events[0].detail.mandatory, updateRequired);
     assert.equal(calls.length, installedVersion ? 2 : 1);
-    assert.match(calls[0], /plugin_instance_id=current-instance/);
     if (installedVersion) assert.match(calls[1], new RegExp(`analytics_plugin_version=${installedVersion.replaceAll(".", "\\.")}`));
   }
 });
@@ -154,13 +149,11 @@ test("collector plugin update status defaults to the plugin manifest version", (
   assert.equal(status.plugin.package_name, `ozon-baodan-erp-plugin-${manifest.version}.zip`);
 });
 
-test("analytics plugin update status follows the active unified or standalone manifest", () => {
+test("analytics plugin update status defaults to the analytics manifest version", () => {
   const manifest = JSON.parse(fs.readFileSync("pivot-table-master/manifest.json", "utf8"));
   const status = globalUpdateStatus();
-  const expectedVersion = status.plugin.unified ? JSON.parse(fs.readFileSync("ozon-erp-collector-plugin/manifest.json", "utf8")).version : manifest.version;
-  assert.equal(status.analytics_plugin.version, expectedVersion);
-  assert.equal(status.analytics_plugin.package_name, status.plugin.unified
-    ? `ozon-baodan-erp-plugin-${expectedVersion}.zip` : `ozon-seller-analytics-plugin-${manifest.version}.zip`);
+  assert.equal(status.analytics_plugin.version, manifest.version);
+  assert.equal(status.analytics_plugin.package_name, `ozon-seller-analytics-plugin-${manifest.version}.zip`);
 });
 
 test("analytics plugin package contains the advertised manifest version", async () => {

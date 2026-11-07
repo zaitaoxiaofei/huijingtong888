@@ -5,7 +5,7 @@ import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql } from
 import { createTenantMysqlFixture } from './helpers/tenant-mysql-fixture.js';
 import { createOrderFixtureSchema, loadTenantOrderService } from './helpers/tenant-order-service.js';
 
-const statuses = ['awaiting_packaging', 'awaiting_deliver', 'ogl_bound', 'ogl_dispatched', 'delivering', 'dispute', 'delivered', 'cancelled',
+const statuses = ['awaiting_packaging', 'awaiting_deliver', 'ogl_dispatched', 'delivering', 'dispute', 'delivered', 'cancelled',
   'unbound', 'pending_purchase', 'purchase_in_transit', 'purchase_records_missing'];
 
 function baselineCountSql(service, base, coverage, scope) {
@@ -70,7 +70,6 @@ test('live count aggregation preserves every tab across OGL/application, physica
         await query(`INSERT INTO orders(id,shop_id,posting_number,status,tracking_stage,logistics_status,ordered_at)
           VALUES(?,?,?,?,?,?,?)`, [id, shop, posting, ...state, stateIndex % 2 ? '2026-10-20 18:00:00' : '2026-10-21 18:00:00']);
         await query('INSERT INTO order_items(id,order_id,ozon_sku,quantity,sale_price) VALUES(?,?,?,?,1)', [id, id, 'same-sku', 1]);
-        if (modeIndex % 2 === 0 && id !== 221) await query('INSERT INTO order_label_prints(order_id,printed_at) VALUES(?,?)',[id,'2026-10-21 18:00:00']);
         if (mode === 'none') continue;
         const foreignShop = tenant === 3 ? 20 : 30, foreignTenant = tenant === 3 ? 2 : 3;
         const selectedBatch = batches.get(`${shop}:${mode === 'closed' ? 'closed' : mode === 'cancelled_batch' ? 'cancelled' : mode === 'manual_physical' ? 'manual' : 'observed'}`);
@@ -111,30 +110,17 @@ test('live count aggregation preserves every tab across OGL/application, physica
           const newSql = calls.at(-1).sql;
           const [explained] = await query(`EXPLAIN FORMAT=JSON ${newSql}`, base.params);
           const plan = explained.EXPLAIN;
-          assert.equal((plan.match(/"materialized_from_subquery"/g) || []).length, 2);
+          assert.equal((plan.match(/"materialized_from_subquery"/g) || []).length, 1);
           assert.equal((plan.match(/"table_name": "ogl_count_member"/g) || []).length, 1);
           t.diagnostic(`Fixture ${orderId} orders: baseline=${oldMs.toFixed(1)}ms optimized=${newMs.toFixed(1)}ms; one OGL materialization, no timing threshold`);
         }
       }
     }
-    await t.test('unsearched list filters preserve complete membership while reusing one OGL relation', async () => {
-      for (const tenant of ['admin','2','3']) {
-        const scope = await service.orderListTenantScopeMysql(tenant);
-        const base = await service.orderBaseSqlMysql({},tenant);
-        for (const status of ['awaiting_packaging','awaiting_deliver','ogl_bound','ogl_dispatched','delivering']) {
-          const original = await query(`SELECT o.id FROM orders o WHERE ${base.where} AND ${service.orderStatusSqlMysql(status,coverage,scope)} ORDER BY o.id`,base.params);
-          const filtered = await service.orderFilteredSqlMysql({status},base,coverage,scope);
-          const optimized = await query(`SELECT o.id FROM orders o ${filtered.joins} WHERE ${filtered.where} ORDER BY o.id`,filtered.params);
-          assert.deepEqual(optimized,original,`${tenant}/${status}`);
-          assert.match(filtered.joins,/ogl_filter_evidence/);
-        }
-      }
-    });
     // The same derived evidence also composes with search, print and exact active-tab filtering.
     const scope = await service.orderListTenantScopeMysql('2');
     const base = await service.orderBaseSqlMysql({}, '2');
     await query('INSERT INTO order_label_prints(order_id,printed_by_person_id,printed_at) VALUES(?,?,UTC_TIMESTAMP())', [221, null]);
-    for (const status of ['all', 'awaiting_deliver', 'ogl_bound', 'ogl_dispatched', 'delivering']) {
+    for (const status of ['all', 'awaiting_deliver', 'ogl_dispatched', 'delivering']) {
       const filtered = await service.orderFilteredSqlMysql({ status, searchType: 'order', searchQuery: 'shared', printFilter: 'unprinted' }, base, coverage, scope);
       const original = await query(`SELECT o.id FROM orders o WHERE ${filtered.where} ORDER BY o.id LIMIT 17 OFFSET 3`, filtered.params);
       const replacement = service.orderStatusSqlMysql(status, coverage, scope, 'ogl_count_evidence');

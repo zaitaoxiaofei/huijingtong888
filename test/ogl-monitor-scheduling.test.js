@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { withMysqlWorkload, currentMysqlWorkload } from '../src/mysql-workload.js';
 
 const server=readFileSync(new URL('../src/server.js',import.meta.url),'utf8');
 const scheduler=readFileSync(new URL('../src/services/scheduled-jobs.js',import.meta.url),'utf8');
@@ -45,12 +44,12 @@ test('actual candidate selection admits OGL before the low-priority cutoff and a
 function deferralFixture(maxDelay=300000) {
   let now=Date.parse('2026-10-22T12:00:00Z'),pressure=false,busy=false,runs=0,releases=0;
   class Clock extends Date {constructor(value=now){super(value);}static now(){return now;}}
-  const context=vm.createContext({withMysqlWorkload,Date:Clock,Math,Number,String,Set,console:{log:()=>{}},
+  const context=vm.createContext({Date:Clock,Math,Number,String,Set,console:{log:()=>{}},
     BACKGROUND_TASK_FOREGROUND_IDLE_MS:20000,BACKGROUND_CRITICAL_JOB_MAX_DEFERRAL_MS:maxDelay,
     activeForegroundApiRequests:1,lastForegroundApiAt:now,
     getMysqlPoolMetrics:()=>({activeConnections:pressure?8:0,connectionLimit:10}),
     claimBackgroundModuleLane:()=>busy?'fixture-lane-busy':null,releaseBackgroundModuleLane:()=>{releases++;},
-    oglDispatch:{monitorRecent:async()=>{assert.equal(currentMysqlWorkload(),'background');runs++;return {tenants:1};}}});
+    oglDispatch:{monitorRecent:async()=>{runs++;return {tenants:1};}}});
   const bounded=server.match(/const FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set\(\[[\s\S]*?\]\);/)[0];
   vm.runInContext(`${bounded}\nlet oglMonitorFirstDueAt=0;\n${['criticalJobForegroundDeferralExpired','foregroundApiDeferral','databasePoolDeferral','backgroundJobDeferral','withForegroundApiDeferral'].map(name=>fn(server,name)).join('\n')}`,context);
   const handlerStart=server.indexOf('withForegroundApiDeferral("ogl_official_monitor", async () =>');

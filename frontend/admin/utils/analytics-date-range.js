@@ -24,16 +24,14 @@ export function getAnalyticsPeriodDateRange(periodKey, now = new Date()) {
     const yesterday = offsetDateKey(today, -1);
     return [yesterday, yesterday];
   }
-  // Match the backend presets, which use the last completed report day.
-  const end = offsetDateKey(today, -1);
-  if (periodKey === "7d") return [offsetDateKey(end, -6), end];
-  if (periodKey === "28d") return [offsetDateKey(end, -27), end];
+  if (periodKey === "7d") return [offsetDateKey(today, -6), today];
+  if (periodKey === "28d") return [offsetDateKey(today, -27), today];
 
-  const [year, month] = end.split("-").map(Number);
+  const [year, month] = today.split("-").map(Number);
   if (periodKey === "quarter") {
     const quarterStartMonth = Math.floor((month - 1) / 3) * 3 + 1;
-    return [`${year}-${String(quarterStartMonth).padStart(2, "0")}-01`, end];
+    return [`${year}-${String(quarterStartMonth).padStart(2, "0")}-01`, today];
   }
-  if (periodKey === "year") return [`${year}-01-01`, end];
+  if (periodKey === "year") return [`${year}-01-01`, today];
   return null;
 }

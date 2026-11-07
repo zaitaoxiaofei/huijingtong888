@@ -94,7 +94,7 @@ function endpointDefinitions(options) {
   const toIso = `${options.to}T23:59:59.999Z`;
   return {
     "warehouse-v2": [
-      { path: "/v2/warehouse/list", payload: { limit: 200, cursor: "" } }
+      { path: "/v2/warehouse/list", payload: {} }
     ],
     "product-prices-v5": [
       { path: "/v5/product/info/prices", payload: { cursor: "", filter: { visibility: "ALL" }, limit: 1 } },

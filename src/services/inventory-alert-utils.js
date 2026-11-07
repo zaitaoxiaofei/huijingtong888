@@ -1,14 +1,5 @@
 import { searchInventoryRows } from "./inventory-search.js";
-import { shanghaiDateKey, shanghaiDateDaysAgo } from "../shanghai-time.js";
-
-function inventoryDateKey(value) {
-  if (!value) return '';
-  if (value instanceof Date) return shanghaiDateKey(value);
-  const text = String(value).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
-  const timestamp = /(Z|[+-]\d{2}:?\d{2})$/i.test(text) ? text : text.replace(' ', 'T') + 'Z';
-  return shanghaiDateKey(timestamp);
-}
+import { shanghaiDateDaysAgo } from "../shanghai-time.js";
 
 const flattenedSnapshots = new WeakMap();
 
@@ -45,7 +36,6 @@ export function applyStockAlertQuery(rows, query = {}) {
   const fbpMode = mode === "fbp" || fbpAlertMode || fbpOperationsMode;
   const sourceRows = fbpMode ? flattenFbpRows(rows) : rows;
   const filtered = searchInventoryRows(sourceRows, searchText).filter((row) => {
-    if (fbpMode && query.inventorySku && ![row.ozon_sku,row.offer_id].some(value => String(value || '').toLowerCase() === String(query.inventorySku).toLowerCase())) return false;
     if (fbpAlertMode && row.alert_level === "ok") return false;
     if (fbpOperationsMode && fbpFocus === "replenishment"
       && (row.replenishment_ignored || Number(row.suggested_qty || 0) <= 0)) return false;
@@ -62,7 +52,7 @@ export function applyStockAlertQuery(rows, query = {}) {
         if (!matched) return false;
       }
     }
-    const dateKey = inventoryDateKey(row.created_at);
+    const dateKey = String(row.created_at || "").slice(0, 10);
     if (dateFrom && (!dateKey || dateKey < dateFrom)) return false;
     if (dateTo && (!dateKey || dateKey > dateTo)) return false;
     return true;
@@ -178,7 +168,6 @@ function flattenFbpRows(rows) {
         product_image_url: product.image_url,
         inventory_id: product.inventory_id,
         inventory_number: product.inventory_number || "",
-        is_consumable: Number(product.is_consumable || 0) ? 1 : 0,
         alert_stock: product.alert_stock,
         local_stock: product.local_stock,
         created_at: product.created_at,
@@ -206,7 +195,6 @@ function flattenFbpRows(rows) {
 
 function matchesFbpAlertType(row = {}, alertType = "all") {
   if (!alertType || alertType === "all") return true;
-  if (alertType === "in_stock") return Number(row.fbp_present ?? row.fbp_available ?? 0) > 0;
   if (alertType === "out_of_stock") return row.alert_type === "out_of_stock";
   if (alertType === "within_7_days") return row.alert_type === "within_7_days";
   if (alertType === "within_15_days") return row.alert_type === "within_15_days";

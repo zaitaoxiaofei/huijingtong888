@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "爆单ERP 统一采集插件",
-  "description": "商品信息采集、前台数据展示与店铺分析同步，只需填写企业密钥",
-  "version": "1.5.4",
-  "permissions": ["activeTab", "alarms", "cookies", "scripting", "storage", "tabs", "webRequest"],
+  "name": "爆单ERP 商品信息采集插件",
+  "description": "采集 Ozon 前台商品信息、同步采集箱并打开后台工作台",
+  "version": "1.4.34",
+  "permissions": ["activeTab", "alarms", "cookies", "scripting", "storage", "tabs"],
   "host_permissions": [
     "http://localhost/*",
     "http://127.0.0.1/*",
@@ -47,7 +47,7 @@
     "128": "assets/logo-128.png"
   },
   "action": {
-    "default_title": "爆单ERP · 商品与店铺分析",
+    "default_title": "爆单ERP 商品信息采集插件",
     "default_icon": {
       "16": "assets/logo-16.png",
       "32": "assets/logo-32.png",
@@ -77,24 +77,6 @@
     }
   ],
   "content_scripts": [
-    {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["analytics/content/erp-relay-page.js", "analytics/content/ozon.js"],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": true
-    },
-    {
-      "matches": ["https://seller.ozon.ru/*"],
-      "js": ["analytics/content/erp-relay-bridge.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    },
-    {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://erp.hjt888.xyz/*"],
-      "js": ["analytics/content/erp-instance.js"],
-      "run_at": "document_start"
-    },
     {
       "matches": [
         "https://ozon.ru/*",

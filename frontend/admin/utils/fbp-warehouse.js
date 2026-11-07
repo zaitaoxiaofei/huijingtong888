@@ -30,5 +30,5 @@ export function buildWarehouseRows(orders) {
     row.last_shipped_qty = facts?.last_shipped_qty;
     row.last_shipped_at = facts?.last_shipped_at;
   }
-  return [...grouped.values()].sort((a, b) => String(a.inventory_id).localeCompare(String(b.inventory_id), "en", { numeric: true }));
+  return [...grouped.values()].sort((a, b) => String(a.inventory_id).localeCompare(String(b.inventory_id)));
 }

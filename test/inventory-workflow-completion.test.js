@@ -33,8 +33,7 @@ test('cost task list is read-only, bounded, searchable, and does not depend on a
   const result = await service.costTasks({ page: 2, query: '车标' });
   assert.equal(result.total, 31);
   assert.equal(result.pageSize, 30);
-  assert.deepEqual(statements[1].args, ['%车标%', '%车标%', '%车标%', '%车标%', 30, 30]);
-  assert.match(statements[1].sql,/inventory_number_aliases/);
+  assert.deepEqual(statements[1].args, ['%车标%', '%车标%', '%车标%', 30, 30]);
   assert.ok(statements.every(row => /SELECT/.test(row.sql) && !/procurement_requests/.test(row.sql)));
 });
 

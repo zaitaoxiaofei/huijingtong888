@@ -12,7 +12,7 @@ const validRoles = new Set(ROLE_DEFINITIONS.map(role => role.value));
 const business = ["orders.read", "orders.manage", "packing", "procurement", "procurement.request.submit", "inventory.read", "inventory.write", "operations", "analytics", "team"];
 const enterpriseAdministration = [...business, "inventory.review", "onboarding.edit", "finance"];
 const enterpriseFinancePages = new Set([
-  "/finance-center", "/finance/payroll", "/finance/inventory-capital", "/mobile/inventory-capital", "/mobile/finance", "/mobile/monthly-billing", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
+  "/finance-center", "/finance/payroll", "/profit/monthly-billing", "/profit/monthly-billing/orders", "/profit/aftersales"
 ]);
 const rolePermissions = {
   admin: enterpriseAdministration, manager: [...business, "inventory.review", "onboarding.edit"], operator: business,
@@ -62,9 +62,6 @@ export function roleLabels(subject) {
 }
 
 export function pagePermission(path = "") {
-  if(path==='/inventory/product-requests')return 'inventory.write';
-  if (["/mobile/inventory-capital", "/mobile/finance", "/mobile/monthly-billing"].includes(path)) return "finance";
-  if (path === "/finance/reimbursements") return "common";
   if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";
   if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path)) return "inventory.read";
   if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
@@ -73,16 +70,12 @@ export function pagePermission(path = "") {
   if (path === "/tenant-shops" || path === "/tenant-people") return "enterprise.admin";
   if (path.startsWith("/finance") || path.startsWith("/profit") || path === "/exceptions/profit") return "finance";
   if (path.startsWith("/team")) return "team";
-  if (["/mobile", "/mobile/account"].includes(path)) return "common";
-  if (path.startsWith("/mobile/procurement")) return "procurement";
-  if (path.startsWith("/mobile/inventory") || path === "/mobile/stock-alerts") return "inventory.read";
-  if (path === "/mobile/online-products") return "operations";
-  if (path === "/orders" || path.startsWith("/mobile/orders")) return "orders.read";
+  if (path === "/orders" || path.startsWith("/mobile")) return "orders.read";
   if (path === "/outbound") return "packing";
   if (path === "/inventory/suppliers" || path.startsWith("/procurement") || path.startsWith("/purchase")) return "procurement";
   if (path.startsWith("/inventory")) return "inventory.read";
   if (path.startsWith("/exceptions")) return "orders.read";
-  if (["/sku-traffic-monitor", "/seller-analytics", "/order-car-heatmap", "/order-tracking"].includes(path) || path.startsWith("/advertising")) return "analytics";
+  if (["/seller-analytics", "/order-car-heatmap", "/order-tracking"].includes(path) || path.startsWith("/advertising")) return "analytics";
   return "operations";
 }
 
@@ -103,5 +96,5 @@ export function canAccessPage(subject, path) {
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);
   if (permission === "finance") return isPlatformAdmin(subject) || (enterpriseFinancePages.has(path) && isEnterpriseAdmin(subject));
   if (["/online-products", "/batch-stock-update"].includes(path) && isEnterpriseAdmin(subject)) return true;
-  return permission === "common" ? ((path === "/finance/reimbursements" && Boolean(subject?.tenant?.id)) || getRoles(subject).length > 0) : hasPermission(subject, permission);
+  return permission === "common" ? getRoles(subject).length > 0 : hasPermission(subject, permission);
 }

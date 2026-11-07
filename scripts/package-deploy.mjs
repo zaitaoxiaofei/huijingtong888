@@ -65,16 +65,14 @@ const managedDeployPaths = [
 const pluginPackageRules = [
   {
     aliasPattern: /^ozon-baodan-erp-plugin\.zip$/,
-    versionPattern: /^ozon-baodan-erp-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/,
-    manifestPath: "ozon-erp-collector-plugin/manifest.json"
+    versionPattern: /^ozon-baodan-erp-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/
   },
   {
     aliasPattern: /^ozon-erp-collector-plugin\.zip$/
   },
   {
     aliasPattern: /^ozon-seller-analytics-plugin\.zip$/,
-    versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/,
-    manifestPath: "pivot-table-master/manifest.json"
+    versionPattern: /^ozon-seller-analytics-plugin-([0-9][0-9A-Za-z.-]*)\.zip$/
   }
 ];
 
@@ -158,12 +156,8 @@ async function copyPluginPackages() {
       const match = rule.versionPattern ? entry.name.match(rule.versionPattern) : null;
       if (match) versioned.push({ name: entry.name, version: match[1] });
     }
-    if (rule.manifestPath) {
-      const manifest = JSON.parse(await fs.readFile(path.resolve(rootDir, rule.manifestPath), "utf8"));
-      const current = versioned.find(entry => entry.version === manifest.version);
-      if (!current) throw new Error(`Missing source-version plugin package: ${rule.manifestPath}`);
-      selectedNames.add(current.name);
-    }
+    versioned.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true, sensitivity: "base" }));
+    if (versioned[0]) selectedNames.add(versioned[0].name);
   }
 
   const copied = [];
@@ -178,6 +172,14 @@ async function copyPluginPackages() {
     copied.push(entry.name);
   }
   return copied;
+}
+
+async function hasReusablePluginPackages() {
+  const packageSourceDir = path.resolve(rootDir, "..");
+  const entries = await fs.readdir(packageSourceDir, { withFileTypes: true }).catch(() => []);
+  return pluginPackageRules.slice(0, 2).every((rule) => entries.some((entry) => (
+    entry.isFile() && rule.aliasPattern.test(entry.name)
+  )));
 }
 
 async function copyPddProcurementPluginPackage() {
@@ -347,7 +349,11 @@ await runNpmScript("check:deploy-preflight", "Deploy preflight");
 await runNpmScript("check:encoding", "Encoding check");
 await runNpmScript("check:sql-bindings", "SQL binding check");
 await runNpmScript("build:frontend", "Frontend build");
-await runNpmScript("package:plugin", "Plugin packaging");
+if (await hasReusablePluginPackages()) {
+  console.log("[package:deploy] Reusing existing plugin packages.");
+} else {
+  await runNpmScript("package:plugin", "Plugin packaging");
+}
 await runNpmScript("package:analytics-plugin", "Analytics plugin packaging");
 
 await fs.rm(outputDir, { recursive: true, force: true });

@@ -1,5 +1,4 @@
 export const SCHEMA_MIGRATIONS = Object.freeze([
-  "migrate-sku-traffic-daily.mjs",
   "migrate-order-search-indexes.mjs",
   "migrate-listing-draft-list-indexes.mjs",
   "migrate-listing-frozen-content.mjs",
@@ -10,9 +9,6 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-tenant-sku-order-trackers.mjs",
   "migrate-enterprise-messages.mjs",
   "migrate-subscription-vouchers.mjs",
-  "migrate-inventory-flow-center.mjs",
-  "migrate-inventory-consumables.mjs",
-  "migrate-inventory-numbering-v2.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
   "migrate-order-profit-calculation-versions.mjs"
 ]);
@@ -52,30 +48,17 @@ export function migrationNeedsApply(filename, report) {
   if (!profitSchema) {
     const mode = filename.includes("-daily-fx.") || filename.includes("-fx-policy.") ? "read_only" : "dry-run";
     if (report.mode !== mode) invalid(`mode must be ${mode}`);
-    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs", "migrate-inventory-consumables.mjs", "migrate-inventory-numbering-v2.mjs"].includes(filename)
+    if (["migrate-order-search-indexes.mjs", "migrate-ai-credits.mjs", "migrate-ogl-dispatch-schema.mjs", "migrate-ai-variant-draft-history-index.mjs"].includes(filename)
       && !boolean(report.ok, "ok")) invalid("inspector refused the schema");
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
   switch (filename) {
-    case "migrate-sku-traffic-daily.mjs": {
-      const ready=boolean(report.ready,"ready"),missing=list(report.missing_tables,"missing_tables"),problems=list(report.problems,"problems");
-      if(report.ok!==true||problems.length||missing.some(name=>!["seller_sku_traffic_daily","seller_sku_traffic_days"].includes(name))||ready!==(missing.length===0))invalid("incompatible SKU daily schema");
-      return !ready;
-    }
     case "migrate-order-search-indexes.mjs": {
       const before = object(report.before, "before");
       const exists = boolean(before.exists, "before.exists"), present = boolean(before.present, "before.present"), valid = boolean(before.valid, "before.valid");
       if ((!exists && (present || valid)) || (!present && valid)) invalid("inconsistent order search index state");
       if (present && !valid) invalid("existing order search index is incompatible");
-      let factsPending = false;
-      if (Object.hasOwn(report, "procurement_facts")) {
-        const facts = object(report.procurement_facts, "procurement_facts");
-        if (!boolean(facts.compatible, "procurement_facts.compatible")) invalid("procurement query facts are incompatible");
-        const factsExist = boolean(facts.exists, "procurement_facts.exists"), factsReady = boolean(facts.ready, "procurement_facts.ready");
-        if (!factsExist && factsReady) invalid("absent procurement query facts cannot be ready");
-        factsPending = factsExist && !factsReady;
-      }
-      return (exists && !present) || factsPending;
+      return exists && !present;
     }
     case "migrate-listing-draft-list-indexes.mjs": {
       if (Object.hasOwn(report, "absent_table") && boolean(report.absent_table, "absent_table")) return false;
@@ -132,31 +115,6 @@ export function migrationNeedsApply(filename, report) {
       const problems = list(report.problems, "problems");
       if ((exists && (!ready || problems.length)) || (!exists && ready)) invalid("subscription voucher schema is incompatible");
       return !exists;
-    }
-    case "migrate-inventory-flow-center.mjs": {
-      const ready = boolean(report.ready, 'ready');
-      const missing = list(report.missing_tables, 'missing_tables');
-      const problems = list(report.problems, 'problems');
-      if (problems.length || missing.some(name => !['inventory_flow_settings','inventory_flow_tasks','inventory_flow_events'].includes(name))) invalid('inventory flow schema is incompatible');
-      if (ready !== (missing.length === 0)) invalid('inconsistent inventory flow readiness');
-      return !ready;
-    }
-    case "migrate-inventory-consumables.mjs": {
-      const ready = boolean(report.schema_ready, 'schema_ready');
-      const missing = boolean(report.schema_would_add_column, 'schema_would_add_column');
-      if (ready === missing || report.changes_database !== false || report.reviewed_product_count !== 0 || report.product_flags_changed !== 0) invalid('consumable inspection must describe only compatible additive schema work');
-      return missing;
-    }
-    case "migrate-inventory-numbering-v2.mjs": {
-      const ready = boolean(report.schema_ready, "schema_ready");
-      const missing = boolean(report.schema_would_change, "schema_would_change");
-      const active = boolean(report.active, "active");
-      if (![null, 1, 2].includes(report.numbering_version) || (ready && report.numbering_version === null)
-        || ready === missing || active !== (report.numbering_version === 2) || (active && !ready)
-        || report.changes_database !== false || report.product_numbers_changed !== 0) {
-        invalid("numbering inspection must describe compatible additive schema only, with no number cutover");
-      }
-      return missing;
     }
     case "migrate-ai-variant-draft-history-index.mjs": {
       const before = object(report.before, "before");

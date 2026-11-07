@@ -1,24 +1,19 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import { Search, Warning } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { apiClient, currentApiCacheScope } from "../../utils/api";
-import InventoryProductEditAction from '../../components/inventory/InventoryProductEditAction.vue';
-import InventoryProductHistoryAction from '../../components/inventory/InventoryProductHistoryAction.vue';
+import { apiClient } from "../../utils/api";
 
 const router = useRouter();
 const loading = ref(false);
 const loadingMore = ref(false);
 const query = ref("");
-const appliedQuery = ref("");
 const rows = ref([]);
 const total = ref(0);
 const page = ref(1);
 const pageSize = 20;
 const hasMore = computed(() => rows.value.length < total.value);
-let version=0,disposed=false,controller;
-const productId=row=>Number.isSafeInteger(Number(row.product_id))&&Number(row.product_id)>0?Number(row.product_id):0;
 
 function integer(value) {
   return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 }).format(Number(value || 0));
@@ -50,7 +45,7 @@ function urgencyClass(row) {
   return "is-info";
 }
 
-function params(nextPage, keyword = query.value.trim()) {
+function params(nextPage) {
   const value = new URLSearchParams({
     mode: "fbp-alerts",
     paged: "1",
@@ -60,36 +55,26 @@ function params(nextPage, keyword = query.value.trim()) {
     dateFrom: "",
     dateTo: ""
   });
+  const keyword = query.value.trim();
   if (keyword) value.set("query", keyword);
   return value;
 }
 
-async function loadAlerts({ append = false, refreshLoaded = false } = {}) {
-  if(append&&(loading.value||loadingMore.value))return;
-  controller?.abort();controller=new AbortController();
-  const token=++version,scope=currentApiCacheScope(),signal=controller.signal,keyword=append||refreshLoaded?appliedQuery.value:query.value.trim();
-  const current=()=>!disposed&&token===version&&scope===currentApiCacheScope();
+async function loadAlerts({ append = false } = {}) {
   if (append) loadingMore.value = true;
   else loading.value = true;
-  if(!append)loadingMore.value=false;
   try {
-    const firstPage=append?page.value+1:1,lastPage=refreshLoaded&&!append?page.value:firstPage;
-    let payload,nextRows=[];
-    for(let requestedPage=firstPage;requestedPage<=lastPage;requestedPage++){
-      const search=params(requestedPage,keyword);
-      if(refreshLoaded&&requestedPage===1)search.set('refresh','1');
-      payload=await apiClient.get(`/api/stock-alerts?${search}`,{noCache:true,signal});
-      if(!current())return;
-      nextRows.push(...(Array.isArray(payload?.rows)?payload.rows:[]));
-    }
-    page.value = Number(payload?.page || lastPage);
+    const nextPage = append ? page.value + 1 : 1;
+    const payload = await apiClient.get(`/api/stock-alerts?${params(nextPage).toString()}`, { noCache: true });
+    const nextRows = Array.isArray(payload?.rows) ? payload.rows : [];
+    page.value = Number(payload?.page || nextPage);
     total.value = Number(payload?.total || payload?.meta?.total || 0);
     rows.value = append ? [...rows.value, ...nextRows] : nextRows;
-    if(!append&&!refreshLoaded)appliedQuery.value=keyword;
   } catch (error) {
-    if(current()&&error.name!=='AbortError')ElMessage.error(error.message || "库存预警加载失败");
+    ElMessage.error(error.message || "库存预警加载失败");
   } finally {
-    if(token===version){loading.value = false;loadingMore.value = false;}
+    loading.value = false;
+    loadingMore.value = false;
   }
 }
 
@@ -98,9 +83,7 @@ function openDesktopAlerts() {
   router.push("/inventory/alerts");
 }
 
-function clearScope(){++version;controller?.abort();rows.value=[];total.value=0;page.value=1;appliedQuery.value='';loading.value=false;loadingMore.value=false;}
-onMounted(() => {loadAlerts();window.addEventListener('erp:auth-scope-changed',clearScope);});
-onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:auth-scope-changed',clearScope);});
+onMounted(() => loadAlerts());
 </script>
 
 <template>
@@ -135,12 +118,10 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
           <div>
             <h2>{{ row.name || row.product_name || "未命名商品" }}</h2>
             <p>库存编号 {{ row.inventory_number || row.inventory_id || "-" }}</p>
-            <p v-if="row.product_name">关联库存 {{ row.product_name }}</p>
             <p>SKU {{ row.ozon_sku || "-" }}</p>
             <span>{{ warningText(row) }}</span>
           </div>
         </div>
-        <div v-if="productId(row)" class="mobile-alert-card__actions"><InventoryProductEditAction :product-id="productId(row)" mobile @saved="loadAlerts({refreshLoaded:true})"/><InventoryProductHistoryAction :product-id="productId(row)" mobile/></div>
         <div class="mobile-alert-card__metrics">
           <span><small>FBP可售</small><strong>{{ integer(row.fbp_available) }}</strong></span>
           <span><small>近7天销量</small><strong>{{ integer(row.recent_7d_qty) }}</strong></span>
@@ -182,7 +163,6 @@ onBeforeUnmount(()=>{disposed=true;clearScope();window.removeEventListener('erp:
 .mobile-alert-card__metrics span { min-width: 0; display: grid; gap: 3px; padding: 9px 4px; text-align: center; }
 .mobile-alert-card__metrics small { overflow: hidden; color: var(--erp-detail-text-regular, #64748b); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-alert-card__metrics strong { font-size: 14px; }
-.mobile-alert-card__actions { display:flex;flex-wrap:wrap;gap:8px;padding:0 12px 12px; }.mobile-alert-card__actions :deep(.el-button+.el-button) { margin-left:0; }
 .mobile-alert-card__suggestion { margin: 0; padding: 10px 12px; border-top: 1px solid var(--erp-detail-border, #edf1f6); color: var(--erp-detail-text-regular, #475569); font-size: 12px; line-height: 1.5; }
 .mobile-alerts-empty { display: grid; gap: 5px; padding: 28px 18px; border: 1px dashed var(--erp-detail-border, #cbd5e1); border-radius: 14px; color: var(--erp-detail-text-regular, #64748b); text-align: center; }
 .mobile-alerts-empty strong { color: var(--erp-detail-text-main, #334155); }

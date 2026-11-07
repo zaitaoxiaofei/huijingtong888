@@ -87,10 +87,10 @@ test('allocation rejects stale edits and requires explicit acknowledgment of cur
     return [[]];
   } };
   const run = new Function('ensureMysqlCutoverEnabled', 'ensureFbpReplenishmentSchemaMysql', 'withMysqlTransaction', 'localStockLocationPredicateMysql',
-    'resolveInventoryTenantScope','assertInventoryMember','assertInventoryRecord','inventoryTenantSql','invalidateOrderProcurementCoverage',
+    'resolveInventoryTenantScope','assertInventoryMember','assertInventoryRecord','inventoryTenantSql',
     source.slice(start, end).replace('export ', '') + '; return saveFbpReplenishmentInventoryAllocationMysql;')(
     () => {}, async () => {}, callback => callback(connection), () => "stock_location = 'LOCAL'",
-    async()=>({id:1,isDefault:true}),async()=>1,async()=>({}),()=>"tenant_id=1",()=>{});
+    async()=>({id:1,isDefault:true}),async()=>1,async()=>({}),()=>"tenant_id=1");
   const body = { inventory_key: '10', reason: '仓库重新分配', items: [{ item_id: 1, order_id: 1, final_qty: 30, expected_final_qty: 9 }] };
   await assert.rejects(run(body, 1), /其他人调整/);
   body.items[0].expected_final_qty = 10;

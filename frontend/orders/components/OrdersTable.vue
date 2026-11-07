@@ -1,20 +1,14 @@
 ﻿<script setup>
-import { computed, defineAsyncComponent, ref } from "vue";
+import { computed, ref } from "vue";
 import { CopyDocument, Document, EditPen, Link, Tickets } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
 import { inventoryOverview } from "../utils/inventory-overview.js";
 import { copyToClipboard } from "../../admin/utils/clipboard.js";
-import { shanghaiDateText } from "../../admin/utils/shanghai-date.js";
+import ProcurementLedgerDialog from "../../admin/components/procurement/ProcurementLedgerDialog.vue";
 import InventoryIdentity from './InventoryIdentity.vue';
 import { openEnterpriseMessage } from "../../admin/utils/enterprise-messages.js";
 
-const ProcurementLedgerDialog = defineAsyncComponent(() => import("../../admin/components/procurement/ProcurementLedgerDialog.vue"));
-
 const props = defineProps({
-  canRemindProcurement: { type: Boolean, default: false },
-  canUpdateInventory: { type: Boolean, default: false },
-  canManageOrderNotes: { type: Boolean, default: false },
-  canEditProcurementNotes: { type: Boolean, default: false },
   rows: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
   selectedIds: { type: Object, default: () => new Set() },
@@ -34,7 +28,6 @@ const emit = defineEmits([
   "split-order",
   "print-order",
   "save-mark",
-  "edit-procurement-note",
   "open-bind-product-from-order",
   "edit-inventory-product",
   "open-product-components",
@@ -50,25 +43,7 @@ const emit = defineEmits([
   "confirm-procurement-inbound"
 ]);
 
-function openStockTopup(row) {
-  const items=inventoryOverview(row).items;
-  if(!items.length)return ElMessage.warning('请先绑定对应的实物库存商品');
-  openInventoryLedger(row,'procurement',items[0].product_id);
-}
-function parentInventoryItems(parent) {
-  return parent.virtual ? parent.children.filter(item => Number(item.product_id) > 0) : [{ product_id: parent.productId, product_name: parent.name, inventory_number: parent.inventoryNumber }].filter(item => item.product_id > 0);
-}
-function openParentInventoryLedger(row, parent, action = '', productId = 0) {
-  openInventoryLedger(row, action, productId || parentInventoryItems(parent)[0]?.product_id || 0);
-}
 const selectedInventoryRow = ref(null);
-const ledgerInitialAction = ref("");
-const stocktakeProductId = ref(0);
-function openInventoryLedger(row, action = "", productId = 0) {
-  ledgerInitialAction.value = action;
-  stocktakeProductId.value = Number(productId || 0);
-  selectedInventoryRow.value = row;
-}
 const inventoryRow = computed(() => props.rows.find(row => row.id === selectedInventoryRow.value?.id) || selectedInventoryRow.value);
 const inventoryViews = computed(() => new Map(props.rows.map(row => [row.id, inventoryOverview(row)])));
 const detailVisible = computed({ get: () => !!inventoryRow.value, set: value => { if (!value) selectedInventoryRow.value = null; } });
@@ -335,19 +310,9 @@ function procurementTimeText(row) {
   const value = row?.procurementState?.latestPurchaseAt;
   return value ? formatDateTime(value, { assumeUtcWhenNaive: true }) : "";
 }
-function procurementDateText(row) {
-  return shanghaiDateText(row.procurementState.latestPurchaseAt, { assumeUtcWhenNaive: true }).replaceAll('-', '/');
-}
-function collaborationNote(row) { return String(row.mark_note || '').trim(); }
-function canEditCollaborationNote(row) {
-  return props.canManageOrderNotes || props.canEditProcurementNotes && !row.inventory_refresh_pending && !isFbpOrder(row)
-    && !row.procurement_coverage?.entered_transport && row.procurement_coverage?.needs_fulfillment
-    && (row.procurement_coverage.items || []).some(item => Number(item.product_id) > 0);
-}
 </script>
 
 <template>
-
   <el-card shadow="never" class="orders-table-card">
     <div class="mobile-landscape-hint">订单信息较多，横屏查看更完整；表格可左右滑动。</div>
     <el-table
@@ -363,8 +328,6 @@ function canEditCollaborationNote(row) {
       <el-table-column width="54" fixed="left" align="center">
         <template #header>
           <el-checkbox
-            aria-label="选择或取消当前页订单"
-            title="仅选择或取消当前页；清除所有页面请点底部“清空全部已选”"
             :model-value="allSelected"
             :indeterminate="someSelected"
             @change="emit('toggle-all', $event)"
@@ -464,11 +427,6 @@ function canEditCollaborationNote(row) {
               {{ row.statusDeadlineHint }}
             </div>
             <el-button v-if="row.ogl_dispatch?.batch_id" class="orders-ogl-batch-link" link type="primary" title="查看此运货单的已保存详情" @click="emit('open-ogl-batch', row.ogl_dispatch.batch_id)">运货单 {{ row.ogl_dispatch.official_carriage_id || row.ogl_dispatch.batch_number || '待获取' }}</el-button>
-            <el-tag v-if="row.ogl_dispatch?.bound || row.ogl_dispatch?.dispatched" size="small" :type="row.ogl_dispatch.awaiting_print ? 'warning' : row.ogl_dispatch.association_type === 'official' ? 'primary' : 'info'" :title="row.ogl_dispatch.awaiting_print ? row.statusHint : ''">{{ row.ogl_dispatch.awaiting_print ? '已加入发运单 · 待打印' : row.ogl_dispatch.association_label || (row.ogl_dispatch.official_member ? 'Ozon' : '系统') }}</el-tag>
-            <el-tag v-if="row.ogl_dispatch?.stage === 'bound'" size="small" type="info" :title="row.statusHint">已绑定发运单 · 未交运</el-tag>
-            <el-tag v-if="row.dispatchHold" size="small" type="warning" :title="row.statusHint">人工标记待处理</el-tag>
-            <el-tag v-if="row.ogl_dispatch?.manually_marked" size="small" type="warning">人工标记</el-tag>
-            <small v-if="row.ogl_dispatch?.tracking_assignment" class="orders-cell-subtext">{{row.ogl_dispatch.tracking_assignment.tracking_number}} · {{row.ogl_dispatch.tracking_assignment.cargo_type==='special'?'特殊货物':'普通货物'}} · 系统关联</small>
             <small v-if="row.ogl_dispatch?.exception_reason || row.ogl_dispatch?.exception_note" class="orders-cell-subtext">异常：{{ row.ogl_dispatch.exception_reason || row.ogl_dispatch.exception_note }}</small>
           </div>
         </template>
@@ -632,32 +590,10 @@ function canEditCollaborationNote(row) {
         </template>
         <template #default="{ row }">
           <div class="inventory-compact">
-            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active">
-              <template #actions="{ parent }">
-
-                <div class="orders-inventory-quick-actions inventory-product-actions" :data-inventory-product-id="parent.productId">
-                  <el-button link type="primary" size="small" :icon="Tickets" @click="openParentInventoryLedger(row, parent)">库存明细</el-button>
-                  <el-button v-if="canUpdateInventory && parentInventoryItems(parent).length === 1" link type="primary" size="small" @click="openParentInventoryLedger(row, parent, 'stocktake')">更新本地库存</el-button>
-                  <el-dropdown v-else-if="canUpdateInventory && parentInventoryItems(parent).length > 1" trigger="click" @command="id => openParentInventoryLedger(row, parent, 'stocktake', id)">
-                    <el-button link type="primary" size="small">更新本地库存</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                  <el-button v-if="parent.skus.length === 1" link type="primary" size="small" :icon="Link" @click="emit('open-bind-product-from-order', row.id, parent.skus[0])">修改绑定</el-button>
-                  <el-dropdown v-else-if="parent.skus.length > 1" trigger="click" @command="sku => emit('open-bind-product-from-order', row.id, sku)">
-                    <el-button link type="primary" size="small" :icon="Link">修改绑定 ▾</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="sku in parent.skus" :key="sku" :command="sku">SKU {{ sku }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                  <el-button v-if="parent.productId > 0" link type="primary" size="small" :icon="EditPen" @click="emit('edit-inventory-product', parent.productId)">修改库存</el-button>
-                  <el-dropdown v-else-if="parentInventoryItems(parent).length" trigger="click" @command="id => emit('edit-inventory-product', id)">
-                    <el-button link type="primary" size="small" :icon="EditPen">修改子产品库存 ▾</el-button>
-                    <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in parentInventoryItems(parent)" :key="item.product_id" :command="item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-                  </el-dropdown>
-                </div>
-              </template>
-            </InventoryIdentity>
+            <InventoryIdentity v-if="inventoryViews.get(row.id)?.parents.length" :parents="inventoryViews.get(row.id).parents" :active="inventoryViews.get(row.id).active" />
             <template v-else-if="inventoryViews.get(row.id)?.items.length === 1">
               <div class="inventory-compact-heading">
-                <strong><el-tag size="small" type="info" class="inventory-fallback-type">类型待核</el-tag>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
+                <strong>库存 ID：{{ inventoryViews.get(row.id).items[0].inventory_number || '待核对' }}</strong>
                 <span>本单 {{ inventoryViews.get(row.id).items[0].quantity ?? '待核对' }} {{ inventoryViews.get(row.id).items[0].stock_unit || '件' }}</span>
               </div>
               <strong class="inventory-compact-name" :title="inventoryViews.get(row.id).items[0].product_name">{{ inventoryViews.get(row.id).items[0].product_name || '库存名称待核对' }}</strong>
@@ -668,16 +604,32 @@ function canEditCollaborationNote(row) {
               <strong>组合库存 · {{ inventoryViews.get(row.id).items.length }} 种子产品</strong>
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
-            <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">库存已变更，正在核对或等待重试</small>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
-              <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
-              <el-button v-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length === 1" link type="primary" size="small" @click="openInventoryLedger(row, 'stocktake', inventoryViews.get(row.id).items[0].product_id)">更新本地库存</el-button>
-              <el-dropdown v-else-if="!inventoryViews.get(row.id)?.parents.length && canUpdateInventory && inventoryViews.get(row.id)?.items.length > 1" trigger="click" @command="id => openInventoryLedger(row, 'stocktake', id)">
-                <el-button link type="primary" size="small">更新本地库存</el-button>
-                <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="item in inventoryViews.get(row.id).items" :key="item.product_id" :command="item.product_id" :disabled="!item.product_id">{{ item.inventory_number || item.product_id }} · {{ item.product_name }}</el-dropdown-item></el-dropdown-menu></template>
-              </el-dropdown>
-              <div v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`" class="orders-inline-actions"><small>SKU {{ item.sku }}</small>
+              <el-button link type="primary" size="small" :icon="Tickets" @click="selectedInventoryRow = row">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
+              <template v-for="product in row.inventorySummaries" :key="`quick-bound-${row.id}-${product.inventoryKey || product.productId}`">
+                <el-button
+                  v-if="product.sku"
+                  link
+                  type="primary"
+                  size="small"
+                  :icon="Link"
+                  @click="emit('open-bind-product-from-order', row.id, product.sku)"
+                >
+                  修改绑定
+                </el-button>
+                <el-button
+                  v-if="Number(product.productId || 0) > 0"
+                  link
+                  type="primary"
+                  size="small"
+                  :icon="EditPen"
+                  @click="emit('edit-inventory-product', product.productId)"
+                >
+                  修改库存
+                </el-button>
+              </template>
+              <template v-for="item in row.unboundItems" :key="`quick-unbound-${row.id}-${item.sku}`">
                 <el-button
                   size="small"
                   class="orders-inline-accent-button orders-inline-accent-button-secondary"
@@ -692,34 +644,36 @@ function canEditCollaborationNote(row) {
                 >
                   创建库存
                 </el-button>
-              </div>
+              </template>
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="采购信息" min-width="240">
+      <el-table-column label="采购信息" min-width="192">
         <template #default="{ row }">
-          <div class="orders-procurement-cell">
-          <div class="orders-procurement-heading">
-          <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">采购覆盖待核对</small>
+          <div v-if="row.procurementState?.latestPurchaseAt" class="orders-cell-stack orders-procurement-time-cell">
+            <strong>{{ procurementTimeText(row) }}</strong>
+            <small>采购单：{{ row.procurementState.inboundDetails?.purchaseOrderNo || '待补充' }}</small>
+            <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">全部入库<template v-if="row.procurementState.latestReceivedAt"> · {{ formatDateTime(row.procurementState.latestReceivedAt, { assumeUtcWhenNaive: true }) }}</template></small>
+            <small v-if="Number(row.procurementState.pendingPurchaseCount || 0) > 1">关联 {{ row.procurementState.pendingPurchaseCount }} 笔在途采购</small>
+            <small v-else-if="row.procurementState.purchaseReceiptStatus !== 'received'">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
+            <el-button size="small" link type="primary" @click="emit('view-procurement-details', row)">查看明细</el-button>
+            <el-button
+              v-if="hasProcurementIncoming(row)"
+              size="small"
+              :type="row.procurementState.overdue ? 'danger' : 'success'"
+              plain
+              :loading="isInboundReceiptPending(row)"
+              :disabled="Number(confirmingInboundRecordId || 0) > 0"
+              @click="emit('confirm-procurement-inbound', row)"
+            >
+              {{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记实收' }}
+            </el-button>
+          </div>
           <small v-else-if="isFbpOrder(row)" class="orders-cell-meta-line">官方仓履约，无需采购</small>
-          <div v-else-if="row.procurementState?.latestPurchaseAt" class="orders-procurement-date-row orders-procurement-time-cell" title="采购日期为最近一次采购的北京时间；在途天数按最早待收批次的采购时间计算">
-            <strong>{{ procurementDateText(row) }}</strong>
-            <small v-if="row.procurementState.purchaseReceiptStatus === 'received'">已入库</small>
-            <small v-else-if="hasProcurementIncoming(row)">在途 {{ Number(row.procurementState.inTransitDays || 0) }} 天</small>
-          </div>
           <small v-else class="orders-cell-meta-line">暂无关联采购</small>
-          <button v-if="canEditCollaborationNote(row)" type="button" class="orders-procurement-note-edit" :aria-label="`${collaborationNote(row) ? '编辑' : '添加'}采购协作备注`" :title="`${collaborationNote(row) ? '编辑' : '添加'}采购协作备注`" @click="emit('edit-procurement-note', row)"><el-icon><EditPen /></el-icon></button>
-          </div>
-          <component :is="canEditCollaborationNote(row) ? 'button' : 'span'" v-if="collaborationNote(row)" :type="canEditCollaborationNote(row) ? 'button' : undefined" class="orders-procurement-note" :class="{'is-editable':canEditCollaborationNote(row)}" :title="collaborationNote(row)" :aria-label="canEditCollaborationNote(row) ? `编辑采购协作备注：${collaborationNote(row)}` : undefined" @click="canEditCollaborationNote(row) && emit('edit-procurement-note', row)">{{ collaborationNote(row) }}</component>
-          <div v-if="!row.inventory_refresh_pending && !isFbpOrder(row)" class="orders-procurement-inline-actions">
-            <el-button v-if="canRemindProcurement" size="small" plain @click="openStockTopup(row)">提醒采购</el-button>
-            <el-button v-if="row.procurementState?.latestPurchaseAt" size="small" plain @click="emit('view-procurement-details', row)">查看明细</el-button>
-            <el-button v-if="row.procurementState?.latestPurchaseAt && hasProcurementIncoming(row)" size="small" plain :loading="isInboundReceiptPending(row)" :disabled="Number(confirmingInboundRecordId || 0) > 0" @click="emit('confirm-procurement-inbound', row)">{{ row.procurement_coverage?.entered_transport ? '核对库存来源' : '登记入库' }}</el-button>
-          </div>
-          </div>
         </template>
       </el-table-column>
 
@@ -754,7 +708,7 @@ function canEditCollaborationNote(row) {
               size="small"
               class="orders-inline-accent-button"
               :class="procurementActionClass(row)"
-              @click="openStockTopup(row)"
+              @click="emit('open-order-procurement', row.id)"
             >
               {{ procurementActionLabel(row) }}
             </el-button>
@@ -768,7 +722,7 @@ function canEditCollaborationNote(row) {
             </el-button>
             <el-tooltip
               v-if="row.availableActions.showSplitPrepare"
-              :content="row.availableActions.splitPrepare ? '仅拆分订单，成功后再单独确认备货' : '订单已经备货并进入等待发货，Ozon 不允许撤回后重新拆分'"
+              :content="row.availableActions.splitPrepare ? '按商品数量拆分多个包裹后备货' : '订单已经备货并进入等待发货，Ozon 不允许撤回后重新拆分'"
               placement="top"
             >
               <span>
@@ -778,7 +732,7 @@ function canEditCollaborationNote(row) {
                   :disabled="row.availableActions.splitPrepare === false"
                   @click="emit('split-order', row.id)"
                 >
-                  {{ row.availableActions.splitPrepare ? "拆单" : "已备货，不能拆分" }}
+                  {{ row.availableActions.splitPrepare ? "拆分备货" : "已备货，不能拆分" }}
                 </el-button>
               </span>
             </el-tooltip>
@@ -827,7 +781,7 @@ function canEditCollaborationNote(row) {
       </template>
     </Teleport>
 
-    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="stocktakeProductId || selectedOverview.items[0]?.product_id || 0" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canUpdateInventory" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved', $event)">
+    <ProcurementLedgerDialog v-if="inventoryRow" v-model="detailVisible" :product-id="selectedOverview.items[0]?.product_id || 0" :order-id="inventoryRow.id" :order-overview="selectedOverview" :order-label="`${inventoryRow.postingNumber || inventoryRow.posting_number || inventoryRow.id} · ${inventoryRow.shopName || inventoryRow.shop_name || ''}`" @saved="emit('inventory-saved')">
       <template #management>
         <template v-for="row in [inventoryRow]" :key="row.id">
           <p>账面参考与子产品绑定管理（不计入本单需求）</p>
@@ -923,7 +877,6 @@ function canEditCollaborationNote(row) {
 .inventory-compact-heading { display: flex; justify-content: space-between; gap: 8px; width: 100%; font-size: inherit; }
 .inventory-compact-heading strong,.inventory-compact-name { font-size: inherit; font-weight: 600; }
 .inventory-compact-heading strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inventory-fallback-type { margin-right: 6px; vertical-align: middle; }
 .inventory-compact-heading span { flex-shrink: 0; font-weight: 600; white-space: nowrap; }
 .inventory-compact-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inventory-compact small { color: #606266; line-height: 1.6; }

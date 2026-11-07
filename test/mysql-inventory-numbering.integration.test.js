@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import mysql from "mysql2/promise";
-import { inventoryNumberingVersion, inspectInventoryNumberingV2Schema, prepareInventoryNumberingV2Schema } from '../src/services/inventory-numbering-v2.js';
 
 // Opt-in: uses only a newly created disposable database, never the ERP database.
 test("MySQL inventory numbers: migration, category reassignment, concurrency and no reuse", { skip: process.env.INVENTORY_NUMBERING_TEST_MYSQL !== "1" }, async () => {
@@ -21,9 +20,8 @@ test("MySQL inventory numbers: migration, category reassignment, concurrency and
     ) ENGINE=InnoDB`);
     await pool.query("INSERT INTO products (name, code, inventory_category) VALUES ('first', 'old-1', '钥匙壳'), ('second', 'old-2', '钥匙壳'), ('third', 'old-3', '门槛条')");
     const source = readFileSync(new URL('../src/services/inventory-numbering.js', import.meta.url), 'utf8')
-      .replace(/^import .*;\r?\n/gm, '').replaceAll('export ', '');
+      .replace(/^import .*;\n/m, '').replaceAll('export ', '');
     const context = vm.createContext({
-      inventoryNumberingVersion, inspectInventoryNumberingV2Schema, prepareInventoryNumberingV2Schema,
       mysqlExecute: (sql, params) => pool.execute(sql, params),
       mysqlQuery: async (sql, params) => (await pool.query(sql, params))[0],
       withMysqlTransaction: async work => {
@@ -85,12 +83,6 @@ test("MySQL inventory numbers: migration, category reassignment, concurrency and
     await pool.query("INSERT INTO product_components VALUES (1,3,2)");
     await pool.query("INSERT INTO sku_inventory_recipes VALUES (1,1,'b',1)");
     await pool.query("INSERT INTO sku_inventory_recipe_items VALUES (1,3,3)");
-    // Picking now enforces enterprise ownership even for the default workflow.
-    await pool.query("CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(64), status VARCHAR(16))");
-    await pool.query("INSERT INTO tenants VALUES (7,'default','active')");
-    await pool.query("CREATE TABLE shops (id BIGINT PRIMARY KEY, tenant_id BIGINT)");
-    await pool.query("INSERT INTO shops VALUES (1,7)");
-    for (const table of ['products', 'sku_mappings', 'product_components']) await pool.query(`ALTER TABLE ${table} ADD COLUMN tenant_id BIGINT DEFAULT 7`);
     context.mysqlQuery = async (sql, params) => (await pool.query(sql, params))[0];
     vm.runInContext(readFileSync(new URL('../src/services/order-inventory-picking.js', import.meta.url), 'utf8')
       .replace(/^import .*;\n/m, '').replaceAll('export ', ''), context);

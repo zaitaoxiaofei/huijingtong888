@@ -1,5 +1,3 @@
-import { orderSearchMatchForInput } from "../src/shared/order-search.js";
-import { exactPostingNumbers } from "../frontend/orders/utils/order-sync-result.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -23,7 +21,7 @@ function harness() {
   const requests = [], inventoryRequests = [], allRequests = [], shops = [], watchers = [], disposers = [], timers = new Map(), listeners = new Map();
   let timerId = 0;
   const context = vm.createContext({
-    AbortController, URLSearchParams, orderSearchMatchForInput, exactPostingNumbers, console: { warn() {} },
+    AbortController, URLSearchParams, console: { warn() {} },
     currentApiCacheScope: () => String(sessionEpoch), useAuthStore: () => auth,
     reactive: (value) => value, ref: (value) => ({ value }),
     computed: (getter) => ({ get value() { return getter(); } }),

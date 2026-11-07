@@ -1,7 +1,6 @@
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { broadcastGlobalEvent } from "../server/notifications.js";
 import { SKU_ORDER_TRACKERS_SCHEMA, skuOrderTrackerSchemaState } from "./sku-order-tracking-schema.js";
-import { inventoryAliasSearch } from './inventory-search.js';
 
 let schemaReady = false;
 let schemaPromise;
@@ -191,8 +190,8 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
   if (shopId !== "all") { where.push("stats.shop_id = ?"); params.push(Number(shopId)); }
   if (keyword) { where.push("LOWER(CONCAT_WS(' ', stats.ozon_sku, stats.order_product_name, op.name, op.offer_id, s.name)) LIKE ?"); params.push(`%${keyword}%`); }
   if (inventoryKeyword && tenant.isDefault) {
-    where.push(`(LOWER(CONCAT_WS(' ', p.name, p.code, p.inventory_number)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?) OR ${inventoryAliasSearch(inventoryKeyword, 'p', { fuzzy: true }).sql})`);
-    params.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`, ...inventoryAliasSearch(inventoryKeyword, 'p', { fuzzy: true }).params);
+    where.push(`(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))`);
+    params.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`);
   } else if (inventoryKeyword) {
     where.push("1 = 0");
   }
@@ -215,8 +214,8 @@ export async function skuOrderTrackingList(query = {}, tenantId = "admin") {
     if (shopId !== "all") { catalogWhere.push("op.shop_id = ?"); catalogParams.push(Number(shopId)); }
     if (keyword) { catalogWhere.push("LOWER(CONCAT_WS(' ', op.ozon_sku, op.name, op.offer_id, s.name)) LIKE ?"); catalogParams.push(`%${keyword}%`); }
     if (inventoryKeyword && tenant.isDefault) {
-      catalogWhere.push(`(LOWER(CONCAT_WS(' ', p.name, p.code, p.inventory_number)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?) OR ${inventoryAliasSearch(inventoryKeyword, 'p', { fuzzy: true }).sql})`);
-      catalogParams.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`, ...inventoryAliasSearch(inventoryKeyword, 'p', { fuzzy: true }).params);
+      catalogWhere.push(`(LOWER(CONCAT_WS(' ', p.name, p.code)) LIKE ? OR EXISTS (SELECT 1 FROM product_name_aliases pna WHERE (pna.tenant_id = ${tenant.id} OR pna.tenant_id IS NULL) AND pna.product_id = p.id AND pna.active = 1 AND LOWER(pna.alias_name) LIKE ?))`);
+      catalogParams.push(`%${inventoryKeyword}%`, `%${inventoryKeyword}%`);
     } else if (inventoryKeyword) {
       catalogWhere.push("1 = 0");
     }

@@ -1,5 +1,4 @@
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
-import { inventoryNumberingVersion, inspectInventoryNumberingV2Schema, prepareInventoryNumberingV2Schema } from "./inventory-numbering-v2.js";
 
 let ready;
 
@@ -49,7 +48,6 @@ export async function ensureInventoryNumberingMysql() {
 }
 
 async function initialize() {
-  if (await activeV2Mysql(mysqlQuery)) return;
   // Named lock also serializes initialization across candidate/production processes.
   await withMysqlTransaction(async (connection) => {
     const [[lock]] = await connection.query("SELECT GET_LOCK('inventory_numbering_schema_v1', 60) AS acquired");
@@ -60,7 +58,6 @@ async function initialize() {
       await connection.query("SELECT RELEASE_LOCK('inventory_numbering_schema_v1')");
     }
   });
-  if (await activeV2Mysql(mysqlQuery)) return;
   // Deterministic, idempotent backfill and correction for records created before category reassignment existed.
   await mysqlExecute(`UPDATE products SET inventory_category = inventory_category, updated_at = updated_at
     WHERE inventory_number IS NULL AND TRIM(COALESCE(inventory_category, '')) <> ''
@@ -69,7 +66,6 @@ async function initialize() {
 }
 
 export async function repairInventoryNumberCategoryMismatchMysql() {
-  if (await activeV2Mysql(mysqlQuery)) return { repaired: 0, version: 2 };
   const mismatch = `
     p.inventory_number IS NOT NULL
     AND TRIM(COALESCE(p.inventory_category, '')) <> ''
@@ -90,7 +86,6 @@ export async function repairInventoryNumberCategoryMismatchMysql() {
 }
 
 export async function initializeInventoryNumberingSchemaMysql(connection, { triggerDefiner = "" } = {}) {
-  if (await activeV2Mysql(connection)) return;
   for (const sql of [
     "ALTER TABLE products ADD COLUMN inventory_number VARCHAR(64) NULL",
     "ALTER TABLE products ADD COLUMN inventory_number_category BIGINT UNSIGNED NULL",
@@ -109,23 +104,15 @@ export async function initializeInventoryNumberingSchemaMysql(connection, { trig
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
   await connection.query(`INSERT IGNORE INTO inventory_number_categories (id, core_name) VALUES
     (0, ''), (1, '钥匙壳'), (2, '门槛条'), (3, '门槛条贴纸'), (4, '扶手箱'), (5, '中柱贴纸')`);
-  await prepareInventoryNumberingV2Schema(connection);
   for (const event of ["INSERT", "UPDATE"]) {
     const [triggers] = await connection.query(`SELECT TRIGGER_NAME, ACTION_STATEMENT FROM information_schema.TRIGGERS
       WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = ?`, [`products_inventory_number_${event.toLowerCase()}`]);
     const action = String(triggers[0]?.ACTION_STATEMENT || "").toLowerCase();
     const needsUpgrade = action.includes("new.product_type") || !action.includes("old.inventory_number_category = category_id");
-    if (triggers.length && needsUpgrade && triggerDefiner) await connection.query(`DROP TRIGGER products_inventory_number_${event.toLowerCase()}`);
+    if (needsUpgrade && triggerDefiner) await connection.query(`DROP TRIGGER products_inventory_number_${event.toLowerCase()}`);
     if (!triggers.length || (needsUpgrade && triggerDefiner)) {
       const sql = inventoryNumberTriggerSql(event);
       await connection.query(triggerDefiner ? sql.replace("CREATE TRIGGER", `CREATE DEFINER = ${triggerDefiner} TRIGGER`) : sql);
     }
   }
-}
-
-async function activeV2Mysql(db) {
-  if (await inventoryNumberingVersion(db) !== 2) return false;
-  const state = await inspectInventoryNumberingV2Schema(db);
-  if (!state.active) throw new Error("Inventory numbering V2 is active but incomplete; legacy initialization and repair are refused");
-  return true;
 }

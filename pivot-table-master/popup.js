@@ -37,23 +37,9 @@ let savingConfig = false;
 
 function sendMessage(message) {
   return new Promise((resolve) => {
-    let settled = false;
-    const finish = (response) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(response);
-    };
-    const timeoutMs = ['PIVOT_ERP_PANEL_GET_STATUS', 'PIVOT_ERP_PANEL_SAVE_CONFIG'].includes(message.type) ? 5000 : 60000;
-    const timer = setTimeout(() => finish({ error: '插件后台响应超时，请重试' }), timeoutMs);
-    try {
-      chrome.runtime.sendMessage(message, (response) => {
-        const error = chrome.runtime.lastError;
-        finish(error ? { error: error.message } : (response || { error: '插件后台没有响应，请重试' }));
-      });
-    } catch (error) {
-      finish({ error: error?.message || String(error) });
-    }
+    chrome.runtime.sendMessage(message, (response) => {
+      resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : (response || { error: '插件后台没有响应，请重试' }));
+    });
   });
 }
 
@@ -184,10 +170,10 @@ function renderStatus(payload = {}, options = {}) {
   renderLogs(state.logs || []);
 }
 
-async function refresh(forceRefresh = false) {
+async function refresh() {
   const requestId = ++statusRequestId;
   const requestEpoch = configEpoch;
-  const status = await sendMessage({ type: 'PIVOT_ERP_PANEL_GET_STATUS', forceRefresh: forceRefresh === true });
+  const status = await sendMessage({ type: 'PIVOT_ERP_PANEL_GET_STATUS' });
   if (requestId < latestRenderedStatusId) return;
   latestRenderedStatusId = requestId;
   renderStatus(status, { syncConfig: requestEpoch === configEpoch && !savingConfig });
@@ -202,15 +188,14 @@ async function saveConfig() {
   const requestId = ++statusRequestId;
   const submittedVersions = { ...fieldVersions };
   const config = Object.fromEntries(configFields.map((key) => [key, els[key].value]));
-  let status;
-  try {
-    status = await sendMessage({ type: 'PIVOT_ERP_PANEL_SAVE_CONFIG', config });
-  } finally {
-    latestRenderedStatusId = Math.max(latestRenderedStatusId, requestId);
-    configEpoch += 1;
-    savingConfig = false;
-    els.saveBtn.disabled = false;
-  }
+  const status = await sendMessage({
+    type: 'PIVOT_ERP_PANEL_SAVE_CONFIG',
+    config
+  });
+  latestRenderedStatusId = Math.max(latestRenderedStatusId, requestId);
+  configEpoch += 1;
+  savingConfig = false;
+  els.saveBtn.disabled = false;
   if (status.error) {
     setSaveFeedback(`保存失败：${status.error}`, 'error');
     els.statusText.textContent = status.error;
@@ -269,7 +254,7 @@ for (const key of configFields) {
     setSaveFeedback('有未保存的修改', 'pending');
   });
 }
-els.refreshBtn.addEventListener('click', () => refresh(true));
+els.refreshBtn.addEventListener('click', refresh);
 els.saveBtn.addEventListener('click', saveConfig);
 els.pollBtn.addEventListener('click', () => runAction('PIVOT_ERP_PANEL_POLL_NOW', '正在触发采集'));
 els.authProbeBtn?.addEventListener('click', authProbe);

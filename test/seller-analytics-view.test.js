@@ -29,7 +29,6 @@ async function checkCollectionReadiness(storeCheck, validation) {
     state: { filters: { shopId: "erp-shop" } },
     selectedShop: { value: { name: "Shop" } },
     pluginInstanceId: { value: "browser-instance" },
-    pluginInstanceEpoch: 0,
     wakeAnalyticsPlugin() {},
     waitForSellerAnalyticsPreparation: (options) => waitForSellerAnalyticsPreparation({ ...options, now: () => elapsed, timeoutMs: 6000 }),
     wait: async (ms) => { elapsed += ms; },

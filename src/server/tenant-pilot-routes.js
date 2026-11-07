@@ -1,14 +1,10 @@
 // Only verified service entry points are admitted. New routes do not inherit
 // access from a business prefix; their full ownership chain must be reviewed.
 const routes = new Set([
-  'GET inventory-workflow/demand-details','POST inventory-workflow/local-safety','GET inventory-workflow/purchase-arrivals','POST inventory-workflow/purchase-arrivals','POST inventory-workflow/cancel-demand','GET inventory-workflow/purchase-bundle','POST inventory-workflow/purchase-bundle','POST inventory-workflow/demand-request',
-  'GET inventory-workflow/receipts/context','POST inventory-workflow/receipts/preview',
-  'GET inventory-workflow/details', 'POST inventory-workflow/node-action',
-  'POST inventory-workflow/feedback', 'GET inventory-workflow/alerts', 'POST inventory-workflow/fbp', 'GET inventory-workflow', 'POST inventory-workflow/requests', 'GET inventory-workflow/receipts', 'POST inventory-workflow/receipts',
   'GET monthly-billing-details', 'GET monthly-billing-orders',
   'GET dashboard', 'GET orders', 'GET orders/status-history/summary', 'GET order-quality-rules',
   'POST orders/package-label', 'POST orders/package-label-printed', 'POST orders/package-label-print-failed',
-  'POST orders/ship', 'POST orders/split', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
+  'POST orders/ship', 'POST orders/repair-outbound', 'POST orders/recalculate-profits',
   'GET profit-ranking', 'GET profit-aftersales', 'GET profit-aftersales/details',
   'GET order-car-heatmap/models', 'GET order-car-heatmap/products', 'GET order-car-heatmap/skus', 'GET order-car-heatmap/unmatched',
   'POST order-car-heatmap/ai-classify', 'POST order-car-heatmap/confirm-tag',
@@ -21,9 +17,6 @@ const routes = new Set([
   'GET team/development-projects', 'POST team/development-projects', 'GET team/development-candidates', 'POST team/development-candidates',
   'GET team/development-ideas', 'POST team/development-ideas', 'GET team/development-categories', 'POST team/attachments',
   'GET ai-generation/tasks', 'POST ai-generation/tasks',
-  'GET product-workflows/templates', 'POST product-workflows/templates',
-  'GET product-workflows/runs', 'POST product-workflows/runs', 'POST product-workflows/import-draft',
-  'GET product-workflows/category', 'GET product-workflows/job-states', 'POST product-workflows/run-action',
   'GET ai-variant-lab/templates', 'GET ai-variant-lab/cases', 'POST ai-variant-lab/cases',
   'GET ai-variant-lab/vehicle-catalog', 'POST ai-variant-lab/vehicle-catalog',
   'POST ai-variant-lab/cases/batch-delete', 'POST ai-variant-lab/save-template',
@@ -58,7 +51,7 @@ const routes = new Set([
   'POST listing/drafts/from-inventory-product', 'GET listing/ozon-categories', 'GET listing/draft-bindings',
   'POST listing/generate-offer-id',
   'POST listing/templates/validate-publish',
-  'GET procurement/summary', 'GET procurement/requests', 'POST procurement/requests', 'POST procurement/warehouse-requests', 'POST procurement/stock-topups',
+  'GET procurement/summary', 'GET procurement/requests', 'POST procurement/requests', 'POST procurement/warehouse-requests',
   'POST procurement/purchases', 'POST procurement/requests/direct-inbound',
   'GET procurement/purchase-orders', 'POST procurement/purchase-orders', 'GET procurement/pending-inbound',
   'GET procurement/ledger', 'POST procurement/ledger/preview', 'POST procurement/ledger',
@@ -99,7 +92,6 @@ const routes = new Set([
 ]);
 
 const recordRoutes = [
-  ['GET', /^orders\/\d+\/split$/],
   ['DELETE', /^products\/\d+$/],
   ['POST', /^products\/\d+\/(?:add-to-inventory|remove-from-inventory|undo-merge|recalculate-profits|force-recalculate-profits)$/],
   ['GET', /^online-products\/\d+\/edit-draft$/],

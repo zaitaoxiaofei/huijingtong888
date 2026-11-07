@@ -26,11 +26,6 @@ export function isTenantScopedPluginRoute(method, parts = []) {
   if (route[0] === "collector-seller-pool") {
     return (route[1] === "status" && verb === "GET") || (route[1] === "collect" && verb === "POST");
   }
-  if (route[0] === "collector-browser-pool") {
-    return route.length === 2 && ((verb === "GET" && route[1] === "status")
-      || (verb === "POST" && ["heartbeat", "batches", "claim", "results"].includes(route[1])))
-      || route.length === 3 && verb === "GET" && route[1] === "batches" && /^[A-Za-z0-9_-]{1,128}$/.test(route[2]);
-  }
   if (route[0] === "seller-analytics") {
     const path = route.join("/");
     return TENANT_SELLER_ANALYTICS_PLUGIN_ROUTES.has(`${verb} ${path}`)

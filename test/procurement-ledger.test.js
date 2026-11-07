@@ -87,21 +87,6 @@ test('structured stocktake reasons allow zero and record sample losses without c
   assert.throws(() => planLedgerAction(snapshot(), body('stocktake', { counted_quantity: 3, reason_code: 'invented' })), /调整原因/);
 });
 
-test('FBP returns record domestic stock recovery without purchasing costs or a platform stock transfer', () => {
-  const state = snapshot({ physical_estimate: 4, local_stock: 4, stocktake_id: 9 });
-  const plan = planLedgerAction(state, body('stocktake', {
-    counted_quantity: 7, reason_code: 'fbp_return', reason_note: '退回3件，已验收入国内仓', reason: ''
-  }));
-  assert.equal(plan.local_delta, 3);
-  assert.equal(plan.reason_code, 'fbp_return');
-  assert.equal(plan.reason, 'FBP退货：退回3件，已验收入国内仓');
-  assert.equal(plan.cost_task_quantity, 0);
-  assert.equal(plan.target_delta, 0);
-  assert.throws(() => planLedgerAction(state, body('stocktake', {
-    counted_quantity: 3, reason_code: 'fbp_return', reason: ''
-  })), /FBP退货.*不能解释库存减少/);
-});
-
 test('available count updates physical ledger after reserving all pending orders and FBP', () => {
   const state = snapshot({ local_stock: 8, physical_estimate: 10, open_order_demand: 6,
     current_stock_reserved: 4, fbp_reserved: 1, available_estimate: 3 });
