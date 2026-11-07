@@ -1,4 +1,5 @@
 ﻿<script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -996,6 +997,7 @@ onDeactivated(() => {
               <div v-if="row.product_id" class="cell-stack">
                 <strong>{{ row.product_name || "-" }}</strong>
                 <span class="muted-text">{{ row.inventory_number || row.product_code || "-" }}</span>
+                <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
               </div>
               <span v-else class="muted-text">未绑定库存产品</span>
             </template>

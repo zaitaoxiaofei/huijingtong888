@@ -2,6 +2,7 @@
 import { inventoryNumberTitle } from '../../utils/inventory-number.js';
 import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
 import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
+import InventoryProductHistoryAction from "../../components/inventory/InventoryProductHistoryAction.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
@@ -2041,6 +2042,7 @@ onActivated(() => {
         <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }"><div class="inventory-actions">
             <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openEditDialog(row)">编辑</el-button>
+            <InventoryProductHistoryAction :product-id="Number(row.id)"/>
             <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
             <el-button size="small" plain type="primary" @click="openInventoryLedger(row)">库存明细</el-button>
             <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">

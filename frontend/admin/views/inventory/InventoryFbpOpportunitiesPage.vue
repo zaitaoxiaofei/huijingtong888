@@ -1,4 +1,5 @@
 <script setup>
+import InventoryProductActions from "../../components/inventory/InventoryProductActions.vue";
 import { inventorySearchDefaults, appendInventorySearch } from "../../../../src/shared/inventory-search-fields.js";
 import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -1251,6 +1252,7 @@ onActivated(() => {
           <template #default="{ row }">
             <div class="fbp-cell-title" :title="inventoryNameText(row)">{{ inventoryNameText(row) }}</div>
             <span class="inventory-id-display">库存 ID：{{ row.inventory_number || row.inventory_id || "-" }}</span>
+            <InventoryProductActions :product-id="Number(row.product_id)" @saved="loadPageData()"/>
             <el-tooltip placement="top" effect="light" :content="inventoryTooltipCn(row)" :popper-style="{ whiteSpace: 'pre-line', maxWidth: '280px' }">
               <div class="inventory-summary-cell">
                 <span><strong>本地可发仓</strong><em>{{ integer(localAvailableQty(row)) }}</em></span>
