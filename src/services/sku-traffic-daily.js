@@ -129,7 +129,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     const keyword=String(body.query||'').trim().slice(0,128),params=[key,...ids,days[0],days.at(-1)];
     const search=keyword?' AND (d.sku LIKE ? OR p.name LIKE ? OR p.offer_id LIKE ?)':'';
     if(keyword)params.push(...Array(3).fill('%'+keyword+'%'));
-    const from=`FROM seller_sku_traffic_daily d LEFT JOIN online_products p ON p.shop_id=d.shop_id AND p.ozon_sku=d.sku WHERE ${scope}${search}`;
+    const from=`FROM seller_sku_traffic_daily d LEFT JOIN online_products p ON p.shop_id=d.shop_id AND p.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci WHERE ${scope}${search}`;
     const [count]=await query(`SELECT COUNT(DISTINCT d.shop_id,d.sku) total ${from}`,params);
     const products=await query(`SELECT d.shop_id,d.sku,MAX(p.name) product_name,MAX(p.image_url) image_url,MAX(p.offer_id) offer_id,DATE_FORMAT(MAX(d.date_key),'%Y-%m-%d') latest_day ${from} GROUP BY d.shop_id,d.sku ORDER BY d.shop_id,d.sku LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]);
     let history=[];
