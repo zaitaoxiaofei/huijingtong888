@@ -1,3 +1,4 @@
+import { normalizePromotionEnrollment, normalizePromotionProductPage, validatePromotionEnrollmentFacts, promotionEnrollmentOutcome } from "./ozon-promotion-enrollment.js";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
 import { currentAiTenantSession, needsAiTenantSession, withAiTenantSession } from "./ai-tenant-context.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
@@ -104,17 +105,6 @@ async function ozonRequest(path, { method = "POST", payload = null, shop, signal
   }
 }
 
-function normalizeProductsForOfficialAdd(products = []) {
-  return products
-    .map((item) => ({
-      product_id: Number(item.product_id ?? item.id),
-      action_price: Number(item.action_price),
-      ...(item.stock != null && item.stock !== "" ? { stock: Number(item.stock) } : {})
-    }))
-    .filter((item) => Number.isFinite(item.product_id) && item.product_id > 0 && Number.isFinite(item.action_price) && item.action_price > 0)
-    .slice(0, 1000);
-}
-
 function normalizeProductsForSellerAdd(products = []) {
   return products
     .map((item) => ({
@@ -192,7 +182,7 @@ async function enrichActionProductsWithImages(shop, products, signal) {
         offer_id: product?.offer_id || info.offer_id || "",
         product_id: product?.product_id ?? info.id ?? info.product_id,
         sku: product?.sku || info.sku,
-        currency: product?.currency || info.currency_code,
+        currency: product?.price_money_verified === false ? "" : product?.currency || info.currency_code,
         image_url: product?.image_url || image,
         primary_image: product?.primary_image || info.primary_image,
         images: product?.images || info.images || [],
@@ -279,13 +269,25 @@ export async function addOzonActionProductsMysql(body = {}, options = {}) {
       signal: options.signal
     });
   }
-  const normalized = normalizeProductsForOfficialAdd(products);
-  if (!normalized.length) throw statusError("No valid product/action_price rows");
-  return ozonRequest("/v1/actions/products/activate", {
-    payload: { action_id: Number(body.actionId), products: normalized },
-    shop,
-    signal: options.signal
-  });
+  const payload = normalizePromotionEnrollment(body.actionId, products);
+  if (body.confirmSharedPrice !== true) throw statusError("官方活动使用共享活动限价，可能影响同商品的其他活动；请阅读报名确认提示后提交", 409);
+  const catalog = await fetchCurrentOfficialActionSummaries(shop, options.signal);
+  const action = catalog.find(item => item.actionId === payload.action_id);
+  if (!action) throw statusError("该活动已不在本店可操作活动列表，请刷新活动后重试", 404);
+  const currentProducts = await fetchSelectedEnrollmentProducts(shop, payload.action_id, payload.products.map(row => row.product_id), options.signal);
+  const preflight = validatePromotionEnrollmentFacts(payload.products, currentProducts, action);
+  const receipt = preflight.products.length
+    ? await ozonRequest("/v1/actions/products/update", { payload: { ...payload, products: preflight.products }, shop, signal: options.signal })
+    : {};
+  let joined = [], verificationError = "";
+  if (preflight.products.length) {
+    try {
+      const verification = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, payload.action_id, options.signal);
+      if (verification.paginationWarning) throw new Error(verification.paginationWarning);
+      joined = verification.joinedProducts;
+    } catch (error) { verificationError = error.message; }
+  }
+  return promotionEnrollmentOutcome(payload.products, receipt, joined, verificationError, preflight.failures);
 }
 
 export async function removeOzonActionProductsMysql(body = {}, options = {}) {
@@ -311,8 +313,9 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
   const catalog = await fetchCurrentOfficialActionSummaries(shop, options.signal);
   const action = catalog.find(item => item.actionId === actionId);
   if (!action) throw statusError("该活动已不在本店可操作活动列表，请刷新活动后重试", 404);
-  let scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
-  let byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
+  shop.promotionApiMode = "unified";
+  const scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
+  const byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
   const reasons = new Map();
   let selected = productIds.filter(id => {
     if (byId.has(id)) return true;
@@ -321,25 +324,8 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
   });
   const warnings = [];
   let receipt;
-  let receiptKind = "legacy";
-  if (selected.length && shop.promotionApiMode !== "unified") {
-    try {
-      receipt = await ozonRequest("/v1/actions/products/deactivate", { payload: { action_id: actionId, product_ids: selected }, shop, signal: options.signal });
-    } catch (error) {
-      if (!isUnifiedPriceError(error)) throw error;
-      shop.promotionApiMode = "unified";
-      // Some shops still allow legacy reads but reject legacy mutations. Refresh
-      // the official Money values instead of trusting old UI prices/metadata.
-      scan = await fetchAllJoinedActionProductIds(shop, actionId, options.signal);
-      byId = new Map(scan.joinedProducts.map(row => [Number(row.product_id ?? row.id), row]));
-      selected = selected.filter(id => {
-        if (byId.has(id)) return true;
-        reasons.set(id, "商品参与状态已变化，请刷新活动后核对");
-        return false;
-      });
-    }
-  }
-  if (selected.length && shop.promotionApiMode === "unified") {
+  let receiptKind = "price";
+  if (selected.length) {
     if (action.isVoucher) {
       receiptKind = "voucher";
       receipt = await ozonRequest("/v2/actions/products/deactivate", { payload: { action_id: actionId, product_ids: selected.map(String) }, shop, signal: options.signal });
@@ -359,7 +345,7 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
       }
     }
   }
-  const response = receiptKind === "legacy" ? receipt?.result : receipt;
+  const response = receipt;
   const ackValues = receiptKind === "price" ? response?.deactivated_product_ids : response?.product_ids;
   const active = new Set((Array.isArray(response?.active_product_ids) ? response.active_product_ids : []).map(Number));
   const rejected = Array.isArray(response?.rejected) ? response.rejected : [];
@@ -403,7 +389,7 @@ export async function removeOzonActionProductsMysql(body = {}, options = {}) {
     removedProductIds,
     failedProductIds,
     warnings: [...new Set(warnings)],
-    apiVersion: shop.promotionApiMode === "unified" ? "v2" : "v1",
+    apiVersion: "v2",
     ...(failures.length ? { error: failures.map(row => `商品 ${row.product_id}：${row.reason}`).join("；") } : {}),
     result: { product_ids: removedProductIds, rejected: failures }
   };
@@ -869,18 +855,44 @@ function isUnifiedPriceError(error) {
 }
 
 async function officialProductPage(shop, endpoint, payload, signal) {
-  try { return await ozonRequest(`/v1/actions/${endpoint}`, { payload, shop, signal }); }
-  catch (error) {
-    if (!isUnifiedPriceError(error)) throw error;
-    const data = await ozonRequest(`/v2/actions/${endpoint}`, { payload, shop, signal });
-    if (!Array.isArray(data.products)) throw statusError("Ozon 新版活动商品响应格式异常，请稍后重试", 502);
-    const moneyFields = ["price", "action_price", "max_action_price", "alert_max_action_price", "marketplace_seller_price", "price_min_elastic", "price_max_elastic", "min_seller_price"];
-    return { result: { ...data, products: data.products.map(row => {
-      const product = { ...row, currency: row.currency || row.action_price?.currency || row.price?.currency || "" };
-      for (const key of moneyFields) if (row[key] && typeof row[key] === "object") product[key] = Number(row[key].amount);
-      return product;
-    }) }, apiVersion: "v2" };
+  const data = await ozonRequest(`/v2/actions/${endpoint}`, { payload, shop, signal });
+  if (!Array.isArray(data.products)) throw statusError("Ozon 新版活动商品响应格式异常，请稍后重试", 502);
+  return { result: { ...data, products: normalizePromotionProductPage(data.products) }, apiVersion: "v2" };
+}
+
+async function fetchSelectedEnrollmentProducts(shop, actionId, productIds, signal) {
+  const selected = new Set(productIds);
+  const found = new Map();
+  const seenIds = new Set(), seenCursors = new Set();
+  let lastId = "", scannedCount = 0;
+  for (let page = 0; page < ACTION_PRODUCTS_MAX_PAGES; page += 1) {
+    const payload = { action_id: actionId, limit: ACTION_PRODUCTS_PAGE_LIMIT, ...(lastId ? { last_id: lastId } : {}) };
+    const data = await ozonRequest("/v2/actions/candidates", { payload, shop, signal });
+    if (!Array.isArray(data.products) || data.total == null || !Number.isSafeInteger(Number(data.total)) || Number(data.total) < 0) throw statusError("Ozon 活动候选商品响应不完整，请重新拉取后再报名", 502);
+    for (const row of data.products) {
+      const id = Number(row.product_id ?? row.id);
+      if (!Number.isSafeInteger(id) || id <= 0 || seenIds.has(id)) throw statusError("Ozon 活动候选商品分页重复或编号异常，请稍后重试", 502);
+      seenIds.add(id);
+      if (selected.has(id)) found.set(id, row);
+    }
+    if (found.size === selected.size) return [...found.values()];
+    scannedCount += data.products.length;
+    const nextCursor = String(data.last_id ?? "").trim();
+    if (!data.products.length || !nextCursor) {
+      if (Number(data.total) > scannedCount) throw statusError("Ozon 活动候选商品分页提前结束，请重新拉取后再报名", 502);
+      const joined = await fetchAllJoinedActionProductIds({ ...shop, promotionApiMode: "unified" }, actionId, signal);
+      for (const row of joined.joinedProducts) {
+        const id = Number(row.product_id ?? row.id);
+        if (selected.has(id) && !found.has(id)) found.set(id, row);
+      }
+      return [...found.values()];
+    }
+    if (seenCursors.has(nextCursor)) throw statusError("Ozon 活动候选商品分页游标重复，请稍后重试", 502);
+    seenCursors.add(nextCursor);
+    lastId = nextCursor;
+    await sleep(180);
   }
+  throw statusError("Ozon 活动候选商品分页超出限制，请减少选择后重试", 502);
 }
 
 function unifiedExitPrice(row, previousPrice = null) {

@@ -14,6 +14,7 @@ import { inventoryIdentifierSearch, isInventoryIdentifier, inventoryNamePattern,
 import { ensureInventoryNumberingMysql } from "./inventory-numbering.js";
 import { orderInventoryPickingMysql } from "./order-inventory-picking.js";
 import { propagateListingVariantInventory } from "./listing-variant-inventory.js";
+import { ozonStockUpdateReceipts } from "./ozon-stock-update.js";
 import { loadOrderFbpStocks, loadProductFbpStocks } from './fbp-inventory-display.js';
 import { selectedReceiptOrderIds, planShippedProcurementReceipts, validateShippedReceiptSubmission } from "./shipped-procurement-receipts.js";
 import { loadOrderProcurementCoverage, cachedOrderProcurementCoverage, invalidateOrderProcurementCoverage as invalidateProcurementCoverageCache, procurementQueueSql } from "./mysql-order-procurement-coverage.js";
@@ -9406,7 +9407,7 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
           pendingRefs.map((item) => Number(item.ozon_product_id || item.id || 0)).filter(Boolean),
           { ...fetchOptions, visibilityById, detailConcurrency: 3 }
         );
-        items = filterPendingListingProductsWithoutFbsStock(detailedItems, stockRows);
+        items = filterPendingListingProductsWithoutFbsStock(detailedItems, stockRows, { requireSku: false, requireStockEvidence: true });
         shopResult.filtered_out = Math.max(0, shopResult.candidates - items.length);
       } else {
         report("details", "正在获取商品详情", shop);
@@ -11058,12 +11059,28 @@ async function resolveFreshOzonProductIdForArchiveMysql(shop, online = {}, befor
   return productId;
 }
 
-export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin") {
+export async function onlineProductWarehousesMysql(query = {}, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const shopId = Number(query.shop_id || query.shopId || 0);
   if (!shopId) throw new Error("请选择店铺后再获取 Ozon 仓库");
   const shop = await activeShopForTenantMysql(shopId, tenantId);
-  const warehouses = await fetchOzonWarehouses(shop);
+  const checkCurrentShop = async () => {
+    const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
+    await assertOrderTaskAccessMysql({ id: normalizedTenantId }, options, ["operations"]);
+    const current = await activeShopForTenantMysql(shopId, tenantId);
+    if (current.status !== 'active') throw Object.assign(new Error('店铺已停用，仓库读取已停止'), { statusCode: 403 });
+    const key = String(current.ozon_api_key || current.api_key_hint || '').trim();
+    if (!current.ozon_client_id || !key || key.startsWith('demo')) {
+      throw Object.assign(new Error('店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后刷新仓库'), { statusCode: 409 });
+    }
+    if (String(current.ozon_client_id) !== String(shop.ozon_client_id)
+      || String(current.ozon_api_key || current.api_key_hint || '') !== String(shop.ozon_api_key || shop.api_key_hint || '')) {
+      throw Object.assign(new Error('店铺授权已变更，请重新获取完整仓库列表'), { statusCode: 409 });
+    }
+    return current;
+  };
+  await checkCurrentShop();
+  const warehouses = await fetchOzonWarehouses(shop, { signal: options.signal, beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop });
   return {
     shop_id: shopId,
     shop_name: shop.name || "",
@@ -11603,16 +11620,18 @@ export function onlineProductStockUpdateTargetForTest(row = {}, stock = 0, wareh
   return onlineProductStockUpdateTargetMysql(row, stock, warehouseId);
 }
 
-export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null, tenantId = "admin") {
+export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = null, tenantId = "admin", options = {}) {
   ensureMysqlCutoverEnabled();
   const normalizedTenantId = await resolveShopTenantIdMysql(tenantId);
   const defaultTenant = await isDefaultShopTenantMysql(normalizedTenantId);
   const onlineProductIds = normalizeBulkStockOnlineProductIdsMysql(body);
-  const stock = Math.max(0, Math.round(Number(body.stock ?? body.quantity ?? 888)));
+  const stock = Number(body.stock ?? body.quantity ?? 888);
   const warehouseId = String(body.warehouse_id || body.warehouseId || "").trim();
   const shopId = Number(body.shop_id || body.shopId || 0);
   if (!onlineProductIds.length) throw new Error("请选择需要更新库存的在线商品");
+  if (!Number.isSafeInteger(stock) || stock < 0) throw new Error("库存数量必须是大于等于 0 的整数，请修改库存数量后重试");
   if (!warehouseId) throw new Error("请选择 Ozon 仓库");
+  if (!Number.isSafeInteger(Number(warehouseId)) || Number(warehouseId) <= 0) throw new Error("Ozon 仓库编号无效，请刷新仓库列表后重新选择");
 
   const rows = await mysqlQuery(`
     SELECT op.*, s.name AS shop_name
@@ -11631,6 +11650,18 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
 
   const targetShopId = targetShopIds[0];
   const shop = await activeShopForTenantMysql(targetShopId, normalizedTenantId);
+  const checkCurrentShop = async () => {
+    await assertOrderTaskAccessMysql({ id: normalizedTenantId }, options, ["operations"]);
+    if (options.signal?.aborted) throw options.signal.reason || new Error("库存更新已取消");
+    const current = await activeShopForTenantMysql(targetShopId, normalizedTenantId);
+    if (current.status !== "active") throw Object.assign(new Error("店铺已停用，库存更新已停止"), { statusCode: 403 });
+    const key = String(current.ozon_api_key || current.api_key_hint || "").trim();
+    if (!current.ozon_client_id || !key || key.startsWith("demo")) throw Object.assign(new Error("店铺缺少有效 Ozon Client ID 或 API Key，请到企业店铺配置真实授权后重试"), { statusCode: 409 });
+    if (String(current.ozon_client_id) !== String(shop.ozon_client_id)
+      || key !== String(shop.ozon_api_key || shop.api_key_hint || "").trim()) throw Object.assign(new Error("店铺授权已变更，请刷新商品和仓库后重新更新库存"), { statusCode: 409 });
+    return current;
+  };
+  await checkCurrentShop();
 
   const targets = [];
   const skipped = [];
@@ -11669,17 +11700,34 @@ export async function batchUpdateOnlineProductStocksMysql(body = {}, userId = nu
     skipped,
     response: null
   };
-
+  const saveReceipts = async () => {
+    result.results = ozonStockUpdateReceipts(targets, result.response);
+    result.success_count = result.results.filter(item => item.accepted).length;
+    result.failed_count = result.results.length - result.success_count;
+    result.ok = result.failed_count === 0 && skipped.length === 0;
+    result.message = `Ozon 已接受 ${result.success_count} 个库存更新，失败 ${result.failed_count} 个，跳过 ${skipped.length} 个；实际库存请稍后刷新核对`;
+    for (let index = 0; index < actionRows.length; index += 1) {
+      const receipt = result.results.find(item => Number(item.online_product_id) === Number(actionRows[index].id));
+      const actionId = actionIds[index];
+      if (receipt?.accepted) await finishOnlineProductActionMysql(actionId, "success", { ...result, item: receipt }, "", normalizedTenantId);
+      else await finishOnlineProductActionMysql(actionId, "failed", { ...result, item: receipt }, receipt?.errors.map(item => item.message).join("；") || "未取得库存更新确认", normalizedTenantId);
+    }
+  };
   try {
-    result.response = await updateOzonProductStocks(shop, targets);
-    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "success", result, "", normalizedTenantId));
+    result.response = await updateOzonProductStocks(shop, targets, {
+      signal: options.signal, beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop, allowPartialResults: true
+    });
+    await checkCurrentShop();
+    await saveReceipts();
     invalidateMasterDataCachePrefix("online-products:");
     return result;
   } catch (error) {
     result.ok = false;
     result.error = error.message || String(error);
-    await mapWithConcurrencyMysql(actionIds, 1, (actionId) => finishOnlineProductActionMysql(actionId, "failed", result, result.error, normalizedTenantId));
-    throw new Error(`批量更新 Ozon 库存失败：${result.error}`);
+    result.response = error.stockResponse || result.response || { result: [] };
+    await saveReceipts();
+    result.ok = false;
+    throw Object.assign(new Error(`批量更新 Ozon 库存已停止：${result.error}；已收到 ${result.success_count} 个接受回执，其余 ${result.failed_count} 个未确认，请刷新核对后再操作`), { statusCode: error.statusCode, stockResult: result });
   }
 }
 
