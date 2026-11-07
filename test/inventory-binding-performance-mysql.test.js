@@ -139,7 +139,7 @@ test('inventory create and binding preserve historical inventory while limiting 
       profile.active = null;
       const shapes=new Map();
       for(const call of calls){const sql=shape(call.sql),entry=shapes.get(sql)||{sql,count:0,total_ms:0};entry.count++;entry.total_ms+=call.ms;shapes.set(sql,entry);}
-      report.requests.push({ name, baseline, ms, query_count: calls.length,
+      report.requests.push({ name, ordinal: report.requests.filter(row=>row.name===name).length+1, baseline, ms, query_count: calls.length,
         shapes:[...shapes.values()].sort((a,b)=>b.count-a.count),
         slowest: [...calls].sort((a,b)=>b.ms-a.ms).slice(0,5).map(row=>({ms:row.ms,sql:shape(row.sql)})) });
       return { result, calls };
@@ -199,7 +199,9 @@ test('inventory create and binding preserve historical inventory while limiting 
     });
     await t.test('create from unbound online inventory retains the same SKU and historical ledgers', async () => {
       const snapshots=[];
-      for (const baseline of [true,false,true,false]) {
+      // Start with the actual optimized route so the first request also measures
+      // its once-per-process dictionary initialization, separately from warm runs.
+      for (const baseline of [false,true,false,true]) {
         await reset({create:true});
         const measured=await measure('create_from_online',baseline,()=>routes['POST /api/online-products/create-product']({_session:session,body:{online_product_id:200,order_item_id:200,ozon_sku:'PERF-SKU',owner_person_id:2,created_by_person_id:2,purchase_cost:5,exchange_rate:11.32,structured_naming:{category:'Fixture',accessory:'Style',quantity:1,stock_unit:'unit'}}}));
         assert.equal(Number(measured.result.id),400);
