@@ -19,7 +19,7 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   const transaction=async callback=>{const c=await pool.getConnection();try{await c.beginTransaction();const value=await callback(c);await c.commit();return value;}catch(e){await c.rollback();throw e;}finally{c.release();}};
   await query('CREATE TABLE tenants(id BIGINT PRIMARY KEY,slug VARCHAR(80),status VARCHAR(32),subscription_status VARCHAR(32),subscription_expires_at DATETIME)');
   await query('CREATE TABLE shops(id BIGINT PRIMARY KEY,tenant_id BIGINT NULL,name VARCHAR(255),status VARCHAR(32),ozon_client_id VARCHAR(80))');
-  await query('CREATE TABLE online_products(shop_id BIGINT,ozon_sku VARCHAR(128),name VARCHAR(255),image_url TEXT,offer_id VARCHAR(255),PRIMARY KEY(shop_id,ozon_sku))');
+  await query('CREATE TABLE online_products(shop_id BIGINT,ozon_sku VARCHAR(128) COLLATE utf8mb4_0900_ai_ci,name VARCHAR(255),image_url TEXT,offer_id VARCHAR(255),PRIMARY KEY(shop_id,ozon_sku))');
   await query("INSERT INTO tenants VALUES(1,'default','active','active',NULL),(2,'second','active','active',NULL),(3,'expired','active','expired',NULL)");
   await query("INSERT INTO shops VALUES(11,NULL,'Default shop','active','111111'),(22,2,'Second shop','active','222222'),(33,3,'Expired shop','active','333333')");
   await query("INSERT INTO online_products VALUES(11,'same','Original shared product metadata','https://example.test/image.jpg','offer1'),(22,'same','Other tenant metadata',NULL,'other-offer')");
