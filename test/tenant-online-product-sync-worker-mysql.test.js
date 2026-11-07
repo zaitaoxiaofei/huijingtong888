@@ -20,7 +20,7 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
   const connection = await mysql.createConnection({ socketPath: process.env.TENANT_TEST_MYSQL_SOCKET, user: 'root', dateStrings: true });
   let created = false;
   const originalFetch = globalThis.fetch;
-  let hook = null, mediaHook = null, empty = false, archive = false, withStocks = false;
+  let hook = null, mediaHook = null, empty = false, archive = false, withStocks = false, outsideBucket = false, missingSku = false, unknownStock = false;
   const requests = [], progress = [];
   try {
     assert.equal(Number((await connection.query('SELECT @@skip_networking isolated'))[0][0].isolated), 1);
@@ -34,7 +34,7 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
     await query("INSERT INTO shops(id,tenant_id,name,status,ozon_client_id,ozon_api_key) VALUES(10,NULL,'Legacy','active','10','fixture-key'),(11,1,'Default','active','11','fixture-key'),(20,2,'A','active','20','fixture-key'),(30,3,'B','active','30','fixture-key')");
     const actor = id => ({ personId: 7, roles: ['operations'], tenant: { id, slug: id === 1 ? 'default' : id === 2 ? 'a' : 'b', role: 'member' } });
     const restore = async () => {
-      hook = null; mediaHook = null; empty = false; archive = false; withStocks = false; requests.length = 0; progress.length = 0;
+      hook = null; mediaHook = null; empty = false; archive = false; withStocks = false; outsideBucket = false; missingSku = false; unknownStock = false; requests.length = 0; progress.length = 0;
       await query("UPDATE people SET active=1");
       await query("UPDATE tenant_members SET active=1,business_roles_json=JSON_ARRAY('operations')");
       await query("UPDATE tenants SET subscription_status='active'");
@@ -46,10 +46,10 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
       requests.push({ endpoint, body, shop });
       await hook?.({ endpoint, shop, body });
       let data;
-      if (endpoint === '/v3/product/list') data = { result: { items: empty || !['EMPTY_STOCK', ...(archive ? ['ARCHIVED'] : [])].includes(body.filter.visibility) ? [] : [{ product_id: 101, offer_id: 'shared-offer' }], last_id: '' } };
+      if (endpoint === '/v3/product/list') data = { result: { items: empty || !(outsideBucket ? ['ALL'] : ['ALL', 'EMPTY_STOCK', ...(archive ? ['ARCHIVED'] : [])]).includes(body.filter.visibility) ? [] : [{ product_id: outsideBucket ? 202 : 101, offer_id: 'shared-offer' }], last_id: '' } };
       else if (endpoint === '/v4/product/info/stocks') data = { result: { items: withStocks
         ? [{ product_id: 101, sku: 1101, offer_id: 'shared-offer', stocks: [{ type: 'fbs', warehouse_id: 'fbs-1', present: 0 }] }] : [], cursor: '' } };
-      else if (endpoint === '/v3/product/info/list') data = { items: body.product_id.map(id => ({ id, sku: id + 1, offer_id: 'offer-' + shop, name: 'Product ' + shop, price: '10', images: [] })) };
+      else if (endpoint === '/v3/product/info/list') data = { items: body.product_id.map(id => ({ id, ...(missingSku ? {} : { sku: id + 1 }), offer_id: 'offer-' + shop + (outsideBucket ? '-all-only' : ''), name: 'Product ' + shop, price: '10', images: [], ...(unknownStock ? {} : { stocks: { has_stock: false, stocks: [] } }) })) };
       else throw new Error('Unexpected external request ' + endpoint);
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     };
@@ -62,6 +62,8 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
       resolveInventoryTenantScope: tenant => resolveInventoryTenantScope(tenant, query),
       assertInventoryRecord: (scope, kind, id) => assertInventoryRecord(scope, kind, id, query),
       assertInventoryReferences: (scope, body) => assertInventoryReferences(scope, body, query),
+      // Credential-health logging is exercised by its own service tests.
+      recordOzonSyncHealth: async () => {},
       ensureMysqlCutoverEnabled() {}, ensureOzonStockStorageSchemaMysql: async () => {}, invalidateMasterDataCachePrefix() {},
       throwIfAbortedMysql(signal) { if (signal?.aborted) throw signal.reason; }, OGL_DISPATCH_REFRESH: Symbol('fixture'),
       nullableNumber: value => Number(value) || null, normalizeMysqlNullableDateTime: value => value || null,
@@ -102,6 +104,14 @@ test('actual product sync worker scopes reads/writes, stops after revocation and
       await run(2);
       const rows = await query("SELECT shop_id,present,stock_type,warehouse_id FROM ozon_stock_snapshots WHERE ozon_sku='1101' ORDER BY shop_id,stock_type");
       assert.deepEqual(rows.map(row => [row.shop_id, Number(row.present),row.stock_type,row.warehouse_id]), [[20,0,"fbp_real","flow-confirmed-zero"],[20,0,"fbs_virtual","fbs-1"],[30,77,"fbs_virtual","fbs-1"]]);
+    });
+    await t.test('ALL-only no-SKU zero-stock products persist under a placeholder, but unknown stock is not called pending', async () => {
+      await restore(); outsideBucket = true; missingSku = true;
+      assert.equal((await run(2)).upserted, 1);
+      const saved = await query("SELECT ozon_sku,offer_id FROM online_products WHERE shop_id=20 AND ozon_product_id='202'");
+      assert.deepEqual(saved.map(row => [row.ozon_sku, row.offer_id]), [['__MISSING_SKU__:202', 'offer-20-all-only']]);
+      unknownStock = true;
+      assert.equal((await run(2)).upserted, 0);
     });
     await t.test('empty pending refs never send the unfiltered ALL stock request or clear saved stock', async () => {
       await restore(); empty = true;

@@ -145,8 +145,8 @@ test("fetchOzonProducts can limit product list to pending listing visibility", a
   assert.deepEqual(products.map((item) => item.offer_id), ["pending-101", "pending-102"]);
 });
 
-test("pending listing sync only pulls the strict pending visibility buckets", () => {
-  assert.deepEqual(pendingListingVisibilityFilters(), ["EMPTY_STOCK", "READY_TO_SUPPLY"]);
+test("pending listing sync includes ALL fallback before stock evidence filtering", () => {
+  assert.deepEqual(pendingListingVisibilityFilters(), ["ALL", "EMPTY_STOCK", "READY_TO_SUPPLY"]);
 });
 
 test("pending listing sync reconciles Ozon archived products into local status", () => {
@@ -222,7 +222,7 @@ test("pending listing refs do not fetch full product details", async (t) => {
   });
 
   assert.deepEqual(refs.map((item) => item.id).sort(), [101, 102]);
-  assert.equal(calls.filter((item) => item.url.endsWith("/v3/product/list")).length, 2);
+  assert.equal(calls.filter((item) => item.url.endsWith("/v3/product/list")).length, 3);
   assert.equal(calls.filter((item) => item.url.endsWith("/v3/product/info/list")).length, 0);
 });
 

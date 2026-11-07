@@ -27,6 +27,7 @@ let productLimitsLoadedShopId = null;
 const listRequestGate = createLatestRequestGate();
 const warehouseCacheByShop = new Map();
 let warehouseRequestVersion = 0;
+let stockDialogVersion = 0;
 let dictionaryLoaded = false;
 
 const loading = ref(false);
@@ -39,13 +40,15 @@ const bindDialogVisible = ref(false);
 const bindSubmitting = ref(false);
 const stockDialogVisible = ref(false);
 const stockSubmitting = ref(false);
+const stockUpdateResult = ref(null);
+const stockTargetIds = ref([]);
 const warehousesLoading = ref(false);
 const warehousesError = ref("");
 const productOptionsLoading = ref(false);
 const productLimitLoading = ref(false);
 
 function defaultStatusFilter() {
-  return route.name === "batch-stock-update" ? "ready_for_sale" : "all";
+  return "all";
 }
 
 const state = reactive({
@@ -383,7 +386,7 @@ async function loadWarehousesForStock(shopId, force = false) {
   const scope = currentApiCacheScope();
   const isCurrent = () => version === warehouseRequestVersion && scope === currentApiCacheScope() && Number(stockForm.shop_id) === Number(shopId);
   const tenantKey = authStore.user?.tenant?.id || authStore.user?.tenant?.slug || "legacy";
-  const normalizedShopId = `${tenantKey}:${String(shopId || "")}`;
+  const normalizedShopId = `${scope}:${tenantKey}:${String(shopId || "")}`;
   warehousesError.value = "";
   const cached = warehouseCacheByShop.get(normalizedShopId);
   if (!force && cached && Date.now() - cached.verifiedAt < 60000) {
@@ -451,6 +454,9 @@ async function openBatchStockDialog() {
     return;
   }
   stockForm.shop_id = String(shopId);
+  stockDialogVersion += 1;
+  stockTargetIds.value = [...state.selectedIds];
+  stockUpdateResult.value = null;
   stockForm.stock = 888;
   state.warehouses = [];
   stockForm.warehouse_id = "";
@@ -459,24 +465,43 @@ async function openBatchStockDialog() {
 }
 
 async function submitBatchStock() {
+  if (stockSubmitting.value) return;
   if (warehousesLoading.value || warehousesError.value) return ElMessage.warning("仓库列表尚未核查完整，请先刷新仓库后重试");
   if (!stockForm.warehouse_id) {
     ElMessage.warning("请选择 Ozon 仓库");
     return;
   }
-  const stock = Math.max(0, Math.round(Number(stockForm.stock || 0)));
+  const stock = Number(stockForm.stock);
+  if (!Number.isSafeInteger(stock) || stock < 0) return ElMessage.warning("库存必须是大于或等于零的整数");
+  const requestScope = currentApiCacheScope();
+  const dialogVersion = stockDialogVersion;
+  const shopId = Number(stockForm.shop_id);
+  const selectedIds = [...stockTargetIds.value];
+  if (!selectedIds.length) return ElMessage.warning("请关闭弹窗并重新选择需要更新库存的商品");
+  stockUpdateResult.value = null;
   stockSubmitting.value = true;
   try {
     const result = await apiClient.post("/api/online-products/batch-stock", {
-      online_product_ids: state.selectedIds,
-      shop_id: Number(stockForm.shop_id),
+      online_product_ids: selectedIds,
+      shop_id: shopId,
       warehouse_id: stockForm.warehouse_id,
       stock
     });
-    ElMessage.success(`已更新 ${result?.target_count || 0} 个商品库存为 ${stock}`);
-    stockDialogVisible.value = false;
+    if (dialogVersion !== stockDialogVersion || requestScope !== currentApiCacheScope() || shopId !== Number(stockForm.shop_id)) return;
+    const receivedRows = Array.isArray(result?.results) ? result.results : [];
+    const rows = selectedIds.map(id => {
+      const matches = receivedRows.filter(row => Number(row.online_product_id) === Number(id));
+      return matches.length === 1 ? matches[0] : { online_product_id: id, accepted: false, errors: [{ message: "Ozon 未返回可核对的商品更新结果，请先同步库存后核对" }] };
+    });
+    const accepted = rows.filter(row => row.accepted === true).length;
+    const failed = selectedIds.length - accepted;
+    stockUpdateResult.value = { accepted, failed, rows };
+    stockTargetIds.value = rows.filter(row => row.accepted !== true).map(row => Number(row.online_product_id));
+    ElMessage[failed > 0 ? "warning" : "success"](`Ozon 已接受 ${accepted} 个商品的库存更新，${failed} 个未确认；实际库存以同步结果为准`);
+    if (failed === 0) stockDialogVisible.value = false;
     await loadPageData();
   } catch (error) {
+    if (dialogVersion !== stockDialogVersion || requestScope !== currentApiCacheScope() || shopId !== Number(stockForm.shop_id)) return;
     ElMessage.error(error.message || "批量改库存失败");
   } finally {
     stockSubmitting.value = false;
@@ -1073,14 +1098,19 @@ onDeactivated(() => {
             <strong>{{ stockDialogShopName }}</strong>
           </div>
           <div class="stock-summary-item">
-            <span class="stock-summary-label">已选商品</span>
-            <strong>{{ state.selectedIds.length }}</strong>
+            <span class="stock-summary-label">待处理商品</span>
+            <strong>{{ stockTargetIds.length }}</strong>
           </div>
           <div class="stock-summary-item">
             <span class="stock-summary-label">目标库存</span>
             <strong>{{ Number(stockForm.stock || 0) }}</strong>
           </div>
         </div>
+
+        <el-alert v-if="stockUpdateResult" :title="`Ozon 已接受 ${stockUpdateResult.accepted} 个，${stockUpdateResult.failed} 个未确认`" :type="stockUpdateResult.failed ? 'warning' : 'success'" :closable="false" show-icon>
+          <p>已接受表示 Ozon 确认收到更新，实际库存以同步结果为准。</p>
+          <p v-for="row in stockUpdateResult.rows.filter(item => item.accepted !== true)" :key="row.online_product_id">商品 {{ row.offer_id || row.product_id || row.online_product_id }}：{{ (row.errors || []).map(item => item.message || item.code).filter(Boolean).join('；') || '尚未确认，请同步后核对' }}</p>
+        </el-alert>
 
         <div class="stock-form-grid">
           <section class="stock-field-panel stock-field-panel-wide">
@@ -1150,7 +1180,7 @@ onDeactivated(() => {
         <div class="erp-dialog-footer stock-dialog-footer">
           <el-button class="erp-btn erp-btn-secondary" @click="stockDialogVisible = false">取消</el-button>
           <el-button class="erp-btn erp-btn-primary" type="primary" :loading="stockSubmitting" :disabled="warehousesLoading || Boolean(warehousesError) || !stockForm.warehouse_id" @click="submitBatchStock">
-            确认更新 {{ state.selectedIds.length }} 个商品
+            确认更新 {{ stockTargetIds.length }} 个商品
           </el-button>
         </div>
       </template>

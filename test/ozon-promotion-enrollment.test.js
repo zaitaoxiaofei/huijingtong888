@@ -1,8 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizePromotionEnrollment, promotionEnrollmentOutcome } from "../src/services/ozon-promotion-enrollment.js";
+import { normalizePromotionEnrollment, normalizePromotionProductPage, validatePromotionEnrollmentFacts, promotionEnrollmentOutcome } from "../src/services/ozon-promotion-enrollment.js";
 
 const product = (id = 1, currency = "RUB") => ({ product_id: id, action_price: { amount: "88.00", currency }, stock: "8" });
+const money = amount => ({ amount, currency: "CNY" });
+
+test("v2 activity price normalization keeps a stable product-price base and blocks ambiguous currency", () => {
+  const row = { id: 1, price: money("200"), action_price: money("100"), max_action_price: money("120"), marketplace_seller_price: money("90") };
+  const normalized = normalizePromotionProductPage([row])[0];
+  assert.equal(normalized.enrollment_base_price, 200);
+  assert.equal(normalized.action_price, 100);
+  assert.equal(normalized.price_money_verified, true);
+  assert.equal(normalized.currency, "CNY");
+  assert.equal(normalizePromotionProductPage([{ ...row, action_price: money("50") }])[0].enrollment_base_price, 200);
+  for (const patch of [{ action_price: { amount: "100", currency: "RUB" } }, { price: 200 }, { price: { amount: "200" } }, { price: { amount: "200.001", currency: "CNY" } }]) {
+    const invalid = normalizePromotionProductPage([{ ...row, ...patch }])[0];
+    assert.equal(invalid.enrollment_base_price, null);
+    assert.equal(invalid.currency, "");
+    assert.equal(invalid.price_money_verified, false);
+  }
+});
+
+test("fresh enrollment preflight uses current shop Money and threshold, without silently decreasing the submitted price", () => {
+  const request = normalizePromotionEnrollment(123, [{ id: 1, action_price: 100, currency: "CNY" }]).products;
+  const row = { id: 1, price: money("200"), action_price: money("80"), max_action_price: money("120") };
+  assert.deepEqual(validatePromotionEnrollmentFacts(request, [row], {}).products, request);
+  for (const rows of [[], [{ ...row, max_action_price: money("90") }], [{ ...row, action_price: { amount: "80", currency: "RUB" } }], [{ ...row, min_seller_price: money("110") }]]) {
+    const result = validatePromotionEnrollmentFacts(request, rows, {});
+    assert.equal(result.products.length, 0);
+    assert.equal(result.failures.length, 1);
+  }
+});
 
 test("official enrollment preserves explicit Money and stock without truncating a batch", () => {
   assert.deepEqual(normalizePromotionEnrollment(123, [product(), product(2, "CNY")]), { action_id: 123, products: [product(), product(2, "CNY")] });

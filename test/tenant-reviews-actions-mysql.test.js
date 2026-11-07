@@ -32,7 +32,15 @@ test("reviews and Ozon actions authorize enterprise shops before network calls a
       let response = { result: {} };
       if (endpoint === "/v1/actions") response = { result: includeAction ? [{ id: 123, action_type: "STOCK_DISCOUNT" }] : [] };
       if (endpoint === "/v1/actions/products") response = { result: { products: removedActionProducts.has(client) ? [] : [{ id: 123, add_mode: "MANUAL", action_price: 1, price: 2 }], total: removedActionProducts.has(client) ? 0 : 1, last_id: "" } };
-      if (endpoint === "/v2/actions/products") response = { products: [], total: 0, last_id: "" };
+      if (["/v2/actions/candidates", "/v2/actions/products"].includes(endpoint)) {
+        const products = endpoint === "/v2/actions/products" && removedActionProducts.has(client) ? [] : [{ id: 123, price: { amount: "2", currency: "CNY" }, action_price: { amount: "1", currency: "CNY" }, max_action_price: { amount: "1", currency: "CNY" } }];
+        response = { products, total: products.length, last_id: "" };
+      }
+      if (endpoint === "/v1/actions/products/update") {
+        const exit = Number(JSON.parse(options.body).products[0].action_price.amount) > 1;
+        if (exit) removedActionProducts.add(client);
+        response = { active_product_ids: exit ? [] : ["123"], deactivated_product_ids: exit ? ["123"] : [], rejected: [], warnings: [] };
+      }
       if (endpoint === "/v1/actions/products/deactivate") {
         removedActionProducts.add(client);
         response = { result: { product_ids: [123], rejected: [] } };
@@ -71,7 +79,7 @@ test("reviews and Ozon actions authorize enterprise shops before network calls a
     });
 
     const actionFunctions = [actions.listOzonActionsMysql, actions.listOzonActionCandidatesMysql, actions.listOzonActionProductsMysql, actions.addOzonActionProductsMysql, actions.removeOzonActionProductsMysql, actions.toggleOzonSellerActionMysql, actions.archiveOzonSellerActionMysql];
-    const payload = { actionId:123,products:[{product_id:123,sku:123,action_price:1,currency:"RUB"}],confirmSharedPrice:true,enabled:true };
+    const payload = { actionId:123,products:[{product_id:123,sku:123,action_price:1,currency:"CNY"}],confirmSharedPrice:true,enabled:true };
     await t.test("all seven external action APIs reject foreign store IDs before making requests",async()=>{
       const before = requests.length;
       for(const id of [1,2]) for(const action of actionFunctions) await assert.rejects(action({...payload,storeId:30},{session:session(id)}),/店铺不存在/);

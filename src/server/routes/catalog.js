@@ -14,7 +14,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "GET /api/products/hidden": (req, url) => services.hiddenProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products": (req, url) => services.onlineProducts(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/online-products/limits": (req, url) => services.onlineProductLimits(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
-    "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req), { signal: req._abortSignal }),
+    "GET /api/online-products/warehouses": (req, url) => services.onlineProductWarehouses(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req), { signal: req._abortSignal, session: req._session }),
     "GET /api/sku-inventory-recipes": (req, url) => services.skuInventoryRecipe(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/mappings": (req, url) => services.mappings(Object.fromEntries(url.searchParams.entries()), tenantIdFromRequest(req)),
     "GET /api/inventory-product-naming/options": (req, url) => services.inventoryProductNamingOptions(Object.fromEntries(url.searchParams.entries()), req._session),
@@ -56,7 +56,7 @@ export function createCatalogRoutes({ services, readJson }) {
     "POST /api/online-products": async (req) => services.createOnlineProduct(await readJson(req), tenantIdFromRequest(req)) || { ok: true },
     "POST /api/online-products/bind": async (req) => services.bindOnlineProduct(await readJson(req), tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }) || { ok: true },
     "POST /api/sku-inventory-recipes": async (req) => services.saveSkuInventoryRecipe(await readJson(req), { tenantId: tenantIdFromRequest(req) }) || { ok: true },
-    "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId, tenantIdFromRequest(req)),
+    "POST /api/online-products/batch-stock": async (req) => services.batchUpdateOnlineProductStocks(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { signal: req._abortSignal, session: req._session }),
     "POST /api/online-products/action": async (req) => services.performOnlineProductAction(await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session, signal: req._abortSignal }),
     "POST /api/online-products/create-product": async (req) => {
       const body = await readProductSaveJson(readJson, req);

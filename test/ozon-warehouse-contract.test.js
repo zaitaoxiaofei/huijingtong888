@@ -106,5 +106,5 @@ test('out-of-order responses for the same shop cannot roll back the latest verif
   const first = f.load(1,true), second = f.load(1,true);
   complete[1]({ warehouses: [{ warehouse_id: 'new' }] }); await second;
   complete[0]({ warehouses: [{ warehouse_id: 'old' }] }); await first;
-  assert.equal(f.stockForm.warehouse_id,'new'); assert.equal(f.cache.get('2:1').rows[0].warehouse_id,'new'); assert.equal(f.loading.value,false);
+  assert.equal(f.stockForm.warehouse_id,'new'); assert.equal(f.cache.get('tenant-2:2:1').rows[0].warehouse_id,'new'); assert.equal(f.loading.value,false);
 });

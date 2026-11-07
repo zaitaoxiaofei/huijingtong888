@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { INVENTORY_FLOW_SCHEMA } from '../../src/services/inventory-flow-schema.js';
+import { SKU_TRAFFIC_DAILY_SCHEMA } from '../../src/services/sku-traffic-daily-schema.js';
 import { readFile } from 'node:fs/promises';
 import mysql from 'mysql2/promise';
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from '../../src/services/order-profit-calculation-schema.js';
@@ -40,7 +41,7 @@ export async function createTenantMysqlFixture(prefix = 'inventory') {
     };
     const privateFiles = await staticSchema('tenant-private-files-schema.js', 'TENANT_PRIVATE_FILES_SCHEMA');
     const salesRefresh = await staticSchema('mysql-inventory-alert-snapshots.js', 'TENANT_INVENTORY_SALES_REFRESH_SCHEMA');
-    const constants = { INVENTORY_FLOW_SCHEMA, ORDER_PROFIT_CALCULATION_SCHEMA, ORDER_PROFIT_DAILY_FX_SCHEMA, ORDER_PROFIT_FX_STATE_SCHEMA, OGL_DISPATCH_SCHEMA_SQL, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
+    const constants = { SKU_TRAFFIC_DAILY_SCHEMA, INVENTORY_FLOW_SCHEMA, ORDER_PROFIT_CALCULATION_SCHEMA, ORDER_PROFIT_DAILY_FX_SCHEMA, ORDER_PROFIT_FX_STATE_SCHEMA, OGL_DISPATCH_SCHEMA_SQL, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
     for (const name of ['TENANT_AI_LIMITS_SCHEMA', 'TENANT_AI_USAGE_SCHEMA', 'AI_IMAGE_TASK_OWNERS_SCHEMA']) {
       constants[name] = await staticSchema('ai-tenant-schema.js', name);
     }
