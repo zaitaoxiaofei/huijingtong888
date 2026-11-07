@@ -32,12 +32,13 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    await query('ALTER TABLE seller_sku_traffic_daily DROP PRIMARY KEY,ADD PRIMARY KEY(tenant_id,shop_id,date_key,sku)');
   });
   const service=createSkuTrafficDailyService({query,execute,transaction});await service.ensureSchema();
-  const pipeline=bootstrap=>{
-   const child=spawnSync(process.execPath,['test/fixtures/sku-traffic-daily-pipeline.mjs',...(bootstrap?['--bootstrap']:[])],{cwd:new URL('..',import.meta.url).pathname,encoding:'utf8',env:{...process.env,DB_CLIENT:'mysql',DB_HOST:'127.0.0.1',DB_NAME:database,DB_USER:'root',DB_PASSWORD:'',DB_SOCKET_PATH:socketPath}});
+  const pipeline=(bootstrap,file='sku-traffic-daily-pipeline.mjs')=>{
+   const child=spawnSync(process.execPath,['test/fixtures/'+file,...(bootstrap?['--bootstrap']:[])],{cwd:new URL('..',import.meta.url).pathname,encoding:'utf8',env:{...process.env,DB_CLIENT:'mysql',DB_HOST:'127.0.0.1',DB_NAME:database,DB_USER:'root',DB_PASSWORD:'',DB_SOCKET_PATH:socketPath}});
    assert.equal(child.status,0,child.stdout+'\n'+child.stderr);return child.stdout;
   };
   pipeline(true);
   await t.test('complete controlled queue publishes daily facts and only one temporary page copy',()=>{const result=JSON.parse(pipeline(false).trim().split('\n').at(-1));assert.equal(result.ok,true);assert.equal(result.duplicateMetricRows,0);});
+  await t.test('replayed results repair missing child rows without resetting live leases or duplicating pages',()=>{const result=JSON.parse(pipeline(false,'seller-analytics-queue-replay.mjs').trim().split('\n').at(-1));assert.equal(result.ok,true);assert.equal(result.missingChildRepaired,true);});
   const day=trafficDays().at(-1);
   const makeRun=(id,store='111111',count=1)=>({id,store_id:store,daily_traffic:true,status:'success',current_period:{date_from:day,date_to:day},requests:[{source_key:'all_metrics',endpoint_type:'by_sku',page_index:0,status:'success',auto_all_pages:true,limit:100,returned_count:count,snapshot_id:'evidence'}]});
   const reserve=async(id,key='admin',shop=11)=>execute("INSERT INTO seller_sku_traffic_days(tenant_id,shop_id,date_key,status,run_id,requested_at) VALUES(?,?,?,'pending',?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE status='pending',run_id=VALUES(run_id)",[key,shop,day,id]);
