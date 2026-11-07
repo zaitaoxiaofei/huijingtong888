@@ -20,13 +20,26 @@ export async function prepareProductWorkflowRun(payload,session,services) {
     const actual=category.attributes.find(a=>a.attributeId===node.attributeId);
     if(!actual)throw workflowError(`“${node.label}”不属于当前类目，请重新导入类目模板`);
     if(Number(node.dictionaryId)!==Number(actual.dictionaryId)||Boolean(node.multiple)!==Boolean(actual.multiple))throw workflowError(`“${node.label}”的类目属性定义已变化，请重新导入`);
-    node.required=Boolean(node.required||actual.required);
+    // Platform-required fields are checked by the listing editor, not by image production.
+    node.platformRequired=actual.platformRequired;
   }
-  // Generated description and tags are supplied by copy nodes. Other required category inputs must be exposed or fixed by the engineer.
-  const missing=category.attributes.filter(a=>a.required&&![4191,23171].includes(a.attributeId)&&!definition.nodes.some(n=>n.type==='attribute'&&Number(n.attributeId)===a.attributeId));
-  if(missing.length)throw workflowError(`类目模板仍有必填属性未配置：${missing.map(a=>a.label).join('、')}。请在新建／编辑流程中添加这些属性节点并设置默认值或交给运营填写。`);
   definition.category=category;
   const variants=expandWorkflowVariants(definition,payload.variants,payload.sharedValues||{});
+  for(const node of definition.nodes.filter(n=>n.type==='attribute'&&n.dictionaryId)) {
+    const selectedIds=[...new Set(variants.flatMap(v=>[v.values[node.id]].flat()).filter(v=>v!==''&&v!=null).map(Number))];
+    const verified=new Map(category.attributes.find(a=>a.attributeId===node.attributeId).options.map(o=>[Number(o.id),o]));
+    for(const id of selectedIds.filter(id=>!verified.has(id))) {
+      const hint=node.options?.find(o=>Number(o.id)===id)?.label;
+      if(!hint)throw workflowError(`“${node.label}”的选项未核实，请从类目下拉列表重新选择`);
+      const rows=await services.listingOzonAttributeValues({description_category_id:category.descriptionCategoryId,type_id:category.typeId,attribute_id:node.attributeId,keyword:hint,limit:2000},session);
+      const actual=rows.find(row=>Number(row.dictionary_value_id||row.id)===id);
+      if(!actual)throw workflowError(`“${node.label}”的选项不在当前类目字典范围内，请重新选择`);
+      verified.set(id,{id,label:actual.display_value_zh||actual.value_zh||actual.label||actual.value||actual.name});
+    }
+    node.options=[...verified.values()];
+    category.attributes.find(a=>a.attributeId===node.attributeId).options=node.options;
+  }
+  validateWorkflow(definition);
   validateWorkflowVariants(definition,variants);
   const template=await services.listingCategoryTemplateDetail(listing.templateId,session);
   const listingSnapshot=Object.fromEntries(['id','template_name','category_name','ozon_category_id','description_category_id','type_id','attributes','category_attributes','required_attributes','editable_payload'].filter(key=>template[key]!==undefined).map(key=>[key,template[key]]));

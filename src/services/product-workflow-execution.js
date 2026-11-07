@@ -6,10 +6,15 @@ export function workflowGenerationInput(definition,variant,node,results) {
   const context=workflowInputContext(definition,variant,node,results);
   const configured=workflowNodeForVariant(node,variant);
   if(node.type==='copy')return {
+    ...(definition.bindings&&node.target!=='bundle'?{workflowOutput:node.target,workflowNodeLabel:node.label}:{}),
     productName:String(Object.values(context.facts)[0]||variant.label),summary:JSON.stringify(context.facts),
-    exactProductIdentity:JSON.stringify(context.facts),rules:[definition.globalPrompt,configured.prompt,'Use only confirmed facts. Output natural Russian.'],
+    exactProductIdentity:JSON.stringify(context.facts),rules:[definition.globalPrompt,configured.prompt,definition.bindings?'Use only confirmed facts. Follow configured language and output rules.':'Use only confirmed facts. Output natural Russian.'],
     sourceContext:{workflowFacts:context.facts}
   };
+  const refsByUrl=new Map();
+  for(const ref of context.refs){const prior=refsByUrl.get(ref.url);if(prior){prior.label+=` / ${ref.label}`;if(!String(prior.role||'').includes(ref.role||''))prior.role=`${prior.role||''} / ${ref.role||''}`;}else refsByUrl.set(ref.url,{...ref});}
+  context.refs=[...refsByUrl.values()];
+  if(context.refs.length>8)throw Object.assign(new Error(`${node.label}引用超过 8 张图片，请减少输入或指定本张的参考槽位，避免参考图被截断`),{status:400});
   return {
     sourceImageUrl:context.refs[0]?.url,sourceImageUrls:context.refs.map(r=>r.url),imageCount:1,ratio:node.ratio,autoCrop:false,
     finalPrompt:[definition.globalPrompt,configured.prompt,`CONFIRMED FACTS: ${JSON.stringify(context.facts)}`,
@@ -34,9 +39,9 @@ function acceptOutput(node,raw) {
     if(!url)throw new Error(`${node.label}没有返回可用图片`);
     return {url};
   }
-  const text={title:raw.title||raw.titles?.[0]||'',tags:raw.tags||[],description:raw.description||''};
+  const text={text:raw.description||raw.text||'',title:raw.title||raw.titles?.[0]||'',tags:raw.tags||[],description:raw.description||''};
   if(node.target&&node.target!=='bundle')return {text:{[node.target]:text[node.target]}};
-  return {text};
+  return {text:{title:text.title,tags:text.tags,description:text.description}};
 }
 
 // One bounded tick, independent of any browser. commit persists submit intent before creating an AI task.

@@ -63,10 +63,13 @@ test('category properties preserve only chosen dictionary values and map into ea
   validateWorkflowVariants(run.payload.definition,run.payload.variants);
   run.payload.variants[1].values[node.id]=999;assert.throws(()=>validateWorkflowVariants(run.payload.definition,run.payload.variants),/未核实/);
 });
-test('submission binds the owned category schema and rejects missing required property mappings',async()=>{
+test('submission binds the owned category schema without requiring every platform attribute',async()=>{
   const run=fixture();
   const services={listingCategoryTemplateDetail:async()=>({id:7,description_category_id:100,type_id:200,editable_payload:{}}),listingOzonCategoryAttributes:async()=>[{id:55,name_zh:'包装数量',is_required:true}]};
-  await assert.rejects(prepareProductWorkflowRun(run.payload,{},services),/包装数量/);
+  const partial=await prepareProductWorkflowRun(run.payload,{},services);
+  assert.equal(partial.executionMode,'background');
+  assert.equal(partial.definition.category.attributes[0].platformRequired,true);
+  assert.equal(partial.definition.category.attributes[0].required,false);
   const attr={...createWorkflowNode('attribute','quantity'),attributeId:55,dictionaryId:0,label:'包装数量',scope:'shared',defaultValue:'1',multiple:false};
   run.payload.definition.nodes.splice(1,0,attr);
   const payload=await prepareProductWorkflowRun({...run.payload,sharedValues:{quantity:'1'}},{},services);
@@ -78,4 +81,44 @@ test('lost authorization or lease stops AI submission after the checkpoint',asyn
   ai.commit=async()=>{saved=true;};ai.guard=async()=>{throw new Error('lease lost');};
   await assert.rejects(advanceProductWorkflow(run,ai),/lease lost/);
   assert.equal(saved,true);assert.equal(ai.calls.length,0);
+});
+
+test('engineer fixed values cannot be replaced by production inputs',()=>{
+  const definition=keyCaseWorkflow();
+  const material=definition.nodes.find(n=>n.id==='material');
+  material.valueSource='engineer';material.defaultValue='TPU';
+  const [variant]=expandWorkflowVariants(definition,[{id:'one',values:{material:'fake'}}],{material:'fake shared'});
+  assert.equal(variant.values.material,'TPU');
+});
+
+test('generated description mapping and rich content use each variant approved output',()=>{
+  const run=fixture();
+  run.payload.definition.nodes.splice(1,0,{...createWorkflowNode('attribute','summary'),attributeId:4191,dictionaryId:0,valueSource:'generated',generatedTarget:'description',required:true});
+  for(const variant of run.payload.variants){
+    run.payload.outputs[variant.id]={};
+    for(const node of run.payload.definition.nodes){
+      if(node.type==='image')run.payload.outputs[variant.id][node.id]={approved:true,url:`https://example.test/${variant.id}/${node.id}.png`};
+      if(node.type==='approval')run.payload.outputs[variant.id][node.id]={approved:true};
+      if(node.type==='copy')run.payload.outputs[variant.id][node.id]={approved:true,text:{title:variant.id,tags:['#key'],description:`Description ${variant.id}`}};
+    }
+  }
+  validateWorkflowVariants(run.payload.definition,run.payload.variants);
+  const draft=buildWorkflowDraft(run.payload.definition,run.payload.variants,run.payload.outputs,{},run.id);
+  for(const row of draft.template_payload.editable_payload.variants){
+    const rich=JSON.parse(row.rich_content_json);
+    assert.equal(rich.content[0].blocks[0].img.src,row.primary_image);
+    assert.equal(rich.content[0].blocks[0].text.items[0].content,row.description);
+    assert.equal(row.dynamic_attributes[4191].value,row.description);
+  }
+});
+
+test('server rejects fabricated dictionary choices and restores authoritative labels',async()=>{
+  const run=fixture();
+  run.payload.definition.nodes.splice(1,0,{...createWorkflowNode('attribute','choice'),attributeId:55,dictionaryId:5,multiple:false,options:[{id:999,label:'伪造值'}],required:false});
+  for(const variant of run.payload.variants)variant.values.choice=999;
+  const services={listingCategoryTemplateDetail:async()=>({id:7,description_category_id:100,type_id:200}),listingOzonCategoryAttributes:async()=>[{id:55,name:'颜色',dictionary_id:5}],listingOzonAttributeValues:async()=>[]};
+  await assert.rejects(prepareProductWorkflowRun(run.payload,{},services),/不在当前类目字典/);
+  services.listingOzonAttributeValues=async()=>[{dictionary_value_id:999,value:'真实颜色'}];
+  const prepared=await prepareProductWorkflowRun(run.payload,{},services);
+  assert.equal(prepared.definition.nodes.find(n=>n.id==='choice').options[0].label,'真实颜色');
 });
