@@ -27,6 +27,7 @@ import {
 } from "../../api/sellerAnalytics";
 import { apiClient } from "../../utils/api";
 import { getAnalyticsPeriodDateRange } from "../../utils/analytics-date-range";
+import { createCollectionRefreshGate } from "../../utils/seller-analytics-progress";
 import { isSellerAnalyticsStoreMismatch, isSellerAnalyticsValidationReady, waitForSellerAnalyticsPreparation } from "../../utils/seller-analytics-recognition";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 
@@ -350,7 +351,9 @@ function handleRateSort(sortKey) {
   handleSearch();
 }
 let pollTimer = 0;
+let pollGeneration = 0;
 let pluginPollTimer = 0;
+let lastPluginWakeAt = 0;
 let lastNotifiedRunId = "";
 
 function wait(ms) {
@@ -436,7 +439,7 @@ const collectStatus = computed(() => {
     return {
       tone: "warning",
       title: "正在采集",
-      detail: `${period} · 已完成 ${done}/${total}`
+      detail: `${period} · 接口 ${done}/${total} · 已展示 ${totalProductCount.value} 个商品，采集中数据持续更新`
     };
   }
   if (run.status === "success") {
@@ -898,8 +901,9 @@ async function refreshData(silent = false, options = {}) {
     cacheFilter();
     if (options.refreshMeta !== false) markMetaStale();
     const params = buildAnalysisQueryParams();
+    const queryKey = JSON.stringify(params);
     const nextAnalysis = await getSellerAnalyticsAnalysis(params);
-    if (params.store_id !== selectedStoreId.value) return;
+    if (queryKey !== JSON.stringify(buildAnalysisQueryParams())) return;
     analysis.value = nextAnalysis || analysis.value;
     if (options.refreshMeta !== false) {
       await loadRunsMeta(true);
@@ -1153,6 +1157,7 @@ async function createPluginCollectRun(payload = {}) {
 }
 
 function wakeAnalyticsPlugin() {
+  lastPluginWakeAt = Date.now();
   window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_WAKE", expectedStoreId: selectedStoreId.value, pluginInstanceId: pluginInstanceId.value }, window.location.origin);
 }
 
@@ -1928,17 +1933,27 @@ function tableRowClassName({ row }) {
 
 function startPolling() {
   stopPolling();
+  const generation = pollGeneration;
+  const shouldRefresh = createCollectionRefreshGate();
+  let inFlight = false;
   pollTimer = window.setInterval(async () => {
-    if (!runningRun.value) return;
-    const runningId = runningRun.value.id;
-    await loadRunsMeta(true).catch(() => {});
-    if (!collectRuns.value.some((run) => run.id === runningId && ["pending", "running"].includes(run.status))) {
-      await refreshData(true, { refreshMeta: false }).catch(() => {});
-    }
+    if (inFlight || !runningRun.value) return;
+    inFlight = true;
+    const before = {...runningRun.value};
+    try {
+      await loadRunsMeta(true).catch(() => {});
+      if (generation !== pollGeneration) return;
+      const after = collectRuns.value.find(run => run.id === before.id);
+      if (!loading.value && shouldRefresh(before, after)) {
+        await refreshData(true, { refreshMeta: false }).catch(() => {});
+      }
+      if (!runningRun.value) stopPolling();
+    } finally { inFlight = false; }
   }, 5000);
 }
 
 function stopPolling() {
+  pollGeneration += 1;
   window.clearInterval(pollTimer);
   pollTimer = 0;
 }
@@ -1946,6 +1961,7 @@ function stopPolling() {
 function startPluginPolling() {
   stopPluginPolling();
   pluginPollTimer = window.setInterval(() => {
+    if (runningRun.value && Date.now() - lastPluginWakeAt >= 60000) wakeAnalyticsPlugin();
     Promise.all([loadPluginStatus(), loadPluginValidation(), loadAuthBindingStatus(), loadBrowserProfileStatus()]).catch(() => {});
   }, 5000);
 }
@@ -1978,7 +1994,7 @@ function requestPluginInstance() {
   window.postMessage({ type: "BAODAN_ANALYTICS_PLUGIN_INSTANCE_REQUEST" }, window.location.origin);
 }
 
-watch(() => runningRun.value?.id, startPolling);
+watch(() => runningRun.value?.id, (id) => { if (id) startPolling(); });
 watch(latestCurrentPeriodRun, (run, previousRun) => {
   const wasActive = previousRun?.id === run?.id && ["pending", "running"].includes(previousRun?.status);
   if (!run || run.status !== "success" || !wasActive || lastNotifiedRunId === run.id) return;
@@ -2105,7 +2121,7 @@ onDeactivated(() => {
           <div><span>数据来源</span><strong>ERP 本地快照</strong><em>刷新不请求 Ozon</em></div>
           <div><span>最新入库</span><strong>{{ latestText || "暂无数据" }}</strong><em>北京时间</em></div>
           <div><span>数据区间</span><strong>{{ runPeriodText(latestCurrentPeriodRun) }}</strong><em>{{ periodHint }}</em></div>
-          <div><span>完整度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
+          <div><span>接口进度</span><strong>{{ runCompleteness(latestCurrentPeriodRun) }}</strong><em>{{ runTriggerLabel(latestCurrentPeriodRun) }}</em></div>
         </div>
         <div class="seller-sync-assistant__progress">
           <div class="seller-sync-assistant__progress-row" :class="`seller-sync-assistant__progress-row--${prepareFlow.tone}`">
