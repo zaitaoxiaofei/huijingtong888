@@ -130,7 +130,7 @@ test("inventory desktop table uses the shared keyboard-accessible responsive fra
 test("mobile stock alerts reuse the paged alert API and expose operational metrics", () => {
   assert.match(router, /name: "mobile-stock-alerts", component: MobileStockAlertsView/);
   assert.match(mobileStockAlerts, /mode: "fbp-alerts"/);
-  assert.match(mobileStockAlerts, /\/api\/stock-alerts\?\$\{params\(nextPage\)\.toString\(\)\}/);
+  assert.match(mobileStockAlerts, /\/api\/stock-alerts\?\$\{[^}]+\}/);
   assert.match(mobileStockAlerts, /FBP可售/);
   assert.match(mobileStockAlerts, /建议备货/);
 });

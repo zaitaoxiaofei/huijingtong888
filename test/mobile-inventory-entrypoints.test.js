@@ -35,3 +35,28 @@ test('identity saves cannot change a pending stocktake form or apply stale inven
  assert.equal(sut.detailProduct.value.id,102);assert.equal(sut.detailProduct.value.name,'新目标');assert.equal(events.some(item=>item.event==='metadata-saved'),false);
  hold=true;const pending=sut.metadataSaved({product:{id:102,name:'另一次保存'}});h.scope='other';sut.clear();release(ledger);await pending;assert.equal(sut.editedProduct.value,null);assert.equal(events.some(item=>item.event==='metadata-saved'),false);
 });
+
+test('mobile alert actions accept only canonical positive product IDs and never mapping, SKU or online IDs',async()=>{
+ const h=await component('views/mobile/MobileStockAlertsView.vue'),sut=h.definition.setup({}, {expose(){}});
+ assert.equal(sut.productId({product_id:101,mapping_id:501}),101);assert.equal(sut.productId({product_id:'102'}),102);
+ for(const row of [{id:501,mapping_id:501,ozon_product_id:101},{product_id:null,id:101},{product_id:-1},{product_id:1.5},{product_id:'invalid'}])assert.equal(sut.productId(row),0);
+});
+
+test('alert identity refresh rereads the loaded page range and retains its query and backend metrics',async()=>{
+ let renamed=false;const h=await component('views/mobile/MobileStockAlertsView.vue',{get:async url=>{const p=new URL(url,'http://localhost:8788').searchParams;return{rows:[{product_id:101,ozon_sku:`S-${p.get('page')}`,product_name:renamed?'新名称':'旧名称',fbp_available:5,suggested_qty:12}],page:Number(p.get('page')),total:60};}}),sut=h.definition.setup({}, {expose(){}});
+ sut.query.value='1-3-101';await sut.loadAlerts();await sut.loadAlerts({append:true});await sut.loadAlerts({append:true});assert.equal(sut.page.value,3);assert.equal(sut.rows.value.length,3);const start=h.calls.length;renamed=true;await sut.loadAlerts({refreshLoaded:true});
+ const requests=h.calls.slice(start).map(call=>new URL(call.path,'http://localhost:8788').searchParams);assert.deepEqual(requests.map(p=>p.get('page')),['1','2','3']);assert.equal(requests[0].get('refresh'),'1');assert.equal(requests[1].has('refresh'),false);assert.ok(requests.every(p=>p.get('query')==='1-3-101'&&p.get('mode')==='fbp-alerts'&&p.get('pageSize')==='20'));
+ assert.equal(sut.page.value,3);assert.equal(sut.rows.value.length,3);assert.equal(sut.total.value,60);assert.ok(sut.rows.value.every(row=>row.product_name==='新名称'&&row.fbp_available===5&&row.suggested_qty===12));assert.equal(h.calls.some(call=>call.method==='POST'),false);
+});
+
+test('late alert queries and prior-enterprise responses cannot replace current rows or loading state',async()=>{
+ let release;const h=await component('views/mobile/MobileStockAlertsView.vue',{get:async url=>url.includes('query=old')?new Promise(resolve=>release=resolve):{rows:[{product_id:102}],page:1,total:1}}),sut=h.definition.setup({}, {expose(){}});
+ sut.query.value='old';const old=sut.loadAlerts();sut.query.value='new';await sut.loadAlerts();release({rows:[{product_id:101}],page:1,total:1});await old;assert.equal(sut.rows.value[0].product_id,102);assert.equal(sut.loading.value,false);
+ sut.query.value='old';const pending=sut.loadAlerts();h.scope='B';sut.clearScope();release({rows:[{product_id:101}],page:4,total:99});await pending;assert.equal(sut.rows.value.length,0);assert.equal(sut.total.value,0);assert.equal(sut.page.value,1);assert.equal(sut.loading.value,false);
+});
+
+test('an unsubmitted alert search stays a draft while append and identity refresh retain the applied keyword',async()=>{
+ const h=await component('views/mobile/MobileStockAlertsView.vue',{get:async url=>{const p=new URL(url,'http://localhost:8788').searchParams;return{rows:[{product_id:101,ozon_sku:`SKU-${p.get('page')}`}],page:Number(p.get('page')),total:60};}}),sut=h.definition.setup({}, {expose(){}});
+ sut.query.value='applied';await sut.loadAlerts();sut.query.value='draft';await sut.loadAlerts({append:true});await sut.loadAlerts({refreshLoaded:true});
+ assert.equal(sut.query.value,'draft');assert.equal(sut.appliedQuery.value,'applied');assert.equal(sut.rows.value.length,2);assert.equal(sut.page.value,2);assert.ok(h.calls.every(call=>new URL(call.path,'http://localhost:8788').searchParams.get('query')==='applied'));
+});
