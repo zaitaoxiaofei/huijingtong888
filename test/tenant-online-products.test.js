@@ -39,8 +39,8 @@ test("online product stock and shop lookup routes derive scope from the session"
   await routes["POST /api/online-products/action"](req);
   assert.deepEqual(calls, [
     ["limits", { shop_id: "10" }, "42"],
-    ["warehouses", { shop_id: "10" }, "42"],
-    ["stock", { online_product_ids: [10], tenant_id: 99 }, 7, "42"],
+    ["warehouses", { shop_id: "10" }, "42", { session: req._session, signal: req._abortSignal }],
+    ["stock", { online_product_ids: [10], tenant_id: 99 }, 7, "42", { session: req._session, signal: req._abortSignal }],
     ["action", { online_product_ids: [10], tenant_id: 99 }, 7, "42", { session: req._session, signal: req._abortSignal }]
   ]);
   assert.equal(calls[3][4].session, req._session);
@@ -164,7 +164,7 @@ test("online-product tenant UI exposes only the scoped stock action and avoids g
   assert.match(view, /if \(!canSyncOnline\.value\) return;/);
   assert.match(view, /v-if="tenantCanUpdateStocks"[^\n]+@click="openBatchStockDialog"/);
   assert.match(view, /if \(showProductLimitPanel\.value\) params\.set\("batchStock", "1"\)/);
-  assert.match(view, /const normalizedShopId = `\$\{tenantKey\}:\$\{String\(shopId \|\| ""\)\}`/);
+  assert.match(view, /const normalizedShopId = `\$\{scope\}:\$\{tenantKey\}:\$\{String\(shopId \|\| ""\)\}`/);
   assert.match(view, /v-if="canOperate \|\| canManageInventory \|\| tenantCanUpdateStocks" label="操作"/);
   assert.match(view, /v-if="tenantReadOnly && tenantCanUpdateStocks"[^\n]+@click="zeroOnlineProductStock\(row\)"/);
   assert.match(view, /action: "zero_stock"/);

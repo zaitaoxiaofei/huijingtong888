@@ -20,7 +20,7 @@ const REAL_SHOP = {
   api_key_hint: ""
 };
 
-test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
+test("fetchOzonWarehouses uses documented v2 list shape", async (t) => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
@@ -30,12 +30,12 @@ test("fetchOzonWarehouses tries v2 before legacy v1", async (t) => {
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), body: JSON.parse(options.body || "{}") });
     return jsonResponse({
-      result: [{
+      warehouses: [{
         warehouse_id: 1001,
         name: "Main warehouse",
         status: "active",
         delivery_schema: "fbs"
-      }]
+      }], has_next: false
     });
   };
 

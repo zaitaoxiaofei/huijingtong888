@@ -138,6 +138,7 @@ test("strict post-removal reads cannot convert a joined-list failure into an emp
   const originalPagers = { candidates: { old: true }, joined: { old: true } };
   const calls = { reset: 0 };
   const context = vm.createContext({
+    productRequestVersion: 0, currentApiCacheScope: () => "test-session",
     state: { storeId: "1", selectedActionId: "2", productPagers: originalPagers, selectedRowKeys: [] },
     createEmptyProductPager: () => ({}),
     fetchProductPage: async (scope) => { if (scope === "joined") throw new Error("joined list unavailable"); return { pager: {}, fetchedRows: [] }; },
@@ -153,6 +154,7 @@ test("strict post-removal reads cannot convert a joined-list failure into an emp
 test("fresh participation totals override stale activity summaries without guessing an absent total", async () => {
   for (const [total, expected] of [[1, 1], [0, 0], [null, 23], [undefined, 23]]) {
     const context = vm.createContext({
+      currentApiCacheScope: () => "test-session",
       PRODUCT_PAGE_SIZE: 100, state: { mode: "official", storeId: "1", selectedActionId: "2" },
       apiClient: { post: async () => ({ result: { products: [], last_id: "", total } }) }
     });
