@@ -82,7 +82,7 @@ export function pagePermission(path = "") {
   if (path === "/inventory/suppliers" || path.startsWith("/procurement") || path.startsWith("/purchase")) return "procurement";
   if (path.startsWith("/inventory")) return "inventory.read";
   if (path.startsWith("/exceptions")) return "orders.read";
-  if (["/seller-analytics", "/order-car-heatmap", "/order-tracking"].includes(path) || path.startsWith("/advertising")) return "analytics";
+  if (["/sku-traffic-monitor", "/seller-analytics", "/order-car-heatmap", "/order-tracking"].includes(path) || path.startsWith("/advertising")) return "analytics";
   return "operations";
 }
 

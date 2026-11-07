@@ -845,6 +845,11 @@ const scheduledJobDefinitions = [
     }
   },
   {
+    key: "sku_traffic_daily_dispatch", name: "SKU每日流量采集排队及清理", category: "analytics", priority: "normal",
+    intervalMinutes: 60, initialDelaySeconds: 180, catchupEnabled: true, maxCatchupRuns: 1,
+    config: {}
+  },
+  {
     key: "seller_analytics_daily_sync",
     name: "Ozon 店铺分析 7 天同步",
     category: "analytics",
@@ -1116,6 +1121,7 @@ const runAiMediaRetentionCleanup = createAiMediaRetentionSweep({
 });
 
 const scheduledJobHandlers = {
+  sku_traffic_daily_dispatch: withForegroundApiDeferral("sku_traffic_daily_dispatch", () => services.skuTrafficDailySchedule()),
   ozon_credential_health: withForegroundApiDeferral("ozon_credential_health", () => runTenantScheduledWork(tenantId => checkTenantOzonHealth(tenantId))),
   order_profit_daily_fx_archive: withForegroundApiDeferral("order_profit_daily_fx_archive", () => {
     dailyFxArchiveFirstDueAt = 0;

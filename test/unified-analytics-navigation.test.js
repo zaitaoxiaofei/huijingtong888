@@ -8,11 +8,12 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const analyticsUrl = 'https://seller.ozon.ru/app/analytics';
 const graphsUrl = `${analyticsUrl}/graphs`;
 
-function harness({ tab = {}, updateError = '', cookieCompany = '1001', pageCompany = '1001', reloadPending = false, noTabs = false } = {}) {
+function harness({ tab = {}, updateError = '', cookieCompany = '1001', pageCompany = '1001', reloadPending = false, noTabs = false, documentReady = false } = {}) {
   const current = { id: 7, title: 'Actual Seller tab', url: 'https://seller.ozon.ru/app/products', status: 'complete', ...tab };
   const calls = { update: [], reload: [], create: [] };
   const timers = new Map();
   let now = 100000, timerId = 0;
+  let documentEpoch = now - 1000;
   class ClockDate extends Date {
     constructor(...args) { super(...(args.length ? args : [now])); }
     static now() { return now; }
@@ -31,13 +32,22 @@ function harness({ tab = {}, updateError = '', cookieCompany = '1001', pageCompa
         current.pendingUrl = changes.url;
         return { ...current };
       },
-      reload: async id => { calls.reload.push(id); if (reloadPending) current.pendingUrl = current.url; },
+      reload: async id => { calls.reload.push(id); if (reloadPending) current.pendingUrl = current.url; else documentEpoch = now; },
       create: async changes => { calls.create.push(changes); throw new Error('Unexpected new tab'); },
       onUpdated: event(), onRemoved: event()
     },
     webRequest: { onBeforeSendHeaders: event(), onHeadersReceived: event() },
     cookies: { getAllCookieStores: async () => [{ id: 'store', tabIds: [7] }], getAll: async () => [{ name: 'sc_company_id', value: cookieCompany }] },
-    scripting: { executeScript: async () => [{ result: { companyId: pageCompany } }] }
+    scripting: { executeScript: async (details) => {
+      if (!details.args) return [{ result: { companyId: pageCompany } }];
+      assert.equal(details.injectImmediately, true);
+      const result = vm.runInNewContext('(' + details.func.toString() + ')(...args)', {
+        args: details.args, location: new URL(current.url),
+        document: { readyState: documentReady ? 'interactive' : current.status },
+        performance: { timeOrigin: documentEpoch }
+      });
+      return [{ result }];
+    } }
   };
   const context = vm.createContext({ chrome, URL, AbortController, Date: ClockDate,
     OzonUnifiedConfig: { get: async () => ({ erpBaseUrl: 'https://erp.hjt888.xyz', tenantId: 'tenant', localPluginToken: '' }) },
@@ -46,9 +56,9 @@ function harness({ tab = {}, updateError = '', cookieCompany = '1001', pageCompa
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ success: true, data: { ok: false, status: 403 } }) })
   });
   vm.runInContext(fs.readFileSync('ozon-erp-collector-plugin/unified-runtime.js', 'utf8'), context);
-  vm.runInContext(source.replace('})(globalThis);', 'global.__navigation = { ensureSellerAnalyticsGraphsTab, navigateSellerTab, warmSellerAnalyticsPermission, openSellerAnalyticsGraphsAfterWarmup, runPrepareRequest, panelState };\n})(globalThis);'), context);
+  vm.runInContext(source.replace('})(globalThis);', 'global.__navigation = { ensureSellerAnalyticsGraphsTab, navigateSellerTab, warmSellerAnalyticsPermission, openSellerAnalyticsGraphsAfterWarmup, runPrepareRequest, panelState, sellerDocumentReady, waitForTabComplete };\n})(globalThis);'), context);
   return { current, calls, api: context.__navigation, runtime: context.OzonUnifiedRuntime,
-    commit(url = current.pendingUrl) { current.url = url; current.status = 'complete'; delete current.pendingUrl; },
+    commit(url = current.pendingUrl) { documentEpoch = now; current.url = url; current.status = 'complete'; delete current.pendingUrl; },
     async advance(ms) {
       now += ms;
       for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); }
@@ -182,4 +192,38 @@ test('real generated preparation timeout blocks warmup and returns its shared ga
   assert.equal(result.identity_code, 'identity_conflict');
   assert.equal(conflict.calls.update.length, 0);
   assert.equal(conflict.calls.reload.length, 0);
+});
+
+
+test('a committed analytics document can be usable while background resources keep the tab loading', async () => {
+  const h = harness({ tab: { url: analyticsUrl, status: 'loading' }, documentReady: true });
+  const result = await h.api.navigateSellerTab(7, analyticsUrl, 'open_analytics');
+  assert.equal(result.url, analyticsUrl);
+  assert.equal(result.status, 'loading');
+  assert.equal(h.calls.update.length, 0);
+});
+
+test('document readiness cannot approve an uncommitted or wrong-route navigation', async () => {
+  for (const tab of [
+    { url: analyticsUrl, status: 'loading', pendingUrl: analyticsUrl },
+    { url: 'https://seller.ozon.ru/login', status: 'loading', pendingUrl: analyticsUrl }
+  ]) {
+    const h = harness({ tab, documentReady: true });
+    const pending = h.api.navigateSellerTab(7, analyticsUrl, 'open_analytics');
+    const denied = assert.rejects(pending, /SELLER_NAVIGATION_TIMEOUT/);
+    await flush(); await h.advance(15000); await denied;
+    assert.equal(h.calls.reload.length, 0);
+  }
+});
+
+
+test('document readiness checks the actual frame route and rejects a pre-reload document', async () => {
+  const h = harness({ tab: { url: analyticsUrl, status: 'loading' }, documentReady: true });
+  assert.equal(await h.api.sellerDocumentReady(h.current, analyticsUrl), true);
+  assert.equal(await h.api.sellerDocumentReady(h.current, graphsUrl), false);
+  assert.equal(await h.api.sellerDocumentReady(h.current, analyticsUrl, 100000), false);
+  h.commit(analyticsUrl);
+  assert.equal(await h.api.sellerDocumentReady(h.current, analyticsUrl, 100000), true);
+  const spoofed = { ...h.current, url: graphsUrl };
+  assert.equal(await h.api.sellerDocumentReady(spoofed, graphsUrl), false);
 });

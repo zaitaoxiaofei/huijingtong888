@@ -668,6 +668,14 @@ if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" && "
   echo "Reviewed AI material schema and ownership migration verified."
 fi
 
+# Only adds compact traffic facts/coverage; staging and source data are untouched.
+if migration_pending migrate-sku-traffic-daily.mjs; then
+  set -a
+  source "$env_file"
+  set +a
+  (cd "$staging_dir" && node scripts/migrate-sku-traffic-daily.mjs --database="$DB_NAME" --mysql-admin-socket=/var/run/mysqld/mysqld.sock --apply)
+fi
+
 # This additive schema is required even when broad maintenance is disabled.
 # Baseline copying is a separate, explicit operation after the new writer is live.
 if migration_pending migrate-order-profit-calculation-versions.mjs; then

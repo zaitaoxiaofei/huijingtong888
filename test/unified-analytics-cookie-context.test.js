@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const source = fs.readFileSync('ozon-erp-collector-plugin/analytics/background.js', 'utf8');
 const tab = { id: 7, url: 'https://seller.ozon.ru/app/analytics/graphs' };
 
-function harness({ helper, cookies = [], pageCompanies = ['1001'], realHelper = false, partitionedCookies = [] } = {}) {
+function harness({ helper, cookies = [], pageCompanies = ['1001'], realHelper = false, partitionedCookies = [], probeResult } = {}) {
   const calls = [];
   const event = () => ({ addListener() {}, removeListener() {} });
   let pageReads = 0;
@@ -14,9 +14,10 @@ function harness({ helper, cookies = [], pageCompanies = ['1001'], realHelper = 
     runtime: { id: 'unified', getManifest: () => ({ version: '1.5.1' }), onMessage: event(), onInstalled: event(), onStartup: event() },
     action: { setBadgeText() {}, setBadgeBackgroundColor() {}, setTitle() {} },
     storage: { local: { get: async () => ({}), set: async () => {} } },
-    tabs: { query: async () => [], onUpdated: event(), onRemoved: event() },
+    tabs: { query: async () => [], onUpdated: event(), onRemoved: event(), sendMessage: async (id, message) => { calls.push({type:'probe', id, request:message.request}); if (!probeResult) throw new Error('probe unavailable'); return {payload:probeResult}; } },
     webRequest: { onBeforeSendHeaders: event(), onHeadersReceived: event() },
-    scripting: { executeScript: async () => {
+    scripting: { executeScript: async details => {
+      if (details.files) return [];
       calls.push({ type: 'page' });
       return [{ result: { companyId: pageCompanies[Math.min(pageReads++, pageCompanies.length - 1)] } }];
     } },
@@ -173,4 +174,36 @@ test('browser proof cannot hide conflicts, stale evidence, failed requests, or a
   const changedPage = harness({ helper: missing, pageCompanies: ['1001', 'other'] });
   changedPage.adapter.proof(tab.id, '1001', '1001');
   assert.equal((await changedPage.adapter.verifiedSellerStoreIdentity(tab, '1001')).ok, false);
+});
+
+
+test('a live guarded browser request verifies identity without extension cookies or passive request headers', async () => {
+ const h=harness({helper:async()=>({cookies:[],companyId:'',code:'COOKIE_COMPANY_ID_MISSING'}),probeResult:{success:true,response_status:200,current_company_id:'1001',response_body:{items:[]}}});
+ const identity=await h.adapter.verifiedSellerStoreIdentity(tab,'1001');
+ assert.equal(identity.ok,true);assert.equal(identity.auth_mode,'browser_only');assert.equal(identity.observedCompanyId,'');assert.equal(identity.cookieCompanyId,'');
+ const request=h.calls.find(x=>x.type==='probe').request;
+ assert.equal(request.store_id,'1001');assert.equal(request.request_headers['X-O3-Company-Id'],'1001');assert.equal(request.request_body.limit,'1');
+ assert.match(request.request_url,/\/table\/by_sku$/);
+ assert.equal(await h.adapter.assertCollectStoreContext('1001',tab),'1001');
+ assert.equal(h.calls.filter(x=>x.type==='probe').length,1,'reuse fresh proof only after reading the current page again');
+ assert.equal((await h.adapter.verifiedSellerStoreIdentity(tab,'other')).ok,false);
+ assert.ok(!h.calls.some(x=>x.type==='fetch'&&/auth-bindings|auth-probe/.test(x.url)));
+});
+
+test('active identity proof rejects HTTP errors, login HTML, missing or wrong returned identity and an in-flight shop switch', async () => {
+ const good={success:true,response_status:200,current_company_id:'1001',response_body:{items:[]}};
+ for(const probeResult of [
+  {...good,success:false,response_status:403}, {...good,response_body:'<html>login</html>'},
+  {...good,current_company_id:''}, {...good,current_company_id:'other'}, {...good,response_body:{error:'blocked'}}
+ ]) {
+  const h=harness({helper:async()=>({cookies:[],companyId:''}),probeResult});
+  assert.equal((await h.adapter.verifiedSellerStoreIdentity(tab,'1001')).ok,false);
+  await h.adapter.verifiedSellerStoreIdentity(tab,'1001');
+  assert.equal(h.calls.filter(x=>x.type==='probe').length,1,'failed probes are throttled');
+ }
+ const switched=harness({helper:async()=>({cookies:[],companyId:''}),probeResult:good,pageCompanies:['1001','1001','other']});
+ assert.equal((await switched.adapter.verifiedSellerStoreIdentity(tab,'1001')).ok,false);
+ const expected=harness({helper:async()=>({cookies:[],companyId:''}),probeResult:good});
+ assert.equal((await expected.adapter.verifiedSellerStoreIdentity(tab,'other')).ok,false);
+ assert.equal(expected.calls.filter(x=>x.type==='probe').length,0);
 });

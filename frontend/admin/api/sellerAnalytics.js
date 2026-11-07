@@ -85,3 +85,10 @@ export function deleteSellerAnalyticsSnapshot(id) {
 export function batchDeleteSellerAnalyticsSnapshots(ids = []) {
   return apiClient.post("/api/db/seller-analytics/snapshots/batch-delete", { ids });
 }
+
+export function getSkuTrafficDaily(params = {}) {
+  return apiClient.get(`/api/db/seller-analytics/sku-daily${queryString(params)}`, {noCache: true});
+}
+export function collectSkuTrafficDaily(payload = {}) {
+  return apiClient.post('/api/db/seller-analytics/sku-daily/collect', payload);
+}

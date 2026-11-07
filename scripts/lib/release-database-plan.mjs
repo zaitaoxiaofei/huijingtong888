@@ -1,4 +1,5 @@
 export const SCHEMA_MIGRATIONS = Object.freeze([
+  "migrate-sku-traffic-daily.mjs",
   "migrate-order-search-indexes.mjs",
   "migrate-listing-draft-list-indexes.mjs",
   "migrate-listing-frozen-content.mjs",
@@ -56,6 +57,11 @@ export function migrationNeedsApply(filename, report) {
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
   switch (filename) {
+    case "migrate-sku-traffic-daily.mjs": {
+      const ready=boolean(report.ready,"ready"),missing=list(report.missing_tables,"missing_tables"),problems=list(report.problems,"problems");
+      if(report.ok!==true||problems.length||missing.some(name=>!["seller_sku_traffic_daily","seller_sku_traffic_days"].includes(name))||ready!==(missing.length===0))invalid("incompatible SKU daily schema");
+      return !ready;
+    }
     case "migrate-order-search-indexes.mjs": {
       const before = object(report.before, "before");
       const exists = boolean(before.exists, "before.exists"), present = boolean(before.present, "before.present"), valid = boolean(before.valid, "before.valid");
