@@ -26,6 +26,13 @@ test('daily facts preserve missing versus zero and retain exact official meaning
  assert.throws(()=>normalizeDailyTrafficMetric({sku:'123',raw_data:{metrics:{unrecognized:1}}}));
  assert.throws(()=>normalizeDailyTrafficMetric({raw_data:{metrics:{total_views:1}}}));
 });
+
+test('observed Ozon camelCase daily metrics preserve all eight meanings and real zero values',()=>{
+ const row=normalizeDailyTrafficMetric({sku:'fixture',raw_data:JSON.stringify({metrics:{totalViews:9,searchViews:4,pdpViews:0,totalHitsToCart:0,orderedUnits:0,convViewsToOrder:0,convTotalViewsToCart:0,convHitsToCartToOrder:0,hitsPdpToCart:99}})});
+ assert.deepEqual(row,{sku:'fixture',total_views:9,search_views:4,pdp_views:0,total_hits_to_cart:0,ordered_units:0,conv_views_to_order:0,conv_total_views_to_cart:0,conv_hits_to_cart_to_order:0});
+ const envelope=normalizeDailyTrafficMetric({sku:'fixture',raw_data:{metrics:{totalViews:{value:12},total_views:null,searchViews:{value:null},pdpViews:{value:0},orderedUnits:3,convViewsToOrder:25}}});
+ assert.equal(envelope.total_views,null);assert.equal(envelope.search_views,null);assert.equal(envelope.pdp_views,0);assert.equal(envelope.ordered_units,3);assert.equal(envelope.conv_views_to_order,25);
+});
 test('missing dates remain null and actual zero remains a plotted point',()=>{
  const series=dailyTrafficSeries(['2026-11-04','2026-11-05'],[{date_key:'2026-11-05',total_views:0}]);
  assert.equal(series[0].available,false);assert.equal(series[0].total_views,null);assert.equal(series[1].available,true);assert.equal(series[1].total_views,0);
