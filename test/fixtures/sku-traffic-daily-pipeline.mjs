@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {ensureSellerAnalyticsSchema,queueSkuTrafficDaily,claimNextCollectRequest,finishCollectRequest,sellerAnalyticsDb} from '../../src/services/seller-analytics.js';
+import {ensureSellerAnalyticsSchema,queueSkuTrafficDaily,claimNextCollectRequests,finishCollectRequest,sellerAnalyticsDb} from '../../src/services/seller-analytics.js';
 import {mysqlQuery,closeMysqlPool} from '../../src/mysql-pool.js';
 import {trafficDays} from '../../src/shared/sku-traffic-daily.js';
 try{
@@ -8,11 +8,15 @@ try{
  else{
   const day=trafficDays().at(-1),queued=await queueSkuTrafficDaily({shop_id:11,date:day},'admin');
   assert.equal(queued.queued.length,1);
+  const claimed=await claimNextCollectRequests(sellerAnalyticsDb,'admin',2,{store_id:'111111'});
+  assert.equal(claimed.length,2);
   let count=0;
-  while(count<5){const request=await claimNextCollectRequest(sellerAnalyticsDb,'admin',{store_id:'111111'});if(!request)break;count++;
+  for(const request of claimed){count++;
    assert.equal(request.request_body.current_period.date_from,day);assert.equal(request.request_body.current_period.date_to,day);
    assert.equal(request.request_body.metrics.length,8);
    const result=await finishCollectRequest(sellerAnalyticsDb,request.run_id,request.request_id,{success:true,response_status:200,request_headers:{'X-O3-Company-Id':'111111'},verified_company_id:'111111',response_body:request.endpoint_type==='by_sku'?{items:[{sku:'same',productInfo:{name:'Temporary name, not a daily column'},metrics:{total_views:25,pdp_views:5,total_hits_to_cart:2,ordered_units:1}},{sku:'zero',metrics:{total_views:0,pdp_views:0,total_hits_to_cart:0,ordered_units:0}}]}:{totals:{total_views:25}}},'admin');
+   const leases=await mysqlQuery('SELECT id,status,attempts,claimed_at FROM seller_analytics_collect_requests WHERE run_id=?',[request.run_id]);
+   for(const lease of leases){assert.equal(Number(lease.attempts),1,'result must preserve the SQL claim attempt');assert.ok(lease.claimed_at,'result must preserve the SQL claim timestamp');if(claimed.slice(count).some(item=>item.request_id===lease.id))assert.equal(lease.status,'running','another in-flight request must not be reset to pending');}
    if(result.run.status==='success')break;
   }
   assert.equal(count,2,'daily collection must not add ABC or extra metric tabs');

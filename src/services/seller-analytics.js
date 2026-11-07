@@ -1708,11 +1708,17 @@ async function saveCollectRunQueueRows(run) {
   })
 }
 
-async function syncCollectRunQueueRows(run) {
-  await saveCollectRunQueueRows(run)
+async function syncCollectRunQueueRows(run, { requests = run.requests || [], insertRequests = requests, preserveClaims = false } = {}) {
+  await saveCollectRunQueueRows({ ...run, requests: insertRequests })
   await withMysqlTransaction(async (connection) => {
-    for (const request of run.requests || []) {
-      await executeSellerAnalyticsSql(connection, `
+    for (const request of requests) {
+      if (preserveClaims) {
+        await executeSellerAnalyticsSql(connection, `
+          UPDATE seller_analytics_collect_requests
+          SET status=?, finished_at=?, updated_at=NOW()
+          WHERE id=? AND run_id=?
+        `, [request.status || 'pending', mysqlDateValue(request.finished_at), request.id, run.id])
+      } else await executeSellerAnalyticsSql(connection, `
         UPDATE seller_analytics_collect_requests
         SET status=?, attempts=?, claimed_at=?, finished_at=?, updated_at=NOW()
         WHERE id=? AND run_id=?
@@ -1728,6 +1734,15 @@ async function syncCollectRunQueueRows(run) {
 async function executeSellerAnalyticsSql(connection, sql, params = []) {
   if (typeof connection.execute === 'function') return connection.execute(sql, params)
   return connection.query(sql, params)
+}
+
+async function syncFinishedCollectRequest(run, request) {
+  const children = (run.requests || []).filter((item) => item.parent_request_id === request.id)
+  await syncCollectRunQueueRows(run, {
+    requests: [request],
+    insertRequests: [request, ...children],
+    preserveClaims: true
+  })
 }
 
 async function loadCollectRunState(db, id, tenantId = 'admin') {
@@ -2615,7 +2630,13 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     if (run.status === 'cancelled' || request.status === 'cancelled') {
       return { run, request, snapshot: null, metricCount: 0, ignored: true, reason: 'collect_run_cancelled' }
     }
-    if (request.status === 'success') return { run, request, snapshot: null, metricCount: 0 }
+    if (request.status === 'success') {
+      if (db === sellerAnalyticsDb) {
+        await syncFinishedCollectRequest(run, request)
+        if (run.daily_traffic && run.status === 'success') await publishSkuTrafficDailyRun(run, tenantId)
+      }
+      return { run, request, snapshot: null, metricCount: 0 }
+    }
     if (run.daily_traffic && payload.success !== false && request.endpoint_type === 'by_sku') {
       const body=parseJson(payload.response_body || payload.responseBody || payload.data,null)
       if ((!Array.isArray(body?.items) && !Array.isArray(body?.result?.items)) || Number(payload.response_status || payload.responseStatus || 200) >= 400) {
@@ -2692,7 +2713,11 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
     run.status = doneCount >= Number(run.request_count || 0) ? (run.failed_count > 0 ? 'failed' : 'success') : 'running'
     run.updated_at = new Date().toISOString()
     await saveCollectRunState(db, run)
-    if (db === sellerAnalyticsDb) await syncCollectRunQueueRows(run)
+    if (db === sellerAnalyticsDb) {
+      // Batch claims live in SQL. Other canonical requests can still say pending;
+      // syncing them here would revoke active leases and requeue completed pages.
+      await syncFinishedCollectRequest(run, request)
+    }
     let operationTodos = null
     if (db === sellerAnalyticsDb && run.daily_traffic && ['success', 'failed'].includes(run.status)) {
       if (run.status === 'success') await publishSkuTrafficDailyRun(run, tenantId)
