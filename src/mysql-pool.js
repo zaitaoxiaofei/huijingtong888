@@ -159,9 +159,12 @@ export async function warmMysqlPool() {
 }
 
 async function ensureMysqlSessionUtc(connection) {
-  if (initializedMysqlSessions.has(connection)) return;
+  // mysql2 creates a new PromisePoolConnection wrapper on each borrow. Session
+  // settings belong to its physical connection, which survives those wrappers.
+  const session = connection.connection || connection;
+  if (initializedMysqlSessions.has(session)) return;
   await connection.query("SET time_zone = ?", [MYSQL_SESSION_TIME_ZONE]);
-  initializedMysqlSessions.add(connection);
+  initializedMysqlSessions.add(session);
 }
 
 export async function mysqlQuery(sql, params = []) {

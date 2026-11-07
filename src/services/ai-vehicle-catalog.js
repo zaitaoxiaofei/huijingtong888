@@ -198,10 +198,11 @@ export async function ensureVehicleCatalogSchema() {
 async function initializeVehicleCatalogSchema() {
   await withMysqlTransaction(connection => migrateAiVehicleCatalogSchema(connection, { apply: true }));
   await ensureCatalogMetadataColumns();
+  const rows = [];
   for (const [baseTag, groups] of [["hot_new", NEW_VEHICLES], ["hot_used", USED_VEHICLES]]) {
     for (const [brand, models] of groups) {
       const brandTags = unique(["hot_all", baseTag, PRIORITY_BRANDS.has(brand) ? "priority_brand" : ""].filter(Boolean));
-      await seedRow(brand, "", brandTags);
+      rows.push([brand, "", brandTags]);
       for (const model of models) {
         const fullName = `${brand} ${model}`.toUpperCase();
         const modelTags = unique([
@@ -209,10 +210,11 @@ async function initializeVehicleCatalogSchema() {
           TOP_MODELS.has(fullName) ? "top_priority_model" : "",
           HOT_NEW_ENERGY_MODELS.has(fullName) ? "hot_new_energy" : ""
         ].filter(Boolean));
-        await seedRow(brand, model, modelTags);
+        rows.push([brand, model, modelTags]);
       }
     }
   }
+  await seedRows(rows);
   for (const [brand, model, aliases, supplyAnchor, searchKeywords, recommendedProducts, competition, priority] of RUSSIA_CHINA_VEHICLE_ANCHORS) {
     const priorityTags = /^S/i.test(priority) ? ["top_priority_model"] : [];
     await seedRow(brand, "", ["hot_all", "hot_new", "priority_brand"]);
@@ -263,6 +265,20 @@ async function seedRow(brand, model, tags) {
       tags_json = IF(source = 'builtin', VALUES(tags_json), tags_json),
       updated_at = CURRENT_TIMESTAMP
   `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags)]);
+}
+
+async function seedRows(rows) {
+  for (let offset = 0; offset < rows.length; offset += 100) {
+    const batch = rows.slice(offset, offset + 100);
+    await mysqlExecute(`
+      INSERT INTO ai_vehicle_catalog
+        (brand_key, brand_name, model_key, model_name, tags_json, source, tenant_id)
+      VALUES ${batch.map(() => "(?, ?, ?, ?, ?, 'builtin', 'builtin')").join(", ")}
+      ON DUPLICATE KEY UPDATE
+        tags_json = IF(source = 'builtin', VALUES(tags_json), tags_json),
+        updated_at = CURRENT_TIMESTAMP
+    `, batch.flatMap(([brand, model, tags]) => [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags)]));
+  }
 }
 
 function parseTags(value) {
