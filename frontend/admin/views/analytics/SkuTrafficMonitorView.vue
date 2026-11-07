@@ -8,6 +8,7 @@ import PageFooterPagination from '../../components/PageFooterPagination.vue';
 import SkuTrafficChart from '../../components/SkuTrafficChart.vue';
 import {getSkuTrafficDaily,collectSkuTrafficDaily} from '../../api/sellerAnalytics';
 import {shanghaiDateTimeText} from '../../utils/shanghai-date';
+import {createDailyTrafficMonitor} from '../../utils/sku-traffic-monitor-pump';
 const state=reactive({rows:[],shops:[],days:[],coverage:[],total:0,date:'',shop_id:'all',query:'',page:1,pageSize:30});
 const loading=ref(false),queuing=ref(false),error=ref(''),active=ref(null),detailVisible=ref(false),chartGroup=ref('traffic');
 let revision=0,disposed=false;
@@ -28,12 +29,17 @@ async function load(reset=false){
 }
 async function collect(selectedDate=false){
  queuing.value=true;
- try{const response=await collectSkuTrafficDaily({shop_id:state.shop_id,...(selectedDate?{date:state.date}:{})});const data=response.data||response;ElMessage.success(`已排队 ${data.queued?.length||0} 个店铺日，另有 ${data.waiting?.length||0} 个等待插件；排队不代表已完成`);await load();}
+ try{const response=await collectSkuTrafficDaily({shop_id:state.shop_id,...(selectedDate?{date:state.date}:{})});const data=response.data||response;ElMessage.success(`已排队 ${data.queued?.length||0} 个店铺日，另有 ${data.waiting?.length||0} 个等待插件；排队不代表已完成`);wakeCollector();await load();}
  catch(e){ElMessage.error(e.message||'采集排队失败');}
  finally{queuing.value=false;}
 }
+function wakeCollector(){
+ const shop=state.shops.find(s=>String(s.id)===String(state.shop_id));
+ window.postMessage({type:'BAODAN_ANALYTICS_PLUGIN_WAKE',expectedStoreId:shop?.store_id||''},window.location.origin);
+}
+const monitor=createDailyTrafficMonitor({refresh:()=>load(),busy:()=>loading.value||queuing.value,wake:()=>{if(!error.value&&state.coverage.some(day=>day.status==='pending'))wakeCollector();}});
 function open(row){active.value=row;detailVisible.value=true;}
-onMounted(()=>load());onBeforeUnmount(()=>{disposed=true;revision++;});
+onMounted(()=>monitor.start());onBeforeUnmount(()=>{disposed=true;revision++;monitor.stop();});
 </script>
 <template>
  <div class="sku-traffic-monitor">
