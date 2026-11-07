@@ -12,6 +12,7 @@ export const KEY_CASE_DETAIL_SHOTS=[
 // Category IDs and dictionary choices are supplied by the owned category template, never invented here.
 export function keyCaseProductionWorkflow(category) {
   const definition=keyCaseWorkflow();definition.name='汽车钥匙壳 · 风格复用与批量上架';definition.preset='key-case-production';definition.deferCommercialInputs=true;definition.category=clone(category);definition.shopIds=[];
+  definition.globalPrompt+=' 每张图只表达当前分镜指定主题，不把全部商品资料重复排入每张图；不得出现 SKU、字段名或流程说明等内部术语。适配钥匙的按键图标严格按真实原图保留。礼盒只按已确认包装展示，不自行添加缎带、蝴蝶结或赠品。';
   definition.nodes.find(n=>n.type==='listing').templateId=Number(category.templateId);
   for(const node of definition.nodes.filter(n=>n.type==='field')){node.valueSource='user';node.required=['model','facts'].includes(node.id);if(node.id!=='name')node.defaultValue='';}
   definition.nodes.find(n=>n.id==='facts').label='已确认卖点与包装内容';
@@ -44,6 +45,7 @@ export function keyCaseProductionWorkflow(category) {
   definition.nodes=definition.nodes.filter(n=>n.id!=='copy'&&n.id!=='detail_6');
   for(const [target,label,prompt] of [['title','俄语标题','只生成一个俄语商品标题，保留钥匙壳品类与用户确认的适配型号，不扩大车型范围。'],['tags','俄语标签','按真实产品、用户确认卖点和适配型号生成去重的俄语标签列表，不引用风格参考上的商品事实。'],['description','俄语简介','生成自然俄语简介，解释已确认适配限制、真实材质、卖点与包装内容。未知的尺寸、信号性能、测试等级和认证不作承诺。']])definition.nodes.push({...createWorkflowNode('copy',`copy_${target}`),target,label,prompt,inputs:factIds});
   addDefaultWorkflowBindings(definition);
+  if(category.attributes.some(a=>Number(a.attributeId)===9048))definition.bindings.attribute_9048={sources:[{nodeId:'model',output:'value'}]};
   if(category.attributes.some(a=>Number(a.attributeId)===4180))definition.bindings.attribute_4180={sources:[{nodeId:'copy_title',output:'title'}]};
   for(const key of ['price','weight','length','width','height']){
     const node={...createWorkflowNode('field',`input_${key}`),label:WORKFLOW_TEMPLATE_FIELDS.find(f=>f.key===key).label,inputGroup:'listing-final',valueSource:'user',scope:'shared',required:false,defaultValue:'',help:'可由工程师固定预填，或本次生产填写。上架前需按实际产品核实。'};
