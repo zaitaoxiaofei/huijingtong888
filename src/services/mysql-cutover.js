@@ -3032,18 +3032,19 @@ export async function orderProcurementBatchesMysql(orderId, tenantId = "admin") 
   };
 }
 
-async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined, tenantScoped = false, tenantId = "admin") {
+async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefined, tenantScoped = false, tenantId = "admin", diagnostics = null) {
+  const measure = (name, work) => diagnostics ? diagnostics.measure(name, work) : work();
   // Procurement coverage reconciles the full order and inventory ledger. Do
   // not let a cold reconciliation block the ordinary order-list first paint.
   const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter(Boolean))];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "rule");
-  const formulaLabelsPromise = orderProfitFormulaLabels(orderIds);
+  const formulaLabelsPromise = measure("profit_labels", () => orderProfitFormulaLabels(orderIds));
   const [coverage, qualityPrefixes, pickingByOrderId, billingRows, , fbpStocks, oglMembers] = await Promise.all([
     coveragePromise === null ? new Map() : (coveragePromise || orderTenantCoverageMysql(tenantScope)),
-    orderQualityPrefixesMysql(),
-    orderInventoryPickingMysql(orderIds, tenantScope.id),
-    orderIds.length ? mysqlQuery(`
+    measure("quality", () => orderQualityPrefixesMysql()),
+    measure("picking", () => orderInventoryPickingMysql(orderIds, tenantScope.id)),
+    orderIds.length ? measure("billing", () => mysqlQuery(`
     SELECT oi.order_id,
       GROUP_CONCAT(DISTINCT rule.name ORDER BY rule.name SEPARATOR ' / ') AS billing_logistics_rule_name,
       GROUP_CONCAT(DISTINCT rule.channel ORDER BY rule.channel SEPARATOR ' / ') AS billing_logistics_rule_channel,
@@ -3052,14 +3053,14 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
     JOIN logistics_fee_rules rule ON rule.id = oi.frozen_logistics_rule_id
     WHERE oi.order_id IN (${orderIds.map(() => "?").join(",")}) AND ${billingScope.sql}
     GROUP BY oi.order_id
-    `, [...orderIds, ...billingScope.params]) : [],
-    rows.length ? activeOrderLogisticsFilterMethodsMysql(tenantScoped ? tenantId : "admin") : undefined,
-    loadOrderFbpStocks(mysqlQuery, orderIds),
-    loadOglDispatchMembersMysql(orderIds, tenantScope)
+    `, [...orderIds, ...billingScope.params])) : [],
+    rows.length ? measure("logistics_dictionary", () => activeOrderLogisticsFilterMethodsMysql(tenantScoped ? tenantId : "admin")) : undefined,
+    measure("fbp", () => loadOrderFbpStocks(mysqlQuery, orderIds)),
+    measure("ogl", () => loadOglDispatchMembersMysql(orderIds, tenantScope))
   ]);
   const billingByOrderId = new Map(billingRows.map((row) => [Number(row.order_id), row]));
   const formulaLabels = await formulaLabelsPromise;
-  return await mapWithConcurrencyMysql(rows, 3, async (row) => {
+  return await measure("logistics_rows", () => mapWithConcurrencyMysql(rows, 3, async (row) => {
     const billing = billingByOrderId.get(Number(row.id)) || {};
     const enriched = withOglDispatch(await enrichOrderLogisticsMysql({ ...row, ...billing, fbp_inventory: fbpStocks.get(Number(row.id)) || [], inventory_picking_items: pickingByOrderId.get(Number(row.id)) || [], procurement_coverage: coverage.get(Number(row.id)) || null }, tenantScoped ? tenantId : "admin"), oglMembers.get(Number(row.id)));
     const accounting = classifyOrderAccounting(enriched, { qualityPrefixes });
@@ -3089,7 +3090,7 @@ async function enrichOrderRowsForListMysql(rows = [], coveragePromise = undefine
       loss_profile_label: cancellation.loss_profile_label,
       loss_formula_text: cancellation.loss_formula_text
     };
-  });
+  }));
 }
 
 function buildOnlineProductPayload(shopId, item = {}) {
@@ -18459,15 +18460,12 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-    LEFT JOIN (
-      SELECT h.*
-      FROM order_status_history h
-      JOIN (
-        SELECT order_id, MAX(observed_at) AS observed_at
-        FROM order_status_history
-        GROUP BY order_id
-      ) latest ON latest.order_id = h.order_id AND latest.observed_at = h.observed_at
-    ) osh ON osh.order_id = o.id
+    LEFT JOIN order_status_history osh ON osh.order_id = o.id
+      AND osh.observed_at = (
+        SELECT MAX(latest_history.observed_at)
+        FROM order_status_history latest_history
+        WHERE latest_history.order_id = o.id
+      )
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
       AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)}
@@ -18614,15 +18612,12 @@ async function syncOutboundForOpenOrdersMysql(options = {}) {
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     LEFT JOIN ozon_orders_raw raw ON raw.store_id = o.shop_id AND raw.posting_number = o.posting_number
-    LEFT JOIN (
-      SELECT h.*
-      FROM order_status_history h
-      JOIN (
-        SELECT order_id, MAX(observed_at) AS observed_at
-        FROM order_status_history
-        GROUP BY order_id
-      ) latest ON latest.order_id = h.order_id AND latest.observed_at = h.observed_at
-    ) osh ON osh.order_id = o.id
+    LEFT JOIN order_status_history osh ON osh.order_id = o.id
+      AND osh.observed_at = (
+        SELECT MAX(latest_history.observed_at)
+        FROM order_status_history latest_history
+        WHERE latest_history.order_id = o.id
+      )
     LEFT JOIN sku_mappings sm ON (
       (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))
       AND sm.active = 1 AND sm.shop_id = o.shop_id AND ${orderTenantPredicateMysql("sm", tenantScope)}
@@ -30275,13 +30270,14 @@ export async function ordersMysql(tenantId = "admin") {
   return orderRowsByIdsMysql(ids.map((row) => row.id), undefined, tenantId);
 }
 
-export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false, bypassCache = false } = {}) {
+export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined, tenantId = "admin", { summaryOnly = false, bypassCache = false, diagnostics = null } = {}) {
+  const measure = (name, work) => diagnostics ? diagnostics.measure(name, work) : work();
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
   if (summaryOnly && coveragePromise === null && !bypassCache) {
     const value = await cachedOrderRead(`rows:${tenantScope.id}:${tenantScope.defaultTenant ? 1 : 0}:${cleanIds.join(',')}`,
-      () => orderRowsByIdsMysql(cleanIds, null, tenantId, { summaryOnly: true, bypassCache: true }));
+      () => orderRowsByIdsMysql(cleanIds, null, tenantId, { summaryOnly: true, bypassCache: true, diagnostics }));
     return structuredClone(value);
   }
   const billingScope = await readableLogisticsTenantScopeMysql(tenantId, "visible_rule");
@@ -30304,7 +30300,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
         AND fallback_mapping.active = 1 AND ${orderTenantPredicateMysql("fallback_mapping", tenantScope)})
   )`;
-  const rows = await mysqlQuery(`
+  const rows = await measure("core_sql", () => mysqlQuery(`
     WITH scoped_order_items AS (
       SELECT DISTINCT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, sm.id AS mapping_id, scoped_product.id AS product_id
       FROM order_items oi
@@ -30317,14 +30313,18 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     scoped_product_ids AS (
       SELECT DISTINCT product_id FROM scoped_order_items WHERE product_id IS NOT NULL
     ),
-    scoped_recipe_product_ids AS (
-      SELECT DISTINCT ri.product_id
+    scoped_recipe_ids AS (
+      SELECT DISTINCT recipe.id
       FROM sku_inventory_recipes recipe
       JOIN scoped_order_items scoped_item
         ON scoped_item.shop_id = recipe.shop_id AND scoped_item.ozon_sku = recipe.ozon_sku
-      JOIN sku_inventory_recipe_items ri ON ri.recipe_id = recipe.id
-      ${tenantScope ? `JOIN products recipe_product ON recipe_product.id = ri.product_id AND ${orderTenantPredicateMysql("recipe_product", tenantScope)}` : ""}
       WHERE recipe.active = 1
+    ),
+    scoped_recipe_product_ids AS (
+      SELECT DISTINCT ri.product_id
+      FROM scoped_recipe_ids scoped_recipe
+      JOIN sku_inventory_recipe_items ri ON ri.recipe_id = scoped_recipe.id
+      ${tenantScope ? `JOIN products recipe_product ON recipe_product.id = ri.product_id AND ${orderTenantPredicateMysql("recipe_product", tenantScope)}` : ""}
     ),
     scoped_component_product_ids AS (
       SELECT DISTINCT pc.component_product_id AS product_id
@@ -30498,6 +30498,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       SELECT ri.recipe_id,
         MIN(FLOOR(COALESCE(stock.local_stock, 0) / NULLIF(ri.quantity, 0))) AS local_stock
       FROM sku_inventory_recipe_items ri
+      JOIN scoped_recipe_ids scoped_recipe ON scoped_recipe.id = ri.recipe_id
       JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ri.product_id
       LEFT JOIN (
         SELECT movement.product_id, SUM(movement.quantity_delta) AS local_stock
@@ -30641,19 +30642,19 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
       ${tenantScope ? `AND ${orderTenantPredicateMysql("s", tenantScope)}` : ""}
     GROUP BY o.id
-  `, [...cleanIds, ...billingScope.params, ...cleanIds]);
+  `, [...cleanIds, ...billingScope.params, ...cleanIds]));
   // Keep large raw payloads out of GROUP BY temporary rows. Fetch exactly the
   // same owned source payload after numeric aggregation, before enrichment.
   if (summaryOnly && rows.length) {
-    const payloads = await mysqlQuery(`SELECT o.id, raw.raw_json
+    const payloads = await measure("raw_payload", () => mysqlQuery(`SELECT o.id, raw.raw_json
       FROM orders o JOIN shops s ON s.id=o.shop_id
       LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
-      WHERE o.id IN (${cleanIds.map(() => "?").join(",")}) AND ${orderTenantPredicateMysql("s", tenantScope)}`, cleanIds);
+      WHERE o.id IN (${cleanIds.map(() => "?").join(",")}) AND ${orderTenantPredicateMysql("s", tenantScope)}`, cleanIds));
     const byOrder = new Map(payloads.map(row => [Number(row.id), row.raw_json]));
     for (const row of rows) row.raw_json = byOrder.get(Number(row.id)) ?? null;
   }
   const ordering = new Map(cleanIds.map((value, index) => [String(value), index]));
-  return (await enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId)).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
+  return (await measure("enrich", () => enrichOrderRowsForListMysql(rows, coveragePromise, Boolean(tenantScope), tenantId, diagnostics))).sort((a, b) => (ordering.get(String(a.id)) ?? 0) - (ordering.get(String(b.id)) ?? 0));
 }
 
 async function orderInventorySortRowsMysql(ids = [], tenantId = "admin") {
@@ -31576,14 +31577,15 @@ async function orderPagedSqlCountsMysql(base, coverage, tenantScope = null) {
 // Current-page physical/available balances are independent of full queue counts.
 // Start both reads together and retain the established deferred fallback if
 // a balance cannot be loaded; never substitute a zero for an unknown balance.
-async function orderPageRowsMysql(ids, coverage, tenantId, includeInventoryAvailability = false) {
+async function orderPageRowsMysql(ids, coverage, tenantId, includeInventoryAvailability = false, diagnostics = null) {
+  const measure = (name, work) => diagnostics ? diagnostics.measure(name, work) : work();
   const balances = includeInventoryAvailability && ids.length
-    ? orderInventoryAvailabilityMysql({ orderIds: ids.join(',') }, tenantId).catch(error => {
+    ? measure("inventory_balances", () => orderInventoryAvailabilityMysql({ orderIds: ids.join(',') }, tenantId)).catch(error => {
       console.warn(`[orders] current-page inventory deferred: ${String(error?.code || error?.name || 'unknown')}`);
       return null;
     }) : null;
   const [rows, facts] = await Promise.all([
-    orderRowsByIdsMysql(ids, coverage, tenantId, { summaryOnly: true }), balances
+    orderRowsByIdsMysql(ids, coverage, tenantId, { summaryOnly: true, diagnostics }), balances
   ]);
   if (!facts) return rows;
   const byOrder = new Map(facts.rows.map(row => [Number(row.order_id), row.inventory_availability]));
@@ -31591,28 +31593,29 @@ async function orderPageRowsMysql(ids, coverage, tenantId, includeInventoryAvail
     ? { ...row, inventory_availability: byOrder.get(Number(row.id)) } : row);
 }
 
-export async function ordersPagedMysql(query = {}, tenantId = "admin") {
+export async function ordersPagedMysql(query = {}, tenantId = "admin", { diagnostics = null } = {}) {
+  const measure = (name, work) => diagnostics ? diagnostics.measure(name, work) : work();
   ensureMysqlCutoverEnabled();
   const tenantScope = await orderListTenantScopeMysql(tenantId);
   assertTenantOrderListFiltersMysql(query, tenantScope);
-  await Promise.all([
+  await measure("schema", () => Promise.all([
     ensureOrderLabelPrintSchemaMysql(),
     ensureSkuInventoryRecipeSchemaMysql(),
     ensureProductCompositionSchemaMysql(),
     ensureProductNamingSchemaMysql()
-  ]);
+  ]));
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
   const includeRows = String(query.includeRows ?? query.include_rows ?? "1") !== "0";
   const includeInventoryAvailability = String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? "0") === "1";
   const includeCounts = String(query.includeCounts ?? query.include_counts ?? "1") !== "0";
   const includeLogisticsOptions = String(query.includeLogisticsOptions ?? query.include_logistics_options ?? "1") !== "0";
-  const [rawBase, optionsBase] = await Promise.all([
+  const [rawBase, optionsBase] = await measure("base", () => Promise.all([
     orderBaseSqlMysql(query, tenantId),
     includeLogisticsOptions
       ? orderBaseSqlMysql({ ...query, logisticsMethod: "all", logistics_method: "all" }, tenantId)
       : null
-  ]);
+  ]));
   const logisticsMethod = String(query.logisticsMethod || query.logistics_method || "all");
   const logisticsCarrier = String(query.logisticsCarrier || query.logistics_carrier || "all").trim().toLowerCase();
   const logisticsServiceClass = normalizeLogisticsServiceClass(query.logisticsServiceClass || query.logistics_service_class || "all");
@@ -31630,7 +31633,7 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const [logisticsSummaryRows, coverage] = await Promise.all([
     carrierOnly ? loadOrderLogisticsCarrierSummaryForBaseMysql(logisticsBase, tenantId, logisticsCarrier)
       : reuseLogisticsSummary ? loadOrderLogisticsSummaryForBaseMysql(logisticsBase, tenantId) : null,
-    includeCounts || needsCoverageForFilter ? orderTenantCoverageMysql(tenantScope, { queuesOnly: !includeRows }) : null
+    includeCounts || needsCoverageForFilter ? measure("coverage", () => orderTenantCoverageMysql(tenantScope, { queuesOnly: !includeRows })) : null
   ]);
   const logisticsIds = filterOrderIdsByLogisticsMethodMysql(logisticsSummaryRows || [], logisticsMethod);
   const carrierIds = filterOrderIdsByLogisticsCarrierMysql(logisticsSummaryRows || [], logisticsCarrier);
@@ -31639,10 +31642,10 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   const serviceClassOptionRows = (logisticsSummaryRows || []).filter((row) => logisticsCarrier === "all" || orderLogisticsCarrierMysql(row) === logisticsCarrier.toLowerCase());
   const carrierOptionRows = (logisticsSummaryRows || []).filter((row) => logisticsServiceClass === "all" || row.logistics_service_class_key === logisticsServiceClass);
   const logisticsMethodOptionsPromise = includeLogisticsOptions && optionsBase
-    ? orderLogisticsMethodOptionsMysql(optionsBase, serviceClassOptionRows, tenantId, logisticsCarrier)
+    ? measure("options", () => orderLogisticsMethodOptionsMysql(optionsBase, serviceClassOptionRows, tenantId, logisticsCarrier))
     : Promise.resolve([]);
-  const countsPromise = includeCounts ? orderPagedSqlCountsMysql(base, coverage, tenantScope) : Promise.resolve({});
-  const filtered = await orderFilteredSqlMysql(query, base, coverage, tenantScope);
+  const countsPromise = includeCounts ? measure("counts", () => orderPagedSqlCountsMysql(base, coverage, tenantScope)) : Promise.resolve({});
+  const filtered = await measure("filters", () => orderFilteredSqlMysql(query, base, coverage, tenantScope));
   const sortMode = String(query.sortMode || query.sort_mode || "ordered");
   // Pagination must use the active filter, not the all-status tab count.
   // Status counts deliberately omit filters such as the selected status,
@@ -31659,20 +31662,20 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
   let rows = [];
   if (includeRows) {
     if (sortMode === "inventory" || sortMode === "inventory_picking") {
-      const idRows = await mysqlQuery(`
+      const idRows = await measure("id_selection", () => mysqlQuery(`
         SELECT o.id
         FROM orders o
         ${filtered.joins}
         WHERE ${filtered.where}
         GROUP BY o.id
         ORDER BY ${orderQuickFilterOrderSqlMysql(query, tenantScope)}
-      `, filtered.params);
+      `, filtered.params));
       inventoryTotal = idRows.length;
-      const sortRows = await orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId);
+      const sortRows = await measure("sort", () => orderInventorySortRowsMysql(idRows.map((row) => row.id), tenantId));
       const pageIds = sortPagedOrdersMysql(sortRows, query).slice(start, start + pageSize).map((row) => row.id);
-      rows = await orderPageRowsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, includeInventoryAvailability);
+      rows = await measure("page_rows", () => orderPageRowsMysql(pageIds, needsCoverageForFilter || includeCounts ? coverage : null, tenantId, includeInventoryAvailability, diagnostics));
     } else {
-      const idRows = await mysqlQuery(`
+      const idRows = await measure("id_selection", () => mysqlQuery(`
         SELECT o.id, COUNT(*) OVER() AS filtered_total
         FROM orders o
         ${filtered.joins}
@@ -31680,23 +31683,23 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin") {
         GROUP BY o.id
         ORDER BY ${orderQuickFilterOrderSqlMysql(query, tenantScope)}
         LIMIT ? OFFSET ?
-      `, [...filtered.params, pageSize, start]);
+      `, [...filtered.params, pageSize, start]));
       // The window runs after grouping, so the page and its filtered total
       // come from one statement. An out-of-range page still needs its total.
       totalPromise = idRows.length && idRows[0].filtered_total != null
         ? Promise.resolve({ total: idRows[0].filtered_total }) : loadFilteredTotal();
-      rows = sortPagedOrdersMysql(await orderPageRowsMysql(
+      rows = sortPagedOrdersMysql(await measure("page_rows", () => orderPageRowsMysql(
         idRows.map((row) => row.id),
         needsCoverageForFilter || includeCounts ? coverage : null,
-        tenantId, includeInventoryAvailability
-      ), query);
+        tenantId, includeInventoryAvailability, diagnostics
+      )), query);
     }
   }
-  const [counts, logisticsMethodOptions, totalRow] = await Promise.all([
+  const [counts, logisticsMethodOptions, totalRow] = await measure("metadata", () => Promise.all([
     countsPromise,
     logisticsMethodOptionsPromise,
     totalPromise
-  ]);
+  ]));
   const total = Number(inventoryTotal ?? totalRow?.total ?? counts?.all ?? rows.length ?? 0);
   return {
     rows,

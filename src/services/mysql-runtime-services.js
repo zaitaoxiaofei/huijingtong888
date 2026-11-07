@@ -1,6 +1,7 @@
 import {skuTrafficDaily} from './sku-traffic-daily.js';
 import {queueSkuTrafficDaily,queueAllSkuTrafficDaily} from './seller-analytics.js';
 import { withRequestReadCache } from './request-read-cache.js';
+import { createOrderReadDiagnostics } from './order-read-diagnostics.js';
 import {productEditHistory} from './product-edit-history.js';
 import { withMysqlWorkload, withMysqlInteractiveRead } from "../mysql-workload.js";
 import { submitInventoryProductRequest, inventoryProductRequests, inventoryProductRequestDetail, reviewInventoryProductRequest } from "./inventory-product-requests.js";
@@ -922,14 +923,24 @@ export const mysqlRuntimeServices = {
   orders: ordersMysql,
   ordersPaged: (query = {}, tenantId = 'admin') => withRequestReadCache(() => withMysqlWorkload(
     String(query.includeRows ?? query.include_rows ?? '1') === '0' ? 'background' : 'foreground',
-    () => {
+    async () => {
       // Inline balances may await a cache refresh already running in the background.
       const needsBackgroundResult = String(query.includeRows ?? query.include_rows ?? '1') === '0'
         || String(query.includeCounts ?? query.include_counts ?? '1') !== '0'
         || ['pending_purchase', 'purchase_in_transit', 'purchase_records_missing'].includes(String(query.status || 'all'))
         || String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? '0') === '1';
-      return needsBackgroundResult ? ordersPagedMysql(query, tenantId)
-        : withMysqlInteractiveRead(() => ordersPagedMysql(query, tenantId));
+      const diagnostics = createOrderReadDiagnostics('ordersPagedMysql');
+      const read = () => ordersPagedMysql(query, tenantId, { diagnostics });
+      try {
+        const result = await (needsBackgroundResult ? read() : withMysqlInteractiveRead(read));
+        diagnostics.finish({ rows: Array.isArray(result?.rows) ? result.rows.length : 0, page: result?.page, page_size: result?.pageSize,
+          include_counts: String(query.includeCounts ?? query.include_counts ?? '1') !== '0',
+          include_inventory: String(query.includeInventoryAvailability ?? query.include_inventory_availability ?? '0') === '1' });
+        return result;
+      } catch (error) {
+        diagnostics.finish({ failed: true });
+        throw error;
+      }
     }
   )),
   outboundRecords: outboundRecordsMysql,
