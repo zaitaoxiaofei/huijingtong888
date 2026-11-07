@@ -1,3 +1,5 @@
+import {authorizeBusinessTaskSession} from './business-task-tenant.js';
+import {writeInventoryProductRequestNotices,publishInventoryProductRequestNotices} from './inventory-product-request-notices.js';
 import { hasPermission } from "../shared/permissions.js";
 import { randomUUID } from "node:crypto";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
@@ -117,6 +119,7 @@ function requestResult(row) {
 }
 
 export async function submitInventoryProductRequest(body = {}, session = {}) {
+  session = {...(await authorizeBusinessTaskSession(session)),name:session.name||''};
   await ensureSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   const personId = applicantId(session);
@@ -132,21 +135,34 @@ export async function submitInventoryProductRequest(body = {}, session = {}) {
     const created = payload.online_product_id ? await createProductFromOnlineProductMysql(payload, String(tenant.id)) : await createProductMysql(payload, null, String(tenant.id));
     return created;
   }
-  await mysqlExecute(`INSERT INTO inventory_product_requests
-    (tenant_id, request_key, applicant_id, applicant_name, payload_json, new_options_json)
-    VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
-  [tenant.id, key, personId, String(session.name || ""), JSON.stringify(payload), JSON.stringify(options)]);
-  const rows = await mysqlQuery(`SELECT * FROM inventory_product_requests WHERE ${inventoryTenantSql(tenant)} AND applicant_id = ? AND request_key = ?`, [personId, key]);
-  return requestResult(rows[0]);
+  const saved = await withMysqlTransaction(async connection => {
+    const current=await authorizeBusinessTaskSession(session,async(sql,args)=>(await connection.query(sql+' FOR UPDATE',args))[0]);
+    if(!hasPermission(current,'inventory.write'))fail('当前企业岗位无权提交库存申请',403);
+    await connection.execute(`INSERT INTO inventory_product_requests
+      (tenant_id, request_key, applicant_id, applicant_name, payload_json, new_options_json)
+      VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+    [tenant.id, key, personId, String(session.name || ""), JSON.stringify(payload), JSON.stringify(options)]);
+    const [rows] = await connection.query(`SELECT * FROM inventory_product_requests WHERE ${inventoryTenantSql(tenant)} AND applicant_id = ? AND request_key = ?`, [personId, key]);
+    return {row:rows[0],targets:await writeInventoryProductRequestNotices(connection,tenant,rows[0])};
+  });
+  publishInventoryProductRequestNotices(tenant.id,saved.targets);
+  return requestResult(saved.row);
 }
 
 export async function inventoryProductRequests(query = {}, session = {}) {
+  session = {...(await authorizeBusinessTaskSession(session)),name:session.name||''};
   await ensureSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   const personId = applicantId(session);
   const where = [inventoryTenantSql(tenant, 'r')], params = [];
   if (!canReviewInventoryProductRequests(session)) { where.push("r.applicant_id = ?"); params.push(personId); }
   if (["pending", "returned", "approved"].includes(query.status)) { where.push("r.status = ?"); params.push(query.status); }
+  const pendingWhere=[inventoryTenantSql(tenant,'r')],pendingParams=[];
+  if(!canReviewInventoryProductRequests(session)){pendingWhere.push('r.applicant_id = ?');pendingParams.push(personId);}
+  pendingWhere.push('r.status = ?');pendingParams.push('pending');
+  const pending=await mysqlQuery(`SELECT COUNT(*) AS total FROM inventory_product_requests r WHERE ${pendingWhere.join(' AND ')}`,pendingParams);
+  const pendingCount=Number(pending[0]?.total||0);
+  if(query.summary==='1')return {pending_count:pendingCount,can_review:canReviewInventoryProductRequests(session)};
   const page = Math.max(1, Math.floor(Number(query.page) || 1));
   const pageSize = 20;
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -156,17 +172,18 @@ export async function inventoryProductRequests(query = {}, session = {}) {
     JSON_UNQUOTE(JSON_EXTRACT(r.payload_json, '$.name')) AS name,
     JSON_UNQUOTE(JSON_EXTRACT(r.payload_json, '$.image_url')) AS image_url
     FROM inventory_product_requests r ${clause} ORDER BY r.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
-  return { rows: rows.map(row => ({ ...row, new_options: parseJson(row.new_options_json) })), total: Number(totals[0]?.total || 0), can_review: canReviewInventoryProductRequests(session) };
+  return { pending_count:pendingCount,rows: rows.map(row => ({ ...row, new_options: parseJson(row.new_options_json) })), total: Number(totals[0]?.total || 0), can_review: canReviewInventoryProductRequests(session) };
 }
 
 export async function inventoryProductRequestDetail(id, session = {}) {
+  session = {...(await authorizeBusinessTaskSession(session)),name:session.name||''};
   await ensureSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   const rows = await mysqlQuery(`SELECT * FROM inventory_product_requests WHERE id = ? AND ${inventoryTenantSql(tenant)}`, [Number(id)]);
   const row = rows[0];
   if (!row) fail("建品申请不存在", 404);
   if (!canReviewInventoryProductRequests(session) && Number(row.applicant_id) !== applicantId(session)) fail("只能查看自己的建品申请", 403);
-  return { ...row, payload: parseJson(row.payload_json), new_options: parseJson(row.new_options_json) };
+  return { ...row, can_review:canReviewInventoryProductRequests(session),payload: parseJson(row.payload_json), new_options: parseJson(row.new_options_json) };
 }
 
 async function finishBinding(row, tenant) {
@@ -191,6 +208,7 @@ async function finishBinding(row, tenant) {
 }
 
 export async function reviewInventoryProductRequest(id, body = {}, session = {}) {
+  session = {...(await authorizeBusinessTaskSession(session)),name:session.name||''};
   await ensureSchema();
   const tenant = await resolveInventoryTenantScope(session?.tenant?.id);
   const personId = applicantId(session);
@@ -199,6 +217,8 @@ export async function reviewInventoryProductRequest(id, body = {}, session = {})
   if (!["approve", "return", "resubmit", "retry_binding"].includes(action)) fail("不支持的建品申请操作");
   if (action !== "resubmit" && !canReviewInventoryProductRequests(session)) fail("仅库存审批人员（经理或管理员）可以审核建品申请", 403);
   const result = await withMysqlTransaction(async connection => {
+    const current=await authorizeBusinessTaskSession(session,async(sql,args)=>(await connection.query(sql+' FOR UPDATE',args))[0]);
+    if(action!=='resubmit'&&!canReviewInventoryProductRequests(current))fail('仅库存审批人员（经理或管理员）可以审核建品申请',403);
     const [rows] = await connection.query(`SELECT * FROM inventory_product_requests WHERE id = ? AND ${inventoryTenantSql(tenant)} FOR UPDATE`, [Number(id)]);
     const row = rows[0];
     if (!row) fail("建品申请不存在", 404);
@@ -211,7 +231,8 @@ export async function reviewInventoryProductRequest(id, body = {}, session = {})
     if (action === "return") {
       if (!note) fail("请填写退回原因，说明缺少的业务信息和修改位置");
       await connection.execute("UPDATE inventory_product_requests SET status = 'returned', review_note = ?, reviewer_id = ?, reviewed_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE id = ?", [note, personId, row.id]);
-      return { ...row, status: "returned" };
+      const updated={...row,status:'returned',review_note:note,revision:Number(row.revision)+1};
+      return {...updated,notice_targets:await writeInventoryProductRequestNotices(connection,tenant,updated)};
     }
     const original = parseJson(row.payload_json);
     // Source order and applicant identity cannot be changed by editing the form.
@@ -221,7 +242,8 @@ export async function reviewInventoryProductRequest(id, body = {}, session = {})
     const options = await newOptions(naming, tenant);
     if (action === "resubmit") {
       await connection.execute("UPDATE inventory_product_requests SET status = 'pending', payload_json = ?, new_options_json = ?, revision = revision + 1 WHERE id = ?", [JSON.stringify(payload), JSON.stringify(options), row.id]);
-      return { ...row, status: "pending" };
+      const updated={...row,status:'pending',payload_json:JSON.stringify(payload),revision:Number(row.revision)+1};
+      return {...updated,notice_targets:await writeInventoryProductRequestNotices(connection,tenant,updated)};
     }
     for (const option of inventoryRequestOptions(naming)) {
       if (option.type === "vehicle_model") {
@@ -257,8 +279,10 @@ export async function reviewInventoryProductRequest(id, body = {}, session = {})
     await connection.execute(`UPDATE inventory_product_requests SET status = 'approved', payload_json = ?, new_options_json = ?, product_id = ?, binding_status = ?,
       reviewer_id = ?, review_note = ?, reviewed_at = CURRENT_TIMESTAMP, revision = revision + 1 WHERE id = ?`,
     [JSON.stringify(payload), JSON.stringify(options), product.id, bindingStatus, personId, note, row.id]);
-    return { ...row, status: "approved", payload_json: JSON.stringify(payload), product_id: product.id, binding_status: bindingStatus };
+    const updated={...row,status:'approved',payload_json:JSON.stringify(payload),product_id:product.id,binding_status:bindingStatus,revision:Number(row.revision)+1};
+    return {...updated,notice_targets:await writeInventoryProductRequestNotices(connection,tenant,updated)};
   });
+  if(result.notice_targets)publishInventoryProductRequestNotices(tenant.id,result.notice_targets);
   return result.status === "approved" ? finishBinding(result, tenant) : requestResult(result);
 }
 

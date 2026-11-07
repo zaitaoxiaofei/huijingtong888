@@ -1,5 +1,11 @@
 ﻿<script setup>
+import {orderHasDispatchHold} from "../../src/shared/order-dispatch-hold.js";
+import {orderSelectionSummary,orderPrintPlan,currentPagePreparePlan} from "./utils/order-print-selection.js";
+import { selectOrderPage, retainSelectedOrders } from "./utils/order-selection.js";
+import InventoryCompositionBadge from "../admin/components/inventory/InventoryCompositionBadge.vue";
 import { computed, defineAsyncComponent, defineExpose, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { useAuthStore } from "../admin/stores/auth.js";
+import { hasPermission } from "../../src/shared/permissions.js";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, Plus } from "@element-plus/icons-vue";
@@ -8,15 +14,9 @@ import OrdersStatusTabs from "./components/OrdersStatusTabs.vue";
 import OrdersQuickFilters from "./components/OrdersQuickFilters.vue";
 import ShippedReceiptDialog from "./components/ShippedReceiptDialog.vue";
 import OrdersTable from "./components/OrdersTable.vue";
-import ProcurementLedgerDialog from "../admin/components/procurement/ProcurementLedgerDialog.vue";
-import HistoricalPurchaseQuickDialog from "../admin/components/procurement/HistoricalPurchaseQuickDialog.vue";
 import OrdersToolbar from "./components/OrdersToolbar.vue";
 import PageFooterPagination from "../admin/components/PageFooterPagination.vue";
-import OzonCategorySelect from "../admin/components/listing/OzonCategorySelect.vue";
-import ProductCompositionDialog from "../admin/components/inventory/ProductCompositionDialog.vue";
-import ProductCreateEditDialog from "../admin/components/inventory/ProductCreateEditDialog.vue";
-import InventoryStructuredSearch from "../admin/components/inventory/InventoryStructuredSearch.vue";
-import { apiClient } from "../admin/utils/api.js";
+import { apiClient,currentApiCacheScope } from "../admin/utils/api.js";
 import { useOrdersPage } from "./composables/useOrdersPage.js";
 import {
   INVENTORY_LIST_PAGE_SIZE,
@@ -35,16 +35,38 @@ import { previewOrderLabels } from "./services/orders-service.js";
 import "./orders-view.css";
 import "../admin/styles/erp-theme.css";
 
+const ProcurementLedgerDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementLedgerDialog.vue"));
+const HistoricalPurchaseQuickDialog = defineAsyncComponent(() => import("../admin/components/procurement/HistoricalPurchaseQuickDialog.vue"));
+const ProcurementOrderNotesDialog = defineAsyncComponent(() => import("../admin/components/procurement/ProcurementOrderNotesDialog.vue"));
+const OzonCategorySelect = defineAsyncComponent(() => import("../admin/components/listing/OzonCategorySelect.vue"));
+const ProductCompositionDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCompositionDialog.vue"));
+const ProductCreateEditDialog = defineAsyncComponent(() => import("../admin/components/inventory/ProductCreateEditDialog.vue"));
+const InventoryStructuredSearch = defineAsyncComponent(() => import("../admin/components/inventory/InventoryStructuredSearch.vue"));
+
 const route = useRoute();
+const inventoryAuth = useAuthStore();
+const canUpdateInventory = computed(() => hasPermission(inventoryAuth.user, "inventory.write"));
+const canRemindProcurement = computed(() => canUpdateInventory.value || hasPermission(inventoryAuth.user, "packing"));
+const canManageOrderNotes = computed(() => hasPermission(inventoryAuth.user, 'orders.manage'));
+const canEditProcurementNotes = computed(() => ['packing','procurement','inventory.write'].some(permission => hasPermission(inventoryAuth.user, permission)));
+const procurementOrderNotes = reactive({visible:false,productId:0,orderId:0});
 const router = useRouter();
 const emit = defineEmits(["inventory-completed"]);
 const elementLocale = zhCn;
 const ProfitCalculationVersions = defineAsyncComponent(() => import("./components/ProfitCalculationVersions.vue"));
 const OglDispatchPanel = defineAsyncComponent(() => import("./components/OglDispatchPanel.vue"));
-const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [] });
+const oglDispatchPanel = reactive({ visible: false, mode: "history", batchId: 0, orderIds: [], version: 0 });
+const OglDispatchComposer = defineAsyncComponent(() => import("./components/OglDispatchComposer.vue"));
+const oglComposer = reactive({ visible: false, orderIds: [], batchId: 0, manualShip: false, quickBind: false });
+const selectionDialogVisible = ref(false);
 
 function openOglDispatch(mode = "history", batchId = 0) {
-  if (mode === "create" && !selectedOrderIds.value.size) return ElMessage.warning("请先勾选本次要发运的 OGL 已打印订单");
+  if (mode === "create" || mode === "manual-ship" || mode === "quick-bind") {
+    if(mode === "manual-ship" && !selectedOrderIds.value.size){ ElMessage.warning("请先勾选订单"); return; }
+    Object.assign(oglComposer, { visible: true, orderIds: mode === "quick-bind" ? [] : [...selectedOrderIds.value], batchId: Number(batchId), manualShip: mode === "manual-ship", quickBind: mode === "quick-bind" });
+    return;
+  }
+  oglDispatchPanel.version += 1;
   Object.assign(oglDispatchPanel, { visible: true, mode, batchId: Number(batchId), orderIds: [...selectedOrderIds.value] });
 }
 
@@ -71,6 +93,9 @@ const {
   totalPages,
   selectedOrderIds,
   loadOrders,
+  refreshInventoryRows,
+  inventoryRefreshNotice,
+  inventoryRefreshFailed,
   loadLogisticsOptions,
   submitFilters,
   changeStatus,
@@ -102,6 +127,9 @@ const {
 
 const selectedCount = computed(() => selectedOrderIds.value.size);
 const selectedOrderIdList = computed(() => [...selectedOrderIds.value]);
+const selectionSummary=computed(()=>orderSelectionSummary(selectedOrderIds.value,vm.rows||[]));
+function clearAllSelected(){selectedOrderIds.value=new Set();}
+const labelPrintBusy=ref(false);
 const allRowsSelected = computed(() => {
   const rows = Array.isArray(vm.rows) ? vm.rows : [];
   return rows.length > 0 && rows.every((row) => selectedOrderIds.value.has(Number(row.id)));
@@ -147,8 +175,19 @@ const splitOrderDialog = reactive({
   submitting: false,
   orderId: null,
   postingNumber: "",
+  requestKey: "",
+  attempted: false,
+  result: null,
+  prepareIds: [],
+  scope: "",
   items: [],
   packages: []
+});
+
+const splitOrderReady = computed(() => {
+  const result = splitOrderDialog.result;
+  return result?.ok === true && result?.split_confirmed === true && result?.prepared === false
+    && Array.isArray(result.orders) && result.orders.length >= 2 && result.orders.every(row => Number(row.id) > 0);
 });
 
 const splitOrderValidation = computed(() => {
@@ -271,7 +310,8 @@ const createComponentProductTotal = ref(0);
 const createComponentCategoryOptions = [
   { label: "单品", value: "single" },
   { label: "组合", value: "combo" },
-  { label: "配件", value: "accessory" }
+  { label: "配件", value: "accessory" },
+  { label: "耗材", value: "consumable" }
 ];
 
 const createForm = reactive({
@@ -494,10 +534,12 @@ function inventoryProductBasicLines(row) {
 }
 
 function inventoryProductTypeText(row) {
+  if (Number(row?.is_consumable || 0)) return "耗材库存";
   return Number(row?.is_accessory || 0) ? "配件库存" : "库存产品";
 }
 
 function inventoryProductCategoryText(row) {
+  if (Number(row?.is_consumable || 0)) return "耗材";
   if (Number(row?.is_accessory || 0)) return "配件";
   if (Number(row?.component_count || 0) > 0) return "组合";
   return "单品";
@@ -576,9 +618,7 @@ watch(inventoryListPageSize, () => {
 });
 
 function toggleAll(checked) {
-  selectedOrderIds.value = checked
-    ? new Set((vm.rows || []).map((row) => Number(row.id)).filter(Boolean))
-    : new Set();
+  selectedOrderIds.value = selectOrderPage(selectedOrderIds.value, vm.rows || [], checked);
 }
 
 function toggleRow(orderId, checked) {
@@ -678,7 +718,9 @@ function rowAvailableActions(row) {
   const isDispute = displayStateKey === "dispute" || statusText.includes("dispute") || statusText.includes("arbitration");
   const isDelivering = displayStateKey === "delivering";
   const isAwaitingDeliver = displayStateKey === "awaiting_deliver";
-  const isOglAwaitingHandover = displayStateKey === "ogl_dispatched"
+  // Local label printing may move an officially included order into the bound queue.
+  // Keep label recovery available there until physical handover is confirmed.
+  const isOglAwaitingHandover = ["ogl_bound", "ogl_dispatched"].includes(displayStateKey)
     && row?.ogl_dispatch?.dispatched !== true && !row?.ogl_dispatch?.dispatched_at
     && rowDisplayStateKey({ ...row, ogl_dispatch: undefined, display_status: undefined }) === "awaiting_deliver";
   const logisticsText = [
@@ -698,10 +740,10 @@ function rowAvailableActions(row) {
   const isAwaitingPackaging = ["awaiting_packaging", "unbound", "stock_issue"].includes(displayStateKey);
   const beforeTransit = !isCancelled && !isDelivered && !isDispute && !isDelivering;
   const apiActions = row?.availableActions && typeof row.availableActions === "object" ? row.availableActions : {};
-  const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false;
+  const showPrepare = beforeTransit && !isFbp && isAwaitingPackaging && apiActions.prepare !== false && !row.inventory_refresh_pending;
   const quantitySummary = Number(row?.total_quantity || row?.quantity_total || row?.quantity || row?.item_count || 1);
   const showSplitPrepare = beforeTransit && !isFbp && quantitySummary > 1 && (isAwaitingPackaging || isAwaitingDeliver);
-  const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false;
+  const showPurchase = beforeTransit && !isFbp && (isAwaitingDeliver || isAwaitingPackaging) && apiActions.purchase !== false && !row.inventory_refresh_pending;
   const isRegistering = statusText.includes("acceptance_in_progress") || statusText.includes("awaiting_registration") || statusText.includes("posting_registration_error");
   const ozonActions = Array.isArray(row?.ozon_available_actions) ? row.ozon_available_actions : [];
   const labelReady = ozonActions.some((action) => ["label_download", "label_download_small"].includes(action));
@@ -759,7 +801,7 @@ function detailItemImageUrl(item = {}) {
 
 function detailItemSaleAmount(item = {}) {
   const outcome = String(detailOrder.value?.outcome_type || "");
-  if (outcome === "cancelled_pre_fulfillment") return 0;
+  if (["cancelled_pre_fulfillment", "cargo_lost"].includes(outcome)) return 0;
   if (["rejected_unclaimed", "after_delivery_return"].includes(outcome)) {
     const hasRetainedSale = detailFinance.value.some((row) => Math.abs(Number(row.accruals_for_sale_cny || row.accruals_for_sale || 0)) > 0.005);
     if (!hasRetainedSale) return 0;
@@ -843,14 +885,18 @@ function buildProcurementState(row = {}) {
   if (coverage?.stock_location === 'FBP' || row.fulfillment_type_key === 'fbp') {
     return { handled: true, detail: '官方仓履约，无需采购', hasOrderIncoming: false, inboundRecordCount: 0 };
   }
+  if (row.inventory_refresh_pending) return { handled: false, detail: '库存已变更，待刷新', hasOrderIncoming: false, inboundRecordCount: 0 };
   if (coverage) {
     const allBatches = coverage.batches || [];
     const batches = allBatches.filter(batch => batch.status === 'pending_arrival');
-    const batchTime = (batch) => new Date(batch?.purchased_at || batch?.created_at || 0).getTime() || 0;
-    const first = batches[0] || {};
+    const batchTime = (batch) => {
+      const value = batch?.purchased_at || batch?.created_at;
+      return value ? new Date(typeof value === 'string' && !/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value.replace(' ', 'T') + 'Z' : value).getTime() || 0 : 0;
+    };
+    const first = [...batches].sort((left, right) => batchTime(left) - batchTime(right))[0] || {};
     const latestBatch = [...allBatches].sort((left, right) => batchTime(right) - batchTime(left))[0] || first;
     const purchases = orderPurchaseDetails(allBatches);
-    const days = first.created_at ? Math.max(0, Math.floor((Date.now() - new Date(first.created_at).getTime()) / 86400000)) : 0;
+    const days = batchTime(first) ? Math.max(0, Math.floor((Date.now() - batchTime(first)) / 86400000)) : 0;
     return { ...coverage, handled: !coverage.shortage_quantity && !coverage.quantity_needs_review,
       detail: coverage.incoming_quantity > 0 ? '采购在途' : '库存可满足', hasOrderIncoming: coverage.incoming_quantity > 0,
       inTransitDays: days, overdue: !coverage.entered_transport && days > 3, latestPurchaseAt: latestBatch.purchased_at || latestBatch.created_at || '',
@@ -1239,7 +1285,7 @@ function buildTableRow(row) {
       seenProductIds.set(dedupeKey, item);
       return true;
     });
-  const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return"].includes(String(row?.outcome_type || ""));
+  const terminalOutcome = ["cancelled_pre_fulfillment", "rejected_unclaimed", "after_delivery_return", "cargo_lost"].includes(String(row?.outcome_type || ""));
   const cancelReasonText = terminalOutcome || ["cancelled", "returned", "rejected"].includes(displayStateKey)
     ? row?.cancel_reason_label || "取消原因待同步"
     : "--";
@@ -1264,6 +1310,7 @@ function buildTableRow(row) {
     inventorySummaries,
     inventoryBoundCount,
     inventoryPendingCount,
+    dispatchHold: orderHasDispatchHold(row),
     printedState: Boolean(row.printed_at),
     printed_at: row.printed_at || "",
     profitSummary,
@@ -1274,7 +1321,7 @@ function buildTableRow(row) {
     cancelInitiatorText: cancelReasonText !== "--" && row?.cancel_initiator_label ? `发起方：${row.cancel_initiator_label}` : "",
     amountText: `CNY ${formatMoney(profitSummary.revenue)}`,
     statusLabel: rowStateLabel(row),
-    statusHint: displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
+    statusHint: orderHasDispatchHold(row) ? "人工标记尚未清除，请处理后选择无标记，再继续发运" : row?.ogl_dispatch?.awaiting_print ? "已加入发运单，尚无 ERP 打印记录；请先打印并核对实物，订单仍等待发运" : row?.ogl_dispatch?.stage === "bound" ? "已打印并绑定发运单，尚未实际交运；订单继续保留在等待发运" : displayStateKey === "ogl_dispatched" ? (row?.ogl_dispatch?.dispatched === true ? "运往集运仓" : "官方申请已创建，等待实际交接") : "",
     statusColor: rowStateColor(row),
     statusDeadlineHint: usesOglTransportDeadline(row) ? oglTransportDeadlineHint(row, orderClock.value) : buildStatusDeadlineHint(displayStateKey, logisticsSummary),
     statusDeadlineDanger: usesOglTransportDeadline(row) && oglTransportDeadlineUrgent(row, orderClock.value),
@@ -1288,6 +1335,24 @@ function buildTableRow(row) {
 const tableRows = computed(() => (
   Array.isArray(vm.rows) ? vm.rows.map((row) => buildTableRow(row)) : []
 ));
+
+const selectedOrderRecords = ref(new Map());
+watch([tableRows, () => [...selectedOrderIds.value]], ([rows]) => {
+  selectedOrderRecords.value = retainSelectedOrders(selectedOrderRecords.value, rows, selectedOrderIds.value);
+}, { immediate: true, flush: "sync" });
+const selectedRows = computed(() => [...selectedOrderIds.value].map(id => selectedOrderRecords.value.get(id) || { id }));
+const preparingCurrentPage=ref(false);
+const pagePreparePlan=computed(()=>currentPagePreparePlan(tableRows.value));
+const canPreparePage=computed(()=>hasPermission(inventoryAuth.user,'packing'));
+
+async function oglComposed(result) {
+  const next = new Set(selectedOrderIds.value);
+  for (const member of result.members || []) next.delete(Number(member.order_id));
+  selectedOrderIds.value = next;
+  oglComposer.visible = false;
+  if(!oglComposer.manualShip&&!oglComposer.quickBind)openOglDispatch("history", result.batch.id);
+  await refreshOglDispatchOrders();
+}
 
 function findOrderRow(orderId) {
   return tableRows.value.find((row) => Number(row.id) === Number(orderId)) || null;
@@ -1670,8 +1735,8 @@ function resetInventoryDialog() {
 }
 
 function selectedActionOrderIds(action) {
-  return tableRows.value
-    .filter((row) => selectedOrderIds.value.has(Number(row.id)) && row.availableActions?.[action] !== false)
+  return selectedRows.value
+    .filter((row) => row.availableActions?.[action] !== false)
     .map((row) => Number(row.id))
     .filter(Boolean);
 }
@@ -1684,52 +1749,63 @@ async function syncAllOrdersAction() {
   await syncAll();
 }
 
-async function openPrintDialog(orderIds = []) {
-  const ids = Array.isArray(orderIds) ? orderIds.map(Number).filter(Boolean) : [];
-  if (!ids.length) return ElMessage.warning("请选择需要打印的订单");
-  if (ids.length > 80) return ElMessage.warning("单次最多打印 80 单，请将每页数量调为 50 条，或分批勾选打印");
+function printBulkOrders(orderIds = []) {
+  if(labelPrintBusy.value)return;
+  const ids=[...new Set(orderIds.map(Number).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  if(!ids.length)return ElMessage.warning("请选择需要打印的订单");
+  if(ids.length>80)return ElMessage.warning("单次最多打印 80 单，请分批勾选打印");
+  const records=new Map([...selectedRows.value,...tableRows.value].map(row=>[Number(row.id),row]));
+  const plan=orderPrintPlan(ids.map(id=>({...records.get(id),id})),tableRows.value.map(row=>Number(row.id)));
+  if(!plan.ids.length)return ElMessage.warning("所选订单暂不可打印，请同步订单后核对面单状态");
+  if(plan.excluded)ElMessage.warning(`${plan.excluded} 单暂不可打印，已跳过；其余订单直接进入打印页面`);
+  return executeLabelPrint(plan.ids,currentApiCacheScope());
+}
+async function executeLabelPrint(ids,scope,options={}){
+  if(labelPrintBusy.value)return;
+  labelPrintBusy.value=true;
   try {
-    const result = await previewOrderLabels(ids);
-    if (result?.printed) {
-      orderDetailCache.clear();
-      await loadOrders({ includeCounts: true });
-      ElMessage.success("已记录面单打印时间；如打印失败，请在确认窗口选择“失败”");
-    } else if (result?.failed) {
-      orderDetailCache.clear();
-      await loadOrders({ includeCounts: true });
-      ElMessage.warning("已撤销本批面单的打印记录");
+    const result = await previewOrderLabels(ids,options);
+    if(scope!==currentApiCacheScope())return;
+    if(result?.printed){
+      ElMessage.success("已记录面单打印时间，已选订单保持勾选，方便核对和贴单");
+    }else if(result?.failed){
+      ElMessage.warning("已撤销本批面单的打印记录，勾选保留，可重新打印");
     }
-  } catch (error) {
-    ElMessage.error(`打开面单失败：${error?.message || "未知错误"}`);
-  }
+    if(result?.printed||result?.failed){
+      orderDetailCache.clear();
+      try{await loadOrders({includeCounts:true});}catch{ElMessage.warning("打印结果已处理，订单列表刷新失败，请手动刷新");}
+    }
+  }catch(error){if(scope===currentApiCacheScope())ElMessage.error(`打开面单失败：${error?.message||"未知错误"}`);}
+  finally{labelPrintBusy.value=false;}
 }
-
-function bulkPrintSelected() {
-  if (!selectedOrderIds.value.size) return ElMessage.warning("请先选择订单");
-  const ids = selectedActionOrderIds("print");
-  if (!ids.length) return ElMessage.warning("已选订单里没有可打印面单的订单");
-  const skipped = selectedOrderIds.value.size - ids.length;
-  if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
-  return openPrintDialog(ids);
-}
-
-function bulkPrintPage() {
-  const rows = tableRows.value;
-  const ids = rows.filter((row) => row.availableActions?.print !== false).map((row) => Number(row.id)).filter(Boolean);
-  if (!ids.length) return ElMessage.warning("当前页没有可打印面单的订单");
-  const skipped = rows.length - ids.length;
-  if (skipped > 0) ElMessage.warning(`已跳过 ${skipped} 个不可打印订单`);
-  return openPrintDialog(ids);
-}
+function bulkPrintSelected(){return printBulkOrders([...selectedOrderIds.value]);}
+function bulkPrintPage(){return printBulkOrders(tableRows.value.map(row=>Number(row.id)));}
 
 function handleToolbarMoreAction(action) {
   if (action === "shipped-receipts") return previewShippedReceipts();
   if (action === "quality-rules") return showQualityRules();
+  if (action === "ogl-quick-bind") return openOglDispatch("quick-bind");
+  if (action === "ogl-manual-ship") return openOglDispatch("manual-ship");
   if (action === "ogl-official-carriages") return openOglDispatch("official");
   if (action === "ogl-create-batch") return openOglDispatch("create");
   if (action === "ogl-batch-history") return openOglDispatch("history");
   if (action === "print-selected") return bulkPrintSelected();
   return handleMoreAction(action);
+}
+
+async function bulkPrepareCurrentPage(){
+ if(!canPreparePage.value||preparingCurrentPage.value)return;
+ const {ids,skipped}=pagePreparePlan.value,scope=currentApiCacheScope();
+ if(!ids.length)return ElMessage.warning('当前页没有可直接备货的FBS订单');
+ preparingCurrentPage.value=true;
+ try{
+  await ElMessageBox.confirm(`确认备货当前页 ${ids.length} 个FBS订单？跳过 ${skipped} 个不可直接备货的订单（含FBP及需单独拆单确认的订单）。不会备货其他页。`,'批量备货当前页',{type:'warning',confirmButtonText:`确认备货 ${ids.length} 单`,cancelButtonText:'取消'});
+  if(scope!==currentApiCacheScope()||!canPreparePage.value)return;
+  const current=pagePreparePlan.value.ids;
+  if(ids.some(id=>!current.includes(id)))return ElMessage.warning('当前页订单状态已变化，请重新核对后备货');
+  await bulkPrepare([...ids]);
+ }catch(error){if(!['cancel','close'].includes(error))ElMessage.error(error.message||'批量备货失败');}
+ finally{preparingCurrentPage.value=false;}
 }
 
 function bulkPrepareSelected() {
@@ -1742,6 +1818,11 @@ function bulkPrepareSelected() {
     : "确认批量备货所选订单？";
   ElMessageBox.confirm(message, "批量备货", { type: "warning" })
     .then(() => bulkPrepare(ids));
+}
+
+async function handleInventoryRowsSaved(change = {}) {
+  orderDetailCache.clear();
+  await refreshInventoryRows(change);
 }
 
 async function openDrawer(mode, orderId) {
@@ -1886,11 +1967,17 @@ async function openSplitOrderDialog(orderId) {
   splitOrderDialog.visible = true;
   splitOrderDialog.loading = true;
   splitOrderDialog.orderId = Number(orderId);
+  splitOrderDialog.requestKey = crypto.randomUUID();
+  splitOrderDialog.attempted = false;
+  splitOrderDialog.result = null;
+  splitOrderDialog.prepareIds = [];
+  splitOrderDialog.scope = `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`;
   splitOrderDialog.items = [];
   splitOrderDialog.packages = [];
   try {
     const detail = await fetchOrderDetail(orderId);
-    const items = (detail?.items || []).map((item) => ({
+    const pendingSplit = await apiClient.get(`/api/orders/${Number(orderId)}/split`, { noCache: true });
+    const items = (pendingSplit?.items || detail?.items || []).map((item) => ({
       id: Number(item.id),
       sku: String(item.ozon_sku || item.mapped_ozon_sku || "-"),
       name: String(item.product_name || item.online_product_name || item.ozon_name || item.ozon_sku || "商品"),
@@ -1904,7 +1991,11 @@ async function openSplitOrderDialog(orderId) {
     }
     splitOrderDialog.postingNumber = String(detail?.order?.posting_number || orderId);
     splitOrderDialog.items = items;
-    distributeSplitPackages();
+    if (pendingSplit) {
+      splitOrderDialog.requestKey = pendingSplit.request_key;
+      splitOrderDialog.attempted = true;
+      splitOrderDialog.packages = pendingSplit.packages.map(pkg => ({ quantities: Object.fromEntries(pkg.products.map(product => [product.order_item_id, product.quantity])) }));
+    } else distributeSplitPackages();
   } catch (error) {
     splitOrderDialog.visible = false;
     ElMessage.error(error?.message || "订单商品加载失败");
@@ -1925,20 +2016,47 @@ async function submitSplitOrder() {
         }))
         .filter((item) => item.quantity > 0)
     }));
-    const result = await prepareSplitOrder(splitOrderDialog.orderId, packages);
+    const reconcile = splitOrderDialog.attempted;
+    splitOrderDialog.attempted = true;
+    const result = await prepareSplitOrder(splitOrderDialog.orderId, packages, splitOrderDialog.requestKey, reconcile);
+    if (splitOrderDialog.scope !== `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`) { splitOrderDialog.visible = false; return; }
+    splitOrderDialog.result = result;
+    if (!result?.ok || !result?.split_confirmed || result.prepared !== false) {
+      ElMessage.warning(result?.error || "拆单结果尚未核实，未自动备货，请重新同步结果");
+      return;
+    }
     orderDetailCache.delete(Number(splitOrderDialog.orderId));
-    splitOrderDialog.visible = false;
     await loadOrders({ includeCounts: true });
-    ElMessage.success(`已拆分为 ${Number(result?.package_count || packages.length)} 个包裹并完成备货`);
+    ElMessage.success("拆单结果已同步；请核对状态，需备货的子单请单独确认");
   } catch (error) {
-    ElMessage.error(error?.message || "拆分备货失败");
+    if (error?.payload?.validation?.split_retry_safe === true) {
+      splitOrderDialog.attempted = false;
+      splitOrderDialog.requestKey = crypto.randomUUID();
+    }
+    ElMessage.error(error?.message || "拆单失败；未自动备货");
   } finally {
     splitOrderDialog.submitting = false;
   }
 }
 
+async function prepareSplitChildren() {
+  if (!splitOrderReady.value || !splitOrderDialog.prepareIds.length || splitOrderDialog.submitting) return;
+  const ids = [...splitOrderDialog.prepareIds];
+  try {
+    await ElMessageBox.confirm(`确认仅为已选择的 ${ids.length} 个子单备货？`, "确认子单备货", { type: "warning", confirmButtonText: "确认备货" });
+    if (splitOrderDialog.scope !== `${inventoryAuth.user?.tenant?.id}:${inventoryAuth.user?.id}`) { splitOrderDialog.visible = false; return; }
+    splitOrderDialog.submitting = true;
+    await bulkPrepare(ids);
+    splitOrderDialog.visible = false;
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error?.message || "子单备货失败，未确认的订单请核对后重试");
+  } finally { splitOrderDialog.submitting = false; }
+}
+
 async function handlePrintOrder(orderId) {
-  openPrintDialog([orderId]);
+  const id=Number(orderId),row=tableRows.value.find(item=>Number(item.id)===id);
+  if(!Number.isSafeInteger(id)||id<=0||row?.availableActions?.print!==true)return ElMessage.warning("该订单暂不可打印，请同步订单后核对面单状态");
+  return executeLabelPrint([id],currentApiCacheScope(),{autoPrint:true});
 }
 
 async function showQualityRules() {
@@ -1974,6 +2092,21 @@ function closeQualityDialog() {
   qualityDialog.visible = false;
 }
 
+const markingSelected=ref(false);
+async function handleBatchMark(markType){
+  if(markingSelected.value)return;
+  const ids=[...selectedOrderIds.value];if(!ids.length)return;
+  const {value:note}=await ElMessageBox.prompt(`为已选 ${ids.length} 单统一设置标记和备注`,"批量标记",{inputType:"textarea",inputPlaceholder:"填写本次统一备注（可留空）",confirmButtonText:"保存标记",cancelButtonText:"取消",closeOnClickModal:false}).catch(()=>({value:null}));
+  if(note===null)return;
+  markingSelected.value=true;let saved=0;const failed=[];
+  try{
+    for(const id of ids){try{await saveOrderMark(id,markType,note);saved++;}catch(error){failed.push(error?.message||"保存失败");}}
+    orderDetailCache.clear();await loadOrders({forceRefresh:true});
+    if(failed.length)ElMessage.error(`成功 ${saved} 单，失败 ${failed.length} 单：${failed[0]}`);
+    else ElMessage.success(`已批量标记 ${saved} 单`);
+  }finally{markingSelected.value=false;}
+}
+
 async function handleSaveMark(orderId, markType) {
   const row = tableRows.value.find((item) => Number(item.id) === Number(orderId));
   const { value: note } = await ElMessageBox.prompt("可填写备注，保存后会显示在订单标记下方", "订单标记备注", {
@@ -1988,10 +2121,29 @@ async function handleSaveMark(orderId, markType) {
         ? { ...row, mark_type: String(saved?.mark_type ?? markType ?? ""), mark_note: String(saved?.note ?? note).trim() }
         : row
     ));
+    orderDetailCache.delete(Number(orderId));
+    await loadOrders({forceRefresh:true});
     ElMessage.success("订单标记和备注已保存");
   } catch (error) {
     ElMessage.error(error?.message || "标记和备注保存失败，请重试");
   }
+}
+
+function editProcurementNote(row) {
+  if (canManageOrderNotes.value) return handleSaveMark(Number(row.id), String(row.mark_type || ''));
+  if (!canEditProcurementNotes.value || row.inventory_refresh_pending || row.procurement_coverage?.entered_transport
+    || row.fulfillment_type_key === 'fbp' || row.logisticsSummary?.isFbp || row.procurement_coverage?.stock_location === 'FBP' || !row.procurement_coverage?.needs_fulfillment) return;
+  const productId = Number((row.procurement_coverage.items || []).find(item => Number(item.product_id) > 0)?.product_id || 0);
+  if (productId) Object.assign(procurementOrderNotes, {visible:true,productId,orderId:Number(row.id)});
+}
+
+function handleOrderCollaborationNoteSaved(event) {
+  const detail = event.detail || {}, orderId = Number(detail.orderId);
+  if (detail.scope !== currentApiCacheScope() || !Number.isSafeInteger(orderId) || orderId <= 0 || typeof detail.note !== 'string') return;
+  vm.rows = (vm.rows || []).map(row => Number(row.id) === orderId
+    ? { ...row, mark_note: detail.note.trim(), ...(typeof detail.markType === 'string' ? { mark_type: detail.markType } : {}) }
+    : row);
+  orderDetailCache.delete(orderId);
 }
 
 async function handleOpenOrderProcurement(orderId) {
@@ -2567,7 +2719,10 @@ watch(() => route.query.orderId, async () => {
 });
 
 onMounted(async () => {
-  await Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()]);
+  window.addEventListener('erp:order-collaboration-note-saved', handleOrderCollaborationNoteSaved);
+  // Auxiliary toolbar data must not delay the first order request.
+  void Promise.all([loadStatusTabPreference(), loadLatestOrderSyncStatus()])
+    .catch(error => console.warn('load order toolbar metadata failed', error));
   latestOrderSyncTimer = window.setInterval(() => {
     orderClock.value = Date.now();
     void loadLatestOrderSyncStatus();
@@ -2585,6 +2740,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener('erp:order-collaboration-note-saved', handleOrderCollaborationNoteSaved);
   window.clearInterval(latestOrderSyncTimer);
 });
 </script>
@@ -2597,6 +2753,7 @@ onBeforeUnmount(() => {
     </div>
 
     <OrdersToolbar
+      :mark-options="vm.markOptions" :marking="markingSelected" @batch-mark="handleBatchMark"
       :filters="vm.filters"
       :shops="vm.shops"
       :logistics-carrier-options="vm.logisticsCarrierOptions"
@@ -2609,6 +2766,9 @@ onBeforeUnmount(() => {
       :more-actions="vm.moreActions"
       :selected-count="selectedCount"
       :page-row-count="tableRows.length"
+      :preparable-count="pagePreparePlan.ids.length"
+      :can-prepare="canPreparePage"
+      :preparing-page="preparingCurrentPage"
       @update:filters="vm.filters = $event"
       @submit="submitFilters"
       @sync-incremental="syncRecentOrdersAction"
@@ -2617,6 +2777,7 @@ onBeforeUnmount(() => {
       @more-action="handleToolbarMoreAction"
       @print-selected="bulkPrintSelected"
       @print-page="bulkPrintPage"
+      @prepare-page="bulkPrepareCurrentPage"
       @open-quality-rules="showQualityRules"
       @load-logistics-options="loadLogisticsOptions"
     >
@@ -2635,15 +2796,30 @@ onBeforeUnmount(() => {
         @change-print-view="changePrintView"
         @change-mark-filter="changeMarkFilter"
         @configure-status-tabs="openStatusPreferenceDialog"
+        @review-selection="selectionDialogVisible = true"
       >
         <template #quick-filters><OrdersQuickFilters :filters="vm.filters" @apply="submitFilters" /></template>
       </OrdersStatusTabs>
+      <div v-if="inventoryRefreshNotice" class="orders-toolbar-status" role="status">{{ inventoryRefreshNotice }} <el-button v-if="inventoryRefreshFailed" size="small" link type="primary" @click="handleInventoryRowsSaved()">重试库存刷新</el-button></div>
     </OrdersToolbar>
 
-    <OglDispatchPanel v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" />
+    <OglDispatchComposer v-if="oglComposer.visible" :quick-bind="oglComposer.quickBind" :manual-ship="oglComposer.manualShip" :order-ids="oglComposer.orderIds" :batch-id="oglComposer.batchId" :order-rows="selectedRows" @open-order="id => openDrawer('detail', id)" @close="oglComposer.visible = false" @created="oglComposed" @open-batch="id => openOglDispatch('history', id)" />
+    <el-dialog v-if="selectionDialogVisible" v-model="selectionDialogVisible" title="跨页已选订单" width="min(1100px,94vw)" append-to-body>
+      <p>已选 {{ selectedCount }} 单；翻页、调整筛选不会清空。批量操作前会由服务端重新校验订单状态。</p>
+      <el-table :data="selectedRows" row-key="id" max-height="55vh" border>
+        <el-table-column label="订单号" min-width="180"><template #default="{ row }">{{ row.posting_number || row.id }}</template></el-table-column>
+        <el-table-column prop="shop_name" label="店铺" min-width="140" />
+        <el-table-column prop="statusLabel" label="状态" min-width="130" />
+        <el-table-column label="打印时间" min-width="180"><template #default="{ row }">{{ row.printed_at ? formatDateTime(row.printed_at) : '未打印' }}</template></el-table-column>
+        <el-table-column label="操作" width="90"><template #default="{ row }"><el-button link type="danger" @click="toggleRow(row.id, false)">移除</el-button></template></el-table-column>
+      </el-table>
+      <template #footer><el-button @click="clearAllSelected">清空全部已选</el-button><el-button type="primary" @click="selectionDialogVisible = false">返回订单</el-button></template>
+    </el-dialog>
+    <OglDispatchPanel :key="oglDispatchPanel.version" v-if="oglDispatchPanel.visible" :mode="oglDispatchPanel.mode" :batch-id="oglDispatchPanel.batchId" :order-ids="oglDispatchPanel.orderIds" @close="oglDispatchPanel.visible = false" @changed="refreshOglDispatchOrders" @compose="id => openOglDispatch('create', id)" />
 
     <ShippedReceiptDialog :shipped-receipt-dialog="shippedReceiptDialog" @preview="previewShippedReceipts(shippedReceiptDialog.orderIds)" @confirm="confirmShippedReceipts" @review="reviewShippedProcurementRecords" />
-    <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="loadOrders()" />
+    <ProcurementLedgerDialog v-if="inventoryDetail.visible" v-model="inventoryDetail.visible" :product-id="inventoryDetail.productId" :order-id="inventoryDetail.orderId" @saved="handleInventoryRowsSaved" />
+    <ProcurementOrderNotesDialog v-if="procurementOrderNotes.visible" v-model="procurementOrderNotes.visible" :product-id="procurementOrderNotes.productId" :order-id="procurementOrderNotes.orderId" />
     <HistoricalPurchaseQuickDialog v-if="historicalPurchaseProducts.length" :products="historicalPurchaseProducts" @close="historicalPurchaseProducts = []" @saved="loadOrders()" />
     <el-dialog v-model="procurementReceiptDialog.visible" title="登记实际收货" width="92%" destroy-on-close>
       <p class="order-procurement-receipt-hint">勾选本次实际到货的采购批次并填写实收数量。未勾选的批次、以及部分收货的剩余数量，都会继续保留在途。</p>
@@ -2703,6 +2879,10 @@ onBeforeUnmount(() => {
     </el-dialog>
     <div class="orders-table-section">
       <OrdersTable
+        :can-update-inventory="canUpdateInventory"
+        :can-remind-procurement="canRemindProcurement"
+        :can-manage-order-notes="canManageOrderNotes"
+        :can-edit-procurement-notes="canEditProcurementNotes"
         :rows="tableRows"
         :mark-options="vm.markOptions"
         :selected-ids="selectedOrderIds"
@@ -2717,6 +2897,7 @@ onBeforeUnmount(() => {
         @split-order="openSplitOrderDialog"
         @print-order="handlePrintOrder"
         @save-mark="handleSaveMark"
+        @edit-procurement-note="editProcurementNote"
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
         @edit-inventory-product="(productId) => openInventoryProductEditor({ id: productId })"
         @open-product-components="openProductCompositionDialog"
@@ -2726,13 +2907,19 @@ onBeforeUnmount(() => {
         @view-procurement-details="handleViewProcurementDetails"
         @review-procurement-records="openOrderProcurementRecords"
         @view-inventory-detail="openInventoryDetail"
-        @inventory-saved="loadOrders({ forceRefresh: true, silent: true, includeCounts: true })"
+        @inventory-saved="handleInventoryRowsSaved"
         @quick-history-purchase="historicalPurchaseProducts = $event"
         @open-ogl-batch="id => openOglDispatch('history', id)"
         @confirm-procurement-inbound="handleConfirmProcurementInbound"
       />
 
       <div class="orders-page-footer">
+        <div class="orders-selection-summary" role="status" aria-live="polite">
+          <span>已选 <strong>{{selectionSummary.total}}</strong> 单<span v-if="selectionSummary.total">（本页 {{selectionSummary.current}} 单，其他页 {{selectionSummary.other}} 单）</span></span>
+          <el-button size="small" :disabled="!selectedCount" @click="selectionDialogVisible=true">查看已选</el-button>
+          <el-button size="small" :disabled="!selectedCount" @click="clearAllSelected">清空全部已选</el-button>
+          <span class="orders-selection-hint">表头勾选框仅选择／取消当前页</span>
+        </div>
         <PageFooterPagination
           :page="vm.filters.page"
           :total-pages="totalPages"
@@ -2743,6 +2930,8 @@ onBeforeUnmount(() => {
         />
       </div>
     </div>
+
+
 
     <el-dialog
       v-model="statusPreferenceDialog.visible"
@@ -2778,14 +2967,23 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="splitOrderDialog.visible"
-      title="拆分包裹并备货"
+      title="拆分订单"
       width="920px"
       align-center
       class="erp-centered-dialog orders-split-dialog"
       destroy-on-close
     >
       <div v-loading="splitOrderDialog.loading" class="orders-split-dialog-body">
-        <div class="orders-split-summary">
+        <el-alert title="此处只拆单，不自动备货。子单同步成功后，请核对并单独确认备货。" type="info" :closable="false" />
+        <el-alert v-if="splitOrderDialog.result?.error" :title="splitOrderDialog.result.error" type="warning" :closable="false" />
+        <div v-if="splitOrderReady" class="orders-split-result">
+          <el-table :data="splitOrderDialog.result.orders" row-key="id" @selection-change="rows => splitOrderDialog.prepareIds = rows.map(row => Number(row.id))">
+            <el-table-column type="selection" width="45" :selectable="row => row.status === 'awaiting_packaging'" />
+            <el-table-column label="已同步订单"><template #default="{row}"><el-button link type="primary" @click="openDrawer('detail', row.id)">{{row.posting_number}}</el-button></template></el-table-column>
+            <el-table-column label="状态"><template #default="{row}">{{row.status === 'awaiting_packaging' ? '待备货 · 需单独确认' : row.status}}</template></el-table-column>
+          </el-table>
+        </div>
+        <div v-if="!splitOrderReady" class="orders-split-summary">
           <div>
             <span>货件号</span>
             <strong>{{ splitOrderDialog.postingNumber || "-" }}</strong>
@@ -2794,11 +2992,11 @@ onBeforeUnmount(() => {
             <span>包裹数量</span>
             <strong>{{ splitOrderDialog.packages.length }}</strong>
           </div>
-          <el-button :icon="Plus" @click="addSplitPackage">新增包裹</el-button>
-          <el-button @click="distributeSplitPackages">重新均分</el-button>
+          <el-button :disabled="splitOrderDialog.attempted" :icon="Plus" @click="addSplitPackage">新增包裹</el-button>
+          <el-button :disabled="splitOrderDialog.attempted" @click="distributeSplitPackages">重新均分</el-button>
         </div>
 
-        <div class="orders-split-packages">
+        <div v-if="!splitOrderReady" class="orders-split-packages">
           <section
             v-for="(pkg, packageIndex) in splitOrderDialog.packages"
             :key="packageIndex"
@@ -2812,7 +3010,7 @@ onBeforeUnmount(() => {
                   circle
                   plain
                   type="danger"
-                  :disabled="splitOrderDialog.packages.length <= 2"
+                  :disabled="splitOrderDialog.attempted || splitOrderDialog.packages.length <= 2"
                   aria-label="删除包裹"
                   @click="removeSplitPackage(packageIndex)"
                 />
@@ -2831,6 +3029,7 @@ onBeforeUnmount(() => {
                 step-strictly
                 controls-position="right"
                 aria-label="包裹商品数量"
+                :disabled="splitOrderDialog.attempted"
                 @update:model-value="updateSplitPackageQuantity(pkg, item, $event)"
               />
             </div>
@@ -2838,7 +3037,7 @@ onBeforeUnmount(() => {
         </div>
 
         <el-alert
-          v-if="splitOrderValidation"
+          v-if="!splitOrderReady && splitOrderValidation"
           :title="splitOrderValidation"
           type="warning"
           :closable="false"
@@ -2846,21 +3045,23 @@ onBeforeUnmount(() => {
         />
         <el-alert
           v-else
-          title="商品数量已全部分配，提交后 Ozon 将按这些包裹完成备货。"
+          title="商品数量已分配；拆单成功不代表已备货，需再次确认。"
           type="success"
           :closable="false"
           show-icon
         />
       </div>
       <template #footer>
-        <el-button @click="splitOrderDialog.visible = false">取消</el-button>
+        <el-button :disabled="splitOrderDialog.submitting" @click="splitOrderDialog.visible = false">返回订单</el-button>
+        <el-button v-if="splitOrderReady" type="primary" :loading="splitOrderDialog.submitting" :disabled="!splitOrderDialog.prepareIds.length" @click="prepareSplitChildren">确认所选子单备货</el-button>
         <el-button
           type="primary"
           :loading="splitOrderDialog.submitting"
           :disabled="Boolean(splitOrderValidation) || splitOrderDialog.loading"
+          v-if="!splitOrderReady"
           @click="submitSplitOrder"
         >
-          确认拆分并备货
+          {{ splitOrderDialog.attempted ? "重新同步拆单结果" : "确认拆单，不备货" }}
         </el-button>
       </template>
     </el-dialog>
@@ -2897,7 +3098,7 @@ onBeforeUnmount(() => {
 
         <div v-if="detailDialog.mode === 'profit'" class="orders-profit-detail-shell">
           <div
-            v-if="['cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return'].includes(detailOrder.outcome_type)"
+            v-if="['cancelled_pre_fulfillment', 'rejected_unclaimed', 'after_delivery_return', 'cargo_lost'].includes(detailOrder.outcome_type)"
             class="orders-profit-attribution"
           >
             <div>
@@ -3293,6 +3494,7 @@ onBeforeUnmount(() => {
                     <div class="picker-item-meta">
                       <strong>{{ inventoryProductLabel(row) }}</strong>
                       <span>编码：{{ inventoryProductCode(row) }}</span>
+                      <InventoryCompositionBadge :product="row"/>
                     </div>
                   </div>
                 </template>
@@ -3719,6 +3921,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <ProductCreateEditDialog
+      v-if="inventoryProductEditorVisible"
       ref="inventoryProductEditorRef"
       v-model:visible="inventoryProductEditorVisible"
       :mode="inventoryProductEditorMode"
@@ -3736,6 +3939,7 @@ onBeforeUnmount(() => {
     />
 
     <ProductCreateEditDialog
+      v-if="quickComponentCreateVisible"
       v-model:visible="quickComponentCreateVisible"
       mode="create"
       target="inventory"
@@ -3748,6 +3952,7 @@ onBeforeUnmount(() => {
     />
 
     <ProductCompositionDialog
+      v-if="compositionDialogVisible"
       v-model:visible="compositionDialogVisible"
       :product="compositionDialogProduct"
       :refresh-key="compositionDialogRefreshKey"

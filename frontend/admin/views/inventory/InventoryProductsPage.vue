@@ -1,10 +1,14 @@
 <script setup>
+import { inventoryNumberTitle } from '../../utils/inventory-number.js';
+import {useInventoryRequestSummary} from '../../composables/useInventoryRequestSummary.js';
+import InventoryCompositionBadge from "../../components/inventory/InventoryCompositionBadge.vue";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { useAuthStore } from "../../stores/auth";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { View } from "@element-plus/icons-vue";
+import { useInventoryLocalQuantities } from "../../utils/use-inventory-local-quantities.js";
 import { apiClient } from "../../utils/api";
 import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
@@ -12,10 +16,8 @@ import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
-import ErpPageHeader from "../../components/ErpPageHeader.vue";
-import InventoryStructuredSearch from "../../components/inventory/InventoryStructuredSearch.vue";
+import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
 import ProductCompositionDialog from "../../components/inventory/ProductCompositionDialog.vue";
-import InventoryProductRequestsDialog from "../../components/inventory/InventoryProductRequestsDialog.vue";
 import ProcurementLedgerDialog from "../../components/procurement/ProcurementLedgerDialog.vue";
 import ProductCreateEditDialog from "../../components/inventory/ProductCreateEditDialog.vue";
 import ProcurementRequestCreateDialog from "../../components/procurement/ProcurementRequestCreateDialog.vue";
@@ -45,7 +47,7 @@ const isTenantScoped = computed(() => Boolean(authStore.user?.tenant?.id && auth
 const canWriteInventory = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canManageProductComponents = computed(() => hasPermission(authStore.user, "inventory.write"));
 const canProcure = computed(() => hasPermission(authStore.user, "procurement"));
-const canSubmitProcurementRequest = computed(() => hasPermission(authStore.user, "procurement.request.submit"));
+const canSubmitProcurementRequest = computed(() => Boolean(authStore.user?.tenant?.id));
 const canOutbound = computed(() => hasPermission(authStore.user, "packing") || hasPermission(authStore.user, "inventory.write"));
 const route = useRoute();
 const router = useRouter();
@@ -58,11 +60,7 @@ const listRequestGate = createLatestRequestGate();
 const loading = ref(false);
 const detailLoading = ref(false);
 const dialogVisible = ref(false);
-const productRequestsVisible = ref(false);
-function refreshAfterProductRequest() {
-  inventoryListCache.clear();
-  return loadPageData();
-}
+const requestSummary=useInventoryRequestSummary();
 
 function loadInventoryDictionaries() {
   if (dictionaryLoaded) return Promise.resolve();
@@ -125,6 +123,8 @@ const compositionDialogProduct = ref(null);
 const compositionDialogRefreshKey = ref(0);
 const selectedRows = ref([]);
 const ledgerVisible = ref(false);
+const ledgerInitialAction = ref("");
+function openInventoryLedger(row, action = "") { ledgerProductId.value = Number(row.id); ledgerInitialAction.value = action; ledgerVisible.value = true; }
 const ledgerProductId = ref(0);
 const manualOutboundVisible = ref(false);
 const manualOutboundSubmitting = ref(false);
@@ -212,10 +212,7 @@ const state = reactive({
     color: "",
     material: [],
     process: "",
-    shopId: "all",
     inventoryType: "all",
-    dateFrom: "",
-    dateTo: "",
     page: 1,
     pageSize: 20,
     sortKey: "",
@@ -235,10 +232,7 @@ const filterDefaults = {
   color: "",
   material: [],
   process: "",
-  shopId: "all",
   inventoryType: "all",
-  dateFrom: "",
-  dateTo: "",
   page: 1,
   pageSize: 20,
   sortKey: "",
@@ -300,7 +294,8 @@ function movementStockLocationText(value) {
   return "未标记";
 }
 
-const pagedRows = computed(() => state.products);
+const localQuantities=useInventoryLocalQuantities(()=>state.products);
+const pagedRows = computed(() => state.products.map(row=>({...row,...(localQuantities.rows.value.get(Number(row.id))||{})})));
 const inventoryTotalPages = computed(() => Math.max(1, Math.ceil(Number(state.total || 0) / Math.max(1, Number(state.filters.pageSize || 1)))));
 const inventoryFooterSummary = computed(() => `第 ${Number(state.filters.page || 1)} / ${inventoryTotalPages.value} 页，共 ${integer(state.total)} 条记录`);
 const canMergeProducts = computed(() => selectedRows.value.length >= 2);
@@ -590,26 +585,16 @@ function totalProductStock(row) {
   return rowNumber(row, "stock");
 }
 
-function productAutoType(row) {
-  if (hasProductComponents(row)) return "套装";
-  return Number(row?.is_accessory || 0) ? "配件" : "单品";
-}
-
-function productAutoTypeTag(row) {
-  if (hasProductComponents(row)) return "warning";
-  return Number(row?.is_accessory || 0) ? "success" : "info";
-}
-
 function productUnit(row) {
   return row?.stock_unit || "个";
 }
 
 function stockForInventoryValue(row) {
-  return totalProductStock(row);
+  return row.physical_stock!=null&&row.fbp_stock_known!=null?Number(row.physical_stock)+Number(row.fbp_stock_known):null;
 }
 
 function productInventoryValue(row) {
-  return stockForInventoryValue(row) * getInventoryPurchaseCost(row);
+  const quantity=stockForInventoryValue(row);return quantity==null?null:quantity * getInventoryPurchaseCost(row);
 }
 
 function averageOrderAmount(row) {
@@ -873,13 +858,16 @@ function profitDetailModelValueText(item) {
 function applyRouteState() {
   syncingRoute = true;
   try {
-    applyFilterQuery(route, state.filters, filterDefaults);
+    const obsoleteKeys = ['shopId', 'shop_id', 'dateFrom', 'dateTo', 'date_from', 'date_to'];
+    const query = Object.fromEntries(Object.entries(route.query).filter(([key]) => !obsoleteKeys.includes(key)));
+    applyFilterQuery({ query }, state.filters, filterDefaults);
+    if (obsoleteKeys.some(key => route.query[key] !== undefined)) void router.replace({ query });
     for (const key of ["vehicleModel", "material"]) {
       state.filters[key] = String(route.query[key] || "").split(",").filter(Boolean);
     }
     if (state.filters.searchMode === "fuzzy") state.filters.searchMode = "name";
     if (state.filters.searchMode === "exact") state.filters.query = "";
-    if (!["inventory_id", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
+    if (!["auto", "inventory_id", "inventory_prefix", "name", "sku"].includes(state.filters.searchMode)) state.filters.searchMode = "inventory_id";
     if (route.query.productId && !state.filters.query) state.filters.query = String(route.query.productId);
   } finally {
     syncingRoute = false;
@@ -895,13 +883,7 @@ const syncRouteQuery = createDefaultRouteQuerySync({
 });
 
 const deletingProducts = ref(false);
-const searchDateRange = computed({
-  get: () => state.filters.dateFrom && state.filters.dateTo ? [state.filters.dateFrom, state.filters.dateTo] : [],
-  set: (value) => {
-    state.filters.dateFrom = value?.[0] || "";
-    state.filters.dateTo = value?.[1] || "";
-  }
-});
+
 
 async function removeSelectedProducts() {
   const rows = [...selectedRows.value];
@@ -942,12 +924,14 @@ function handleReset() {
 
 function handlePageChange(page) {
   state.filters.page = page;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
 function handlePageSizeChange(size) {
   state.filters.pageSize = size;
   state.filters.page = 1;
+  syncRouteQuery("manual");
   loadPageData();
 }
 
@@ -1828,12 +1812,11 @@ async function loadPageData({ silent = false } = {}) {
   try {
     const params = new URLSearchParams({
       paged: "1",
+      view: "inventory",
+      includeStock: "0",
       page: String(state.filters.page),
       pageSize: String(state.filters.pageSize),
-      shopId: String(state.filters.shopId || "all"),
       inventoryType: String(state.filters.inventoryType || "all"),
-      dateFrom: String(state.filters.dateFrom || ""),
-      dateTo: String(state.filters.dateTo || ""),
       sortKey: String(state.filters.sortKey || ""),
       sortDir: String(state.filters.sortDir || "")
     });
@@ -1868,6 +1851,7 @@ async function loadPageData({ silent = false } = {}) {
       return;
     }
     selectedRows.value = [];
+    void localQuantities.refresh();
   } catch (error) {
     if (!listRequestGate.isLatest(requestToken)) return;
     ElMessage.error(error.message || "加载库存产品列表失败");
@@ -1876,7 +1860,11 @@ async function loadPageData({ silent = false } = {}) {
   }
 }
 
-watch(() => route.query, applyRouteState, { deep: true });
+watch(() => route.query, () => {
+  const previous = JSON.stringify(state.filters);
+  applyRouteState();
+  if (previous !== JSON.stringify(state.filters)) void loadPageData();
+}, { deep: true });
 watch(() => mergePreview.targetProductId, () => {
   updateMergeCountSummary();
   selectDefaultMergeCompositionSource();
@@ -1901,57 +1889,21 @@ onActivated(() => {
 
 <template>
   <div class="inventory-page-shell inventory-card">
-    <ErpPageHeader title="商品库存" description="维护商品库存、成本、供应商与采购资料。" compact>
+    <InventoryPageToolbar product-search :show-shop="false" :show-date-range="false" :filters="state.filters" :loading="loading" @search="handleSearch" @reset="handleReset">
+      <el-form-item label="库存类型"><el-select v-model="state.filters.inventoryType"><el-option label="全部库存" value="all" /><el-option label="单品" value="single" /><el-option label="套装" value="combo" /><el-option label="配件" value="accessory" /><el-option label="耗材" value="consumable" /></el-select></el-form-item>
       <template #actions>
-        <div class="product-header-actions">
-          <el-button class="product-main-action" type="primary" :loading="loading" @click="handleSearch">查询</el-button>
-          <el-button v-if="canWriteInventory" class="product-main-action" type="primary" plain @click="openCreateDialog">新增库存</el-button>
-          <el-button v-if="canWriteInventory" plain @click="productRequestsVisible = true">建品申请 / 待审核</el-button>
-          <el-button v-if="canSubmitProcurementRequest" class="product-main-action" type="primary" plain :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
-          <el-button v-if="canWriteInventory" class="product-main-action" type="danger" plain :disabled="!selectedRows.length" :loading="deletingProducts" @click="removeSelectedProducts">批量删除{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-button>
-          <span class="product-action-divider" />
-          <el-button plain @click="handleReset">重置</el-button>
-          <el-button plain @click="openMergeHistoryDialog">合并历史</el-button>
-          <el-button v-if="canWriteInventory" plain :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-button>
-        </div>
+        <el-badge v-if="requestSummary.enabled.value" :value="requestSummary.pending.value" :hidden="!requestSummary.pending.value" type="danger" class="inventory-request-entry"><el-button type="primary" plain @click="router.push('/inventory/product-requests')">库存申请</el-button></el-badge>
+        <el-dropdown trigger="click"><el-button>更多</el-button><template #dropdown><el-dropdown-menu>
+          <el-dropdown-item v-if="canWriteInventory" @click="openCreateDialog">新增库存</el-dropdown-item>
+          <el-dropdown-item v-if="canSubmitProcurementRequest" :disabled="!selectedRows.length" @click="openWarehouseProcurementRequest">提交采购需求{{ selectedRows.length ? `（${selectedRows.length}）` : '' }}</el-dropdown-item>
+          <el-dropdown-item divided @click="openMergeHistoryDialog">合并历史</el-dropdown-item>
+          <el-dropdown-item v-if="canWriteInventory" :disabled="!canMergeProducts" @click="openMergeDialog">合并库存</el-dropdown-item>
+          <el-dropdown-item v-if="canWriteInventory" :disabled="!selectedRows.length || deletingProducts" divided @click="removeSelectedProducts">删除所选库存</el-dropdown-item>
+        </el-dropdown-menu></template></el-dropdown>
       </template>
-    </ErpPageHeader>
-    <el-form class="product-search-row" label-position="top" @submit.prevent="handleSearch">
-      <el-form-item label="搜索方式">
-        <el-select v-model="state.filters.searchMode">
-          <el-option label="库存 ID 精确搜索" value="inventory_id" />
-          <el-option label="产品名称模糊搜索" value="name" />
-          <el-option label="SKU／货号精确搜索" value="sku" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="搜索内容">
-        <el-input v-model="state.filters.query" clearable :placeholder="state.filters.searchMode === 'inventory_id' ? '完整新编号或旧编码，如 1-23' : state.filters.searchMode === 'sku' ? '完整 Ozon SKU 或货号' : '名称关键词，多个词用空格分隔'" @keyup.enter="handleSearch" />
-      </el-form-item>
-      <el-form-item label="店铺">
-        <el-select v-model="state.filters.shopId" filterable>
-          <el-option label="全部店铺" value="all" />
-          <el-option v-for="shop in state.shops" :key="shop.id" :label="shop.name" :value="String(shop.id)" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="创建时间区间">
-        <el-date-picker v-model="searchDateRange" type="daterange" value-format="YYYY-MM-DD" range-separator="至" start-placeholder="开始日期" end-placeholder="结束日期" />
-      </el-form-item>
-      <el-form-item label="产品类型">
-        <el-select v-model="state.filters.inventoryType">
-          <el-option label="全部库存" value="all" />
-          <el-option label="单品" value="single" />
-          <el-option label="套装" value="combo" />
-          <el-option label="配件" value="accessory" />
-        </el-select>
-      </el-form-item>
-    </el-form>
+    </InventoryPageToolbar>
 
-    <InventoryStructuredSearch
-      compact
-      :model-value="state.filters"
-      @update:model-value="Object.assign(state.filters, $event)"
-    />
-
+    <el-alert v-if="localQuantities.error.value" :title="localQuantities.error.value" type="warning" :closable="false" />
     <div class="mobile-landscape-hint">库存字段较多，横屏查看更完整；表格可左右滑动。</div>
     <div class="inventory-table-wrap erp-responsive-table" role="region" aria-label="库存商品表格" tabindex="0">
       <el-table
@@ -1965,7 +1917,7 @@ onActivated(() => {
       >
         <el-table-column v-if="canWriteInventory || canSubmitProcurementRequest" type="selection" width="48" fixed="left" />
         <el-table-column label="库存编号" prop="inventory_number" width="125" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }"><strong :title="row.inventory_number ? '库存编号生成后保持不变' : '缺少产品身份中的核心品名（inventory_category），请打开编辑库存补齐，保存后自动生成编号'">{{ row.inventory_number || "待补核心品名" }}</strong></template>
+          <template #default="{ row }"><strong :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || "待补核心品名" }}</strong></template>
         </el-table-column>
         <el-table-column label="产品信息" prop="product" min-width="340" fixed="left" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row, $index }">
@@ -1973,9 +1925,9 @@ onActivated(() => {
               <ProductImagePreview :src="inventoryProductImageUrl(row, true)" :preview-list="[inventoryProductImageUrl(row)]" :load-delay="Math.min($index, 12) * 120" />
               <div class="cell-stack">
                 <ProductTitleLink :title="row.name || '-'" :lines="2" />
-                <span class="muted-text">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
+                <span class="muted-text" :title="inventoryNumberTitle(row.inventory_number)">{{ row.inventory_number || row.inventory_id || row.code || "-" }}</span>
                 <div class="product-type-tags">
-                  <el-tag size="small" :type="productAutoTypeTag(row)" effect="light">{{ productAutoType(row) }}</el-tag>
+                  <InventoryCompositionBadge :product="row"/>
                   <span class="muted-text">单位：{{ productUnit(row) }}</span>
                 </div>
                 <span class="muted-text">负责人：{{ row.owner_name || "-" }}</span>
@@ -1987,13 +1939,9 @@ onActivated(() => {
         <el-table-column label="库存" prop="stock" width="180" align="center" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="inventory-stock-cell">
-              <div class="stock-total-line">
-                <span>总库存</span>
-                <strong>{{ integer(totalProductStock(row)) }} {{ productUnit(row) }}</strong>
-              </div>
-              <div class="stock-split-grid">
+              <div class="stock-summary-list">
                 <span class="local-stock-line">
-                  本地 {{ integer(localStock(row)) }} {{ productUnit(row) }}
+                  本地库存 {{ row.physical_stock==null?'待核对':integer(row.physical_stock) }} {{ productUnit(row) }}
                   <el-popover
                     v-if="hasProductComponents(row)"
                     placement="left"
@@ -2033,30 +1981,15 @@ onActivated(() => {
                     </div>
                   </el-popover>
                 </span>
-                <span>FBP {{ integer(fbpStock(row)) }} {{ productUnit(row) }}</span>
+                <div class="available-stock-line"><span>可用库存</span><el-tooltip content="本地实物扣除FBS订单、安全保障和已确认FBP占用；未确认申请不提前扣实物"><strong>{{ row.workflow_free==null?'待核对':integer(row.workflow_free) }} {{ productUnit(row) }}</strong></el-tooltip></div>
+                <el-button size="small" plain @click="openInventoryLedger(row)">库存明细</el-button>
               </div>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="采购在途" prop="incoming_stock" width="120" align="center" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }">
-            <div class="cell-stack cell-center">
-              <strong>{{ integer(row.incoming_stock) }}</strong>
-              <span class="muted-text">采购/入库</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="FBP在途" prop="fbp_transfer_in_transit_qty" width="120" align="center" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }">
-            <div class="cell-stack cell-center">
-              <strong>{{ integer(fbpTransferStock(row)) }}</strong>
-              <span class="muted-text">待入FBP</span>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="销售表现" prop="total_sales_amount" min-width="190" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductSalesDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductSalesDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>{{ integer(row.total_sales_quantity) }} 件</strong>
                 <span class="muted-text">销售额 ¥{{ money(row.total_sales_amount) }}</span>
@@ -2072,7 +2005,7 @@ onActivated(() => {
         </el-table-column>
         <el-table-column label="采购成本" prop="total_purchase_amount" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProductProcurementDetails(row)">
+            <el-button v-if="!isTenantScoped" class="metric-cell-link" plain type="primary" @click.stop="openProductProcurementDetails(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
                 <strong>总采购 ¥{{ money(row.total_purchase_amount) }}</strong>
                 <span class="muted-text">采购数 {{ integer(row.total_purchase_quantity) }}</span>
@@ -2086,71 +2019,40 @@ onActivated(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="手动出库" prop="manual_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="历史出库" prop="manual_outbound_quantity" min-width="160" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
-            <el-button class="metric-cell-link" link type="warning" @click.stop="openManualOutboundRecords(row)">
+            <el-button class="metric-cell-link" plain type="warning" @click.stop="openManualOutboundRecords(row)">
               <div class="metric-cell-content cell-stack cell-align-end">
-                <strong>总损 {{ integer(row.manual_outbound_quantity) }} 件</strong>
-                <span class="muted-text">损耗金额 ¥{{ money(row.manual_outbound_amount) }}</span>
-                <span class="muted-text">点击查看记录</span>
+                <strong>共 {{ integer(Number(row.total_sales_quantity||0)+Number(row.manual_outbound_quantity||0)) }} 件</strong>
+                <span class="muted-text">销售出库 {{ integer(row.total_sales_quantity) }} · 人工登记 {{ integer(row.manual_outbound_quantity) }}</span>
+                <span class="muted-text">点击看人工登记记录</span>
               </div>
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="预估利润" prop="estimated_profit_total" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="success" @click.stop="openProfitDetailsByMode(row, 'estimated')">
-              <div class="metric-cell-content cell-stack cell-align-end">
-                <strong :class="profitDetailProfitClass(row.estimated_profit_total)">¥{{ money(row.estimated_profit_total) }}</strong>
-                <span class="muted-text">待入账 ¥{{ money(pendingAccruedProfit(row)) }}</span>
-                <span class="muted-text">利润率 {{ percent(row.profit_rate) }}</span>
-              </div>
-            </el-button>
-            <div v-else class="metric-cell-content cell-stack cell-align-end">
-              <strong :class="profitDetailProfitClass(row.estimated_profit_total)">¥{{ money(row.estimated_profit_total) }}</strong>
-              <span class="muted-text">待入账 ¥{{ money(pendingAccruedProfit(row)) }}</span>
-              <span class="muted-text">利润率 {{ percent(row.profit_rate) }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="真实利润" prop="actual_profit_total" min-width="170" align="right" :sortable="isTenantScoped ? false : 'custom'">
-          <template #default="{ row }">
-            <el-button v-if="!isTenantScoped" class="metric-cell-link" link type="primary" @click.stop="openProfitDetailsByMode(row, 'actual')">
-              <div class="metric-cell-content cell-stack cell-align-end">
-                <strong :class="profitDetailProfitClass(row.actual_profit_total)">¥{{ money(row.actual_profit_total) }}</strong>
-                <span class="muted-text">已入账利润</span>
-                <span class="muted-text">参考件利 ¥{{ inventoryProfitMoneyText(row, "profit") }}</span>
-              </div>
-            </el-button>
-            <div v-else class="metric-cell-content cell-stack cell-align-end">
-              <strong :class="profitDetailProfitClass(row.actual_profit_total)">¥{{ money(row.actual_profit_total) }}</strong>
-              <span class="muted-text">已入账利润</span>
-              <span class="muted-text">参考件利 ¥{{ inventoryProfitMoneyText(row, "profit") }}</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="库存占用" prop="inventory_value" min-width="150" align="right" :sortable="isTenantScoped ? false : 'custom'">
+        <el-table-column label="库存货值" prop="inventory_value" min-width="150" align="right" :sortable="isTenantScoped ? false : 'custom'">
           <template #default="{ row }">
             <div class="cell-stack cell-align-end">
-              <strong>¥{{ money(productInventoryValue(row)) }}</strong>
-              <span class="muted-text">库存 {{ integer(stockForInventoryValue(row)) }} x 成本</span>
+              <strong>{{ productInventoryValue(row)==null?'待核对':`¥${money(productInventoryValue(row))}` }}</strong>
+              <span class="muted-text">本地＋FBP库存 × 采购成本</span>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="132" fixed="right">
-          <template #default="{ row }">
-            <div class="inventory-actions">
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" @click="openEditDialog(row)">编辑</el-button>
-              <el-button v-if="canManageProductComponents" class="erp-btn-link" link type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
-              <el-button v-if="canProcure" class="erp-btn-link" link @click="openProcurement(row)">创建采购</el-button>
-              <el-button v-if="canProcure" class="erp-btn-link" link @click="ledgerProductId = Number(row.id); ledgerVisible = true">采购库存对账</el-button>
-              <el-button v-if="canOutbound" class="erp-btn-link" link type="warning" @click="openManualOutbound(row)">手动出库</el-button>
-              <el-button class="erp-btn-link" link @click="openManualOutboundRecords(row)">出库记录</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link" link type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
-              <el-button v-if="canWriteInventory" class="erp-btn-link erp-btn-link-danger" link type="danger" @click="removeFromInventory(row)">删除</el-button>
-            </div>
-          </template>
+        <el-table-column label="操作" width="290" fixed="right">
+          <template #default="{ row }"><div class="inventory-actions">
+            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openEditDialog(row)">编辑</el-button>
+            <el-button v-if="canWriteInventory" size="small" plain type="primary" @click="openInventoryLedger(row, 'stocktake')">更新本地库存</el-button>
+            <el-button size="small" plain type="primary" @click="openInventoryLedger(row)">库存明细</el-button>
+            <el-popover trigger="click" placement="bottom-end" :width="240"><template #reference><el-button size="small" plain>更多</el-button></template><div class="inventory-more-actions">
+              <el-button v-if="canManageProductComponents" class="inventory-more-button" size="small" plain type="primary" @click="openCompositionDialog(row)">添加子产品</el-button>
+              <el-button v-if="canProcure" class="inventory-more-button" size="small" plain @click="openProcurement(row)">创建采购</el-button>
+              <el-button v-if="canOutbound" class="inventory-more-button" size="small" plain type="warning" @click="openManualOutbound(row)">手动出库</el-button>
+              <el-button class="inventory-more-button" size="small" plain @click="openManualOutboundRecords(row)">出库记录</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="success" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'estimated'" @click="recalculateProfits(row)">重算预估</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="primary" :loading="productProfitRecalculatingId === Number(row.id) && productProfitRecalculatingMode === 'actual'" @click="recalculateActualProfits(row)">重算真实</el-button>
+              <el-button v-if="canWriteInventory" class="inventory-more-button" size="small" plain type="danger" @click="removeFromInventory(row)">删除</el-button>
+            </div></el-popover>
+          </div></template>
         </el-table-column>
       </el-table>
     </div>
@@ -2453,9 +2355,8 @@ onActivated(() => {
       />
     </el-dialog>
 
-    <InventoryProductRequestsDialog v-if="productRequestsVisible" :people="state.people" :suppliers="state.suppliers" :logistics-rules="state.logisticsRules" @close="productRequestsVisible = false" @changed="refreshAfterProductRequest" />
 
-    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" @saved="loadPageData" />
+    <ProcurementLedgerDialog v-if="ledgerVisible" v-model="ledgerVisible" :product-id="ledgerProductId" :initial-action="ledgerInitialAction" :inventory-mode="ledgerInitialAction === 'stocktake'" :stocktake-enabled="canWriteInventory" @saved="loadPageData();localQuantities.refresh(true)" />
     <ProductCreateEditDialog
       ref="productCreateDialogRef"
       v-model:visible="dialogVisible"
@@ -2929,22 +2830,16 @@ onActivated(() => {
 </template>
 
 <style scoped>
-.product-header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.inventory-more-actions{display:flex;flex-direction:column;align-items:flex-start;gap:10px}.inventory-more-actions .el-button{margin-left:0}.product-header-actions { padding:4px 0 10px;display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 .product-header-actions .el-button { margin-left: 0; height: 38px; min-width: 80px; font-size: 14px; }
 .product-header-actions .product-main-action { width: 128px; font-weight: 600; }
-.inventory-page-shell > .erp-page-header, .inventory-page-shell > .product-search-row, .inventory-page-shell > .inventory-structured-search { flex: 0 0 auto; }
-.inventory-page-shell > .inventory-structured-search { width: auto; overflow: visible; grid-template-columns: repeat(8, minmax(0, 1fr)); padding: 14px 18px; gap: 12px; }
-@media (max-width: 1200px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .inventory-page-shell > .inventory-structured-search { grid-template-columns: repeat(2, minmax(0, 1fr)); } .inventory-page-shell.inventory-card { overflow-y: auto; } .inventory-page-shell > .inventory-table-wrap { flex-shrink: 0; min-height: 280px; } }
+.inventory-page-shell > .erp-page-header, .inventory-page-shell > .inventory-search-toolbar { flex: 0 0 auto; }
+
+@media (max-width: 600px) { .inventory-page-shell.inventory-card { overflow-y: auto; } .inventory-page-shell > .inventory-table-wrap { flex-shrink: 0; min-height: 280px; } }
 .product-action-divider { height: 22px; width: 1px; background: var(--erp-detail-border-light, #e2e8f0); margin: 0 4px; }
 .inventory-page-shell :deep(.erp-image-preview) { border-color: var(--erp-detail-border-light, #e5e7eb); background: var(--erp-detail-surface-alt, #f8fafc); }
 .inventory-page-shell :deep(.erp-image-preview__empty) { color: var(--erp-detail-text-secondary, #94a3b8); }
-.product-search-row { display: grid; grid-template-columns: minmax(170px, 1fr) minmax(220px, 1.8fr) minmax(140px, 1fr) minmax(270px, 1.5fr) minmax(120px, .8fr); gap: 16px; padding: 16px 18px; border: 1px solid var(--erp-detail-border-light, #e8edf5); border-radius: 12px; background: var(--erp-detail-surface-alt, #f8fafc); }
-.product-search-row :deep(.el-form-item) { margin: 0; min-width: 0; }
-.product-search-row :deep(.el-form-item__label) { margin-bottom: 6px; font-size: 12px; color: var(--erp-detail-text-secondary, #64748b); }
-.product-search-row :deep(.el-select), .product-search-row :deep(.el-date-editor) { width: 100%; min-width: 0; }
-@media (max-width: 1100px) { .product-search-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .product-search-row { grid-template-columns: 1fr; } .product-action-divider { display: none; } }
+
 
 .sku-summary-cell {
   display: flex;
@@ -3061,9 +2956,9 @@ onActivated(() => {
   width: 100%;
   min-height: 64px;
   padding: 8px 10px;
-  border: 1px solid transparent;
+  border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
-  background: transparent;
+  background: var(--el-fill-color-blank);
   text-align: right;
   transition: background 0.18s ease, border-color 0.18s ease;
 }
@@ -3124,10 +3019,11 @@ onActivated(() => {
 
 .inventory-actions {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 6px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px 10px;
 }
 
 .inventory-actions :deep(.el-button) {
@@ -3257,23 +3153,10 @@ onActivated(() => {
   line-height: 1;
 }
 
-.stock-split-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.stock-split-grid span {
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid var(--erp-detail-border-light, #dbe6f3);
-  border-radius: 8px;
-  background: var(--erp-detail-surface-alt, #f8fbff);
-  color: var(--erp-detail-text-regular, #334155);
-  font-size: 12px;
-  line-height: 1.3;
-}
-
+.stock-summary-list { display: flex; flex-direction: column; align-items: stretch; gap: 7px; }
+.stock-summary-list > .local-stock-line, .available-stock-line { display:flex; align-items:center; justify-content:space-between; gap:6px; white-space:nowrap; font-size:12px; line-height:1.6; }
+.available-stock-line strong { font-size:13px; font-variant-numeric:tabular-nums; }
+.stock-summary-list > .el-button { align-self:center; margin:0; }
 .local-stock-line {
   display: inline-flex;
   align-items: center;

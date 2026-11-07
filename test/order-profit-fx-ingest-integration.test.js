@@ -9,7 +9,7 @@ import { ORDER_PROFIT_CALCULATION_SCHEMA } from "../src/services/order-profit-ca
 import { createOrderProfitDailyFxSchema } from "../src/services/order-profit-daily-fx-schema.js";
 import { ensureOrderProfitDailyFx, orderProfitFxBusinessDate } from "../src/services/order-profit-daily-fx.js";
 import * as policy from "../src/services/order-profit-fx-policy.js";
-import { getProfitFormula, assertProfitFormulaSupported } from "../src/services/profit-formulas/registry.js";
+import { getProfitFormula, assertProfitFormulaSupported, usesDailyProfitFx } from "../src/services/profit-formulas/registry.js";
 
 const socketPath = process.env.TENANT_TEST_MYSQL_SOCKET;
 const service = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
@@ -57,7 +57,7 @@ async function fixture(body) {
     await createOrderProfitDailyFxSchema(connection);
     await ensureOrderProfitDailyFx({ query: mysqlQuery }, day, { fetchImpl: async () => ({ ok: true,
       text: async () => `<ValCurs Date="${day.split("-").reverse().join(".")}"><Valute><CharCode>CNY</CharCode><Nominal>1</Nominal><Value>12</Value></Valute></ValCurs>` }) });
-    const dependencies = { ...versions, ...policy, getProfitFormula, assertProfitFormulaSupported,
+    const dependencies = { ...versions, ...policy, getProfitFormula, assertProfitFormulaSupported, usesDailyProfitFx,
       mysqlQuery, mysqlExecute, withMysqlTransaction, mysqlQueryOne: async (sql, params) => /FROM sku_mappings/.test(sql) ? null : (await mysqlQuery(sql, params))[0] || null,
       orderListTenantScopeMysql: async tenant => ({ id: Number(tenant) }), assertOrderTaskAccessMysql: async () => {},
       activeShopForTenantMysql: async id => ({ id, tenant_id: 1 }), markInventoryAlertSkuDailyDirtyMysql: async () => {},
@@ -96,13 +96,13 @@ async function fixture(body) {
   }
 }
 
-test("real ingestion pins first V2 item and estimate revision atomically while legacy imports remain V1", { skip: !socketPath }, () => fixture(async ({ query, run }) => {
+test("real ingestion pins first V4 item and estimate revision atomically while non-FX imports use V3", { skip: !socketPath }, () => fixture(async ({ query, run }) => {
   await run(posting("new-v2-1"));
   const [fresh] = await query("SELECT oi.sale_price,s.formula_version,s.current_estimate_revision_id FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN order_profit_calc_state s ON s.order_item_id=oi.id WHERE o.posting_number='new-v2-1'");
-  assert.equal(fresh.formula_version, "V2");assert.equal(Number(fresh.sale_price), 100);assert.ok(fresh.current_estimate_revision_id);
+  assert.equal(fresh.formula_version, "V4");assert.equal(Number(fresh.sale_price), 100);assert.ok(fresh.current_estimate_revision_id);
   await run({ ...posting("old-import-1"), ordered_at: "2026-01-01T00:00:00Z" });
   const [old] = await query("SELECT oi.sale_price,s.formula_version FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN order_profit_calc_state s ON s.order_item_id=oi.id WHERE o.posting_number='old-import-1'");
-  assert.equal(old.formula_version, "V1");assert.equal(Number(old.sale_price), 1200);
+  assert.equal(old.formula_version, "V3");assert.equal(Number(old.sale_price), 1200);
 }));
 
 test("a failed revision write rolls back the newly inserted item and its version state together", { skip: !socketPath }, () => fixture(async ({ connection, query, run }) => {
@@ -112,17 +112,17 @@ test("a failed revision write rolls back the newly inserted item and its version
   assert.equal(Number((await query("SELECT COUNT(*) n FROM order_profit_calc_state"))[0].n), 0);
 }));
 
-test("a previously pinned V1 item cannot silently acquire a converted price after missing order-time evidence is repaired", { skip: !socketPath }, () => fixture(async ({ query, run }) => {
+test("a previously pinned non-FX V3 item cannot silently acquire a converted price after missing order-time evidence is repaired", { skip: !socketPath }, () => fixture(async ({ query, run }) => {
   await run(posting("repaired-evidence-1", false));
   const [before] = await query("SELECT oi.sale_price,s.formula_version FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN order_profit_calc_state s ON s.order_item_id=oi.id WHERE o.posting_number='repaired-evidence-1'");
-  assert.equal(before.formula_version, "V1");assert.equal(Number(before.sale_price), 1200);
+  assert.equal(before.formula_version, "V3");assert.equal(Number(before.sale_price), 1200);
   await run(posting("repaired-evidence-1", true));
   const [after] = await query("SELECT oi.sale_price,s.formula_version FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN order_profit_calc_state s ON s.order_item_id=oi.id WHERE o.posting_number='repaired-evidence-1'");
-  assert.equal(after.formula_version, "V1");assert.equal(Number(after.sale_price), 1200, "V1 price basis must not be changed by creating a later V2 FX state");
+  assert.equal(after.formula_version, "V3");assert.equal(Number(after.sale_price), 1200, "V1 price basis must not be changed by creating a later V2 FX state");
 }));
 
 test("real V2 estimate writer preserves converted unit precision until the quantity total is rounded", async () => {
-  const context = vm.createContext({ ...versions, ...policy, getProfitFormula, assertProfitFormulaSupported, Number, Math, String });
+  const context = vm.createContext({ ...versions, ...policy, getProfitFormula, assertProfitFormulaSupported, usesDailyProfitFx, Number, Math, String });
   vm.runInContext(writer, context);
   const fx = { id: "1", business_date: day, source_date: day, rate: "3.000000000000", currency_from: "CNY", currency_to: "RUB", source: "cbr" };
   const input = { ozonSku: "precision-sku", quantity: 300,
@@ -135,7 +135,7 @@ test("real V2 estimate writer preserves converted unit precision until the quant
   assert.equal(result.profit, expected.profit, "The adapter must preserve the formula's outcome, without rounding converted 1/3 CNY unit prices to .33 first");
 });
 
-test("uncommitted real V1 ingestion and a concurrent V2 prepare serialize on the parent order without mixed state", { skip: !socketPath }, () => fixture(async ({ connection, name, query, run, setBeforeCommit }) => {
+test("uncommitted real non-FX V3 ingestion and a concurrent V2 prepare serialize on the parent order without mixed state", { skip: !socketPath }, () => fixture(async ({ connection, name, query, run, setBeforeCommit }) => {
   const other = await mysql.createConnection({ socketPath, user: "root", database: name, timezone: "Z", dateStrings: true });
   let entered, release;
   const reached = new Promise(resolve => { entered = resolve; }), hold = new Promise(resolve => { release = resolve; });
@@ -157,7 +157,7 @@ test("uncommitted real V1 ingestion and a concurrent V2 prepare serialize on the
     release();await ingest;
     assert.equal(await preparing, null);
     assert.equal(Number((await query("SELECT COUNT(*) n FROM order_profit_fx_state"))[0].n), 0);
-    assert.deepEqual((await query("SELECT formula_version FROM order_profit_calc_state")).map(row => row.formula_version), ["V1"]);
+    assert.deepEqual((await query("SELECT formula_version FROM order_profit_calc_state")).map(row => row.formula_version), ["V3"]);
     assert.equal(Number((await query("SELECT COUNT(*) n FROM order_items"))[0].n), 1);
   } finally { release();await Promise.allSettled([ingest, preparing]);await other.end(); }
 }));

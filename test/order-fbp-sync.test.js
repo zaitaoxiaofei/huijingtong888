@@ -101,7 +101,11 @@ test("one failed feed cannot suppress orders from the other feed", async () => {
   const written = [];
   let failFbp = true;
   const sync = vm.runInNewContext(`${source.replace("export ", "")}; syncDemoOrdersMysql`, {
+    recordOzonSyncHealth: async () => {},
     mergeOrderPostingLogistics,
+    orderOwnershipTenantScopeMysql: async () => ({ id: 1 }),
+    assertOrderTaskAccessMysql: async () => {},
+    activeShopForTenantMysql: async () => shop,
     ensureMysqlCutoverEnabled() {},
     nullableInteger: (value) => Number(value || 0),
     shopsMysql: async () => [{ ...shop, status: "active" }],
@@ -136,6 +140,9 @@ test("new-order sync covers two complete Beijing days of FBP without a long init
   assert.ok(source);
   const requests = [];
   const sync = vm.runInNewContext(`${source.replace("export ", "")}; syncOzonIncrementalOrdersMysql`, {
+    orderOwnershipTenantScopeMysql: async () => ({ id: 1 }),
+    assertOrderTaskAccessMysql: async () => {},
+    activeShopForTenantMysql: async () => shop,
     ensureMysqlCutoverEnabled() {},
     nullableInteger: () => 0,
     shopsMysql: async () => [{ ...shop, status: "active" }],

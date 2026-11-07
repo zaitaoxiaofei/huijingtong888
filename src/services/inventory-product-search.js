@@ -1,0 +1,79 @@
+import { normalizeVehicleBrand } from '../shared/vehicle-brand.js';
+import { inventoryTenantSql } from './inventory-tenant-scope.js';
+import { inventoryAliasSearch, inventoryIdentifierSearch, inventoryNamePattern, inventoryNumberQueryMode, searchInventoryRows } from './inventory-search.js';
+
+// Additional product predicates only. Existing page status/date/shop filters still apply.
+export function inventoryProductSearch(query, scope, alias = 'p') {
+  if (!/^[a-z_]+$/i.test(alias)) throw new Error('Invalid product alias');
+  query = { ...query };
+  for (const [key, legacy] of Object.entries({inventoryCategory:'inventory_category', productName:'product_name', vehicleBrand:'vehicle_brand', fitmentType:'fitment_type', vehicleModel:'vehicle_model', accessoryName:'accessory_name', process:'surface_process'})) {
+    if (!query[key]) query[key] = query[legacy];
+  }
+  const where = [], params = [];
+  const add = (sql, ...values) => { where.push(sql); params.push(...values); };
+  for (const [key, column] of [['inventoryCategory','inventory_category'], ['accessoryName','accessory_name'], ['process','surface_process']]) {
+    const value = String(query[key] || '').trim();
+    if (value) add(`${alias}.${column} = ?`, value);
+  }
+  const brand = normalizeVehicleBrand(query.vehicleBrand, { strict: false });
+  if (brand) add(`${alias}.vehicle_brand = ?`, brand);
+  if (['universal','specific'].includes(query.fitmentType)) add(`${alias}.fitment_type = ?`, query.fitmentType);
+  const name = String(query.productName || '').trim();
+  if (name) add(`${alias}.name LIKE ? ESCAPE '='`, inventoryNamePattern(name));
+  for (const [key,column] of [['vehicleModel','vehicle_model'], ['material','material']]) {
+    const values = String(query[key] || '').split(',').map(v=>v.trim()).filter(Boolean);
+    if (values.length) add(`(${values.map(()=>`CONCAT('/', COALESCE(${alias}.${column}, ''), '/') LIKE ? ESCAPE '='`).join(' OR ')})`, ...values.map(v=>inventoryNamePattern('/'+v+'/')));
+  }
+  const color = String(query.color || '').trim();
+  if (color) add(`CONCAT(',', REPLACE(REPLACE(COALESCE(${alias}.color, ''), '，', ','), '/', ','), ',') LIKE ? ESCAPE '='`, inventoryNamePattern(','+color+','));
+  const inventoryType=String(query.inventoryType || query.inventory_type || 'all').trim().toLowerCase();
+  if (inventoryType==='consumable') add(`${alias}.is_consumable=1`);
+  if (['normal','single','combo','accessory'].includes(inventoryType)) {
+    if (inventoryType==='accessory') add(`${alias}.is_accessory=1`);
+    else {
+      add(`COALESCE(${alias}.is_accessory,0)=0`);
+      add(`COALESCE(${alias}.is_consumable,0)=0`);
+      const components=`SELECT 1 FROM product_components search_pc JOIN products search_child ON search_child.id=search_pc.component_product_id AND ${inventoryTenantSql(scope,'search_child')} WHERE search_pc.product_id=${alias}.id AND ${inventoryTenantSql(scope,'search_pc')}`;
+      if (inventoryType!=='normal') add(`${inventoryType==='single'?'NOT ':''}EXISTS (${components})`);
+    }
+  }
+  const text = String(query.query || query.search || '').trim();
+  const numberMode = inventoryNumberQueryMode(text, query.searchMode || 'auto');
+  if (text && numberMode) {
+    const match = inventoryIdentifierSearch(text, numberMode);
+    add(`${alias}.id IN (${match.sql})`, ...match.params);
+  } else if (text && query.searchMode === 'sku') {
+    add(`EXISTS (SELECT 1 FROM sku_mappings search_sm JOIN shops search_shop ON search_shop.id=search_sm.shop_id AND ${inventoryTenantSql(scope,'search_shop')}
+      WHERE search_sm.product_id=${alias}.id AND search_sm.active=1 AND ${inventoryTenantSql(scope,'search_sm')}
+      AND (search_sm.ozon_sku=? OR search_sm.offer_id=?))`, text, text);
+  } else if (text && query.searchMode === 'name') {
+    for (const term of text.split(/\s+/)) add(`(${alias}.name LIKE ? ESCAPE '=' OR EXISTS (SELECT 1 FROM product_name_aliases search_alias
+      WHERE search_alias.product_id=${alias}.id AND search_alias.active=1 AND ${inventoryTenantSql(scope,'search_alias')} AND search_alias.alias_name LIKE ? ESCAPE '='))`, inventoryNamePattern(term), inventoryNamePattern(term));
+  }
+  return { sql: where.length ? where.join(' AND ') : '', params };
+}
+
+// Filter cached rows before business summaries and pagination; never fetch full product payloads.
+export async function filterInventoryProductRows(rows, query, scope, execute) {
+  if (!rows.length) return rows;
+  const criteria = inventoryProductSearch(query, scope);
+  let result = rows;
+  if (criteria.sql) {
+    const matched = await execute(`SELECT p.id FROM products p WHERE p.active=1 AND ${inventoryTenantSql(scope,'p')} AND ${criteria.sql}`, criteria.params);
+    const ids = new Set(matched.map(row=>Number(row.id)));
+    result = rows.filter(row=>ids.has(Number(row.product_id)));
+  }
+  const text = String(query.query || query.search || '').trim();
+  if (text && (!query.searchMode || query.searchMode === 'auto') && !inventoryNumberQueryMode(text)) {
+    const alias = inventoryAliasSearch(text, 'p', { fuzzy: true });
+    const matched = await execute(`SELECT p.id FROM products p WHERE p.active=1 AND ${inventoryTenantSql(scope,'p')} AND ${alias.sql}`, alias.params);
+    const ids = new Set([...matched.map(row=>Number(row.id)), ...searchInventoryRows(result, text).map(row=>Number(row.product_id))]);
+    result = result.filter(row=>ids.has(Number(row.product_id)));
+  }
+  return result;
+}
+export function inventoryBusinessSearch(query, resolvedCachedSearch = false) {
+  const explicitMode = ['inventory_id','inventory_prefix','sku','name'].includes(query.searchMode);
+  return resolvedCachedSearch || explicitMode || inventoryNumberQueryMode(query.query || query.search, query.searchMode || 'auto')
+    ? { ...query, query: '', search: '', inventorySku: query.searchMode === 'sku' ? String(query.query || query.search || '').trim() : explicitMode ? '' : query.inventorySku || '' } : query;
+}

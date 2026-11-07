@@ -33,7 +33,7 @@ test('compact inventory opens lazy component table and preserves management/rece
   try {
     await build({ configFile: false, root: process.cwd(), logLevel: 'error', plugins: [vue(), {
       name: 'inventory-fixture', resolveId(id) { if (id === 'virtual:inventory') return '\0inventory'; },
-      load(id) { if (id === '\0inventory') return `import {createApp,h,ref} from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Table from '/frontend/orders/components/OrdersTable.vue'; createApp({setup(){const event=ref('');return ()=>h('div',[h(Table,{rows:[${JSON.stringify(row)}],tableHeight:700,onEditInventoryProduct:id=>event.value='edit:'+id,onInventorySaved:()=>event.value='saved',onViewInventoryDetail:(row,id)=>event.value='detail:'+id,onConfirmProcurementInbound:row=>event.value='receipt:'+row.id}),h('p',{id:'event'},event.value)])}}).use(ElementPlus).mount('#app');`; }
+      load(id) { if (id === '\0inventory') return `import {createApp,h,ref} from 'vue'; import ElementPlus from 'element-plus'; import 'element-plus/dist/index.css'; import Table from '/frontend/orders/components/OrdersTable.vue'; createApp({setup(){const event=ref('');return ()=>h('div',[h(Table,{rows:[${JSON.stringify(row)}],canUpdateInventory:true,tableHeight:700,onEditInventoryProduct:id=>event.value='edit:'+id,onInventorySaved:()=>event.value='saved',onViewInventoryDetail:(row,id)=>event.value='detail:'+id,onConfirmProcurementInbound:row=>event.value='receipt:'+row.id}),h('p',{id:'event'},event.value)])}}).use(ElementPlus).mount('#app');`; }
     }], build: { outDir: output, cssCodeSplit: false, rollupOptions: { input: 'virtual:inventory', output: { entryFileNames: 'entry.js' } } } });
     browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE || (process.platform === 'win32' ? 'C:/Program Files/Google/Chrome/Application/chrome.exe' : process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : undefined), headless: true });
     const page = await browser.newPage({ viewport: { width: 1800, height: 1000 } });
@@ -114,7 +114,7 @@ test('compact inventory opens lazy component table and preserves management/rece
     assert.equal(await drawer.getByRole('tab').nth(2).innerText(), '采购与成本');
     await drawer.getByRole('button', { name: '更新本地库存', exact: true }).click();
     const form = page.getByRole('dialog', { name: '更新本地库存', exact: true });
-    await form.getByText('更新仓库实物数', { exact: true }).click();
+    await form.getByText('更新仓库实物数（推荐）', { exact: true }).click();
     await form.getByRole('spinbutton').fill('1');
     await form.getByText('历史库存记错', { exact: true }).click();
     await form.getByRole('textbox').fill('库管实盘为1件');

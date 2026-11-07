@@ -214,10 +214,10 @@ test("fixed components use a structured inventory directory and restore bound pa
   assert.match(dialog, /function normalizeComponentBrand/);
   assert.match(dialog, /parts\.at\(-1\)/);
   assert.match(dialog, /field === "vehicle_brand" \? normalizeComponentBrand/);
-  assert.match(dialog, /\["brand", "fitment_type", "vehicle_model", "accessory", "color", "quantity"\]/);
+  assert.match(dialog, /\["brand", "vehicle_model", "accessory", "color", "material", "process"\]/);
   assert.match(dialog, /namingOptionValues/);
   assert.match(dialog, /共 \{\{ componentOptions\.length \}\} 个匹配商品，选择后直接添加/);
-  assert.match(dialog, /allow-create default-first-option clearable placeholder="品牌"/);
+  assert.match(dialog, /allow-create default-first-option clearable placeholder="汽车品牌"/);
   assert.match(dialog, /allow-create default-first-option clearable placeholder="颜色"/);
   assert.match(dialog, /componentSearchActive \? '高匹配子产品' : '已有相似库存'/);
   assert.match(dialog, /添加为\{\{ componentRole === 'gift' \? '固定赠品' : '固定组成' \}\}/);

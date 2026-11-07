@@ -5,7 +5,8 @@ import { useAuthStore } from "../../admin/stores/auth.js";
 import { loadShopDictionary } from "../../admin/utils/shop-dictionary.js";
 import { shanghaiDateDaysAgo, shanghaiDateKey, shanghaiDateTimeText } from "../../admin/utils/shanghai-date.js";
 import { normalizePrintState, togglePrintViewState } from "../utils/order-print-filters.js";
-import { summarizeOrderSyncResult } from "../utils/order-sync-result.js";
+import { summarizeOrderSyncResult, exactPostingNumbers } from "../utils/order-sync-result.js";
+import { orderUsesInventoryProduct } from "../utils/order-inventory-refresh.js";
 import { orderStateKey } from "../constants/orders-ui.js";
 import { orderSearchMatchForInput } from "../../../src/shared/order-search.js";
 import {
@@ -99,8 +100,8 @@ function writeOrdersMetaCache(filters = {}, counts = {}) {
 const STATUS_TABS = [
   { value: "all", label: "全部订单" },
   { value: "awaiting_packaging", label: "等待备货" },
-  { value: "awaiting_deliver", label: "等待发运" },
-  { value: "ogl_dispatched", label: "已发运", title: "已申请·待交接与已实际交运分别展示，实际交运以逐行状态为准" },
+  { value: "awaiting_deliver", label: "等待发运", title: "打印、绑定发运单及实际交运后仍保留，平台进入运输中后移出；已取消、异常和已签收订单除外" },
+  { value: "ogl_dispatched", label: "已交运待上网", title: "仓库已确认实际交运，尚未收到平台运输状态；同时保留在等待发运中" },
   { value: "delivering", label: "运输中" },
   { value: "delivered", label: "已签收" },
   { value: "cancelled", label: "已取消" },
@@ -215,7 +216,7 @@ function friendlyPrepareError(error) {
 
 function orderTabKey(row = {}) {
   const key = orderStateKey(row);
-  return ["awaiting_packaging", "awaiting_deliver", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
+  return ["awaiting_packaging", "awaiting_deliver", "ogl_bound", "ogl_dispatched", "delivering", "delivered", "cancelled", "dispute"].includes(key) ? key : "all";
 }
 
 export function useOrdersPage() {
@@ -234,6 +235,8 @@ export function useOrdersPage() {
   const logisticsOptionsPromise = ref(null);
   const logisticsOptionsRequestKey = ref("");
   const ordersLoadToken = ref(0);
+  const inventoryRefreshNotice = ref('');
+  const inventoryRefreshFailed = ref(false);
   const statusTabOrder = ref([...DEFAULT_STATUS_TAB_ORDER]);
   const defaultTo = shanghaiDateKey();
   const defaultFrom = shanghaiDateDaysAgo(90);
@@ -376,7 +379,7 @@ export function useOrdersPage() {
       vm.filters = {
         page: Number(filters.page || 1),
         pageSize: Number(filters.pageSize || DEFAULT_PAGE_SIZE),
-        status: ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
+        status: filters.status === "ogl_bound" ? "awaiting_deliver" : ["dispute", "purchase_records_missing"].includes(filters.status) ? DEFAULT_ORDER_STATUS : String(filters.status || DEFAULT_ORDER_STATUS),
         shopId: String(filters.shopId || "all"),
         logisticsCarrier: String(filters.logisticsCarrier || "all"),
         logisticsMethod: String(filters.logisticsMethod || "all"),
@@ -421,6 +424,8 @@ export function useOrdersPage() {
     const scope = currentOrdersCacheScope();
     if (viewCacheScope !== scope) {
       viewCacheScope = scope;
+      inventoryRefreshNotice.value = '';
+      inventoryRefreshFailed.value = false;
       abortOrderReads();
       ordersLoadToken.value += 1;
       selectedOrderIds.value = new Set();
@@ -441,12 +446,30 @@ export function useOrdersPage() {
   const handleAuthStorageChange = (event) => {
     if (["authToken", "baodanAuthUser"].includes(event.key)) ensureOrdersViewScope();
   };
+  const handleCollaborationNoteSaved = (event) => {
+    if (event.detail?.scope !== currentApiCacheScope()) return;
+    window.clearTimeout(ordersMetaTimer);
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    ordersMetaAbort.value?.abort();
+    ordersLoadToken.value += 1;
+    ordersMetaRequestKey.value = '';
+    loading.value = false;
+    if (vm.rows.some(row => row.inventory_refresh_pending)) {
+      inventoryRefreshFailed.value = true;
+      inventoryRefreshNotice.value = '备注已保存，请重试库存刷新核对最新数量。';
+    }
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+  };
   window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
   window.addEventListener("storage", handleAuthStorageChange);
+  window.addEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   onScopeDispose(() => {
     abortOrderReads();
     window.removeEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
     window.removeEventListener("storage", handleAuthStorageChange);
+    window.removeEventListener("erp:order-collaboration-note-saved", handleCollaborationNoteSaved);
   });
 
   async function loadOrdersMeta(filtersSnapshot) {
@@ -496,7 +519,48 @@ export function useOrdersPage() {
     }
   }
 
+  async function refreshInventoryRows({ productId = null } = {}) {
+    const scope = ensureOrdersViewScope(), token = ordersLoadToken.value;
+    // A second save must also reconcile an earlier interrupted save.
+    const changedProduct = vm.rows.some(row => row.inventory_refresh_pending) ? null : productId;
+    const ids = vm.rows.map(row => Number(row.id));
+    ordersListCache.clear();
+    ordersMetaCache.clear();
+    window.clearTimeout(ordersMetaTimer);
+    ordersMetaAbort.value?.abort();
+    ordersListAbort.value?.abort();
+    ordersInventoryAbort.value?.abort();
+    if (!ids.length) return;
+    const controller = new AbortController();
+    ordersInventoryAbort.value = controller;
+    inventoryRefreshNotice.value = '正在更新受影响订单的库存与采购覆盖…';
+    inventoryRefreshFailed.value = false;
+    vm.rows = vm.rows.map(row => orderUsesInventoryProduct(row, changedProduct)
+      ? { ...row, inventory_refresh_pending: true } : row);
+    try {
+      const params = new URLSearchParams({ orderIds: ids.join(','), refresh: '1', includeRows: '1' });
+      if (Number(changedProduct) > 0) params.set('productId', String(changedProduct));
+      const result = await apiClient.get(`/api/orders/inventory-availability?${params}`, { signal: controller.signal, noCache: true });
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || token !== ordersLoadToken.value) return;
+      const updates = new Map((result?.rows || []).map(row => [Number(row.order_id), row.order]));
+      if ([...updates.values()].some(row => !row || !Array.isArray(row.inventory_availability))
+        || vm.rows.some(row => row.inventory_refresh_pending && !updates.has(Number(row.id)))) throw new Error('订单库存刷新结果不完整');
+      vm.rows = vm.rows.map(row => updates.has(Number(row.id))
+        ? { ...updates.get(Number(row.id)), inventory_refresh_pending: false }
+        : row.inventory_refresh_pending ? { ...row, inventory_refresh_pending: false } : row);
+      inventoryRefreshNotice.value = `已更新 ${updates.size} 条受影响订单。当前排序和分页保持不变；刷新列表可查看最新筛选结果和数量。`;
+    } catch (error) {
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || token !== ordersLoadToken.value) return;
+      inventoryRefreshFailed.value = true;
+      inventoryRefreshNotice.value = '库存已保存，关联订单刷新失败，旧数量暂不作为最新结果。请重试库存刷新。';
+      console.warn('refresh affected order inventory failed', error);
+    } finally {
+      if (ordersInventoryAbort.value === controller) ordersInventoryAbort.value = null;
+    }
+  }
+
   async function loadPageInventory(rows, requestToken, cacheKey, forceRefresh = false) {
+    if (!forceRefresh && rows.every(row => Array.isArray(row.inventory_availability))) return;
     const scope = ensureOrdersViewScope();
     const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
     if (!orderIds.length) return;
@@ -526,6 +590,8 @@ export function useOrdersPage() {
 
   async function loadOrders(options = {}) {
     const scope = ensureOrdersViewScope();
+    inventoryRefreshNotice.value = '';
+    inventoryRefreshFailed.value = false;
     window.clearTimeout(ordersMetaTimer);
     ordersListAbort.value?.abort();
     ordersInventoryAbort.value?.abort();
@@ -541,7 +607,8 @@ export function useOrdersPage() {
       if (ordersMetaAbort.value && ordersMetaRequestKey.value !== metaKey) ordersMetaAbort.value.abort();
       const params = buildOrdersParams(filtersSnapshot, {
         includeCounts: "0",
-        includeLogisticsOptions: "0"
+        includeLogisticsOptions: "0",
+        includeInventoryAvailability: options.forceRefresh ? "0" : "1"
       });
       const requestUrl = `/api/orders?${params.toString()}`;
       const cacheKey = `${scope}:${requestUrl}`;
@@ -942,6 +1009,9 @@ export function useOrdersPage() {
     activeStatusLabel,
     patch,
     loadOrders,
+    refreshInventoryRows,
+    inventoryRefreshNotice,
+    inventoryRefreshFailed,
     loadLogisticsOptions,
     submitFilters: async (nextFilters = null) => {
       if (nextFilters && typeof nextFilters === "object") {
@@ -1010,9 +1080,11 @@ export function useOrdersPage() {
     },
     syncRecent: async () => {
       const body = { from_latest: true, fallback_days: 7, overlap_minutes: 15 };
+      const postingNumbers = exactPostingNumbers(vm.filters.searchType, vm.filters.searchQuery);
+      if (postingNumbers.length) body.posting_numbers = postingNumbers;
       if (vm.filters.shopId && vm.filters.shopId !== "all") body.shop_id = vm.filters.shopId;
       return runOrderSync("/api/sync/ozon/incremental", body, {
-        running: "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
+        running: postingNumbers.length ? `正在按完整单号核对 ${postingNumbers.length} 个 Ozon 货件，不受新单时间窗口限制。` : "正在从 Ozon 拉取本地最新订单之后的新订单，请勿重复点击。",
         refreshing: "拉取完成，正在刷新订单列表...",
         success: (result, summary) => `新订单拉取完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result, summary) => `已拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
@@ -1024,9 +1096,11 @@ export function useOrdersPage() {
         from: vm.filters.dateFrom || "",
         to: vm.filters.dateTo || ""
       };
+      const postingNumbers = exactPostingNumbers(vm.filters.searchType, vm.filters.searchQuery);
+      if (postingNumbers.length) body.posting_numbers = postingNumbers;
       if (vm.filters.shopId && vm.filters.shopId !== "all") body.shop_id = vm.filters.shopId;
       return runOrderSync("/api/sync/ozon", body, {
-        running: `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
+        running: postingNumbers.length ? `正在按完整单号核对 ${postingNumbers.length} 个 Ozon 货件，不受新单时间窗口限制。` : `正在同步 ${vm.filters.dateFrom || "开始日期"} 到 ${vm.filters.dateTo || "结束日期"} 的订单，请勿重复点击。`,
         refreshing: "同步完成，正在刷新订单列表...",
         success: (result, summary) => `当前范围同步完成：拉取 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单，更新 ${result?.updated || 0} 单。`,
         successToast: (result, summary) => `已同步 ${result?.fetched || 0} 单，新增 ${summary.insertedOrders} 单`,
@@ -1057,7 +1131,7 @@ export function useOrdersPage() {
     fetchOrderDetail: (orderId) => fetchOrderDetail(orderId),
     openOrderProfit: (orderId) => openOrderProfit(orderId),
     prepareSingleOrder: (orderId) => runPrepareOrders([orderId]),
-    prepareSplitOrder: (orderId, packages) => prepareSplitOrder(orderId, packages),
+    prepareSplitOrder: (orderId, packages, requestKey, reconcile) => prepareSplitOrder(orderId, packages, requestKey, reconcile),
     previewOrderProcurement: (orderId) => previewOrderProcurement(orderId),
     createOrderProcurementRequests: (orderId, payload = {}) => createOrderProcurementRequests(orderId, payload),
     printSingleOrder: (orderId) => runPrintOrders([orderId]),

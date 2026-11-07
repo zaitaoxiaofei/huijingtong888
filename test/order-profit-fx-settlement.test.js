@@ -166,12 +166,12 @@ test("a refunded income anchor is not counted again as a platform fee", async ()
 test("finance integration branches before unchanged V1 arithmetic and records pending/immutable baseline evidence", () => {
   const source = readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
   const apply = source.slice(source.indexOf("async function applyOzonFinanceToOrdersMysql("), source.indexOf("export async function syncOzonFinanceMysql("));
-  assert.ok(apply.indexOf('if (itemVersions.includes("V2"))') < apply.indexOf("const financeRows = await orderFinanceRowsWithParentAllocationMysql"));
+  assert.ok(apply.indexOf('if (itemVersions.some(usesDailyProfitFx))') < apply.indexOf("const financeRows = await orderFinanceRowsWithParentAllocationMysql"));
   assert.match(apply, /inputs\?\.estimate\?\.fxPending/);
   assert.match(apply, /ORDER BY order_item_id, revision_no/);
   assert.match(apply, /uses_estimated_collecting: false/);
   assert.match(apply, /fx_attribution: projection.attribution/);
-  assert.match(apply, /formulaVersion !== "V2"/);
+  assert.match(apply, /formulaVersion !== itemVersions\[0\]/);
   assert.match(apply, /fx_pending: fxPending/);
 });
 

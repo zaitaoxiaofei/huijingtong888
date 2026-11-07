@@ -240,7 +240,7 @@ test('actual inventory and procurement services isolate A, B, and default across
       const aSession = { personId:2,tenant:{ id:2,slug:'a' } };
       await service.refreshProcurementDemandMysql(2,{ session:aSession });
       const warnings = await query("SELECT tenant_id,person_id,created_by_person_id FROM procurement_requests WHERE request_group_no LIKE 'AUTO-STOCK-%'");
-      assert.ok(warnings.length > 0);
+      assert.equal(warnings.length, 0, "Safety recommendations must await a person submitting; demand refresh must not create purchases");
       assert.ok(warnings.every(row => Number(row.tenant_id) === 2 && row.created_by_person_id === null));
       assert.deepEqual(await query('SELECT * FROM procurement_requests WHERE tenant_id=3 OR tenant_id=1 OR tenant_id IS NULL ORDER BY id'),foreignRequests);
       await assert.rejects(service.refreshProcurementDemandMysql('admin',{session:aSession}),{statusCode:403});

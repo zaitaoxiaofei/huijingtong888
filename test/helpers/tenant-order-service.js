@@ -1,10 +1,15 @@
+import { memoRequestRead } from '../../src/services/request-read-cache.js';
+import { orderReadIdentity } from "../../src/services/order-read-cache.js";
+import { ORDER_SPLIT_SCHEMA } from '../../src/services/order-split-schema.js';
+import { profitRankingGroupCountSql, orderLogisticsSummarySql } from "../../src/services/order-report-query-sql.js";
+import { orderReportOutcomeCtesSql } from '../../src/services/order-report-outcome-sql.js';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
 import { loadOrderProcurementCoverage, procurementQueueSql } from '../../src/services/mysql-order-procurement-coverage.js';
 import { ORDER_PROFIT_CALCULATION_SCHEMA } from '../../src/services/order-profit-calculation-schema.js';
 import { OGL_DISPATCH_SCHEMA_SQL } from '../../src/services/ogl-dispatch-schema.js';
-import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql, withOglDispatch } from '../../src/services/ogl-dispatch-state.js';
+import { oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql, withOglDispatch } from '../../src/services/ogl-dispatch-state.js';
 import { OGL_DISPATCH_REFRESH } from '../../src/services/ogl-dispatch-access.js';
 import { initializeOrderQueryFacts } from '../../src/services/order-query-facts.js';
 import { authorizeBusinessTaskSession } from '../../src/services/business-task-tenant.js';
@@ -12,10 +17,12 @@ import { hasPermission, primaryRole, getRoles } from '../../src/shared/permissio
 import { isDemoPackageLabelBufferMysql, normalizePackageLabelBufferMysql, orderPackageLabelFailureMysql } from '../../src/services/mysql-order-label-utils.js';
 import * as profitVersioning from '../../src/services/order-profit-calculation-versions.js';
 import { getOrderProfitFxPolicy, prepareOrderProfitFx, readOrderProfitFxState, orderFxSalePrice, pendingOrderFxEstimate } from '../../src/services/order-profit-fx-policy.js';
-import {getProfitFormula,assertProfitFormulaSupported} from '../../src/services/profit-formulas/registry.js';
+import {getProfitFormula,assertProfitFormulaSupported,usesDailyProfitFx} from '../../src/services/profit-formulas/registry.js';
 import { resolveInventoryTenantScope, inventoryTenantSql, assertInventoryRecord, assertInventoryReferences } from '../../src/services/inventory-tenant-scope.js';
 import { orderTransportEvidenceSql, automaticCancellationReturnSql } from '../../src/services/order-transport-evidence.js';
 import { ORDER_HEATMAP_TENANT_SCHEMA } from '../../src/services/order-heatmap-tenant-schema.js';
+import { inventoryAliasSearch } from '../../src/services/inventory-search.js';
+import { INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS } from '../../src/services/inventory-numbering-v2.js';
 
 const source = readFileSync(new URL('../../src/services/mysql-cutover.js', import.meta.url), 'utf8');
 export function loadOrderHeatmapService(connection, overrides = {}) {
@@ -44,7 +51,7 @@ export function loadOrderProfitWriter(connection) {
     .replace(/^import[\s\S]*?;\r?\n/gm,'').replaceAll('export ','');
   const query=async(sql,params=[])=>(await connection.execute(sql,params))[0];
   const transaction=async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}};
-  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,console,...profitVersioning,getProfitFormula,assertProfitFormulaSupported,mysqlQuery:query,withMysqlTransaction:transaction});
+  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,console,...profitVersioning,getProfitFormula,assertProfitFormulaSupported,usesDailyProfitFx,mysqlQuery:query,withMysqlTransaction:transaction});
   vm.runInContext(writer,context);
   return context;
 }
@@ -57,7 +64,7 @@ export async function createOrderFixtureSchema(connection) {
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
-  for (const statement of [...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables]) await connection.query(statement.replaceAll("\\`", "`"));
+  for (const statement of [ORDER_SPLIT_SCHEMA, ...ORDER_PROFIT_CALCULATION_SCHEMA, ...OGL_DISPATCH_SCHEMA_SQL, ...tables, ...INVENTORY_NUMBERING_V2_SCHEMA_STATEMENTS]) await connection.query(statement.replaceAll("\\`", "`"));
   const exceptionSnapshot = source.match(/CREATE TABLE IF NOT EXISTS exception_workbench_snapshots[\s\S]*?ENGINE=InnoDB[^\r\n]*/)?.[0];
   if (!exceptionSnapshot) throw new Error('Missing exception snapshot schema');
   await connection.query(exceptionSnapshot);
@@ -84,23 +91,29 @@ export async function createOrderFixtureSchema(connection) {
   await initializeOrderQueryFacts(connection);
 }
 export function loadTenantOrderService(connection, { extraMethods = [], ...overrides }={}) {
+  const analyticsContext=vm.createContext({setTimeout, withMysqlBackgroundReadAdmission: action=>action(),
+    getMysqlConnection:async()=>connection,
+    ensureMysqlSessionUtc:async()=>{},releaseMysqlConnection:()=>{}});
+  const analyticsSql=readFileSync(new URL('../../src/mysql-pool.js',import.meta.url),'utf8')
+    .match(/export async function mysqlExecuteReadCommitted[\s\S]*?\n}/)[0].replace('export ','');
+  vm.runInContext(analyticsSql,analyticsContext);
   const calls=[];
   const query=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.query(sql,params))[0];};
   const execute=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.execute(sql,params))[0];};
   const methods=[
-    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
-    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedSqlCountsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
+    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
+    'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','orderPageRowsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
-    'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','trimOrderPostingSuffix',
-    'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql',
+    'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','mapWithConcurrencyMysql','trimOrderPostingSuffix',
+    'loadOglDispatchMembersMysql','assertCancellationInventoryAnchorsMysql','reconcileRemovedPostingItemsMysql',
     ...extraMethods
   ];
   const noop=async()=>{};
-  const context=vm.createContext({Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
+  const context=vm.createContext({recordOzonSyncHealth: async () => {}, memoRequestRead,orderReadIdentity,structuredClone,cachedOrderRead:(_key,loader)=>loader(),invalidateOrderReadCache(){},ORDER_SPLIT_IMPORT:Symbol("fixture-order-split"),usesDailyProfitFx,profitRankingGroupCountSql,orderLogisticsSummarySql,orderReportOutcomeCtesSql,Date,Map,Set,Number,String,Object,Array,Buffer,console,createHash,authorizeBusinessTaskSession,hasPermission,isDemoPackageLabelBufferMysql,normalizePackageLabelBufferMysql,orderPackageLabelFailureMysql,oglBoundStatusSql, oglDispatchedStatusSql,oglOnlineStatusSql,oglTerminalStatusSql,oglPhysicalDispatchSql,withOglDispatch,OGL_DISPATCH_REFRESH,
     getOrderProfitFxPolicy,prepareOrderProfitFx,readOrderProfitFxState,orderFxSalePrice,pendingOrderFxEstimate,
-    resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
+    resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,inventoryAliasSearch,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
-    mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,
+    mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,mysqlExecuteReadCommitted:analyticsContext.mysqlExecuteReadCommitted,
     ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,
     ensureOrderLabelPrintSchemaMysql:noop,ensureSkuInventoryRecipeSchemaMysql:noop,ensureProductCompositionSchemaMysql:noop,ensureProductNamingSchemaMysql:noop,ensureProcurementOrderSourceSchemaMysql:noop,ensureOrderPackageLabelCacheSchemaMysql:noop,
     normalizeSyncDateMysql:value=>String(value||'').slice(0,10),shanghaiDateKeyToUtcDateTimeMysql:(value,days=0)=>value?new Date(new Date(value+'T00:00:00+08:00').getTime()+days*86400000).toISOString().slice(0,19).replace('T',' '):'',
@@ -114,7 +127,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     nullableInteger:value=>Number(value)||null,nullableNumber:value=>Number(value)||null,
     normalizeSyncDateTimeMysql:value=>value||'',normalizeShanghaiDateBoundaryMysql:value=>value||'',normalizeMysqlNullableDateTime:value=>value||null,
     chinaDateKeyMysql:value=>String(value||'').slice(0,10),chinaDateSqlMysql:column=>`DATE(${column})`,
-    normalizeFinanceBackfillDateMysql:value=>String(value||'').slice(0,10),dateKeyDaysAgoMysql:()=> '2026-10-01',todayDateKeyMysql:()=> '2026-10-05',
+    normalizeFinanceBackfillDateMysql:value=>value instanceof Date?value.toISOString().slice(0,10):String(value||'').slice(0,10),addDateKeyDaysMysql:(day,count)=>new Date(Date.parse(day+'T00:00:00Z')+count*86400000).toISOString().slice(0,10),dateKeyDaysAgoMysql:()=> '2026-10-01',todayDateKeyMysql:()=> '2026-10-05',
     throwIfAbortedMysql(signal){if(signal?.aborted)throw Error('aborted');},textValueMysql:(...values)=>values.find(Boolean)||'',
     invalidateMasterDataCache(){},invalidateMasterDataCachePrefix(){},
     orderProcurementCoverageMysql:async options=>new Map(),

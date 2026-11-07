@@ -72,3 +72,39 @@ test('cancelled reads do not send requests', async t => {
   const controller = new AbortController(); controller.abort(new Error('cancelled fixture'));
   await assert.rejects(fetchOzonWarehouses(SHOP, { signal: controller.signal }), /cancelled fixture/); assert.equal(calls,0);
 });
+
+const view = readFileSync(new URL('../frontend/admin/views/inventory/OnlineProductsView.vue', import.meta.url), 'utf8');
+const load = view.match(/async function loadWarehousesForStock\([^]*?\n}/)[0];
+function viewFixture(request) {
+  const state = { warehouses: [] }, stockForm = { shop_id: 1, warehouse_id: '' }, loading = { value: false }, error = { value: '' }, cache = new Map();
+  const context = vm.createContext({ state, stockForm, warehousesLoading: loading, warehousesError: error, warehouseCacheByShop: cache,
+    warehouseRequestVersion: 0, authStore: { user: { tenant: { id: 2 } } }, currentApiCacheScope: () => 'tenant-2', apiClient: { get: request }, ElMessage: { error() {} } });
+  vm.runInContext(load, context);
+  return { load: context.loadWarehousesForStock, state, stockForm, loading, error, cache };
+}
+
+test('a failed forced refresh invalidates the old cache and leaves no writeable warehouse selection', async () => {
+  let calls = 0;
+  const f = viewFixture(async () => { if (++calls === 1) return { warehouses: [{ warehouse_id: '7' }] }; throw new Error('warehouse API unavailable'); });
+  await f.load(1); assert.equal(f.stockForm.warehouse_id, '7');
+  await f.load(1,true); assert.equal(f.stockForm.warehouse_id,''); assert.equal(f.cache.size,0); assert.match(f.error.value,/unavailable/);
+  await f.load(1); assert.equal(calls,3); assert.equal(f.state.warehouses.length,0);
+});
+
+test('an older warehouse response cannot replace the latest shop selection', async () => {
+  let first;
+  const f = viewFixture(() => new Promise(resolve => { first = resolve; }));
+  const pending = f.load(1);
+  f.stockForm.shop_id = 2;
+  first({ warehouses: [{ warehouse_id: 'old' }] }); await pending;
+  assert.equal(f.state.warehouses.length,0); assert.equal(f.stockForm.warehouse_id,''); assert.equal(f.cache.size,0);
+});
+
+test('out-of-order responses for the same shop cannot roll back the latest verified list', async () => {
+  const complete = [];
+  const f = viewFixture(() => new Promise(resolve => complete.push(resolve)));
+  const first = f.load(1,true), second = f.load(1,true);
+  complete[1]({ warehouses: [{ warehouse_id: 'new' }] }); await second;
+  complete[0]({ warehouses: [{ warehouse_id: 'old' }] }); await first;
+  assert.equal(f.stockForm.warehouse_id,'new'); assert.equal(f.cache.get('tenant-2:2:1').rows[0].warehouse_id,'new'); assert.equal(f.loading.value,false);
+});

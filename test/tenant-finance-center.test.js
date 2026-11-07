@@ -60,6 +60,8 @@ test("tenant finance routes include authenticated enterprise-private voucher att
     ["POST", ["api", "finance-center", "companies"]],
     ["POST", ["api", "finance-center", "shop-assignments"]],
     ["GET", ["api", "finance-center", "report"]],
+    ["GET", ["api", "finance-center", "inventory-capital"]],
+    ["GET", ["api", "finance-center", "inventory-capital-details"]],
     ["GET", ["api", "finance-center", "expenses"]],
     ["GET", ["api", "finance-center", "vouchers"]],
     ["GET", ["api", "finance-center", "platform-items"]],

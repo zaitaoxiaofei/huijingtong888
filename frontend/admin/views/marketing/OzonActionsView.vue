@@ -1454,6 +1454,11 @@ onActivated(() => {
           <p v-for="(warning, index) in state.enrollmentResult.warnings" :key="index">{{ warning }}</p>
         </el-alert>
 
+        <el-alert v-if="state.enrollmentResult" :type="state.enrollmentResult.success ? 'success' : 'warning'" :title="`本次报名已确认 ${state.enrollmentResult.count || 0} 个，待核对 ${state.enrollmentResult.failures?.length || 0} 个`" :closable="false" show-icon>
+          <p v-for="item in state.enrollmentResult.failures" :key="item.product_id">商品 {{ item.product_id }}：{{ item.reason }}</p>
+          <p v-for="(warning, index) in state.enrollmentResult.warnings" :key="index">{{ warning }}</p>
+        </el-alert>
+
         <el-alert v-if="state.removalResult" :type="state.removalResult.type" :title="state.removalResult.summary" :closable="false" show-icon>
           <p v-if="state.removalResult.refreshError">{{ state.removalResult.refreshError }}</p>
           <details v-if="state.removalResult.failedCount || state.removalResult.error || state.removalResult.warnings.length">

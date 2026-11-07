@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {inventorySupplyPlan} from '../src/shared/inventory-supply-plan.js';
+const forecast={stock_incomplete:false,skus:[{shop_id:1,ozon_sku:'a',available:0,fbp_target:0,per_set_quantity:1}]};
+const plan=({physical=2,incoming=0,orders=28,fbp=0}={})=>inventorySupplyPlan({physical_estimate:physical,open_order_demand:orders,fbp_reserved:0,incoming_quantity:incoming,current_incoming:Math.min(incoming,Math.max(0,orders-physical)),current_shortage:Math.max(0,orders-physical-incoming),flow_summary:{safety:47},fbp_inventory:{incomplete:false}},[{status:'pending_review',shop_id:1,ozon_sku:'a',requested_quantity:fbp}],forecast);
+test('26 required plus47 extra safety means73 net procurement, not47 total',()=>{const p=plan();assert.equal(p.required_purchase,26);assert.equal(p.optional_purchase,47);assert.equal(p.required_purchase+p.optional_purchase,73);});
+test('inbound first covers obligations, then safety; fully covered stock has no further purchase task',()=>{let p=plan({incoming:26});assert.equal(p.required_purchase,0);assert.equal(p.optional_purchase,47);p=plan({incoming:73});assert.equal(p.required_purchase,0);assert.equal(p.optional_purchase,0);});
+test('formal FBP applications add required demand before optional local protection',()=>{const p=plan({fbp:10});assert.equal(p.required_fbs,26);assert.equal(p.required_fbp,10);assert.equal(p.optional_local,47);assert.equal(p.required_purchase+p.optional_purchase,83);});
+test('receipt moves supply from inbound to physical without creating a second supply pool',()=>{const before=plan({incoming:73}),after=plan({physical:75});assert.equal(before.required_purchase+before.optional_purchase,0);assert.equal(after.required_purchase+after.optional_purchase,0);const more=plan({incoming:73,orders:38});assert.equal(more.required_purchase,0);assert.equal(more.optional_purchase,10);});

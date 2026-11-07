@@ -540,8 +540,21 @@
     };
   }
 
-  async function runSellerRequest(message) {
+  function assertSellerCompany(expectedCompanyId) {
     const companyId = getCompanyId();
+    const unavailable = location.origin !== 'https://seller.ozon.ru' || !companyId;
+    if (unavailable || (expectedCompanyId && companyId !== String(expectedCompanyId))) {
+      const code = unavailable ? 'STORE_IDENTITY_UNAVAILABLE' : 'STORE_CONTEXT_MISMATCH';
+      const error = new Error(code);
+      error.code = code;
+      error.status = 409;
+      throw error;
+    }
+    return companyId;
+  }
+
+  async function runSellerRequest(message) {
+    const companyId = assertSellerCompany(message.expectedCompanyId);
     const request = buildSellerRequest(message);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -560,8 +573,11 @@
       });
       if (!response.ok) {
         clearCompanyId();
-        throw new Error(`seller.ozon.ru 请求失败：HTTP ${response.status} ${response.statusText}`);
+        throw Object.assign(new Error(`seller.ozon.ru 请求失败：HTTP ${response.status} ${response.statusText}`), { status: response.status });
       }
+      const data = await response.json();
+      assertSellerCompany(message.expectedCompanyId);
+      return data;
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error('seller.ozon.ru 请求超时，请确认 seller 登录状态或稍后重试');
@@ -570,7 +586,6 @@
     } finally {
       clearTimeout(timeoutId);
     }
-    return await response.json();
   }
 
   async function runMediaUploadRequest(message) {
@@ -662,6 +677,8 @@
           sendResponse({
             success: false,
             error: error?.message || String(error),
+            code: error?.code || '',
+            status: Number(error?.status || 0),
             sku: message.sku,
             requestId: message.requestId
           });

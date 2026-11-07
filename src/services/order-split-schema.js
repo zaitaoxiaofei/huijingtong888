@@ -1,0 +1,20 @@
+export const ORDER_SPLIT_SCHEMA = `CREATE TABLE IF NOT EXISTS order_split_operations (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  tenant_id BIGINT UNSIGNED NOT NULL,
+  order_id BIGINT UNSIGNED NOT NULL,
+  shop_id BIGINT UNSIGNED NOT NULL,
+  active_order_id BIGINT UNSIGNED NULL,
+  request_key VARCHAR(128) NOT NULL,
+  request_hash CHAR(64) NOT NULL,
+  posting_number VARCHAR(128) NOT NULL,
+  state VARCHAR(24) NOT NULL DEFAULT 'submitting',
+  request_json JSON NOT NULL,
+  result_json JSON NULL,
+  error_message VARCHAR(1000) NULL,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_order_split_request (tenant_id, request_key),
+  UNIQUE KEY uk_order_split_active (tenant_id, active_order_id),
+  KEY idx_order_split_order (tenant_id, order_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`;

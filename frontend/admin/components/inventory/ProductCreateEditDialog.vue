@@ -2,7 +2,7 @@
 import { normalizeVehicleBrand, vehicleBrandAliases } from "../../../../src/shared/vehicle-brand.js";
 import { hasPermission } from "../../../../src/shared/permissions.js";
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElDialog, ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { invalidateInventoryNamingOptions, invalidateInventoryVehicleCatalog, loadInventoryNamingOptions, loadInventoryVehicleCatalog } from "../../utils/inventory-naming-options";
 import { uploadListingMedia } from "../../api/tools/imageCropper";
@@ -13,9 +13,12 @@ import { buildShortInventoryName, scoreInventorySimilarity } from "../../utils/i
 import { useAuthStore } from "../../stores/auth";
 import { useRouter } from "vue-router";
 import ProductImagePreview from "../ProductImagePreview.vue";
+import MobileDialog from "../mobile/MobileDialog.vue";
+import InventoryProductHistoryAction from "./InventoryProductHistoryAction.vue";
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
+  mobile: Boolean,
   mode: { type: String, default: "create" },
   target: { type: String, default: "selection" },
   people: { type: Array, default: () => [] },
@@ -53,14 +56,14 @@ const componentPageSize = 12;
 const componentDirectory = reactive({
   category: "",
   brand: "",
-  fitment_type: "",
   vehicle_model: "",
   accessory: "",
   color: "",
-  quantity: ""
+  material: "",
+  process: ""
 });
 const componentDirectoryOptions = reactive({
-  brand: [], fitment_type: [], vehicle_model: [], accessory: [], color: [], quantity: []
+  brand: [], vehicle_model: [], accessory: [], color: [], material: [], process: []
 });
 const namingOptions = reactive({ category: [], brand: [], accessory: [], color: [], material: [], process: [], quantity: [] });
 const pendingCoreNames = ref([]);
@@ -73,13 +76,12 @@ const fallbackLogisticsRules = ref([]);
 let similarProductsTimer = null;
 
 const STOCK_UNIT_OPTIONS = ["个", "件", "套", "对", "双", "条", "米", "卷", "包", "片", "张", "盒"];
-const PRODUCTION_LEAD_DAY_OPTIONS = [3, 5, 7, 10, 15, 30];
+const PRODUCTION_LEAD_DAY_OPTIONS = [1, 2, 3, 5, 7, 10, 15, 30];
 const WAREHOUSE_LOGISTICS_DAY_OPTIONS = [1, 2, 3, 4, 5];
 
 const formRules = {
   name: [{ required: true, message: "请输入商品名称", trigger: "blur" }],
-  owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }],
-  purchase_quantity: [{ required: true, message: "请输入采购数量", trigger: "blur" }]
+  owner_person_id: [{ required: true, message: "请选择负责人", trigger: "change" }]
 };
 
 const form = reactive(createDefaultForm());
@@ -193,6 +195,7 @@ function createDefaultForm() {
     production_lead_days: null,
     warehouse_logistics_days: null,
     is_accessory: 0,
+    is_consumable: 0,
     composition_items: [],
     product_type: "selection",
     selection_status: "draft"
@@ -235,7 +238,7 @@ function resetForm() {
   componentOptions.value = [];
   componentDirectoryRows.value = [];
   componentPage.value = 1;
-  Object.assign(componentDirectory, { category: "", brand: "", fitment_type: "", vehicle_model: "", accessory: "", color: "", quantity: "" });
+  Object.assign(componentDirectory, { category: "", brand: "", vehicle_model: "", accessory: "", color: "", material: "", process: "" });
   syncPackagingFee(form);
 }
 
@@ -270,6 +273,7 @@ function fillFormFromValue(value = {}) {
     production_lead_days: value.production_lead_days == null ? (isInventoryTarget.value ? 7 : null) : Number(value.production_lead_days),
     warehouse_logistics_days: value.warehouse_logistics_days == null ? (isInventoryTarget.value ? 2 : null) : Number(value.warehouse_logistics_days),
     is_accessory: Number(value.is_accessory || 0) ? 1 : 0,
+    is_consumable: Number(value.is_consumable || 0) ? 1 : 0,
     composition_items: Array.isArray(value.composition_items) ? value.composition_items.map(normalizeComponentItem) : [],
     product_type: value.product_type || (isInventoryTarget.value ? "main" : "selection"),
     selection_status: value.selection_status || (isInventoryTarget.value ? "listed" : "draft")
@@ -965,7 +969,7 @@ function uniqueDirectoryValues(field, predicate = () => true, fallbackType = "",
   const counts = new Map();
   const rows = componentDirectoryRows.value.filter(predicate);
   for (const row of rows) {
-    const raw = field === "color" ? String(row[field] || "").split(",") : [String(row[field] || "")];
+    const raw = ["color", "material"].includes(field) ? String(row[field] || "").split(/[，,/、]+/u) : [String(row[field] || "")];
     for (const item of raw) {
       const value = field === "vehicle_brand" ? normalizeComponentBrand(item) : item.trim();
       if (value) counts.set(value, Number(counts.get(value) || 0) + 1);
@@ -989,7 +993,8 @@ const componentDirectoryBrands = computed(() => uniqueDirectoryValues("vehicle_b
   ...componentDirectoryOptions.brand,
   ...vehicleCatalog.value.map((brand) => brand.name)
 ]));
-const componentDirectoryFitments = computed(() => uniqueDirectoryValues("fitment_type", undefined, "", componentDirectoryOptions.fitment_type));
+const componentDirectoryMaterials = computed(() => uniqueDirectoryValues("material", undefined, "material", [...componentDirectoryOptions.material, ...namingOptions.material]));
+const componentDirectoryProcesses = computed(() => uniqueDirectoryValues("surface_process", undefined, "process", [...componentDirectoryOptions.process, ...namingOptions.process]));
 const componentDirectoryModels = computed(() => {
   const selectedBrand = normalizeComponentBrand(componentDirectory.brand);
   const catalogBrand = vehicleCatalog.value.find((brand) => normalizeComponentBrand(brand.name) === selectedBrand);
@@ -1000,7 +1005,6 @@ const componentDirectoryModels = computed(() => {
 });
 const componentDirectoryAccessories = computed(() => uniqueDirectoryValues("accessory_name", undefined, "accessory", componentDirectoryOptions.accessory));
 const componentDirectoryColors = computed(() => uniqueDirectoryValues("color", undefined, "color", componentDirectoryOptions.color));
-const componentDirectoryQuantities = computed(() => uniqueDirectoryValues("product_quantity", undefined, "quantity", componentDirectoryOptions.quantity));
 const pagedComponentOptions = computed(() => componentOptions.value.slice(
   (componentPage.value - 1) * componentPageSize,
   componentPage.value * componentPageSize
@@ -1011,8 +1015,8 @@ function componentFieldMatches(row, field, expected) {
   if (expected === "" || expected === null || expected === undefined) return true;
   const target = (field === "vehicle_brand" ? normalizeComponentBrand(expected) : String(expected || "").trim()).toLowerCase();
   const name = String(row.name || "").toLowerCase();
-  if (field === "color") {
-    const colors = String(row.color || "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  if (["color", "material"].includes(field)) {
+    const colors = String(row[field] || "").split(/[，,/、]+/u).map((value) => value.trim().toLowerCase()).filter(Boolean);
     return colors.includes(target) || (!colors.length && name.includes(target));
   }
   if (field === "quantity") {
@@ -1030,11 +1034,11 @@ function componentFieldMatches(row, field, expected) {
 function componentMatchReasons(row) {
   const fields = [
     ["brand", "vehicle_brand", "品牌"],
-    ["fitment_type", "fitment_type", "适配"],
+    ["material", "material", "材质"],
+    ["process", "surface_process", "工艺"],
     ["vehicle_model", "vehicle_model", "车型"],
     ["accessory", "accessory_name", "款式"],
-    ["color", "color", "颜色"],
-    ["quantity", "quantity", "包装"]
+    ["color", "color", "颜色"]
   ];
   return fields
     .filter(([key, field]) => componentDirectory[key] !== "" && componentFieldMatches(row, field, componentDirectory[key]))
@@ -1076,11 +1080,11 @@ async function searchComponentProducts() {
     Object.assign(componentDirectory, {
       category: componentDirectory.category,
       brand: "",
-      fitment_type: "",
       vehicle_model: "",
       accessory: "",
       color: "",
-      quantity: ""
+      material: "",
+      process: ""
     });
     const rows = [];
     let page = 1;
@@ -1118,12 +1122,11 @@ async function searchComponentProducts() {
 
 async function loadComponentDirectoryOptions() {
   const category = String(componentDirectory.category || "").trim();
-  const types = ["brand", "fitment_type", "vehicle_model", "accessory", "color", "quantity"];
+  const types = ["brand", "vehicle_model", "accessory", "color", "material", "process"];
   const results = await Promise.allSettled(types.map(async (type) => {
     const params = new URLSearchParams({ type });
     if (category) params.set("category", category);
     if (componentDirectory.brand) params.set("brand", normalizeComponentBrand(componentDirectory.brand));
-    if (componentDirectory.fitment_type) params.set("fitment_type", componentDirectory.fitment_type);
     if (componentDirectory.vehicle_model) params.set("vehicle_model", componentDirectory.vehicle_model);
     componentDirectoryOptions[type] = await loadInventoryNamingOptions(params);
   }));
@@ -1135,11 +1138,11 @@ async function loadComponentDirectoryOptions() {
 function filterComponentDirectoryProducts() {
   componentOptions.value = componentDirectoryRows.value
     .filter((row) => componentFieldMatches(row, "vehicle_brand", componentDirectory.brand))
-    .filter((row) => componentFieldMatches(row, "fitment_type", componentDirectory.fitment_type))
+    .filter((row) => componentFieldMatches(row, "material", componentDirectory.material))
+    .filter((row) => componentFieldMatches(row, "surface_process", componentDirectory.process))
     .filter((row) => componentFieldMatches(row, "vehicle_model", componentDirectory.vehicle_model))
     .filter((row) => componentFieldMatches(row, "accessory_name", componentDirectory.accessory))
     .filter((row) => componentFieldMatches(row, "color", componentDirectory.color))
-    .filter((row) => componentFieldMatches(row, "quantity", componentDirectory.quantity))
     .sort((left, right) => (
       componentMatchReasons(right).length - componentMatchReasons(left).length
       || Number(right.stock || 0) - Number(left.stock || 0)
@@ -1153,7 +1156,7 @@ async function handleComponentFilterChange(field = "") {
     componentDirectory.brand = normalizeComponentBrand(componentDirectory.brand);
     componentDirectory.vehicle_model = "";
   }
-  if (["brand", "fitment_type", "vehicle_model"].includes(field)) await loadComponentDirectoryOptions();
+  if (["brand", "vehicle_model"].includes(field)) await loadComponentDirectoryOptions();
   filterComponentDirectoryProducts();
 }
 
@@ -1167,7 +1170,7 @@ function handleComponentCategoryChange(value) {
   componentOptions.value = [];
   componentDirectoryRows.value = [];
   componentPage.value = 1;
-  Object.assign(componentDirectory, { category: "", brand: "", fitment_type: "", vehicle_model: "", accessory: "", color: "", quantity: "" });
+  Object.assign(componentDirectory, { category: "", brand: "", vehicle_model: "", accessory: "", color: "", material: "", process: "" });
 }
 
 function addComponentProduct(row) {
@@ -1206,6 +1209,7 @@ function removeComponentProduct(productId) {
 }
 
 function productAutoTypeLabel() {
+  if (Number(form.is_consumable || 0)) return "耗材产品";
   return form.composition_items.length ? "组合产品" : "单品产品";
 }
 
@@ -1541,6 +1545,7 @@ async function submitDialog(options = {}) {
       production_lead_days: form.production_lead_days,
       warehouse_logistics_days: form.warehouse_logistics_days,
       is_accessory: Number(form.is_accessory || 0) ? 1 : 0,
+      is_consumable: Number(form.is_consumable || 0) ? 1 : 0,
       composition_items: form.composition_items.map((item) => ({
         component_product_id: Number(item.component_product_id || 0),
         quantity: Number(item.quantity || 1),
@@ -1549,6 +1554,9 @@ async function submitDialog(options = {}) {
       selection_status: isInventoryTarget.value ? "listed" : (isEditMode.value ? form.selection_status || "draft" : "draft"),
       product_type: isInventoryTarget.value ? "main" : (isEditMode.value ? form.product_type || "selection" : "selection")
     };
+    // Ordinary editing preserves the persisted workflow; inventory requests use
+    // their dedicated review endpoint and creation still chooses the initial type.
+    if(isEditMode.value&&!props.inventoryRequest){delete payload.selection_status;delete payload.product_type;}
     let savedProduct;
     if (props.inventoryRequest) {
       const reviewBody = { action: props.inventoryRequest.action, revision: props.inventoryRequest.revision, payload };
@@ -1566,6 +1574,7 @@ async function submitDialog(options = {}) {
         : await apiClient.post(props.createEndpoint || "/api/products", { ...payload, ...(props.createContext || {}), request_key: requestKey.value });
     }
     if (savedProduct?.request_id) {
+      window.dispatchEvent(new CustomEvent('erp:inventory-product-requests-changed'));
       invalidateInventoryNamingOptions();
       invalidateInventoryVehicleCatalog();
       if (savedProduct.binding_status === "failed") ElMessage.warning(`库存已创建，订单绑定失败：${savedProduct.binding_error}。请在建品申请中重试绑定。`);
@@ -1614,28 +1623,35 @@ function submitAndCreateDraft() {
 </script>
 
 <template>
-  <el-dialog
+  <component :is="mobile ? MobileDialog : ElDialog"
     :model-value="visible"
     :title="dialogTitle"
     width="min(1880px, 99vw)"
-    align-center
+    :align-center="!mobile"
     append-to-body
     destroy-on-close
     class="selection-form-dialog erp-centered-dialog"
+    :class="{'selection-form-dialog--mobile':mobile}"
+    :show-close="!mobile || !submitting"
+    :close-on-click-modal="mobile ? false : undefined"
+    :close-on-press-escape="!mobile || !submitting"
+    :before-close="done => { if (!mobile || !submitting) done(); }"
     @closed="formRef?.clearValidate?.()"
     @update:model-value="emit('update:visible', $event)"
   >
     <template #header>
       <div class="inventory-dialog-header">
         <strong>{{ dialogTitle }}</strong>
-        <div class="inventory-dialog-header__actions">
+        <div v-if="!mobile" class="inventory-dialog-header__actions">
+          <InventoryProductHistoryAction v-if="isInventoryTarget && isEditMode" :product-id="Number(editProductId || value?.id)"/>
           <el-tooltip content="关闭弹窗，不保存本次修改" placement="bottom"><el-button class="erp-btn erp-btn-secondary" :disabled="submitting" @click="closeDialog">取消</el-button></el-tooltip>
           <el-tooltip v-if="inventoryRequest?.action !== 'view'" :content="newNamingValues.length || inventoryRequest ? '新名称随完整建品信息提交审核，通过后自动创建库存' : '仅保存库存商品，暂不创建上架草稿'" placement="bottom"><el-button class="erp-btn erp-btn-primary" type="primary" :loading="submitting && !creatingDraft" :disabled="submitting" @click="submitDialog">{{ saveButtonText }}</el-button></el-tooltip>
           <el-tooltip v-if="isInventoryTarget && !inventoryRequest" content="保存库存商品并创建关联的上架草稿；如已有相同库存，可直接选用" placement="bottom"><el-button class="erp-btn" type="success" :loading="creatingDraft" :disabled="(submitting && !creatingDraft) || newNamingValues.length > 0" @click="submitAndCreateDraft">建草稿</el-button></el-tooltip>
         </div>
       </div>
     </template>
-    <el-form ref="formRef" :model="form" :rules="formRules" :disabled="inventoryRequest?.action === 'view'" label-width="96px">
+    <p v-if="mobile && isEditMode" class="mobile-inventory-edit-help">此处编辑名称、规格等库存资料；实物盘点、确认到货和验收入库请使用对应入口。</p>
+    <el-form ref="formRef" :model="form" :rules="formRules" :disabled="inventoryRequest?.action === 'view'" :label-width="mobile ? 'auto' : '96px'" :label-position="mobile ? 'top' : 'right'">
       <div class="selection-workbench has-similar-products">
         <div class="selection-workbench-main">
           <div class="form-section standard-naming-section">
@@ -1828,6 +1844,11 @@ function submitAndCreateDraft() {
                   </el-radio-group>
                 </el-form-item>
               </el-col>
+              <el-col :span="12">
+                <el-form-item label="库存属性">
+                  <el-checkbox v-model="form.is_consumable" :true-value="1" :false-value="0">耗材</el-checkbox>
+                </el-form-item>
+              </el-col>
             </el-row>
           </div>
 
@@ -1847,11 +1868,6 @@ function submitAndCreateDraft() {
               <el-col :span="8">
                 <el-form-item label="打包费">
                   <el-input-number v-model="form.handling_fee" :min="0" :precision="1" :step="0.1" controls-position="right" @change="manualPackagingFee = true" />
-                </el-form-item>
-              </el-col>
-              <el-col :span="8">
-                <el-form-item label="采购数量" prop="purchase_quantity">
-                  <el-input-number v-model="form.purchase_quantity" :min="1" :precision="0" :step="1" controls-position="right" />
                 </el-form-item>
               </el-col>
               <el-col v-if="isInventoryTarget" :span="8">
@@ -1973,23 +1989,23 @@ function submitAndCreateDraft() {
               >
                 <el-option v-for="item in namingOptions.category" :key="item.id || item.value" :label="item.label || item.value" :value="item.value" />
               </el-select>
-                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="品牌" @change="handleComponentFilterChange('brand')">
+                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="汽车品牌" @change="handleComponentFilterChange('brand')">
                   <el-option v-for="value in componentDirectoryBrands" :key="value" :label="value" :value="value" />
-                </el-select>
-                <el-select v-model="componentDirectory.fitment_type" filterable allow-create default-first-option clearable placeholder="适配" @change="handleComponentFilterChange('fitment_type')">
-                  <el-option v-for="value in componentDirectoryFitments" :key="value" :label="value === 'specific' ? '专用' : '通用'" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="车型" @change="handleComponentFilterChange('vehicle_model')">
                   <el-option v-for="value in componentDirectoryModels" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式/特征" @change="handleComponentFilterChange">
+                <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式" @change="handleComponentFilterChange">
                   <el-option v-for="value in componentDirectoryAccessories" :key="value" :label="value" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.color" filterable allow-create default-first-option clearable placeholder="颜色" @change="handleComponentFilterChange">
                   <el-option v-for="value in componentDirectoryColors" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.quantity" filterable allow-create default-first-option clearable placeholder="包装" @change="handleComponentFilterChange">
-                  <el-option v-for="value in componentDirectoryQuantities" :key="value" :label="`${value}件`" :value="value" />
+                <el-select v-model="componentDirectory.material" filterable clearable placeholder="材质" @change="handleComponentFilterChange">
+                  <el-option v-for="value in componentDirectoryMaterials" :key="value" :label="value" :value="value" />
+                </el-select>
+                <el-select v-model="componentDirectory.process" filterable clearable placeholder="工艺" @change="handleComponentFilterChange">
+                  <el-option v-for="value in componentDirectoryProcesses" :key="value" :label="value" :value="value" />
                 </el-select>
               <el-button @click="requestQuickCreateComponent">快速创建配件</el-button>
             </div>
@@ -2160,7 +2176,12 @@ function submitAndCreateDraft() {
       </div>
     </el-form>
 
-  </el-dialog>
+    <template v-if="mobile" #footer>
+      <InventoryProductHistoryAction v-if="isInventoryTarget && isEditMode" :product-id="Number(editProductId || value?.id)" mobile/>
+      <el-button :disabled="submitting" @click="closeDialog">取消</el-button>
+      <el-button v-if="inventoryRequest?.action !== 'view'" type="primary" :loading="submitting" :disabled="submitting" @click="submitDialog">{{ saveButtonText }}</el-button>
+    </template>
+  </component>
 </template>
 
 <style scoped>
@@ -2875,4 +2896,33 @@ function submitAndCreateDraft() {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+/* MobileDialog owns the fixed header/footer and the one scrolling form region. */
+:global(.selection-form-dialog--mobile .inventory-dialog-header) { min-width: 0; padding-right: 0; }
+:global(.selection-form-dialog--mobile .inventory-dialog-header > strong) { font-size: 16px; overflow-wrap: anywhere; }
+:global(.selection-form-dialog--mobile .mobile-inventory-edit-help) { margin: 0 0 12px; font-size: 12px; line-height: 1.6; color: var(--el-text-color-secondary); }
+:global(.selection-form-dialog--mobile .naming-step-heading) { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+:global(.selection-form-dialog--mobile .selection-workbench),
+:global(.selection-form-dialog--mobile .selection-workbench-main),
+:global(.selection-form-dialog--mobile .naming-workspace),
+:global(.selection-form-dialog--mobile .component-quick-search),
+:global(.selection-form-dialog--mobile .naming-quantity-row),
+:global(.selection-form-dialog--mobile .color-editor) { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+:global(.selection-form-dialog--mobile .el-row) { display: grid; grid-template-columns: minmax(0, 1fr); margin-left: 0 !important; margin-right: 0 !important; gap: 12px; }
+:global(.selection-form-dialog--mobile .el-col) { grid-column: 1 / -1; width: 100%; max-width: 100%; padding: 0 !important; }
+:global(.selection-form-dialog--mobile .el-form-item),
+:global(.selection-form-dialog--mobile .el-form-item__content),
+:global(.selection-form-dialog--mobile .el-select),
+:global(.selection-form-dialog--mobile .el-input),
+:global(.selection-form-dialog--mobile .form-section) { min-width: 0; max-width: 100%; }
+:global(.selection-form-dialog--mobile .form-section) { padding: 12px; }
+:global(.selection-form-dialog--mobile .el-input__inner),
+:global(.selection-form-dialog--mobile .el-select__placeholder),
+:global(.selection-form-dialog--mobile .el-textarea__inner) { font-size: 16px; }
+:global(.selection-form-dialog--mobile .similar-products-panel) { position: static; max-height: none; overflow: visible; }
+:global(.selection-form-dialog--mobile .core-name-review-head),
+:global(.selection-form-dialog--mobile .core-name-review-item),
+:global(.selection-form-dialog--mobile .component-result-picker) { flex-wrap: wrap; }
+:global(.selection-form-dialog--mobile .core-name-review-list) { grid-template-columns: minmax(0, 1fr); }
+:global(.selection-form-dialog--mobile .selection-preview-row) { grid-template-columns: minmax(0, 1fr); }
 </style>

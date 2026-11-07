@@ -1,7 +1,11 @@
+import { fetchOzonPackageLabelTask } from "./services/ozon-package-label-task.js";
+import { createOzonLabelRequestQueue } from "./services/ozon-label-request-queue.js";
 import { resolveOzonSellerMoney } from "./services/ozon-seller-money.js";
 import { fetchOzonDailyAccruals } from "./services/ozon-finance-accrual-client.js";
 import { normalizeOzonFinanceAccrual } from "./services/ozon-finance-accruals.js";
 import { ozonStockUpdateReceipts } from "./services/ozon-stock-update.js";
+
+const runOzonLabelRequest = createOzonLabelRequestQueue();
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -49,7 +53,7 @@ export async function fetchOzonPostings(shop, options = {}) {
           barcodes: true,
           financial_data: true
         }
-      }, { signal: params.signal });
+      }, { signal: params.signal, beforeRequest: params.beforeRequest });
       requests += 1;
       const page = Array.isArray(data.postings) ? data : data.result;
       if (!Array.isArray(page?.postings) || typeof page.has_next !== "boolean") {
@@ -1143,46 +1147,42 @@ export async function fetchOzonPackageLabel(shop, postingNumbers = [], options =
   if (!hasRealOzonCredentials(shop)) {
     throw new Error("店铺缺少有效的 Ozon Client ID 或 API Key，无法获取真实面单");
   }
-  return ozonBinaryRequest(shop, "/v2/posting/fbs/package-label", { posting_number: postings }, options);
+  return fetchOzonPackageLabelTask(postings, {
+    signal: options.signal,
+    request: (path, payload) => runOzonLabelRequest(shop.ozon_client_id, () => ozonRequestOnce(shop, path, payload, options), options),
+    download: async fileUrl => {
+      const url = new URL(fileUrl);
+      if (url.protocol !== "https:" || !/(^|\.)(ozonstatic\.(cn|ru|com)|ozone\.ru|ozon\.ru)$/.test(url.hostname)) throw new Error("Ozon 返回了无法识别的面单下载地址");
+      const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000);
+      const response = await fetch(url, { signal, redirect: "error" });
+      if (!response.ok) throw new Error(`Ozon 面单 PDF 下载失败：HTTP ${response.status}`);
+      return Buffer.from(await response.arrayBuffer());
+    }
+  });
 }
 
 export async function fetchOzonFinanceTransactions(shop, options = {}) {
+  if (options.source && options.source !== "daily_accrual") {
+    throw Object.assign(new Error("旧版 Ozon 财务流水接口已停用，请使用按日计提账单；不能回退旧接口或把旧新金额直接合并"), { code: "OZON_FINANCE_LEGACY_RETIRED", statusCode: 400 });
+  }
   if (!hasRealOzonCredentials(shop)) {
-    return { operations: [], fetched: 0, requests: 0 };
+    throw Object.assign(new Error("店铺缺少有效 Ozon Client ID 或 API Key，请在「企业店铺 → 编辑」配置真实授权后同步财务账单"), { code: "OZON_FINANCE_CREDENTIALS_MISSING", statusCode: 409 });
   }
-  if (options.source === "daily_accrual") {
-    const result = await fetchOzonDailyAccruals(shop, { from: options.from, to: options.to,
-      signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
-      request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions) });
-    return { ...result, operations: result.accruals };
-  }
-  const from = normalizeIsoStart(options.from, 30);
-  const to = normalizeIsoEnd(options.to, new Date());
-  const pageSize = Math.min(Math.max(Number(options.pageSize || 1000), 1), 1000);
-  const operations = [];
-  let page = 1;
-  let requests = 0;
-  while (true) {
-    throwIfAborted(options.signal);
-    const data = await ozonRequest(shop, "/v3/finance/transaction/list", {
-      filter: {
-        date: { from, to },
-        operation_type: [],
-        posting_number: "",
-        transaction_type: "all"
-      },
-      page,
-      page_size: pageSize
-    }, { signal: options.signal, beforeRequest: options.beforeRequest });
-    requests += 1;
-    const result = data.result || {};
-    const batch = result.operations || result.items || [];
-    for (const operation of batch) operations.push(normalizeFinanceOperation(operation));
-    const pageCount = Number(result.page_count || result.pages_count || 0);
-    if (!batch.length || (pageCount && page >= pageCount) || batch.length < pageSize) break;
-    page += 1;
-  }
-  return { operations, fetched: operations.length, requests };
+  const result = await fetchOzonDailyAccruals(shop, {
+    from: options.from || normalizeIsoStart(undefined, 30), to: options.to || normalizeIsoEnd(undefined, new Date()),
+    signal: options.signal, beforeRequest: options.beforeRequest, normalizeAccrual: normalizeOzonFinanceAccrual,
+    request: (path, payload, requestOptions) => ozonRequest(requestOptions.shop || shop, path, payload, requestOptions)
+  });
+  return { ...result, operations: result.accruals };
+}
+
+export async function splitOzonPosting(shop, postingNumber, postings, options = {}) {
+  if (!hasRealOzonCredentials(shop)) throw Object.assign(new Error("店铺尚未配置有效 Ozon API Key，不能拆单"), { statusCode: 409 });
+  // Splitting is a non-idempotent mutation: a lost response must be reconciled,
+  // never retried automatically through the generic request loop.
+  return ozonRequestOnce(shop, "/v1/posting/fbs/split", {
+    posting_number: String(postingNumber), postings
+  }, options);
 }
 
 export async function shipOzonPosting(shop, postingNumber, products = [], options = {}) {
@@ -1544,8 +1544,12 @@ async function ozonRequestOnce(shop, path, payload, options = {}) {
   }
   if (!response.ok) {
     const message = data.message || data.error || text || `Ozon API ${response.status}`;
-    const error = new Error(`Ozon ${path} failed: ${message}`);
-    error.statusCode = response.status;
+    const credentialFailure = /api[ -]?key/i.test(String(message)) && /expired|invalid|not valid/i.test(String(message));
+    const error = new Error(credentialFailure
+      ? `店铺「${shop.name || shop.id}」的 Ozon API Key ${/expired/i.test(String(message)) ? '已过期' : '无效'}。请在「企业店铺 → 编辑 → Ozon API Key」更新并保存；密钥备注不会替换密钥。`
+      : `Ozon ${path} failed: ${message}`);
+    error.statusCode = credentialFailure ? 409 : response.status;
+    if (credentialFailure) error.code = "OZON_API_KEY_INVALID";
     error.path = path;
     error.retryAfterMs = retryAfterMs(response.headers?.get?.("retry-after"));
     throw error;
@@ -1617,44 +1621,6 @@ function normalizeOzonArrayPayload(data = {}, keys = []) {
   return [];
 }
 
-async function ozonBinaryRequest(shop, path, payload, options = {}) {
-  const controller = new AbortController();
-  const abortFromParent = () => controller.abort(options.signal.reason || new Error("本次请求已取消"));
-  if (options.signal?.aborted) abortFromParent();
-  else options.signal?.addEventListener("abort", abortFromParent, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 45000);
-  let response;
-  try {
-    response = await fetch(`${OZON_API_BASE}${path}`, {
-      method: "POST",
-      headers: {
-        "Client-Id": String(shop.ozon_client_id),
-        "Api-Key": ozonApiKey(shop),
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (options.signal?.aborted) throwIfAborted(options.signal);
-    if (error.name === "AbortError") throw new Error(`Ozon ${path} timeout after 45s`);
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    options.signal?.removeEventListener("abort", abortFromParent);
-  }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!response.ok) {
-    const text = buffer.toString("utf8");
-    let message = text;
-    try {
-      const parsed = JSON.parse(text);
-      message = parsed.message || parsed.error || text;
-    } catch {}
-    throw new Error(`Ozon ${path} failed: ${message}`);
-  }
-  return buffer;
-}
 
 function demoPdf(text) {
   const safe = String(text || "Demo PDF").replace(/[()\\]/g, "\\$&").replace(/\r?\n/g, ") Tj T* (");
@@ -1847,36 +1813,6 @@ function classifyStockType(stock = {}, parent = {}) {
 function stockNumber(value) {
   const num = Number(value || 0);
   return Number.isFinite(num) ? Math.max(0, Math.round(num)) : 0;
-}
-
-function normalizeFinanceOperation(item) {
-  const posting = item.posting || item.posting_number || {};
-  const services = Array.isArray(item.services) ? item.services : [];
-  const items = Array.isArray(item.items) ? item.items : [];
-  return {
-    operation_id: String(item.operation_id || item.id || item.operation_number || ""),
-    operation_type: String(item.operation_type || item.type || ""),
-    operation_type_name: String(item.operation_type_name || item.name || ""),
-    operation_date: item.operation_date || item.date || item.created_at || "",
-    posting_number: String(posting.posting_number || posting || ""),
-    order_number: String(posting.order_number || item.order_number || ""),
-    amount: numberFromOzon(item.amount || item.total || 0),
-    accruals_for_sale: numberFromOzon(item.accruals_for_sale || 0),
-    sale_commission: numberFromOzon(item.sale_commission || 0),
-    delivery_charge: numberFromOzon(item.delivery_charge || 0),
-    return_delivery_charge: numberFromOzon(item.return_delivery_charge || 0),
-    currency_code: item.currency_code || item.currency || "",
-    services: services.map((service) => ({
-      name: String(service.name || service.service_name || service.type || ""),
-      price: numberFromOzon(service.price || service.amount || service.value || 0)
-    })),
-    items: items.map((row) => ({
-      sku: String(row.sku || row.ozon_sku || ""),
-      name: String(row.name || ""),
-      quantity: Number(row.quantity || 1)
-    })),
-    raw_json: stringify(item)
-  };
 }
 
 function normalizeOzonProductPrice(item = {}) {

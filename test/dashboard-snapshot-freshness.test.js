@@ -2,21 +2,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("dashboard rebuilds a persisted snapshot when analytics are newer", async () => {
+test("snapshot polling does not run freshness aggregates before returning saved metrics", async () => {
   const source = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
-  const dashboard = source.match(/async function dashboardSnapshotIsStaleMysql[\s\S]*?export async function inventoryMysql/)?.[0] || "";
-
-  assert.match(dashboard, /MAX\(refreshed_at\) AS refreshed_at[\s\S]*FROM analytics_shop_daily/);
-  assert.match(dashboard, /if \(await dashboardSnapshotIsStaleMysql\(snapshot, dateKey\)\)/);
-  assert.match(dashboard, /queueDashboardSnapshotRefreshMysql\(\{ forceRefresh: true, dateKey \}\)/);
-  assert.match(dashboard, /status: "building"/);
+  const dashboard = source.slice(source.indexOf("export async function dashboardMysql"), source.indexOf("export async function inventoryMysql"));
+  assert.doesNotMatch(dashboard, /dashboardSnapshotIsStaleMysql|COUNT\(|buildOrderOutcomeSql/);
+  assert.match(dashboard, /dashboardSnapshotProgressMysql\.get\(snapshotKey\) \|\| snapshot/);
 });
 
 test("dashboard calculates today's order metrics from live orders", async () => {
   const source = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
   const builder = source.match(/async function buildDashboardPayloadMysql[\s\S]*?async function rebuildDashboardSnapshotMysql/)?.[0] || "";
 
-  assert.match(builder, /dashboardRecentCommerceMysql\(selectedDate, previousDate\)/);
+  assert.match(builder, /dashboardRecentCommerceMysql\(selectedDate, previousDate, tenantId\)/);
   assert.doesNotMatch(builder, /profitSummaryOverviewMysql\(selectedDate, selectedDate\)/);
   assert.doesNotMatch(builder, /profitSummaryOverviewMysql\(previousDate, previousDate\)/);
 });
@@ -26,7 +23,7 @@ test("dashboard snapshot refresh leaves database capacity for foreground request
   const builder = source.match(/async function buildDashboardPayloadMysql[\s\S]*?async function rebuildDashboardSnapshotMysql/)?.[0] || "";
 
   assert.match(builder, /mapWithConcurrencyMysql\(\[/);
-  assert.match(builder, /\], 3, \(loadSection\) => loadSection\(\)\)/);
+  assert.match(builder, /\], 3, async \(loadSection\) =>/);
   assert.doesNotMatch(builder, /await Promise\.all\(\[/);
 });
 

@@ -1,0 +1,65 @@
+/* Shared desktop list contract: controls and pagination stay outside the table
+   body scrollport. Only the layout hook's main paginated lists are marked. */
+.erp-workspace-panel[data-erp-paged-layout="column"],
+.erp-workspace-panel[data-erp-paged-layout="grid"] {
+  flex: 1 1 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.erp-workspace-panel[data-erp-paged-layout="column"] {
+  display: flex;
+  flex-direction: column;
+}
+
+.erp-workspace-panel [data-erp-paged-layout="column"]:not([hidden]) {
+  display: flex;
+  flex-direction: column !important;
+  flex: 1 1 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  min-width: 0;
+  overflow: hidden !important;
+}
+
+.erp-workspace-panel [data-erp-paged-layout="grid"] {
+  flex: 1 1 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+[data-erp-paged-layout="column"] > :not([data-erp-paged-layout="column"]):not([data-erp-paged-layout="grid"]):not([data-erp-paged-layout="table"]),
+[data-erp-paged-layout="footer"] {
+  flex: 0 0 auto !important;
+}
+
+.erp-workspace-panel [data-erp-paged-layout="table"] {
+  flex: 1 1 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+[data-erp-paged-layout="table"] > .el-table__inner-wrapper {
+  height: 100% !important;
+  min-height: 0;
+  max-height: 100%;
+}
+
+[data-erp-paged-layout="table"] > .el-table__inner-wrapper > .el-table__header-wrapper,
+[data-erp-paged-layout="table"] > .el-table__inner-wrapper > .el-table__footer-wrapper {
+  flex: none;
+}
+
+[data-erp-paged-layout="table"] > .el-table__inner-wrapper > .el-table__body-wrapper {
+  flex: 1 1 0;
+  height: auto !important;
+  min-height: 0;
+  overflow: hidden;
+}
+
+[data-erp-paged-layout="table"] > .el-table__inner-wrapper > .el-table__body-wrapper > .el-scrollbar {
+  height: 100%;
+}

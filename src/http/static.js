@@ -5,6 +5,7 @@ import { AI_WORKBENCH_PROXY_FALLBACK_ASSETS } from "./aiWorkbenchProxyAssets.js"
 import { notFound, writeHead } from "./response.js";
 
 const CONTENT_TYPES = {
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",

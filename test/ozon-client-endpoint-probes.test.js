@@ -20,7 +20,7 @@ const REAL_SHOP = {
   api_key_hint: ""
 };
 
-test("fetchOzonWarehouses uses documented v2 list shape", async (t) => {
+test("fetchOzonWarehouses uses the current v2 request and response contract", async (t) => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   t.after(() => {
@@ -35,7 +35,7 @@ test("fetchOzonWarehouses uses documented v2 list shape", async (t) => {
         name: "Main warehouse",
         status: "active",
         delivery_schema: "fbs"
-      }], has_next: false
+      }], has_next: false, cursor: ""
     });
   };
 
@@ -43,6 +43,7 @@ test("fetchOzonWarehouses uses documented v2 list shape", async (t) => {
 
   assert.equal(calls.length, 1);
   assert.ok(calls[0].url.endsWith("/v2/warehouse/list"));
+  assert.deepEqual(calls[0].body, { limit: 200, cursor: "" });
   assert.deepEqual(rows.map((item) => item.warehouse_id), ["1001"]);
 });
 

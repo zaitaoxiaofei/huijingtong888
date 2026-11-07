@@ -39,6 +39,7 @@ export function createCatalogRoutes({ services, readJson }) {
           product: {
             id: created.id,
             code: created.code || "",
+            is_consumable: Number(created.is_consumable || 0) ? 1 : 0,
             name: String(body.name || "").trim(),
             stock_unit: String(body.structured_naming?.stock_unit || body.structuredNaming?.stock_unit || body.stock_unit || "个")
           }
@@ -67,6 +68,9 @@ export function createCatalogRoutes({ services, readJson }) {
 }
 
 export async function handleCatalogRestRoute({ req, res, url, parts, services, readJson, json, notFound, sendProductImage }) {
+  if(req.method==='GET'&&parts[0]==='api'&&parts[1]==='products'&&/^\d+$/.test(parts[2]||'')&&parts.length===4&&parts[3]==='edit-history'){
+    return json(res,await services.productEditHistory(Number(parts[2]),Object.fromEntries(url.searchParams.entries()),req._session));
+  }
   if (parts[0] === "api" && parts[1] === "inventory-product-requests" && /^\d+$/.test(parts[2] || "") && !parts[3]) {
     if (req.method === "GET") return json(res, await services.inventoryProductRequestDetail(Number(parts[2]), req._session));
     if (req.method === "PUT") return json(res, await services.reviewInventoryProductRequest(Number(parts[2]), await readProductSaveJson(readJson, req), req._session));
@@ -124,7 +128,7 @@ export async function handleCatalogRestRoute({ req, res, url, parts, services, r
       await services.updateProductComponents(productId, await readJson(req), tenantIdFromRequest(req));
       return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }, tenantIdFromRequest(req)) });
     }
-    await services.updateProduct(productId, await readProductSaveJson(readJson, req), tenantIdFromRequest(req));
+    await services.updateProduct(productId, await readProductSaveJson(readJson, req), tenantIdFromRequest(req), {session:req._session});
     return json(res, { ok: true, product: await services.selectionProduct(productId, { includeDetails: 0 }, tenantIdFromRequest(req)) });
   }
 

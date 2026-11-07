@@ -54,7 +54,7 @@ test("mobile shared layout prevents dialogs and dense tables from squeezing the 
   assert.match(globalStyles, /-webkit-overflow-scrolling: touch/);
   assert.match(globalStyles, /\.inventory-page-shell \.erp-data-table[\s\S]*?min-width: 980px/);
   assert.match(inventoryToolbar, /@media \(max-width: 760px\)/);
-  assert.match(inventoryToolbar, /grid-template-columns: 1fr/);
+  assert.match(inventoryToolbar, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
 });
 
 test("listing drafts and publish records keep filters usable and tables scrollable on phones", () => {
@@ -91,12 +91,13 @@ test("mobile redirect preserves the requested desktop route", () => {
   assert.match(router, /desktopTarget:\s*to\.fullPath/);
 });
 
-test("mobile workbench has a real home route and four touch navigation targets", () => {
+test("mobile workbench has a real home route and permission-aware touch navigation targets", () => {
   assert.match(router, /name: "mobile-home", component: MobileHomeView/);
   assert.match(mobileLayout, /to="\/mobile"/);
-  assert.match(mobileLayout, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
-  assert.match(mobileHome, /继续访问原页面/);
-  assert.match(mobileHome, /\/mobile\/orders\?status=unbound/);
+  assert.match(mobileLayout, /grid-template-columns: repeat\(5, minmax\(0, 1fr\)\)/);
+  assert.match(mobileLayout, /desktopTarget/);
+  assert.match(mobileLayout, /hasPermission\(authStore.user/);
+  assert.match(mobileHome, /view=mobile/);
 });
 
 test("shared headers and filters keep laptop layouts horizontal until tablet width", () => {
@@ -114,9 +115,9 @@ test("settings forms remove fixed label offsets on phones", () => {
 test("mobile inventory reuses the paged product API and presents stock as cards", () => {
   assert.match(router, /name: "mobile-inventory", component: MobileInventoryView/);
   assert.match(mobileLayout, /to="\/mobile\/inventory"/);
-  assert.match(mobileInventory, /\/api\/products\?\$\{buildParams\(nextPage\)\.toString\(\)\}/);
-  assert.match(mobileInventory, /class="mobile-inventory-card__stocks"/);
-  assert.match(mobileInventory, /pageSize = 20/);
+  assert.match(mobileInventory, /apiClient.get\('\/api\/products\?'\+p/);
+  assert.match(mobileInventory, /class="mobile-record-grid"/);
+  assert.match(mobileInventory, /pageSize=ref\(20\)/);
 });
 
 test("inventory desktop table uses the shared keyboard-accessible responsive frame", () => {
@@ -141,7 +142,7 @@ test("inventory alerts use the shared responsive table frame", () => {
 
 test("mobile online products reuse the paged desktop API without exposing mutations", () => {
   assert.match(router, /name: "mobile-online-products", component: MobileOnlineProductsView/);
-  assert.match(mobileHome, /route: "\/mobile\/online-products"/);
+  assert.match(router, /path: "online-products"/);
   assert.match(mobileOnlineProducts, /\/api\/online-products\?\$\{buildParams\(nextPage\)\.toString\(\)\}/);
   assert.match(mobileOnlineProducts, /FBS可售/);
   assert.match(mobileOnlineProducts, /绑定库存/);

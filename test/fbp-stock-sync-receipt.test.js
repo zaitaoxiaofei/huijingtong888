@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import {confirmedFbpZeroSnapshots} from "../src/shared/fbp-zero-snapshots.js";
 
 const source = fs.readFileSync(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -12,12 +13,14 @@ function functionSource(name) {
 for (const scenario of [
   { name: "stock recovers from zero", before: 0, after: 172 },
   { name: "stock rises while a shipment is outstanding", before: 158, after: 168 },
-  { name: "stock API fails and falls back to cached stock", before: 0, after: 161, fail: true }
+  { name: "stock API fails and retains existing snapshot", before: 0, after: 161, fail: true }
 ]) {
   test(`stock sync does not confirm shipment receipt when ${scenario.name}`, async () => {
     let stock = scenario.before;
-    const receipts = [];
-    const context = vm.createContext({
+    const receipts = [], health = [];let invalidations=0;
+    const context = vm.createContext({ invalidateOrderProcurementCoverage() {invalidations++;},
+      recordOzonSyncHealth: async (...args) => health.push(args[3]),
+      confirmedFbpZeroSnapshots,
       ensureMysqlCutoverEnabled() {}, ensureOzonStockStorageSchemaMysql() {},
       resolveInventoryTenantScope: async () => ({id:1,isDefault:true}),
       assertInventoryReferences: async () => {},
@@ -31,7 +34,6 @@ for (const scenario of [
       fetchOzonStockAnalyticsSafeMysql: async () => ({ rows: [], errors: [] }),
       mergeOzonStockAnalyticsRowsMysql: (rows) => rows,
       clearStockSnapshotsForSyncMysql: async () => { stock = 0; },
-      fallbackStockRowsFromOnlineProductsMysql: async () => [{ present: scenario.after }],
       upsertStockSnapshotMysql: async (_, row) => { stock = row.present; },
       reclassifyStockSnapshotsMysql: async () => {},
       invalidateMasterDataCache() {}, stockAlertsMysql: async () => [],
@@ -46,9 +48,11 @@ for (const scenario of [
       "autoConfirmFbpTransfersFromStockDeltaMysql", "syncOzonStocksMysql"
     ].map(functionSource).join("\n"), context);
     const result = await context.syncOzonStocksMysql({ shop_id: 4 });
-    assert.equal(stock, scenario.after, "stock snapshots still refresh");
+    assert.equal(stock, scenario.fail ? scenario.before : scenario.after, "only confirmed official snapshots refresh");
+    assert.equal(health.at(-1).success, !scenario.fail);
+    assert.equal(invalidations,scenario.fail ? 0 : 1,"updated official snapshots invalidate demand reads");
     assert.equal(receipts.length, 0, "inventory changes are not shipment receipt evidence");
-    assert.equal(result.upserted, 1);
+    assert.equal(result.upserted, scenario.fail ? 0 : 1);
     assert.equal(result.status, scenario.fail ? "partial_error" : "ok");
     assert.equal(result.auto_fbp_receive.confirmedQuantity, 0);
   });

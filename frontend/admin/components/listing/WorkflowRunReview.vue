@@ -1,0 +1,41 @@
+<script setup>
+import { computed, ref, watch } from 'vue';
+import { withImageToken } from '../../api/tools/imageCropper.js';
+import { applyWorkflowBindings } from '../../../../src/shared/product-workflow-bindings.js';
+import { readableWorkflowValue } from '../../../../src/shared/product-workflow-inputs.js';
+const props=defineProps({record:{type:Object,required:true},job:{type:Object,default:()=>({})},busy:Boolean});
+const emit=defineEmits(['action','finish','open-draft','editing']);
+const active=ref(0);
+watch(()=>props.record.id,()=>{active.value=0;});
+const payload=computed(()=>props.record.payload);
+const variant=computed(()=>payload.value.variants[active.value]||payload.value.variants[0]);
+const nodes=computed(()=>payload.value.definition.nodes.filter(n=>['image','copy','approval'].includes(n.type)));
+const results=computed(()=>payload.value.outputs[variant.value.id]||{});
+const facts=computed(()=>payload.value.definition.nodes.filter(n=>['field','attribute'].includes(n.type)));
+const assembly=computed(()=>{
+  if(!payload.value.definition.bindings)return null;
+  try{return {value:applyWorkflowBindings(payload.value.definition,variant.value,Object.fromEntries(Object.entries(results.value).map(([id,state])=>[id,{...state,approved:true}])))};}
+  catch(error){return {error:error.message};}
+});
+const allGenerated=computed(()=>payload.value.variants.every(v=>nodes.value.filter(n=>n.type!=='approval').every(n=>payload.value.outputs[v.id]?.[n.id]?.url||payload.value.outputs[v.id]?.[n.id]?.text)));
+const act=(action,node,extra={})=>emit('action',{id:props.record.id,action,nodeId:node.id,variantId:variant.value.id,...extra});
+const copyChanged=node=>{emit('editing',false);act('save-copy',node,{text:JSON.parse(JSON.stringify(results.value[node.id].text))});};
+</script>
+<template>
+  <div class="review-head"><div><h3>{{ payload.definition.name }}</h3><p>{{ payload.variants.length }} 个变体 · {{ payload.definition.category?.categoryName }} · 任务 {{ record.id.slice(0,8) }}</p></div><el-button v-if="payload.draftId" type="primary" @click="emit('open-draft',payload.draftId)">预览商品并选择店铺上架</el-button><el-button v-else-if="allGenerated&&['awaiting_review','ready'].includes(job.status)" type="primary" :disabled="busy" @click="emit('finish')">整套检查通过，完成生产</el-button></div>
+  <el-alert v-if="job.error_message" :title="job.error_message" type="error" :closable="false"/>
+  <el-alert v-else type="info" :closable="false" title="后台自动推进生产。确认主图后自动继续；检查完整套图与文案后完成生产，再预览编辑并选择店铺上架。"/>
+  <el-radio-group v-model="active" class="variant-tabs"><el-radio-button v-for="(v,i) in payload.variants" :key="v.id" :value="i">{{ v.label }}</el-radio-button></el-radio-group>
+  <el-collapse><el-collapse-item title="预览本变体的产品资料与上架属性" name="facts"><el-descriptions :column="2" border><el-descriptions-item v-for="node in facts" :key="node.id" :label="node.label">{{ readableWorkflowValue(node,variant.values[node.id])||'未填写' }}</el-descriptions-item></el-descriptions></el-collapse-item></el-collapse>
+  <el-collapse v-if="assembly"><el-collapse-item title="预览模板字段装配结果（按当前绑定）" name="assembly"><p v-if="assembly.error">{{ assembly.error }}</p><template v-else><el-descriptions :column="1" border><el-descriptions-item label="标题">{{ assembly.value.title||'上架前补齐' }}</el-descriptions-item><el-descriptions-item label="标签">{{ assembly.value.tags.join(' ')||'未配置' }}</el-descriptions-item><el-descriptions-item label="简介">{{ assembly.value.description||'未配置' }}</el-descriptions-item><el-descriptions-item label="富文本">{{ assembly.value.rich_content_json?'已按绑定图片和文本组合':'未配置' }}</el-descriptions-item></el-descriptions><div class="assembled-images"><el-image v-for="(image,index) in assembly.value.images" :key="index" :src="withImageToken(image.url)" :preview-src-list="assembly.value.images.map(i=>withImageToken(i.url))" :initial-index="index" preview-teleported fit="contain"/></div></template></el-collapse-item></el-collapse>
+  <div class="review-grid"><article v-for="node in nodes" :key="node.id"><div class="review-head"><h4>{{ node.label }}</h4><el-tag :type="results[node.id]?.approved?'success':'info'">{{ results[node.id]?.approved?'已确认':results[node.id]?.url||results[node.id]?.text?'待检查':results[node.id]?.status==='failed'?'失败':results[node.id]?.status==='unknown'?'待核对':results[node.id]?.taskId?'生成中':'等待前序' }}</el-tag></div>
+    <template v-if="node.type==='image'"><el-image v-if="results[node.id]?.url" :src="withImageToken(results[node.id].url)" :preview-src-list="[withImageToken(results[node.id].url)]" preview-teleported fit="contain"/><div v-else class="placeholder">{{ node.role==='main'?'变体主图':'详情图' }} · {{ node.ratio }}</div></template>
+    <template v-if="node.type==='approval'"><p>检查 {{ node.inputs.map(id=>payload.definition.nodes.find(n=>n.id===id)?.label).join('、') }}</p><el-button v-if="!results[node.id]?.approved&&!payload.draftId" type="success" :disabled="busy||!node.inputs.every(id=>results[id]?.url||results[id]?.approved)" @click="act('approve',node)">主图确认，后台继续生成</el-button></template>
+    <template v-if="node.type==='copy'&&results[node.id]?.text"><label v-if="'text'in results[node.id].text">{{ node.label }}<el-input v-model="results[node.id].text.text" type="textarea" :rows="4" :disabled="Boolean(payload.draftId)" @focus="emit('editing',true)" @blur="emit('editing',false)" @change="copyChanged(node)"/></label><label v-if="'title'in results[node.id].text">标题<el-input v-model="results[node.id].text.title" :disabled="Boolean(payload.draftId)" @focus="emit('editing',true)" @blur="emit('editing',false)" @change="copyChanged(node)"/></label><label v-if="'tags'in results[node.id].text">标签<el-select v-model="results[node.id].text.tags" multiple filterable allow-create :disabled="Boolean(payload.draftId)" @visible-change="emit('editing',$event)" @change="copyChanged(node)"><el-option v-for="tag in results[node.id].text.tags" :key="tag" :label="tag" :value="tag"/></el-select></label><label v-if="'description'in results[node.id].text">描述<el-input v-model="results[node.id].text.description" type="textarea" :rows="4" :disabled="Boolean(payload.draftId)" @focus="emit('editing',true)" @blur="emit('editing',false)" @change="copyChanged(node)"/></label></template>
+    <p v-if="results[node.id]?.error" class="error">{{ results[node.id].error }}</p>
+    <div v-if="!payload.draftId&&node.type!=='approval'" class="review-actions"><el-button v-if="(results[node.id]?.url||results[node.id]?.text)&&!results[node.id]?.approved" :disabled="busy" @click="act('approve',node)">检查通过</el-button><el-button v-if="results[node.id]&&!['running','submitting'].includes(results[node.id].status)" :disabled="busy" text @click="act('retry',node)">{{ results[node.id]?.status==='unknown'?'核对并恢复原任务':'重生成本节点' }}</el-button></div>
+  </article></div>
+</template>
+<style scoped>
+.assembled-images{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0}.assembled-images .el-image{width:100px;height:134px}.review-head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}.review-head h3,.review-head h4{margin:0}.review-head p{color:var(--el-text-color-secondary)}.variant-tabs{margin:18px 0}.review-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.review-grid article{padding:16px;border:1px solid var(--el-border-color-lighter);border-radius:8px;min-width:0;background:var(--el-bg-color)}.review-grid .el-image{width:100%;height:280px;background:var(--el-fill-color-lighter)}.placeholder{height:180px;display:grid;place-items:center;background:var(--el-fill-color-light);color:var(--el-text-color-secondary)}label{display:block;margin:12px 0}label .el-input,label .el-select{margin-top:6px;width:100%}.review-actions{display:flex;flex-wrap:wrap;margin-top:12px;gap:8px}.error{color:var(--el-color-danger)}
+</style>

@@ -1,18 +1,22 @@
+import {procurementQueueOrderIds} from '../src/services/order-procurement-queues.js';
 import mysql from "mysql2/promise";
 import { readFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
+import { inventoryLocation } from "../src/shared/inventory-fulfillment.js";
+import { shanghaiDateKey } from "../src/shanghai-time.js";
+import { loadFbpReservations } from "../src/services/fbp-warehouse.js";
 import { calculateOrderProcurementCoverage } from "../src/services/order-procurement-coverage.js";
 import { transportStatusesSql } from "../src/services/order-query-facts.js";
 import { resolveInventoryTenantScope } from "../src/services/inventory-tenant-scope.js";
-import { oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql } from "../src/services/ogl-dispatch-state.js";
+import { oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, oglPhysicalDispatchSql } from "../src/services/ogl-dispatch-state.js";
 
 // Deliberately does not import server.js/mysql-cutover.js or initialize schema.
 // Only exact SELECT/EXPLAIN queries pass the execution boundary; no credentials,
 // business rows, names, addresses or raw payloads are emitted in this report.
 const args = process.argv.slice(2), value = name => args.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
-if (args.some(arg => arg !== "--explain" && !/^(?:--database|--mysql-admin-socket|--tenant-id|--date-from|--date-to|--compare-coverage-source|--compare-algorithm-source)=.+$/.test(arg))) throw Error("Unknown read-only profile argument");
+if (args.some(arg => arg !== "--explain" && !/^(?:--database|--mysql-admin-socket|--tenant-id|--date-from|--date-to|--compare-coverage-source|--compare-algorithm-source|--coverage-source)=.+$/.test(arg))) throw Error("Unknown read-only profile argument");
 if (new Set(args.map(arg => arg.split("=")[0])).size !== args.length) throw Error("Duplicate read-only profile argument");
 const database = value("--database"), socketPath = value("--mysql-admin-socket"), tenantId = value("--tenant-id");
 if (!database || !/^[A-Za-z0-9_]+$/.test(database) || !socketPath || !tenantId) throw Error("Explicit database, administrative socket and tenant ID required");
@@ -21,7 +25,7 @@ const report = { mode: "read-only", initialization_performed: false, connection_
 const plans = [];
 let snapshot, serial = Promise.resolve(), variant = "baseline";
 const digest = sql => createHash("sha256").update(sql).digest("hex");
-const label = sql => sql.startsWith("SELECT o.id AS order_id") ? "procurement_demands"
+const label = sql => /^SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql) ? "procurement_demands"
   : sql.includes("AS all_count") ? "status_counts" : sql.includes("FROM inventory_movements") ? "inventory_movements"
     : sql.includes("FROM inbound_records") ? "inbound_records" : sql.includes("FROM procurement_order_allocations") ? "procurement_allocations"
       : sql.includes("FROM procurement_requests") ? "procurement_requests" : sql.includes("FROM products WHERE") ? "owned_products" : "other_scoped_read";
@@ -44,7 +48,7 @@ async function executeRead(sql, params, fixedConnection) {
     const started = performance.now(), [rows] = await connection.query(sql, params);
     report.measurements.push({ variant, stage: label(sql), sql_sha256: digest(sql), sql_bytes: Buffer.byteLength(sql), rows: rows.length,
       pool_wait_ms: +(started - waited).toFixed(2), query_ms: +(performance.now() - started).toFixed(2) });
-    if (args.includes("--explain") && (sql.startsWith("SELECT o.id AS order_id") || sql.includes("AS all_count"))) plans.push({ sql, params, variant });
+    if (args.includes("--explain") && (/^SELECT (?:STRAIGHT_JOIN )?o\.id AS order_id/.test(sql) || sql.includes("AS all_count"))) plans.push({ sql, params, variant });
     return rows;
   } finally { if (!fixedConnection) connection.release(); }
 }
@@ -59,8 +63,9 @@ function coverageHash(coverage) {
   return digest(JSON.stringify({ orders: stable(coverage), properties: stable({ ...coverage }) }));
 }
 function algorithmReader(source) {
+  source = source.replace(/^import \{inventoryLocation\} from '\.\.\/shared\/inventory-fulfillment\.js';\r?\n/m, "");
   if (/^import\s/m.test(source)) throw Error("Pure allocation profile source must not import runtime services");
-  const context = vm.createContext({ Date });
+  const context = vm.createContext({ Date, inventoryLocation });
   vm.runInContext(source.replace(/^export /gm, ""), context);
   if (typeof context.calculateOrderProcurementCoverage !== "function") throw Error("Pure allocation function missing from profile source");
   return context.calculateOrderProcurementCoverage;
@@ -74,12 +79,11 @@ function coverageReader(source, algorithm = calculateOrderProcurementCoverage) {
     try { return algorithm(input); }
     finally { algorithmMs += performance.now() - before; }
   };
-  const context = vm.createContext({ calculateOrderProcurementCoverage: calculate, transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
-    __profileCoveragePhase: profileMark,
-    loadFbpReservations: () => { throw Error("Unexpected global FBP access refused by read-only profiler"); } });
+  const context = vm.createContext({ procurementQueueOrderIds, calculateOrderProcurementCoverage: calculate, calculateOrderProcurementCoverageAsync:async input=>calculate(input), transportStatusesSql, oglPhysicalDispatchSql, resolveInventoryTenantScope,
+    __profileCoveragePhase: profileMark, shanghaiDateKey, loadFbpReservations });
   const code = source.replace(/^import[^\n]*\r?\n/gm, "").replace(/^export /gm, "")
     .replace("const liveItems =", "__profileCoveragePhase('inputs'); const liveItems =")
-    .replace("const value = calculateOrderProcurementCoverage(", "__profileCoveragePhase('prepared'); const value = calculateOrderProcurementCoverage(");
+    .replace(/const value = (?:await calculateOrderProcurementCoverageAsync|calculateOrderProcurementCoverage)\(/, match => "__profileCoveragePhase('prepared'); " + match);
   vm.runInContext(code, context);
   const original = context.loadOrderProcurementCoverage;
   context.loadOrderProcurementCoverage = async (...args) => {
@@ -119,17 +123,17 @@ try {
   const scope = await resolveInventoryTenantScope(tenantId, query);
   const ownerScope = { id: scope.id, defaultTenant: scope.isDefault };
   const source = await readFile(new URL("../src/services/mysql-cutover.js", import.meta.url), "utf8");
-  const coverageSource = await readFile(new URL("../src/services/mysql-order-procurement-coverage.js", import.meta.url), "utf8");
+  const coverageSource = await readFile(value("--coverage-source") || new URL("../src/services/mysql-order-procurement-coverage.js", import.meta.url), "utf8");
   const algorithmSource = value("--compare-algorithm-source") ? await readFile(new URL("../src/services/order-procurement-coverage.js", import.meta.url), "utf8") : null;
   const coverageContext = coverageReader(coverageSource, algorithmSource ? algorithmReader(algorithmSource) : calculateOrderProcurementCoverage);
-  const names = ["orderTenantPredicateMysql", "orderStatusSqlMysql", "orderPagedOglEvidenceJoinMysql", "orderPagedSqlCountsMysql"];
+  const names = ["orderTenantPredicateMysql", "orderStatusSqlMysql", "orderPagedOglEvidenceJoinMysql", "orderPagedUnboundEvidenceJoinMysql", "orderPagedSqlCountsMysql"];
   const definitions = names.map(name => {
     const match = source.match(new RegExp(`^(?:export )?(?:async )?function ${name}\\([^]*?^}`, "m"));
     if (!match) throw Error("Checked-in order count function is missing");
     return match[0].replace(/^export /, "");
   });
-  const context = vm.createContext({ Number, String, Object, Array, Math, procurementQueueSql: coverageContext.procurementQueueSql,
-    oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, mysqlQueryOne: async (sql, params) => (await query(sql, params))[0] });
+  const context = vm.createContext({ createHash, cachedOrderRead:(_key,loader)=>loader(), orderReadIdentity:()=>0, Number, String, Object, Array, Math, procurementQueueSql: coverageContext.procurementQueueSql,
+    oglBoundStatusSql, oglDispatchedStatusSql, oglOnlineStatusSql, oglTerminalStatusSql, mysqlQueryOne: async (sql, params) => (await query(sql, params))[0] });
   vm.runInContext(definitions.join("\n"), context);
   const started = performance.now();
   const coverage = await coverageContext.loadOrderProcurementCoverage(query, "", { tenantId: scope.id, fresh: true });
@@ -160,4 +164,7 @@ try {
     report.explains.push({ variant: plannedVariant, sql_sha256: digest(sql), tables: planTables(JSON.parse(row.EXPLAIN)) });
   }
   console.log(JSON.stringify(report, null, 2));
+} catch (error) {
+  console.log(JSON.stringify({ ...report, error: { code: error.code || error.name, message: "Read-only profile did not complete" } }));
+  process.exitCode = 1;
 } finally { if (snapshot) { await snapshot.rollback(); snapshot.release(); } await pool.end(); }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertProfitFormulaSupported } from "./profit-formulas/registry.js";
+import { assertProfitFormulaSupported, usesDailyProfitFx } from "./profit-formulas/registry.js";
 
 const volatileKeys = new Set(["updated_at", "last_synced_at", "synced_at", "synced_at_ms", "fetched_at", "collected_at", "refreshed_at", "recorded_at"]);
 const privateKey = /(?:password|secret|token|cookie|authorization|buyer|customer|recipient|address|phone|email)/i;
@@ -54,7 +54,7 @@ async function lockState(connection, input, create = true) {
   // Duplicate-key INSERT IGNORE takes a shared record lock. Concurrent writers
   // then deadlock while both upgrade it in SELECT FOR UPDATE. A no-op upsert
   // obtains the exclusive lock immediately and preserves every existing field.
-  if (create && input.initialFormulaVersion === "V2") {
+  if (create && input.initialFormulaVersion && input.initialFormulaVersion !== "V1") {
     assertProfitFormulaSupported(input.initialFormulaVersion);
     await connection.execute(`INSERT INTO order_profit_calc_state
       (tenant_key, order_item_id, order_id, formula_version, legacy_baseline) VALUES (?, ?, ?, ?, ?)
@@ -186,13 +186,13 @@ export async function readOrderProfitCalculationVersions(deps, { tenantId, order
     const decode = row => row ? ({ ...row, legacy_baseline: Boolean(row.legacy_baseline),
       rate_version: parse(row.rate_version_json), cost_version: parse(row.cost_version_json),
       inputs: parse(row.inputs_json, {}), outputs: parse(row.outputs_json, {}) }) : null;
-    const [firstEstimate] = state.formula_version === "V2" ? rows(await deps.query(`SELECT * FROM order_profit_calc_revisions
-      WHERE tenant_key = ? AND order_item_id = ? AND layer = 'estimate' AND formula_version = 'V2'
+    const [firstEstimate] = usesDailyProfitFx(state.formula_version) ? rows(await deps.query(`SELECT * FROM order_profit_calc_revisions
+      WHERE tenant_key = ? AND order_item_id = ? AND layer = 'estimate' AND formula_version IN ('V2', 'V4')
         AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(inputs_json, '$.estimate.fxPending')), 'false') <> 'true'
       ORDER BY revision_no LIMIT 1`, [tenantKey, state.order_item_id])) : [];
     items.push({ ...state, legacy_baseline: Boolean(state.legacy_baseline), history_count: Number(state.revision_count || 0),
       truncated: Number(state.revision_count || 0) > history.length,
-      ...(state.formula_version === "V2" ? { first_estimate_revision: decode(firstEstimate) } : {}),
+      ...(usesDailyProfitFx(state.formula_version) ? { first_estimate_revision: decode(firstEstimate) } : {}),
       revisions: history.map(decode) });
   }
   return { available: items.length > 0, items };

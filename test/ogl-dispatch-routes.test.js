@@ -6,7 +6,7 @@ const session = { personId: 7, tenant: { id: 12 } };
 
 test("OGL routes forward authenticated session independently from payload or query tenant", async () => {
   const calls = [];
-  const dispatch = Object.fromEntries(["bootstrap", "saveSettings", "preview", "createBatch", "listBatches", "detail", "listOfficial", "officialDetail", "officialTracking", "discover", "action"].map((method) => [method, async (...args) => { calls.push({ method, args }); return { ok: true }; }]));
+  const dispatch = Object.fromEntries(["candidates", "bootstrap", "saveSettings", "preview", "createBatch", "listBatches", "detail", "listOfficial", "officialDetail", "officialTracking", "discover", "action"].map((method) => [method, async (...args) => { calls.push({ method, args }); return { ok: true }; }]));
   const payload = { order_ids: [2, 3], tenant_id: 999 };
   const routes = createOglDispatchRoutes({ dispatch, readJson: async () => payload });
   const url = new URL("http://localhost/api/ogl-dispatch/batch?id=8&tenant_id=999");

@@ -610,6 +610,7 @@ test("auth-only prepare stays auth-only through plugin claim and rejects browser
   const context = {
     latestContextHeadersByTab: new Map(),
     latestAnalyticsTableByTab: new Map([[7, { ok: true, company_id: "111111", updated_at: Date.now() }]]),
+    activeBrowserProofByTab: new Map(),
     prepareStartedAt: Date.now() - 1000,
     AUTH_CONTEXT_TIMEOUT_MS: 45000,
     currentSellerCompanyId: () => "111111",

@@ -8,11 +8,11 @@ export const navigationMenus = [
     key: "finance",
     label: "财务中心",
     icon: Coin,
-    adminOnly: true,
     children: [
-      { key: "finance-center", label: "财务总览", route: "/finance-center" },
+      { key: "finance-center", label: "经营总览", route: "/finance-center" },
       { key: "profit-monthly-billing", label: "月度账单", route: "/profit/monthly-billing" },
-      { key: "finance-payroll", label: "员工工资", route: "/finance/payroll" },
+      { key: "finance-payroll", label: "工资管理", route: "/finance/payroll" },
+      { key: "finance-reimbursements", label: "报销中心", route: "/finance/reimbursements" },
     ]
   },
   {
@@ -20,6 +20,7 @@ export const navigationMenus = [
     label: "数据分析",
     icon: DataAnalysis,
     children: [
+      { key: "sku-traffic-monitor", label: "SKU流量监控", route: "/sku-traffic-monitor" },
       { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
       { key: "order-car-heatmap", label: "车型机会", route: "/order-car-heatmap" },
       { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" }
@@ -50,6 +51,7 @@ export const navigationMenus = [
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
       { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
+      { key: "product-workflows", label: "产品模板工作流", route: "/product-workflows" },
       { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" },
       { key: "ai-materials", label: "AI素材", route: "/ai-materials" },
       { key: "ai-prompts", label: "AI提示词库", route: "/ai-prompts" }
@@ -60,7 +62,7 @@ export const navigationMenus = [
     label: "订单",
     icon: Document,
     children: [
-      { key: "orders", label: "订单列表", route: "/orders" },
+      { key: "orders", label: "订单处理", route: "/orders" },
       { key: "order-tracking", label: "单量追踪", route: "/order-tracking" },
       { key: "outbound", label: "出库记录", route: "/outbound" },
       { key: "customer-messages", label: "客户消息", route: "/customer-messages", icon: ChatDotRound }
@@ -71,14 +73,11 @@ export const navigationMenus = [
     label: "库存",
     icon: Goods,
     children: [
+      { key: "inventory-capital", label: "库存占用", route: "/finance/inventory-capital", adminOnly: true },
       { key: "inventory-products", label: "商品库存", route: "/inventory/products" },
-      { key: "purchase-list", label: "待入库清单", route: "/purchase-list" },
-      { key: "inventory-fbp", label: "FBP库存", route: "/inventory/fbp" },
-      { key: "inventory-alerts", label: "库存预警", route: "/inventory/alerts" },
-      { key: "inventory-fbp-opportunities", label: "备货建议", route: "/inventory/fbp-opportunities" },
-      { key: "inventory-fbp-replenishment", label: "FBP备货单", route: "/inventory/fbp-replenishment" },
-      { key: "inventory-mappings", label: "SKU绑定", route: "/inventory/mappings" },
-      { key: "inventory-hidden", label: "已删除商品", route: "/inventory/hidden" }
+      { key: "purchase-list", label: "收货入库", route: "/purchase-list" },
+      { key: "inventory-fbp", label: "FBP", route: "/inventory/fbp" },
+      { key: "inventory-mappings", label: "库存管理", route: "/inventory/mappings" }
     ]
   },
   {
@@ -87,10 +86,9 @@ export const navigationMenus = [
     icon: ShoppingCart,
     children: [
       { key: "procurement-workspace", label: "采购工作台", route: "/procurement/workspace" },
-      { key: "purchase-history", label: "入库记录", route: "/purchase-history" },
-      { key: "purchase-cost-center", label: "成本预警", route: "/purchase-cost-center" },
-      { key: "procurement-reconciliation", label: "采购对账", route: "/procurement/reconciliation" },
-      { key: "procurement-platform-orders", label: "平台订单", route: "/procurement/platform-orders" },
+      { key: "procurement-workspace-legacy", label: "登记采购", route: "/procurement/workspace", badge: "旧" },
+      { key: "purchase-cost-center", label: "成本管理", route: "/purchase-cost-center" },
+      { key: "procurement-reconciliation", label: "采购核对", route: "/procurement/platform-orders" },
       { key: "inventory-suppliers", label: "供应商", route: "/inventory/suppliers" }
     ]
   },

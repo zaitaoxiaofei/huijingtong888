@@ -25,6 +25,8 @@ function popupHarness() {
   });
   const elements = Object.fromEntries(ids.map((id) => [id, createElement()]));
   const pending = [];
+  const timers = new Map();
+  let timerId = 0;
   let interval = null;
   let downloadedBlob = null;
   const document = {
@@ -36,20 +38,28 @@ function popupHarness() {
   const chrome = {
     runtime: {
       lastError: null,
-      sendMessage(message, callback) { pending.push({ message, callback }); }
+      sendMessage(message, callback) { pending.push({ message, callback, timerId }); }
     }
   };
   vm.runInNewContext(popupSource, {
     document, chrome, Blob, Date, Intl,
     URL: { createObjectURL(blob) { downloadedBlob = blob; return 'blob:test'; }, revokeObjectURL() {} },
     setInterval(callback) { interval = callback; },
-    setTimeout() {}
+    setTimeout(callback, delay) { timers.set(++timerId, { callback, delay }); return timerId; },
+    clearTimeout(id) { timers.delete(id); }
   });
   return {
     elements, document, pending,
     refresh() { interval(); },
     click(id) { return elements[id].listeners.click(); },
     input(id, value) { elements[id].value = value; elements[id].listeners.input(); },
+    async expire(type) {
+      const item = pending.find((entry) => entry.message.type === type);
+      assert.ok(item && timers.has(item.timerId));
+      assert.equal(timers.get(item.timerId).delay, 5000);
+      timers.get(item.timerId).callback();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
     async reply(type, payload, options = {}) {
       const index = pending.findIndex((item) => item.message.type === type);
       assert.ok(index >= 0, `pending message ${type}`);
@@ -106,6 +116,36 @@ test('missing status response preserves typed configuration and reports failure'
   await popup.reply('PIVOT_ERP_PANEL_GET_STATUS', undefined, { error: { message: '后台暂不可用' } });
   assert.equal(popup.elements.localPluginToken.value, 'typing-token');
   assert.equal(popup.elements.statusText.textContent, '后台暂不可用');
+});
+
+test('save timeout restores the button and ignores a late result after further edits', async () => {
+  const popup = popupHarness();
+  await popup.reply('PIVOT_ERP_PANEL_GET_STATUS', status());
+  popup.input('localPluginToken', 'first-edit');
+  popup.click('saveBtn');
+  assert.equal(popup.elements.saveBtn.disabled, true);
+  await popup.expire('PIVOT_ERP_PANEL_SAVE_CONFIG');
+  assert.equal(popup.elements.saveBtn.disabled, false);
+  assert.match(popup.elements.saveFeedback.textContent, /响应超时/);
+  popup.input('localPluginToken', 'second-edit');
+  await popup.reply('PIVOT_ERP_PANEL_SAVE_CONFIG', status('first-edit'));
+  assert.equal(popup.elements.localPluginToken.value, 'second-edit');
+  assert.equal(popup.elements.saveFeedback.textContent, '有未保存的修改');
+  popup.click('saveBtn');
+  await popup.reply('PIVOT_ERP_PANEL_SAVE_CONFIG', status('second-edit'));
+  assert.equal(popup.elements.saveFeedback.textContent, '已保存');
+});
+
+test('storage failure and status timeout preserve edits and leave save available', async () => {
+  const popup = popupHarness();
+  popup.input('localPluginToken', 'new-token');
+  await popup.expire('PIVOT_ERP_PANEL_GET_STATUS');
+  assert.match(popup.elements.statusText.textContent, /响应超时/);
+  popup.click('saveBtn');
+  await popup.reply('PIVOT_ERP_PANEL_SAVE_CONFIG', { error: 'storage write failed' });
+  assert.equal(popup.elements.saveBtn.disabled, false);
+  assert.equal(popup.elements.localPluginToken.value, 'new-token');
+  assert.match(popup.elements.saveFeedback.textContent, /storage write failed/);
 });
 
 test('diagnostic export includes bounded log data without config or token', async () => {

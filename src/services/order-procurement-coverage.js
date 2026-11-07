@@ -1,3 +1,4 @@
+import {inventoryLocation} from '../shared/inventory-fulfillment.js';
 const positive = (value) => Math.max(0, Number(value) || 0);
 const rounded = (value) => Math.round(value * 10000) / 10000;
 
@@ -18,6 +19,7 @@ export function planPartialReceipt(record, quantity, expectedQuantity, allowOver
 // This is an operational projection. It never repairs the inventory ledger or
 // creates purchases from a shipping status. All quantities use physical product units.
 export function calculateOrderProcurementCoverage({ demands = [], stocks = [], allocations = [], inbounds = [], requests = [], marks = [], sources = [], stockSources = [], includeTrace = false }) {
+  demands = demands.map(row => ({...row,stock_location:inventoryLocation(row.stock_location)}));
   // All caches live for this calculation only. They do not alter the source
   // rows, FIFO ordering, batch identity or freshness of another request.
   const receivedTimes = new WeakMap(), boughtTimes = new WeakMap(), transportTimes = new WeakMap();
@@ -262,6 +264,7 @@ export function calculateOrderProcurementCoverage({ demands = [], stocks = [], a
     for (const key of ['shortage_quantity', 'stock_quantity', 'incoming_quantity', 'missing_record_quantity', 'missing_purchase_quantity', 'missing_receipt_quantity']) order[key] = rounded(order[key] + detail[key]);
     for (const key of ['missing_amount', 'quantity_needs_review', 'inventory_needs_review']) order[key] ||= detail[key];
     order.items.push({ order_item_id: Number(detail.order_item_id), product_id: Number(detail.product_id), product_name: detail.product_name || '',
+      root_product_id: Number(detail.root_product_id || detail.product_id),root_product_name: detail.root_product_name || detail.product_name || '',root_inventory_number:detail.root_inventory_number||null,root_quantity:Number(detail.root_quantity||detail.quantity),
       ...(includeTrace ? { coverage_trace: traces.get(detail) || [] } : {}),
       receipt_claims: detail.receipt_claims, quantity_needs_review: detail.quantity_needs_review, unit: detail.stock_unit || '件', quantity: detail.quantity, stock_quantity: detail.stock_quantity, incoming_quantity: detail.incoming_quantity,
       product_total_incoming_quantity: pendingIncomingByProduct.get(Number(detail.product_id)) || 0,

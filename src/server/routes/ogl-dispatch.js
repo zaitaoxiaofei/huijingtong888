@@ -1,5 +1,6 @@
 export function createOglDispatchRoutes({ dispatch, readJson }) {
   return {
+    "GET /api/ogl-dispatch/candidates": (req, url) => dispatch.candidates(req._session, Object.fromEntries(url.searchParams)),
     "GET /api/ogl-dispatch/bootstrap": (req) => dispatch.bootstrap(req._session),
     "PUT /api/ogl-dispatch/settings": async (req) => dispatch.saveSettings(req._session, await readJson(req)),
     "POST /api/ogl-dispatch/preview": async (req) => dispatch.preview(req._session, await readJson(req)),

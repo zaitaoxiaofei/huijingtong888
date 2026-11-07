@@ -62,6 +62,8 @@ test("real publish SQL keeps A/B/default records and external calls in the persi
       personId: value => Number(value?.personId || 0),
       firstOfferId: value => value.items?.[0]?.offer_id || "",
       normalizeShopTextVariantPolicy: () => ({}),
+      shouldReusePreparedShopWatermarkMedia: () => false,
+      prepareSafeShopOfferIds: async payload => structuredClone(payload),
       normalizeRetryPublishPayload: value => value,
       normalizePublishRecordRow: value => value,
       assertNoEmbeddedMediaForPersistence() {},

@@ -525,10 +525,19 @@
 
   async function fetchOzonEntrypoint(path, origin = global.location?.origin) {
     const requestUrl = `${origin}/api/entrypoint-api.bx/page/json/v2?url=${encodeURIComponent(path)}`;
-    const response = await fetch(requestUrl, { credentials: 'include' });
-    if (!response.ok) throw new Error(`Ozon entrypoint failed ${response.status}`);
-    const data = await response.json();
-    return { requestUrl, data };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(requestUrl, { credentials: 'include', signal: controller.signal });
+      if (!response.ok) throw new Error(`Ozon entrypoint failed ${response.status}`);
+      const data = await response.json();
+      return { requestUrl, data };
+    } catch (error) {
+      if (error?.name === 'AbortError') throw new Error('Ozon entrypoint request timed out (15000ms)');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function parseVariantsFromAspects(aspectsState) {
@@ -1531,6 +1540,9 @@
     let variantApiType = 'variant_v2';
     let resolvedVariantId = '';
 
+    // Independent requests overlap; consume errors below without an unhandled rejection.
+    const baseInfoTask = requestSellerBridgeData(normalizedSku, 'search-sku-base')
+      .then(value => ({ value }), error => ({ error }));
     try {
       const salesResponse = await requestSellerBridgeData(normalizedSku, 'sales');
       if (Array.isArray(salesResponse?.items) && salesResponse.items.length > 0) {
@@ -1550,26 +1562,15 @@
 
     if (!baseInfo) {
       try {
-        baseInfo = await requestSellerBridgeData(normalizedSku, 'search-sku-base');
+        const baseResult = await baseInfoTask;
+        if (baseResult.error) throw baseResult.error;
+        baseInfo = baseResult.value;
         const categoryIds = fields.category_ids;
         Object.assign(fields, buildSellerBaseInfoFields(baseInfo));
         if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
         if (!resolvedVariantId) {
           resolvedVariantId = String(baseInfo?.variants?.[0]?.variant_id || '').trim();
         }
-      } catch (error) {
-        if (options.throwOnVariantError) throw error;
-        warnings.push(error?.message || String(error));
-      }
-    }
-
-    if (!resolvedVariantId && !baseInfo) {
-      try {
-        baseInfo = await requestSellerBridgeData(normalizedSku, 'search-sku-base');
-        const categoryIds = fields.category_ids;
-        Object.assign(fields, buildSellerBaseInfoFields(baseInfo));
-        if (Array.isArray(categoryIds) && categoryIds.length > 0) fields.category_ids = categoryIds;
-        resolvedVariantId = String(baseInfo?.variants?.[0]?.variant_id || '').trim();
       } catch (error) {
         if (options.throwOnVariantError) throw error;
         warnings.push(error?.message || String(error));

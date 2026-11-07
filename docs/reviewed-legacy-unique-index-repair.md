@@ -62,6 +62,8 @@ The 2026-10-23 full-data rehearsal exposed one MySQL rendering difference after 
 
 ## Combined reviewed parent correction and strict reconstruction
 
+For a repair limited to historical order parent links and the history natural key, use the separate [history-only maintenance workflow](reviewed-history-only-repair.md). Its four-table staging scope installs only `order_status_history`; the combined coordinator below retains its fixed fifteen-table scope.
+
 `scripts/repair-reviewed-combined-shadow.mjs` is the separate administrator coordinator for the explicitly reviewed combination of history-parent corrections, online identity/inventory decisions, reviewed outbound item corrections or the one unchanged preservation case, and the three strict natural keys. Its libraries never import application credentials or execute a standalone writing CLI. The ordinary unique-repair rollback command explicitly refuses a `mode: combined-shadow` journal; use the matching combined coordinator.
 
 The fixed scope is fifteen tables. Only `online_products`, `order_status_history` and `ozon_category_mappings` receive complete original-table archives and strict shadow replacement. The seven documented reference tables receive native before/after images of **only changed primary rows**, followed by one reference DML transaction; the outbound item correction is in that same transaction. `tenants`, `shops`, `products`, `orders` and `order_items` remain read-only parent evidence. All fifteen are copied into an independent repair-owned staging database so the original ownership, exact candidate and typed-reference guards can run before any source installation. This staging copy does not install or archive the parent tables.
