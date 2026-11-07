@@ -1,6 +1,8 @@
 <script setup>
 import MobileDialog from './MobileDialog.vue';
 import ProductImagePreview from '../ProductImagePreview.vue';
+import InventoryProductEditAction from '../inventory/InventoryProductEditAction.vue';
+import InventoryProductHistoryAction from '../inventory/InventoryProductHistoryAction.vue';
 import {computed,onBeforeUnmount,reactive,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -8,8 +10,9 @@ import {useAuthStore} from '../../stores/auth.js';
 import {shanghaiDateTimeText} from '../../utils/shanghai-date.js';
 import {inventoryWorkflow} from '../../../../src/shared/inventory-workflow.js';
 import {inventoryAdjustmentReasons,validateInventoryAdjustment} from '../../../../src/inventory-adjustment-reasons.js';
-const props=defineProps({modelValue:Boolean,readOnly:Boolean,contextNote:String,product:{type:Object,default:()=>({})}}),emit=defineEmits(['update:modelValue','saved']);
+const props=defineProps({modelValue:Boolean,readOnly:Boolean,contextNote:String,product:{type:Object,default:()=>({})}}),emit=defineEmits(['update:modelValue','saved','metadata-saved']);
 const auth=useAuthStore();
+const editedProduct=ref(null),detailProduct=computed(()=>({...props.product,...editedProduct.value}));
 const lastStocktake=computed(()=>[...(data.value?.actions||[])].sort((a,b)=>Number(b.id)-Number(a.id))[0]);
 const visible=computed({get:()=>props.modelValue,set:v=>emit('update:modelValue',v)}),data=ref(null),submission=ref(null),error=ref(''),busy=ref(false),loading=ref(false),form=reactive({counted_quantity:null,reason_code:'',reason_note:''});let generation=0,disposed=false;
 const availableBefore=computed(()=>data.value?inventoryWorkflow(data.value,{applications:[]}).free:null);
@@ -18,6 +21,12 @@ const impact=computed(()=>data.value&&validQuantity.value?{physical_before:data.
 const reasonError=computed(()=>{if(!impact.value||!form.reason_code)return '';try{validateInventoryAdjustment(form.reason_code,form.reason_note,impact.value.stocktake_delta);return '';}catch(e){return e.message;}});
 const canSave=computed(()=>!!data.value&&validQuantity.value&&!!form.reason_code&&!reasonError.value&&!loading.value);
 async function load(){const token=++generation,scope=currentApiCacheScope();loading.value=true;busy.value=false;data.value=null;submission.value=null;error.value='';Object.assign(form,{counted_quantity:null,reason_code:'',reason_note:''});try{const result=await apiClient.get(`/api/inventory/ledger?product_id=${props.product.id}&include_flow=local`,{noCache:true});if(!disposed&&token===generation&&scope===currentApiCacheScope())data.value=result;}catch(e){if(token===generation&&scope===currentApiCacheScope())error.value=e.message;}finally{if(token===generation)loading.value=false;}}
+async function metadataSaved(value){
+ if(!props.readOnly||!props.modelValue||Number(value?.product?.id)!==Number(props.product.id))return;
+ const id=Number(props.product.id),scope=currentApiCacheScope();editedProduct.value=value.product;
+ const pending=load(),token=generation;await pending;
+ if(!disposed&&token===generation&&props.modelValue&&id===Number(props.product.id)&&scope===currentApiCacheScope())emit('metadata-saved',value);
+}
 async function save(){
  if(busy.value||props.readOnly||!data.value)return;
  if(!submission.value){
@@ -41,13 +50,14 @@ async function save(){
   }
  }finally{if(token===generation)busy.value=false;}
 }
-function clear(){++generation;data.value=null;submission.value=null;visible.value=false;}
-watch(()=>[props.modelValue,props.product.id],()=>{if(props.modelValue)load();else ++generation;},{immediate:true});window.addEventListener('erp:auth-scope-changed',clear);onBeforeUnmount(()=>{disposed=true;clear();window.removeEventListener('erp:auth-scope-changed',clear);});
+function clear(){++generation;data.value=null;submission.value=null;editedProduct.value=null;visible.value=false;}
+watch([()=>props.modelValue,()=>props.product.id],()=>{editedProduct.value=null;if(props.modelValue)load();else ++generation;},{immediate:true});window.addEventListener('erp:auth-scope-changed',clear);onBeforeUnmount(()=>{disposed=true;clear();window.removeEventListener('erp:auth-scope-changed',clear);});
 </script>
 <template>
  <MobileDialog v-model="visible" class="mobile-stocktake-dialog" :mode="readOnly?'sheet':'compact'" :title="readOnly?'库存明细':'更新本地库存'" :close-on-press-escape="!busy" :show-close="!busy">
   <div class="mobile-form" v-loading="loading">
-   <div class="mobile-record-head"><ProductImagePreview :src="`/api/products/${product.id}/image?thumb=1`" :preview-list="[`/api/products/${product.id}/image`]" size="portrait"/><div><h3>{{product.name}}</h3><small class="mobile-muted">库存 {{product.inventory_number||product.code||product.id}}</small><el-tag size="small">{{Number(product.component_count)>0?'套装':Number(product.is_accessory)?'配件':'单品'}}</el-tag></div></div>
+   <div class="mobile-record-head"><ProductImagePreview :src="`/api/products/${product.id}/image?thumb=1`" :preview-list="[`/api/products/${product.id}/image`]" size="portrait"/><div><h3>{{detailProduct.name}}</h3><small class="mobile-muted">库存 {{detailProduct.inventory_number||detailProduct.code||product.id}}</small><el-tag size="small">{{Number(detailProduct.component_count)>0?'套装':Number(detailProduct.is_accessory)?'配件':'单品'}}</el-tag></div></div>
+   <div v-if="readOnly&&Number(product.id)>0" class="mobile-record-actions"><InventoryProductEditAction :product-id="Number(product.id)" mobile @saved="metadataSaved"/><InventoryProductHistoryAction :product-id="Number(product.id)" mobile/></div>
    <el-alert v-if="error" :title="error" type="warning" :closable="false"/>
    <template v-if="data">
     <small v-if="contextNote&&!readOnly" class="mobile-muted">{{contextNote}}</small>
