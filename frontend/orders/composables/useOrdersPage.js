@@ -229,6 +229,8 @@ export function useOrdersPage() {
   const orderSyncCancelReason = ref("");
   const ordersListAbort = ref(null);
   const ordersInventoryAbort = ref(null);
+  let pageInventoryController = null;
+  let pageInventoryRequestKey = '';
   const ordersMetaAbort = ref(null);
   const ordersMetaRequestKey = ref("");
   const logisticsOptionsAbort = ref(null);
@@ -461,6 +463,9 @@ export function useOrdersPage() {
     }
     ordersListCache.clear();
     ordersMetaCache.clear();
+    if (vm.rows.length && !vm.rows.some(row => row.inventory_refresh_pending)) {
+      void loadPageInventory(vm.rows, ordersLoadToken.value, '');
+    }
   };
   window.addEventListener("erp:auth-scope-changed", ensureOrdersViewScope);
   window.addEventListener("storage", handleAuthStorageChange);
@@ -564,9 +569,14 @@ export function useOrdersPage() {
     const scope = ensureOrdersViewScope();
     const orderIds = [...new Set(rows.map((row) => Number(row.id)).filter((id) => Number.isSafeInteger(id) && id > 0))];
     if (!orderIds.length) return;
+    const requestKey = `${scope}:${requestToken}:${orderIds.join(',')}:${forceRefresh ? 'refresh' : 'cached'}`;
+    if (pageInventoryRequestKey === requestKey && ordersInventoryAbort.value === pageInventoryController
+      && pageInventoryController && !pageInventoryController.signal.aborted) return;
     const controller = new AbortController();
     ordersInventoryAbort.value?.abort();
     ordersInventoryAbort.value = controller;
+    pageInventoryController = controller;
+    pageInventoryRequestKey = requestKey;
     try {
       const params = new URLSearchParams({ orderIds: orderIds.join(",") });
       if (forceRefresh) params.set("refresh", "1");
@@ -580,11 +590,26 @@ export function useOrdersPage() {
       vm.rows = vm.rows.map(mergeFacts);
       const cached = ordersListCache.get(cacheKey);
       if (cached) cached.result = { ...cached.result, rows: (cached.result.rows || []).map(mergeFacts) };
+      if (orderIds.some(id => !Array.isArray(facts.get(id)))) {
+        throw new Error('部分订单的库存数量暂不可用，请重试库存刷新');
+      }
+      if (inventoryRefreshFailed.value && !vm.rows.some(row => row.inventory_refresh_pending)) {
+        inventoryRefreshFailed.value = false;
+        inventoryRefreshNotice.value = '';
+      }
     } catch (error) {
-      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || error?.name === "AbortError") return;
+      if (controller.signal.aborted || scope !== currentOrdersCacheScope() || ordersLoadToken.value !== requestToken || error?.name === "AbortError") return;
+      if (!vm.rows.some(row => row.inventory_refresh_pending)) {
+        inventoryRefreshFailed.value = true;
+        inventoryRefreshNotice.value = '库存数量暂不可用，未取得的数量仍待核对，请重试库存刷新。';
+      }
       console.warn("load order inventory availability failed", error);
     } finally {
       if (ordersInventoryAbort.value === controller) ordersInventoryAbort.value = null;
+      if (pageInventoryController === controller) {
+        pageInventoryController = null;
+        pageInventoryRequestKey = '';
+      }
     }
   }
 
@@ -608,7 +633,7 @@ export function useOrdersPage() {
       const params = buildOrdersParams(filtersSnapshot, {
         includeCounts: "0",
         includeLogisticsOptions: "0",
-        includeInventoryAvailability: options.forceRefresh ? "0" : "1"
+        includeInventoryAvailability: "0"
       });
       const requestUrl = `/api/orders?${params.toString()}`;
       const cacheKey = `${scope}:${requestUrl}`;
@@ -631,6 +656,7 @@ export function useOrdersPage() {
           meta: { total: Number(cachedResult.total || 0), counts: vm.meta.counts }
         });
         if (showLoading) loading.value = false;
+        void loadPageInventory(vm.rows, requestToken, cacheKey);
       }
       const shopsPromise = loadShopDictionary().catch((error) => {
         console.warn("fetch shops for orders failed", error);

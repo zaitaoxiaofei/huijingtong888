@@ -30642,7 +30642,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
       ${tenantScope ? `AND ${orderTenantPredicateMysql("s", tenantScope)}` : ""}
     GROUP BY o.id
-  `, [...cleanIds, ...billingScope.params, ...cleanIds]));
+  `, [...cleanIds, ...billingScope.params, ...cleanIds], { interactive: true }));
   // Keep large raw payloads out of GROUP BY temporary rows. Fetch exactly the
   // same owned source payload after numeric aggregation, before enrichment.
   if (summaryOnly && rows.length) {
