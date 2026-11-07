@@ -1,5 +1,5 @@
 import mysql from "mysql2/promise";
-import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads, withMysqlBackgroundReadAdmission } from "./mysql-workload.js";
+import { currentMysqlWorkload, withMysqlTransactionPriority, mysqlWorkloadLimits, waitForMysqlInteractiveReads, withMysqlBackgroundReadAdmission, withMysqlInteractiveRead } from "./mysql-workload.js";
 import { config } from "./config.js";
 
 const mysqlPools = new Map();
@@ -167,8 +167,12 @@ async function ensureMysqlSessionUtc(connection) {
   initializedMysqlSessions.add(session);
 }
 
-export async function mysqlQuery(sql, params = []) {
-  return withMysqlBackgroundReadAdmission(() => runMysqlQuery(sql, params));
+export async function mysqlQuery(sql, params = [], { interactive = false } = {}) {
+  const read = () => withMysqlBackgroundReadAdmission(() => runMysqlQuery(sql, params));
+  // Protect only the foreground statement, never a caller's separate balance
+  // promise: that promise may itself need the paused background connection.
+  return interactive && currentMysqlWorkload() === 'foreground'
+    ? withMysqlInteractiveRead(read) : read();
 }
 
 async function runMysqlQuery(sql, params) {
