@@ -103,7 +103,7 @@ export function vehicleCatalogTenantPredicate(tenantKey, alias = "") {
 async function catalogSession(session, write = false) {
   const authorized = await authorizeBusinessTaskSession(session);
   const permissions = write ? ["inventory.write", "operations"] : ["inventory.read", "operations", "team"];
-  if (!permissions.some(permission => hasPermission(authorized, permission))) throw statusError("当前企业岗位无权访问或维护车型目录，请联系企业管理员", 403);
+  if (!permissions.some(permission => hasPermission(authorized, permission))) throw statusError("当前企业岗位无权访问或维护品牌型号目录，请联系企业管理员", 403);
   return authorized;
 }
 
@@ -167,12 +167,12 @@ export async function addAiVehicleCatalogEntry(body = {}, session = {}) {
   const model = cleanName(body.model || body.modelName);
   const tags = unique((Array.isArray(body.tags) ? body.tags : []).map(String).filter((tag) => TAGS.some((item) => item.key === tag)));
   const vehicleReferenceImageUrl = cleanReferenceImageUrl(body.vehicleReferenceImageUrl || body.vehicle_reference_image_url);
-  if (!brand) throw statusError("汽车品牌不能为空", 400);
-  if (brand.length > 128) throw statusError("汽车品牌（brand）最多 128 个字符，请缩短后再保存。", 400);
-  if (!isLatinVehicleBrand(brand)) throw statusError("汽车品牌必须使用俄罗斯市场可识别的英文名称，不能填写中文或俄文字母", 400);
+  if (!brand) throw statusError("品牌不能为空", 400);
+  if (brand.length > 128) throw statusError("品牌（brand）最多 128 个字符，请缩短后再保存。", 400);
+  if (!isLatinVehicleBrand(brand)) throw statusError("品牌必须使用英文名称，不能填写中文或俄文字母", 400);
   const [existing] = await mysqlQuery(`SELECT * FROM ai_vehicle_catalog WHERE brand_key = ? AND model_key = ? AND ${scope.sql}
     ORDER BY source = 'builtin', id LIMIT 1`, [keyOf(brand), model ? keyOf(model) : "__brand__", ...scope.params]);
-  if (existing && !existing.enabled) throw statusError("该品牌或车型（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
+  if (existing && !existing.enabled) throw statusError("该品牌或型号（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
   const builtin = existing?.source === "builtin" ? existing : {};
   const result = await mysqlExecute(`
     INSERT INTO ai_vehicle_catalog
@@ -185,7 +185,7 @@ export async function addAiVehicleCatalogEntry(body = {}, session = {}) {
   `, [keyOf(brand), brand, model ? keyOf(model) : "__brand__", model, JSON.stringify(tags.length ? tags : parseTags(builtin.tags_json)), vehicleReferenceImageUrl || builtin.vehicle_reference_image_url || "", tenantKey,
     JSON.stringify(parseJsonArray(builtin.aliases_json)), builtin.supply_anchor || "", JSON.stringify(parseJsonArray(builtin.search_keywords_json)), JSON.stringify(parseJsonArray(builtin.recommended_products_json)), builtin.ozon_competition || "", builtin.user_priority || "", personId(session)]);
   const [saved] = await mysqlQuery("SELECT id,brand_name,model_name,tags_json,vehicle_reference_image_url,enabled FROM ai_vehicle_catalog WHERE id=? AND tenant_id=? AND source <> 'builtin'", [Number(result.insertId), tenantKey]);
-  if (!saved?.enabled) throw statusError("该品牌或车型（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
+  if (!saved?.enabled) throw statusError("该品牌或型号（brand/model）已停用，请联系目录管理员核对后恢复，不能通过重复新增覆盖原记录。", 409);
   return { ok: true, id: Number(saved.id), brand: saved.brand_name, model: saved.model_name, tags: parseTags(saved.tags_json), vehicleReferenceImageUrl: saved.vehicle_reference_image_url || "" };
 }
 
