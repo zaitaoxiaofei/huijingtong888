@@ -52,3 +52,35 @@ test('complete posting searches select targeted official synchronization without
  const calls=[];const routes=createSyncRoutes({readJson:async()=>({posting_numbers:['37471023-0116-3']}),services:{syncDemoOrders:()=>assert.fail('must not enumerate a date range'),syncOzonPostingsByNumber:(body,options)=>{calls.push([body,options]);return{fetched:1};}},tasks:{start:async(session,kind,run)=>run({session,signal:undefined,onProgress(){}})}});
  const result=await routes['POST /api/sync/ozon']({_session:{personId:2,tenant:{id:2,slug:'a'}}});assert.equal(result.fetched,1);assert.equal(calls[0][1].tenantId,'2');
 });
+
+test('running snapshots without queued never become a zero-count success', async () => {
+  const { waitForOrderSyncTask } = await import('../frontend/orders/utils/order-sync-result.js');
+  const progress = [];
+  const snapshots = [
+    { task_id: 'same', running: true, result: null, progress: { phase: 'saving', message: '正在写入 506 单', fetched: 506 } },
+    { task_id: 'same', running: false, result: { fetched: 506, updated: 500, shops: [{ inserted: 6 }] } }
+  ];
+  let reads = 0;
+  const task = await waitForOrderSyncTask({ task_id: 'same', queued: true, running: true }, {
+    wait: async () => {}, fetchStatus: async () => snapshots[reads++], onProgress: text => progress.push(text)
+  });
+  assert.equal(reads, 2);
+  assert.equal(task.result.fetched, 506);
+  assert.match(progress[1], /已拉取 506 单/);
+  assert.match(progress[1], /任务仍在执行/);
+});
+
+test('lost tasks, missing final results and failed tasks never report success', async () => {
+  const { waitForOrderSyncTask } = await import('../frontend/orders/utils/order-sync-result.js');
+  for (const final of [
+    { task_id: '', running: false, result: null },
+    { task_id: 'same', running: false, result: null },
+    { task_id: 'same', running: false, result: null, error: 'Ozon 请求失败' }
+  ]) {
+    await assert.rejects(waitForOrderSyncTask({ task_id: 'same', running: true }, {
+      wait: async () => {}, fetchStatus: async () => final, onProgress: () => {}
+    }));
+  }
+  const zero = { task_id: 'same', running: false, result: { fetched: 0, shops: [] } };
+  assert.equal((await waitForOrderSyncTask(zero, { onProgress() {} })).result.fetched, 0);
+});
