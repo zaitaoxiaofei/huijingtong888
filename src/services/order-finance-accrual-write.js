@@ -88,10 +88,9 @@ export async function writeOrderFinanceAccrual({ transaction, shop, operation, f
       throw fail("ORDER_FINANCE_SHOP_SCOPE_INVALID", "店铺不存在、已停用或企业归属已改变，停止财务写入");
     }
     await assertAuthorized({ connection, shop: lockedShop });
-    const [legacyDay] = rowsOf(await connection.query(`SELECT id FROM ozon_finance_items
-      WHERE shop_id=? AND operation_date>=? AND operation_date<DATE_ADD(?, INTERVAL 1 DAY)
-        AND LEFT(operation_id,15)<>'accrual_by_day:' LIMIT 1 FOR UPDATE`,
-    [shopId, `${pinned.business_date} 00:00:00`, `${pinned.business_date} 00:00:00`]));
+    const [legacyDay] = rowsOf(await connection.query(`SELECT id FROM ozon_finance_items FORCE INDEX (idx_finance_shop_legacy_day)
+      WHERE shop_id=? AND legacy_operation_date=? LIMIT 1 FOR UPDATE`,
+    [shopId, pinned.business_date]));
     if (legacyDay) throw fail("ORDER_FINANCE_ACCRUAL_LEGACY_DAY_CONFLICT", "该店铺同一财务日期已有旧接口记录，请先核对跨接口重复，未导入新计提或删除旧记录");
     const storedFx = await getOrderProfitDailyFxById(connection, pinned.id);
     if (!storedFx || ["id", "business_date", "source_date", "currency_from", "currency_to", "source"].some(key => String(storedFx[key]) !== String(pinned[key]))

@@ -9,6 +9,9 @@ const cases = [
   ["migrate-order-search-indexes.mjs",
     { ok: true, mode: "dry-run", before: { exists: true, present: true, valid: true } },
     { ok: true, mode: "dry-run", before: { exists: true, present: false, valid: false } }],
+  ["migrate-operational-query-indexes.mjs",
+    { ok: true, mode: "dry-run", changes_database: false, ready: true, finance_column: { exists: true, present: true, valid: true }, indexes: [1,2].map(() => ({ exists: true, present: true, valid: true })) },
+    { ok: true, mode: "dry-run", changes_database: false, ready: false, finance_column: { exists: true, present: false, valid: false }, indexes: [1,2].map(() => ({ exists: true, present: false, valid: false })) }],
   ["migrate-listing-draft-list-indexes.mjs",
     { mode: "dry-run", changes_database: false, missing_indexes: [] },
     { mode: "dry-run", changes_database: false, missing_indexes: ["idx_listing_drafts_tenant_created"] }],
@@ -55,7 +58,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 16);
+  assert.equal(SCHEMA_MIGRATIONS.length, 17);
 });
 
 for (const [filename, ready, pending] of cases) {

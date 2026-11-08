@@ -48,6 +48,8 @@ ${functionSource("wait_for_release")}
 ${functionSource("rollback")}
 ${functionSource("assert_release_interruption_policy")}
 ${functionSource("start_candidate")}
+${functionSource("assert_install_resources")}
+${functionSource("install_release_dependencies")}
 ${script}
 `], { cwd: directory, env: { ...process.env, BASH_ENV: "" } });
     const trace = async () => (await fs.readFile(path.join(directory, "trace"), "utf8").catch(error => error.code === "ENOENT" ? "" : Promise.reject(error))).trim().split(/\r?\n/).filter(Boolean);
@@ -66,6 +68,37 @@ start_candidate
 [[ "$candidate_ready" == 1 && "$SECONDS" -ge 60 ]]
 `);
     assert.deepEqual(await trace(), ["stop-existing-candidate", "candidate-start"]);
+  });
+});
+
+test("resource pressure refuses installation without stopping the primary or its failover", { skip }, async () => {
+  await fixture(async ({ run, trace }) => {
+    for (const resources of ["700000 4194304 100", "2000000 4194304 100"]) {
+      await assert.rejects(run(`
+releases_root="$PWD"
+awk() { if [[ "$*" == *meminfo* ]]; then printf '${resources}\\n'; else printf '9000000\\n'; fi; }
+df() { :; }
+trap rollback ERR
+assert_install_resources
+trace should-not-install
+`), error => /Release refused before installation/.test(error.stderr) && /Primary was not changed/.test(error.stderr));
+    }
+    assert.deepEqual(await trace(), []);
+  });
+});
+
+test("dependency installer uses a bounded transient unit and propagates failure", { skip }, async () => {
+  await fixture(async ({ run, trace }) => {
+    await assert.rejects(run(`
+staging_dir="$PWD/staging"
+release_block_device() { printf /dev/fixture; }
+systemd-run() { trace "$*"; return 137; }
+trap rollback ERR
+install_release_dependencies
+`), error => /Primary was not changed/.test(error.stderr));
+    const steps = await trace();assert.equal(steps.length, 1);
+    for (const flag of ["--wait", "--collect", "MemoryMax=512M", "MemorySwapMax=0", "CPUQuota=50%", "IOWeight=10", "IOReadBandwidthMax=/dev/fixture 8M", "IOWriteBandwidthMax=/dev/fixture 4M", "IOWriteIOPSMax=/dev/fixture 256", "RuntimeMaxSec=600", "KillMode=control-group", "--no-audit", "--maxsockets=2"]) assert.ok(steps[0].includes(flag), flag);
+    assert.ok(source.indexOf("\nassert_install_resources\n") < source.indexOf('unzip -q "$archive_path"'));
   });
 });
 
