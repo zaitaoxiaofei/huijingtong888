@@ -62,7 +62,7 @@ import { archiveOzonProducts, fetchOzonCategoryAttributes, fetchOzonChatHistory,
 import { buildOrderOutcomeSql, classifyOrderAccounting, classifyOrderOutcome, estimateOutcomeReturnLoss, resolveOrderLossProfile, resolveReturnLossCostPolicy } from "./order-outcome.js";
 import { cancellationDisplay } from "./order-cancellation-display.js";
 import { matchesCancellationRule } from "./order-cancellation-review.js";
-import { isMysqlPrimaryEnabled, mysqlExecute, mysqlExecuteReadCommitted, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { isMysqlPrimaryEnabled, mysqlExecute, mysqlExecuteReadCommitted, mysqlQuery, withMysqlTransaction, withMysqlReadSnapshot } from "../mysql-pool.js";
 import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
 import { loadWarehouseFacts, appendPrintRecord } from "./fbp-warehouse.js";
 import { buildOrderProfitDetailSnapshotPayload } from "./order-profit-detail-snapshots.js";
@@ -30300,8 +30300,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       WHERE fallback_mapping.shop_id = o.shop_id AND fallback_mapping.ozon_sku = oi.ozon_sku
         AND fallback_mapping.active = 1 AND ${orderTenantPredicateMysql("fallback_mapping", tenantScope)})
   )`;
-  const rows = await measure("core_sql", () => mysqlQuery(`
-    WITH scoped_order_items AS (
+  const itemScopeSql = `
       SELECT DISTINCT oi.id AS order_item_id, oi.order_id, oi.ozon_sku, o.shop_id, sm.id AS mapping_id, scoped_product.id AS product_id
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
@@ -30309,24 +30308,38 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       LEFT JOIN products scoped_product ON scoped_product.id = sm.product_id AND ${orderTenantPredicateMysql("scoped_product", tenantScope)}
       WHERE oi.order_id IN (${cleanIds.map(() => "?").join(",")})
         ${tenantScope ? `AND o.shop_id IN (SELECT tenant_shop.id FROM shops tenant_shop WHERE ${orderTenantPredicateMysql("tenant_shop", tenantScope)})` : ""}
-    ),
-    scoped_product_ids AS (
+  `;
+  // Resolve mappings once for ordinary bounded pages. Reconstruct SKU/shop from
+  // their original columns in the same snapshot, preserving their collations.
+  const reuseItemScope = summaryOnly && coveragePromise === null && cleanIds.length <= 100;
+  const preparedItemScopeSql = `
+      SELECT DISTINCT scope_seed.order_item_id, oi.order_id, oi.ozon_sku, o.shop_id,
+        scope_seed.mapping_id, scope_seed.product_id
+      FROM JSON_TABLE(?, '$[*]' COLUMNS (
+        order_item_id BIGINT UNSIGNED PATH '$.order_item_id',
+        mapping_id BIGINT UNSIGNED PATH '$.mapping_id',
+        product_id BIGINT UNSIGNED PATH '$.product_id'
+      )) scope_seed
+      JOIN order_items oi ON oi.id = scope_seed.order_item_id
+      JOIN orders o ON o.id = oi.order_id
+  `;
+  const productScopeSql = `
       SELECT DISTINCT product_id FROM scoped_order_items WHERE product_id IS NOT NULL
-    ),
-    scoped_recipe_ids AS (
+  `;
+  const recipeScopeSql = `
       SELECT DISTINCT recipe.id
       FROM sku_inventory_recipes recipe
       JOIN scoped_order_items scoped_item
         ON scoped_item.shop_id = recipe.shop_id AND scoped_item.ozon_sku = recipe.ozon_sku
       WHERE recipe.active = 1
-    ),
-    scoped_recipe_product_ids AS (
+  `;
+  const recipeProductScopeSql = `
       SELECT DISTINCT ri.product_id
       FROM scoped_recipe_ids scoped_recipe
       JOIN sku_inventory_recipe_items ri ON ri.recipe_id = scoped_recipe.id
       ${tenantScope ? `JOIN products recipe_product ON recipe_product.id = ri.product_id AND ${orderTenantPredicateMysql("recipe_product", tenantScope)}` : ""}
-    ),
-    scoped_component_product_ids AS (
+  `;
+  const componentScopeSql = `
       SELECT DISTINCT pc.component_product_id AS product_id
       FROM product_components pc
       JOIN scoped_product_ids scoped_product ON scoped_product.product_id = pc.product_id
@@ -30334,7 +30347,39 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       WHERE ${orderTenantPredicateMysql("pc", tenantScope)}` : ""}
       UNION
       SELECT product_id FROM scoped_recipe_product_ids
-    ),
+  `;
+  const loadCoreRows = async query => {
+    let itemJson, componentJson;
+    if (reuseItemScope) {
+      const scopeRows = await query(`
+        SELECT CAST(scope_seed.order_item_id AS CHAR) AS order_item_id,
+          CAST(scope_seed.mapping_id AS CHAR) AS mapping_id,
+          CAST(scope_seed.product_id AS CHAR) AS product_id
+        FROM (${itemScopeSql}) scope_seed
+      `, cleanIds);
+      itemJson = JSON.stringify(scopeRows);
+      // The component scope owns both BOM and recipe product checks. Resolve
+      // them once too, rather than reopening trigger-heavy products per use.
+      const components = await query(`
+        WITH
+        scoped_order_items AS (${preparedItemScopeSql}),
+        scoped_product_ids AS (${productScopeSql}),
+        scoped_recipe_ids AS (${recipeScopeSql}),
+        scoped_recipe_product_ids AS (${recipeProductScopeSql}),
+        scoped_component_product_ids AS (${componentScopeSql})
+        SELECT CAST(product_id AS CHAR) AS product_id FROM scoped_component_product_ids
+      `, [itemJson]);
+      componentJson = JSON.stringify(components.map(row => row.product_id));
+    }
+    return query(`
+    WITH scoped_order_items AS (${reuseItemScope ? preparedItemScopeSql : itemScopeSql}),
+    scoped_product_ids AS (${productScopeSql}),
+    scoped_recipe_ids AS (${recipeScopeSql}),
+    ${reuseItemScope ? '' : `scoped_recipe_product_ids AS (${recipeProductScopeSql}),`}
+    scoped_component_product_ids AS (${reuseItemScope ? `
+      SELECT DISTINCT scope_component.product_id
+      FROM JSON_TABLE(?, '$[*]' COLUMNS (product_id BIGINT UNSIGNED PATH '$')) scope_component
+    ` : componentScopeSql}),
     scoped_procurement_request_ids AS (
       SELECT DISTINCT allocation.procurement_request_id
       FROM procurement_order_allocations allocation
@@ -30484,8 +30529,9 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     ) stock ON stock.shop_id = o.shop_id AND stock.ozon_sku = oi.ozon_sku
     LEFT JOIN (
       SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
-      FROM inventory_movements
-      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = inventory_movements.product_id
+      ${reuseItemScope ? `FROM scoped_product_ids scoped_product
+      STRAIGHT_JOIN inventory_movements ON scoped_product.product_id = inventory_movements.product_id` : `FROM inventory_movements
+      JOIN scoped_product_ids scoped_product ON scoped_product.product_id = inventory_movements.product_id`}
       WHERE status = 'posted'
         ${tenantScope ? `AND ${orderTenantPredicateMysql("inventory_movements", tenantScope)}` : ""}
         AND COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'
@@ -30502,8 +30548,9 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = ri.product_id
       LEFT JOIN (
         SELECT movement.product_id, SUM(movement.quantity_delta) AS local_stock
-        FROM inventory_movements movement
-        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = movement.product_id
+        ${reuseItemScope ? `FROM scoped_component_product_ids scoped_component
+        STRAIGHT_JOIN inventory_movements movement ON scoped_component.product_id = movement.product_id` : `FROM inventory_movements movement
+        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = movement.product_id`}
         WHERE movement.status = 'posted'
           ${tenantScope ? `AND ${orderTenantPredicateMysql("movement", tenantScope)}` : ""}
           AND ${localStockLocationPredicateMysql("movement")}
@@ -30532,8 +30579,9 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       JOIN products component_product ON component_product.id = pc.component_product_id AND component_product.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("component_product", tenantScope)} AND ${orderTenantPredicateMysql("pc", tenantScope)}` : ""}
       LEFT JOIN (
         SELECT inventory_movements.product_id, SUM(inventory_movements.quantity_delta) AS local_stock
-        FROM inventory_movements
-        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = inventory_movements.product_id
+        ${reuseItemScope ? `FROM scoped_component_product_ids scoped_component
+        STRAIGHT_JOIN inventory_movements ON scoped_component.product_id = inventory_movements.product_id` : `FROM inventory_movements
+        JOIN scoped_component_product_ids scoped_component ON scoped_component.product_id = inventory_movements.product_id`}
         WHERE status = 'posted'
           ${tenantScope ? `AND ${orderTenantPredicateMysql("inventory_movements", tenantScope)}` : ""}
           AND ${localStockLocationPredicateMysql()}
@@ -30642,7 +30690,11 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     WHERE o.id IN (${cleanIds.map(() => "?").join(",")})
       ${tenantScope ? `AND ${orderTenantPredicateMysql("s", tenantScope)}` : ""}
     GROUP BY o.id
-  `, [...cleanIds, ...billingScope.params, ...cleanIds], { interactive: true }));
+  `, [...(reuseItemScope ? [itemJson, componentJson] : cleanIds), ...billingScope.params, ...cleanIds]);
+  };
+  const rows = await measure("core_sql", () => reuseItemScope
+    ? withMysqlReadSnapshot(loadCoreRows, { interactive: true })
+    : loadCoreRows((sql, params) => mysqlQuery(sql, params, { interactive: true })));
   // Keep large raw payloads out of GROUP BY temporary rows. Fetch exactly the
   // same owned source payload after numeric aggregation, before enrichment.
   if (summaryOnly && rows.length) {

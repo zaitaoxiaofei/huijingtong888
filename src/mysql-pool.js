@@ -123,12 +123,13 @@ async function getMysqlConnection() {
   }
 }
 
-function releaseMysqlConnection(connection) {
+function releaseMysqlConnection(connection, { discard = false } = {}) {
   const lane = connectionWorkloads.get(connection);
   if (lane) mysqlPoolMetrics[lane + 'Active'] = Math.max(0, mysqlPoolMetrics[lane + 'Active'] - 1);
   connectionWorkloads.delete(connection);
   mysqlPoolMetrics.activeConnections = Math.max(0, mysqlPoolMetrics.activeConnections - 1);
-  connection.release();
+  if (discard) connection.destroy();
+  else connection.release();
 }
 
 export function getMysqlPoolMetrics() {
@@ -184,6 +185,41 @@ async function runMysqlQuery(sql, params) {
     return rows;
   } finally {
     releaseMysqlConnection(connection);
+  }
+}
+
+// A bounded multi-statement reader keeps exactly one snapshot and connection.
+// Callers must finish their SQL before awaiting independent background results.
+export async function withMysqlReadSnapshot(operation, { interactive = false } = {}) {
+  const read = () => withMysqlBackgroundReadAdmission(() => runMysqlReadSnapshot(operation));
+  return interactive && currentMysqlWorkload() === 'foreground'
+    ? withMysqlInteractiveRead(read) : read();
+}
+
+async function runMysqlReadSnapshot(operation) {
+  const connection = await getMysqlConnection();
+  let started = false, finalizing = false, discard = false;
+  try {
+    await ensureMysqlSessionUtc(connection);
+    await waitForMysqlInteractiveReads();
+    await connection.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+    started = true;
+    const value = await operation(async (sql, params = []) => (await connection.query(sql, params))[0]);
+    finalizing = true;
+    await connection.rollback();
+    return value;
+  } catch (error) {
+    // Do not return a session with pending transaction characteristics or a
+    // failed cleanup to the pool. Preserve the original statement exception.
+    discard = !started || finalizing;
+    if (started && !finalizing) {
+      try { await connection.rollback(); }
+      catch { discard = true; }
+    }
+    throw error;
+  } finally {
+    releaseMysqlConnection(connection, { discard });
   }
 }
 

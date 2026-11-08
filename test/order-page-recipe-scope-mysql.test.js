@@ -67,7 +67,9 @@ test('order recipe aggregation stays inside current-page recipes with complete S
    await query(`INSERT INTO sku_inventory_recipes(id,shop_id,ozon_sku,active,mode) VALUES ${entries.map(()=>"(?,?,?,1,'combo')").join(',')}`,entries.flat());
    await query(`INSERT INTO sku_inventory_recipe_items(recipe_id,product_id,quantity) VALUES ${entries.flatMap(()=>['(?,22,1)','(?,23,2)']).join(',')}`,entries.flatMap(row=>[row[0],row[0]]));
   }
-  await connection.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
+  // The candidate owns its two-read snapshot. The fixture is immutable during
+  // these comparisons; pin the clock without nesting another transaction.
+  await connection.query('SET timestamp=?',[Math.floor(Date.now()/1000)]);
   const ids=fixtures.map(row=>row[0]);
   await t.test('whole detail and summary payload hashes match for A, B and legacy NULL enterprises',async()=>{
    for(const tenant of ['2','3','admin'])for(const summaryOnly of [false,true]){
@@ -75,7 +77,7 @@ test('order recipe aggregation stays inside current-page recipes with complete S
     const oldRows=await before.service.orderRowsByIdsMysql(ids,null,tenant,{summaryOnly,bypassCache:true});
     const newRows=await after.service.orderRowsByIdsMysql(ids,null,tenant,{summaryOnly,bypassCache:true});
     assert.equal(hash(newRows),hash(oldRows),tenant+' complete row fields');
-    assert.equal(before.calls.length-startOld,after.calls.length-startNew,'no extra SQL round trips');
+    assert.equal(after.calls.length-startNew,before.calls.length-startOld+(summaryOnly?4:0),'bounded summaries add snapshot setup and one scope read');
     assert.deepEqual(Array.from(newRows,row=>Number(row.id)),tenant==='2'?[1,2,3,4,5,6,7,8,9]:tenant==='3'?[30]:[10]);
     if(tenant==='2'){assert.ok(!JSON.stringify(newRows).includes('Secret B'));assert.match(newRows.find(row=>row.id===3).sku_stock_summaries,/RECIPE:0:0:3/);assert.equal(newRows.find(row=>row.id===4).product_ids,'20');assert.equal(newRows.find(row=>row.id===8).product_ids,null);if(!summaryOnly)assert.equal(Number(newRows.find(row=>row.id===3).profit_purchase_cost),11.5);}
     t.diagnostic(JSON.stringify({tenant,summary:summaryOnly,rows:newRows.length,result_sha256:hash(newRows)}));
@@ -121,8 +123,9 @@ test('order recipe aggregation stays inside current-page recipes with complete S
     const prefix=call.sql.slice(0,call.sql.indexOf('\n    SELECT STRAIGHT_JOIN o.*'));
     const relation=call.sql.match(/LEFT JOIN \(\s*(SELECT ri\.recipe_id,[\s\S]*?)\n    \) sku_recipe_stock/)[1];
     const sql=prefix+'\nSELECT COUNT(*) AS group_count FROM ('+relation+') recipe_groups';
-    const started=performance.now(),rows=await query(sql,ids),ms=Math.round((performance.now()-started)*100)/100;
-    const plan=(await query('EXPLAIN FORMAT=JSON '+sql,ids))[0];
+    const params=call.params.slice(0,(prefix.match(/\?/g)||[]).length);
+    const started=performance.now(),rows=await query(sql,params),ms=Math.round((performance.now()-started)*100)/100;
+    const plan=(await query('EXPLAIN FORMAT=JSON '+sql,params))[0];
     return {groups:Number(rows[0].group_count),ms,plan:JSON.parse(plan.EXPLAIN)};
    };
    const oldPlan=await inspect(old),newPlan=await inspect(candidate);
@@ -155,7 +158,7 @@ test('order recipe aggregation stays inside current-page recipes with complete S
    const execute=async context=>{const start=context.calls.length,started=performance.now(),rows=await context.service.orderRowsByIdsMysql(pageIds,null,'2',{summaryOnly:true,bypassCache:true});return{rows,ms:Math.round((performance.now()-started)*100)/100,calls:context.calls.slice(start),core:context.calls.slice(start).find(call=>call.sql.includes('WITH scoped_order_items'))};};
    const baseline=[],candidate=[];
    for(let run=0;run<3;run++){
-    const old=await execute(before),current=await execute(after);assert.equal(hash(current.rows),hash(old.rows));assert.equal(current.rows.length,20);assert.equal(old.calls.length,current.calls.length);
+    const old=await execute(before),current=await execute(after);assert.equal(hash(current.rows),hash(old.rows));assert.equal(current.rows.length,20);assert.equal(current.calls.length,old.calls.length+4);
     baseline.push(old);candidate.push(current);
    }
    const explain=async call=>{
@@ -172,7 +175,7 @@ test('order recipe aggregation stays inside current-page recipes with complete S
    let blocked=null,onRefresh=()=>{};const reads=[];
    const run=async(sql,args=[])=>{reads.push(sql);if(blocked&&sql.includes('AS open_demand_qty')){blocked.started.resolve();await blocked.release.promise;}return(await pool.query(sql,args))[0];};
    const transaction=async action=>{const c=await pool.getConnection();try{await c.query("SET time_zone='+00:00'");await c.beginTransaction();const value=await action(c);await c.commit();return value;}catch(error){await c.rollback();throw error;}finally{c.release();}};
-   const service=loadTenantOrderService(connection,{orderInventoryAvailabilityMysql:(request,tenant)=>loadOrderInventoryAvailability({query:run,loadBalances:(products,owner,legacy,forceRefresh)=>loadInventoryProductBalances(run,transaction,owner,legacy,products,{forceRefresh,onRefreshed:()=>onRefresh()})},request,{tenantId:Number(tenant),defaultTenantId:1})}).service;
+   const service=loadTenantOrderService(connection,{readSnapshotPool:pool,orderInventoryAvailabilityMysql:(request,tenant)=>loadOrderInventoryAvailability({query:run,loadBalances:(products,owner,legacy,forceRefresh)=>loadInventoryProductBalances(run,transaction,owner,legacy,products,{forceRefresh,onRefreshed:()=>onRefresh()})},request,{tenantId:Number(tenant),defaultTenantId:1})}).service;
    const pageIds=[1,2,3],sourceReads=()=>reads.filter(sql=>sql.includes('AS open_demand_qty')).length;
    const measured=async inline=>{const started=performance.now(),rows=await service.orderPageRowsMysql(pageIds,null,'2',inline);return{rows,ms:Math.round((performance.now()-started)*100)/100};};
    const bounded=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Fixture page unexpectedly waited for a held balance refresh')),3000);})]);}finally{clearTimeout(timer);}};

@@ -90,7 +90,7 @@ export async function createOrderFixtureSchema(connection) {
   }
   await initializeOrderQueryFacts(connection);
 }
-export function loadTenantOrderService(connection, { extraMethods = [], ...overrides }={}) {
+export function loadTenantOrderService(connection, { extraMethods = [], readSnapshotPool = null, ...overrides }={}) {
   const analyticsContext=vm.createContext({setTimeout, withMysqlBackgroundReadAdmission: action=>action(),
     getMysqlConnection:async()=>connection,
     ensureMysqlSessionUtc:async()=>{},releaseMysqlConnection:()=>{}});
@@ -100,6 +100,16 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
   const calls=[];
   const query=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.query(sql,params))[0];};
   const execute=async (sql,params=[])=>{calls.push({sql,params:Array.from(params)});return (await connection.execute(sql,params))[0];};
+  const snapshotContext=vm.createContext({
+    getMysqlConnection:async()=>{
+      const c=readSnapshotPool?await readSnapshotPool.getConnection():connection;
+      return {query:async(sql,params=[])=>{calls.push({sql,params:Array.from(params)});return c.query(sql,params);},rollback:()=>c.rollback(),release:()=>c.release(),destroy:()=>c.destroy()};
+    },
+    ensureMysqlSessionUtc:async()=>{},waitForMysqlInteractiveReads:async()=>{},releaseMysqlConnection:(c,{discard}={})=>{if(readSnapshotPool){if(discard)c.destroy();else c.release();}}
+  });
+  const snapshotSource=readFileSync(new URL('../../src/mysql-pool.js',import.meta.url),'utf8')
+    .match(/async function runMysqlReadSnapshot[\s\S]*?\n}/)[0];
+  vm.runInContext(snapshotSource,snapshotContext);
   const methods=[
     'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','orderPageRowsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
@@ -114,6 +124,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], ...overr
     resolveInventoryTenantScope:(tenant,run=query)=>resolveInventoryTenantScope(tenant,run),inventoryTenantSql,inventoryAliasSearch,assertInventoryRecord,assertInventoryReferences,orderTransportEvidenceSql,automaticCancellationReturnSql,mysqlPoolConnectionAdapter:connection,primaryRole,getRoles,
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
     mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,mysqlExecuteReadCommitted:analyticsContext.mysqlExecuteReadCommitted,
+    withMysqlReadSnapshot:operation=>snapshotContext.runMysqlReadSnapshot(operation),
     ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,
     ensureOrderLabelPrintSchemaMysql:noop,ensureSkuInventoryRecipeSchemaMysql:noop,ensureProductCompositionSchemaMysql:noop,ensureProductNamingSchemaMysql:noop,ensureProcurementOrderSourceSchemaMysql:noop,ensureOrderPackageLabelCacheSchemaMysql:noop,
     normalizeSyncDateMysql:value=>String(value||'').slice(0,10),shanghaiDateKeyToUtcDateTimeMysql:(value,days=0)=>value?new Date(new Date(value+'T00:00:00+08:00').getTime()+days*86400000).toISOString().slice(0,19).replace('T',' '):'',
