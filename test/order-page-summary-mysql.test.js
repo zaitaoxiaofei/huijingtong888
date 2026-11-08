@@ -80,7 +80,10 @@ test('order page summary keeps profit, quantities, kit stock and tenant ownershi
   await t.test('query resolves mappings once, removes optional people joins and narrows purchase history',()=>{
    const sql=calls.filter(call=>call.sql.includes('WITH scoped_order_items')).at(-1).sql;
    assert.match(sql,/NULL AS raw_json/);assert.doesNotMatch(sql,/JOIN ozon_orders_raw raw/);
-   assert.doesNotMatch(sql,/sm\.id = oi\.sku_mapping_id OR/);assert.match(sql,/SELECT DISTINCT oi\.id AS order_item_id/);assert.match(sql,/sm\.id = page_item\.mapping_id/);
+   const scope=calls.find(call=>call.sql.includes('CAST(scope_seed.order_item_id AS CHAR)'));
+   assert.ok(scope,'the current page resolves mapping IDs once before aggregation');
+   assert.doesNotMatch(scope.sql,/sm\.id = oi\.sku_mapping_id OR/);assert.match(scope.sql,/SELECT DISTINCT oi\.id AS order_item_id/);
+   assert.match(sql,/JSON_TABLE\(/);assert.match(sql,/sm\.id = page_item\.mapping_id/);
    assert.doesNotMatch(sql,/JOIN people (pe|creator|pr_person|pr_creator|mark_creator|request_person|request_creator) /);assert.match(sql,/AND ir.status = 'pending_arrival'/);
   });
  }finally{if(created)await c.query('DROP DATABASE `'+database+'`');await c.end();}
