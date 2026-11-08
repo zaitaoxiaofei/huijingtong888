@@ -97,7 +97,7 @@ trap rollback ERR
 install_release_dependencies
 `), error => /Primary was not changed/.test(error.stderr));
     const steps = await trace();assert.equal(steps.length, 1);
-    for (const flag of ["--wait", "--collect", "MemoryMax=512M", "MemorySwapMax=0", "CPUQuota=50%", "IOWeight=10", "IOReadBandwidthMax=/dev/fixture 8M", "IOWriteBandwidthMax=/dev/fixture 4M", "IOWriteIOPSMax=/dev/fixture 256", "RuntimeMaxSec=600", "KillMode=control-group", "--no-audit", "--maxsockets=2"]) assert.ok(steps[0].includes(flag), flag);
+    for (const flag of ["--wait", "--collect", "MemoryMax=384M", "MemorySwapMax=0", "NODE_OPTIONS=--max-old-space-size=192", "CPUQuota=50%", "IOWeight=10", "IOReadBandwidthMax=/dev/fixture 8M", "IOWriteBandwidthMax=/dev/fixture 4M", "IOWriteIOPSMax=/dev/fixture 256", "RuntimeMaxSec=600", "KillMode=control-group", "--no-audit", "--maxsockets=2"]) assert.ok(steps[0].includes(flag), flag);
     assert.ok(source.indexOf("\nassert_install_resources\n") < source.indexOf('unzip -q "$archive_path"'));
   });
 });
