@@ -59,6 +59,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
         if(!results[node.id]?.approved)review=true;continue;
       }
       if(state?.url||state?.text) {if(definition.reviewMode==='automatic'){state.approved=true;state.approvalMode='automatic';}else if(!state.approved)review=true;continue;}
+      if(node.type==='image'&&node.imageMode==='material'){const ref=node.materialRefs?.[0],url=definition.materialSnapshots?.[ref?.id]?.images?.[ref?.imageIndex||0];if(!url)return {status:'failed',error:`${node.label}没有可用资料图片，请重新选择`};results[node.id]={url,status:'done',approved:definition.reviewMode==='automatic',source:'material'};return {status:'running'};}
       if(!dependenciesReady(definition,variant,node,results)){review=true;continue;}
       if(state?.status==='failed')return {status:'failed',error:`${variant.label} / ${node.label}：${state.error||'生成失败'}`};
       if(state?.taskId) {

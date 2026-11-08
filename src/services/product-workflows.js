@@ -71,7 +71,14 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     catch(error){if(body.creationId&&error.code==='ER_DUP_ENTRY')return get(kind,id,session);throw error;}
     return {id,kind,name,payload,revision:1};
   }
-  return {list,get,save,scope};
+  async function factsHistory(session){
+    const {tenant}=await scope(session);
+    const rows=await query("SELECT id, name, JSON_EXTRACT(payload_json, '$.variants') AS variants_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' ORDER BY updated_at DESC LIMIT 60",[tenant]);
+    const result=[],seen=new Set();
+    for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
+    return result;
+  }
+  return {list,get,save,scope,factsHistory};
 }
 export const productWorkflowStore=createProductWorkflowStore();
 

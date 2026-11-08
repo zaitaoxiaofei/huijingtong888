@@ -1,3 +1,4 @@
+import {validateMaterialRefs, normalizeMaterialBindings} from './workflow-materials.js';
 import { validateWorkflowBindings, applyWorkflowBindings } from './product-workflow-bindings.js';
 import { attributeSelectedValues, readableWorkflowValue } from './product-workflow-inputs.js';
 // Portable workflow format. Node types and dependencies are independent of product category.
@@ -13,16 +14,19 @@ export function validateWorkflow(value) {
   if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 80) throw workflowError("模板需要 1–80 个节点");
   if(typeof value.globalPrompt!=="string")throw workflowError("全局提示词必须为文本");
   if(value.reviewMode&&!['manual','automatic'].includes(value.reviewMode))throw workflowError('请选择人工检查或自动检查模式');
-  for(const refs of [value.sharedMaterialRefs,...value.nodes.map(n=>n.materialRefs)])if(refs!==undefined&&(!Array.isArray(refs)||refs.length>12||refs.some(ref=>!ref||typeof ref.id!=='string'||!Number.isSafeInteger(ref.revision)||ref.revision<1||(ref.kind&&!['material','key_model'].includes(ref.kind)))))throw workflowError('生产资料引用无效，请从资料库重新选择');
+  for(const refs of [value.sharedMaterialRefs,...value.nodes.map(n=>n.materialRefs)])validateMaterialRefs(refs);
   const seen = new Map();
   for (const node of value.nodes) {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(node.id) || ["constructor","prototype","__proto__"].includes(node.id) || seen.has(node.id)) throw workflowError("节点标识无效或重复，请重新添加该节点");
     if (!WORKFLOW_TYPES[node.type] || !String(node.label || "").trim()) throw workflowError("节点类型或名称无效");
     if (!Array.isArray(node.inputs) || node.inputs.some(id => !seen.has(id))) throw workflowError(`${node.label}只能引用排在前面的节点；请调整顺序或输入引用`);
-    if (["image", "copy"].includes(node.type) && !String(node.prompt || "").trim()) throw workflowError(`${node.label}缺少提示词，请在节点设置填写`);
+    if (["image", "copy"].includes(node.type) && node.imageMode!=='material' && !String(node.prompt || "").trim()) throw workflowError(`${node.label}缺少提示词，请在节点设置填写`);
+    if(node.imageMode&&!['generate','material'].includes(node.imageMode))throw workflowError(`${node.label}的图片来源无效`);
+    if(node.type==='image'&&node.imageMode==='material'&&node.materialRefs?.length!==1)throw workflowError(`${node.label}请从资料库选择一张成品图`);
+    if(node.inputFormat&&!['text','number','images'].includes(node.inputFormat))throw workflowError(`${node.label}的输入格式无效`);
     if (node.type === "images" && (!Number.isInteger(node.count) || node.count < 1 || node.count > 8 || !Array.isArray(node.slots) || node.slots.length !== node.count || node.slots.some(x => !String(x).trim()))) throw workflowError(`${node.label}需要为每张参考图填写用途（1–8 张）`);
     if (node.type === "image" && !["1:1", "3:4", "4:5"].includes(node.ratio)) throw workflowError(`${node.label}请选择有效图片比例`);
-    if (node.type === "image" && !node.inputs.some(id => ["images", "image", "approval"].includes(seen.get(id).type))) throw workflowError(`${node.label}需要引用产品图片或已确认图片`);
+    if (node.type === "image" && node.imageMode!=='material' && !node.inputs.some(id => ["images", "image", "approval"].includes(seen.get(id).type))) throw workflowError(`${node.label}需要引用产品图片或已确认图片`);
     if(node.type==='video'&&(node.inputs.length!==1||seen.get(node.inputs[0])?.type!=='image'||seen.get(node.inputs[0])?.role!=='main'))throw workflowError(`${node.label}需要引用本流程生成的主图`);
     if (node.type === "approval" && (!node.inputs.length || node.inputs.some(id => !["image", "approval"].includes(seen.get(id).type)))) throw workflowError(`${node.label}需要引用待确认的图片生成节点`);
     if (node.type === "price" && (!Number.isFinite(Number(node.value)) || Number(node.value) <= 0)) throw workflowError(`${node.label}请填写大于零的卢布售价`);
@@ -77,10 +81,11 @@ export function validateWorkflowVariants(definition, variants) {
   const keys = new Set();
   for (const variant of variants) {
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(variant.id) || ["constructor","prototype","__proto__"].includes(variant.id) || keys.has(variant.id)) throw workflowError("变体标识重复或无效");
-    keys.add(variant.id);
+    keys.add(variant.id);validateMaterialRefs(variant.materialRefs);if(variant.fitments)normalizeMaterialBindings(variant.fitments.map(f=>({brand:f.brand,models:[f.model]})));
     for (const node of definition.nodes) {
       const input=variant.values?.[node.id];
       if (["field","attribute"].includes(node.type) && node.valueSource!=="generated" && node.required && (!String(input ?? "").trim()||Array.isArray(input)&&!input.length)) throw workflowError(`${variant.label}缺少“${node.label}”，请在商品公共资料或变体材料区填写`);
+      if(node.inputFormat==='number'&&input!==''&&input!==undefined&&input!==null&&(!['string','number'].includes(typeof input)||!String(input).trim()||!Number.isFinite(Number(input))))throw workflowError(`${variant.label}的“${node.label}”必须填写数字`);
       if(node.type==='attribute')attributeSelectedValues(node,input);
       if (node.type === "images") {
         if (!Array.isArray(input) || input.length > node.count) throw workflowError(`${variant.label}的“${node.label}”图片数量无效`);
@@ -113,7 +118,7 @@ export function workflowInputContext(definition, variant, node, results) {
     }
   }
   node.inputs.forEach(visit);
-  for(const ref of [...(definition.sharedMaterialRefs||[]),...(node.materialRefs||[])]) {
+  for(const ref of [...(definition.sharedMaterialRefs||[]),...(node.materialRefs||[]),...(variant.materialRefs||[])]) {
     const record=definition.materialSnapshots?.[ref.id];
     if(!record)throw workflowError('生产资料未加载，请重新提交任务');
     facts[`参考资料：${record.name}`]=[record.brand,record.model,record.material,record.category,record.notes].filter(Boolean).join('；');

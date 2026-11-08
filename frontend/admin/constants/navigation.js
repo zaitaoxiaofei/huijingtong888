@@ -51,6 +51,7 @@ export const navigationMenus = [
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
       { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
+      { key: "workflow-materials", label: "企业生产资料库", route: "/workflow-materials" },
       { key: "product-workflows", label: "产品模板工作流", route: "/product-workflows" },
       { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" },
       { key: "ai-materials", label: "AI素材", route: "/ai-materials" },

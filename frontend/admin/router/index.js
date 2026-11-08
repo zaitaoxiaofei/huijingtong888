@@ -32,6 +32,7 @@ const AiVariantLabView = () => import("../views/listing/AiVariantLabView.vue");
 const AiVariantCaseLibraryView = () => import("../views/listing/AiVariantCaseLibraryView.vue");
 const AiProductMaterialOptimizerView = () => import("../views/listing/AiProductMaterialOptimizerView.vue");
 const AiEcommerceSuiteWorkbenchView = () => import("../views/listing/AiEcommerceSuiteWorkbenchView.vue");
+const WorkflowMaterialCenterView = () => import("../views/listing/WorkflowMaterialCenterView.vue");
 const ProductWorkflowView = () => import("../views/listing/ProductWorkflowView.vue");
 const AiMaterialOptimizationRecordsView = () => import("../views/listing/AiMaterialOptimizationRecordsView.vue");
 const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVariantCenter.vue");
@@ -167,6 +168,7 @@ export const router = createRouter({
         { path: "ai-variant-cases", name: "ai-variant-cases", component: AiVariantCaseLibraryView, meta: { title: "裂变案例", breadcrumb: ["AI技能库", "裂变案例"], tabKey: "workbench" } },
         { path: "ai-product-material-optimizer", name: "ai-product-material-optimizer", component: AiProductMaterialOptimizerView, meta: { title: "AI优化", breadcrumb: ["AI技能库", "AI优化"], tabKey: "workbench" } },
         { path: "ai-ecommerce-suite", name: "ai-ecommerce-suite", component: AiEcommerceSuiteWorkbenchView, meta: { title: "AI电商套图", breadcrumb: ["AI技能库", "AI电商套图"], tabKey: "workbench" } },
+        { path: "workflow-materials", name: "workflow-materials", component: WorkflowMaterialCenterView, meta: { title: "企业生产资料库", breadcrumb: ["AI技能库", "企业生产资料库"] } },
         { path: "product-workflows", name: "product-workflows", component: ProductWorkflowView, meta: { title: "产品模板工作流", breadcrumb: ["AI技能库", "产品模板工作流"] } },
         { path: "ai-material-optimization-records", name: "ai-material-optimization-records", component: AiMaterialOptimizationRecordsView, meta: { title: "素材优化记录", breadcrumb: ["AI技能库", "素材优化记录"] } },
         { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "商品上架", breadcrumb: ["商品运营", "商品上架"], tabKey: "workbench" } },
