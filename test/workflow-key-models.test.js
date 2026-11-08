@@ -33,3 +33,12 @@ test('run submission resolves only owned matching key profiles and freezes their
  await store.save('key_model',{id:saved.id,revision:1,payload:{...profile,images:['https://example.test/new.png']}},a);assert.deepEqual(run.variants[0].values.key,profile.images);
  await assert.rejects(prepareProductWorkflowRun(structuredClone(payload),a,services,store),/已更新/);
 });
+
+test('general enterprise materials allow text references and isolate revisions and tenant access',async()=>{
+ const {normalizeWorkflowMaterial}=await import('../src/shared/workflow-key-models.js');
+ assert.throws(()=>normalizeWorkflowMaterial({name:'empty'}),/图片或填写/);
+ assert.throws(()=>normalizeWorkflowMaterial({name:'local',images:['file:///tmp/x.png']}),/HTTPS/);
+ const store=fixture(),a=session(1),b=session(2),payload={name:'黑色礼盒',brand:'JETOUR',model:'Dashing',category:'包装',notes:'已确认礼盒',images:[]};
+ const saved=await store.save('material',{payload},a);assert.equal((await store.list('material',a)).length,1);assert.equal((await store.list('material',b)).length,0);
+ await assert.rejects(store.get('material',saved.id,b),{status:404});await store.save('material',{id:saved.id,revision:1,payload:{...payload,notes:'已更新'}},a);await assert.rejects(store.save('material',{id:saved.id,revision:1,payload},a),{status:409});
+});

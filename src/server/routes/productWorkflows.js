@@ -11,6 +11,8 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
   }
   routes['GET /api/product-workflows/key-models']=req=>req.query?.id?store.get('key_model',String(req.query.id),req._session):store.list('key_model',req._session,req.query||{});
   routes['POST /api/product-workflows/key-models']=async req=>store.save('key_model',await readJson(req),req._session);
+  routes['GET /api/product-workflows/materials']=req=>req.query?.id?store.get('material',String(req.query.id),req._session):store.list('material',req._session,req.query||{});
+  routes['POST /api/product-workflows/materials']=async req=>store.save('material',await readJson(req),req._session);
   routes['GET /api/product-workflows/category']=req=>productWorkflowCategory(req.query?.id,req._session,services);
   routes['GET /api/product-workflows/job-states']=req=>workflowJobStates(req._session);
   routes['POST /api/product-workflows/run-action']=async req=>productWorkflowAction(await readJson(req),req._session);

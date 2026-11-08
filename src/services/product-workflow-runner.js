@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { restoreBusinessTaskSession, authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
-import { productWorkflowStore } from './product-workflows.js';
+import { productWorkflowStore, importProductWorkflowDraft } from './product-workflows.js';
 import { createAiGenerationTasks, aiGenerationTasks, retryAiGenerationTask } from './ai-generation-tasks.js';
 import { advanceProductWorkflow, invalidateWorkflowResults } from './product-workflow-execution.js';
 import { buildWorkflowDraft, workflowInputContext, workflowError } from '../shared/product-workflow.js';
@@ -70,7 +70,16 @@ export async function tickProductWorkflowJobs() {
         createTask:body=>createAiGenerationTasks(body,actor),
         retryTask:id=>retryAiGenerationTask(id,actor)
       });
-      await commit(result);
+      const automaticReady=result.status==='ready'&&document.payload.definition.reviewMode==='automatic';
+      // Keep automatic imports recoverable if the process stops after the checkpoint.
+      await commit(automaticReady?{status:'running'}:result);
+      if(automaticReady) {
+        try {
+          const {mysqlRuntimeServices}=await import('./mysql-runtime-services.js');
+          await importProductWorkflowDraft(job.run_id,actor,mysqlRuntimeServices);
+          await mysqlExecute("UPDATE product_workflow_jobs SET status = 'imported', error_message = NULL WHERE tenant_id = ? AND run_id = ?",[job.tenant_id,job.run_id]);
+        }catch(error){await mysqlExecute("UPDATE product_workflow_jobs SET status = 'failed', error_message = ? WHERE tenant_id = ? AND run_id = ?",[`自动生成草稿失败：${error.message}`,job.tenant_id,job.run_id]);}
+      }
     }catch(error){if(error.code!=='WORKFLOW_LEASE_LOST')await commit({status:'failed',error:error.message}).catch(e=>console.error('product workflow checkpoint',e.message));}
   } finally {working=false;}
 }
@@ -88,7 +97,7 @@ export async function productWorkflowAction(body,session) {
     let next='queued';
     if(body.action!=='start'&&body.action!=='approve-all') {
       const variant=payload.variants.find(v=>v.id===body.variantId);
-      const node=payload.definition.nodes.find(n=>n.id===body.nodeId&&['image','copy','approval'].includes(n.type));
+      const node=payload.definition.nodes.find(n=>n.id===body.nodeId&&['image','copy','video','approval'].includes(n.type));
       if(!variant||!node)throw workflowError('变体或生产节点无效');
       const results=payload.outputs[variant.id] ||= {},state=results[node.id];
       if(body.action==='approve') {
@@ -109,7 +118,7 @@ export async function productWorkflowAction(body,session) {
         else invalidateWorkflowResults(payload,variant.id,node.id);
       }else throw workflowError('不支持此任务操作');
     }else if(body.action==='approve-all') {
-      for(const variant of payload.variants)for(const node of payload.definition.nodes.filter(n=>['image','copy'].includes(n.type))) {
+      for(const variant of payload.variants)for(const node of payload.definition.nodes.filter(n=>['image','copy','video'].includes(n.type))) {
         const state=payload.outputs[variant.id]?.[node.id];
         if(!state?.url&&!state?.text)throw workflowError(`${variant.label}的“${node.label}”尚未生成完成`);
         workflowInputContext(payload.definition,variant,node,payload.outputs[variant.id]);state.approved=true;

@@ -15,3 +15,12 @@ export function matchingKeyModels(records,model) {
 export function applyKeyModel(values,record,count=8) {
   values.key=record.payload.images.slice(0,count);values.__keyModelId=record.id;values.__keyModelRevision=record.revision;
 }
+
+export function normalizeWorkflowMaterial(input={}) {
+  const value=Object.fromEntries(['name','brand','model','material','category','notes'].map(key=>[key,clean(input[key])]));
+  const images=Array.isArray(input.images)?[...new Set(input.images.filter(Boolean))]:[];
+  if(!value.name||value.name.length>200||Object.values(value).some(v=>v.length>4000))throw Object.assign(new Error('请填写资料名称，说明不能超过 4000 字'),{status:400});
+  if(!images.length&&!value.notes)throw Object.assign(new Error('请上传参考图片或填写资料说明'),{status:400});
+  if(images.length>8||images.some(url=>typeof url!=='string'||url.length>3000||!/^https:\/\//i.test(url)))throw Object.assign(new Error('生产资料最多上传 8 张 HTTPS 图片'),{status:400});
+  return {...value,images,role:['product','compatibility','style'].includes(input.role)?input.role:'style',archived:Boolean(input.archived)};
+}

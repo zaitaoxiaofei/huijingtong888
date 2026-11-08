@@ -9,7 +9,7 @@ const fullName=()=>[brand.value,model.value].filter(Boolean).join(' ').trim();
 watch([()=>props.modelValue,()=>props.brands],([value],previous=[])=>{
   if(value===fullName()&&previous[1]===props.brands)return;
   if(!value){model.value='';return;}
-  const match=props.brands.flatMap(b=>(b.models||[]).map(m=>({brand:b.name,...m}))).find(m=>m.fullName===value);
+  const match=props.brands.flatMap(b=>(b.models||[]).map(m=>({brand:b.name,...m}))).find(m=>m.fullName.toLocaleLowerCase()===value.toLocaleLowerCase());
   if(match){brand.value=match.brand;model.value=match.name;manual.value=false;}
   else{brand.value='';model.value=value;manual.value=true;}
 },{immediate:true});

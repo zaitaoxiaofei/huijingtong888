@@ -15,6 +15,14 @@ export async function productWorkflowCategory(id,session,services) {
 }
 export async function prepareProductWorkflowRun(payload,session,services,store=null) {
   const definition=validateWorkflow(payload.definition);
+  delete definition.materialSnapshots;
+  definition.materialSnapshots={};
+  for(const ref of [...(definition.sharedMaterialRefs||[]),...definition.nodes.flatMap(n=>n.materialRefs||[])]) {
+    if(!store)throw workflowError('生产资料库暂不可用，请重试');
+    const record=await store.get(ref.kind||'material',ref.id,session);
+    if(record.payload.archived||record.revision!==ref.revision)throw workflowError(`生产资料“${record.name}”已更新或停用，请重新选择后提交`);
+    definition.materialSnapshots[ref.id]={...record.payload,...(ref.kind==='key_model'?{role:'compatibility',category:record.payload.label}:{})};
+  }
   const listing=definition.nodes.find(n=>n.type==='listing');
   const category=await productWorkflowCategory(listing.templateId,session,services);
   for(const node of definition.nodes.filter(n=>n.type==='attribute')) {
