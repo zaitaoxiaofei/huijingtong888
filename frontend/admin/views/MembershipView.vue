@@ -6,6 +6,7 @@ import { getMembership } from "../api/account";
 import { currentApiCacheScope } from "../utils/api";
 import { membershipDisplay } from "../utils/account-membership";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
+import { canAccessPage } from "../../../src/shared/permissions.js";
 import MembershipActivationForm from "../components/MembershipActivationForm.vue";
 
 const props = defineProps({ embedded: { type: Boolean, default: false } });
@@ -86,6 +87,12 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
         <el-empty v-else :image-size="64" :description="status.kind === 'permanent' ? '当前授权无需兑换时长' : status.kind === 'suspended' ? '会员已暂停，请联系平台管理员' : tenant ? '请联系企业负责人激活或续期会员' : '平台账号无需开通企业会员'" />
       </el-card>
     </div>
+    <el-card shadow="never" class="membership-start">
+      <template #header><strong>首次使用，按这三步开始</strong></template>
+      <ol><li><strong>开通试用或会员</strong><p>向服务人员领取会员激活码，在上方兑换。套餐期限和店铺额度以实际开通结果为准，注册不会自动收费。</p></li>
+        <li><strong>绑定自己的店铺</strong><p>在企业店铺中填写你自己的 Ozon Client ID 和 API Key；不要在聊天中发送密钥。</p><el-button v-if="status.active && canAccessPage(auth.user, '/tenant-shops')" @click="router.push('/tenant-shops')">配置企业店铺</el-button></li>
+        <li><strong>验证第一条业务流程</strong><p>先拉取新订单，再上传产品图试用工作流。首次生成先人工检查，不直接发布商品；AI 额度需单独配置。</p><el-button v-if="status.active && canAccessPage(auth.user, '/orders')" @click="router.push('/orders')">打开订单</el-button><el-button v-if="status.active && canAccessPage(auth.user, '/product-workflows')" @click="router.push('/product-workflows')">打开产品工作流</el-button></li></ol>
+    </el-card>
     <el-card v-if="!props.embedded" shadow="never" class="membership-tools">
       <template #header><strong>基础工具</strong></template>
       <p>无需激活即可使用，先算清成本，再开始运营。</p>
@@ -112,3 +119,5 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
 .membership-tools :deep(.el-button + .el-button) { margin-left: 0; }
 @media (max-width: 720px) { .membership-grid { grid-template-columns: 1fr; } .membership-page { padding: 4px; } }
 </style>
+
+<style scoped>.membership-start ol{margin:0;padding-left:22px;display:grid;gap:18px}.membership-start p{font-size:13px;line-height:1.7;color:var(--erp-text-regular)}</style>

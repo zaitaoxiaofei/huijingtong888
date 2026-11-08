@@ -23,6 +23,23 @@ const inScope = (scope, revision) => !disposed && active && canManageVouchers.va
 const dateText = value => value ? shanghaiDateTimeText(value, { assumeUtcWhenNaive: true }) : "—";
 const labels = { active: "待兑换", used: "已兑换", revoked: "已作废", expired: "已过期" };
 
+const registrationUrl = computed(() => {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.hash = "/login?register=1";
+  return url.href;
+});
+async function copyCustomerGuide(includeCode = false) {
+  if (!canManageVouchers.value || (includeCode && !issuedCode.value)) return;
+  const text = [`爆单 ERP 开通入口：${registrationUrl.value}`,
+    "1. 注册账号及独立企业。若出现站点访问验证，请先联系服务人员获取试点访问方式。",
+    includeCode ? `2. 在会员中心输入激活码：${issuedCode.value}` : "2. 向服务人员领取会员激活码，在会员中心兑换开通。",
+    "3. 开通后绑定自己的 Ozon 店铺，再拉取订单或使用产品工作流。",
+    "AI 额度单独配置；注册不会自动扣费或自动开通试用。"].join("\n");
+  try { await navigator.clipboard.writeText(text); ElMessage.success("客户开通指引已复制"); }
+  catch { ElMessage.error("复制失败，请手动复制注册链接和激活码"); }
+}
+
 async function load() {
   if (disposed || !active || !canManageVouchers.value) { clearSensitiveState(); return; }
   const scope = currentApiCacheScope();
@@ -104,6 +121,7 @@ onBeforeUnmount(() => { disposed = true; clearSensitiveState(); window.removeEve
 <template>
   <section v-if="canManageVouchers" class="vouchers-panel">
     <div class="vouchers-heading"><div><h2>会员激活码</h2><p>客户注册后，在自己的会员中心兑换；会员期限从兑换时起计算，续期会累加剩余时长。</p></div><el-button :loading="loading" @click="load">刷新</el-button></div>
+    <div class="customer-signup"><strong>客户注册入口</strong><el-input :model-value="registrationUrl" readonly aria-label="客户注册链接" /><el-button @click="copyCustomerGuide()">复制开通指引</el-button><p>先发注册链接，再发本页生成的会员激活码。站点如有内部访问验证，需先安排试点访问；这里不会关闭访问保护。</p></div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <el-form inline class="vouchers-issue" @submit.prevent="issue"><el-form-item label="开通套餐"><el-select v-model="planCode" aria-label="激活码套餐" placeholder="选择套餐"><el-option v-for="plan in activePlans" :key="plan.code" :label="`${plan.name} · ${plan.duration_days} 天`" :value="plan.code" /></el-select></el-form-item><el-form-item><el-button type="primary" native-type="submit" :disabled="!planCode" :loading="issuing">生成激活码</el-button></el-form-item></el-form>
     <p class="vouchers-hint">默认 30 天内可兑换，一码一次。完整码仅生成时显示；套餐期限和额度在发码时固定。</p>
@@ -116,7 +134,7 @@ onBeforeUnmount(() => { disposed = true; clearSensitiveState(); window.removeEve
       <el-table-column label="兑换时间（北京时间）" min-width="205"><template #default="{ row }">{{ dateText(row.used_at) }}</template></el-table-column>
       <el-table-column label="操作" width="100"><template #default="{ row }"><el-button v-if="row.status === 'active'" type="danger" link @click="revoke(row)">作废</el-button></template></el-table-column>
     </el-table>
-    <el-dialog v-model="issuedVisible" title="激活码已生成" width="500px" append-to-body :close-on-click-modal="false" @closed="issuedCode = ''"><el-alert title="请立即复制保存，关闭后无法再次查看完整激活码。" type="warning" :closable="false" show-icon /><el-input :model-value="issuedCode" readonly aria-label="新生成的会员激活码" class="voucher-code" /><template #footer><el-button @click="issuedVisible = false">已保存，关闭</el-button><el-button type="primary" @click="copyCode">复制激活码</el-button></template></el-dialog>
+    <el-dialog v-model="issuedVisible" title="激活码已生成" width="500px" append-to-body :close-on-click-modal="false" @closed="issuedCode = ''"><el-alert title="请立即复制保存，关闭后无法再次查看完整激活码。" type="warning" :closable="false" show-icon /><el-button @click="copyCustomerGuide(true)">复制含激活码的开通指引</el-button><el-input :model-value="issuedCode" readonly aria-label="新生成的会员激活码" class="voucher-code" /><template #footer><el-button @click="issuedVisible = false">已保存，关闭</el-button><el-button type="primary" @click="copyCode">复制激活码</el-button></template></el-dialog>
   </section>
 </template>
 
@@ -130,3 +148,5 @@ onBeforeUnmount(() => { disposed = true; clearSensitiveState(); window.removeEve
 .voucher-code { margin-top: 20px; }
 @media (max-width: 600px) { .vouchers-heading { align-items: flex-start; } .vouchers-issue :deep(.el-form-item) { width: 100%; margin-right: 0; } }
 </style>
+
+<style scoped>.customer-signup{display:grid;grid-template-columns:1fr auto;gap:10px;margin:16px 0;padding:16px;border:1px solid var(--el-border-color-lighter);border-radius:8px}.customer-signup>strong,.customer-signup>p{grid-column:1/-1}.customer-signup>p{margin:0;color:var(--el-text-color-secondary);font-size:12px;line-height:1.7}@media(max-width:600px){.customer-signup{grid-template-columns:1fr}}</style>
