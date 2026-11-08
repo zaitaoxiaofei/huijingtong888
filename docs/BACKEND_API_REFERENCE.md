@@ -2307,7 +2307,8 @@ Read current-enterprise daily SKU traffic for the last 15 complete report dates.
   - `sort_key` (`string`, optional): One of the eight daily metric keys or detail_view_rate; default total_views
   - `sort_order` (`string`, optional): asc or desc; null values last
   - `filters` (`string`, optional): JSON array of at most eight AND rules: metric, op (gt/gte/lt/lte/eq), value. Filtered and sorted before pagination. Count metrics sum observed days; multi-day rates use count-weighted ratios; available_days identifies missing calendar dates
-  - `include_series` (`number`, optional): 0 omits histories for summary lists; default 1. Fetch one exact SKU with 1 when its trend is selected
+  - `include_series` (`number`, optional): 0 omits histories; default 1
+  - `series_format` (`string`, optional): object (default) retains 15-day series; matrix shares series_days and series_columns once per page and returns each SKU trend_values as numeric arrays/null for the selected range, enabling one inline chart per SKU without per-row requests
   - `page` (`number`, optional): 1-based page
   - `pageSize` (`number`, optional): At most 100
 - Responses:
