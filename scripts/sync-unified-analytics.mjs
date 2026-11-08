@@ -221,9 +221,7 @@ await fs.cp(path.join(sourceDir, 'content'), path.join(targetDir, 'content'), { 
 await fs.copyFile(path.join(sourceDir, 'LICENSE'), path.join(targetDir, 'LICENSE'));
 const instancePath = path.join(targetDir, 'content', 'erp-instance.js');
 let instance = await fs.readFile(instancePath, 'utf8');
-instance = instance.replace('pluginInstanceId: chrome.runtime.id,', 'pluginInstanceId: chrome.runtime.id,\n      capabilities: { collector: true, sellerAnalytics: true },');
-instance = instance.replace("if (event.source !== window || event.origin !== window.location.origin) return;", "if (event.source !== window || event.origin !== window.location.origin) return;\n    const targetInstance = String(event.data?.pluginInstanceId || '').trim();\n    if (targetInstance && targetInstance !== chrome.runtime.id) return;")
-  .replaceAll('{ type: CHECK_RESULT_TYPE, requestId, result', '{ type: CHECK_RESULT_TYPE, requestId, pluginInstanceId: chrome.runtime.id, result');
+instance = instance.replace('pluginInstanceId: instanceId,', 'pluginInstanceId: instanceId,\n      capabilities: { collector: true, sellerAnalytics: true, storeDiscovery: instanceId !== chrome.runtime.id, browserInstance: instanceId !== chrome.runtime.id },');
 await fs.writeFile(instancePath, instance, 'utf8');
 for (const file of ['popup.html', 'popup.js', 'popup.css']) {
   let source = await fs.readFile(path.join(sourceDir, file), 'utf8');

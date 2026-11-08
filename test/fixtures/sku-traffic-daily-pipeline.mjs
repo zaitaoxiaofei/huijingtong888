@@ -8,7 +8,8 @@ try{
  await ensureSellerAnalyticsSchema();
  if(process.argv.includes('--bootstrap')) process.exitCode=0;
  else{
-  const compact=vm.runInNewContext(fs.readFileSync('ozon-erp-collector-plugin/analytics/background.js','utf8').match(/function compactDailyTrafficResult\([\s\S]*?\n\}/)[0]+';compactDailyTrafficResult');
+  const compactRaw=vm.runInNewContext(fs.readFileSync('ozon-erp-collector-plugin/analytics/background.js','utf8').match(/function compactDailyTrafficResult\([\s\S]*?\n\}/)[0]+';compactDailyTrafficResult');
+  const compact=(request,payload)=>({...compactRaw(request,payload),plugin_instance_id:'pipeline-browser-A'});
   const day=trafficDays().at(-1),queued=await queueSkuTrafficDaily({shop_id:11,date:day},'admin');
   assert.equal(queued.queued.length,1);
   const claimed=await claimNextCollectRequests(sellerAnalyticsDb,'admin',2,{store_id:'111111'});
@@ -24,6 +25,7 @@ try{
    if(result.run.status==='success')break;
   }
   assert.equal(count,2,'daily collection must not add ABC or extra metric tabs');
+  const [savedRun]=await mysqlQuery('SELECT value FROM settings WHERE tenant_id=? AND `key`=?',['admin','seller_analytics_collect_run:'+claimed[0].run_id]);assert.deepEqual(JSON.parse(savedRun.value).collector_instance_ids,['pipeline-browser-A']);
   const facts=await mysqlQuery('SELECT sku,total_views FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id=? AND date_key=? ORDER BY sku',['admin',11,day]);
   assert.equal(facts.length,2);assert.equal(Number(facts[0].total_views),25);assert.equal(Number(facts[1].total_views),0);
   const [coverage]=await mysqlQuery('SELECT status,product_count FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id=? AND date_key=?',['admin',11,day]);assert.equal(coverage.status,'complete');assert.equal(coverage.product_count,2);

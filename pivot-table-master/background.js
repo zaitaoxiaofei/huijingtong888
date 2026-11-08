@@ -126,6 +126,17 @@ function normalizeErpBaseUrl(value) {
   }
 }
 
+let browserInstancePromise;
+async function getAnalyticsBrowserInstanceId(){
+ if(!browserInstancePromise)browserInstancePromise=(async()=>{
+  const key='ozonAnalyticsBrowserInstanceV1',saved=await chrome.storage.local.get(key);
+  let id=String(saved[key]||'');
+  if(!/^[0-9a-f-]{36}$/i.test(id)){id=crypto.randomUUID();await chrome.storage.local.set({[key]:id});}
+  return `${chrome.runtime.id}_${id}`;
+ })().catch(error=>{browserInstancePromise=null;throw error;});
+ return browserInstancePromise;
+}
+
 async function getErpConfig() {
   const stored = await chrome.storage.local.get([ERP_BASE_URL_KEY, ERP_TENANT_ID_KEY, LOCAL_PLUGIN_TOKEN_KEY]);
   const config = {
@@ -459,7 +470,7 @@ async function syncPluginStatus(force = false, selectedTab = null, panelRefreshV
     }),
     body: JSON.stringify({
       tenant_id: config.tenantId,
-      plugin_instance_id: chrome.runtime.id,
+      plugin_instance_id: await getAnalyticsBrowserInstanceId(),
       plugin_version: chrome.runtime.getManifest()?.version || '',
       seller_missing: !sellerTab?.id,
       seller_tab: sellerTab ? {
@@ -570,7 +581,7 @@ async function getNextCollectRequests(sellerTab = null) {
 
 async function getNextPrepareRequest() {
   const config = await getErpConfig();
-  const params = new URLSearchParams({ plugin_instance_id: chrome.runtime.id });
+  const params = new URLSearchParams({ plugin_instance_id: await getAnalyticsBrowserInstanceId() });
   const response = await fetch(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/plugin-prepare/next?${params.toString()}`, {
     method: 'GET',
     headers: localPluginHeaders(config)
@@ -589,7 +600,7 @@ async function postPrepareResult(payload = {}) {
     }),
     body: JSON.stringify({
       ...payload,
-      plugin_instance_id: chrome.runtime.id,
+      plugin_instance_id: await getAnalyticsBrowserInstanceId(),
       tenant_id: config.tenantId
     })
   });
@@ -687,6 +698,7 @@ async function postCollectResult(request, payload) {
     }),
     body: JSON.stringify({
       ...wirePayload,
+      plugin_instance_id: await getAnalyticsBrowserInstanceId(),
       tenant_id: config.tenantId
     })
   });
@@ -698,6 +710,8 @@ async function postCollectResult(request, payload) {
   if (!response.ok || json?.success === false) throw new Error(json?.error || text || `HTTP ${response.status}`);
   return json;
 }
+
+function selectCurrentSellerTab(tabs=[]){return tabs.filter(tab=>tab?.id&&/^https:\/\/seller\.ozon\.ru\//.test(String(tab.url||''))).sort((a,b)=>Number(b.lastAccessed||0)-Number(a.lastAccessed||0))[0]||null;}
 
 function selectSellerTab(tabs = [], expectedStoreId = '') {
   const candidates = tabs
@@ -1513,12 +1527,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => sendResponse({ error: error?.message || String(error) }));
     return true;
   }
+  if(message?.type==='PIVOT_ERP_INSTANCE_ID'){getAnalyticsBrowserInstanceId().then(pluginInstanceId=>sendResponse({pluginInstanceId})).catch(()=>sendResponse({error:'INSTANCE_UNAVAILABLE'}));return true;}
   if (message?.type === 'PIVOT_ERP_CHECK_STORE') {
     const expectedStoreId = String(message.expectedStoreId || '').trim();
     Promise.resolve()
-      .then(() => findAnySellerTab(expectedStoreId))
+      .then(async () => selectCurrentSellerTab(await chrome.tabs.query({url:'https://seller.ozon.ru/*'})))
       .then(async (tab) => {
         const identity = await verifiedSellerStoreIdentity(tab, expectedStoreId);
+        if(identity.ok&&!preparing){preferredSellerStoreId=identity.companyId;prepareSellerTabId=tab.id;prepareStartedAt=0;setPanelSellerTab(tab);}
         await syncPluginStatus(true, tab);
         return identity;
       })

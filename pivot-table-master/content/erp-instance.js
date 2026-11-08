@@ -23,17 +23,21 @@
     }).catch(() => null);
   }
 
+  let instanceId=chrome.runtime.id;
   async function announce() {
+    const response=await chrome.runtime.sendMessage({type:'PIVOT_ERP_INSTANCE_ID'}).catch(()=>null);
+    if(response?.pluginInstanceId)instanceId=response.pluginInstanceId;
     await pairCurrentErpOrigin();
     window.postMessage({
       type: RESPONSE_TYPE,
-      pluginInstanceId: chrome.runtime.id,
+      pluginInstanceId: instanceId,
       pluginVersion: chrome.runtime.getManifest()?.version || ''
     }, window.location.origin);
   }
 
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== window.location.origin) return;
+    const targetInstance=String(event.data?.pluginInstanceId||'').trim();if(targetInstance&&targetInstance!==instanceId)return;
     if (event.data?.type === REQUEST_TYPE) void announce();
     if (event.data?.type === WAKE_TYPE) {
       const expectedStoreId = String(event.data.expectedStoreId || '').trim();
@@ -42,10 +46,10 @@
     if (event.data?.type === CHECK_TYPE && isTrustedErpPage()) {
       const requestId = String(event.data.requestId || '').trim();
       const expectedStoreId = String(event.data.expectedStoreId || '').trim();
-      if (!requestId || !expectedStoreId) return;
+      if (!requestId) return;
       void chrome.runtime.sendMessage({ type: 'PIVOT_ERP_CHECK_STORE', expectedStoreId })
-        .then((result) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, result }, window.location.origin))
-        .catch((error) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, result: { ok: false, code: 'check_failed', error: error?.message || String(error) } }, window.location.origin));
+        .then((result) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, pluginInstanceId: instanceId, result }, window.location.origin))
+        .catch((error) => window.postMessage({ type: CHECK_RESULT_TYPE, requestId, pluginInstanceId: instanceId, result: { ok: false, code: 'check_failed', error: error?.message || String(error) } }, window.location.origin));
     }
     if (event.data?.type === CANCEL_TYPE && isTrustedErpPage()) {
       const runId = String(event.data.runId || '').trim();

@@ -1,4 +1,5 @@
-export const SKU_TRAFFIC_RETENTION_DAYS = 15;
+export const COLLECT_REQUEST_STALE_MS = 120000;
+export const SKU_TRAFFIC_RETENTION_DAYS = 30;
 export const SKU_TRAFFIC_METRICS = [
   ['total_views', '总曝光'], ['search_views', '搜索曝光'], ['pdp_views', '商品详情浏览'],
   ['total_hits_to_cart', '总加购次数'], ['ordered_units', '下单件数'],

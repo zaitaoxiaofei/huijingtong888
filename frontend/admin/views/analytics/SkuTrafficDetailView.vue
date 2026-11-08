@@ -9,7 +9,7 @@ import {trafficRowSeries} from '../../utils/sku-traffic-row-series';
 import {dailyMetricChange} from '../../utils/sku-traffic-detail';
 import {SKU_TRAFFIC_OPERATION_METRICS,SKU_TRAFFIC_PRIMARY_RATE_KEYS} from '../../../../src/shared/sku-traffic-monitor-query';
 const route=useRoute(),router=useRouter(),row=ref(null),series=ref([]),response=ref({}),loading=ref(false),error=ref('');
-const rangeDays=ref([1,7,15].includes(Number(route.query.range_days))?Number(route.query.range_days):7);
+const rangeDays=ref([1,7,15,30].includes(Number(route.query.range_days))?Number(route.query.range_days):7);
 const chartGroup=ref('rates');
 const displayName=computed(()=>row.value?.inventory?.map(p=>p.name).filter(Boolean).join(' / ')||row.value?.product_name||'商品名称未同步');
 const counts=SKU_TRAFFIC_OPERATION_METRICS.slice(0,5),rates=SKU_TRAFFIC_PRIMARY_RATE_KEYS.map(key=>SKU_TRAFFIC_OPERATION_METRICS.find(([k])=>k===key));
@@ -35,7 +35,7 @@ onBeforeUnmount(()=>{disposed=true;revision++;});
 </script>
 <template>
  <div class="sku-detail" v-loading="loading">
-  <ErpPageHeader compact title="SKU 分析明细" description="每日流量与转化"><template #actions><el-button @click="router.push('/sku-traffic-monitor')">返回列表</el-button><el-select v-model="rangeDays" class="detail-range" aria-label="明细统计范围"><el-option label="单日" :value="1"/><el-option label="近7天" :value="7"/><el-option label="近15天" :value="15"/></el-select><el-button @click="load">刷新数据</el-button></template></ErpPageHeader>
+  <ErpPageHeader compact title="SKU 分析明细" description="每日流量与转化"><template #actions><el-button @click="router.push('/sku-traffic-monitor')">返回列表</el-button><el-select v-model="rangeDays" class="detail-range" aria-label="明细统计范围"><el-option label="单日" :value="1"/><el-option label="近7天" :value="7"/><el-option label="近15天" :value="15"/><el-option label="近30天" :value="30"/></el-select><el-button @click="load">刷新数据</el-button></template></ErpPageHeader>
   <el-alert v-if="error" type="error" :title="error" :closable="false"/>
   <template v-if="row">
    <section class="product-profile">
