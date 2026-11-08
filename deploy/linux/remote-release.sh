@@ -490,7 +490,7 @@ install_release_dependencies() {
   block_device="$(release_block_device)"
   systemd-run --quiet --wait --pipe --collect --unit="ozon-erp-install-${release_version}" \
     --uid=ozon-erp --working-directory="$staging_dir" \
-    --property=MemoryHigh=256M --property=MemoryMax=384M --property=MemorySwapMax=0 \
+    --property=MemoryHigh=384M --property=MemoryMax=384M --property=MemorySwapMax=0 \
     --property=CPUQuota=50% --property=IOWeight=10 --property=Nice=10 \
     --property="IOReadBandwidthMax=$block_device 8M" --property="IOWriteBandwidthMax=$block_device 4M" \
     --property="IOReadIOPSMax=$block_device 512" --property="IOWriteIOPSMax=$block_device 256" \
