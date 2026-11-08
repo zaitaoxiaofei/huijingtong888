@@ -470,8 +470,49 @@ start_candidate() {
   candidate_ready=1
 }
 
+assert_install_resources() {
+  local available_kib swap_total_kib swap_free_kib disk_free_kib
+  read -r available_kib swap_total_kib swap_free_kib < <(awk '
+    /^MemAvailable:/ { available=$2 } /^SwapTotal:/ { total=$2 } /^SwapFree:/ { free=$2 }
+    END { print available+0, total+0, free+0 }' /proc/meminfo)
+  disk_free_kib="$(df -Pk "$releases_root" | awk 'NR==2 {print $4}')"
+  if ((available_kib < 1048576 || disk_free_kib < 3145728 || (swap_total_kib > 0 && swap_free_kib * 100 < swap_total_kib * 20))); then
+    echo "Release refused before installation: require 1 GiB available memory, 3 GiB disk and less than 80% swap usage. Primary left running." >&2
+    return 1
+  fi
+  command -v systemd-run >/dev/null || { echo "Bounded dependency installer requires systemd-run." >&2; return 1; }
+}
+
+install_release_dependencies() {
+  # A failed install must terminate its whole process group without competing
+  # unboundedly with MySQL, the primary or the previous failover candidate.
+  local block_device
+  block_device="$(release_block_device)"
+  systemd-run --quiet --wait --pipe --collect --unit="ozon-erp-install-${release_version}" \
+    --uid=ozon-erp --working-directory="$staging_dir" \
+    --property=MemoryHigh=384M --property=MemoryMax=512M --property=MemorySwapMax=0 \
+    --property=CPUQuota=50% --property=IOWeight=10 --property=Nice=10 \
+    --property="IOReadBandwidthMax=$block_device 8M" --property="IOWriteBandwidthMax=$block_device 4M" \
+    --property="IOReadIOPSMax=$block_device 512" --property="IOWriteIOPSMax=$block_device 256" \
+    --property=IOSchedulingClass=idle --property=TasksMax=64 --property=RuntimeMaxSec=600 \
+    --property=KillMode=control-group --property=OOMPolicy=kill --property=TimeoutStopSec=15 --setenv=HOME=/opt/ozon-erp \
+    --setenv=NODE_OPTIONS=--max-old-space-size=256 --setenv=npm_config_jobs=1 \
+    /usr/bin/npm ci --omit=dev --include=optional --no-audit --no-fund --maxsockets=2
+}
+
+release_block_device() {
+  local device parent
+  device="$(findmnt -n -o SOURCE --target "$staging_dir")"
+  [[ -b "$device" ]] || { echo "Cannot identify the release filesystem block device." >&2; return 1; }
+  parent="$(lsblk -ndo PKNAME "$device")"
+  if [[ -n "$parent" ]]; then device="/dev/$parent"; fi
+  [[ -b "$device" ]] || return 1
+  printf '%s\n' "$device"
+}
+
 install -d -o ozon-erp -g ozon-erp "$releases_root" "$shared_root/uploads/public" "$shared_root/uploads/runtime"
 install -d -m 700 -o ozon-erp -g ozon-erp "$shared_root/private-ai-results"
+assert_install_resources
 rm -rf "$staging_dir"
 install -d -o ozon-erp -g ozon-erp "$staging_dir"
 unzip -q "$archive_path" -d "$staging_dir"
@@ -482,7 +523,7 @@ if [[ ! -f "$staging_dir/package.json" || ! -f "$staging_dir/src/server.js" ]]; 
 fi
 
 chown -R ozon-erp:ozon-erp "$staging_dir"
-runuser -u ozon-erp -- bash -lc "cd '$staging_dir' && npm ci --omit=dev --include=optional"
+install_release_dependencies
 
 if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" ]]; then
   if ! material_change_required="$(material_optimization_preflight)"; then
@@ -513,7 +554,7 @@ fi
 # Additive performance/reader/credit schemas are installed before candidate
 # readiness even when broad maintenance is skipped. These scripts do not enrol
 # an enterprise, set a price, opt in a writer or repair/delete legacy rows.
-for additive_migration in migrate-order-search-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs migrate-inventory-consumables.mjs migrate-inventory-numbering-v2.mjs; do
+for additive_migration in migrate-order-search-indexes.mjs migrate-operational-query-indexes.mjs migrate-listing-draft-list-indexes.mjs migrate-listing-frozen-content.mjs migrate-ai-credits.mjs migrate-order-profit-daily-fx.mjs migrate-order-profit-fx-policy.mjs migrate-inventory-consumables.mjs migrate-inventory-numbering-v2.mjs; do
   if ! migration_pending "$additive_migration"; then continue; fi
   set -a
   source "$env_file"

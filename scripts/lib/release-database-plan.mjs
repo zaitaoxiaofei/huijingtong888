@@ -1,6 +1,7 @@
 export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-sku-traffic-daily.mjs",
   "migrate-order-search-indexes.mjs",
+  "migrate-operational-query-indexes.mjs",
   "migrate-listing-draft-list-indexes.mjs",
   "migrate-listing-frozen-content.mjs",
   "migrate-ai-credits.mjs",
@@ -57,6 +58,21 @@ export function migrationNeedsApply(filename, report) {
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
   switch (filename) {
+    case "migrate-operational-query-indexes.mjs": {
+      if (report.ok !== true) invalid("operational query index inspector refused");
+      const ready = boolean(report.ready, "ready");
+      if (!Array.isArray(report.indexes) || report.indexes.length !== 2) invalid("expected two operational indexes");
+      for (const index of report.indexes) {
+        const present = boolean(index.present, "index.present"), valid = boolean(index.valid, "index.valid");
+        boolean(index.exists, "index.exists");
+        if ((present && !valid) || (!present && valid)) invalid("incompatible operational query index");
+      }
+      const column = object(report.finance_column, "finance_column");
+      if (boolean(column.present, "finance_column.present") && !boolean(column.valid, "finance_column.valid")) invalid("incompatible legacy finance date");
+      boolean(column.exists, "finance_column.exists");
+      if (ready !== (report.indexes.every(index => !index.exists || index.valid) && (!column.exists || column.valid))) invalid("inconsistent operational index readiness");
+      return !ready;
+    }
     case "migrate-sku-traffic-daily.mjs": {
       const ready=boolean(report.ready,"ready"),missing=list(report.missing_tables,"missing_tables"),problems=list(report.problems,"problems");
       if(report.ok!==true||problems.length||missing.some(name=>!["seller_sku_traffic_daily","seller_sku_traffic_days"].includes(name))||ready!==(missing.length===0))invalid("incompatible SKU daily schema");

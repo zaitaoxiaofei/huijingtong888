@@ -626,6 +626,7 @@ CREATE TABLE IF NOT EXISTS online_products (
   UNIQUE KEY uk_online_products_shop_sku (shop_id, ozon_sku),
   KEY idx_online_products_shop_status (shop_id, status),
   KEY idx_online_products_shop_offer (shop_id, offer_id),
+  KEY idx_online_products_shop_ozon_product (shop_id, ozon_product_id),
   KEY idx_online_products_product (product_id),
   KEY idx_online_products_published (published_at, id),
   KEY idx_online_products_synced (synced_at, id)
@@ -1247,6 +1248,7 @@ CREATE TABLE IF NOT EXISTS ozon_finance_items (
   operation_type VARCHAR(128) NULL,
   operation_type_name VARCHAR(255) NULL,
   operation_date DATETIME NULL,
+  legacy_operation_date DATE GENERATED ALWAYS AS (CASE WHEN LEFT(operation_id,15)<>'accrual_by_day:' THEN CAST(operation_date AS DATE) ELSE NULL END) VIRTUAL,
   service_type VARCHAR(191) NOT NULL,
   service_name VARCHAR(255) NULL,
   amount DECIMAL(18,4) NOT NULL DEFAULT 0,
@@ -1265,6 +1267,7 @@ CREATE TABLE IF NOT EXISTS ozon_finance_items (
   exchange_rate DECIMAL(18,4) NOT NULL DEFAULT 0,
   UNIQUE KEY uk_finance_shop_operation_service (shop_id, operation_id, service_type),
   KEY idx_finance_posting (shop_id, posting_number),
+  KEY idx_finance_shop_legacy_day (shop_id, legacy_operation_date),
   KEY idx_finance_operation_date (operation_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
