@@ -2300,11 +2300,12 @@ Read current-enterprise daily SKU traffic for the last 15 complete report dates.
 - Query parameters:
   - `shop_id` (`string`, optional): Owned shop ID or all
   - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to latest available owned-shop date, or yesterday if no facts; explicit missing dates stay missing
+  - `date_mode` (`string`, optional): Optional latest_report_day anchors the range to yesterday, preserving recent gaps; absent retains legacy latest-available behavior
   - `range_days` (`number`, optional): 1, 7 or 15 (default 15), ending on date and clamped to retention
   - `query` (`string`, optional): Search text
-  - `search_by` (`string`, optional): all, sku, offer_id, inventory, inventory_name or product_name; inventory uses verified current-enterprise direct/combo bindings
+  - `search_by` (`string`, optional): all, sku, offer_id, inventory_id (strict numeric ID, always exact), inventory, inventory_name or product_name; inventory uses verified current-enterprise direct/combo bindings
   - `exact` (`number`, optional): 1 for exact match, otherwise contains
-  - `sort_key` (`string`, optional): One of the eight daily metric keys or detail_view_rate; default total_views
+  - `sort_key` (`string`, optional): Daily metric key, detail_view_rate, search_share (search/total), or pdp_order_rate (ordered units/detail views); default total_views
   - `sort_order` (`string`, optional): asc or desc; null values last
   - `filters` (`string`, optional): JSON array of at most eight AND rules: metric, op (gt/gte/lt/lte/eq), value. Filtered and sorted before pagination. Count metrics sum observed days; multi-day rates use count-weighted ratios; available_days identifies missing calendar dates
   - `include_series` (`number`, optional): 0 omits histories; default 1
