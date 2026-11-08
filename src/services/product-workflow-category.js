@@ -1,3 +1,4 @@
+import { keyModelIdentity } from '../shared/workflow-key-models.js';
 import { categoryAttributeNodes, expandWorkflowVariants } from '../shared/product-workflow-inputs.js';
 import { validateWorkflow, validateWorkflowVariants, workflowError } from '../shared/product-workflow.js';
 
@@ -12,7 +13,7 @@ export async function productWorkflowCategory(id,session,services) {
   const attributes=categoryAttributeNodes(template,schema);
   return {templateId:Number(id),name:template.template_name||template.category_name,categoryName:template.category_name||template.template_name,descriptionCategoryId,typeId,attributes};
 }
-export async function prepareProductWorkflowRun(payload,session,services) {
+export async function prepareProductWorkflowRun(payload,session,services,store=null) {
   const definition=validateWorkflow(payload.definition);
   const listing=definition.nodes.find(n=>n.type==='listing');
   const category=await productWorkflowCategory(listing.templateId,session,services);
@@ -38,6 +39,14 @@ export async function prepareProductWorkflowRun(payload,session,services) {
     }
     node.options=[...verified.values()];
     category.attributes.find(a=>a.attributeId===node.attributeId).options=node.options;
+  }
+  for(const variant of variants)if(variant.keyModelId){
+    if(!store)throw workflowError('钥匙适配库暂不可用，请重试或手动上传适配图');
+    const record=await store.get('key_model',String(variant.keyModelId),session),profile=record.payload;
+    if(variant.keyModelRevision&&Number(variant.keyModelRevision)!==record.revision)throw workflowError(`${variant.label}的钥匙适配资料已更新，请重新选择后提交`);
+    if(profile.archived||keyModelIdentity(`${profile.brand} ${profile.model}`)!==keyModelIdentity(variant.values.model))throw workflowError(`${variant.label}的钥匙适配资料与型号不一致或已停用，请重新选择`);
+    if(!definition.nodes.some(n=>n.id==='key'&&n.type==='images'))throw workflowError('当前流程未配置适配钥匙图片输入');
+    variant.values.key=profile.images.slice(0,definition.nodes.find(n=>n.id==='key').count);variant.keyModelRevision=record.revision;
   }
   validateWorkflow(definition);
   validateWorkflowVariants(definition,variants);

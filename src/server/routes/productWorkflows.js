@@ -9,6 +9,8 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
       ?store.get(kind,String(req.query.id),req._session):store.list(kind,req._session);
     routes[`POST /api/product-workflows/${collection}`]=async req=>store.save(kind,await readJson(req),req._session);
   }
+  routes['GET /api/product-workflows/key-models']=req=>req.query?.id?store.get('key_model',String(req.query.id),req._session):store.list('key_model',req._session,req.query||{});
+  routes['POST /api/product-workflows/key-models']=async req=>store.save('key_model',await readJson(req),req._session);
   routes['GET /api/product-workflows/category']=req=>productWorkflowCategory(req.query?.id,req._session,services);
   routes['GET /api/product-workflows/job-states']=req=>workflowJobStates(req._session);
   routes['POST /api/product-workflows/run-action']=async req=>productWorkflowAction(await readJson(req),req._session);
@@ -20,7 +22,7 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
       try{const existing=await store.get('run',body.requestId,req._session);await enqueue(existing.id,req._session);return existing;}
       catch(error){if(error.status!==404)throw error;}
     }
-    const payload=await prepareProductWorkflowRun(body.payload,req._session,services);
+    const payload=await prepareProductWorkflowRun(body.payload,req._session,services,store);
     const saved=await store.save('run',{payload,creationId:body.requestId},req._session);
     await enqueue(saved.id,req._session);
     return saved;

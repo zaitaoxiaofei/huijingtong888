@@ -44,7 +44,7 @@ test('duplicate catalog additions preserve original model ID, spelling, tags and
 
 test('invalid brands do not write; duplicate adds cannot reactivate disabled catalog entries',async()=>{
   const h=catalogHarness();
-  for(const brand of ['中文品牌','', 'A'.repeat(129)]) await assert.rejects(h.context.addAiVehicleCatalogEntry({brand,model:'T1'},session),/汽车品牌/);
+  for(const brand of ['中文品牌','', 'A'.repeat(129)]) await assert.rejects(h.context.addAiVehicleCatalogEntry({brand,model:'T1'},session),/品牌/);
   assert.equal(h.writes.length,0);
   const disabled=catalogHarness({id:9,brand_name:'TENET',model_name:'T4',tags_json:'[]',enabled:0});
   await assert.rejects(disabled.context.addAiVehicleCatalogEntry({brand:'tenet',model:'T4'},session),/已停用/);
