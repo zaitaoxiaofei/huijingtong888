@@ -51,3 +51,16 @@ test('fixed image input imports an owned material image and ignores replacement 
  const run=await prepareProductWorkflowRun({definition,variants:[{id:'one',label:'产品',values}],outputs:{}},{},services,{get:async()=>structuredClone(record)});
  assert.deepEqual(run.variants[0].values.product,['https://example.test/key.png']);
 });
+
+test('template search covers records beyond the old first hundred and pagination stays tenant scoped',async()=>{
+ const templates=Array.from({length:125},(_,i)=>({tenant:'1',id:`t${i+1}`,kind:'template',name:`Template ${i+1}`,revision:1,payload_json:JSON.stringify({category:{categoryName:i===124?'独有钥匙类目':'钥匙壳'},...(i===0?{previewImage:'https://example.test/cached.png'}:{})})}));
+ templates.push({tenant:'2',id:'foreign',name:'Foreign only',kind:'template',revision:1,payload_json:'{}'});
+ const previous={templateId:'t13',draftId:10,definition:{nodes:[{id:'custom_main',type:'image',role:'main'}]},variants:[{id:'black'}],outputs:{black:{custom_main:{url:'https://example.test/actual.png'}}}};
+ const scopes=[];const store=createProductWorkflowStore({authorize:async s=>s,execute:async()=>({}),query:async(sql,p)=>{scopes.push(p[0]);if(sql.includes("kind = 'run'"))return p[0]==='1'&&p.includes('t13')?[{payload_json:JSON.stringify(previous)}]:[];const needle=p[2].slice(1,-1).toLowerCase();const rows=templates.filter(r=>r.tenant===p[0]&&(r.name.toLowerCase().includes(needle)||JSON.parse(r.payload_json).category?.categoryName.includes(needle)));if(sql.includes('COUNT(*)'))return [{total:rows.length}];return rows.slice(p[5],p[5]+p[4]);}});
+ const session={personId:1,roles:['operations'],tenant:{id:1,slug:'a',role:'member'}};
+ const first=await store.list('template',session,{page:1,pageSize:12});assert.equal(first.total,125);assert.equal(first.items.length,12);assert.equal(first.items[0].preview_image,'https://example.test/cached.png');
+ const second=await store.list('template',session,{page:2,pageSize:12});assert.equal(second.items[0].id,'t13');assert.equal(second.items[0].preview_image,'https://example.test/actual.png');
+ const distant=await store.list('template',session,{page:999,pageSize:12});assert.equal(distant.page,11);assert.equal(distant.items.length,5);
+ const search=await store.list('template',session,{page:1,pageSize:12,keyword:'独有钥匙类目'});assert.equal(search.total,1);assert.equal(search.items[0].id,'t125');
+ const foreign=await store.list('template',session,{page:1,keyword:'Foreign only'});assert.equal(foreign.total,0);assert.ok(scopes.every(tenant=>tenant==='1'));
+});
