@@ -51,7 +51,7 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   await t.test('same day replaces once without duplicates and reuses product metadata',async()=>{
    await reserve('refresh');await service.publish(makeRun('refresh'),'admin',[metric(50)]);await service.publish(makeRun('refresh'),'admin',[metric(50)]);
    const rows=await query('SELECT sku,total_views FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id=? AND date_key=?',['admin',11,day]);assert.equal(rows.length,1);assert.equal(Number(rows[0].total_views),50);
-   const read=await service.read({shop_id:11},'admin');assert.equal(read.rows[0].product_name,'Original shared product metadata');assert.equal(read.rows[0].selected.total_views,'50.0000');assert.equal(read.rows[0].series.length,15);
+   const read=await service.read({shop_id:11},'admin');assert.equal(read.rows[0].product_name,'Original shared product metadata');assert.equal(read.rows[0].selected.total_views,'50.0000');assert.equal(read.rows[0].series.length,30);
    const columns=await query("SELECT COLUMN_NAME name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='seller_sku_traffic_daily'",[database]);for(const name of ['product_name','image_url','raw_data','response_body'])assert.equal(columns.some(c=>c.name===name),false);
   });
   await t.test('default date follows actual available data while explicit missing days remain missing',async()=>{
@@ -76,7 +76,7 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    assert.equal(result.total,1);assert.equal(result.rows[0].sku,'potential');assert.equal(Number(result.rows[0].summary.total_views),15);assert.equal(Number(result.rows[0].summary.ordered_units),2);assert.ok(Math.abs(Number(result.rows[0].summary.conv_views_to_order)-100*2/15)<0.0001);assert.equal(Number(result.rows[0].summary.available_days),2);
    assert.deepEqual(result.rows[0].inventory.map(p=>p.id),[123]);assert.ok(Math.abs(Number(result.rows[0].summary.pdp_order_rate)-100*2/6)<.0001);assert.equal(Number(result.rows[0].summary.search_share),100);
    const brief=await service.read({shop_id:11,date:day,range_days:7,filters,include_series:0},'admin');assert.equal(brief.rows[0].series.length,0);assert.equal(Number(brief.rows[0].summary.total_views),15);
-   const detail=await service.read({shop_id:11,date:day,range_days:7,query:'potential',search_by:'sku',exact:1,include_series:1,pageSize:1},'admin');assert.equal(detail.rows.length,1);assert.equal(detail.rows[0].series.length,15);
+   const detail=await service.read({shop_id:11,date:day,range_days:7,query:'potential',search_by:'sku',exact:1,include_series:1,pageSize:1},'admin');assert.equal(detail.rows.length,1);assert.equal(detail.rows[0].series.length,30);
    const matrix=await service.read({shop_id:11,date:day,range_days:7,filters,series_format:'matrix',include_series:1},'admin');
    assert.equal(matrix.rows[0].series.length,0);assert.equal(matrix.series_days.length,7);assert.equal(matrix.rows[0].trend_values.length,7);
    const expanded=trafficRowSeries(matrix.rows[0],matrix);assert.equal(expanded.filter(p=>p.available).length,2);assert.equal(expanded.at(-1).total_views,10);assert.equal(expanded.at(-2).total_views,5);assert.equal(expanded[0].available,false);
@@ -136,8 +136,28 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    await execute("DELETE FROM seller_sku_traffic_days WHERE tenant_id='admin'");
    await execute("INSERT INTO seller_sku_traffic_days(tenant_id,shop_id,date_key,status,last_success_at,requested_at) VALUES('admin',11,?,'complete',UTC_TIMESTAMP(),UTC_TIMESTAMP())",[day]);
    const missing=await service.queue({shop_id:11,range_days:7,missing_only:true},'admin',deps);assert.equal(missing.queued.length,3);assert.equal(missing.queued[0].day,shiftTrafficDate(day,-1));assert.ok(missing.queued.every(item=>item.day>=shiftTrafficDate(day,-6)&&item.day<day));
-   await assert.rejects(service.queue({shop_id:11,range_days:30},'admin',deps),/补采范围/);
-   await assert.rejects(service.queue({date:'2000-01-01'},'admin',deps),/最近15/);
+   const done=await service.queue({shop_id:11,range_days:1,missing_only:true},'admin',deps);assert.equal(done.queued.length,0);assert.equal(done.completed.length,1);assert.equal(done.completed[0].day,day);
+   await assert.rejects(service.queue({shop_id:11,range_days:31},'admin',deps),/补采范围/);
+   await assert.rejects(service.queue({date:'2000-01-01'},'admin',deps),/最近30/);
+  });
+  await t.test('month view includes older valid daily facts without leaking them into seven-day totals',async()=>{
+   const oldDay=shiftTrafficDate(day,-20);await query('INSERT INTO seller_sku_traffic_daily(tenant_id,shop_id,sku,date_key,total_views,updated_at) VALUES(?,?,?,?,?,UTC_TIMESTAMP())',['admin',11,'month-history',oldDay,42]);
+   const month=await service.read({shop_id:11,date:day,range_days:30,query:'month-history',search_by:'sku',exact:1},'admin');assert.equal(month.total,1);assert.equal(Number(month.rows[0].summary.total_views),42);
+   const week=await service.read({shop_id:11,date:day,range_days:7,query:'month-history',search_by:'sku',exact:1},'admin');assert.equal(week.total,0);
+   await query("DELETE FROM seller_sku_traffic_daily WHERE sku='month-history'");
+  });
+  await t.test('lightweight status exposes real queue progress and browser source without publishing unfinished data',async()=>{
+   const statusDay=shiftTrafficDate(day,-20);await reserve('progress-status','admin',11);
+   await query("INSERT INTO seller_sku_traffic_days(tenant_id,shop_id,date_key,status,run_id,requested_at) VALUES('admin',11,?,'pending','progress-status',UTC_TIMESTAMP())",[statusDay]);
+   await query("INSERT INTO seller_analytics_collect_runs(id,tenant_id,store_id,status) VALUES('progress-status','admin','111111','running')");
+   await query("INSERT INTO seller_analytics_collect_requests(id,run_id,tenant_id,status) VALUES('proof-1','progress-status','admin','success'),('proof-2','progress-status','admin','running')");
+   await query("INSERT INTO settings(`key`,tenant_id,value) VALUES('seller_analytics_collect_run:progress-status','admin',?)",[JSON.stringify({collector_instance_ids:['browser-B']})]);
+   await query("UPDATE seller_analytics_collect_requests SET claimed_at=UTC_TIMESTAMP() WHERE id='proof-2'");
+   let metadata=await service.read({shop_id:11,metadata_only:1},'admin');assert.equal(metadata.days.length,30);assert.equal(metadata.rows,undefined);
+   let observed=metadata.coverage.find(p=>p.date_key===statusDay);assert.equal(observed.status,'pending');assert.equal(observed.progress.completed_requests,1);assert.equal(observed.progress.active_requests,1);assert.deepEqual(observed.progress.collector_instance_ids,['browser-B']);
+   await query("UPDATE seller_analytics_collect_requests SET claimed_at=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 5 MINUTE) WHERE id='proof-2'");const stalled=await service.read({shop_id:11,metadata_only:1},'admin');const stalledDay=stalled.coverage.find(p=>p.date_key===statusDay);assert.equal(stalledDay.progress.active_requests,0);assert.equal(stalledDay.progress.stale_requests,1);
+   await query("UPDATE seller_analytics_collect_requests SET status='success' WHERE id='proof-2'");metadata=await service.read({shop_id:11,metadata_only:1},'admin');observed=metadata.coverage.find(p=>p.date_key===statusDay);assert.equal(observed.status,'pending');assert.equal(observed.progress.completed_requests,2);
+   assert.equal((await query('SELECT sku FROM seller_sku_traffic_daily WHERE date_key=?',[statusDay])).length,0);
   });
   await t.test('retention clears only expired daily facts and temporary pages/runs, keeps active stage and legacy analysis',async()=>{
    const oldest=trafficDays()[0],expired=shiftTrafficDate(oldest,-1);

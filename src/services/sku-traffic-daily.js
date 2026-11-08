@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {mysqlQuery, mysqlExecute, withMysqlTransaction} from '../mysql-pool.js';
 import {normalizeTrafficMonitorQuery} from '../shared/sku-traffic-monitor-query.js';
 import {SKU_TRAFFIC_DAILY_SCHEMA, inspectSkuTrafficDailySchema} from './sku-traffic-daily-schema.js';
-import {SKU_TRAFFIC_METRICS, trafficToday, trafficDays, trafficDate, shiftTrafficDate, dailyTrafficCoverage, normalizeDailyTrafficMetric, dailyTrafficSeries} from '../shared/sku-traffic-daily.js';
+import {COLLECT_REQUEST_STALE_MS, SKU_TRAFFIC_METRICS, trafficToday, trafficDays, trafficDate, shiftTrafficDate, dailyTrafficCoverage, normalizeDailyTrafficMetric, dailyTrafficSeries} from '../shared/sku-traffic-daily.js';
 const metricKeys = SKU_TRAFFIC_METRICS.map(([key]) => key);
 const error = (message, statusCode = 400) => Object.assign(new Error(message), {statusCode});
 const sqlTime = value => new Date(value).toISOString().replace('T', ' ').replace('Z', '');
@@ -35,7 +35,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
   }
   function dayInWindow(day) {
     const days = trafficDays(clock());
-    if (!trafficDate(day) || !days.includes(day)) throw error('请选择最近15个完整报表日；今天尚未结束，不能作为完整日数据');
+    if (!trafficDate(day) || !days.includes(day)) throw error('请选择最近30个完整报表日；今天尚未结束，不能作为完整日数据');
     return day;
   }
   async function mark(run, key, status, message) {
@@ -47,7 +47,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     await ensureSchema();
     const key = tenant(tenantId), coverage = dailyTrafficCoverage(run,{allowPartial:true});
     if (!coverage.ok) {await mark(run,key,'partial',coverage.error);return {published:false,error:coverage.error};}
-    if (!trafficDays(clock()).includes(coverage.day)) return {published:false,error:'报表日已超出15天窗口'};
+    if (!trafficDays(clock()).includes(coverage.day)) return {published:false,error:'报表日已超出30天窗口'};
     const owned = (await shops(key)).filter(s => String(s.store_id) === String(run.store_id));
     if (owned.length !== 1) throw error('店铺分析ID（ozon_client_id）缺失或重复，请在店铺管理核对本店Client ID，再回到流量监控补采；未保存每日数据',409);
     const shop = owned[0];
@@ -84,11 +84,11 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
   async function queue(body, tenantId, {createRun,loadRun,publishRun} = {}) {
     await ensureSchema();
     const key=tenant(tenantId), owned=await shops(key,body.shop_id), days=trafficDays(clock()), today=trafficToday(clock());
-    if(body.range_days!==undefined&&![1,7,15].includes(Number(body.range_days)))throw error('补采范围请选择1天、7天或15天');
+    if(body.range_days!==undefined&&![1,7,15,30].includes(Number(body.range_days)))throw error('补采范围请选择1天、7天、15天或30天');
     if(body.date&&body.range_days!==undefined)throw error('请选择补采单日或补齐区间');
     const target=body.date?[dayInWindow(body.date)]:body.range_days?[...days.slice(-Number(body.range_days))].reverse():[...days].reverse();
     const missingOnly=body.missing_only===true||String(body.missing_only)==='1';
-    const result={queued:[],waiting:[],skipped:0};
+    const result={queued:[],waiting:[],completed:[],skipped:0};
     for(const shop of owned) {
       if(!String(shop.store_id||'').trim()) continue;
       const states=await query("SELECT *,DATE_FORMAT(date_key,'%Y-%m-%d') date_key FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id=? AND date_key>=?",[key,shop.id,days[0]]);
@@ -101,10 +101,10 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
         else {await execute("UPDATE seller_sku_traffic_days SET status='failed',message=? WHERE tenant_id=? AND shop_id=? AND date_key=? AND run_id=?",['采集失败或任务已失效，等待补采',key,shop.id,state.date_key,state.run_id]);state.status='failed';}
       }
       for(const day of target) {
-        if(pending+added>=3)break;
         const state=byDay.get(day), recent=days.slice(-3).includes(day);
         if(state?.status==='pending'&&(clock().getTime()-new Date(state.requested_at).getTime()<300000||!state.run_id?.startsWith('reserve:')))continue;
-        if(missingOnly&&state?.status==='complete'){result.skipped++;continue;}
+        if(missingOnly&&state?.status==='complete'){result.skipped++;result.completed.push({shop_id:shop.id,day,last_success_at:state.last_success_at});continue;}
+        if(pending+added>=3)break;
         if(!missingOnly&&!body.date&&(state?.status==='complete'||state?.status==='partial'&&state.product_count!==null)&&(!recent||trafficToday(new Date(state.last_success_at||state.requested_at))===today)){result.skipped++;continue;}
         const reservation='reserve:'+randomUUID(), requested=sqlTime(clock());
         const reserved=await transaction(async connection=>{
@@ -126,6 +126,16 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     }
     return result;
   }
+  async function readCoverage(key,ids,days,includeProgress){
+    const marks=ids.map(()=>'?').join(',');
+    const coverage=await query(`SELECT shop_id,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,status,message,last_success_at,product_count,run_id FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? ORDER BY shop_id,date_key`,[key,...ids,days[0],days.at(-1)]);
+    const runIds=[...new Set(coverage.map(day=>day.run_id).filter(id=>id&&!id.startsWith('reserve:')))];
+    if(includeProgress&&runIds.length){
+      const progress=await query(`SELECT p.*,CASE WHEN JSON_VALID(s.value) THEN JSON_EXTRACT(s.value,'$.collector_instance_ids') ELSE NULL END collector_instance_ids FROM (SELECT run_id,COUNT(*) total_requests,SUM(status='success') completed_requests,SUM(status='failed') failed_requests,SUM(status='running' AND claimed_at>=?) active_requests,SUM(status='running' AND (claimed_at IS NULL OR claimed_at<?)) stale_requests,SUM(status='cancelled') cancelled_requests FROM seller_analytics_collect_requests WHERE tenant_id=? AND run_id IN(${runIds.map(()=>'?').join(',')}) GROUP BY run_id) p LEFT JOIN settings s ON s.tenant_id=? AND s.\`key\`=CONCAT('seller_analytics_collect_run:',p.run_id)`,[sqlTime(new Date(clock().getTime()-COLLECT_REQUEST_STALE_MS)),sqlTime(new Date(clock().getTime()-COLLECT_REQUEST_STALE_MS)),key,...runIds,key]);
+      for(const day of coverage){const row=progress.find(p=>p.run_id===day.run_id);if(row){let instances=[];try{instances=typeof row.collector_instance_ids==='string'?JSON.parse(row.collector_instance_ids):row.collector_instance_ids||[];}catch{};day.progress={total_requests:Number(row.total_requests),completed_requests:Number(row.completed_requests),failed_requests:Number(row.failed_requests),active_requests:Number(row.active_requests),stale_requests:Number(row.stale_requests),cancelled_requests:Number(row.cancelled_requests),collector_instance_ids:Array.isArray(instances)?instances:[]};}}
+    }
+    return coverage;
+  }
   async function read(body={},tenantId) {
     await ensureSchema();
     const key=tenant(tenantId),owned=await shops(key,body.shop_id),days=trafficDays(clock()),options=normalizeTrafficMonitorQuery(body);
@@ -137,6 +147,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     const ids=owned.map(s=>s.id);
     if(!ids.length)return{rows:[],total:0,shops:[],coverage:[],days,date:requestedDate||days.at(-1),latest_available_date:null,report_end_date:days.at(-1),selected_count:0,page,pageSize};
     const marks=ids.map(()=>'?').join(',');
+    if(String(body.metadata_only)==='1')return {shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),days,date:requestedDate||days.at(-1),report_end_date:days.at(-1),coverage:await readCoverage(key,ids,days,true)};
     const dayCounts=await query(`SELECT DATE_FORMAT(date_key,'%Y-%m-%d') date_key,COUNT(*) sku_count FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? GROUP BY date_key ORDER BY date_key`,[key,...ids,days[0],days.at(-1)]);
     const latest=dayCounts.at(-1)?.date_key||null,date=requestedDate||(body.date_mode==='latest_report_day'?days.at(-1):latest)||days.at(-1),fromDate=[days[0],shiftTrafficDate(date,1-options.rangeDays)].sort().at(-1);
     const seriesDays=days.filter(day=>day>=fromDate&&day<=date);
@@ -178,7 +189,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
       inventory=await query(`SELECT DISTINCT sm.shop_id,sm.ozon_sku,ip.id,ip.name,ip.code,ip.inventory_number ${inventoryFrom} AND (${bindingFilter})`,pairs);
     }
     const details=new Map(metadata.map(p=>[`${p.shop_id}:${p.ozon_sku}`,p]));
-    const coverage=await query(`SELECT shop_id,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,status,message,last_success_at,product_count,run_id FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? ORDER BY shop_id,date_key`,[key,...ids,days[0],days.at(-1)]);
+    const coverage=await readCoverage(key,ids,days,String(body.include_progress)==='1');
     return {rows:products.map(p=>{
       const observed=history.filter(r=>r.shop_id===p.shop_id&&r.sku===p.sku),byDay=new Map(observed.map(r=>[r.date_key,r]));
       const series=includeSeries&&!matrix?dailyTrafficSeries(days,observed):[],info=details.get(`${p.shop_id}:${p.sku}`)||{};

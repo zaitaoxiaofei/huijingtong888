@@ -13,7 +13,7 @@ export function trafficDerivedMetrics(row={}) {
 export function normalizeTrafficMonitorQuery(body={}) {
   const invalid=message=>{throw Object.assign(new Error(message),{statusCode:400});};
   const rangeDays=Number(body.range_days||15);
-  if(![1,7,15].includes(rangeDays))invalid('统计范围请选择1天、7天或15天');
+  if(![1,7,15,30].includes(rangeDays))invalid('统计范围请选择1天、7天、15天或30天');
   const metricKeys=new Set(SKU_TRAFFIC_OPERATION_METRICS.map(([key])=>key));
   const sort=String(body.sort_key||'total_views'),direction=String(body.sort_order||'desc');
   if(!metricKeys.has(sort)||!['asc','desc'].includes(direction))invalid('请选择有效的运营指标和排序方向');

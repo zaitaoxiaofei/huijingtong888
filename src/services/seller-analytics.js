@@ -1,5 +1,5 @@
 import {skuTrafficDaily} from './sku-traffic-daily.js';
-import {dailyTrafficCoverage, SKU_TRAFFIC_METRICS} from '../shared/sku-traffic-daily.js';
+import {dailyTrafficCoverage, SKU_TRAFFIC_METRICS, COLLECT_REQUEST_STALE_MS} from '../shared/sku-traffic-daily.js';
 import crypto from "node:crypto";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import {
@@ -16,7 +16,6 @@ const PLUGIN_STATUS_SETTING_KEY = 'seller_analytics_plugin_status'
 const PLUGIN_PREPARE_SETTING_KEY = 'seller_analytics_plugin_prepare'
 const DEFAULT_COLLECT_SOURCE_KEYS = TAB_KEYS
 const DEFAULT_PAGE_LIMIT = 30
-const COLLECT_REQUEST_STALE_MS = 120000
 const DEFAULT_AUTO_COLLECT_MAX_PAGES = 500
 const PLUGIN_STATUS_STALE_MS = 45000
 const DIRECT_COLLECT_BATCH_SIZE = 9
@@ -2702,6 +2701,8 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
         period_key: run.period_key,
         page_url: payload.page_url || payload.pageUrl
       }, tenantId)
+      const collector=normalizePluginInstanceId(payload.plugin_instance_id);
+      if(collector)run.collector_instance_ids=[...new Set([...(run.collector_instance_ids||[]),collector])].slice(-8);
       request.status = 'success'
       request.snapshot_id = snapshotResult.snapshot.id
       request.returned_count = responseItemCount(payload.response_body || payload.responseBody || payload.data)
@@ -4872,6 +4873,12 @@ export async function publishSkuTrafficDailyRun(run, tenantId = 'admin') {
 }
 
 export async function queueSkuTrafficDaily(body = {}, tenantId = 'admin') {
+  if(body.browser_instance_id){
+    const selected=await skuTrafficDaily.shops(tenantId,body.shop_id);
+    if(selected.length!==1||body.shop_id==='all')throw Object.assign(new Error('请先选择本机插件已识别的一家店铺'),{statusCode:400});
+    const validation=await validatePluginStatus(sellerAnalyticsDb,{plugin_instance_id:body.browser_instance_id,store_id:String(selected[0].store_id)},tenantId);
+    if(!validation.ok)throw Object.assign(new Error(validation.message+' '+(validation.detail||'')),{statusCode:409});
+  }
   return skuTrafficDaily.queue(body,tenantId,{
     createRun:(payload,key)=>createCollectRun(sellerAnalyticsDb,payload,key),
     loadRun:(id,key)=>loadCollectRunState(sellerAnalyticsDb,id,key),
@@ -4885,7 +4892,7 @@ export async function queueAllSkuTrafficDaily() {
   const results=[]
   for (const tenant of tenants) {
     const key=tenant.slug==='default'?'admin':String(tenant.id)
-    try {const result=await queueSkuTrafficDaily({},key);results.push({tenant_id:tenant.id,queued:result.queued.length,waiting:result.waiting.length})}
+    try {const result=await queueSkuTrafficDaily({missing_only:true},key);results.push({tenant_id:tenant.id,queued:result.queued.length,waiting:result.waiting.length})}
     catch(e){results.push({tenant_id:tenant.id,error:e.message})}
   }
   const cleanup=await skuTrafficDaily.cleanup()

@@ -9,7 +9,7 @@ const run=(requests=[page(0,1)])=>({id:'r',store_id:'s',status:'success',daily_t
 
 test('retention uses Beijing calendar days and rejects invalid dates',()=>{
  assert.equal(trafficToday(new Date('2026-11-05T16:01:00Z')),'2026-11-06');
- const days=trafficDays(new Date('2026-11-05T16:01:00Z'));assert.equal(days.length,15);assert.equal(days[0],'2026-10-22');assert.equal(days.at(-1),'2026-11-05');
+ const days=trafficDays(new Date('2026-11-05T16:01:00Z'));assert.equal(days.length,30);assert.equal(days[0],'2026-10-07');assert.equal(days.at(-1),'2026-11-05');
  for(const value of ['2026-02-30','2026-99-99','today',''])assert.equal(trafficDate(value),'');
 });
 test('only a fully completed single-day SKU chain can publish, including a proven empty day',()=>{

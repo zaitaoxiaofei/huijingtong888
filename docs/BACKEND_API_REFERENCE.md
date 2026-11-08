@@ -2301,15 +2301,17 @@ Read current-enterprise daily SKU traffic for the last 15 complete report dates.
   - `shop_id` (`string`, optional): Owned shop ID or all
   - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to latest available owned-shop date, or yesterday if no facts; explicit missing dates stay missing
   - `date_mode` (`string`, optional): Optional latest_report_day anchors the range to yesterday, preserving recent gaps; absent retains legacy latest-available behavior
-  - `range_days` (`number`, optional): 1, 7 or 15 (default 15), ending on date and clamped to retention
+  - `range_days` (`number`, optional): 1, 7, 15 or 30 (default 15), ending on date and clamped to retention
   - `query` (`string`, optional): Search text
   - `search_by` (`string`, optional): all, sku, offer_id, inventory_id (strict numeric ID, always exact), inventory, inventory_name or product_name; inventory uses verified current-enterprise direct/combo bindings
   - `exact` (`number`, optional): 1 for exact match, otherwise contains
   - `sort_key` (`string`, optional): Daily metric key, detail_view_rate, search_share (search/total), or pdp_order_rate (ordered units/detail views); default total_views
   - `sort_order` (`string`, optional): asc or desc; null values last
   - `filters` (`string`, optional): JSON array of at most eight AND rules: metric, op (gt/gte/lt/lte/eq), value. Filtered and sorted before pagination. Count metrics sum observed days; multi-day rates use count-weighted ratios; available_days identifies missing calendar dates
+  - `metadata_only` (`number`, optional): 1 returns only owned shops, 30 report dates and daily queue/publication status, without SKU reads
+  - `include_progress` (`number`, optional): 1 attaches SQL request counters (including stale/cancelled work) and available browser attribution to daily coverage; completed requests do not imply published daily data
   - `include_series` (`number`, optional): 0 omits histories; default 1
-  - `series_format` (`string`, optional): object (default) retains 15-day series; matrix shares series_days and series_columns once per page and returns each SKU trend_values as numeric arrays/null for the selected range, enabling one inline chart per SKU without per-row requests
+  - `series_format` (`string`, optional): object (default) retains 30-day series; matrix shares series_days and series_columns once per page and returns each SKU trend_values as numeric arrays/null for the selected range, enabling one inline chart per SKU without per-row requests
   - `page` (`number`, optional): 1-based page
   - `pageSize` (`number`, optional): At most 100
 - Responses:
@@ -2320,7 +2322,7 @@ Read current-enterprise daily SKU traffic for the last 15 complete report dates.
 
 #### `POST /api/db/seller-analytics/sku-daily/collect`
 
-Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 15 report dates.
+Queue single-day full-store collection using the existing plugin. At most three pending days per shop; recent dates are refreshed once per day and older gaps are filled. Queue acceptance is not collection completion. Original pages are retained for one day; compact daily facts for 30 report dates.
 
 - Auth: `authenticated`
 - Request body: required
