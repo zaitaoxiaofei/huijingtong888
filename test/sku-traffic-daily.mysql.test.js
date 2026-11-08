@@ -20,6 +20,10 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
   await query('CREATE TABLE tenants(id BIGINT PRIMARY KEY,slug VARCHAR(80),status VARCHAR(32),subscription_status VARCHAR(32),subscription_expires_at DATETIME)');
   await query('CREATE TABLE shops(id BIGINT PRIMARY KEY,tenant_id BIGINT NULL,name VARCHAR(255),status VARCHAR(32),ozon_client_id VARCHAR(80))');
   await query('CREATE TABLE online_products(shop_id BIGINT,ozon_sku VARCHAR(128) COLLATE utf8mb4_0900_ai_ci,name VARCHAR(255),image_url TEXT,offer_id VARCHAR(255),PRIMARY KEY(shop_id,ozon_sku))');
+  await query('CREATE TABLE products(id BIGINT PRIMARY KEY,tenant_id BIGINT NULL,name VARCHAR(255),code VARCHAR(128),inventory_number VARCHAR(64),active TINYINT DEFAULT 1)');
+  await query('CREATE TABLE sku_mappings(id BIGINT PRIMARY KEY,tenant_id BIGINT NULL,shop_id BIGINT,ozon_sku VARCHAR(128),product_id BIGINT,active TINYINT DEFAULT 1)');
+  await query("CREATE TABLE sku_inventory_recipes(id BIGINT PRIMARY KEY,shop_id BIGINT,ozon_sku VARCHAR(128),mode VARCHAR(32),active TINYINT DEFAULT 1)");
+  await query('CREATE TABLE sku_inventory_recipe_items(recipe_id BIGINT,product_id BIGINT)');
   await query("INSERT INTO tenants VALUES(1,'default','active','active',NULL),(2,'second','active','active',NULL),(3,'expired','active','expired',NULL)");
   await query("INSERT INTO shops VALUES(11,NULL,'Default shop','active','111111'),(22,2,'Second shop','active','222222'),(33,3,'Expired shop','active','333333')");
   await query("INSERT INTO online_products VALUES(11,'same','Original shared product metadata','https://example.test/image.jpg','offer1'),(22,'same','Other tenant metadata',NULL,'other-offer')");
@@ -48,6 +52,35 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    const rows=await query('SELECT sku,total_views FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id=? AND date_key=?',['admin',11,day]);assert.equal(rows.length,1);assert.equal(Number(rows[0].total_views),50);
    const read=await service.read({shop_id:11},'admin');assert.equal(read.rows[0].product_name,'Original shared product metadata');assert.equal(read.rows[0].selected.total_views,'50.0000');assert.equal(read.rows[0].series.length,15);
    const columns=await query("SELECT COLUMN_NAME name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME='seller_sku_traffic_daily'",[database]);for(const name of ['product_name','image_url','raw_data','response_body'])assert.equal(columns.some(c=>c.name===name),false);
+  });
+  await t.test('default date follows actual available data while explicit missing days remain missing',async()=>{
+   const later=createSkuTrafficDailyService({query,execute,transaction,clock:()=>new Date(shiftTrafficDate(day,2)+'T01:00:00Z')});
+   const automatic=await later.read({shop_id:11,pageSize:1},'admin');
+   assert.equal(automatic.date,day);assert.equal(automatic.latest_available_date,day);assert.equal(automatic.report_end_date,shiftTrafficDate(day,1));assert.equal(automatic.selected_count,1);assert.equal(automatic.rows[0].selected.available,true);
+   const pinned=await later.read({shop_id:11,date:shiftTrafficDate(day,1)},'admin');
+   assert.equal(pinned.date,shiftTrafficDate(day,1));assert.equal(pinned.selected_count,0);assert.equal(pinned.rows[0].selected.available,false);assert.equal(pinned.rows[0].selected.total_views,null);
+   const searched=await later.read({shop_id:11,query:'Original shared'},'admin');assert.equal(searched.total,1);assert.equal(searched.rows[0].product_name,'Original shared product metadata');
+   assert.equal((await later.read({shop_id:11,query:'no matching product'},'admin')).total,0);
+  });
+  await t.test('operational AND filters and sorting run before pagination; exact inventory links stay tenant scoped',async()=>{
+   const previous=shiftTrafficDate(day,-1);
+   await query("INSERT INTO products(id,tenant_id,name,code,inventory_number) VALUES(123,NULL,'Local inventory','P123','INV-123'),(124,1,'Combo component','P124','INV-124'),(999,2,'Foreign secret inventory','FOREIGN','INV-123')");
+   await query("INSERT INTO sku_mappings(id,tenant_id,shop_id,ozon_sku,product_id) VALUES(1,NULL,11,'potential',123),(2,1,11,'weak',123),(3,2,11,'same',999)");
+   await query("INSERT INTO sku_inventory_recipes VALUES(1,11,'weak','combo',1)");
+   await query('INSERT INTO sku_inventory_recipe_items VALUES(1,124),(1,999)');
+   for(const [sku,date,views,orders] of [['potential',day,10,1],['potential',previous,5,1],['weak',day,100,0],['missing',day,null,1]])await query('INSERT INTO seller_sku_traffic_daily(tenant_id,shop_id,sku,date_key,total_views,search_views,pdp_views,total_hits_to_cart,ordered_units,conv_views_to_order,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP())',['admin',11,sku,date,views,views,3,2,orders,views?orders/views*100:null]);
+   const filters=JSON.stringify([{metric:'conv_views_to_order',op:'gt',value:8},{metric:'total_views',op:'lt',value:20}]);
+   const result=await service.read({shop_id:11,date:day,range_days:7,filters,pageSize:1,sort_key:'total_views'},'admin');
+   assert.equal(result.total,1);assert.equal(result.rows[0].sku,'potential');assert.equal(Number(result.rows[0].summary.total_views),15);assert.equal(Number(result.rows[0].summary.ordered_units),2);assert.ok(Math.abs(Number(result.rows[0].summary.conv_views_to_order)-100*2/15)<0.0001);assert.equal(Number(result.rows[0].summary.available_days),2);
+   assert.deepEqual(result.rows[0].inventory.map(p=>p.id),[123]);
+   const brief=await service.read({shop_id:11,date:day,range_days:7,filters,include_series:0},'admin');assert.equal(brief.rows[0].series.length,0);assert.equal(Number(brief.rows[0].summary.total_views),15);
+   const detail=await service.read({shop_id:11,date:day,range_days:7,query:'potential',search_by:'sku',exact:1,include_series:1,pageSize:1},'admin');assert.equal(detail.rows.length,1);assert.equal(detail.rows[0].series.length,15);
+   const sorted=await service.read({shop_id:11,date:day,range_days:1,sort_key:'total_views',sort_order:'desc',pageSize:1},'admin');assert.equal(sorted.rows[0].sku,'weak');assert.deepEqual(sorted.rows[0].inventory.map(p=>p.id),[124]);
+   for(const [search_by,text] of [['sku','potential'],['inventory','INV-123'],['inventory','123'],['inventory_name','Local inventory']]){const exact=await service.read({shop_id:11,date:day,query:text,search_by,exact:1},'admin');assert.equal(exact.total,1);assert.equal(exact.rows[0].sku,'potential');}
+   assert.equal((await service.read({shop_id:11,date:day,query:'Foreign secret inventory',search_by:'inventory_name',exact:1},'admin')).total,0);
+   await assert.rejects(service.read({shop_id:11,sort_key:'total_views;DROP TABLE products'},'admin'),/有效/);
+   await assert.rejects(service.read({shop_id:11,filters:'[{"metric":"unknown","op":"gt","value":1}]'},'admin'),/不支持/);
+   await query("DELETE FROM seller_sku_traffic_daily WHERE tenant_id='admin' AND shop_id=11 AND sku IN('potential','weak','missing')");
   });
   await t.test('partial pagination, duplicate SKUs and late results preserve the successful day',async()=>{
    await reserve('partial');const r=makeRun('partial');r.requests[0].returned_count=100;assert.equal((await service.publish(r,'admin',[])).published,false);

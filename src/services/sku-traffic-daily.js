@@ -1,5 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {mysqlQuery, mysqlExecute, withMysqlTransaction} from '../mysql-pool.js';
+import {normalizeTrafficMonitorQuery} from '../shared/sku-traffic-monitor-query.js';
 import {SKU_TRAFFIC_DAILY_SCHEMA, inspectSkuTrafficDailySchema} from './sku-traffic-daily-schema.js';
 import {SKU_TRAFFIC_METRICS, trafficToday, trafficDays, trafficDate, shiftTrafficDate, dailyTrafficCoverage, normalizeDailyTrafficMetric, dailyTrafficSeries} from '../shared/sku-traffic-daily.js';
 const metricKeys = SKU_TRAFFIC_METRICS.map(([key]) => key);
@@ -122,20 +123,54 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
   }
   async function read(body={},tenantId) {
     await ensureSchema();
-    const key=tenant(tenantId),owned=await shops(key,body.shop_id),days=trafficDays(clock()),date=dayInWindow(body.date||days.at(-1));
+    const key=tenant(tenantId),owned=await shops(key,body.shop_id),days=trafficDays(clock()),options=normalizeTrafficMonitorQuery(body);
+    const requestedDate=body.date?dayInWindow(body.date):null,includeSeries=body.include_series!==false&&String(body.include_series)!=='0';
     const page=Math.min(100000,Math.max(1,Math.floor(Number(body.page)||1))),pageSize=Math.min(100,Math.max(1,Math.floor(Number(body.pageSize)||30)));
-    const ids=owned.map(s=>s.id);if(!ids.length)return{rows:[],total:0,shops:[],coverage:[],days,date,page,pageSize};
-    const scope=`d.tenant_id=? AND d.shop_id IN(${ids.map(()=>'?').join(',')}) AND d.date_key>=? AND d.date_key<=?`;
-    const keyword=String(body.query||'').trim().slice(0,128),params=[key,...ids,days[0],days.at(-1)];
-    const search=keyword?' AND (d.sku LIKE ? OR p.name LIKE ? OR p.offer_id LIKE ?)':'';
-    if(keyword)params.push(...Array(3).fill('%'+keyword+'%'));
-    const from=`FROM seller_sku_traffic_daily d LEFT JOIN online_products p ON p.shop_id=d.shop_id AND p.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci WHERE ${scope}${search}`;
-    const [count]=await query(`SELECT COUNT(DISTINCT d.shop_id,d.sku) total ${from}`,params);
-    const products=await query(`SELECT d.shop_id,d.sku,MAX(p.name) product_name,MAX(p.image_url) image_url,MAX(p.offer_id) offer_id,DATE_FORMAT(MAX(d.date_key),'%Y-%m-%d') latest_day ${from} GROUP BY d.shop_id,d.sku ORDER BY d.shop_id,d.sku LIMIT ? OFFSET ?`,[...params,pageSize,(page-1)*pageSize]);
-    let history=[];
-    if(products.length){const filter=products.map(()=>'(shop_id=? AND sku=?)').join(' OR ');history=await query(`SELECT shop_id,sku,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,${metricKeys.join(',')},updated_at FROM seller_sku_traffic_daily WHERE tenant_id=? AND date_key>=? AND date_key<=? AND (${filter}) ORDER BY date_key`,[key,days[0],days.at(-1),...products.flatMap(p=>[p.shop_id,p.sku])]);}
-    const coverage=await query(`SELECT shop_id,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,status,message,last_success_at,product_count,run_id FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id IN(${ids.map(()=>'?').join(',')}) AND date_key>=? AND date_key<=? ORDER BY shop_id,date_key`,[key,...ids,days[0],days.at(-1)]);
-    return {rows:products.map(p=>{const series=dailyTrafficSeries(days,history.filter(r=>r.shop_id===p.shop_id&&r.sku===p.sku));return{...p,shop_name:owned.find(s=>s.id===p.shop_id)?.name,series,selected:series.find(s=>s.date_key===date),previous:series.find(s=>s.date_key===shiftTrafficDate(date,-1))||null};}),total:Number(count.total),shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),coverage,days,date,page,pageSize};
+    const ids=owned.map(s=>s.id);
+    if(!ids.length)return{rows:[],total:0,shops:[],coverage:[],days,date:requestedDate||days.at(-1),latest_available_date:null,report_end_date:days.at(-1),selected_count:0,page,pageSize};
+    const marks=ids.map(()=>'?').join(',');
+    const dayCounts=await query(`SELECT DATE_FORMAT(date_key,'%Y-%m-%d') date_key,COUNT(*) sku_count FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? GROUP BY date_key ORDER BY date_key`,[key,...ids,days[0],days.at(-1)]);
+    const latest=dayCounts.at(-1)?.date_key||null,date=requestedDate||latest||days.at(-1),fromDate=[days[0],shiftTrafficDate(date,1-options.rangeDays)].sort().at(-1);
+    const inventoryFrom=`FROM sku_mappings sm JOIN shops bs ON bs.id=sm.shop_id JOIN tenants bt ON (bt.id=bs.tenant_id OR (bs.tenant_id IS NULL AND bt.slug='default'))
+      LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id=sm.shop_id AND recipe.ozon_sku=sm.ozon_sku AND recipe.active=1 AND recipe.mode='combo'
+      LEFT JOIN sku_inventory_recipe_items recipe_item ON recipe_item.recipe_id=recipe.id
+      JOIN products ip ON ip.id=COALESCE(recipe_item.product_id,sm.product_id) AND ip.active=1
+        AND (ip.tenant_id=bt.id OR (bt.slug='default' AND ip.tenant_id IS NULL))
+      WHERE sm.active=1 AND (sm.tenant_id=bt.id OR (bt.slug='default' AND sm.tenant_id IS NULL))`;
+    const where=[`d.tenant_id=? AND d.shop_id IN(${marks}) AND d.date_key>=? AND d.date_key<=?`],params=[key,...ids,fromDate,date];
+    if(options.keyword){
+      const op=options.exact?'=':'LIKE',value=options.exact?options.keyword:'%'+options.keyword+'%',terms=[];
+      if(['all','sku'].includes(options.searchBy)){terms.push(`d.sku ${op} ?`);params.push(value);}
+      const fields=options.searchBy==='offer_id'?['p.offer_id']:options.searchBy==='product_name'?['p.name']:options.searchBy==='all'?['p.offer_id','p.name']:[];
+      if(fields.length){terms.push(`EXISTS(SELECT 1 FROM online_products p WHERE p.shop_id=d.shop_id AND p.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci AND (${fields.map(f=>`${f} ${op} ?`).join(' OR ')}))`);params.push(...fields.map(()=>value));}
+      if(['all','inventory','inventory_name'].includes(options.searchBy)){
+        const inventoryFields=options.searchBy==='inventory_name'?['ip.name']:options.searchBy==='inventory'?['ip.inventory_number','ip.code','CAST(ip.id AS CHAR)']:['ip.name','ip.inventory_number','ip.code','CAST(ip.id AS CHAR)'];
+        terms.push(`EXISTS(SELECT 1 ${inventoryFrom} AND sm.shop_id=d.shop_id AND sm.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci AND (${inventoryFields.map(f=>`${f} ${op} ?`).join(' OR ')}))`);params.push(...inventoryFields.map(()=>value));
+      }
+      where.push('('+terms.join(' OR ')+')');
+    }
+    const sum=metric=>`CASE WHEN COUNT(d.${metric})=COUNT(*) THEN SUM(d.${metric}) ELSE NULL END`;
+    const ratio=(numerator,denominator,official)=>`${official?`CASE WHEN COUNT(*)=1 THEN MAX(d.${official}) ELSE `:''}CASE WHEN COUNT(d.${numerator})=COUNT(*) AND COUNT(d.${denominator})=COUNT(*) AND SUM(d.${denominator})>0 THEN SUM(d.${numerator})/SUM(d.${denominator})*100 ELSE NULL END${official?' END':''}`;
+    const counts=['total_views','search_views','pdp_views','total_hits_to_cart','ordered_units'];
+    const metrics=[...counts.map(k=>`${sum(k)} ${k}`),`${ratio('ordered_units','total_views','conv_views_to_order')} conv_views_to_order`,`${ratio('total_hits_to_cart','total_views','conv_total_views_to_cart')} conv_total_views_to_cart`,`${ratio('ordered_units','total_hits_to_cart','conv_hits_to_cart_to_order')} conv_hits_to_cart_to_order`,`${ratio('pdp_views','total_views')} detail_view_rate`];
+    const grouped=`SELECT d.shop_id,d.sku,DATE_FORMAT(MAX(d.date_key),'%Y-%m-%d') latest_day,COUNT(*) available_days,${metrics.join(',')} FROM seller_sku_traffic_daily d WHERE ${where.join(' AND ')} GROUP BY d.shop_id,d.sku`;
+    const operators={gt:'>',gte:'>=',lt:'<',lte:'<=',eq:'='};
+    const conditions=options.filters.map(rule=>`q.\`${rule.metric}\` ${operators[rule.op]} ?`).join(' AND ')||'1=1';
+    const filteredParams=[...params,...options.filters.map(rule=>rule.value)];
+    const [count]=await query(`SELECT COUNT(*) total FROM (${grouped}) q WHERE ${conditions}`,filteredParams);
+    const products=await query(`SELECT q.* FROM (${grouped}) q WHERE ${conditions} ORDER BY (q.\`${options.sort}\` IS NULL),q.\`${options.sort}\` ${options.direction.toUpperCase()},q.shop_id,q.sku LIMIT ? OFFSET ?`,[...filteredParams,pageSize,(page-1)*pageSize]);
+    let history=[],metadata=[],inventory=[];
+    if(products.length){
+      const pairs=products.flatMap(p=>[p.shop_id,p.sku]),filter=products.map(()=>'(shop_id=? AND sku=?)').join(' OR ');
+      if(includeSeries)history=await query(`SELECT shop_id,sku,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,${metricKeys.join(',')},updated_at FROM seller_sku_traffic_daily WHERE tenant_id=? AND date_key>=? AND date_key<=? AND (${filter}) ORDER BY date_key`,[key,days[0],days.at(-1),...pairs]);
+      const metadataFilter=products.map(()=>'(shop_id=? AND ozon_sku=? COLLATE utf8mb4_0900_ai_ci)').join(' OR ');
+      metadata=await query(`SELECT shop_id,ozon_sku,MAX(name) product_name,MAX(image_url) image_url,MAX(offer_id) offer_id FROM online_products WHERE ${metadataFilter} GROUP BY shop_id,ozon_sku`,pairs);
+      const bindingFilter=products.map(()=>'(sm.shop_id=? AND sm.ozon_sku=? COLLATE utf8mb4_0900_ai_ci)').join(' OR ');
+      inventory=await query(`SELECT DISTINCT sm.shop_id,sm.ozon_sku,ip.id,ip.name,ip.code,ip.inventory_number ${inventoryFrom} AND (${bindingFilter})`,pairs);
+    }
+    const details=new Map(metadata.map(p=>[`${p.shop_id}:${p.ozon_sku}`,p]));
+    const coverage=await query(`SELECT shop_id,DATE_FORMAT(date_key,'%Y-%m-%d') date_key,status,message,last_success_at,product_count,run_id FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? ORDER BY shop_id,date_key`,[key,...ids,days[0],days.at(-1)]);
+    return {rows:products.map(p=>{const series=includeSeries?dailyTrafficSeries(days,history.filter(r=>r.shop_id===p.shop_id&&r.sku===p.sku)):[],info=details.get(`${p.shop_id}:${p.sku}`)||{};return{shop_id:p.shop_id,sku:p.sku,latest_day:p.latest_day,summary:Object.fromEntries([...counts,'conv_views_to_order','conv_total_views_to_cart','conv_hits_to_cart_to_order','detail_view_rate','available_days'].map(k=>[k,p[k]??null])),inventory:inventory.filter(i=>i.shop_id===p.shop_id&&i.ozon_sku===p.sku).map(({id,name,code,inventory_number})=>({id,name,code,inventory_number})),product_name:info.product_name||null,image_url:info.image_url||null,offer_id:info.offer_id||null,shop_name:owned.find(s=>s.id===p.shop_id)?.name,series,selected:series.find(s=>s.date_key===date),previous:series.find(s=>s.date_key===shiftTrafficDate(date,-1))||null};}),total:Number(count.total),shops:owned.map(s=>({id:s.id,name:s.name,store_id:String(s.store_id||'')})),coverage,days,date,range_days:options.rangeDays,range_from:fromDate,latest_available_date:latest,report_end_date:days.at(-1),selected_count:Number(dayCounts.find(d=>d.date_key===date)?.sku_count||0),page,pageSize};
   }
   async function cleanup() {
     await ensureSchema();const oldest=trafficDays(clock())[0];

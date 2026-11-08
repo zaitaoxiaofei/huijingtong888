@@ -632,19 +632,61 @@ async function probeServerSideAuth(companyId = '', sellerTab = null) {
   return result;
 }
 
+function compactDailyTrafficResult(request, payload) {
+  if (request.daily_traffic !== true || request.endpoint_type !== 'by_sku') return payload;
+  const status = Number(payload.response_status || 0);
+  if (payload.success === false || status >= 400) return { compact_daily_v1: true, success: false, response_status: status, error: String(payload.error || `HTTP ${status}`).slice(0, 512) };
+  const parse = value => typeof value === 'string' ? JSON.parse(value) : value;
+  const planned = request.request_body?.current_period;
+  const observed = parse(payload.request_body)?.current_period;
+  if (!planned?.date_from || planned.date_from !== planned.date_to || observed?.date_from !== planned.date_from || observed?.date_to !== planned.date_to) throw new Error('每日采集实际日期未确认，未上传日指标');
+  const company = String(Object.entries(payload.request_headers || {}).find(([key]) => key.toLowerCase() === 'x-o3-company-id')?.[1] || '');
+  if (!company || company !== String(request.store_id || request.company_id || '') || (payload.current_company_id && String(payload.current_company_id) !== company) || (payload.verified_company_id && String(payload.verified_company_id) !== company)) throw new Error('每日采集实际店铺未对齐，未上传日指标');
+  const body = parse(payload.response_body);
+  const sourceItems = body?.items || body?.result?.items;
+  if (status !== 200 || !Array.isArray(sourceItems)) throw new Error('每日SKU响应结构不完整，未上传空日数据');
+  const keys = ['total_views','search_views','pdp_views','total_hits_to_cart','ordered_units','conv_views_to_order','conv_total_views_to_cart','conv_hits_to_cart_to_order'];
+  const seen = new Set();
+  const items = sourceItems.map(item => {
+    const sku = String(item.sku || item.productInfo?.sku || item.product_info?.sku || '').trim();
+    if (!sku || sku.length > 128 || seen.has(sku)) throw new Error('每日SKU编号缺失或重复，未上传该页');
+    seen.add(sku);
+    const input = item.metrics || item.metric || item;
+    const metrics = {};
+    for (const key of keys) {
+      const alias = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+      const value = Object.hasOwn(input, key) ? input[key] : input[alias];
+      const raw = value && typeof value === 'object' ? value.value : value;
+      if (raw === null || raw === undefined || raw === '') { metrics[key] = null; continue; }
+      if (!['number','string'].includes(typeof raw) || !String(raw).trim() || !Number.isFinite(Number(raw)) || Number(raw) < 0 || Number(raw) > 1e12) throw new Error('每日SKU指标不是有效非负数，未上传该页');
+      metrics[key] = Number(raw);
+    }
+    if (keys.every(key => metrics[key] === null)) throw new Error('每日SKU缺少所需指标，未上传该页');
+    return {sku, metrics};
+  });
+  const responseBody = {items};
+  const more = body.has_more ?? body.result?.has_more;
+  if (typeof more === 'boolean') responseBody.has_more = more;
+  if (body.nextOffset !== undefined && Number.isInteger(Number(body.nextOffset)) && Number(body.nextOffset) >= 0) responseBody.nextOffset = Number(body.nextOffset);
+  return {compact_daily_v1:true,success:true,response_status:200,response_body:responseBody,request_body:{current_period:{date_from:observed.date_from,date_to:observed.date_to}},request_headers:{'X-O3-Company-Id':company},current_company_id:payload.current_company_id,verified_company_id:payload.verified_company_id};
+}
+
 async function postCollectResult(request, payload) {
   const config = await getErpConfig();
   const headerSnapshot = takeHeaderSnapshot(payload.request_url || request.request_url, payload.request_method || request.request_method);
+  const wirePayload = compactDailyTrafficResult(request, {
+    ...payload,
+    request_headers: payload.request_headers || headerSnapshot?.request_headers,
+    response_headers: payload.response_headers || headerSnapshot?.response_headers,
+    response_status: payload.response_status || headerSnapshot?.response_status
+  });
   const response = await fetch(`${config.erpBaseUrl}/api/local-plugin/seller-analytics/collect-runs/${encodeURIComponent(request.run_id)}/requests/${encodeURIComponent(request.request_id)}/result`, {
     method: 'POST',
     headers: localPluginHeaders(config, {
       'Content-Type': 'application/json',
     }),
     body: JSON.stringify({
-      ...payload,
-      request_headers: payload.request_headers || headerSnapshot?.request_headers,
-      response_headers: payload.response_headers || headerSnapshot?.response_headers,
-      response_status: payload.response_status || headerSnapshot?.response_status,
+      ...wirePayload,
       tenant_id: config.tenantId
     })
   });
