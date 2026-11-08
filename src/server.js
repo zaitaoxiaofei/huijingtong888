@@ -13,6 +13,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import sharp from "sharp";
 import { config } from "./config.js";
+import {sellerAnalyticsPluginResultResponse} from './server/seller-analytics-plugin-result.js';
 import { resolveUploadSubdirRoots } from "./runtime-uploads.js";
 import { calculateCelFbsPricing } from "./celRates.js";
 import { mysqlRuntimeServices } from "./services/mysql-runtime-services.js";
@@ -1903,7 +1904,7 @@ async function handleLocalPluginRoute(req, res, parts) {
   ) {
     const body = await readJson(req);
     const result = await services.sellerAnalyticsFinishCollectRequest(decodeURIComponent(parts[4]), decodeURIComponent(parts[6]), body || {}, tenantId);
-    return localPluginJson(req, res, { success: true, data: result, ...result });
+    return localPluginJson(req, res, sellerAnalyticsPluginResultResponse(result, body?.compact_daily_v1 === true));
   }
 
   return false;

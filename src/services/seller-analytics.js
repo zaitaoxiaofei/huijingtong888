@@ -2383,6 +2383,7 @@ async function claimNextCollectRequest(db, tenantId = 'admin', options = {}) {
       request_method: request.request_method,
       request_headers: request.request_headers || {},
       request_body: request.request_body,
+      daily_traffic: run.daily_traffic === true,
       period_key: run.period_key,
       current_period: run.current_period,
       previous_period: run.previous_period
@@ -2454,6 +2455,7 @@ async function claimNextCollectRequests(db, tenantId = 'admin', limit = 6, optio
         request_method: request.request_method,
         request_headers: request.request_headers || {},
         request_body: request.request_body,
+        daily_traffic: run.daily_traffic === true,
         period_key: run.period_key,
         current_period: run.current_period,
         previous_period: run.previous_period
@@ -2505,9 +2507,12 @@ async function claimMysqlCollectRequests(tenantId, take, requestedStoreIds) {
     const runIds = Array.from(new Set(rows.map((row) => row.run_id)))
     await executeSellerAnalyticsSql(connection, `UPDATE seller_analytics_collect_runs SET status='running' WHERE id IN (${runIds.map(() => '?').join(',')})`, runIds)
     const [runs] = await executeSellerAnalyticsSql(connection, `
-      SELECT id, period_key, current_period_json, previous_period_json
-      FROM seller_analytics_collect_runs WHERE id IN (${runIds.map(() => '?').join(',')})
-    `, runIds)
+      SELECT r.id, r.period_key, r.current_period_json, r.previous_period_json,
+        JSON_UNQUOTE(JSON_EXTRACT(s.value,'$.daily_traffic')) daily_traffic
+      FROM seller_analytics_collect_runs r LEFT JOIN settings s
+        ON s.tenant_id=r.tenant_id AND s.\`key\`=CONCAT('seller_analytics_collect_run:',r.id)
+      WHERE r.tenant_id=? AND r.id IN (${runIds.map(() => '?').join(',')})
+    `, [tenantId, ...runIds])
     const runById = new Map(runs.map((run) => [run.id, run]))
     return rows.map((request) => {
       const run = runById.get(request.run_id) || {}
@@ -2524,6 +2529,7 @@ async function claimMysqlCollectRequests(tenantId, take, requestedStoreIds) {
         request_method: request.request_method,
         request_headers: parseJson(request.request_headers_json, {}) || {},
         request_body: parseJson(request.request_body_json, {}) || {},
+        daily_traffic: run.daily_traffic === 'true',
         period_key: run.period_key,
         current_period: parseJson(run.current_period_json, {}) || {},
         previous_period: parseJson(run.previous_period_json, {}) || {}
@@ -2680,6 +2686,7 @@ async function finishCollectRequest(db, runId, requestId, payload = {}, tenantId
         source_context: {
           collection_run_id: run.id,
           collection_request_id: request.id,
+          daily_wire_version: run.daily_traffic && payload.compact_daily_v1 === true ? 1 : 0,
           endpoint_type: request.endpoint_type,
           page_index: request.page_index || 0,
           inferredFrom: 'erp_collect_plan'
@@ -4848,6 +4855,10 @@ export async function publishSkuTrafficDailyRun(run, tenantId = 'admin') {
       const period = parseJson(snapshot?.request_body,{})?.current_period
       if (!snapshot || snapshot.source !== 'sku-traffic-daily-stage' || String(snapshot.store_id) !== String(run.store_id) || context.collection_run_id !== run.id || period?.date_from !== coverage.day || period?.date_to !== coverage.day) throw new Error('日数据临时页已过期或来源不一致，请重新补采')
       for (const item of getResponseItems(parseJson(snapshot.response_body,{}))) {
+        if (context.daily_wire_version === 1) {
+          rows.push({sku:item.sku,raw_data:{metrics:item.metrics}})
+          continue
+        }
         const normalized = normalizeMetricRow(item,{})
         if (!normalized) throw new Error('临时页包含无法识别的SKU记录，请检查接口字段')
         rows.push(normalized)

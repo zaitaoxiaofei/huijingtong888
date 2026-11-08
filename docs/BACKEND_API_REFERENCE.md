@@ -2299,12 +2299,20 @@ Read current-enterprise daily SKU traffic for the last 15 complete report dates.
 - Auth: `authenticated`
 - Query parameters:
   - `shop_id` (`string`, optional): Owned shop ID or all
-  - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to yesterday
-  - `query` (`string`, optional): SKU, offer or name
+  - `date` (`string`, optional): Complete report day YYYY-MM-DD; defaults to latest available owned-shop date, or yesterday if no facts; explicit missing dates stay missing
+  - `range_days` (`number`, optional): 1, 7 or 15 (default 15), ending on date and clamped to retention
+  - `query` (`string`, optional): Search text
+  - `search_by` (`string`, optional): all, sku, offer_id, inventory, inventory_name or product_name; inventory uses verified current-enterprise direct/combo bindings
+  - `exact` (`number`, optional): 1 for exact match, otherwise contains
+  - `sort_key` (`string`, optional): One of the eight daily metric keys or detail_view_rate; default total_views
+  - `sort_order` (`string`, optional): asc or desc; null values last
+  - `filters` (`string`, optional): JSON array of at most eight AND rules: metric, op (gt/gte/lt/lte/eq), value. Filtered and sorted before pagination. Count metrics sum observed days; multi-day rates use count-weighted ratios; available_days identifies missing calendar dates
+  - `include_series` (`number`, optional): 0 omits histories for summary lists; default 1. Fetch one exact SKU with 1 when its trend is selected
   - `page` (`number`, optional): 1-based page
   - `pageSize` (`number`, optional): At most 100
 - Responses:
   - `200` `application/json` -> `object`
+  - `400` `application/json` -> `ErrorResponse`
   - `403` `application/json` -> `ErrorResponse`
   - `404` `application/json` -> `ErrorResponse`
 

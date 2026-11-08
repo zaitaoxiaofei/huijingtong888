@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {ensureSellerAnalyticsSchema,queueSkuTrafficDaily,claimNextCollectRequests,finishCollectRequest,sellerAnalyticsDb} from '../../src/services/seller-analytics.js';
 import {mysqlQuery,closeMysqlPool} from '../../src/mysql-pool.js';
@@ -6,6 +8,7 @@ try{
  await ensureSellerAnalyticsSchema();
  if(process.argv.includes('--bootstrap')) process.exitCode=0;
  else{
+  const compact=vm.runInNewContext(fs.readFileSync('ozon-erp-collector-plugin/analytics/background.js','utf8').match(/function compactDailyTrafficResult\([\s\S]*?\n\}/)[0]+';compactDailyTrafficResult');
   const day=trafficDays().at(-1),queued=await queueSkuTrafficDaily({shop_id:11,date:day},'admin');
   assert.equal(queued.queued.length,1);
   const claimed=await claimNextCollectRequests(sellerAnalyticsDb,'admin',2,{store_id:'111111'});
@@ -14,7 +17,8 @@ try{
   for(const request of claimed){count++;
    assert.equal(request.request_body.current_period.date_from,day);assert.equal(request.request_body.current_period.date_to,day);
    assert.equal(request.request_body.metrics.length,8);
-   const result=await finishCollectRequest(sellerAnalyticsDb,request.run_id,request.request_id,{success:true,response_status:200,request_headers:{'X-O3-Company-Id':'111111'},verified_company_id:'111111',response_body:request.endpoint_type==='by_sku'?{items:[{productInfo:{sku:'same',name:'Temporary name, not a daily column'},metrics:{totalViews:25,pdpViews:5,totalHitsToCart:2,orderedUnits:1}},{productInfo:{sku:'zero'},metrics:{totalViews:0,pdpViews:0,totalHitsToCart:0,orderedUnits:0}}]}:{totals:{total_views:25}}},'admin');
+   assert.equal(request.daily_traffic,true,'SQL claims must identify compact daily tasks');
+   const result=await finishCollectRequest(sellerAnalyticsDb,request.run_id,request.request_id,compact(request,{request_body:request.request_body,current_company_id:'111111',success:true,response_status:200,request_headers:{'X-O3-Company-Id':'111111'},verified_company_id:'111111',response_body:request.endpoint_type==='by_sku'?{items:[{productInfo:{sku:'same',name:'Temporary name, not a daily column'},metrics:{totalViews:25,pdpViews:5,totalHitsToCart:2,orderedUnits:1}},{productInfo:{sku:'zero'},metrics:{totalViews:0,pdpViews:0,totalHitsToCart:0,orderedUnits:0}}]}:{totals:{total_views:25}}}),'admin');
    const leases=await mysqlQuery('SELECT id,status,attempts,claimed_at FROM seller_analytics_collect_requests WHERE run_id=?',[request.run_id]);
    for(const lease of leases){assert.equal(Number(lease.attempts),1,'result must preserve the SQL claim attempt');assert.ok(lease.claimed_at,'result must preserve the SQL claim timestamp');if(claimed.slice(count).some(item=>item.request_id===lease.id))assert.equal(lease.status,'running','another in-flight request must not be reset to pending');}
    if(result.run.status==='success')break;
