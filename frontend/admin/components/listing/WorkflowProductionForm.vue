@@ -6,7 +6,8 @@ import WorkflowCatalogInput from './WorkflowCatalogInput.vue';
 import WorkflowKeyPicker from './WorkflowKeyPicker.vue';
 import { isWorkflowInput } from '../../../../src/shared/product-workflow-inputs.js';
 const props=defineProps({definition:{type:Object,required:true},sharedValues:{type:Object,required:true},variants:{type:Array,required:true},productionMode:String,fitmentMode:String,busy:Boolean,keyLibraryRevision:Number});
-const emit=defineEmits(['update:productionMode','update:fitmentMode','add','upload','manage-keys']);
+const emit=defineEmits(['update:productionMode','update:fitmentMode','add','upload','manage-keys','import-files']);
+const folderInput=ref(null);
 const brands=ref([]),catalogLoading=ref(false),catalogError=ref(''),expanded=ref([]);
 const locked=computed(()=>props.busy||props.variants.some(v=>v.submissionStarted));
 const inputs=computed(()=>props.definition.nodes.filter(n=>isWorkflowInput(n)&&n.inputGroup!=='listing-final'&&!['engineer','generated'].includes(n.valueSource)).map(n=>n.inputGroup==='fitment'?{...n,scope:props.fitmentMode==='individual'?'variant':'shared'}:n));
@@ -38,7 +39,7 @@ function label(node){return ({facts:'卖点与包装说明',model:'品牌与型�
       <WorkflowKeyPicker v-if="keyNode" :values="sharedValues" :node="keyNode" :disabled="locked" :refresh="keyLibraryRevision" @upload="(file,index)=>emit('upload',file,sharedValues,keyNode,index)" @manage="emit('manage-keys',$event)"/>
     </section>
     <section class="production-section">
-      <div class="section-heading"><h3><span class="step-number">{{ common.some(primary)||keyNode?2:1 }}</span>上传产品图片</h3><el-button :disabled="busy||variants.length>=20" @click="add">＋ 再加一件</el-button></div>
+      <input ref="folderInput" type="file" multiple webkitdirectory hidden @change="emit('import-files',$event.target.files);$event.target.value=''"/><div class="section-heading"><h3><span class="step-number">{{ common.some(primary)||keyNode?2:1 }}</span>上传产品图片</h3><div><el-button :disabled="locked" @click="folderInput.click()">从文件夹导入</el-button><el-button :disabled="busy||variants.length>=20" @click="add">＋ 再加一件</el-button></div></div>
       <div v-if="showRows.length>1" class="batch-options"><el-checkbox v-if="definition.nodes.some(n=>n.inputGroup==='fitment')" :model-value="fitmentMode==='shared'" :disabled="locked" @update:model-value="emit('update:fitmentMode',$event?'shared':'individual')">这些产品使用同一型号</el-checkbox><span>{{ productionMode==='variants'?'生成一份多款商品草稿':'每件独立生成，互不影响' }}</span></div>
       <div class="product-cards"><article v-for="(row,index) in showRows" :key="row.id" class="product-card">
         <div class="product-card-heading"><strong>产品 {{ index+1 }}</strong><el-input v-if="showRows.length>1" v-model="row.label" :disabled="busy||Boolean(row.submissionStarted)" placeholder="例如：仅壳、挂绳款" aria-label="产品备注名称"/><el-button v-if="showRows.length>1&&!row.submissionStarted" link type="danger" @click="variants.splice(variants.indexOf(row),1)">移除</el-button></div>
@@ -50,7 +51,7 @@ function label(node){return ({facts:'卖点与包装说明',model:'品牌与型�
       </article></div>
     </section>
     <el-collapse v-model="expanded" class="advanced-production"><el-collapse-item title="更多设置：其他属性、批量与多款商品" name="advanced"><div v-for="node in extraCommon" :key="node.id" class="production-field"><label>{{ label(node) }}</label><WorkflowMaterialInput v-model="sharedValues[node.id]" compact :node="node" :category="definition.category" :disabled="locked" @options="setOptions(node,$event)" @upload="(file,index)=>emit('upload',file,sharedValues,node,index)"/></div><el-checkbox v-if="showRows.length>1" :model-value="productionMode==='variants'" :disabled="locked" @update:model-value="emit('update:productionMode',$event?'variants':'batch')">合并为一份多款商品草稿</el-checkbox><p>不勾选时，每件产品生成独立任务和草稿。</p></el-collapse-item></el-collapse>
-    <div class="production-note">生成后先检查图片和文案，再填写售价、包装重量和尺寸，最后选择店铺上架。生成期间可以离开页面。</div>
+    <div class="production-note">{{ definition.reviewMode==='automatic'?'本模板已启用自动审批，生成完会自动进入待上架草稿。':'生成后先检查图片和文案。' }}上架前填写售价、包装重量和尺寸，最后选择店铺上架。生成期间可以离开页面。</div>
   </div>
 </template>
 <style scoped>

@@ -3,7 +3,7 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey } from "./business-task-tenant.js";
 import { validateWorkflow, validateWorkflowVariants, buildWorkflowDraft, workflowError } from "../shared/product-workflow.js";
 
-import { normalizeWorkflowKeyModel } from "../shared/workflow-key-models.js";
+import { normalizeWorkflowKeyModel, normalizeWorkflowMaterial } from "../shared/workflow-key-models.js";
 
 const SCHEMA=`CREATE TABLE IF NOT EXISTS product_workflow_documents (
   id VARCHAR(36) NOT NULL, tenant_id VARCHAR(64) NOT NULL, kind VARCHAR(16) NOT NULL,
@@ -23,9 +23,9 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   const map=row=>({id:row.id,name:row.name,revision:Number(row.revision),kind:row.kind,payload:JSON.parse(row.payload_json)});
   async function list(kind,session,options={}) {
     const {tenant}=await scope(session);
-    if(kind==='key_model'){
+    if(['key_model','material'].includes(kind)){
       const keyword=String(options.keyword||options.model||'').trim().slice(0,200);
-      const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND name LIKE ? ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`]);
+      const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR payload_json LIKE ?) ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
       return rows.map(map).filter(record=>!record.payload.archived);
     }
     return (await query(`SELECT id, name, revision, kind,
@@ -43,9 +43,9 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   }
   async function save(kind,body,session) {
     const {tenant,actor}=await scope(session);
-    const payload=kind==='key_model'?normalizeWorkflowKeyModel(body.payload):body.payload;
+    const payload=kind==='key_model'?normalizeWorkflowKeyModel(body.payload):kind==='material'?normalizeWorkflowMaterial(body.payload):body.payload;
     if(kind==="template")validateWorkflow(payload);
-    else if(kind!=='key_model') {
+    else if(!['key_model','material'].includes(kind)) {
       validateWorkflow(payload?.definition);
       validateWorkflowVariants(payload.definition,payload.variants);
       if(!payload.outputs || typeof payload.outputs!=="object" || Array.isArray(payload.outputs))throw workflowError("任务结果格式无效");

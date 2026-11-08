@@ -3,6 +3,7 @@ import { workflowInputContext } from '../shared/product-workflow.js';
 import { workflowNodeForVariant } from '../shared/product-workflow-inputs.js';
 
 export function workflowGenerationInput(definition,variant,node,results) {
+  if(node.type==='video')return {imageUrl:results[node.inputs[0]]?.url,sourceId:`${variant.id}-${node.id}`,title:variant.label,listingVariantMedia:true};
   const context=workflowInputContext(definition,variant,node,results);
   const configured=workflowNodeForVariant(node,variant);
   if(node.type==='copy')return {
@@ -34,6 +35,7 @@ function dependenciesReady(definition,variant,node,results) {
   });
 }
 function acceptOutput(node,raw) {
+  if(node.type==='video'){const url=raw.video?.publishUrl||raw.video?.url||raw.cover?.publishUrl;if(!url)throw new Error(`${node.label}没有返回可用视频`);return {url};}
   if(node.type==='image') {
     const url=raw.generatedImages?.[0]?.url||raw.croppedImages?.[0]?.url||raw.images?.[0]?.url||raw.url;
     if(!url)throw new Error(`${node.label}没有返回可用图片`);
@@ -50,10 +52,13 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
   let pending=false,review=false;
   for(const variant of payload.variants) {
     const results=payload.outputs[variant.id] ||= {};
-    for(const node of definition.nodes.filter(n=>['image','copy','approval'].includes(n.type))) {
+    for(const node of definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type))) {
       const state=results[node.id];
-      if(node.type==='approval') {if(!state?.approved)review=true;continue;}
-      if(state?.url||state?.text) {if(!state.approved)review=true;continue;}
+      if(node.type==='approval') {
+        if(!state?.approved&&definition.reviewMode==='automatic'&&dependenciesReady(definition,variant,node,results)){results[node.id]={approved:true,approvalMode:'automatic'};for(const input of node.inputs)if(results[input])results[input].approved=true;}
+        if(!results[node.id]?.approved)review=true;continue;
+      }
+      if(state?.url||state?.text) {if(definition.reviewMode==='automatic'){state.approved=true;state.approvalMode='automatic';}else if(!state.approved)review=true;continue;}
       if(!dependenciesReady(definition,variant,node,results)){review=true;continue;}
       if(state?.status==='failed')return {status:'failed',error:`${variant.label} / ${node.label}：${state.error||'生成失败'}`};
       if(state?.taskId) {
@@ -93,7 +98,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
   return {status:pending?'running':review?'awaiting_review':'ready',error:null};
 }
 function taskRequest(id,variant,node,state,definition,results) {
-  return {taskId:state.taskId,fieldKey:node.type==='image'?'mainImage':'commerceCopy',sourceModule:'product_workflow',workflowId:id,resultId:state.submissionKey,maxAttempts:1,input:workflowGenerationInput(definition,variant,node,results)};
+  return {taskId:state.taskId,fieldKey:node.type==='image'?'mainImage':node.type==='video'?'video':'commerceCopy',sourceModule:'product_workflow',workflowId:id,resultId:state.submissionKey,maxAttempts:1,input:workflowGenerationInput(definition,variant,node,results)};
 }
 
 export function invalidateWorkflowResults(payload,variantId,nodeId) {

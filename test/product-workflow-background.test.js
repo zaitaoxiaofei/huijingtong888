@@ -122,3 +122,26 @@ test('server rejects fabricated dictionary choices and restores authoritative la
   const prepared=await prepareProductWorkflowRun(run.payload,{},services);
   assert.equal(prepared.definition.nodes.find(n=>n.id==='choice').options[0].label,'真实颜色');
 });
+
+test('automatic review completes every variant and reuses listing video tasks from each generated main',async()=>{
+ const run=fixture(),ai=fakeAi();run.payload.definition.reviewMode='automatic';run.payload.definition.nodes.push({...createWorkflowNode('video','video'),inputs:['main']});
+ const create=ai.createTask;ai.createTask=async body=>{if(body.fieldKey!=='video')return create(body);ai.calls.push(body);ai.tasks.set(body.taskId,{status:'done',output:{video:{publishUrl:`https://example.test/${body.input.sourceId}.mp4`}}});};
+ let result;for(let i=0;i<150;i++){result=await advanceProductWorkflow(run,ai);if(result.status==='ready')break;}
+ assert.equal(result.status,'ready');assert.equal(ai.calls.filter(c=>c.fieldKey==='video').length,2);
+ for(const variant of run.payload.variants){const call=ai.calls.find(c=>c.fieldKey==='video'&&c.input.sourceId.startsWith(variant.id));assert.equal(call.input.imageUrl,run.payload.outputs[variant.id].main.url);assert.equal(call.input.listingVariantMedia,true);assert.equal(run.payload.outputs[variant.id].video.approved,true);}
+ const draft=buildWorkflowDraft(run.payload.definition,run.payload.variants,run.payload.outputs,{},run.id);
+ const rows=draft.template_payload.editable_payload.variants;assert.ok(rows.every(r=>r.video_urls[0].endsWith('.mp4')));assert.notDeepEqual(rows[0].video_urls,rows[1].video_urls);
+ const count=ai.calls.length;await advanceProductWorkflow(run,ai);assert.equal(ai.calls.length,count);
+});
+
+test('production references resolve enterprise ownership, freeze content and reach only selected nodes',async()=>{
+ const run=fixture();run.payload.definition.sharedMaterialRefs=[{id:'shared',revision:1}];run.payload.definition.nodes.find(n=>n.id==='detail_1').materialRefs=[{id:'detail',revision:2}];run.payload.definition.materialSnapshots={forged:{notes:'untrusted'}};
+ const shared={name:'礼盒',notes:'确认黑色礼盒',images:['https://example.test/box.png'],role:'product'};
+ const detail={name:'适配对照',notes:'核对四个按键',images:['https://example.test/key-detail.png'],role:'compatibility'};
+ const services={listingCategoryTemplateDetail:async()=>({id:7,description_category_id:100,type_id:200}),listingOzonCategoryAttributes:async()=>[]};
+ const store={get:async(kind,id,session)=>{if(session.tenant!=='a')throw Object.assign(new Error('foreign'),{status:404});return {revision:id==='shared'?1:2,name:id,payload:structuredClone(id==='shared'?shared:detail)};}};
+ const prepared=await prepareProductWorkflowRun(run.payload,{tenant:'a'},services,store);assert.equal(prepared.definition.materialSnapshots.forged,undefined);shared.notes='edited later';assert.equal(prepared.definition.materialSnapshots.shared.notes,'确认黑色礼盒');
+ const variant=prepared.variants[0],main=prepared.definition.nodes.find(n=>n.id==='main');const input=workflowGenerationInput(prepared.definition,variant,main,{});assert.ok(input.sourceImageUrls.includes('https://example.test/box.png'));assert.ok(!input.sourceImageUrls.includes('https://example.test/key-detail.png'));assert.match(input.finalPrompt,/确认黑色礼盒/);
+ await assert.rejects(prepareProductWorkflowRun(run.payload,{tenant:'b'},services,store),{status:404});
+ const stale=structuredClone(run.payload);stale.definition.sharedMaterialRefs[0].revision=2;await assert.rejects(prepareProductWorkflowRun(stale,{tenant:'a'},services,store),/已更新/);
+});
