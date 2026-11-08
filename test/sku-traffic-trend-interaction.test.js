@@ -14,4 +14,5 @@ test('trend hover and keyboard select the exact calendar day; missing dates brea
  const paths=api.segments('total_views');assert.equal(paths.length,2);assert.equal(paths[0].length,2);assert.equal(paths[0][0].y,266);
  api.toggle('total_views');assert.equal(api.shown.value.length,1);assert.equal(api.ceiling.value,2);
  api.move({clientX:100+668});assert.equal(api.selected.value.date_key,'2026-11-04');
+ props.compact=true;assert.equal(api.segments('total_views')[0][0].y,108);
 });

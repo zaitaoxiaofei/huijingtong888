@@ -6,6 +6,7 @@ import {spawnSync} from 'node:child_process';
 import {createSkuTrafficDailyService} from '../src/services/sku-traffic-daily.js';
 import {migrateSkuTrafficDaily} from '../scripts/migrate-sku-traffic-daily.mjs';
 import {trafficDays,shiftTrafficDate} from '../src/shared/sku-traffic-daily.js';
+import {trafficRowSeries} from '../frontend/admin/utils/sku-traffic-row-series.js';
 const socketPath=process.env.TENANT_TEST_MYSQL_SOCKET;
 test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue fencing and two-tier retention',{skip:!socketPath,timeout:60000},async t=>{
  const database='ozon_sku_daily_'+randomBytes(8).toString('hex');
@@ -75,6 +76,10 @@ test('daily traffic real MySQL pipeline, atomic refresh, tenant ownership, queue
    assert.deepEqual(result.rows[0].inventory.map(p=>p.id),[123]);
    const brief=await service.read({shop_id:11,date:day,range_days:7,filters,include_series:0},'admin');assert.equal(brief.rows[0].series.length,0);assert.equal(Number(brief.rows[0].summary.total_views),15);
    const detail=await service.read({shop_id:11,date:day,range_days:7,query:'potential',search_by:'sku',exact:1,include_series:1,pageSize:1},'admin');assert.equal(detail.rows.length,1);assert.equal(detail.rows[0].series.length,15);
+   const matrix=await service.read({shop_id:11,date:day,range_days:7,filters,series_format:'matrix',include_series:1},'admin');
+   assert.equal(matrix.rows[0].series.length,0);assert.equal(matrix.series_days.length,7);assert.equal(matrix.rows[0].trend_values.length,7);
+   const expanded=trafficRowSeries(matrix.rows[0],matrix);assert.equal(expanded.filter(p=>p.available).length,2);assert.equal(expanded.at(-1).total_views,10);assert.equal(expanded.at(-2).total_views,5);assert.equal(expanded[0].available,false);
+   await assert.rejects(service.read({shop_id:11,series_format:'unknown'},'admin'),/无效/);
    const sorted=await service.read({shop_id:11,date:day,range_days:1,sort_key:'total_views',sort_order:'desc',pageSize:1},'admin');assert.equal(sorted.rows[0].sku,'weak');assert.deepEqual(sorted.rows[0].inventory.map(p=>p.id),[124]);
    for(const [search_by,text] of [['sku','potential'],['inventory','INV-123'],['inventory','123'],['inventory_name','Local inventory']]){const exact=await service.read({shop_id:11,date:day,query:text,search_by,exact:1},'admin');assert.equal(exact.total,1);assert.equal(exact.rows[0].sku,'potential');}
    assert.equal((await service.read({shop_id:11,date:day,query:'Foreign secret inventory',search_by:'inventory_name',exact:1},'admin')).total,0);
