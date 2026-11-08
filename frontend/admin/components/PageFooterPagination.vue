@@ -7,6 +7,7 @@ const props = defineProps({
   pageSize: { type: Number, default: 20 },
   totalPages: { type: Number, default: 0 },
   pageSizes: { type: Array, default: () => [20, 50, 100] },
+  disabled: { type: Boolean, default: false },
   compact: { type: Boolean, default: false },
   summary: { type: String, default: "" },
   pageSizeLabel: { type: String, default: "每页" }
@@ -37,6 +38,7 @@ const showPageSizeSelect = computed(() => Array.isArray(props.pageSizes) && prop
         <span>{{ pageSizeLabel }}</span>
         <el-select
           :model-value="pageSize"
+          :disabled="disabled"
           size="small"
           class="erp-page-size__select"
           @change="emit('update:pageSize', Number($event))"
@@ -46,6 +48,7 @@ const showPageSizeSelect = computed(() => Array.isArray(props.pageSizes) && prop
       </div>
       <span class="erp-page-status">{{ pageStatusText }}</span>
       <el-pagination
+        :disabled="disabled"
         background
         size="small"
         layout="prev, pager, next"
