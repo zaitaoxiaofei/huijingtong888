@@ -144,6 +144,32 @@ test("complete HTTP registration, basic access, voucher redemption and re-login"
       assert.equal((await fixture.query("SELECT COUNT(*) AS count FROM tenant_members WHERE person_id=1"))[0].count, 0);
     });
 
+    await t.test("newly activated customers create only their own shop and materials", async () => {
+      const created = await request("/api/shops", token, "POST", { name: "新客户专属测试店铺", user_id: account.id });
+      assert.equal(created.status, 200, JSON.stringify(created.data));
+      const shops = await request("/api/shops", token);
+      assert.equal(shops.status, 200);
+      assert.equal(shops.data.length, 1);
+      assert.equal(shops.data[0].name, "新客户专属测试店铺");
+      const material = await request("/api/product-workflows/materials", token, "POST", {
+        payload: { name: "新客户钥匙模具", role: "compatibility", images: ["https://example.invalid/isolated-key.png"], bindings: [] }
+      });
+      assert.equal(material.status, 200, JSON.stringify(material.data));
+      const secondVoucher = await request("/api/tenants/subscription-vouchers", adminToken, "POST", { plan_code: "trial_7d" });
+      assert.equal(secondVoucher.status, 200, JSON.stringify(secondVoucher.data));
+      const secondActivation = await request("/api/auth/activate", otherToken, "POST", { activation_code: secondVoucher.data.activation_code });
+      assert.equal(secondActivation.status, 200, JSON.stringify(secondActivation.data));
+      assert.equal(secondActivation.data.membership.status, "trial");
+      assert.equal(secondActivation.data.membership.remaining_days, 7);
+      const otherShops = await request("/api/shops", otherToken);
+      assert.equal(otherShops.status, 200);
+      assert.deepEqual(otherShops.data, []);
+      const otherMaterials = await request("/api/product-workflows/materials", otherToken);
+      assert.equal(otherMaterials.status, 200);
+      assert.deepEqual(otherMaterials.data, []);
+      assert.equal((await request(`/api/product-workflows/materials?id=${material.data.id}`, otherToken)).status, 404);
+    });
+
     await t.test("revoking a separate unused voucher leaves existing membership intact", async () => {
       const next = await request("/api/tenants/subscription-vouchers", adminToken, "POST", { plan_code: "monthly" });
       const revoked = await request("/api/tenants/subscription-vouchers", adminToken, "DELETE", { id: next.data.id });

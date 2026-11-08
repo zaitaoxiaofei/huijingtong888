@@ -177,6 +177,7 @@ async function finishLoginRedirect(target) {
 onMounted(() => {
   setLoginViewportState(true);
   window.__hideAdminStaticLoginFallback?.();
+  if (route.query.register === "1") openRegistration();
   initializeWechatLogin();
 });
 
