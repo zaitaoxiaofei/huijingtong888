@@ -23,6 +23,7 @@ const routes = new Set([
   'GET ai-generation/tasks', 'POST ai-generation/tasks',
   'GET product-workflows/templates', 'POST product-workflows/templates',
   'GET product-workflows/runs', 'POST product-workflows/runs', 'POST product-workflows/import-draft',
+  'GET product-workflows/facts-history',
   'GET product-workflows/materials', 'POST product-workflows/materials',
   'GET product-workflows/key-models', 'POST product-workflows/key-models',
   'GET product-workflows/category', 'GET product-workflows/job-states', 'POST product-workflows/run-action',

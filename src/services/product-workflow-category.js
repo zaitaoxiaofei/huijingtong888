@@ -1,3 +1,4 @@
+import {categoryKey, materialBindings, materialCoversFitments, validateMaterialRefs} from '../shared/workflow-materials.js';
 import { keyModelIdentity } from '../shared/workflow-key-models.js';
 import { categoryAttributeNodes, expandWorkflowVariants } from '../shared/product-workflow-inputs.js';
 import { validateWorkflow, validateWorkflowVariants, workflowError } from '../shared/product-workflow.js';
@@ -15,12 +16,14 @@ export async function productWorkflowCategory(id,session,services) {
 }
 export async function prepareProductWorkflowRun(payload,session,services,store=null) {
   const definition=validateWorkflow(payload.definition);
+  for(const variant of payload.variants||[])validateMaterialRefs(variant.materialRefs);
   delete definition.materialSnapshots;
   definition.materialSnapshots={};
-  for(const ref of [...(definition.sharedMaterialRefs||[]),...definition.nodes.flatMap(n=>n.materialRefs||[])]) {
+  for(const ref of [...(definition.sharedMaterialRefs||[]),...definition.nodes.flatMap(n=>n.materialRefs||[]),...(payload.variants||[]).flatMap(v=>v.materialRefs||[])]) {
     if(!store)throw workflowError('生产资料库暂不可用，请重试');
     const record=await store.get(ref.kind||'material',ref.id,session);
     if(record.payload.archived||record.revision!==ref.revision)throw workflowError(`生产资料“${record.name}”已更新或停用，请重新选择后提交`);
+    if(ref.imageIndex!==undefined&&!record.payload.images?.[ref.imageIndex])throw workflowError(`生产资料“${record.name}”的所选图片已变化，请重新选择`);
     definition.materialSnapshots[ref.id]={...record.payload,...(ref.kind==='key_model'?{role:'compatibility',category:record.payload.label}:{})};
   }
   const listing=definition.nodes.find(n=>n.type==='listing');
@@ -33,6 +36,7 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
     node.platformRequired=actual.platformRequired;
   }
   definition.category=category;
+  for(const node of definition.nodes.filter(n=>n.type==='images'&&n.valueSource==='engineer'&&n.materialRefs?.length)){const ref=node.materialRefs[0],url=definition.materialSnapshots[ref.id]?.images?.[ref.imageIndex||0];if(!url)throw workflowError(`“${node.label}”的资料图片不可用，请重新选择`);node.defaultValue=Array.from({length:node.count},(_,i)=>i?(node.defaultValue?.[i]||''):url);}
   const variants=expandWorkflowVariants(definition,payload.variants,payload.sharedValues||{});
   for(const node of definition.nodes.filter(n=>n.type==='attribute'&&n.dictionaryId)) {
     const selectedIds=[...new Set(variants.flatMap(v=>[v.values[node.id]].flat()).filter(v=>v!==''&&v!=null).map(Number))];
@@ -48,14 +52,17 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
     node.options=[...verified.values()];
     category.attributes.find(a=>a.attributeId===node.attributeId).options=node.options;
   }
+  for(const variant of variants)if(variant.fitments?.length)variant.values.model=variant.fitments.map(f=>`${f.brand} ${f.model}`).join('；');
   for(const variant of variants)if(variant.keyModelId){
     if(!store)throw workflowError('钥匙适配库暂不可用，请重试或手动上传适配图');
-    const record=await store.get('key_model',String(variant.keyModelId),session),profile=record.payload;
+    const record=await store.get(variant.keyModelKind==='material'?'material':'key_model',String(variant.keyModelId),session),profile=record.payload;
     if(variant.keyModelRevision&&Number(variant.keyModelRevision)!==record.revision)throw workflowError(`${variant.label}的钥匙适配资料已更新，请重新选择后提交`);
-    if(profile.archived||keyModelIdentity(`${profile.brand} ${profile.model}`)!==keyModelIdentity(variant.values.model))throw workflowError(`${variant.label}的钥匙适配资料与型号不一致或已停用，请重新选择`);
+    if(!profile.images?.length||variant.keyModelKind==='material'&&profile.role!=='compatibility')throw workflowError(`${variant.label}请选择有图片的适配资料`);
+    if(profile.archived||(materialBindings(profile).length&&(variant.fitments?.length?!materialCoversFitments(profile,variant.fitments):keyModelIdentity(`${profile.brand} ${profile.model}`)!==keyModelIdentity(variant.values.model))))throw workflowError(`${variant.label}的钥匙适配资料与型号不一致或已停用，请重新选择`);
     if(!definition.nodes.some(n=>n.id==='key'&&n.type==='images'))throw workflowError('当前流程未配置适配钥匙图片输入');
     variant.values.key=profile.images.slice(0,definition.nodes.find(n=>n.id==='key').count);variant.keyModelRevision=record.revision;
   }
+  for(const snapshot of Object.values(definition.materialSnapshots))if(snapshot.listingCategory&&categoryKey(snapshot.listingCategory)!==categoryKey(category))throw workflowError(`生产资料“${snapshot.name}”不属于当前上架类目，请重新筛选`);
   validateWorkflow(definition);
   validateWorkflowVariants(definition,variants);
   const template=await services.listingCategoryTemplateDetail(listing.templateId,session);

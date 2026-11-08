@@ -23,6 +23,21 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   const map=row=>({id:row.id,name:row.name,revision:Number(row.revision),kind:row.kind,payload:JSON.parse(row.payload_json)});
   async function list(kind,session,options={}) {
     const {tenant}=await scope(session);
+    if(kind==='template'&&options.page!==undefined){
+      const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
+      const filter="tenant_id = ? AND kind = ? AND (name LIKE ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) LIKE ?)";
+      const params=[tenant,'template',`%${keyword}%`,`%${keyword}%`];
+      const total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      const page=Math.max(1,Math.min(Math.ceil(total/size)||1,Number.parseInt(options.page,10)||1));
+      const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
+      const items=rows.map(row=>{const doc=map(row);return {id:doc.id,name:doc.name,revision:doc.revision,category_name:doc.payload.category?.categoryName||doc.payload.category?.name||'',preview_image:doc.payload.previewImage||''};});
+      const missing=items.filter(item=>!item.preview_image);
+      if(missing.length){
+        const recent=await query(`SELECT payload_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.templateId')) IN (${missing.map(()=>'?').join(',')}) AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) NOT IN ('null', '') ORDER BY updated_at DESC LIMIT 100`,[tenant,...missing.map(item=>item.id)]);
+        for(const row of recent){const run=JSON.parse(row.payload_json),item=items.find(item=>item.id===run.templateId&&!item.preview_image),main=run.definition?.nodes.find(n=>n.type==='image'&&n.role==='main');if(item&&main)item.preview_image=run.outputs?.[run.variants?.[0]?.id]?.[main.id]?.url||'';}
+      }
+      return {items,total,page,pageSize:size};
+    }
     if(['key_model','material'].includes(kind)){
       const keyword=String(options.keyword||options.model||'').trim().slice(0,200);
       const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR payload_json LIKE ?) ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
@@ -71,7 +86,14 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     catch(error){if(body.creationId&&error.code==='ER_DUP_ENTRY')return get(kind,id,session);throw error;}
     return {id,kind,name,payload,revision:1};
   }
-  return {list,get,save,scope};
+  async function factsHistory(session){
+    const {tenant}=await scope(session);
+    const rows=await query("SELECT id, name, JSON_EXTRACT(payload_json, '$.variants') AS variants_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' ORDER BY updated_at DESC LIMIT 60",[tenant]);
+    const result=[],seen=new Set();
+    for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
+    return result;
+  }
+  return {list,get,save,scope,factsHistory};
 }
 export const productWorkflowStore=createProductWorkflowStore();
 
@@ -107,5 +129,7 @@ export async function importProductWorkflowDraft(id,session,services,{store=prod
   if(!draftId)throw new Error("草稿保存未返回标识，请点击导入操作箱核对已有结果");
   claim.run.draftId=draftId;claim.run.draftImportStatus="done";
   await execute("UPDATE product_workflow_documents SET payload_json = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND kind = 'run' AND id = ?",[JSON.stringify(claim.run),tenant,id]);
+  const main=claim.run.definition.nodes.find(n=>n.type==='image'&&n.role==='main'),preview=main&&claim.run.outputs?.[claim.run.variants[0]?.id]?.[main.id]?.url;
+  if(claim.run.templateId&&preview&&Number.isSafeInteger(Number(claim.run.templateRevision))&&Number(claim.run.templateRevision)>0)await execute("UPDATE product_workflow_documents SET payload_json = JSON_SET(payload_json, '$.previewImage', ?), revision = revision + 1 WHERE tenant_id = ? AND kind = 'template' AND id = ? AND revision = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.previewImage')), '') = ''",[preview,tenant,claim.run.templateId,Number(claim.run.templateRevision)]).catch(error=>console.warn('workflow preview cache',error.message));
   return {id:draftId};
 }

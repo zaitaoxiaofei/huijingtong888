@@ -6,11 +6,12 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
   const routes={};
   for(const [collection,kind] of [["templates","template"],["runs","run"]]) {
     routes[`GET /api/product-workflows/${collection}`]=req=>req.query?.id
-      ?store.get(kind,String(req.query.id),req._session):store.list(kind,req._session);
+      ?store.get(kind,String(req.query.id),req._session):store.list(kind,req._session,req.query||{});
     routes[`POST /api/product-workflows/${collection}`]=async req=>store.save(kind,await readJson(req),req._session);
   }
   routes['GET /api/product-workflows/key-models']=req=>req.query?.id?store.get('key_model',String(req.query.id),req._session):store.list('key_model',req._session,req.query||{});
   routes['POST /api/product-workflows/key-models']=async req=>store.save('key_model',await readJson(req),req._session);
+  routes['GET /api/product-workflows/facts-history']=req=>store.factsHistory(req._session);
   routes['GET /api/product-workflows/materials']=req=>req.query?.id?store.get('material',String(req.query.id),req._session):store.list('material',req._session,req.query||{});
   routes['POST /api/product-workflows/materials']=async req=>store.save('material',await readJson(req),req._session);
   routes['GET /api/product-workflows/category']=req=>productWorkflowCategory(req.query?.id,req._session,services);
