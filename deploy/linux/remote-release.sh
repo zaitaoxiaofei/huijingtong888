@@ -476,8 +476,8 @@ assert_install_resources() {
     /^MemAvailable:/ { available=$2 } /^SwapTotal:/ { total=$2 } /^SwapFree:/ { free=$2 }
     END { print available+0, total+0, free+0 }' /proc/meminfo)
   disk_free_kib="$(df -Pk "$releases_root" | awk 'NR==2 {print $4}')"
-  if ((available_kib < 786432 || disk_free_kib < 3145728 || (swap_total_kib > 0 && swap_free_kib * 100 < swap_total_kib * 20))); then
-    echo "Release refused before installation: require 768 MiB available memory, 3 GiB disk and less than 80% swap usage. Primary left running." >&2
+  if ((available_kib < 1048576 || disk_free_kib < 3145728 || (swap_total_kib > 0 && swap_free_kib * 100 < swap_total_kib * 20))); then
+    echo "Release refused before installation: require 1 GiB available memory, 3 GiB disk and less than 80% swap usage. Primary left running." >&2
     return 1
   fi
   command -v systemd-run >/dev/null || { echo "Bounded dependency installer requires systemd-run." >&2; return 1; }
@@ -490,7 +490,7 @@ install_release_dependencies() {
   block_device="$(release_block_device)"
   systemd-run --quiet --wait --pipe --collect --unit="ozon-erp-install-${release_version}" \
     --uid=ozon-erp --working-directory="$staging_dir" \
-    --property=MemoryHigh=384M --property=MemoryMax=384M --property=MemorySwapMax=0 \
+    --property=MemoryHigh=512M --property=MemoryMax=512M --property=MemorySwapMax=0 \
     --property=CPUQuota=50% --property=IOWeight=10 --property=Nice=10 \
     --property="IOReadBandwidthMax=$block_device 8M" --property="IOWriteBandwidthMax=$block_device 4M" \
     --property="IOReadIOPSMax=$block_device 512" --property="IOWriteIOPSMax=$block_device 256" \
