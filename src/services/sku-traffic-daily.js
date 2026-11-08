@@ -84,7 +84,10 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
   async function queue(body, tenantId, {createRun,loadRun,publishRun} = {}) {
     await ensureSchema();
     const key=tenant(tenantId), owned=await shops(key,body.shop_id), days=trafficDays(clock()), today=trafficToday(clock());
-    const target=body.date ? [dayInWindow(body.date)] : [...days.slice(-3).reverse(),...days.slice(0,-3)];
+    if(body.range_days!==undefined&&![1,7,15].includes(Number(body.range_days)))throw error('补采范围请选择1天、7天或15天');
+    if(body.date&&body.range_days!==undefined)throw error('请选择补采单日或补齐区间');
+    const target=body.date?[dayInWindow(body.date)]:body.range_days?[...days.slice(-Number(body.range_days))].reverse():[...days].reverse();
+    const missingOnly=body.missing_only===true||String(body.missing_only)==='1';
     const result={queued:[],waiting:[],skipped:0};
     for(const shop of owned) {
       if(!String(shop.store_id||'').trim()) continue;
@@ -101,14 +104,16 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
         if(pending+added>=3)break;
         const state=byDay.get(day), recent=days.slice(-3).includes(day);
         if(state?.status==='pending'&&(clock().getTime()-new Date(state.requested_at).getTime()<300000||!state.run_id?.startsWith('reserve:')))continue;
-        if(!body.date&&(state?.status==='complete'||state?.status==='partial'&&state.product_count!==null)&&(!recent||trafficToday(new Date(state.last_success_at||state.requested_at))===today)){result.skipped++;continue;}
+        if(missingOnly&&state?.status==='complete'){result.skipped++;continue;}
+        if(!missingOnly&&!body.date&&(state?.status==='complete'||state?.status==='partial'&&state.product_count!==null)&&(!recent||trafficToday(new Date(state.last_success_at||state.requested_at))===today)){result.skipped++;continue;}
         const reservation='reserve:'+randomUUID(), requested=sqlTime(clock());
         const reserved=await transaction(async connection=>{
           await connection.execute("INSERT IGNORE INTO seller_sku_traffic_days(tenant_id,shop_id,date_key,status,requested_at) VALUES(?,?,?,'missing',?)",[key,shop.id,day,requested]);
           const [current]=await connection.query('SELECT * FROM seller_sku_traffic_days WHERE tenant_id=? AND shop_id=? AND date_key=? FOR UPDATE',[key,shop.id,day]);
           const active=current[0];
           if(active.status==='pending'&&(clock().getTime()-new Date(active.requested_at).getTime()<300000||!active.run_id?.startsWith('reserve:')))return false;
-          if(!body.date&&(active.status==='complete'||active.status==='partial'&&active.product_count!==null)&&(!recent||trafficToday(new Date(active.last_success_at||active.requested_at))===today))return false;
+          if(missingOnly&&active.status==='complete')return false;
+          if(!missingOnly&&!body.date&&(active.status==='complete'||active.status==='partial'&&active.product_count!==null)&&(!recent||trafficToday(new Date(active.last_success_at||active.requested_at))===today))return false;
           await connection.execute("UPDATE seller_sku_traffic_days SET status='pending',run_id=?,requested_at=?,message='等待在线插件采集' WHERE tenant_id=? AND shop_id=? AND date_key=?",[reservation,requested,key,shop.id,day]);return true;
         });
         if(!reserved)continue;
@@ -125,6 +130,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     await ensureSchema();
     const key=tenant(tenantId),owned=await shops(key,body.shop_id),days=trafficDays(clock()),options=normalizeTrafficMonitorQuery(body);
     const requestedDate=body.date?dayInWindow(body.date):null,includeSeries=body.include_series!==false&&String(body.include_series)!=='0';
+    if(body.date_mode&&!['latest_report_day'].includes(body.date_mode))throw error('统计日期模式无效');
     const matrix=body.series_format==='matrix';
     if(body.series_format&&!['object','matrix'].includes(body.series_format))throw error('趋势数据格式无效');
     const page=Math.min(100000,Math.max(1,Math.floor(Number(body.page)||1))),pageSize=Math.min(100,Math.max(1,Math.floor(Number(body.pageSize)||30)));
@@ -132,7 +138,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
     if(!ids.length)return{rows:[],total:0,shops:[],coverage:[],days,date:requestedDate||days.at(-1),latest_available_date:null,report_end_date:days.at(-1),selected_count:0,page,pageSize};
     const marks=ids.map(()=>'?').join(',');
     const dayCounts=await query(`SELECT DATE_FORMAT(date_key,'%Y-%m-%d') date_key,COUNT(*) sku_count FROM seller_sku_traffic_daily WHERE tenant_id=? AND shop_id IN(${marks}) AND date_key>=? AND date_key<=? GROUP BY date_key ORDER BY date_key`,[key,...ids,days[0],days.at(-1)]);
-    const latest=dayCounts.at(-1)?.date_key||null,date=requestedDate||latest||days.at(-1),fromDate=[days[0],shiftTrafficDate(date,1-options.rangeDays)].sort().at(-1);
+    const latest=dayCounts.at(-1)?.date_key||null,date=requestedDate||(body.date_mode==='latest_report_day'?days.at(-1):latest)||days.at(-1),fromDate=[days[0],shiftTrafficDate(date,1-options.rangeDays)].sort().at(-1);
     const seriesDays=days.filter(day=>day>=fromDate&&day<=date);
     const inventoryFrom=`FROM sku_mappings sm JOIN shops bs ON bs.id=sm.shop_id JOIN tenants bt ON (bt.id=bs.tenant_id OR (bs.tenant_id IS NULL AND bt.slug='default'))
       LEFT JOIN sku_inventory_recipes recipe ON recipe.shop_id=sm.shop_id AND recipe.ozon_sku=sm.ozon_sku AND recipe.active=1 AND recipe.mode='combo'
@@ -146,16 +152,16 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
       if(['all','sku'].includes(options.searchBy)){terms.push(`d.sku ${op} ?`);params.push(value);}
       const fields=options.searchBy==='offer_id'?['p.offer_id']:options.searchBy==='product_name'?['p.name']:options.searchBy==='all'?['p.offer_id','p.name']:[];
       if(fields.length){terms.push(`EXISTS(SELECT 1 FROM online_products p WHERE p.shop_id=d.shop_id AND p.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci AND (${fields.map(f=>`${f} ${op} ?`).join(' OR ')}))`);params.push(...fields.map(()=>value));}
-      if(['all','inventory','inventory_name'].includes(options.searchBy)){
-        const inventoryFields=options.searchBy==='inventory_name'?['ip.name']:options.searchBy==='inventory'?['ip.inventory_number','ip.code','CAST(ip.id AS CHAR)']:['ip.name','ip.inventory_number','ip.code','CAST(ip.id AS CHAR)'];
-        terms.push(`EXISTS(SELECT 1 ${inventoryFrom} AND sm.shop_id=d.shop_id AND sm.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci AND (${inventoryFields.map(f=>`${f} ${op} ?`).join(' OR ')}))`);params.push(...inventoryFields.map(()=>value));
+      if(['all','inventory','inventory_id','inventory_name'].includes(options.searchBy)){
+        const inventoryFields=options.searchBy==='inventory_id'?['CAST(ip.id AS CHAR)']:options.searchBy==='inventory_name'?['ip.name']:options.searchBy==='inventory'?['ip.inventory_number','ip.code','CAST(ip.id AS CHAR)']:['ip.name','ip.inventory_number','ip.code','CAST(ip.id AS CHAR)'];
+        terms.push(`EXISTS(SELECT 1 ${inventoryFrom} AND sm.shop_id=d.shop_id AND sm.ozon_sku=d.sku COLLATE utf8mb4_0900_ai_ci AND (${inventoryFields.map(f=>`${f} ${options.searchBy==='inventory_id'?'=':op} ?`).join(' OR ')}))`);params.push(...inventoryFields.map(()=>options.searchBy==='inventory_id'?options.keyword:value));
       }
       where.push('('+terms.join(' OR ')+')');
     }
     const sum=metric=>`CASE WHEN COUNT(d.${metric})=COUNT(*) THEN SUM(d.${metric}) ELSE NULL END`;
     const ratio=(numerator,denominator,official)=>`${official?`CASE WHEN COUNT(*)=1 THEN MAX(d.${official}) ELSE `:''}CASE WHEN COUNT(d.${numerator})=COUNT(*) AND COUNT(d.${denominator})=COUNT(*) AND SUM(d.${denominator})>0 THEN SUM(d.${numerator})/SUM(d.${denominator})*100 ELSE NULL END${official?' END':''}`;
     const counts=['total_views','search_views','pdp_views','total_hits_to_cart','ordered_units'];
-    const metrics=[...counts.map(k=>`${sum(k)} ${k}`),`${ratio('ordered_units','total_views','conv_views_to_order')} conv_views_to_order`,`${ratio('total_hits_to_cart','total_views','conv_total_views_to_cart')} conv_total_views_to_cart`,`${ratio('ordered_units','total_hits_to_cart','conv_hits_to_cart_to_order')} conv_hits_to_cart_to_order`,`${ratio('pdp_views','total_views')} detail_view_rate`];
+    const metrics=[...counts.map(k=>`${sum(k)} ${k}`),`${ratio('ordered_units','total_views','conv_views_to_order')} conv_views_to_order`,`${ratio('total_hits_to_cart','total_views','conv_total_views_to_cart')} conv_total_views_to_cart`,`${ratio('ordered_units','total_hits_to_cart','conv_hits_to_cart_to_order')} conv_hits_to_cart_to_order`,`${ratio('pdp_views','total_views')} detail_view_rate`,`${ratio('search_views','total_views')} search_share`,`${ratio('ordered_units','pdp_views')} pdp_order_rate`];
     const grouped=`SELECT d.shop_id,d.sku,DATE_FORMAT(MAX(d.date_key),'%Y-%m-%d') latest_day,COUNT(*) available_days,${metrics.join(',')} FROM seller_sku_traffic_daily d WHERE ${where.join(' AND ')} GROUP BY d.shop_id,d.sku`;
     const operators={gt:'>',gte:'>=',lt:'<',lte:'<=',eq:'='};
     const conditions=options.filters.map(rule=>`q.\`${rule.metric}\` ${operators[rule.op]} ?`).join(' AND ')||'1=1';
@@ -177,7 +183,7 @@ export function createSkuTrafficDailyService({query = mysqlQuery, execute = mysq
       const observed=history.filter(r=>r.shop_id===p.shop_id&&r.sku===p.sku),byDay=new Map(observed.map(r=>[r.date_key,r]));
       const series=includeSeries&&!matrix?dailyTrafficSeries(days,observed):[],info=details.get(`${p.shop_id}:${p.sku}`)||{};
       return {shop_id:p.shop_id,sku:p.sku,latest_day:p.latest_day,
-        summary:Object.fromEntries([...counts,'conv_views_to_order','conv_total_views_to_cart','conv_hits_to_cart_to_order','detail_view_rate','available_days'].map(k=>[k,p[k]??null])),
+        summary:Object.fromEntries([...counts,'conv_views_to_order','conv_total_views_to_cart','conv_hits_to_cart_to_order','detail_view_rate','search_share','pdp_order_rate','available_days'].map(k=>[k,p[k]??null])),
         inventory:inventory.filter(i=>i.shop_id===p.shop_id&&i.ozon_sku===p.sku).map(({id,name,code,inventory_number})=>({id,name,code,inventory_number})),
         product_name:info.product_name||null,image_url:info.image_url||null,offer_id:info.offer_id||null,shop_name:owned.find(s=>s.id===p.shop_id)?.name,
         series,...(matrix&&includeSeries?{trend_values:seriesDays.map(day=>{const row=byDay.get(day);return row?metricKeys.map(k=>row[k]===null||row[k]===undefined?null:Number(row[k])):null;})}:{}),

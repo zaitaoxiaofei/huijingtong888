@@ -1,6 +1,6 @@
 <script setup>
 import {computed,ref} from 'vue';
-const props=defineProps({series:{type:Array,default:()=>[]},metrics:{type:Array,required:true},unit:{type:String,default:''},compact:Boolean});
+const props=defineProps({series:{type:Array,default:()=>[]},metrics:{type:Array,required:true},unit:{type:String,default:''},compact:Boolean,tooltipMetrics:{type:Array,default:null}});
 const hidden=ref([]),hover=ref(null),svg=ref(null);
 const colors=['#4c9bff','#27c5a3','#f5b84c','#b28aff','#f47987'];
 const lines=computed(()=>props.metrics.map(([key,label,color],index)=>({key,label,color:color||colors[index%colors.length]})));
@@ -13,11 +13,14 @@ const bottom=computed(()=>props.compact?108:266);
 const y=n=>bottom.value-n/ceiling.value*(props.compact?100:226);
 const ticks=computed(()=>Array.from({length:props.compact?3:5},(_,i)=>ceiling.value*i/(props.compact?2:4)));
 function segments(key){const result=[];let current=[];props.series.forEach((day,index)=>{const n=value(day,key);if(n===null){if(current.length)result.push(current);current=[];}else current.push({x:x(index),y:y(n),date:day.date_key,value:n});});if(current.length)result.push(current);return result;}
-function move(event){const box=svg.value?.getBoundingClientRect();if(!box?.width||!props.series.length)return;const position=(event.clientX-box.left)*700/box.width;hover.value=Math.max(0,Math.min(props.series.length-1,Math.round((position-56)/612*Math.max(1,props.series.length-1))));}
-function keyMove(event){if(!['ArrowLeft','ArrowRight'].includes(event.key)||!props.series.length)return;event.preventDefault();hover.value=Math.max(0,Math.min(props.series.length-1,(hover.value??0)+(event.key==='ArrowRight'?1:-1)));}
+function move(event){const box=svg.value?.getBoundingClientRect();if(!box?.width||!props.series.length)return;positionTooltip(event.clientX,event.clientY??box.top??0);const position=(event.clientX-box.left)*700/box.width;hover.value=Math.max(0,Math.min(props.series.length-1,Math.round((position-56)/612*Math.max(1,props.series.length-1))));}
+function keyMove(event){if(!['ArrowLeft','ArrowRight'].includes(event.key)||!props.series.length)return;event.preventDefault();const box=svg.value?.getBoundingClientRect();if(box)positionTooltip(box.left+56,box.top||0);hover.value=Math.max(0,Math.min(props.series.length-1,(hover.value??0)+(event.key==='ArrowRight'?1:-1)));}
 function toggle(key){hidden.value=hidden.value.includes(key)?hidden.value.filter(k=>k!==key):[...hidden.value,key];}
+const tooltipLines=computed(()=>props.tooltipMetrics?.length?props.tooltipMetrics.map((line,index)=>({...line,color:lines.value.find(item=>item.key===line.key)?.color||colors[index%colors.length]})):lines.value.map(line=>({...line,unit:props.unit})));
+const tooltipPosition=ref({left:'12px',top:'12px'});
+function positionTooltip(clientX,clientY){const width=typeof window==='undefined'?1200:window.innerWidth,height=typeof window==='undefined'?800:window.innerHeight;const boxHeight=38+tooltipLines.value.length*24;tooltipPosition.value={left:Math.max(8,Math.min(width-336,clientX+16))+'px',top:Math.max(8,Math.min(height-boxHeight-12,clientY+16))+'px'};}
 const selected=computed(()=>hover.value===null?null:props.series[hover.value]);
-const number=n=>n===null?'未采到':`${n.toLocaleString(undefined,{maximumFractionDigits:2})}${props.unit}`;
+const number=(n,unit=props.unit)=>n===null?'未采到':`${n.toLocaleString(undefined,{maximumFractionDigits:2})}${unit}`;
 const hasData=computed(()=>props.series.some(day=>shown.value.some(line=>value(day,line.key)!==null)));
 </script>
 <template>
@@ -32,12 +35,12 @@ const hasData=computed(()=>props.series.some(day=>shown.value.some(line=>value(d
     <text v-if="!shown.length" x="360" :y="compact?65:155" text-anchor="middle">请在图例中选择指标</text>
     <text v-else-if="!hasData" x="360" :y="compact?65:155" text-anchor="middle">所选范围尚无日记录</text>
    </svg>
-   <div v-if="selected" class="hover-detail" :style="hover>Math.max(1,series.length-1)/2?{right:'12px'}:{left:'12px'}" role="status"><strong>{{selected.date_key}}</strong><span v-for="line in lines" :key="line.key"><i :style="{background:line.color}"/>{{line.label}}<b>{{number(value(selected,line.key))}}</b></span></div>
+   <Teleport to="body"><div v-if="selected" class="hover-detail" :class="{compact}" :style="tooltipPosition" role="status"><strong>{{selected.date_key}} · 当天数据</strong><span v-for="line in tooltipLines" :key="line.key"><i :style="{background:line.color}"/>{{line.label}}<b>{{number(value(selected,line.key),line.unit)}}</b></span></div></Teleport>
   </div>
   <p v-if="!compact">点击图例可显示或隐藏曲线；悬浮查看当天数值。未采到的日期保留断点。</p>
  </section>
 </template>
 <style scoped>
-.trend-chart{min-width:0}.legend{display:flex;flex-wrap:wrap;gap:6px 12px}.legend button{display:flex;align-items:center;gap:5px;border:0;background:none;color:var(--erp-text);font-size:12px;cursor:pointer;padding:4px 0}.legend button.hidden{opacity:.35}.legend i,.hover-detail i{width:8px;height:8px;border-radius:50%;flex-shrink:0}.plot{position:relative;outline-offset:3px}.plot svg{display:block;width:100%;min-height:230px}.grid{stroke:var(--erp-border);stroke-dasharray:3 4}.cursor{stroke:var(--erp-text-secondary);stroke-dasharray:4 4}text{font-size:11px;fill:var(--erp-text-secondary)}.hover-detail{position:absolute;top:24px;width:210px;padding:12px;background:var(--erp-surface-alt);border:1px solid var(--erp-border-strong);border-radius:8px;box-shadow:0 8px 26px #0003;pointer-events:none;display:flex;flex-direction:column;gap:8px;font-size:12px;z-index:2}.hover-detail span{display:flex;align-items:center;gap:6px}.hover-detail b{margin-left:auto}p{font-size:12px;color:var(--erp-text-secondary);line-height:1.7;margin:0}
-.compact .plot svg{height:112px;min-height:0}.compact text{font-size:13px}.compact .hover-detail{top:0;padding:8px;gap:5px}.compact .plot{min-width:0}
+.trend-chart{min-width:0}.legend{display:flex;flex-wrap:wrap;gap:6px 12px}.legend button{display:flex;align-items:center;gap:5px;border:0;background:none;color:var(--erp-text);font-size:12px;cursor:pointer;padding:4px 0}.legend button.hidden{opacity:.35}.legend i,.hover-detail i{width:8px;height:8px;border-radius:50%;flex-shrink:0}.plot{position:relative;outline-offset:3px}.plot svg{display:block;width:100%;min-height:230px}.grid{stroke:var(--erp-border);stroke-dasharray:3 4}.cursor{stroke:var(--erp-text-secondary);stroke-dasharray:4 4}text{font-size:11px;fill:var(--erp-text-secondary)}.hover-detail{position:fixed;width:320px;max-width:calc(100vw - 16px);padding:12px;background:var(--erp-surface-alt);border:1px solid var(--erp-border-strong);border-radius:8px;box-shadow:0 8px 26px #0003;pointer-events:none;display:flex;flex-direction:column;gap:8px;font-size:12px;z-index:5000;color:var(--erp-text)}.hover-detail span{display:flex;align-items:center;gap:6px}.hover-detail b{margin-left:auto}p{font-size:12px;color:var(--erp-text-secondary);line-height:1.7;margin:0}
+.compact .plot svg{height:112px;min-height:0}.compact text{font-size:13px}.hover-detail.compact{padding:10px 12px;gap:6px;font-size:11px;line-height:18px}.compact .plot{min-width:0}
 </style>
