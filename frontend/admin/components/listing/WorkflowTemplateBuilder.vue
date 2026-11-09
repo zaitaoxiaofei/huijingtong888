@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import { createIndependentImageNode, createImageReference } from '../../utils/workflow-image-nodes.js';
 import WorkflowMaterialReferences from './WorkflowMaterialReferences.vue';
 import WorkflowValuePreview from './WorkflowValuePreview.vue';
 import WorkflowMaterialInput from './WorkflowMaterialInput.vue';
@@ -25,6 +26,8 @@ watch([()=>props.mode,()=>props.definition.nodes],(current,previous=[])=>{if(sho
 const referenceEditors=computed(()=>selected.value?.type==='image'&&selected.value.imageMode!=='material'?props.definition.nodes.filter(n=>n.type==='images'&&n.valueSource==='engineer'&&n.referenceRole==='style'&&(selected.value.role==='main'||n.id!=='style')&&selected.value.inputs.includes(n.id)).map(node=>({node,indices:selected.value.referenceSlots?.[node.id]?.length?selected.value.referenceSlots[node.id]:node.slots.map((_,i)=>i)})):[]);
 function referenceNode(entry){return {...entry.node,count:entry.indices.length,slots:entry.indices.map(i=>entry.node.slots[i])};}
 function updateReference(entry,values){entry.node.defaultValue||=Array(entry.node.count).fill('');entry.indices.forEach((slot,i)=>{entry.node.defaultValue[slot]=values[i]||'';});}
+function addImageReference(){const node=selected.value;if(node?.type!=='image')return;const reference=createImageReference(node);insert(reference);node.inputs.push(reference.id);selectedId.value=node.id;}
+function removeImageReference(id){const node=selected.value;node.inputs=node.inputs.filter(input=>input!==id);if(node.referenceSlots)delete node.referenceSlots[id];}
 const outputs=computed(()=>nodes.value.flatMap(workflowNodeOutputs));
 const binding=computed(()=>props.definition.bindings[field.value.key]||{sources:[]});
 const earlier=computed(()=>props.definition.nodes.slice(0,props.definition.nodes.findIndex(n=>n.id===selectedId.value)).filter(n=>selected.value?.type==='copy'?['field','attribute','copy'].includes(n.type):isWorkflowInput(n)||['image','copy','approval'].includes(n.type)));
@@ -39,11 +42,12 @@ function insert(node){
 const sourceTypes={user:'用户输入',fixed:'预先定义',copy:'AI 文本生成',image:'AI 图片生成'};
 const currentSource=computed(()=>selected.value?isWorkflowInput(selected.value)?selected.value.valueSource==='engineer'?'fixed':'user':selected.value.type:'user');
 function create(type){
+  if(type==='image'){const {node,reference}=createIndependentImageNode(props.definition.nodes);insert(reference);insert(node);if(showFields.value)bind(workflowNodeOutputs(node)[0]);return;}
   const input=['user','fixed'].includes(type),node=createWorkflowNode(input?'field':type);
   node.label=sourceTypes[type];
   if(input)Object.assign(node,{scope:'shared',valueSource:type==='fixed'?'engineer':'user',inputFormat:field.value.kind==='number'?'number':'text',required:false,defaultValue:''});
   if(type==='copy'){node.target='text';node.prompt='根据引用材料与已确认事实生成所需俄语文本，不编造信息。';}
-  if(['image','copy'].includes(type))node.inputs=props.definition.nodes.filter(isWorkflowInput).filter(n=>n.valueSource!=='generated'&&(type!=='copy'||n.type!=='images')).map(n=>n.id);
+  if(type==='copy')node.inputs=props.definition.nodes.filter(isWorkflowInput).filter(n=>n.valueSource!=='generated'&&n.type!=='images').map(n=>n.id);
   insert(node);if(showFields.value)bind(workflowNodeOutputs(node)[0]);
 }
 function changeSource(type){
@@ -113,7 +117,7 @@ function slotsChanged(){const node=selected.value;node.slots=Array.from({length:
           <WorkflowValuePreview v-if="selected.valueSource==='engineer'" :value="selected.defaultValue" :format="selected.type==='images'?'images':selected.inputFormat||'text'"/><label v-if="selected.valueSource!=='engineer'">填写说明<el-input v-model="selected.help"/></label>
         </template>
         <template v-if="['image','copy'].includes(selected.type)">
-          <el-radio-group v-if="selected.type==='image'" :model-value="selected.imageMode||'generate'" @change="selected.imageMode=$event;if($event==='material')selected.materialRefs=(selected.materialRefs||[]).slice(0,1)"><el-radio value="generate">AI 图片生成</el-radio><el-radio value="material">直接使用资料图</el-radio></el-radio-group><div v-if="mode==='images'" class="reference-editors"><div v-for="entry in referenceEditors" :key="entry.node.id"><strong>{{ selected.role==='main'?'主图风格参考':'本张详情风格参考' }}</strong><WorkflowMaterialInput :model-value="entry.indices.map(i=>entry.node.defaultValue?.[i]||'')" :node="referenceNode(entry)" compact :category="category" @update:model-value="updateReference(entry,$event)" @upload="(file,index)=>emit('upload',file,entry.node,entry.indices[index])"/></div><small v-if="selected.role!=='main'&&selected.imageMode!=='material'&&selected.inputs.includes('style')">沿用整套公共风格</small><WorkflowMaterialReferences :category="category" :direct="selected.imageMode==='material'" v-model="selected.materialRefs" :image-references="selected.type==='image'" :label="`本节点生产资料 · ${selected.label}`"/></div>
+          <el-radio-group v-if="selected.type==='image'" :model-value="selected.imageMode||'generate'" @change="selected.imageMode=$event;if($event==='material')selected.materialRefs=(selected.materialRefs||[]).slice(0,1)"><el-radio value="generate">AI 图片生成</el-radio><el-radio value="material">直接使用资料图</el-radio></el-radio-group><div v-if="mode==='images'" class="reference-editors"><el-button v-if="selected.imageMode!=='material'" size="small" @click="addImageReference">添加本节点参考图</el-button><div v-for="entry in referenceEditors" :key="entry.node.id"><div class="reference-title"><strong>{{ selected.role==='main'?'主图风格参考':'本张详情风格参考' }}</strong><el-button link type="danger" @click="removeImageReference(entry.node.id)">移除引用</el-button></div><WorkflowMaterialInput :model-value="entry.indices.map(i=>entry.node.defaultValue?.[i]||'')" :node="referenceNode(entry)" compact :category="category" @update:model-value="updateReference(entry,$event)" @upload="(file,index)=>emit('upload',file,entry.node,entry.indices[index])"/></div><small v-if="selected.role!=='main'&&selected.imageMode!=='material'&&selected.inputs.includes('style')">沿用整套公共风格</small><WorkflowMaterialReferences :category="category" :direct="selected.imageMode==='material'" v-model="selected.materialRefs" :image-references="selected.type==='image'" :label="`本节点生产资料 · ${selected.label}`"/></div>
           <WorkflowMaterialReferences v-if="mode!=='images'" v-model="selected.materialRefs" :image-references="selected.type==='image'" label="本节点生产资料"/><el-collapse v-if="selected.imageMode!=='material'" :model-value="mode==='all'?['node-options']:undefined"><el-collapse-item title="引用材料与输出设置" name="node-options"><label class="input-drop" @dragover.prevent @drop.stop="dropInput($event)">输入材料／引用前序节点（也可拖入）<el-select v-model="selected.inputs" multiple filterable><el-option v-for="node in earlier" :key="node.id" :label="node.label" :value="node.id"/></el-select></label>
           <template v-if="selected.type==='copy'"><label>输出格式<el-select v-model="selected.target"><el-option label="通用文本（任意属性）" value="text"/><el-option label="标题" value="title"/><el-option label="标签列表" value="tags"/><el-option label="简介" value="description"/><el-option label="标题＋标签＋简介" value="bundle"/></el-select></label></template>
           <label v-if="selected.type==='image'">图片比例<el-select v-model="selected.ratio"><el-option v-for="ratio in ['3:4','1:1','4:5']" :key="ratio" :label="ratio" :value="ratio"/></el-select></label>
@@ -137,3 +141,5 @@ function slotsChanged(){const node=selected.value;node.slots=Array.from({length:
 .compact:not(.compact-fields) .output-name small{display:none}.compact:not(.compact-fields) .output-name{font-size:13px;line-height:1.5}.compact:not(.compact-fields) .output-node{padding:8px;margin-top:6px}.compact-fields .field-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.compact-fields .template-field{font-size:12px;padding:6px;min-height:34px}.compact-fields .sources-panel{display:flex;flex-wrap:wrap;gap:6px;padding:10px}.compact-fields .sources-panel>h3{width:100%;font-size:13px}.compact-fields .source-type{flex:1;min-width:45px;margin:0;padding:6px;font-size:11px}
 .compact .image-settings>.section-head:last-child{grid-row:4}.compact .image-settings>.reference-editors{grid-row:3}.compact .image-settings>label{grid-row:3}.compact .direct-material>.reference-editors{grid-column:1/-1;max-width:740px}
 </style>
+
+<style scoped>.reference-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.reference-title>strong{margin:0}.reference-title>.el-button{font-size:12px;flex:none}</style>
