@@ -2956,7 +2956,7 @@ onBeforeUnmount(() => {
                   </el-form-item>
                 </el-col>
                 <el-col v-if="vehicleBrandOptions.length" :span="6">
-                  <el-form-item label="汽车品牌">
+                  <el-form-item label="绑定品牌">
                     <el-select
                       v-model="dialog.form.vehicle_brand"
                       filterable
@@ -2964,14 +2964,14 @@ onBeforeUnmount(() => {
                       allow-create
                       default-first-option
                       :loading="catalogDictionaryLoading"
-                      placeholder="选择 Ozon 汽车品牌"
+                      placeholder="选择要绑定的 Ozon 品牌"
                     >
                       <el-option v-for="item in vehicleBrandOptions" :key="catalogOptionValue(item)" :label="catalogOptionLabel(item)" :value="catalogOptionValue(item)" />
                     </el-select>
                   </el-form-item>
                 </el-col>
                 <el-col v-if="vehicleOptions.length || dialog.form.vehicle_model" :span="6">
-                  <el-form-item label="汽车型号">
+                  <el-form-item label="绑定型号">
                     <el-select
                       v-model="dialog.form.vehicle_model"
                       filterable

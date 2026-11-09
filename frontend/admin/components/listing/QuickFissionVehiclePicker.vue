@@ -40,18 +40,18 @@ function statusType(status) { return { completed: "success", in_progress: "warni
 <template>
   <section class="quick-vehicle-picker" v-loading="loading" aria-label="车型库快速选择">
     <div class="picker-heading">
-      <strong>从车型库勾选</strong>
+      <strong>选择品牌机会与型号机会</strong>
       <span>复用 AI 裂变车型库 · 历史标记仅对应当前案例</span>
     </div>
     <div class="picker-toolbar">
-      <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索品牌或车型" aria-label="搜索品牌或车型" />
+      <el-input v-model="keyword" :prefix-icon="Search" clearable placeholder="搜索品牌机会或型号机会" aria-label="搜索品牌机会或型号机会" />
       <el-button size="small" :disabled="!freshTargets.length || loading" @click="selectFresh">勾选当前品牌未裂变车型</el-button>
     </div>
     <div v-if="error" class="picker-error" role="alert">
       <span>{{ error }}</span><el-button link type="primary" @click="emit('reload')">重新加载</el-button>
     </div>
     <div v-else-if="filteredBrands.length" class="picker-grid">
-      <nav class="brand-list" aria-label="汽车品牌">
+      <nav class="brand-list" aria-label="品牌机会">
         <button v-for="brand in filteredBrands" :key="brand.name" type="button" :class="{ active: currentBrand?.name === brand.name }" :aria-pressed="currentBrand?.name === brand.name" @click="activeBrand = brand.name">
           <span>{{ brand.name }}</span><small>{{ brand.models.length }}</small>
         </button>

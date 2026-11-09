@@ -77,7 +77,7 @@ export function normalizeInventoryRequestPayload(body, session) {
 
 export function inventoryRequestOptions(naming) {
   return [
-    ["category", "核心品名", naming.category], ["brand", "汽车品牌", naming.vehicleBrand],
+    ["category", "核心品名", naming.category], ["brand", "品牌", naming.vehicleBrand],
     ["accessory", "款式", naming.accessory],
     ...naming.colors.map(value => ["color", "颜色", value]),
     ...naming.materials.map(value => ["material", "材质", value]),

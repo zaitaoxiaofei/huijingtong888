@@ -1324,9 +1324,9 @@ async function saveDevelopmentIdeaMatrix(ideaId, body, sessionPersonId = null) {
 async function developmentIdeaScope(body) {
   const brand = normalizeText(body.development_brand, 255);
   const category = normalizeText(body.development_category, 255);
-  if (!brand || !category) throw new Error("灵感开发任务缺少汽车品牌或开发类目（development_brand/development_category），请在灵感编辑中选择品牌和类目后保存；非汽车产品请选择“非汽车”。");
+  if (!brand || !category) throw new Error("灵感开发任务缺少品牌或开发类目（development_brand/development_category），请在灵感编辑中选择品牌和类目后保存；非汽车产品请选择“非汽车”。");
   const [catalog, categories] = await Promise.all([aiVehicleCatalog({}, teamTenantSession()), inventoryProductNamingOptions({ type: "category" }, undefined, teamTenantKey())]);
-  if (brand !== "非汽车" && !catalog.brands.some((row) => row.name === brand)) throw new Error("灵感汽车品牌（development_brand）不在车型目录中，请在灵感编辑中重新选择。");
+  if (brand !== "非汽车" && !catalog.brands.some((row) => row.name === brand)) throw new Error("灵感品牌（development_brand）不在车型目录中，请在灵感编辑中重新选择。");
   if (!categories.rows.some((row) => row.value === category)) throw new Error("灵感开发类目（development_category）不在已审核核心品名中，请在灵感编辑中重新选择。");
   return { brand, category };
 }

@@ -22,7 +22,7 @@ export const navigationMenus = [
     children: [
       { key: "sku-traffic-monitor", label: "SKU流量监控", route: "/sku-traffic-monitor" },
       { key: "seller-analytics", label: "数据分析", route: "/seller-analytics" },
-      { key: "order-car-heatmap", label: "车型机会", route: "/order-car-heatmap" },
+      { key: "order-car-heatmap", label: "型号机会", route: "/order-car-heatmap" },
       { key: "advertising-daily", label: "广告分析", route: "/advertising/daily" }
     ]
   },

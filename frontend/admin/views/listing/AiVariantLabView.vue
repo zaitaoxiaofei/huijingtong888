@@ -306,7 +306,7 @@ function openAddVehicleCatalog() {
 
 async function saveVehicleCatalogEntry() {
   if (!String(vehicleCatalog.addForm.brand || "").trim()) {
-    ElMessage.warning("请填写汽车品牌");
+    ElMessage.warning("请填写所属品牌");
     return;
   }
   vehicleCatalog.addSaving = true;
@@ -3143,7 +3143,7 @@ function uploadRowMainImageRequest(row) {
 
           <section v-if="state.analysis" class="vehicle-target-picker" v-loading="vehicleCatalog.loading">
             <div class="vehicle-picker-heading">
-              <div><strong>目标车型</strong><span>先筛选车型范围，再按品牌或具体型号加入任务。{{ sourceModel ? `母车型：${sourceModel}（不重复生成）` : "" }}</span></div>
+              <div><strong>目标型号</strong><span>先筛选型号范围，再按品牌或具体型号加入任务。{{ sourceModel ? `母车型：${sourceModel}（不重复生成）` : "" }}</span></div>
               <div class="vehicle-heading-actions"><span>已选 {{ targetModels.length }} 个</span><el-button :icon="Plus" size="small" @click="openAddVehicleCatalog">新增车型</el-button></div>
             </div>
             <div class="vehicle-tag-toolbar">
@@ -3152,12 +3152,12 @@ function uploadRowMainImageRequest(row) {
             </div>
             <div class="vehicle-picker-grid">
               <div class="vehicle-brand-column">
-                <div class="column-heading"><strong>汽车品牌</strong><span>{{ filteredVehicleBrands.length }}</span></div>
+                <div class="column-heading"><strong>品牌机会</strong><span>{{ filteredVehicleBrands.length }}</span></div>
                 <button v-for="brand in filteredVehicleBrands" :key="brand.name" type="button" :class="{ active: activeVehicleBrand?.name === brand.name }" @click="vehicleCatalog.activeBrand = brand.name"><span>{{ brand.name }}</span><em>{{ brand.models.length }}</em></button>
               </div>
               <div class="vehicle-model-column">
                 <div class="column-heading">
-                  <strong>{{ activeVehicleBrand?.name || "具体型号" }}</strong>
+                  <strong>{{ activeVehicleBrand ? `${activeVehicleBrand.name} · 型号机会` : "型号机会" }}</strong>
                   <el-button v-if="activeVehicleBrand" size="small" type="primary" plain @click="addActiveBrandModels">加入当前品牌全部型号</el-button>
                 </div>
                 <div class="vehicle-model-options">
@@ -3171,7 +3171,7 @@ function uploadRowMainImageRequest(row) {
               <div class="selected-targets-heading"><strong>已选目标</strong><div><el-button v-if="targetModels.length" link type="danger" size="small" @click="setTargetModels([])">清空</el-button><el-button link type="primary" size="small" @click="manualTargetExpanded = !manualTargetExpanded">{{ manualTargetExpanded ? "收起手工输入" : "手工补充" }}</el-button></div></div>
               <div class="selected-target-chips">
                 <el-tag v-for="target in targetModels" :key="target" closable effect="plain" @close="removeTargetModel(target)">{{ target }}</el-tag>
-                <span v-if="!targetModels.length">还没有选择目标车型</span>
+                <span v-if="!targetModels.length">还没有选择目标型号</span>
               </div>
               <el-input v-if="manualTargetExpanded" v-model="material.targetInput" type="textarea" :rows="3" placeholder="一行一个完整车型，例如 HAVAL Jolion、TENET T7。" />
             </div>
@@ -3385,7 +3385,7 @@ function uploadRowMainImageRequest(row) {
 
     <el-dialog v-model="vehicleCatalog.addVisible" title="新增品牌 / 车型" width="520px" destroy-on-close>
       <el-form label-position="top">
-        <el-form-item label="汽车品牌"><el-input v-model="vehicleCatalog.addForm.brand" placeholder="例如 HAVAL" /></el-form-item>
+        <el-form-item label="所属品牌"><el-input v-model="vehicleCatalog.addForm.brand" placeholder="例如 HAVAL" /></el-form-item>
         <el-form-item label="具体型号"><el-input v-model="vehicleCatalog.addForm.model" placeholder="例如 Jolion；留空时只新增品牌" /></el-form-item>
         <el-form-item label="真实车型参考图链接"><el-input v-model="vehicleCatalog.addForm.vehicleReferenceImageUrl" placeholder="建议使用清晰的官方车型外观图；用于背景车准确生成" /></el-form-item>
         <el-form-item label="车型标签">

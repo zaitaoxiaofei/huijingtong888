@@ -118,10 +118,10 @@ const newNamingValues = computed(() => {
   if (!inlineInventoryRequest.value) return [];
   const naming = form.structured_naming;
   const entries = [
-    ["category", "核心品名", naming.category], ["brand", "汽车品牌", naming.vehicle_brand],
+    ["category", "核心品名", naming.category], ["brand", "绑定品牌", naming.vehicle_brand],
     ["accessory", "款式", naming.accessory], ...naming.colors.map(value => ["color", "颜色", value]),
     ...naming.materials.map(value => ["material", "材质", value]), ["process", "工艺", naming.process],
-    ...naming.vehicle_models.map(value => ["vehicle_model", "车型", value])
+    ...naming.vehicle_models.map(value => ["vehicle_model", "绑定型号", value])
   ];
   return entries.filter(([type, , value]) => {
     if (!value) return false;
@@ -544,7 +544,7 @@ async function approveCoreName(option) {
     });
     invalidateInventoryNamingOptions();
     await Promise.all([loadPendingCoreNames(), loadNamingOption(option.option_type)]);
-    ElMessage.success(`${option.option_type === "brand" ? "汽车品牌" : "核心品名"}“${option.value}”已通过审核`);
+    ElMessage.success(`${option.option_type === "brand" ? "品牌" : "核心品名"}“${option.value}”已通过审核`);
   } catch (error) {
     ElMessage.error(error.message || "标准选项审核失败");
   } finally {
@@ -554,7 +554,7 @@ async function approveCoreName(option) {
 
 async function rejectCoreName(option) {
   if (!option?.id) return;
-  const optionLabel = option.option_type === "brand" ? "汽车品牌" : "核心品名";
+  const optionLabel = option.option_type === "brand" ? "品牌" : "核心品名";
   try {
     await ElMessageBox.confirm(
       `确认驳回${optionLabel}“${option.value}”？该申请不会进入正式下拉。`,
@@ -764,14 +764,14 @@ async function applyVehicleBrand() {
   try {
     result = await ElMessageBox.prompt(
       "品牌不能直接新增。请填写俄罗斯市场使用的英文品牌名，提交后由经理或管理员审核。",
-      "申请汽车品牌",
+      "申请新增品牌",
       {
         inputPlaceholder: "例如：TOYOTA",
         confirmButtonText: "提交申请",
         cancelButtonText: "取消",
         inputValidator: (value) => {
           const text = String(value || "").trim().toUpperCase();
-          if (!text) return "请输入汽车品牌";
+          if (!text) return "请输入要新增的品牌";
           return (/[A-Z]/.test(text) && /^[A-Z0-9][A-Z0-9 &/().+'-]*$/.test(text)) || "请填写英文品牌名";
         }
       }
@@ -781,10 +781,10 @@ async function applyVehicleBrand() {
     const brand = String(result.value || "").trim().toUpperCase();
     const response = await apiClient.post("/api/inventory-product-naming/options", { option_type: "brand", value: brand, label: brand });
     invalidateInventoryNamingOptions();
-    ElMessage.success(response.status === "active" ? "汽车品牌已创建" : "品牌申请已提交，审核通过后可使用");
+    ElMessage.success(response.status === "active" ? "品牌已创建，可以绑定" : "品牌申请已提交，审核通过后可使用");
     await loadNamingOption("brand");
   } catch (error) {
-    ElMessage.error(error.message || "汽车品牌申请失败");
+    ElMessage.error(error.message || "品牌申请失败");
   }
 }
 
@@ -1061,10 +1061,10 @@ function componentFieldMatches(row, field, expected) {
 
 function componentMatchReasons(row) {
   const fields = [
-    ["brand", "vehicle_brand", "品牌"],
+    ["brand", "vehicle_brand", "绑定品牌"],
     ["material", "material", "材质"],
     ["process", "surface_process", "工艺"],
-    ["vehicle_model", "vehicle_model", "车型"],
+    ["vehicle_model", "vehicle_model", "绑定型号"],
     ["accessory", "accessory_name", "款式"],
     ["color", "color", "颜色"]
   ];
@@ -1710,14 +1710,14 @@ function submitAndCreateDraft() {
               <div v-show="!mobile || mobileCoreNamesExpanded">
               <div class="core-name-review-head">
                 <div>
-                  <strong>核心品名审批 / 汽车品牌审批</strong>
+                  <strong>核心品名审批 / 品牌审批</strong>
                   <span>待审核 {{ pendingCoreNames.length }} 项</span>
                 </div>
                 <el-button link type="primary" @click="loadPendingCoreNames">刷新</el-button>
               </div>
               <div v-if="pendingCoreNames.length" class="core-name-review-list">
                 <div v-for="item in pendingCoreNames" :key="item.id" class="core-name-review-item">
-                  <span><el-tag size="small" type="info">{{ item.option_type === 'brand' ? '汽车品牌' : '核心品名' }}</el-tag> {{ item.label || item.value }}</span>
+                  <span><el-tag size="small" type="info">{{ item.option_type === 'brand' ? '品牌' : '核心品名' }}</el-tag> {{ item.label || item.value }}</span>
                   <div>
                     <el-button size="small" type="success" :loading="pendingCoreNameActionId === Number(item.id)" @click="approveCoreName(item)">通过</el-button>
                     <el-button size="small" type="danger" plain :disabled="pendingCoreNameActionId === Number(item.id)" @click="rejectCoreName(item)">驳回</el-button>
@@ -1737,7 +1737,7 @@ function submitAndCreateDraft() {
               <el-row :gutter="10" class="naming-fields-grid">
               <el-col :span="24" v-show="showMobileSection('identity')" class="naming-step-heading">
                 <strong>{{ mobile ? '产品身份' : '1. 产品身份' }}</strong>
-                <span>核心品名只写商品本身；汽车品牌和车型不填时按通用处理。</span>
+                <span>核心品名只写商品本身；未绑定品牌和型号时按通用处理。</span>
               </el-col>
               <el-col :span="8" v-show="showMobileSection('identity')" class="naming-field naming-field--identity">
                 <el-form-item label="核心品名" required>
@@ -1757,16 +1757,16 @@ function submitAndCreateDraft() {
                 </el-form-item>
               </el-col>
               <el-col :span="8" v-show="showMobileSection('identity')" class="naming-field naming-field--identity">
-                <el-form-item label="汽车品牌">
+                <el-form-item label="绑定品牌">
                   <el-select v-model="form.structured_naming.vehicle_brand" filterable clearable :allow-create="inlineInventoryRequest" default-first-option placeholder="不选择则为通用" :filter-method="value => vehicleBrandQuery = value" @visible-change="visible => { if (!visible) vehicleBrandQuery = '' }" @change="handleVehicleBrandChange">
                     <el-option v-for="brand in filteredVehicleBrandOptions" :key="brand.value" :label="brand.label" :value="brand.value" />
                   </el-select>
-                  <el-button v-if="!inlineInventoryRequest" class="core-name-apply-button" link type="primary" @click="applyVehicleBrand">申请汽车品牌</el-button>
+                  <el-button v-if="!inlineInventoryRequest" class="core-name-apply-button" link type="primary" @click="applyVehicleBrand">申请新增品牌</el-button>
                 </el-form-item>
               </el-col>
               <el-col :span="8" v-show="showMobileSection('identity')" class="naming-field naming-field--identity">
-                <el-form-item label="车型">
-                  <el-select v-model="form.structured_naming.vehicle_models" multiple filterable allow-create default-first-option clearable collapse-tags :disabled="!form.structured_naming.vehicle_brand" placeholder="可选择或输入车型；不选择为品牌全系" @change="handleVehicleModelsChange">
+                <el-form-item label="绑定型号">
+                  <el-select v-model="form.structured_naming.vehicle_models" multiple filterable allow-create default-first-option clearable collapse-tags :disabled="!form.structured_naming.vehicle_brand" placeholder="可选择或输入型号；不选择为品牌全系" @change="handleVehicleModelsChange">
                     <el-option v-for="model in vehicleModelOptions" :key="model.id || model.name" :label="model.label || model.name" :value="model.name" />
                   </el-select>
                 </el-form-item>
@@ -2038,10 +2038,10 @@ function submitAndCreateDraft() {
               >
                 <el-option v-for="item in namingOptions.category" :key="item.id || item.value" :label="item.label || item.value" :value="item.value" />
               </el-select>
-                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="汽车品牌" @change="handleComponentFilterChange('brand')">
+                <el-select v-model="componentDirectory.brand" filterable allow-create default-first-option clearable placeholder="品牌筛选" @change="handleComponentFilterChange('brand')">
                   <el-option v-for="value in componentDirectoryBrands" :key="value" :label="value" :value="value" />
                 </el-select>
-                <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="车型" @change="handleComponentFilterChange('vehicle_model')">
+                <el-select v-model="componentDirectory.vehicle_model" filterable allow-create default-first-option clearable placeholder="型号筛选" @change="handleComponentFilterChange('vehicle_model')">
                   <el-option v-for="value in componentDirectoryModels" :key="value" :label="value" :value="value" />
                 </el-select>
                 <el-select v-model="componentDirectory.accessory" filterable allow-create default-first-option clearable placeholder="款式" @change="handleComponentFilterChange">
