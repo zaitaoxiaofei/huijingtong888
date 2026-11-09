@@ -158,19 +158,19 @@ watch(
 <template>
   <div class="inventory-structured-search" :class="{ 'is-compact': compact, 'is-simple': simple, 'is-inventory-form': layout === 'inventory-form' }">
     <div class="search-group search-group--identity">
-      <div v-if="!simple" class="search-group__title"><strong>产品身份</strong><span>汽车品牌和车型不选表示不限制搜索条件</span></div>
+      <div v-if="!simple" class="search-group__title"><strong>产品身份</strong><span>品牌筛选和型号筛选不选表示不限制搜索条件</span></div>
       <el-form-item label="核心品名">
         <el-select :model-value="modelValue.inventoryCategory" filterable clearable :loading="optionState.category.loading" :no-data-text="noDataText('category')" placeholder="输入或选择核心品名" @visible-change="retryOption('category', $event)" @update:model-value="update('inventoryCategory', $event)">
           <el-option v-for="item in options.category" :key="item.id || optionValue(item)" :label="optionLabel(item)" :value="optionValue(item)" />
         </el-select>
       </el-form-item>
-      <el-form-item label="汽车品牌">
+      <el-form-item label="品牌筛选">
         <el-select :model-value="modelValue.vehicleBrand" filterable clearable :loading="vehicleState.loading" :no-data-text="vehicleState.failed ? '加载失败，请重新打开下拉重试' : '暂无品牌数据'" placeholder="全部品牌" @visible-change="(visible) => visible && (vehicleState.failed || !vehicleCatalog.brands.length) && loadVehicleCatalog()" @update:model-value="update('vehicleBrand', $event)">
           <el-option v-for="brand in vehicleBrandOptions" :key="brand.value" :label="brand.label" :value="brand.value" />
         </el-select>
       </el-form-item>
-      <el-form-item label="车型">
-        <el-select :model-value="modelValue.vehicleModel" multiple filterable clearable collapse-tags :loading="vehicleState.loading" :disabled="!modelValue.vehicleBrand" :no-data-text="vehicleState.failed ? '车型目录加载失败' : '当前品牌暂无车型'" placeholder="全部车型" @update:model-value="update('vehicleModel', $event)">
+      <el-form-item label="型号筛选">
+        <el-select :model-value="modelValue.vehicleModel" multiple filterable clearable collapse-tags :loading="vehicleState.loading" :disabled="!modelValue.vehicleBrand" :no-data-text="vehicleState.failed ? '车型目录加载失败' : '当前品牌暂无型号'" placeholder="全部型号" @update:model-value="update('vehicleModel', $event)">
           <el-option v-for="model in vehicleModelOptions" :key="model.id || model.name" :label="model.label || model.name" :value="model.name" />
         </el-select>
       </el-form-item>

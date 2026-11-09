@@ -195,7 +195,7 @@ export const router = createRouter({
         { path: "sku-traffic-monitor/detail", name: "sku-traffic-detail", component: () => import("../views/analytics/SkuTrafficDetailView.vue"), meta: { title: "SKU分析明细", breadcrumb: ["数据分析", "SKU流量监控", "SKU分析明细"] } },
         { path: "sku-traffic-monitor", name: "sku-traffic-monitor", component: () => import("../views/analytics/SkuTrafficMonitorView.vue"), meta: { title: "SKU流量监控", breadcrumb: ["数据分析", "SKU流量监控"] } },
         { path: "seller-analytics", name: "seller-analytics", component: SellerAnalyticsView, meta: { title: "数据分析", breadcrumb: ["数据看板", "数据分析"] } },
-        { path: "order-car-heatmap", name: "order-car-heatmap", component: OrderCarHeatmapView, meta: { title: "车型机会", breadcrumb: ["数据看板", "车型机会"] } },
+        { path: "order-car-heatmap", name: "order-car-heatmap", component: OrderCarHeatmapView, meta: { title: "型号机会", breadcrumb: ["数据看板", "型号机会"] } },
         { path: "profit/aftersales", redirect: (to) => ({ path: "/profit/monthly-billing", query: { ...to.query, tab: "aftersales" } }) },
         { path: "profit/monthly-billing", name: "profit-monthly-billing", component: MonthlyBillingHubView, meta: { title: "月度账单", breadcrumb: ["财务中心", "月度账单"] } },
         { path: "profit/monthly-billing/orders", redirect: (to) => ({ path: "/profit/monthly-billing", query: { ...to.query, tab: "orders" } }) },

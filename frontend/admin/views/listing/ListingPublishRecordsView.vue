@@ -2090,7 +2090,7 @@ watch(() => route.query.taskId, () => {
         <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="refreshToolbarRecords">刷新列表</el-button>
         <el-button v-if="isPublishMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Refresh" :loading="batchRefreshing" :disabled="!selectedPublishRows.length" @click="batchRefreshRecords">批量同步状态 / SKU</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-primary" type="primary" :disabled="!selectedDraftRows.length" @click="openBatchListingDialog">批量去上架</el-button>
-        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('vehicle', selectedDraftRows)">批量绑定车型</el-button>
+        <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('vehicle', selectedDraftRows)">批量绑定品牌与型号</el-button>
         <el-button v-if="isDraftMode" :disabled="!selectedDraftRows.length" @click="openDraftBinding('task', selectedDraftRows)">批量绑定任务</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="Edit" :disabled="selectedDraftRows.length < 2" @click="batchOpenDraftsForListing">批量编辑</el-button>
         <el-button v-if="isDraftMode" class="erp-btn erp-btn-secondary" type="primary" plain :icon="MagicStick" :disabled="!selectedDraftRows.length" @click="openBatchMaterialOptimization">批量优化</el-button>
@@ -2131,7 +2131,7 @@ watch(() => route.query.taskId, () => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-if="isDraftMode" label="车型" min-width="150" show-overflow-tooltip>
+      <el-table-column v-if="isDraftMode" label="已绑定型号" min-width="150" show-overflow-tooltip>
         <template #default="{ row }">
           {{ row.vehicle_bindings?.length ? row.vehicle_bindings.map((item) => [item.brand_name, item.model_name].filter(Boolean).join(' · ')).join('、') : (vehicleModelText(row) || '-') }}
           <el-button link type="primary" size="small" @click="openDraftBinding('vehicle', [row])">绑定</el-button>
@@ -2701,19 +2701,19 @@ watch(() => route.query.taskId, () => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="draftBinding.visible" :title="`${draftBinding.draftIds.length > 1 ? '批量' : ''}绑定${draftBinding.mode === 'vehicle' ? '车型' : '任务'}`" :width="draftBinding.mode === 'task' ? 'min(1320px, 96vw)' : '480px'" top="3vh">
+    <el-dialog v-model="draftBinding.visible" :title="`${draftBinding.draftIds.length > 1 ? '批量' : ''}绑定${draftBinding.mode === 'vehicle' ? '品牌与型号' : '任务'}`" :width="draftBinding.mode === 'task' ? 'min(1320px, 96vw)' : '480px'" top="3vh">
       <p>已选择 {{ draftBinding.draftIds.length }} 条草稿</p>
       <template v-if="draftBinding.mode === 'vehicle'">
         <div class="draft-vehicle-binding-fields">
-          <div class="draft-vehicle-binding-heading"><strong>一级品牌</strong><el-button link type="primary" @click="catalogEntry = { kind: 'brand' }">＋ 新增品牌</el-button></div>
-          <el-select v-model="draftBinding.brands" multiple collapse-tags filterable clearable :loading="draftBinding.loading" placeholder="搜索或多选品牌" style="width: 100%" @change="draftBinding.vehicleIds = draftBinding.vehicleIds.filter((id) => selectedBrandModels.some((model) => Number(model.id) === Number(id)))">
+          <div class="draft-vehicle-binding-heading"><strong>绑定品牌</strong><el-button link type="primary" @click="catalogEntry = { kind: 'brand' }">＋ 新增品牌</el-button></div>
+          <el-select v-model="draftBinding.brands" multiple collapse-tags filterable clearable :loading="draftBinding.loading" placeholder="搜索或多选要绑定的品牌" style="width: 100%" @change="draftBinding.vehicleIds = draftBinding.vehicleIds.filter((id) => selectedBrandModels.some((model) => Number(model.id) === Number(id)))">
             <el-option v-for="brand in bindingOptions.brands" :key="brand.name" :label="brand.nameZh ? `${brand.name} · ${brand.nameZh}` : brand.name" :value="brand.name" />
           </el-select>
-          <div class="draft-vehicle-binding-heading"><strong>二级车型</strong><el-button link type="primary" :disabled="draftBinding.brands.length !== 1" @click="catalogEntry = { kind: 'model', brand: draftBinding.brands[0] }">＋ 新增车型</el-button></div>
-          <el-select v-model="draftBinding.vehicleIds" multiple collapse-tags filterable clearable :disabled="!draftBinding.brands.length" :loading="draftBinding.loading" placeholder="搜索或多选车型" style="width: 100%">
+          <div class="draft-vehicle-binding-heading"><strong>绑定型号</strong><el-button link type="primary" :disabled="draftBinding.brands.length !== 1" @click="catalogEntry = { kind: 'model', brand: draftBinding.brands[0] }">＋ 新增型号</el-button></div>
+          <el-select v-model="draftBinding.vehicleIds" multiple collapse-tags filterable clearable :disabled="!draftBinding.brands.length" :loading="draftBinding.loading" placeholder="搜索或多选要绑定的型号" style="width: 100%">
             <el-option v-for="model in selectedBrandModels" :key="model.id" :label="`${model.brand} · ${model.label || model.name}`" :value="Number(model.id)" />
           </el-select>
-          <span class="muted-text">已选择 {{ draftBinding.brands.length }} 个品牌、{{ draftBinding.vehicleIds.length }} 个车型。新增车型时请先只选择一个品牌。</span>
+          <span class="muted-text">已选择 {{ draftBinding.brands.length }} 个品牌、{{ draftBinding.vehicleIds.length }} 个型号。新增型号时请先只选择一个品牌。</span>
         </div>
       </template>
       <div v-else class="draft-task-binding-picker">
@@ -2736,7 +2736,7 @@ watch(() => route.query.taskId, () => {
           <el-select v-model="draftBinding.taskBrand" filterable allow-create clearable default-first-option placeholder="品牌（可输入）" aria-label="筛选品牌" @change="draftBinding.taskModel = ''">
             <el-option v-for="brand in bindingTaskBrands" :key="brand" :label="brand" :value="brand" />
           </el-select>
-          <el-select v-model="draftBinding.taskModel" filterable allow-create clearable default-first-option placeholder="车型（可输入）" aria-label="筛选车型">
+          <el-select v-model="draftBinding.taskModel" filterable allow-create clearable default-first-option placeholder="型号筛选（可输入）" aria-label="型号筛选">
             <el-option v-for="model in bindingTaskModels" :key="model" :label="model" :value="model" />
           </el-select>
         </div>
@@ -2749,7 +2749,7 @@ watch(() => route.query.taskId, () => {
           <el-table :data="filteredBindingTasks" max-height="min(52vh, 540px)" highlight-current-row row-key="id" @row-click="(row) => draftBinding.selectedId = row.id">
             <el-table-column width="46" align="center"><template #default="{ row }"><el-radio v-model="draftBinding.selectedId" :value="row.id" :aria-label="`选择任务 ${row.title}`" /></template></el-table-column>
             <el-table-column label="任务 / 核心品名" min-width="260"><template #default="{ row }"><div class="draft-task-binding-name"><strong>{{ row.title }}</strong><small>#{{ row.id }} · {{ row.core_name || '未设置核心品名' }}</small></div></template></el-table-column>
-            <el-table-column label="品牌 / 车型" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ [row.brand, row.models?.map((model) => model.name).join('、')].filter(Boolean).join(' · ') || '未配置车型' }}</template></el-table-column>
+            <el-table-column label="已绑定品牌 / 型号" min-width="220" show-overflow-tooltip><template #default="{ row }">{{ [row.brand, row.models?.map((model) => model.name).join('、')].filter(Boolean).join(' · ') || '未配置车型' }}</template></el-table-column>
             <el-table-column label="负责人" width="145"><template #default="{ row }"><div class="draft-task-binding-person"><el-avatar :src="row.owner_avatar_url" :size="26">{{ (row.owner_name || '未').slice(0, 1) }}</el-avatar>{{ row.owner_name || '未分配' }}</div></template></el-table-column>
             <el-table-column label="进度" width="110"><template #default="{ row }">{{ Number(row.done_count || 0) }} / {{ Number(row.target_count || 0) }}</template></el-table-column>
             <el-table-column label="状态" width="90"><template #default="{ row }"><el-tag size="small" effect="plain">{{ taskStatusLabels[row.status] || row.status }}</el-tag></template></el-table-column>

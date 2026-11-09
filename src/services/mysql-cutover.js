@@ -1209,7 +1209,7 @@ export function normalizeStructuredNamingMysql(body = {}) {
     : String(source.vehicle_model || source.vehicleModel || "").split(/[，,、/]+/u);
   const vehicleModels = [...new Set(rawModels.map((item) => clean(item)).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" }));
-  if (!vehicleBrand && vehicleModels.length) throw new Error("选择车型前必须先选择汽车品牌");
+  if (!vehicleBrand && vehicleModels.length) throw new Error("绑定型号前必须先选择绑定品牌");
   const fitmentType = vehicleBrand || vehicleModels.length ? "specific" : "universal";
   const vehicleModel = vehicleModels.join("/");
   const accessoryRaw = clean(source.accessory || "普通款").replace(/\s+/g, "");

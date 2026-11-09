@@ -332,7 +332,7 @@ async function submitConfirm() {
   const brand = state.confirmForm.brand.trim();
   const model = state.confirmForm.model.trim();
   if (!brand || !model) {
-    ElMessage.warning("请填写品牌和车型");
+    ElMessage.warning("请选择绑定品牌和绑定型号");
     return;
   }
   try {
@@ -391,7 +391,7 @@ onMounted(async () => {
 <template>
   <div class="page-stack car-heatmap-page">
     <el-card shadow="never" class="page-card">
-      <ErpPageHeader title="车型机会分析" description="用自有订单反推俄罗斯真实车型需求，筛出值得多类目铺货的汽车型号。">
+      <ErpPageHeader title="型号机会分析" description="用自有订单反推俄罗斯真实品牌与型号需求，筛出值得多类目铺货的型号。">
         <template #actions>
           <el-button class="erp-btn erp-btn-secondary" :icon="Refresh" :loading="loading" @click="loadModels">刷新</el-button>
         </template>
@@ -454,14 +454,14 @@ onMounted(async () => {
           <strong>{{ modelLabel(row) }}</strong>
           <span>{{ numberText(row.sku_count) }} SKU / {{ numberText(row.order_count) }} 单</span>
         </div>
-        <el-empty v-if="!loading && !topOpportunityRows.length" description="暂无可深挖车型" />
+        <el-empty v-if="!loading && !topOpportunityRows.length" description="暂无可深挖型号" />
       </div>
 
       <div class="car-opportunity-layout">
         <section class="car-opportunity-main">
           <header class="car-section-header">
             <div>
-              <h3>车型深挖榜</h3>
+              <h3>型号机会榜</h3>
               <span>只展示已识别车型；待归类标题先进入识别助手，确认后再参与机会排序。</span>
             </div>
             <el-button class="erp-btn erp-btn-secondary" size="small" :loading="unmatchedLoading" @click="openReviewAssistant">
@@ -491,7 +491,7 @@ onMounted(async () => {
             :row-class-name="modelRowClassName"
             @row-click="selectModel"
           >
-            <el-table-column label="车型" min-width="210" fixed>
+            <el-table-column label="绑定型号" min-width="210" fixed>
               <template #default="{ row }">
                 <div class="model-cell">
                   <div>
@@ -576,7 +576,7 @@ onMounted(async () => {
               <div>
                 <h3>{{ activeModelLabel }}</h3>
                 <span v-if="isRecognizedModel(state.activeModel)">二级按产品关键词订单数排序，点击看 SKU 明细。</span>
-                <span v-else>这是一批未归类标题，不用于判断车型机会。</span>
+                <span v-else>这是一批未归类标题，不用于判断型号机会。</span>
               </div>
               <el-button
                 v-if="isRecognizedModel(state.activeModel)"
@@ -794,10 +794,10 @@ onMounted(async () => {
       <div class="car-confirm-dialog">
         <p>{{ state.confirmRow?.title || "-" }}</p>
         <el-form label-width="86px">
-          <el-form-item label="品牌">
+          <el-form-item label="绑定品牌">
             <el-input v-model="state.confirmForm.brand" placeholder="例如 Toyota" />
           </el-form-item>
-          <el-form-item label="车型">
+          <el-form-item label="绑定型号">
             <el-input v-model="state.confirmForm.model" placeholder="例如 Camry" />
           </el-form-item>
           <el-form-item label="产品">

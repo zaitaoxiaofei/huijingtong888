@@ -879,7 +879,7 @@ const workbenchPreviewTemplateRows = computed(() => {
     { label: "用途", value: workbenchPreviewTemplateHint.value },
     { label: "商品", value: task.productName || "-" },
     { label: "类目", value: task.categoryName || task.productType || "-" },
-    { label: "品牌/型号", value: `${task.brand || "-"} ${task.vehicleModel || ""}`.trim() || "-" },
+    { label: "已绑定品牌 / 型号", value: `${task.brand || "-"} ${task.vehicleModel || ""}`.trim() || "-" },
     { label: "目标车型", value: targetModel },
     { label: "当前输出", value: selectedWriteBackAssets.value.join(" / ") || "待选择" }
   ];
@@ -1416,7 +1416,7 @@ const sourceFieldOptions = computed(() => [
   { key: "productName", label: "商品名称", hint: "选品表商品名，AI 识别产品主体", value: task.productName, model: "productName", placeholder: "例如：TENET 通用不锈钢门槛条", span: 2 },
   { key: "categoryName", label: "产品类目", hint: "Ozon 类目或内部产品类型", value: task.categoryName || task.productType, model: "categoryName", placeholder: "例如：汽车用品 / 门槛条", span: 2 },
   { key: "title", label: "上架标题", hint: "编辑上架里的标题，可作为文案参考", value: task.title, model: "title", placeholder: "如果已有标题，可以放在这里", span: 2 },
-  { key: "brandModel", label: "汽车品牌 / 型号", hint: "当前母商品适配车型", custom: "brandModel" },
+  { key: "brandModel", label: "绑定品牌 / 绑定型号", hint: "当前母商品适配车型", custom: "brandModel" },
   { key: "materialColor", label: "材质 / 颜色", hint: "影响图片质感、颜色和文案", custom: "materialColor" },
   { key: "quantity", label: "数量", hint: "套装数量、件数或包装数量", value: task.quantity, model: "quantity", placeholder: "例如：4件套" },
   { key: "package", label: "包装克重 / 尺寸", hint: "编辑上架必填物流属性", custom: "package", span: 2 },
@@ -1485,7 +1485,7 @@ const productInfoPreviewFacts = computed(() => {
     { label: "当前来源", value: task.sourceLabel || "当前编辑桌商品" },
     { label: "编辑模板", value: productInfoTemplateMeta.value.title },
     { label: "类目", value: productInfoForm.categoryName || productInfoForm.productType || "-" },
-    { label: "品牌 / 型号", value: `${productInfoForm.brand || "-"} ${productInfoForm.vehicleModel || ""}`.trim() || "-" }
+    { label: "已绑定品牌 / 型号", value: `${productInfoForm.brand || "-"} ${productInfoForm.vehicleModel || ""}`.trim() || "-" }
   ];
   if (task.sourceType === "selection") {
     facts.push(
@@ -5309,8 +5309,8 @@ function openNewWorkbench() {
               </span>
               <template v-if="field.custom === 'brandModel'">
                 <div class="inline-fields">
-                  <el-input v-model="task.brand" placeholder="汽车品牌，例如 TENET" />
-                  <el-input v-model="task.vehicleModel" placeholder="当前型号，例如 T4 / 通用" />
+                  <el-input v-model="task.brand" placeholder="绑定品牌，例如 TENET" />
+                  <el-input v-model="task.vehicleModel" placeholder="绑定型号，例如 T4 / 通用" />
                 </div>
               </template>
               <template v-else-if="field.custom === 'materialColor'">
@@ -5850,8 +5850,8 @@ function openNewWorkbench() {
                   </span>
                   <template v-if="field.custom === 'brandModel'">
                     <div class="inline-fields">
-                      <el-input v-model="productInfoForm.brand" placeholder="汽车品牌，例如 TENET" />
-                      <el-input v-model="productInfoForm.vehicleModel" placeholder="当前型号，例如 T4 / 通用" />
+                      <el-input v-model="productInfoForm.brand" placeholder="绑定品牌，例如 TENET" />
+                      <el-input v-model="productInfoForm.vehicleModel" placeholder="绑定型号，例如 T4 / 通用" />
                     </div>
                   </template>
                   <template v-else-if="field.custom === 'materialColor'">

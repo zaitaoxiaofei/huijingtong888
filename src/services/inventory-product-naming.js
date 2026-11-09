@@ -35,7 +35,7 @@ function validateCoreProductName(value) {
 
 export function validateVehicleBrand(value) {
   const text = normalizeVehicleBrand(value);
-  if (!text) throw new Error("汽车品牌不能为空；通用产品请选择通用适配，不要创建“无品牌”品牌选项。");
+  if (!text) throw new Error("品牌不能为空；通用产品请选择通用适配，不要创建“无品牌”品牌选项。");
   return text;
 }
 
@@ -52,7 +52,7 @@ export async function inventoryProductNamingOptions(query = {}, session = {}, in
   const vehicleModel = clean(query.vehicle_model, 255);
 
   if (status === "pending") {
-    if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以查看待审核核心品名和汽车品牌");
+    if (!isNamingMaintainer(session)) throw new Error("仅经理或管理员可以查看待审核核心品名和品牌");
     const params = [];
     const where = [inventoryTenantSql(tenant, 'o'), "o.option_type IN ('category', 'brand')", "o.status = 'pending'"];
     if (search) {
@@ -260,7 +260,7 @@ export async function updateInventoryProductNamingOption(id, body = {}, session 
     `, [optionId]);
     const option = options[0];
     if (!option) throw new Error("标准选项不存在或已删除");
-    if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和汽车品牌");
+    if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和品牌");
     const nextValue = option.option_type === "brand"
       ? validateVehicleBrand(body.value || body.label)
       : validateCoreProductName(body.value || body.label);
@@ -331,7 +331,7 @@ export async function deleteInventoryProductNamingOption(id, session = {}) {
   `, [optionId]);
   const option = rows[0];
   if (!option) throw new Error("标准选项不存在或已删除");
-  if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和汽车品牌");
+  if (!["category", "brand"].includes(option.option_type)) throw new Error("当前只支持维护核心品名和品牌");
   if (option.option_type === "brand") {
     await mysqlExecute(`UPDATE inventory_product_naming_options SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [optionId]);
     return { ok: true, id: optionId, value: option.value };
