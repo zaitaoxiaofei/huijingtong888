@@ -53,5 +53,5 @@ test('queued jobs, retries and provider permits cannot spend for a non-default s
   }
   assert.equal(storage,0);
   const billing=await checkAiCreditProviderBoundary(internal,'text',async sql=>sql.includes('FROM tenants')?[{id:7,slug:'default',feature_flags_json:{}}]:[]);
-  assert.equal(billing.mode,'internal');
+  assert.equal(billing.mode,'free');
 });

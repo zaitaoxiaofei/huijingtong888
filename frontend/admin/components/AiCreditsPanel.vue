@@ -6,6 +6,7 @@ import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { useAuthStore } from "../stores/auth";
 import { isPlatformAdmin } from "../../../src/shared/permissions.js";
 import { aiSkillsAvailable } from "../../../src/shared/ai-skills-access.js";
+import { AI_POINTS_PER_YUAN } from "../../../src/shared/ai-image-pricing.js";
 
 const props = defineProps({ platform: Boolean, tenantId: { type: Number, default: 0 }, tenantName: { type: String, default: "" } });
 const auth = useAuthStore();
@@ -23,6 +24,8 @@ let sequence = 0;
 let disposed = false;
 const labels = { recharge: "充值", reserve: "冻结", settle: "使用扣除", release: "解冻返还" };
 const points = value => Number(value || 0).toLocaleString("zh-CN");
+const yuan = value => (Number(value || 0) / AI_POINTS_PER_YUAN).toFixed(2);
+const chargedPoints = row => row.kind === "settle" ? Math.max(0, -Number(row.available_delta) - Number(row.frozen_delta)) : 0;
 const changeText = value => `${Number(value) > 0 ? "+" : ""}${points(value)}`;
 const statusText = computed(() => !wallet.value ? "尚未读取" : wallet.value.status === "active" ? "已开通" : "未开通或已停用");
 function identity() { return `${currentApiCacheScope()}:${target.value}:${props.platform}`; }
@@ -99,9 +102,10 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
   <section class="ai-credits-panel">
     <div class="credit-heading"><div><h2>AI积分{{ tenantName ? ` · ${tenantName}` : '' }}</h2><p>积分与会员时长分别管理。充值请联系平台管理员登记。</p></div><el-button :loading="loading" :disabled="saving" @click="load()">刷新</el-button></div>
     <el-alert v-if="platform || !aiSkillsAvailable(auth.user)" title="AI技能库暂未开放；登记或充值积分后仍保持关闭。" type="info" :closable="false" show-icon />
+    <el-alert title="1 积分 = ¥0.01；每张成功生成的图片扣 10 积分（¥0.10），文本免费。生成前冻结积分，明确失败后返还；状态不明时等待原任务核对。裁切和复用已有图片不重复收费。" type="info" :closable="false" show-icon />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <div class="credit-summary" v-loading="loading && !wallet">
-      <el-card shadow="never"><span>可用积分</span><strong>{{ wallet ? points(wallet.available_points) : '—' }}</strong></el-card>
+      <el-card shadow="never"><span>可用积分</span><strong>{{ wallet ? points(wallet.available_points) : '—' }}</strong><small v-if="wallet">余额折合 ¥{{ yuan(wallet.available_points) }}</small></el-card>
       <el-card shadow="never"><span>冻结积分</span><strong>{{ wallet ? points(wallet.frozen_points) : '—' }}</strong></el-card>
       <el-card shadow="never"><span>积分账户</span><strong>{{ statusText }}</strong></el-card>
     </div>
@@ -110,6 +114,7 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
       <el-table :data="entries" v-loading="loading" empty-text="暂无积分记录" style="width: 100%">
         <el-table-column label="时间（北京时间）" width="180"><template #default="{ row }">{{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</template></el-table-column>
         <el-table-column label="类型" width="110"><template #default="{ row }">{{ labels[row.kind] || '积分变动' }}</template></el-table-column>
+        <el-table-column label="图片费用" width="140"><template #default="{ row }">{{ row.kind === 'settle' ? `${points(chargedPoints(row))} 积分 / ¥${yuan(chargedPoints(row))}` : '—' }}</template></el-table-column>
         <el-table-column label="可用积分变动" width="130"><template #default="{ row }">{{ changeText(row.available_delta) }}</template></el-table-column>
         <el-table-column label="冻结积分变动" width="130"><template #default="{ row }">{{ changeText(row.frozen_delta) }}</template></el-table-column>
         <el-table-column label="变动后可用" width="130"><template #default="{ row }">{{ points(row.available_after) }}</template></el-table-column>
@@ -119,6 +124,7 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
     </el-card>
     <el-dialog v-model="rechargeVisible" :title="`登记积分充值 · ${tenantName}`" width="520px" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close>
       <p>此操作向所选企业增加积分，不发起线上扣款。相同充值编号只入账一次；请求失败时请保留原编号重试。</p>
+      <p>本次增加积分折合 ¥{{ yuan(recharge.points) }}，可生成 {{ Math.floor(recharge.points / 10) }} 张图片。</p>
       <el-form label-position="top"><el-form-item label="增加积分"><el-input-number v-model="recharge.points" :min="1" :max="1000000000000" :precision="0" /></el-form-item><el-form-item label="充值编号（防重复）"><el-input v-model="recharge.reference" maxlength="128" /></el-form-item><el-form-item label="充值依据"><el-input v-model="recharge.reason" type="textarea" :rows="3" maxlength="500" show-word-limit /></el-form-item></el-form>
       <template #footer><el-button :disabled="saving" @click="rechargeVisible=false">取消</el-button><el-button type="primary" :loading="saving" @click="submitRecharge">确认增加 {{ points(recharge.points) }} 积分</el-button></template>
     </el-dialog>

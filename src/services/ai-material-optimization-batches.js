@@ -464,13 +464,19 @@ async function generateOptimizedImage(sourceImage, prompt, title, item, slot) {
   const previous = parseJson(rows[0]?.checkpoint_json, {}).images?.[slot] || {};
   await assertMaterialActor(item);
   if (previous.state === "completed" && previous.url) return previous.url;
-  if (previous.state === "submitting" && !previous.provider_job?.jobId) throw statusError("上次图片提交结果未知，请先核对原供应商任务，不能重复计费", 409);
+  if (previous.state === "submitting" && !previous.provider_job?.jobId && !previous.credit_task_id) throw statusError("上次图片提交结果未知，请先核对原供应商任务，不能重复计费", 409);
   await saveCheckpoint(item, { images: { [slot]: { ...previous, state: "submitting" } } });
-  const result = await generateImages({ sourceImageUrl: sourceImage,
+  let result;
+  try {
+    result = await generateImages({ sourceImageUrl: sourceImage,
     finalPrompt: `${prompt || "Optimize this ecommerce product image."}\nExact source product: ${title}. Preserve identity, shape, material, color and quantity. No platform logos or watermarks.`,
-    ratio: "3:4", imageCount: 1, autoCrop: false, providerJob: previous.provider_job || null,
+    ratio: "3:4", imageCount: 1, autoCrop: false, idempotencyKey: `material:${item.id}:${slot}`, providerJob: previous.provider_job || null,
     onProviderJob: async providerJob => { await saveProviderReceipt(item, slot, providerJob); await assertMaterialActor(item); }
-  });
+    });
+  } catch (error) {
+    if (error.code === "AI_CREDIT_RESULT_PENDING" && error.creditTaskId) await saveCheckpoint(item, { images: { [slot]: { ...previous, state: "submitting", credit_task_id: error.creditTaskId } } });
+    throw error;
+  }
   await assertMaterialActor(item);
   const url = result.generatedImages?.[0]?.url || result.croppedImages?.[0]?.url || "";
   if (!url) throw statusError("图片服务未返回可用图片，请核对原服务商任务", 502);

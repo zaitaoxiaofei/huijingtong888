@@ -1,5 +1,6 @@
 import { resolveWorkflowImageRuntime } from "../../../services/ai-image-runtime-selection.js";
 import crypto from "node:crypto";
+import { aiImageCharge } from "../../../shared/ai-image-pricing.js";
 import fs from "node:fs/promises";
 import fsSync, { createReadStream } from "node:fs";
 import path from "node:path";
@@ -66,11 +67,37 @@ export async function generateImages(payload = {}, { creditRuntime } = {}) {
   if (!finalPrompt) throw Object.assign(new Error("finalPrompt 不能为空"), { status: 400 });
   const credited = await tryGenerateCreditedImage({ ...payload, finalPrompt }, {
     run: input => generateImagesInternal(input, input.taskId), getFile: getAiTaskFile, resolveRuntimes: aiImageRuntimePoolConfig,
-    validateInput: validateCreditedImageInput, runtime: creditRuntime
+    validateInput: validateCreditedImageInput, mergeResults: mergeCreditedImageResults, runtime: creditRuntime
   });
   if (credited.handled) return credited.result;
   const imageRuntimeConfig=await resolveWorkflowImageRuntime(payload,aiImageRuntimePoolConfig);
-  return generateImagesInternal({...payload,imageRuntimeConfig});
+  const result = await generateImagesInternal({...payload,imageRuntimeConfig});
+  return { ...result, billing: { mode: "internal", ...aiImageCharge(result.generatedImages.length), chargedPoints: 0 } };
+}
+
+async function mergeCreditedImageResults(results, failures) {
+  // Materialize a stable combined download without submitting any new images.
+  const hex = crypto.createHash("sha256").update(results.map(result => result.taskId).join(":")).digest("hex");
+  const taskId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  try { await registerAiImageTaskOwner(taskId); }
+  catch (error) { if (error.code !== "ER_DUP_ENTRY") throw error; await assertAiImageTaskOwner(taskId); }
+  const output = { ...results[0], taskId, generatedImages: [], croppedImages: [], zipUrl: zipUrl(taskId), imageFailures: failures };
+  for (const [index, result] of results.entries()) {
+    for (const [scope, field, directory] of [["generated", "generatedImages", resolveGeneratedTaskDir(taskId)], ["cropped", "croppedImages", resolveCroppedTaskDir(taskId)]]) {
+      await fs.mkdir(directory, { recursive: true });
+      for (const image of result[field] || []) {
+        const file = await getAiTaskFile(result.taskId, scope, image.filename);
+        const filename = `${index + 1}_${image.filename}`;
+        const filePath = path.join(directory, filename);
+        await fs.copyFile(file.filePath, filePath);
+        output[field].push({ ...image, ...createImageRecord(taskId, scope, filename, filePath) });
+      }
+    }
+  }
+  output.billing = { mode: "credits", ...aiImageCharge(output.generatedImages.length),
+    chargedPoints: results.reduce((sum, result) => sum + result.billing.chargedPoints, 0),
+    creditTaskIds: results.flatMap(result => result.billing.creditTaskIds) };
+  return output;
 }
 
 async function validateCreditedImageInput(payload) {

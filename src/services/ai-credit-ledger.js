@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AI_IMAGE_POINTS, AI_IMAGE_PRICE_KEY, AI_IMAGE_PRICE_VERSION } from "../shared/ai-image-pricing.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission } from "./business-task-tenant.js";
 
 const MAX_POINTS = 1_000_000_000_000;
@@ -100,6 +101,13 @@ export function createAiCreditLedger({ transaction }) {
       if (!["active", "disabled"].includes(input.status)) throw error("账户状态无效", "AI_CREDIT_INVALID", 400);
       return transaction(async connection => {
         await lockTenant(connection, id); await platform(session, connection);
+        if (input.status === "active") {
+          // Explicit platform account activation installs the approved tariff;
+          // ordinary generation never creates accounts, prices or balances.
+          await rows(connection, `INSERT INTO ai_credit_prices (id, price_key, version, points_per_result, created_by_person_id)
+            VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE id = id`,
+          [randomUUID(), AI_IMAGE_PRICE_KEY, AI_IMAGE_PRICE_VERSION, AI_IMAGE_POINTS, session.personId]);
+        }
         await rows(connection, "INSERT INTO ai_credit_accounts (tenant_id, account_key, status) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE status = VALUES(status)", [id, randomUUID(), input.status]);
         // Independent durable opt-in prevents a missing/disabled wallet table
         // from silently turning a paying enterprise back into internal mode.
@@ -111,6 +119,7 @@ export function createAiCreditLedger({ transaction }) {
     async createPrice(session, input) {
       const key = token(input.priceKey, "价格标识", 80), version = integer(input.version, "价格版本", { min: 1, max: 4294967295 });
       const points = integer(input.pointsPerResult, "单个结果积分", { min: 1 });
+      if (key === AI_IMAGE_PRICE_KEY && points !== AI_IMAGE_POINTS) throw error("图片统一为每张成功图片 10 积分（¥0.10）", "AI_CREDIT_INVALID", 400);
       return transaction(async connection => {
         await platform(session, connection);
         await rows(connection, `INSERT INTO ai_credit_prices (id, price_key, version, points_per_result, created_by_person_id)
@@ -163,7 +172,9 @@ export function createAiCreditLedger({ transaction }) {
         const wallet = await account(connection, id, true);
         const prices = await rows(connection, "SELECT * FROM ai_credit_prices WHERE price_key = ? ORDER BY version DESC LIMIT 1 FOR SHARE", [priceKey]);
         if (!prices.length) throw error("该 AI 能力尚未设置积分价格", "AI_CREDIT_PRICE_UNAVAILABLE", 409);
-        const price = prices[0], required = integer(Number(price.points_per_result) * quantity, "预占积分");
+        const price = prices[0];
+        if (priceKey === AI_IMAGE_PRICE_KEY && Number(price.points_per_result) !== AI_IMAGE_POINTS) throw error("图片积分价格与每张 10 积分不一致，请平台管理员核查价格配置", "AI_CREDIT_PRICE_UNAVAILABLE");
+        const required = integer(Number(price.points_per_result) * quantity, "预占积分");
         if (Number(wallet.available_points) < required) throw error("AI 积分不足，请联系企业负责人充值", "AI_CREDIT_INSUFFICIENT", 402);
         const taskId = randomUUID();
         await rows(connection, `INSERT INTO ai_credit_tasks (id, tenant_id, created_by_person_id, idempotency_key, input_sha256,

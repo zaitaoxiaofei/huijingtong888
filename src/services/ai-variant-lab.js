@@ -763,16 +763,22 @@ async function runBatchImageRow(jobNo, row, options = {}, runtimeChannels = [], 
       const completedResult = durableImageResult;
       const elapsedMs = Date.now() - started;
       await assertCurrentBatchImageActor(jobNo);
-      await mysqlExecute(`
-        UPDATE ai_variant_lab_batch_items
-        SET status = ?, image_result_json = ?, provider_job_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP
-        WHERE tenant_id = ? AND item_no = ?
-      `, aiTenantParams(["image_done", JSON.stringify({ ...completedResult, elapsedMs, attempts }), row.item_no], 2));
+      await withMysqlTransaction(async connection => {
+        await connection.execute("SELECT job_no FROM ai_variant_lab_batch_jobs WHERE tenant_id = ? AND job_no = ? FOR UPDATE", [aiTenantId(), jobNo]);
+        await connection.execute(`UPDATE ai_variant_lab_batch_items
+          SET status = ?, image_result_json = ?, provider_job_json = NULL, error_message = '', updated_at = CURRENT_TIMESTAMP
+          WHERE tenant_id = ? AND item_no = ?`,
+        aiTenantParams(["image_done", JSON.stringify({ ...completedResult, elapsedMs, attempts }), row.item_no], 2));
+        await connection.execute(`UPDATE ai_variant_lab_batch_jobs SET cost_json = JSON_SET(COALESCE(cost_json, '{}'),
+          '$.image_spend_cny', (SELECT COUNT(*) * 0.10 FROM ai_variant_lab_batch_items WHERE tenant_id = ? AND job_no = ? AND status = 'image_done'),
+          '$.customer_text_points', 0)
+          WHERE tenant_id = ? AND job_no = ?`, [aiTenantId(), jobNo, aiTenantId(), jobNo]);
+      });
       return { item_no: row.item_no, target_variant_value: row.target_variant_value, elapsedMs, image_result: completedResult };
     } catch (error) {
       const publicError = formatImageGenerationError(error);
       const elapsedMs = Date.now() - started;
-      const providerPending = error?.code === "provider_pending";
+      const providerPending = ["provider_pending", "AI_CREDIT_RESULT_PENDING"].includes(error?.code);
       await mysqlExecute(`
         UPDATE ai_variant_lab_batch_items
         SET status = ?, image_result_json = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
@@ -921,7 +927,7 @@ async function generateImagesWithChannelRetry(payload, runtimeChannels = [], row
           throw resubmitError;
         }
       }
-      if (error?.code === "provider_pending" || savedProviderJob?.jobId) throw error;
+      if (String(error?.code || "").startsWith("AI_CREDIT_") || error?.code === "provider_pending" || savedProviderJob?.jobId) throw error;
     }
   }
   throw lastError || statusError("No image provider channel is available", 400);
