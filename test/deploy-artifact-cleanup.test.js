@@ -13,7 +13,7 @@ test("deployment promotion removes stale runtime data from generated artifacts",
 
 test("deployment copy still excludes source uploads unless explicitly enabled", () => {
   assert.match(packageDeploySource, /OZON_DEPLOY_INCLUDE_UPLOADS/);
-  assert.match(packageDeploySource, /relativeSource !== "uploads"/);
+  assert.match(packageDeploySource, /createDeployCopyFilter\(rootDir, \{ includeUploads/);
 });
 
 test("deployment output directory creation retries transient Windows and OneDrive failures", () => {

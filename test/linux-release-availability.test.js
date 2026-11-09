@@ -40,9 +40,10 @@ candidate_warmup_seconds=360
 rollback_warmup_seconds=360
 trace() { printf '%s\\n' "$*" >> "$PWD/trace"; }
 kill() { if [[ "$1" != -0 ]]; then trace "kill $*"; fi; }
-systemctl() { trace "$*"; }
+systemctl() { if [[ "$1" == show ]]; then printf 424242; else trace "$*"; fi; }
+systemd-run() { trace candidate-start; }
 stop_existing_candidate() { trace stop-existing-candidate; }
-runuser() { printf '424242' > "$candidate_pid_file"; trace candidate-start; }
+runuser() { cat > "$candidate_pid_file"; }
 sleep() { SECONDS=$((SECONDS + $1)); }
 ${functionSource("wait_for_release")}
 ${functionSource("rollback")}

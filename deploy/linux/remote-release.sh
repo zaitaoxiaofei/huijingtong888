@@ -23,6 +23,7 @@ release_backup_path=""
 app_root="/opt/ozon-erp"
 releases_root="$app_root/releases"
 shared_root="$app_root/shared"
+dependency_cache_root="$app_root/artifacts/dependencies"
 current_link="$app_root/current"
 env_file="/etc/ozon-erp/ozon-erp.env"
 candidate_port="3001"
@@ -449,17 +450,16 @@ backup_database() {
 start_candidate() {
   stop_existing_candidate
   rm -f "$candidate_log"
-  set -a
-  # shellcheck disable=SC1090
-  source "$env_file"
-  set +a
-  runuser -u ozon-erp -- bash -lc "
-    cd '$release_dir'
-    exec 9>&-
-    nohup env PORT='$candidate_port' HOST='127.0.0.1' SCHEDULED_JOBS_ENABLED='false' DEPLOYMENT_CANDIDATE='1' NODE_ENV='production' NODE_OPTIONS='--max-old-space-size=384' /usr/bin/node src/server.js >'$candidate_log' 2>&1 &
-    echo \$! >'$candidate_pid_file'
-  "
-  candidate_pid="$(cat "$candidate_pid_file")"
+  # The candidate must outlive the publishing job and its SSH connection. A
+  # separate transient unit also closes the inherited release lock descriptor.
+  systemd-run --quiet --collect --unit="ozon-erp-candidate-${release_version}" \
+    --uid=ozon-erp --working-directory="$release_dir" --property="EnvironmentFile=$env_file" \
+    --property="StandardOutput=append:$candidate_log" --property="StandardError=append:$candidate_log" \
+    /usr/bin/env PORT="$candidate_port" HOST=127.0.0.1 SCHEDULED_JOBS_ENABLED=false DEPLOYMENT_CANDIDATE=1 \
+    NODE_ENV=production NODE_OPTIONS=--max-old-space-size=384 /usr/bin/node src/server.js
+  candidate_pid="$(systemctl show "ozon-erp-candidate-${release_version}.service" -p MainPID --value)"
+  [[ "$candidate_pid" =~ ^[0-9]+$ ]] && ((candidate_pid > 1)) || { echo "Candidate PID unavailable." >&2; return 1; }
+  printf '%s\n' "$candidate_pid" | runuser -u ozon-erp -- tee "$candidate_pid_file" >/dev/null
 
   # The primary continues serving throughout normal cold-start warmup.
   if ! wait_for_release "$candidate_port" "$release_version" "$candidate_warmup_seconds" "$candidate_pid"; then
@@ -510,6 +510,36 @@ release_block_device() {
   printf '%s\n' "$device"
 }
 
+prepare_release_dependencies() {
+  local key cached temporary helper="$staging_dir/scripts/lib/release-dependencies.mjs"
+  key="$(node "$helper" key "$staging_dir")"
+  if [[ -z "$key" ]]; then
+    install_release_dependencies
+    node "$helper" verify "$staging_dir"
+    return
+  fi
+  install -d -m 755 "$dependency_cache_root"
+  cached="$(node "$helper" find "$dependency_cache_root" "$key")"
+  if [[ -n "$cached" ]]; then
+    ln -s "$cached/node_modules" "$staging_dir/node_modules"
+    node "$helper" verify "$staging_dir"
+    echo "Reused verified immutable dependencies: $key"
+    return
+  fi
+  install_release_dependencies
+  node "$helper" verify "$staging_dir"
+  temporary="$(mktemp -d "$dependency_cache_root/.${key}.XXXXXX")"
+  mv "$staging_dir/node_modules" "$temporary/node_modules"
+  node "$helper" receipt "$temporary" "$key"
+  chown -hR root:root "$temporary"
+  chmod 755 "$temporary"
+  chmod -R a-w "$temporary"
+  [[ ! -e "$dependency_cache_root/$key" ]] || { echo "Dependency cache entry already exists." >&2; return 1; }
+  mv "$temporary" "$dependency_cache_root/$key"
+  ln -s "$dependency_cache_root/$key/node_modules" "$staging_dir/node_modules"
+  node "$helper" find "$dependency_cache_root" "$key" >/dev/null
+}
+
 install -d -o ozon-erp -g ozon-erp "$releases_root" "$shared_root/uploads/public" "$shared_root/uploads/runtime"
 install -d -m 700 -o ozon-erp -g ozon-erp "$shared_root/private-ai-results"
 assert_install_resources
@@ -522,8 +552,9 @@ if [[ ! -f "$staging_dir/package.json" || ! -f "$staging_dir/src/server.js" ]]; 
   exit 3
 fi
 
-chown -R ozon-erp:ozon-erp "$staging_dir"
-install_release_dependencies
+node "$staging_dir/scripts/lib/release-external-files.mjs" apply "$staging_dir" "${archive_path}.files"
+chown -hR ozon-erp:ozon-erp "$staging_dir"
+prepare_release_dependencies
 
 if [[ -f "$staging_dir/scripts/migrate-tenant-ai-material-optimization.mjs" ]]; then
   if ! material_change_required="$(material_optimization_preflight)"; then
@@ -749,7 +780,7 @@ if [[ -e "$release_dir" ]]; then
   exit 3
 fi
 mv "$staging_dir" "$release_dir"
-chown -R ozon-erp:ozon-erp "$release_dir"
+chown -hR ozon-erp:ozon-erp "$release_dir"
 configure_nginx_failover
 if [[ -n "$reviewed_identity_manifest" ]]; then
   chmod 600 "$reviewed_identity_manifest"

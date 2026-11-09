@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createDeployCopyFilter } from "./lib/deploy-copy-filter.mjs";
+import { EXTERNAL_TOOL_FILES, packageExternalFiles } from "./lib/release-external-files.mjs";
 
 const rootDir = process.cwd();
 const finalOutputDir = path.resolve(process.env.DEPLOY_OUTPUT_DIR || path.join(rootDir, "dist", "deploy"));
@@ -13,7 +14,9 @@ const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEA
 const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "production";
 const includeUploads = process.env.OZON_DEPLOY_INCLUDE_UPLOADS === "1";
 const includeEnv = process.env.OZON_DEPLOY_INCLUDE_ENV === "1";
-const deployCopyFilter = createDeployCopyFilter(rootDir, { includeUploads, privateResultRoot: process.env.AI_CREDIT_RESULT_ROOT || "" });
+const linuxTarget = process.env.OZON_DEPLOY_TARGET === "linux";
+const sourceCopyFilter = createDeployCopyFilter(rootDir, { includeUploads, privateResultRoot: process.env.AI_CREDIT_RESULT_ROOT || "" });
+const deployCopyFilter = source => !(linuxTarget && EXTERNAL_TOOL_FILES.includes(path.relative(rootDir, source).split(path.sep).join("/"))) && sourceCopyFilter(source);
 
 const filesToCopy = [
   ".env.example",
@@ -140,14 +143,16 @@ async function copyEntry(relativePath) {
 }
 
 async function copyPluginPackages() {
-  const packageSourceDir = path.resolve(rootDir, "..");
   const packageTargetDir = path.dirname(outputDir);
-  let entries = [];
-  try {
-    entries = await fs.readdir(packageSourceDir, { withFileTypes: true });
-  } catch {
-    return [];
+  const candidates = new Map();
+  for (const directory of new Set([path.resolve(rootDir, ".."), process.env.COLLECTOR_PLUGIN_OUTPUT_DIR, process.env.ANALYTICS_PLUGIN_OUTPUT_DIR].filter(Boolean))) {
+    try {
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        if (entry.isFile()) candidates.set(entry.name, { name: entry.name, source: path.join(directory, entry.name), isFile: () => true });
+      }
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
   }
+  const entries = [...candidates.values()];
 
   const selectedNames = new Set();
   for (const rule of pluginPackageRules) {
@@ -169,7 +174,7 @@ async function copyPluginPackages() {
   const copied = [];
   for (const entry of entries) {
     if (!entry.isFile() || !selectedNames.has(entry.name)) continue;
-    const source = path.join(packageSourceDir, entry.name);
+    const source = entry.source;
     const target = path.join(packageTargetDir, entry.name);
     const deployTarget = path.join(outputDir, entry.name);
     await fs.mkdir(packageTargetDir, { recursive: true });
@@ -352,6 +357,7 @@ await runNpmScript("package:analytics-plugin", "Analytics plugin packaging");
 
 await fs.rm(outputDir, { recursive: true, force: true });
 await fs.mkdir(outputDir, { recursive: true });
+const externalFiles = linuxTarget ? await packageExternalFiles(rootDir, `${finalOutputDir}-external`) : [];
 
 for (const file of filesToCopy) {
   await copyEntry(file);
@@ -387,7 +393,8 @@ const manifest = {
   includedDirectories: directoriesToCopy,
   includedUploads: includeUploads,
   includedEnv: includeEnv,
-  includedPluginPackages
+  includedPluginPackages,
+  externalFiles
 };
 
 await fs.writeFile(

@@ -137,6 +137,7 @@ ssh_port="${ssh_port:-22}"
 version="${version:-$(date '+%Y.%m.%d-%H%M%S')}"
 
 [[ "$version" =~ ^[0-9A-Za-z._-]+$ ]] || fail "version contains unsupported characters: $version"
+((${#version} <= 128)) || fail "version is too long for a release job"
 [[ -z "$expected_production_commit" || "$expected_production_commit" =~ ^[a-f0-9]{40}$ ]] || fail "expected production commit must be a full Git SHA"
 [[ "$ssh_port" =~ ^[0-9]+$ ]] && ((ssh_port >= 1 && ssh_port <= 65535)) || fail "invalid SSH port"
 [[ "$ssh_user" =~ ^[A-Za-z_][A-Za-z0-9._-]*$ ]] || fail "invalid SSH user"
@@ -144,8 +145,10 @@ version="${version:-$(date '+%Y.%m.%d-%H%M%S')}"
 
 output_dir="$artifact_root/$version-package"
 archive_path="$artifact_root/ozon-erp-$version.zip"
-remote_archive="/tmp/ozon-erp-$version.zip"
-remote_script="/tmp/ozon-erp-remote-release.sh"
+release_job_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(6).toString("hex"))')"
+release_unit="ozon-erp-release-$version-$release_job_token"
+remote_archive="/tmp/ozon-erp-$version-$release_job_token.zip"
+remote_script="/tmp/ozon-erp-remote-release-$version-$release_job_token.sh"
 remote_identity_manifest=""
 remote_ai_material_manifest=""
 remote_ai_media_retention_manifest=""
@@ -231,7 +234,14 @@ material_upload_attempted=0
 retention_upload_attempted=0
 consumables_upload_attempted=0
 numbering_upload_attempted=0
+remote_job_started=0
+remote_job_finished=0
 cleanup() {
+  if ((remote_job_started && !remote_job_finished)); then
+    printf 'Release may still be running in ECS unit %s; private manifests retained for that job.\n' "$release_unit" >&2
+    rm -rf -- "$work_dir"
+    return
+  fi
   if ((numbering_upload_attempted)); then
     ssh "${ssh_options[@]}" "$remote_target" "rm -f -- '$remote_inventory_numbering_manifest'" >/dev/null 2>&1 || printf 'Private inventory numbering manifest cleanup could not be confirmed.\n' >&2
   fi
@@ -257,6 +267,7 @@ if ((!skip_build)); then
     OZON_RELEASE_BRANCH="$(git branch --show-current)" \
     OZON_RELEASE_COMMIT="$(git rev-parse HEAD)" \
     OZON_RELEASE_CHANNEL="production" \
+    OZON_DEPLOY_TARGET="linux" \
     npm run package:deploy
 fi
 
@@ -268,13 +279,52 @@ ssh_options=(-p "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 
 scp_options=(-P "$ssh_port" -o ServerAliveInterval=15 -o ServerAliveCountMax=12 -i "$identity_file")
 remote_target="$ssh_user@$host"
 
+file_hash() {
+  node -e 'const fs=require("node:fs"),crypto=require("node:crypto");const hash=crypto.createHash("sha256");fs.createReadStream(process.argv[1]).on("data",chunk=>hash.update(chunk)).on("end",()=>process.stdout.write(hash.digest("hex"))).on("error",()=>process.exit(1));' "$1"
+}
+
+upload_verified_file() {
+  local source="$1" destination="$2" checksum attempt
+  checksum="$(file_hash "$source")"
+  for attempt in 1 2 3; do
+    if ssh "${ssh_options[@]}" "$remote_target" "test -f '$destination' && test ! -L '$destination' && test \"\$(sha256sum '$destination' | cut -d' ' -f1)\" = '$checksum'"; then return; fi
+    if scp "${scp_options[@]}" "$source" "$remote_target:$destination" \
+      && ssh "${ssh_options[@]}" "$remote_target" "test \"\$(sha256sum '$destination' | cut -d' ' -f1)\" = '$checksum'"; then return; fi
+    sleep 2
+  done
+  fail "Upload failed checksum verification: $destination"
+}
+
+# Large Windows tools are source-versioned blobs, not mutable files copied from
+# a running release. Only missing objects are uploaded; rollback keeps old hashes.
+node --input-type=module - "$output_dir/deploy-manifest.json" > "$work_dir/external-files.tsv" <<'NODE'
+import fs from 'node:fs';
+const files=JSON.parse(fs.readFileSync(process.argv[2],'utf8')).externalFiles||[];
+if(!Array.isArray(files)||files.length>2)throw Error('Invalid external file manifest');
+for(const file of files) {
+  if(!/^[a-f0-9]{64}$/.test(file.sha256)||!/^[a-f0-9]{64}$/.test(file.compressed_sha256))throw Error('Invalid external object hash');
+  console.log(`${file.sha256}\t${file.compressed_sha256}`);
+}
+NODE
+while IFS=$'\t' read -r object_hash compressed_hash; do
+  [[ -n "$object_hash" ]] || continue
+  if ssh "${ssh_options[@]}" "$remote_target" "test -f '/opt/ozon-erp/artifacts/files/$object_hash' && test ! -L '/opt/ozon-erp/artifacts/files/$object_hash' && test \"\$(sha256sum '/opt/ozon-erp/artifacts/files/$object_hash' | cut -d' ' -f1)\" = '$object_hash'"; then
+    printf 'Reusing unchanged tool object %s\n' "$object_hash"
+    continue
+  fi
+  object_source="${output_dir}-external/$object_hash.gz"
+  [[ "$(file_hash "$object_source")" == "$compressed_hash" ]] || fail "External object does not match source manifest"
+  ssh "${ssh_options[@]}" "$remote_target" "install -d -m 700 '${remote_archive}.files'"
+  upload_verified_file "$object_source" "${remote_archive}.files/$object_hash.gz"
+done < "$work_dir/external-files.tsv"
+
 printf 'Splitting release artifact for upload...\n'
 split -b 4m "$archive_path" "$work_dir/ozon-erp-upload-part-"
 printf 'Uploading release artifact in chunks...\n'
 for chunk_path in "$work_dir"/ozon-erp-upload-part-*; do
   chunk_suffix="${chunk_path##*-}"
   printf 'Uploading artifact chunk %s...\n' "$chunk_suffix"
-  scp "${scp_options[@]}" "$chunk_path" "$remote_target:$remote_archive.part-$chunk_suffix"
+  upload_verified_file "$chunk_path" "$remote_archive.part-$chunk_suffix"
 done
 ssh "${ssh_options[@]}" "$remote_target" \
   "set -e; cat '$remote_archive'.part-* > '$remote_archive'; rm -f '$remote_archive'.part-*; unzip -tqq '$remote_archive'"
@@ -303,12 +353,48 @@ if [[ -n "$reviewed_inventory_numbering_manifest" ]]; then
   scp "${scp_options[@]}" "$reviewed_inventory_numbering_manifest" "$remote_target:$remote_inventory_numbering_manifest"
 fi
 
-printf 'Activating release on ECS...\n'
+archive_hash="$(file_hash "$archive_path")"
+script_hash="$(file_hash "$script_dir/remote-release.sh")"
+ssh "${ssh_options[@]}" "$remote_target" "test \"\$(sha256sum '$remote_archive' | cut -d' ' -f1)\" = '$archive_hash' && test \"\$(sha256sum '$remote_script' | cut -d' ' -f1)\" = '$script_hash'"
+printf 'Starting independent ECS release job %s...\n' "$release_unit"
 if [[ -n "$remote_identity_manifest" ]]; then
   ssh "${ssh_options[@]}" "$remote_target" "chmod 600 '$remote_identity_manifest'"
 fi
+node - "$artifact_root/deploy-job-$version-$release_job_token.json" "$release_unit" "$host" "$version" "$archive_hash" <<'NODE'
+const fs=require('node:fs');const [file,unit,host,version,sha256]=process.argv.slice(2);
+fs.writeFileSync(file,JSON.stringify({unit,host,version,sha256})+'\n',{mode:0o600});
+NODE
+remote_job_started=1
 ssh "${ssh_options[@]}" "$remote_target" \
-  "$activation_command"
+  "systemd-run --quiet --unit='$release_unit' --property=RuntimeMaxSec=1800 --property=KillMode=control-group $activation_command"
+
+wait_for_remote_release() {
+  local deadline=$((SECONDS + 1860)) status active result exit_status load_state
+  while ((SECONDS < deadline)); do
+    if ! status="$(ssh "${ssh_options[@]}" "$remote_target" "systemctl show '$release_unit.service' -p LoadState -p ActiveState -p Result -p ExecMainStatus")"; then
+      sleep 5
+      continue
+    fi
+    active=""; result=""; exit_status=""; load_state=""
+    while IFS='=' read -r key value; do
+      case "$key" in LoadState) load_state="$value" ;; ActiveState) active="$value" ;; Result) result="$value" ;; ExecMainStatus) exit_status="$value" ;; esac
+    done <<< "$status"
+    if [[ "$load_state" != "loaded" ]]; then
+      echo "Release unit is unavailable; verify the running version before retrying." >&2
+      return 1
+    fi
+    if [[ "$active" == "failed" || "$active" == "inactive" ]]; then
+      remote_job_finished=1
+      ssh "${ssh_options[@]}" "$remote_target" "journalctl -u '$release_unit.service' -n 30 --no-pager" || true
+      [[ "$active" == "inactive" && "$result" == "success" && "$exit_status" == "0" ]] || return 1
+      return
+    fi
+    sleep 5
+  done
+  echo "Release status is unknown; inspect ECS unit $release_unit before retrying." >&2
+  return 1
+}
+wait_for_remote_release
 
 if command -v shasum >/dev/null 2>&1; then
   archive_hash="$(shasum -a 256 "$archive_path" | awk '{print $1}')"

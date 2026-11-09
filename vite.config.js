@@ -5,17 +5,15 @@ import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 import ElementPlus from "unplugin-element-plus/vite";
 import path from "node:path";
 
-// Release provenance may contain branch separators; asset names must stay flat.
-const buildStamp = (process.env.OZON_BUILD_STAMP || String(Date.now())).replace(/[^A-Za-z0-9_-]/g, "-");
-const releaseVersion = process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local";
-const releaseChannel = process.env.OZON_RELEASE_CHANNEL || "local";
+// Release provenance belongs in release.json. Unchanged assets must retain
+// their content-addressed URLs across builds and releases.
 const frontendOutDir = path.resolve(process.env.OZON_VITE_OUT_DIR || "public/vue-apps");
 
 export default defineConfig({
   base: "/vue-apps/",
   define: {
-    __APP_RELEASE_VERSION__: JSON.stringify(releaseVersion),
-    __APP_RELEASE_CHANNEL__: JSON.stringify(releaseChannel)
+    __APP_RELEASE_VERSION__: "globalThis.__ERP_RELEASE_METADATA__?.version",
+    __APP_RELEASE_CHANNEL__: "globalThis.__ERP_RELEASE_METADATA__?.channel"
   },
   plugins: [
     vue(),
@@ -48,9 +46,9 @@ export default defineConfig({
           if (id.includes("/vue/")) return "vendor-vue";
           return "vendor";
         },
-        entryFileNames: `assets/[name]-view-[hash]-${buildStamp}.js`,
-        chunkFileNames: `assets/[name]-[hash]-${buildStamp}.js`,
-        assetFileNames: `assets/[name]-[hash]-${buildStamp}[extname]`
+        entryFileNames: "assets/[name]-view-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]"
       }
     }
   }
