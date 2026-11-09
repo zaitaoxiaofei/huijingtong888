@@ -1,3 +1,4 @@
+import { WORKFLOW_COPY_RULES } from './workflow-copy-rules.js';
 import { createWorkflowNode, keyCaseWorkflow, validateWorkflow } from './product-workflow.js';
 import { addDefaultWorkflowBindings, WORKFLOW_TEMPLATE_FIELDS } from './product-workflow-bindings.js';
 
@@ -27,7 +28,7 @@ export function keyCaseProductionWorkflow(category) {
   mapAttribute('vehicle_brand',7204,'shared');mapAttribute('vehicle_model',7212,'shared');
   const type=mapAttribute('product_type',8229,'shared');if(type){type.valueSource='engineer';type.defaultValue=clone(category.attributes.find(a=>Number(a.attributeId)===8229).defaultValue??'');}
   for(const id of ['model','key','vehicle_brand','vehicle_model']){const node=definition.nodes.find(n=>n.id===id);if(node)node.inputGroup='fitment';}
-  const key=definition.nodes.find(n=>n.id==='key');key.valueSource='user';key.required=false;key.fallbackInput='product';key.help='产品主图已含右下角适配钥匙时无需重传；没有钥匙小卡片时请补充独立钥匙图';key.slots=['实际适配钥匙正面；产品图右下角已含钥匙时，可直接复用该产品图并以小卡片为准'];
+  const key=definition.nodes.find(n=>n.id==='key');key.valueSource='user';key.required=false;delete key.fallbackInput;key.help='选填：上传优先；未上传按品牌型号匹配企业模具。没有匹配则隐藏裸钥匙并跳过适配对照详情';key.slots=['适配钥匙图片（选填）'];
   const product=definition.nodes.find(n=>n.id==='product');product.valueSource='user';product.slots=['当前款式的真实钥匙壳产品主图，禁止用其他款式代替'];
   const style=definition.nodes.find(n=>n.id==='style');Object.assign(style,{valueSource:'engineer',required:true,defaultValue:[''],label:'固定风格参考 · 主图',slots:['上传一次后保存：只借鉴版式、色彩和文字层级，不复制商品或型号']});
   const packaging={...createWorkflowNode('field','packaging'),label:'已确认包装说明',valueSource:'user',scope:'shared',required:false,defaultValue:''};
@@ -39,11 +40,11 @@ export function keyCaseProductionWorkflow(category) {
   const main=definition.nodes.find(n=>n.id==='main');main.inputs=[...factIds,'product','key','style'];
   main.prompt+=' 当前产品图是外观事实依据；适配钥匙图只用于说明适配轮廓，不得生成其他按键数量或其他钥匙型号。风格参考中的旧商品、颜色、适配车型、logo和卖点不能继承。';
   for(let i=0;i<KEY_CASE_DETAIL_SHOTS.length;i++){
-    const shot=definition.nodes.find(n=>n.id===`detail_${i+1}`);shot.inputs=[...factIds,'product','key','style','style_details','approve'];shot.referenceSlots={style_details:[i]};shot.label=KEY_CASE_DETAIL_SHOTS[i].label;shot.prompt=KEY_CASE_DETAIL_SHOTS[i].prompt;if(i===3)shot.inputs.push('vehicle_photo');
+    const shot=definition.nodes.find(n=>n.id===`detail_${i+1}`);shot.inputs=[...factIds,'product','key','style','style_details','approve'];shot.referenceSlots={style_details:[i]};shot.label=KEY_CASE_DETAIL_SHOTS[i].label;if(i===0)shot.requiresInput='key';shot.prompt=KEY_CASE_DETAIL_SHOTS[i].prompt;if(i===3)shot.inputs.push('vehicle_photo');
     shot.prompt+=' 使用本张对应的详情参考版式，保持主图的字体和产品保真，使用统一黑银、深蓝与米色的信息层级；场景明暗跟随本张参考。当前款式的形状、颜色、包边、挂扣和按键以真实产品图为准；只写用户已确认卖点。';
   }
   definition.nodes=definition.nodes.filter(n=>n.id!=='copy'&&n.id!=='detail_6');
-  for(const [target,label,prompt] of [['title','俄语标题','只生成一个俄语商品标题，保留钥匙壳品类与用户确认的适配型号，不扩大车型范围。'],['tags','俄语标签','按真实产品、用户确认卖点和适配型号生成去重的俄语标签列表，不引用风格参考上的商品事实。'],['description','俄语简介','生成自然俄语简介，解释已确认适配限制、真实材质、卖点与包装内容。未知的尺寸、信号性能、测试等级和认证不作承诺。']])definition.nodes.push({...createWorkflowNode('copy',`copy_${target}`),target,label,prompt,inputs:factIds});
+  for(const [target,label] of [['title','俄语标题'],['tags','俄语标签'],['description','俄语简介']])definition.nodes.push({...createWorkflowNode('copy',`copy_${target}`),target,label,prompt:WORKFLOW_COPY_RULES[target],inputs:[...factIds,...(target==='description'?['copy_title','copy_tags']:[])]});
   addDefaultWorkflowBindings(definition);
   if(category.attributes.some(a=>Number(a.attributeId)===9048))definition.bindings.attribute_9048={sources:[{nodeId:'model',output:'value'}]};
   if(category.attributes.some(a=>Number(a.attributeId)===4180))definition.bindings.attribute_4180={sources:[{nodeId:'copy_title',output:'title'}]};

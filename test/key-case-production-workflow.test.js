@@ -56,7 +56,7 @@ test('headless production gates main approval then produces five detail shots an
 
 test('first detail gives the bare key priority and the last detail is confirmed packaging',()=>{const run=fixture();const shots=run.payload.definition.nodes.filter(n=>n.type==='image'&&n.role==='detail');assert.equal(shots.length,5);assert.match(shots[0].prompt,/原钥匙为主视觉/);assert.match(shots[0].prompt,/小比例陪衬/);assert.match(shots[4].label,/礼盒/);assert.ok(shots[3].inputs.includes('vehicle_photo'));});
 
-test('embedded key card reuses the product image without asking for a second upload',()=>{const run=fixture();const expanded=expandWorkflowVariants(run.payload.definition,[{id:'one',label:'one',values:{product:['https://example.test/composite-product.jpg']}}],{model:'DASHING',facts:'black carbon pattern'});assert.deepEqual(expanded[0].values.key,expanded[0].values.product);validateWorkflowVariants(run.payload.definition,expanded);});
+test('missing key no longer silently treats the product picture as a verified mold',()=>{const run=fixture();const expanded=expandWorkflowVariants(run.payload.definition,[{id:'one',label:'one',values:{product:['https://example.test/composite-product.jpg']}}],{model:'DASHING',facts:'black carbon pattern'});assert.ok(!expanded[0].values.key.some(Boolean));validateWorkflowVariants(run.payload.definition,expanded);});
 
 test('commercial fields stay empty until listing and never inherit another SKU price or packaging',()=>{
   const run=fixture();

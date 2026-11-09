@@ -1,3 +1,4 @@
+import { materialMatches,materialBindings,materialCoversFitments,normalizeMaterialBindings } from '../shared/workflow-materials.js';
 import { randomUUID } from "node:crypto";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { authorizeBusinessTaskSession, assertBusinessTaskPermission, businessTaskTenantKey } from "./business-task-tenant.js";
@@ -23,6 +24,19 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   const map=row=>({id:row.id,name:row.name,revision:Number(row.revision),kind:row.kind,payload:JSON.parse(row.payload_json)});
   async function list(kind,session,options={}) {
     const {tenant}=await scope(session);
+    if(kind==='library'){
+      const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
+      const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'", '(name LIKE ? OR payload_json LIKE ?)'];
+      const params=[tenant,`%${keyword}%`,`%${keyword}%`];
+      if(options.role==='compatibility')filters.push("(kind = 'key_model' OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.role')) = 'compatibility')");
+      if(options.category){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.listingCategory.key')) = ? OR JSON_EXTRACT(payload_json, '$.listingCategory') IS NULL OR JSON_TYPE(JSON_EXTRACT(payload_json, '$.listingCategory')) = 'NULL')");params.push(String(options.category));}
+      if(options.brand){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand')) = ? OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL)");params.push(String(options.brand),String(options.brand));}
+      if(options.model){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.model')) = ? OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings') OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings'))");params.push(String(options.model),JSON.stringify([{brand:String(options.brand),models:[String(options.model)]}]),JSON.stringify([{brand:String(options.brand),allModels:true}]));}
+      const filter=filters.join(' AND '),total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      const page=Math.max(1,Math.min(Math.ceil(total/size)||1,Number.parseInt(options.page,10)||1));
+      const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
+      return {items:rows.map(map),total,page,pageSize:size};
+    }
     if(kind==='template'&&options.page!==undefined){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
       const filter="tenant_id = ? AND kind = ? AND (name LIKE ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) LIKE ?)";
@@ -86,6 +100,14 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     catch(error){if(body.creationId&&error.code==='ER_DUP_ENTRY')return get(kind,id,session);throw error;}
     return {id,kind,name,payload,revision:1};
   }
+  async function matchingKeys(fitments,category,session){
+    const {tenant}=await scope(session);
+    normalizeMaterialBindings(fitments.map(f=>({brand:f?.brand,models:[f?.model]})));
+    if(!fitments.length)return [];
+    // Search by confirmed brand before matching all fitments; no first-500 truncation.
+    const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind IN ('material','key_model') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand'))) = LOWER(?) OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL) ORDER BY updated_at DESC, id DESC",[tenant,fitments[0].brand,fitments[0].brand]);
+    return rows.map(map).filter(r=>r.payload.images?.length&&(r.kind==='key_model'||r.payload.role==='compatibility')&&materialBindings(r.payload).length&&materialMatches(r,{category,fitments})&&materialCoversFitments(r,fitments));
+  }
   async function factsHistory(session){
     const {tenant}=await scope(session);
     const rows=await query("SELECT id, name, JSON_EXTRACT(payload_json, '$.variants') AS variants_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' ORDER BY updated_at DESC LIMIT 60",[tenant]);
@@ -93,7 +115,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
     return result;
   }
-  return {list,get,save,scope,factsHistory};
+  return {list,get,save,scope,factsHistory,matchingKeys};
 }
 export const productWorkflowStore=createProductWorkflowStore();
 

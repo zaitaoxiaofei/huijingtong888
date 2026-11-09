@@ -1,3 +1,4 @@
+import { workflowNodeSkipped } from './workflow-conditions.js';
 import {validateMaterialRefs, normalizeMaterialBindings} from './workflow-materials.js';
 import { validateWorkflowBindings, applyWorkflowBindings } from './product-workflow-bindings.js';
 import { attributeSelectedValues, readableWorkflowValue } from './product-workflow-inputs.js';
@@ -23,6 +24,7 @@ export function validateWorkflow(value) {
     if (["image", "copy"].includes(node.type) && node.imageMode!=='material' && !String(node.prompt || "").trim()) throw workflowError(`${node.label}缺少提示词，请在节点设置填写`);
     if(node.imageMode&&!['generate','material'].includes(node.imageMode))throw workflowError(`${node.label}的图片来源无效`);
     if(node.type==='image'&&node.imageMode==='material'&&node.materialRefs?.length!==1)throw workflowError(`${node.label}请从资料库选择一张成品图`);
+    if(node.requiresInput&&(node.type!=='image'||node.role==='main'||!seen.has(node.requiresInput)||seen.get(node.requiresInput).type!=='images'))throw workflowError(`${node.label}的可选图片依赖无效`);
     if(node.inputFormat&&!['text','number','images'].includes(node.inputFormat))throw workflowError(`${node.label}的输入格式无效`);
     if (node.type === "images" && (!Number.isInteger(node.count) || node.count < 1 || node.count > 8 || !Array.isArray(node.slots) || node.slots.length !== node.count || node.slots.some(x => !String(x).trim()))) throw workflowError(`${node.label}需要为每张参考图填写用途（1–8 张）`);
     if (node.type === "image" && !["1:1", "3:4", "4:5"].includes(node.ratio)) throw workflowError(`${node.label}请选择有效图片比例`);
@@ -137,6 +139,7 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
   const rows=variants.map((variant,i)=>{
     const result=outputs[variant.id]||{};
     for(const node of definition.nodes.filter(n=>["image","copy","video","approval"].includes(n.type))){
+      if(workflowNodeSkipped(node,variant))continue;
       if(["image","copy","video"].includes(node.type)&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未检查通过`);
       workflowInputContext(definition,variant,node,result);
       if(node.type==="approval"&&!result[node.id]?.approved)throw workflowError(`${variant.label}的“${node.label}”尚未人工确认`);
@@ -147,7 +150,7 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
       const mapped=applyWorkflowBindings(definition,variant,result);
       return {...mapped,...videoFields,offer_id:`WF-${runId.slice(0,8)}-${i+1}`,sku:`WF-${runId.slice(0,8)}-${i+1}`,images_manually_edited:true,image_edit_intent:'manual',workflow_variant_id:variant.id,workflow_facts:clone(variant.values)};
     }
-    const images=imageNodes.map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
+    const images=imageNodes.filter(n=>!workflowNodeSkipped(n,variant)).map(n=>{if(!result[n.id]?.url || !result[n.id]?.approved) throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`); return result[n.id].url;});
     const copy={};
     for(const n of copyNodes){if(!result[n.id]?.approved || !result[n.id]?.text)throw workflowError(`${variant.label}的“${n.label}”尚未检查通过`);Object.assign(copy,result[n.id].text);}
     if(!String(copy.title||"").trim() || !String(copy.description||"").trim() || !Array.isArray(copy.tags) || !copy.tags.length)throw workflowError(`${variant.label}缺少标题、标签或描述，请检查文案节点输出`);

@@ -1,3 +1,5 @@
+import { normalizeWorkflowTags,validateWorkflowCopy } from './workflow-copy-rules.js';
+import { workflowNodeSkipped } from './workflow-conditions.js';
 import { attributeSelectedValues, isWorkflowInput, readableWorkflowValue } from './product-workflow-inputs.js';
 
 const fail=message=>{throw Object.assign(new Error(message),{status:400});};
@@ -38,6 +40,7 @@ export function validateWorkflowBindings(definition) {
 }
 function sourceValue(definition,variant,results,ref) {
   const node=definition.nodes.find(n=>n.id===ref.nodeId);
+  if(workflowNodeSkipped(node,variant))return '';
   if(isWorkflowInput(node))return node.type==='images'?(variant.values[node.id]||[]):readableWorkflowValue(node,variant.values[node.id]);
   const state=results[node.id];
   if(!state?.approved)fail(`${variant.label}的“${node.label}”尚未检查通过`);
@@ -76,6 +79,8 @@ export function resolveWorkflowBindings(definition,variant,results) {
       values[field.key]=field.kind==='number'&&value!==''?Number(value):value;
     }
   }
+  if(values.tags?.length)values.tags=normalizeWorkflowTags(values.tags);
+  for(const key of ['title','description'])if(values[key])values[key]=validateWorkflowCopy(key,values[key],variant.fitments||[]);
   return values;
 }
 export function applyWorkflowBindings(definition,variant,results,baseAttributes={}) {

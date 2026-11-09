@@ -1,3 +1,5 @@
+import { workflowNodeSkipped } from '../shared/workflow-conditions.js';
+import { validateWorkflowCopy } from '../shared/workflow-copy-rules.js';
 import { randomUUID } from 'node:crypto';
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from '../mysql-pool.js';
 import { restoreBusinessTaskSession, authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
@@ -111,6 +113,7 @@ export async function productWorkflowAction(body,session) {
       }else if(body.action==='save-copy'&&node.type==='copy'&&state?.text) {
         const text=body.text;
         if(!text||typeof text!=='object'||Array.isArray(text)||Object.keys(text).some(key=>!['title','tags','description','text'].includes(key))||('tags'in text&&(!Array.isArray(text.tags)||text.tags.some(x=>typeof x!=='string')))||['title','description','text'].some(key=>key in text&&typeof text[key]!=='string')||JSON.stringify(text).length>40000)throw workflowError('文案格式无效');
+        for(const key of ['title','tags','description'])if(key in text)text[key]=validateWorkflowCopy(key,text[key],key==='tags'?[]:variant.fitments||[]);
         const retained={...state,text,approved:false};invalidateWorkflowResults(payload,variant.id,node.id);results[node.id]=retained;
       }else if(body.action==='retry') {
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');
@@ -119,6 +122,7 @@ export async function productWorkflowAction(body,session) {
       }else throw workflowError('不支持此任务操作');
     }else if(body.action==='approve-all') {
       for(const variant of payload.variants)for(const node of payload.definition.nodes.filter(n=>['image','copy','video'].includes(n.type))) {
+        if(workflowNodeSkipped(node,variant))continue;
         const state=payload.outputs[variant.id]?.[node.id];
         if(!state?.url&&!state?.text)throw workflowError(`${variant.label}的“${node.label}”尚未生成完成`);
         workflowInputContext(payload.definition,variant,node,payload.outputs[variant.id]);state.approved=true;

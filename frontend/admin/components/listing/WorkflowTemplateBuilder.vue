@@ -1,4 +1,5 @@
 <script setup>
+import { WORKFLOW_COPY_RULES } from '../../../../src/shared/workflow-copy-rules.js';
 import { computed, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { createIndependentImageNode, createImageReference } from '../../utils/workflow-image-nodes.js';
@@ -122,7 +123,7 @@ function slotsChanged(){const node=selected.value;node.slots=Array.from({length:
           <template v-if="selected.type==='copy'"><label>输出格式<el-select v-model="selected.target"><el-option label="通用文本（任意属性）" value="text"/><el-option label="标题" value="title"/><el-option label="标签列表" value="tags"/><el-option label="简介" value="description"/><el-option label="标题＋标签＋简介" value="bundle"/></el-select></label></template>
           <label v-if="selected.type==='image'">图片比例<el-select v-model="selected.ratio"><el-option v-for="ratio in ['3:4','1:1','4:5']" :key="ratio" :label="ratio" :value="ratio"/></el-select></label>
           <template v-if="selected.type==='image'"><label v-for="source in earlier.filter(n=>n.type==='images'&&n.count>1&&selected.inputs.includes(n.id))" :key="source.id">{{ source.label }} · 本张引用槽位<el-select :model-value="selected.referenceSlots?.[source.id]||[]" multiple placeholder="留空使用全部图片" @change="selected.referenceSlots||={};$event.length?selected.referenceSlots[source.id]=$event:delete selected.referenceSlots[source.id]"><el-option v-for="(slot,index) in source.slots" :key="index" :value="index" :label="slot"/></el-select></label></template>
-          </el-collapse-item></el-collapse><label v-if="selected.imageMode!=='material'">生成提示词<el-input v-model="selected.prompt" type="textarea" :rows="mode==='all'?6:mode==='images'?12:8" placeholder="定义这个节点要生成什么，以及必须遵循的规则"/></label>
+          </el-collapse-item></el-collapse><el-alert v-if="selected.type==='copy'&&WORKFLOW_COPY_RULES[selected.target]" :title="WORKFLOW_COPY_RULES[selected.target]" type="info" :closable="false"/><label v-if="selected.imageMode!=='material'">生成提示词<el-input v-model="selected.prompt" type="textarea" :rows="mode==='all'?6:mode==='images'?12:8" placeholder="定义这个节点要生成什么，以及必须遵循的规则"/></label>
         </template>
         <template v-if="selected.type==='approval'"><p>兼容已有流程的人工确认节点。</p><el-select v-model="selected.inputs" multiple><el-option v-for="node in earlier.filter(n=>n.type==='image')" :key="node.id" :value="node.id" :label="node.label"/></el-select></template>
         <div class="section-head"><el-button @click="duplicate">复制节点</el-button><el-button plain type="danger" @click="removeNode">删除节点</el-button></div>
