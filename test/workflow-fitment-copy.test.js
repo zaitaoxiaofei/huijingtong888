@@ -47,7 +47,7 @@ test('no mold skips comparison without AI expense, removes its binding and still
 test('library search pages both legacy molds and new materials beyond 500 records, scoped to tenant',async()=>{
  const {createProductWorkflowStore}=await import('../src/services/product-workflows.js');
  const docs=Array.from({length:530},(_,i)=>({tenant:'1',id:`m${i}`,kind:i%2?'material':'key_model',name:i===529?'奔驰钥匙模具':'包装 '+i,revision:1,payload_json:JSON.stringify({images:[],bindings:[]})}));docs.push({tenant:'2',id:'other',kind:'material',name:'奔驰钥匙模具',revision:1,payload_json:'{}'});
- const calls=[];const store=createProductWorkflowStore({authorize:async s=>s,execute:async()=>({}),query:async(sql,p)=>{calls.push({sql,p});const rows=docs.filter(d=>d.tenant===p[0]&&d.name.includes(p[1].slice(1,-1)));if(sql.includes('COUNT(*)'))return [{total:rows.length}];return rows.slice(p.at(-1),p.at(-1)+p.at(-2));}});
+ const calls=[];const store=createProductWorkflowStore({loadCatalog:null,authorize:async s=>s,execute:async()=>({}),query:async(sql,p)=>{calls.push({sql,p});const rows=docs.filter(d=>d.tenant===p[0]&&d.name.includes(p[1].slice(1,-1)));if(sql.includes('COUNT(*)'))return [{total:rows.length}];return rows.slice(p.at(-1),p.at(-1)+p.at(-2));}});
  const a={personId:1,roles:['operations'],tenant:{id:1,slug:'one',role:'member'}},b={personId:2,roles:['operations'],tenant:{id:2,slug:'two',role:'member'}};
  const page=await store.list('library',a,{page:2,pageSize:12});assert.equal(page.total,530);assert.equal(page.items.length,12);assert.equal(page.items[0].id,'m12');
  const found=await store.list('library',a,{keyword:'奔驰',page:1});assert.equal(found.items[0].id,'m529');assert.equal(found.total,1);
@@ -59,7 +59,7 @@ test('library search pages both legacy molds and new materials beyond 500 record
 test('automatic matching searches owned documents without the legacy 500 cap and excludes partial or wrong categories',async()=>{
  const {createProductWorkflowStore}=await import('../src/services/product-workflows.js');let last;
  const good=mold(),partial=mold('partial'),wrong=mold('wrong'),style=mold('style');partial.payload.bindings[0].models=['GLC'];wrong.payload.listingCategory.key='100:999';style.payload.role='style';
- const store=createProductWorkflowStore({authorize:async s=>s,execute:async()=>({}),query:async(sql,p)=>{last={sql,p};return [good,partial,wrong,style].map(r=>({id:r.id,kind:r.kind,name:r.payload.name,revision:1,payload_json:JSON.stringify(r.payload)}));}});
+ const store=createProductWorkflowStore({loadCatalog:null,authorize:async s=>s,execute:async()=>({}),query:async(sql,p)=>{last={sql,p};return [good,partial,wrong,style].map(r=>({id:r.id,kind:r.kind,name:r.payload.name,revision:1,payload_json:JSON.stringify(r.payload)}));}});
  const actor={personId:1,roles:['operations'],tenant:{id:1,slug:'one',role:'member'}};
  await assert.rejects(store.matchingKeys([null],category,actor),{status:400});
  const found=await store.matchingKeys(fits,category,actor);assert.deepEqual(found.map(r=>r.id),['m']);assert.equal(last.p[0],'1');assert.ok(!last.sql.includes('LIMIT 500'));assert.match(last.sql,/tenant_id = \?/);

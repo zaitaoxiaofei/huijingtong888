@@ -23,7 +23,7 @@ const showRows=computed(()=>props.productionMode==='single'?props.variants.slice
 function setOptions(node,options){const original=props.definition.nodes.find(n=>n.id===node.id);if(original)original.options=options;}
 function add(){if(props.productionMode==='single')emit('update:productionMode','batch');emit('add');}
 function fitmentBindings(values){if(values.__fitmentBindings)return values.__fitmentBindings;const fits=values.__fitments?.length?values.__fitments:values.model?[{brand:String(values.model).split(' ')[0],model:String(values.model).split(' ').slice(1).join(' ')}]:[];return fits.reduce((rows,f)=>{let b=rows.find(b=>b.brand===f.brand);if(!b){b={brand:f.brand,models:[]};rows.push(b);}b.models.push(f.model);return rows;},[]);}
-function setFitments(values,bindings){const fits=bindings.flatMap(b=>b.models.map(model=>({brand:b.brand,model})));const text=fits.map(f=>`${f.brand} ${f.model}`).join('；');setModel(values,'model',text);values.__fitments=fits;values.__fitmentBindings=bindings;}
+function setFitments(values,bindings){const fits=bindings.flatMap(b=>b.models.map((model,i)=>({brand:b.brand,model,...(b.modelIds?.[i]?{modelId:b.modelIds[i]}:{})})));const text=fits.map(f=>`${f.brand} ${f.model}`).join('；');setModel(values,'model',text);values.__fitments=fits;values.__fitmentBindings=bindings;}
 function setModel(target,id,value){const previous=target[id];target[id]=value;if(previous&&previous!==value&&Array.isArray(target.key))target.key=target.key.map(()=>'');if(previous!==value)delete target.__keyModelId;}
 function label(node){return ({facts:'卖点与包装说明',model:'品牌与型号',vehicle_brand:'适配品牌（上架属性）',vehicle_model:'适配型号（上架属性）',brand:'商品品牌（上架属性）',key:'适配钥匙图片'})[node.id]||node.label;}
 </script>

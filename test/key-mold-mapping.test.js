@@ -23,7 +23,7 @@ test('pending mappings remain searchable but never automatically match; legacy r
 });
 function fixture(){let rows=[{id:'one',tenant_id:'1',kind:'material',name:payload.name,revision:2,payload_json:JSON.stringify(payload)},{id:'foreign',tenant_id:'2',kind:'material',name:payload.name,revision:1,payload_json:JSON.stringify(payload)}];let transactionDdl=0;
  const execute=async(sql,p=[])=>{if(sql.startsWith('CREATE'))return {};if(sql.startsWith('SELECT'))return rows.filter(r=>r.tenant_id===p[0]&&r.kind===p[1]&&r.id===p[2]);if(sql.startsWith('UPDATE')){const [name,json,tenant,kind,id,revision]=p;const row=rows.find(r=>r.id===id&&r.kind===kind&&r.tenant_id===tenant&&r.revision===revision);if(!row)return {affectedRows:0};Object.assign(row,{name,payload_json:json,revision:row.revision+1});return {affectedRows:1};}if(sql.startsWith('INSERT')){rows.push({id:p[0],tenant_id:p[1],kind:p[2],name:p[3],payload_json:p[4],revision:1});return {affectedRows:1};}throw Error(sql);};
- const store=createProductWorkflowStore({authorize:async s=>s,query:execute,execute});const transaction=async callback=>{const before=structuredClone(rows);try{return await callback({execute:async(sql,p)=>{if(sql.startsWith('CREATE'))transactionDdl++;return [await execute(sql,p)];}});}catch(error){rows=before;throw error;}};return {store,transaction,rows:()=>rows,ddl:()=>transactionDdl};}
+ const store=createProductWorkflowStore({loadCatalog:null,authorize:async s=>s,query:execute,execute});const transaction=async callback=>{const before=structuredClone(rows);try{return await callback({execute:async(sql,p)=>{if(sql.startsWith('CREATE'))transactionDdl++;return [await execute(sql,p)];}});}catch(error){rows=before;throw error;}};return {store,transaction,rows:()=>rows,ddl:()=>transactionDdl};}
 test('mapping imports update one tenant atomically and reject stale or foreign records',async()=>{
  const f=fixture(),records=parseMoldCsv(exportMoldCsv([record]));const result=await f.store.importMappings(records,actor,f.transaction);assert.equal(result.count,1);assert.equal(result.items[0].revision,3);assert.equal(f.ddl(),0);
  await assert.rejects(f.store.importMappings(records,actor,f.transaction),{status:409});assert.equal(f.rows().find(r=>r.id==='one').revision,3);
@@ -34,7 +34,7 @@ test('mapping routes preserve actor and filters; anonymous import fails authoriz
  const routes=createProductWorkflowRoutes({readJson:async req=>req.body,services:{},store:{list:async(...args)=>{calls.push(args);return [];},importMappings:async(...args)=>{calls.push(args);return {count:1};}}});
  const query={category:'100:200',brand:'A',reviewStatus:'pending'};await routes['GET /api/product-workflows/mold-mappings']({_session:actor,query});assert.deepEqual(calls[0],['mapping',actor,query]);
  const records=parseMoldCsv(exportMoldCsv([record]));await routes['POST /api/product-workflows/mold-mappings']({_session:actor,body:{records}});assert.deepEqual(calls[1],[records,actor]);
- const store=createProductWorkflowStore({ensureSchema:async()=>{}});await assert.rejects(store.importMappings(records,null),/登录|企业|会话/);
+ const store=createProductWorkflowStore({loadCatalog:null,ensureSchema:async()=>{}});await assert.rejects(store.importMappings(records,null),/登录|企业|会话/);
 });
 test('mapping batch cannot repurpose an ordinary packaging material',async()=>{
  const f=fixture();f.rows()[0].payload_json=JSON.stringify({...payload,role:'style'});

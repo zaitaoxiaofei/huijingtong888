@@ -1,3 +1,5 @@
+import {aiVehicleCatalog} from './ai-vehicle-catalog.js';
+import {bindMaterialToCatalog,requireCatalogBindings} from '../shared/workflow-catalog-bindings.js';
 import {isReviewedMold,isKeyMold} from '../shared/key-mold-mapping.js';
 import { materialMatches,materialBindings,materialCoversFitments,normalizeMaterialBindings } from '../shared/workflow-materials.js';
 import { randomUUID } from "node:crypto";
@@ -15,31 +17,38 @@ const SCHEMA=`CREATE TABLE IF NOT EXISTS product_workflow_documents (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
 
 // Dependencies are injectable so isolation and optimistic writes can be verified without real AI or MySQL.
-export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecute,authorize=authorizeBusinessTaskSession,ensureSchema=()=>execute(SCHEMA)}={}) {
+export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecute,authorize=authorizeBusinessTaskSession,loadCatalog=aiVehicleCatalog,ensureSchema=()=>execute(SCHEMA)}={}) {
   let schema;
   async function scope(session) {
     const actor=await authorize(session); assertBusinessTaskPermission(actor,"operations");
     if(!schema) schema=ensureSchema().catch(error=>{schema=null;throw error;});
     await schema;return {tenant:businessTaskTenantKey(actor),actor};
   }
+  const catalogFor=async actor=>loadCatalog?(await loadCatalog({},actor)).brands:null;
+  const decorate=async(records,actor)=>{const brands=await catalogFor(actor);return brands?records.map(r=>bindMaterialToCatalog(r,brands)):records;};
   const map=row=>({id:row.id,name:row.name,revision:Number(row.revision),kind:row.kind,payload:JSON.parse(row.payload_json)});
   async function list(kind,session,options={}) {
-    const {tenant}=await scope(session);
+    const {tenant,actor}=await scope(session);
     if(kind==='library'||kind==='mapping'){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
-      const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'", '(name LIKE ? OR payload_json LIKE ?)'];
-      const params=[tenant,`%${keyword}%`,`%${keyword}%`];
+      const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'"];
+      const terms=keyword.split(/\s+/).filter(Boolean);if(!terms.length)terms.push('');
+      const params=[tenant];for(const term of terms){filters.push('(name LIKE ? OR payload_json LIKE ?)');params.push(`%${term}%`,`%${term}%`);}
       if(options.reviewStatus&&['pending','verified'].includes(options.reviewStatus)){filters.push("COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.reviewStatus')), 'verified') = ?");params.push(options.reviewStatus);}
       if(options.role==='compatibility'||kind==='mapping')filters.push("(kind = 'key_model' OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.role')) = 'compatibility')");
       if(options.category){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.listingCategory.key')) = ? OR JSON_EXTRACT(payload_json, '$.listingCategory') IS NULL OR JSON_TYPE(JSON_EXTRACT(payload_json, '$.listingCategory')) = 'NULL')");params.push(String(options.category));}
-      if(options.brand){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand')) = ? OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL)");params.push(String(options.brand),String(options.brand));}
-      if(options.model){filters.push("(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.model')) = ? OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings') OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings'))");params.push(String(options.model),JSON.stringify([{brand:String(options.brand),models:[String(options.model)]}]),JSON.stringify([{brand:String(options.brand),allModels:true}]));}
+      if(options.brand){
+        const brands=await catalogFor(actor),models=options.model?[String(options.model)]:(brands?.find(b=>b.name===options.brand)?.models||[]).map(m=>m.name);
+        const pairs=[{brand:String(options.brand),model:String(options.model||'')},...models.flatMap(model=>{const words=model.split(' ');return words.slice(0,-1).map((_,i)=>({brand:[options.brand,...words.slice(0,i+1)].join(' '),model:words.slice(i+1).join(' ')}));})];
+        const clauses=pairs.map(pair=>{if(options.model){params.push(pair.brand,pair.model,JSON.stringify([{brand:pair.brand,models:[pair.model]}]),JSON.stringify([{brand:pair.brand,allModels:true}]));return "((LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand'))) = LOWER(?) AND LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.model'))) = LOWER(?)) OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings') OR JSON_CONTAINS(LOWER(payload_json), LOWER(?), '$.bindings'))";}params.push(pair.brand,pair.brand);return "(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand')) = ? OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL)";});
+        filters.push('('+clauses.join(' OR ')+')');
+      }
       const filter=filters.join(' AND ');
-      if(kind==='mapping'){const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT 5001`,params);if(rows.length>5000)throw workflowError('导出超过5000份模具，请缩小搜索范围');return rows.map(map);}
+      if(kind==='mapping'){const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT 5001`,params);if(rows.length>5000)throw workflowError('导出超过5000份模具，请缩小搜索范围');return decorate(rows.map(map),actor);}
       const total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
       const page=Math.max(1,Math.min(Math.ceil(total/size)||1,Number.parseInt(options.page,10)||1));
       const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
-      return {items:rows.map(map),total,page,pageSize:size};
+      return {items:await decorate(rows.map(map),actor),total,page,pageSize:size};
     }
     if(kind==='template'&&options.page!==undefined){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
@@ -59,7 +68,7 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     if(['key_model','material'].includes(kind)){
       const keyword=String(options.keyword||options.model||'').trim().slice(0,200);
       const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR payload_json LIKE ?) ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
-      return rows.map(map).filter(record=>!record.payload.archived);
+      return decorate(rows.map(map).filter(record=>!record.payload.archived),actor);
     }
     return (await query(`SELECT id, name, revision, kind,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) AS draft_id,
@@ -70,12 +79,13 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision)}));
   }
   async function get(kind,id,session) {
-    const {tenant}=await scope(session);
+    const {tenant,actor}=await scope(session);
     const row=(await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND id = ?",[tenant,kind,id]))[0];
-    if(!row) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return map(row);
+    if(!row) throw Object.assign(new Error("当前企业中没有这个工作流记录"),{status:404});return ['material','key_model'].includes(kind)?(await decorate([map(row)],actor))[0]:map(row);
   }
   async function save(kind,body,session) {
     const {tenant,actor}=await scope(session);
+    if(['material','key_model'].includes(kind)&&loadCatalog){const brands=await catalogFor(actor),bindings=requireCatalogBindings(Object.hasOwn(body.payload||{},'bindings')?body.payload.bindings:materialBindings(body.payload),brands);body={...body,payload:{...body.payload,brand:bindings[0]?.brand||'',model:bindings[0]?.models[0]||'',bindings}};}
     const payload=kind==='key_model'?normalizeWorkflowKeyModel(body.payload):kind==='material'?normalizeWorkflowMaterial(body.payload):body.payload;
     if(kind==="template")validateWorkflow(payload);
     else if(!['key_model','material'].includes(kind)) {
@@ -106,26 +116,29 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   }
   async function importMappings(records,session,transaction=withMysqlTransaction){
     const {actor}=await scope(session);
+    const brands=await catalogFor(actor);
     if(!Array.isArray(records)||!records.length||records.length>100)throw workflowError('每次请导入1–100份模具');
     if(records.some(r=>!r||!['material','key_model'].includes(r.kind)||!r.patch||r.patch.role!=='compatibility'||(r.id&&(!Number.isSafeInteger(r.revision)||r.revision<1))))throw workflowError('映射表只能更新钥匙模具资料');
     return transaction(async connection=>{
-      const scoped=createProductWorkflowStore({query:async(sql,p)=>(await connection.execute(sql,p))[0],execute:async(sql,p)=>(await connection.execute(sql,p))[0],authorize:async()=>actor,ensureSchema:async()=>{}});
+      const scoped=createProductWorkflowStore({query:async(sql,p)=>(await connection.execute(sql,p))[0],execute:async(sql,p)=>(await connection.execute(sql,p))[0],authorize:async()=>actor,loadCatalog:brands?async()=>({brands}):null,ensureSchema:async()=>{}});
       const saved=[];
       for(const row of records){const previous=row.id?await scoped.get(row.kind,row.id,actor):null;if(previous&&!isKeyMold(previous))throw workflowError('映射表不能将其他生产资料改为钥匙模具');const payload={...previous?.payload,...row.patch};if(row.kind==='key_model'){payload.brand=payload.bindings?.[0]?.brand||'';payload.model=payload.bindings?.[0]?.models?.[0]||'';payload.label=row.patch.name;}
         saved.push(await scoped.save(row.kind,{id:row.id,revision:row.revision,payload},actor));}
       return {count:saved.length,items:saved};
     });
   }
-  async function matchingKeys(fitments,category,session){
-    const {tenant}=await scope(session);
+  async function matchingKeys(fitments,category,session,{includePending=false}={}){
+    const {tenant,actor}=await scope(session);
     normalizeMaterialBindings(fitments.map(f=>({brand:f?.brand,models:[f?.model]})));
     if(!fitments.length)return [];
     // Search by confirmed brand before matching all fitments; no first-500 truncation.
-    const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind IN ('material','key_model') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand'))) = LOWER(?) OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL) ORDER BY updated_at DESC, id DESC",[tenant,fitments[0].brand,fitments[0].brand]);
-    return rows.map(map).filter(r=>isReviewedMold(r)&&r.payload.images?.length&&(r.kind==='key_model'||r.payload.role==='compatibility')&&materialBindings(r.payload).length&&materialMatches(r,{category,fitments})&&materialCoversFitments(r,fitments));
+    const names=[...new Set(fitments.flatMap(f=>{const parts=String(f.model).split(' ');return [f.brand,...parts.slice(0,-1).map((_,i)=>[f.brand,...parts.slice(0,i+1)].join(' '))];}))];
+    const match=names.map(()=>"(LOWER(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.brand'))) = LOWER(?) OR JSON_SEARCH(LOWER(payload_json), 'one', LOWER(?), NULL, '$.bindings[*].brand') IS NOT NULL)").join(' OR ');
+    const rows=await query(`SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind IN ('material','key_model') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (${match}) ORDER BY updated_at DESC, id DESC`,[tenant,...names.flatMap(name=>[name,name])]);
+    return (await decorate(rows.map(map),actor)).filter(r=>(includePending||isReviewedMold(r))&&r.payload.images?.length&&(r.kind==='key_model'||r.payload.role==='compatibility')&&materialBindings(r.payload).length&&materialMatches(r,{category,fitments})&&materialCoversFitments(r,fitments));
   }
   async function factsHistory(session){
-    const {tenant}=await scope(session);
+    const {tenant,actor}=await scope(session);
     const rows=await query("SELECT id, name, JSON_EXTRACT(payload_json, '$.variants') AS variants_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' ORDER BY updated_at DESC LIMIT 60",[tenant]);
     const result=[],seen=new Set();
     for(const row of rows)for(const variant of (typeof row.variants_json==='string'?JSON.parse(row.variants_json):row.variants_json)||[]){const facts=String(variant.values?.facts||'').trim();if(!facts||seen.has(facts))continue;seen.add(facts);result.push({id:`${row.id}:${variant.id}`,runId:row.id,name:row.name,product:variant.label,facts});if(result.length>=40)return result;}
