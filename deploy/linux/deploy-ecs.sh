@@ -306,7 +306,8 @@ for(const file of files) {
   console.log(`${file.sha256}\t${file.compressed_sha256}`);
 }
 NODE
-while IFS=$'\t' read -r object_hash compressed_hash; do
+# SSH reads stdin by default; keep manifest records on their own descriptor.
+while IFS=$'\t' read -r object_hash compressed_hash <&3; do
   [[ -n "$object_hash" ]] || continue
   if ssh "${ssh_options[@]}" "$remote_target" "test -f '/opt/ozon-erp/artifacts/files/$object_hash' && test ! -L '/opt/ozon-erp/artifacts/files/$object_hash' && test \"\$(sha256sum '/opt/ozon-erp/artifacts/files/$object_hash' | cut -d' ' -f1)\" = '$object_hash'"; then
     printf 'Reusing unchanged tool object %s\n' "$object_hash"
@@ -316,7 +317,7 @@ while IFS=$'\t' read -r object_hash compressed_hash; do
   [[ "$(file_hash "$object_source")" == "$compressed_hash" ]] || fail "External object does not match source manifest"
   ssh "${ssh_options[@]}" "$remote_target" "install -d -m 700 '${remote_archive}.files'"
   upload_verified_file "$object_source" "${remote_archive}.files/$object_hash.gz"
-done < "$work_dir/external-files.tsv"
+done 3< "$work_dir/external-files.tsv"
 
 printf 'Splitting release artifact for upload...\n'
 split -b 4m "$archive_path" "$work_dir/ozon-erp-upload-part-"

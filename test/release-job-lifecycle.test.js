@@ -21,6 +21,27 @@ async function fixture(body){
   }
 }
 
+test('SSH stdin cannot consume the next external tool manifest record',unix,()=>fixture(async root=>{
+  const loop=client.slice(client.indexOf("while IFS=$'\\t' read -r object_hash"),client.indexOf("printf 'Splitting release artifact"));
+  await fs.writeFile(path.join(root,'external-files.tsv'),'first\\tcompressed-first\nsecond\\tcompressed-second\n'.replaceAll('\\t','\t'));
+  const result=await execute('bash',['--noprofile','--norc','-c',`
+set -euo pipefail
+work_dir="$PWD"
+remote_target=fixture
+remote_archive=fixture
+output_dir=fixture
+ssh_options=(-p 22)
+ssh(){ cat >/dev/null; [[ "\${!#}" == install* ]]; }
+file_hash(){ printf '%s' "$compressed_hash"; }
+upload_verified_file(){ cat >/dev/null; printf '%s\\n' "$object_hash"; }
+fail(){ exit 1; }
+{
+${loop}
+} </dev/null
+`],{cwd:root,env:{...process.env,BASH_ENV:''}});
+  assert.equal(result.stdout,'first\nsecond\n');
+}));
+
 test('a missing transient unit cannot be mistaken for a successful release after reboot',unix,()=>fixture(async root=>{
   const result=await execute('bash',['--noprofile','--norc','-c',`
 set -euo pipefail
