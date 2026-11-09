@@ -401,7 +401,14 @@ test('real Git Bash consumable client keeps argument ten private and cleans fail
     await fsPromises.writeFile(key, 'fixture');
     await fsPromises.writeFile(mock, `
 record() { node -e 'require("node:fs").appendFileSync(process.env.OZON_DEPLOY_BASH_TRACE, JSON.stringify(process.argv.slice(1))+"\\n")' "$@"; }
-ssh() { record ssh "$@"; return 0; }
+ssh() {
+  record ssh "$@"
+  local remote_command="\${!#}"
+  if [[ "$remote_command" == 'systemctl show '* ]]; then printf 'LoadState=loaded\\nActiveState=inactive\\nResult=success\\nExecMainStatus=0\\n'; return; fi
+  if [[ "$remote_command" == systemd-run* ]]; then return "\${OZON_DEPLOY_BASH_ACTIVATION_EXIT:-0}"; fi
+  if [[ "$remote_command" == 'test -f '* ]]; then return 1; fi
+  return 0
+}
 scp() { record scp "$@"; if [[ "$*" == *ozon-erp-inventory-consumables-* ]]; then return "\${OZON_DEPLOY_BASH_UPLOAD_EXIT:-0}"; fi; }
 zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
 `, 'utf8');
@@ -414,7 +421,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
       const { stdout } = await execute(expected);
       assert.doesNotMatch(stdout, /CONSUMABLE_CONTENT_MUST_NOT_BE_PRINTED/);
       const steps = await calls();
-      assert.match(steps.find(call => call[0] === 'ssh' && call.at(-1).startsWith('bash ')).at(-1), new RegExp(`'1' '0' '' '' '0' '' '${expected}' '/tmp/ozon-erp-inventory-consumables-fixture-[a-f0-9]{32}\\.json'$`));
+      assert.match(steps.find(call => call[0] === 'ssh' && call.at(-1).startsWith('systemd-run ')).at(-1), new RegExp(`'1' '0' '' '' '0' '' '${expected}' '/tmp/ozon-erp-inventory-consumables-fixture-[a-f0-9]{32}\\.json'$`));
       const prepare = steps.findIndex(call => call[0] === 'ssh' && call.at(-1).includes('umask 077'));
       const upload = steps.findIndex(call => call[0] === 'scp' && call.at(-1).includes('inventory-consumables'));
       assert.ok(prepare >= 0 && upload > prepare);
@@ -423,7 +430,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
     await fsPromises.writeFile(trace, '');
     await assert.rejects(execute('', '41'));
     const failed = await calls();
-    assert.equal(failed.some(call => call[0] === 'ssh' && call.at(-1).startsWith('bash ')), false);
+    assert.equal(failed.some(call => call[0] === 'ssh' && call.at(-1).startsWith('systemd-run ')), false);
     assert.match(failed.at(-1).at(-1), /^rm -f -- '.*inventory-consumables/);
   } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
 });
@@ -442,7 +449,14 @@ test('real Git Bash numbering client enforces maintenance and keeps argument ele
     await fsPromises.writeFile(key, 'fixture');
     await fsPromises.writeFile(mock, `
 record() { node -e 'require("node:fs").appendFileSync(process.env.OZON_DEPLOY_BASH_TRACE, JSON.stringify(process.argv.slice(1))+"\\n")' "$@"; }
-ssh() { record ssh "$@"; if [[ "\${!#}" == bash* ]]; then return "\${OZON_DEPLOY_BASH_ACTIVATION_EXIT:-0}"; fi; }
+ssh() {
+  record ssh "$@"
+  local remote_command="\${!#}"
+  if [[ "$remote_command" == 'systemctl show '* ]]; then printf 'LoadState=loaded\\nActiveState=inactive\\nResult=success\\nExecMainStatus=0\\n'; return; fi
+  if [[ "$remote_command" == systemd-run* ]]; then return "\${OZON_DEPLOY_BASH_ACTIVATION_EXIT:-0}"; fi
+  if [[ "$remote_command" == 'test -f '* ]]; then return 1; fi
+  return 0
+}
 scp() { record scp "$@"; if [[ "$*" == *ozon-erp-inventory-numbering-* ]]; then return "\${OZON_DEPLOY_BASH_UPLOAD_EXIT:-0}"; fi; }
 zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
 `, 'utf8');
@@ -459,7 +473,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
       const { stdout } = await execute({ expected });
       assert.doesNotMatch(stdout, /NUMBERING_CONTENT_MUST_NOT_BE_PRINTED/);
       const steps = await calls();
-      assert.match(steps.find(call => call[0] === 'ssh' && call.at(-1).startsWith('bash ')).at(-1), new RegExp(`'1' '0' '' '' '1' '' '${expected}' '' '/tmp/ozon-erp-inventory-numbering-fixture-[a-f0-9]{32}\\.json'$`));
+      assert.match(steps.find(call => call[0] === 'ssh' && call.at(-1).startsWith('systemd-run ')).at(-1), new RegExp(`'1' '0' '' '' '1' '' '${expected}' '' '/tmp/ozon-erp-inventory-numbering-fixture-[a-f0-9]{32}\\.json'$`));
       const prepare = steps.findIndex(call => call[0] === 'ssh' && call.at(-1).includes('umask 077'));
       const upload = steps.findIndex(call => call[0] === 'scp' && call.at(-1).includes('inventory-numbering'));
       assert(prepare >= 0 && upload > prepare);
@@ -467,12 +481,13 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
     }
     for (const failure of [{ uploadExit: '41' }, { activationExit: '42' }]) {
       await assert.rejects(execute(failure));
-      assert.match((await calls()).at(-1).at(-1), /^rm -f -- '.*inventory-numbering/);
+      if (failure.activationExit) assert.equal((await calls()).some(call => call.at(-1).startsWith('rm -f -- ')),false,'unknown background job retains its private manifest');
+      else assert.match((await calls()).at(-1).at(-1), /^rm -f -- '.*inventory-numbering/);
     }
     await execute({ dryRun: true });
     assert.deepEqual(await calls(), []);
     await execute({ consumables: true, expected: 'a'.repeat(40) });
-    const activation = (await calls()).find(call => call[0] === 'ssh' && call.at(-1).startsWith('bash '));
+    const activation = (await calls()).find(call => call[0] === 'ssh' && call.at(-1).startsWith('systemd-run '));
     assert.match(activation.at(-1), /'[a-f0-9]{40}' '\/tmp\/ozon-erp-inventory-consumables-[^']+' '\/tmp\/ozon-erp-inventory-numbering-[^']+'$/);
   } finally { await fsPromises.rm(fixture, { recursive: true, force: true }); }
 });
@@ -491,7 +506,14 @@ test("real Git Bash client forwards material as argument six with an empty ident
     await fsPromises.writeFile(identity, "{}"); await fsPromises.writeFile(key, "fixture");
     await fsPromises.writeFile(mock, `
 record() { node -e 'require("node:fs").appendFileSync(process.env.OZON_DEPLOY_BASH_TRACE, JSON.stringify(process.argv.slice(1))+"\\n")' "$@"; }
-ssh() { record ssh "$@"; return 0; }
+ssh() {
+  record ssh "$@"
+  local remote_command="\${!#}"
+  if [[ "$remote_command" == 'systemctl show '* ]]; then printf 'LoadState=loaded\\nActiveState=inactive\\nResult=success\\nExecMainStatus=0\\n'; return; fi
+  if [[ "$remote_command" == systemd-run* ]]; then return "\${OZON_DEPLOY_BASH_ACTIVATION_EXIT:-0}"; fi
+  if [[ "$remote_command" == 'test -f '* ]]; then return 1; fi
+  return 0
+}
 scp() { record scp "$@"; if [[ "$*" == *ozon-erp-ai-material-* ]]; then return "\${OZON_DEPLOY_BASH_UPLOAD_EXIT:-0}"; fi; }
 zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
 `, "utf8");
@@ -503,7 +525,7 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
       const { stdout } = await execute(withIdentity ? ["--reviewed-identity-manifest", bashPath(identity)] : []);
       assert.doesNotMatch(stdout, /MATERIAL_CONTENT_MUST_NOT_BE_PRINTED/);
       const calls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-      const activation = calls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash "));
+      const activation = calls.find(call => call[0] === "ssh" && call.at(-1).startsWith("systemd-run "));
       assert.match(activation.at(-1), new RegExp(`'1' '0' '${withIdentity ? "/tmp/ozon-erp-identity-fixture.json" : ""}' '/tmp/ozon-erp-ai-material-fixture-[a-f0-9]{32}\\.json' '0'$`));
       const prepare = calls.findIndex(call => call[0] === "ssh" && call.at(-1).includes("umask 077"));
       const upload = calls.findIndex(call => call[0] === "scp" && call.at(-1).includes("ozon-erp-ai-material-"));
@@ -513,12 +535,12 @@ zip() { record zip "$@"; printf 'fixture archive' > "$3"; }
     await fsPromises.writeFile(trace, "");
     await execute(["--allow-service-interruption", "--skip-database-maintenance"]);
     const maintenanceCalls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
-    assert.match(maintenanceCalls.find(call => call[0] === "ssh" && call.at(-1).startsWith("bash ")).at(-1), /'1' '0' '' '[^']+\.json' '1'$/);
+    assert.match(maintenanceCalls.find(call => call[0] === "ssh" && call.at(-1).startsWith("systemd-run ")).at(-1), /'1' '0' '' '[^']+\.json' '1'$/);
     await fsPromises.writeFile(trace, "");
     await assert.rejects(execute([], { OZON_DEPLOY_BASH_UPLOAD_EXIT: "41" }));
     const failedCalls = (await fsPromises.readFile(trace, "utf8")).trim().split(/\r?\n/).map(JSON.parse);
     assert.match(failedCalls.at(-1).at(-1), /^rm -f -- '\/tmp\/ozon-erp-ai-material-/);
-    assert.equal(failedCalls.some(call => call[0] === "ssh" && call.at(-1).startsWith("bash ")), false);
+    assert.equal(failedCalls.some(call => call[0] === "ssh" && call.at(-1).startsWith("systemd-run ")), false);
     await fsPromises.writeFile(trace, "");
     const { stdout } = await execute(["--dry-run"]);
     assert.equal(await fsPromises.readFile(trace, "utf8"), "");
@@ -573,10 +595,11 @@ candidate_port=8788
 release_version=fixture
 candidate_warmup_seconds=1
 stop_existing_candidate() { :; }
-runuser() { printf '424242' > "$candidate_pid_file"; }
+runuser() { cat > "$candidate_pid_file"; }
+systemd-run() { :; }
 kill() { if [[ "$1" != -0 ]]; then printf 'candidate-stop\\n' >> "$PWD/trace"; fi; }
 curl() { printf '503'; }
-systemctl() { printf '%s\\n' "$*" >> "$PWD/trace"; }
+systemctl() { if [[ "$1" == show ]]; then printf 424242; else printf '%s\\n' "$*" >> "$PWD/trace"; fi; }
 ${rollback.replaceAll("\r\n","\n")}
 ${wait.replaceAll("\r\n","\n")}
 ${start.replaceAll("\r\n","\n")}
@@ -857,7 +880,7 @@ test("ECS deployment validates the service before accepting the release", () => 
 
 test("ECS deployment warms a backup candidate before restarting the primary", () => {
   assert.match(remote, /candidate_port="3001"/);
-  assert.match(remote, /DEPLOYMENT_CANDIDATE='1'/);
+  assert.match(remote, /DEPLOYMENT_CANDIDATE=(?:'1'|1)/);
   assert.ok(remote.indexOf("\nstart_candidate\n") < remote.lastIndexOf("systemctl restart ozon-erp"));
   assert.match(remote, /server 127\.0\.0\.1:3001 backup/);
   assert.match(remote, /nginx -t/);

@@ -49,9 +49,16 @@ async function main() {
     .filter(Boolean)])]
     .map((file) => `    <link rel="modulepreload" href="/vue-apps/${file}" />`)
     .join("\n");
+  // Version labels belong to the HTML shell. Compiling a new version string
+  // into App.vue invalidates every route chunk which imports the app entry.
+  const releaseMetadata = JSON.stringify({
+    version: process.env.OZON_RELEASE_VERSION || process.env.APP_RELEASE_VERSION || "local",
+    channel: process.env.OZON_RELEASE_CHANNEL || "local"
+  }).replaceAll("<", "\\u003c");
   const html = `<!doctype html>
 <html lang="zh-CN">
   <head>
+    <script>globalThis.__ERP_RELEASE_METADATA__ = ${releaseMetadata};</script>
     <script>
       window.__ERP_BOOT_STARTED_AT = performance && performance.now ? performance.now() : Date.now();
     </script>
