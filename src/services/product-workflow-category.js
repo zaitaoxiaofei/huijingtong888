@@ -1,3 +1,4 @@
+import {isReviewedMold} from '../shared/key-mold-mapping.js';
 import {categoryKey, materialMatches, materialBindings, materialCoversFitments, validateMaterialRefs} from '../shared/workflow-materials.js';
 import { keyModelIdentity } from '../shared/workflow-key-models.js';
 import { categoryAttributeNodes, expandWorkflowVariants } from '../shared/product-workflow-inputs.js';
@@ -61,7 +62,7 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
   let candidates;
   for(const variant of variants)if(definition.preset==='key-case-production'&&!variant.keyModelId&&!variant.values.key?.some(Boolean)&&variant.fitments?.length&&(store?.matchingKeys||store?.list)){
     if(!store.matchingKeys)candidates||=await Promise.all(['key_model','material'].map(kind=>store.list(kind,session)));
-    const matches=store.matchingKeys?await store.matchingKeys(variant.fitments,category,session):candidates.flat().filter(record=>record.payload.images?.length&&(record.kind==='key_model'||record.payload.role==='compatibility')&&materialBindings(record.payload).length&&materialMatches(record,{category,fitments:variant.fitments})&&materialCoversFitments(record,variant.fitments));
+    const matches=store.matchingKeys?await store.matchingKeys(variant.fitments,category,session):candidates.flat().filter(record=>isReviewedMold(record)&&record.payload.images?.length&&(record.kind==='key_model'||record.payload.role==='compatibility')&&materialBindings(record.payload).length&&materialMatches(record,{category,fitments:variant.fitments})&&materialCoversFitments(record,variant.fitments));
     if(matches.length>1)throw workflowError(`${variant.label}匹配到多份钥匙模具，请在适配钥匙区域预览选用一份，或直接上传本次钥匙图片`);
     if(matches.length===1)Object.assign(variant,{keyModelId:matches[0].id,keyModelKind:matches[0].kind,keyModelRevision:matches[0].revision});
   }
@@ -69,6 +70,7 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
     if(!store)throw workflowError('钥匙适配库暂不可用，请重试或手动上传适配图');
     const record=await store.get(variant.keyModelKind==='material'?'material':'key_model',String(variant.keyModelId),session),profile=record.payload;
     if(variant.keyModelRevision&&Number(variant.keyModelRevision)!==record.revision)throw workflowError(`${variant.label}的钥匙适配资料已更新，请重新选择后提交`);
+    if(!isReviewedMold(record))throw workflowError(`${variant.label}引用的钥匙模具尚未核对，请先在模具映射表确认适配关系，或手动上传本次钥匙图`);
     if(!profile.images?.length||variant.keyModelKind==='material'&&profile.role!=='compatibility')throw workflowError(`${variant.label}请选择有图片的适配资料`);
     if(profile.archived||(materialBindings(profile).length&&(variant.fitments?.length?!materialCoversFitments(profile,variant.fitments):keyModelIdentity(`${profile.brand} ${profile.model}`)!==keyModelIdentity(variant.values.model))))throw workflowError(`${variant.label}的钥匙适配资料与型号不一致或已停用，请重新选择`);
     if(!definition.nodes.some(n=>n.id==='key'&&n.type==='images'))throw workflowError('当前流程未配置适配钥匙图片输入');
