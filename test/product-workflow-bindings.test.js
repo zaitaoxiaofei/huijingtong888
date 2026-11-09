@@ -102,3 +102,11 @@ test('custom text prompts do not inherit commerce-copy length or tag-count const
   assert.deepEqual(tags.tags,['#one']);
   await assert.rejects(generateProductWorkflowText({workflowOutput:'tags'},async()=>({content:'{"value":"not a list"}'})),/标签/);
 });
+test('fixed package facts do not remain flagged as missing in the listing draft',()=>{
+ const {definition,variants,outputs}=fixture();definition.deferCommercialInputs=true;
+ const weight={...createWorkflowNode('field','fixed_weight'),valueSource:'engineer',scope:'shared',inputFormat:'number',required:false,defaultValue:220};definition.nodes.splice(1,0,weight);definition.bindings.weight={sources:[ref(weight.id,'value')]};
+ const expanded=expandWorkflowVariants(definition,variants);
+ const draft=buildWorkflowDraft(definition,expanded,outputs,{},'fixed-package');
+ assert.equal(draft.template_payload.editable_payload.variants[0].weight_g,220);
+ assert.deepEqual(draft.template_payload.editable_payload.pending_listing_fields,['售价','包装长','包装宽','包装高']);
+});

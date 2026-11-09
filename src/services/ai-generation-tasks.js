@@ -1053,6 +1053,7 @@ function fitJsonBytes(value, maxBytes) {
   return pruneEmpty({
     workflowOutput: value.workflowOutput,
     workflowNodeLabel: value.workflowNodeLabel,
+    workflowCopyRules: value.workflowCopyRules,
     finalPrompt: value.finalPrompt,
     ratio: value.ratio,
     imageCount: value.imageCount,
