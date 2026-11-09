@@ -1,3 +1,5 @@
+import { runAiCreditImageBatch } from "./ai-credit-image-batch.js";
+import { aiImageCharge } from "../shared/ai-image-pricing.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import sharp from "sharp";
@@ -9,7 +11,7 @@ const fail = (message, code, status = 409) => Object.assign(new Error(message), 
 const IMAGE_INPUTS = ["finalPrompt", "prompt", "ratio", "autoCrop", "cropMode", "sourceImageUrl", "sourceImageUrls",
   "referenceImageUrl", "sourceImage", "fallbackSourceImageUrl", "fallbackReferenceImageUrl", "productImageCount",
   "title", "productName", "product_name", "variantTarget", "variant_target", "categoryName", "category_name",
-  "description", "summary", "material", "color", "row", "product", "source"];
+  "description", "summary", "material", "color", "row", "product", "source", "batchImageCount", "batchImageIndex"];
 
 export function aiImageCreditProviderIdentity(runtime) {
   // Include the upstream account without storing any credential in the wallet.
@@ -79,12 +81,18 @@ export function createAiCreditImageAdapter({ runtime, run, getFile, recoveryPayl
 
 // The existing workflow remains the image implementation; this adds its durable
 // billing boundary without changing its response shape or accepting client keys.
-export async function tryGenerateCreditedImage(payload, { run, getFile, resolveRuntimes, validateInput, runtime = aiCreditRuntime } = {}) {
+export async function tryGenerateCreditedImage(payload, { run, getFile, resolveRuntimes, validateInput, mergeResults, runtime = aiCreditRuntime } = {}) {
   const session = currentAiTenantSession();
   if ((await runtime.mode(session)).mode !== "credits") return { handled: false };
   const count = Number(payload.imageCount ?? payload.count ?? 1);
-  if (count !== 1) throw fail("积分图片当前仅支持单张生成，请逐张创建任务；批量能力尚未开通", "AI_CREDIT_CAPABILITY_DISABLED");
-  const idempotencyKey = aiCreditOperationKey(payload);
+  if (!Number.isSafeInteger(count) || count < 1 || count > 3) throw fail("每个图片任务支持 1 至 3 张图片，请调整生成数量", "AI_CREDIT_INPUT_INVALID", 400);
+  if (count > 1) {
+    if (!mergeResults) throw fail("此入口暂不支持批量图片", "AI_CREDIT_CAPABILITY_DISABLED");
+    const batch = await runAiCreditImageBatch(count, index => tryGenerateCreditedImage({ ...payload,
+      imageCount: 1, batchImageCount: count, batchImageIndex: index }, { run, getFile, resolveRuntimes, validateInput, runtime }).then(value => value.result));
+    return { handled: true, result: await mergeResults(batch.results, batch.failures) };
+  }
+  const idempotencyKey = aiCreditOperationKey(payload, `image:${payload.batchImageIndex ?? 0}`);
   const configs = await resolveRuntimes();
   const requested = payload.imageRuntimeConfig || payload.runtimeConfig;
   const binding = await runtime.existingProvider?.(session, idempotencyKey);
@@ -95,9 +103,11 @@ export async function tryGenerateCreditedImage(payload, { run, getFile, resolveR
   // attempt. Recovery must not require an old reference to remain available.
   if (!binding) await validateInput?.(payload);
   const input = imageInput(payload);
-  const adapter = createAiCreditImageAdapter({ runtime: selected, run, getFile, recoveryPayload: input, notifyProviderJob: payload.onProviderJob });
+  const adapter = createAiCreditImageAdapter({ runtime: selected, run, getFile, recoveryPayload: input, notifyProviderJob: payload.onProviderJob ? job => payload.onProviderJob(job, payload.batchImageIndex ?? 0) : null });
   // Recovery uses the exact same canonical request, never a browser-supplied
   // providerJob/status URL. The executor verifies the original provider binding.
   const executed = await runtime.execute(session, { kind: "image", capability: "image", idempotencyKey, payload: input, provider: adapter });
-  return { handled: true, result: await validateAiCreditImageResult(executed.result, { id: executed.task.id }, getFile) };
+  const result = await validateAiCreditImageResult(executed.result, { id: executed.task.id }, getFile);
+  return { handled: true, result: { ...result, billing: { mode: "credits", ...aiImageCharge(1),
+    chargedPoints: Number(executed.task.charged_points), creditTaskIds: [executed.task.id] } } };
 }

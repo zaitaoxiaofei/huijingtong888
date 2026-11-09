@@ -64,6 +64,7 @@ export function withAiCreditProviderPermit(session, kind, operation) {
 
 export async function checkAiCreditProviderBoundary(session, kind, query) {
   if (session) assertAiSkillsAvailable(session);
+  if (kind === "text") return { mode: "free" };
   const mode = await readAiCreditModeFromQuery(session, query);
   if (mode.mode !== "credits") return mode;
   const permit = providerContext.getStore();

@@ -15,11 +15,10 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js
 import { assetVariantExecutionScope, assetVariantTenantPredicate, assetVariantTenantScope } from "./asset-variant-tenant-scope.js";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey, restoreBusinessTaskSession } from "./business-task-tenant.js";
 import { aiTenantId, currentAiTenantSession, needsAiTenantSession, withAiTenantRequestGuard, withAiTenantSession } from "./ai-tenant-context.js";
-import { getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
+import { generateImages, getAiTaskFile } from "../server/services/ai/aiWorkflowService.js";
 import { getTaskFile as getCropperTaskFile } from "../server/services/tools/imageCropperService.js";
 import { fetchOzonDescriptionCategoryTree } from "../ozonClient.js";
 import { chatWithAiProvider } from "./ai-provider-settings.js";
-import { editOpenAiImage } from "../server/services/openai/imageGenerationService.js";
 import { archiveRemoteMediaObjectUrl, isManagedOssObjectUrl, putContentAddressedObject } from "./object-storage.js";
 import {
   ensureListingAutomationSchema,
@@ -2517,7 +2516,7 @@ async function generateVariantImages({ material, shopDir, watermark, tailImageUr
     if (mainImagePlan === "original") {
       await sharp(mainBuffer).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
     } else if (mainImagePlan === "ai_similar") {
-      const edited = await generateAiSimilarMainImage({ mainBuffer, material, sourceTitle, variantTitle });
+      const edited = await generateAiSimilarMainImage({ mainBuffer, material, sourceTitle, variantTitle, idempotencyKey: `asset:${batchId}:${shopId}:main` });
       await sharp(edited).rotate().jpeg({ quality: 92 }).toFile(mainOutput);
     } else {
       const mainImage = await applyWatermark(mainBuffer, watermark);
@@ -2598,7 +2597,7 @@ function tailImageSkipWarning(error, tailImageUrl = "") {
   return "店铺尾图生成失败，已跳过尾图，不影响继续上架";
 }
 
-async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = "", variantTitle = "" }) {
+async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = "", variantTitle = "", idempotencyKey }) {
   const referencePng = await sharp(mainBuffer).rotate().png().toBuffer();
   const prompt = [
     "Use the uploaded image as a reference and create a similar but not identical e-commerce main image.",
@@ -2611,13 +2610,11 @@ async function generateAiSimilarMainImage({ mainBuffer, material, sourceTitle = 
     material?.tags ? `Keywords: ${cleanText(material.tags, 300)}.` : ""
   ].filter(Boolean).join("\n");
 
-  return editOpenAiImage({
-    imageBuffer: referencePng,
-    filename: "main-reference.png",
-    contentType: "image/png",
-    prompt,
-    ratio: "3:4"
-  });
+  const result = await generateImages({ sourceImageUrl: `data:image/png;base64,${referencePng.toString("base64")}`,
+    finalPrompt: prompt, ratio: "3:4", imageCount: 1, autoCrop: false, idempotencyKey });
+  const image = result.generatedImages[0];
+  const file = await getAiTaskFile(result.taskId, "generated", image.filename);
+  return fs.readFile(file.filePath);
 }
 
 async function storeTailTemplateImage(source, name) {
