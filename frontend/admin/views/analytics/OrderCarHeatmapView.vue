@@ -68,7 +68,7 @@ function isRecognizedModel(row = {}) {
 const recognizedModels = computed(() => state.models.filter((row) => isRecognizedModel(row)));
 const unresolvedBucket = computed(() => state.models.find((row) => !isRecognizedModel(row)) || null);
 const activeModelLabel = computed(() => {
-  if (!state.activeModel) return "请选择车型";
+  if (!state.activeModel) return "请选择型号";
   return isRecognizedModel(state.activeModel) ? `${state.activeModel.brand} ${state.activeModel.model}` : "待归类标题";
 });
 const activeProductLabel = computed(() => state.activeProduct?.product_label || "请选择产品");
@@ -199,7 +199,7 @@ async function loadModels() {
     if (!state.activeModel && state.models.length) state.activeModel = state.models[0];
     await loadProducts();
   } catch (error) {
-    ElMessage.error(error.message || "车型热力加载失败");
+    ElMessage.error(error.message || "型号机会加载失败");
   } finally {
     loading.value = false;
   }
@@ -383,7 +383,7 @@ onMounted(async () => {
     await loadShops();
     await loadModels();
   } catch (error) {
-    ElMessage.error(error.message || "车型热力分析初始化失败");
+    ElMessage.error(error.message || "型号机会分析初始化失败");
   }
 });
 </script>
@@ -427,7 +427,7 @@ onMounted(async () => {
           <strong>{{ numberText(state.sourceRows) }}</strong>
         </div>
         <div>
-          <span>车型 SKU</span>
+          <span>型号 SKU</span>
           <strong>{{ numberText(state.totals.sku_count) }}</strong>
         </div>
         <div>
@@ -462,7 +462,7 @@ onMounted(async () => {
           <header class="car-section-header">
             <div>
               <h3>型号机会榜</h3>
-              <span>只展示已识别车型；待归类标题先进入识别助手，确认后再参与机会排序。</span>
+              <span>只展示已识别型号；待归类标题先进入识别助手，确认后再参与机会排序。</span>
             </div>
             <el-button class="erp-btn erp-btn-secondary" size="small" :loading="unmatchedLoading" @click="openReviewAssistant">
               识别助手
@@ -470,10 +470,10 @@ onMounted(async () => {
           </header>
           <div v-if="unresolvedBucket" class="unresolved-model-callout">
             <div>
-              <strong>有一批订单标题还没识别出车型</strong>
+              <strong>有一批订单标题还没识别出型号</strong>
               <span>
                 {{ numberText(unresolvedBucket.sku_count) }} SKU / {{ numberText(unresolvedBucket.order_count) }} 单。
-                这不是一个真实车型，先用 AI 或手工确认，归类后才会进入深挖榜。
+                这不是一个真实型号，先用 AI 或手工确认，归类后才会进入型号机会榜。
               </span>
             </div>
             <div class="unresolved-model-callout__actions">
@@ -491,7 +491,7 @@ onMounted(async () => {
             :row-class-name="modelRowClassName"
             @row-click="selectModel"
           >
-            <el-table-column label="绑定型号" min-width="210" fixed>
+            <el-table-column label="型号" min-width="210" fixed>
               <template #default="{ row }">
                 <div class="model-cell">
                   <div>
@@ -591,11 +591,11 @@ onMounted(async () => {
             </header>
             <div v-if="!isRecognizedModel(state.activeModel)" class="unresolved-side-panel">
               <strong>怎么用这组数据？</strong>
-              <p>它代表标题里有订单和 SKU，但系统暂时没看出品牌/车型。这里不能直接拿来铺货，因为不知道到底是哪款车。</p>
+              <p>它代表标题里有订单和 SKU，但系统暂时没看出品牌/型号。这里不能直接拿来铺货，因为尚未确认具体品牌和型号。</p>
               <ol>
                 <li>点“识别助手”，让 AI 先识别标题。</li>
-                <li>对高订单或高 SKU 的标题手工确认车型。</li>
-                <li>确认后这些订单会自动回到对应车型，再参与深挖分排序。</li>
+                <li>对高订单或高 SKU 的标题手工确认型号。</li>
+                <li>确认后这些订单会自动回到对应型号，再参与型号机会排序。</li>
               </ol>
               <el-button class="erp-btn erp-btn-primary" type="primary" :loading="unmatchedLoading" @click="openReviewAssistant">打开识别助手</el-button>
             </div>
@@ -612,7 +612,7 @@ onMounted(async () => {
                 <span>{{ numberText(row.order_count) }} 单 / {{ numberText(row.sku_count) }} SKU</span>
                 <em>{{ moneyText(row.revenue) }}</em>
               </button>
-              <el-empty v-if="!productsLoading && !state.products.length" description="请选择车型" />
+              <el-empty v-if="!productsLoading && !state.products.length" description="请选择型号" />
             </div>
           </section>
 
@@ -786,7 +786,7 @@ onMounted(async () => {
 
     <el-dialog
       v-model="confirmVisible"
-      title="确认车型识别"
+      title="确认型号识别"
       width="560px"
       destroy-on-close
       class="erp-centered-dialog"
