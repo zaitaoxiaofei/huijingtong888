@@ -29,6 +29,7 @@ export function validateWorkflow(value) {
     if (node.type === "images" && (!Number.isInteger(node.count) || node.count < 1 || node.count > 8 || !Array.isArray(node.slots) || node.slots.length !== node.count || node.slots.some(x => !String(x).trim()))) throw workflowError(`${node.label}需要为每张参考图填写用途（1–8 张）`);
     if (node.type === "image" && !["1:1", "3:4", "4:5"].includes(node.ratio)) throw workflowError(`${node.label}请选择有效图片比例`);
     if (node.type === "image" && node.imageMode!=='material' && !node.inputs.some(id => ["images", "image", "approval"].includes(seen.get(id).type))) throw workflowError(`${node.label}需要引用产品图片或已确认图片`);
+    if(node.copyRules!==undefined&&(node.type!=='copy'||typeof node.copyRules!=='string'||node.copyRules.length>20000))throw workflowError('文案通用规则须为不超过20000字符的文本');
     if(node.type==='video'&&(node.inputs.length!==1||seen.get(node.inputs[0])?.type!=='image'||seen.get(node.inputs[0])?.role!=='main'))throw workflowError(`${node.label}需要引用本流程生成的主图`);
     if (node.type === "approval" && (!node.inputs.length || node.inputs.some(id => !["image", "approval"].includes(seen.get(id).type)))) throw workflowError(`${node.label}需要引用待确认的图片生成节点`);
     if (node.type === "price" && (!Number.isFinite(Number(node.value)) || Number(node.value) <= 0)) throw workflowError(`${node.label}请填写大于零的卢布售价`);
@@ -174,7 +175,7 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
     for(const target of [cleanBase,editable])for(const key of ['source_raw','sourceRaw','attributes','category_attributes','required_attributes','dimensions','logistics','sku','offer_id','price','price_value','priceValue','sale_price','salePrice','cost_price','costPrice','old_price','oldPrice','min_price','minPrice','weight','weight_g','weightG','length_cm','width_cm','height_cm','length_mm','width_mm','height_mm','depth','width','height'])delete target[key];
     cleanBase.attributes=Object.values(rows[0].dynamic_attributes);
     editable.attributes=clone(cleanBase.attributes);
-    if(definition.deferCommercialInputs)editable.pending_listing_fields=['售价','包装重量','包装长','包装宽','包装高'];
+    if(definition.deferCommercialInputs)editable.pending_listing_fields=[['售价','price'],['包装重量','weight_g'],['包装长','length_mm'],['包装宽','width_mm'],['包装高','height_mm']].filter(([,key])=>rows.some(row=>!Number(row[key]))).map(([label])=>label);
   }
   // Never inherit image sets or variant identity from the category template.
   const payload={...cleanBase,title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,images:rows[0].images,editable_payload:{...editable,title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,rich_content_json:rows[0].rich_content_json||"",rich_content:rows[0].rich_content||"",tags:rows[0].tags,workflow_target_shop_ids:clone(definition.shopIds||[]),images:rows[0].images,variants:rows}};

@@ -1,3 +1,4 @@
+import {starterWorkflow} from '../shared/workflow-starter.js';
 import {aiVehicleCatalog} from './ai-vehicle-catalog.js';
 import {bindMaterialToCatalog,requireCatalogBindings} from '../shared/workflow-catalog-bindings.js';
 import {isReviewedMold,isKeyMold} from '../shared/key-mold-mapping.js';
@@ -54,10 +55,17 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
       const filter="tenant_id = ? AND kind = ? AND (name LIKE ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) LIKE ?)";
       const params=[tenant,'template',`%${keyword}%`,`%${keyword}%`];
-      const total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      let total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      // First visit provisions an editable sample within this tenant only. No customer assets are copied.
+      if(!total&&!keyword){
+        const payload=starterWorkflow(null,{sample:true});
+        await execute("INSERT IGNORE INTO product_workflow_documents (id, tenant_id, kind, name, payload_json, created_by) SELECT ?, ?, 'template', ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'template')",['00000000-0000-4000-8000-000000000001',tenant,payload.name,JSON.stringify(payload),actor.personId,tenant]);
+        total=Number((await query(`SELECT COUNT(*) AS total FROM product_workflow_documents WHERE ${filter}`,params))[0]?.total||0);
+      }
+
       const page=Math.max(1,Math.min(Math.ceil(total/size)||1,Number.parseInt(options.page,10)||1));
       const rows=await query(`SELECT * FROM product_workflow_documents WHERE ${filter} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,[...params,size,(page-1)*size]);
-      const items=rows.map(row=>{const doc=map(row);return {id:doc.id,name:doc.name,revision:doc.revision,category_name:doc.payload.category?.categoryName||doc.payload.category?.name||'',preview_image:doc.payload.previewImage||''};});
+      const items=rows.map(row=>{const doc=map(row);return {id:doc.id,name:doc.name,revision:doc.revision,category_name:doc.payload.category?.categoryName||doc.payload.category?.name||(doc.payload.starterSample?'宠物玩具示例 · 待关联官方类目':''),preview_image:doc.payload.previewImage||''};});
       const missing=items.filter(item=>!item.preview_image);
       if(missing.length){
         const recent=await query(`SELECT payload_json FROM product_workflow_documents WHERE tenant_id = ? AND kind = 'run' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.templateId')) IN (${missing.map(()=>'?').join(',')}) AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) NOT IN ('null', '') ORDER BY updated_at DESC LIMIT 100`,[tenant,...missing.map(item=>item.id)]);

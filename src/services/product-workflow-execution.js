@@ -8,7 +8,7 @@ export function workflowGenerationInput(definition,variant,node,results) {
   const context=workflowInputContext(definition,variant,node,results);
   const configured=workflowNodeForVariant(node,variant);
   if(node.type==='copy')return {
-    ...(definition.bindings&&node.target!=='bundle'?{workflowOutput:node.target,workflowNodeLabel:node.label}:{}),
+    ...(definition.bindings&&node.target!=='bundle'?{workflowOutput:node.target,workflowNodeLabel:node.label,...(configured.copyRules!==undefined?{workflowCopyRules:configured.copyRules}:{})}:{}),
     productName:String(Object.values(context.facts)[0]||variant.label),summary:JSON.stringify(context.facts),
     exactProductIdentity:JSON.stringify(context.facts),rules:[definition.globalPrompt,configured.prompt,definition.bindings?'Use only confirmed facts. Follow configured language and output rules.':'Use only confirmed facts. Output natural Russian.'],
     sourceContext:{workflowFacts:context.facts,workflowFitments:variant.fitments?.length?variant.fitments:variant.values.model?String(variant.values.model).split(/[；;]/).map(model=>({model})):[]}

@@ -9,7 +9,7 @@ export async function generateProductWorkflowText(input,chat=chatWithAiProvider)
   for(let attempt=0;attempt<2;attempt++){
   const response=await chat({temperature:0.2,maxTokens:2200,timeoutMs:60000,messages:[
     {role:'system',content:'按用户定义的节点规则，基于已确认事实生成所需文本。不能编造商品事实。只返回 JSON 对象，键为 value。文本值使用字符串，标签列表使用字符串数组。'},
-    {role:'user',content:JSON.stringify({node:input.workflowNodeLabel,outputType:target,rules:[WORKFLOW_COPY_RULES[target]||'',...(input.rules||[]),feedback],confirmedFitments:input.sourceContext?.workflowFitments||[],confirmedFacts:input.sourceContext?.workflowFacts||{}})}
+    {role:'user',content:JSON.stringify({node:input.workflowNodeLabel,outputType:target,rules:[input.workflowCopyRules??WORKFLOW_COPY_RULES[target]??'',...(input.rules||[]),feedback],confirmedFitments:input.sourceContext?.workflowFitments||[],confirmedFacts:input.sourceContext?.workflowFacts||{}})}
   ]});
   let value;
   try{value=JSON.parse(String(response.content).trim().replace(/^```(?:json)?\s*/i,'').replace(/\s*```$/,'')).value;}
