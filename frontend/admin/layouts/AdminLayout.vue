@@ -44,7 +44,7 @@ const mobileNavigationOpen = ref(false);
 const profileDialogVisible = ref(false);
 const profileSaving = ref(false);
 const profileAvatarUploading = ref(false);
-const profileForm = ref({ name: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
+const profileForm = ref({ name: "", username: "", avatar_url: "", old_password: "", new_password: "", confirm_password: "" });
 let mobileViewportQuery = null;
 let notificationRefreshTimer = 0;
 let notificationEventTimer = 0;
@@ -384,6 +384,7 @@ function notificationActionLabel(item = {}) {
 function openProfileDialog() {
   profileForm.value = {
     name: authStore.user?.name || "",
+    username: authStore.user?.username || "",
     avatar_url: authStore.user?.avatar_url || "",
     old_password: "",
     new_password: "",
@@ -437,10 +438,10 @@ async function saveProfile() {
   const form = profileForm.value;
   if (!String(form.name || "").trim()) return ElMessage.warning("请输入姓名");
   if (form.new_password && form.new_password !== form.confirm_password) return ElMessage.warning("两次输入的新密码不一致");
-  if (form.new_password && !form.old_password) return ElMessage.warning("请输入当前密码");
+  if ((form.new_password || form.username.trim() !== authStore.user?.username) && !form.old_password) return ElMessage.warning("修改登录账号或密码时请输入当前密码");
   profileSaving.value = true;
   try {
-    await apiClient.put("/api/auth/profile", { name: form.name, avatar_url: form.avatar_url });
+    await apiClient.put("/api/auth/profile", { name: form.name, ...(form.username.trim() !== authStore.user?.username ? { username: form.username, current_password: form.old_password } : {}), avatar_url: form.avatar_url });
     if (form.new_password) {
       await apiClient.post("/api/auth/change-password", { old_password: form.old_password, new_password: form.new_password });
     }
@@ -1094,14 +1095,14 @@ onBeforeUnmount(() => {
       <section class="erp-profile-section">
         <header><span><el-icon><User /></el-icon></span><div><strong>基本信息</strong><small>用于系统内人员识别和协作展示</small></div></header>
         <div class="erp-profile-form-grid">
-          <el-form-item label="登录账号"><el-input :model-value="authStore.user?.username" disabled /></el-form-item>
+          <el-form-item label="登录账号"><el-input v-model="profileForm.username" maxlength="80" autocomplete="username" /></el-form-item>
           <el-form-item label="显示名称"><el-input v-model="profileForm.name" maxlength="100" placeholder="请输入姓名" /></el-form-item>
         </div>
       </section>
 
       <section class="erp-profile-section">
-        <header><span class="is-security"><el-icon><Lock /></el-icon></span><div><strong>账户安全</strong><small>如不修改密码，以下三项保持为空即可</small></div></header>
-        <el-form-item label="当前密码"><el-input v-model="profileForm.old_password" type="password" show-password autocomplete="current-password" placeholder="修改密码时请输入当前密码" /></el-form-item>
+        <header><span class="is-security"><el-icon><Lock /></el-icon></span><div><strong>账户安全</strong><small>修改登录账号或密码时需填写当前密码；不改新密码时留空即可</small></div></header>
+        <el-form-item label="当前密码"><el-input v-model="profileForm.old_password" type="password" show-password autocomplete="current-password" placeholder="修改登录账号或密码时请输入当前密码" /></el-form-item>
         <div class="erp-profile-form-grid">
           <el-form-item label="新密码"><el-input v-model="profileForm.new_password" type="password" show-password autocomplete="new-password" placeholder="至少 8 位，不能为纯数字" /></el-form-item>
           <el-form-item label="确认新密码"><el-input v-model="profileForm.confirm_password" type="password" show-password autocomplete="new-password" placeholder="再次输入新密码" /></el-form-item>
