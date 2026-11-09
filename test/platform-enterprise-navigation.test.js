@@ -1,3 +1,5 @@
+import * as aiSkillsAccess from "../src/shared/ai-skills-access.js";
+import * as permissions from "../src/shared/permissions.js";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
@@ -7,7 +9,7 @@ import { canAccessPage } from "../src/shared/permissions.js";
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const navSource = read("../frontend/admin/constants/navigation.js").replace(/^import .*;\r?\n/gm, "").replaceAll("export ", "");
 const icons = Object.fromEntries(["ChatDotRound", "Coin", "DataAnalysis", "Document", "Finished", "Goods", "House", "MagicStick", "Setting", "ShoppingCart", "Tools", "WarningFilled"].map((name) => [name, name]));
-const nav = vm.createContext({ ...icons, canAccessPage });
+const nav = vm.createContext({ ...icons, ...permissions, ...aiSkillsAccess });
 vm.runInContext(navSource, nav);
 const routesFor = (subject) => nav.navigationMenusForRole(subject).flatMap((group) => group.children || [group]).map((item) => item.route);
 

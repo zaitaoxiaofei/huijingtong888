@@ -1,3 +1,4 @@
+import { assertAiSkillsAvailable } from "../shared/ai-skills-access.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 
@@ -62,6 +63,7 @@ export function withAiCreditProviderPermit(session, kind, operation) {
 }
 
 export async function checkAiCreditProviderBoundary(session, kind, query) {
+  if (session) assertAiSkillsAvailable(session);
   const mode = await readAiCreditModeFromQuery(session, query);
   if (mode.mode !== "credits") return mode;
   const permit = providerContext.getStore();

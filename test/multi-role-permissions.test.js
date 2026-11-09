@@ -1,3 +1,5 @@
+import * as aiSkillsAccess from "../src/shared/ai-skills-access.js";
+import * as permissions from "../src/shared/permissions.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -97,7 +99,7 @@ test("menus and direct route access follow the same combined permissions", () =>
   assert.equal(canAccessPage({ ...businessUser(["technical", "admin"]), platform_role: "super_admin" }, "/finance/payroll"), true);
   const source = readFileSync(new URL("../frontend/admin/constants/navigation.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replaceAll("export ", "");
   const icons = Object.fromEntries("ChatDotRound Coin DataAnalysis Document Finished Goods House MagicStick Setting ShoppingCart Tools WarningFilled".split(" ").map(name => [name, null]));
-  const context = vm.createContext({ ...icons, canAccessPage }); vm.runInContext(source, context);
+  const context = vm.createContext({ ...icons, ...permissions, ...aiSkillsAccess }); vm.runInContext(source, context);
   const menus = context.navigationMenusForRole(businessUser(["technical"]));
   const paths = menus.flatMap(menu => menu.children ? menu.children.map(child => child.route) : [menu.route]);
   assert.ok(!paths.includes("/settings/system-monitoring")); assert.ok(!paths.includes("/settings")); assert.ok(!paths.includes("/orders"));

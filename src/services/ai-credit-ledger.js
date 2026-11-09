@@ -81,6 +81,20 @@ export function createAiCreditLedger({ transaction }) {
       result_reference: resultReference, result_sha256: resultHash });
   }
   return {
+    async platformAccount(session, input) {
+      const id = integer(input.tenantId, "企业", { min: 1, max: Number.MAX_SAFE_INTEGER });
+      const size = integer(input.limit ?? 30, "分页大小", { min: 1, max: 100 });
+      const before = integer(input.before ?? Number.MAX_SAFE_INTEGER, "分页游标", { min: 1, max: Number.MAX_SAFE_INTEGER });
+      return transaction(async connection => {
+        await platform(session, connection);
+        const tenant = await rows(connection, "SELECT id FROM tenants WHERE id = ?", [id]);
+        if (!tenant.length) throw error("企业不存在", "AI_CREDIT_NOT_FOUND", 404);
+        const wallets = await rows(connection, "SELECT tenant_id, status, available_points, frozen_points, updated_at FROM ai_credit_accounts WHERE tenant_id = ?", [id]);
+        const entries = await rows(connection, `SELECT id, entry_key, task_id, kind, available_delta, frozen_delta, available_after, frozen_after, reason, created_at
+          FROM ai_credit_entries WHERE tenant_id = ? AND id < ? ORDER BY id DESC LIMIT ${size}`, [id, before]);
+        return { wallet: wallets[0] || { tenant_id: id, status: "disabled", available_points: 0, frozen_points: 0 }, entries };
+      });
+    },
     async configureAccount(session, input) {
       const id = integer(input.tenantId, "企业", { min: 1, max: Number.MAX_SAFE_INTEGER });
       if (!["active", "disabled"].includes(input.status)) throw error("账户状态无效", "AI_CREDIT_INVALID", 400);

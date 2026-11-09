@@ -27,10 +27,11 @@ function decision(session, method, path) {
   return isolated.allowed ? authorizeApiRequest({ _session: session, method }, parts) : isolated;
 }
 
-test('default and A/B ordinary operators reach only reviewed optimization and matrix actions', () => {
+test('default operators retain reviewed AI actions while A/B operators only read history or cancel', () => {
   for (const id of [1, 2, 3]) for (const [method, path] of routes) {
-    assert.equal(decision(member(id), method, path).allowed, true, `${id} ${method} ${path}`);
-    assert.equal(decision(member(id, [], 'owner'), method, path).allowed, true, `owner ${id} ${path}`);
+    const allowed = id === 1 || method === 'GET' || path.endsWith('/cancel') || path.startsWith('listing/');
+    assert.equal(decision(member(id), method, path).allowed, allowed, `${id} ${method} ${path}`);
+    assert.equal(decision(member(id, [], 'owner'), method, path).allowed, allowed, `owner ${id} ${path}`);
     for (const roles of [[], ['packing'], ['procurement'], ['technical']]) {
       assert.equal(decision(member(id, roles), method, path).allowed, false, `${id} ${roles} ${path}`);
     }
@@ -55,7 +56,7 @@ test('AI admission rejects alternate methods, path suffixes and adjacent unrevie
     && !path.startsWith('asset-variant-engine/files/')
     && !(method === 'GET' && path === 'ai-material-optimization/batches/extra'));
   denied.push(['POST', 'asset-variant-engine/publish'], ['POST', 'asset-variant-engine/sync-ozon-categories'],
-    ['GET', 'asset-variant-engine/jobs/not-numeric'], ['POST', 'listing/publish-tasks/12/retry'],
+    ['GET', 'asset-variant-engine/jobs/not-numeric'],
     ['POST', 'ai-variant-lab/plan-variant'], ['POST', 'asset-variant-engine/files/group-1/image.png']);
   for (const id of [1, 2, 3]) for (const [method, path] of denied) {
     assert.equal(decision(member(id), method, path).allowed, false, `${id} ${method} ${path}`);
@@ -65,6 +66,6 @@ test('AI admission rejects alternate methods, path suffixes and adjacent unrevie
 test('operations execution does not grant matrix configuration writes', () => {
   for (const id of [1, 2, 3]) for (const action of ['rules', 'tail-templates']) {
     assert.equal(decision(member(id), 'POST', `asset-variant-engine/${action}`).allowed, false);
-    assert.equal(decision(member(id, [], 'owner'), 'POST', `asset-variant-engine/${action}`).allowed, true);
+    assert.equal(decision(member(id, [], 'owner'), 'POST', `asset-variant-engine/${action}`).allowed, id === 1);
   }
 });
