@@ -10,6 +10,7 @@ import { bootstrapDefaultTenantAccessMysql } from "./tenant-default-access.js";
 import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
 import { getRoles } from "../shared/permissions.js";
 import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
+import { tenantLifecycle } from "./tenant-lifecycle.js";
 import { TENANT_AI_LIMITS_SCHEMA } from "./ai-tenant-schema.js";
 
 const DEFAULT_TENANT_SLUG = "default";
@@ -98,6 +99,7 @@ export async function ensureTenantSchemaMysql() {
       "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32) NOT NULL DEFAULT 'trial'",
       "ALTER TABLE tenants ADD COLUMN subscription_expires_at DATETIME NULL",
       "ALTER TABLE tenants ADD COLUMN feature_flags_json JSON NULL",
+      "ALTER TABLE tenants ADD COLUMN subscription_started_at DATETIME NULL",
       "ALTER TABLE tenants ADD COLUMN member_limit INT UNSIGNED NULL",
       "ALTER TABLE tenants ADD COLUMN shop_limit INT UNSIGNED NULL"
     ]) await mysqlExecute(sql).catch(error => {
@@ -109,7 +111,8 @@ export async function ensureTenantSchemaMysql() {
     await mysqlExecute("CREATE INDEX idx_sessions_active_tenant ON sessions (active_tenant_id)").catch(error => {
       if (error?.code !== "ER_DUP_KEYNAME") throw error;
     });
-    await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "默认企业"]);
+    await mysqlExecute("INSERT IGNORE INTO tenants (slug, name, plan_code, subscription_status) VALUES (?, ?, 'yearly', 'active')", [DEFAULT_TENANT_SLUG, "汇进通企业"]);
+    await mysqlExecute("UPDATE tenants SET name = ? WHERE slug = ? AND name = ?", ["汇进通企业", DEFAULT_TENANT_SLUG, "默认企业"]);
     await ensurePeopleRolesSchemaMysql();
     await ensurePlatformGrantSchemaMysql();
     await withMysqlTransaction(bootstrapDefaultTenantAccessMysql);
@@ -125,7 +128,7 @@ function subscriptionState(tenant = {}) {
   const expiresAt = tenant.subscription_expires_at ? new Date(tenant.subscription_expires_at) : null;
   const expired = ["trial", "active"].includes(status) && expiresAt && expiresAt.getTime() <= Date.now();
   const accessAllowed = tenant.status === "active" && !expired && ["trial", "active"].includes(status);
-  return { ...tenant, subscription_status: expired ? "expired" : status, access_allowed: accessAllowed };
+  return { ...tenant, ...tenantLifecycle(tenant), subscription_status: expired ? "expired" : status, access_allowed: accessAllowed };
 }
 
 export function tenantHasAccess(tenant = {}) {
@@ -134,7 +137,7 @@ export function tenantHasAccess(tenant = {}) {
 
 export async function tenantMembershipsMysql(personId) {
   await ensureTenantSchemaMysql();
-  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, tm.role, tm.active, tm.business_roles_json,
+  const rows = await mysqlQuery(`SELECT t.id, t.slug, t.name, t.status, t.plan_code, t.subscription_status, t.subscription_expires_at, t.subscription_started_at, tm.role, tm.active, tm.business_roles_json,
       p.role AS legacy_role, p.roles_json
     FROM tenant_members tm JOIN tenants t ON t.id = tm.tenant_id JOIN people p ON p.id = tm.person_id
     WHERE tm.person_id = ? AND tm.active = 1 AND t.status = 'active'
@@ -186,8 +189,8 @@ export async function createTenantMysql(body = {}) {
   const ownerPasswordHash = ownerCredentials ? hashPassword(ownerCredentials.password) : null;
   const activationCode = ownerCredentials ? null : generateTenantActivationCode();
   const result = await withMysqlTransaction(async connection => {
-    const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, member_limit, shop_limit)
-      VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
+    const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, subscription_started_at, member_limit, shop_limit)
+      VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), CURRENT_TIMESTAMP, ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
     const tenantId = Number(tenantResult.insertId);
     if (ownerCredentials) {
       const [person] = await connection.execute(`INSERT INTO people (name, username, role, roles_json, active, password_hash)
@@ -290,17 +293,20 @@ export async function setTenantSubscriptionMysql(tenantId, body = {}) {
   const plans = planCode ? await mysqlQuery("SELECT * FROM tenant_plans WHERE code = ? AND active = 1 LIMIT 1", [planCode]) : [];
   const plan = plans[0];
   if (!plan && text(body.subscription_status || body.subscriptionStatus) !== "suspended") throw new Error("不支持的套餐或套餐已停用");
-  const tenantRows = await mysqlQuery("SELECT id FROM tenants WHERE id = ?", [normalizedTenantId]);
-  if (!tenantRows[0]) throw new Error("企业不存在");
-  if (!plan) {
-    await mysqlExecute("UPDATE tenants SET subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
-    return { ok: true, subscription_status: "suspended" };
-  }
-  const durationDays = Number(plan.duration_days);
-  const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
-  const memberLimit = tenantPlanMemberLimit(plan);
-  await mysqlExecute("UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ?, member_limit = ?, shop_limit = ? WHERE id = ?", [plan.code, plan.subscription_status, expiresAt, memberLimit, plan.shop_limit, normalizedTenantId]);
-  return { ok: true, plan_code: plan.code, subscription_status: plan.subscription_status, subscription_expires_at: expiresAt, member_limit: memberLimit, shop_limit: plan.shop_limit };
+  return withMysqlTransaction(async connection => {
+    const [tenantRows] = await connection.execute("SELECT id, slug, subscription_expires_at FROM tenants WHERE id = ? AND status = 'active' FOR UPDATE", [normalizedTenantId]);
+    if (!tenantRows[0]) throw new Error("企业不存在或已归档，请刷新后重试");
+    if (tenantLifecycle(tenantRows[0]).retention_due) throw new Error("企业到期已超过 30 天保留期，不能通过续费恢复旧数据；请清理旧空间后重新开户");
+    if (!plan) {
+      await connection.execute("UPDATE tenants SET subscription_status = 'suspended' WHERE id = ?", [normalizedTenantId]);
+      return { ok: true, subscription_status: "suspended" };
+    }
+    const durationDays = Number(plan.duration_days);
+    const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
+    const memberLimit = tenantPlanMemberLimit(plan);
+    await connection.execute("UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ?, member_limit = ?, shop_limit = ?, subscription_started_at = UTC_TIMESTAMP() WHERE id = ?", [plan.code, plan.subscription_status, expiresAt, memberLimit, plan.shop_limit, normalizedTenantId]);
+    return { ok: true, plan_code: plan.code, subscription_status: plan.subscription_status, subscription_expires_at: expiresAt, member_limit: memberLimit, shop_limit: plan.shop_limit };
+  });
 }
 
 export async function listTenantPlansMysql() {
@@ -342,7 +348,7 @@ export async function archiveTenantMysql(tenantId) {
   const rows = await mysqlQuery("SELECT id, slug FROM tenants WHERE id = ?", [normalizedTenantId]);
   if (!rows[0]) throw new Error("企业不存在");
   if (rows[0].slug === DEFAULT_TENANT_SLUG) throw new Error("默认企业不能删除");
-  await mysqlExecute("UPDATE tenants SET status = 'archived', subscription_status = 'suspended', subscription_expires_at = NULL WHERE id = ?", [normalizedTenantId]);
+  await mysqlExecute("UPDATE tenants SET status = 'archived', subscription_status = 'suspended' WHERE id = ?", [normalizedTenantId]);
   await mysqlExecute("UPDATE tenant_members SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = ?", [normalizedTenantId]);
   await mysqlExecute("UPDATE tenant_activation_codes SET status = 'revoked', revoked_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND status = 'active'", [normalizedTenantId]);
   return { ok: true };

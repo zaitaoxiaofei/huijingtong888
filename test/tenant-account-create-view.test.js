@@ -7,22 +7,28 @@ const source = readFileSync(new URL("../frontend/admin/views/settings/TenantSubs
 const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]+\n/gm, "");
 function harness(fail = false) {
   const calls = [];
+  let deleted = false;
   const messages = [];
   const context = vm.createContext({
     structuredClone,
     navigator: { clipboard: { writeText: async text => calls.push({ copied: text }) } }, window: { location: { origin: "https://example.test" } },
     ref: value => ({ value }), reactive: value => value, computed: getter => ({ get value() { return getter(); } }), onMounted() {},
+    ElMessageBox: { prompt: async () => ({ value: "Customer" }) },
     ElMessage: { success: message => messages.push(message), error: message => messages.push(message) },
     apiClient: {
       post: async (url, body) => { calls.push({ url, body: structuredClone(body) }); if (fail) throw new Error("子账号名额已满");
         if (url === "/api/tenants/login-info") return { enterprise: "New Company", username: "latest-admin", password: "Latest#9382" };
         if (url === "/api/tenants") return { id: 7, owner_credentials: { username: "admin_random", password: "Secret#9382" } };
       },
-      get: async url => url === "/api/tenants" ? [{ id: 7, name: "Customer" }] : []
+      delete: async (url, options) => { calls.push({ method: "delete", url, body: JSON.parse(options.body) }); deleted = true; return { files_cleanup: "done" }; },
+      get: async url => {
+        if (url.startsWith("/api/tenants/deletion-preview")) { calls.push({ method: "get", url }); return { tenant_id: 7, name: "Customer", total_rows: 4, fingerprint: "reviewed-plan" }; }
+        return url === "/api/tenants" && !deleted ? [{ id: 7, name: "Customer" }] : [];
+      }
     }
   });
   vm.runInContext(script, context);
-  const view = vm.runInContext("({ selected, accountForm, accountVisible, accountSaving, memberVisible, createAccount, tenantForm, createVisible, tenantSaving, deliveryVisible, deliveryInfo, createTenant, copyDeliveryInfo, deliveryCopying })", context);
+  const view = vm.runInContext("({ selected, accountForm, accountVisible, accountSaving, memberVisible, createAccount, tenantForm, createVisible, tenantSaving, deliveryVisible, deliveryInfo, createTenant, copyDeliveryInfo, deliveryCopying, permanentlyDelete, deletingTenant, rows, filters, filteredRows, summary, remainingText, detailVisible })", context);
   view.selected.value = { id: 7, name: "Customer" };
   view.accountVisible.value = true;
   Object.assign(view.accountForm, { name: "New Admin", username: "new-admin", password: "Secure#9382" });
@@ -93,4 +99,25 @@ test("enterprise details can repeatedly copy the persisted latest login info wit
   await view.copyDeliveryInfo(7);
   assert.equal(calls.filter(call => call.url === "/api/tenants/login-info").length, 2);
   assert.equal(calls.filter(call => call.copied).length, 2);
+});
+
+test("archived enterprises are hidden from the default list and explicitly accessible through the archived filter", () => {
+  const { view } = harness();
+  view.rows.value = [{ id: 1, status: "archived", subscription_status: "suspended" }, { id: 2, status: "active", subscription_status: "active", access_allowed: true }];
+  assert.deepEqual(Array.from(view.filteredRows.value, row => row.id), [2]);
+  assert.equal(view.summary.value.total, 1);
+  assert.equal(view.summary.value.attention, 0);
+  view.filters.status = "archived";
+  assert.deepEqual(Array.from(view.filteredRows.value, row => row.id), [1]);
+});
+
+test("permanent deletion submits the reviewed fingerprint and typed name as JSON and closes the removed enterprise", async () => {
+  const { view, calls } = harness();
+  view.detailVisible.value = true;
+  await view.permanentlyDelete();
+  assert.equal(calls[0].url, "/api/tenants/deletion-preview?tenant_id=7");
+  assert.deepEqual(calls[1], { method: "delete", url: "/api/tenants", body: { tenant_id: 7, fingerprint: "reviewed-plan", confirmation_name: "Customer" } });
+  assert.equal(view.selected.value, null);
+  assert.equal(view.detailVisible.value, false);
+  assert.equal(view.deletingTenant.value, false);
 });
