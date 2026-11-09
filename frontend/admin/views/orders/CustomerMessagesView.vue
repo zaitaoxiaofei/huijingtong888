@@ -590,6 +590,7 @@ async function updateShop(shop) {
     await loadRows();
   } catch (error) {
     ElMessage.error(error?.message || "保存店铺配置失败");
+    await loadSettings();
   } finally {
     rowActionKey.value = "";
   }
@@ -915,7 +916,17 @@ onMounted(reloadAll);
     <el-dialog v-model="shopConfigDialogVisible" title="配置适用店铺" width="620px" destroy-on-close>
       <div class="shop-config-dialog">
         <div class="shop-config-summary"><div><strong>{{ shopConfigDialog.form.label }}</strong><span>{{ scenarioTimingText(shopConfigDialog.form) }}</span></div><el-tag type="info" effect="plain">已选 {{ shopConfigDialog.form.shop_ids?.length || 0 }} 家</el-tag></div>
-        <el-checkbox-group v-model="shopConfigDialog.form.shop_ids" class="shop-config-grid"><label v-for="shop in state.shops" :key="shop.shop_id" class="shop-config-item"><el-checkbox :label="Number(shop.shop_id)"><span class="shop-config-name">{{ shop.shop_name }}</span></el-checkbox></label></el-checkbox-group>
+        <p class="shop-config-help">新模板默认关闭且不选店铺。勾选适用店铺后请保存；店铺自动消息总开关即时生效，影响该店铺所有已启用的模板。</p>
+        <el-checkbox-group v-model="shopConfigDialog.form.shop_ids" class="shop-config-grid">
+          <div v-for="shop in state.shops" :key="shop.shop_id" class="shop-config-item">
+            <el-checkbox :label="Number(shop.shop_id)"><span class="shop-config-name">{{ shop.shop_name }}</span></el-checkbox>
+            <div class="shop-config-controls">
+              <el-switch v-model="shop.chat_enabled" :disabled="Boolean(rowActionKey)" :loading="rowActionKey === `shop:${shop.shop_id}`" active-text="自动消息" @change="updateShop(shop)" />
+              <el-button size="small" text :disabled="Boolean(rowActionKey)" :loading="rowActionKey === `shop-check:${shop.shop_id}`" @click="checkShopCapability(shop)">检测聊天权限</el-button>
+            </div>
+            <small>{{ shop.chat_capability === 'available' ? '聊天权限检测通过，发送仍以 Ozon 实际权限为准' : shop.chat_capability === 'unchecked' ? '尚未检测聊天权限，请先检测' : '聊天权限需要重新检测' }}</small>
+          </div>
+        </el-checkbox-group>
         <el-empty v-if="!state.shops.length" description="暂无可配置店铺" :image-size="72" />
       </div>
       <template #footer><el-button @click="shopConfigDialogVisible=false">取消</el-button><el-button type="primary" :loading="rowActionKey === `template:${shopConfigDialog.form.scenario}`" @click="saveShopConfig">保存店铺配置</el-button></template>
@@ -1181,6 +1192,9 @@ onMounted(reloadAll);
 .shop-config-summary span { color: var(--erp-text-secondary); font-size: 12px; }
 .shop-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; max-height: 360px; overflow: auto; }
 .shop-config-item { padding: 11px 12px; border: 1px solid var(--erp-detail-border-light, #e7ebf2); border-radius: 9px; background: var(--erp-detail-surface, #fff); cursor: pointer; transition: border-color .18s ease, background .18s ease; }
+.shop-config-help, .shop-config-item small { color: var(--erp-text-secondary); font-size: 12px; line-height: 1.6; }
+.shop-config-help { margin: 0; }
+.shop-config-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; }
 .shop-config-item:hover { border-color: var(--erp-detail-primary-border, #a5b4fc); background: var(--erp-detail-primary-faint, #fafaff); }
 .shop-config-name { display: inline-block; max-width: 190px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
 .template-list--automation { grid-template-columns: 1fr; }
