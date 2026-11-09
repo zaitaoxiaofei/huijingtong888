@@ -761,8 +761,8 @@ const scheduledJobDefinitions = [
     name: "Ozon 客户消息任务扫描",
     category: "orders",
     priority: "high",
-    intervalMinutes: 10,
-    initialDelaySeconds: 300,
+    intervalMinutes: 1,
+    initialDelaySeconds: 30,
     catchupEnabled: true,
     maxCatchupRuns: 1
   },

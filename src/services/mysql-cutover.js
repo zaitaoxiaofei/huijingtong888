@@ -32286,14 +32286,16 @@ export async function orderDetailMysql(id, tenantId = "admin") {
   return { order, items, finance, profit_detail_snapshot: profitDetailSnapshot, profit_calculation_versions: calculationVersions, profit_fx: profitFx };
 }
 
-const CUSTOMER_MESSAGE_TYPES = new Set(["order_created", "passport_reminder", "order_update", "shipment_delay", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"]);
+const CUSTOMER_MESSAGE_TYPES = new Set(["order_promo", "order_created", "passport_reminder", "order_update", "shipment_delay", "stall_comfort", "delay_comfort", "pickup_notice", "review_request"]);
 const CUSTOMER_MESSAGE_AUTOMATION_ACTIVATION_COLUMNS = {
+  order_promo: "promo_automation_enabled_at",
   pickup_notice: "pickup_automation_enabled_at",
   review_request: "review_automation_enabled_at",
   passport_reminder: "passport_automation_enabled_at"
 };
 
 function customerMessageTypeLabel(type) {
+  if (type === "order_promo") return "大促配送提醒";
   if (type === "order_created") return "下单感谢";
   if (type === "passport_reminder") return "护照资料提醒";
   if (type === "shipment_delay") return "超时发货提醒";
@@ -32996,6 +32998,7 @@ export async function previewCustomerMessageMysql(body = {}) {
 }
 
 const DEFAULT_CUSTOMER_MESSAGE_SCENARIOS = [
+  { key: "order_promo", label: "大促配送提醒" },
   { key: "order_created", label: "下单感谢" },
   { key: "passport_reminder", label: "护照资料提醒" },
   { key: "order_update", label: "催单回复" },
@@ -33199,6 +33202,7 @@ async function ensureCustomerMessageTablesMysql({ repairLegacy = false } = {}) {
   await addCustomerMessageColumnMysql("customer_message_shop_settings", "pickup_automation_enabled_at", "DATETIME NULL");
   await addCustomerMessageColumnMysql("customer_message_shop_settings", "review_automation_enabled_at", "DATETIME NULL");
   await addCustomerMessageColumnMysql("customer_message_shop_settings", "passport_automation_enabled_at", "DATETIME NULL");
+  await addCustomerMessageColumnMysql("customer_message_shop_settings", "promo_automation_enabled_at", "DATETIME NULL");
   if (repairLegacy) for (const activationColumn of Object.values(CUSTOMER_MESSAGE_AUTOMATION_ACTIVATION_COLUMNS)) {
     await mysqlExecute(`UPDATE customer_message_shop_settings
       SET ${activationColumn}=DATE_SUB(${activationColumn}, INTERVAL 8 HOUR)
@@ -33263,8 +33267,8 @@ export async function testCustomerMessageTemplateMysql(body = {}) {
       : scenario === "passport_reminder"
         ? /passport|пасп|护照/.test(`${stateText} ${order.raw_json || ""}`.toLowerCase())
         : true;
-  const baseTime = new Date(order.delivered_at || order.last_status_changed_at || order.last_synced_at || order.ordered_at || Date.now());
-  const scheduledAt = new Date((Number.isNaN(baseTime.getTime()) ? Date.now() : baseTime.getTime()) + delayHours * 3600000);
+  const baseTime = new Date((scenario === "order_promo" ? order.ordered_at : order.delivered_at || order.last_status_changed_at || order.last_synced_at || order.ordered_at) || Date.now());
+  const scheduledAt = new Date((Number.isNaN(baseTime.getTime()) ? Date.now() : baseTime.getTime()) + (scenario === "order_promo" ? 30000 : delayHours * 3600000));
   if (body.create_test_draft === true) {
     await mysqlExecute(`
       INSERT INTO customer_message_records (order_id, posting_number, shop_id, scenario, status, read_state, message_text)
@@ -33501,6 +33505,16 @@ async function processOzonWebhookEventsBatchMysql(body = {}) {
 function defaultCustomerMessageTemplatesMysql() {
   return [
     {
+      scenario: "order_promo",
+      label: "大促配送提醒",
+      name: "大促配送提醒",
+      enabled: false,
+      trigger_condition: "order_created",
+      delay_hours: 0,
+      template_text: "Здравствуйте!\n\nСпасибо за заказ №{{posting_number}}!\nТовары: {{product_summary}}.\n\nЗаранее предупреждаем: в период распродажи доставка может занять на 2–4 недели больше срока, указанного в Ozon. Это возможная дополнительная задержка, а не точная дата получения.\n\nЕсли вы готовы подождать, никаких действий не требуется. Спасибо за ваше терпение! Если товар нужен к определённой дате и такой срок вам не подходит, пожалуйста, по возможности отмените заказ до отправки через приложение Ozon и рассмотрите предложение другого продавца с подходящими сроками. Доступность отмены зависит от статуса заказа и правил Ozon.\n\nЕсли у вас есть вопросы, напишите нам — постараемся помочь. Спасибо за понимание!\n{{shop_name}}",
+      template_translation: "您好！\n\n感谢您在 {{shop_name}} 下单！\n订单号：{{posting_number}}\n订单商品：{{product_summary}}。\n\n提前向您说明：大促期间，配送可能比 Ozon 页面显示的预计时间额外延迟 2–4 周。这是可能增加的等待时间，并非确定的收货日期。\n\n如果您愿意等待，无需额外操作，感谢您的耐心！如果您急需商品、无法接受这一等待时间，建议尽量在发货前通过 Ozon 应用取消订单，并考虑选择配送时间更合适的其他商家。能否取消以订单状态及 Ozon 规则为准。\n\n如有疑问，欢迎联系我们，我们会尽力协助。感谢您的理解！"
+    },
+    {
       scenario: "order_created",
       label: "下单感谢",
       name: "下单感谢",
@@ -33641,11 +33655,12 @@ export async function customerMessageSettingsMysql() {
       shop_id: Number(shop.id),
       shop_name: shop.name || shop.shop_name || "",
       chat_enabled: Boolean(Number(shopSettings.get(Number(shop.id))?.chat_enabled || 0)),
+      automation_authorization_required: !Number(shopSettings.get(Number(shop.id))?.automation_person_id || 0),
       send_mode: shopSettings.get(Number(shop.id))?.send_mode || "draft",
       chat_capability: shopSettings.get(Number(shop.id))?.chat_capability || "unchecked",
       chat_capability_checked_at: shopSettings.get(Number(shop.id))?.chat_capability_checked_at || null,
       chat_capability_error: shopSettings.get(Number(shop.id))?.chat_capability_error || "",
-      enabled_scenarios: parseJsonOrNull(shopSettings.get(Number(shop.id))?.enabled_scenarios) || DEFAULT_CUSTOMER_MESSAGE_SCENARIOS.map((item) => item.key),
+      enabled_scenarios: parseJsonOrNull(shopSettings.get(Number(shop.id))?.enabled_scenarios) || [],
       stall_hours: Number(shopSettings.get(Number(shop.id))?.stall_hours || 48),
       delay_hours_before_due: Number(shopSettings.get(Number(shop.id))?.delay_hours_before_due || 24),
       pickup_delay_hours: Number(shopSettings.get(Number(shop.id))?.pickup_delay_hours || 1),
@@ -33684,7 +33699,7 @@ export async function updateCustomerMessageShopSettingMysql(body = {}) {
   const nextScenarios = Array.isArray(body.enabled_scenarios)
     ? body.enabled_scenarios
     : (parseJsonOrNull(existing.enabled_scenarios) || []);
-  const automationTemplateRows = await mysqlQuery(`SELECT scenario, enabled, deleted FROM customer_message_templates WHERE ${customerMessageTemplateSql()} AND scenario IN ('pickup_notice','review_request','passport_reminder')`);
+  const automationTemplateRows = await mysqlQuery(`SELECT scenario, enabled, deleted FROM customer_message_templates WHERE ${customerMessageTemplateSql()} AND scenario IN ('pickup_notice','review_request','passport_reminder','order_promo')`);
   const automationTemplates = new Map(automationTemplateRows.map((row) => [row.scenario, Boolean(Number(row.enabled || 0)) && !Number(row.deleted || 0)]));
   const previousScenarios = parseJsonOrNull(existing.enabled_scenarios) || [];
   const activationTimestamp = (scenario) => {
@@ -33703,11 +33718,12 @@ export async function updateCustomerMessageShopSettingMysql(body = {}) {
   const pickupAutomationEnabledAt = activationTimestamp("pickup_notice");
   const reviewAutomationEnabledAt = activationTimestamp("review_request");
   const passportAutomationEnabledAt = activationTimestamp("passport_reminder");
+  const promoAutomationEnabledAt = activationTimestamp("order_promo");
   await mysqlExecute(`
     INSERT INTO customer_message_shop_settings
       (shop_id, chat_enabled, send_mode, automation_defaults_version, stall_hours, delay_hours_before_due, pickup_delay_hours, review_delay_hours,
-       pickup_automation_enabled_at, review_automation_enabled_at, passport_automation_enabled_at, enabled_scenarios, note)
-    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       pickup_automation_enabled_at, review_automation_enabled_at, passport_automation_enabled_at, promo_automation_enabled_at, enabled_scenarios, note)
+    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON DUPLICATE KEY UPDATE
       chat_enabled = VALUES(chat_enabled),
       send_mode = VALUES(send_mode),
@@ -33719,6 +33735,7 @@ export async function updateCustomerMessageShopSettingMysql(body = {}) {
       pickup_automation_enabled_at = VALUES(pickup_automation_enabled_at),
       review_automation_enabled_at = VALUES(review_automation_enabled_at),
       passport_automation_enabled_at = VALUES(passport_automation_enabled_at),
+      promo_automation_enabled_at = VALUES(promo_automation_enabled_at),
       enabled_scenarios = VALUES(enabled_scenarios),
       note = VALUES(note)
   `, [
@@ -33732,21 +33749,26 @@ export async function updateCustomerMessageShopSettingMysql(body = {}) {
     pickupAutomationEnabledAt,
     reviewAutomationEnabledAt,
     passportAutomationEnabledAt,
+    promoAutomationEnabledAt,
     JSON.stringify(nextScenarios),
     String(body.note ?? existing.note ?? "")
   ]);
   await mysqlExecute('UPDATE customer_message_shop_settings SET automation_person_id=? WHERE shop_id=?', [session.personId, shopId]);
+  await mysqlExecute(`UPDATE customer_message_tasks SET person_id=?, status='retry', next_attempt_at=NOW(), last_error=''
+    WHERE shop_id=? AND status='failed' AND person_id IS NULL
+      AND last_error='自动消息未保存运营授权，请由企业运营人员重新保存店铺消息设置'`, [session.personId, shopId]);
   await mysqlExecute(`UPDATE customer_message_tasks SET person_id=? WHERE shop_id=? AND person_id IS NULL AND status IN ('pending','retry','failed')`, [session.personId, shopId]);
   return { ok: true, settings: await customerMessageSettingsMysql() };
 }
 
 export async function updateCustomerMessageTemplateMysql(body = {}) {
   ensureMysqlCutoverEnabled();
-  const { scope } = await assertCustomerMessageAccess({ outbound: true });
+  const { scope, session } = await assertCustomerMessageAccess({ outbound: true });
   await ensureCustomerMessageTablesMysql();
   for (const shopId of Array.isArray(body.shop_ids) ? body.shop_ids : []) await assertCustomerMessageAccess({ shopId });
   const scenario = String(body.scenario || "").trim();
   if (!scenario) throw new Error("缺少消息场景");
+  const templateEnabled = scenario === "order_promo" ? body.enabled === true : body.enabled !== false;
   const fallback = defaultCustomerMessageTemplatesMysql().find((template) => template.scenario === scenario) || {};
   const splitTemplate = splitCustomerMessageTemplateText(body.template_text || fallback.template_text || "", fallback.template_translation || "");
   await mysqlExecute(`
@@ -33768,7 +33790,7 @@ export async function updateCustomerMessageTemplateMysql(body = {}) {
     scenario,
     String(body.name || body.label || fallback.name || fallback.label || scenario),
     String(body.label || body.name || fallback.label || scenario),
-    body.enabled === false ? 0 : 1,
+    templateEnabled ? 1 : 0,
     splitTemplate.template_text,
     String(body.template_translation || splitTemplate.template_translation || fallback.template_translation || "").trim(),
     String(body.trigger_condition || fallback.trigger_condition || scenario),
@@ -33786,6 +33808,13 @@ export async function updateCustomerMessageTemplateMysql(body = {}) {
       else scenarios.delete(scenario);
       await mysqlExecute(`INSERT INTO customer_message_shop_settings (shop_id, enabled_scenarios)
         VALUES (?,?) ON DUPLICATE KEY UPDATE enabled_scenarios=VALUES(enabled_scenarios)`, [shopId, JSON.stringify([...scenarios])]);
+      if (selected.has(shopId) && templateEnabled) {
+        await mysqlExecute('UPDATE customer_message_shop_settings SET automation_person_id=? WHERE shop_id=?', [session.personId, shopId]);
+        await mysqlExecute(`UPDATE customer_message_tasks SET person_id=?, status='retry', next_attempt_at=NOW(), last_error=''
+          WHERE shop_id=? AND scenario=? AND status='failed' AND person_id IS NULL
+            AND last_error='自动消息未保存运营授权，请由企业运营人员重新保存店铺消息设置'`, [session.personId, shopId, scenario]);
+        await mysqlExecute(`UPDATE customer_message_tasks SET person_id=? WHERE shop_id=? AND person_id IS NULL AND status IN ('pending','retry')`, [session.personId, shopId]);
+      }
     }
   }
   const activationColumn = CUSTOMER_MESSAGE_AUTOMATION_ACTIVATION_COLUMNS[scenario];
@@ -33795,7 +33824,7 @@ export async function updateCustomerMessageTemplateMysql(body = {}) {
         WHEN chat_enabled=1 AND send_mode='auto' AND chat_capability='available'
           AND enabled_scenarios LIKE ? AND ?=1
           THEN COALESCE(${activationColumn}, NOW())
-        ELSE NULL END WHERE ${customerMessageShopSql()}`, [`%"${scenario}"%`, body.enabled === false ? 0 : 1]);
+        ELSE NULL END WHERE ${customerMessageShopSql()}`, [`%"${scenario}"%`, templateEnabled ? 1 : 0]);
   }
   return { ok: true, settings: await customerMessageSettingsMysql() };
 }
@@ -33904,7 +33933,7 @@ async function customerMessageSendRecordsMysql(query = {}) {
     where.push("e.event_status = ?");
     params.push(status);
   }
-  if (["pickup_notice", "review_request", "passport_reminder"].includes(scenario)) {
+  if (["pickup_notice", "review_request", "passport_reminder", "order_promo"].includes(scenario)) {
     where.push("e.scenario = ?");
     params.push(scenario);
   }
@@ -34036,7 +34065,7 @@ async function customerMessageUpcomingCandidatesMysql(query = {}) {
       o.status, o.logistics_status, o.tracking_stage, o.tracking_number, o.ordered_at, o.delivered_at,
       t.scenario, t.reminder_step, 0 AS manual_only,
       CASE
-        WHEN t.scenario='passport_reminder' THEN o.ordered_at
+        WHEN t.scenario IN ('passport_reminder','order_promo') THEN o.ordered_at
         WHEN t.scenario='review_request' THEN COALESCE(o.delivered_at,o.last_status_changed_at)
         ELSE COALESCE(o.last_status_changed_at,o.ordered_at)
       END AS trigger_at,
@@ -34055,13 +34084,16 @@ async function customerMessageUpcomingCandidatesMysql(query = {}) {
     JOIN customer_message_templates cmt ON cmt.scenario=t.scenario AND cmt.enabled=1 AND cmt.deleted=0 AND ${customerMessageTemplateSql('cmt')}
     LEFT JOIN order_items oi ON oi.order_id=o.id
     LEFT JOIN online_products op ON op.shop_id=o.shop_id AND op.ozon_sku=oi.ozon_sku
-    WHERE ${customerMessageShopSql('t.shop_id')} AND t.scenario IN ('pickup_notice','review_request','passport_reminder')
+    WHERE ${customerMessageShopSql('t.shop_id')} AND t.scenario IN ('pickup_notice','review_request','passport_reminder','order_promo')
       AND t.status IN ('pending','retry')
       AND cms.chat_enabled=1 AND cms.send_mode='auto' AND cms.chat_capability='available'
-      AND cms.webhook_last_received_at IS NOT NULL
+      AND (t.scenario='order_promo' OR cms.webhook_last_received_at IS NOT NULL)
       AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) NOT REGEXP 'cancel|return|reject'
       AND (
-        (t.scenario='pickup_notice'
+        (t.scenario='order_promo' AND cms.enabled_scenarios LIKE '%"order_promo"%'
+          AND o.ordered_at>=cms.promo_automation_enabled_at AND o.ordered_at>=DATE_SUB(NOW(),INTERVAL 1 HOUR)
+          AND LOWER(o.status) IN ('awaiting_packaging','awaiting_registration','awaiting_approve'))
+        OR (t.scenario='pickup_notice'
           AND cms.enabled_scenarios LIKE '%\"pickup_notice\"%'
           AND cms.pickup_automation_enabled_at IS NOT NULL
           AND COALESCE(o.last_status_changed_at,o.ordered_at)>=cms.pickup_automation_enabled_at
@@ -34136,7 +34168,7 @@ async function customerMessageUpcomingCandidatesMysql(query = {}) {
     };
   });
   if (shopId) rows = rows.filter((row) => Number(row.shop_id) === shopId);
-  if (["pickup_notice", "review_request", "passport_reminder"].includes(scenario)) rows = rows.filter((row) => row.scenario === scenario);
+  if (["pickup_notice", "review_request", "passport_reminder", "order_promo"].includes(scenario)) rows = rows.filter((row) => row.scenario === scenario);
   if (search) rows = rows.filter((row) => `${row.posting_number} ${row.shop_name} ${row.product_names} ${row.skus}`.toLowerCase().includes(search));
   const total = rows.length;
   const offset = (page - 1) * pageSize;
@@ -34481,7 +34513,7 @@ function customerChatCapabilityFromError(error) {
   const message = String(error?.message || error || "");
   if (status === 401) return { capability: "credentials_error", permanent: true, message };
   if (status === 403) return { capability: "unavailable", permanent: true, message };
-  if (status === 404) return { capability: "unavailable", permanent: true, message };
+  if (status === 404) return { capability: "temporary_error", permanent: false, message };
   return { capability: "temporary_error", permanent: false, message };
 }
 
@@ -34508,7 +34540,8 @@ async function updateCustomerChatCapabilityMysql(shopId, capability, error = "")
     await mysqlExecute(`UPDATE customer_message_shop_settings SET
       pickup_automation_enabled_at=NULL,
       review_automation_enabled_at=NULL,
-      passport_automation_enabled_at=NULL
+      passport_automation_enabled_at=NULL,
+      promo_automation_enabled_at=NULL
       WHERE shop_id=?`, [shopId]);
   }
 }
@@ -34691,6 +34724,22 @@ export async function materializeCustomerMessageTasksMysql() {
           AND manual_sent.status IN ('sending','sent')
       )
   `);
+  const promo = await mysqlExecute(`
+    INSERT IGNORE INTO customer_message_tasks
+      (person_id, order_id, posting_number, shop_id, scenario, reminder_step, status, scheduled_at, next_attempt_at)
+    SELECT cms.automation_person_id, o.id, o.posting_number, o.shop_id, 'order_promo', 1, 'pending',
+      DATE_ADD(o.ordered_at, INTERVAL 30 SECOND), DATE_ADD(o.ordered_at, INTERVAL 30 SECOND)
+    FROM orders o
+    JOIN customer_message_shop_settings cms ON cms.shop_id=o.shop_id
+    JOIN customer_message_templates cmt ON cmt.scenario='order_promo' AND cmt.enabled=1 AND cmt.deleted=0 AND ${customerMessageTemplateSql('cmt')}
+    WHERE ${customerMessageShopSql('o.shop_id')} AND cms.chat_enabled=1 AND cms.send_mode='auto' AND cms.chat_capability='available'
+      AND cms.automation_person_id IS NOT NULL AND cms.enabled_scenarios LIKE '%"order_promo"%'
+      AND o.ordered_at>=cms.promo_automation_enabled_at AND o.ordered_at>=DATE_SUB(NOW(),INTERVAL 1 HOUR)
+      AND LOWER(o.status) IN ('awaiting_packaging','awaiting_registration','awaiting_approve')
+      AND LOWER(CONCAT_WS(' ',o.status,o.tracking_stage,o.logistics_status)) NOT REGEXP 'cancel|return|reject'
+      AND NOT EXISTS (SELECT 1 FROM customer_message_records sent WHERE sent.shop_id=o.shop_id AND sent.order_id=o.id AND sent.scenario='order_promo' AND sent.status='sent')
+      AND NOT EXISTS (SELECT 1 FROM customer_message_manual_tests sent WHERE sent.shop_id=o.shop_id AND sent.candidate_key=CONCAT('order_promo-',o.id,'-1') AND sent.status IN ('sending','sent'))
+  `);
   const passport = await mysqlExecute(`
     INSERT IGNORE INTO customer_message_tasks
       (person_id, order_id, posting_number, shop_id, scenario, reminder_step, status, scheduled_at, next_attempt_at)
@@ -34722,6 +34771,7 @@ export async function materializeCustomerMessageTasksMysql() {
     cancelled,
     pickup: Number(pickup?.affectedRows || 0),
     review: Number(review?.affectedRows || 0),
+    promo: Number(promo?.affectedRows || 0),
     passport: Number(passport?.affectedRows || 0)
   };
 }
@@ -34731,6 +34781,7 @@ async function customerMessageTaskCancellationReasonMysql(task, order) {
   const scheduledAgeHours = Math.max(0, (Date.now() - new Date(task.scheduled_at || 0).getTime()) / 3600000);
   const orderAgeHours = Math.max(0, (Date.now() - new Date(order.ordered_at || 0).getTime()) / 3600000);
   const deliveredAgeHours = Math.max(0, (Date.now() - new Date(order.delivered_at || order.last_status_changed_at || 0).getTime()) / 3600000);
+  if (task.scenario === "order_promo" && (!Number.isFinite(orderAgeHours) || orderAgeHours < 30 / 3600 || orderAgeHours > 1 || !["awaiting_packaging", "awaiting_registration", "awaiting_approve"].includes(String(order.status || "").toLowerCase()))) return "订单已不在下单后一小时内的发货前提醒窗口";
   if (task.scenario === "pickup_notice" && customerMessageIsDelivered(order)) return "订单已经签收";
   if (task.scenario === "pickup_notice" && scheduledAgeHours > 1) return "本次取货提醒已经超过安全发送窗口";
   if (task.scenario === "review_request" && deliveredAgeHours > 72) return "签收时间过久，为避免打扰不再发送";
@@ -34784,7 +34835,7 @@ export async function processCustomerMessageTasksMysql(body = {}) {
   const tasks = await mysqlQuery(`
     SELECT * FROM customer_message_tasks
     WHERE ${customerMessageShopSql()} AND EXISTS (SELECT 1 FROM orders o WHERE o.id=customer_message_tasks.order_id AND o.shop_id=customer_message_tasks.shop_id)
-      AND scenario IN ('pickup_notice','review_request','passport_reminder')
+      AND scenario IN ('pickup_notice','review_request','passport_reminder','order_promo')
       AND status IN ('pending','retry') AND next_attempt_at <= NOW()
     ORDER BY next_attempt_at ASC, id ASC LIMIT ${limit}
   `);
@@ -34804,7 +34855,7 @@ export async function processCustomerMessageTasksMysql(body = {}) {
     const setting = await mysqlQueryOne(`
       SELECT shop_id, automation_person_id, chat_enabled, send_mode, chat_capability, webhook_last_received_at,
         enabled_scenarios, pickup_automation_enabled_at, review_automation_enabled_at,
-        passport_automation_enabled_at
+        passport_automation_enabled_at, promo_automation_enabled_at
       FROM customer_message_shop_settings WHERE shop_id=? LIMIT 1
     `, [task.shop_id]);
     const template = await mysqlQueryOne(`
@@ -34816,11 +34867,12 @@ export async function processCustomerMessageTasksMysql(body = {}) {
     if (!cancelReason && Number(setting?.automation_person_id) !== Number(task.person_id)) cancelReason = "自动消息运营授权已变更，请重新配置任务";
     if (!cancelReason && (!Number(setting?.chat_enabled) || setting?.send_mode !== "auto")) cancelReason = "店铺自动客户消息已关闭";
     if (!cancelReason && setting?.chat_capability !== "available") cancelReason = "店铺聊天能力不可用";
-    if (!cancelReason && !setting?.webhook_last_received_at) cancelReason = "店铺尚未接入 Ozon Push";
+    if (!cancelReason && task.scenario !== "order_promo" && !setting?.webhook_last_received_at) cancelReason = "店铺尚未接入 Ozon Push";
     const enabledScenarios = parseJsonOrNull(setting?.enabled_scenarios) || [];
     if (!cancelReason && !enabledScenarios.includes(task.scenario)) cancelReason = "该模板未配置给此店铺";
     const activationColumn = CUSTOMER_MESSAGE_AUTOMATION_ACTIVATION_COLUMNS[task.scenario];
     if (!cancelReason && (!activationColumn || !setting?.[activationColumn])) cancelReason = "该自动消息场景尚未启用";
+    if (!cancelReason && task.scenario === "order_promo" && new Date(order.ordered_at).getTime() < new Date(setting.promo_automation_enabled_at).getTime()) cancelReason = "订单早于本次大促提醒启用时间";
     if (!cancelReason && (!template || !Number(template.enabled) || Number(template.deleted || 0))) cancelReason = "消息模板已停用";
     if (!cancelReason && await customerMessageTaskAlreadySentMysql(task)) cancelReason = "同一订单的本次消息已经人工或自动发送";
     if (cancelReason) {
@@ -34898,8 +34950,8 @@ export async function sendCustomerMessageManualTestMysql(body = {}) {
   const orderId = Number(body.order_id || body.orderId || 0);
   const scenario = String(body.scenario || "").trim();
   const reminderStep = Math.max(1, Number(body.reminder_step || body.reminderStep || 1));
-  if (!orderId || !["pickup_notice", "review_request", "passport_reminder"].includes(scenario)) {
-    return { ok: false, __status: 400, error: "请选择有效的三类测试消息和订单。" };
+  if (!orderId || !["pickup_notice", "review_request", "passport_reminder", "order_promo"].includes(scenario)) {
+    return { ok: false, __status: 400, error: "请选择有效的自动消息类型和订单。" };
   }
   const candidateKey = `${scenario}-${orderId}-${reminderStep}`;
   let { order } = await assertCustomerMessageAccess({ orderId, shopId: Number(body.shop_id || body.shopId || 0) || null });
@@ -34916,16 +34968,17 @@ export async function sendCustomerMessageManualTestMysql(body = {}) {
     return { ok: false, __status: 502, error: `发送前无法从 Ozon 复核订单状态：${error?.message || error}` };
   }
   const state = `${order.status || ""} ${order.tracking_stage || ""} ${order.logistics_status || ""}`.toLowerCase();
-  const triggerAt = new Date((scenario === "review_request" ? order.delivered_at : scenario === "passport_reminder" ? order.ordered_at : order.last_status_changed_at) || order.ordered_at || 0);
+  const triggerAt = new Date((scenario === "review_request" ? order.delivered_at : ["passport_reminder", "order_promo"].includes(scenario) ? order.ordered_at : order.last_status_changed_at) || order.ordered_at || 0);
   const ageHours = (Date.now() - triggerAt.getTime()) / 3600000;
   let invalidReason = !Number.isFinite(ageHours) ? "订单触发时间不完整" : "";
   if (!invalidReason && /cancel|return|reject/.test(state)) invalidReason = "订单已取消、退货或拒收";
+  if (!invalidReason && scenario === "order_promo" && (ageHours > 1 || ageHours < 30 / 3600 || !["awaiting_packaging", "awaiting_registration", "awaiting_approve"].includes(String(order.status || "").toLowerCase()))) invalidReason = "订单已不在下单后30秒至1小时内的发货前提醒窗口";
   if (!invalidReason && scenario === "pickup_notice" && (!state.includes("pickup") || ageHours > 73)) invalidReason = "订单已不在有效的待取货提醒窗口";
   if (!invalidReason && scenario === "review_request" && (!state.includes("delivered") || ageHours < 24 || ageHours > 72)) invalidReason = "订单已不在签收后1至3天的邀评窗口";
   if (!invalidReason && scenario === "passport_reminder" && (!/awaiting_registration|posting_awaiting_registration/.test(state) || ageHours > 24)) invalidReason = "订单已不在护照未填的24小时提醒窗口";
   if (invalidReason) return { ok: false, __status: 409, error: `${invalidReason}，已阻止测试发送。` };
   const setting = await mysqlQueryOne("SELECT * FROM customer_message_shop_settings WHERE shop_id=? LIMIT 1", [order.shop_id]);
-  if (!setting?.webhook_last_received_at) return { ok: false, __status: 409, error: "该店铺尚未收到真实 Ozon Push，不能进入测试发送。" };
+  if (scenario !== "order_promo" && !setting?.webhook_last_received_at) return { ok: false, __status: 409, error: "该店铺尚未收到真实 Ozon Push，不能进入测试发送。" };
   if (setting?.chat_capability !== "available") return { ok: false, __status: 409, error: "店铺聊天能力尚未检测通过，请先执行聊天能力检测。" };
   const preview = await previewCustomerMessageMysql({ order_id: order.id, type: scenario });
   const messageText = String(body.message_text || preview.message_text || preview.customer_message || "").trim();

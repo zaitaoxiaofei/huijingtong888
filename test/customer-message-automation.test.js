@@ -43,7 +43,7 @@ test("three priority messages use durable idempotent delayed tasks", () => {
   assert.match(serviceSource, /passport_automation_enabled_at IS NOT NULL/);
   assert.match(serviceSource, /const pickupAutomationEnabledAt = activationTimestamp\("pickup_notice"\)/);
   assert.match(serviceSource, /pickup_automation_enabled_at = VALUES\(pickup_automation_enabled_at\)/);
-  assert.match(serviceSource, /scenario IN \('pickup_notice','review_request','passport_reminder'\)/);
+  assert.match(serviceSource, /scenario IN \('pickup_notice','review_request','passport_reminder','order_promo'\)/);
   assert.match(serviceSource, /customerMessageTaskCancellationReasonMysql/);
   assert.match(serviceSource, /attempts >= 5/);
   assert.match(serviceSource, /status='sending'.*status IN \('pending','retry'\)/s);
@@ -75,8 +75,8 @@ test("three priority templates use safer natural copy and remain opt-in by defau
   assert.match(serviceSource, /scenario: "passport_reminder"[\s\S]*?enabled: false/);
 });
 
-test("customer message dispatcher scans every ten minutes and UI exposes status", () => {
-  assert.match(serverSource, /key: "customer_message_dispatch"[\s\S]*intervalMinutes: 10/);
+test("customer message dispatcher scans every minute and UI exposes status", () => {
+  assert.match(serverSource, /key: "customer_message_dispatch",[^}]*intervalMinutes: 1,/);
   assert.match(serverSource, /FOREGROUND_DEFERRAL_BOUNDED_JOBS = new Set\(\[[\s\S]*"customer_message_dispatch"/);
   assert.match(serverSource, /services\.processCustomerMessageTasks\(\{ limit: 30 \}\)/);
   assert.match(serverSource, /runTenantScheduledWork\(tenantId => runCustomerMessageTenantScheduledOperation\(tenantId, async \(\) => \{\s*const tasks = await services\.processCustomerMessageTasks\(\{ limit: 30 \}\);\s*const webhooks = await services\.processOzonWebhookEvents\(\{ limit: 10 \}\)/);
@@ -164,7 +164,7 @@ test("template editor inserts variables and assigns each template to selected sh
   assert.match(routeSource, /req\.method === "DELETE".*parts\[1\] === "customer-message-settings".*parts\[2\] === "template"/s);
 });
 
-test("upcoming customer messages are limited to three safe workflows and push-enabled shops", () => {
+test("upcoming customer messages include promotion reminders while preserving Push gates for existing workflows", () => {
   const manualSendSource = serviceSource.slice(
     serviceSource.indexOf("export async function sendCustomerMessageManualTestMysql"),
     serviceSource.indexOf("export async function translateCustomerMessageRuMysql")

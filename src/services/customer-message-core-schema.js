@@ -15,6 +15,7 @@ export const CUSTOMER_MESSAGE_SHOP_SCHEMA = `
       pickup_automation_enabled_at DATETIME NULL,
       review_automation_enabled_at DATETIME NULL,
       passport_automation_enabled_at DATETIME NULL,
+      promo_automation_enabled_at DATETIME NULL,
       enabled_scenarios TEXT NULL,
       note TEXT NULL,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP

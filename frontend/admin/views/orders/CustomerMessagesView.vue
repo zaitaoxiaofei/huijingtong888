@@ -63,7 +63,7 @@ const typeOptions = computed(() => [
 ]);
 
 const automationScenarios = computed(() => state.scenarios);
-const primaryAutomationScenarioKeys = new Set(["pickup_notice", "review_request", "passport_reminder"]);
+const primaryAutomationScenarioKeys = new Set(["order_promo", "pickup_notice", "review_request", "passport_reminder"]);
 const automationTemplates = computed(() => state.templates.filter((item) => primaryAutomationScenarioKeys.has(item.scenario)));
 const availableTemplateScenarios = computed(() => {
   const existing = new Set(automationTemplates.value.map((item) => item.scenario));
@@ -197,13 +197,14 @@ const sendMethodOptions = [
   { value: "auto", label: "自动" }
 ];
 
-const scenarioOrder = ["pickup_notice", "review_request", "passport_reminder"];
+const scenarioOrder = ["order_promo", "pickup_notice", "review_request", "passport_reminder"];
 
 function scenarioTimingText(templateOrScenario) {
   const template = typeof templateOrScenario === "object" ? templateOrScenario : { scenario: templateOrScenario };
   const trigger = triggerOptions.find((item) => item.value === template.trigger_condition)?.label
     || ({ order_created: "客户下单", passport_reminder: "护照资料仍未填写", order_update: "客户主动咨询", shipment_delay: "订单超时未发货", stall_comfort: "物流长时间未更新", delay_comfort: "配送发生延误", pickup_notice: "订单到达取货点", review_request: "订单已签收" })[template.scenario]
     || "按订单状态触发";
+  if (template.scenario === "order_promo") return "下单后 30 秒到期，每分钟扫描；订单同步可能影响实际发送时间";
   const delay = Math.max(0, Number(template.delay_hours || 0));
   return `${trigger} · ${delay ? `${delay} 小时后` : "立即"}`;
 }
@@ -613,6 +614,7 @@ async function updateTemplate(template) {
   try {
     const result = await apiClient.post("/api/customer-message-settings/template", template);
     if (result?.settings?.templates) state.templates = result.settings.templates;
+    if (result?.settings?.shops) state.shops = result.settings.shops;
     ElMessage.success("消息模板已保存");
     await loadRows();
   } catch (error) {
@@ -688,6 +690,8 @@ onMounted(reloadAll);
           </div>
         </div>
       </template>
+
+      <el-alert v-if="state.shops.some(shop => shop.chat_enabled && shop.send_mode === 'auto' && shop.automation_authorization_required)" title="部分店铺缺少运营授权，自动消息已暂停。请在消息模板中为对应店铺重新保存启用的模板配置，以记录当前运营人员授权。" type="warning" :closable="false" show-icon />
 
       <section v-if="activeTab === 'records'" class="customer-message-section">
         <div class="records-page-heading"><div><h3>消息发送记录</h3><p>统一查询人工测试与自动消息的发送、失败及取消过程。</p></div><div class="records-summary"><span>累计记录</span><strong>{{ state.total }}</strong></div></div>
@@ -824,11 +828,11 @@ onMounted(reloadAll);
 
       <section v-else-if="activeTab === 'upcoming'" class="customer-message-section">
         <div class="records-page-heading">
-          <div><h3>即将发送</h3><p>展示三类真实自动任务，包括未来排期、已到发送时间和重试任务。</p></div>
+          <div><h3>即将发送</h3><p>展示已配置的真实自动任务，包括未来排期、已到发送时间和重试任务。</p></div>
           <div class="records-summary"><span>排期任务</span><strong>{{ upcoming.total }}</strong></div>
         </div>
         <el-alert
-          :title="upcoming.safety.manual_test_enabled ? '人工测试发送已开启；每次发送前仍需在预览窗口二次确认。' : '自动发送和人工测试发送均保持关闭，当前页面只读预览。'"
+          :title="upcoming.safety.manual_test_enabled ? '人工测试发送已开启；每次发送前仍需在预览窗口二次确认。' : (upcoming.safety.sends_enabled ? '自动发送已开启，符合店铺授权及模板条件的任务将自动发送；人工测试发送未开启。' : '自动发送和人工测试发送均保持关闭，当前页面只读预览。')"
           :type="upcoming.safety.manual_test_enabled ? 'warning' : 'success'"
           :closable="false"
           show-icon
@@ -840,6 +844,7 @@ onMounted(reloadAll);
             </el-select>
             <el-input v-model="state.search" clearable placeholder="订单号 / 商品" @keyup.enter="reloadUpcomingFirstPage" />
             <el-select v-model="state.scenarioFilter" placeholder="消息类型" clearable @change="reloadUpcomingFirstPage">
+              <el-option label="大促配送提醒" value="order_promo" />
               <el-option label="到货取货" value="pickup_notice" />
               <el-option label="签收后求好评" value="review_request" />
               <el-option label="护照未填" value="passport_reminder" />
@@ -896,7 +901,8 @@ onMounted(reloadAll);
           <el-form-item label="消息类型"><el-select v-model="templateDialog.form.scenario" :disabled="templateDialog.mode === 'edit'"><el-option v-for="scenario in (templateDialog.mode === 'edit' ? automationScenarios : availableTemplateScenarios)" :key="scenario.key" :label="scenario.label" :value="scenario.key" /></el-select></el-form-item>
           <el-form-item label="模板名称"><el-input v-model="templateDialog.form.label" /></el-form-item>
           <el-form-item label="触发条件"><el-select v-model="templateDialog.form.trigger_condition" style="width: 100%"><el-option v-for="option in triggerOptions" :key="option.value" :label="option.label" :value="option.value" /></el-select></el-form-item>
-          <el-form-item label="触发时间"><div class="trigger-delay-field"><span>满足条件后</span><el-input-number v-model="templateDialog.form.delay_hours" :min="0" :max="720" /><span>小时生成消息任务</span></div></el-form-item>
+          <el-form-item v-if="templateDialog.form.scenario === 'order_promo'" label="触发时间">下单后 30 秒到期，每分钟扫描发送；仅处理启用后的新订单，订单同步可能影响实际发送时间。</el-form-item>
+          <el-form-item v-else label="触发时间"><div class="trigger-delay-field"><span>满足条件后</span><el-input-number v-model="templateDialog.form.delay_hours" :min="0" :max="720" /><span>小时生成消息任务</span></div></el-form-item>
           <el-form-item label="插入变量"><div class="template-variable-bar"><el-button v-for="variable in templateVariables" :key="variable.key" size="small" plain @click="insertTemplateVariable(templateDialog.form, variable.key)">+ {{ variable.label }}</el-button></div></el-form-item>
           <el-form-item label="俄语内容"><el-input v-model="templateDialog.form.template_text" type="textarea" :rows="6" /></el-form-item>
           <el-form-item label="中文释义"><div class="dialog-field-stack"><el-input v-model="templateDialog.form.template_translation" type="textarea" :rows="4" /><el-button plain :loading="translationActionKey === `template-translate:${templateDialog.form.scenario}`" @click="translateTemplate(templateDialog.form)">根据俄语更新中文释义</el-button></div></el-form-item>
