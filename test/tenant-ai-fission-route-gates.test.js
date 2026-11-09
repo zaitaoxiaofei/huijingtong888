@@ -31,13 +31,18 @@ function throughGateway(session, path, method = "POST", dispatch = () => {}) {
 
 for (const tenant of enterprises) {
   for (const path of fissionPaths) {
-    test(`${tenant.slug} ordinary operations can reach exact POST ${path}`, () => {
+    test(`${tenant.slug} ordinary operations follow the current AI pause for POST ${path}`, () => {
       const session = member(tenant, ["operations"]);
       assert.equal(authorizeApiRequest({ method: "POST", _session: session }, partsOf(path)).allowed, true);
       let dispatches = 0;
       const decision = throughGateway(session, path, "POST", () => { dispatches += 1; });
-      assert.deepEqual(decision, { stage: "dispatch", allowed: true }, JSON.stringify(decision));
-      assert.equal(dispatches, 1);
+      if (tenant.slug !== "default" && path.startsWith("/api/ai-variant-lab/")) {
+        assert.equal(decision.code, "AI_SKILLS_DISABLED");
+        assert.equal(dispatches, 0);
+      } else {
+        assert.deepEqual(decision, { stage: "dispatch", allowed: true }, JSON.stringify(decision));
+        assert.equal(dispatches, 1);
+      }
     });
   }
 }
@@ -87,7 +92,6 @@ test("the fission gate does not admit other methods, extended paths, or adjacent
     ["POST", "/api/ai-variant-lab/batch-jobs/job-1/run-images"],
     ["POST", "/api/ai-variant-lab/batch-delete"],
     ["POST", "/api/listing/generate-offer-ids"],
-    ["POST", "/api/listing/publish-tasks/12/retry"],
     ["POST", "/api/asset-variant-engine/publish"]
   ];
   for (const tenant of enterprises) {
@@ -96,8 +100,13 @@ test("the fission gate does not admit other methods, extended paths, or adjacent
       const decision = throughGateway(member(tenant, ["operations"]), path, method, () => { dispatches += 1; });
       assert.equal(decision.stage, "isolation", `${tenant.slug} ${method} ${path}`);
       assert.equal(decision.allowed, false);
-      assert.equal(decision.code, "TENANT_ISOLATION_PENDING");
+      assert.equal(decision.code, tenant.slug !== "default" && !["GET", "HEAD"].includes(method) && (path.startsWith("/api/ai-variant-lab/") || path.startsWith("/api/asset-variant-engine/")) ? "AI_SKILLS_DISABLED" : "TENANT_ISOLATION_PENDING");
       assert.equal(dispatches, 0);
     }
   }
+});
+
+// This non-generating retry is already admitted by the release baseline.
+test("ordinary publish task retries retain their existing enterprise access", () => {
+  for (const tenant of enterprises) assert.equal(throughGateway(member(tenant, ["operations"]), "/api/listing/publish-tasks/12/retry").allowed, true);
 });

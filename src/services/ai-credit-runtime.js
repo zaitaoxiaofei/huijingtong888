@@ -1,3 +1,4 @@
+import { assertAiSkillsAvailable } from "../shared/ai-skills-access.js";
 import path from "node:path";
 import { mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { assertCurrentAiTenantPermission, currentAiTenantSession } from "./ai-tenant-context.js";
@@ -38,6 +39,7 @@ export function createAiCreditRuntime({ query = mysqlQuery, transaction = withMy
         if (!current || Number(current.tenant?.id) !== Number(session.tenant?.id) || Number(current.personId) !== Number(session.personId)) {
           throw fail("AI 积分执行身份与当前企业操作人不一致", "AI_CREDIT_FORBIDDEN", 403);
         }
+        assertAiSkillsAvailable(current);
         await readAiCreditMode(session, query);
       };
       await authorizeCurrent();

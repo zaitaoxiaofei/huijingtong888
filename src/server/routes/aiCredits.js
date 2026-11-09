@@ -18,11 +18,17 @@ export async function handleAiCreditRoute({ req, res, url, parts, readJson, json
   const read = isAiCreditReadRoute(parts, req.method);
   const platform = req.method === "POST" && parts.length === 4 && parts[0] === "api" && parts[1] === "platform"
     && parts[2] === "ai-credits" && ["accounts", "prices", "recharges", "reconcile"].includes(parts[3]);
-  if (!read && !platform) return false;
+  const platformRead = req.method === "GET" && parts.length === 5 && parts[0] === "api" && parts[1] === "platform"
+    && parts[2] === "ai-credits" && parts[3] === "accounts" && /^[1-9]\d*$/.test(parts[4]);
+  if (!read && !platform && !platformRead) return false;
   res.setHeader("Cache-Control", "no-store");
   try {
     ledger ||= await runtimeLedger();
     const session = req._session;
+    if (platformRead) {
+      json(res, await ledger.platformAccount(session, { tenantId: parts[4], before: url.searchParams.get("before") || Number.MAX_SAFE_INTEGER, limit: url.searchParams.get("limit") || 30 }));
+      return true;
+    }
     if (read) {
       let result;
       if (parts[2] === "wallet") result = await ledger.wallet(session);

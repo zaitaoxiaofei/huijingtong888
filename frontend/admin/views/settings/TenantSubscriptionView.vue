@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { apiClient } from "../../utils/api";
 import { shanghaiDateTimeText } from "../../utils/shanghai-date";
+import AiCreditsPanel from "../../components/AiCreditsPanel.vue";
 import SubscriptionVouchersPanel from "../../components/SubscriptionVouchersPanel.vue";
 
 const loading = ref(false);
@@ -12,6 +13,7 @@ const people = ref([]);
 const members = ref([]);
 const selected = ref(null);
 const activeSection = ref("customers");
+const creditTenantId = ref(null);
 const detailVisible = ref(false);
 const createVisible = ref(false);
 const tenantSaving = ref(false);
@@ -600,6 +602,11 @@ onMounted(load);
             </div>
           </div>
         </section>
+      </el-tab-pane>
+      <el-tab-pane label="AI积分" name="credits" lazy>
+        <el-select v-model="creditTenantId" filterable clearable placeholder="请选择要管理积分的企业" style="width: 320px; margin-bottom: 16px"><el-option v-for="tenant in currentRows" :key="tenant.id" :value="Number(tenant.id)" :label="tenant.slug === 'default' ? `${tenant.name}（内部空间沿用现有AI配置）` : tenant.name" :disabled="tenant.slug === 'default'" /></el-select>
+        <AiCreditsPanel v-if="creditTenantId" :key="creditTenantId" platform :tenant-id="creditTenantId" :tenant-name="rows.find(row => Number(row.id) === creditTenantId)?.name || ''" />
+        <el-empty v-else description="选择企业后查看积分及登记手工充值" />
       </el-tab-pane>
       <el-tab-pane label="会员激活码" name="vouchers" lazy><SubscriptionVouchersPanel :plans="plans" /></el-tab-pane>
     </el-tabs>

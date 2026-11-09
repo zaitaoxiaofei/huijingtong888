@@ -187,7 +187,7 @@ function handleMenuSelect(index) {
     window.open(target, "_blank", "noopener,noreferrer");
     return;
   }
-  if (!target.startsWith("/")) return;
+  if (!target.startsWith("/") || !canAccessPage(authStore.user, target)) return;
   mobileNavigationOpen.value = false;
   if (target === AI_VARIANT_LAB_ROUTE) {
     openAiVariantLabWindow({ source: "menu" });
@@ -249,7 +249,7 @@ function showRouteSwitching() {
 
 function prefetchMenuRoute(target) {
   const routeTarget = String(target || "").trim();
-  if (!routeTarget.startsWith("/") || prefetchedRoutes.has(routeTarget)) return;
+  if (!routeTarget.startsWith("/") || !canAccessPage(authStore.user, routeTarget) || prefetchedRoutes.has(routeTarget)) return;
   prefetchedRoutes.add(routeTarget);
   prefetchRouteComponent(routeTarget);
 }
@@ -859,14 +859,15 @@ onBeforeUnmount(() => {
             @select="handleMenuSelect"
           >
             <template v-for="menu in visibleNavigationMenus" :key="menu.key">
-              <el-sub-menu v-if="menu.children?.length" :index="menu.key">
+              <el-sub-menu v-if="menu.children?.length" :index="menu.key" :disabled="menu.disabled" :title="menu.disabledReason">
                 <template #title>
                   <el-icon><component :is="menu.icon" /></el-icon>
-                  <span>{{ menu.label }}</span>
+                  <span>{{ menu.label }}{{ menu.disabled ? "（暂未开放）" : "" }}</span>
                 </template>
                 <el-menu-item
                   v-for="child in menu.children"
                   :key="child.key"
+                  :disabled="child.disabled"
                   :index="child.key === 'procurement-workspace-legacy' ? child.key : child.route"
                   @mouseenter="prefetchMenuRoute(child.route)"
                   @focus="prefetchMenuRoute(child.route)"

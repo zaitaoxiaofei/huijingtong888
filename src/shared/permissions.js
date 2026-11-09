@@ -1,3 +1,4 @@
+import { aiSkillsAvailable, isAiSkillsPage } from "./ai-skills-access.js";
 // Shared by server authorization and the admin UI. Multiple roles grant the union of permissions.
 export const ROLE_DEFINITIONS = [
   { value: "admin", label: "企业管理员（兼容）", description: "本企业业务权限；不包含平台授权或系统全局配置" },
@@ -93,11 +94,13 @@ export function needsMembershipActivation(subject) {
 }
 
 export function canAccessPage(subject, path) {
+  if (subject?.tenant?.id && isAiSkillsPage(path) && !aiSkillsAvailable(subject)) return false;
   const permission = pagePermission(path);
   if (permission === "platform.admin") return isPlatformAdmin(subject);
   if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path) && isPlatformAdmin(subject)) return true;
   if (path === "/login") return true;
   if (path === "/membership") return Boolean(subject?.tenant?.id) || isPlatformAdmin(subject);
+  if (path === "/ai-credits") return Boolean(subject?.tenant?.id) && !needsMembershipActivation(subject);
   if (subject && typeof subject === "object" && !Array.isArray(subject) && !subject.tenant?.id) return false;
   if (needsMembershipActivation(subject) && !["/tools/pricing", "/tools/profit-calculator"].includes(path)) return false;
   if (permission === "enterprise.admin") return isEnterpriseAdmin(subject);

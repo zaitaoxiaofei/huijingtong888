@@ -1,3 +1,4 @@
+import { aiSkillsApiDecision } from "../shared/ai-skills-access.js";
 import { isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isTenantPilotRoute } from "./tenant-pilot-routes.js";
@@ -71,6 +72,8 @@ function isTenantSellerAnalyticsRoute(path, method) {
  * Platform administrators retain the legacy platform maintenance surface.
  */
 export function tenantIsolationDecision(session, parts = [], method = "GET") {
+  const aiSkills = aiSkillsApiDecision(session, parts, method);
+  if (!aiSkills.allowed) return aiSkills;
   const tenant = session?.tenant;
   if (parts[1] === "finance-submissions") {
     const access = financeSubmissionRoute(parts, String(method).toUpperCase());
