@@ -54,7 +54,7 @@ function fixture() {
     if (sql.startsWith("SELECT id, code_hint, status")) return [[...state.vouchers].reverse().slice(0, 100).map(({ code_hash, issued_by_person_id, ...row }) => row)];
     if (sql.startsWith("SELECT * FROM tenant_subscription_vouchers")) return [state.vouchers.filter(voucher => voucher.code_hash === params[0])];
     if (sql.startsWith("UPDATE tenants SET plan_code")) {
-      Object.assign(state.tenants.find(tenant => tenant.id === params[5]), { plan_code: params[0], subscription_status: params[1], subscription_expires_at: new Date(`${params[2].replace(" ", "T")}Z`), member_limit: params[3], shop_limit: params[4] });
+      Object.assign(state.tenants.find(tenant => tenant.id === params[6]), { subscription_started_at: params[5], plan_code: params[0], subscription_status: params[1], subscription_expires_at: new Date(`${params[2].replace(" ", "T")}Z`), member_limit: params[3], shop_limit: params[4] });
       return [{ affectedRows: 1 }];
     }
     if (sql.startsWith("UPDATE tenant_subscription_vouchers SET status = 'used'")) {
@@ -191,10 +191,14 @@ test("renewal retains remaining duration and uses the issued snapshot even after
   const renewal = await f.services.activate({ activation_code: next.activation_code }, session);
   assert.equal(renewal.membership.expires_at, new Date(NOW + 60 * DAY).toISOString());
   assert.equal(renewal.membership.remaining_days, 59);
-  f.setClock(NOW + 100 * DAY);
+  f.setClock(NOW + 70 * DAY);
   const expiredRenewalCode = await f.services.issueVoucher({ plan_code: "monthly" }, platform);
   const renewedExpired = await f.services.activate({ activation_code: expiredRenewalCode.activation_code }, session);
   assert.equal(renewedExpired.membership.remaining_days, 7);
+  f.setClock(NOW + 108 * DAY);
+  const afterRetention = await f.services.issueVoucher({ plan_code: "monthly" }, platform);
+  await assert.rejects(f.services.activate({ activation_code: afterRetention.activation_code }, session), error => error.statusCode === 410);
+  assert.equal(f.state.vouchers.at(-1).status, "active");
 });
 
 test("expired, revoked, old bound, malformed and forged-target vouchers fail without entitlement changes", async () => {

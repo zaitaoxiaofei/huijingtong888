@@ -18,6 +18,7 @@ const tenantSaving = ref(false);
 const deliveryVisible = ref(false);
 const deliveryInfo = ref(null);
 const deliveryCopying = ref(false);
+const deletingTenant = ref(false);
 const planVisible = ref(false);
 const editingPlanId = ref(null);
 const memberVisible = ref(false);
@@ -46,28 +47,31 @@ const title = computed(() => selected.value?.name || "客户空间");
 const activePlans = computed(() => plans.value.filter(plan => Number(plan.active)));
 const trialPlans = computed(() => plans.value.filter(plan => plan.subscription_status === "trial"));
 const paidPlans = computed(() => plans.value.filter(plan => plan.subscription_status !== "trial"));
+const currentRows = computed(() => rows.value.filter(row => row.status !== "archived"));
 const summary = computed(() => ({
-  total: rows.value.length,
-  active: rows.value.filter(row => row.access_allowed && row.subscription_status === "active").length,
-  trial: rows.value.filter(row => row.access_allowed && row.subscription_status === "trial").length,
-  attention: rows.value.filter(row => !row.access_allowed || row.subscription_status === "expired").length
+  total: currentRows.value.length,
+  active: currentRows.value.filter(row => row.access_allowed && row.subscription_status === "active").length,
+  trial: currentRows.value.filter(row => row.access_allowed && row.subscription_status === "trial").length,
+  attention: currentRows.value.filter(row => !row.access_allowed || row.subscription_status === "expired").length
 }));
 const filteredRows = computed(() => {
   const keyword = filters.keyword.trim().toLowerCase();
   return rows.value.filter(row => {
+    if (row.status === "archived" && filters.status !== "archived") return false;
     const matchesKeyword = !keyword || [row.name, row.slug, row.plan_code].some(value => String(value || "").toLowerCase().includes(keyword));
     const matchesStatus = filters.status === "all"
       || (filters.status === "available" && row.access_allowed)
       || (filters.status === "unactivated" && row.subscription_status === "unactivated")
       || (filters.status === "expired" && row.subscription_status === "expired")
-      || (filters.status === "suspended" && row.subscription_status === "suspended");
+      || (filters.status === "suspended" && row.subscription_status === "suspended")
+      || (filters.status === "archived" && row.status === "archived");
     const matchesPlan = filters.plan === "all" || row.plan_code === filters.plan;
     return matchesKeyword && matchesStatus && matchesPlan;
   });
 });
 
 function planName(code, tenant = null) {
-  if (tenant?.slug === "default") return "默认企业（内部空间）";
+  if (tenant?.slug === "default") return "汇进通企业（内部空间）";
   if (code === "unactivated") return "尚未开通";
   return plans.value.find(item => item.code === code)?.name || code || "未设置";
 }
@@ -88,6 +92,7 @@ function statusType(row) {
 }
 
 function statusText(row) {
+  if (row.status === "archived") return "已归档";
   if (row.subscription_status === "unactivated") return "未激活";
   if (!row.access_allowed && row.subscription_status !== "suspended") return "已到期";
   return statusLabels[row.subscription_status] || row.subscription_status || "未知";
@@ -336,6 +341,36 @@ async function createAccount() {
   }
 }
 
+async function permanentlyDelete() {
+  if (!selected.value || deletingTenant.value) return;
+  deletingTenant.value = true;
+  try {
+    const preview = await apiClient.get(`/api/tenants/deletion-preview?tenant_id=${selected.value.id}`, { noCache: true });
+    const { value } = await ElMessageBox.prompt(
+      `将永久删除「${preview.name}」及其 ${preview.total_rows} 条企业数据，无法恢复。共用账号和其他企业的数据不会删除。请输入完整企业名称确认。`,
+      "永久删除客户空间", { type: "error", confirmButtonText: "永久删除", inputValidator: text => text === preview.name || "请输入完整企业名称" }
+    );
+    const result = await apiClient.delete("/api/tenants", { body: JSON.stringify({ tenant_id: preview.tenant_id, fingerprint: preview.fingerprint, confirmation_name: value }) });
+    selected.value = null; members.value = []; detailVisible.value = false;
+    ElMessage.success(result.files_cleanup === "pending" ? "企业数据已删除，独享文件正在后台回收" : "企业及独享数据已永久删除");
+    await load();
+  } catch (error) {
+    if (!["cancel", "close"].includes(error)) ElMessage.error(error.message || "永久删除失败");
+  } finally { deletingTenant.value = false; }
+}
+
+function expiryText(row) {
+  if (row.subscription_status === "unactivated") return "尚未开通";
+  if (row.subscription_expires_at) return formatDateTime(row.subscription_expires_at);
+  return row.status === "archived" || row.subscription_status === "suspended" ? "未记录" : "长期有效";
+}
+
+function remainingText(row) {
+  if (row.subscription_status === "unactivated") return "尚未开通";
+  if (row.remaining_days == null) return row.status === "archived" || row.subscription_status === "suspended" ? "未记录" : "长期有效";
+  return Number(row.remaining_days) > 0 ? `剩余 ${row.remaining_days} 天` : `已到期 ${row.expired_days || 0} 天`;
+}
+
 async function archive() {
   try {
     await ElMessageBox.confirm(`将归档「${selected.value.name}」，成员会被移出，但业务数据不会删除。`, "归档客户空间", { type: "error", confirmButtonText: "确认归档" });
@@ -505,7 +540,8 @@ onMounted(load);
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
             <el-select v-model="filters.status" aria-label="按服务状态筛选" class="filter-select">
-              <el-option label="全部状态" value="all" />
+              <el-option label="全部状态（不含归档）" value="all" />
+              <el-option label="已归档" value="archived" />
               <el-option label="可使用" value="available" />
               <el-option label="未激活" value="unactivated" />
               <el-option label="已到期" value="expired" />
@@ -522,7 +558,8 @@ onMounted(load);
             </el-table-column>
             <el-table-column label="当前套餐" min-width="160"><template #default="{ row }"><span class="plan-cell">{{ planName(row.plan_code, row) }}</span></template></el-table-column>
             <el-table-column label="服务状态" width="120"><template #default="{ row }"><el-tag :type="statusType(row)" effect="light" round>{{ statusText(row) }}</el-tag></template></el-table-column>
-            <el-table-column label="到期时间（北京时间）" min-width="210"><template #default="{ row }">{{ row.subscription_status === 'unactivated' ? '尚未开通' : formatDateTime(row.subscription_expires_at) }}</template></el-table-column>
+            <el-table-column label="授权时间（北京时间）" min-width="250"><template #default="{ row }"><div>开始：{{ row.subscription_started_at ? formatDateTime(row.subscription_started_at) : '未记录' }}</div><div>到期：{{ expiryText(row) }}</div></template></el-table-column>
+            <el-table-column label="剩余天数" min-width="130"><template #default="{ row }">{{ remainingText(row) }}</template></el-table-column>
             <el-table-column label="账号用量" min-width="145"><template #default="{ row }"><span>{{ row.member_count }} 个总账号</span><small class="usage-sub">子账号用量：{{ row.sub_account_count }} / {{ quotaText(row.member_limit, '名额') }}</small></template></el-table-column>
             <el-table-column label="店铺用量" width="120"><template #default="{ row }">{{ row.shop_count }} / {{ quotaText(row.shop_limit) }}</template></el-table-column>
             <el-table-column label="操作" width="110" fixed="right"><template #default="{ row }"><el-button type="primary" link @click="openTenant(row)">管理<el-icon class="el-icon--right"><ArrowRight /></el-icon></el-button></template></el-table-column>
@@ -576,8 +613,9 @@ onMounted(load);
 
         <section class="drawer-section subscription-card">
           <div class="section-heading"><div><h3>当前授权</h3><p>{{ planName(selected.plan_code, selected) }}</p></div><el-tag :type="statusType(selected)" effect="light">{{ statusText(selected) }}</el-tag></div>
-          <div class="subscription-facts"><div><span>服务到期</span><strong>{{ formatDateTime(selected.subscription_expires_at) }}</strong></div><div><span>账号用量</span><strong>{{ selected.member_count }} / {{ selected.member_limit == null ? '不限' : Number(selected.member_limit) + 1 }} 个</strong></div><div><span>店铺用量</span><strong>{{ selected.shop_count }} / {{ selected.shop_limit == null ? '不限' : selected.shop_limit }} 个</strong></div></div>
+          <div class="subscription-facts"><div><span>本期授权开始</span><strong>{{ selected.subscription_started_at ? formatDateTime(selected.subscription_started_at) : '历史未记录' }}</strong></div><div><span>剩余天数</span><strong>{{ remainingText(selected) }}</strong></div><div><span>服务到期</span><strong>{{ expiryText(selected) }}</strong></div><div><span>账号用量</span><strong>{{ selected.member_count }} / {{ selected.member_limit == null ? '不限' : Number(selected.member_limit) + 1 }} 个</strong></div><div><span>店铺用量</span><strong>{{ selected.shop_count }} / {{ selected.shop_limit == null ? '不限' : selected.shop_limit }} 个</strong></div></div>
           <div class="plan-assign"><el-select v-model="selectedPlanCode" placeholder="选择要开通的套餐" class="assign-select"><el-option v-for="plan in activePlans" :key="plan.id" :label="`${plan.name} · ${plan.duration_days} 天 · 1 主账号 + ${quotaText(plan.account_limit == null ? null : Math.max(0, Number(plan.account_limit) - 1), '子账号')} · ${quotaText(plan.shop_limit, '店铺')}`" :value="plan.code" /></el-select><el-button type="primary" :disabled="!selectedPlanCode" @click="applyPlan">重新开通 / 调整套餐</el-button></div>
+          <p v-if="selected.slug !== 'default'" class="inline-hint">服务到期后数据保留 30 天；超过保留期将永久删除，重新开户也无法恢复。<template v-if="selected.data_delete_after">本期清理期限：{{ formatDateTime(selected.data_delete_after) }}。</template></p>
           <p class="inline-hint">重新授权会从现在重新计算有效期，并按套餐更新额度；已有激活码不会自动重发，请在下方按需重发。</p>
         </section>
 
@@ -627,7 +665,7 @@ onMounted(load);
           </el-collapse-item>
         </el-collapse>
 
-        <section class="archive-section"><div><strong>归档客户空间</strong><p>停用空间并移出成员，不直接删除业务数据。</p></div><el-button type="danger" plain @click="archive">归档空间</el-button></section>
+        <section v-if="selected.slug !== 'default'" class="archive-section"><div><strong>归档客户空间</strong><p>停用空间并移出成员，不直接删除业务数据。</p></div><div><el-button v-if="selected.status !== 'archived'" type="danger" plain @click="archive">归档空间</el-button><el-button v-if="selected.can_permanently_delete" type="danger" :loading="deletingTenant" @click="permanentlyDelete">永久删除</el-button></div></section>
       </template>
     </el-drawer>
 

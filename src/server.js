@@ -81,6 +81,7 @@ import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } f
 import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
 import { createEnterpriseManagementRoutes, handleEnterpriseManagementRestRoute } from "./server/routes/enterpriseManagement.js";
 import { createPlatformTenantPersonMysql, createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
+import { tenantPurge, cleanupTenantPurgeFiles } from "./services/tenant-purge.js";
 import { readTenantLoginDeliveryMysql } from "./services/tenant-login-delivery.js";
 import { listPlatformAccountsMysql } from "./services/platform-grants.js";
 import { selfServiceMembership } from "./services/self-service-membership.js";
@@ -317,6 +318,12 @@ const routes = {
   "GET /api/system/update-status": (req) => globalUpdateStatus(req.query || {}),
   "GET /api/system-monitoring": (req) => systemMonitoringOverview(req.query || {}),
   "GET /api/tenants": () => listTenantsMysql(),
+  "GET /api/tenants/deletion-preview": req => tenantPurge.preview(req.query?.tenant_id, req._session),
+  "DELETE /api/tenants": async req => {
+    const result = await tenantPurge.remove(await readJson(req), req._session);
+    const files = await cleanupTenantPurgeFiles();
+    return { ...result, files_cleanup: files.pending ? "pending" : "done" };
+  },
   "GET /api/tenants/subscription-vouchers": (req) => {
     req._sensitiveResponse = true;
     return selfServiceMembership.listVouchers(req._session);
@@ -1014,6 +1021,11 @@ const scheduledJobDefinitions = [
     config: { limit: 5 }
   },
   {
+    key: "tenant_data_retention_cleanup", name: "到期企业 30 天数据保留清理", category: "maintenance", priority: "low",
+    intervalMinutes: 60, initialDelaySeconds: 300,
+    catchupEnabled: true, maxCatchupRuns: 1, config: { retentionDays: 30 }
+  },
+  {
     key: "scheduled_history_cleanup",
     name: "定时任务日志分级清理",
     category: "maintenance",
@@ -1172,6 +1184,12 @@ const scheduledJobHandlers = {
   listing_publish_record_sync: withForegroundApiDeferral("listing_publish_record_sync", (job) => services.autoSyncListingPublishRecords(job?.config || {})),
   listing_publish_summary_backfill: withForegroundApiDeferral("listing_publish_summary_backfill", (job) => services.backfillListingPublishRecordListSummaries(job?.config || {})),
   ozon_action_cleanup: withForegroundApiDeferral("ozon_action_cleanup", runOzonActionCleanupSweep),
+  tenant_data_retention_cleanup: withForegroundApiDeferral("tenant_data_retention_cleanup", async () => {
+    const result = await tenantPurge.sweep();
+    const files = await cleanupTenantPurgeFiles();
+    if (result.errors.length) throw Object.assign(new Error("部分到期企业清理失败，请查看企业编号及错误后重试"), { result: { ...result, files } });
+    return { ...result, files };
+  }),
   scheduled_history_cleanup: withForegroundApiDeferral("scheduled_history_cleanup", (job) => cleanupScheduledJobHistory(job?.config || {})),
   ai_generation_history_cleanup: withForegroundApiDeferral("ai_generation_history_cleanup", (job) => cleanupAiGenerationTaskHistory(job?.config || {})),
   ai_media_retention_cleanup: withForegroundApiDeferral("ai_media_retention_cleanup", runAiMediaRetentionCleanup),

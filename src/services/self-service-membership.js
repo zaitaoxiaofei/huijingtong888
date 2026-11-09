@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { hashPassword, validatePasswordStrength } from "../auth-password.js";
 import { mysqlExecute, withMysqlTransaction } from "../mysql-pool.js";
 import { isPlatformAdmin } from "../shared/permissions.js";
+import { tenantLifecycle } from "./tenant-lifecycle.js";
 import { ensureTenantSchemaMysql } from "./tenants.js";
 import { tenantPlanMemberLimit } from "./tenant-plans.js";
 import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
@@ -200,6 +201,7 @@ export function createSelfServiceMembershipService(overrides = {}) {
         WHERE code_hash = ? FOR UPDATE`, [hash]);
       // Lock acquisition may wait beyond the voucher deadline or tenant expiry.
       const now = deps.now();
+      if (tenantLifecycle(tenant, now).retention_due) fail("企业已超过到期后 30 天的数据保留期，旧数据不能恢复；请联系平台重新开户", 410);
       const current = membershipSummary(tenant, role, now);
       const voucher = vouchers[0];
       if (!voucher || voucher.status !== "active" || new Date(voucher.redeemable_until).getTime() <= now) fail("激活码无效、已过期或已使用，请核对后重试");
@@ -213,7 +215,7 @@ export function createSelfServiceMembershipService(overrides = {}) {
       const base = current.access_allowed ? Math.max(now, new Date(tenant.subscription_expires_at).getTime()) : now;
       const expiresAt = base + snapshot.duration_days * DAY_MS;
       await connection.execute(`UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ?,
-        member_limit = ?, shop_limit = ? WHERE id = ?`, [snapshot.plan_code, snapshot.subscription_status, sqlDate(expiresAt), snapshot.member_limit, snapshot.shop_limit, Number(tenant.id)]);
+        member_limit = ?, shop_limit = ?, subscription_started_at = ? WHERE id = ?`, [snapshot.plan_code, snapshot.subscription_status, sqlDate(expiresAt), snapshot.member_limit, snapshot.shop_limit, current.access_allowed ? tenant.subscription_started_at || null : sqlDate(now), Number(tenant.id)]);
       const [consumed] = await connection.execute(`UPDATE tenant_subscription_vouchers SET status = 'used', used_at = UTC_TIMESTAMP(),
         used_by_person_id = ?, used_by_tenant_id = ? WHERE id = ? AND status = 'active'`, [Number(session.personId), Number(tenant.id), Number(voucher.id)]);
       if (Number(consumed.affectedRows) !== 1) fail("激活码已被使用，请刷新后重试", 409);

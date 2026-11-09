@@ -42,6 +42,9 @@ const cases = [
   ["migrate-inventory-flow-center.mjs",
     { mode: "dry-run", changes_database: false, ready: true, missing_tables: [], problems: [] },
     { mode: "dry-run", changes_database: false, ready: false, missing_tables: ["inventory_flow_tasks"], problems: [] }],
+  ["migrate-tenant-lifecycle.mjs",
+    {mode:"dry-run",changes_database:false,ok:true,ready:true,missing:[],incompatible:[],rename_pending:false,proven_start_backfill_count:0},
+    {mode:"dry-run",changes_database:false,ok:true,ready:false,missing:["tenants.subscription_started_at"],incompatible:[],rename_pending:true,proven_start_backfill_count:1}],
   ["migrate-inventory-consumables.mjs",
     { ok: true, mode: "dry-run", changes_database: false, schema_ready: true, schema_would_add_column: false, reviewed_product_count: 0, product_flags_changed: 0 },
     { ok: true, mode: "dry-run", changes_database: false, schema_ready: false, schema_would_add_column: true, reviewed_product_count: 0, product_flags_changed: 0 }],
@@ -58,7 +61,7 @@ const cases = [
 
 test("the release plan covers every always-run migration in dependency order", () => {
   assert.deepEqual(SCHEMA_MIGRATIONS, cases.map(([filename]) => filename));
-  assert.equal(SCHEMA_MIGRATIONS.length, 17);
+  assert.equal(SCHEMA_MIGRATIONS.length, 18);
 });
 
 for (const [filename, ready, pending] of cases) {

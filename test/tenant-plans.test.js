@@ -48,7 +48,7 @@ test("tenant plan catalog persists presets and is wired into enterprise create a
   const view = read("../frontend/admin/views/settings/TenantSubscriptionView.vue");
   assert.match(tenantService, /CREATE TABLE IF NOT EXISTS tenant_plans/);
   assert.match(tenantService, /INSERT IGNORE INTO tenant_plans/);
-  assert.match(tenantService, /UPDATE tenants SET plan_code = \?, subscription_status = \?, subscription_expires_at = \?, member_limit = \?, shop_limit = \? WHERE id = \?/);
+  assert.match(tenantService, /UPDATE tenants SET plan_code = \?, subscription_status = \?, subscription_expires_at = \?, member_limit = \?, shop_limit = \?, subscription_started_at = UTC_TIMESTAMP\(\) WHERE id = \?/);
   assert.match(tenantService, /tenantPlanMemberLimit\(plan\)/);
   assert.match(server, /GET \/api\/tenants\/plans/);
   assert.match(server, /POST \/api\/tenants\/plans/);

@@ -12,6 +12,7 @@ export const SCHEMA_MIGRATIONS = Object.freeze([
   "migrate-enterprise-messages.mjs",
   "migrate-subscription-vouchers.mjs",
   "migrate-inventory-flow-center.mjs",
+  "migrate-tenant-lifecycle.mjs",
   "migrate-inventory-consumables.mjs",
   "migrate-inventory-numbering-v2.mjs",
   "migrate-ai-variant-draft-history-index.mjs",
@@ -58,6 +59,16 @@ export function migrationNeedsApply(filename, report) {
     if (Object.hasOwn(report, "changes_database") && report.changes_database !== false) invalid("read-only inspection changed the database");
   }
   switch (filename) {
+    case "migrate-tenant-lifecycle.mjs": {
+      const missing = list(report.missing, "missing");
+      const incompatible = list(report.incompatible, "incompatible");
+      const rename = boolean(report.rename_pending, "rename_pending");
+      const starts = report.proven_start_backfill_count;
+      if (report.ok !== true || incompatible.length || !Number.isSafeInteger(starts) || starts < 0
+        || missing.some(name => !["tenants.subscription_started_at", "tenant_purge_audit", "tenant_purge_files"].includes(name))
+        || boolean(report.ready, "ready") !== (!missing.length && !rename && !starts)) invalid("incompatible tenant lifecycle schema");
+      return !report.ready;
+    }
     case "migrate-operational-query-indexes.mjs": {
       if (report.ok !== true) invalid("operational query index inspector refused");
       const ready = boolean(report.ready, "ready");
