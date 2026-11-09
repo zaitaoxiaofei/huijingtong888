@@ -1,4 +1,5 @@
 <script setup>
+import { workflowNodeSkipped } from '../../../../src/shared/workflow-conditions.js';
 import { computed, ref, watch } from 'vue';
 import { withImageToken } from '../../api/tools/imageCropper.js';
 import { applyWorkflowBindings } from '../../../../src/shared/product-workflow-bindings.js';
@@ -9,7 +10,7 @@ const active=ref(0);
 watch(()=>props.record.id,()=>{active.value=0;});
 const payload=computed(()=>props.record.payload);
 const variant=computed(()=>payload.value.variants[active.value]||payload.value.variants[0]);
-const nodes=computed(()=>payload.value.definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type)));
+const nodes=computed(()=>payload.value.definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type)&&!workflowNodeSkipped(n,variant.value)));
 const results=computed(()=>payload.value.outputs[variant.value.id]||{});
 const facts=computed(()=>payload.value.definition.nodes.filter(n=>['field','attribute'].includes(n.type)));
 const assembly=computed(()=>{
@@ -17,7 +18,7 @@ const assembly=computed(()=>{
   try{return {value:applyWorkflowBindings(payload.value.definition,variant.value,Object.fromEntries(Object.entries(results.value).map(([id,state])=>[id,{...state,approved:true}])))};}
   catch(error){return {error:error.message};}
 });
-const allGenerated=computed(()=>payload.value.variants.every(v=>nodes.value.filter(n=>n.type!=='approval').every(n=>payload.value.outputs[v.id]?.[n.id]?.url||payload.value.outputs[v.id]?.[n.id]?.text)));
+const allGenerated=computed(()=>payload.value.variants.every(v=>payload.value.definition.nodes.filter(n=>['image','copy','video'].includes(n.type)&&!workflowNodeSkipped(n,v)).every(n=>payload.value.outputs[v.id]?.[n.id]?.url||payload.value.outputs[v.id]?.[n.id]?.text)));
 const act=(action,node,extra={})=>emit('action',{id:props.record.id,action,nodeId:node.id,variantId:variant.value.id,...extra});
 const copyChanged=node=>{emit('editing',false);act('save-copy',node,{text:JSON.parse(JSON.stringify(results.value[node.id].text))});};
 </script>

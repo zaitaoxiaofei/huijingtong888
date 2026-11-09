@@ -1,4 +1,4 @@
-import {categoryKey, materialBindings, materialCoversFitments, validateMaterialRefs} from '../shared/workflow-materials.js';
+import {categoryKey, materialMatches, materialBindings, materialCoversFitments, validateMaterialRefs} from '../shared/workflow-materials.js';
 import { keyModelIdentity } from '../shared/workflow-key-models.js';
 import { categoryAttributeNodes, expandWorkflowVariants } from '../shared/product-workflow-inputs.js';
 import { validateWorkflow, validateWorkflowVariants, workflowError } from '../shared/product-workflow.js';
@@ -37,6 +37,11 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
   }
   definition.category=category;
   for(const node of definition.nodes.filter(n=>n.type==='images'&&n.valueSource==='engineer'&&n.materialRefs?.length)){const ref=node.materialRefs[0],url=definition.materialSnapshots[ref.id]?.images?.[ref.imageIndex||0];if(!url)throw workflowError(`“${node.label}”的资料图片不可用，请重新选择`);node.defaultValue=Array.from({length:node.count},(_,i)=>i?(node.defaultValue?.[i]||''):url);}
+  if(definition.preset==='key-case-production'){
+    const key=definition.nodes.find(n=>n.id==='key'&&n.type==='images');if(key){delete key.fallbackInput;key.required=false;}
+    const comparison=definition.nodes.find(n=>n.id==='detail_1'&&n.type==='image');if(comparison)comparison.requiresInput='key';
+    const description=definition.nodes.find(n=>n.type==='copy'&&n.target==='description');if(description)for(const text of definition.nodes.filter(n=>n.type==='copy'&&['title','tags'].includes(n.target)&&definition.nodes.indexOf(n)<definition.nodes.indexOf(description)))if(!description.inputs.includes(text.id))description.inputs.push(text.id);
+  }
   const variants=expandWorkflowVariants(definition,payload.variants,payload.sharedValues||{});
   for(const node of definition.nodes.filter(n=>n.type==='attribute'&&n.dictionaryId)) {
     const selectedIds=[...new Set(variants.flatMap(v=>[v.values[node.id]].flat()).filter(v=>v!==''&&v!=null).map(Number))];
@@ -53,6 +58,13 @@ export async function prepareProductWorkflowRun(payload,session,services,store=n
     category.attributes.find(a=>a.attributeId===node.attributeId).options=node.options;
   }
   for(const variant of variants)if(variant.fitments?.length)variant.values.model=variant.fitments.map(f=>`${f.brand} ${f.model}`).join('；');
+  let candidates;
+  for(const variant of variants)if(definition.preset==='key-case-production'&&!variant.keyModelId&&!variant.values.key?.some(Boolean)&&variant.fitments?.length&&(store?.matchingKeys||store?.list)){
+    if(!store.matchingKeys)candidates||=await Promise.all(['key_model','material'].map(kind=>store.list(kind,session)));
+    const matches=store.matchingKeys?await store.matchingKeys(variant.fitments,category,session):candidates.flat().filter(record=>record.payload.images?.length&&(record.kind==='key_model'||record.payload.role==='compatibility')&&materialBindings(record.payload).length&&materialMatches(record,{category,fitments:variant.fitments})&&materialCoversFitments(record,variant.fitments));
+    if(matches.length>1)throw workflowError(`${variant.label}匹配到多份钥匙模具，请在适配钥匙区域预览选用一份，或直接上传本次钥匙图片`);
+    if(matches.length===1)Object.assign(variant,{keyModelId:matches[0].id,keyModelKind:matches[0].kind,keyModelRevision:matches[0].revision});
+  }
   for(const variant of variants)if(variant.keyModelId){
     if(!store)throw workflowError('钥匙适配库暂不可用，请重试或手动上传适配图');
     const record=await store.get(variant.keyModelKind==='material'?'material':'key_model',String(variant.keyModelId),session),profile=record.payload;

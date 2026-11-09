@@ -1,3 +1,4 @@
+import { workflowNodeSkipped, NO_KEY_REFERENCE_RULE } from '../shared/workflow-conditions.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { workflowInputContext } from '../shared/product-workflow.js';
 import { workflowNodeForVariant } from '../shared/product-workflow-inputs.js';
@@ -10,7 +11,7 @@ export function workflowGenerationInput(definition,variant,node,results) {
     ...(definition.bindings&&node.target!=='bundle'?{workflowOutput:node.target,workflowNodeLabel:node.label}:{}),
     productName:String(Object.values(context.facts)[0]||variant.label),summary:JSON.stringify(context.facts),
     exactProductIdentity:JSON.stringify(context.facts),rules:[definition.globalPrompt,configured.prompt,definition.bindings?'Use only confirmed facts. Follow configured language and output rules.':'Use only confirmed facts. Output natural Russian.'],
-    sourceContext:{workflowFacts:context.facts}
+    sourceContext:{workflowFacts:context.facts,workflowFitments:variant.fitments?.length?variant.fitments:variant.values.model?String(variant.values.model).split(/[；;]/).map(model=>({model})):[]}
   };
   const refsByUrl=new Map();
   for(const ref of context.refs){const prior=refsByUrl.get(ref.url);if(prior){prior.label+=` / ${ref.label}`;if(!String(prior.role||'').includes(ref.role||''))prior.role=`${prior.role||''} / ${ref.role||''}`;}else refsByUrl.set(ref.url,{...ref});}
@@ -18,7 +19,7 @@ export function workflowGenerationInput(definition,variant,node,results) {
   if(context.refs.length>8)throw Object.assign(new Error(`${node.label}引用超过 8 张图片，请减少输入或指定本张的参考槽位，避免参考图被截断`),{status:400});
   return {
     sourceImageUrl:context.refs[0]?.url,sourceImageUrls:context.refs.map(r=>r.url),imageCount:1,ratio:node.ratio,autoCrop:false,
-    finalPrompt:[definition.globalPrompt,configured.prompt,`CONFIRMED FACTS: ${JSON.stringify(context.facts)}`,
+    finalPrompt:[definition.globalPrompt,configured.prompt,...(definition.preset==='key-case-production'&&!variant.values.key?.some(Boolean)?[NO_KEY_REFERENCE_RULE]:[]),`CONFIRMED FACTS: ${JSON.stringify(context.facts)}`,
       `REFERENCE ORDER: ${JSON.stringify(context.refs.map((r,i)=>({index:i+1,role:r.role,purpose:r.label})))}`,
       'Product references define true geometry, color and structure. Compatibility references define only the exact key fit. Style references define art direction only. Never copy their product, claims or branding. Keep suite style consistent with the approved main.'
     ].join('\n')
@@ -54,6 +55,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
     const results=payload.outputs[variant.id] ||= {};
     for(const node of definition.nodes.filter(n=>['image','copy','video','approval'].includes(n.type))) {
       const state=results[node.id];
+      if(workflowNodeSkipped(node,variant)){results[node.id]={status:'skipped',approved:true,reason:'未提供或未匹配到适配钥匙图'};continue;}
       if(node.type==='approval') {
         if(!state?.approved&&definition.reviewMode==='automatic'&&dependenciesReady(definition,variant,node,results)){results[node.id]={approved:true,approvalMode:'automatic'};for(const input of node.inputs)if(results[input])results[input].approved=true;}
         if(!results[node.id]?.approved)review=true;continue;

@@ -12,6 +12,8 @@ export function createProductWorkflowRoutes({readJson,services,store=productWork
   routes['GET /api/product-workflows/key-models']=req=>req.query?.id?store.get('key_model',String(req.query.id),req._session):store.list('key_model',req._session,req.query||{});
   routes['POST /api/product-workflows/key-models']=async req=>store.save('key_model',await readJson(req),req._session);
   routes['GET /api/product-workflows/facts-history']=req=>store.factsHistory(req._session);
+  routes['GET /api/product-workflows/key-model-matches']=req=>{let fitments;try{fitments=JSON.parse(req.query?.fitments||'[]');}catch{throw Object.assign(new Error('品牌型号筛选格式无效'),{status:400});}if(!Array.isArray(fitments)||fitments.length>100)throw Object.assign(new Error('最多选择100个适配型号'),{status:400});return store.matchingKeys(fitments,{key:String(req.query?.category||'')},req._session);};
+  routes['GET /api/product-workflows/material-library']=req=>store.list('library',req._session,req.query||{});
   routes['GET /api/product-workflows/materials']=req=>req.query?.id?store.get('material',String(req.query.id),req._session):store.list('material',req._session,req.query||{});
   routes['POST /api/product-workflows/materials']=async req=>store.save('material',await readJson(req),req._session);
   routes['GET /api/product-workflows/category']=req=>productWorkflowCategory(req.query?.id,req._session,services);
