@@ -62,7 +62,7 @@ function storeFixture(){
     const [name,payload_json,tenant,kind,id,revision]=p;const row=rows.find(r=>r.id===id&&r.tenant_id===tenant&&r.kind===kind&&r.revision===revision);
     if(!row)return {affectedRows:0};Object.assign(row,{name,payload_json,revision:revision+1});return {affectedRows:1};
   };
-  return createProductWorkflowStore({query,execute,authorize:async s=>s});
+  return createProductWorkflowStore({loadCatalog:null,query,execute,authorize:async s=>s});
 }
 const session=id=>({personId:id,roles:["operations"],tenant:{id,slug:`tenant-${id}`,role:"member"}});
 test("template and run persistence isolate enterprises, reject stale writes and freeze run inputs",async()=>{

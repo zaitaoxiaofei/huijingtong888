@@ -127,6 +127,7 @@ export async function aiVehicleCatalog(query = {}, session = {}) {
     const brandZh = VEHICLE_BRAND_ZH[row.brand_name] || "";
     const brand = brands.get(row.brand_name) || {
       name: row.brand_name,
+      key: row.brand_key,
       nameZh: brandZh,
       label: row.brand_name,
       tags: [],

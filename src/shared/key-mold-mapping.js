@@ -1,7 +1,7 @@
 import {materialBindings} from './workflow-materials.js';
 const clean=value=>String(value??'').trim();
 export const isKeyMold=record=>record.kind==='key_model'||record.payload?.role==='compatibility';
-export const isReviewedMold=record=>record.payload?.reviewStatus!=='pending';
+export const isReviewedMold=record=>record.payload?.reviewStatus!=='pending'&&!record.payload?.unresolvedBindings?.length;
 export function normalizeMoldDetails(input={}){
  const value=Object.fromEntries(['moldCode','shape','yearRange','sourceUrl'].map(key=>[key,clean(input[key])]));
  if(value.moldCode.length>80||value.shape.length>300||value.yearRange.length>300||value.sourceUrl.length>2000||(value.sourceUrl&&!/^https:\/\//i.test(value.sourceUrl)))throw Object.assign(new Error('模具编号或说明过长，来源须为 HTTPS 链接'),{status:400});

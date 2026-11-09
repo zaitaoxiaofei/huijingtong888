@@ -4,7 +4,7 @@ const fail=message=>{throw Object.assign(new Error(message),{status:400});};
 export function normalizeMaterialBindings(input=[]) {
  if(!Array.isArray(input)||input.length>50)fail('适用品牌最多 50 个，请重新选择');
  const grouped=new Map();
- for(const item of input){const brand=clean(item.brand);if(!brand||brand.length>128||!Array.isArray(item.models)||item.models.length>100)fail('请为适用资料选择有效的品牌和型号');const models=[...new Set(item.models.map(clean).filter(Boolean))];if(models.some(m=>m.length>191)||(!models.length&&!item.allModels))fail(`${brand}请勾选适用型号，或明确选择该品牌全部型号`);const key=identity(brand),old=grouped.get(key);grouped.set(key,{brand,models:[...new Set([...(old?.models||[]),...models])],allModels:Boolean(old?.allModels||item.allModels)});}
+ for(const item of input){const brand=clean(item.brand);if(!brand||brand.length>128||!Array.isArray(item.models)||item.models.length>100)fail('请为适用资料选择有效的品牌和型号');const models=[...new Set(item.models.map(clean).filter(Boolean))];if(models.some(m=>m.length>191)||(!models.length&&!item.allModels))fail(`${brand}请勾选适用型号，或明确选择该品牌全部型号`);const key=identity(brand),old=grouped.get(key);grouped.set(key,{brand,models:[...new Set([...(old?.models||[]),...models])],allModels:Boolean(old?.allModels||item.allModels),...(item.brandKey?{brandKey:clean(item.brandKey)}:{}),...(Array.isArray(item.modelIds)?{modelIds:[...(old?.modelIds||[]),...item.modelIds.map(Number)]}:{})});}
  return [...grouped.values()];
 }
 export function materialBindings(payload={}){return payload.bindings?.length?payload.bindings:payload.brand?[{brand:payload.brand,models:payload.model?[payload.model]:[],allModels:!payload.model}]:[];}
