@@ -81,6 +81,7 @@ function fixture(change = () => {}) {
   const context = vm.createContext({
     getRoles, validateRoles, validatePasswordStrength, assertTenantQuotaAvailable, effectiveTenantMembershipRole,
     ensureTenantSchemaMysql: async () => {}, ensurePlatformGrantSchemaMysql: async () => {},
+    getPlatformGrantMysql: async id => state.grants.find(grant => grant.person_id === id && grant.role === "super_admin" && grant.active === 1),
     hashPassword: () => "hashed-with-test-salt",
     withMysqlTransaction: async work => {
       const before = structuredClone(state);
@@ -250,4 +251,49 @@ test("explicitly assigning enterprise ownership is not overridden by a packing d
   assert.deepEqual(JSON.parse(f.state.members[1].business_roles_json), ["packing"]);
   assert.equal(f.state.people[1].role, "packing");
   assert.equal(f.state.grants.length, 0);
+});
+
+const platformSession = { personId: 40, platform_role: "super_admin" };
+const newTenantAccount = { tenant_id: 2, name: "Customer Admin", username: "customer-admin", password: "Secure#9382", tenant_role: "admin" };
+function grantPlatform(state) { state.grants.push({ person_id: 40, role: "super_admin", active: 1 }); }
+
+test("platform creates an admin directly in the target enterprise without default membership or platform authority", async () => {
+  const f = fixture(grantPlatform);
+  const result = await f.services.createPlatformTenantPersonMysql(newTenantAccount, platformSession);
+  assert.equal(result.tenant_role, "admin");
+  assert.deepEqual(f.state.members.filter(member => member.person_id === result.id).map(member => member.tenant_id), [2]);
+  assert.equal(f.state.people.find(person => person.id === result.id).role, "operator");
+  assert.equal(f.state.grants.some(grant => grant.person_id === result.id), false);
+  assert.equal(JSON.stringify(result).includes("password"), false);
+});
+
+test("platform enterprise creation rejects missing, revoked and legacy-only authority", async () => {
+  for (const session of [ownerSession, { personId: 40, roles: ["admin"] }, platformSession]) {
+    const f = fixture();
+    await assert.rejects(f.services.createPlatformTenantPersonMysql(newTenantAccount, session), { statusCode: 403 });
+    assert.equal(f.calls.length, 0);
+  }
+});
+
+test("platform enterprise creation rolls back identities on membership failure and enforces tenant quota", async () => {
+  const f = fixture(state => { grantPlatform(state); state.failMemberInsert = true; });
+  await assert.rejects(f.services.createPlatformTenantPersonMysql(newTenantAccount, platformSession), /Simulated/);
+  assert.equal(f.state.people.length, 4);
+  const full = fixture(state => { grantPlatform(state); state.tenants[1].member_limit = 0; });
+  await assert.rejects(full.services.createPlatformTenantPersonMysql(newTenantAccount, platformSession), /子账号/);
+  assert.equal(full.state.people.length, 4);
+});
+
+test("platform enterprise creation rejects invalid tenants, duplicate identities, weak passwords and authority injection", async () => {
+  for (const body of [
+    { ...newTenantAccount, tenant_id: 999 },
+    { ...newTenantAccount, username: "user20" },
+    { ...newTenantAccount, password: "12345678" },
+    { ...newTenantAccount, platform_role: "super_admin" }
+  ]) {
+    const f = fixture(grantPlatform);
+    await assert.rejects(f.services.createPlatformTenantPersonMysql(body, platformSession));
+    assert.equal(f.state.people.length, 4);
+    assert.equal(f.state.members.length, 3);
+  }
 });

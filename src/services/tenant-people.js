@@ -2,7 +2,7 @@ import { withMysqlTransaction } from "../mysql-pool.js";
 import { hashPassword, validatePasswordStrength } from "../auth-password.js";
 import { getRoles, validateRoles } from "../shared/permissions.js";
 import { ensureTenantSchemaMysql } from "./tenants.js";
-import { ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
+import { getPlatformGrantMysql, ensurePlatformGrantSchemaMysql } from "./platform-grants.js";
 import { assertTenantQuotaAvailable } from "./tenant-quotas.js";
 import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
 
@@ -123,6 +123,22 @@ export async function listEnterprisePeopleMysql(session) {
 }
 
 export async function createEnterprisePersonMysql(body = {}, session) {
+  return createTenantPerson(body, connection => requireEnterpriseAdmin(connection, session, true));
+}
+
+export async function createPlatformTenantPersonMysql(body = {}, session) {
+  if (session?.platform_role !== "super_admin" || !(await getPlatformGrantMysql(session.personId))) {
+    fail("仅平台超级管理员可以为指定企业创建账号", 403);
+  }
+  const tenantId = positiveId(body.tenant_id, "目标企业");
+  return createTenantPerson(body, async connection => {
+    const [rows] = await connection.execute("SELECT id, slug, status, member_limit FROM tenants WHERE id = ? FOR UPDATE", [tenantId]);
+    if (rows[0]?.status !== "active") fail("目标企业不存在或已停用，请在客户空间列表检查企业状态", 403);
+    return rows[0];
+  });
+}
+
+async function createTenantPerson(body, resolveTenant) {
   rejectPlatformOrLinkFields(body);
   const name = requiredText(body.name, "姓名");
   const username = requiredText(body.username, "登录名");
@@ -134,7 +150,7 @@ export async function createEnterprisePersonMysql(body = {}, session) {
   await prepareSchema();
   try {
     return await withMysqlTransaction(async connection => {
-      const tenant = await requireEnterpriseAdmin(connection, session, true);
+      const tenant = await resolveTenant(connection);
       if (body.tenant_id !== undefined && Number(body.tenant_id) !== Number(tenant.id)) fail("只能在当前企业创建人员", 403);
       await checkOwnerAndQuota(connection, tenant, 0, target);
       const [created] = await connection.execute(`INSERT INTO people (name, username, role, roles_json, avatar_url, active, password_hash)

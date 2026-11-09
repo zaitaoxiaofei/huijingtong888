@@ -1,5 +1,7 @@
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { createHash, randomBytes } from "node:crypto";
+import { hashPassword } from "../auth-password.js";
+import { ensureTenantLoginDeliverySchemaMysql, saveTenantLoginDelivery } from "./tenant-login-delivery.js";
 import { assertTenantQuotaAvailable, normalizeTenantQuotaLimit } from "./tenant-quotas.js";
 import { DEFAULT_TENANT_PLAN_PRESETS, normalizeTenantPlanInput, tenantPlanMemberLimit } from "./tenant-plans.js";
 import { decryptTenantPluginToken, encryptTenantPluginToken, tenantPluginTokenEncryptionConfigured } from "./tenant-plugin-token-crypto.js";
@@ -166,7 +168,7 @@ export async function listTenantsMysql() {
 export async function createTenantMysql(body = {}) {
   await ensureTenantSchemaMysql();
   const name = text(body.name);
-  const slug = text(body.slug, 80).toLowerCase();
+  const slug = (text(body.slug, 80) || (body.provision_owner === true ? `company-${randomBytes(8).toString("hex")}` : "")).toLowerCase();
   if (!name) throw new Error("企业名称不能为空");
   if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw new Error("企业标识只能使用小写字母、数字和连字符");
   const planCode = text(body.plan_code || body.planCode, 32) || "trial_7d";
@@ -175,17 +177,33 @@ export async function createTenantMysql(body = {}) {
   if (!plan) throw new Error("请选择一个有效套餐；套餐可在企业管理的套餐目录中启用或编辑");
   const memberLimit = tenantPlanMemberLimit(plan);
   const ownerPersonId = Number(body.owner_person_id || body.ownerPersonId || 0);
-  const activationCode = generateTenantActivationCode();
+  if (body.provision_owner === true && ownerPersonId) throw new Error("自动创建企业管理员时不能同时绑定已有账号");
+  const ownerCredentials = body.provision_owner === true ? {
+    username: `admin_${randomBytes(8).toString("hex")}`,
+    password: `Aa!${randomBytes(18).toString("hex")}`
+  } : null;
+  if (ownerCredentials) await ensureTenantLoginDeliverySchemaMysql();
+  const ownerPasswordHash = ownerCredentials ? hashPassword(ownerCredentials.password) : null;
+  const activationCode = ownerCredentials ? null : generateTenantActivationCode();
   const result = await withMysqlTransaction(async connection => {
     const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, member_limit, shop_limit)
       VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
     const tenantId = Number(tenantResult.insertId);
+    if (ownerCredentials) {
+      const [person] = await connection.execute(`INSERT INTO people (name, username, role, roles_json, active, password_hash)
+        VALUES (?, ?, 'operator', JSON_ARRAY('operator'), 1, ?)`,
+      [`企业管理员-${ownerCredentials.username.slice(6)}`, ownerCredentials.username, ownerPasswordHash]);
+      await connection.execute(`INSERT INTO tenant_members (tenant_id, person_id, role, business_roles_json, active)
+        VALUES (?, ?, 'owner', JSON_ARRAY('operator'), 1)`, [tenantId, Number(person.insertId)]);
+      await saveTenantLoginDelivery(connection, tenantId, Number(person.insertId), ownerCredentials.password);
+    }
     if (ownerPersonId) await connection.execute("INSERT INTO tenant_members (tenant_id, person_id, role) VALUES (?, ?, 'owner')", [tenantId, ownerPersonId]);
-    await connection.execute(`INSERT INTO tenant_activation_codes
+    if (!ownerCredentials) await connection.execute(`INSERT INTO tenant_activation_codes
       (tenant_id, code_hash, code_hint, status, expires_at, created_by_person_id)
       VALUES (?, ?, ?, 'active', DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), ?)`, [tenantId, hashTenantActivationCode(activationCode), activationCode.slice(-6), Number(plan.duration_days), Number(body.created_by_person_id || 0) || null]);
     return tenantId;
   });
+  if (ownerCredentials) return { ok: true, id: result, owner_credentials: ownerCredentials };
   return { ok: true, id: result, activation_code: activationCode };
 }
 

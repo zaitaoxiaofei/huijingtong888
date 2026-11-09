@@ -1,6 +1,8 @@
 import { ensurePeopleRolesSchemaMysql } from "./people-roles.js";
 import { getRoles, primaryRole } from "../shared/permissions.js";
-import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery } from "../mysql-pool.js";
+import { isMysqlPrimaryEnabled, mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
+import { verifyPassword } from "../auth-password.js";
+import { ensureTenantLoginDeliverySchemaMysql, refreshTenantLoginDeliveries } from "./tenant-login-delivery.js";
 import { ensureTenantSchemaMysql, resolveActiveTenantMysql, tenantHasAccess } from "./tenants.js";
 import { getPlatformGrantMysql } from "./platform-grants.js";
 import { effectiveTenantMembershipRole } from "./tenant-membership-authority.js";
@@ -139,8 +141,15 @@ export async function findPersonByIdMysql(personId) {
   );
 }
 
-export async function updatePersonPasswordMysql(personId, passwordHash) {
+export async function updatePersonPasswordMysql(personId, passwordHash, password = null) {
   ensureMysqlAuthSessionEnabled();
+  if (password !== null) {
+    await ensureTenantLoginDeliverySchemaMysql();
+    return withMysqlTransaction(async connection => {
+      await connection.execute("UPDATE people SET password_hash = ? WHERE id = ?", [passwordHash, personId]);
+      await refreshTenantLoginDeliveries(connection, personId, password);
+    });
+  }
   await mysqlExecute("UPDATE people SET password_hash = ? WHERE id = ?", [passwordHash, personId]);
 }
 
@@ -150,6 +159,27 @@ export async function updateOwnProfileMysql(personId, body = {}) {
   if (!name) throw new Error("姓名不能为空");
   if (name.length > 100) throw new Error("姓名不能超过 100 个字符");
   const avatarUrl = String(body.avatar_url || body.avatarUrl || "").trim();
+  if (body.username !== undefined) {
+    const username = String(body.username || "").trim();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_.@-]{2,79}$/.test(username)) {
+      throw Object.assign(new Error("登录账号须为 3–80 位字母、数字、下划线、点、@ 或连字符，并以字母或数字开头"), { statusCode: 400 });
+    }
+    try {
+      await withMysqlTransaction(async connection => {
+        const [rows] = await connection.execute("SELECT username, password_hash FROM people WHERE id = ? FOR UPDATE", [Number(personId)]);
+        if (!rows[0]) throw Object.assign(new Error("当前账号不存在，请重新登录"), { statusCode: 401 });
+        if (username !== rows[0].username && !verifyPassword(String(body.current_password || ""), rows[0].password_hash)) {
+          throw Object.assign(new Error("修改登录账号需要正确的当前密码，请在账户安全中填写"), { statusCode: 400 });
+        }
+        await connection.execute("UPDATE people SET name = ?, username = ?, avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [name, username, avatarUrl, Number(personId)]);
+        await connection.execute("UPDATE sessions SET name = ?, username = ? WHERE person_id = ?", [name, username, Number(personId)]);
+      });
+    } catch (error) {
+      if (error.code === "ER_DUP_ENTRY") throw Object.assign(new Error("显示名称或登录账号已被使用，请更换后重试"), { statusCode: 409 });
+      throw error;
+    }
+    return findPersonByIdMysql(personId);
+  }
   await mysqlExecute(
     "UPDATE people SET name = ?, avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     [name, avatarUrl, Number(personId)]

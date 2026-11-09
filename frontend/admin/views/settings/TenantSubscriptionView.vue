@@ -14,10 +14,15 @@ const selected = ref(null);
 const activeSection = ref("customers");
 const detailVisible = ref(false);
 const createVisible = ref(false);
+const tenantSaving = ref(false);
+const deliveryVisible = ref(false);
+const deliveryInfo = ref(null);
+const deliveryCopying = ref(false);
 const planVisible = ref(false);
 const editingPlanId = ref(null);
 const memberVisible = ref(false);
 const accountVisible = ref(false);
+const accountSaving = ref(false);
 const pluginTokenStatus = ref({ configured: false });
 const pluginTokenDialog = ref(false);
 const pluginTokenValue = ref("");
@@ -30,10 +35,10 @@ const activationCodeLoading = ref(false);
 const selectedPlanCode = ref("");
 const filters = reactive({ keyword: "", status: "all", plan: "all" });
 
-const tenantForm = reactive({ name: "", slug: "", owner_person_id: null, plan_code: "trial_7d" });
+const tenantForm = reactive({ name: "", slug: "", provision_owner: true, plan_code: "trial_7d" });
 const quotaForm = reactive({ member_limit: null, shop_limit: null });
 const memberForm = reactive({ person_id: null, role: "member" });
-const accountForm = reactive({ name: "", username: "", password: "", roles: ["operator"] });
+const accountForm = reactive({ name: "", username: "", password: "", tenant_role: "admin" });
 const planForm = reactive({ name: "", duration_days: 30, subscription_status: "active", account_limit: 1, shop_limit: 2, unlimited_accounts: false, unlimited_shops: false });
 
 const statusLabels = { active: "已开通", trial: "体验中", expired: "已到期", suspended: "已暂停", unactivated: "未激活" };
@@ -146,22 +151,44 @@ async function openTenant(row) {
 }
 
 function openCreateTenant() {
-  Object.assign(tenantForm, { name: "", slug: "", owner_person_id: null, plan_code: activePlans.value.some(plan => plan.code === "trial_7d") ? "trial_7d" : activePlans.value[0]?.code || "" });
+  Object.assign(tenantForm, { name: "", slug: "", provision_owner: true, plan_code: activePlans.value.some(plan => plan.code === "trial_7d") ? "trial_7d" : activePlans.value[0]?.code || "" });
   createVisible.value = true;
 }
 
 async function createTenant() {
+  if (tenantSaving.value) return;
+  tenantSaving.value = true;
   try {
     const result = await apiClient.post("/api/tenants", tenantForm);
     ElMessage.success(`客户空间已创建并按「${planName(tenantForm.plan_code)}」开通`);
     createVisible.value = false;
+    deliveryInfo.value = result.owner_credentials ? { tenant_id: result.id, enterprise: tenantForm.name, username: result.owner_credentials.username } : null;
+    deliveryVisible.value = Boolean(deliveryInfo.value);
     await load();
     const created = rows.value.find(row => Number(row.id) === Number(result.id));
     if (created) await openTenant(created);
-    activationCodeValue.value = result.activation_code || "";
-    activationCodeDialog.value = Boolean(result.activation_code);
+    if (!result.owner_credentials) {
+      activationCodeValue.value = result.activation_code || "";
+      activationCodeDialog.value = Boolean(result.activation_code);
+    }
   } catch (error) {
     ElMessage.error(error.message || "创建客户空间失败");
+  } finally {
+    tenantSaving.value = false;
+  }
+}
+
+async function copyDeliveryInfo(tenantId = deliveryInfo.value?.tenant_id) {
+  if (!tenantId || deliveryCopying.value) return;
+  deliveryCopying.value = true;
+  try {
+    const info = await apiClient.post("/api/tenants/login-info", { tenant_id: tenantId });
+    await navigator.clipboard.writeText(`企业：${info.enterprise}\n登录地址：${window.location.origin}/admin.html\n登录账号：${info.username}\n密码：${info.password}\n登录后可在右上角个人资料修改账号和密码；在企业人员中创建子账号。`);
+    ElMessage.success("登录信息已复制，可发送给客户");
+  } catch (error) {
+    ElMessage.error(error.message || "复制失败，请允许浏览器访问剪贴板后重试");
+  } finally {
+    deliveryCopying.value = false;
   }
 }
 
@@ -294,15 +321,18 @@ async function remove(row) {
 }
 
 async function createAccount() {
+  if (accountSaving.value || !selected.value?.id) return;
+  accountSaving.value = true;
   try {
-    const person = await apiClient.post("/api/people", accountForm);
-    memberForm.person_id = person.id || person.person_id;
+    await apiClient.post("/api/tenants/members", { tenant_id: selected.value.id, ...accountForm });
     accountVisible.value = false;
-    memberVisible.value = true;
-    Object.assign(accountForm, { name: "", username: "", password: "", roles: ["operator"] });
+    Object.assign(accountForm, { name: "", username: "", password: "", tenant_role: "admin" });
+    ElMessage.success("账号已创建并加入当前企业，未授予平台管理权限");
     await load();
   } catch (error) {
-    ElMessage.error(error.message || "创建子账号失败");
+    ElMessage.error(error.message || "创建企业账号失败");
+  } finally {
+    accountSaving.value = false;
   }
 }
 
@@ -547,8 +577,12 @@ onMounted(load);
         <section class="drawer-section subscription-card">
           <div class="section-heading"><div><h3>当前授权</h3><p>{{ planName(selected.plan_code, selected) }}</p></div><el-tag :type="statusType(selected)" effect="light">{{ statusText(selected) }}</el-tag></div>
           <div class="subscription-facts"><div><span>服务到期</span><strong>{{ formatDateTime(selected.subscription_expires_at) }}</strong></div><div><span>账号用量</span><strong>{{ selected.member_count }} / {{ selected.member_limit == null ? '不限' : Number(selected.member_limit) + 1 }} 个</strong></div><div><span>店铺用量</span><strong>{{ selected.shop_count }} / {{ selected.shop_limit == null ? '不限' : selected.shop_limit }} 个</strong></div></div>
-          <div class="plan-assign"><el-select v-model="selectedPlanCode" placeholder="选择要开通的套餐" class="assign-select"><el-option v-for="plan in activePlans" :key="plan.id" :label="`${plan.name} · ${plan.duration_days} 天 · ${quotaText(plan.account_limit, '账号')} · ${quotaText(plan.shop_limit, '店铺')}`" :value="plan.code" /></el-select><el-button type="primary" :disabled="!selectedPlanCode" @click="applyPlan">重新开通 / 调整套餐</el-button></div>
+          <div class="plan-assign"><el-select v-model="selectedPlanCode" placeholder="选择要开通的套餐" class="assign-select"><el-option v-for="plan in activePlans" :key="plan.id" :label="`${plan.name} · ${plan.duration_days} 天 · 1 主账号 + ${quotaText(plan.account_limit == null ? null : Math.max(0, Number(plan.account_limit) - 1), '子账号')} · ${quotaText(plan.shop_limit, '店铺')}`" :value="plan.code" /></el-select><el-button type="primary" :disabled="!selectedPlanCode" @click="applyPlan">重新开通 / 调整套餐</el-button></div>
           <p class="inline-hint">重新授权会从现在重新计算有效期，并按套餐更新额度；已有激活码不会自动重发，请在下方按需重发。</p>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading"><div><h3>主账号登录信息</h3><p>密码不直接显示，可随时复制发送给客户；主账号在个人资料修改账号密码后，复制内容会同步更新。</p></div><el-button type="primary" plain :loading="deliveryCopying" @click="copyDeliveryInfo(selected.id)">复制登录信息</el-button></div>
         </section>
 
         <section class="drawer-section">
@@ -598,13 +632,22 @@ onMounted(load);
     </el-drawer>
 
     <el-dialog v-model="createVisible" title="创建客户空间" width="560px" destroy-on-close>
-      <p class="dialog-lead">创建后会立即按所选套餐开通服务，并生成一枚与套餐期限一致的客户激活码。客户自助注册兑换将在下一步接入。</p>
+      <p class="dialog-lead">创建后立即开通服务，自动生成独立的企业管理员账号和随机密码。复制登录信息发给客户即可使用，无需再手动创建或关联账号。</p>
       <el-form label-position="top" class="dialog-form">
-        <div class="form-row"><el-form-item label="空间名称" required><el-input v-model="tenantForm.name" placeholder="例如：星河贸易团队" /></el-form-item><el-form-item label="空间标识" required><el-input v-model="tenantForm.slug" placeholder="例如 xinghe-team" /></el-form-item></div>
-        <el-form-item label="开通套餐" required><el-select v-model="tenantForm.plan_code" class="full-width"><el-option v-for="plan in activePlans" :key="plan.id" :value="plan.code" :label="`${plan.name} · ${plan.duration_days} 天 · ${quotaText(plan.account_limit, '账号')} · ${quotaText(plan.shop_limit, '店铺')}`" /></el-select></el-form-item>
-        <el-form-item label="绑定已有负责人账号（可选）"><el-select v-model="tenantForm.owner_person_id" clearable filterable class="full-width" placeholder="之后也可以从空间详情加入"><el-option v-for="person in people" :key="person.id" :label="`${person.name}（${person.username || '未设置登录账号'}）`" :value="person.id" /></el-select></el-form-item>
+        <div class="form-row"><el-form-item label="空间名称" required><el-input v-model="tenantForm.name" placeholder="例如：星河贸易团队" /></el-form-item><el-form-item label="空间标识（可选）"><el-input v-model="tenantForm.slug" placeholder="留空自动生成" /></el-form-item></div>
+        <el-form-item label="开通套餐" required><el-select v-model="tenantForm.plan_code" class="full-width"><el-option v-for="plan in activePlans" :key="plan.id" :value="plan.code" :label="`${plan.name} · ${plan.duration_days} 天 · 1 主账号 + ${quotaText(plan.account_limit == null ? null : Math.max(0, Number(plan.account_limit) - 1), '子账号')} · ${quotaText(plan.shop_limit, '店铺')}`" /></el-select></el-form-item>
+        <p class="muted">主账号拥有本企业管理权限，可按套餐名额创建子账号；不加入默认企业，也没有平台管理权限。</p>
       </el-form>
-      <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :disabled="!tenantForm.name || !tenantForm.slug || !tenantForm.plan_code" @click="createTenant">创建并开通</el-button></template>
+      <template #footer><el-button @click="createVisible = false">取消</el-button><el-button type="primary" :loading="tenantSaving" :disabled="!tenantForm.name || !tenantForm.plan_code" @click="createTenant">创建并开通</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="deliveryVisible" title="企业已开通 · 交付登录信息" width="600px" :close-on-click-modal="false" @closed="deliveryInfo = null">
+      <template v-if="deliveryInfo">
+        <el-alert type="warning" :closable="false" title="登录信息已加密保存，可随时在企业详情中复制，不直接显示密码。" />
+        <el-form label-position="top"><el-form-item label="企业"><el-input :model-value="deliveryInfo.enterprise" readonly /></el-form-item><el-form-item label="管理员登录账号"><el-input :model-value="deliveryInfo.username" readonly /></el-form-item></el-form>
+        <p class="muted">客户可直接登录，在右上角个人资料修改账号密码，在企业人员中创建子账号；仅能访问本企业。</p>
+      </template>
+      <template #footer><el-button @click="deliveryVisible = false">关闭</el-button><el-button type="primary" @click="copyDeliveryInfo()" :loading="deliveryCopying">复制完整登录信息</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="planVisible" :title="editingPlanId ? '编辑套餐' : '新增套餐'" width="520px" destroy-on-close>
@@ -622,9 +665,9 @@ onMounted(load);
       <template #footer><el-button @click="memberVisible = false">取消</el-button><el-button type="primary" :disabled="!memberForm.person_id" @click="saveMember">加入空间</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="accountVisible" title="创建空间子账号" width="460px" destroy-on-close>
-      <el-form label-position="top"><el-form-item label="姓名"><el-input v-model="accountForm.name" /></el-form-item><el-form-item label="登录账号"><el-input v-model="accountForm.username" /></el-form-item><el-form-item label="初始密码"><el-input v-model="accountForm.password" show-password /></el-form-item></el-form>
-      <template #footer><el-button @click="accountVisible = false">取消</el-button><el-button type="primary" :disabled="!accountForm.name || !accountForm.username || !accountForm.password" @click="createAccount">创建账号并加入空间</el-button></template>
+    <el-dialog v-model="accountVisible" title="创建企业账号" width="460px" destroy-on-close>
+      <el-form label-position="top"><el-form-item label="姓名"><el-input v-model="accountForm.name" /></el-form-item><el-form-item label="登录账号"><el-input v-model="accountForm.username" /></el-form-item><el-form-item label="初始密码"><el-input v-model="accountForm.password" show-password /><div class="muted">至少 8 位，不能为纯数字、常见弱密码或包含登录名、姓名。</div></el-form-item><el-form-item label="企业角色"><el-select v-model="accountForm.tenant_role" class="full-width"><el-option label="企业管理员" value="admin" /><el-option label="负责人" value="owner" /><el-option label="成员" value="member" /></el-select></el-form-item><div class="muted">新账号仅加入「{{ title }}」，不会加入默认企业，也没有平台管理权限。登录账号须全平台唯一。</div></el-form>
+      <template #footer><el-button @click="accountVisible = false">取消</el-button><el-button type="primary" :loading="accountSaving" :disabled="!accountForm.name || !accountForm.username || !accountForm.password" @click="createAccount">创建账号并加入空间</el-button></template>
     </el-dialog>
 
     <el-dialog v-model="activationCodeDialog" title="客户激活码已生成" width="620px"><el-alert type="warning" :closable="false" title="请立即复制并安全发送给客户；完整码只显示这一次。" /><p class="dialog-lead">此码当前尚不能用于自助注册；兑换功能完成后客户才能用它创建主账号并认领此工作空间。</p><el-input v-model="activationCodeValue" readonly /><template #footer><el-button @click="activationCodeDialog = false">关闭</el-button><el-button type="primary" @click="copyActivationCode">复制激活码</el-button></template></el-dialog>

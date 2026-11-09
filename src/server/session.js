@@ -388,7 +388,7 @@ export function createAuthHandler(readJson, overrides = {}) {
         const row = await deps.findPersonById(session.personId);
         if (!deps.verifyPassword(body.old_password || "", row.password_hash)) return { error: "原密码错误" };
         deps.validatePasswordStrength(body.new_password, row);
-        await deps.updatePersonPassword(session.personId, deps.hashPassword(body.new_password));
+        await deps.updatePersonPassword(session.personId, deps.hashPassword(body.new_password), body.new_password);
         await deps.destroySessionsByPersonId(session.personId, extractToken(req));
         return { ok: true };
       };

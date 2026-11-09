@@ -80,7 +80,8 @@ import { createImageCropperRoutes, handleImageCropperRestRoute } from "./server/
 import { createOnboardingKnowledgeRoutes, handleOnboardingKnowledgeRestRoute } from "./server/routes/onboardingKnowledge.js";
 import { createSystemNotificationRoutes, handleSystemNotificationRestRoute } from "./server/routes/systemNotifications.js";
 import { createEnterpriseManagementRoutes, handleEnterpriseManagementRestRoute } from "./server/routes/enterpriseManagement.js";
-import { createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
+import { createPlatformTenantPersonMysql, createEnterprisePersonMysql, listEnterprisePeopleMysql, updateEnterprisePersonMysql } from "./services/tenant-people.js";
+import { readTenantLoginDeliveryMysql } from "./services/tenant-login-delivery.js";
 import { listPlatformAccountsMysql } from "./services/platform-grants.js";
 import { selfServiceMembership } from "./services/self-service-membership.js";
 import { subscriptionAccessDecision } from "./server/subscription-access.js";
@@ -335,7 +336,15 @@ const routes = {
     const body = await readJson(req);
     return updateTenantPlanMysql(body.id || body.plan_id || body.planId, body);
   },
-  "POST /api/tenants": async (req) => createTenantMysql({ ...(await readJson(req)), created_by_person_id: req._session?.personId }),
+  "POST /api/tenants": async (req) => {
+    req._sensitiveResponse = true;
+    return createTenantMysql({ ...(await readJson(req)), created_by_person_id: req._session?.personId });
+  },
+  "POST /api/tenants/login-info": async (req) => {
+    req._sensitiveResponse = true;
+    const body = await readJson(req);
+    return readTenantLoginDeliveryMysql(body.tenant_id, req._session);
+  },
   "GET /api/tenants/activation-code": (req) => tenantActivationCodeStatusMysql(req.query?.tenant_id || req.query?.tenantId),
   "POST /api/tenants/activation-code": async (req) => {
     const body = await readJson(req);
@@ -352,6 +361,7 @@ const routes = {
       ? (req.query?.tenant_id || req.query?.tenantId || req._session?.tenant?.id)
       : req._session?.tenant?.id
   ),
+  "POST /api/tenants/members": async (req) => createPlatformTenantPersonMysql(await readJson(req), req._session),
   "PUT /api/tenants/members": async (req) => {
     const body = await readJson(req);
     return upsertTenantMemberMysql(body.tenant_id || body.tenantId, body);

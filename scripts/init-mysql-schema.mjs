@@ -17,9 +17,11 @@ import { CUSTOMER_MESSAGE_SHOP_SCHEMA, CUSTOMER_MESSAGE_TASKS_SCHEMA } from "../
 import { AI_VEHICLE_CATALOG_SCHEMA } from "../src/services/ai-vehicle-catalog-schema.js";
 import { SUBSCRIPTION_VOUCHER_SCHEMA } from "../src/services/subscription-voucher-schema.js";
 import { SKU_ORDER_TRACKERS_SCHEMA } from "../src/services/sku-order-tracking-schema.js";
+import { TENANT_LOGIN_DELIVERY_SCHEMA } from "../src/services/tenant-login-delivery.js";
 import { FINANCE_SUBMISSIONS_SCHEMA } from "../src/services/finance-submissions-schema.js";
 
 const mysqlSchemaSql = `
+${TENANT_LOGIN_DELIVERY_SCHEMA};
 ${SKU_TRAFFIC_DAILY_SCHEMA.join(";\n")};
 ${ORDER_SPLIT_SCHEMA};
 ${INVENTORY_FLOW_SCHEMA.join(";\n")};
