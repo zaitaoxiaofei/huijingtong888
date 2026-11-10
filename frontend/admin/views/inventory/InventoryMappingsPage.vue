@@ -195,11 +195,11 @@ async function submitDialog() {
       person_id: dialog.person_id ? Number(dialog.person_id) : null,
       updated_at: dialog.updated_at || ""
     });
-    ElMessage.success("SKU 绑定已更新");
+    ElMessage.success("库存绑定已更新");
     dialogVisible.value = false;
     await loadPageData();
   } catch (error) {
-    ElMessage.error(error.message || "更新 SKU 绑定失败");
+    ElMessage.error(error.message || "更新 库存绑定失败");
   } finally {
     dialogSubmitting.value = false;
   }
@@ -213,11 +213,11 @@ async function deleteMapping(row) {
       cancelButtonText: "取消"
     });
     await apiClient.delete(`/api/mappings/${row.id}`);
-    ElMessage.success("SKU 绑定已停用");
+    ElMessage.success("库存绑定已停用");
     await loadPageData();
   } catch (error) {
     if (error === "cancel" || error === "close" || error?.message === "cancel") return;
-    ElMessage.error(error.message || "停用 SKU 绑定失败");
+    ElMessage.error(error.message || "停用 库存绑定失败");
   }
 }
 
@@ -279,7 +279,7 @@ onMounted(async () => {
       <div class="mapping-focus-copy">
         <strong>{{ focusedProduct?.name || "当前产品" }}</strong>
         <span class="inventory-id-display">库存 ID：{{ focusedProduct?.inventory_number || focusedProduct?.inventory_id || focusedProduct?.code || `产品ID ${focusProductId}` }}</span>
-        <span>当前只显示这个产品对应的 SKU 绑定。</span>
+        <span>当前只显示这个产品对应的 库存绑定。</span>
       </div>
       <div class="mapping-focus-actions">
         <el-button class="erp-btn erp-btn-secondary" v-if="cameFromProducts" @click="goBackToProducts">返回产品库存表</el-button>
@@ -357,7 +357,7 @@ onMounted(async () => {
       @update:pageSize="handlePageSizeChange"
     />
 
-    <el-dialog v-model="dialogVisible" title="编辑 SKU 绑定" width="760px" align-center class="erp-centered-dialog">
+    <el-dialog v-model="dialogVisible" title="编辑 库存绑定" width="760px" align-center class="erp-centered-dialog">
       <el-form label-width="100px">
         <el-form-item label="库存产品">
           <el-select v-model="dialog.product_id" filterable :loading="productOptionsLoading" style="width: 100%">
