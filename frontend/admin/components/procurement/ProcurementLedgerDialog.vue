@@ -1,4 +1,6 @@
 <script setup>
+import OrderHandlingSummary from './OrderHandlingSummary.vue';
+import {orderHandlingRow} from '../../utils/order-handling-context.js';
 import { computed, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { getActivePinia } from 'pinia';
 import { useAuthStore } from '../../stores/auth.js';
@@ -15,6 +17,9 @@ import InventoryFlowDiagram from './InventoryFlowDiagram.vue';
 import InventoryFbpSkuTable from './InventoryFbpSkuTable.vue';
 import { buildPurchaseUsage, availableHistoryBatches } from '../../../../src/services/procurement-purchase-usage.js';
 import { inventoryAdjustmentReasons, validateInventoryAdjustment } from '../../../../src/inventory-adjustment-reasons.js';
+function handlingOrder(row){
+ return orderHandlingRow(data.value?.orders||[],row);
+}
 const props = defineProps({ modelValue: Boolean, fullPage: Boolean, allowFullPage:{type:Boolean,default:true}, productId: { type: Number, default: 0 }, orderId: { type: Number, default: 0 }, initialTab: { type: String, default: 'current' }, initialInboundId: {type:Number,default:0}, initialAction: { type: String, default: '' }, orderOverview: { type: Object, default: null }, orderLabel: { type: String, default: '' }, inventoryMode: { type: Boolean, default: false }, stocktakeEnabled: { type: Boolean, default: true } });
 const identityVersion=ref(0);
 const workflowPanel=ref(null), workflow=ref(null);
@@ -481,7 +486,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
             <p>现货覆盖表示已分配给订单的数量，不等于仓库总现货。包含已分拣、已打包但尚未进入运输的订单。</p>
             <p>待履约需求 {{ currentTotals[0] }} = 现货覆盖 {{ currentTotals[1] }} + 在途覆盖 {{ currentTotals[2] }} + 待采购 {{ currentTotals[3] }} 件<span v-if="currentOrders.some(row => row.quantity_needs_review)">（存在数量待核订单，暂不可据此确认平衡）</span>。</p>
             <el-table :data="currentOrders" max-height="400" empty-text="暂无待履约的本地订单">
-              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }} <el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
+              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }} <el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag><OrderHandlingSummary :row="handlingOrder(row)"/></template></el-table-column>
               <el-table-column label="下单时间" min-width="175"><template #default="{ row }">{{ time(row.ordered_at) }}</template></el-table-column>
               <el-table-column prop="quantity" label="需求" width="90" />
               <el-table-column prop="stock_quantity" label="现货覆盖" width="110" />
@@ -541,7 +546,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
             </div>
             <el-table :key="`${productId}-${historyPage}-${historyPageSize}-${historyFilter}`" :data="historyRows" empty-text="暂无符合条件的历史订单" @selection-change="historySelection = $event">
               <el-table-column type="selection" width="45" :selectable="row => Number(row.missing_record_quantity) > 0 && !saving" />
-              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }}<el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag></template></el-table-column>
+              <el-table-column label="订单" min-width="190"><template #default="{ row }">{{ row.posting_number }}<el-tag v-if="row.order_id === props.orderId" size="small">当前订单</el-tag><OrderHandlingSummary :row="handlingOrder(row)"/></template></el-table-column>
               <el-table-column prop="quantity" label="已发件数" width="100" />
               <el-table-column label="历史采购来源／核对依据" min-width="330"><template #default="{ row }">
                 <div v-for="(source, index) in sourceSuggestions.get(row.order_item_id) || []" :key="`suggest-${index}`">
@@ -568,7 +573,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
             <el-pagination v-model:current-page="historyPage" :page-size="historyPageSize" :total="history.length" layout="prev, pager, next, total" />
             <el-collapse><el-collapse-item title="历史补录成本（最近50次操作）" name="history-costs">
               <el-table :data="historicalCosts" max-height="300" empty-text="暂无批量补齐记录">
-                <el-table-column prop="posting_number" label="历史订单" min-width="180" />
+                <el-table-column label="历史订单" min-width="220"><template #default="{ row }">{{ row.posting_number }}<OrderHandlingSummary :row="handlingOrder(row)"/></template></el-table-column>
                 <el-table-column prop="purchase_order_id" label="采购单 ID" width="110" />
                 <el-table-column prop="quantity" label="补齐数量" />
                 <el-table-column prop="amount" label="分摊货款（元）" />
@@ -601,7 +606,7 @@ watch(() => props.modelValue, value => { if (value) { recordsVisible.value=['pur
       <el-alert :type="usagePurchase.usage_needs_review ? 'error' : 'info'" :closable="false" :title="usagePurchase.usage_needs_review ? '使用数超过收货数，请核对采购或关联记录' : '未归属订单可能包含现货保留、FBP 调拨、损耗、转换或历史漏关联，不能直接当作现货。无批次凭证的去向不强行归入本采购。'" />
       <div class="ledger-toolbar"><el-button @click="usagePurchaseId = null; showHistoryTodo()">去关联历史订单</el-button><el-button @click="usagePurchaseId = null; activeTab = 'movements'">核对库存流水</el-button></div>
       <el-table :data="usagePurchase.usage_orders.slice((usagePage - 1) * 20, usagePage * 20)" empty-text="暂无已归属订单">
-        <el-table-column prop="posting_number" label="订单号" min-width="180" />
+        <el-table-column label="订单号" min-width="220"><template #default="{ row }">{{ row.posting_number }}<OrderHandlingSummary :row="handlingOrder(row)"/></template></el-table-column>
         <el-table-column prop="usage_kind" label="用途" width="120" />
         <el-table-column prop="usage_quantity" label="本采购使用数量" width="150" />
         <el-table-column label="依据"><template #default="{ row }">{{ row.basis === 'recorded' ? '人工／业务关联' : '自动分配（数量核算）' }}</template></el-table-column>

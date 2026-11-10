@@ -15,6 +15,7 @@ import { loadShopDictionary } from "../../utils/shop-dictionary";
 import { createLatestRequestGate } from "../../utils/request-gate";
 import { createDefaultRouteQuerySync } from "../../utils/route-query-sync.js";
 import PageFooterPagination from "../../components/PageFooterPagination.vue";
+import OrderHandlingSummary from "../../components/procurement/OrderHandlingSummary.vue";
 import ProductImagePreview from "../../components/ProductImagePreview.vue";
 import ProductTitleLink from "../../components/ProductTitleLink.vue";
 import InventoryPageToolbar from "../../components/inventory/InventoryPageToolbar.vue";
@@ -2737,7 +2738,7 @@ onActivated(() => {
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="posting_number" label="订单号" min-width="220" />
+          <el-table-column label="订单 / 打印 / 标记" min-width="235"><template #default="{ row }">{{ row.posting_number }}<OrderHandlingSummary :row="row"/></template></el-table-column>
           <el-table-column prop="shop_name" label="店铺" min-width="150" />
           <el-table-column prop="quantity" label="数量" width="80" align="center" />
           <el-table-column label="销售额" width="120" align="right">
@@ -2786,7 +2787,7 @@ onActivated(() => {
             <ProductImagePreview :src="detailImage(row)" size="portrait" :alt="row.product_name || row.posting_number || '订单商品图片'" />
           </template>
         </el-table-column>
-        <el-table-column prop="posting_number" label="订单号" min-width="180" />
+        <el-table-column label="订单 / 打印 / 标记" min-width="235"><template #default="{ row }">{{ row.posting_number }}<OrderHandlingSummary :row="row"/></template></el-table-column>
         <el-table-column prop="shop_name" label="店铺" min-width="120" />
         <el-table-column prop="quantity" label="数量" width="80" align="center" />
         <el-table-column prop="sale_price" label="售价" width="110" align="right">

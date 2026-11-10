@@ -65,7 +65,8 @@ test('node records, approval purchase, receipt markers and order notes preserve 
    await assert.rejects(service.mutate({action:'reject',product_id:200,id:3,note:'越权'},buyer),{statusCode:404});
   });
   await t.test('FBS detail returns image, shop and persisted marks; concurrent edits conflict',async()=>{
-   let r=await service.records({node:'orders',product_id:200},warehouse);assert.equal(r.rows.length,1);assert.equal(r.rows[0].shop_name,'A shop');assert.equal(r.rows[0].image_url,'https://example.invalid/a.jpg');
+   await q("INSERT INTO order_label_prints(order_id,printed_at,print_batch_id) VALUES(2000,'2026-11-10 08:00:00','node-batch')");
+   let r=await service.records({node:'orders',product_id:200},warehouse);assert.equal(r.rows.length,1);assert.equal(r.rows[0].shop_name,'A shop');assert.ok(r.rows[0].printed_at);assert.equal(r.rows[0].print_batch_id,'node-batch');assert.equal(r.rows[0].image_url,'https://example.invalid/a.jpg');
    await service.mutate({action:'order-note',product_id:200,id:2000,note:'暂缓发货，待运营确认',expected_note:''},operator);
    await assert.rejects(service.mutate({action:'order-note',product_id:200,id:2000,note:'旧备注覆盖',expected_note:''},buyer),{statusCode:409});
    r=await service.records({node:'orders',product_id:200},warehouse);assert.equal(r.rows[0].mark_type,'follow');assert.match(r.rows[0].mark_note,/暂缓发货/);assert.equal(r.rows[0].sale_price,undefined);

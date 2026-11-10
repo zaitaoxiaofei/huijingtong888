@@ -1,4 +1,5 @@
 <script setup>
+import OrderHandlingSummary from './OrderHandlingSummary.vue';
 import {computed,defineAsyncComponent,onBeforeUnmount,reactive,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -47,7 +48,7 @@ watch(()=>props.productId,()=>{editingOrder.value=0;void load();},{immediate:tru
     <p>共 {{new Set(data.orders.map(o=>o.order_id)).size}} 个待履约订单 · 需求 {{data.state.order_demand}} 件 · 尚需采购 {{data.state.supply_plan?.required_fbs??'待核对'}} 件</p>
     <el-table :data="data.orders" border empty-text="当前没有关联的待履约FBS订单" max-height="60vh">
      <el-table-column label="订单商品" min-width="245"><template #default="{row}"><div class="order-product"><ProductImagePreview :src="row.ozon_image_url" :preview-list="[row.ozon_image_url].filter(Boolean)" style="width:66px;height:88px;min-width:66px"/><div><b>{{row.ozon_name||row.ozon_sku}}</b><small>SKU {{row.ozon_sku}}</small><small>实物需求 {{row.quantity}} 件</small></div></div></template></el-table-column>
-     <el-table-column label="订单与店铺" min-width="210"><template #default="{row}"><b>{{row.posting_number}}</b><p>{{row.shop_name}}</p><small>{{row.logistics}}</small></template></el-table-column>
+     <el-table-column label="订单与店铺" min-width="210"><template #default="{row}"><b>{{row.posting_number}}</b><p>{{row.shop_name}}</p><small>{{row.logistics}}</small><OrderHandlingSummary :row="row" :show-note="false"/></template></el-table-column>
      <el-table-column label="下单时间" min-width="175"><template #default="{row}">{{time(row.ordered_at)}}</template></el-table-column>
      <el-table-column label="货源覆盖" min-width="155"><template #default="{row}">现货 {{row.stock_quantity??0}} 件<p>采购在途 {{row.incoming_quantity??0}} 件</p><strong class="gap">缺 {{row.shortage_quantity??0}} 件</strong></template></el-table-column>
      <el-table-column label="人工备注" min-width="220"><template #default="{row}"><p v-if="row.manual_note" class="manual-order-note">{{row.manual_note}}</p><el-button v-if="canNote" plain size="small" @click="editingOrder=Number(row.order_id)">{{row.manual_note?'编辑备注':'添加备注'}}</el-button></template></el-table-column>
