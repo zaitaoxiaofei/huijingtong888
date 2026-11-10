@@ -1,3 +1,4 @@
+import { createOrderBindingIgnoreService } from "./order-binding-ignore.js";
 import { settlementOverdue } from '../shared/settlement-overdue.js';
 import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
 import { credentialVersion } from './ozon-credential-health.js';
@@ -7994,6 +7995,23 @@ export async function saveOrderQualityRulesMysql(body = {}) {
   }
 
   return { ok: true, rules: await orderQualityRulesMysql() };
+}
+
+const orderBindingIgnoreService = createOrderBindingIgnoreService({
+  query: mysqlQuery, execute: mysqlExecute, predicate: orderTenantPredicateMysql,
+  scope: async (tenantId, options) => {
+    const scope = await orderOwnershipTenantScopeMysql(tenantId);
+    await assertOrderTaskAccessMysql(scope, options, ["orders.manage"]);
+    return scope;
+  },
+  person: requireSessionPersonIdMysql, invalidate: invalidateOrderReadCache
+});
+export const updateOrderBindingIgnoreMysql = (...args) => orderBindingIgnoreService.set(...args);
+
+// Match the existing cancelled/returned order bucket, including tracking states.
+function orderBindingActiveSqlMysql(alias) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new Error("Invalid order alias");
+  return `LOWER(CONCAT(COALESCE(${alias}.status,''),' ',COALESCE(${alias}.tracking_stage,''),' ',COALESCE(${alias}.logistics_status,''))) NOT REGEXP 'cancel|return|not_accepted'`;
 }
 
 export async function updateOrderMarkMysql(orderId, body = {}, userId = null, tenantId = "admin") {
@@ -30285,6 +30303,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
   const cleanIds = [...new Set(ids.map(Number).filter(Boolean))];
   if (!cleanIds.length) return [];
   const tenantScope = await orderListTenantScopeMysql(tenantId);
+  await orderBindingIgnoreService.ensure();
   if (summaryOnly && coveragePromise === null && !bypassCache) {
     const value = await cachedOrderRead(`rows:${tenantScope.id}:${tenantScope.defaultTenant ? 1 : 0}:${cleanIds.join(',')}`,
       () => orderRowsByIdsMysql(cleanIds, null, tenantId, { summaryOnly: true, bypassCache: true, diagnostics }));
@@ -30497,6 +30516,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
       COUNT(CASE WHEN oi.id IS NOT NULL AND p.id IS NULL AND sku_recipe.id IS NULL THEN 1 END) AS unbound_item_count,
       COALESCE(SUM(CASE WHEN oi.id IS NOT NULL AND p.id IS NULL AND sku_recipe.id IS NULL THEN oi.quantity ELSE 0 END), 0) AS unbound_quantity,
       GROUP_CONCAT(DISTINCT CASE WHEN oi.id IS NOT NULL AND p.id IS NULL AND sku_recipe.id IS NULL THEN oi.ozon_sku END) AS unbound_skus,
+      GROUP_CONCAT(DISTINCT CASE WHEN p.id IS NULL AND sku_recipe.id IS NULL AND binding_ignore.order_id IS NOT NULL THEN oi.ozon_sku END) AS binding_ignored_skus,
       GROUP_CONCAT(DISTINCT COALESCE(CASE
         WHEN p.code LIKE 'P-%' THEN p.code
         WHEN p.id IS NOT NULL THEN CONCAT('P-', DATE_FORMAT(p.created_at, '%Y%m%d-%H%i%s'), '-', LPAD(p.id, 3, '0'))
@@ -30524,6 +30544,7 @@ export async function orderRowsByIdsMysql(ids = [], coveragePromise = undefined,
     FROM orders o
     JOIN shops s ON s.id = o.shop_id
     LEFT JOIN order_items oi ON oi.order_id = o.id AND oi.quantity > 0
+    LEFT JOIN order_inventory_binding_ignores binding_ignore ON binding_ignore.order_id = o.id AND binding_ignore.ozon_sku = oi.ozon_sku AND binding_ignore.tenant_id = ${tenantScope.id}
     LEFT JOIN scoped_order_items page_item ON page_item.order_item_id = oi.id AND page_item.order_id = o.id
     LEFT JOIN sku_mappings sm ON sm.id = page_item.mapping_id
     LEFT JOIN products p ON p.id = sm.product_id AND p.active = 1 ${tenantScope ? `AND ${orderTenantPredicateMysql("p", tenantScope)}` : ""}
@@ -31588,6 +31609,9 @@ function orderPagedUnboundEvidenceJoinMysql(tenantScope) {
     LEFT JOIN sku_mappings fallback_binding ON fallback_binding.shop_id = unbound_order.shop_id AND fallback_binding.ozon_sku = unbound_item.ozon_sku AND fallback_binding.active = 1 AND ${orderTenantPredicateMysql("fallback_binding", tenantScope)}
     LEFT JOIN products fallback_product ON fallback_product.id = fallback_binding.product_id AND fallback_product.active = 1 AND ${orderTenantPredicateMysql("fallback_product", tenantScope)}
     WHERE direct_product.id IS NULL AND fallback_product.id IS NULL
+      AND unbound_item.quantity > 0 AND ${orderBindingActiveSqlMysql("unbound_order")}
+      AND NOT EXISTS (SELECT 1 FROM order_inventory_binding_ignores binding_ignore
+        WHERE binding_ignore.tenant_id = ${tenantScope.id} AND binding_ignore.order_id = unbound_item.order_id AND binding_ignore.ozon_sku = unbound_item.ozon_sku)
   ) unbound_count_evidence ON unbound_count_evidence.order_id = o.id`;
 }
 
@@ -31664,7 +31688,8 @@ export async function ordersPagedMysql(query = {}, tenantId = "admin", { diagnos
     ensureOrderLabelPrintSchemaMysql(),
     ensureSkuInventoryRecipeSchemaMysql(),
     ensureProductCompositionSchemaMysql(),
-    ensureProductNamingSchemaMysql()
+    ensureProductNamingSchemaMysql(),
+    orderBindingIgnoreService.ensure()
   ]));
   const pageSize = Math.min(Math.max(Number(query.pageSize || query.page_size || 20), 1), 100);
   const page = Math.max(Number(query.page || 1), 1);
@@ -31978,9 +32003,12 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
     )`;
   }
   if (status === "unbound") {
-    return `EXISTS (
+    return `(${orderBindingActiveSqlMysql("o")} AND EXISTS (
       SELECT 1 FROM order_items oi
-      WHERE oi.order_id = o.id
+      WHERE oi.order_id = o.id AND oi.quantity > 0
+        AND NOT EXISTS (SELECT 1 FROM order_inventory_binding_ignores binding_ignore
+          WHERE binding_ignore.order_id = oi.order_id AND binding_ignore.ozon_sku = oi.ozon_sku
+            ${tenantScope ? `AND binding_ignore.tenant_id = ${tenantScope.id}` : ""})
         AND NOT (
           (oi.sku_mapping_id IS NOT NULL AND EXISTS (
             SELECT 1
@@ -31999,7 +32027,7 @@ function orderStatusSqlMysql(status, coverage = null, tenantScope = null, eviden
               ${tenantScope ? `AND ${orderTenantPredicateMysql("sm_by_sku", tenantScope)} AND ${orderTenantPredicateMysql("p_by_sku", tenantScope)}` : ""}
           )
         )
-    )`;
+    ))`;
   }
   const state = "LOWER(COALESCE(o.status, ''))";
   const stage = "LOWER(COALESCE(o.tracking_stage, ''))";

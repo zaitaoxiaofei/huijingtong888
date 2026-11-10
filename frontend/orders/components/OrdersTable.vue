@@ -14,6 +14,7 @@ const props = defineProps({
   canRemindProcurement: { type: Boolean, default: false },
   canUpdateInventory: { type: Boolean, default: false },
   canManageOrderNotes: { type: Boolean, default: false },
+  bindingIgnoreBusy: { type: String, default: "" },
   canEditProcurementNotes: { type: Boolean, default: false },
   rows: { type: Array, default: () => [] },
   markOptions: { type: Array, default: () => [] },
@@ -36,6 +37,7 @@ const emit = defineEmits([
   "save-mark",
   "edit-procurement-note",
   "open-bind-product-from-order",
+  "set-binding-ignore",
   "edit-inventory-product",
   "open-product-components",
   "view-product-components",
@@ -669,6 +671,11 @@ function canEditCollaborationNote(row) {
               <small v-if="inventoryViews.get(row.id).active">{{ inventoryViews.get(row.id).shortageCount }} 种缺货 · {{ inventoryViews.get(row.id).coveredCount }} 种已覆盖</small>
             </template>
             <small v-if="row.inventory_refresh_pending" class="orders-cell-meta-line">库存已变更，正在核对或等待重试</small>
+            <small v-if="row.inventoryBindingNotRequired && row.productDisplayRows?.some(item => item.unbound)">订单已取消／退回，无需补绑库存</small>
+            <div v-for="item in row.ignoredBindingItems" :key="`ignored-binding-${row.id}-${item.sku}`" class="orders-inline-actions">
+              <small>SKU {{ item.sku }} · 已忽略本单绑定提醒</small>
+              <el-button v-if="canManageOrderNotes && !row.inventoryBindingNotRequired" link size="small" type="primary" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, false)">恢复提醒</el-button>
+            </div>
             <small v-if="row.unboundItems?.length">有 {{ row.unboundItems.length }} 项未绑定库存</small>
             <div class="orders-inventory-quick-actions">
               <el-button v-if="!inventoryViews.get(row.id)?.parents.length" link type="primary" size="small" :icon="Tickets" @click="openInventoryLedger(row)">库存明细<span v-if="inventoryViews.get(row.id)?.items.length > 1">（{{ inventoryViews.get(row.id).items.length }}）</span></el-button>
@@ -692,6 +699,9 @@ function canEditCollaborationNote(row) {
                 >
                   创建库存
                 </el-button>
+                <el-tooltip v-if="canManageOrderNotes" content="仅忽略本单该 SKU 的绑定提醒，其他订单不受影响；发货仍需完成库存绑定。" placement="top">
+                  <el-button link size="small" :disabled="!!bindingIgnoreBusy" :loading="bindingIgnoreBusy === `${row.id}:${item.sku}`" @click="emit('set-binding-ignore', row.id, item.sku, true)">忽略本单</el-button>
+                </el-tooltip>
               </div>
               <el-tag v-if="inventoryViews.get(row.id)?.review" type="warning" size="small">待核对</el-tag>
             </div>

@@ -104,6 +104,7 @@ const routes = new Set([
 ]);
 
 const recordRoutes = [
+  ['PUT', /^orders\/\d+\/binding-ignore$/],
   ['GET', /^orders\/\d+\/split$/],
   ['DELETE', /^products\/\d+$/],
   ['POST', /^products\/\d+\/(?:add-to-inventory|remove-from-inventory|undo-merge|recalculate-profits|force-recalculate-profits)$/],
