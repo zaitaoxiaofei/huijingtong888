@@ -7421,6 +7421,12 @@ export async function hardDeletePersonMysql(id) {
   return { ok: true };
 }
 
+export function normalizeShopPayoutRate(value) {
+  const rate = value === undefined || value === null || value === "" ? 0 : Number(value);
+  if (!Number.isFinite(rate) || rate < 0 || rate > 1) throw Object.assign(new Error("店铺提成比例需在 0% 至 100% 之间"), { statusCode: 400 });
+  return rate;
+}
+
 export async function createShopMysql(body = {}, tenantId = "admin") {
   ensureMysqlCutoverEnabled();
   await ensureShopWatermarkSchemaMysql();
@@ -7439,7 +7445,7 @@ export async function createShopMysql(body = {}, tenantId = "admin") {
     body.ozon_client_id || "",
     body.ozon_seller_id || "",
     body.api_key_hint || "",
-    body.ozon_api_key || body.api_key_hint || "",
+    body.ozon_api_key || "",
     body.performance_client_id || "",
     performanceSecret,
     performanceSecret ? maskSecret(performanceSecret) : "",
@@ -7448,7 +7454,7 @@ export async function createShopMysql(body = {}, tenantId = "admin") {
     clampMysqlNumber(body.watermark_y_percent, 0, 100, 75),
     clampMysqlNumber(body.watermark_scale_percent, 8, 45, 22),
     clampMysqlNumber(body.watermark_opacity_percent, 10, 100, 82),
-    Number(body.payout_rate || 0.33)
+    normalizeShopPayoutRate(body.payout_rate)
   ];
 
   const result = await withMysqlTransaction(async connection => {
@@ -7498,7 +7504,7 @@ export async function updateShopMysql(id, body = {}, tenantId = "admin") {
     body.ozon_client_id || "",
     body.ozon_seller_id ?? existing.ozon_seller_id ?? "",
     body.api_key_hint || existing.api_key_hint || "",
-    body.ozon_api_key || existing.ozon_api_key || body.api_key_hint || existing.api_key_hint || "",
+    body.ozon_api_key || existing.ozon_api_key || existing.api_key_hint || "",
     body.performance_client_id || "",
     nextPerformanceSecret,
     nextPerformanceSecret ? maskSecret(nextPerformanceSecret) : "",
@@ -7508,7 +7514,7 @@ export async function updateShopMysql(id, body = {}, tenantId = "admin") {
     clampMysqlNumber(body.watermark_y_percent ?? existing.watermark_y_percent, 0, 100, 75),
     clampMysqlNumber(body.watermark_scale_percent ?? existing.watermark_scale_percent, 8, 45, 22),
     clampMysqlNumber(body.watermark_opacity_percent ?? existing.watermark_opacity_percent, 10, 100, 82),
-    Number(body.payout_rate || 0.33),
+    normalizeShopPayoutRate(body.payout_rate ?? existing.payout_rate),
     Number(id)
   ];
 

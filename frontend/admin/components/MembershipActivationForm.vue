@@ -63,7 +63,7 @@ async function submit() {
     <el-form-item label="激活码" :error="errorText">
       <el-input v-model="code" maxlength="128" autocomplete="off" placeholder="请输入会员激活码" :disabled="saving" clearable @input="errorText = ''" />
     </el-form-item>
-    <p>激活码用于当前企业的会员开通或续期，权益由企业成员共享。续期保留剩余时长；账号和店铺额度按激活码对应套餐更新。现有数据保留，超过额度时不能继续新增。</p>
+    <p>续期累加剩余时长，账号与店铺额度以激活码对应套餐为准。</p>
     <el-button type="primary" native-type="submit" :loading="saving">{{ active ? "兑换并续期" : "激活会员" }}</el-button>
   </el-form>
 </template>

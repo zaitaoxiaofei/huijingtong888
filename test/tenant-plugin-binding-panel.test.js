@@ -50,10 +50,13 @@ test('ordinary members cannot read or create keys; deactivating the owner page c
  assert.doesNotMatch(source,/localStorage|sessionStorage/);
 });
 
-test('membership exposes the binding panel and explains enterprise collection ownership',()=>{
+test('membership keeps key actions at the top and moves collection guidance to documentation',()=>{
  const membership=readFileSync(new URL('../frontend/admin/views/MembershipView.vue',import.meta.url),'utf8');
+ const documentation=readFileSync(new URL('../frontend/admin/components/UsageDocumentation.vue',import.meta.url),'utf8');
  assert.match(membership,/<TenantPluginBindingPanel v-if="tenant" :enabled="status.active"/);
- for(const text of ['企业专属密钥','保存密钥','本企业的“采集箱”','本企业的“草稿箱”','切换 ERP 空间不会自动更换插件密钥'])assert.ok(source.includes(text),text);
+ assert.ok(membership.indexOf('<TenantPluginBindingPanel') < membership.indexOf('class="membership-status"'));
+ assert.ok(source.includes('查看 / 复制企业密钥'));
+ for(const text of ['企业专属密钥','保存密钥','采集箱','草稿箱','切换 ERP 空间不会自动切换插件密钥'])assert.ok(documentation.includes(text),text);
 });
 
 

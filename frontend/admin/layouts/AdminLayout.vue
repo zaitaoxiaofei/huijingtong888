@@ -1,7 +1,7 @@
 <script setup>
 import { KeepAlive, computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { RouterView, useRoute, useRouter } from "vue-router";
-import { ArrowDown, Bell, Camera, Close, Download, Expand, Fold, Key, Lock, Operation, Paperclip, RefreshRight, SwitchButton, Ticket, User } from "@element-plus/icons-vue";
+import { ArrowDown, Bell, Camera, Close, Download, Expand, Fold, Lock, Operation, Paperclip, RefreshRight, SwitchButton, Ticket, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { navigationMenus, navigationMenusForRole } from "../constants/navigation.js";
 import { prefetchRouteComponent } from "../router";
@@ -28,6 +28,8 @@ const workspacePanel = ref(null);
 usePagedWorkspaceLayout(workspacePanel);
 
 const MembershipView = defineAsyncComponent(() => import("../views/MembershipView.vue"));
+const UsageDocumentation = defineAsyncComponent(() => import("../components/UsageDocumentation.vue"));
+const documentationVisible = ref(false);
 const QuickToolsDialog = defineAsyncComponent(() => import("../components/QuickToolsDialog.vue"));
 const EnterpriseMessenger = defineAsyncComponent(() => import("../components/EnterpriseMessenger.vue"));
 
@@ -963,6 +965,7 @@ onBeforeUnmount(() => {
             </el-button>
           </el-badge>
           <EnterpriseMessenger v-if="canUseEnterpriseMessages" :key="quickToolScope" />
+          <el-button text @click="documentationVisible = true">使用文档</el-button>
           <AppearanceSettings />
           <div class="erp-account-area">
             <el-tooltip v-if="authStore.user?.tenant?.id" :content="membershipExpiryText" placement="bottom">
@@ -988,7 +991,6 @@ onBeforeUnmount(() => {
                     <small v-if="authStore.user?.tenant?.id">{{ membershipExpiryText }}</small>
                   </li>
                   <el-dropdown-item :icon="User" @click="openProfileDialog">个人资料</el-dropdown-item>
-                  <el-dropdown-item v-if="canActivateMembership" command="activate" :icon="Key">{{ membershipActionLabel }}</el-dropdown-item>
                   <el-dropdown-item command="membership" :icon="Ticket">会员中心</el-dropdown-item>
                   <el-dropdown-item command="logout" :icon="SwitchButton" divided class="erp-account-logout">退出登录</el-dropdown-item>
                 </el-dropdown-menu>
@@ -1064,6 +1066,7 @@ onBeforeUnmount(() => {
     </el-container>
   </el-container>
 
+  <el-drawer v-model="documentationVisible" title="使用文档" size="min(760px, 96vw)" destroy-on-close><UsageDocumentation v-if="documentationVisible" /></el-drawer>
   <el-dialog v-model="activationDialogVisible" title="会员中心" width="min(940px, 94vw)" align-center destroy-on-close :close-on-press-escape="true" class="erp-membership-dialog">
     <MembershipView v-if="activationDialogVisible" embedded />
   </el-dialog>

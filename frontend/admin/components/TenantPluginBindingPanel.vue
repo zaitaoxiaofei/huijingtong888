@@ -1,14 +1,13 @@
 <script setup>
 import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { useAuthStore } from "../stores/auth";
 import { apiClient, currentApiCacheScope } from "../utils/api";
-import { canAccessPage, isEnterpriseAdmin, isPlatformAdmin } from "../../../src/shared/permissions.js";
+import { isEnterpriseAdmin, isPlatformAdmin } from "../../../src/shared/permissions.js";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 
 const props = defineProps({ enabled: { type: Boolean, default: true } });
-const auth = useAuthStore(), router = useRouter();
+const auth = useAuthStore();
 const tenant = computed(() => auth.user?.tenant || null);
 const canManage = computed(() => props.enabled && Boolean(tenant.value?.id) && (isPlatformAdmin(auth.user) || tenant.value.slug !== "default" && isEnterpriseAdmin(auth.user)));
 const origin = window.location.origin;
@@ -66,12 +65,8 @@ onBeforeUnmount(() => { disposed = true; reset(); window.removeEventListener("er
 
 <template>
   <el-card shadow="never" class="plugin-binding-panel">
-    <template #header><div class="binding-heading"><strong>插件绑定 · 当前企业</strong><el-button v-if="canManage" :loading="loading" :disabled="saving" @click="loadStatus">刷新绑定信息</el-button></div></template>
+    <template #header><div class="binding-heading"><strong>企业密钥</strong><el-button v-if="canManage" :loading="loading" :disabled="saving" @click="loadStatus">刷新</el-button></div></template>
     <p><strong>{{ tenant?.name || '当前企业' }}</strong> · 企业编号 {{ tenant?.id }} · 系统地址 {{ origin }}</p>
-    <p>插件采集先进入本企业的“采集箱”，生成或保存草稿后进入本企业的“草稿箱”。同一企业成员共享，其他企业不可读取。</p>
-    <p>插件按所填密钥确定企业归属，切换 ERP 空间不会自动更换插件密钥；跨企业使用时请更新插件中的密钥。</p>
-    <ol><li>下载并安装采集插件。</li><li>在这里生成或查看企业专属密钥，点击复制。</li><li>打开插件，将密钥粘贴到“企业专属密钥”，点击“保存密钥”，并确认插件显示连接成功。</li></ol>
-    <div class="binding-actions"><el-button tag="a" href="/downloads/ozon-baodan-erp-plugin.zip" target="_blank" rel="noopener noreferrer">下载采集插件</el-button><el-button v-if="canAccessPage(auth.user, '/collector-box')" @click="router.push('/collector-box')">打开本企业采集箱</el-button></div>
     <el-alert v-if="!canManage" :title="!props.enabled ? '请先在会员中心激活试用或会员，再生成或查看企业专属密钥。' : tenant?.slug === 'default' ? '默认企业的插件密钥由平台管理员管理。' : '企业专属密钥由本企业负责人或管理员生成，请联系他们获取后填写到插件。'" type="info" :closable="false" />
     <template v-else>
       <el-alert v-if="error" :title="error" type="error" :closable="false" />
