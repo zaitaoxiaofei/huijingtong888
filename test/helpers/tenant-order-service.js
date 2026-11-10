@@ -1,3 +1,4 @@
+import { ORDER_BINDING_IGNORE_SCHEMA } from "../../src/services/order-binding-ignore.js";
 import { memoRequestRead } from '../../src/services/request-read-cache.js';
 import { orderReadIdentity } from "../../src/services/order-read-cache.js";
 import { ORDER_SPLIT_SCHEMA } from '../../src/services/order-split-schema.js';
@@ -61,6 +62,7 @@ export function orderFunctionSource(name) {
   return match[0].replace(/^export /, '');
 }
 export async function createOrderFixtureSchema(connection) {
+  await connection.query(ORDER_BINDING_IGNORE_SCHEMA);
   const schema = readFileSync(new URL('../../scripts/init-mysql-schema.mjs', import.meta.url),'utf8');
   const tables = schema.match(/CREATE TABLE IF NOT EXISTS [\s\S]*?ENGINE=InnoDB[^;]+;/g) || [];
   if (!tables.length) throw new Error('Missing checked-in fixture schema');
@@ -111,7 +113,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], readSnap
     .match(/async function runMysqlReadSnapshot[\s\S]*?\n}/)[0];
   vm.runInContext(snapshotSource,snapshotContext);
   const methods=[
-    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
+    'isDefaultShopTenantMysql','resolveShopTenantIdMysql','tenantShopPredicateMysql','orderBindingActiveSqlMysql','orderListTenantScopeMysql','readRequestTenantContextMysql','orderOwnershipTenantScopeMysql','orderTenantPredicateMysql','assertOrderTaskAccessMysql','orderTenantCoverageMysql','assertTenantOrderListFiltersMysql',
     'orderBaseSqlMysql','orderFilteredSqlMysql','orderSearchBaseSqlMysql','orderQuickFilterOrderSqlMysql','addOrderSearchSqlMysql','orderStatusSqlMysql','orderPagedOglEvidenceJoinMysql','orderPagedUnboundEvidenceJoinMysql','orderPagedSqlCountsMysql','orderPageRowsMysql','ordersPagedMysql','ordersMysql','orderRowsByIdsMysql','orderInventorySortRowsMysql',
     'updateOrderMarkMysql','orderStatusHistoryMysql','orderStatusHistorySummaryMysql','orderLatestHistoryFactsSqlMysql','assertOrderBatchOwnershipMysql','markOrderLabelsPrintedMysql','removeFailedOrderLabelPrintBatchMysql','orderPackageLabelMysql','shipOrdersMysql',
     'orderDetailMysql','orderDetailFinanceMysql','orderProfitDetailSnapshotMysql','parseJsonOrNull','parseJsonFallback','sortRowsByInputMysql','mapWithConcurrencyMysql','trimOrderPostingSuffix',
@@ -125,7 +127,7 @@ export function loadTenantOrderService(connection, { extraMethods = [], readSnap
     withMysqlTransaction:async action=>{await connection.beginTransaction();try{const result=await action(connection);await connection.commit();return result;}catch(error){await connection.rollback();throw error;}},
     mysqlQuery:query,mysqlQueryOne:async(sql,params)=>(await query(sql,params))[0]||null,mysqlExecute:execute,mysqlExecuteReadCommitted:analyticsContext.mysqlExecuteReadCommitted,
     withMysqlReadSnapshot:operation=>snapshotContext.runMysqlReadSnapshot(operation),
-    ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,
+    orderBindingIgnoreService:{ensure:async()=>{}},ensureMysqlCutoverEnabled(){},mysqlSchemaColumnExists:async(table,column)=>(await query('SELECT 1 FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?', [table,column])).length>0,
     ensureOrderLabelPrintSchemaMysql:noop,ensureSkuInventoryRecipeSchemaMysql:noop,ensureProductCompositionSchemaMysql:noop,ensureProductNamingSchemaMysql:noop,ensureProcurementOrderSourceSchemaMysql:noop,ensureOrderPackageLabelCacheSchemaMysql:noop,
     normalizeSyncDateMysql:value=>String(value||'').slice(0,10),shanghaiDateKeyToUtcDateTimeMysql:(value,days=0)=>value?new Date(new Date(value+'T00:00:00+08:00').getTime()+days*86400000).toISOString().slice(0,19).replace('T',' '):'',
     orderQualityPrefixesMysql:async()=>[],localStockLocationPredicateMysql:()=>"COALESCE(NULLIF(stock_location, ''), 'LOCAL') != 'FBP'",procurementQueueSql,

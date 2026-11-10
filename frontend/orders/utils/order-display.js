@@ -72,6 +72,7 @@ export function buildProductDisplayRows(row = {}) {
   const componentCountMap = parseSkuMap(row, "sku_component_counts", (value) => Number(value || 0));
   const skus = splitCsv(row.skus);
   const unboundSkus = new Set(splitCsv(row.unbound_skus));
+  const ignoredSkus = new Set(splitCsv(row.binding_ignored_skus));
   const rawFallbackName = firstCsvValue(row.product_names);
   const fallbackName = rawFallbackName && rawFallbackName !== "Unbound product" ? rawFallbackName : "";
   const fallbackImage = firstCsvValue(row.order_image_urls) || firstCsvValue(row.image_urls) || inventoryImages[0] || "";
@@ -95,6 +96,7 @@ export function buildProductDisplayRows(row = {}) {
       inventoryMode: "unbound",
       ozonProductId: String(row.ozon_product_id || row.ozon_sku || ""),
       unbound: true,
+      bindingIgnored: ignoredSkus.has(row.ozon_sku),
       productLink: ozonBuyerProductLinkFor(row.ozon_product_id || row.ozon_sku)
     }];
   }
@@ -125,9 +127,19 @@ export function buildProductDisplayRows(row = {}) {
       inventoryMode: inventoryModes.get(sku) || (productIds.get(sku) ? "single" : "unbound"),
       ozonProductId,
       unbound: unboundSkus.has(sku),
+      bindingIgnored: ignoredSkus.has(sku),
       productLink: ozonBuyerProductLinkFor(ozonProductId)
     };
   });
+}
+
+export function inventoryBindingReminders(products = [], cancelled = false) {
+  const missing = products.filter(item => item.unbound);
+  return {
+    unboundItems: cancelled ? [] : missing.filter(item => !item.bindingIgnored),
+    ignoredBindingItems: missing.filter(item => item.bindingIgnored),
+    inventoryBindingNotRequired: cancelled
+  };
 }
 
 export function buildInventoryPickingSummary(rows = [], summary = {}) {

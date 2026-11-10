@@ -25,6 +25,7 @@ test('inventory pagination loads details only for the globally sorted page, incl
       let loadedIds, coverageCalls = 0;
       const context = vm.createContext({
         ensureMysqlCutoverEnabled() {},
+        orderBindingIgnoreService: { ensure: async () => {} },
         orderListTenantScopeMysql: async () => null, assertTenantOrderListFiltersMysql() {},
         normalizeLogisticsServiceClass,
         ensureOrderLabelPrintSchemaMysql: async () => {}, ensureSkuInventoryRecipeSchemaMysql: async () => {},

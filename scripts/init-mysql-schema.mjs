@@ -1,3 +1,4 @@
+import { ORDER_BINDING_IGNORE_SCHEMA } from "../src/services/order-binding-ignore.js";
 import {SKU_TRAFFIC_DAILY_SCHEMA} from '../src/services/sku-traffic-daily-schema.js';
 import { ORDER_SPLIT_SCHEMA } from "../src/services/order-split-schema.js";
 import { createMysqlConnection, closeMysqlConnection } from "./mysql-runtime.mjs";
@@ -1130,6 +1131,8 @@ CREATE TABLE IF NOT EXISTS order_items (
   KEY idx_order_items_sku_order (ozon_sku, order_id),
   KEY idx_order_items_mapping (sku_mapping_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+${ORDER_BINDING_IGNORE_SCHEMA}
 
 CREATE TABLE IF NOT EXISTS order_status_history (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,

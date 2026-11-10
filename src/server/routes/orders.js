@@ -71,6 +71,10 @@ export async function handleOrderRestRoute({ req, res, url, parts, services, rea
     return detail ? json(res, detail) : notFound(res);
   }
 
+  if (req.method === "PUT" && parts.length === 4 && parts[0] === "api" && parts[1] === "orders" && /^\d+$/.test(parts[2]) && parts[3] === "binding-ignore") {
+    return json(res, await services.updateOrderBindingIgnore(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req), { session: req._session }));
+  }
+
   if (req.method === "PUT" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "mark") {
     return json(res, await services.updateOrderMark(Number(parts[2]), await readJson(req), req._session?.personId, tenantIdFromRequest(req)));
   }

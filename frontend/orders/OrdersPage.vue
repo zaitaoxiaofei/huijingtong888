@@ -25,7 +25,7 @@ import {
   STATE_META,
   orderStateKey
 } from "./constants/orders-ui.js";
-import { buildInventoryPickingSummary, buildProductDisplayRows, firstCsvValue, splitCsv } from "./utils/order-display.js";
+import { buildInventoryPickingSummary, buildProductDisplayRows, inventoryBindingReminders, firstCsvValue, splitCsv } from "./utils/order-display.js";
 import { formatDateTime, formatLogisticsRuleLabel, formatMoney, formatPercent, formatSignedMoney, moneyValueClass } from "./utils/order-format.js";
 import { buildOrderProfitDetail, profitDetailCellClassName } from "./utils/order-profit-detail.js";
 import { orderProcurementRecordDetails, orderPurchaseDetails } from "./utils/order-procurement-detail.js";
@@ -1295,7 +1295,7 @@ function buildTableRow(row) {
         row?.aftersale_bucket_label ? `归类：${row.aftersale_bucket_label}` : "",
         row?.loss_profile_label ? `损失口径：${row.loss_profile_label}` : ""
       ].filter(Boolean).join(" · ");
-  const unboundItems = productDisplayRows.filter((item) => item.unbound);
+  const { inventoryBindingNotRequired, ignoredBindingItems, unboundItems } = inventoryBindingReminders(productDisplayRows, displayStateKey === "cancelled");
   const inventoryBoundCount = inventorySummaries.length;
   const inventoryPendingCount = unboundItems.length;
 
@@ -1307,6 +1307,8 @@ function buildTableRow(row) {
     stockSummary,
     productDisplayRows,
     unboundItems,
+    ignoredBindingItems,
+    inventoryBindingNotRequired,
     inventorySummaries,
     inventoryBoundCount,
     inventoryPendingCount,
@@ -2463,6 +2465,23 @@ async function createInventoryForFirstProcurementMissingItem() {
   await handleOpenCreateProductFromOrder(item.order_id || orderProcurementDialog.orderId, item.ozon_sku);
 }
 
+const bindingIgnoreBusy = ref("");
+async function handleSetBindingIgnore(orderId, sku, ignored) {
+  if (bindingIgnoreBusy.value || !canManageOrderNotes.value) return;
+  bindingIgnoreBusy.value = `${orderId}:${sku}`;
+  let saved = false;
+  try {
+    await apiClient.put(`/api/orders/${orderId}/binding-ignore`, { ozon_sku: sku, ignored });
+    saved = true;
+    await loadOrders({ forceRefresh: true, includeCounts: true });
+    ElMessage.success(ignored ? "已忽略本单商品的绑定提醒，可在全部订单中恢复" : "已恢复本单商品的绑定提醒");
+  } catch (error) {
+    ElMessage.error(saved ? "操作已保存，但列表刷新失败，请手动刷新" : (error.message || "修改库存绑定提醒失败"));
+  } finally {
+    bindingIgnoreBusy.value = "";
+  }
+}
+
 async function handleOpenBindProductFromOrder(orderId, sku) {
   const context = resolveOrderInventoryContext(orderId, sku);
   if (!context?.onlineProductId) {
@@ -2898,6 +2917,8 @@ onBeforeUnmount(() => {
         @print-order="handlePrintOrder"
         @save-mark="handleSaveMark"
         @edit-procurement-note="editProcurementNote"
+        :binding-ignore-busy="bindingIgnoreBusy"
+        @set-binding-ignore="handleSetBindingIgnore"
         @open-bind-product-from-order="handleOpenBindProductFromOrder"
         @edit-inventory-product="(productId) => openInventoryProductEditor({ id: productId })"
         @open-product-components="openProductCompositionDialog"
