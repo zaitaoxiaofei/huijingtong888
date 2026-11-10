@@ -45,8 +45,8 @@ async function open(source, options = {}) {
   if (source === "draft" && options.defaultDraftScope === "mine" && !state.creatorId && currentPersonId.value) {
     state.creatorId = String(currentPersonId.value);
   }
-  if (source === "draft") await loadDraftFilterOptions();
-  await loadRows();
+  // Filter metadata must not delay the first page of candidates.
+  await Promise.all([loadRows(), source === "draft" ? loadDraftFilterOptions() : Promise.resolve()]);
 }
 
 async function loadDraftFilterOptions() {
@@ -67,6 +67,7 @@ async function loadRows() {
     const params = new URLSearchParams({ paged: "1", page: String(state.page), pageSize: String(state.pageSize) });
     if (state.keyword.trim()) params.set("query", state.keyword.trim());
     if (state.source === "draft") {
+      params.set("lightweight", "1");
       params.set("sortBy", "created_at");
       params.set("status", "draft");
       if (state.creatorId) params.set("creatorId", state.creatorId);
