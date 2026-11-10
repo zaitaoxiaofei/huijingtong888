@@ -76,12 +76,14 @@ export function createInventoryNodeRecords({query=mysqlQuery,transaction=withMys
       const local=await ledger({product_id:id,include_flow:'local'},scope.id);
       const ids=[...new Set((local.orders||[]).filter(r=>r.needs_fulfillment).map(r=>Number(r.order_item_id)))];
       if(!ids.length)return{rows:[]};
-      const details=await query(`SELECT oi.*,o.id AS order_id,o.ordered_at,o.posting_number,o.logistics_status,s.name AS shop_name,
+      const details=await query(`SELECT oi.*,o.id AS order_id,o.ordered_at,o.posting_number,o.status AS order_status,o.tracking_stage,o.logistics_status,printed.printed_at,printed.print_batch_id,printed.print_sequence,s.name AS shop_name,
         mark.note AS mark_note,mark.mark_type,osh.warehouse_name,osh.tpl_provider
         FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id AND ${inventoryTenantSql(scope,'s')}
+        LEFT JOIN order_label_prints printed ON printed.order_id=o.id
         LEFT JOIN order_marks mark ON mark.order_id=o.id LEFT JOIN order_status_history osh ON osh.id=(SELECT h.id FROM order_status_history h WHERE h.order_id=o.id AND h.shop_id=o.shop_id ORDER BY h.observed_at DESC,h.id DESC LIMIT 1)
         WHERE oi.id IN (${ids.map(()=>'?').join(',')})`,ids);
       return{rows:details.map(r=>({order_id:r.order_id,order_item_id:r.id,posting_number:r.posting_number,ordered_at:r.ordered_at,
+        printed_at:r.printed_at,print_batch_id:r.print_batch_id,print_sequence:r.print_sequence,order_status:r.order_status,tracking_stage:r.tracking_stage,logistics_status:r.logistics_status,
         image_url:r.image_url||r.ozon_image_url||'',product_name:r.ozon_name||r.product_name||r.name||'',shop_name:r.shop_name,
         logistics:r.warehouse_name||r.tpl_provider||r.logistics_status,mark_note:r.mark_note||'',mark_type:r.mark_type||''}))};
     }

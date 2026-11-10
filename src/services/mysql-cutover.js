@@ -14235,6 +14235,7 @@ async function productOrderDetailRowsMysql(productId, cancelled, query = {}, ten
       SELECT
         oi.id AS order_item_id,
         oi.order_id,
+        printed.printed_at,printed.print_batch_id,printed.print_sequence,mark.mark_type,mark.note AS mark_note,
         oi.ozon_sku,
         oi.ozon_name,
         oi.ozon_image_url,
@@ -14311,6 +14312,8 @@ async function productOrderDetailRowsMysql(productId, cancelled, query = {}, ten
       FROM order_items oi
       JOIN orders o ON o.id = oi.order_id
       JOIN shops s ON s.id = o.shop_id AND ${orderTenantPredicateMysql("s", tenantScope)}
+      LEFT JOIN order_label_prints printed ON printed.order_id=o.id
+      LEFT JOIN order_marks mark ON mark.order_id=o.id
       LEFT JOIN order_profit_items opi ON opi.order_item_id = oi.id
       JOIN sku_mappings sm ON (
         (sm.id = oi.sku_mapping_id OR (sm.shop_id = o.shop_id AND sm.ozon_sku = oi.ozon_sku))

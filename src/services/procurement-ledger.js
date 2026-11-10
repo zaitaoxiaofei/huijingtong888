@@ -1,3 +1,4 @@
+import {withOrderHandlingContext} from './order-handling-context.js';
 import { receiptEvidence, assertEvidenceOwnership } from './procurement-evidence.js';
 import { hasPermission } from '../shared/permissions.js';
 import {isFbpInventory,pendingInventoryOrders} from '../shared/inventory-fulfillment.js';
@@ -451,6 +452,7 @@ export function createProcurementLedgerService(hooks) {
       ? (sql, args = []) => existingConnection.query(sql, args).then(([rows]) => rows)
       : query;
     const value = await snapshot(id, run, tenantId);
+    value.orders = await withOrderHandlingContext(value.orders, run, await resolveScope(tenantId, run));
     const fbp = hooks.fbpStocks && body.include_fbp !== false && String(body.include_fbp) !== '0' ? await hooks.fbpStocks(id, tenantId) : null;
     if (fbp) value.fbp_inventory = fbp;
     value.source_inference = inferProcurementSources(value);

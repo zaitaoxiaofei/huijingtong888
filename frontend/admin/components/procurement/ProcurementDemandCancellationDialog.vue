@@ -1,4 +1,5 @@
 <script setup>
+import OrderHandlingSummary from './OrderHandlingSummary.vue';
 import {computed,onBeforeUnmount,ref,watch} from 'vue';
 import {ElMessage} from 'element-plus';
 import {apiClient,currentApiCacheScope} from '../../utils/api.js';
@@ -44,7 +45,7 @@ onBeforeUnmount(()=>{disposed=true;version++;controller?.abort();});
    <el-radio-group v-model="operation" :disabled="busy||!!submitted"><el-radio-button value="cancel">取消本次采购</el-radio-button><el-radio-button value="restore">恢复已取消采购</el-radio-button></el-radio-group>
    <el-table :key="operation" :data="rows" row-key="order_item_id" border max-height="330" @selection-change="selected=$event" empty-text="当前没有待履约的FBS订单采购需求">
     <el-table-column type="selection" width="45" :selectable="selectable"/>
-    <el-table-column label="订单 / 商品" min-width="245"><template #default="{row}"><b>{{row.posting_number}}</b><p>{{row.ozon_name||row.ozon_sku}}</p><small>{{row.shop_name}}</small></template></el-table-column>
+    <el-table-column label="订单 / 商品" min-width="245"><template #default="{row}"><b>{{row.posting_number}}</b><p>{{row.ozon_name||row.ozon_sku}}</p><small>{{row.shop_name}}</small><OrderHandlingSummary :row="row"/></template></el-table-column>
     <el-table-column label="实际缺货" width="100"><template #default="{row}">{{row.shortage_quantity??0}} 件</template></el-table-column>
     <el-table-column label="本次处理" width="110"><template #default="{row}">{{quantity(row)}} 件</template></el-table-column>
     <el-table-column label="采购决定" min-width="230"><template #default="{row}"><template v-if="row.cancellation"><el-tag size="small" type="warning">本次已取消</el-tag><p>{{PROCUREMENT_CANCELLATION_CAUSES[row.cancellation.cause]}} · {{row.cancellation.note}}</p><small>{{row.cancellation.person_name||'采购人员'}} · {{shanghaiDateTimeText(row.cancellation.created_at,{assumeUtcWhenNaive:true})}}</small></template><span v-else>按当前未覆盖缺口处理</span></template></el-table-column>

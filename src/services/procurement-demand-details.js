@@ -27,8 +27,9 @@ export function createProcurementDemandDetails({query=mysqlQuery,transaction=wit
   const all=[...coverage.values()].flatMap(o=>(o.items||[]).filter(i=>Number(i.product_id)===id).map(i=>({...i,order_id:o.order_id,ordered_at:o.ordered_at,transport_at:o.transport_at,needs_fulfillment:o.needs_fulfillment,entered_transport:o.entered_transport,stock_location:o.stock_location})));
   const cancellationEvents=await readDemandCancellationEvents(query,scope.id,[id]),cancellations=activeDemandCancellations(cancellationEvents);
   const open=all.filter(i=>i.needs_fulfillment&&i.stock_location!=='FBP'),itemIds=[...new Set(open.map(i=>Number(i.order_item_id)))];
-  const metadata=itemIds.length?await query(`SELECT oi.id AS order_item_id,o.id AS order_id,o.posting_number,o.ordered_at,o.status,s.name AS shop_name,oi.ozon_sku,oi.ozon_name,oi.ozon_image_url,om.note AS manual_note,raw.raw_json
+  const metadata=itemIds.length?await query(`SELECT oi.id AS order_item_id,o.id AS order_id,o.posting_number,o.ordered_at,o.status,o.tracking_stage,o.logistics_status,printed.printed_at,printed.print_batch_id,printed.print_sequence,om.mark_type,s.name AS shop_name,oi.ozon_sku,oi.ozon_name,oi.ozon_image_url,om.note AS manual_note,raw.raw_json
     FROM order_items oi JOIN orders o ON o.id=oi.order_id JOIN shops s ON s.id=o.shop_id AND ${inventoryTenantSql(scope,'s')}
+    LEFT JOIN order_label_prints printed ON printed.order_id=o.id
     LEFT JOIN order_marks om ON om.order_id=o.id LEFT JOIN ozon_orders_raw raw ON raw.store_id=o.shop_id AND raw.posting_number=o.posting_number
     WHERE oi.id IN (${itemIds.map(()=>'?').join(',')})`,itemIds):[];
   const orders=open.map(i=>{const row=metadata.find(m=>Number(m.order_item_id)===Number(i.order_item_id));if(!row)return null;const {raw_json,...safe}=row;return{...safe,quantity:i.quantity,stock_quantity:i.stock_quantity,incoming_quantity:i.incoming_quantity,shortage_quantity:i.shortage_quantity,quantity_needs_review:Boolean(i.quantity_needs_review),...cancelledOrderPurchase(i,id,cancellations),logistics:classifyOrderLogistics({raw_json}).logistics_display_name||'物流渠道待核对'};}).filter(Boolean);

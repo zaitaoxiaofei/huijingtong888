@@ -16,7 +16,7 @@ export function inventoryLedgerView(value = {}) {
     ...pick(value, ['revision', 'local_stock', 'physical_estimate', 'open_order_deducted', 'available_estimate',
       'open_order_demand', 'fbp_reserved', 'current_stock_reserved', 'incoming_quantity', 'current_incoming',
       'current_shortage', 'stocktake_id', 'last_stocktake_at']),
-    orders: (value.orders || []).map((row) => pick(row, ['order_id', 'order_item_id', 'posting_number', 'ordered_at',
+    orders: (value.orders || []).map((row) => pick(row, ['printed_at', 'print_batch_id', 'print_sequence', 'mark_type', 'mark_note', 'order_status', 'tracking_stage', 'logistics_status', 'order_id', 'order_item_id', 'posting_number', 'ordered_at',
       'transport_at', 'needs_fulfillment', 'entered_transport', 'stock_location', 'quantity', 'stock_quantity',
       'incoming_quantity', 'shortage_quantity', 'outbound_quantity', 'quantity_needs_review'])),
     movements: (value.movements || []).map((row) => pick(row, ['source_type', 'stock_location', 'quantity_delta',
