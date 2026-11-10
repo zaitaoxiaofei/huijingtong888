@@ -148,3 +148,22 @@ test("template preserves stock/admin and image/binding boundaries while exposing
   assert.match(source, /<ProductImagePreview[\s\S]*?<\/ProductImagePreview>|<ProductImagePreview[\s\S]*?\/>/);
   assert.match(source, /!dictionaryLoaded && !tenantReadOnly\.value && !showProductLimitPanel\.value/);
 });
+
+
+test("full product pull includes current-shop stock reads without the zero-stock-only filter", async () => {
+  const f = fixture(); f.context.state.filters.shopId = "11";
+  await f.context.syncOnlineProducts("all");
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls.posts[0])), {
+    path: "/api/sync/online-products", payload: { include_stocks: true, shop_id: 11 }
+  });
+  assert.match(source, /@click="syncOnlineProducts\('all'\)"/);
+});
+
+test("full sync completion never describes all returned products as filtered stock", async () => {
+  const f = fixture({ get: () => ({ running: false, scope: "all", payload: { shop_id: 11 },
+    result: { upserted: 5, shops: [{ shop_id: 11, candidates: 5, filtered_out: 0 }] } }) });
+  await f.context.pollOnlineProductSyncStatus();
+  assert.match(f.calls.successes[0], /更新 5 条/);
+  assert.doesNotMatch(f.calls.successes[0], /排除|过滤/);
+  assert.equal(f.calls.loads, 1);
+});

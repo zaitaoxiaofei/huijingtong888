@@ -695,7 +695,7 @@ async function syncOnlineProducts(mode = "pending_listing") {
   onlineProductSyncProgress.value = { phase: "starting", message: "正在启动商品拉取任务" };
   try {
     const pendingListing = mode === "pending_listing";
-    const payload = pendingListing ? { pending_listing: true, scope: "pending_listing", concurrency: 5 } : {};
+    const payload = pendingListing ? { pending_listing: true, scope: "pending_listing", concurrency: 5 } : { include_stocks: true };
     if (state.filters.shopId !== "all") payload.shop_id = Number(state.filters.shopId);
     const result = await apiClient.post("/api/sync/online-products", payload);
     if (result?.started === false && result?.running) {
@@ -704,7 +704,7 @@ async function syncOnlineProducts(mode = "pending_listing") {
       startOnlineProductSyncPolling();
       return;
     }
-    ElMessage.success(pendingListing ? "已开始后台拉取待上架商品" : "已开始后台拉取商品");
+    ElMessage.success(pendingListing ? "已开始后台拉取待上架商品" : "已开始后台拉取全部商品及库存");
     startOnlineProductSyncPolling();
   } catch (error) {
     stopOnlineProductSyncPolling();
@@ -771,8 +771,8 @@ async function pollOnlineProductSyncStatus() {
     const syncResult = result?.result || {};
     const selectedShopId = Number(result?.payload?.shop_id || 0);
     const selectedShop = (syncResult.shops || []).find((shop) => Number(shop.shop_id) === selectedShopId);
-    const detail = selectedShop
-      ? `，Ozon 返回 ${Number(selectedShop.candidates || selectedShop.fetched || 0)} 条，过滤已有库存 ${Number(selectedShop.filtered_out || 0)} 条`
+    const detail = result?.scope === "pending_listing" && selectedShop
+      ? `，Ozon 返回 ${Number(selectedShop.candidates || selectedShop.fetched || 0)} 条，排除已有库存或未确认零库存 ${Number(selectedShop.filtered_out || 0)} 条`
       : "";
     if (syncResult.errors?.length) {
       ElMessage.warning(`${taskName}部分失败：${syncResult.errors.join("；")}`);
@@ -871,7 +871,10 @@ onDeactivated(() => {
               <el-button class="erp-btn erp-btn-secondary" @click="handleReset">重置</el-button>
             </el-form-item>
             <el-form-item>
-              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
+              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-primary" type="primary" :loading="syncLoading" @click="syncOnlineProducts('all')">
+                拉取全部商品及库存
+              </el-button>
+              <el-button v-if="canSyncOnline" class="erp-btn erp-btn-secondary" :loading="syncLoading" @click="syncOnlineProducts('pending_listing')">
                 拉取待上架商品
               </el-button>
               <el-text v-if="syncLoading" type="info" size="small" aria-live="polite">{{ onlineProductSyncProgressText() }}</el-text>
