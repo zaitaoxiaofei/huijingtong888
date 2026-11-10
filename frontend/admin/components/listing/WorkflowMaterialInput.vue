@@ -1,5 +1,6 @@
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
+import {workflowDictionaryOptions} from '../../../../src/shared/product-workflow-inputs.js';
 import { ElMessage } from 'element-plus';
 import { Plus } from '@element-plus/icons-vue';
 import { apiClient } from '../../utils/api.js';
@@ -7,15 +8,14 @@ import { withImageToken } from '../../api/tools/imageCropper.js';
 const props=defineProps({node:{type:Object,required:true},modelValue:{default:''},category:{type:Object,default:()=>({})},disabled:Boolean,compact:Boolean});
 const emit=defineEmits(['update:modelValue','upload','options']);
 const loading=ref(false);
+const dictionaryOptions=computed(()=>workflowDictionaryOptions(props.node.options||[],[],props.node.attributeId));
 async function loadOptions(keyword='') {
   if(!props.node.dictionaryId||loading.value)return;
   loading.value=true;
   try {
     const params=new URLSearchParams({description_category_id:props.category.descriptionCategoryId,type_id:props.category.typeId,attribute_id:props.node.attributeId,limit:60,keyword});
     const rows=await apiClient.get(`/api/listing/ozon-attribute-values?${params}`,{noCache:true});
-    const options=new Map((props.node.options||[]).map(x=>[x.id,x]));
-    for(const row of rows){const id=Number(row.dictionary_value_id||row.id);if(id)options.set(id,{id,label:row.display_value_zh||row.value_zh||row.label||row.value||row.name});}
-    emit('options',[...options.values()]);
+    emit('options',workflowDictionaryOptions(rows,props.node.options||[],props.node.attributeId));
   }catch(error){ElMessage.error(error.message);}finally{loading.value=false;}
 }
 function remove(index){const next=[...(props.modelValue||[])];next[index]='';emit('update:modelValue',next);}
@@ -32,7 +32,7 @@ function remove(index){const next=[...(props.modelValue||[])];next[index]='';emi
     </div>
   </div>
   <el-select v-else-if="node.type==='attribute'&&node.dictionaryId" :model-value="modelValue" :multiple="node.multiple" filterable remote :remote-method="loadOptions" :loading="loading" :disabled="disabled" placeholder="选择已核实的属性值" @update:model-value="emit('update:modelValue',$event)" @visible-change="$event&&loadOptions()">
-    <el-option v-for="option in node.options||[]" :key="option.id" :label="option.label" :value="option.id"/>
+    <el-option v-for="option in dictionaryOptions" :key="option.id" :label="option.label" :value="option.id"/>
   </el-select>
   <el-input-number v-else-if="node.inputFormat==='number'" :model-value="modelValue===''||modelValue==null?undefined:Number(modelValue)" :controls="false" :disabled="disabled" placeholder="填写数字" @update:model-value="emit('update:modelValue',$event??'')"/>
   <el-input v-else :model-value="modelValue" :type="compact&&['facts','packaging'].includes(node.id)?'textarea':'text'" :rows="3" :disabled="disabled" :placeholder="compact&&node.id==='facts'?'例如：黑银碳纹、仅壳款、黑色礼盒。只填写已确认的卖点和包装内容。':node.help||'填写产品信息'" @update:model-value="emit('update:modelValue',$event)"/>

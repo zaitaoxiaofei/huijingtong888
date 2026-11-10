@@ -47,6 +47,7 @@ function acceptOutput(node,raw) {
   return {text:{title:text.title,tags:text.tags,description:text.description}};
 }
 
+export function isConfirmedImageTaskFailure(task){return task?.status==='failed'&&['AI_CREDIT_TASK_FAILED','provider_job_terminal_failed'].includes(task.error?.code);}
 // One bounded tick, independent of any browser. commit persists submit intent before creating an AI task.
 export async function advanceProductWorkflow({id,payload}, {findTask,createTask,retryTask,commit,guard}) {
   const definition=payload.definition;
@@ -63,7 +64,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
       if(state?.url||state?.text) {if(definition.reviewMode==='automatic'){state.approved=true;state.approvalMode='automatic';}else if(!state.approved)review=true;continue;}
       if(node.type==='image'&&node.imageMode==='material'){const ref=node.materialRefs?.[0],url=definition.materialSnapshots?.[ref?.id]?.images?.[ref?.imageIndex||0];if(!url)return {status:'failed',error:`${node.label}没有可用资料图片，请重新选择`};results[node.id]={url,status:'done',approved:definition.reviewMode==='automatic',source:'material'};return {status:'running'};}
       if(!dependenciesReady(definition,variant,node,results)){review=true;continue;}
-      if(state?.status==='failed')return {status:'failed',error:`${variant.label} / ${node.label}：${state.error||'生成失败'}`};
+      if(state?.status==='failed'&&!state.taskId)return {status:'failed',error:`${variant.label} / ${node.label}：${state.error||'生成失败'}`};
       if(state?.taskId) {
         const task=await findTask(state.taskId);
         if(!task) {
@@ -72,15 +73,22 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
             await createTask(taskRequest(id,variant,node,state,definition,results));
             state.status='running';return {status:'running'};
           }
-          state.status='unknown';return {status:'failed',error:`${variant.label} / ${node.label}提交待核对。重试会使用原任务标识，不会另建付费任务。`};
+          state.status='unknown';return {status:'awaiting_review',error:`${variant.label} / ${node.label}提交状态待核对，请核对并恢复原任务，不会自动另建付费任务。`};
         }
         if(task.status==='done') {
-          try{Object.assign(state,acceptOutput(node,task.output||{}),{status:'done',approved:false,error:null});}
-          catch(error){state.status='failed';state.error=error.message;return {status:'failed',error:error.message};}
+          try{Object.assign(state,acceptOutput(node,task.output||{}),{status:'done',approved:false,error:null,progressMessage:null,phase:null});}
+          catch(error){state.status='unknown';state.error=error.message;return {status:'awaiting_review',error:`已返回的结果待核对：${error.message}`};}
           return {status:'running'};
         }
-        if(['failed','cancelled'].includes(task.status)){state.status='failed';state.error=task.error?.message||'生成失败';return {status:'failed',error:`${variant.label} / ${node.label}：${state.error}`};}
-        if(task.status==='provider_pending'){await guard();await retryTask(state.taskId);}
+        if(['failed','cancelled'].includes(task.status)){
+          if(node.type==='image'&&!isConfirmedImageTaskFailure(task)){
+            if(state.status==='resubmit'){await guard();await retryTask(state.taskId);state.status='running';state.error=null;return {status:'running'};}
+            state.status='unknown';state.failureKind='unconfirmed';state.error=`原任务结果待核对：${task.error?.message||'未收到明确生成结果'}；可核对并恢复原任务，不自动新建生图请求。`;return {status:'awaiting_review',error:state.error};
+          }
+          state.status='failed';if(node.type==='image')state.failureKind='provider_confirmed';state.error=task.error?.message||'生成失败';return {status:'failed',error:`${variant.label} / ${node.label}：${state.error}`};
+        }
+        state.status='running';state.phase=task.status;state.progressMessage=task.status==='queued'?'排队中，等待可用通道':task.status==='provider_pending'?(task.error?.code==='AI_GENERATION_STORAGE_PENDING'?'图片已生成，等待素材保存恢复；复用原图':'正在查询原任务结果，不重复提交'):'正在生成';
+        // The AI worker repolls the original receipt. Do not reset its durable output checkpoint here.
         pending=true;continue;
       }
       const submissionKey=randomUUID();
@@ -91,7 +99,7 @@ export async function advanceProductWorkflow({id,payload}, {findTask,createTask,
       catch(error) {
         if(!await findTask(taskId)) {
           results[node.id].status=[400,401,403,422].includes(Number(error.status||error.statusCode))?'failed':'unknown';
-          results[node.id].error=error.message;return {status:'failed',error:`${variant.label} / ${node.label}：${error.message}`};
+          results[node.id].error=error.message;return {status:results[node.id].status==='unknown'?'awaiting_review':'failed',error:`${variant.label} / ${node.label}：${error.message}`};
         }
         results[node.id].status='running';
       }

@@ -1,3 +1,4 @@
+import {createWorkflowJobPump} from './product-workflow-pump.js';
 import { workflowNodeSkipped } from '../shared/workflow-conditions.js';
 import { validateWorkflowCopy } from '../shared/workflow-copy-rules.js';
 import { randomUUID } from 'node:crypto';
@@ -5,7 +6,7 @@ import { mysqlExecute, mysqlQuery, withMysqlTransaction } from '../mysql-pool.js
 import { restoreBusinessTaskSession, authorizeBusinessTaskSession, assertBusinessTaskPermission } from './business-task-tenant.js';
 import { productWorkflowStore, importProductWorkflowDraft } from './product-workflows.js';
 import { createAiGenerationTasks, aiGenerationTasks, retryAiGenerationTask } from './ai-generation-tasks.js';
-import { advanceProductWorkflow, invalidateWorkflowResults } from './product-workflow-execution.js';
+import { advanceProductWorkflow, invalidateWorkflowResults, isConfirmedImageTaskFailure } from './product-workflow-execution.js';
 import { buildWorkflowDraft, workflowInputContext, workflowError } from '../shared/product-workflow.js';
 
 let schema;
@@ -18,7 +19,8 @@ export async function ensureProductWorkflowJobs() {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`).catch(error=>{schema=null;throw error;});
   await schema;
 }
-let timer,working=false;
+let timer;
+const pump=createWorkflowJobPump(processNextWorkflowJob,process.env.PRODUCT_WORKFLOW_CONCURRENCY||3);
 export async function startProductWorkflowRunner() {
   await ensureProductWorkflowJobs();
   if(timer)return;
@@ -35,8 +37,10 @@ export async function enqueueProductWorkflow(id,session) {
 }
 
 export async function tickProductWorkflowJobs() {
-  if(working)return;working=true;
-  try {
+  const results=await pump();
+  for(const result of results)if(result.status==='rejected')console.error('product workflow runner',result.reason?.message||result.reason);
+}
+async function processNextWorkflowJob() {
     const job=await withMysqlTransaction(async connection=>{
       const [rows]=await connection.execute(`SELECT * FROM product_workflow_jobs WHERE status IN ('queued', 'running')
         AND next_tick_at <= UTC_TIMESTAMP() AND (lease_until IS NULL OR lease_until < UTC_TIMESTAMP())
@@ -83,8 +87,8 @@ export async function tickProductWorkflowJobs() {
         }catch(error){await mysqlExecute("UPDATE product_workflow_jobs SET status = 'failed', error_message = ? WHERE tenant_id = ? AND run_id = ?",[`自动生成草稿失败：${error.message}`,job.tenant_id,job.run_id]);}
       }
     }catch(error){if(error.code!=='WORKFLOW_LEASE_LOST')await commit({status:'failed',error:error.message}).catch(e=>console.error('product workflow checkpoint',e.message));}
-  } finally {working=false;}
 }
+
 
 export async function productWorkflowAction(body,session) {
   const {tenant,actor}=await productWorkflowStore.scope(session);
@@ -117,7 +121,9 @@ export async function productWorkflowAction(body,session) {
         const retained={...state,text,approved:false};invalidateWorkflowResults(payload,variant.id,node.id);results[node.id]=retained;
       }else if(body.action==='retry') {
         if(['running','submitting'].includes(state?.status))throw workflowError('该节点仍在生成，请等待后台更新');
-        if(state?.status==='unknown')state.status='resubmit';
+        const original=node.type==='image'&&state?.taskId&&!state.url?(await aiGenerationTasks({taskIds:state.taskId,includePayload:1},actor))[0]:null;
+        if(body.recoverOnly&&isConfirmedImageTaskFailure(original)){state.status='failed';state.failureKind='provider_confirmed';state.error=original.error?.message||'供应商已确认失败，请确认后重新生成';}
+        else if(state?.status==='unknown'||node.type==='image'&&state?.taskId&&!state.url&&!isConfirmedImageTaskFailure(original))state.status='resubmit';
         else invalidateWorkflowResults(payload,variant.id,node.id);
       }else throw workflowError('不支持此任务操作');
     }else if(body.action==='approve-all') {
