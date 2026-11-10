@@ -28,7 +28,7 @@ export async function restoreBusinessTaskSession(tenantKey, personId, query = qu
   const lookup = listingTenantLookup(tenantKey);
   const person = Number(personId);
   if (!Number.isSafeInteger(person) || person <= 0) throw denied("后台任务未保存有效操作人员，不能自动恢复执行");
-  const rows = await query(`SELECT t.id, t.slug, tm.role AS tenant_role, tm.business_roles_json,
+  const rows = await query(`SELECT t.id, t.slug, t.plan_code, t.subscription_status, tm.role AS tenant_role, tm.business_roles_json,
       p.role AS legacy_role, p.roles_json
     FROM tenants t
     JOIN tenant_members tm ON tm.tenant_id = t.id AND tm.person_id = ? AND tm.active = 1
@@ -41,7 +41,7 @@ export async function restoreBusinessTaskSession(tenantKey, personId, query = qu
   if (!tenant) throw denied("任务所属企业、成员或订阅已不可用，请恢复授权后重试");
   const roles = getRoles({ roles: tenant.business_roles_json ?? tenant.roles_json ?? tenant.legacy_role });
   return { personId: person, roles, role: primaryRole(roles), tenant: {
-    id: Number(tenant.id), slug: tenant.slug,
+    id: Number(tenant.id), slug: tenant.slug, plan_code: tenant.plan_code, subscription_status: tenant.subscription_status,
     role: effectiveTenantMembershipRole({ ...tenant, tenant_slug: tenant.slug }), business_roles_json: tenant.business_roles_json
   } };
 }

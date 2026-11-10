@@ -14,7 +14,7 @@ function fixture(t, kind = "membership") {
   const auth = reactive({ user: { id: 1, platform_role: kind === "vouchers" ? "super_admin" : null, tenant: { id: 10, role: "owner", subscription_status: "unactivated", access_allowed: false } } });
   const request = name => new Promise((resolve, reject) => calls.push({ name, resolve, reject }));
   const context = vm.createContext({
-    computed, reactive, ref, watch, auth, useAuthStore: () => auth,
+    defineAsyncComponent: () => ({}), BETA_PLAN_PRICES_FEN: {}, computed, reactive, ref, watch, auth, useAuthStore: () => auth,
     defineProps: () => ({ plans: [{ code: "monthly", active: 1 }] }),
     useRoute: () => ({ query: {} }), useRouter: () => ({ push() {} }),
     currentApiCacheScope: () => scope, membershipDisplay, shanghaiDateTimeText: value => String(value),

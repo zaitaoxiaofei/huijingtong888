@@ -1,3 +1,4 @@
+import { planFeatures } from "../shared/subscription-plan-features.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
@@ -22,6 +23,7 @@ function storageName(url) {
   return name;
 }
 function permitted(session, purpose) {
+  if (!planFeatures(session?.tenant)[purpose === "finance" ? "finance" : "tasks"]) return false;
   return hasPermission(session, purpose === "finance" ? "finance" : "team");
 }
 
