@@ -1,3 +1,4 @@
+import { workflowRunIdentity } from '../shared/workflow-run-identity.js';
 import {starterWorkflow} from '../shared/workflow-starter.js';
 import {aiVehicleCatalog} from './ai-vehicle-catalog.js';
 import {bindMaterialToCatalog,requireCatalogBindings} from '../shared/workflow-catalog-bindings.js';
@@ -30,6 +31,10 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
   const map=row=>({id:row.id,name:row.name,revision:Number(row.revision),kind:row.kind,payload:JSON.parse(row.payload_json)});
   async function list(kind,session,options={}) {
     const {tenant,actor}=await scope(session);
+    if(['prompt','optimization'].includes(kind)){
+      const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' ORDER BY updated_at DESC LIMIT 500",[tenant,kind]);
+      return rows.map(row=>({...map(row),updated_at:row.updated_at}));
+    }
     if(kind==='library'||kind==='mapping'){
       const size=Math.max(1,Math.min(48,Number.parseInt(options.pageSize,10)||12)),keyword=String(options.keyword||'').trim().slice(0,200);
       const filters=["tenant_id = ?", "kind IN ('material','key_model')", "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false'"];
@@ -78,13 +83,14 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
       const rows=await query("SELECT * FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.archived')), 'false') = 'false' AND (name LIKE ? OR payload_json LIKE ?) ORDER BY updated_at DESC LIMIT 500",[tenant,kind,`%${keyword}%`,`%${keyword}%`]);
       return decorate(rows.map(map).filter(record=>!record.payload.archived),actor);
     }
-    return (await query(`SELECT id, name, revision, kind,
+    return (await query(`SELECT id, name, revision, kind, updated_at,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.draftId')) AS draft_id,
       JSON_LENGTH(JSON_EXTRACT(payload_json, '$.variants')) AS variant_count,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.variants[0].label')) AS product_label,
       JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.productionMode')) AS production_mode,
-      JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')) AS category_name
-      FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision)}));
+      COALESCE(JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.categoryName')), JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.definition.category.name'))) AS category_name,
+      JSON_EXTRACT(payload_json, '$.sharedValues.__fitments', '$.variants[*].values.__fitments') AS fitments_json
+      FROM product_workflow_documents WHERE tenant_id = ? AND kind = ? ORDER BY updated_at DESC LIMIT 100`,[tenant,kind])).map(row=>({...row,draft_id:row.draft_id==='null'?null:row.draft_id,revision:Number(row.revision),...workflowRunIdentity(row.fitments_json)}));
   }
   async function get(kind,id,session) {
     const {tenant,actor}=await scope(session);
@@ -96,6 +102,10 @@ export function createProductWorkflowStore({query=mysqlQuery,execute=mysqlExecut
     if(['material','key_model'].includes(kind)&&loadCatalog){const brands=await catalogFor(actor),bindings=requireCatalogBindings(Object.hasOwn(body.payload||{},'bindings')?body.payload.bindings:materialBindings(body.payload),brands);body={...body,payload:{...body.payload,brand:bindings[0]?.brand||'',model:bindings[0]?.models[0]||'',bindings}};}
     const payload=kind==='key_model'?normalizeWorkflowKeyModel(body.payload):kind==='material'?normalizeWorkflowMaterial(body.payload):body.payload;
     if(kind==="template")validateWorkflow(payload);
+    else if(['prompt','optimization'].includes(kind)) {
+      if(!payload || typeof payload !== 'object' || Array.isArray(payload) || !String(payload.name||'').trim())throw workflowError('请填写记录名称');
+      if(kind==='prompt' && (!['main','detail','title','tags','description'].includes(payload.category)||!String(payload.prompt||'').trim()))throw workflowError('请选择提示词分类并填写提示词');
+    }
     else if(!['key_model','material'].includes(kind)) {
       validateWorkflow(payload?.definition);
       validateWorkflowVariants(payload.definition,payload.variants);

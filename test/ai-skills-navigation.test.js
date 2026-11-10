@@ -12,12 +12,8 @@ const selection = readFileSync(new URL("../frontend/admin/views/selection/Select
 test("AI skills navigation uses the requested labels and ordering", () => {
   const aiSkills = navigation.match(/key: "ai-skills"[\s\S]*?\n  \},/)?.[0] || "";
   const expected = [
-    'label: "AI裂变"',
-    'label: "AI裂变案例库"',
-    'label: "AI优化"',
-    'label: "素材优化记录"',
-    'label: "AI素材"',
-    'label: "AI提示词库"'
+    'label: "AI模板工作流"', 'label: "AI裂变"', 'label: "AI优化"',
+    'label: "AI电商套图"', 'label: "AI生成记录"', 'label: "提示词库"'
   ];
   let previous = -1;
   for (const label of expected) {
@@ -33,7 +29,7 @@ test("AI skills navigation uses the requested labels and ordering", () => {
 test("removed AI content optimization route is no longer registered", () => {
   assert.doesNotMatch(router, /AiOptimizationWorkbenchV2View/);
   assert.doesNotMatch(router, /path: "ai-optimization-workbench-v2"/);
-  assert.match(router, /breadcrumb: \["AI技能库", "素材优化记录"\]/);
+  assert.match(router, /path: "ai-material-optimization-records".*redirect:.*source: "optimization"/);
 });
 
 test("operational page buttons use the new AI names and valid destinations", () => {

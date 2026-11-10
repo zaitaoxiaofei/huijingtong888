@@ -21,6 +21,8 @@ const routes = new Set([
   'GET team/development-projects', 'POST team/development-projects', 'GET team/development-candidates', 'POST team/development-candidates',
   'GET team/development-ideas', 'POST team/development-ideas', 'GET team/development-categories', 'POST team/attachments',
   'GET ai-generation/tasks', 'POST ai-generation/tasks',
+  'GET product-workflows/prompts', 'POST product-workflows/prompts',
+  'GET product-workflows/optimizations', 'POST product-workflows/optimizations',
   'GET product-workflows/templates', 'POST product-workflows/templates',
   'GET product-workflows/runs', 'POST product-workflows/runs', 'POST product-workflows/import-draft',
   'GET product-workflows/facts-history', 'GET product-workflows/material-library', 'GET product-workflows/mold-mappings', 'POST product-workflows/mold-mappings', 'GET product-workflows/key-model-matches',

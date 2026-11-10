@@ -10,14 +10,11 @@ const route = useRoute();
 const router = useRouter();
 
 const tabs = [
-  { label: "利润异常", route: "/exceptions/profit" },
-  { label: "订单超时", route: "/exceptions/deadline" },
-  { label: "超时预警", route: "/exceptions/deadline-warning" },
-  { label: "库存异常", route: "/exceptions/stock" },
+  { label: "库存不足", route: "/exceptions/stock" },
   { label: "未绑定库存", route: "/exceptions/binding" }
 ];
 
-const activeRoute = computed(() => tabs.find((item) => route.path === item.route)?.route || "/exceptions/profit");
+const activeRoute = computed(() => tabs.find((item) => route.path === item.route)?.route || "/exceptions/stock");
 
 function change(target) {
   if (target && target !== route.path) {
@@ -30,7 +27,7 @@ function change(target) {
   <el-card shadow="never" class="page-card exception-module-tabs-card" :class="{ 'is-compact': props.compact }">
     <div v-if="!props.compact" class="exception-module-tabs-card__head">
       <strong>异常页面</strong>
-      <span>5 个页面共用一套异常处理上下文。</span>
+      <span>处理库存不足和未绑定库存。</span>
     </div>
     <el-segmented
       :model-value="activeRoute"

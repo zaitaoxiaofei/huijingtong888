@@ -37,13 +37,13 @@ test("matrix operators in default and A/B enterprises receive the same workbench
   for (const id of [1, 2, 3]) for (const roles of [['operations'], ['packing'], ['procurement']]) {
     const user = { id: 90 + id, roles, tenant: { id, slug: id === 1 ? 'default' : `customer-${id}`, role: 'member' } };
     const disabled = vm.runInNewContext(expression, { authStore: { user }, hasPermission });
-    assert.equal(disabled, !roles.includes('operations'));
+    assert.equal(disabled, true);
     assert.equal(canAccessPage(user, '/asset-variant-center'), roles.includes('operations'));
   }
   assert.match(source, /<section v-if="!tenantConfigOnly" class="step-panel source-step"/);
   assert.match(source, /<section v-if="!tenantConfigOnly" class="step-panel step-results"/);
-  for (const action of ["exportPackages", "generateCurrentShop", "generateAllShops", "goToListingAutomation", "previewGeneratedResult"]) {
-    assert.match(source, new RegExp(`<el-button v-if="!tenantConfigOnly"[^>]*@click="${action}"`), action);
+  for (const action of ["exportPackages", "generateCurrentShop", "generateAllShops", "goToListingAutomation"]) {
+    assert.doesNotMatch(source, new RegExp(`<el-button[^>]*@click="${action}"`));
   }
   assert.match(source, /<el-button v-if="canManageMatrix"[^>]*@click="saveRule\(shop\)"/);
   assert.match(source, /<el-button v-if="canManageMatrix"[^>]*@click="openTailTemplateDialog\(\)"/);

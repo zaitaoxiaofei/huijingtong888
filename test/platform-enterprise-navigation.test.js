@@ -17,7 +17,7 @@ test("platform-only and enterprise-only identities receive separate navigation, 
   const platform = { platform_role: "super_admin", roles: ["admin"], tenant: null };
   const enterprise = { roles: ["admin"], tenant: { id: 42, slug: "company-a", role: "owner" } };
   const dual = { ...enterprise, platform_role: "super_admin" };
-  for (const route of ["/platform-accounts", "/tenant-management", "/order-cancellation-rules", "/settings/scheduled-jobs", "/settings/system-monitoring", "/settings/ai", "/ai-prompts"]) {
+  for (const route of ["/platform-accounts", "/tenant-management", "/order-cancellation-rules", "/settings/scheduled-jobs", "/settings/system-monitoring", "/settings/ai"]) {
     assert.ok(routesFor(platform).includes(route), route);
     assert.ok(!routesFor(enterprise).includes(route), route);
     assert.ok(routesFor(dual).includes(route), route);
@@ -29,14 +29,14 @@ test("platform-only and enterprise-only identities receive separate navigation, 
   }
   const group = nav.navigationMenusForRole(enterprise).find((item) => item.key === "tenant-shops");
   assert.equal(group.label, "企业店铺");
-  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/tenant-people", "/logistics-settings"]);
+  assert.deepEqual([...group.children.map((item) => item.route)], ["/tenant-shops", "/ai-credits", "/tenant-people", "/logistics-settings"]);
   const operator = { roles: ['operations'], tenant: { id: 42, slug: 'company-a', role: 'member' } };
   assert.ok(routesFor(operator).includes('/asset-variant-center'));
   assert.ok(!routesFor(operator).includes('/tenant-people'));
   assert.ok(!routesFor(operator).includes('/tenant-shops'));
-  assert.ok(nav.navigationMenusForRole(operator).find(item => item.key === 'ai-skills').children.some(item => item.route === '/asset-variant-center'));
+  assert.ok(nav.navigationMenusForRole(operator).find(item => item.key === 'products').children.some(item => item.route === '/asset-variant-center'));
   assert.ok(routesFor(operator).includes('/ai-materials'));
-  assert.ok(!routesFor(operator).includes('/ai-prompts'));
+  assert.ok(routesFor(operator).includes('/ai-prompts')); // visible but disabled with the customer's AI group
   assert.ok(routesFor(operator).includes('/tools/packaging-fee-rule'));
 });
 
@@ -52,7 +52,7 @@ test("shared settings use focused pages and legacy exchange settings no longer e
   const router = read("../frontend/admin/router/index.js");
   assert.match(router, /path: "tenant-people".*component: EnterprisePersonnelPanel/);
   assert.match(router, /path: "platform-accounts".*component: PlatformAccountsView/);
-  assert.match(router, /path: "ai-materials".*component: MaterialCenterView/);
+  assert.match(router, /path: "ai-materials".*AiGenerationRecordsView/);
   assert.match(router, /path: "ai-prompts".*component: AiPromptLibraryView/);
   assert.match(router, /rates: "\/dashboard"/);
   assert.match(router, /path: "tools\/packaging-fee-rule".*component: PackagingFeeRuleView/);

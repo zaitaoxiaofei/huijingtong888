@@ -1,3 +1,4 @@
+import { settlementOverdue } from '../shared/settlement-overdue.js';
 import { checkOzonHealth, recordOzonSyncHealth } from './ozon-credential-health-mysql.js';
 import { credentialVersion } from './ozon-credential-health.js';
 import { normalizeMobileDashboardDate, mobileDashboardPeriod } from '../shared/mobile-dashboard.js';
@@ -29417,6 +29418,9 @@ export async function pendingSettlementCostsMysql(query = {}) {
     OR LOWER(COALESCE(o.tracking_stage, '')) = 'posting_received'
     OR LOWER(COALESCE(o.logistics_status, '')) = 'delivered'
   )`];
+  if (String(query.overdue || '') === '1') {
+    where.push("o.delivered_at IS NOT NULL AND o.delivered_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 30 DAY) AND COALESCE(opi.profit_status, oi.settlement_state, '') <> 'accrued'");
+  }
   const params = [];
   if (from) { where.push(`${chinaDateSqlMysql("o.ordered_at")} >= ?`); params.push(from); }
   if (to) { where.push(`${chinaDateSqlMysql("o.ordered_at")} <= ?`); params.push(to); }
@@ -29485,7 +29489,7 @@ export async function pendingSettlementCostsMysql(query = {}) {
     ORDER BY o.delivered_at DESC, o.ordered_at DESC, oi.id DESC
     LIMIT 20000
   `, params);
-  const normalized = rows.map((row) => {
+  const normalized = rows.filter(row => String(query.overdue || '') !== '1' || settlementOverdue(row)).map((row) => {
     const reasons = [];
     if (Number(row.purchase_cost_cny || 0) <= 0.005) reasons.push("purchase");
     if (Number(row.international_shipping_cny || 0) <= 0.005) reasons.push("international");
@@ -29508,7 +29512,7 @@ export async function pendingSettlementCostsMysql(query = {}) {
       cost_total_cny: roundMoneyMysql(costTotal),
       calculated_profit_cny: roundMoneyMysql(Number(row.sale_amount_cny || 0) - costTotal)
     };
-  }).filter((row) => row.missing_reasons.length > 0)
+  }).filter((row) => String(query.overdue || '') === '1' || row.missing_reasons.length > 0)
     .filter((row) => missing === "all" || row.missing_reasons.includes(missing))
     .filter((row) => !keyword || `${row.posting_number} ${row.order_number} ${row.ozon_sku} ${row.ozon_name} ${row.product_code} ${row.product_name}`.toLowerCase().includes(keyword));
   const summary = normalized.reduce((acc, row) => {

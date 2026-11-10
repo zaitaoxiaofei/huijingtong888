@@ -36,8 +36,8 @@ const feeDefinitions = [
   ["estimated_profit", "预估利润", "profit"], ["calculated_profit_cny", "当前可计算利润", "profit"]
 ];
 function feeRows(row) { return feeDefinitions.map(([key, label, tone]) => ({ key, label, value: Number(row[key] || 0), tone, missing: row.missing_reasons?.includes({ purchase_cost_cny: "purchase", international_shipping_cny: "international", commission_fee_cny: "commission", collecting_fee_cny: "collecting" }[key]) })); }
-function params() { return new URLSearchParams({ shopId: state.filters.shopId, keyword: state.filters.keyword, missing: state.filters.missing, page: String(state.filters.page), pageSize: String(state.filters.pageSize) }); }
-async function loadData() { controller?.abort(); controller = new AbortController(); const signal = controller.signal; state.loading = true; try { const data = await apiClient.get(`/api/pending-settlement-costs?${params()}`, { signal, noCache: true }); if (signal.aborted) return; Object.assign(state, { rows: data.rows || [], shops: data.shops || [], total: Number(data.total || 0), itemTotal: Number(data.itemTotal || 0), totalPages: Number(data.totalPages || 1), summary: data.summary || {} }); } catch (error) { if (error?.name !== "AbortError") ElMessage.error(error.message || "待结算成本加载失败"); } finally { if (controller?.signal === signal) { controller = null; state.loading = false; } } }
+function params() { return new URLSearchParams({ overdue: "1", shopId: state.filters.shopId, keyword: state.filters.keyword, missing: state.filters.missing, page: String(state.filters.page), pageSize: String(state.filters.pageSize) }); }
+async function loadData() { controller?.abort(); controller = new AbortController(); const signal = controller.signal; state.loading = true; try { const data = await apiClient.get(`/api/pending-settlement-costs?${params()}`, { signal, noCache: true }); if (signal.aborted) return; Object.assign(state, { rows: data.rows || [], shops: data.shops || [], total: Number(data.total || 0), itemTotal: Number(data.itemTotal || 0), totalPages: Number(data.totalPages || 1), summary: data.summary || {} }); } catch (error) { if (error?.name !== "AbortError") ElMessage.error(error.message || "订单结算超时加载失败"); } finally { if (controller?.signal === signal) { controller = null; state.loading = false; } } }
 function search() { state.filters.page = 1; loadData(); }
 function editInventory(row) { const returnTo = route.fullPath || "/profit/pending-settlement-costs"; router.push({ path: "/inventory/products", query: { productId: String(row.product_id), openEdit: "1", recalculateAfterSave: "1", returnTo, source: "pending-settlement-costs" } }); }
 async function openOrderInventoryDialog(row, action = "bind") {
@@ -49,7 +49,7 @@ async function openOrderInventoryDialog(row, action = "bind") {
   });
 }
 async function handleInventoryCompleted() {
-  ElMessage.success("库存处理完成，已返回待结算成本");
+  ElMessage.success("库存处理完成，已返回订单结算超时");
   await loadData();
 }
 function orderStatusText(row) {
@@ -74,7 +74,7 @@ onMounted(loadData); onBeforeUnmount(() => controller?.abort());
 <template>
   <div class="page-stack pending-page">
     <div class="order-inventory-bridge" aria-hidden="true"><OrdersPage ref="orderInventoryBridge" @inventory-completed="handleInventoryCompleted" /></div>
-    <ErpPageHeader title="待结算成本" description="按库存商品归并问题订单；修改一次库存并批量重算后，所有关联订单会同步更新。展开商品可查看每笔订单的全部费用。">
+    <ErpPageHeader title="订单结算超时" description="签收超过 30 天仍未完成结算，按库存商品归并；修改一次库存并批量重算后，所有关联订单会同步更新。展开商品可查看每笔订单的全部费用。">
       <template #actions><el-button class="erp-btn erp-btn-secondary" @click="router.push('/profit/inventory-risks')">库存利润风险</el-button><el-button class="erp-btn erp-btn-secondary" @click="router.push('/profit/order-item-variances')">订单商品行差异</el-button></template>
     </ErpPageHeader>
     <section class="summary-strip"><div v-for="card in cards" :key="card.label"><span>{{ card.label }}</span><strong>{{ formatInteger(card.value) }}</strong></div></section>

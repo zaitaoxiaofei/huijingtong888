@@ -91,7 +91,7 @@ async function loadData() {
     state.total = Number(payload?.total || 0);
     state.totalPages = Number(payload?.totalPages || 1);
   } catch (error) {
-    if (error?.name !== "AbortError") ElMessage.error(error.message || "库存利润风险加载失败");
+    if (error?.name !== "AbortError") ElMessage.error(error.message || "库存利润异常加载失败");
   } finally {
     if (abortController?.signal === signal) {
       abortController = null;
@@ -164,7 +164,7 @@ onBeforeUnmount(() => abortController?.abort());
 
 <template>
   <div class="page-stack risk-page">
-    <ErpPageHeader title="库存利润风险" description="从库存资料问题开始处理，修改后立即重算利润并回看差异。">
+    <ErpPageHeader title="库存利润异常" description="从库存资料问题开始处理，修改后立即重算利润并回看差异。">
       <template #actions><el-button class="erp-btn erp-btn-secondary" :icon="Tickets" @click="router.push('/profit/order-item-variances')">订单商品行差异</el-button></template>
     </ErpPageHeader>
 

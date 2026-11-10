@@ -30,11 +30,9 @@ const ListingPublishRecordsView = () => import("../views/listing/ListingPublishR
 const CollectorBoxView = () => import("../views/listing/CollectorBoxView.vue");
 const AiVariantLabView = () => import("../views/listing/AiVariantLabView.vue");
 const AiVariantCaseLibraryView = () => import("../views/listing/AiVariantCaseLibraryView.vue");
-const AiProductMaterialOptimizerView = () => import("../views/listing/AiProductMaterialOptimizerView.vue");
+const AiProductMaterialOptimizerView = () => import("../views/listing/SimpleAiOptimizerView.vue");
 const AiEcommerceSuiteWorkbenchView = () => import("../views/listing/AiEcommerceSuiteWorkbenchView.vue");
-const WorkflowMaterialCenterView = () => import("../views/listing/WorkflowMaterialCenterView.vue");
 const ProductWorkflowView = () => import("../views/listing/ProductWorkflowView.vue");
-const AiMaterialOptimizationRecordsView = () => import("../views/listing/AiMaterialOptimizationRecordsView.vue");
 const ShopAssetVariantCenterView = () => import("../views/listing/ShopAssetVariantCenter.vue");
 const SelectionView = () => import("../views/selection/SelectionView.vue");
 const MonthlyBillingHubView = () => import("../views/profit/MonthlyBillingHubView.vue");
@@ -61,7 +59,6 @@ const PurchaseCostCenterView = () => import("../views/procurement/PurchaseCostCe
 const SettingsView = () => import("../views/settings/SettingsView.vue");
 const PackagingFeeRuleView = () => import("../views/tools/PackagingFeeRuleView.vue");
 const AiProviderSettingsView = () => import("../views/settings/AiProviderSettingsView.vue");
-const MaterialCenterView = () => import("../views/settings/MaterialCenterView.vue");
 const AiPromptLibraryView = () => import("../views/settings/AiPromptLibraryView.vue");
 const ScheduledJobsView = () => import("../views/settings/ScheduledJobsView.vue");
 const SystemMonitoringView = () => import("../views/settings/SystemMonitoringView.vue");
@@ -139,8 +136,8 @@ export const router = createRouter({
         { path: "exceptions/profit", name: "exceptions-profit", component: ProfitExceptionView, meta: { title: "利润异常", breadcrumb: ["待处理异常", "利润异常"] } },
         { path: "exceptions/deadline", name: "exceptions-deadline", component: DeadlineExceptionView, meta: { title: "订单超时", breadcrumb: ["待处理异常", "订单超时"] } },
         { path: "exceptions/deadline-warning", name: "exceptions-deadline-warning", component: DeadlineWarningExceptionView, meta: { title: "超时预警", breadcrumb: ["待处理异常", "超时预警"] } },
-        { path: "exceptions/stock", name: "exceptions-stock", component: StockExceptionView, meta: { title: "库存异常", breadcrumb: ["待处理异常", "库存异常"] } },
-        { path: "exceptions/binding", name: "exceptions-binding", component: BindingExceptionView, meta: { title: "未绑定 SKU", breadcrumb: ["待处理异常", "未绑定 SKU"] } },
+        { path: "exceptions/stock", name: "exceptions-stock", component: StockExceptionView, meta: { title: "库存不足", breadcrumb: ["待处理异常", "库存不足"] } },
+        { path: "exceptions/binding", name: "exceptions-binding", component: BindingExceptionView, meta: { title: "未绑定库存", breadcrumb: ["待处理异常", "未绑定库存"] } },
         {
           path: "inventory",
           name: "inventory",
@@ -162,16 +159,16 @@ export const router = createRouter({
           ]
         },
         { path: "online-products", name: "online-products", component: OnlineProductsView, meta: { title: "在线商品", breadcrumb: ["商品运营", "在线商品"] } },
-        { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵", breadcrumb: ["AI技能库", "店铺矩阵"] } },
+        { path: "asset-variant-center", name: "asset-variant-center", component: ShopAssetVariantCenterView, meta: { title: "店铺矩阵", breadcrumb: ["运营", "店铺矩阵"] } },
         { path: "asset-variant-center/create", name: "asset-variant-center-create", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }) },
         { path: "asset-variant-center/wizard", name: "asset-variant-center-wizard", redirect: (to) => ({ name: "ai-variant-lab", query: to.query }), meta: { title: "AI裂变", breadcrumb: ["AI技能库", "AI裂变"], tabKey: "workbench" } },
         { path: "ai-variant-lab", name: "ai-variant-lab", component: AiVariantLabView, meta: { title: "AI裂变", breadcrumb: ["AI技能库", "AI裂变"], tabKey: "workbench" } },
         { path: "ai-variant-cases", name: "ai-variant-cases", component: AiVariantCaseLibraryView, meta: { title: "裂变案例", breadcrumb: ["AI技能库", "裂变案例"], tabKey: "workbench" } },
         { path: "ai-product-material-optimizer", name: "ai-product-material-optimizer", component: AiProductMaterialOptimizerView, meta: { title: "AI优化", breadcrumb: ["AI技能库", "AI优化"], tabKey: "workbench" } },
         { path: "ai-ecommerce-suite", name: "ai-ecommerce-suite", component: AiEcommerceSuiteWorkbenchView, meta: { title: "AI电商套图", breadcrumb: ["AI技能库", "AI电商套图"], tabKey: "workbench" } },
-        { path: "workflow-materials", name: "workflow-materials", component: WorkflowMaterialCenterView, meta: { title: "企业生产资料库", breadcrumb: ["AI技能库", "企业生产资料库"] } },
-        { path: "product-workflows", name: "product-workflows", component: ProductWorkflowView, meta: { title: "产品模板工作流", breadcrumb: ["AI技能库", "产品模板工作流"] } },
-        { path: "ai-material-optimization-records", name: "ai-material-optimization-records", component: AiMaterialOptimizationRecordsView, meta: { title: "素材优化记录", breadcrumb: ["AI技能库", "素材优化记录"] } },
+        { path: "workflow-materials", name: "workflow-materials", redirect: { path: "/product-workflows", query: { tab: "materials" } }, meta: { title: "企业生产资料库", breadcrumb: ["AI技能库", "企业生产资料库"] } },
+        { path: "product-workflows", name: "product-workflows", component: ProductWorkflowView, meta: { title: "AI模板工作流", breadcrumb: ["AI技能库", "AI模板工作流"] } },
+        { path: "ai-material-optimization-records", name: "ai-material-optimization-records", redirect: to => ({path: "/ai-materials", query: {...to.query, source: "optimization"}}), meta: { title: "AI生成记录", breadcrumb: ["AI技能库", "AI生成记录"] } },
         { path: "listing-automation", name: "listing-automation", component: ListingAutomationView, meta: { title: "商品上架", breadcrumb: ["商品运营", "商品上架"], tabKey: "workbench" } },
         { path: "collector-box", name: "collector-box", component: CollectorBoxView, meta: { title: "采集箱", breadcrumb: ["商品运营", "采集箱"], tabKey: "workbench" } },
         { path: "listing-records", name: "listing-records", component: ListingPublishRecordsView, meta: { title: "草稿箱", breadcrumb: ["商品运营", "草稿箱"], recordMode: "drafts" } },
@@ -201,9 +198,9 @@ export const router = createRouter({
         { path: "profit/monthly-billing", name: "profit-monthly-billing", component: MonthlyBillingHubView, meta: { title: "月度账单", breadcrumb: ["财务中心", "月度账单"] } },
         { path: "profit/monthly-billing/orders", redirect: (to) => ({ path: "/profit/monthly-billing", query: { ...to.query, tab: "orders" } }) },
         { path: "profit/reconciliation", redirect: "/profit/inventory-risks" },
-        { path: "profit/inventory-risks", name: "profit-inventory-risks", component: ProfitInventoryRisksView, meta: { title: "库存利润风险", breadcrumb: ["财务中心", "利润分析", "库存利润风险"] } },
+        { path: "profit/inventory-risks", name: "profit-inventory-risks", component: ProfitInventoryRisksView, meta: { title: "库存利润异常", breadcrumb: ["财务中心", "利润分析", "库存利润异常"] } },
         { path: "profit/order-item-variances", name: "profit-order-item-variances", component: ProfitOrderItemVariancesView, meta: { title: "订单商品行差异", breadcrumb: ["财务中心", "利润分析", "订单商品行差异"] } },
-        { path: "profit/pending-settlement-costs", name: "pending-settlement-costs", component: PendingSettlementCostsView, meta: { title: "待结算成本", breadcrumb: ["财务中心", "利润分析", "待结算成本"] } },
+        { path: "profit/pending-settlement-costs", name: "pending-settlement-costs", component: PendingSettlementCostsView, meta: { title: "订单结算超时", breadcrumb: ["财务中心", "利润分析", "订单结算超时"] } },
         { path: "profit/sku-ranking", redirect: "/profit/monthly-billing" },
         { path: "profit/shop-ranking", redirect: "/profit/monthly-billing" },
         { path: "advertising/daily", name: "advertising-daily", component: AdvertisingDailyView, meta: { title: "广告分析", breadcrumb: ["数据看板", "广告分析"] } },
@@ -230,14 +227,14 @@ export const router = createRouter({
         { path: "settings/system-monitoring", name: "settings-system-monitoring", component: SystemMonitoringView, meta: { title: "系统监控", breadcrumb: ["系统管理", "系统监控"] } },
         { path: "settings/ai", name: "settings-ai", component: AiProviderSettingsView, meta: { title: "AI 设置", breadcrumb: ["系统管理", "AI 设置"] } },
         { path: "settings/materials", name: "settings-materials", redirect: "/ai-materials" },
-        { path: "ai-materials", name: "ai-materials", component: MaterialCenterView, meta: { title: "AI素材", breadcrumb: ["AI技能库", "AI素材"] } },
+        { path: "ai-materials", name: "ai-materials", component: () => import("../views/listing/AiGenerationRecordsView.vue"), meta: { title: "AI生成记录", breadcrumb: ["AI技能库", "AI生成记录"] } },
         { path: "tenant-management", name: "tenant-management", component: TenantSubscriptionView, meta: { title: "企业与授权", breadcrumb: ["企业与授权"] } },
         { path: "tenant-shops", name: "tenant-shops", component: TenantShopsView, meta: { title: "企业店铺", breadcrumb: ["企业管理", "店铺管理"] } },
         { path: "tenant-people", name: "tenant-people", component: EnterprisePersonnelPanel, meta: { title: "企业人员", breadcrumb: ["企业管理", "企业人员"] } },
         { path: "platform-accounts", name: "platform-accounts", component: PlatformAccountsView, meta: { title: "平台人员", breadcrumb: ["平台管理", "平台人员"] } },
         { path: "settings/tenants", name: "settings-tenants", redirect: (to) => ({ path: "/tenant-management", query: to.query }) },
         { path: "settings/prompts", name: "settings-prompts", redirect: "/ai-prompts" },
-        { path: "ai-prompts", name: "ai-prompts", component: AiPromptLibraryView, meta: { title: "AI提示词库", breadcrumb: ["AI技能库", "AI提示词库"] } },
+        { path: "ai-prompts", name: "ai-prompts", component: AiPromptLibraryView, meta: { title: "提示词库", breadcrumb: ["AI技能库", "提示词库"] } },
         { path: "tools/product-video-generator", name: "tools-product-video-generator", component: ProductVideoGeneratorView, meta: { title: "商品视频", breadcrumb: ["实用工具", "商品视频"] } },
         { path: "tools/pricing", name: "tools-pricing", component: PricingToolView, meta: { title: "定价工具", breadcrumb: ["实用工具", "定价工具"] } },
         { path: "tools/profit-calculator", name: "tools-profit-calculator", component: ProfitCalculatorView, meta: { title: "利润计算器", breadcrumb: ["实用工具", "利润计算器"] } },

@@ -1,6 +1,6 @@
 ﻿<script setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { Camera, Collection, DocumentChecked, Picture, Plus, Refresh } from "@element-plus/icons-vue";
 import { apiClient } from "../../utils/api";
@@ -11,6 +11,7 @@ import AiProductImportDialog from "../../components/listing/AiProductImportDialo
 import { parseQuickTargets, quickTargetsFromQuery } from "../../utils/ai-variant-quick-targets.js";
 
 const route = useRoute();
+const router = useRouter();
 const currentStep = ref("material");
 const planTableRef = ref(null);
 const queueTableRef = ref(null);
@@ -2977,15 +2978,11 @@ function uploadRowMainImageRequest(row) {
     <header class="lab-header">
       <div>
         <h1>AI裂变</h1>
-        <p>测试页：验证从一个母 SKU 到多个目标车型的半自动闭环，稳定后再接入正式 AI 裂变。</p>
+
       </div>
       <div class="header-tools">
         <el-button :icon="Collection" @click="openHistory">裂变记录</el-button>
-        <div class="header-stats">
-          <div><span>目标车型</span><strong>{{ targetModels.length }}</strong></div>
-          <div><span>已选任务</span><strong>{{ selectedCount }}</strong></div>
-          <div><span>文案成本</span><strong>¥{{ textCost.toFixed(4) }}</strong><small>不含图片请求</small></div>
-        </div>
+        <el-button @click="router.push('/ai-variant-cases')">资料库</el-button>
       </div>
     </header>
 
@@ -3168,7 +3165,7 @@ function uploadRowMainImageRequest(row) {
               </div>
             </div>
             <div class="selected-targets-bar">
-              <div class="selected-targets-heading"><strong>已选目标</strong><div><el-button v-if="targetModels.length" link type="danger" size="small" @click="setTargetModels([])">清空</el-button><el-button link type="primary" size="small" @click="manualTargetExpanded = !manualTargetExpanded">{{ manualTargetExpanded ? "收起手工输入" : "手工补充" }}</el-button></div></div>
+              <div class="selected-targets-heading"><strong>已选目标 · {{ targetModels.length }} 个型号</strong><div><el-button v-if="targetModels.length" link type="danger" size="small" @click="setTargetModels([])">清空</el-button><el-button link type="primary" size="small" @click="manualTargetExpanded = !manualTargetExpanded">{{ manualTargetExpanded ? "收起手工输入" : "手工补充" }}</el-button></div></div>
               <div class="selected-target-chips">
                 <el-tag v-for="target in targetModels" :key="target" closable effect="plain" @close="removeTargetModel(target)">{{ target }}</el-tag>
                 <span v-if="!targetModels.length">还没有选择目标型号</span>

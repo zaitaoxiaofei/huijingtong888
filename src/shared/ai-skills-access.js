@@ -1,6 +1,6 @@
 export const AI_SKILLS_DISABLED_MESSAGE = "当前企业暂未开放 AI 技能库，开放时间请联系平台管理员";
 const pages = [
-  "/ai-variant-lab", "/ai-variant-cases", "/ai-product-material-optimizer", "/asset-variant-center",
+  "/ai-variant-lab", "/ai-variant-cases", "/ai-product-material-optimizer",
   "/ai-ecommerce-suite", "/workflow-materials", "/product-workflows", "/ai-material-optimization-records",
   "/ai-materials", "/ai-prompts", "/settings/prompts", "/settings/materials"
 ];
@@ -14,6 +14,7 @@ export function isAiSkillsPage(path = "") {
   return pages.some(page => pathname === page || pathname.startsWith(page + "/"));
 }
 export function aiSkillsApiDecision(session, parts, method = "GET") {
+  if (parts[1] === 'asset-variant-engine' && parts.length === 3 && ['rules','tail-templates'].includes(parts[2]) && String(method).toUpperCase() === 'POST') return { allowed: true };
   if (!session?.tenant?.id || !resources.has(parts[1]) || ["GET", "HEAD"].includes(String(method).toUpperCase()) || parts.at(-1) === "cancel" || aiSkillsAvailable(session)) return { allowed: true };
   return { allowed: false, code: "AI_SKILLS_DISABLED", error: AI_SKILLS_DISABLED_MESSAGE };
 }

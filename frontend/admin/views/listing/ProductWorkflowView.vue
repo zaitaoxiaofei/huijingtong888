@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { apiClient } from '../../utils/api.js';
 import { uploadListingMedia } from '../../api/tools/imageCropper.js';
@@ -25,7 +25,7 @@ import { isWorkflowInput, workflowDefault, expandWorkflowVariants } from '../../
 
 const productionName=ref('');
 const shops=ref([]),productionMode=ref('single'),fitmentMode=ref('shared');
-const router=useRouter(),tab=ref('library'),templates=ref([]),runs=ref([]),jobs=ref([]),listingTemplates=ref([]);
+const route=useRoute(),router=useRouter(),tab=ref(['materials','results','tasks'].includes(route.query.tab)?route.query.tab:'library'),templates=ref([]),runs=ref([]),jobs=ref([]),listingTemplates=ref([]);
 const templateDocument=ref(null),definition=ref(blankWorkflow()),categoryId=ref(null),selectedCategoryKey=ref(''),selectedCategory=ref(null);
 const keyModelChoices=ref([]),editorOpen=ref(false),templateSearch=ref('');
 const templatePage=ref(1),templatePageSize=ref(12),templateTotal=ref(0),templateLoading=ref(false);let templateSequence=0,searchTimer;
@@ -54,7 +54,7 @@ async function action(work){if(busy.value)return;busy.value=true;try{await work(
 async function loadTemplates(){const seq=++templateSequence;templateLoading.value=true;try{const params=new URLSearchParams({page:templatePage.value,pageSize:templatePageSize.value,keyword:templateSearch.value.trim()});const result=await apiClient.get(`/api/product-workflows/templates?${params}`,{noCache:true});if(seq!==templateSequence)return;templates.value=result.items||result;templateTotal.value=result.total??templates.value.length;templatePage.value=result.page||1;}finally{if(seq===templateSequence)templateLoading.value=false;}}
 async function refreshLists(){const [,runRows,jobRows]=await Promise.all([loadTemplates(),apiClient.get('/api/product-workflows/runs',{noCache:true}),apiClient.get('/api/product-workflows/job-states',{noCache:true})]);runs.value=runRows;jobs.value=jobRows;}
 
-onMounted(()=>{action(async()=>{await refreshLists();listingTemplates.value=await apiClient.get('/api/listing/templates');shops.value=(await apiClient.get('/api/shops')).filter(s=>s.status!=='deleted');});pollTimer=setInterval(poll,4000);});
+onMounted(()=>{action(async()=>{await refreshLists();if(route.query.runId){runDocument.value=await apiClient.get('/api/product-workflows/runs?id='+encodeURIComponent(String(route.query.runId)),{noCache:true});tab.value='results';}listingTemplates.value=await apiClient.get('/api/listing/templates');shops.value=(await apiClient.get('/api/shops')).filter(s=>s.status!=='deleted');});pollTimer=setInterval(poll,4000);});
 onUnmounted(()=>{clearInterval(pollTimer);clearTimeout(searchTimer);templateSequence++;});
 async function poll(){if(polling||busy.value||reviewEditing.value||!['tasks','results'].includes(tab.value))return;polling=true;try{await refreshLists();if(runDocument.value)runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});}catch{/* Explicit refresh reports failures; retain the last visible state on transient network errors. */}finally{polling=false;}}
 function resetMaterials(){productionName.value=definition.value.name;fitmentMode.value='shared';sharedValues.value=Object.fromEntries(sharedInputs.value.map(n=>[n.id,workflowDefault(n)]));variants.value=[freshVariant(0)];}
@@ -126,14 +126,14 @@ async function submitProduction(){await action(async()=>{
 });}
 async function openRun(id,completed=false){await action(async()=>{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(id)}`,{noCache:true});tab.value=completed?'results':'tasks';});}
 async function runAction(body){await action(async()=>{if(body.action==='retry'&&runDocument.value.payload.outputs[body.variantId]?.[body.nodeId]?.status!=='unknown'){try{await ElMessageBox.confirm('重生成会清除依赖本节点的后续结果，并重新调用 AI。是否继续？','重生成',{type:'warning'});}catch{return;}}runDocument.value=await apiClient.post('/api/product-workflows/run-action',body);await refreshLists();});}
-async function finishProduction(){await action(async()=>{try{await ElMessageBox.confirm('我已检查全部变体的套图、文案和属性，确认完成生产并生成上架草稿。','整套人工检查',{confirmButtonText:'确认完成',type:'info'});}catch{return;}if(runDocument.value.payload.draftImportStatus!=='unknown')runDocument.value=await apiClient.post('/api/product-workflows/run-action',{id:runDocument.value.id,action:'approve-all'});try{await apiClient.post('/api/product-workflows/import-draft',{id:runDocument.value.id});}finally{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});await refreshLists();}tab.value='results';ElMessage.success('生产完成，已生成操作箱草稿；可预览编辑并选择店铺上架');});}
+async function finishProduction(){await action(async()=>{try{await ElMessageBox.confirm('我已检查全部变体的套图、文案和属性，确认完成生产并生成上架草稿。','整套人工检查',{confirmButtonText:'确认完成',type:'info'});}catch{return;}if(runDocument.value.payload.draftImportStatus!=='unknown')runDocument.value=await apiClient.post('/api/product-workflows/run-action',{id:runDocument.value.id,action:'approve-all'});try{await apiClient.post('/api/product-workflows/import-draft',{id:runDocument.value.id});}finally{runDocument.value=await apiClient.get(`/api/product-workflows/runs?id=${encodeURIComponent(runDocument.value.id)}`,{noCache:true});await refreshLists();}tab.value='results';ElMessage.success('生产完成，已生成草稿箱草稿；可预览编辑并选择店铺上架');});}
 function openDraft(id){router.push({path:'/listing-automation',query:{draftId:id}});}
 watch(tab,()=>{reviewEditing.value=false;});
 </script>
 
 <template>
   <div class="workflow-page" v-loading="busy" :element-loading-text="busyLabel||'正在保存'">
-    <header class="page-heading"><div><h2>产品模板工作流</h2><p>选择模板，上传产品图片，后台生成套图和文案，检查后上架。</p></div><el-tag effect="plain">流程可复用 · 支持多变体</el-tag></header>
+    <header class="page-heading"><h2>AI模板工作流</h2></header>
     <el-tabs v-model="tab">
       <el-tab-pane label="已有流程" name="library" class="workflow-library-pane">
         <div class="toolbar"><h3>选择流程开始生产</h3><el-button type="primary" @click="newTemplate">新建一个流程</el-button><el-button @click="importInput.click()">导入流程文件</el-button><el-button @click="openKeyLibrary()">企业生产资料库</el-button></div>
@@ -159,14 +159,15 @@ watch(tab,()=>{reviewEditing.value=false;});
       </el-tab-pane>
       <el-tab-pane :label="`生产任务／待人工检查${taskRows.length?' · '+taskRows.length:''}`" name="tasks">
         <div class="toolbar"><h3>后台生产与人工检查</h3><el-button @click="action(refreshLists)">刷新任务</el-button></div>
-        <el-table :data="taskRows" empty-text="暂无生产任务，从已有流程开始生产"><el-table-column prop="name" label="流程" min-width="180"/><el-table-column prop="product_label" label="产品／首个变体" min-width="150"/><el-table-column label="变体" width="80"><template #default="{row}">{{ row.variant_count||'—' }}</template></el-table-column><el-table-column label="状态" min-width="150"><template #default="{row}"><el-tag :type="stateFor(row.id).status==='failed'?'danger':stateFor(row.id).status==='awaiting_review'?'warning':'info'">{{ statusLabels[stateFor(row.id).status]||'待提交后台' }}</el-tag></template></el-table-column><el-table-column label="操作" min-width="200"><template #default="{row}"><el-button type="primary" text @click="openRun(row.id)">{{ stateFor(row.id).status==='awaiting_review'?'进入人工预览':'查看进度／处理' }}</el-button></template></el-table-column></el-table>
+        <el-table :data="taskRows" empty-text="暂无生产任务，从已有流程开始生产"><el-table-column prop="category_name" label="类目" min-width="150" show-overflow-tooltip/><el-table-column prop="name" label="流程名称" min-width="200"/><el-table-column prop="brands" label="品牌" min-width="140"/><el-table-column prop="models" label="型号" min-width="180" show-overflow-tooltip/><el-table-column prop="product_label" label="产品／首个变体" min-width="150"/><el-table-column label="变体" width="80"><template #default="{row}">{{ row.variant_count||'—' }}</template></el-table-column><el-table-column label="状态" min-width="150"><template #default="{row}"><el-tag :type="stateFor(row.id).status==='failed'?'danger':stateFor(row.id).status==='awaiting_review'?'warning':'info'">{{ statusLabels[stateFor(row.id).status]||'待提交后台' }}</el-tag></template></el-table-column><el-table-column label="操作" min-width="200"><template #default="{row}"><el-button type="primary" text @click="openRun(row.id)">{{ stateFor(row.id).status==='awaiting_review'?'进入人工预览':'查看进度／处理' }}</el-button></template></el-table-column></el-table>
         <section v-if="runDocument&&!runDocument.payload.draftId" class="run-detail"><div class="toolbar"><el-button v-if="!stateFor(runDocument.id).status" @click="runAction({id:runDocument.id,action:'start'})">提交后台执行</el-button><el-tag>{{ statusLabels[currentJob.status]||'等待后台执行' }}</el-tag></div><WorkflowRunReview :record="runDocument" :job="currentJob" :busy="busy" @action="runAction" @finish="finishProduction" @open-draft="openDraft" @editing="reviewEditing=$event"/></section>
       </el-tab-pane>
       <el-tab-pane label="生产结果" name="results">
         <div class="toolbar"><h3>已完成的商品</h3><el-button @click="action(refreshLists)">刷新结果</el-button></div>
-        <el-table :data="resultRows" empty-text="人工检查通过并完成生产后，商品会出现在这里"><el-table-column prop="name" label="流程" min-width="180"/><el-table-column label="状态" min-width="150"><template #default>已生成操作箱草稿</template></el-table-column><el-table-column label="操作" min-width="230"><template #default="{row}"><el-button text @click="openRun(row.id,true)">查看完整产出</el-button><el-button type="primary" @click="openDraft(row.draft_id)">预览并上架</el-button></template></el-table-column></el-table>
+        <el-table :data="resultRows" empty-text="人工检查通过并完成生产后，商品会出现在这里"><el-table-column prop="category_name" label="类目" min-width="150" show-overflow-tooltip/><el-table-column prop="name" label="流程名称" min-width="200"/><el-table-column prop="brands" label="品牌" min-width="140"/><el-table-column prop="models" label="型号" min-width="180" show-overflow-tooltip/><el-table-column label="状态" min-width="150"><template #default>已生成草稿箱草稿</template></el-table-column><el-table-column label="操作" min-width="230"><template #default="{row}"><el-button text @click="openRun(row.id,true)">查看完整产出</el-button><el-button type="primary" @click="openDraft(row.draft_id)">预览并上架</el-button></template></el-table-column></el-table>
         <section v-if="runDocument?.payload.draftId" class="run-detail"><WorkflowRunReview :record="runDocument" :job="currentJob" @open-draft="openDraft"/></section>
       </el-tab-pane>
+      <el-tab-pane label="企业生产资料库" name="materials"><WorkflowMaterialLibrary v-if="tab==='materials'" standalone/></el-tab-pane>
     </el-tabs>
     <el-dialog v-model="keyLibraryOpen" title="企业生产资料库" width="1100px" top="4vh" append-to-body><WorkflowMaterialLibrary v-if="keyLibraryOpen" :category="category" :seed="keyLibrarySeed" :selectable="Boolean(keyLibrarySeed.target)" @select="selectLibraryKey" @saved="keyLibraryRevision++;loadKeyChoices()"/></el-dialog>
     <input ref="importInput" type="file" accept=".json" hidden @change="importTemplate"/>
