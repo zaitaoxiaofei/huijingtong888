@@ -7,6 +7,7 @@ import { currentApiCacheScope } from "../utils/api";
 import { membershipDisplay } from "../utils/account-membership";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { canAccessPage } from "../../../src/shared/permissions.js";
+import AiCreditsPanel from "../components/AiCreditsPanel.vue";
 import MembershipActivationForm from "../components/MembershipActivationForm.vue";
 
 const props = defineProps({ embedded: { type: Boolean, default: false } });
@@ -87,7 +88,7 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
         <el-empty v-else :image-size="64" :description="status.kind === 'permanent' ? '当前授权无需兑换时长' : status.kind === 'suspended' ? '会员已暂停，请联系平台管理员' : tenant ? '请联系企业负责人激活或续期会员' : '平台账号无需开通企业会员'" />
       </el-card>
     </div>
-    <el-card v-if="tenant" shadow="never"><template #header><strong>AI积分</strong></template><p>查看企业积分余额、充值和使用记录。积分与会员时长分别管理，充值不会自动开放 AI 技能库。</p><el-button :disabled="!canAccessPage(auth.user, '/ai-credits')" @click="router.push('/ai-credits')">查看AI积分</el-button></el-card>
+    <el-collapse v-if="tenant && canAccessPage(auth.user, '/ai-credits')"><el-collapse-item title="AI积分 · 余额与使用记录" name="credits"><AiCreditsPanel /></el-collapse-item></el-collapse>
     <el-card shadow="never" class="membership-start">
       <template #header><strong>首次使用，按这三步开始</strong></template>
       <ol><li><strong>开通试用或会员</strong><p>向服务人员领取会员激活码，在上方兑换。套餐期限和店铺额度以实际开通结果为准，注册不会自动收费。</p></li>

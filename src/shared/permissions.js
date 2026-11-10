@@ -66,7 +66,7 @@ export function pagePermission(path = "") {
   if(path==='/inventory/product-requests')return 'inventory.write';
   if (["/mobile/inventory-capital", "/mobile/finance", "/mobile/monthly-billing"].includes(path)) return "finance";
   if (path === "/finance/reimbursements") return "common";
-  if (["/ai-prompts", "/order-cancellation-rules"].includes(path)) return "platform.admin";
+  if (["/order-cancellation-rules"].includes(path)) return "platform.admin";
   if (["/tools/packaging-fee-rule", "/logistics-settings"].includes(path)) return "inventory.read";
   if (["/dashboard", "/onboarding", "/login", "/membership"].includes(path)) return "common";
   if (["/tools/pricing", "/tools/profit-calculator"].includes(path)) return "common";

@@ -4,7 +4,7 @@ import { productWorkflowCategory, prepareProductWorkflowRun } from '../../servic
 
 export function createProductWorkflowRoutes({readJson,services,store=productWorkflowStore,enqueue=enqueueProductWorkflow}) {
   const routes={};
-  for(const [collection,kind] of [["templates","template"],["runs","run"]]) {
+  for(const [collection,kind] of [["templates","template"],["runs","run"],["prompts","prompt"],["optimizations","optimization"]]) {
     routes[`GET /api/product-workflows/${collection}`]=req=>req.query?.id
       ?store.get(kind,String(req.query.id),req._session):store.list(kind,req._session,req.query||{});
     routes[`POST /api/product-workflows/${collection}`]=async req=>store.save(kind,await readJson(req),req._session);

@@ -39,7 +39,8 @@ export const navigationMenus = [
       { key: "listing-publish-records", label: "上架记录", route: "/listing-publish-records" },
       { key: "online-products", label: "在线商品", route: "/online-products" },
       { key: "batch-stock-update", label: "批量改库存", route: "/batch-stock-update" },
-      { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" }
+      { key: "ozon-actions", label: "Ozon 活动", route: "/ozon-actions" },
+      { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" }
     ]
   },
   {
@@ -47,19 +48,14 @@ export const navigationMenus = [
     label: "AI技能库",
     icon: MagicStick,
     children: [
+      { key: "product-workflows", label: "AI模板工作流", route: "/product-workflows" },
       { key: "ai-variant-lab", label: "AI裂变", route: "/ai-variant-lab" },
-      { key: "ai-variant-cases", label: "AI裂变案例库", route: "/ai-variant-cases" },
       { key: "ai-product-material-optimizer", label: "AI优化", route: "/ai-product-material-optimizer" },
-      { key: "asset-variant-center", label: "店铺矩阵", route: "/asset-variant-center" },
       { key: "ai-ecommerce-suite", label: "AI电商套图", route: "/ai-ecommerce-suite" },
-      { key: "workflow-materials", label: "企业生产资料库", route: "/workflow-materials" },
-      { key: "product-workflows", label: "产品模板工作流", route: "/product-workflows" },
-      { key: "ai-material-optimization-records", label: "素材优化记录", route: "/ai-material-optimization-records" },
-      { key: "ai-materials", label: "AI素材", route: "/ai-materials" },
-      { key: "ai-prompts", label: "AI提示词库", route: "/ai-prompts" }
+      { key: "ai-materials", label: "AI生成记录", route: "/ai-materials" },
+      { key: "ai-prompts", label: "提示词库", route: "/ai-prompts" }
     ]
   },
-  { key: "ai-credits", label: "AI积分", route: "/ai-credits", icon: Coin },
   {
     key: "orders",
     label: "订单",
@@ -100,13 +96,10 @@ export const navigationMenus = [
     label: "异常",
     icon: WarningFilled,
     children: [
-      { key: "exceptions-profit", label: "利润异常", route: "/exceptions/profit", adminOnly: true },
-      { key: "exceptions-deadline", label: "订单超时", route: "/exceptions/deadline" },
-      { key: "exceptions-deadline-warning", label: "超时预警", route: "/exceptions/deadline-warning" },
-      { key: "exceptions-stock", label: "库存异常", route: "/exceptions/stock" },
-      { key: "exceptions-binding", label: "未绑定 SKU", route: "/exceptions/binding" },
-      { key: "profit-inventory-risks", label: "库存利润风险", route: "/profit/inventory-risks", adminOnly: true },
-      { key: "pending-settlement-costs", label: "待结算成本", route: "/profit/pending-settlement-costs", adminOnly: true },
+      { key: "exceptions-stock", label: "库存不足", route: "/exceptions/stock" },
+      { key: "exceptions-binding", label: "未绑定库存", route: "/exceptions/binding" },
+      { key: "profit-inventory-risks", label: "库存利润异常", route: "/profit/inventory-risks", adminOnly: true },
+      { key: "pending-settlement-costs", label: "订单结算超时", route: "/profit/pending-settlement-costs", adminOnly: true },
       { key: "profit-order-item-variances", label: "订单商品行差异", route: "/profit/order-item-variances", adminOnly: true }
     ]
   },
@@ -129,6 +122,7 @@ export const navigationMenus = [
     icon: Setting,
     children: [
       { key: "tenant-shops", label: "店铺管理", route: "/tenant-shops" },
+      { key: "ai-credits", label: "AI积分", route: "/ai-credits", icon: Coin },
       { key: "tenant-people", label: "企业人员", route: "/tenant-people" },
       { key: "logistics-settings", label: "物流设置", route: "/logistics-settings" }
     ]

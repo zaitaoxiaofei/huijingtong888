@@ -57,7 +57,7 @@ const syncingCategories = ref(false);
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const tenantConfigOnly = computed(() => !authStore.user?.tenant?.id || !hasPermission(authStore.user, "operations"));
+const tenantConfigOnly = computed(() => true);
 const canManageMatrix = computed(() => isEnterpriseAdmin(authStore.user));
 const canManagePlatform = computed(() => isPlatformAdmin(authStore.user));
 const detailDragIndex = ref(null);
@@ -2103,7 +2103,7 @@ onBeforeUnmount(() => {
     <header class="workspace-header">
         <div>
           <h1>{{ tenantConfigOnly ? "店铺矩阵配置" : "店铺矩阵裂变" }}</h1>
-          <p>{{ tenantConfigOnly ? "维护本企业店铺的水印、尾图、价格和文案风格配置。" : "上传一套原始商品素材，按店铺规则批量生成标题、标签、描述、水印图、详情图和 listing 素材包。" }}</p>
+          <p>{{ tenantConfigOnly ? "维护本企业店铺模板和价格规则。" : "上传一套原始商品素材，按店铺规则批量生成标题、标签、描述、水印图、详情图和 listing 素材包。" }}</p>
           <div v-if="!tenantConfigOnly && generateJob.id" class="active-job-banner">
             <span>后台批量生成任务{{ generateJob.jobNo ? `：${generateJob.jobNo}` : "" }}</span>
             <strong>{{ generateJobProgressText }}</strong>
@@ -2117,13 +2117,7 @@ onBeforeUnmount(() => {
             <el-button size="small" type="primary" link @click="copyText(state.localOutputDir, '已复制路径')">复制路径</el-button>
           </div>
         </div>
-      <div class="header-actions">
-        <el-button :icon="Refresh" @click="loadBootstrap">刷新</el-button>
-        <el-button v-if="!tenantConfigOnly" :icon="Download" :disabled="!state.variants.length" @click="exportPackages">导出素材包</el-button>
-        <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate || !selectedShop" @click="generateCurrentShop">一键生成当前版本</el-button>
-        <el-button v-if="!tenantConfigOnly" type="primary" :loading="generating" :disabled="!canGenerate" @click="generateAllShops">批量生成全部店铺版本</el-button>
-        <el-button v-if="!tenantConfigOnly" type="success" :loading="importing" :disabled="!state.variants.length" @click="goToListingAutomation">编辑上架</el-button>
-      </div>
+
       <input v-if="!tenantConfigOnly" ref="folderInputRef" class="hidden-input" type="file" webkitdirectory directory multiple @change="onFolderImport">
       <input v-if="!tenantConfigOnly" ref="detailReplaceInputRef" class="hidden-input" type="file" accept="image/*" @change="onDetailReplaceInput">
     </header>
@@ -2299,7 +2293,7 @@ onBeforeUnmount(() => {
             <span class="step-index">{{ tenantConfigOnly ? 1 : 2 }}</span>
             <div>
               <h2>店铺模板</h2>
-              <p>这里主要负责每个店铺的水印、尾图和主图生成方案，价格和文案风格放到下方独立矩阵。</p>
+              <p>配置各店铺的水印、尾图和主图模板，价格规则在下方单独设置。</p>
             </div>
             <div class="step-actions">
               <el-button v-if="canManagePlatform" size="small" :loading="syncingCategories" @click="syncOzonCategories">同步 Ozon 真实类目</el-button>
@@ -2392,7 +2386,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <section class="step-panel matrix-panel">
+        <section v-if="false" class="step-panel matrix-panel">
           <div class="step-heading">
             <span class="step-index">{{ tenantConfigOnly ? 3 : 4 }}</span>
             <div>

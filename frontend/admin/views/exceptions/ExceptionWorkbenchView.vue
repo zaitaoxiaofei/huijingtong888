@@ -48,7 +48,7 @@ const configs = {
   profit: { label: "利润异常", tag: "danger", countKey: "profit", description: "优先处理利润为负的订单。" },
   deadline: { label: "订单超时异常", tag: "warning", countKey: "delivery_timeout", description: "优先处理已经超时的订单。" },
   deadline_warning: { label: "超时预警", tag: "warning", countKey: "delivery_warning", description: "提前处理临近超时的订单。" },
-  stock: { label: "库存异常", tag: "danger", countKey: "stock", description: "处理库存不足和库存预警问题。" },
+  stock: { label: "库存不足", tag: "danger", countKey: "stock", description: "处理库存不足和库存预警问题。" },
   binding: { label: "未绑定库存", tag: "info", countKey: "binding", description: "处理缺少库存绑定的订单。" }
 };
 

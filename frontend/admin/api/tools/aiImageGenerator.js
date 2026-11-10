@@ -126,7 +126,7 @@ export function generateAiWorkflow(payload) {
 export async function generateAiCommerceCopy(payload, options = {}) {
   const created = await apiClient.post("/api/ai-generation/tasks", {
     fieldKey: "commerceCopy",
-    sourceModule: "ai_commerce_copy",
+    sourceModule: options.sourceModule || "ai_commerce_copy",
     input: payload
   });
   const taskId = created?.taskId || created?.taskIds?.[0];

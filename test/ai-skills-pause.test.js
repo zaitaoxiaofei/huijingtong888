@@ -10,7 +10,7 @@ import { checkAiCreditProviderBoundary, withAiCreditProviderPermit } from '../sr
 const actor = (id, slug, extra = {}) => ({ personId: 9, roles: ['operations'], tenant: { id, slug, role: 'member', access_allowed: true }, ...extra });
 const customer = actor(1, 'customer-a', { platform_role: 'super_admin' });
 const internal = actor(7, 'default');
-const paths = ['/ai-variant-lab', '/ai-variant-cases', '/ai-product-material-optimizer', '/asset-variant-center', '/ai-ecommerce-suite', '/workflow-materials', '/product-workflows', '/ai-material-optimization-records', '/ai-materials', '/ai-prompts'];
+const paths = ['/ai-variant-lab', '/ai-variant-cases', '/ai-product-material-optimizer', '/ai-ecommerce-suite', '/workflow-materials', '/product-workflows', '/ai-material-optimization-records', '/ai-materials', '/ai-prompts'];
 
 test('only the actual default space keeps AI skills; platform authority and a low tenant ID do not override the pause', () => {
   for (const path of paths) {
@@ -31,7 +31,7 @@ test('customer AI menu stays visible and disabled while credits remain separatel
   const customerMenus=context.navigationMenusForRole(customer);
   const skills=customerMenus.find(menu=>menu.key==='ai-skills');
   assert.equal(skills.disabled,true);assert.ok(skills.children.length>0);assert.ok(skills.children.every(child=>child.disabled));
-  assert.ok(customerMenus.some(menu=>menu.route==='/ai-credits'&&!menu.disabled));
+  assert.ok(customerMenus.some(menu=>menu.children?.some(child=>child.route==='/ai-credits'&&!child.disabled)));
   assert.ok(!context.navigationMenusForRole(internal).find(menu=>menu.key==='ai-skills').disabled);
 });
 
@@ -54,4 +54,10 @@ test('queued jobs, retries and provider permits cannot spend for a non-default s
   assert.equal(storage,0);
   const billing=await checkAiCreditProviderBoundary(internal,'text',async sql=>sql.includes('FROM tenants')?[{id:7,slug:'default',feature_flags_json:{}}]:[]);
   assert.equal(billing.mode,'free');
+});
+
+test('configuration-only matrix can save reviewed tenant rules while generation stays paused',()=>{
+ assert.equal(permissions.canAccessPage(customer,'/asset-variant-center'),true);
+ assert.equal(access.aiSkillsApiDecision(customer,['api','asset-variant-engine','rules'],'POST').allowed,true);
+ assert.equal(access.aiSkillsApiDecision(customer,['api','asset-variant-engine','generate'],'POST').allowed,false);
 });

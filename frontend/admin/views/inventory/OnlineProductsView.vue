@@ -1038,7 +1038,7 @@ onDeactivated(() => {
               <div class="erp-inline-actions">
                 <template v-if="canOperate">
                   <el-button class="erp-btn-link" link type="primary" :loading="openingEditId === Number(row.id)" @click="openOnlineProductEditor(row)">编辑上架</el-button>
-                  <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'optimization')">AI优化</el-button>
+
                   <el-button class="erp-btn-link" link type="primary" @click="openOnlineProductAiWorkbench(row, 'variant')">AI裂变</el-button>
                   <el-button class="erp-btn-link erp-btn-link-danger" link type="danger" @click="archiveOnlineProduct(row)">归档商品</el-button>
                 </template>
