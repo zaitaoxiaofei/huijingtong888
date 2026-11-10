@@ -1,3 +1,4 @@
+import { planFeatures, planFeatureMessage, subscriptionApiFeature } from "../shared/subscription-plan-features.js";
 import { getRoles, hasPermission, isEnterpriseAdmin, isPlatformAdmin } from "../shared/permissions.js";
 import { isEnterpriseMessageRoute } from "./enterprise-message-paths.js";
 import { isOglDispatchRoute } from "./ogl-dispatch-paths.js";
@@ -20,6 +21,8 @@ export function authorizeApiRequest(req, parts = []) {
   const session = req._session;
   if (!session) return deny("未登录");
   if (parts[0] !== "api") return { allowed: true };
+  const feature = subscriptionApiFeature(parts);
+  if (session.tenant?.id && feature && !planFeatures(session.tenant)[feature]) return deny(planFeatureMessage(feature));
   if (parts[1] === "finance-submissions") {
     const access = financeSubmissionRoute(parts, String(req.method || "GET").toUpperCase());
     return session.tenant?.id && session.tenant?.slug && access && (access === "member" || canReviewFinance(session)) ? { allowed: true } : deny();

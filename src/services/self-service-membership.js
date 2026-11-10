@@ -1,3 +1,5 @@
+import { claimTenantTrial, tenantHasUsedTrial } from "./tenant-trial-eligibility.js";
+import { publicPlanDetails, BETA_PLAN_PRICES_FEN, isTrialPlan } from "../shared/subscription-plan-features.js";
 import { createHash, randomBytes } from "node:crypto";
 import { hashPassword, validatePasswordStrength } from "../auth-password.js";
 import { mysqlExecute, withMysqlTransaction } from "../mysql-pool.js";
@@ -136,6 +138,18 @@ export function createSelfServiceMembershipService(overrides = {}) {
     });
   }
 
+  async function catalog(session) {
+    await prepareSchema();
+    return deps.withMysqlTransaction(async connection => {
+      const { tenant } = await currentTenant(connection, session);
+      const [plans] = await connection.execute("SELECT code, name, duration_days, subscription_status, account_limit, shop_limit FROM tenant_plans WHERE active = 1 ORDER BY duration_days, id");
+      const [history] = await connection.execute(`SELECT id FROM tenant_subscription_vouchers WHERE used_by_tenant_id = ? AND status = 'used'
+        AND JSON_UNQUOTE(JSON_EXTRACT(plan_snapshot_json, '$.subscription_status')) = 'trial' LIMIT 1`, [Number(tenant.id)]);
+      const trialUsed = tenantHasUsedTrial(tenant) || history.length > 0;
+      return { tenant_id: Number(tenant.id), trial_used: trialUsed, plans: plans.filter(plan => Object.hasOwn(BETA_PLAN_PRICES_FEN, plan.code)).map(plan => ({ ...publicPlanDetails(plan), eligible: !isTrialPlan(plan) || !trialUsed })) };
+    });
+  }
+
   async function issueVoucher(body = {}, session) {
     if (!isPlatformAdmin(session)) fail("仅平台超级管理员可以管理会员激活码", 403);
     if (!body || typeof body !== "object" || Array.isArray(body)) fail("请选择有效套餐");
@@ -212,6 +226,7 @@ export function createSelfServiceMembershipService(overrides = {}) {
         || !Number.isInteger(snapshot.duration_days) || snapshot.duration_days < 1 || snapshot.duration_days > 36500
         || !["active", "trial"].includes(snapshot.subscription_status)
         || ![snapshot.member_limit, snapshot.shop_limit].every(value => value === null || (Number.isSafeInteger(value) && value >= 0))) fail("激活码套餐配置无效，请联系平台管理员");
+      await claimTenantTrial(connection, tenant, snapshot);
       const base = current.access_allowed ? Math.max(now, new Date(tenant.subscription_expires_at).getTime()) : now;
       const expiresAt = base + snapshot.duration_days * DAY_MS;
       await connection.execute(`UPDATE tenants SET plan_code = ?, subscription_status = ?, subscription_expires_at = ?,
@@ -224,7 +239,7 @@ export function createSelfServiceMembershipService(overrides = {}) {
     });
   }
 
-  return { register, membership, issueVoucher, listVouchers, revokeVoucher, activate };
+  return { register, membership, catalog, issueVoucher, listVouchers, revokeVoucher, activate };
 }
 
 export const selfServiceMembership = createSelfServiceMembershipService();

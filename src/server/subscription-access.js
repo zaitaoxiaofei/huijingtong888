@@ -1,3 +1,4 @@
+import { planFeatures, planFeatureMessage, subscriptionApiFeature } from "../shared/subscription-plan-features.js";
 import { isPlatformAdmin } from "../shared/permissions.js";
 
 const BASIC_REQUESTS = new Set([
@@ -6,6 +7,8 @@ const BASIC_REQUESTS = new Set([
 ]);
 
 export function subscriptionAccessDecision(session, parts = [], method = "GET") {
+  const feature = subscriptionApiFeature(parts);
+  if (session?.tenant?.id && feature && !planFeatures(session.tenant)[feature]) return { allowed: false, status: 403, code: "TENANT_PLAN_FEATURE_REQUIRED", error: planFeatureMessage(feature) };
   if (isPlatformAdmin(session) || parts[1] === "auth" || session?.tenant?.access_allowed) return { allowed: true };
   const key = `${String(method).toUpperCase()} ${parts.slice(1).join("/")}`;
   if (session?.tenant?.id && BASIC_REQUESTS.has(key)) return { allowed: true };

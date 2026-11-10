@@ -44,6 +44,13 @@ function fixture() {
       .filter(member => state.people.find(person => person.id === member.person_id)?.active === 1)
       .map(member => ({ tenant_role: member.role, business_roles_json: member.business_roles_json, legacy_role: "operator", roles_json: '["operator"]' }))];
     if (sql.startsWith("SELECT pg.person_id")) return [state.grants.filter(grant => grant.person_id === params[0] && grant.active === 1 && state.people.find(person => person.id === grant.person_id)?.active === 1)];
+    if (sql.startsWith("SELECT code, name, duration_days")) return [state.plans.filter(plan => plan.active === 1)];
+    if (sql.startsWith("SELECT id FROM tenant_subscription_vouchers")) return [state.vouchers.filter(voucher => voucher.used_by_tenant_id === params[0] && voucher.status === "used" && voucher.plan_snapshot_json.subscription_status === "trial").map(voucher => ({ id: voucher.id }))];
+    if (sql.startsWith("UPDATE tenants SET feature_flags_json")) {
+      const tenant = state.tenants.find(tenant => tenant.id === params[0]);
+      tenant.feature_flags_json = { ...tenant.feature_flags_json, beta_trial_used: true };
+      return [{ affectedRows: 1 }];
+    }
     if (sql.startsWith("SELECT * FROM tenant_plans")) return [state.plans.filter(plan => plan.code === params[0] && plan.active === 1)];
     if (sql.startsWith("INSERT INTO tenant_subscription_vouchers")) {
       const id = state.vouchers.length + 1;
@@ -271,7 +278,7 @@ test("registration auth route returns the resolved unactivated session and rate-
 });
 
 test("membership auth APIs reject unauthenticated requests and activation throttles before reading a secret", async () => {
-  for (const [method, path] of [["GET", "membership"], ["POST", "activate"]]) {
+  for (const [method, path] of [["GET", "membership"], ["GET", "membership-plans"], ["POST", "activate"]]) {
     const req = { method, headers: {} };
     const result = await createAuthHandler(async () => { throw new Error("Must not read body"); }, { getSession: async () => null })(req, new URL(`http://localhost/api/auth/${path}`))();
     assert.equal(result.__status, 401);
@@ -280,4 +287,52 @@ test("membership auth APIs reject unauthenticated requests and activation thrott
   const req = { method: "POST", headers: { authorization: "Bearer test-token" } };
   const result = await createAuthHandler(async () => { throw new Error("Must not read body"); }, { getSession: async () => ({ personId: 2 }), getClientIp: () => "test-ip", consumeRateLimit: () => ({ allowed: false }) })(req, new URL("http://localhost/api/auth/activate"))();
   assert.equal(result.__status, 429);
+});
+
+test('trial choices share one durable enterprise claim and concurrent distinct vouchers have one winner', async () => {
+  const f=fixture(), session=await f.register('-trial');
+  f.state.plans.push(...['trial_1d','trial_7d'].map((code,i)=>({code,name:code,duration_days:i?7:1,subscription_status:'trial',account_limit:1,shop_limit:2,active:1})));
+  const one=await f.services.issueVoucher({plan_code:'trial_1d',redeemable_days:7},platform);
+  const seven=await f.services.issueVoucher({plan_code:'trial_7d',redeemable_days:7},platform);
+  const results=await Promise.allSettled([f.services.activate({activation_code:one.activation_code},session),f.services.activate({activation_code:seven.activation_code},session)]);
+  assert.equal(results.filter(x=>x.status==='fulfilled').length,1);
+  assert.equal(f.state.vouchers.filter(x=>x.status==='used').length,1);
+  assert.equal(f.state.tenants.find(x=>x.id===session.tenant.id).feature_flags_json.beta_trial_used,true);
+  const paid=await f.services.issueVoucher({plan_code:'monthly',redeemable_days:7},platform);
+  await f.services.activate({activation_code:paid.activation_code},session);
+  const unspent=f.state.vouchers.find(x=>x.status==='active'&&x.plan_snapshot_json.subscription_status==='trial');
+  await assert.rejects(f.services.activate({activation_code:unspent.id===1?one.activation_code:seven.activation_code},session),/已使用体验/);
+});
+
+test('failed trial redemption rolls back the trial marker and the read-only catalog reflects actual eligibility', async () => {
+  const f=fixture(), session=await f.register('-rollback');
+  f.state.plans.push({code:'trial_1d',name:'1 day',duration_days:1,subscription_status:'trial',account_limit:1,shop_limit:2,active:1});
+  const voucher=await f.services.issueVoucher({plan_code:'trial_1d',redeemable_days:7},platform);
+  f.state.failConsume=true;
+  await assert.rejects(f.services.activate({activation_code:voucher.activation_code},session),/已被使用/);
+  assert.equal(f.state.tenants.find(x=>x.id===session.tenant.id).feature_flags_json,undefined);
+  assert.equal((await f.services.catalog(session)).plans.find(x=>x.code==='trial_1d').eligible,true);
+  f.state.failConsume=false;await f.services.activate({activation_code:voucher.activation_code},session);
+  const catalog=await f.services.catalog(session);assert.equal(catalog.tenant_id,session.tenant.id);
+  assert.equal(catalog.plans.find(x=>x.code==='trial_1d').eligible,false);
+  assert.equal(catalog.plans.find(x=>x.code==='monthly').price_fen,29900);
+});
+
+test('historical voucher trial use remains ineligible after the current plan changes', async () => {
+  const f=fixture(), session=await f.register('-history');
+  f.state.plans.push({code:'trial_7d',name:'7 days',duration_days:7,subscription_status:'trial',account_limit:1,shop_limit:2,active:1});
+  f.state.vouchers.push({id:500,status:'used',used_by_tenant_id:session.tenant.id,plan_snapshot_json:{subscription_status:'trial'}});
+  const code=await f.services.issueVoucher({plan_code:'trial_7d'},platform);
+  await assert.rejects(f.services.activate({activation_code:code.activation_code},session),/已使用体验/);
+  assert.equal((await f.services.catalog(session)).plans.find(x=>x.code==='trial_7d').eligible,false);
+});
+
+
+test('plan catalog auth route always uses the logged-in enterprise and remains read only', async () => {
+  const session={personId:2,tenant:{id:42,slug:'a',role:'member'}};
+  const req={method:'GET',headers:{authorization:'Bearer test'}};
+  const handler=createAuthHandler(async()=>{throw Error('No body on catalog reads');},{getSession:async()=>session,membershipPlans:async actor=>{assert.equal(actor,session);return {tenant_id:42,plans:[]};}});
+  const result=await handler(req,new URL('http://localhost/api/auth/membership-plans?tenant_id=99'))();
+  assert.equal(result.tenant_id,42);assert.equal(req._sensitiveResponse,true);
+  assert.equal(handler({...req,method:'POST'},new URL('http://localhost/api/auth/membership-plans')),null);
 });

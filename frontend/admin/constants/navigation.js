@@ -1,4 +1,5 @@
-import { aiSkillsAvailable, AI_SKILLS_DISABLED_MESSAGE } from "../../../src/shared/ai-skills-access.js";
+import { planFeatureMessage } from "../../../src/shared/subscription-plan-features.js";
+import { aiSkillsAvailable } from "../../../src/shared/ai-skills-access.js";
 import { canAccessPage, pagePermission, hasPermission, isPlatformAdmin, needsMembershipActivation } from "../../../src/shared/permissions.js";
 import { ChatDotRound, Coin, DataAnalysis, Document, Finished, Goods, House, MagicStick, Setting, ShoppingCart, Tools, WarningFilled } from "@element-plus/icons-vue";
 
@@ -145,7 +146,7 @@ export function navigationMenusForRole(subject) {
   return navigationMenus
     .map(menu => {
       if (menu.key === "ai-skills" && subject?.tenant?.id && !aiSkillsAvailable(subject)) {
-        return { ...menu, disabled: true, disabledReason: AI_SKILLS_DISABLED_MESSAGE,
+        return { ...menu, disabled: true, disabledReason: planFeatureMessage("ai"),
           children: menu.children.filter(child => !needsMembershipActivation(subject) && (pagePermission(child.route) === "platform.admin" ? isPlatformAdmin(subject) : hasPermission(subject, pagePermission(child.route)))).map(child => ({ ...child, disabled: true })) };
       }
       return menu.children ? { ...menu, children: menu.children.filter(child => canAccessPage(subject, child.route)) } : menu;

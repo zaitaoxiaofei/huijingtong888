@@ -95,6 +95,7 @@ export function createAuthHandler(readJson, overrides = {}) {
     tenantMemberships: tenantMembershipsMysql,
     registerAccount: selfServiceMembership.register,
     membership: selfServiceMembership.membership,
+    membershipPlans: selfServiceMembership.catalog,
     activateMembership: selfServiceMembership.activate,
     hashPassword,
     verifyPassword,
@@ -146,11 +147,12 @@ export function createAuthHandler(readJson, overrides = {}) {
       };
     }
 
-    if (key === "GET /api/auth/membership" || key === "POST /api/auth/activate") {
+    if (key === "GET /api/auth/membership" || key === "GET /api/auth/membership-plans" || key === "POST /api/auth/activate") {
       return async () => {
         req._sensitiveResponse = true;
         const session = await deps.getSession(extractToken(req));
         if (!session) return { error: "未登录", __status: 401 };
+        if (key === "GET /api/auth/membership-plans") return deps.membershipPlans(session);
         if (req.method === "GET") return deps.membership(session);
         const rate = deps.consumeRateLimit(`activate:${session.personId}:${deps.getClientIp(req)}`, AUTH_RATE_LIMIT_MAX_ATTEMPTS, AUTH_RATE_LIMIT_WINDOW_MS);
         if (!rate.allowed) return { error: "激活尝试过多，请稍后再试", __status: 429 };

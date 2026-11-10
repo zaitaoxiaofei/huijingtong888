@@ -1,3 +1,4 @@
+import { planFeatures, planFeatureMessage } from "../shared/subscription-plan-features.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertBusinessTaskPermission, authorizeBusinessTaskSession, businessTaskTenantKey } from "./business-task-tenant.js";
 
@@ -11,6 +12,7 @@ export function teamTenantSession() {
 export async function withTeamTenantSession(session, operation) {
   const authorized = await authorizeBusinessTaskSession(session);
   assertBusinessTaskPermission(authorized, "team");
+  if (!planFeatures(authorized.tenant).tasks) throw Object.assign(new Error(planFeatureMessage("tasks")), { statusCode: 403 });
   return context.run(authorized, operation);
 }
 export function teamTenantKey() { return businessTaskTenantKey(teamTenantSession()); }

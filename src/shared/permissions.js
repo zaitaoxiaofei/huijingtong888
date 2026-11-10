@@ -1,3 +1,4 @@
+import { planFeatures, subscriptionPageFeature } from "./subscription-plan-features.js";
 import { aiSkillsAvailable, isAiSkillsPage } from "./ai-skills-access.js";
 // Shared by server authorization and the admin UI. Multiple roles grant the union of permissions.
 export const ROLE_DEFINITIONS = [
@@ -94,6 +95,8 @@ export function needsMembershipActivation(subject) {
 }
 
 export function canAccessPage(subject, path) {
+  const feature = subscriptionPageFeature(path);
+  if (subject?.tenant?.id && feature && !planFeatures(subject.tenant)[feature]) return false;
   if (subject?.tenant?.id && isAiSkillsPage(path) && !aiSkillsAvailable(subject)) return false;
   const permission = pagePermission(path);
   if (permission === "platform.admin") return isPlatformAdmin(subject);

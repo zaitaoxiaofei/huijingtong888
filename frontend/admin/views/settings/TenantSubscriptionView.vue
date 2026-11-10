@@ -584,7 +584,7 @@ onMounted(load);
             <div class="plan-grid">
               <article v-for="plan in trialPlans" :key="plan.id" class="plan-card" :class="{ inactive: !Number(plan.active) }">
                 <div class="plan-card-top"><div><span class="plan-kind trial-kind">体验</span><h4>{{ plan.name }}</h4></div><el-tag :type="Number(plan.active) ? 'success' : 'info'" effect="light">{{ Number(plan.active) ? '可开通' : '已停用' }}</el-tag></div>
-                <div class="plan-duration"><strong>{{ plan.duration_days }}</strong><span>天</span><el-tag v-if="Number(plan.is_builtin)" size="small" effect="plain">预置方案</el-tag></div>
+                <p v-if="plan.price_fen !== null && plan.price_fen !== undefined">¥{{ (plan.price_fen / 100).toFixed(plan.price_fen % 100 ? 1 : 0) }} · Beta 内测人工开通</p><div class="plan-duration"><strong>{{ plan.duration_days }}</strong><span>天</span><el-tag v-if="Number(plan.is_builtin)" size="small" effect="plain">预置方案</el-tag></div>
                 <div class="plan-quotas"><span><el-icon><User /></el-icon>{{ quotaText(plan.account_limit, '个账号') }}<small>含主账号</small></span><span><el-icon><Shop /></el-icon>{{ quotaText(plan.shop_limit, '个店铺') }}</span></div>
                 <div class="plan-actions"><el-button link type="primary" @click="openPlanEditor(plan)">编辑套餐</el-button><el-button link :type="Number(plan.active) ? 'danger' : 'success'" @click="togglePlan(plan)">{{ Number(plan.active) ? '停用' : '重新上架' }}</el-button></div>
               </article>
@@ -595,7 +595,7 @@ onMounted(load);
             <div class="plan-grid">
               <article v-for="plan in paidPlans" :key="plan.id" class="plan-card" :class="{ inactive: !Number(plan.active) }">
                 <div class="plan-card-top"><div><span class="plan-kind paid-kind">正式服务</span><h4>{{ plan.name }}</h4></div><el-tag :type="Number(plan.active) ? 'success' : 'info'" effect="light">{{ Number(plan.active) ? '可开通' : '已停用' }}</el-tag></div>
-                <div class="plan-duration"><strong>{{ plan.duration_days }}</strong><span>天</span><el-tag v-if="Number(plan.is_builtin)" size="small" effect="plain">预置方案</el-tag></div>
+                <p v-if="plan.price_fen !== null && plan.price_fen !== undefined">¥{{ (plan.price_fen / 100).toFixed(plan.price_fen % 100 ? 1 : 0) }} · Beta 内测人工开通</p><div class="plan-duration"><strong>{{ plan.duration_days }}</strong><span>天</span><el-tag v-if="Number(plan.is_builtin)" size="small" effect="plain">预置方案</el-tag></div>
                 <div class="plan-quotas"><span><el-icon><User /></el-icon>{{ quotaText(plan.account_limit, '个账号') }}<small>含主账号</small></span><span><el-icon><Shop /></el-icon>{{ quotaText(plan.shop_limit, '个店铺') }}</span></div>
                 <div class="plan-actions"><el-button link type="primary" @click="openPlanEditor(plan)">编辑套餐</el-button><el-button link :type="Number(plan.active) ? 'danger' : 'success'" @click="togglePlan(plan)">{{ Number(plan.active) ? '停用' : '重新上架' }}</el-button></div>
               </article>

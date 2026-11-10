@@ -34,8 +34,8 @@ async function copyCustomerGuide(includeCode = false) {
   const text = [`爆单 ERP 开通入口：${registrationUrl.value}`,
     "1. 注册账号及独立企业。若出现站点访问验证，请先联系服务人员获取试点访问方式。",
     includeCode ? `2. 在会员中心输入激活码：${issuedCode.value}` : "2. 向服务人员领取会员激活码，在会员中心兑换开通。",
-    "3. 开通后绑定自己的 Ozon 店铺，再拉取订单或使用产品工作流。",
-    "AI 额度单独配置；注册不会自动扣费或自动开通试用。"].join("\n");
+    "3. 开通后绑定自己的 Ozon 店铺，再拉取订单；团队套餐可使用 AI 产品工作流。",
+    "体验套餐每企业仅一次，1 天和 7 天二选一。AI 技能库仅团队版开放，生成图片另扣积分；注册不会自动扣费或自动开通试用。"].join("\n");
   try { await navigator.clipboard.writeText(text); ElMessage.success("客户开通指引已复制"); }
   catch { ElMessage.error("复制失败，请手动复制注册链接和激活码"); }
 }

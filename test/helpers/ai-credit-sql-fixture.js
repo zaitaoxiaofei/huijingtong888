@@ -14,7 +14,7 @@ import { AI_CREDIT_SCHEMAS } from "../../src/services/ai-credit-schema.js";
 export function createAiCreditSqlFixture() {
   const db = new DatabaseSync(":memory:");
   db.function("UTC_TIMESTAMP", () => new Date().toISOString().slice(0, 19).replace("T", " "));
-  db.exec(`CREATE TABLE tenants (id INTEGER PRIMARY KEY, slug TEXT UNIQUE, status TEXT DEFAULT 'active', subscription_status TEXT DEFAULT 'active', subscription_expires_at TEXT, feature_flags_json TEXT);
+  db.exec(`CREATE TABLE tenants (id INTEGER PRIMARY KEY, slug TEXT UNIQUE, plan_code TEXT DEFAULT 'monthly_team', status TEXT DEFAULT 'active', subscription_status TEXT DEFAULT 'active', subscription_expires_at TEXT, feature_flags_json TEXT);
     CREATE TABLE people (id INTEGER PRIMARY KEY, active INTEGER DEFAULT 1, role TEXT DEFAULT 'operations', roles_json TEXT);
     CREATE TABLE tenant_members (tenant_id INTEGER, person_id INTEGER, role TEXT DEFAULT 'member', active INTEGER DEFAULT 1, business_roles_json TEXT, PRIMARY KEY(tenant_id,person_id));
     CREATE TABLE platform_grants (person_id INTEGER PRIMARY KEY, role TEXT, active INTEGER DEFAULT 1);`);

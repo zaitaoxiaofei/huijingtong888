@@ -1,3 +1,5 @@
+import { publicPlanDetails, isTrialPlan } from "../shared/subscription-plan-features.js";
+import { claimTenantTrial } from "./tenant-trial-eligibility.js";
 import { mysqlExecute, mysqlQuery, withMysqlTransaction } from "../mysql-pool.js";
 import { createHash, randomBytes } from "node:crypto";
 import { hashPassword } from "../auth-password.js";
@@ -189,8 +191,8 @@ export async function createTenantMysql(body = {}) {
   const ownerPasswordHash = ownerCredentials ? hashPassword(ownerCredentials.password) : null;
   const activationCode = ownerCredentials ? null : generateTenantActivationCode();
   const result = await withMysqlTransaction(async connection => {
-    const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, subscription_started_at, member_limit, shop_limit)
-      VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), CURRENT_TIMESTAMP, ?, ?)`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit]);
+    const [tenantResult] = await connection.execute(`INSERT INTO tenants (slug, name, status, plan_code, subscription_status, subscription_expires_at, subscription_started_at, member_limit, shop_limit, feature_flags_json)
+      VALUES (?, ?, 'active', ?, ?, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? DAY), CURRENT_TIMESTAMP, ?, ?, JSON_OBJECT('beta_trial_used', ?))`, [slug, name, plan.code, plan.subscription_status, Number(plan.duration_days), memberLimit, plan.shop_limit, isTrialPlan(plan) ? 1 : 0]);
     const tenantId = Number(tenantResult.insertId);
     if (ownerCredentials) {
       const [person] = await connection.execute(`INSERT INTO people (name, username, role, roles_json, active, password_hash)
@@ -294,13 +296,14 @@ export async function setTenantSubscriptionMysql(tenantId, body = {}) {
   const plan = plans[0];
   if (!plan && text(body.subscription_status || body.subscriptionStatus) !== "suspended") throw new Error("不支持的套餐或套餐已停用");
   return withMysqlTransaction(async connection => {
-    const [tenantRows] = await connection.execute("SELECT id, slug, subscription_expires_at FROM tenants WHERE id = ? AND status = 'active' FOR UPDATE", [normalizedTenantId]);
+    const [tenantRows] = await connection.execute("SELECT id, slug, plan_code, subscription_status, feature_flags_json, subscription_expires_at FROM tenants WHERE id = ? AND status = 'active' FOR UPDATE", [normalizedTenantId]);
     if (!tenantRows[0]) throw new Error("企业不存在或已归档，请刷新后重试");
     if (tenantLifecycle(tenantRows[0]).retention_due) throw new Error("企业到期已超过 30 天保留期，不能通过续费恢复旧数据；请清理旧空间后重新开户");
     if (!plan) {
       await connection.execute("UPDATE tenants SET subscription_status = 'suspended' WHERE id = ?", [normalizedTenantId]);
       return { ok: true, subscription_status: "suspended" };
     }
+    await claimTenantTrial(connection, tenantRows[0], plan);
     const durationDays = Number(plan.duration_days);
     const expiresAt = new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace("T", " ");
     const memberLimit = tenantPlanMemberLimit(plan);
@@ -311,7 +314,7 @@ export async function setTenantSubscriptionMysql(tenantId, body = {}) {
 
 export async function listTenantPlansMysql() {
   await ensureTenantSchemaMysql();
-  return mysqlQuery("SELECT id, code, name, duration_days, subscription_status, account_limit, shop_limit, active, is_builtin, created_at, updated_at FROM tenant_plans ORDER BY active DESC, is_builtin DESC, duration_days, id");
+  return (await mysqlQuery("SELECT id, code, name, duration_days, subscription_status, account_limit, shop_limit, active, is_builtin, created_at, updated_at FROM tenant_plans ORDER BY active DESC, is_builtin DESC, duration_days, id")).map(plan => ({ ...plan, ...publicPlanDetails(plan) }));
 }
 
 export async function createTenantPlanMysql(body = {}) {
