@@ -7,7 +7,7 @@ import { useAuthStore } from "../stores/auth";
 import { isPlatformAdmin } from "../../../src/shared/permissions.js";
 import { aiCreditPoints, aiCreditPointsText, aiCreditYuanText } from "../../../src/shared/ai-credit-points.js";
 
-const props = defineProps({ platform: Boolean, tenantId: { type: Number, default: 0 }, tenantName: { type: String, default: "" } });
+const props = defineProps({ compact: Boolean, platform: Boolean, tenantId: { type: Number, default: 0 }, tenantName: { type: String, default: "" } });
 const auth = useAuthStore();
 const target = computed(() => props.platform ? props.tenantId : Number(auth.user?.tenant?.id || 0));
 const canManage = computed(() => props.platform && isPlatformAdmin(auth.user));
@@ -18,6 +18,8 @@ const saving = ref(false);
 const more = ref(false);
 const error = ref("");
 const rechargeVisible = ref(false);
+const recordsVisible = ref(false);
+const contactVisible = ref(false);
 const recharge = reactive({ points: 1, reference: "", reason: "" });
 let sequence = 0;
 let disposed = false;
@@ -89,7 +91,7 @@ async function submitRecharge() {
   finally { if (!disposed && scope === identity()) saving.value = false; }
 }
 function resetScope() {
-  sequence += 1; wallet.value = null; entries.value = []; error.value = ""; more.value = false; loading.value = false; saving.value = false; rechargeVisible.value = false;
+  sequence += 1; wallet.value = null; entries.value = []; error.value = ""; more.value = false; loading.value = false; saving.value = false; rechargeVisible.value = false; recordsVisible.value = false; contactVisible.value = false;
   void load();
 }
 watch(() => [auth.user?.id, auth.user?.tenant?.id, auth.user?.platform_role, target.value, props.platform], resetScope, { immediate: true, flush: "sync" });
@@ -100,16 +102,18 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
 <template>
   <section class="ai-credits-panel">
     <div class="credit-heading"><div><h2>AI积分{{ tenantName ? ` · ${tenantName}` : '' }}</h2><p>积分与会员时长分别管理。充值请联系平台管理员登记。</p></div><el-button :loading="loading" :disabled="saving" @click="load()">刷新</el-button></div>
-    <el-alert title="每个企业按北京时间自然月赠送 100 积分，余额可累计，同一企业多个账号不会重复领取。AI 技能库已开放，默认企业同样按积分规则使用。" type="info" :closable="false" show-icon />
-    <el-alert title="1 积分 = ¥0.01；每张成功生成的图片扣 10 积分（¥0.10），文本免费。生成前冻结积分，明确失败后返还；状态不明时等待原任务核对。裁切和复用已有图片不重复收费。" type="info" :closable="false" show-icon />
+    <el-alert v-if="!compact" title="每个企业按北京时间自然月赠送 100 积分，余额可累计，同一企业多个账号不会重复领取。AI 技能库已开放，默认企业同样按积分规则使用。" type="info" :closable="false" show-icon />
+    <el-alert v-if="!compact" title="1 积分 = ¥0.01；每张成功生成的图片扣 10 积分（¥0.10），文本免费。生成前冻结积分，明确失败后返还；状态不明时等待原任务核对。裁切和复用已有图片不重复收费。" type="info" :closable="false" show-icon />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <div class="credit-summary" v-loading="loading && !wallet">
-      <el-card shadow="never"><span>可用积分</span><strong>{{ wallet ? points(wallet.available_points) : '—' }}</strong><small v-if="wallet">余额折合 ¥{{ yuan(wallet.available_points) }}</small></el-card>
+      <el-card shadow="never"><span>可用积分</span><button v-if="compact" type="button" class="credit-balance-button" @click="contactVisible = true" aria-label="查看可用积分与充值方式">{{ wallet ? points(wallet.available_points) : '—' }}</button><strong v-else>{{ wallet ? points(wallet.available_points) : '—' }}</strong><small v-if="wallet">余额折合 ¥{{ yuan(wallet.available_points) }}</small></el-card>
       <el-card shadow="never"><span>冻结积分</span><strong>{{ wallet ? points(wallet.frozen_points) : '—' }}</strong></el-card>
       <el-card shadow="never"><span>积分账户</span><strong>{{ statusText }}</strong></el-card>
     </div>
     <div v-if="canManage" class="credit-actions"><el-button :loading="saving" :disabled="loading || !wallet" @click="configureAccount">{{ wallet?.status === 'active' ? '停用积分账户' : '开通积分账户' }}</el-button><el-button type="primary" :disabled="loading || saving || wallet?.status !== 'active'" @click="openRecharge">登记手工充值</el-button></div>
-    <el-card shadow="never"><template #header><strong>充值与使用记录</strong></template>
+    <div v-if="compact" class="credit-actions"><el-button type="primary" @click="contactVisible = true">充值积分</el-button><el-button @click="recordsVisible = !recordsVisible">{{ recordsVisible ? '收起记录' : '充值与使用记录' }}</el-button></div>
+    <el-alert v-if="contactVisible" title="积分充值请联系平台服务人员，完成付款并由管理员登记后到账。1 积分 = ¥0.01，每张成功图片 10 积分，文本免费。" type="info" :closable="false" />
+    <el-card v-if="!compact || recordsVisible" shadow="never"><template #header><strong>充值与使用记录</strong></template>
       <el-table :data="entries" v-loading="loading" empty-text="暂无积分记录" style="width: 100%">
         <el-table-column label="时间（北京时间）" width="180"><template #default="{ row }">{{ shanghaiDateTimeText(row.created_at, { assumeUtcWhenNaive: true }) }}</template></el-table-column>
         <el-table-column label="类型" width="110"><template #default="{ row }">{{ labels[row.kind] || '积分变动' }}</template></el-table-column>
@@ -139,6 +143,7 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
 .credit-summary :deep(.el-card__body) { display: grid; gap: 12px; }
 .credit-summary span { color: var(--erp-text-secondary); font-size: 13px; }
 .credit-summary strong { font-size: 22px; overflow-wrap: anywhere; }
+.credit-balance-button { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font-size: 22px; font-weight: 700; color: var(--erp-primary); overflow-wrap: anywhere; }
 .credit-actions { display: flex; gap: 8px; }
 .credit-more { margin-top: 16px; }
 @media(max-width: 720px) { .credit-summary { grid-template-columns: 1fr; } .credit-heading { align-items: flex-start; } }

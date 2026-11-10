@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute } from "vue-router";
 import { useAuthStore } from "../stores/auth";
 import { getMembership } from "../api/account";
 import { currentApiCacheScope } from "../utils/api";
@@ -14,8 +14,8 @@ import MembershipActivationForm from "../components/MembershipActivationForm.vue
 const props = defineProps({ embedded: { type: Boolean, default: false } });
 const auth = useAuthStore();
 const route = useRoute();
-const router = useRouter();
 const membership = ref(null);
+const activationVisible = ref(false);
 const loading = ref(false);
 const error = ref("");
 let disposed = false;
@@ -54,6 +54,7 @@ async function load() {
 
 function clearMembership() {
   requestSequence += 1;
+  activationVisible.value = false;
   membership.value = null;
   loading.value = false;
   error.value = "";
@@ -74,35 +75,14 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
     <header class="membership-heading"><div><h1 v-if="!props.embedded">会员中心</h1><p>{{ tenant?.name || "当前账号" }} · 查看会员时长与激活服务</p></div><el-button :loading="loading" @click="load">刷新</el-button></header>
     <el-alert v-if="route.query.denied === 'activation'" title="此功能需要开通会员，激活后即可继续使用。" type="info" :closable="false" show-icon />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
-    <div class="membership-grid">
-      <el-card shadow="never" class="membership-status" v-loading="loading">
-        <span class="membership-eyebrow">当前会员</span>
-        <h2>{{ status.label }}</h2>
-        <p v-if="status.active">服务已开通，可以按你的岗位权限使用业务功能。</p>
-        <p v-else>基础工具可直接使用，业务功能需要有效会员。</p>
-        <dl><div><dt>所属空间</dt><dd>{{ membership?.tenant_name || tenant?.name || "未加入企业" }}</dd></div><div><dt>到期时间（北京时间）</dt><dd>{{ expiryText }}</dd></div></dl>
-        <el-button v-if="status.active && !props.embedded" type="primary" @click="router.push('/dashboard')">进入工作台</el-button>
-      </el-card>
-      <el-card shadow="never" class="membership-activation">
-        <template #header><strong>{{ status.active ? "续期会员" : "激活会员" }}</strong></template>
-        <MembershipActivationForm v-if="canActivate" :active="status.active" @activated="load" />
-        <el-empty v-else :image-size="64" :description="status.kind === 'permanent' ? '当前授权无需兑换时长' : status.kind === 'suspended' ? '会员已暂停，请联系平台管理员' : tenant ? '请联系企业负责人激活或续期会员' : '平台账号无需开通企业会员'" />
-      </el-card>
-    </div>
-    <el-collapse v-if="tenant && canAccessPage(auth.user, '/ai-credits')"><el-collapse-item title="AI积分 · 余额与使用记录" name="credits"><AiCreditsPanel /></el-collapse-item></el-collapse>
     <TenantPluginBindingPanel v-if="tenant" :enabled="status.active" />
-    <el-card shadow="never" class="membership-start">
-      <template #header><strong>首次使用，按这四步开始</strong></template>
-      <ol><li><strong>开通试用或会员</strong><p>向服务人员领取会员激活码，在上方兑换。套餐期限和店铺额度以实际开通结果为准，注册不会自动收费。</p></li>
-        <li><strong>绑定自己的店铺</strong><p>在企业店铺中填写你自己的 Ozon Client ID 和 API Key；不要在聊天中发送密钥。</p><el-button v-if="status.active && canAccessPage(auth.user, '/tenant-shops')" @click="router.push('/tenant-shops')">配置企业店铺</el-button></li>
-        <li><strong>绑定采集插件</strong><p>在上方“插件绑定”中生成或复制本企业专属密钥，粘贴到插件的“企业专属密钥”，点击“保存密钥”。采集内容先进入本企业采集箱。</p></li>
-        <li><strong>验证第一条业务流程</strong><p>先拉取新订单，再上传产品图试用工作流。图片按成功张数扣积分、文本免费，产出需人工检查；AI 积分与会员时长分别管理。</p><el-button v-if="status.active && canAccessPage(auth.user, '/orders')" @click="router.push('/orders')">打开订单</el-button><el-button v-if="status.active && canAccessPage(auth.user, '/product-workflows')" @click="router.push('/product-workflows')">打开产品工作流</el-button></li></ol>
+    <el-card shadow="never" class="membership-status" v-loading="loading">
+      <div class="membership-heading"><div><span class="membership-eyebrow">会员时长</span><h2><button v-if="canActivate" type="button" class="membership-time-button" @click="activationVisible = !activationVisible">{{ status.label }}</button><span v-else>{{ status.label }}</span></h2></div><el-button v-if="canActivate" type="primary" @click="activationVisible = !activationVisible">{{ status.active ? '续费 / 输入激活码' : '输入激活码' }}</el-button></div>
+      <dl><div><dt>到期时间（北京时间）</dt><dd>{{ expiryText }}</dd></div><div><dt>本期开始时间（北京时间）</dt><dd>{{ membership?.started_at ? shanghaiDateTimeText(membership.started_at, { assumeUtcWhenNaive: true }) : '暂无记录' }}</dd></div><div><dt>所属企业</dt><dd>{{ membership?.tenant_name || tenant?.name || '未加入企业' }}</dd></div><div><dt>套餐价格</dt><dd>请联系服务人员确认</dd></div></dl>
+      <MembershipActivationForm v-if="canActivate && (activationVisible || !status.active)" :active="status.active" @activated="load" />
+      <p v-else-if="!canActivate && !status.active">{{ tenant ? '请联系企业负责人激活或续期会员' : '请先加入企业' }}</p>
     </el-card>
-    <el-card v-if="!props.embedded" shadow="never" class="membership-tools">
-      <template #header><strong>基础工具</strong></template>
-      <p>无需激活即可使用，先算清成本，再开始运营。</p>
-      <div><el-button @click="router.push('/tools/profit-calculator')">利润计算器</el-button><el-button @click="router.push('/tools/pricing')">定价工具</el-button></div>
-    </el-card>
+    <AiCreditsPanel v-if="tenant && canAccessPage(auth.user, '/ai-credits')" compact />
   </main>
 </template>
 
@@ -110,19 +90,15 @@ onBeforeUnmount(() => { disposed = true; clearMembership(); window.removeEventLi
 .membership-page { display: grid; gap: 18px; max-width: 1080px; margin: 0 auto; padding: 12px; color: var(--erp-text-main); }
 .membership-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .membership-heading h1 { margin: 0; font-size: 22px; }
-.membership-heading p, .membership-status p, .membership-tools p { color: var(--erp-text-regular); font-size: 13px; line-height: 1.7; }
+.membership-heading p, .membership-status p { color: var(--erp-text-regular); font-size: 13px; line-height: 1.7; }
 .membership-heading p { margin: 8px 0 0; }
-.membership-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .membership-eyebrow { color: var(--erp-primary); font-size: 12px; font-weight: 600; }
 .membership-status h2 { margin: 16px 0 10px; font-size: 26px; }
-.membership-status dl { display: grid; gap: 18px; margin: 28px 0; }
+.membership-status dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; margin: 20px 0; }
+.membership-time-button { cursor:pointer; border:0; padding:0; background:none; color:inherit; font:inherit; text-align:left; }
+.membership-time-button:focus-visible { outline:2px solid var(--erp-primary); outline-offset:4px; }
 .membership-status dl > div { display: grid; gap: 6px; }
 .membership-status dt { font-size: 12px; color: var(--erp-text-secondary); }
 .membership-status dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
-.membership-tools p { margin-top: 0; }
-.membership-tools > :deep(.el-card__body) > div { display: flex; flex-wrap: wrap; gap: 8px; }
-.membership-tools :deep(.el-button + .el-button) { margin-left: 0; }
-@media (max-width: 720px) { .membership-grid { grid-template-columns: 1fr; } .membership-page { padding: 4px; } }
+@media (max-width: 720px) { .membership-status dl { grid-template-columns: 1fr; } .membership-page { padding: 4px; } }
 </style>
-
-<style scoped>.membership-start ol{margin:0;padding-left:22px;display:grid;gap:18px}.membership-start p{font-size:13px;line-height:1.7;color:var(--erp-text-regular)}</style>

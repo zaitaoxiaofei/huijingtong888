@@ -30,7 +30,7 @@ export function membershipSummary(tenant, role, now = Date.now()) {
   const allowed = tenant.status === "active" && ["active", "trial"].includes(status);
   return {
     tenant_id: Number(tenant.id), tenant_name: tenant.name, plan_code: tenant.plan_code,
-    status, expires_at: iso(tenant.subscription_expires_at),
+    status, started_at: iso(tenant.subscription_started_at), expires_at: iso(tenant.subscription_expires_at),
     remaining_days: allowed && expiresAt === null ? null : allowed ? Math.max(0, Math.ceil((expiresAt - now) / DAY_MS)) : 0,
     access_allowed: allowed, can_activate: role === "owner" && tenant.status === "active" && status !== "suspended" && !(allowed && expiresAt === null),
     server_time: new Date(now).toISOString()
