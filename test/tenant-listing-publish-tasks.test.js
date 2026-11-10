@@ -73,7 +73,7 @@ test("publish task reads, writes, retries, and record joins are tenant-bound", (
   assert.match(detail, /i\.publish_task_id = \? AND COALESCE\(i\.tenant_id, 'admin'\) = \?/);
   assert.match(detail, /COALESCE\(r\.tenant_id, 'admin'\) = COALESCE\(i\.tenant_id, 'admin'\)/);
   assert.match(retry, /WHERE id IN \(\$\{shopIds\.map\(\(\) => "\?"\)\.join\(","\)\}\).*COALESCE\(tenant_id, 'admin'\) = \?/s);
-  assert.match(retry, /claimListingPublishTaskItemForRetry\(item\.id, tenantId\)/);
+  assert.match(retry, /claimListingPublishTaskItemForRetry\(item\.id, tenantId, reconciledRecord\)/);
   assert.match(retry, /updateListingPublishTaskItem\(item\.id, \{[\s\S]*?\}, tenantId\)/);
   assert.match(publish, /const tenantId = listingTenantId\(session\)/);
   assert.match(publish, /COALESCE\(tenant_id, 'admin'\) = \?/);

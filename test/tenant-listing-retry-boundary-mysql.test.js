@@ -42,7 +42,7 @@ test("legacy retry uses real owned SQL, fresh attempt guards and durable receipt
     pool = mysql.createPool({ socketPath, user: "root", database, connectionLimit: 6 });
     const query = async (sql, params = []) => (await pool.execute(sql, params))[0];
     for (const sql of [
-      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL, feature_flags_json JSON NULL)",
+      "CREATE TABLE tenants (id BIGINT PRIMARY KEY, slug VARCHAR(80), plan_code VARCHAR(32) DEFAULT 'free', status VARCHAR(32) DEFAULT 'active', subscription_status VARCHAR(32) DEFAULT 'active', subscription_expires_at DATETIME NULL, feature_flags_json JSON NULL)",
       "CREATE TABLE people (id BIGINT PRIMARY KEY, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'operations', roles_json JSON NULL)",
       "CREATE TABLE tenant_members (tenant_id BIGINT, person_id BIGINT, active TINYINT DEFAULT 1, role VARCHAR(32) DEFAULT 'member', business_roles_json JSON NULL, PRIMARY KEY(tenant_id, person_id))",
       "CREATE TABLE shops (id BIGINT PRIMARY KEY, tenant_id BIGINT NULL, name VARCHAR(80), status VARCHAR(32) DEFAULT 'active', ozon_client_id VARCHAR(80), ozon_api_key VARCHAR(80), api_key_hint VARCHAR(80), watermark_path TEXT, watermark_name TEXT, watermark_position TEXT, watermark_x_percent INT, watermark_y_percent INT, watermark_scale_percent INT, watermark_opacity_percent INT)",

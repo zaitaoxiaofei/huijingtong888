@@ -8022,6 +8022,7 @@ function normalizePublishTaskRow(row = {}) {
     shop_count: Number(row.shop_count || 0),
     total_count: total,
     queued_count: queued,
+    status: publishTaskStatusFromCounts({ total, submitted, failed, interrupted, processing: processing + queued }),
     submitted_count: submitted,
     success_count: success,
     failed_count: failed,
@@ -8041,7 +8042,9 @@ function normalizePublishTaskItemRow(row = {}) {
   const recordStatus = String(row.record_status || "");
   const storedStatus = String(row.status || "pending");
   const submittedToOzon = Boolean(String(row.record_task_id || "").trim() || Number(row.record_has_response || 0));
-  const status = ["imported", "published", "success", "failed", "ozon_status_error"].includes(recordStatus)
+  const status = storedStatus === "preparing" && recordStatus === "resubmitting"
+    ? "preparing"
+    : ["imported", "published", "success", "failed", "ozon_status_error"].includes(recordStatus)
     ? publishTaskRecordStatus(recordStatus)
     : submittedToOzon
     ? "submitted"
@@ -8050,7 +8053,7 @@ function normalizePublishTaskItemRow(row = {}) {
     : storedStatus === "submitted"
     ? "processing"
     : storedStatus;
-  const error = parseJson(row.effective_error_json || row.error_json, null);
+  const error = ["failed", "interrupted"].includes(status) ? parseJson(row.effective_error_json || row.error_json, null) : null;
   return {
     ...row,
     id: Number(row.id || 0),
@@ -8103,6 +8106,7 @@ async function syncListingPublishTaskItemsFromRecords(publishTaskId = 0, tenantI
     UPDATE listing_publish_task_items i
     JOIN listing_publish_records r ON r.id = i.record_id AND COALESCE(r.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
     SET i.status = CASE
+          WHEN i.status = 'preparing' AND r.status = 'resubmitting' THEN 'preparing'
           WHEN r.status IN ('imported', 'published', 'success') THEN 'success'
           WHEN r.status IN ('failed', 'ozon_status_error') THEN 'failed'
           WHEN r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
@@ -8110,7 +8114,8 @@ async function syncListingPublishTaskItemsFromRecords(publishTaskId = 0, tenantI
           WHEN COALESCE(r.task_id, '') <> '' OR r.response_json IS NOT NULL THEN 'submitted'
           ELSE i.status
         END,
-        i.error_json = CASE WHEN r.status IN ('failed', 'ozon_status_error') THEN r.error_json ELSE i.error_json END,
+        i.error_json = CASE WHEN r.status IN ('failed', 'ozon_status_error') THEN r.error_json
+          WHEN r.status IN ('imported', 'published', 'success', 'submitted', 'processing', 'resubmitting', 'ozon_status_pending') THEN NULL ELSE i.error_json END,
         i.finished_at = CASE
           WHEN r.status IN ('imported', 'published', 'success', 'failed', 'ozon_status_error') THEN COALESCE(i.finished_at, CURRENT_TIMESTAMP)
           ELSE i.finished_at
@@ -8193,8 +8198,10 @@ async function readOnlyListingPublishTaskStats(taskIds = [], tenantId = "admin")
       SELECT i.publish_task_id,
         i.shop_name,
         r.status AS record_status,
-        CASE WHEN COALESCE(r.task_id, '') <> '' OR r.response_json IS NOT NULL THEN 1 ELSE 0 END AS submitted_to_ozon,
+        CASE WHEN i.status = 'preparing' AND r.status = 'resubmitting' THEN 0
+          WHEN COALESCE(r.task_id, '') <> '' OR r.response_json IS NOT NULL THEN 1 ELSE 0 END AS submitted_to_ozon,
         CASE
+          WHEN i.status = 'preparing' AND r.status = 'resubmitting' THEN 'preparing'
           WHEN r.status IN ('imported', 'published', 'success') THEN 'success'
           WHEN r.status IN ('failed', 'ozon_status_error') THEN 'failed'
           WHEN r.status IN ('submitted', 'processing', 'resubmitting', 'ozon_status_pending')
@@ -8254,7 +8261,9 @@ async function finalizeListingPublishTaskItemFromRecord(itemId, recordId, fallba
     ? await row("SELECT status, task_id, response_json, error_json FROM listing_publish_records WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?", [Number(recordId), itemTenantId]).catch(() => null)
     : null;
   const wasSubmitted = Boolean(String(record?.task_id || "").trim() || record?.response_json);
-  const status = wasSubmitted ? "submitted" : (record ? publishTaskRecordStatus(record.status) : (fallback.ok ? "submitted" : "failed"));
+  const status = record && ["imported", "published", "success", "failed", "ozon_status_error"].includes(record.status)
+    ? publishTaskRecordStatus(record.status)
+    : wasSubmitted ? "submitted" : (record ? publishTaskRecordStatus(record.status) : (fallback.ok ? "submitted" : "failed"));
   const error = status === "failed"
     ? parseJson(record?.error_json, null) || (fallback.error ? buildOzonPublishErrorPayload(fallback.error, {}) : null)
     : null;
@@ -8510,11 +8519,11 @@ export async function listingPublishTaskDetail(id, session = null) {
   };
 }
 
-async function claimListingPublishTaskItemForRetry(itemId = 0, tenantId = "admin") {
+async function claimListingPublishTaskItemForRetry(itemId = 0, tenantId = "admin", reconciledRecord = null) {
   return withMysqlTransaction(async (connection) => {
     const [rows] = await connection.query(`
       SELECT i.id, i.publish_task_id, i.draft_id, i.shop_id, i.record_id, i.status,
-        r.task_id AS record_task_id, r.response_json AS record_response_json
+        r.status AS record_status, r.task_id AS record_task_id, r.response_json AS record_response_json
       FROM listing_publish_task_items i
       LEFT JOIN listing_publish_records r ON r.id = i.record_id AND COALESCE(r.tenant_id, 'admin') = COALESCE(i.tenant_id, 'admin')
       WHERE i.id = ? AND COALESCE(i.tenant_id, 'admin') = ?
@@ -8522,7 +8531,15 @@ async function claimListingPublishTaskItemForRetry(itemId = 0, tenantId = "admin
     `, [Number(itemId), tenantId]);
     const item = rows[0] || null;
     if (!item || !["failed", "interrupted"].includes(String(item.status || ""))) return null;
-    if (String(item.record_task_id || "").trim() || item.record_response_json) return null;
+    if (["imported", "published", "success", "deleted"].includes(String(item.record_status || ""))) return null;
+    if (String(item.record_task_id || "").trim() || item.record_response_json) {
+      // A receipt is retryable only after this exact attempt was confirmed failed
+      // by Ozon. The row lock prevents a second caller claiming the same attempt.
+      if (!["failed", "ozon_status_error"].includes(String(item.record_status || ""))
+        || !reconciledRecord || Number(reconciledRecord.id) !== Number(item.record_id)
+        || String(reconciledRecord.task_id || "") !== String(item.record_task_id || "")
+        || reconciledRecord.response_json !== item.record_response_json) return null;
+    }
     if (!item.record_id) {
       const [recordRows] = await connection.query(`
         SELECT id
@@ -8640,11 +8657,45 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
     const shop = shopById.get(Number(item.shop_id || 0));
     let recordId = 0;
     let draft = null;
+    let retryClaimed = false;
     try {
       if (!shop) throw new Error("目标店铺不存在或已删除");
       await assertListingPublishExecution(shop);
-      const claimedItem = await claimListingPublishTaskItemForRetry(item.id, tenantId);
+      let reconciledRecord = null;
+      if (item.record_id) {
+        const previous = await row(`SELECT id, status, task_id, response_json FROM listing_publish_records
+          WHERE id = ? AND shop_id = ? AND COALESCE(tenant_id, 'admin') = ?`,
+        [Number(item.record_id), Number(shop.id), tenantId]);
+        if (previous && (String(previous.task_id || "").trim() || previous.response_json)) {
+          const response = parseJson(previous.response_json, {});
+          const previousTaskId = String(previous.task_id || response?.submit?.result?.task_id
+            || response?.submit?.task_id || response?.submit?.result?.taskId
+            || response?.submit?.submit?.result?.task_id || "").trim();
+          if (!previousTaskId) throw new Error("上次提交结果待核对，请先同步上架记录状态，确认失败后再重试");
+          const importInfo = await fetchOzonProductImportInfo(shop, previousTaskId, {
+            beforeRequest: () => assertListingPublishExecution(shop)
+          });
+          await assertListingPublishExecution(shop);
+          const status = importInfoStatus(importInfo);
+          if (status === "ozon_status_error") throw new Error("Ozon 上次提交结果查询失败，请同步状态后再重试");
+          if (status !== "failed") {
+            // Reconcile stale failure displays without overwriting a newer retry.
+            await run(`UPDATE listing_publish_records SET status = ?, error_json = NULL,
+                response_json = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND shop_id = ? AND COALESCE(tenant_id, 'admin') = ?
+                AND status IN ('failed', 'ozon_status_error') AND task_id <=> ? AND response_json <=> ?`,
+            [status, JSON.stringify({ submit: response?.submit || response, import_info: importInfo }),
+              Number(previous.id), Number(shop.id), tenantId, previous.task_id, previous.response_json]);
+            results.push({ ok: false, skipped: true, publish_task_item_id: item.id,
+              error: status === "imported" ? "Ozon 已确认上架成功，无需重试" : "Ozon 仍在处理上次提交，本次未重复提交" });
+            return;
+          }
+          reconciledRecord = previous;
+        }
+      }
+      const claimedItem = await claimListingPublishTaskItemForRetry(item.id, tenantId, reconciledRecord);
       if (!claimedItem) return;
+      retryClaimed = true;
       item.record_id = claimedItem.record_id;
       recordId = Number(claimedItem.record_id || 0);
       draft = await listingDraft(draftId, session);
@@ -8722,19 +8773,21 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
       });
     } catch (error) {
       const errorPayload = buildOzonPublishErrorPayload(error, { shop, recordId, draftId });
-      if (recordId) {
-        await run(`
-          UPDATE listing_publish_records
-          SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
-        `, [JSON.stringify(errorPayload), recordId, tenantId]).catch(() => null);
+      if (retryClaimed) {
+        if (recordId) {
+          await run(`
+            UPDATE listing_publish_records
+            SET status = 'failed', error_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND COALESCE(tenant_id, 'admin') = ?
+          `, [JSON.stringify(errorPayload), recordId, tenantId]).catch(() => null);
+        }
+        await updateListingPublishTaskItem(item.id, {
+          status: "failed",
+          recordId,
+          error: errorPayload,
+          finished: true
+        }, tenantId);
       }
-      await updateListingPublishTaskItem(item.id, {
-        status: "failed",
-        recordId,
-        error: errorPayload,
-        finished: true
-      }, tenantId);
       results.push({
         ok: false,
         publish_task_item_id: item.id,
@@ -8757,7 +8810,8 @@ export async function retryListingPublishTask(id, body = {}, session = null) {
     summary: {
       total: results.length,
       queued,
-      failed: results.length - queued
+      failed: results.filter((item) => !item.ok && !item.skipped).length,
+      skipped: results.filter((item) => item.skipped).length
     },
     results
   };
