@@ -1,6 +1,6 @@
 // Built-in commercial plans. Custom historical plans keep their existing access;
 // business permissions and tenant isolation are always checked separately.
-export const BETA_PLAN_PRICES_FEN = Object.freeze({ trial_1d: 990, trial_7d: 1990, monthly: 29900, monthly_team: 39900, quarterly_team: 109900, yearly: 899900 });
+export const BETA_PLAN_PRICES_FEN = Object.freeze({ trial_1d: 990, trial_7d: 1990, monthly: 29900, monthly_team: 39900, quarterly_team: 109900, yearly: 399900 });
 export const TRIAL_PLAN_CODES = Object.freeze(['trial_1d', 'trial_7d']);
 export function isTrialPlan(plan = {}) { return plan.subscription_status === "trial" || TRIAL_PLAN_CODES.includes(plan.code || plan.plan_code); }
 export function planFeatures(tenant = {}) {

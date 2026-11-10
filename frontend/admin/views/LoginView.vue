@@ -6,13 +6,14 @@ import { ElMessage } from "element-plus";
 import { useAuthStore } from "../stores/auth";
 import { useAppStore } from "../stores/app";
 import BrandLogo from "../components/BrandLogo.vue";
-import { currentApiCacheScope } from "../utils/api";
+import { currentApiCacheScope, apiClient } from "../utils/api";
 
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const appStore = useAppStore();
 const loginStage = ref("welcome");
+const legacyLoginAvailable = ref(false);
 const registerVisible = ref(false);
 const registerError = ref("");
 const registerForm = reactive({ username: "", name: "", enterprise_name: "", password: "", confirm_password: "" });
@@ -178,7 +179,7 @@ onMounted(() => {
   setLoginViewportState(true);
   window.__hideAdminStaticLoginFallback?.();
   if (route.query.register === "1") openRegistration();
-  initializeWechatLogin();
+  void apiClient.get("/api/auth/entry-options", { noCache: true, routeScoped: false }).then(options => { if (!loginDisposed) { legacyLoginAvailable.value = options.legacy_login_available === true; if (legacyLoginAvailable.value) initializeWechatLogin(); } }).catch(() => {});
 });
 
 onBeforeUnmount(() => {
@@ -438,6 +439,7 @@ async function pollQrLogin() {
         </section>
         <el-button
           size="large"
+          v-if="legacyLoginAvailable"
           class="qr-login-button"
           :loading="qrLogin.loading"
           @click="startQrLogin"
@@ -466,7 +468,7 @@ async function pollQrLogin() {
     </section>
 
     <el-dialog v-model="registerVisible" title="注册爆单 ERP" width="460px" append-to-body class="registration-dialog" :close-on-click-modal="false" :close-on-press-escape="!authStore.loading" @closed="registerForm.password = ''; registerForm.confirm_password = ''">
-      <p class="registration-intro">创建独立工作空间，先体验基础工具，再用激活码开通业务功能。</p>
+      <p class="registration-intro">创建独立企业空间，注册后可在会员中心选购套餐或输入激活码开通。</p>
       <el-alert v-if="registerError" :title="registerError" type="error" :closable="false" show-icon />
       <el-form :model="registerForm" label-position="top" @submit.prevent="handleRegister">
         <el-form-item label="登录名" required><el-input v-model="registerForm.username" autocomplete="username" maxlength="64" placeholder="字母、数字、下划线或连字符" /></el-form-item>

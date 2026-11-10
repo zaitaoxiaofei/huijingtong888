@@ -1,3 +1,4 @@
+import { publicSelfServiceEnabled, publicWebsitePath, isPublicEntry, renderPublicWebsite, loadPublicPlans } from "./server/public-website.js";
 import { createOzonHealthRoutes } from './server/routes/ozonHealth.js';
 import { checkTenantOzonHealth } from './services/ozon-credential-health-mysql.js';
 import { withMysqlWorkload } from "./mysql-workload.js";
@@ -2317,11 +2318,21 @@ const server = http.createServer(async (req, res) => {
       return json(res, await services.receiveOzonWebhook(await readJson(req)));
     }
 
+    if (publicSelfServiceEnabled() && ["GET", "HEAD"].includes(req.method) && publicWebsitePath(url.pathname)) {
+      if (["/register", "/login"].includes(url.pathname)) {
+        writeHead(res, 302, { Location: url.pathname === "/register" ? "/admin.html#/login?register=1" : "/admin.html#/login" }); res.end(); return;
+      }
+      const plans = ["/", "/pricing"].includes(url.pathname) ? await loadPublicPlans(mysqlQuery) : [];
+      return html(res, renderPublicWebsite(url.pathname, plans));
+    }
+
     if (url.pathname === SITE_ACCESS_SESSION_PATH || url.pathname === SITE_ACCESS_LOGIN_PATH || url.pathname === SITE_ACCESS_LOGOUT_PATH || url.pathname === SITE_ACCESS_API_LOGIN_PATH) {
       if (await handleSiteAccess(req, res, url)) return;
     }
 
-    if (!isSiteAccessAuthorized(req) && !isPublicAuthCallbackPath(req, parts)) {
+    const publicSession = publicSelfServiceEnabled() && (parts[0] === "api" || isPrivateAttachmentPath(url.pathname)) && !isSiteAccessAuthorized(req) && !isPublicEntry(req, url)
+      ? await getSession(extractToken(req) || readCookie(req, IMAGE_SESSION_COOKIE)) : null;
+    if (!isSiteAccessAuthorized(req) && !isPublicAuthCallbackPath(req, parts) && !isPublicEntry(req, url) && !publicSession) {
       if (parts[0] === "api") {
         console.warn(`[forbidden] ${req.method} ${url.pathname} reason=site_access`);
         return json(res, { error: "访问受限，请先通过内部访问验证" }, 403);
@@ -2407,7 +2418,7 @@ const server = http.createServer(async (req, res) => {
       const bearerToken = extractToken(req);
       const queryToken = allowQueryTokenAuth(req, parts, url) ? url.searchParams.get("token") : "";
       const imageCookieToken = isPrivateImageRead(req, parts) ? readCookie(req, IMAGE_SESSION_COOKIE) : "";
-      const session = await getSession(bearerToken || queryToken || imageCookieToken);
+      const session = publicSession && bearerToken ? publicSession : await getSession(bearerToken || queryToken || imageCookieToken);
       markRequestTiming(req, "after_session");
       if (!session) return json(res, { error: "未登录，请先登录" }, 401);
       req._session = session;
