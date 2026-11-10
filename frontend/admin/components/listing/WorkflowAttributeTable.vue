@@ -6,7 +6,7 @@ import {isWorkflowInput} from '../../../../src/shared/product-workflow-inputs.js
 import WorkflowMaterialInput from './WorkflowMaterialInput.vue';
 const props=defineProps({definition:{type:Object,required:true},category:{type:Object,required:true}}),emit=defineEmits(['navigate','upload']);
 const search=ref(''),pendingOnly=ref(false),richOpen=ref(false);
-const fields=computed(()=>workflowTemplateFields(props.category));
+const fields=computed(()=>workflowTemplateFields(props.category,props.definition.currencyCode||'CNY'));
 const contentKeys=['title','tags','description','images','richContent'];
 const contents=computed(()=>fields.value.filter(f=>contentKeys.includes(f.key)));
 const attributes=computed(()=>fields.value.filter(f=>!contentKeys.includes(f.key)&&f.label.toLowerCase().includes(search.value.toLowerCase())&&(!pendingOnly.value||!sources(f).length)));

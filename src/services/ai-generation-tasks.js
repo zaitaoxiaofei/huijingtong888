@@ -1,3 +1,4 @@
+import {completeCheckpointedImage} from './ai-image-output-checkpoint.js';
 import { generateProductWorkflowText } from './product-workflow-text.js';
 import { createHash, randomUUID } from "node:crypto";
 import { mysqlExecute, mysqlQuery } from "../mysql-pool.js";
@@ -15,6 +16,7 @@ const SUPPORTED_FIELDS = new Set(["mainImage", "detailImages", "title", "tags", 
 const MAX_TASK_INPUT_JSON_BYTES = 220_000;
 const MAX_TASK_TEXT_BYTES = 24_000;
 const WORKER_LIMITS = {
+  commerceCopy: 3,
   title: 3,
   tags: 3,
   description: 3,
@@ -254,7 +256,7 @@ export async function retryAiGenerationTask(taskId, session = null) {
   const ownershipParams = [aiTenantId(), currentPersonId];
   await mysqlExecute(`
     UPDATE ai_generation_tasks
-    SET status = 'queued', error_json = NULL, output_json = NULL, started_at = NULL, finished_at = NULL
+    SET status = 'queued', error_json = NULL, output_json = CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(output_json, '$.stage')) = 'generated_image_v1' THEN output_json ELSE NULL END, started_at = NULL, finished_at = NULL
     WHERE task_no = ? AND status IN ('failed', 'cancelled', 'provider_pending')${ownershipSql}
   `, [taskNo, ...ownershipParams]);
   startAiGenerationTaskWorker();
@@ -379,6 +381,8 @@ async function executeAuthorizedAiGenerationTask(row) {
     const output = await withAiCreditOperation(`generation:${row.task_no}`, () => runTaskHandler(row.field_key, {
       ...input,
       providerJob: providerJobState,
+      generatedCheckpoint: parseJson(row.output_json,null),
+      onGeneratedOutput: async saved => {const value=JSON.stringify(saved);await mysqlExecute('UPDATE ai_generation_tasks SET output_json = ? WHERE id = ? AND tenant_id = ?',[value,row.id,row.tenant_id]);row.output_json=value;},
       onProviderJob: async (providerJob, index = 0) => {
         const jobs = Array.isArray(providerJobState?.jobs) ? [...providerJobState.jobs] : [];
         jobs[index] = providerJob;
@@ -396,7 +400,7 @@ async function executeAuthorizedAiGenerationTask(row) {
     `, [JSON.stringify(output || {}), row.id]);
     broadcastTaskStatus(row, "done", { queuedMs: elapsedSince(row.created_at, startedAt), runMs: Date.now() - startedAt });
   } catch (error) {
-    const providerPending = ["provider_pending", "AI_CREDIT_RESULT_PENDING"].includes(error?.code);
+    const providerPending = ["provider_pending", "AI_CREDIT_RESULT_PENDING"].includes(error?.code)||error?.code==="AI_GENERATION_STORAGE_PENDING";
     const failed = !providerPending && Number(row.attempts || 0) + 1 >= Number(row.max_attempts || 0);
     await mysqlExecute(`
       UPDATE ai_generation_tasks
@@ -431,8 +435,7 @@ function elapsedSince(value, fallback = Date.now()) {
 
 async function runTaskHandler(fieldKey, input) {
   if (["mainImage", "detailImages"].includes(fieldKey)) {
-    const output = await generateImages(input);
-    return persistGeneratedImageOutput(output, input, fieldKey);
+    return completeCheckpointedImage(input,{generate:generateImages,persist:(output,payload)=>persistGeneratedImageOutput(output,payload,fieldKey),checkpoint:input.onGeneratedOutput});
   }
   if (fieldKey === "commerceCopy") return input.workflowOutput ? generateProductWorkflowText(input) : generateCommerceCopy(input);
   if (["title", "tags", "description"].includes(fieldKey)) return generateTextFieldOutput(fieldKey, input);

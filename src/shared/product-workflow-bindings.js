@@ -8,13 +8,13 @@ export const WORKFLOW_TEMPLATE_FIELDS=[
   {key:'title',label:'标题',kind:'text'}, {key:'tags',label:'#产品标签',kind:'text'},
   {key:'description',label:'简介',kind:'text'}, {key:'images',label:'主图／详情图',kind:'images'},
   {key:'richContent',label:'富文本（JSON富内容）',kind:'rich'},
-  {key:'price',label:'售价（RUB）',kind:'number'}, {key:'weight',label:'包装重量／克重（g）',kind:'number'},
+  {key:'price',label:'售价（人民币／CNY）',kind:'number'}, {key:'old_price',label:'划线价（人民币／CNY）',kind:'number'}, {key:'weight',label:'包装重量／克重（g）',kind:'number'},
   {key:'length',label:'包装长（cm）',kind:'number'}, {key:'width',label:'包装宽（cm）',kind:'number'}, {key:'height',label:'包装高（cm）',kind:'number'}
 ];
-export function workflowTemplateFields(category={}) {
+export function workflowTemplateFields(category={},currencyCode='CNY') {
   const aliases={4191:'description',23171:'tags',11254:'richContent'};
-  return [...WORKFLOW_TEMPLATE_FIELDS.map(field=>({...field,attribute:category.attributes?.find(a=>aliases[a.attributeId]===field.key)})),
-    ...(category.attributes||[]).filter(a=>!aliases[a.attributeId]).map(a=>({key:`attribute_${a.attributeId}`,label:a.label,kind:'text',attribute:a}))];
+  return [...WORKFLOW_TEMPLATE_FIELDS.map(field=>({...field,...(['price','old_price'].includes(field.key)&&currencyCode!=='CNY'?{label:field.label.replace('人民币／CNY',currencyCode)}:{}),attribute:category.attributes?.find(a=>aliases[a.attributeId]===field.key)})),
+    ...(category.attributes||[]).filter(a=>!aliases[a.attributeId]).map(a=>({key:`attribute_${a.attributeId}`,label:a.label,kind:a.inputFormat==='number'&&!a.dictionaryId?'number':'text',attribute:a}))];
 }
 export function workflowNodeOutputs(node) {
   if(node.type==='image'||node.type==='images')return [{nodeId:node.id,output:'image',kind:'image',label:node.label}];
@@ -24,7 +24,7 @@ export function workflowNodeOutputs(node) {
 }
 export function validateWorkflowBindings(definition) {
   if(!definition.bindings||typeof definition.bindings!=='object'||Array.isArray(definition.bindings))fail('模板字段绑定格式无效');
-  const fields=workflowTemplateFields(definition.category),allowed=new Map(fields.map(f=>[f.key,f]));
+  const fields=workflowTemplateFields(definition.category,definition.currencyCode||'CNY'),allowed=new Map(fields.map(f=>[f.key,f]));
   for(const [key,binding] of Object.entries(definition.bindings)) {
     const field=allowed.get(key);
     if(!field)fail(`模板字段 ${key} 不属于当前类目，请重新绑定`);
@@ -55,7 +55,7 @@ export function composeWorkflowRichContent(title,text,images) {
 }
 export function resolveWorkflowBindings(definition,variant,results) {
   const values={};
-  for(const field of workflowTemplateFields(definition.category)) {
+  for(const field of workflowTemplateFields(definition.category,definition.currencyCode||'CNY')) {
     const sources=definition.bindings[field.key]?.sources||[];
     if(!sources.length)continue;
     const resolved=sources.map(ref=>({ref,value:sourceValue(definition,variant,results,ref),kind:workflowNodeOutputs(definition.nodes.find(n=>n.id===ref.nodeId)).find(o=>o.output===ref.output).kind}));
@@ -75,10 +75,11 @@ export function resolveWorkflowBindings(definition,variant,results) {
     }else if(field.key==='tags')values[field.key]=resolved.flatMap(v=>Array.isArray(v.value)?v.value:String(v.value||'').split(/[\s,，;；]+/)).filter(Boolean);
     else {
       const value=resolved.flatMap(v=>[v.value].flat()).filter(v=>v!==''&&v!=null).join('\n');
-      if(field.kind==='number'&&value!==''&&(!Number.isFinite(Number(value))||Number(value)<=0))fail(`${variant.label}的“${field.label}”应大于零，请检查来源节点`);
+      if(field.kind==='number'&&value!==''&&(!Number.isFinite(Number(value))||(field.key==='old_price'?Number(value)<0:['price','weight','length','width','height'].includes(field.key)&&Number(value)<=0)))fail(`${variant.label}的“${field.label}”${field.key==='old_price'?'应为零或正数':field.key.startsWith('attribute_')?'须填写有效数字':'应大于零'}，请检查来源节点`);
       values[field.key]=field.kind==='number'&&value!==''?Number(value):value;
     }
   }
+  if(values.old_price>0&&values.price>0&&values.old_price<=values.price)fail('划线价必须大于售价；不使用划线价时可留空或填0');
   if(values.tags?.length)values.tags=normalizeWorkflowTags(values.tags);
   for(const key of ['title','description'])if(values[key])values[key]=validateWorkflowCopy(key,values[key],variant.fitments||[]);
   return values;
@@ -89,7 +90,7 @@ export function applyWorkflowBindings(definition,variant,results,baseAttributes=
   const dynamic_attributes=clone(baseAttributes);
   const rich=resolved.richContent;
   const richContent=rich?composeWorkflowRichContent(title,rich.text,rich.images):'';
-  for(const field of workflowTemplateFields(definition.category)) {
+  for(const field of workflowTemplateFields(definition.category,definition.currencyCode||'CNY')) {
     if(!field.attribute||!(field.key in resolved))continue;
     const raw=field.kind==='rich'?richContent:resolved[field.key];
     const selected=attributeSelectedValues(field.attribute,raw);
@@ -102,13 +103,17 @@ export function applyWorkflowBindings(definition,variant,results,baseAttributes=
   }
   return {title,name:title,description,tags,hashtags:tags,main_tags:tags,dynamic_attributes,
     rich_content_json:richContent,rich_content:richContent,images:images.map((url,i)=>({url,role:i?'detail':'main',sort_order:i+1})),primary_image:images[0]||'',
-    ...(resolved.price?{price:String(resolved.price),price_value:String(resolved.price)}:{}),
+    ...(resolved.price?{price:String(resolved.price),price_value:String(resolved.price)}:{}),currency_code:definition.currencyCode||'CNY',currency:definition.currencyCode||'CNY',
+    ...('old_price' in resolved&&resolved.old_price!==''?{old_price:String(resolved.old_price||0)}:{}),
     ...(resolved.weight?{weight:resolved.weight,weight_g:resolved.weight,weight_unit:'g'}:{}),
     ...Object.fromEntries(['length','width','height'].filter(k=>resolved[k]).flatMap(k=>[[`${k}_mm`,resolved[k]*10],[k==='length'?'depth':k,resolved[k]*10]])),dimension_unit:'mm'};
 }
 // Upgrade older saved workflows without changing a running task's frozen definition.
 export function addDefaultWorkflowBindings(definition) {
-  if(definition.bindings)return definition;
+  if(definition.bindings){
+    for(const key of ['price','old_price'])for(const ref of definition.bindings[key]?.sources||[]){const node=definition.nodes.find(n=>n.id===ref.nodeId);if(node&&/^(?:售价|划线价)(?:[（(](?:RUB|CNY|人民币[／/]CNY)[）)])?$/.test(node.label))node.label=workflowTemplateFields({},definition.currencyCode||'CNY').find(f=>f.key===key).label;}
+    return definition;
+  }
   const ref=(nodeId,output)=>({nodeId,output});
   const bindings={};
   const imageNodes=definition.nodes.filter(n=>n.type==='image').sort((a,b)=>Number(b.role==='main')-Number(a.role==='main'));

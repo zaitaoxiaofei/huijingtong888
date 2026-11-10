@@ -13,15 +13,15 @@ const props=defineProps({definition:{type:Object,required:true},category:{type:O
 const emit=defineEmits(['upload']);
 const fieldKey=ref('title'),selectedId=ref(''),search=ref(''),drag=ref(null);
 watch(()=>props.focusNode,id=>{if(id)selectedId.value=id;},{immediate:true});
-const fields=computed(()=>workflowTemplateFields(props.category));
-const coreGroups=[{label:'商品内容',keys:['title','tags','description','richContent','images']},{label:'价格与包装',keys:['price','weight','length','width','height']}];
+const fields=computed(()=>workflowTemplateFields(props.category,props.definition.currencyCode||'CNY'));
+const coreGroups=[{label:'商品内容',keys:['title','tags','description','richContent','images']},{label:'价格与包装',keys:['price','old_price','weight','length','width','height']}];
 const filteredFields=computed(()=>fields.value.filter(f=>f.key.startsWith('attribute_')&&f.label.toLowerCase().includes(search.value.toLowerCase())));
 const fieldFor=key=>fields.value.find(f=>f.key===key);
 const fieldSummary=key=>props.definition.bindings[key]?.sources.length?props.definition.bindings[key].sources.map(outputLabel).join(' ＋ '):'待配置来源／上架前补齐';
 const field=computed(()=>fields.value.find(f=>f.key===fieldKey.value)||fields.value[0]);
 const nodes=computed(()=>props.definition.nodes.filter(n=>n.type!=='listing'));
 const selected=computed(()=>nodes.value.find(n=>n.id===selectedId.value));
-watch(selected,node=>{if(node?.type==='field'&&!node.inputFormat&&Object.entries(props.definition.bindings).some(([key,b])=>['price','weight','length','width','height'].includes(key)&&b.sources.some(ref=>ref.nodeId===node.id)))node.inputFormat='number';});
+watch(selected,node=>{if(node?.type==='field'&&!node.inputFormat&&Object.entries(props.definition.bindings).some(([key,b])=>['price','old_price','weight','length','width','height'].includes(key)&&b.sources.some(ref=>ref.nodeId===node.id)))node.inputFormat='number';});
 const showFields=computed(()=>['all','fields'].includes(props.mode));
 const visibleNodes=computed(()=>{const list=nodes.value.filter(n=>props.mode==='images'?n.type==='image':props.mode==='text'?n.type==='copy':true);if(props.mode!=='fields')return list;const rank=node=>props.definition.bindings[fieldKey.value]?.sources.some(s=>s.nodeId===node.id)?0:['image','copy'].includes(node.type)?1:2;return [...list].sort((a,b)=>rank(a)-rank(b));});
 watch([()=>props.mode,()=>props.definition.nodes],(current,previous=[])=>{if(showFields.value){if(current[0]!==previous[0])selectField(fieldKey.value);return;}if(!visibleNodes.value.some(n=>n.id===selectedId.value))selectedId.value=visibleNodes.value[0]?.id||'';},{immediate:true});

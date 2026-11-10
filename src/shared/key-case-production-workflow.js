@@ -48,7 +48,7 @@ export function keyCaseProductionWorkflow(category) {
   addDefaultWorkflowBindings(definition);
   if(category.attributes.some(a=>Number(a.attributeId)===9048))definition.bindings.attribute_9048={sources:[{nodeId:'model',output:'value'}]};
   if(category.attributes.some(a=>Number(a.attributeId)===4180))definition.bindings.attribute_4180={sources:[{nodeId:'copy_title',output:'title'}]};
-  for(const key of ['price','weight','length','width','height']){
+  for(const key of ['price','old_price','weight','length','width','height']){
     const node={...createWorkflowNode('field',`input_${key}`),label:WORKFLOW_TEMPLATE_FIELDS.find(f=>f.key===key).label,inputGroup:'listing-final',valueSource:'user',scope:'shared',required:false,defaultValue:'',help:'可由工程师固定预填，或本次生产填写。上架前需按实际产品核实。'};
     definition.nodes.splice(1,0,node);definition.bindings[key]={sources:[{nodeId:node.id,output:'value'}]};
   }

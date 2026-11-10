@@ -10,6 +10,6 @@ export function starterWorkflow(category=null,{sample=false}={}) {
  const d={schemaVersion:1,name:sample?'示例｜宠物玩具图文模板':'新产品流程',globalPrompt:'保持真实产品外观，套图背景、光线、字体一致。图片及商品文案使用自然俄语，不编造材质、性能、认证或包装。',richContentEnabled:true,reviewMode:'manual',nodes,shopIds:[],...(category?{category}:{}),...(sample?{starterSample:true}: {})};
  addDefaultWorkflowBindings(d);
  d.bindings.richContent={sources:[...d.bindings.images.sources,...d.bindings.description.sources]};
- for(const key of ['price','weight','length','width','height']){const n={...createWorkflowNode('field',`input_${key}`),label:({price:'售价（RUB）',weight:'包装重量（g）',length:'包装长（cm）',width:'包装宽（cm）',height:'包装高（cm）'})[key],scope:'shared',valueSource:'user',inputFormat:'number',required:false};d.nodes.splice(1,0,n);d.bindings[key]={sources:[{nodeId:n.id,output:'value'}]};}
+ for(const key of ['price','old_price','weight','length','width','height']){const n={...createWorkflowNode('field',`input_${key}`),label:({price:'售价（人民币／CNY）',old_price:'划线价（人民币／CNY）',weight:'包装重量（g）',length:'包装长（cm）',width:'包装宽（cm）',height:'包装高（cm）'})[key],scope:'shared',valueSource:'user',inputFormat:'number',required:false};d.nodes.splice(1,0,n);d.bindings[key]={sources:[{nodeId:n.id,output:'value'}]};}
  return d;
 }

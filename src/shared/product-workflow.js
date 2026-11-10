@@ -14,6 +14,7 @@ export function validateWorkflow(value) {
   if (!value || value.schemaVersion !== 1 || !String(value.name || "").trim()) throw workflowError("请填写模板名称，或导入 schemaVersion 为 1 的工作流文件");
   if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 80) throw workflowError("模板需要 1–80 个节点");
   if(typeof value.globalPrompt!=="string")throw workflowError("全局提示词必须为文本");
+  if(value.currencyCode&&!['CNY','RUB','USD','EUR','KZT','BYN'].includes(value.currencyCode))throw workflowError('请选择有效的计价币种');
   if(value.reviewMode&&!['manual','automatic'].includes(value.reviewMode))throw workflowError('请选择人工检查或自动检查模式');
   for(const refs of [value.sharedMaterialRefs,...value.nodes.map(n=>n.materialRefs)])validateMaterialRefs(refs);
   const seen = new Map();
@@ -32,7 +33,7 @@ export function validateWorkflow(value) {
     if(node.copyRules!==undefined&&(node.type!=='copy'||typeof node.copyRules!=='string'||node.copyRules.length>20000))throw workflowError('文案通用规则须为不超过20000字符的文本');
     if(node.type==='video'&&(node.inputs.length!==1||seen.get(node.inputs[0])?.type!=='image'||seen.get(node.inputs[0])?.role!=='main'))throw workflowError(`${node.label}需要引用本流程生成的主图`);
     if (node.type === "approval" && (!node.inputs.length || node.inputs.some(id => !["image", "approval"].includes(seen.get(id).type)))) throw workflowError(`${node.label}需要引用待确认的图片生成节点`);
-    if (node.type === "price" && (!Number.isFinite(Number(node.value)) || Number(node.value) <= 0)) throw workflowError(`${node.label}请填写大于零的卢布售价`);
+    if (node.type === "price" && (!Number.isFinite(Number(node.value)) || Number(node.value) <= 0)) throw workflowError(`${node.label}请填写大于零的售价`);
     if (node.type === "package" && ["weight", "length", "width", "height"].some(k => !Number.isFinite(Number(node[k])) || Number(node[k]) <= 0)) throw workflowError(`${node.label}请填写大于零的克重和厘米尺寸`);
     if (node.type === "listing" && !Number.isSafeInteger(Number(node.templateId))) throw workflowError(`${node.label}的类目模板标识无效`);
     if(node.type==="copy"&&!["bundle","title","tags","description","text"].includes(node.target))throw workflowError(`${node.label}的文案输出类型无效`);
@@ -178,6 +179,6 @@ export function buildWorkflowDraft(definition, variants, outputs, baseTemplate, 
     if(definition.deferCommercialInputs)editable.pending_listing_fields=[['售价','price'],['包装重量','weight_g'],['包装长','length_mm'],['包装宽','width_mm'],['包装高','height_mm']].filter(([,key])=>rows.some(row=>!Number(row[key]))).map(([label])=>label);
   }
   // Never inherit image sets or variant identity from the category template.
-  const payload={...cleanBase,title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,images:rows[0].images,editable_payload:{...editable,title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,rich_content_json:rows[0].rich_content_json||"",rich_content:rows[0].rich_content||"",tags:rows[0].tags,workflow_target_shop_ids:clone(definition.shopIds||[]),images:rows[0].images,variants:rows}};
+  const payload={...cleanBase,...(definition.bindings?{currency_code:rows[0].currency_code||'CNY'}:{}),title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,images:rows[0].images,editable_payload:{...editable,...(definition.bindings?{...(rows[0].price!==undefined||rows[0].old_price!==undefined?{price:{value:Number(rows[0].price||0),old_price:Number(rows[0].old_price||0),currency_code:rows[0].currency_code||'CNY'}}:{}),currency_code:rows[0].currency_code||'CNY'}:{}),title:rows[0].title,description:rows[0].description,video_urls:rows[0].video_urls,video_cover_urls:rows[0].video_cover_urls,rich_content_json:rows[0].rich_content_json||"",rich_content:rows[0].rich_content||"",tags:rows[0].tags,workflow_target_shop_ids:clone(definition.shopIds||[]),images:rows[0].images,variants:rows}};
   return {template_id:Number(listNode.templateId),product_name:rows[0].title,internal_code:`WF-${runId}`,template_payload:payload,source_images:rows[0].images.map(x=>x.url),sale_price:Number(rows[0].price||price?.value||0),...(definition.bindings?{weight_g:Number(rows[0].weight_g||0),length_cm:Number(rows[0].length_mm||0)/10,width_cm:Number(rows[0].width_mm||0)/10,height_cm:Number(rows[0].height_mm||0)/10}:{}),...(pack?{weight_g:Number(pack.weight),length_cm:Number(pack.length),width_cm:Number(pack.width),height_cm:Number(pack.height)}:{}),development_type:"new",ai_payload:{source:"product_workflow",workflow_run_id:runId,definition:clone(definition)},manual_facts:{workflow_run_id:runId,variants:clone(variants)}};
 }
