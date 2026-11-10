@@ -303,7 +303,7 @@ test("listing automation supports safe multi-shop text variants", () => {
 });
 
 test("draft batch publish exposes safe AI text failure handling and bounded concurrency", () => {
-  assert.match(publishRecordsSource, /textVariantFailureMode: "block"/);
+  assert.match(publishRecordsSource, /textVariantFailureMode: "keep_original"/);
   assert.match(publishRecordsSource, /failure_mode: batchListing\.textVariantFailureMode/);
   assert.match(listingAutomationServiceSource, /await mapWithConcurrency\(shops, LISTING_PUBLISH_SHOP_CONCURRENCY, async \(shop\) =>/);
   assert.match(listingAutomationServiceSource, /LISTING_TEXT_VARIANT_ITEM_CONCURRENCY/);
@@ -326,7 +326,7 @@ test("draft batch publish prefers current editable attributes and defines every 
 
 test("draft box can batch publish drafts with multi-shop text variant policy", () => {
   assert.match(publishRecordsSource, /batchListing = reactive\(\{[\s\S]*textVariantEnabled/);
-  assert.match(publishRecordsSource, /textVariantFailureMode: "block"/);
+  assert.match(publishRecordsSource, /textVariantFailureMode: "keep_original"/);
   assert.match(publishRecordsSource, /failure_mode: batchListing\.textVariantFailureMode/);
   assert.match(publishRecordsSource, /阻断该店铺/);
   assert.match(publishRecordsSource, /buildBatchTextVariantPolicy/);

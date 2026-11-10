@@ -29,6 +29,8 @@ const draftBindingsLoading = ref(false);
 const refreshingId = ref(null);
 const detailLoadingId = ref(null);
 const retrying = ref(false);
+const retryingRecordId = ref(null);
+const recordsTableRef = ref(null);
 const deletingId = ref(null);
 const batchRefreshing = ref(false);
 const batchDeleting = ref(false);
@@ -174,11 +176,11 @@ const batchListing = reactive({
   visible: false,
   publishing: false,
   shopIds: [],
-  textVariantEnabled: true,
+  textVariantEnabled: false,
   baseShopId: "",
   textVariantStyle: "light",
   textVariantFields: ["title", "tags", "description"],
-  textVariantFailureMode: "block",
+  textVariantFailureMode: "keep_original",
   shopStyles: {},
   requestId: "",
   browserPreparing: false,
@@ -1494,6 +1496,20 @@ function loadDrawerTechnicalJson() {
   drawer.technicalJsonLoaded = true;
 }
 
+async function retryFailedRecord(row) {
+  if (retryingRecordId.value) return;
+  retryingRecordId.value = row.id;
+  try {
+    await apiClient.post(`/api/listing/publish-records/${row.id}/retry`, { updated_at: row.updated_at || "" });
+    ElMessage.success("已重新提交上架，可稍后同步状态");
+    await loadRecords();
+  } catch (error) {
+    ElMessage.error(error?.message || "重新上架失败，请稍后重试");
+  } finally {
+    retryingRecordId.value = null;
+  }
+}
+
 async function retryRecord() {
   if (!drawer.row?.id) return;
   let payload;
@@ -1666,6 +1682,8 @@ function openBatchListingDialog() {
     ElMessage.warning("请先选择编辑中或等待上架的草稿");
     return;
   }
+  batchListing.textVariantEnabled = false;
+  batchListing.textVariantFailureMode = "keep_original";
   batchListing.shopIds = state.shops.map((shop) => shop.id).slice(0, 1);
   batchListing.requestId = createListingPublishRequestId();
   batchListing.result = null;
@@ -1961,10 +1979,27 @@ function handlePublishViewChange(name) {
   else loadRecords();
 }
 
+async function openRouteQuickPublish() {
+  if (!isDraftMode.value || route.query.quickPublish !== "1" || !route.query.draftIds) return;
+  const ids = new Set(String(route.query.draftIds).split(",").map(Number));
+  await nextTick();
+  recordsTableRef.value?.clearSelection();
+  const rows = state.rows.filter((row) => row.row_type === "draft" && ids.has(Number(row.id)));
+  rows.forEach((row) => recordsTableRef.value?.toggleRowSelection(row, true));
+  selectedRows.value = rows;
+  if (rows.length === ids.size) openBatchListingDialog();
+  else if (rows.length) ElMessage.warning("本次草稿未全部加载，请确认勾选数量后再批量上架。");
+  else ElMessage.warning("未找到本次保存的草稿，请刷新草稿箱后重试。");
+  const query = { ...route.query };
+  delete query.quickPublish;
+  await router.replace({ name: route.name, query });
+}
+
 onMounted(async () => {
   window.addEventListener("beforeunload", guardBatchBrowserPublishClose);
   publishView.value = route.query.tab === "tasks" ? "tasks" : "records";
   if (route.query.draftIds) state.creatorId = "all";
+  if (route.query.quickPublish === "1") state.pageSize = 100;
   applyRouteStatusFilter();
   applyRouteShopFilter();
   if (isTaskMode.value) {
@@ -1973,6 +2008,7 @@ onMounted(async () => {
   } else {
     await Promise.all([loadShops(), loadPeople(), loadRecords()]);
     await openRoutePublishRecord();
+    await openRouteQuickPublish();
   }
 });
 
@@ -2013,11 +2049,13 @@ watch(() => route.query.recordId, () => {
   openRoutePublishRecord();
 });
 
-watch(() => route.query.draftIds, () => {
+watch(() => route.query.draftIds, async () => {
   if (!isDraftMode.value) return;
   state.page = 1;
+  if (route.query.quickPublish === "1") state.pageSize = 100;
   state.creatorId = route.query.draftIds ? "all" : currentPersonId.value || "all";
-  loadRecords();
+  await Promise.all([loadShops(), loadRecords()]);
+  await openRouteQuickPublish();
 });
 
 watch(() => route.query.taskId, () => {
@@ -2103,6 +2141,7 @@ watch(() => route.query.taskId, () => {
     <div class="mobile-landscape-hint">草稿和上架字段较多，横屏查看更完整；表格可左右滑动。</div>
     <div class="publish-table-wrap erp-table-scroll">
       <el-table
+        ref="recordsTableRef"
         v-loading="loading"
         :data="filteredRows"
         border
@@ -2214,8 +2253,9 @@ watch(() => route.query.taskId, () => {
         <template #default="{ row }">
           <div class="row-actions">
             <el-button class="erp-btn-link" link type="primary" :icon="Edit" :disabled="detailLoadingId === row.id || (isPublishMode && row.payload_compacted)" @click="editInListingAutomation(row)">编辑</el-button>
-            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
-            <el-button class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
+            <el-button v-if="isDraftMode" class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'optimization')">AI优化</el-button>
+            <el-button v-if="isDraftMode" class="erp-btn-link" link type="primary" :icon="MagicStick" @click="openAiWorkbench(row, 'variant')">AI裂变</el-button>
+            <el-button v-if="isPublishMode && ['failed', 'ozon_status_error'].includes(row.status)" class="erp-btn-link" link type="primary" :icon="Refresh" :loading="retryingRecordId === row.id" :disabled="Boolean(retryingRecordId)" @click="retryFailedRecord(row)">重新上架</el-button>
             <el-button class="erp-btn-link-danger" link type="danger" :icon="Delete" :disabled="deletingId === row.id" @click="deleteRecord(row)">删除</el-button>
           </div>
         </template>
