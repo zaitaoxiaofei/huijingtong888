@@ -211,6 +211,36 @@ const taskState = reactive({
 const taskLoading = ref(false);
 const taskViewer = ref({ person_name: "当前用户" });
 const taskRetryingId = ref(null);
+const taskRetryFeedback = reactive({ taskId: null, type: "info", message: "" });
+const taskRefreshError = ref("");
+const recordRetryFeedback = reactive({ recordId: null, status: "", type: "info", message: "" });
+let taskRefreshTimer = null;
+let taskRefreshRunning = false;
+
+async function refreshTaskProgress() {
+  if (!isPublishMode.value || taskRefreshRunning) return;
+  taskRefreshRunning = true;
+  try {
+    if (!isTaskMode.value) {
+      await loadRecords({ silent: true });
+      const record = state.rows.find((item) => Number(item.id) === Number(recordRetryFeedback.recordId));
+      if (record && record.status !== recordRetryFeedback.status) showRecordRetryResult(record, false);
+      taskRefreshError.value = "";
+      return;
+    }
+    await loadPublishTasks({ silent: true });
+    const taskId = taskDrawer.visible && taskDrawer.task?.id;
+    if (taskId) {
+      const task = await apiClient.get(`/api/listing/publish-tasks/${encodeURIComponent(taskId)}`, { noCache: true });
+      if (taskDrawer.visible && taskDrawer.task?.id === taskId) taskDrawer.task = task;
+    }
+    taskRefreshError.value = "";
+  } catch (error) {
+    taskRefreshError.value = `任务进度刷新失败：${error.message || "网络异常"}，将在 5 秒后重试`;
+  } finally {
+    taskRefreshRunning = false;
+  }
+}
 const taskDrawer = reactive({
   visible: false,
   loading: false,
@@ -309,7 +339,7 @@ const summary = computed(() => {
   };
 });
 
-async function loadRecords() {
+async function loadRecords({ silent = false } = {}) {
   const requestSeq = ++recordsRequestSeq;
   const requestScope = currentApiCacheScope();
   const current = () => requestSeq === recordsRequestSeq && requestScope === currentApiCacheScope();
@@ -363,8 +393,8 @@ async function loadRecords() {
   const cacheKey = `${requestScope}:${requestUrl}`;
   const cached = cacheKey ? draftListCache.get(cacheKey) : null;
   const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < DRAFT_LIST_CACHE_TTL_MS);
-  if (hasFreshCache) applyDraftListResult(cached.result);
-  loading.value = !hasFreshCache;
+  if (hasFreshCache && !silent) applyDraftListResult(cached.result);
+  loading.value = !silent && !hasFreshCache;
   try {
     const result = await apiClient.get(requestUrl, { noCache: true });
     if (!current()) return;
@@ -541,20 +571,20 @@ function hasSyncedSku(row) {
   return Number(row?.sku_count || 0) > 0 || Boolean(row?.ozon_sku);
 }
 
-async function loadPublishTasks() {
+async function loadPublishTasks({ silent = false } = {}) {
   const query = taskState.query.trim();
   const key = [taskState.page, taskState.pageSize, taskState.creatorId, taskState.status, query].join("|");
   if (publishTasksRequest?.key === key) return publishTasksRequest.promise;
   const promise = (async () => {
     const cached = publishTaskListCache.get(key);
     const hasFreshCache = Boolean(cached && Date.now() - cached.timestamp < DRAFT_LIST_CACHE_TTL_MS);
-    if (hasFreshCache) {
+    if (hasFreshCache && !silent) {
       const cachedResult = cached.result || {};
       taskState.rows = Array.isArray(cachedResult.rows) ? cachedResult.rows : [];
       taskViewer.value = cachedResult.viewer || taskViewer.value;
       taskState.total = Number(cachedResult.total || taskState.rows.length);
     }
-    taskLoading.value = !hasFreshCache;
+    taskLoading.value = !silent && !hasFreshCache;
     try {
       const params = new URLSearchParams({
         page: String(taskState.page),
@@ -626,13 +656,19 @@ function taskCanRetry(row = {}) {
 
 async function retryPublishTask(row) {
   const taskId = Number(row?.id || taskDrawer.task?.id || 0);
-  if (!taskId || !taskCanRetry(row || taskDrawer.task)) return;
+  if (taskRetryingId.value) return;
+  if (!taskId || !taskCanRetry(row || taskDrawer.task)) {
+    ElMessage.warning("没有可重试的失败或中断项");
+    return;
+  }
   taskRetryingId.value = taskId;
+  Object.assign(taskRetryFeedback, { taskId, type: "info", message: "正在加载失败明细和店铺配置，请勿关闭页面…" });
   try {
     const task = await apiClient.get(`/api/listing/publish-tasks/${encodeURIComponent(taskId)}`, { noCache: true });
     const candidates = (Array.isArray(task?.items) ? task.items : [])
       .filter((item) => ["failed", "interrupted"].includes(String(item.status || "")));
     if (!candidates.length) {
+      Object.assign(taskRetryFeedback, { type: "warning", message: "没有可重试的失败或中断项，请刷新任务明细" });
       ElMessage.warning("没有可重试的失败或中断项");
       return;
     }
@@ -653,7 +689,13 @@ async function retryPublishTask(row) {
     if (shops.length !== shopIds.size) throw new Error("部分重试店铺的浏览器素材配置加载失败");
     const shopById = new Map(shops.map((shop) => [shop.id, shop]));
     const draftIds = [...new Set(candidates.map((item) => Number(item.draft_id)).filter(Boolean))];
-    const drafts = await mapFrontendConcurrency(draftIds, 10, (draftId) => apiClient.get(`/api/listing/drafts/${draftId}`, { noCache: true }));
+    let loadedDrafts = 0;
+    taskRetryFeedback.message = `正在加载草稿 0/${draftIds.length}…`;
+    const drafts = await mapFrontendConcurrency(draftIds, 10, async (draftId) => {
+      const draft = await apiClient.get(`/api/listing/drafts/${draftId}`, { noCache: true });
+      taskRetryFeedback.message = `正在加载草稿 ${++loadedDrafts}/${draftIds.length}…`;
+      return draft;
+    });
     const draftById = new Map(drafts.map((draft, index) => [draftIds[index], draft]));
     const mediaJobs = candidates.map((item) => {
       const draft = draftById.get(Number(item.draft_id));
@@ -667,6 +709,7 @@ async function retryPublishTask(row) {
       onProgress(progress) {
         batchListing.browserCompleted = Number(progress.completed || 0);
         batchListing.browserTotal = Number(progress.total || 0);
+        taskRetryFeedback.message = `${progress.stage === "browser_watermark_recovery" ? "正在修复重复图片" : "正在处理重试图片"} ${progress.completed || 0}/${progress.total || 0}，请勿关闭页面…`;
       }
     });
     const preparedMediaByDraftShop = {};
@@ -674,6 +717,7 @@ async function retryPublishTask(row) {
       const prepared = preparedByItem[`retry-${item.id}`] || {};
       preparedMediaByDraftShop[`${Number(item.draft_id)}:${Number(item.shop_id)}`] = prepared[String(item.shop_id)] || [];
     }
+    taskRetryFeedback.message = `图片已准备完成，正在提交 ${candidates.length} 个重试项并等待服务器受理…`;
     const result = await apiClient.post(`/api/listing/publish-tasks/${encodeURIComponent(taskId)}/retry`, {
       item_ids: candidates.map((item) => item.id),
       browser_prepared_media: true,
@@ -681,11 +725,21 @@ async function retryPublishTask(row) {
     });
     const queued = Number(result?.summary?.queued || 0);
     const failed = Number(result?.summary?.failed || 0);
+    const skipped = Number(result?.summary?.skipped || 0);
+    const firstFailure = result?.results?.find((item) => !item.ok && !item.skipped);
+    const skippedReason = result?.results?.find((item) => item.skipped)?.error || "";
+    Object.assign(taskRetryFeedback, {
+      type: failed ? "warning" : queued ? "success" : "info",
+      message: `重试已受理 ${queued} 项，创建失败 ${failed} 项，跳过 ${skipped} 项。${firstFailure ? [firstFailure.error, firstFailure.fix_tip].filter(Boolean).join("；") : skippedReason || (queued ? "任务进度每 5 秒自动刷新，可打开明细查看结果。" : "没有可重试项目，请刷新明细。")}`
+    });
     if (queued) ElMessage.success(`已重新提交 ${queued} 个失败或中断项`);
-    else ElMessage.warning("没有可重试的失败或中断项");
+    else ElMessage.warning(skippedReason || "没有可重试的失败或中断项");
     if (failed) ElMessage.warning(`${failed} 条重试创建失败，请查看任务明细`);
     await loadPublishTasks();
     if (taskDrawer.visible) await openTaskDrawer({ id: taskId });
+  } catch (error) {
+    Object.assign(taskRetryFeedback, { type: "error", message: `重试未完成：${error.message || "请求失败"}。请查看任务明细确认已受理项目后，再重试失败项。` });
+    ElMessage.error(taskRetryFeedback.message);
   } finally {
     batchListing.browserPreparing = false;
     taskRetryingId.value = null;
@@ -1496,15 +1550,32 @@ function loadDrawerTechnicalJson() {
   drawer.technicalJsonLoaded = true;
 }
 
+function showRecordRetryResult(updated, notify = true) {
+  const failed = ["failed", "ozon_status_error"].includes(updated.status);
+  const success = ["imported", "published", "success"].includes(updated.status);
+  const message = failed
+    ? `重新上架失败：${publishFailureReason(updated) || "Ozon 未返回具体原因，请同步状态查看"}。${publishFailureFixTip(updated)}`
+    : success ? "Ozon 已确认上架成功" : "重新上架已受理，正在处理，记录状态每 5 秒自动刷新";
+  Object.assign(recordRetryFeedback, { recordId: updated.id, status: updated.status, type: failed ? "error" : success ? "success" : "info", message });
+  if (!notify) return;
+  if (failed) ElMessage.error(message);
+  else ElMessage.success(message);
+}
+
 async function retryFailedRecord(row) {
   if (retryingRecordId.value) return;
   retryingRecordId.value = row.id;
   try {
-    await apiClient.post(`/api/listing/publish-records/${row.id}/retry`, { updated_at: row.updated_at || "" });
-    ElMessage.success("已重新提交上架，可稍后同步状态");
+    Object.assign(recordRetryFeedback, { recordId: row.id, status: row.status, type: "info" });
+    recordRetryFeedback.message = "正在核对 Ozon 上次结果并重新上架，请稍候…";
+    const updated = await apiClient.post(`/api/listing/publish-records/${row.id}/retry`, { updated_at: row.updated_at || "" });
+    const index = state.rows.findIndex((item) => Number(item.id) === Number(updated.id));
+    if (index >= 0) state.rows[index] = mergeRefreshedPublishRecord(state.rows[index], updated);
+    showRecordRetryResult(updated);
     await loadRecords();
   } catch (error) {
-    ElMessage.error(error?.message || "重新上架失败，请稍后重试");
+    Object.assign(recordRetryFeedback, { type: "error", message: error?.message || "重新上架失败，请稍后重试" });
+    ElMessage.error(recordRetryFeedback.message);
   } finally {
     retryingRecordId.value = null;
   }
@@ -1520,6 +1591,7 @@ async function retryRecord() {
     return;
   }
   retrying.value = true;
+  Object.assign(recordRetryFeedback, { type: "info", message: "正在核对 Ozon 上次结果并重新上架，请稍候…" });
   try {
     const updated = await apiClient.post(`/api/listing/publish-records/${drawer.row.id}/retry`, {
       payload,
@@ -1529,8 +1601,12 @@ async function retryRecord() {
     if (drawer.technicalJsonLoaded) drawer.responseText = JSON.stringify(drawerResponseCache, null, 2);
     const index = state.rows.findIndex((row) => Number(row.id) === Number(updated.id));
     if (index >= 0) state.rows[index] = mergeRefreshedPublishRecord(state.rows[index], updated);
-    drawer.visible = false;
-    ElMessage.success("已重新提交 Ozon，可稍后刷新状态");
+    drawer.row = mergeRefreshedPublishRecord(drawer.row, updated);
+    showRecordRetryResult(updated);
+    if (!["failed", "ozon_status_error"].includes(updated.status)) drawer.visible = false;
+  } catch (error) {
+    Object.assign(recordRetryFeedback, { type: "error", message: error.message || "重新上架失败" });
+    ElMessage.error(recordRetryFeedback.message);
   } finally {
     retrying.value = false;
   }
@@ -1996,6 +2072,7 @@ async function openRouteQuickPublish() {
 }
 
 onMounted(async () => {
+  taskRefreshTimer = window.setInterval(refreshTaskProgress, 5000);
   window.addEventListener("beforeunload", guardBatchBrowserPublishClose);
   publishView.value = route.query.tab === "tasks" ? "tasks" : "records";
   if (route.query.draftIds) state.creatorId = "all";
@@ -2014,6 +2091,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   recordsRequestSeq += 1;
+  window.clearInterval(taskRefreshTimer);
   window.removeEventListener("beforeunload", guardBatchBrowserPublishClose);
 });
 
@@ -2073,6 +2151,8 @@ watch(() => route.query.taskId, () => {
     </el-tabs>
 
     <template v-if="!isTaskMode">
+    <el-alert v-if="isPublishMode && recordRetryFeedback.message" :title="recordRetryFeedback.message" :type="recordRetryFeedback.type" :closable="false" show-icon />
+    <el-alert v-if="isPublishMode && taskRefreshError" :title="taskRefreshError" type="warning" :closable="false" show-icon />
     <section class="toolbar-panel" :class="{ 'draft-toolbar-panel': isDraftMode, 'publish-record-toolbar-panel': isPublishMode }">
       <div class="toolbar-filters" :class="{ 'draft-toolbar-filters': isDraftMode, 'publish-record-toolbar-filters': isPublishMode }">
         <el-input v-if="isPublishMode" v-model="state.query" class="publish-record-search" :prefix-icon="Search" clearable placeholder="标题关键词 / offer_id / 线上 SKU / 店铺 / 类目" aria-label="搜索上架记录" @keyup.enter="searchRecords" @clear="searchRecords" />
@@ -2215,6 +2295,15 @@ watch(() => route.query.taskId, () => {
           <el-tag :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column v-if="isPublishMode" label="失败原因 / 处理建议" min-width="260">
+        <template #default="{ row }">
+          <div v-if="publishFailureReason(row)" class="failure-cell">
+            <strong>{{ publishFailureReason(row) }}</strong>
+            <span v-if="publishFailureFixTip(row)">{{ publishFailureFixTip(row) }}</span>
+          </div>
+          <span v-else>—</span>
+        </template>
+      </el-table-column>
       <el-table-column v-if="isDraftMode" label="上架状态" min-width="98">
         <template #default="{ row }">
           <el-tooltip :content="row.publish_record_count ? `关联 ${row.publish_record_count} 条上架记录` : '尚未提交到 Ozon'" placement="top">
@@ -2273,6 +2362,8 @@ watch(() => route.query.taskId, () => {
     </template>
 
     <template v-else>
+      <el-alert v-if="taskRetryFeedback.message" :title="`任务 ${taskRetryFeedback.taskId}：${taskRetryFeedback.message}`" :type="taskRetryFeedback.type" :closable="false" show-icon />
+      <el-alert v-if="taskRefreshError" :title="taskRefreshError" type="warning" :closable="false" show-icon />
       <section class="toolbar-panel task-toolbar-panel">
         <div class="toolbar-filters task-toolbar-filters">
           <el-input v-model="taskState.query" :prefix-icon="Search" clearable placeholder="任务编号 / 草稿 / 店铺" @keyup.enter="searchPublishTasks" @clear="searchPublishTasks" />
@@ -2343,7 +2434,7 @@ watch(() => route.query.taskId, () => {
             <template #default="{ row }">
               <div class="row-actions">
                 <el-button class="erp-btn-link" link type="primary" :icon="View" @click="openTaskDrawer(row)">明细</el-button>
-                <el-button class="erp-btn-link" link type="primary" :icon="Refresh" :loading="taskRetryingId === row.id" :disabled="!taskCanRetry(row)" @click="retryPublishTask(row)">重试失败 / 中断项</el-button>
+                <el-button class="erp-btn-link" link type="primary" :icon="Refresh" :loading="taskRetryingId === row.id" :disabled="Boolean(taskRetryingId) || !taskCanRetry(row)" @click="retryPublishTask(row)">重试失败 / 中断项</el-button>
               </div>
             </template>
           </el-table-column>
@@ -2573,6 +2664,8 @@ watch(() => route.query.taskId, () => {
     <el-drawer v-model="taskDrawer.visible" title="上架任务明细" size="920px">
       <div v-loading="taskDrawer.loading" class="task-drawer">
         <template v-if="taskDrawer.task">
+          <el-alert v-if="taskRetryFeedback.taskId === taskDrawer.task.id && taskRetryFeedback.message" :title="taskRetryFeedback.message" :type="taskRetryFeedback.type" :closable="false" show-icon />
+          <el-alert v-if="taskRefreshError" :title="taskRefreshError" type="warning" :closable="false" show-icon />
           <section class="task-drawer-summary">
             <div>
               <strong>{{ taskDisplayName(taskDrawer.task) }}</strong>
@@ -2595,7 +2688,7 @@ watch(() => route.query.taskId, () => {
               type="primary"
               :icon="Refresh"
               :loading="taskRetryingId === taskDrawer.task.id"
-              :disabled="!taskCanRetry(taskDrawer.task)"
+              :disabled="Boolean(taskRetryingId) || !taskCanRetry(taskDrawer.task)"
               @click="retryPublishTask(taskDrawer.task)"
             >
               重试失败 / 中断项

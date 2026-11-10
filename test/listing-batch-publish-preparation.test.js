@@ -17,6 +17,7 @@ function fixture({ get, media, post } = {}) {
     Number, String, Object, Array, Set, Promise,
     selectedDraftRows: { value: [{ id: 11, images: ["https://fixture.invalid/own.png"] }] }, batchListing,
     draftListImages: row => row.images,
+    draftPublishImages: row => row.images,
     buildBatchTextVariantPolicy: () => ({ enabled: false }),
     ElMessageBox: { confirm: async () => {} },
     ElMessage: { warning() {}, success() {}, error: value => calls.errors.push(value) },

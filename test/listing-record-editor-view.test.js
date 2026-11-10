@@ -29,7 +29,7 @@ test("status sync keeps the publish record category shown by the list", () => {
     { id: 1, status: "imported" }), { id: 1, category_name: "汽车枕头", status: "imported" });
   assert.equal(merge({ category_name: "汽车枕头" }, { category_name: "汽车坐垫" }).category_name, "汽车坐垫");
   const calls = publishRecordsSource.match(/state\.rows\[index\] = mergeRefreshedPublishRecord\(state\.rows\[index\], updated\)/g) || [];
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
 });
 
 test("draft batch media uses the current effective image set", () => {
@@ -360,7 +360,7 @@ test("draft box can batch publish drafts with multi-shop text variant policy", (
   assert.match(listingAutomationServiceSource, /sourceRecordId: Number\(item\.record_id \|\| 0\)/);
   assert.match(listingAutomationServiceSource, /updateExisting: Boolean\(item\.record_id\)/);
   assert.match(publishRecordsSource, /function taskCanRetry/);
-  assert.match(publishRecordsSource, /:disabled="!taskCanRetry\(row\)"/);
+  assert.match(publishRecordsSource, /:disabled="Boolean\(taskRetryingId\) \|\| !taskCanRetry\(row\)"/);
   assert.match(listingAutomationServiceSource, /item_complex_attributes_json/);
   assert.match(listingAutomationServiceSource, /Math\.max\(prioritizedImages\.length, listImageCount\)/);
   assert.match(listingAutomationServiceSource, /async function processListingDraftBatchPublishTask/);

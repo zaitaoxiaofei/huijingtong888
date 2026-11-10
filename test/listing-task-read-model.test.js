@@ -35,7 +35,7 @@ test("stale local submitted rows without Ozon evidence become retryable interrup
   assert.match(interruptionSource, /r\.updated_at END\) <= DATE_SUB\(NOW\(\), INTERVAL 30 MINUTE\)/);
   assert.match(syncSource, /r\.status IN \('submitted', 'processing', 'resubmitting', 'ozon_status_pending'\)[\s\S]*r\.task_id/);
   assert.match(retryClaimSource, /record_task_id/);
-  assert.match(retryClaimSource, /if \(String\(item\.record_task_id \|\| ""\)\.trim\(\) \|\| item\.record_response_json\) return null/);
+  assert.match(retryClaimSource, /reconciledRecord\.response_json !== item\.record_response_json/);
 });
 
 test("task refresh qualifies status columns after joining publish records", () => {

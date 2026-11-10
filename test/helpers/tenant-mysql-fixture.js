@@ -1,3 +1,4 @@
+import { TENANT_PURGE_SCHEMA } from "../../src/services/tenant-lifecycle-schema.js";
 import { ORDER_BINDING_IGNORE_SCHEMA } from "../../src/services/order-binding-ignore.js";
 import { randomBytes } from 'node:crypto';
 import { INVENTORY_FLOW_SCHEMA } from '../../src/services/inventory-flow-schema.js';
@@ -42,10 +43,11 @@ export async function createTenantMysqlFixture(prefix = 'inventory') {
     };
     const privateFiles = await staticSchema('tenant-private-files-schema.js', 'TENANT_PRIVATE_FILES_SCHEMA');
     const salesRefresh = await staticSchema('mysql-inventory-alert-snapshots.js', 'TENANT_INVENTORY_SALES_REFRESH_SCHEMA');
-    const constants = { ORDER_BINDING_IGNORE_SCHEMA, SKU_TRAFFIC_DAILY_SCHEMA, INVENTORY_FLOW_SCHEMA, ORDER_PROFIT_CALCULATION_SCHEMA, ORDER_PROFIT_DAILY_FX_SCHEMA, ORDER_PROFIT_FX_STATE_SCHEMA, OGL_DISPATCH_SCHEMA_SQL, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
+    const constants = { TENANT_PURGE_SCHEMA, ORDER_BINDING_IGNORE_SCHEMA, SKU_TRAFFIC_DAILY_SCHEMA, INVENTORY_FLOW_SCHEMA, ORDER_PROFIT_CALCULATION_SCHEMA, ORDER_PROFIT_DAILY_FX_SCHEMA, ORDER_PROFIT_FX_STATE_SCHEMA, OGL_DISPATCH_SCHEMA_SQL, TENANT_PRIVATE_FILES_SCHEMA: privateFiles, TENANT_INVENTORY_SALES_REFRESH_SCHEMA: salesRefresh };
     for (const name of ['TENANT_AI_LIMITS_SCHEMA', 'TENANT_AI_USAGE_SCHEMA', 'AI_IMAGE_TASK_OWNERS_SCHEMA']) {
       constants[name] = await staticSchema('ai-tenant-schema.js', name);
     }
+    constants.TENANT_LOGIN_DELIVERY_SCHEMA = await staticSchema('tenant-login-delivery.js', 'TENANT_LOGIN_DELIVERY_SCHEMA');
     constants.TEAM_TASKS_SCHEMA = await staticSchema('team-task-schema.js', 'TEAM_TASKS_SCHEMA');
     constants.ORDER_HEATMAP_TENANT_SCHEMA = await staticSchema('order-heatmap-tenant-schema.js', 'ORDER_HEATMAP_TENANT_SCHEMA');
     constants.MATERIAL_ASSETS_SCHEMA = await staticSchema('material-assets-schema.js', 'MATERIAL_ASSETS_SCHEMA');

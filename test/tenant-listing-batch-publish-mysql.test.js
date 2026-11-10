@@ -334,6 +334,143 @@ test("batch publishing persists and restores enterprise operations authority in 
       assert.ok((await records()).every(row => row.created_by_person_id === 7 && row.status === "imported"));
     });
 
+    await scenario("yesterday quota failure retries the same record once after Ozon confirms failure", async () => {
+      const created = await service.publishListingDraftsToOzon(body(2), session(2));
+      await drain("batch"); await drain("record");
+      const [previous] = await records();
+      await query("UPDATE listing_publish_records SET status='failed',task_id='yesterday-quota',response_json=JSON_OBJECT('submit',JSON_OBJECT('result',JSON_OBJECT('task_id','yesterday-quota'))),error_json=JSON_OBJECT('message','periodic_limit_exceeded') WHERE id=?", [previous.id]);
+      await query("UPDATE listing_publish_task_items SET status='failed' WHERE publish_task_id=?", [created.task.id]);
+      const originalInfo = service.fetchOzonProductImportInfo;
+      service.fetchOzonProductImportInfo = async (shop, taskId, options) => {
+        if (taskId !== "yesterday-quota") return originalInfo(shop, taskId, options);
+        await options?.beforeRequest?.();
+        return { result: { items: [{ offer_id: "offer-200", status: "failed", errors: [{ code: "periodic_limit_exceeded", message: "Yesterday quota exhausted" }] }] } };
+      };
+      let observedPreparing = false;
+      hook = async name => {
+        if (name !== "limit") return;
+        const preparing = await service.listingPublishTaskDetail(created.task.id, session(2));
+        assert.equal(preparing.items[0].status, "preparing");
+        assert.equal(preparing.items[0].error, null);
+        assert.equal(preparing.queued_count, 1);
+        assert.equal(preparing.status, "running");
+        observedPreparing = true;
+      };
+      const importsBefore = calls.filter(row => row.name === "import").length;
+      const parallel = await Promise.all([
+        service.retryListingPublishTask(created.task.id, {}, session(2)),
+        service.retryListingPublishTask(created.task.id, {}, session(2))
+      ]);
+      assert.equal(parallel.reduce((sum, result) => sum + result.summary.queued, 0), 1, JSON.stringify(parallel));
+      const retried = parallel.find(result => result.summary.queued === 1);
+      assert.equal(observedPreparing, true);
+      assert.equal(retried.summary.queued, 1, JSON.stringify(retried));
+      const [processing] = await query("SELECT i.status,i.error_json,r.status AS record_status,r.error_json AS record_error FROM listing_publish_task_items i JOIN listing_publish_records r ON r.id=i.record_id WHERE i.publish_task_id=?", [created.task.id]);
+      assert.equal(processing.status, "processing");
+      assert.equal(processing.record_status, "processing");
+      assert.equal(processing.error_json, null);
+      assert.equal(processing.record_error, null);
+      const duplicate = await service.retryListingPublishTask(created.task.id, {}, session(2));
+      assert.equal(duplicate.summary.queued, 0);
+      await drain("record");
+      const current = await records();
+      assert.equal(current.length, 1);
+      assert.equal(current[0].id, previous.id);
+      assert.equal(current[0].status, "imported");
+      assert.equal(current[0].task_id, "fixture-20");
+      const detail = await service.listingPublishTaskDetail(created.task.id, session(2));
+      assert.equal(detail.failed_count, 0);
+      assert.equal(detail.success_count, 1);
+      assert.equal(detail.items[0].status, "success");
+      assert.equal(detail.items[0].error, null);
+      assert.equal(detail.items[0].error_summary, "");
+      const [storedItem] = await query("SELECT status,error_json FROM listing_publish_task_items WHERE publish_task_id=?", [created.task.id]);
+      assert.equal(storedItem.status, "success");
+      assert.equal(storedItem.error_json, null);
+      assert.equal(calls.filter(row => row.name === "import").length, importsBefore + 1);
+    });
+
+    await scenario("failed Ozon reconciliation preserves the linked record and never resubmits", async () => {
+      const created = await service.publishListingDraftsToOzon(body(2), session(2));
+      await drain("batch"); await drain("record");
+      const [previous] = await records();
+      await query("UPDATE listing_publish_records SET status='failed' WHERE id=?", [previous.id]);
+      await query("UPDATE listing_publish_task_items SET status='failed' WHERE publish_task_id=?", [created.task.id]);
+      service.fetchOzonProductImportInfo = async () => { throw new Error("Ozon temporarily unavailable"); };
+      const importsBefore = calls.filter(row => row.name === "import").length;
+      const result = await service.retryListingPublishTask(created.task.id, {}, session(2));
+      assert.equal(result.summary.queued, 0);
+      assert.equal(result.summary.failed, 1);
+      assert.match(result.results[0].error, /Ozon temporarily unavailable/);
+      const [item] = await query("SELECT record_id,status FROM listing_publish_task_items WHERE publish_task_id=?", [created.task.id]);
+      assert.equal(item.record_id, previous.id);
+      assert.equal(item.status, "failed");
+      assert.equal(calls.filter(row => row.name === "import").length, importsBefore);
+    });
+
+    await scenario("record-page retry updates the original record and linked task to success", async () => {
+      const created = await service.publishListingDraftsToOzon(body(2), session(2));
+      await drain("batch"); await drain("record");
+      const [previous] = await records();
+      await query("UPDATE listing_publish_records SET status='failed',task_id='record-old-quota',error_json=JSON_OBJECT('message','Old quota failure') WHERE id=?", [previous.id]);
+      await query("UPDATE listing_publish_task_items SET status='failed',error_json=JSON_OBJECT('message','Old quota failure') WHERE publish_task_id=?", [created.task.id]);
+      const originalImport = service.importOzonProducts;
+      service.importOzonProducts = (shop, ...args) => originalImport({ ...shop, id: shop.shop_id || shop.id }, ...args);
+      const originalInfo = service.fetchOzonProductImportInfo;
+      service.fetchOzonProductImportInfo = async (shop, taskId, options) => taskId === "record-old-quota"
+        ? { result: { items: [{ status: "failed", errors: [{ code: "periodic_limit_exceeded", message: "Old quota failure" }] }] } }
+        : originalInfo({ ...shop, id: shop.shop_id || shop.id }, taskId, options);
+      const importsBefore = calls.filter(row => row.name === "import").length;
+      const updated = await service.retryListingPublishRecord(previous.id, {}, session(2));
+      assert.equal(updated.status, "imported", JSON.stringify(updated.error));
+      assert.equal(updated.id, previous.id);
+      assert.equal(updated.error, null);
+      assert.equal(updated.error_summary, "");
+      assert.equal(calls.filter(row => row.name === "import").length, importsBefore + 1);
+      const detail = await service.listingPublishTaskDetail(created.task.id, session(2));
+      assert.equal(detail.failed_count, 0);
+      assert.equal(detail.items[0].status, "success");
+      assert.equal(detail.items[0].error, null);
+    });
+
+    await scenario("a repeated rejection replaces the previous failure reason", async () => {
+      const created = await service.publishListingDraftsToOzon(body(2), session(2));
+      await drain("batch"); await drain("record");
+      const [previous] = await records();
+      await query("UPDATE listing_publish_records SET status='failed',task_id='old-quota',error_json=JSON_OBJECT('message','Old quota error') WHERE id=?", [previous.id]);
+      await query("UPDATE listing_publish_task_items SET status='failed',error_json=JSON_OBJECT('message','Old quota error') WHERE publish_task_id=?", [created.task.id]);
+      service.fetchOzonProductImportInfo = async (shop, taskId) => ({ result: { items: [{ offer_id: "offer-200", status: "failed", errors: [{ code: taskId === "old-quota" ? "periodic_limit_exceeded" : "invalid_price", message: taskId === "old-quota" ? "Old quota error" : "Current price invalid" }] }] } });
+      const retried = await service.retryListingPublishTask(created.task.id, {}, session(2));
+      assert.equal(retried.summary.queued, 1, JSON.stringify(retried));
+      await drain("record");
+      const detail = await service.listingPublishTaskDetail(created.task.id, session(2));
+      assert.equal(detail.failed_count, 1);
+      assert.equal(detail.items[0].status, "failed");
+      assert.doesNotMatch(JSON.stringify(detail.items[0].error), /Old quota error/);
+      assert.match(JSON.stringify(detail.items[0].error), /invalid_price|Current price invalid/);
+    });
+
+    for (const officialStatus of ["imported", "processing"]) {
+      await scenario(`stale failed row does not resubmit when Ozon reports ${officialStatus}`, async () => {
+        const created = await service.publishListingDraftsToOzon(body(2), session(2));
+        await drain("batch"); await drain("record");
+        const [previous] = await records();
+        await query("UPDATE listing_publish_records SET status='failed' WHERE id=?", [previous.id]);
+        await query("UPDATE listing_publish_task_items SET status='failed' WHERE publish_task_id=?", [created.task.id]);
+        service.fetchOzonProductImportInfo = async () => ({ result: { items: [{ offer_id: "offer-200", status: officialStatus }] } });
+        const importsBefore = calls.filter(row => row.name === "import").length;
+        const retried = await service.retryListingPublishTask(created.task.id, {}, session(2));
+        assert.equal(retried.summary.queued, 0, JSON.stringify(retried));
+        assert.equal(retried.results[0].skipped, true);
+        const detail = await service.listingPublishTaskDetail(created.task.id, session(2));
+        assert.equal(detail.failed_count, 0);
+        assert.equal(detail.items[0].status, officialStatus === "imported" ? "success" : "submitted");
+        assert.equal(detail.items[0].error, null);
+        await drain("record");
+        assert.equal(calls.filter(row => row.name === "import").length, importsBefore);
+      });
+    }
+
     await scenario("task retry rejects foreign task IDs and non-operations actors without writes", async () => {
       const bTask = await failedTask(3);
       const before = await snapshotB();
