@@ -9691,6 +9691,16 @@ export async function syncOzonOnlineProductsMysql(body = {}, options = {}) {
         }
         return true;
       });
+      if (!pendingListingOnly && body.include_stocks === true) {
+        const productIds = [...new Set(matchingItems.map(item => Number(item.ozon_product_id || item.id || 0)).filter(Boolean))];
+        if (productIds.length) {
+          report("stocks", `正在刷新 ${productIds.length} 个商品的库存`, shop);
+          const stockRows = await fetchOzonProductStocks(shop, { productIds, stockConcurrency: 3, signal: options.signal,
+            beforeRequest: checkCurrentShop, afterRequest: checkCurrentShop });
+          await checkCurrentShop();
+          await refreshPendingListingStockSnapshotsMysql(shop.id, productIds, stockRows, checkCurrentShop);
+        }
+      }
       const previousBySku = new Map();
       for (let start = 0; start < matchingItems.length; start += 500) {
         await checkCurrentShop();
