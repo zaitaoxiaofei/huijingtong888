@@ -24,6 +24,7 @@ for (const apiMode of ["chat", "responses"]) {
         statusCode: scenario === "quota" ? 409 : 403, code: scenario === "quota" ? "TENANT_AI_QUOTA_EXCEEDED" : "TENANT_TASK_ACCESS_DENIED"
       });
       const context = vm.createContext({ AbortController, setTimeout, clearTimeout,
+        assertAiCreditProviderBoundary: async () => ({ mode: "free" }),
         resolveRuntimeConfig: async () => ({ apiMode, provider: "fixture", baseUrl: "https://fixture.invalid", apiKey: "fixture", textModel: "fixture" }),
         normalizeVisionMessages: messages => messages, cleanText: value => String(value || "").trim(),
         reserveTenantAiRequest: async kind => {

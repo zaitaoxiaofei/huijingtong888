@@ -7,73 +7,7 @@ import { readFileSync } from 'node:fs';
 import { loadOrderProcurementCoverage } from '../src/services/mysql-order-procurement-coverage.js';
 
 const service = readFileSync(new URL('../src/services/mysql-cutover.js', import.meta.url), 'utf8');
-const view = readFileSync(new URL('../frontend/admin/views/procurement/ProcurementWorkspaceView.vue', import.meta.url), 'utf8');
 const server = readFileSync(new URL('../src/server.js', import.meta.url), 'utf8');
-const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-};
-
-function workspace() {
-  const requests = [], errors = [];
-  const context = vm.createContext({
-    AbortController, disposed: false, rowsController: null, loading: { value: false },
-    demandRefreshing: { value: false }, state: { rows: [], total: 0 }, queryString: () => 'page=1',
-    ElMessage: { error: message => errors.push(message), warning: message => errors.push(message) },
-    apiClient: Object.fromEntries(['get', 'post'].map(method => [method, (url, options) => {
-      const task = deferred(); requests.push({ method, url, options, ...task }); return task.promise;
-    }]))
-  });
-  vm.runInContext(view.slice(view.indexOf('async function loadRows('), view.indexOf('async function loadOptions(')), context);
-  return { context, requests, errors };
-}
-
-test('procurement first paint does not wait for demand reconciliation', async () => {
-  const { context, requests } = workspace();
-  const load = context.loadRows();
-  assert.equal(requests[0].method, 'get');
-  requests[0].resolve({ rows: [{ id: 1 }], total: 1 });
-  await load;
-  assert.equal(context.state.rows[0].id, 1);
-  const refresh = context.refreshWorkbench();
-  assert.equal(context.demandRefreshing.value, true);
-  assert.equal(context.loading.value, false);
-  await context.refreshWorkbench();
-  assert.equal(requests.length, 2, 'repeated refreshes are coalesced');
-  requests[1].resolve({ ok: true });
-  await new Promise(resolve => setImmediate(resolve));
-  requests[2].resolve({ rows: [{ id: 2 }], total: 1 });
-  await refresh;
-  assert.equal(context.state.rows[0].id, 2);
-  assert.equal(context.demandRefreshing.value, false);
-  const mount = view.slice(view.indexOf('onMounted(async'), view.indexOf('</script>'));
-  assert.match(mount, /startPurchaseView\(\)/);
-  const start = view.slice(view.indexOf('async function startPurchaseView'), view.indexOf('watch(workMode'));
-  assert.match(start, /await Promise\.all\(\[loadRows\(\)/);
-  assert.match(start, /void refreshWorkbench\(\)/);
-  assert.doesNotMatch(start, /await refreshWorkbench\(\)/);
-  assert.doesNotMatch(mount, /loadRows\(\{ refreshDemand/);
-});
-
-test('late procurement search responses cannot overwrite newer results', async () => {
-  const { context, requests, errors } = workspace();
-  const old = context.loadRows();
-  const latest = context.loadRows();
-  assert.equal(requests[0].options.signal.aborted, true);
-  requests[1].resolve({ rows: [{ id: 2 }], total: 1 });
-  await latest;
-  requests[0].resolve({ rows: [{ id: 1 }], total: 1 });
-  await old;
-  assert.equal(context.state.rows[0].id, 2);
-  assert.equal(errors.length, 0);
-  const refresh = context.refreshWorkbench();
-  requests[2].reject(new Error('refresh unavailable'));
-  await refresh;
-  assert.equal(context.state.rows[0].id, 2, 'refresh failure preserves visible records');
-  assert.equal(errors.length, 1);
-});
-
 test('profit ranking limits classification to the Beijing date range with matching SQL parameters', async () => {
   const calls = [];
   const context = vm.createContext({

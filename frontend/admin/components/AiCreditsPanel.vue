@@ -5,8 +5,7 @@ import { apiClient, currentApiCacheScope } from "../utils/api";
 import { shanghaiDateTimeText } from "../utils/shanghai-date";
 import { useAuthStore } from "../stores/auth";
 import { isPlatformAdmin } from "../../../src/shared/permissions.js";
-import { aiSkillsAvailable } from "../../../src/shared/ai-skills-access.js";
-import { AI_POINTS_PER_YUAN } from "../../../src/shared/ai-image-pricing.js";
+import { aiCreditPoints, aiCreditPointsText, aiCreditYuanText } from "../../../src/shared/ai-credit-points.js";
 
 const props = defineProps({ platform: Boolean, tenantId: { type: Number, default: 0 }, tenantName: { type: String, default: "" } });
 const auth = useAuthStore();
@@ -22,11 +21,11 @@ const rechargeVisible = ref(false);
 const recharge = reactive({ points: 1, reference: "", reason: "" });
 let sequence = 0;
 let disposed = false;
-const labels = { recharge: "充值", reserve: "冻结", settle: "使用扣除", release: "解冻返还" };
-const points = value => Number(value || 0).toLocaleString("zh-CN");
-const yuan = value => (Number(value || 0) / AI_POINTS_PER_YUAN).toFixed(2);
-const chargedPoints = row => row.kind === "settle" ? Math.max(0, -Number(row.available_delta) - Number(row.frozen_delta)) : 0;
-const changeText = value => `${Number(value) > 0 ? "+" : ""}${points(value)}`;
+const labels = { recharge: "充值", monthly_grant: "每月赠送", initial_grant: "初始积分", reserve: "冻结", settle: "使用扣除", release: "解冻返还" };
+const points = value => aiCreditPointsText(value || 0);
+const yuan = value => aiCreditYuanText(value || 0);
+const chargedPoints = row => row.kind === "settle" ? -aiCreditPoints(row.available_delta) - aiCreditPoints(row.frozen_delta) : 0n;
+const changeText = value => `${aiCreditPoints(value) > 0n ? "+" : ""}${points(value)}`;
 const statusText = computed(() => !wallet.value ? "尚未读取" : wallet.value.status === "active" ? "已开通" : "未开通或已停用");
 function identity() { return `${currentApiCacheScope()}:${target.value}:${props.platform}`; }
 
@@ -101,7 +100,7 @@ onBeforeUnmount(() => { disposed = true; sequence += 1; window.removeEventListen
 <template>
   <section class="ai-credits-panel">
     <div class="credit-heading"><div><h2>AI积分{{ tenantName ? ` · ${tenantName}` : '' }}</h2><p>积分与会员时长分别管理。充值请联系平台管理员登记。</p></div><el-button :loading="loading" :disabled="saving" @click="load()">刷新</el-button></div>
-    <el-alert v-if="platform || !aiSkillsAvailable(auth.user)" title="AI技能库暂未开放；登记或充值积分后仍保持关闭。" type="info" :closable="false" show-icon />
+    <el-alert title="每个企业按北京时间自然月赠送 100 积分，余额可累计，同一企业多个账号不会重复领取。AI 技能库已开放，默认企业同样按积分规则使用。" type="info" :closable="false" show-icon />
     <el-alert title="1 积分 = ¥0.01；每张成功生成的图片扣 10 积分（¥0.10），文本免费。生成前冻结积分，明确失败后返还；状态不明时等待原任务核对。裁切和复用已有图片不重复收费。" type="info" :closable="false" show-icon />
     <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
     <div class="credit-summary" v-loading="loading && !wallet">

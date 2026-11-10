@@ -31,7 +31,7 @@ test("default operations members retain reviewed matrix generation and publishin
   }
 });
 
-test("enterprise roles retain matrix permissions while the customer AI pause blocks execution writes", () => {
+test("enterprise roles retain reviewed matrix generation permissions after reopening skills", () => {
   for (const slug of ["default", "company-a"]) {
     const session = employee(slug, "owner", ["packing"]);
     for (const path of configurationReads) assert.equal(allowed(session, "GET", path), true, `${slug}: ${path}`);
@@ -42,8 +42,7 @@ test("enterprise roles retain matrix permissions while the customer AI pause blo
     for (const [method, path] of executionRoutes) {
       assert.equal(allowed(session, method, path), true, path);
       const decision = tenantIsolationDecision(session, parts(path), method);
-      assert.equal(decision.allowed, method === "GET", path);
-      if (method === "POST") assert.equal(decision.code, "AI_SKILLS_DISABLED", path);
+      assert.equal(decision.allowed, true, path);
     }
     if (role === "member") {
       for (const path of configurationReads) {

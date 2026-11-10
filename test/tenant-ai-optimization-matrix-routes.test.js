@@ -27,9 +27,9 @@ function decision(session, method, path) {
   return isolated.allowed ? authorizeApiRequest({ _session: session, method }, parts) : isolated;
 }
 
-test('default operators retain reviewed AI actions while A/B operators only read history or cancel', () => {
+test('default and A/B operators share reviewed AI routes and keep role boundaries', () => {
   for (const id of [1, 2, 3]) for (const [method, path] of routes) {
-    const allowed = id === 1 || method === 'GET' || path.endsWith('/cancel') || path.startsWith('listing/');
+    const allowed = true;
     assert.equal(decision(member(id), method, path).allowed, allowed, `${id} ${method} ${path}`);
     assert.equal(decision(member(id, [], 'owner'), method, path).allowed, allowed, `owner ${id} ${path}`);
     for (const roles of [[], ['packing'], ['procurement'], ['technical']]) {
@@ -66,6 +66,6 @@ test('AI admission rejects alternate methods, path suffixes and adjacent unrevie
 test('operations execution does not grant matrix configuration writes', () => {
   for (const id of [1, 2, 3]) for (const action of ['rules', 'tail-templates']) {
     assert.equal(decision(member(id), 'POST', `asset-variant-engine/${action}`).allowed, false);
-    assert.equal(decision(member(id, [], 'owner'), 'POST', `asset-variant-engine/${action}`).allowed, id === 1);
+    assert.equal(decision(member(id, [], 'owner'), 'POST', `asset-variant-engine/${action}`).allowed, true);
   }
 });
