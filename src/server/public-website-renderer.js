@@ -1,0 +1,55 @@
+import { escapeHtml as e } from './access.js';
+import { websiteStyle } from './public-website-style.js';
+
+const arrow = '<span class="arrow" aria-hidden="true">↗</span>';
+const button = (text, href, style = '') => `<a class="btn ${style}" href="${href}">${text}${arrow}</a>`;
+const money = p => '¥' + (p.price_fen / 100).toFixed(p.price_fen % 100 ? 1 : 0);
+const capacity = p => `${p.account_limit === null ? '不限' : p.account_limit} 个账号 · ${p.shop_limit === null ? '不限' : p.shop_limit} 家店铺`;
+const brand = `<span class="brand-symbol" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M5 17V9h4v8H5Zm5-3V5h4v9h-4Zm5 5V9h4v10h-4Z" fill="currentColor"/></svg></span>爆单 ERP`;
+const cta = `<div class="wrap"><section class="bottom-cta"><div><h2>下一阶段的生意，<br>从更有序的运营开始。</h2><p>创建自己的企业空间，让每一次经营都有据可循。</p></div>${button('创建企业账号', '/register', 'bright')}</section></div>`;
+
+function dashboard() {
+  return `<figure class="hero-product"><a class="product-frame" href="/website/erp-dashboard-demo.png" target="_blank" rel="noopener" aria-label="放大查看系统真实经营总览界面（演示数据）"><img class="product-screenshot" src="/website/erp-dashboard-demo.png" width="2305" height="954" alt="爆单 ERP 真实经营总览页面：经营指标、Top15 库存商品和店铺上架额度；金额、商品与店铺均为演示数据" fetchpriority="high"></a><figcaption class="dashboard-caption">系统真实界面 · 演示数据 <span aria-hidden="true">↗</span> 点击查看大图</figcaption></figure>`;
+}
+
+function home(plans) {
+  const preview = ['monthly', 'monthly_team', 'yearly'].map(code => plans.find(p => p.code === code)).filter(Boolean);
+  return `<section class="hero-zone"><div class="wrap"><div class="hero"><div class="hero-copy"><div class="eyebrow">专为 OZON 卖家打造 · BETA 内测</div><h1>经营更有章法，<br><span>增长更有底气。</span></h1><p>从商品采集、订单管理到采购与利润分析，<br>在一个工作空间，串起你的 Ozon 生意。</p><div class="hero-actions">${button('创建企业账号', '/register', 'bright')}${button('了解产品', '/#features', 'outline')}</div><div class="hero-note"><span>独立企业空间</span><span>注册不自动扣费</span><span>按需选择套餐</span></div></div>${dashboard()}</div><div class="hero-proof"><span class="proof-label">BUILT FOR YOUR DAILY OPERATIONS</span><span><strong>经营可视</strong>看清数据与利润</span><span><strong>流程连贯</strong>连接选品与履约</span><span><strong>团队有序</strong>让协作各就其位</span></div></div></section>
+    <section class="section wrap" id="features"><div class="section-heading"><div><div class="eyebrow">ONE WORKSPACE. MORE CLARITY.</div><h2>把分散的日常，<br>变成清晰的经营。</h2></div><p>个人运营有趁手的工具，团队协作有清楚的分工。让精力回到商品、客户和生意本身。</p></div><div class="features-grid">
+    <article class="feature-card"><span class="feature-number">01 / INSIGHTS</span><h3>每一份经营，都看得见</h3><p>营业额、利润、Top15 畅销商品与店铺额度，汇集在经营首页。</p><div class="feature-bottom"><span class="chip">经营总览</span><span class="chip">利润分析</span><span class="chip">销售排行</span></div></article>
+    <article class="feature-card"><span class="feature-number">02 / OPERATIONS</span><h3>从上架到采购，有条不紊</h3><p>用采集插件整理商品，在自己的企业内管理草稿、订单、库存与采购。</p><div class="feature-bottom"><span class="chip">商品采集</span><span class="chip">订单中心</span><span class="chip">采购工作台</span></div></article>
+    <article class="feature-card"><span class="feature-number">03 / COLLABORATION</span><h3>团队成长，协作跟上</h3><p>按岗位管理成员与店铺。团队套餐配备任务系统、财务中心与 AI 技能库。</p><div class="feature-bottom"><span class="chip">岗位权限</span><span class="chip">任务协作</span><span class="chip">AI 创作</span></div></article></div></section>
+    <section class="section workflow-section"><div class="wrap workflow"><div class="workflow-copy"><div class="eyebrow">A SIMPLE START</div><h2>开始运营，<br>不必从复杂开始。</h2><p>从创建账号到连接第一家店铺，沿着清晰的步骤，让业务逐步进入工作空间。</p><a class="workflow-link" href="/docs">查看入门指南 ${arrow}</a></div><div class="steps"><article class="step"><span>01 — CREATE</span><h3>创建企业</h3><p>注册账号，建立属于自己的企业空间。</p></article><article class="step"><span>02 — ACTIVATE</span><h3>选择服务</h3><p>按运营规模选套餐，或使用激活码开通。</p></article><article class="step"><span>03 — CONNECT</span><h3>连接店铺</h3><p>配置 Ozon 授权信息，绑定企业采集插件。</p></article><article class="step"><span>04 — OPERATE</span><h3>开启日常经营</h3><p>管理商品、处理订单，让经营数据逐步沉淀。</p></article></div></div></section>
+    <section class="section wrap"><div class="section-heading"><div><div class="eyebrow">ROOM TO GROW</div><h2>适合现在，也容得下成长。</h2></div><a class="workflow-link" href="/pricing">查看全部套餐 ${arrow}</a></div><div class="mini-plans">${preview.map(p => `<article class="mini-plan ${p.code === 'monthly_team' ? 'featured' : ''}"><h3>${e(p.name)}</h3><div class="mini-price">${money(p)} <small>/ ${p.duration_days} 天</small></div><p>${capacity(p)} · ${p.features.ai ? '含 AI 技能库' : '适合个人日常运营'}</p><a href="/pricing">了解套餐 ${arrow}</a></article>`).join('')}</div></section>${cta}`;
+}
+
+function pricing(plans) {
+  const order = ['monthly', 'monthly_team', 'quarterly_team', 'yearly'];
+  const descriptions = { monthly: '轻装起步，做好个人店铺经营', monthly_team: '为分工明确的小团队准备', quarterly_team: '为稳定运营，留出更多空间', yearly: '长期投入，让经营持续积累' };
+  const sale = order.map(code => plans.find(p => p.code === code)).filter(Boolean);
+  const trials = plans.filter(p => p.code === 'trial_1d' || p.code === 'trial_7d');
+  const features = p => [['经营总览、Top15 与店铺额度', true], ['商品、订单、库存与采购', true], ['财务中心', p.features.finance], ['团队任务系统', p.features.tasks], ['AI 技能库 · 图片另扣积分', p.features.ai]];
+  return `<div class="wrap"><section class="page-intro"><div class="eyebrow">PLANS FOR EVERY STAGE</div><h1>选择适合你的经营节奏。</h1><p>从个人运营到团队协作，按规模选择服务。<br>套餐有效期、账号与店铺额度，一眼清楚。</p><div class="pricing-note"><span>注册不自动扣费</span><span>续费累加剩余时长</span><span>企业空间独立</span></div></section>
+    <div class="pricing-grid">${sale.map(p => `<article class="plan-card ${p.code === 'monthly_team' ? 'recommended' : ''}">${p.code === 'monthly_team' ? '<span class="plan-ribbon">团队入门推荐</span>' : ''}<div class="plan-kind">${p.code === 'monthly' ? 'ESSENTIAL' : 'TEAM'}</div><h2>${e(p.name)}</h2><p class="plan-description">${descriptions[p.code]}</p><div class="plan-price"><strong>${money(p)}</strong><span>/ ${p.duration_days} 天</span></div>${button('注册并选购', '/register', p.code === 'monthly_team' ? '' : 'outline')}<div class="plan-capacity">${capacity(p)}</div><ul class="plan-features">${features(p).map(([label, enabled]) => `<li class="${enabled ? '' : 'unavailable'}">${enabled ? '' : '不含 '}${label}</li>`).join('')}</ul></article>`).join('')}</div>
+    ${trials.length ? `<section class="trial-row"><div class="trial-intro"><h2>先体验，再决定。</h2><p>每企业仅可体验一次，1 天与 7 天二选一。</p></div>${trials.map(p => `<div class="trial-option"><div><strong>${money(p)} <small>/ ${p.duration_days} 天</small></strong><p>${capacity(p)}</p></div><a href="/register">选择体验 ↗</a></div>`).join('')}</section>` : ''}
+    <p class="price-disclaimer">账号总数包含企业主账号。体验版不含财务中心、任务系统与 AI 技能库；基础版含财务中心，不含任务系统与 AI 技能库。<br>AI 图片按成功张数另计积分，购买积分不改变套餐权限。Beta 内测期间暂未开放在线支付，可在会员中心联系开通或兑换激活码。</p>
+    <section class="faq"><div><div class="eyebrow">GOOD TO KNOW</div><h2>选购前，你可能想问。</h2></div><div><details><summary>团队年卡和季卡如何选择？</summary><p>团队年卡 ¥3999，服务 365 天；团队季卡 ¥1099，服务 90 天。两者均包含 3 个账号、10 家店铺及团队功能，可根据预计使用时长选择。</p></details><details><summary>续费会清掉原来的剩余时间吗？</summary><p>不会。有效期从当前到期时间与付款时刻两者中较晚的一刻继续累加；套餐账号数、店铺数和功能范围在开通后立即按新套餐更新。</p></details><details><summary>AI 积分与会员有什么区别？</summary><p>会员决定功能权限与服务时长。AI 积分用于图片生成，成功图片每张扣 10 积分（¥0.10），文本免费。每企业每自然月赠送 100 积分，余额可累计。使用 AI 技能库仍需团队套餐。</p></details><details><summary>注册后如何开通服务？</summary><p>登录会员中心查看套餐，联系服务人员获取激活码，由企业负责人兑换开通。当前暂未开放在线支付。</p></details></div></section></div>${cta}`;
+}
+
+function docs() {
+  const sections = [
+    ['start', '01', '创建你的企业空间', `<p>一个账号，从一个独立的企业空间开始。企业店铺、成员与业务资料在当前企业内管理。</p><ol><li>点击右上角“创建企业”，填写登录名、昵称、企业名称与密码。</li><li>注册后进入会员中心，查看当前会员状态、AI 积分和企业密钥。</li><li>选择适合的服务套餐，或输入激活码开通。</li></ol><div class="doc-callout">注册不会自动扣费。开通会员后，业务功能按套餐范围及成员岗位权限使用。</div>`],
+    ['membership', '02', '购买与续费', `<p>在会员中心查看套餐，联系服务人员确认开通方式并获取激活码，由企业负责人兑换。当前暂未开放在线支付。</p><p>激活成功后，会员中心显示最新有效期和套餐权益。续费累加剩余时长，套餐额度立即更新。每个企业仅可体验一次，1 天与 7 天体验二选一。</p><a class="inline-link" href="/pricing">查看完整套餐与功能范围 ↗</a>`],
+    ['shops', '03', '连接 Ozon 店铺', `<p>在“企业店铺”填写同一家店铺的 Ozon Client ID 和 API Key。公司主体名称用于记录店铺所属经营主体。</p><p>广告接口使用独立的 Client ID 与 Client Secret，请勿与店铺 API Key 混用。成员可按岗位和授权范围参与运营。</p><div class="doc-callout">请在系统表单中配置授权信息，不要将店铺 API Key 或支付密钥发送到聊天中。</div>`],
+    ['plugin', '04', '绑定采集插件', `<ol><li>进入会员中心，点击顶部的“查看 / 复制企业密钥”。</li><li>打开采集插件，将密钥粘贴到“企业专属密钥”，保存并确认连接状态。</li><li>采集商品进入密钥所属企业的采集箱，保存为草稿后进入该企业草稿箱。</li></ol><div class="doc-callout">切换 ERP 企业空间不会自动更换插件密钥。跨企业使用时，请在插件中重新绑定对应企业密钥。</div>`],
+    ['credits', '05', '理解 AI 积分', `<div class="doc-credit-grid"><div><strong>¥0.01</strong><span>每 1 积分的价值</span></div><div><strong>10 积分</strong><span>每张成功生成的图片</span></div><div><strong>100 积分</strong><span>每企业每自然月赠送</span></div></div><p>文本免费；图片生成成功后扣费，明确失败不收费。月赠积分按企业发放，同一企业的多个成员不重复领取，未使用的余额可累计。</p><p>团队套餐可使用 AI 技能库；单独充值积分不会解锁套餐功能。在会员中心点击 AI 积分，可查看余额、充值和使用记录。</p>`],
+    ['help', '06', '获取开通帮助', `<p>在会员中心查看套餐，点击联系开通，展示客服二维码后扫码添加服务人员，确认套餐及开通安排。</p><p>会员通过激活码开通或续期，积分充值暂由服务人员处理。支付与充值接口尚未对外启用，请以会员中心实际状态为准。</p><div class="doc-callout">企业密钥只用于插件绑定。客服二维码用于添加联系人，请勿将店铺 API Key 或企业密钥发送到聊天中。</div>`]
+  ];
+  return `<section class="docs-banner"><div class="wrap"><div class="eyebrow">HELP CENTER</div><h1>使用文档</h1><p>从第一次连接店铺，到有序开展日常经营。</p></div></section><div class="wrap docs-layout"><aside class="docs-sidebar" aria-label="文档目录"><span>GETTING STARTED / 入门指南</span>${sections.map(([id, number, title], i) => `<a class="${i === 0 ? 'start' : ''}" href="#${id}">${number} &nbsp; ${title}</a>`).join('')}</aside><div class="docs-content">${sections.map(([id, number, title, body]) => `<section class="doc-section" id="${id}"><div class="doc-label">GUIDE / ${number}</div><h2>${title}</h2>${body}</section>`).join('')}</div></div>`;
+}
+
+export function renderPublicWebsite(path, plans = []) {
+  const title = path === '/docs' ? '使用文档' : path === '/pricing' ? '套餐价格' : '让 Ozon 经营更有章法';
+  const nav = [['/', '产品首页'], ['/pricing', '套餐价格'], ['/docs', '使用文档']].map(([href, label]) => `<a href="${href}" ${path === href ? 'aria-current="page"' : ''}>${label}</a>`).join('');
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#ffffff"><meta name="description" content="爆单 ERP，为 Ozon 卖家连接商品采集、订单管理、库存采购与经营分析。创建独立企业空间，按团队规模选择服务。"><title>${title} · 爆单 ERP</title><style>${websiteStyle}</style></head><body><header class="site-header"><div class="wrap nav-shell"><a class="brand" href="/" aria-label="爆单 ERP 首页">${brand}<em>BETA</em></a><nav class="main-nav" aria-label="主导航">${nav}</nav><div class="nav-actions"><a href="/login">登录</a>${button('创建企业', '/register', 'small')}</div></div></header><main>${path === '/docs' ? docs() : path === '/pricing' ? pricing(plans) : home(plans)}</main><footer class="site-footer"><div class="wrap"><div class="footer-top"><div><a class="brand" href="/">${brand}</a><p>为认真经营的 Ozon 卖家，建立有序的工作空间。</p></div><div class="footer-links"><a href="/pricing">套餐价格</a><a href="/docs">使用文档</a><a href="/login">进入工作台 ↗</a></div></div><div class="footer-bottom"><span>爆单 ERP · Beta 内测 &nbsp; / &nbsp; BUILT FOR BETTER OPERATIONS</span><span>会员与 AI 积分分别管理 · 业务时间按北京时间显示</span></div></div></footer></body></html>`;
+}

@@ -9,7 +9,7 @@ import { subscriptionAccessDecision } from '../src/server/subscription-access.js
 import { restoreBusinessTaskSession } from '../src/services/business-task-tenant.js';
 const actor = code => ({ personId: 1, roles: ['admin'], tenant: { id: 20, slug: 'enterprise-a', role: 'owner', plan_code: code, subscription_status: code.startsWith('trial') ? 'trial' : 'active', access_allowed: true } });
 test('six plans have the confirmed prices and quotas including the main account', () => {
-  assert.deepEqual(Object.values(BETA_PLAN_PRICES_FEN), [990,1990,29900,39900,109900,899900]);
+  assert.deepEqual(Object.values(BETA_PLAN_PRICES_FEN), [990,1990,29900,39900,109900,399900]);
   const plans = DEFAULT_TENANT_PLAN_PRESETS.map(publicPlanDetails);
   assert.deepEqual(plans.map(x => [x.account_limit,x.shop_limit]), [[1,2],[1,2],[1,2],[3,10],[3,10],[3,10]]);
   assert.deepEqual(plans.map(x => x.price_fen), Object.values(BETA_PLAN_PRICES_FEN));

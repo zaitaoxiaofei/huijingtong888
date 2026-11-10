@@ -1,3 +1,4 @@
+import { publicSelfServiceEnabled } from "./public-website.js";
 import { getRoles, primaryRole } from "../shared/permissions.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
@@ -17,7 +18,7 @@ import {
   updateOwnProfileMysql,
   updatePersonPasswordMysql
 } from "../services/mysql-auth-session.js";
-import { clearRateLimit, consumeRateLimit, getClientIp, releaseRateLimit } from "./access.js";
+import { clearRateLimit, consumeRateLimit, getClientIp, releaseRateLimit, isSiteAccessAuthorized } from "./access.js";
 import {
   confirmQrLoginSession,
   createQrMobileSession,
@@ -135,6 +136,8 @@ export function createAuthHandler(readJson, overrides = {}) {
 
   return function handleAuth(req, url) {
     const key = `${req.method} ${url.pathname}`;
+
+    if (key === "GET /api/auth/entry-options") return async () => { req._sensitiveResponse = true; return { legacy_login_available: !publicSelfServiceEnabled() || isSiteAccessAuthorized(req) }; };
 
     if (key === "POST /api/auth/register") {
       return async () => {
