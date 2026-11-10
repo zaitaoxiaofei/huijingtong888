@@ -1782,7 +1782,7 @@ function buildSaveCasePayload(rows = selectedRowsForRun()) {
   };
 }
 
-async function saveSelectedRowsToDrafts() {
+async function saveSelectedRowsToDrafts(quickPublish = false) {
   if (running.saveDrafts) return;
   const rows = selectedRowsForRun();
   if (!rows.length) {
@@ -1845,7 +1845,7 @@ async function saveSelectedRowsToDrafts() {
     });
     Object.assign(draftSaveProgress, { batchNo: batches.map((item) => item.batchNo).filter(Boolean).join(","), status: "queued", total: rows.length, success: 0, failed: 0 });
     ElMessage.success(`已将 ${rows.length} 个草稿拆成 ${batches.length} 批提交，后台将继续完成，可继续操作页面。`);
-    void monitorDraftSaveBatches(batches);
+    void monitorDraftSaveBatches(batches, quickPublish === true);
   } catch (error) {
     rows.forEach((row) => {
       if (row.draftSaveStatus === "queued") row.draftSaveStatus = "failed";
@@ -1875,7 +1875,7 @@ function buildDraftSaveRequestChunks(rows = []) {
   return chunks;
 }
 
-async function monitorDraftSaveBatches(batches = []) {
+async function monitorDraftSaveBatches(batches = [], quickPublish = false) {
   const activeBatches = batches.filter((batch) => batch.batchNo && batch.rows.length);
   if (!activeBatches.length) return;
   if (draftSaveBatchPollTimer) window.clearTimeout(draftSaveBatchPollTimer);
@@ -1907,6 +1907,12 @@ async function monitorDraftSaveBatches(batches = []) {
       if (allFinished) {
         if (success) ElMessage.success(`后台已完成 ${success}/${total} 个草稿保存${failed ? `，${failed} 个失败` : ""}。`);
         if (failed) ElMessage.warning(`${failed} 个草稿保存失败，请查看对应行的失败原因后重试。`);
+        if (quickPublish && success) {
+          const draftIds = [...new Set(activeBatches.flatMap((batch) => batch.rows)
+            .filter((row) => row.draftSaveStatus === "saved" && row.listingDraftId)
+            .map((row) => row.listingDraftId))];
+          if (draftIds.length) await router.push({ name: "listing-records", query: { draftIds: draftIds.join(","), quickPublish: "1" } });
+        }
         return;
       }
     } catch {
@@ -3228,7 +3234,8 @@ function uploadRowMainImageRequest(row) {
                 <el-button type="primary" :loading="running.imageExecute" :disabled="quickCaseImport.active || !state.batchJob || operatorRulesNeedReplan" @click="executeBatchImages()">生成选中项</el-button>
               </div>
               <div class="action-group action-group--save">
-                <el-button type="success" :loading="running.saveDrafts" :disabled="quickCaseImport.active || !state.batchJob || running.saveDrafts" @click="saveSelectedRowsToDrafts">{{ running.saveDraftStage || "保存到草稿箱" }}</el-button>
+                <el-button type="primary" :loading="running.saveDrafts" :disabled="quickCaseImport.active || !state.batchJob || running.saveDrafts" @click="saveSelectedRowsToDrafts(true)">快速去上架</el-button>
+                <el-button type="success" :loading="running.saveDrafts" :disabled="quickCaseImport.active || !state.batchJob || running.saveDrafts" @click="saveSelectedRowsToDrafts()">{{ running.saveDraftStage || "保存到草稿箱" }}</el-button>
                 <el-button :icon="Collection" :loading="running.saveTemplate" :disabled="quickCaseImport.active || !state.batchJob" @click="saveTemplate">保存选中案例</el-button>
               </div>
             </div>
