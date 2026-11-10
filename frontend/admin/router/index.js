@@ -153,7 +153,7 @@ export const router = createRouter({
             { path: "fbp-opportunities", name: "inventory-fbp-opportunities", component: InventoryFbpOpportunitiesPage, meta: { title: "备货建议", breadcrumb: ["库存中心", "备货建议"] } },
             { path: "fbp-replenishment", name: "inventory-fbp-replenishment", component: InventoryFbpReplenishmentPage, meta: { title: "FBP备货单", breadcrumb: ["库存中心", "FBP备货单"] } },
             { path: "hidden", name: "inventory-hidden", component: InventoryHiddenPage, meta: { title: "已删除商品", breadcrumb: ["库存中心", "已删除商品"] } },
-            { path: "mappings", name: "inventory-mappings", component: InventoryMappingsPage, meta: { title: "SKU 绑定", breadcrumb: ["库存中心", "SKU 绑定"] } },
+            { path: "mappings", name: "inventory-mappings", component: InventoryMappingsPage, meta: { title: "绑定库存", breadcrumb: ["库存中心", "商品库存", "绑定库存"] } },
             { path: "suppliers", name: "inventory-suppliers", component: InventorySuppliersPage, meta: { title: "供应商", breadcrumb: ["采购入库", "供应商"] } },
             { path: "alerts", name: "inventory-alerts", component: InventoryAlertsPage, meta: { title: "库存预警", breadcrumb: ["库存中心", "库存预警"] } }
           ]
