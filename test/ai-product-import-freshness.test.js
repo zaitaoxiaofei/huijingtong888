@@ -20,7 +20,7 @@ function dialog(get) {
 test("draft picker requests current payloads ordered by creation with all filters", async () => {
   const instance = dialog(async (url, options) => {
     const params = new URL(url, "http://localhost").searchParams;
-    assert.equal(params.has("lightweight"), false);
+    assert.equal(params.get("lightweight"), "1");
     assert.equal(params.get("sortBy"), "created_at");
     assert.equal(params.get("pageSize"), "12");
     assert.equal(params.get("creatorId"), "12");
@@ -86,4 +86,26 @@ test("reopening clears the previous list before draft filter options arrive", as
   pending.forEach((resolve) => resolve([]));
   await opening;
   assert.equal(instance.state.loading, false);
+});
+
+
+test("draft candidates load before slow filter metadata and can be imported immediately", async () => {
+  const pendingFilters = [];
+  const calls = [];
+  const instance = dialog((url) => {
+    calls.push(url);
+    if (url.startsWith("/api/listing/drafts?")) return Promise.resolve({ rows: [{ id: 44, product_name: "Ready" }], total: 1 });
+    if (url === "/api/listing/drafts/44") return Promise.resolve({ id: 44, effective_images: ["/fresh.jpg"] });
+    return new Promise((resolve) => pendingFilters.push(resolve));
+  });
+  const opening = instance.open("draft");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 3);
+  assert.equal(instance.state.rows[0].sourceId, "44");
+  assert.equal(instance.state.loading, false);
+  instance.state.selected = instance.state.rows[0];
+  await instance.confirm();
+  assert.equal(instance.imports[0][1].imageUrl, "/fresh.jpg");
+  pendingFilters.forEach((resolve) => resolve([]));
+  await opening;
 });

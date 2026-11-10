@@ -11762,7 +11762,9 @@ export async function listingDrafts(query = {}, session) {
         ) AS draft_publish_variant_images_json,
         '{}' AS manual_facts_json, '{}' AS ai_payload_json,
         JSON_OBJECT(
+          'title', JSON_EXTRACT(d.template_payload_json, '$.title'),
           'editable_payload', JSON_OBJECT(
+            'title', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.title'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.title')),
             'variants', JSON_ARRAY(JSON_OBJECT(
               'images', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[0].images'), JSON_EXTRACT(d.template_payload_json, '$.variants[0].images')),
               'images_manually_edited', COALESCE(JSON_EXTRACT(d.template_payload_json, '$.editable_payload.variants[0].images_manually_edited'), JSON_EXTRACT(d.template_payload_json, '$.editablePayload.variants[0].images_manually_edited'), JSON_EXTRACT(d.template_payload_json, '$.variants[0].images_manually_edited')),
